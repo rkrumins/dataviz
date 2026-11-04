@@ -692,10 +692,25 @@ tests/integration/test_s3_store_minio.py tests/test_object_store.py`.
   human label per row — a real "T0 · updated / orders · new / row 13 · invalid: <reason>" preview,
   not noise. The **full field-level diff is the draft-vs-main diff** served by the existing
   versioning endpoints ([06 — API Reference](06-api-reference.md)).
-- **Starter template.** `GET /imports/template` (`versioning.py:2030-2050`, declared *before*
-  `/imports/{job_id}` so the literal path wins) returns a prepopulated file — the column schema plus
-  a few real rows from the graph, or worked examples when it's empty (`build_template`,
-  `service.py:251-273`).
+- **Starter template.** `GET /imports/template?format=` (declared *before* `/imports/{job_id}` so
+  the literal path wins) is built from the data source's ontology by the record contract
+  (`import_export/contract.py`, `build_template`):
+  - every column a file can carry: each type's properties, the identifier property, and the
+    fields an edge's ends are found by;
+  - a worked row of each entity type, and an edge of each relationship type between example nodes
+    of types it may join, pointing at them by example urns;
+  - an Excel template's Columns sheet, saying what each column means.
+
+  It never carries a real entity, so importing it as it is changes nothing that exists; to edit
+  real data, export it. With no ontology it holds worked examples. CSV and TSV carry a BOM, and the
+  media type fits the format.
+- **The record contract.** `contract.py` declares the format's columns as Pydantic models.
+  - `GET /imports/schema` serves their JSON Schema, narrowed to the data source. The generic one
+    is committed as `backend/common/schema/import-record.v1.json`, and
+    `tests/test_import_record_schema.py` fails when it drifts.
+  - `POST /imports/validate` is a dry run of a file of up to one window: parse, normalize and
+    resolve exactly as a window is, writing nothing.
+  - [Building a Connector](../CONNECTOR_GUIDE.md) is the guide for a team that sends files.
 - **The dialogs** (`frontend/src/features/import-export/{ImportDialog,ExportDialog}.tsx`, client
   service `importExportApiService.ts`): the ImportDialog drag-drops a file, content-detects its
   format, offers upsert/replace (replace warns, and when view-scoped notes only the view's entities

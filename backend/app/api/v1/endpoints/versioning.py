@@ -3250,9 +3250,22 @@ async def _resolve_ontology_types(workspace_id, data_source_id):
         defs = getattr(resolved, "entity_type_definitions", {}) or {}
         flagged = lambda flag: {t: [f.id for f in getattr(d, "fields", []) or [] if getattr(f, flag, False)]
                                 for t, d in defs.items()}
+        # And, for the import template and the record schema (import_export/contract.py), every
+        # field of each type and the types each relationship may join (none: any).
+        fields = {t: [{"id": f.id, "name": getattr(f, "name", None) or f.id,
+                       "type": getattr(f, "type", None), "required": bool(getattr(f, "required", False)),
+                       "key": bool(getattr(f, "reconciliation_key", False)),
+                       "unique": bool(getattr(f, "unique", False))}
+                      for f in getattr(d, "fields", []) or []]
+                  for t, d in defs.items()}
+        rels = getattr(resolved, "relationship_type_definitions", {}) or {}
+        edge_ends = {t: {"source": list(getattr(d, "source_types", None) or []),
+                         "target": list(getattr(d, "target_types", None) or [])}
+                     for t, d in rels.items()}
         return {"node_types": node_types, "edge_types": edge_types,
                 "keys": {t: fs for t, fs in flagged("reconciliation_key").items() if fs},
-                "unique": {t: fs for t, fs in flagged("unique").items() if fs}}
+                "unique": {t: fs for t, fs in flagged("unique").items() if fs},
+                "fields": {t: fs for t, fs in fields.items() if fs}, "edge_ends": edge_ends}
     except Exception:
         logger.exception("ontology type resolution failed for import (ds=%s)", data_source_id)
         return None
@@ -3627,19 +3640,98 @@ async def import_template(
     _meta: dict = Depends(graph_in_workspace),
     ie=Depends(get_import_export_service),
 ):
-    """A prepopulated starter template (columns + a few real/example rows) so a user learns the
-    import format instantly. Small + synchronous — returned as a direct file download."""
+    """The import template, built from the data source's ontology: every column a file of this
+    data source can carry, a worked row of each entity type and an edge of each relationship
+    type; a workbook says what each column means on its Columns sheet. Small and synchronous —
+    returned as a direct file download."""
     from fastapi.responses import Response
     from backend.app.services.versioning.import_export.formats import get_adapter
+    from backend.app.services.versioning.import_export.stream import MEDIA_TYPES
     try:
         get_adapter(format)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
+    format = format.lower()
     with _domain_errors():
-        data = await ie.build_template(graph_id=graph_id, export_format=format)
-    media = "text/csv" if format in ("csv", "tsv") else "application/x-ndjson"
-    return Response(content=data, media_type=media,
+        ontology, identity = await ie.contract_context(ws_id, _meta.get("data_source_id"))
+        data = await ie.build_template(export_format=format, ontology=ontology,
+                                       identity_property=identity)
+    return Response(content=data, media_type=MEDIA_TYPES.get(format, "application/octet-stream"),
                     headers={"Content-Disposition": f'attachment; filename="import-template.{format}"'})
+
+
+# Declared before `/imports/{job_id}` too.
+@router.get("/graphs/{graph_id}/imports/schema")
+async def import_schema(
+    ws_id: str, graph_id: str, request: Request,
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    meta: dict = Depends(graph_in_workspace),
+    ie=Depends(get_import_export_service),
+):
+    """The JSON Schema (draft 2020-12) of one record of this data source's import and export
+    files — the published record format (``backend/common/schema/import-record.v1.json``) narrowed
+    to its entity and edge types and its typed properties — for a connector to check what it
+    writes. ``X-Schema-Version`` is the format's version; ``If-None-Match`` with its ``ETag``
+    answers 304 while it is unchanged."""
+    import hashlib
+    from backend.app.services.versioning.import_export import contract
+    with _domain_errors():
+        ontology, _identity = await ie.contract_context(ws_id, meta.get("data_source_id"))
+    body = json.dumps(contract.json_schema(ontology), indent=2, sort_keys=True, ensure_ascii=False)
+    tag = f'W/"{hashlib.sha256(body.encode()).hexdigest()[:16]}"'
+    headers = {"ETag": tag, "X-Schema-Version": str(contract.FORMAT_VERSION),
+               "Cache-Control": "private, max-age=300"}
+    if request.headers.get("if-none-match") == tag:
+        return Response(status_code=304, headers=headers)
+    return Response(content=body, media_type="application/schema+json", headers=headers)
+
+
+#: The largest body a dry run reads (``POST …/imports/validate``): a larger file is imported into
+#: a draft, which is itself a dry run until it is published.
+_VALIDATE_MAX_BYTES = 8 * 1024 * 1024
+
+
+@router.post("/graphs/{graph_id}/imports/validate")
+async def validate_import(
+    ws_id: str, graph_id: str, request: Request,
+    format: str = Query("ndjson"),
+    branch_id: Optional[str] = Query(None, alias="branchId"),
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    viewer: Viewer = Depends(viewer_ctx),
+    meta: dict = Depends(graph_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    ie=Depends(get_import_export_service),
+):
+    """Check a file as an import would read it, without importing it: every row parsed and
+    resolved against ``main`` (or the draft ``branchId``) — what it would create, update, leave
+    unchanged or delete, the ids new nodes would take, and why a row would be refused — and
+    nothing written, no draft opened, no job made. The body is the file (up to 8 MiB and
+    ``IMPORT_COMMIT_WINDOW`` rows; **413** past either). **422** when the file can't be read. A
+    strict graph's write gate, which runs at commit, can still refuse a row that passes here."""
+    from backend.app.services.versioning.import_export.formats import get_adapter
+    from backend.app.services.versioning.import_export.service import DryRunTooLarge
+    try:
+        get_adapter(format)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    body = bytearray()
+    async for chunk in request.stream():
+        body += chunk
+        if len(body) > _VALIDATE_MAX_BYTES:
+            raise HTTPException(status_code=413, detail={
+                "type": "too_large", "message": "A dry run checks up to 8 MiB: import a larger "
+                "file into a draft and read its preview."})
+    if branch_id:
+        with _domain_errors():
+            await svc.assert_branch_readable(graph_id=graph_id, branch_id=branch_id, viewer=viewer)
+    try:                                       # the draft is checked above: what is left is the file
+        return await ie.validate_import(
+            graph_id=graph_id, workspace_id=ws_id, data_source_id=meta.get("data_source_id"),
+            branch_id=branch_id, data=bytes(body), import_format=format.lower())
+    except DryRunTooLarge as exc:
+        raise HTTPException(status_code=413, detail={"type": "too_large", "message": str(exc)})
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail={"type": "invalid_file", "message": str(exc)})
 
 
 @router.get("/graphs/{graph_id}/imports/{job_id}")

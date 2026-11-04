@@ -75,6 +75,7 @@ tests/test_ci_required_list.py
 tests/test_cleanup_graph_indices.py
 tests/test_concurrency_tuning_doc.py
 tests/test_configmap_matches_manifests.py
+tests/test_connector_example.py
 tests/test_controlplane_loops_wiring.py
 tests/test_cors_expose_headers.py
 tests/test_count_alerts.py
@@ -137,6 +138,7 @@ tests/test_identity_minting_guard.py
 tests/test_import_export_idempotency.py
 tests/test_import_formats.py
 tests/test_import_job_liveness.py
+tests/test_import_record_schema.py
 tests/test_import_replace.py
 tests/test_import_replace_scope.py
 tests/test_import_resolve.py

@@ -51,6 +51,7 @@ export const filenameMap: Record<string, string> = {
   'SSO_BACKCHANNEL_CONTRACT.md': 'sso-backchannel-contract',
   'INTEGRATION_QUICKSTART.md': 'integration-quickstart',
   'API_GUIDE.md': 'api-guide',
+  'CONNECTOR_GUIDE.md': 'connector-guide',
   'KEY_MANAGEMENT_API.md': 'key-management-api',
   'GRAPH_METADATA_API.md': 'graph-metadata-api',
   'ONBOARDING_A_SOURCE.md': 'onboarding-a-source',

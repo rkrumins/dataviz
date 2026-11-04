@@ -165,7 +165,7 @@ export function ImportDialog({ wsId, graphId, branchId, viewId, onClose, onRevie
               inputRef={inputRef} reconcileMode={reconcileMode} setReconcileMode={setReconcileMode}
               format={format} setFormat={(f) => { setFormat(f); setAutoDetected(false) }} autoDetected={autoDetected}
               warning={warning} viewScoped={!!viewId}
-              onDownloadTemplate={() => triggerBrowserDownload(templateDownloadUrl(wsId, graphId, 'csv'), 'import-template.csv')}
+              onDownloadTemplate={(fmt) => triggerBrowserDownload(templateDownloadUrl(wsId, graphId, fmt), `import-template.${fmt}`)}
             />
           )}
           {phase === 'running' && <RunningStep job={job} upload={upload} fileName={file?.name} />}
@@ -225,7 +225,7 @@ function ChooseStep(props: {
   autoDetected: boolean
   warning: string | null
   viewScoped: boolean
-  onDownloadTemplate: () => void
+  onDownloadTemplate: (format: ImportFormat) => void
 }) {
   const {
     file, setFile, dragging, setDragging, onDrop, inputRef, reconcileMode, setReconcileMode,
@@ -240,18 +240,32 @@ function ChooseStep(props: {
           <p className="text-[11px] text-ink-muted mt-0.5">Offline edits, applied safely — with a full review first.</p>
         </div>
         <ol className="space-y-3">
-          <Step n={1} title="Download a starter template" body="Prefilled with your current data so you learn the columns instantly." />
+          <Step n={1} title="Download a starter template" body="Every column your data can carry, with an example row of each type. To change what's there, export it instead." />
           <Step n={2} title="Edit it anywhere" body="Excel, Sheets, or any editor. Each property is its own column — edit a cell to change it, add a prop.<name> column for a new one." />
           <Step n={3} title="Upload it here" body="Excel, CSV, TSV, NDJSON or JSON — the format is detected automatically." />
           <Step n={4} title="Review every change" body="See exactly what's new, updated or deleted on a draft before it's live." />
           <Step n={5} title="Publish or open a PR" body="Nothing touches the published model until you approve it." />
         </ol>
-        <button
-          onClick={props.onDownloadTemplate}
-          className="w-full flex items-center justify-center gap-2 px-3 py-2.5 rounded-xl border border-indigo-200/80 dark:border-indigo-800/50 bg-white/70 dark:bg-white/[0.04] text-indigo-600 dark:text-indigo-400 text-xs font-semibold hover:bg-indigo-50 dark:hover:bg-indigo-950/30 transition-colors"
-        >
-          <Download className="w-4 h-4" /> Download a starter template
-        </button>
+        <div className="space-y-1.5">
+          <button
+            onClick={() => props.onDownloadTemplate('xlsx')}
+            className="w-full flex items-center justify-center gap-2 px-3 py-2.5 rounded-xl border border-indigo-200/80 dark:border-indigo-800/50 bg-white/70 dark:bg-white/[0.04] text-indigo-600 dark:text-indigo-400 text-xs font-semibold hover:bg-indigo-50 dark:hover:bg-indigo-950/30 transition-colors"
+          >
+            <Download className="w-4 h-4" /> Download a starter template
+          </button>
+          <p className="text-center text-[11px] text-ink-muted">
+            Excel, with a sheet explaining every column · or{' '}
+            {(['csv', 'ndjson'] as const).map((fmt, i) => (
+              <span key={fmt}>
+                {i > 0 && ' · '}
+                <button onClick={() => props.onDownloadTemplate(fmt)}
+                  className="font-semibold text-indigo-600 dark:text-indigo-400 hover:underline">
+                  {fmt === 'csv' ? 'CSV' : 'NDJSON'}
+                </button>
+              </span>
+            ))}
+          </p>
+        </div>
         <div className="flex items-start gap-2 rounded-lg bg-black/[0.03] dark:bg-white/[0.04] px-3 py-2.5">
           <Lock className="w-3.5 h-3.5 text-ink-muted mt-0.5 flex-shrink-0" />
           <p className="text-[11px] text-ink-muted leading-relaxed">

@@ -9,6 +9,35 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — A connector-ready import and export contract
+
+### Added
+
+- **The record format is a published contract (v1).** `import_export/contract.py` declares every
+  column of an import or export file, and its JSON Schema is committed at
+  `backend/common/schema/import-record.v1.json`. `GET …/versioning/graphs/{graphId}/imports/schema`
+  serves it narrowed to a data source: its entity and edge types as enums, and its properties
+  typed. It answers with an `ETag` and `X-Schema-Version`. Version 1 only gains columns.
+- **A dry run:** `POST …/imports/validate`, with the file as the body. It reads a file exactly as an
+  import would and writes nothing, with no draft and no job. It says what each row would do, the id
+  a new node would take, why a row would be refused, and which columns the format doesn't know
+  (usually a typo). It takes up to 8 MiB and one window of rows.
+- **[Building a Connector](docs/CONNECTOR_GUIDE.md)** covers the format, pointers, deltas vs
+  snapshots, sending large files, retries, the dry run and publishing. A reference connector ships
+  in `docs/examples/connector/` and is tested against the contract.
+- **API keys can call** the schema and the dry run.
+
+### Changed
+
+- **The import template is built from the data source's ontology.** It has every column a file can
+  carry, a worked row of each entity type and an edge of each relationship type, and an Excel
+  Columns sheet explaining each column. It no longer copies a few real rows from `main`: to edit
+  real data, export it. The dialog offers Excel, CSV or NDJSON.
+- **Template downloads carry the right media type** for Excel, JSON and TSV, and CSV/TSV start with
+  a BOM, as exports do.
+
+---
+
 ## [Unreleased] — The ids a file carries are pointers; importing it again changes nothing
 
 ### Changed

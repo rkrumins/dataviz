@@ -550,20 +550,42 @@ class ImportWorker:
         self._keys = keys if keys else None
         if self._keys is None:
             return
-        wanted: Dict[str, set] = {}
         async with db.graphver_session() as s:
             result = await s.stream(select(ImportRowORM.kind, ImportRowORM.raw)
                                     .where(ImportRowORM.job_id == job_id))
-            async for kind, raw in result:
-                if kind == "node":
-                    pairs = keys.values(self._canon.get(str(raw.get("entityType") or "").lower(),
-                                                        raw.get("entityType")), raw.get("properties"))
-                else:
-                    pairs = [(f, key_value(v)) for end in ("source", "target")
-                             for f, v in (raw.get(f"{end}Keys") or {}).items()]
-                for field, value in pairs:
-                    if value is not None:
-                        wanted.setdefault(field, set()).add(value)
+            await self._read_keys(snap, result)
+
+    async def validation_state(self, snap, graph_id: str, branch_id: str, rows) -> None:
+        """The identity state a dry run (``ImportExportService.validate_import``) resolves its
+        rows against: as :meth:`_identity_state`, for rows held in memory and no job."""
+        from backend.app.services.node_identity import identity_property
+        self._graph_id, self._branch_id = graph_id, branch_id
+        self._id_scope = await self._svc.identity_scope(graph_id)
+        self._identity_prop = identity_property(self._node_identity)
+        onto = self._ontology or {}
+        keys = KeyIndex(onto.get("keys"), onto.get("unique"))
+        self._keys = keys if keys else None
+        if self._keys is not None:
+            async def held():
+                for row in rows:
+                    yield row["kind"], row
+            await self._read_keys(snap, held())
+
+    async def _read_keys(self, snap, rows) -> None:
+        """Fill the team keys with their holders: the values ``rows`` (``(kind, raw)``, as staged)
+        use, found in one pass over the draft's live nodes of the key types."""
+        keys = self._keys
+        wanted: Dict[str, set] = {}
+        async for kind, raw in rows:
+            if kind == "node":
+                pairs = keys.values(self._canon.get(str(raw.get("entityType") or "").lower(),
+                                                    raw.get("entityType")), raw.get("properties"))
+            else:
+                pairs = [(f, key_value(v)) for end in ("source", "target")
+                         for f, v in (raw.get(f"{end}Keys") or {}).items()]
+            for field, value in pairs:
+                if value is not None:
+                    wanted.setdefault(field, set()).add(value)
         if not wanted:
             return
         types = set(keys.match) | set(keys.unique)
