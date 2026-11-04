@@ -110,8 +110,7 @@ const INDEX_STATUS = { a: 'added', m: 'modified', r: 'removed' } as const
  *  type and ends — what finds a draft's created children and draws a removed link — so nothing here
  *  can reconstruct a removed node (no ghost). `counts` stands in for the entries of an index too
  *  large to list (`truncated`). */
-export function fromChangeIndex(index: ChangeListIndex, branchId: string, counts?: ChangeCounts): ChangeSet {
-  const origin: ChangeOrigin = { source: 'branch', branchId }
+export function fromChangeIndex(index: ChangeListIndex, origin: ChangeOrigin, counts?: ChangeCounts): ChangeSet {
   const changes: GraphChange[] = index.entries.map((e) => {
     const status = INDEX_STATUS[e[2]]
     // By the canvas's names: a node's urn, an edge's ends' urns — given where they are not the ids.
@@ -128,7 +127,7 @@ export function fromChangeIndex(index: ChangeListIndex, branchId: string, counts
 }
 
 /** Counts alone, for a surface that says how much a draft changes and lists none of it. */
-export function fromChangeCounts(counts: ChangeCounts, _branchId: string): ChangeSet {
+export function fromChangeCounts(counts: ChangeCounts): ChangeSet {
   const any = counts.added + counts.modified + counts.removed > 0
   return { changes: [], byEntityId: new Map(), counts, origin: any ? 'branch' : 'empty' }
 }

@@ -23,7 +23,9 @@ import type { GraphSchema } from './GraphDataProvider'
 import type { GraphProviderContextValueExtended } from './GraphProviderContext'
 import { useGraphProviderContext, ProviderOverride } from './GraphProviderContext'
 import { getOrCreateProvider, poolKey } from './providerPool'
-import { useBranchStore, useEffectiveBranchId } from '@/store/branchStore'
+import { useBranchStore, useEffectiveBranchId, useEffectiveRevision } from '@/store/branchStore'
+import { useRevision } from '@/features/versioning/hooks/useVersioning'
+import { useRevisionGuard, useRevisionViewer } from '@/features/versioning/hooks/useRevisionViewer'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { useProviderStatus } from '@/store/providerStatus'
 import { useGraphSchema } from '@/hooks/useGraphSchema'
@@ -57,6 +59,9 @@ export interface ViewExecutionContextValue {
   /** True when the data plane is read-only for this caller — the whole
    *  canvas tree hides edit/draft/versioning affordances off this flag. */
   readOnly: boolean
+  /** The past revision of Published this view reads the graph as it was at (read-only, the
+   *  versioning bar stays as the way back), or null for the graph as it is now. */
+  asOfSeq: number | null
 }
 
 const ViewExecCtx = createContext<ViewExecutionContextValue | null>(null)
@@ -72,10 +77,15 @@ export function useViewExecutionContext(): ViewExecutionContextValue | null {
  * against the unsaved form state) and by tests — never by real views, which
  * go through ViewExecutionProvider's fetch/gate flow.
  */
-export function StaticViewSchemaProvider({ schema, children }: { schema: ResolvedViewSchema; children: ReactNode }) {
+export function StaticViewSchemaProvider({ schema, asOfSeq = null, children }: {
+  schema: ResolvedViewSchema
+  /** A past revision the preview reads (the revision harness), or none. */
+  asOfSeq?: number | null
+  children: ReactNode
+}) {
   const value = useMemo<ViewExecutionContextValue>(
-    () => ({ schema, workspaceId: '__preview__', dataSourceId: null, access: null, readOnly: false }),
-    [schema],
+    () => ({ schema, workspaceId: '__preview__', dataSourceId: null, access: null, readOnly: false, asOfSeq }),
+    [schema, asOfSeq],
   )
   return <ViewExecCtx.Provider value={value}>{children}</ViewExecCtx.Provider>
 }
@@ -174,6 +184,19 @@ export function ViewExecutionProvider({
   // this view's branch — without it, ViewPage doesn't remount on a view-only route
   // change, so a stale/other view's branchId could route this view's reads. ──
   const effectiveBranchId = useEffectiveBranchId(workspaceId, dataSourceId, viewId)
+  // A past revision of Published, open in this scope: every graph read names it (?asOfSeq=) on a
+  // provider — and a response cache — of its own. A draft is never read at one, nor is one read by
+  // someone the server would refuse it to (the preview off, or a view's share link).
+  const effectiveRevision = useEffectiveRevision(workspaceId, dataSourceId, viewId)
+  const revisionViewer = useRevisionViewer(workspaceId)
+  const wantedAsOf = effectiveBranchId || !revisionViewer ? null : effectiveRevision
+  // What opening it takes, asked first: the canvas moves to it only once it is known to open, so it
+  // never draws a read the server would refuse — and one that won't open hands over to its
+  // comparison with now (useRevisionGuard).
+  const revisionGraphId = useBranchStore((s) => s.graphId)
+  const revisionPlan = useRevision(workspaceId, wantedAsOf != null ? revisionGraphId : null, wantedAsOf)
+  useRevisionGuard(wantedAsOf, revisionPlan)
+  const asOfSeq = wantedAsOf != null && revisionPlan.data?.openable ? wantedAsOf : null
   const mainEpoch = useBranchStore((s) => s.mainEpoch)
   const draftEpoch = useBranchStore((s) => s.draftEpoch)
 
@@ -183,30 +206,33 @@ export function ViewExecutionProvider({
   // Members pay one extra cheap getStats() probe; non-members need it.
   const scopeMatchesGlobal =
     !effectiveBranchId &&
+    asOfSeq == null &&
     !viewId &&
     workspaceId === globalCtx.workspaceId &&
     (dataSourceId === globalCtx.dataSourceId || (!dataSourceId && !globalCtx.dataSourceId))
 
   const scopedProvider = useMemo(() => {
     if (scopeMatchesGlobal) return globalCtx.provider
-    return getOrCreateProvider(workspaceId, dataSourceId, effectiveBranchId, viewId)
-  }, [scopeMatchesGlobal, workspaceId, dataSourceId, effectiveBranchId, viewId, globalCtx.provider])
+    return getOrCreateProvider(workspaceId, dataSourceId, effectiveBranchId, viewId, asOfSeq)
+  }, [scopeMatchesGlobal, workspaceId, dataSourceId, effectiveBranchId, viewId, asOfSeq, globalCtx.provider])
 
   // ── Provider version: global if matching, otherwise local counter ──
   const [localVersion, setLocalVersion] = useState(1)
-  const prevScopeRef = useRef(poolKey(workspaceId, dataSourceId, effectiveBranchId, viewId))
+  const prevScopeRef = useRef(poolKey(workspaceId, dataSourceId, effectiveBranchId, viewId, asOfSeq))
 
   useEffect(() => {
-    const key = poolKey(workspaceId, dataSourceId, effectiveBranchId, viewId)
+    const key = poolKey(workspaceId, dataSourceId, effectiveBranchId, viewId, asOfSeq)
     if (key !== prevScopeRef.current) {
       prevScopeRef.current = key
       setLocalVersion(v => v + 1)
     }
-  }, [workspaceId, dataSourceId, effectiveBranchId, viewId])
+  }, [workspaceId, dataSourceId, effectiveBranchId, viewId, asOfSeq])
 
   // mainEpoch bumps on publish/merge → folds into the version so schema + hydration
   // (keyed by providerVersion) refetch once main has moved; draftEpoch the same, once the open
-  // draft was rewritten behind the canvas (an import, others' saves taken in).
+  // draft was rewritten behind the canvas (an import, others' saves taken in). Folded in at a past
+  // revision too, which a publish doesn't change: the version only ever grows, so no two scopes
+  // ever share one.
   const providerVersion = (scopeMatchesGlobal ? globalCtx.providerVersion : localVersion) + mainEpoch + draftEpoch
 
   // ── Background connectivity check for scoped providers ──
@@ -277,6 +303,7 @@ export function ViewExecutionProvider({
             dataSourceId={dataSourceId}
             access={access}
             readOnly={readOnly}
+            asOfSeq={asOfSeq}
           >
             {children}
           </ViewExecValue>
@@ -308,11 +335,12 @@ function ViewExecValue({
   dataSourceId,
   access,
   readOnly,
+  asOfSeq,
   children,
 }: ViewExecutionContextValue & { children: ReactNode }) {
   const value = useMemo<ViewExecutionContextValue>(
-    () => ({ schema, workspaceId, dataSourceId, access, readOnly }),
-    [schema, workspaceId, dataSourceId, access, readOnly],
+    () => ({ schema, workspaceId, dataSourceId, access, readOnly, asOfSeq }),
+    [schema, workspaceId, dataSourceId, access, readOnly, asOfSeq],
   )
   return <ViewExecCtx.Provider value={value}>{children}</ViewExecCtx.Provider>
 }

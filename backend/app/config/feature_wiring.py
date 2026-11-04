@@ -844,9 +844,11 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
             "Every /graph read that names a past revision (?asOfSeq=) — the canvas, its nodes, "
             "edges, children and rollups as they were then",
         ),
-        # No UI surface yet: the screens that open a past revision and compare two come next,
-        # and read this flag.
-        ui_surfaces=(),
+        ui_surfaces=(
+            "Reviews → History: Open on canvas, Compare with now, Compare with… and Copy link on a "
+            "revision, the month picker, and two revisions compared",
+            "The canvas: the past-revision banner, its ?rev= link, and a comparison highlighted",
+        ),
         still_allowed=(
             "Every read of the graph as it is now, and every draft",
             "History: each revision's changes, and Undo and Restore for the people who can publish",

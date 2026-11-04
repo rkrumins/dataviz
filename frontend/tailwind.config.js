@@ -174,11 +174,17 @@ export default {
         'slide-right': 'slideRight 0.3s ease-out',
         'pulse-soft': 'pulseSoft 2s ease-in-out infinite',
         'flow': 'flow 2s linear infinite',
+        // A sweep along a bar, for work whose length isn't known (a past revision being rewound).
+        'indeterminate': 'indeterminate 1.2s ease-in-out infinite',
       },
       keyframes: {
         fadeIn: {
           '0%': { opacity: '0' },
           '100%': { opacity: '1' },
+        },
+        indeterminate: {
+          '0%': { transform: 'translateX(-100%)' },
+          '100%': { transform: 'translateX(300%)' },
         },
         slideUp: {
           '0%': { opacity: '0', transform: 'translateY(10px)' },

@@ -259,8 +259,8 @@ interface CanvasState {
   setPlacementsNotFound: (found: { viewId: string; urns: string[] } | null) => void
   /** Why a subset view's layers list no matches: the preview is off, this data
    *  source can't list them, or the view's base view is gone. */
-  subsetIssue: 'off' | 'unsupported' | 'base_missing' | null
-  setSubsetIssue: (issue: 'off' | 'unsupported' | 'base_missing' | null) => void
+  subsetIssue: 'off' | 'unsupported' | 'base_missing' | 'revision' | null
+  setSubsetIssue: (issue: 'off' | 'unsupported' | 'base_missing' | 'revision' | null) => void
   /** Bumped to ask a subset view's layers for answers on the current data. */
   subsetRefreshNonce: number
   refreshSubsetFeeds: () => void

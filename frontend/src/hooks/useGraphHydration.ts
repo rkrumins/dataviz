@@ -5,6 +5,7 @@ import type { ViewFeedPage } from '@/types/searchView'
 import { httpStatusOf } from '@/services/graphRequestFailure'
 import { primeLineageFor } from '@/lib/primeLineageFor'
 import { useGraphProvider, useGraphProviderContext } from '@/providers/GraphProviderContext'
+import { useViewExecutionContext } from '@/providers/ViewExecutionContext'
 import {
     useActiveView,
     isContainmentEdgeType,
@@ -473,6 +474,8 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
 
     const provider = useGraphProvider()
     const { providerVersion, workspaceId: providerWsId, dataSourceId: providerDsId } = useGraphProviderContext()
+    // A past revision: a subset view's layers are a search's matches, which reads the graph as it is.
+    const atRevision = (useViewExecutionContext()?.asOfSeq ?? null) != null
 
     // Force the client-side circuit breakers closed so a re-attempt actually
     // probes the provider. Without this, an OPEN breaker (it opens for ~15s
@@ -832,7 +835,9 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                         // type, which would list every entity of the layer's types. With
                         // the preview off it lists nothing and says why.
                         const viewFeed = provider.viewFeedPage?.bind(provider)
-                        if (!featureEnabled('searchViewsEnabled') || !viewFeed || !activeView?.id) {
+                        if (atRevision) {
+                            useCanvasStore.getState().setSubsetIssue('revision')
+                        } else if (!featureEnabled('searchViewsEnabled') || !viewFeed || !activeView?.id) {
                             useCanvasStore.getState().setSubsetIssue(
                                 featureEnabled('searchViewsEnabled') ? 'unsupported' : 'off')
                         } else {
@@ -1295,7 +1300,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
             }
         }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [enableHydration, provider, providerVersion, activeView?.id, activeView?.layout.type, rootTypesKey, schemaTypesKey, isSchemaReady, committedDeltaKey, retryEpoch, subsetKey])
+    }, [enableHydration, provider, providerVersion, activeView?.id, activeView?.layout.type, rootTypesKey, schemaTypesKey, isSchemaReady, committedDeltaKey, retryEpoch, subsetKey, atRevision])
 
     // Explicit, user-triggered retry (the overlay's "Retry" button, or when a
     // background tab is brought back to the foreground). Re-arms a fresh round

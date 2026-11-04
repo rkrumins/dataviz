@@ -75,7 +75,7 @@ export function NodeDiffBadge({
     >
       <meta.Icon className="w-3 h-3" />
       {withLabel && <span>{meta.label}</span>}
-      {count != null && <span className="tabular-nums">{count}</span>}
+      {count != null && <span className="tabular-nums">{count.toLocaleString()}</span>}
     </span>
   )
 }

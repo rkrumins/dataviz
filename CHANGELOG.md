@@ -9,6 +9,56 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — See the graph as it was at any revision, and compare any two (preview)
+
+The screens of the revision history viewer, behind the preview switch **Revision history viewer:
+the graph as it was** (`revisionViewerEnabled`), which ships off. The history itself now lists
+every revision, for everyone.
+
+### Added
+
+- **Open the graph as it was at any revision.** In **Reviews → History**, a revision's **⋯** menu
+  → **Open on canvas**.
+  - The canvas shows the published graph as it was then, read-only.
+  - A banner says when that was, which revision it is, who made it, and how much has changed
+    since. It says *Opening…* until the graph is ready, and *Rewinding 12,400 changes…* while a
+    long one draws.
+  - **Back to Published**, or **Esc**, returns to the graph as it is now.
+  - The menu says before you choose whether a revision can be opened.
+  - Exporting while a revision is open exports the graph as it was.
+- **A link to the graph as it was.** The address carries the revision (`?rev=128`), and **Copy
+  link** on a revision copies one. Either opens that revision for anyone who can read the data
+  source.
+- **Go to any month.** **Months** shows a year at a time, each month shaded by how many revisions it
+  saw, and a month opens to its days. From the end of any month or day you can open the graph as it
+  was, compare it with now, or bring the list to it.
+- **Compare two revisions.** Choose **Compare with now**, or **Compare with…** and then the other
+  revision. You see:
+  - how much was added, modified and removed, over how many revisions and by whom;
+  - which types changed most;
+  - every change, a page at a time.
+
+  **Highlight on canvas** rings the changes on the graph.
+- **A revision too far back to draw** (more than 100,000 changes since) opens as its comparison
+  with now instead, with **Export as it was then**.
+
+### Changed
+
+- **The history lists every revision.** It used to stop at 500. It now loads older revisions as you
+  scroll, newest first, grouped by month and day in your time zone, with the month you're reading
+  pinned at the top. Only the rows on screen are drawn, so years of history scroll as smoothly as a
+  week's.
+- With the preview on, the **Commits** tab is called **History**.
+
+### Known limitations
+
+- **At a past revision**, search, traces, Narrow, display rules and subset views are off, because
+  they read the graph as it is now. The layout and the ontology are today's.
+- **Publishing while a past revision is open** makes the canvas read that revision again: the same
+  past data, fetched twice.
+
+---
+
 ## [Unreleased] — The published graph as it was at any past revision (API, preview)
 
 The server side of the revision history viewer. A graph read can name a past revision of a data

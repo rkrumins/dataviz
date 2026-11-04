@@ -31,8 +31,8 @@ export function PublishDraftDialog({
   const origin = useMemo(() => ({ branchId }), [branchId])
   const summaryQ = useChangeSummary(wsId, graphId, origin)
   const changeSet = useMemo(
-    () => (summaryQ.data ? fromChangeCounts(summaryQ.data.counts, branchId) : EMPTY_CHANGE_SET),
-    [summaryQ.data, branchId],
+    () => (summaryQ.data ? fromChangeCounts(summaryQ.data.counts) : EMPTY_CHANGE_SET),
+    [summaryQ.data],
   )
   if (summaryQ.isLoading) {
     return createPortal(

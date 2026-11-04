@@ -174,6 +174,41 @@ After a merge or publish, the banner *Merged — your changes are now live* (or
 *Published — …*) offers **View in history** too. A data source's **Versioning**
 tab lists its recent commits, drafts and open merge requests.
 
+The history is listed newest first, by month and day, and keeps loading older
+revisions as you scroll — all the way back to the first.
+
+### See the graph as it was
+
+> **Preview.** This needs **Revision history viewer: the graph as it was** turned
+> on under Admin → Features. While it is, the **Commits** tab is called **History**.
+
+Like checking out an earlier commit, you can open the published graph as it was at
+any revision, read-only, and compare any two revisions.
+
+1. In **Reviews → History**, open a revision's **⋯** menu and choose **Open on
+   canvas**. Or choose **Months** to go to the end of any month or day: darker
+   months saw more revisions.
+2. The canvas shows the graph as it was. The banner above it says when that was,
+   which revision it is and who made it, and how much has changed since.
+3. Choose **Back to Published** (or press **Esc**) to return to the graph as it is now.
+
+While a past revision is open:
+
+- **Nothing can be edited**, and search, traces, Narrow, display rules and subset
+  views are off: they read the graph as it is now.
+- **The layout is today's**: the view's layers and the ontology as they are now.
+- **Exporting** downloads the graph as it was.
+- **The address in your browser** (`?rev=…`) opens the same revision for anyone
+  who can read the data source. **Copy link** on a revision gives you one.
+
+To compare, choose **Compare with now** (on a revision or in the banner) or
+**Compare with…** and then the other revision. You see how much was added,
+modified and removed, over how many revisions and by whom, which types changed
+most, and every change. **Highlight on canvas** rings them on the graph.
+
+A revision more than 100,000 changes back is too far to draw. It opens as a
+comparison with now instead, and you can still export the graph as it was then.
+
 ## Undo vs. Restore — the distinction that matters
 
 Two different tools fix a published mistake, and they're not interchangeable.

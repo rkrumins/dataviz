@@ -142,8 +142,32 @@ export interface RemoteGraphProviderOptions {
      * membership path short-circuits first.
      */
     viewId?: string
+    /**
+     * A past revision of Published to read the graph as it was at, read-only. Appended as
+     * ?asOfSeq= to every read but the data source's own chrome ({@link TODAYS_PATHS}): the
+     * server answers the reads that can be answered as they were then and refuses every other
+     * one, so nothing at a revision is ever quietly answered from the graph as it is now.
+     */
+    asOfSeq?: number
     /** @deprecated Legacy connection ID. Use workspaceId instead. */
     connectionId?: string
+}
+
+/**
+ * The reads about the data source itself rather than its graph, which a past revision reads as
+ * they are now: whether it answers at all (the view's connectivity probe), its schema and ontology
+ * (a revision is drawn with today's), its statistics. The banner says so.
+ */
+const TODAYS_PATHS: ReadonlyArray<RegExp> = [
+    /^\/stats$/,
+    /^\/introspection$/,
+    /^\/metadata\/(ontology|schema)$/,
+]
+
+/** Whether a read at a past revision goes without it, as the data source is now. */
+export function readsAsItIsNow(path: string): boolean {
+    const pathOnly = path.split('?')[0]
+    return TODAYS_PATHS.some((p) => p.test(pathOnly))
 }
 
 export class RemoteGraphProvider implements GraphDataProvider {
@@ -153,13 +177,15 @@ export class RemoteGraphProvider implements GraphDataProvider {
     private readonly dataSourceId?: string
     private readonly branchId?: string
     private readonly viewId?: string
+    private readonly asOfSeq?: number
     private readonly connectionId?: string
 
-    /** (workspace, data source, branch, view) identity — client caches keyed
+    /** (workspace, data source, branch or revision, view) identity — client caches keyed
      *  by URN fold this in so the same URN across two graphs (or two
-     *  capability contexts) can't collide. */
+     *  capability contexts, or the graph as it is and as it was) can't collide. */
     get scopeKey(): string {
-        return `${this.workspaceId ?? ''}:${this.dataSourceId ?? ''}:${this.branchId ?? this.connectionId ?? ''}:${this.viewId ?? ''}`
+        const branch = this.branchId ?? (this.asOfSeq != null ? `main@${this.asOfSeq}` : this.connectionId)
+        return `${this.workspaceId ?? ''}:${this.dataSourceId ?? ''}:${branch ?? ''}:${this.viewId ?? ''}`
     }
 
     /** In-flight request deduplication: identical concurrent requests share one Promise */
@@ -210,6 +236,7 @@ export class RemoteGraphProvider implements GraphDataProvider {
         this.dataSourceId = options?.dataSourceId
         this.branchId = options?.branchId
         this.viewId = options?.viewId
+        this.asOfSeq = options?.asOfSeq
         this.connectionId = options?.connectionId
     }
 
@@ -278,6 +305,11 @@ export class RemoteGraphProvider implements GraphDataProvider {
         // funnel through buildUrl.
         if (this.workspaceId && this.viewId) {
             url.searchParams.set('viewId', this.viewId)
+        }
+
+        // A past revision: every read of the graph names it (see TODAYS_PATHS).
+        if (this.workspaceId && this.asOfSeq != null && !readsAsItIsNow(path)) {
+            url.searchParams.set('asOfSeq', String(this.asOfSeq))
         }
 
         // Legacy fallback: append connectionId as query param

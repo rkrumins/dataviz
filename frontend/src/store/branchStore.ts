@@ -14,6 +14,23 @@ import { create } from 'zustand'
 import type { ResolveResponse } from '@/services/versioningApiService'
 import type { ChangeSet } from '@/features/versioning/model/changeModel'
 
+/** A past revision of Published the canvas reads, read-only — like checking out a commit. What the
+ *  history list knew of it rides along, so the banner reads at once; a deep link knows only `seq`. */
+export interface OpenRevision {
+  seq: number
+  commitId?: string | null
+  createdAt?: string | null
+  message?: string | null
+  actor?: string | null
+}
+
+/** Two revisions of Published compared on the canvas: what changed after `fromSeq`, up to and
+ *  including `toSeq`, highlighted on the graph as it was at `toSeq` (or as it is, at the head). */
+export interface RevisionHighlight {
+  fromSeq: number
+  toSeq: number
+}
+
 interface BranchState {
   /** The (workspace, data source, view) this branch context is scoped to — a branchId is
    *  only valid for its own graph AND the view it was resolved for (branch-per-view: each
@@ -49,6 +66,12 @@ interface BranchState {
    *  in — so its reads refetch (folded into providerVersion) and the canvas remounts on it. */
   draftEpoch: number
 
+  /** The past revision of Published the canvas reads (`?asOfSeq=`), or null for the graph as it is.
+   *  A revision is of Published: opening one leaves any draft, and opening a draft closes it. */
+  revision: OpenRevision | null
+  /** A comparison of two revisions highlighted on the canvas, or null. */
+  highlight: RevisionHighlight | null
+
   /** True when the active branch is a draft (not trunk). */
   isDraftMode: () => boolean
   /** The branchId to use for reads in (wsId, dataSourceId[, viewId]) — null unless the scope
@@ -66,6 +89,12 @@ interface BranchState {
   setActiveChangeSet: (cs: ChangeSet | null) => void
   bumpMainEpoch: () => void
   bumpDraftEpoch: () => void
+  /** Read the graph as it was at a past revision of Published — read-only. */
+  openRevision: (revision: OpenRevision) => void
+  /** Back to Published as it is now. */
+  closeRevision: () => void
+  /** Highlight what changed between two revisions; null clears it. */
+  setHighlight: (highlight: RevisionHighlight | null) => void
   /** Clear all branch context — call when leaving a data source / view. */
   reset: () => void
 }
@@ -83,6 +112,8 @@ const INITIAL = {
   committedDiffHidden: false,
   mainEpoch: 0,
   draftEpoch: 0,
+  revision: null,
+  highlight: null,
 } as const
 
 export const useBranchStore = create<BranchState>((set, get) => ({
@@ -125,15 +156,20 @@ export const useBranchStore = create<BranchState>((set, get) => ({
               currentBranchId: null,
               originatingViewId: null,
               activeChangeSet: null,
+              revision: null,
+              highlight: null,
             }),
       }
     }),
 
+  // Published as it is now: no draft, and no past revision either.
   switchToMain: () =>
     set({
       currentBranchId: null,
       originatingViewId: null,
       activeChangeSet: null,
+      revision: null,
+      highlight: null,
     }),
 
   switchToDraft: (branchId, originatingViewId = null) =>
@@ -142,6 +178,8 @@ export const useBranchStore = create<BranchState>((set, get) => ({
       originatingViewId,
       // Leaving any prior diff set behind — it described a different branch.
       activeChangeSet: null,
+      revision: null,
+      highlight: null,
     }),
 
   // The committed-vs-main highlight is a view preference: it survives branch switches (so the
@@ -154,6 +192,20 @@ export const useBranchStore = create<BranchState>((set, get) => ({
   bumpMainEpoch: () => set((s) => ({ mainEpoch: s.mainEpoch + 1 })),
   bumpDraftEpoch: () => set((s) => ({ draftEpoch: s.draftEpoch + 1 })),
 
+  openRevision: (revision) =>
+    set((s) => ({
+      revision,
+      currentBranchId: null,
+      originatingViewId: null,
+      // A highlight of two revisions stays only while it shows the revision opened.
+      highlight: s.highlight && s.highlight.toSeq === revision.seq ? s.highlight : null,
+      activeChangeSet: null,
+    })),
+
+  closeRevision: () => set({ revision: null, highlight: null, activeChangeSet: null }),
+
+  setHighlight: (highlight) => set({ highlight, activeChangeSet: null }),
+
   reset: () => set({ ...INITIAL }),
 }))
 
@@ -163,6 +215,8 @@ export const useIsDraftMode = () =>
   useBranchStore((s) => !!s.currentBranchId && s.currentBranchId !== s.mainBranchId)
 export const useGraphId = () => useBranchStore((s) => s.graphId)
 export const useCommittedDiffHidden = () => useBranchStore((s) => s.committedDiffHidden)
+export const useOpenRevision = () => useBranchStore((s) => s.revision)
+export const useRevisionHighlight = () => useBranchStore((s) => s.highlight)
 
 /** The branchId to apply to reads in (wsId, dataSourceId[, viewId]), or null if the active
  *  branch context belongs to a different scope (or is trunk). `viewId` is optional — omitting
@@ -179,5 +233,21 @@ export const useEffectiveBranchId = (
     s.dataSourceId === dataSourceId &&
     (viewId === undefined || s.viewId === viewId)
       ? s.currentBranchId
+      : null,
+  )
+
+/** The past revision reads in (wsId, dataSourceId[, viewId]) are of — its seq — or null when none
+ *  is open, or the open one belongs to another scope. */
+export const useEffectiveRevision = (
+  wsId: string,
+  dataSourceId: string | null,
+  viewId?: string | null,
+): number | null =>
+  useBranchStore((s) =>
+    s.revision &&
+    s.workspaceId === wsId &&
+    s.dataSourceId === dataSourceId &&
+    (viewId === undefined || s.viewId === viewId)
+      ? s.revision.seq
       : null,
   )

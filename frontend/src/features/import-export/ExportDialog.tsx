@@ -43,6 +43,8 @@ export interface ExportDialogProps {
   viewId?: string
   viewName?: string
   branchId?: string   // present when the user is on a working draft branch → offer to include it
+  /** Published as it was at this revision: what is exported, in place of Published as it is. */
+  asOfSeq?: number | null
   onClose: () => void
 }
 
@@ -69,9 +71,12 @@ function fileStem(parts: Array<string | undefined>): string {
 const count = (n: number) => n.toLocaleString()
 
 export function ExportDialog({
-  wsId, dataSourceId, graphId, dataSourceName, viewId, viewName, branchId, onClose,
+  wsId, dataSourceId, graphId, dataSourceName, viewId, viewName, branchId: draftId, asOfSeq = null, onClose,
 }: ExportDialogProps) {
   const live = !graphId
+  // At a past revision, that revision is what is exported: never a draft.
+  const pastRevision = !live && asOfSeq != null ? asOfSeq : null
+  const branchId = pastRevision != null ? undefined : draftId
   // An export of this data source the server was preparing when the dialog last closed: it opens on that.
   const [earlier] = useState(() => (graphId
     ? findRunningExport((e) => e.kind === 'data' && e.wsId === wsId && e.graphId === graphId) : null))
@@ -100,13 +105,15 @@ export function ExportDialog({
       wsId, dataSourceId, graphId,
       viewId: inView ? viewId : undefined,
       branchId: onDraft ? branchId : undefined,
+      asOfSeq: pastRevision ?? undefined,
     }
     try {
       const planned = await planExport(target, fmt)
       setPlan(planned)
       if (planned.empty) { setPhase('empty'); return }
       if (planned.formatLimit) { setPhase('limit'); return }
-      const stem = fileStem([dataSourceName, inView ? viewName : undefined, onDraft ? 'draft' : undefined])
+      const stem = fileStem([dataSourceName, inView ? viewName : undefined, onDraft ? 'draft' : undefined,
+        pastRevision != null ? `revision-${pastRevision}` : undefined])
       const props = SPREADSHEETS.includes(fmt)
         ? newProps.split(',').map((s) => s.trim()).filter(Boolean) : []
       // Recorded when the export starts. Format and scope, never the property list: those
@@ -129,7 +136,7 @@ export function ExportDialog({
       const what = [...new Set([dataSourceName, inView ? viewName : undefined].filter(Boolean))].join(' · ')
       trackExport({
         jobId: created.jobId, kind: 'data', wsId, graphId, fileName: `${stem}.${fmt}`,
-        label: `${what || 'Data source'}${onDraft ? ' (your draft)' : ''} · ${fmt.toUpperCase()}`,
+        label: `${what || 'Data source'}${onDraft ? ' (your draft)' : ''}${pastRevision != null ? ` (as at revision #${pastRevision})` : ''} · ${fmt.toUpperCase()}`,
         format: fmt, exact: planned.exact,
         total: planned.nodes != null && planned.edges != null ? planned.nodes + planned.edges : null,
       })
@@ -171,6 +178,7 @@ export function ExportDialog({
               <h3 className="text-xl font-bold text-ink">Export data</h3>
               <p className="text-xs text-ink-muted mt-0.5">
                 {live ? 'Download the graph — a cold copy you can import again later'
+                  : pastRevision != null ? `Download the graph as it was at revision #${pastRevision} — a complete, re-importable copy`
                   : 'Download the graph — a complete, re-importable backup'}
               </p>
             </div>

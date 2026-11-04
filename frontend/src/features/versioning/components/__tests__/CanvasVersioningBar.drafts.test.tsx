@@ -29,9 +29,14 @@ vi.mock('@/store/schema', () => ({ useActiveView: () => ({ id: 'v1', name: 'View
 vi.mock('@/store/branchStore', () => ({
   useBranchStore: (sel: (s: unknown) => unknown) => sel({
     committedDiffHidden: false, setCommittedDiffHidden: vi.fn(), setActiveChangeSet: vi.fn(), switchToMain: vi.fn(),
+    openRevision: vi.fn(), setHighlight: vi.fn(), viewId: null,
   }),
   useEffectiveBranchId: () => 'br_1',
+  useEffectiveRevision: () => null,
+  useRevisionHighlight: () => null,
 }))
+// The ?rev= link reads the router, which this bar is never rendered without in the app.
+vi.mock('../../hooks/useRevisionDeepLink', () => ({ useRevisionDeepLink: () => {} }))
 vi.mock('@/store/stagedChangesStore', () => ({ useStagedChangeCount: () => 0 }))
 vi.mock('../../hooks/useVersioning', () => ({
   useResolveGraph: () => ({ data: { graphId: 'g1', mainHeadCommitSeq: 5, kind: 'bootstrap' }, isLoading: false }),

@@ -373,6 +373,10 @@ export interface CommitLogResponse {
   commits: Array<Record<string, unknown>>
   /** actor/contributor id → resolved display name, covering every commit in this response. */
   userNames?: Record<string, string>
+  /** More commits lie past this page. */
+  hasMore?: boolean
+  /** One branch's log: the oldest `commit_seq` on this page, to pass back as `before`. */
+  nextBefore?: number | null
 }
 
 /** What one revision changed: a field (`[name]`) or a property (`['properties', name]`). */
@@ -1716,6 +1720,8 @@ export function getCommitLog(
   params: {
     branchId?: string; originatingViewId?: string; publishedOnly?: boolean
     limit?: number; offset?: number
+    /** Only commits older than this `commit_seq` — the previous page's `nextBefore`. */
+    before?: number
   } = {},
 ): Promise<CommitLogResponse> {
   const sp = new URLSearchParams()
@@ -1724,6 +1730,7 @@ export function getCommitLog(
   if (params.publishedOnly) sp.set('publishedOnly', 'true')
   if (params.limit != null) sp.set('limit', String(params.limit))
   if (params.offset != null) sp.set('offset', String(params.offset))
+  if (params.before != null) sp.set('before', String(params.before))
   const qs = sp.toString()
   return vfetch<CommitLogResponse>(`${base(wsId)}/graphs/${graphId}/commits${qs ? `?${qs}` : ''}`)
 }
@@ -2042,6 +2049,56 @@ export function getChangeIndex(
   wsId: string, graphId: string, origin: ChangeListOrigin,
 ): Promise<ChangeListIndex> {
   return vfetch<ChangeListIndex>(`${base(wsId)}/graphs/${graphId}/diff/index?${changeOriginParams(origin)}`)
+}
+
+// ============================================
+// Revisions — the published graph as it was, by revision and by month
+// ============================================
+
+/** One revision of Published, and what opening the graph as it was then takes. */
+export interface RevisionInfo {
+  /** Its commit, as the commit log lists it. */
+  commit: Record<string, unknown>
+  userNames?: Record<string, string>
+  headSeq: number
+  /** Entities Published changed since, counted no further than past `limit`. */
+  changedSince: number
+  limit: number
+  /** Whether the canvas can read the graph as it was then — and if not, why. */
+  openable: boolean
+  reason?: 'too_far' | 'fork' | null
+}
+
+/** Revision `seq` of Published, and what opening it takes — asked before anything is drawn. */
+export function getRevision(wsId: string, graphId: string, seq: number): Promise<RevisionInfo> {
+  return vfetch<RevisionInfo>(`${base(wsId)}/graphs/${graphId}/revisions/${seq}`)
+}
+
+export interface HistoryDay { day: string; count: number; firstSeq: number; lastSeq: number }
+
+export interface HistoryMonth {
+  /** `YYYY-MM`, in the time zone asked for. */
+  month: string
+  count: number
+  firstSeq: number
+  /** The graph as it was at the end of the month. */
+  lastSeq: number
+  lastAt?: string | null
+  days: HistoryDay[]
+}
+
+export interface HistoryMonths { headSeq: number; tz: string; months: HistoryMonth[] }
+
+/** Published's revisions by month and day in the reader's time zone, oldest first; with
+ *  `originatingViewId`, what that view's history lists. */
+export function getHistoryMonths(
+  wsId: string, graphId: string, opts: { tz?: string; originatingViewId?: string | null } = {},
+): Promise<HistoryMonths> {
+  const sp = new URLSearchParams()
+  if (opts.tz) sp.set('tz', opts.tz)
+  if (opts.originatingViewId) sp.set('originatingViewId', opts.originatingViewId)
+  const qs = sp.toString()
+  return vfetch<HistoryMonths>(`${base(wsId)}/graphs/${graphId}/history/months${qs ? `?${qs}` : ''}`)
 }
 
 /** Top-level groups of a PR's Files Changed as a containment tree. */

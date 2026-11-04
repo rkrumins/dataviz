@@ -133,7 +133,7 @@ describe('fromChangeIndex (a draft too large for the whole diff)', () => {
         ['e1', 'e', 'a', 'CONTAINS', 'urn:t', 'urn:c'],
         ['e2', 'e', 'r', 'FLOWS_TO', 'urn:a', 'urn:b'],
       ],
-    }, 'br_x')
+    }, { source: 'branch', branchId: 'br_x' })
     expect(cs.counts).toEqual({ added: 3, modified: 0, removed: 1 })
     expect(cs.byEntityId.get('urn:t')).toMatchObject({ kind: 'node', status: 'added' })
     expect(cs.byEntityId.get('e2')?.before).toEqual({ edgeType: 'FLOWS_TO', sourceEntityId: 'urn:a', targetEntityId: 'urn:b' })
@@ -150,7 +150,7 @@ describe('fromChangeIndex (a draft too large for the whole diff)', () => {
         ['ent_c', 'n', 'a', 'Column', 'urn:c'],
         ['e1', 'e', 'a', 'CONTAINS', 'urn:p', 'ent_c', 'urn:p', 'urn:c'],
       ],
-    }, 'br_x')
+    }, { source: 'branch', branchId: 'br_x' })
     expect(cs.byEntityId.get('urn:c')).toMatchObject({ entityId: 'ent_c', urn: 'urn:c', status: 'added' })
     expect(cs.byEntityId.has('ent_c')).toBe(false)
     expect(cs.byEntityId.get('e1')).toMatchObject({ sourceUrn: 'urn:p', targetUrn: 'urn:c' })
@@ -158,18 +158,26 @@ describe('fromChangeIndex (a draft too large for the whole diff)', () => {
     expect([...committedCreatedChildUrns(cs, ['CONTAINS'])]).toEqual(['urn:c'])
   })
 
+  it('marks a comparison of two revisions as one', () => {
+    const cs = fromChangeIndex({
+      origin: { fromSeq: 3, toSeq: 9 }, total: 1, truncated: false, entries: [['urn:t', 'n', 'm', 'Table']],
+    }, { source: 'compare', fromSeq: 3, toSeq: 9 })
+    expect(cs.origin).toBe('compare')
+    expect(cs.byEntityId.get('urn:t')).toMatchObject({ status: 'modified', origin: { source: 'compare', fromSeq: 3, toSeq: 9 } })
+  })
+
   it('takes its counts from the summary when the index is too large to list', () => {
     const counts = { added: 300_000, modified: 2, removed: 1 }
-    const cs = fromChangeIndex({ origin: { branchId: 'br_x' }, total: 300_003, truncated: true, entries: [] }, 'br_x', counts)
+    const cs = fromChangeIndex({ origin: { branchId: 'br_x' }, total: 300_003, truncated: true, entries: [] }, { source: 'branch', branchId: 'br_x' }, counts)
     expect(cs.changes).toEqual([])
     expect(cs.counts).toEqual(counts)
   })
 
   it('counts alone, for a surface that lists nothing', () => {
-    expect(fromChangeCounts({ added: 2, modified: 0, removed: 0 }, 'br_x')).toMatchObject({
+    expect(fromChangeCounts({ added: 2, modified: 0, removed: 0 })).toMatchObject({
       changes: [], counts: { added: 2, modified: 0, removed: 0 }, origin: 'branch',
     })
-    expect(fromChangeCounts({ added: 0, modified: 0, removed: 0 }, 'br_x').origin).toBe('empty')
+    expect(fromChangeCounts({ added: 0, modified: 0, removed: 0 }).origin).toBe('empty')
   })
 })
 

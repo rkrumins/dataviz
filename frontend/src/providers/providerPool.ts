@@ -20,13 +20,15 @@ export function poolKey(
   dsId: string | null,
   branchId?: string | null,
   viewId?: string | null,
+  asOfSeq?: number | null,
 ): string {
   // A draft is a distinct read-context from main — keying on branchId gives it its
   // own provider instance (and response cache), so switching branches can't serve
   // stale cross-branch data. The same goes for viewId: two views on one source
   // produce different request URLs (capability context), so they must not share
-  // a response cache.
-  return `${wsId}:${dsId ?? 'default'}:${branchId ?? 'main'}:${viewId ?? 'none'}`
+  // a response cache — and for a past revision of main, which is the graph as it was.
+  const branch = branchId ?? (asOfSeq != null ? `main@${asOfSeq}` : 'main')
+  return `${wsId}:${dsId ?? 'default'}:${branch}:${viewId ?? 'none'}`
 }
 
 /** Release every pooled provider's cached responses — the memory gauge's
@@ -45,8 +47,9 @@ export function getOrCreateProvider(
   dsId: string | null,
   branchId?: string | null,
   viewId?: string | null,
+  asOfSeq?: number | null,
 ): RemoteGraphProvider {
-  const key = poolKey(wsId, dsId, branchId, viewId)
+  const key = poolKey(wsId, dsId, branchId, viewId, asOfSeq)
   const existing = providerPool.get(key)
   if (existing) {
     existing.lastUsed = Date.now()
@@ -69,6 +72,7 @@ export function getOrCreateProvider(
     dataSourceId: dsId ?? undefined,
     branchId: branchId ?? undefined,
     viewId: viewId ?? undefined,
+    asOfSeq: branchId ? undefined : asOfSeq ?? undefined,
   })
   providerPool.set(key, { provider, lastUsed: Date.now() })
   return provider

@@ -21,17 +21,22 @@
  * (the Context View). Every other canvas has no toolbar slot for it and keeps it here.
  */
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Eye, EyeOff, GitPullRequest, Trash2, Loader2, GitBranch, Sparkles, LayoutTemplate } from 'lucide-react'
+import { Eye, EyeOff, GitPullRequest, Trash2, Loader2, GitBranch, Sparkles, LayoutTemplate, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { HoverTip } from '@/components/ui/HoverTip'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { usePermission } from '@/store/auth'
 import { useDataSourceProviderMap } from '@/hooks/useDataSourceProviderMap'
 import { useActiveView } from '@/store/schema'
-import { useBranchStore, useEffectiveBranchId } from '@/store/branchStore'
+import { useBranchStore, useEffectiveBranchId, useEffectiveRevision, useRevisionHighlight } from '@/store/branchStore'
 import { useStagedChangeCount } from '@/store/stagedChangesStore'
 import { CREATED_ROOTS_LOADED, useCanvasStore } from '@/store/canvas'
-import { useVersioningPanelStore } from '@/store/versioningPanelStore'
+import { useVersioningPanelStore, type CompareRequest } from '@/store/versioningPanelStore'
+import { useFeature } from '@/store/features'
+import { ExportDialog } from '@/features/import-export/ExportDialog'
+import { useRevisionDeepLink } from '../hooks/useRevisionDeepLink'
+import { useRevisionViewer } from '../hooks/useRevisionViewer'
+import { RevisionBanner } from './RevisionBanner'
 import {
   useAbandonDraft, useBranch, useBranchFreshness, useDiffVsMain, useRefreshDraftFromOthers, useResolveGraph,
   useBranchViewChanges, useChangeIndex, useChangeSummary,
@@ -106,6 +111,39 @@ export function CanvasVersioningBar({
 
   const [showPublish, setShowPublish] = useState(false)
   const [panelTab, setPanelTab] = useState<ViewPanelTab | null>(null)
+  // A comparison of two revisions to open History on, and a revision to export as it was.
+  const [compare, setCompare] = useState<CompareRequest | null>(null)
+  const [exportAt, setExportAt] = useState<number | null>(null)
+
+  // Travelling in time (the revision viewer, a preview): the past revision this view reads, its
+  // `?rev=` link, and two revisions highlighted on the canvas.
+  const revisionViewer = useRevisionViewer(workspaceId)
+  const revisionSeq = useEffectiveRevision(workspaceId, dataSourceId, viewId)
+  const openRevision = useBranchStore((s) => s.openRevision)
+  const scopeViewId = useBranchStore((s) => s.viewId)
+  useRevisionDeepLink({
+    enabled: revisionViewer && !!graphId,
+    headSeq: resolve.data?.mainHeadCommitSeq ?? null,
+    revisionSeq,
+    scopeViewId,
+    activeViewId: viewId,
+    openRevision,
+  })
+  const highlight = useRevisionHighlight()
+  const setHighlight = useBranchStore((s) => s.setHighlight)
+  const highlightOrigin = useMemo(
+    () => (revisionViewer && !isDraft && highlight ? { fromSeq: highlight.fromSeq, toSeq: highlight.toSeq } : null),
+    [revisionViewer, isDraft, highlight],
+  )
+  const highlightIndexQ = useChangeIndex(workspaceId, graphId, highlightOrigin)
+  const highlightCountsQ = useChangeSummary(workspaceId, graphId,
+    highlightOrigin && highlightIndexQ.data?.truncated ? highlightOrigin : null)
+  const canPublish = usePermission('workspace:datasource:publish', workspaceId)
+  const versioningEnabled = useFeature('versioningEnabled')
+  const openCompare = useCallback((fromSeq: number, toSeq: number | null) => {
+    setCompare({ fromSeq, toSeq })
+    setPanelTab('history')
+  }, [])
   const uncommitted = useStagedChangeCount()
 
   // Slim: modified entities by id alone — the bar counts changes and rings nodes, and never reads
@@ -124,7 +162,7 @@ export function CanvasVersioningBar({
   const viewChangeCount = (viewChangesQ.data?.views.length ?? 0) + (viewChangesQ.data?.hidden ?? 0)
   const changeSet = useMemo(() => {
     if (!branchId) return EMPTY_CHANGE_SET
-    if (large) return indexQ.data ? fromChangeIndex(indexQ.data, branchId, countsQ.data?.counts) : EMPTY_CHANGE_SET
+    if (large) return indexQ.data ? fromChangeIndex(indexQ.data, { source: 'branch', branchId }, countsQ.data?.counts) : EMPTY_CHANGE_SET
     return diffQ.data ? fromDiffVsMain(diffQ.data, branchId) : EMPTY_CHANGE_SET
   }, [branchId, large, indexQ.data, countsQ.data, diffQ.data])
   const changeCount = changeSet.counts.added + changeSet.counts.modified + changeSet.counts.removed
@@ -134,6 +172,12 @@ export function CanvasVersioningBar({
   useEffect(() => {
     if (isDraft) setActiveChangeSet(changeSet)
   }, [isDraft, changeSet, setActiveChangeSet])
+  // Two revisions compared, ringed on the canvas showing the newer one.
+  useEffect(() => {
+    if (isDraft || !highlightOrigin || !highlightIndexQ.data) return
+    setActiveChangeSet(fromChangeIndex(highlightIndexQ.data, { source: 'compare', ...highlightOrigin },
+      highlightCountsQ.data?.counts))
+  }, [isDraft, highlightOrigin, highlightIndexQ.data, highlightCountsQ.data, setActiveChangeSet])
 
   // One-shot bridge: the Context View header's "Changes" button (far from this bar)
   // asks to open the versioning panel via useVersioningPanelStore. Honour the request
@@ -141,12 +185,16 @@ export function CanvasVersioningBar({
   // graph yet (the panel needs graphId) — harmless, since the header button only shows
   // in a draft, where a graph necessarily exists.
   const requestedTab = useVersioningPanelStore((s) => s.requestedTab)
+  const requestedCompare = useVersioningPanelStore((s) => s.requestedCompare)
   const clearPanelRequest = useVersioningPanelStore((s) => s.clearRequest)
   useEffect(() => {
     if (!requestedTab) return
-    if (graphId) setPanelTab(requestedTab)
+    if (graphId) {
+      setPanelTab(requestedTab)
+      if (requestedCompare) setCompare(requestedCompare)
+    }
     clearPanelRequest()
-  }, [requestedTab, graphId, clearPanelRequest])
+  }, [requestedTab, requestedCompare, graphId, clearPanelRequest])
 
   const abandon = useAbandonDraft(workspaceId, graphId ?? '')
 
@@ -311,6 +359,15 @@ export function CanvasVersioningBar({
       {/* "Your changes are now live" — sits ABOVE the controls: it announces what happened, it isn't
           something to operate. Survives the navigation back from the Reviews inbox. */}
       <PublishReceiptBanner graphId={graphId} onViewCommit={() => setPanelTab('history')} />
+      {/* The graph as it was: when, which revision, how far behind now — and the ways on. */}
+      {revisionViewer && revisionSeq != null && graphId && (
+        <RevisionBanner
+          workspaceId={workspaceId}
+          graphId={graphId}
+          canRestore={canManage && canPublish && versioningEnabled}
+          onCompare={openCompare}
+        />
+      )}
       <div
         className={cn(
           // empty:hidden is what collapses the band. On main every child below is
@@ -328,6 +385,16 @@ export function CanvasVersioningBar({
         )}
       >
         {showBranchSwitcher && <BranchSwitcher workspaceId={workspaceId} dataSourceId={dataSourceId} />}
+        {highlightOrigin && (
+          <span className="inline-flex items-center gap-1.5 pl-2 pr-1 py-0.5 rounded-full text-[11px] font-medium bg-indigo-500/10 text-indigo-700 dark:text-indigo-300 border border-indigo-500/20">
+            <Sparkles className="w-3 h-3" />
+            {highlightIndexQ.isLoading ? 'Highlighting…' : `What changed after #${highlightOrigin.fromSeq} up to #${highlightOrigin.toSeq}`}
+            <HoverTip className="inline-flex" label="Stop highlighting">
+              <button onClick={() => setHighlight(null)} aria-label="Stop highlighting"
+                className="p-0.5 rounded-full hover:bg-indigo-500/15"><X className="w-3 h-3" /></button>
+            </HoverTip>
+          </span>
+        )}
         <RefreshingBadge workspaceId={workspaceId} graphId={graphId} />
         {/* Which store serves reads: says nothing while published is on FalkorDB. */}
         <ReadRouteChip workspaceId={workspaceId} graphId={graphId} isDraft={isDraft} />
@@ -508,7 +575,20 @@ export function CanvasVersioningBar({
           viewName={viewName}
           initialTab={panelTab}
           canManage={canManage}
-          onClose={() => setPanelTab(null)}
+          compare={compare}
+          onExport={(seq) => { setPanelTab(null); setCompare(null); setExportAt(seq) }}
+          onClose={() => { setPanelTab(null); setCompare(null) }}
+        />
+      )}
+      {exportAt != null && graphId && dataSourceId && (
+        <ExportDialog
+          wsId={workspaceId}
+          dataSourceId={dataSourceId}
+          graphId={graphId}
+          viewId={viewId ?? undefined}
+          viewName={viewName ?? undefined}
+          asOfSeq={exportAt}
+          onClose={() => setExportAt(null)}
         />
       )}
     </>

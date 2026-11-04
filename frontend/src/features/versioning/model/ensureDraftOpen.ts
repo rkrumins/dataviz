@@ -24,6 +24,9 @@ import { GraphNotWritableError, resolveAndOpenDraft } from '@/services/versionin
 import { useNotificationStore } from '@/components/ui/notifications'
 import { VERSIONING_KEYS } from '../hooks/useVersioning'
 
+/** Why nothing can be edited while a past revision is open. */
+export const AT_REVISION = "You're viewing a past revision, which is read-only. Go back to Published to edit."
+
 /** The branches/resolve caches must reflect a draft the moment it exists — the
  *  ?branch deep-link guard validates the URL param against the CACHED branches
  *  list, and a stale list makes it reject (and notify about) a draft this very
@@ -40,6 +43,12 @@ export async function ensureDraftOpen(): Promise<string | null> {
   // off there are no drafts, so all editing is off ("null = cannot edit").
   if (!featureEnabled('versioningEnabled')) return null
   const s = useBranchStore.getState()
+  // A past revision is read-only, and opening a draft from one would quietly carry the person back
+  // to the graph as it is now: say so, and leave them where they are.
+  if (s.revision) {
+    useNotificationStore.getState().add({ type: 'info', message: AT_REVISION })
+    return null
+  }
   if (s.isDraftMode()) return s.currentBranchId
   const { workspaceId, dataSourceId, graphId } = s
   if (!workspaceId || !dataSourceId || !graphId) return null

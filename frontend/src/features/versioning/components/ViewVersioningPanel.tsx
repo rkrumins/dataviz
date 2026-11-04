@@ -5,7 +5,9 @@
  *     tree). So after you save, your work doesn't "disappear" — it moves from Pending to Committed
  *     in the same view.
  *   • Commits — the branch's history commit-by-commit (this draft / this view / whole graph), each
- *     expandable to its own diff (GitHub-style).
+ *     expandable to its own diff (GitHub-style). With the revision viewer (a preview) it is
+ *     History: each revision of Published opens on the canvas as the graph was then, any month is a
+ *     click away, and two revisions compare — the drawer widening for the comparison.
  *   • Pull Requests — raised from this view, or the whole data source.
  */
 import { useCallback, useState } from 'react'
@@ -17,6 +19,8 @@ import { Backdrop } from '@/components/ui/Backdrop'
 import * as api from '@/services/versioningApiService'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { useBranchDiffSummary, useBranchViewChanges } from '../hooks/useVersioning'
+import { useRevisionViewer } from '../hooks/useRevisionViewer'
+import type { CompareRequest } from '@/store/versioningPanelStore'
 import { DraftViewChanges } from './DraftViewChanges'
 import { ChangeTreePanel } from './ChangeTreePanel'
 import { ViewPrList } from '../../reviews/components/ViewPrList'
@@ -73,6 +77,8 @@ export function ViewVersioningPanel({
   viewName,
   initialTab = 'changes',
   canManage = false,
+  compare = null,
+  onExport,
   onClose,
 }: {
   wsId: string
@@ -83,9 +89,23 @@ export function ViewVersioningPanel({
   viewName?: string | null
   initialTab?: ViewPanelTab
   canManage?: boolean
+  /** A comparison of two revisions to open History on. */
+  compare?: CompareRequest | null
+  /** Export Published as it was at a revision (the drawer closes for the export dialog). */
+  onExport?: (seq: number) => void
   onClose: () => void
 }) {
   const [tab, setTab] = useState<ViewPanelTab>(initialTab)
+  // A request for another tab (or a comparison) while the drawer is open moves it there — adjusted
+  // as the request arrives, not in an effect after it has drawn the old tab.
+  const [asked, setAsked] = useState({ initialTab, compare })
+  if (asked.initialTab !== initialTab || asked.compare !== compare) {
+    setAsked({ initialTab, compare })
+    setTab(compare && asked.compare !== compare ? 'history' : initialTab)
+  }
+  const revisionViewer = useRevisionViewer(wsId)
+  // A comparison reads better wider: the timeline says when one is open.
+  const [comparing, setComparing] = useState(!!compare)
 
   // Request the backend max of top-level groups so "all branch changes" is genuinely complete —
   // the truncation advisory only appears past it (far beyond any real schema's top-level containers).
@@ -107,10 +127,16 @@ export function ViewVersioningPanel({
           exit is interrupted; without one there is nothing to strand. */}
       <motion.aside
         key="panel"
-        className="fixed right-0 top-0 h-full w-[560px] max-w-[94vw] z-[61] bg-canvas border-l border-glass-border flex flex-col shadow-lg"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Changes & Reviews"
+        className={cn(
+          'fixed right-0 top-0 h-full max-w-[94vw] z-[61] bg-canvas border-l border-glass-border flex flex-col shadow-lg transition-[width] duration-200 ease-out',
+          comparing && tab === 'history' ? 'w-[720px]' : 'w-[560px]',
+        )}
         initial={{ x: 560 }}
         animate={{ x: 0 }}
-        transition={MOTION.modalSpring}
+        transition={MOTION.drawerSlide}
       >
         <div className="flex items-start justify-between gap-3 px-5 pt-5 pb-3 border-b border-glass-border/60">
           <div className="min-w-0">
@@ -123,7 +149,10 @@ export function ViewVersioningPanel({
         </div>
 
         <div className="flex items-center gap-1 px-3 pt-2 border-b border-glass-border/60">
-          {TABS.map(({ id, label, Icon }) => (
+          {TABS.map(({ id, label: tabLabel, Icon }) => {
+            // While the preview is on, the history is a place to travel in time, not a commit log.
+            const label = id === 'history' && revisionViewer ? 'History' : tabLabel
+            return (
             <button
               key={id}
               onClick={() => setTab(id)}
@@ -134,10 +163,12 @@ export function ViewVersioningPanel({
             >
               <Icon className="w-4 h-4" /> {label}
             </button>
-          ))}
+            )
+          })}
         </div>
 
-        <div className="flex-1 overflow-y-auto custom-scrollbar px-5 py-5">
+        {/* History scrolls its own list (a window of it at a time), so its body doesn't. */}
+        <div className={cn('flex-1 min-h-0 px-5', tab === 'history' ? 'flex flex-col py-4' : 'overflow-y-auto custom-scrollbar py-5')}>
           {tab === 'changes' &&
             (branchId ? (
               <div className="space-y-4">
@@ -179,7 +210,17 @@ export function ViewVersioningPanel({
             ))}
 
           {tab === 'history' && (
-            <ViewHistoryTimeline wsId={wsId} graphId={graphId} viewId={viewId} branchId={branchId} canManage={canManage} />
+            <ViewHistoryTimeline
+              wsId={wsId}
+              graphId={graphId}
+              viewId={viewId}
+              branchId={branchId}
+              canManage={canManage}
+              compare={compare}
+              onNavigate={onClose}
+              onExport={onExport}
+              onComparingChange={setComparing}
+            />
           )}
 
           {/* Everyone sees the graph's health and where it lives; only managers get its actions. */}

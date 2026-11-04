@@ -80,6 +80,15 @@ export const VERSIONING_KEYS = {
     [...VERSIONING_KEYS.all, 'viewPrCounts', ws, viewId] as const,
   viewCommitLog: (ws?: string, gid?: string | null, viewId?: string | null, graphWide?: boolean, limit?: number) =>
     [...VERSIONING_KEYS.all, 'viewCommits', ws, gid, viewId, !!graphWide, limit ?? 'default'] as const,
+  // Under 'viewCommits', so every publish, merge, revert and restore that refreshes the history
+  // refreshes these too: a timeline's pages, the history calendar, and what opening a revision takes
+  // (how far behind the head it is moves with the head).
+  historyPages: (ws?: string, gid?: string | null, scope?: string) =>
+    [...VERSIONING_KEYS.all, 'viewCommits', ws, gid, 'pages', scope ?? 'graph'] as const,
+  historyMonths: (ws?: string, gid?: string | null, tz?: string, viewId?: string | null) =>
+    [...VERSIONING_KEYS.all, 'viewCommits', ws, gid, 'months', tz ?? 'UTC', viewId ?? null] as const,
+  revision: (ws?: string, gid?: string | null, seq?: number | null) =>
+    [...VERSIONING_KEYS.all, 'viewCommits', ws, gid, 'revision', seq ?? null] as const,
   squashedCommits: (ws?: string, gid?: string | null, cid?: string | null) =>
     [...VERSIONING_KEYS.all, 'squashed', ws, gid, cid] as const,
   projectionWatermark: (ws?: string, gid?: string | null) =>
@@ -655,6 +664,72 @@ export function useViewCommitLog(
           : { originatingViewId: viewId, publishedOnly: true, limit }),
     enabled: !!wsId && !!graphId && (graphWide || !!viewId),
     staleTime: 15_000,
+  })
+}
+
+/** Revisions fetched per page of a history timeline. */
+export const HISTORY_PAGE = 50
+
+/** Whose history a timeline lists: a draft's own commits, a view's published timeline, or the
+ *  whole graph's. */
+export type HistoryScope =
+  | { kind: 'draft'; branchId: string }
+  | { kind: 'view'; viewId: string }
+  | { kind: 'graph' }
+
+/** A history timeline, newest first, a page at a time. Paged by `before` (the oldest revision
+ *  already listed), so a walk neither skips nor repeats one while new revisions land. */
+export function useHistoryPages(
+  wsId: string | undefined, graphId: string | null | undefined, scope: HistoryScope, enabled = true,
+) {
+  const scopeKey = scope.kind === 'draft' ? `draft:${scope.branchId}`
+    : scope.kind === 'view' ? `view:${scope.viewId}` : 'graph'
+  return useInfiniteQuery({
+    queryKey: VERSIONING_KEYS.historyPages(wsId, graphId, scopeKey),
+    queryFn: ({ pageParam }) => api.getCommitLog(wsId!, graphId!, {
+      ...(scope.kind === 'draft' ? { branchId: scope.branchId }
+        : scope.kind === 'view' ? { originatingViewId: scope.viewId, publishedOnly: true } : {}),
+      limit: HISTORY_PAGE,
+      ...(pageParam != null ? { before: pageParam } : {}),
+    }),
+    initialPageParam: null as number | null,
+    getNextPageParam: (last) => (last.hasMore && last.nextBefore != null ? last.nextBefore : undefined),
+    enabled: enabled && !!wsId && !!graphId,
+    staleTime: 15_000,
+  })
+}
+
+/** The reader's time zone, which the history calendar counts days and months in. */
+export function readerTimeZone(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+  } catch {
+    return 'UTC'
+  }
+}
+
+/** Published's revisions by month and day, in the reader's time zone — the month picker's heat. */
+export function useHistoryMonths(
+  wsId: string | undefined, graphId: string | null | undefined, viewId?: string | null, enabled = true,
+) {
+  const tz = readerTimeZone()
+  return useQuery({
+    queryKey: VERSIONING_KEYS.historyMonths(wsId, graphId, tz, viewId),
+    queryFn: () => api.getHistoryMonths(wsId!, graphId!, { tz, originatingViewId: viewId }),
+    enabled: enabled && !!wsId && !!graphId,
+    staleTime: 60_000,
+  })
+}
+
+/** One revision of Published and what opening it takes: asked before the canvas reads it. */
+export function useRevision(wsId: string | undefined, graphId: string | null | undefined, seq: number | null) {
+  return useQuery({
+    queryKey: VERSIONING_KEYS.revision(wsId, graphId, seq),
+    queryFn: () => api.getRevision(wsId!, graphId!, seq!),
+    enabled: !!wsId && !!graphId && seq != null,
+    staleTime: 30_000,
+    // A revision that isn't one is an answer, not an outage.
+    retry: (n, err) => n < 1 && (err as { status?: number })?.status !== 404,
   })
 }
 

@@ -10,10 +10,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { useBranchStore } from '@/store/branchStore'
 
 import { NO_DRAFT, NO_VERSION_CONTROL, useEntityEditing } from '../useEntityEditing'
+import { AT_REVISION } from '../../model/ensureDraftOpen'
 
 
 let flags: Record<string, boolean>
 let readOnly: boolean
+let asOfSeq: number | null
 let resolve: {
     data?: { graphId: string; bootstrap?: unknown }; isError: boolean; failureReason?: Error | null
 }
@@ -23,7 +25,7 @@ vi.mock('@/store/schema', () => ({
     useActiveView: () => ({ id: 'view-1', workspaceId: 'ws', dataSourceId: 'ds' }),
 }))
 vi.mock('@/providers/ViewExecutionContext', () => ({
-    useViewExecutionContext: () => ({ readOnly }),
+    useViewExecutionContext: () => ({ readOnly, asOfSeq }),
 }))
 vi.mock('../useVersioning', () => ({ useResolveGraph: () => resolve }))
 
@@ -38,6 +40,7 @@ function inDraftOf(viewId: string) {
 beforeEach(() => {
     flags = { versioningEnabled: true, editModeEnabled: true }
     readOnly = false
+    asOfSeq = null
     resolve = VERSIONED
     useBranchStore.getState().reset()
 })
@@ -48,6 +51,12 @@ describe('useEntityEditing', () => {
         inDraftOf('view-1')
         const { result } = renderHook(() => useEntityEditing())
         expect(result.current).toEqual({ offered: true, blocked: null })
+    })
+
+    it('says a past revision is read-only, and how to edit', () => {
+        asOfSeq = 12
+        const { result } = renderHook(() => useEntityEditing())
+        expect(result.current).toEqual({ offered: true, blocked: AT_REVISION })
     })
 
     it('asks for a draft on a versioned source with none open', () => {
