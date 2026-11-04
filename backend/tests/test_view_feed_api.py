@@ -378,6 +378,35 @@ class TestAnswers:
         bad = await post(ws, sub.id, {"layerId": "t", "cursor": "%%%"}, engine)
         assert bad.status_code == 400
 
+    async def test_a_cursor_cant_be_made_up_or_borrowed(self, on, views, post, charged):
+        """Signed: a count reset to page past the cap, a position nobody was given
+        (each would start a scan of its own), or another layer's cursor is refused."""
+        import base64 as b64
+        import json as js
+
+        ws, _base, sub, _plain = await views()
+        engine = FeedEngine()
+        engine.provider.scanned = SearchResultPage(
+            hits=_hits(200), total_count=5000, status="complete", cursor="c1", elapsed_ms=1)
+        issued = (await post(ws, sub.id, {"layerId": "t"}, engine)).json()["cursor"]
+        payload, tag = issued.split(".")
+        assert js.loads(b64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4))) == {"c": "c1", "d": 200}
+
+        def forged(state):
+            raw = b64.urlsafe_b64encode(js.dumps(state, separators=(",", ":")).encode()).decode().rstrip("=")
+            return f"{raw}.{tag}"
+
+        calls = len(engine.provider.calls)
+        for cursor in (forged({"c": "c1", "d": 0}), forged({"c": "anywhere", "d": 200}),
+                       payload,  # unsigned, as cursors were before
+                       issued):  # good for layer t only
+            layer = "d" if cursor == issued else "t"
+            resp = await post(ws, sub.id, {"layerId": layer, "cursor": cursor}, engine)
+            assert resp.status_code == 400, (cursor, resp.text)
+        assert len(engine.provider.calls) == calls, "nothing searched for a cursor refused"
+        # The one it was issued for still pages on.
+        assert (await post(ws, sub.id, {"layerId": "t", "cursor": issued}, engine)).status_code == 200
+
 
 class TestCache:
     @pytest.fixture()
@@ -398,19 +427,19 @@ class TestCache:
         as_of = datetime.fromtimestamp(time.time() - 100, tz=timezone.utc).isoformat()
         page = SearchResultPage(hits=_hits(1), status="complete", stale=True, as_of=as_of,
                                 elapsed_ms=1)
-        built = feed._feed_page(TABLES, None, page, 0, 2000, 300)
+        built = feed._feed_page(TABLES, None, page, 0, 2000, 300, "b")
         assert 130 <= built.cache_ttl_s <= 141 and built.lkg is False
         fresh = feed._feed_page(TABLES, None, page.model_copy(update={"stale": False, "as_of": None}),
-                                0, 2000, 300)
+                                0, 2000, 300, "b")
         assert fresh.cache_ttl_s is None and fresh.lkg is True
 
     def test_a_page_whose_paths_ran_late_is_kept_for_seconds(self):
         page = SearchResultPage(hits=_hits(1), status="complete", elapsed_ms=1)
         page._paths_left_out = True
-        built = feed._feed_page(TABLES, None, page, 0, 2000, 300)
+        built = feed._feed_page(TABLES, None, page, 0, 2000, 300, "b")
         # Degraded: the cache keeps it for seconds, never as last-known-good.
         assert built.degraded_detail == "paths"
-        assert feed._feed_page(TABLES, None, page.model_copy(), 0, 2000, 300).degraded_detail == "paths"
+        assert feed._feed_page(TABLES, None, page.model_copy(), 0, 2000, 300, "b").degraded_detail == "paths"
 
     async def test_each_row_says_how_many_of_its_containers_share_its_layer(self, on, views, post):
         # oracle_prod is placed in Source systems by hand; sales inherits it there.

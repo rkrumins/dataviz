@@ -22,6 +22,10 @@ from backend.app.services.view_placement import CONTRACT_VERSION, contract_enabl
 
 router = APIRouter()
 
+#: What a failed layer assignment says. Never the exception's own text, which is
+#: the server's — a statement, a host — and reaches readers, share links too.
+_COMPUTE_FAILED = "Couldn't work out where this view's entities go. Try again in a moment."
+
 
 def _cache_params(request: LayerAssignmentRequest, *, contract: bool = False) -> dict:
     """What this compute actually depends on — not the raw request.
@@ -110,7 +114,8 @@ async def compute_assignments(
         except Exception as e:
             import traceback
             traceback.print_exc()
-            raise HTTPException(status_code=500, detail=str(e))
+            # The exception's text is the server's (a query, a host): logged, not sent.
+            raise HTTPException(status_code=500, detail=_COMPUTE_FAILED) from e
 
     try:
         return await get_graph_cache().get_or_compute(
@@ -130,4 +135,4 @@ async def compute_assignments(
     except Exception as e:
         import traceback
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=_COMPUTE_FAILED) from e

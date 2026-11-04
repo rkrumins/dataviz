@@ -32,6 +32,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import hashlib
+import hmac
 import json
 import time
 from datetime import datetime
@@ -95,26 +97,54 @@ def _lane() -> asyncio.Semaphore:
     return lane
 
 
-def _read_cursor(raw: Optional[str]) -> Dict[str, Any]:
-    """A feed cursor: the engine's, and how many rows the layer has listed."""
+def _cursor_binding(scope_hash: str, condition: Any, types: Any) -> str:
+    """What a feed cursor is good for: this layer's search in this scope. The feed
+    cache's own key, so a page shared by identical subsets keeps a cursor every one
+    of them can use, and no other layer's or view's."""
+    raw = json.dumps({"s": scope_hash,
+                      "c": condition.model_dump(mode="json", by_alias=True) if condition is not None else None,
+                      "t": types}, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+
+def _cursor_tag(payload: str, binding: str, key: str) -> str:
+    return hmac.new(key.encode(), f"view-feed.{binding}.{payload}".encode(),
+                    hashlib.sha256).hexdigest()[:32]
+
+
+def _read_cursor(raw: Optional[str], binding: str) -> Dict[str, Any]:
+    """A feed cursor: the engine's, and how many rows the layer has listed —
+    signed, so neither can be made up. A count reset to page past the cap, or a
+    position nobody was given (each would start a scan of its own), is refused
+    like any cursor this server didn't issue for this layer."""
     if not raw:
         return {"c": None, "d": 0}
-    try:
-        state = json.loads(base64.urlsafe_b64decode(raw.encode() + b"=" * (-len(raw) % 4)))
-    except (ValueError, TypeError):
-        state = None  # not base64, or not JSON: malformed, answered below
-    if isinstance(state, dict) and isinstance(state.get("c"), str) and isinstance(state.get("d"), int):
+    from backend.auth_service.core import config as auth_config
+
+    payload, sep, tag = raw.partition(".")
+    state = None
+    if sep and any(hmac.compare_digest(tag, _cursor_tag(payload, binding, key))
+                   for _kid, key in auth_config.JWT_VERIFICATION_KEYS):
+        try:
+            state = json.loads(base64.urlsafe_b64decode(payload.encode() + b"=" * (-len(payload) % 4)))
+        except (ValueError, TypeError):
+            state = None  # not base64, or not JSON: malformed, answered below
+    if (isinstance(state, dict) and isinstance(state.get("c"), str)
+            and isinstance(state.get("d"), int) and state["d"] >= 0):
         return state
     raise HTTPException(status_code=400, detail="cursor is malformed — start from the first page")
 
 
-def _write_cursor(engine_cursor: str, delivered: int) -> str:
+def _write_cursor(engine_cursor: str, delivered: int, binding: str) -> str:
+    from backend.auth_service.core import config as auth_config
+
     raw = json.dumps({"c": engine_cursor, "d": delivered}, separators=(",", ":"))
-    return base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
+    payload = base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
+    return f"{payload}.{_cursor_tag(payload, binding, auth_config.JWT_SECRET_KEY)}"
 
 
 def _feed_page(layer: SubsetLayer, placement: Optional[BasePlacement], page: SearchResultPage,
-               delivered_before: int, max_rows: int, reuse_s: int) -> ViewFeedPage:
+               delivered_before: int, max_rows: int, reuse_s: int, binding: str) -> ViewFeedPage:
     """A page of ``layer``'s matches as the canvas draws them: each with where it
     sits (``ancestorPath``, root first) and how many of its nearest containers
     sit in this layer too (``inLayer``), which the canvas draws it inside."""
@@ -134,7 +164,7 @@ def _feed_page(layer: SubsetLayer, placement: Optional[BasePlacement], page: Sea
     more = page.cursor is not None
     out = ViewFeedPage(
         layer_id=layer.id, nodes=nodes,
-        cursor=_write_cursor(page.cursor, delivered) if more and delivered < max_rows else None,
+        cursor=_write_cursor(page.cursor, delivered, binding) if more and delivered < max_rows else None,
         total_count=page.total_count if page.total_count is not None else page.candidate_count,
         count_status="lowerBound" if running or page.count_status == "lowerBound" else "exact",
         status="running" if running else "complete",
@@ -202,9 +232,10 @@ async def view_feed(
 
     settings = get_deep_search_settings()
     max_rows = settings.view_feed_max_rows
-    cursor = _read_cursor(body.cursor)
     condition = layer_condition(layer, eff.subset_placement)
     types = scope_types(layer, eff.entity_type_allow_list, eff.subset_placement)
+    binding = _cursor_binding(eff.scope_hash, condition, types)
+    cursor = _read_cursor(body.cursor, binding)
     if condition is None or types == [] or cursor["d"] >= max_rows:
         # A layer that can hold nothing here — or a client past the cap — is
         # answered without searching.
@@ -270,7 +301,7 @@ async def view_feed(
             except NothingReusable:
                 page = await (busy() if _lane().locked() else search(scan=True, reuse=reuse_s))
         return _feed_page(layer, eff.subset_placement, page, cursor["d"], max_rows,
-                          settings.view_feed_reuse_seconds)
+                          settings.view_feed_reuse_seconds, binding)
 
     scope = _cache_scope(engine)
     try:

@@ -8,7 +8,9 @@ This is the kill-switch contract from plan §2.6 step 9.
 """
 import os
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
+
+from backend.app.api.v1.capability_gate import require_ds_read_or_view
 
 from .endpoints import graph as graph_v2
 
@@ -33,4 +35,7 @@ api_v2_router.include_router(
     graph_v2.router,
     prefix="/{ws_id}/graph",
     tags=["graph:v2"],
+    # The read gate every v1 graph route has: mounting this router must never
+    # open a data source to someone who can't read it, or past a share link.
+    dependencies=[Depends(require_ds_read_or_view)],
 )
