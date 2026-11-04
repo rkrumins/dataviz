@@ -141,6 +141,12 @@ interface PreferencesState {
   // type, in order. A type absent from the map features its defaults.
   drawerPinnedProperties: Record<string, string[]>
   setDrawerPinnedProperties: (typeId: string, keys: string[] | null) => void
+  // Context View: a line that points back — its source in a layer to the
+  // right of its target — drawn in an alert colour. Off until turned on.
+  highlightBackPointers: boolean
+  setHighlightBackPointers: (on: boolean) => void
+  backPointerColor: string
+  setBackPointerColor: (color: string) => void
 
   // Canvas preferences
   showMinimap: boolean
@@ -428,6 +434,10 @@ export const usePreferencesStore = create<PreferencesState>()(
       setDrawerLayout: (mode, layout) => set((state) => ({
         drawerLayout: { ...state.drawerLayout, [mode]: layout },
       })),
+      highlightBackPointers: false,
+      setHighlightBackPointers: (highlightBackPointers) => set({ highlightBackPointers }),
+      backPointerColor: '#ef4444',
+      setBackPointerColor: (backPointerColor) => set({ backPointerColor }),
       drawerPinnedProperties: {},
       setDrawerPinnedProperties: (typeId, keys) => set((state) => {
         const next = { ...state.drawerPinnedProperties }

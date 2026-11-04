@@ -148,11 +148,13 @@ export type ComputedEdge = {
   isFocusIncident?: boolean
   /**
    * True when this edge points back upstream (target's layer index <
-   * source's). Renderer routes these in a dedicated dimmed lane so the
-   * canonical left→right flow stays clean. Computed in useEdgeProjection
-   * via `nodeLayerIndexMap`.
+   * source's). Computed in useEdgeProjection via `nodeLayerIndexMap`.
    */
   isReverseFlow?: boolean
+  /** Drawn as pointing back: reverse flow, outside a trace, one way, where
+   *  the reader turned highlighting on (Display → Highlight lines that point
+   *  back). It then wears the alert colour. */
+  pointsBack?: boolean
   /**
    * True when the projection collapsed an A→B and a B→A bundle into a
    * single record. Renderer should draw a dual-arrowhead path

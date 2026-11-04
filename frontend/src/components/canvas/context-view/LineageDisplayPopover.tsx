@@ -334,6 +334,10 @@ export function LineageDisplaySections({
         {lineageRenderMode === 'auto' && <FlowRibbonsToggle disabled={disabled} />}
       </CollapsibleSection>
 
+      <div className="h-px bg-black/[0.08] dark:bg-white/[0.06] mx-3" />
+
+      <BackPointers disabled={disabled} />
+
       {!simple && <>
       <div className="h-px bg-black/[0.08] dark:bg-white/[0.06] mx-3" />
 
@@ -614,6 +618,58 @@ function AppearanceSection({ disabled }: { disabled: boolean }) {
 }
 
 /** A labelled on/off switch in the Appearance section's own style. */
+/** Alert colours for lines that point back. */
+const BACK_POINTER_COLORS = [
+  { label: 'Red', color: '#ef4444' },
+  { label: 'Amber', color: '#f59e0b' },
+  { label: 'Magenta', color: '#d946ef' },
+] as const
+
+/** Lines that point back: a source in a layer to the right of its target — a
+ *  dependency running against the order of the view's layers — in an alert
+ *  colour. Off until the reader turns it on. A trace keeps its own colours. */
+function BackPointers({ disabled }: { disabled: boolean }) {
+  const on = usePreferencesStore((s) => s.highlightBackPointers) ?? false
+  const setOn = usePreferencesStore((s) => s.setHighlightBackPointers)
+  const color = usePreferencesStore((s) => s.backPointerColor) ?? '#ef4444'
+  const setColor = usePreferencesStore((s) => s.setBackPointerColor)
+  return (
+    <div className="px-3 pb-2.5">
+      <SwitchRow
+        on={on}
+        disabled={disabled}
+        onToggle={() => setOn(!on)}
+        label="Highlight lines that point back"
+        detail="A line whose source sits in a layer to the right of its target, in an alert colour"
+      />
+      {on && (
+        <div role="radiogroup" aria-label="Colour of lines that point back" className="mt-2 flex items-center gap-2 px-2.5">
+          {BACK_POINTER_COLORS.map(({ label, color: c }) => {
+            const active = c.toLowerCase() === color.toLowerCase()
+            return (
+              <button
+                key={c}
+                type="button"
+                role="radio"
+                aria-checked={active}
+                aria-label={label}
+                disabled={disabled}
+                onClick={() => setColor(c)}
+                className={cn(
+                  'w-5 h-5 rounded-full transition-transform',
+                  active ? 'ring-2 ring-offset-2 ring-offset-canvas-elevated scale-110' : 'opacity-80 hover:opacity-100 hover:scale-105',
+                )}
+                style={{ backgroundColor: c, ...(active ? { boxShadow: `0 0 0 2px ${c}` } : {}) }}
+              />
+            )
+          })}
+          <span className="text-[11px] text-ink-muted">Its colour</span>
+        </div>
+      )}
+    </div>
+  )
+}
+
 function SwitchRow({ on, disabled, onToggle, label, detail }: {
   on: boolean
   disabled: boolean

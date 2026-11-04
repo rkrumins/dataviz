@@ -190,4 +190,18 @@ describe('DisplayMenu — Business view', () => {
     expect(screen.queryByText('Advanced')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /Orphaned entities/ })).not.toBeInTheDocument()
   })
+
+  it('offers lines that point back in either view, off until turned on, with an alert colour', () => {
+    usePersonaStore.setState({ mode: 'business' })
+    usePreferencesStore.setState({ highlightBackPointers: false, backPointerColor: '#ef4444' })
+    render(<DisplayMenu {...baseProps()} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Display' }))
+    const toggle = screen.getByRole('switch', { name: /highlight lines that point back/i })
+    expect(toggle).toHaveAttribute('aria-checked', 'false')
+    fireEvent.click(toggle)
+    expect(usePreferencesStore.getState().highlightBackPointers).toBe(true)
+    fireEvent.click(screen.getByRole('radio', { name: 'Amber' }))
+    expect(usePreferencesStore.getState().backPointerColor).toBe('#f59e0b')
+    usePreferencesStore.setState({ highlightBackPointers: false, backPointerColor: '#ef4444' })
+  })
 })

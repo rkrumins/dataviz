@@ -43,6 +43,10 @@ than build it; **Technical** is the full toolset, as before. Business stays the 
   higher in the list wins. In Context View rows and on Graph and Hierarchy cards.
 - **Blue** and **slate** rule colours, for a status read at a glance — "starting points blue, the
   rest grey" is a recipe in Display Rules.
+- **Lines that point back**, in a Context View: **Display → Highlight lines that point back** draws a
+  line whose source sits in a layer to the right of its target in an alert colour (**Red**,
+  **Amber** or **Magenta**). Its hover card says **Points back**, and **Flows** counts them in the
+  same colour. Off by default, in both views.
 - API: a display rule carries an optional `style` — `{"chip": bool, "fill": bool, "frame":
   "solid" | "dashed"}`. `PUT /api/v1/views/{view_id}/library/rules/{rule_id}`, library files and
   `view-library.v1.json` accept it; any other `frame` is a `422`.
@@ -71,6 +75,13 @@ than build it; **Technical** is the full toolset, as before. Business stays the 
 - **View & Edit** and `Enter` open an entity's details without deselecting it when it was already
   the selection.
 - The switch, its tip and the command palette say what each view now does.
+
+### Known limitations
+
+- Lines that point back follow each relationship's stored direction, as the arrowheads do. A type
+  stored from reader to read — `CONSUMES` in the demo data — points back whenever the reader sits to
+  the right of what it reads. A line standing for flows both ways, and a line inside one layer, are
+  never marked; a trace keeps its own colours. The Graph canvas doesn't mark them.
 
 ### Upgrading
 

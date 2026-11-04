@@ -22,6 +22,7 @@ import { ConnectionsPanel, type ConnectionsPanelProps } from '../ConnectionsPane
 import type { ConnectionModel, ConnectionTypeRow } from '../connectionModel'
 import type { EdgeTypeDefinition } from '@/utils/edgeTypeUtils'
 import { useDrawnEdgesStore } from '@/store/drawnEdges'
+import { usePreferencesStore } from '@/store/preferences'
 import { unitMeaning } from '../connectionUnits'
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
@@ -580,5 +581,32 @@ describe('ConnectionsPanel', () => {
     expect(within(row).getByText('30').className).toMatch(/tabular-nums/)
     // A hidden row is still a row: same label scale, so nothing jumps.
     expect(within(rowFor('OWNS')).getByText('Owns').className).toMatch(/text-\[13px\]/)
+  })
+})
+
+describe('ConnectionsPanel — lines that point back', () => {
+  afterEach(() => {
+    cleanup()
+    usePreferencesStore.setState({ highlightBackPointers: false, backPointerColor: '#ef4444' })
+  })
+
+  it('counts them in the alert colour while highlighting is on, outside a trace', () => {
+    usePreferencesStore.setState({ highlightBackPointers: true, backPointerColor: '#d946ef' })
+    mount({ defaultExpanded: true })
+    const marked = rowFor('FLOWS_TO').querySelector<HTMLElement>('[data-points-back]')
+    expect(marked).not.toBeNull()
+    expect(marked!.textContent).toBe('← 3')
+    expect(marked!.style.color).toBe('rgb(217, 70, 239)')
+    // A type with none points nowhere back.
+    expect(rowFor('DERIVES_FROM').querySelector('[data-points-back]')).toBeNull()
+  })
+
+  it('leaves the count plain while highlighting is off, and during a trace', () => {
+    mount({ defaultExpanded: true })
+    expect(document.querySelector('[data-points-back]')).toBeNull()
+    cleanup()
+    usePreferencesStore.setState({ highlightBackPointers: true })
+    mount({ defaultExpanded: true, traceMode: true })
+    expect(document.querySelector('[data-points-back]')).toBeNull()
   })
 })

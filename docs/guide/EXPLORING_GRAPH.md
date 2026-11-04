@@ -307,6 +307,7 @@ the view itself.
 | See lines without hovering | **Edge Density** to **Adaptive** (strongest flows stay visible) or **All Edges**. **On Hover** is the default |
 | Draw more or fewer lines on a busy view | The **Edge Budget** slider (**Lines per entity** in On Hover), from 100 to 2,000 |
 | Hide the arrowheads | **Direction → Arrow markers** off |
+| Spot dependencies that run against the layers | **Highlight lines that point back** on: a line whose source sits in a layer to the right of its target is drawn in an alert colour — **Red** (the default), **Amber** or **Magenta**. Its hover card says **Points back**, and **Flows** counts them (**←**) in the same colour |
 | Change the upstream and downstream colours | **Appearance → Lineage colours**: pick a preset, or set **Incoming** and **Outgoing** yourself |
 | Stop the off-screen partner lists opening | **Appearance → Off-screen partners** off (a small hint shows instead) |
 | Hide alerts about links to entities outside the view | **Missing Connections → Missing-link alerts** off |
@@ -314,7 +315,15 @@ the view itself.
 
 The lineage settings work only while **Lineage** in the header is on; when it's
 off, the menu says *Turn on Lineage to adjust edge appearance*. A trace draws
-every line it walks, whatever **Edge Density** is set to.
+every line it walks, whatever **Edge Density** is set to. In the Business view,
+**Display** keeps the canvas settings, **Edge Density** and **Highlight lines
+that point back**; the rest are the Technical view's.
+
+Lines that point back follow each relationship's stored direction, the same one
+the arrowheads show. A trace keeps its own colours, and a line standing for
+flows both ways is never marked. Some relationship types are stored from
+reader to read — `CONSUMES` in the demo data — so they point back whenever the
+reader sits to the right of what it reads.
 
 ![The Display popover open from the view header, showing the Canvas section and the Lineage appearance section with Edge Density set to On Hover](/docs-assets/guide/exploring-graph-display.png)
 
