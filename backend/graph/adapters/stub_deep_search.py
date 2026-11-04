@@ -556,9 +556,9 @@ class StubDeepSearchProvider:
             types = {t for t in types if not is_derived_edge_type(t)}
         return {str(t).upper() for t in types}
 
-    def _layer_of(self, urn: str, target) -> Optional[str]:
-        """The layer the view's canvas draws ``urn`` in: ``place_all`` itself,
-        over every node and the containment between them, once per view."""
+    def _placement_of(self, urn: str, target):
+        """Where the view's canvas places ``urn``: ``place_all`` itself, over
+        every node and the containment between them, once per view."""
         placed = self._placed.get(id(target.spec))
         if placed is None:
             facts = {n["urn"]: NodeFacts(
@@ -569,9 +569,9 @@ class StubDeepSearchProvider:
                 stamp=(n["layerAssignment"] if isinstance(n.get("layerAssignment"), str)
                        and n["layerAssignment"] else None),
             ) for n in self._nodes}
-            layers = {u: p.layer_id for u, p in place_all(target.spec, facts, self._parents).items()}
             # The spec is kept with its answer, so its id can't be reused while cached.
-            placed = self._placed[id(target.spec)] = (target.spec, layers)
+            placed = self._placed[id(target.spec)] = (
+                target.spec, place_all(target.spec, facts, self._parents))
         return placed[1].get(urn)
 
     def _ancestors(self, node: Dict[str, Any]) -> List[str]:
@@ -880,7 +880,12 @@ def _matches(node: Dict[str, Any], predicate, graph=None, depth: int = 12) -> bo
     if isinstance(predicate, LayerPredicate):
         target = getattr(predicate, "_placement", None)
         if target is not None and graph is not None:
-            return graph._layer_of(node["urn"], target) == target.layer_id
+            placement = graph._placement_of(node["urn"], target)
+            if placement is None:
+                return False
+            if target.layer_id is None:     # in any of the view's layers, as a member
+                return placement.member
+            return placement.layer_id == target.layer_id
         return node.get("layerAssignment") == predicate.layer_assignment
 
     if isinstance(predicate, TextPredicate):

@@ -2126,10 +2126,24 @@ export function ContextViewCanvas({
 
   useEffect(() => { fitToWidthRef.current = handleFitToWidth }, [handleFitToWidth])
 
+  // A subset view's rows are drawn in the layer whose feed listed them: the server
+  // placed them there (as the view's base places them, or by type). Never this
+  // canvas's own type rules, nor a loaded container's column. Placed where a
+  // session's drags would be, which win at any depth; a subset view has none.
+  const subsetView = !!activeView?.search
+  const feedPlacements = useMemo(() => {
+    if (!subsetView) return null
+    const placed = new Map<string, { layerId: string }>()
+    for (const n of nodes) {
+      if (n.data?.feedLayerId) placed.set(n.id, { layerId: n.data.feedLayerId })
+    }
+    return placed
+  }, [subsetView, nodes])
+
   // Layer assignment: rules, nodesByLayer, displayFlat, displayMap, urnToIdMap, nodeLayerMap
   const { nodesByLayer, displayFlat, displayMap, urnToIdMap, nodeLayerMap, nodeGroupMap, unassignedNodes, promotedAnchors, contractPlacements } = useLayerAssignment({
     nodes, sortedLayers, nodeEdgeFingerprint,
-    instanceAssignments, effectiveAssignments,
+    instanceAssignments: feedPlacements ?? instanceAssignments, effectiveAssignments,
     nodeMap, childMap, parentMap,
     assignments: activeReferenceLayout.assignments,
     entityScope: activeEntityScope,
@@ -3840,7 +3854,6 @@ export function ContextViewCanvas({
   // never loads more.
   const typeFeeds = useCanvasStore(s => s.typeFeeds)
   // A subset view's layer pages its own feed (`layer:<id>`): its search's matches.
-  const subsetView = !!activeView?.search
   const feedTypesByLayer = useMemo(() => {
     const out = new Map<string, string[]>()
     if (subsetView) {

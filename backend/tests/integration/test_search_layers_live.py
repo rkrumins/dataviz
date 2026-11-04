@@ -174,7 +174,9 @@ def _reference(g, case):
     parents = {}
     for parent, child, _ in _parent_child(case):
         parents.setdefault(child, []).append(parent)
-    return spec, {urn: p.layer_id for urn, p in place_all(spec, facts, parents).items()}
+    placed = place_all(spec, facts, parents)
+    return (spec, {urn: p.layer_id for urn, p in placed.items()},
+            sorted(urn for urn, p in placed.items() if p.member))
 
 
 def _ids(case):
@@ -186,7 +188,7 @@ def test_the_layer_filter_finds_what_the_canvas_draws(graph, case):
     if case["name"] in CYCLES:
         pytest.skip("place_all ignores a containment cycle's edges; the walk follows them")
     _seed(graph, case)
-    spec, placed = _reference(graph, case)
+    spec, placed, members = _reference(graph, case)
     types = sorted({t for _, _, t in _parent_child(case)} | set(_containment(case)))
     urns = sorted(placed)
     for layer_id in sorted(spec.layer_ids) + ["no-such-layer"]:
@@ -207,12 +209,20 @@ def test_the_layer_filter_finds_what_the_canvas_draws(graph, case):
             f"WHERE t RETURN p.target", p.params).result_set)
         assert far == want, ("as a far end", layer_id)
 
+    # In any of its layers, as a member: what a subset's "Other matches" leaves out.
+    p = _Params()
+    test = layer_test(LayerTarget(spec, None, "d"), "n", name=p.name, bind=p.bind, containment=types)
+    rows = graph.query(f"MATCH (n) WHERE NOT n:Probe WITH n, {test} AS t "
+                       f"RETURN n.urn, t", p.params).result_set
+    assert all(t is True or t is False for _, t in rows), rows
+    assert sorted(u for u, t in rows if t) == members, "in any layer"
+
 
 def test_cycles_do_not_fail_the_query(graph):
     """A cycle may place differently, but never errors or answers null."""
     for case in (c for c in CASES if c["name"] in CYCLES):
         _seed(graph, case)
-        spec, _ = _reference(graph, case)
+        spec, _, _ = _reference(graph, case)
         types = sorted({t for _, _, t in _parent_child(case)} | set(_containment(case)))
         for layer_id in sorted(spec.layer_ids):
             p = _Params()

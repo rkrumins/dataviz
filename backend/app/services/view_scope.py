@@ -67,6 +67,7 @@ from backend.app.db.repositories.view_repo import effective_view_config
 from backend.app.services.layout_config import derive_entity_scope, parse_reference_layout
 from backend.app.services.search_views import (
     boundary_hash,
+    follow_placement,
     is_subset,
     search_hash,
     shown_layers,
@@ -158,7 +159,10 @@ class EffectiveViewScope:
     see, only what the subset shows."""
     subset_layers: Tuple[Any, ...] = ()
     """A subset view's layers (``search_views.SubsetLayer``): what a layer filter in
-    it means — the types the layer holds."""
+    it means (``search_views.layer_condition``)."""
+    subset_placement: Any = None
+    """How a subset that follows its base places its matches in those layers
+    (``search_views.BasePlacement``): as the base's canvas does. None: by type."""
 
 
 # --------------------------------------------------------------------------- #
@@ -522,7 +526,9 @@ class ViewScopeResolver:
         # includes — held to what those columns show.
         every_layer = subset_layers(definition, config, base_config)
         layers = shown_layers(every_layer)
-        search = shown_search(definition.search_predicate(), every_layer)
+        placement = (follow_placement(base_config)[0]
+                     if definition.layout == "inherit" and base_config is not None else None)
+        search = shown_search(definition.search_predicate(), every_layer, placement)
         return EffectiveViewScope(
             view_id=view.id,
             workspace_id=view.workspace_id,
@@ -537,7 +543,8 @@ class ViewScopeResolver:
                 view_id=base.id if base is not None else None,
                 data_source_id=view.data_source_id, root_urns=effective_root_urns,
                 entity_types=effective_entity_types, max_depth=effective_max_depth,
-                predicate_hash=search_hash(search)),
+                predicate_hash=search_hash(search),
+                placement=placement.digest if placement is not None else ""),
             dropped_urns=tuple(dropped),
             layers=tuple((layer.id, layer.name) for layer in layers),
             search=search,
@@ -545,6 +552,7 @@ class ViewScopeResolver:
             redact_roots=bool(base is not None and can_read is not None
                               and not await can_read(base)),
             subset_layers=tuple(layers),
+            subset_placement=placement,
         )
 
     async def _load_view(self, view_id: str) -> Optional[ViewORM]:

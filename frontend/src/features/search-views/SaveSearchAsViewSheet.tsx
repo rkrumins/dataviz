@@ -6,12 +6,14 @@
  * size, made at once, laid out like the view it came from and shared like any
  * view. Nothing is saved blind: the preview counts what each layer would hold.
  *
- * Beside the matches it can keep what they reach — everything inside them, what
- * contains them, one lineage step either way — still live and any size; and
- * fewer layers: a layer left out in the preview takes its matches with it. More
- * reach than that is a list of members, which Narrow makes.
+ * Following its base, each match is in the layer the base places it in — by hand,
+ * by what children inherit, by rules — and "Other matches" holds what the base
+ * places nowhere. Beside the matches it can keep what they reach — everything
+ * inside them, what contains them, one lineage step either way — still live and
+ * any size; and fewer layers: a layer left out in the preview takes its matches
+ * with it. More reach than that is a list of members, which Narrow makes.
  */
-import { useMemo, useState, type KeyboardEvent, type ReactNode } from 'react'
+import { useEffect, useMemo, useState, type KeyboardEvent, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { AnimatePresence, motion } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
@@ -23,6 +25,7 @@ import { narrowErrorText } from '@/features/narrow/useNarrowResolve'
 import { MOTION } from '@/lib/motion'
 import { cn } from '@/lib/utils'
 import { httpStatusOf } from '@/services/graphRequestFailure'
+import type { RuleCount } from '@/services/ruleCounts'
 import { createFromSearch } from '@/services/searchViewsApi'
 import type { View } from '@/services/viewApiService'
 import type { Predicate } from '@/types/search'
@@ -66,8 +69,13 @@ export interface SaveSearchAsViewSheetProps {
   /** From a narrowing kept live: what it reaches, and where it looks. */
   initialInclude?: SubsetInclude
   initialWithin?: SubsetWithin
-  /** Beside the title: keep it as a list of members instead (from a narrowing). */
+  /** Beside the title: keep it as a list of members instead. */
   headerExtra?: ReactNode
+  /** Its choices as they change, so Save as view can keep them as a list instead. */
+  onChoicesChange?: (choices: { include: SubsetInclude; within: SubsetWithin }) => void
+  /** Keep their places as a list of members instead: offered when a live view can't
+   *  follow how its base places entities. */
+  onKeepAsList?: () => void
   /** More reach than a live view keeps (two lineage steps, chosen entities): narrow first. */
   onNarrowInstead?: () => void
   onClose: () => void
@@ -90,6 +98,15 @@ const CARDS: Record<LayoutChoice, { icon: keyof typeof LucideIcons; title: (base
 
 const NO_TYPES: Array<{ type: string; count: number }> = []
 const NONE_LEFT_OUT: ReadonlySet<string> = new Set()
+/** The count of everything it finds, beside its layers' (Other matches is what is left). */
+const FOUND = '__found__'
+/** No counts asked for: the other way of counting is the one in use. */
+const NOTHING_TO_COUNT: Array<{ id: string; predicate: Predicate }> = []
+
+/** What it finds that its base places in layer ``id``: a layer filter, which the
+ *  server resolves as the base's canvas places entities. */
+const inLayer = (found: Predicate, id: string): Predicate =>
+  ({ kind: 'group', op: 'and', children: [found, { kind: 'layer', layerAssignment: id }] }) as unknown as Predicate
 
 const number = new Intl.NumberFormat()
 const capitalise = (s: string) => (s ? s[0].toUpperCase() + s.slice(1) : s)
@@ -108,7 +125,8 @@ function saveErrorText(err: unknown): string {
 
 export function SaveSearchAsViewSheet({
   viewId, viewName, workspaceId, dataSourceId, predicate, boardLayers, boardConfig, subset,
-  typeLabel, initialInclude, initialWithin, headerExtra, onNarrowInstead, onClose, onSaved,
+  typeLabel, initialInclude, initialWithin, headerExtra, onChoicesChange, onKeepAsList, onNarrowInstead,
+  onClose, onSaved,
 }: SaveSearchAsViewSheetProps) {
   const kept = combinedWith(subset?.definition, predicate, viewId)
   const baseName = subset ? (subset.baseName ?? 'its base view') : viewName
@@ -123,10 +141,11 @@ export function SaveSearchAsViewSheet({
   const [error, setError] = useState<string | null>(null)
   // One per sheet: a retry of this save answers with the view the first attempt made.
   const [idempotencyKey] = useState(() => (globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`))
+  useEffect(() => { onChoicesChange?.({ include, within }) }, [include, within, onChoicesChange])
 
   const offers: Array<{ choice: LayoutChoice; available: boolean; hint: string }> = [
     { choice: 'like', available: true, hint: within === 'view'
-      ? 'Its layers, followed as they change — each match in the layer of its type'
+      ? 'Its layers, followed as they change — each match where it places it'
       : 'A copy of its layers — each match in the layer of its type' },
     { choice: 'perType', available: true, hint: 'A column for each kind it holds, the most common first' },
     { choice: 'one', available: true, hint: 'Every match in one list' },
@@ -161,21 +180,53 @@ export function SaveSearchAsViewSheet({
     return next
   })
 
-  // What the view finds in each layer it keeps.
-  const toCount = useMemo(() => layers.flatMap((layer) => {
+  // Following its base, a layer holds what the base places there: each counted in
+  // the base as a layer filter, for every one of its layers, left out or not, and
+  // Other matches is what none of them holds. A base past what a live view can
+  // follow (too many entities placed by hand, too many rules) refuses those counts;
+  // its matches are then placed by type, as the server places them, and counted
+  // that way.
+  const likeBase = choice === 'like' && within === 'view'
+  const followToCount = useMemo(() => (likeBase ? [
+    ...layers.filter((l) => l.id !== REST_LAYER_ID).map((l) => ({ id: l.id, predicate: inLayer(found, l.id) })),
+    { id: FOUND, predicate: found },
+  ] : NOTHING_TO_COUNT), [likeBase, layers, found])
+  const followCounts = useLayerCounts(kept.baseViewId, followToCount, false)
+  const followed = (followCounts.status === 'counting' || followCounts.status === 'done') ? followCounts.counts : null
+  const cantFollow = likeBase && followToCount.some((l) => l.id !== FOUND && followed?.get(l.id)?.complete && followed.get(l.id)?.error)
+  const follows = likeBase && !cantFollow
+
+  // By type: every other layout, and a base it can't follow.
+  const byTypeToCount = useMemo(() => (follows ? NOTHING_TO_COUNT : layers.flatMap((layer) => {
     if (hidden.has(layer.id)) return []
     const p = layerPredicate(found, layer)
     return p ? [{ id: layer.id, predicate: p }] : []
-  }), [layers, found, hidden])
-  const keptLayers = layers.filter((l) => !hidden.has(l.id) && (l.rest || l.entityTypes.length > 0))
-  const counts = useLayerCounts(kept.baseViewId, toCount, within === 'dataSource')
-  const countOf = (id: string) => (counts.status === 'counting' || counts.status === 'done') ? counts.counts.get(id) : undefined
-  const total = toCount.reduce((sum, l) => sum + (countOf(l.id)?.count ?? 0), 0)
-  // Each layer's share, drawn against the fullest one so a small layer still shows.
-  const most = Math.max(1, ...toCount.map((l) => countOf(l.id)?.count ?? 0))
-  const exact = counts.status === 'done' && toCount.every((l) => countOf(l.id)?.complete)
+  })), [follows, layers, found, hidden])
+  const byTypeCounts = useLayerCounts(kept.baseViewId, byTypeToCount, within === 'dataSource')
 
-  const placedByType = choice === 'like' && !!boardConfig && placesByMoreThanType(boardConfig)
+  const toCount = follows ? followToCount : byTypeToCount
+  const counts = follows ? followCounts : byTypeCounts
+  const keptLayers = layers.filter((l) => !hidden.has(l.id) && (follows || l.rest || l.entityTypes.length > 0))
+  const counted = (counts.status === 'counting' || counts.status === 'done') ? counts.counts : null
+  const countOf = (id: string): RuleCount | undefined => {
+    if (!(follows && id === REST_LAYER_ID)) return counted?.get(id)
+    // Other matches: what it finds that none of its base's layers holds — once
+    // every count is exact, as floors say nothing of what is left.
+    const all = counted?.get(FOUND)
+    const parts = toCount.filter((l) => l.id !== FOUND).map((l) => counted?.get(l.id))
+    if (!all?.complete || parts.some((c) => !c?.complete)) return undefined
+    return { count: Math.max(0, all.count - parts.reduce((sum, c) => sum + (c?.count ?? 0), 0)), complete: true, percent: 100 }
+  }
+  const shownLayers = layers.filter((l) => !hidden.has(l.id))
+  const total = shownLayers.reduce((sum, l) => sum + (countOf(l.id)?.count ?? 0), 0)
+  // Each layer's share, drawn against the fullest one so a small layer still shows.
+  const most = Math.max(1, ...layers.map((l) => countOf(l.id)?.count ?? 0))
+  const exact = counts.status === 'done' && toCount.every((l) => counted?.get(l.id)?.complete)
+
+  // Placed by type: a copy of its layers (a whole data source's subset) of a base
+  // that places by more, or a live view that can't follow its base.
+  const copiedByType = choice === 'like' && within === 'dataSource' && !!boardConfig && placesByMoreThanType(boardConfig)
+  const unfollowed = choice === 'like' && within === 'view' && cantFollow
   const canSave = !!name.trim() && !saving && keptLayers.length > 0
 
   const save = async () => {
@@ -349,11 +400,29 @@ export function SaveSearchAsViewSheet({
                 )
               })}
             </div>
-            {placedByType && (
+            {copiedByType && (
               <p className="mt-2.5 flex gap-2 text-[12px] text-amber-700 dark:text-amber-400 leading-snug">
                 <LucideIcons.Info className="w-3.5 h-3.5 flex-none mt-0.5" aria-hidden />
-                “{baseName}” also places entities by rules on tags or properties, or by hand. A subset places them by type.
+                “{baseName}” also places entities by rules on tags or properties, or by hand. A copy of its layers places them by type.
               </p>
+            )}
+            {unfollowed && (
+              <div className="mt-2.5 flex gap-2 text-[12px] text-amber-700 dark:text-amber-400 leading-snug" role="status">
+                <LucideIcons.Info className="w-3.5 h-3.5 flex-none mt-0.5" aria-hidden />
+                <div>
+                  <p>
+                    A live view can’t follow how “{baseName}” places entities: it places too many by hand, or by too
+                    many rules. Here its matches would be placed by type.
+                  </p>
+                  {onKeepAsList && (
+                    <button type="button" onClick={onKeepAsList}
+                      className="mt-1.5 inline-flex items-center gap-1.5 h-7 px-2.5 rounded-lg text-[12px] font-medium text-accent-lineage bg-accent-lineage/10 hover:bg-accent-lineage/15 transition-colors">
+                      <LucideIcons.ListChecks className="w-3.5 h-3.5" aria-hidden />
+                      Keep their places as a list
+                    </button>
+                  )}
+                </div>
+              </div>
             )}
           </Section>
 
@@ -373,13 +442,13 @@ export function SaveSearchAsViewSheet({
               {layers.map((layer) => {
                 const c = countOf(layer.id)
                 const left = hidden.has(layer.id)
-                const counted = toCount.some((l) => l.id === layer.id)
-                const empty = counted && c?.complete && c.count === 0
+                const held = (follows && layer.id === REST_LAYER_ID) || toCount.some((l) => l.id === layer.id)
+                const empty = held && c?.complete && c.count === 0
                 // Leaving out the last layer that can hold matches would leave nothing to show.
                 const lastKept = !left && keptLayers.length === 1 && keptLayers[0].id === layer.id
                 return (
                   <li key={layer.id} className={cn('relative overflow-hidden flex items-center justify-between gap-3 px-3.5 py-2',
-                    (empty || !counted) && !left && 'opacity-50')}>
+                    (empty || !held) && !left && 'opacity-50')}>
                     {/* Its share of the matches, in its colour, behind the row. */}
                     {c && c.count > 0 && (
                       <span aria-hidden className="absolute inset-y-0 left-0 opacity-[0.10] dark:opacity-[0.16] transition-[width] duration-500 ease-out"
@@ -400,12 +469,12 @@ export function SaveSearchAsViewSheet({
                         <span className="w-2 h-2 rounded-full flex-none" style={{ background: layer.color ?? 'var(--color-ink-muted, #94a3b8)' }} aria-hidden />
                       )}
                       <span className={cn('truncate text-[12.5px]', left ? 'text-ink-muted line-through decoration-ink-muted/50' : 'text-ink')}>{layer.name}</span>
-                      {layer.rest && <span className={cn('text-[11px] text-ink-muted', left && 'opacity-60')}>· every other type</span>}
+                      {layer.rest && <span className={cn('text-[11px] text-ink-muted', left && 'opacity-60')}>{follows ? '· the rest' : '· every other type'}</span>}
                     </span>
                     <span className="relative flex-none text-[12px] font-medium tabular-nums text-ink-secondary">
                       {left ? <span className="text-ink-muted font-normal">left out</span>
-                        : !counted ? 'nothing to hold'
-                          : c === undefined ? '…'
+                        : !held ? 'nothing to hold'
+                          : c === undefined ? (held && follows && layer.id === REST_LAYER_ID && counts.status === 'done' ? 'the rest' : '…')
                             : empty ? 'no matches — hidden'
                               : `${number.format(c.count)}${c.complete ? '' : '+'}`}
                     </span>

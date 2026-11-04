@@ -358,9 +358,12 @@ still follows the base, so a layer the base adds later arrives. **Save view**
 (⌘/Ctrl+Enter) makes it and opens it. Saving from inside a subset view keeps
 both searches, against the same base.
 
-**What its layers show.** Each layer lists the matches of the types it holds.
-**Other matches** holds every other type. A layer's header reads what it lists,
-of how many:
+**What its layers show.** While it follows its base, each match is in the layer
+the base puts it in, however the base places it: by hand, by what children
+inherit from their container, by its own rules on types, tags or properties.
+**Other matches** holds the matches the base places in none of its layers. So a
+search for *oracle* across a view built by hand keeps every match where the view
+shows it. A layer's header reads what it lists, of how many:
 
 - **so far** while the count is still rising;
 - **as of 10:42** while it shows a recent answer, because the data has just
@@ -370,8 +373,9 @@ Under each match, its containers are named, for example *in warehouse ›
 sales*, without loading them.
 
 The canvas lists up to 2,000 rows a layer. Past that, the layer says how many it
-shows, and **Search in this layer** finds the rest. Matches are placed by type:
-nothing is placed by hand, grouped or reordered in a subset view.
+shows, and **Search in this layer** finds the rest. Nothing is placed by hand,
+grouped or reordered in a subset view itself: its matches go where its base puts
+them.
 
 **Its header chip** reads **Subset of *Sales overview***. It says what the view
 shows and where its layers come from. If you can edit the view, it also offers:
@@ -382,7 +386,7 @@ shows and where its layers come from. If you can edit the view, it also offers:
 | Keep more with the matches, or less | Under **Keeps with them**, choose **Everything inside**, **What contains them**, **What feeds them** or **What they feed**. Each change offers **Undo** |
 | Leave a layer out, or bring it back | In a subset that follows its base, choose the layer's pill. A layer left out is struck through, and its matches go with it. At least one layer stays |
 | Ask each layer for a fresh answer | **Refresh** |
-| Change its layers yourself | **Make its own layout**: it keeps every one of the base's current layers as its own, the ones it left out too. **Undo** leaves them out again |
+| Change its layers yourself | **Make its own layout**: it keeps every one of the base's current layers as its own, the ones it left out too. Its own layers hold matches by type, so a match the base places by hand or by a rule may move to **Other matches**. **Undo** leaves them out again |
 | Take its layers from the base again | **Follow *Sales overview* again** |
 
 Each change is recorded as a version of the view.
@@ -401,10 +405,18 @@ can open it.
 **Limits.**
 - It reads the published data: entities created in a draft appear once the draft
   is published.
-- It places by type. When the base places entities by rules on tags or
-  properties, or by hand, the sheet and the chip say so. Entities shown inside
-  their container in the base, such as a table's columns, are in **Other
-  matches** in the subset.
+- It follows how its base places entities up to what a search can follow: at
+  most 1,000 entities placed by hand, and rules that compare properties up to
+  about thirty. Past that it places its matches by type, and the sheet and the
+  chip say why. The sheet then offers **Keep their places as a list**: a list
+  of members, up to 5,000, each placed where the base places it.
+- Its own layout, and a subset of the whole data source, place matches by type.
+- A subset places its matches by the shared placement rule. The base's canvas
+  uses it too only with **One placement rule for every view surface** on. With it
+  off, a few cases can differ between the base and its subset: a child with its
+  own type rule, a stamped child, or the child of an entity in the fallback
+  layer. Entities placed by hand, and what their children inherit, agree either
+  way.
 - A search that follows lineage can take one step at most, and so can what it
   keeps with the matches. Two or more steps, or entities you choose, are kept as
   a list of members: Narrow, then **Save as view**.

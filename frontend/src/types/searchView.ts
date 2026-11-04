@@ -109,8 +109,10 @@ export interface SearchViewStatus {
   /** The base view; its name is null for a reader who can't open it. */
   base: ReadInView | null
   layers: SubsetLayer[]
-  /** The base places by more than type (rules, entities placed by hand): here it's by type. */
+  /** It follows its base, but the base's placement is more than a search can follow
+   *  (`placedByTypeReason` says why): here its matches are placed by type. */
   placedByType: boolean
+  placedByTypeReason?: string | null
 }
 
 export interface SubsetSummary {

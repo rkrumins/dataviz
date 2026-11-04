@@ -233,9 +233,10 @@ class SearchViewStatus(_Base):
     status: SubsetStatus = "ok"
     base: Optional[ReadInView] = None
     layers: List[SubsetLayer] = Field(default_factory=list)
-    #: The base places entities by more than type (rules on tags or
-    #: properties, entities placed by hand): here they are placed by type.
+    #: It follows its base, but the base's placement is more than a search can
+    #: follow (``placedByTypeReason`` says why): here its matches are placed by type.
     placed_by_type: bool = Field(False, alias="placedByType")
+    placed_by_type_reason: Optional[str] = Field(None, alias="placedByTypeReason")
 
 
 class SubsetSummary(_Base):

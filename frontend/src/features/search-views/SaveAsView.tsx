@@ -3,10 +3,12 @@
  *
  * A search's matches are kept live: a subset view, current every time it opens,
  * any size, with what they reach (everything inside them, what contains them, one
- * lineage step either way) kept as part of its search. A narrowing is kept live
- * when a live view can keep what it reaches; otherwise — chosen entities, levels
- * inside, two or more lineage steps — as a list of its members, brought up to date
- * when it is opened. Where both are possible, the sheet switches between them.
+ * lineage step either way) kept as part of its search — or as a list of members,
+ * keeping their places where a live view can't follow how its base places them.
+ * A narrowing is kept live when a live view can keep what it reaches; otherwise —
+ * chosen entities, levels inside, two or more lineage steps — as a list of its
+ * members, brought up to date when it is opened. Where both are possible, the
+ * sheet switches between them.
  */
 import { useState } from 'react'
 import * as LucideIcons from 'lucide-react'
@@ -16,9 +18,9 @@ import { SaveAsViewSheet } from '@/features/live-views/SaveAsViewSheet'
 import type { NarrowDraft } from '@/features/narrow/narrowStore'
 import type { View } from '@/services/viewApiService'
 import type { Predicate } from '@/types/search'
-import type { SearchViewDefinition } from '@/types/searchView'
+import type { SearchViewDefinition, SubsetInclude, SubsetWithin } from '@/types/searchView'
 
-import { liveFromNarrowing, type BoardLayer } from './model'
+import { combinedWith, liveFromNarrowing, type BoardLayer } from './model'
 import { SaveSearchAsViewSheet } from './SaveSearchAsViewSheet'
 
 export type SaveAsViewSource =
@@ -49,6 +51,21 @@ export interface SaveAsViewProps {
 
 type Kind = 'live' | 'list'
 
+/** A search's matches, and what it keeps beside them, as a list of members: its
+ *  search the starting points, everything inside them, one lineage step either
+ *  way. The list draws what contains them itself (Show where they sit). */
+function listFromSearch(predicate: Predicate, choices: { include?: SubsetInclude; within?: SubsetWithin }): NarrowDraft {
+  const { include, within = 'view' } = choices
+  return {
+    spec: {
+      v: 1, seeds: { query: predicate }, within,
+      expand: { children: include?.contents ? 'all' : 0, upstream: include?.upstream ? 1 : 0,
+                downstream: include?.downstream ? 1 : 0, partnerChildren: 0 },
+    },
+    seedsLabel: 'the matches of your search',
+  }
+}
+
 export function SaveAsView({
   source, viewId, viewName, workspaceId, dataSourceId, boardLayers, boardConfig, subset, typeLabel,
   canKeepLive, canKeepList, onNarrowInstead, onClose, onSaved,
@@ -57,9 +74,13 @@ export function SaveAsView({
   const liveReason = !canKeepLive ? 'Live views are turned off here.'
     : live && 'reason' in live ? live.reason : null
   const [kind, setKind] = useState<Kind>(liveReason === null ? 'live' : 'list')
+  const shaped = live && !('reason' in live) ? live : null
+  // The live sheet's choices, kept to carry them to a list, and back.
+  const [choices, setChoices] = useState<{ include?: SubsetInclude; within?: SubsetWithin }>(
+    () => ({ include: shaped?.include, within: shaped?.within }))
 
-  // A narrowing can be kept either way: a switch beside the title, saying why live can't be when it can't.
-  const switcher = source.kind === 'narrowing' && canKeepList ? (
+  // Either way: a switch beside the title, saying why live can't be when it can't.
+  const switcher = canKeepList && (source.kind === 'narrowing' || liveReason === null) ? (
     <div>
       <Segmented<Kind>
         label="Keep it"
@@ -76,12 +97,13 @@ export function SaveAsView({
           ? <>Kept as a list of its members, brought up to date when it is opened. {liveReason}</>
           : kind === 'live'
             ? 'Live: it keeps the search, never a list, so it is current every time it opens.'
-            : 'A list of its members, brought up to date when it is opened after its data changed.'}
+            : source.kind === 'search'
+              ? 'A list of its matches, each where its view places it, brought up to date when it is opened after its data changed.'
+              : 'A list of its members, brought up to date when it is opened after its data changed.'}
       </p>
     </div>
   ) : null
 
-  const shaped = live && !('reason' in live) ? live : null
   const predicate = source.kind === 'search' ? source.predicate : shaped?.predicate
   if (kind === 'live' && liveReason === null && predicate) {
     return (
@@ -95,23 +117,32 @@ export function SaveAsView({
         boardConfig={boardConfig}
         subset={subset}
         typeLabel={typeLabel}
-        initialInclude={shaped?.include}
-        initialWithin={shaped?.within}
+        initialInclude={choices.include}
+        initialWithin={choices.within}
         headerExtra={switcher}
+        onChoicesChange={setChoices}
+        onKeepAsList={canKeepList ? () => setKind('list') : undefined}
         onNarrowInstead={source.kind === 'search' ? onNarrowInstead : undefined}
         onClose={onClose}
         onSaved={onSaved}
       />
     )
   }
-  if (source.kind !== 'narrowing') return null
+  if (source.kind === 'search' && !canKeepList) return null
+  // From inside a subset view, a list is made from its base: it searches there, and
+  // takes the base's layers (a subset that follows its base stores none).
+  const list = source.kind === 'search' ? (() => {
+    const kept = combinedWith(subset?.definition, source.predicate, viewId)
+    return { viewId: kept.baseViewId, viewName: subset ? (subset.baseName ?? 'its base view') : viewName,
+             draft: listFromSearch(kept.predicate, choices) }
+  })() : { viewId, viewName, draft: source.draft }
   return (
     <SaveAsViewSheet
-      viewId={viewId}
-      viewName={viewName}
+      viewId={list.viewId}
+      viewName={list.viewName}
       workspaceId={workspaceId}
       dataSourceId={dataSourceId ?? undefined}
-      draft={source.draft}
+      draft={list.draft}
       sourceLayerCount={boardLayers.length}
       headerExtra={switcher}
       onClose={onClose}

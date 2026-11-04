@@ -10,19 +10,27 @@ overlap, and each one is a search of its own (``feed_predicate``) that reads
 only its types' entities.
 
 A subset that follows its base (``layout: inherit``) takes its layers from the
-base view as it is now: the base's layers, by type. Rules on tags or
-properties, groups, anchors and entities placed by hand have no part in that
-— a subset places by type alone (``placed_by_type`` says when the base does
-more).
+base view as it is now, and places its matches as the base's canvas does
+(``follow_placement``): by hand, by what children inherit, by stamps and by
+rules, each layer a search for what the base places there and "Other matches"
+for what it places nowhere. A base past what a search can follow (too many
+entities placed by hand, or rules too costly to read) is followed by type, and
+the subset says why.
 """
 from __future__ import annotations
 
 import hashlib
 import json
 import math
+from dataclasses import dataclass
 from typing import Any, Dict, FrozenSet, Iterable, List, Optional, Sequence, Tuple
 
 from backend.app.services.layout_config import _resolve_raw_layout, parse_reference_layout
+from backend.app.services.view_placement import (
+    LayerTarget,
+    PlacementSpec,
+    placement_digest,
+)
 from backend.common.models.search import (
     EdgesPredicate,
     EntityTypePredicate,
@@ -159,21 +167,34 @@ def _claimed(layers: Sequence[SubsetLayer]) -> List[str]:
     return list(seen.values())
 
 
-def places_by_more_than_type(config: Optional[Dict[str, Any]]) -> bool:
-    """Whether ``config``'s board places entities by more than their type — rules
-    on tags, properties or URNs, groups, anchors, entities placed by hand — which
-    a subset of it can't follow."""
-    layout = parse_reference_layout(config)
-    if any(isinstance(e, dict) and e.get("layerId") for e in layout.assignments.values()):
-        return True
-    for layer in layout.layers:
-        if not isinstance(layer, dict):
-            continue
-        if any(isinstance(r, dict) for r in layer.get("rules") or []):
-            return True
-        if layer.get("logicalNodes") or layer.get("anchorUrn"):
-            return True
-    return False
+@dataclass(frozen=True)
+class BasePlacement:
+    """How a subset that follows its base places its matches: as the base's canvas
+    places entities (``spec``), ``digest`` naming what decides it."""
+    spec: PlacementSpec
+    digest: str
+
+
+def follow_placement(base_config: Optional[Dict[str, Any]]) -> Tuple[Optional[BasePlacement], Optional[str]]:
+    """How a subset that follows ``base_config`` places its matches: as the base's
+    canvas places them — or None, placing them by type, with why when the base's
+    placement is more than a search can follow."""
+    from backend.app.providers.falkordb_placement import placement_cost_problem
+    from backend.app.services.advanced_search_service import (
+        LAYER_FILTER_MAX_HAND_PLACED,
+    )
+    spec = PlacementSpec.from_config(base_config)
+    if not spec.layer_ids:
+        return None, None
+    hand = sum(1 for entry in spec.explicit.values() if entry.layer_id in spec.layer_ids)
+    if hand > LAYER_FILTER_MAX_HAND_PLACED:
+        return None, (f"Its base view places {hand:,} entities by hand, and a subset follows "
+                      f"at most {LAYER_FILTER_MAX_HAND_PLACED:,}, so it places its matches by type.")
+    digest = placement_digest(spec)
+    if placement_cost_problem(spec, digest):
+        return None, (f"Its base view places entities with {len(spec.rules):,} rules, more than "
+                      "a subset can follow quickly, so it places its matches by type.")
+    return BasePlacement(spec, digest), None
 
 
 def subset_layers(definition: SearchViewDefinition, config: Dict[str, Any],
@@ -193,11 +214,16 @@ def shown_layers(layers: Sequence[SubsetLayer]) -> List[SubsetLayer]:
     return [layer for layer in layers if not layer.hidden]
 
 
-def shown_search(search, layers: Sequence[SubsetLayer]):
+def shown_search(search, layers: Sequence[SubsetLayer],
+                 placement: Optional[BasePlacement] = None):
     """What a subset's entities are found by, held to what its columns show: a
-    hidden layer's types are left out, and with no column for every other type
-    (no shown fallback layer), only the types the shown columns hold. So a search
-    inside the view finds what it shows, and nothing it hides."""
+    hidden layer's matches are left out. Placed by type, that is its types, and
+    with no column for every other type (no shown fallback layer), only the types
+    the shown columns hold. So a search inside the view finds what it shows, and
+    nothing it hides."""
+    if placement is not None:
+        return _and(search, *(_not(layer_condition(layer, placement))
+                              for layer in layers if layer.hidden))
     shown = shown_layers(layers)
     if any(layer.rest for layer in shown):
         left_out = _claimed([layer for layer in layers if layer.hidden and not layer.rest])
@@ -375,28 +401,59 @@ def _and(*parts):
     return kept[0] if len(kept) == 1 else GroupPredicate(op="and", children=kept)
 
 
-def layer_condition(layer: SubsetLayer):
-    """What a match must also meet to be in ``layer``: one of its types — or, for
-    the fallback layer, none of the types the others own. None: the layer can
-    hold nothing."""
+def _not(p):
+    if isinstance(p, GroupPredicate) and p.op == "not" and len(p.children) == 1:
+        return p.children[0]
+    return GroupPredicate(op="not", children=[p])
+
+
+#: What a layer filter resolved to "any of the base's layers" is called.
+ANY_LAYER = "*"
+
+
+def placed_in(placement: BasePlacement, layer_id: Optional[str]) -> LayerPredicate:
+    """In ``layer_id`` as the base's canvas places entities there — or, for None,
+    in any of its layers (``ANY_LAYER``): a layer filter already resolved against
+    the base."""
+    leaf = LayerPredicate.model_validate({"kind": "layer",
+                                          "layerAssignment": layer_id or ANY_LAYER})
+    leaf._placement = LayerTarget(placement.spec, layer_id, placement.digest)
+    return leaf
+
+
+def layer_condition(layer: SubsetLayer, placement: Optional[BasePlacement] = None):
+    """What a match must also meet to be in ``layer``. Placed as the base places
+    them: in that layer of the base's — or, for the "Other matches" a subset adds,
+    in none of them. Placed by type: one of its types — or, for the fallback
+    layer, none of the types the others own; None when the layer can hold
+    nothing."""
+    if placement is not None:
+        if layer.rest and layer.id not in placement.spec.layer_ids:
+            return _not(placed_in(placement, None))
+        return placed_in(placement, layer.id)
     if layer.rest:
         return types_not_in(layer.excluded_types) if layer.excluded_types else MatchAllPredicate()
     return types_in(layer.entity_types) if layer.entity_types else None
 
 
-def feed_predicate(predicate, layer: SubsetLayer):
-    """The search that fills ``layer``: the subset's search and the layer's types.
-    None when the layer can hold nothing — answered without searching."""
-    condition = layer_condition(layer)
+def feed_predicate(predicate, layer: SubsetLayer, placement: Optional[BasePlacement] = None):
+    """The search that fills ``layer``: the subset's search and what puts a match
+    in the layer. None when the layer can hold nothing — answered without
+    searching."""
+    condition = layer_condition(layer, placement)
     return None if condition is None else _and(predicate, condition)
 
 
-def scope_types(layer: SubsetLayer, boundary_types: FrozenSet[str]) -> Optional[List[str]]:
+def scope_types(layer: SubsetLayer, boundary_types: FrozenSet[str],
+                placement: Optional[BasePlacement] = None) -> Optional[List[str]]:
     """The entity types a search for ``layer`` reads (what the engine prunes its
     labels to): the layer's types, inside the boundary's when it has some — or,
-    for the fallback layer, the boundary's less the others'. None: every type
+    for the fallback layer, the boundary's less the others'. Placed as the base
+    places them, a layer can hold any type the boundary does. None: every type
     (an unbounded boundary's fallback layer). ``[]``: nothing to read."""
     folded = {fold_case(t): t for t in boundary_types}
+    if placement is not None:
+        return sorted(folded.values()) if folded else None
     if layer.rest:
         if not folded:
             return None
@@ -419,22 +476,27 @@ def with_boundary(predicate, boundary):
     return _and(predicate, boundary)
 
 
-def layer_filter_as_types(predicate, layers: Sequence[SubsetLayer]):
-    """``predicate`` with each layer filter written as the types the layer holds —
-    a subset's layers hold matches by type alone. A layer no layer of the
-    subset is called matches nothing."""
+def layer_filters_in_subset(predicate, layers: Sequence[SubsetLayer],
+                            placement: Optional[BasePlacement] = None):
+    """``predicate`` with each layer filter written as what puts a match in that
+    layer of the subset (``layer_condition``): placed there as its base places
+    entities, or by type. A layer no layer of the subset is called matches
+    nothing; one already resolved against the base (the server's own) stands."""
     if isinstance(predicate, LayerPredicate):
+        if getattr(predicate, "_placement", None) is not None:
+            return predicate
         layer = find_layer(layers, predicate.layer_assignment)
-        condition = layer_condition(layer) if layer is not None else None
+        condition = layer_condition(layer, placement) if layer is not None else None
         return NOTHING if condition is None else condition
     if isinstance(predicate, GroupPredicate):
         return predicate.model_copy(update={"children": [
-            layer_filter_as_types(c, layers) for c in predicate.children]})
+            layer_filters_in_subset(c, layers, placement) for c in predicate.children]})
     if isinstance(predicate, RelatedPredicate) and predicate.where is not None:
-        return predicate.model_copy(update={"where": layer_filter_as_types(predicate.where, layers)})
+        return predicate.model_copy(update={
+            "where": layer_filters_in_subset(predicate.where, layers, placement)})
     if isinstance(predicate, (PathPredicate, EdgesPredicate)):
         return predicate.model_copy(update={
-            f"{side}_where": layer_filter_as_types(where, layers)
+            f"{side}_where": layer_filters_in_subset(where, layers, placement)
             for side, where in (("source", predicate.source_where),
                                 ("target", predicate.target_where)) if where is not None})
     return predicate
@@ -442,15 +504,18 @@ def layer_filter_as_types(predicate, layers: Sequence[SubsetLayer]):
 
 def boundary_hash(*, view_id: Optional[str], data_source_id: Optional[str],
                   root_urns: Iterable[str], entity_types: Iterable[str], max_depth: int,
-                  predicate_hash: str) -> str:
+                  predicate_hash: str, placement: str = "") -> str:
     """The identity of where a subset's matches are looked for, and of what they
     must meet: its base's scope as that scope reads — never when the base was
-    last saved, so renaming it or recolouring a layer keeps every scan — and
-    its search. Two subsets of one base with one search share their scans."""
+    last saved, so renaming it or recolouring a layer keeps every scan — its
+    search, and, placed as the base places them, what decides that placement
+    (``placement_digest``). Two subsets of one base with one search share their
+    scans."""
     payload = {
         "base": view_id or "", "ds": data_source_id or "",
         "roots": sorted(set(root_urns)), "types": sorted({fold_case(t) for t in entity_types}),
         "depth": max_depth, "p": predicate_hash,
+        **({"placement": placement} if placement else {}),
     }
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return "sv" + hashlib.sha1(blob.encode()).hexdigest()[:12]

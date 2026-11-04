@@ -9,6 +9,47 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Subset views keep their base view's layers: each match where the base places it
+
+A search for *oracle* across a Context View whose layers are built by hand, saved as a subset view,
+used to put every match in **Other matches**. A subset that follows its base now places each match
+as the base's canvas does.
+
+### Fixed
+
+- **Each match is in the layer its base puts it in**, not the layer of its type. That holds for
+  entities placed by hand, for what children inherit from their container, and for the base's
+  stamps and rules on types, tags and properties, whatever the search found them by. **Other
+  matches** holds what the base places in none of its layers.
+- **A match stays in its own column when its container is a match too.** Before, the canvas moved
+  it into its container's column.
+
+### Changed
+
+- **Leaving a layer out, Search in this layer, counts and export** all go by where the base places
+  each match.
+- **The save sheet counts what the base places in each layer.** **Other matches** is what is left.
+- **A subset rescans when its base's placements change** (a hand placement, a rule, the layers'
+  order), and not when a layer is renamed or recoloured.
+- **Save as view keeps a search's matches as a list too.** **Keep it · As a list** keeps them as
+  a list of members, up to 5,000, each where its view places it. Saved from inside a subset view,
+  the list is made from its base, with both searches. What the live sheet chose comes with it.
+- **Make its own layout** says that its own layers hold matches by type.
+
+### Known limitations
+
+- A subset follows at most 1,000 entities placed by hand, and rules up to what a search can read
+  quickly. Past that it places its matches by type, as before. The chip and the status
+  (`placedByTypeReason`) say why, and the save sheet offers to keep their places as a list.
+- A followed layer reads every match of the search and places each one as the base does, where it
+  used to read only its own types. A broad search over a big base costs more per layer. The feed
+  lane, fair share and the shared cache bound it, as they bound every feed.
+- With **One placement rule for every view surface** off, the base's canvas places a few cases
+  differently from its subset: a child with its own type rule, a stamped child, the child of an
+  entity in the fallback layer. Entities placed by hand, and what their children inherit, agree.
+
+---
+
 ## [Unreleased] — Subset views keep what their matches reach, in fewer layers; one Save as view
 
 A subset view can now keep more than its matches: everything inside them, what contains them,

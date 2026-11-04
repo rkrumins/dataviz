@@ -37,7 +37,7 @@ from backend.app.services.deep_search import (
 )
 from backend.app.services.native_query.cypher_text import inline_params
 from backend.app.services.search_downloads import mint_download_token
-from backend.app.services.search_views import layer_filter_as_types, with_boundary
+from backend.app.services.search_views import layer_filters_in_subset, with_boundary
 from backend.app.services.view_placement import LayerTarget, PlacementSpec
 from backend.app.services.view_scope import (
     EffectiveViewScope,
@@ -1590,12 +1590,13 @@ class AdvancedSearchService:
 
     @staticmethod
     def _in_subset(predicate, eff_scope: EffectiveViewScope, boundary):
-        """``predicate`` as it runs in a subset view: each layer filter as the types
-        the subset's layer holds, and — in the view's own scope — the subset's
-        search added."""
+        """``predicate`` as it runs in a subset view: each layer filter as what puts
+        a match in that layer of the subset (as its base places them, or by type),
+        and — in the view's own scope — the subset's search added."""
         if _subset_search(eff_scope) is None:
             return predicate
-        predicate = layer_filter_as_types(predicate, eff_scope.subset_layers)
+        predicate = layer_filters_in_subset(predicate, eff_scope.subset_layers,
+                                            eff_scope.subset_placement)
         return predicate if boundary is None else with_boundary(predicate, boundary)
 
     async def _subset_query(self, query: SearchQuery, eff_scope: EffectiveViewScope,

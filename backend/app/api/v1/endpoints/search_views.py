@@ -47,12 +47,12 @@ from backend.app.services.permission_service import PermissionClaims, has_permis
 from backend.app.services.search_views import (
     SubsetError,
     check_predicate,
+    follow_placement,
     hidden_layer_problems,
     is_subset,
     layers_of,
     layout_problems,
     own_layers,
-    places_by_more_than_type,
     subset_layers,
 )
 from backend.app.services.view_scope import _collect_content_scope, _collect_reference_roots
@@ -175,14 +175,16 @@ async def search_status(session: AsyncSession, row: ViewORM, definition: SearchV
         view = ReadInView(view_id=definition.read_in, name=base.name if visible else None,
                           available=base is not None)
     missing = definition.within == "view" and base is None
+    why = (follow_placement(base_config)[1]
+           if definition.layout == "inherit" and base_config is not None else None)
     return SearchViewStatus(
         definition=definition,
         definition_hash=definition.definition_hash(),
         status="base_missing" if missing else "ok",
         base=view,
         layers=[] if missing else subset_layers(definition, config_of(row), base_config),
-        placed_by_type=bool(definition.layout == "inherit" and base_config is not None
-                            and places_by_more_than_type(base_config)),
+        placed_by_type=why is not None,
+        placed_by_type_reason=why,
     )
 
 

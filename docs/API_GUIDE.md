@@ -995,10 +995,12 @@ see the matches, and the base's name only if they can open it.
 
    - `predicate` is an Advanced Search predicate asked of one entity at a time: no path, no
      *within hops*, no Connections search, and no layer filter (a subset's layers are its base's).
-   - `"layout": "inherit"` (the default): its layers are the base's, read live and placed by type,
-     plus **Other matches** for every match whose type no layer claims. When the base's layers
-     change, the subset's do too. `placedByType: true` in the answer says the base places by more
-     than type (tag or property rules, entities placed by hand), which a subset doesn't follow.
+   - `"layout": "inherit"` (the default): its layers are the base's, read live, each holding the
+     matches the base places there (by hand, by what children inherit, by stamps and rules), plus
+     **Other matches** for the matches the base places in none of them. When the base's layers or
+     placements change, the subset's do too. `placedByType: true` in the answer, with
+     `placedByTypeReason`, says the base's placement is more than a search follows (over 1,000
+     entities placed by hand, or rules too costly to read), so its matches are placed by type.
    - `"layout": "own"` with `"layers": [{"name", "color"?, "entityTypes": [...]}]` (at most 12)
      and `"rest"` (the name of the layer for the other matches, or `null` for none).
    - `"within": "dataSource"` (with `"layout": "own"` and no `readIn`) looks for the matches in
