@@ -78,6 +78,7 @@ import { Crosshair, X, History, Workflow, ChevronUp, ChevronDown } from 'lucide-
 import { LayerStrip } from './LayerStrip'
 import { CanvasEdgeFades } from './CanvasEdgeFades'
 import { SelectionBar } from './SelectionBar'
+import { BulkEditPanel } from './BulkEditPanel'
 import { useRevealNode, type RevealOptions } from '@/hooks/useRevealNode'
 import { useLocateManyOnCanvas } from '@/hooks/useLocateManyOnCanvas'
 import { useRevealPartners, REVEAL_PARTNERS_CAP } from '@/hooks/useRevealPartners'
@@ -2302,6 +2303,19 @@ export function ContextViewCanvas({
   // them for one held entity while the drawer is closed.
   const opensDetailsOnSelect = useOpensDetailsOnSelect()
   const offerDetails = !opensDetailsOnSelect && bulkSelection.length === 1 && !drawerNodeId && !drawerEdge
+  // Several held entities, read — and in a draft edited — as one (BulkEditPanel),
+  // as selected when it opened. An entity's or a relationship's own details take
+  // the rail back.
+  const [bulkEditFor, setBulkEditFor] = useState<string[] | null>(null)
+  // Adjusted while rendering, not in an effect: the two never paint together.
+  if (bulkEditFor && (drawerNodeId || drawerEdge)) setBulkEditFor(null)
+  const openShared = () => {
+    const ids = [...bulkSelection]
+    useCanvasStore.getState().requestDrawerMove(() => {
+      useCanvasStore.getState().closeNodeDrawer()
+      setBulkEditFor(ids)
+    })
+  }
   const bulkSelectionCount = bulkSelection.length
   // The server refuses trace requests when this is off; the header hides its
   // Trace and Focus for it, and the SelectionBar follows suit.
@@ -7199,6 +7213,8 @@ export function ContextViewCanvas({
             onNarrow={narrowEnabled ? () => openNarrow(narrowDraftFor(bulkSelection)) : undefined}
             lineage={selectionLineage}
             onOpenDetails={offerDetails ? () => useCanvasStore.getState().openNodeDrawer(bulkSelection[0]) : undefined}
+            onOpenShared={bulkSelection.length > 1 ? openShared : undefined}
+            sharedEditable={canvasWritable && !traceActive}
           />
         )}
         {/* Link the selection to other entities in one go — a draft being
@@ -7925,7 +7941,17 @@ export function ContextViewCanvas({
             onStartEditing={drawerStartEditing}
           />
         )}
-        {!builderOpen && !buildOpen && !drawerNodeId && !drawerEdge && isEdgePanelOpen && (
+        {!builderOpen && !buildOpen && !drawerNodeId && !drawerEdge && bulkEditFor && (
+          <BulkEditPanel
+            key="bulk-edit-panel"
+            nodeIds={bulkEditFor}
+            // Edits are draft-only, and a trace is read-only for its whole life.
+            canEdit={canvasWritable && !traceActive}
+            onStartEditing={drawerStartEditing}
+            onClose={() => setBulkEditFor(null)}
+          />
+        )}
+        {!builderOpen && !buildOpen && !drawerNodeId && !drawerEdge && !bulkEditFor && isEdgePanelOpen && (
           <EdgeDetailPanel
             key="edge-detail-panel"
             isOpen={isEdgePanelOpen}

@@ -43,6 +43,13 @@ than build it; **Technical** is the full toolset, as before. Business stays the 
   higher in the list wins. In Context View rows and on Graph and Hierarchy cards.
 - **Blue** and **slate** rule colours, for a status read at a glance — "starting points blue, the
   rest grey" is a recipe in Display Rules.
+- **Edit many entities at once.** Select several on a Context View and choose **Edit N…** in the
+  selection bar: a panel says how many you hold, of which types, and what they share — each
+  property **Same**, or **Mixed** with how many have it. Set a description or a property for all of
+  them, remove a property from all, or add one to all, then **Stage for N**. Each entity's change is
+  staged as its own edit, so an earlier edit of it is kept and Review & Save sends them as one
+  batch. **Undo** takes the whole edit back. Outside a draft the bar says **Details**, and the
+  panel compares them read-only.
 - **Lines that point back**, in a Context View: **Display → Highlight lines that point back** draws a
   line whose source sits in a layer to the right of its target in an alert colour (**Red**,
   **Amber** or **Magenta**). Its hover card says **Points back**, and **Flows** counts them in the

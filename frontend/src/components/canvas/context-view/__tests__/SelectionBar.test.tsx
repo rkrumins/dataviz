@@ -52,6 +52,17 @@ describe('SelectionBar', () => {
     expect(onOpenDetails).toHaveBeenCalledTimes(1)
   })
 
+  it('offers to edit what several share in a draft — and to read it outside one', async () => {
+    const onOpenShared = vi.fn()
+    const { unmount } = render(<SelectionBar nodeIds={['a', 'b']} labelFor={labelFor} onRemove={vi.fn()} onClear={vi.fn()}
+      onOpenShared={onOpenShared} sharedEditable />)
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Edit 2…' }))
+    expect(onOpenShared).toHaveBeenCalledTimes(1)
+    unmount()
+    render(<SelectionBar nodeIds={['a', 'b']} labelFor={labelFor} onRemove={vi.fn()} onClear={vi.fn()} onOpenShared={onOpenShared} />)
+    expect(screen.getByRole('button', { name: 'Details' })).toBeInTheDocument()
+  })
+
   it('never offers Details for several', () => {
     renderBar(['a', 'b'], { onOpenDetails: vi.fn() })
     expect(screen.queryByRole('button', { name: /^Details/ })).not.toBeInTheDocument()

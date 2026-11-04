@@ -66,7 +66,8 @@ You can also start from where you are:
 
 ## Change an entity
 
-1. Click the entity on the canvas. Its drawer opens on the **View** tab.
+1. Click the entity on the canvas. Its drawer opens on the **View** tab (in the
+   Business view, choose **Details** in the bar at the bottom, or press `Enter`).
 2. Choose the **Edit** tab.
 3. Change what you need: **Name**, **Business label** (the name the business
    knows it by), **Description**, **Qualified name**, **Source system**,
@@ -93,6 +94,32 @@ with an edit you haven't staged opens **Unsaved changes**:
 
 If you try to close the browser tab with an unstaged edit, the browser asks you
 to confirm.
+
+## Change many entities at once
+
+1. Select the entities: hold `⌘` (Mac) or `Ctrl` (Windows) and click each one,
+   or Shift-click to add a range.
+2. In the bar at the bottom of the canvas, choose **Edit N…**. A panel opens on
+   the right with how many you hold, of which types, and what they share:
+
+   | It says | Meaning |
+   | --- | --- |
+   | **Same** | Every one has this value — it's in the box |
+   | **Mixed · 7 of 12** | They differ, or only 7 of the 12 have it — the box is empty |
+   | **None set** | None of them has it |
+
+3. Change what should be the same for all of them:
+   - type a **Description**, or a property's value, to give all of them that
+     value (**Leave each as it is** takes a description back);
+   - the bin beside a property removes it from all of them;
+   - **Add a property to all** adds a new one.
+4. Choose **Stage for N**. Each entity's change is staged on its own, as if you
+   had edited them one by one — an entity you had already changed keeps that
+   change too, and one the edit wouldn't change isn't touched. **Undo** on the
+   message takes the whole edit back.
+
+Outside a draft the same bar says **Details**: the panel shows what they share,
+read-only, with **Edit in a draft**. Choosing one entity's own details closes it.
 
 ## Change a relationship
 
