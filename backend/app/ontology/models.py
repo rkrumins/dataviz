@@ -48,6 +48,10 @@ class FieldData:
     show_in_tooltip: bool = False
     display_order: int = 0
     format: Optional[Dict[str, Any]] = None
+    # Imports match a row of this type to the node carrying the same value here (a team's own
+    # key: sap_id, sys_id), and — ``unique`` — no two nodes of the type may share a value.
+    reconciliation_key: bool = False
+    unique: bool = False
 
 
 @dataclass

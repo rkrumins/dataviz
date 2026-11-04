@@ -180,9 +180,9 @@ interface ReferenceModelState {
     /** Remove an instance assignment */
     removeEntityAssignment: (entityId: string) => void
 
-    /** Re-key an entity's layer assignment from one id to another (e.g. a staged temp
-     *  urn → its real urn after Save), so the assignment survives the id swap. */
-    remapEntityId: (oldId: string, newId: string) => void
+    /** Re-key entities' layer assignments from one id to another (`ids`: each staged temp urn →
+     *  its real urn after Save), so the assignments survive the id swap. One write for them all. */
+    remapEntityIds: (ids: ReadonlyMap<string, string>) => void
 
     /** Check if assigning an entity would cause a conflict */
     checkAssignmentConflict: (entityId: string, layerId: string) => AssignmentConflict | null
@@ -664,33 +664,38 @@ export const useReferenceModelStore = create<ReferenceModelState>()(
                 })
             },
 
-            remapEntityId: (oldId, newId) => {
-                if (!oldId || !newId || oldId === newId) return
+            remapEntityIds: (ids) => {
+                const moves = new Map([...ids].filter(([oldId, newId]) => oldId && newId && oldId !== newId))
+                if (moves.size === 0) return
                 const state = get()
-                const cfg = state.instanceAssignments.get(oldId)
-                const effective = state.effectiveAssignments.get(oldId)
-                const inLayers = state.layers.some(l => l.entityAssignments?.some(a => a.entityId === oldId))
-                if (!cfg && !effective && !inLayers) return   // nothing assigned under the old id
-
                 const newAssignments = new Map(state.instanceAssignments)
-                if (cfg) {
-                    newAssignments.delete(oldId)
-                    newAssignments.set(newId, { ...cfg, entityId: newId })
-                }
                 const newEffective = new Map(state.effectiveAssignments)
-                if (effective) {
-                    newEffective.delete(oldId)
-                    newEffective.set(newId, { ...effective, entityId: newId })
+                let changed = false
+                for (const [oldId, newId] of moves) {
+                    const cfg = newAssignments.get(oldId)
+                    if (cfg) {
+                        newAssignments.delete(oldId)
+                        newAssignments.set(newId, { ...cfg, entityId: newId })
+                        changed = true
+                    }
+                    const effective = newEffective.get(oldId)
+                    if (effective) {
+                        newEffective.delete(oldId)
+                        newEffective.set(newId, { ...effective, entityId: newId })
+                        changed = true
+                    }
                 }
                 const updatedLayers = state.layers.map(layer => {
-                    if (!layer.entityAssignments?.some(a => a.entityId === oldId)) return layer
+                    if (!layer.entityAssignments?.some(a => moves.has(a.entityId))) return layer
+                    changed = true
                     return {
                         ...layer,
                         entityAssignments: layer.entityAssignments.map(a =>
-                            a.entityId === oldId ? { ...a, entityId: newId } : a,
+                            moves.has(a.entityId) ? { ...a, entityId: moves.get(a.entityId)! } : a,
                         ),
                     }
                 })
+                if (!changed) return   // nothing assigned under any of the old ids
                 set({ instanceAssignments: newAssignments, effectiveAssignments: newEffective, layers: updatedLayers })
             },
 

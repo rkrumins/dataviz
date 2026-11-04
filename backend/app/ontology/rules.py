@@ -21,7 +21,9 @@ def resolved_ontology_to_rules(resolved: ResolvedOntology) -> OntologyRules:
     entity-type keys keep their canonical casing.
     """
     entity_types = {
-        type_id: EntityRule(can_contain=frozenset(entry.hierarchy.can_contain or []))
+        type_id: EntityRule(can_contain=frozenset(entry.hierarchy.can_contain or []),
+                            unique_fields=frozenset(f.id for f in (entry.fields or [])
+                                                    if getattr(f, "unique", False)))
         for type_id, entry in (resolved.entity_type_definitions or {}).items()
     }
     edge_types = {

@@ -191,6 +191,9 @@ interface CanvasState {
   _version: number
   setNodes: (nodes: LineageNode[]) => void
   setEdges: (edges: LineageEdge[]) => void
+  /** `setNodes` and `setEdges` as ONE write, for a caller that rebuilt both (a save's reconcile).
+   *  Not a new graph, as `setGraph` is: no overlay, and pagers and feeds carry on. */
+  setNodesAndEdges: (nodes: LineageNode[], edges: LineageEdge[]) => void
   addNodes: (nodes: LineageNode[]) => void
   addEdges: (edges: LineageEdge[]) => void
   /** Atomic set of both nodes and edges (1 re-render, prevents flash-of-no-edges) */
@@ -385,6 +388,9 @@ interface CanvasState {
   applyServerNodes: (nodes: readonly GraphNode[]) => void
   /** The same for edges: `version`, confidence and the roll-up flags. */
   applyServerEdges: (edges: readonly GraphEdge[]) => void
+  /** A save's `versions` — the token of every entity it wrote, where `applyServerNodes`/`Edges`
+   *  get only the ones it answered in full — onto each the canvas holds. One write. */
+  applyServerVersions: (versions: Readonly<Record<string, string | null>>) => void
   removeNode: (id: string) => void
   removeEdge: (id: string) => void
   removeNodes: (ids: string[]) => void
@@ -521,6 +527,9 @@ export const useCanvasStore = create<CanvasState>()(
       _version: 0,
       setNodes: (nodes) => set({ nodes, _nodeIndex: new Set(nodes.map((n) => n.id)) }),
       setEdges: (edges) => set({ edges, _edgeIndex: new Set(edges.map((e) => e.id)) }),
+      setNodesAndEdges: (nodes, edges) => set({
+        nodes, edges, _nodeIndex: new Set(nodes.map((n) => n.id)), _edgeIndex: new Set(edges.map((e) => e.id)),
+      }),
       visibleEdges: [],
       setVisibleEdges: (visibleEdges) => set({ visibleEdges }),
 
@@ -908,13 +917,42 @@ export const useCanvasStore = create<CanvasState>()(
         const byId = new Map(fresh.map((g) => [g.id, g]))
         let changed = false
         const edges = state.edges.map((e) => {
-          const g = byId.get(e.id)
+          // An edge written as `edge:X` (its id was also an item's) is the one the canvas reads as `X`.
+          const g = byId.get(e.id) ?? byId.get(`edge:${e.id}`)
           if (!g) return e
           changed = true
           return { ...e, data: { ...e.data, ...toCanvasEdge(g).data } }
         })
         return changed ? { edges } : state
       }),
+      applyServerVersions: (versions) => {
+        const byId = new Map(Object.entries(versions))
+        if (byId.size === 0) return
+        // `null`: no token to hold — leaving the old one would conflict the next edit with this save.
+        const tokenOf = (...ids: string[]) => {
+          for (const id of ids) if (byId.has(id)) return { version: byId.get(id) ?? undefined }
+          return null
+        }
+        // Read, then write only what changed: a set that hands the state back still counts as a
+        // graph write here (withVersion), and re-renders everything that reads `_version`.
+        const state = get()
+        let nodesChanged = false
+        const nodes = state.nodes.map((n) => {
+          const t = tokenOf(n.id, n.data.urn)
+          if (!t || t.version === n.data.version) return n
+          nodesChanged = true
+          return { ...n, data: { ...n.data, version: t.version } }
+        })
+        let edgesChanged = false
+        const edges = state.edges.map((e) => {
+          const t = tokenOf(e.id, `edge:${e.id}`)
+          if (!t || t.version === e.data?.version) return e
+          edgesChanged = true
+          return { ...e, data: { ...e.data, version: t.version } }
+        })
+        if (!nodesChanged && !edgesChanged) return
+        set({ ...(nodesChanged ? { nodes } : {}), ...(edgesChanged ? { edges } : {}) })
+      },
       removeNode: (id) => set((state) => {
         const nextNodeIndex = new Set(state._nodeIndex)
         nextNodeIndex.delete(id)

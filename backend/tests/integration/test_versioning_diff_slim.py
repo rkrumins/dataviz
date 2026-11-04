@@ -20,6 +20,12 @@ def _by_id(entries):
     return {e["entityId"]: e for e in entries}
 
 
+def _unnamed(entries):
+    """Entries without the names the slim diff adds for the canvas."""
+    return {e["entityId"]: {k: v for k, v in e.items() if k not in ("urn", "sourceUrn", "targetUrn")}
+            for e in entries}
+
+
 async def _run() -> None:
     await models.create_schema_and_partitions()
     svc = GraphVersioningService()
@@ -54,10 +60,14 @@ async def _run() -> None:
     assert set(_by_id(slim["removed"])) == {"C"}
     assert set(_by_id(slim["modified"])) == {"A", "E1"}, "D was changed and changed back"
 
-    assert _by_id(slim["added"]) == _by_id(full["added"]), "a draft-created node keeps its payload"
-    assert _by_id(slim["removed"]) == _by_id(full["removed"]), "a deletion ghost keeps its payload"
-    assert _by_id(slim["modified"]) == {"A": {"entityId": "A", "kind": "node"},
-                                        "E1": {"entityId": "E1", "kind": "edge"}}
+    # Each entry also names its entity as the canvas does — a node by its urn, an edge's ends by
+    # their nodes' urns — which an entity id need not be (an import's is not).
+    assert _unnamed(slim["added"]) == _by_id(full["added"]), "a draft-created node keeps its payload"
+    assert _unnamed(slim["removed"]) == _by_id(full["removed"]), "a deletion ghost keeps its payload"
+    assert _by_id(slim["modified"]) == {"A": {"entityId": "A", "kind": "node", "urn": "urn:A"},
+                                        "E1": {"entityId": "E1", "kind": "edge",
+                                               "sourceUrn": "urn:A", "targetUrn": "urn:B"}}
+    assert _by_id(slim["added"])["N"]["urn"] == "urn:N" and _by_id(slim["removed"])["C"]["urn"] == "urn:C"
     await db.dispose_engine()
 
 

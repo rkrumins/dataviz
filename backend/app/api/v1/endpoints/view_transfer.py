@@ -695,6 +695,9 @@ async def import_package_data(
                 workspace_id=body.workspaceId, data_source_id=body.dataSourceId, graph_id=graph["graph_id"],
                 actor=user.id, import_format="ndjson", source_uri=uploads.record_key(record),
                 reconcile_mode="upsert", idempotency_key=key, name=name, originating_view_id=body.viewId,
+                # An update's data places the roots it creates in the draft's copy of that view (its
+                # staged view keeps them), or a curated view shows none of them.
+                scope_view_id=body.viewId,
                 draft_visibility=await draft_level(session, body.dataSourceId),
             )
         except IntegrityError:              # the same target, asked for twice at once

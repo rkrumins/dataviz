@@ -18,10 +18,11 @@ vi.mock('@/services/importExportApiService', async (importOriginal) => ({
   ...await importOriginal<typeof import('@/services/importExportApiService')>(),
   importInParts: vi.fn(),
   getImport: vi.fn(),
+  getImportPreview: vi.fn(),
   pollJob: vi.fn(),
 }))
 
-import { importInParts, pollJob } from '@/services/importExportApiService'
+import { getImportPreview, importInParts, pollJob } from '@/services/importExportApiService'
 import { ImportDialog } from '../ImportDialog'
 
 let unmount = () => {}
@@ -112,8 +113,24 @@ describe('ImportDialog', () => {
 
     expect(await screen.findByText('Applying the changes… 4,000 of 10,000 rows')).toBeInTheDocument()
     expect(screen.getByText('Resumed where it left off (attempt 2).')).toBeInTheDocument()
+    // It cannot be closed while it runs, so it never says to carry on working elsewhere.
+    expect(screen.queryByText(/keep working/i)).not.toBeInTheDocument()
+    expect(screen.getByText(/Keep this open until it finishes/)).toBeInTheDocument()
     const signal = vi.mocked(pollJob).mock.calls[0][1]!.signal!
     unmount()
     await waitFor(() => expect(signal.aborted).toBe(true))
+  })
+
+  it('says the staged changes show on the canvas once it closes, not that they already do', async () => {
+    vi.mocked(importInParts).mockResolvedValue({ jobId: 'j1', branchId: 'br1', sourceUri: 's', status: 'pending' })
+    vi.mocked(pollJob).mockResolvedValue({ jobId: 'j1', jobType: 'ingest', graphId: 'g1', status: 'completed',
+      summary: { new: 3, updated: 1, deleted: 0, invalid: 0 } } as Job)
+    vi.mocked(getImportPreview).mockResolvedValue({ sample: [] } as never)
+    await userEvent.upload(open(), file('graph.csv', 2048))
+    await userEvent.click(screen.getByRole('button', { name: /^Import$/ }))
+
+    expect(await screen.findByText('4 changes ready to review')).toBeInTheDocument()
+    expect(screen.queryByText(/already visible/i)).not.toBeInTheDocument()
+    expect(screen.getByText(/when this closes/i)).toBeInTheDocument()
   })
 })

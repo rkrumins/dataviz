@@ -428,8 +428,9 @@ function RunningStep({ job, upload, fileName }: {
           : <div className="h-full w-2/3 rounded-full bg-gradient-to-r from-indigo-400 to-indigo-600 animate-pulse" />}
       </div>
       <p className="text-[11px] text-ink-muted">
+        {/* No close and no Cancel while a job runs: the dialog stays until it ends, and says so. */}
         {job
-          ? 'You can keep working — this runs in the background.'
+          ? 'Keep this open until it finishes — the import runs on the server.'
           : 'Keep this open while the file uploads. If it stops, choose the same file again to pick up where it left off.'}
       </p>
     </div>
@@ -455,7 +456,7 @@ function DoneStep({ summary, previewRows }: { summary: ImportSummary | null; pre
           <p className="text-sm text-ink-muted mt-1">
             {nothing
               ? 'Your data already matches the file — nothing was staged.'
-              : 'Staged on your draft and already visible in the canvas and the Changes tab. Review, then publish or open a pull request.'}
+              : 'Staged on your draft. The canvas and the Changes tab show them when this closes — review, then publish or open a pull request.'}
           </p>
         </div>
       </div>

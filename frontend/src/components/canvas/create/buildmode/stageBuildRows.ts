@@ -43,6 +43,8 @@ export interface PlanBuildStagingOptions {
    *  `rootParentUrn`'s real type itself, if it needs one. Returns `undefined` when the ontology
    *  declares no containment relationship for the pairing (⇒ the child is created at the root). */
   containmentEdgeTypeFor: (parentType: string, childType: string) => string | undefined
+  /** `rootParentUrn`'s name, for a batch-root row's summary — as a single create names its parent. */
+  rootParentLabel?: string
 }
 
 /**
@@ -80,6 +82,7 @@ export function planBuildStaging(rows: BuildRow[], opts: PlanBuildStagingOptions
     const parentRow = row.parentId != null ? byId.get(row.parentId) : undefined
     const parentUrn = parentRow ? rowUrn.get(parentRow.id) : (opts.rootParentUrn ?? undefined)
     const parentType = parentRow ? (parentRow.typeId ?? '') : ''
+    const parentLabel = parentRow ? parentRow.name : opts.rootParentLabel
     const containmentEdgeType = parentUrn ? opts.containmentEdgeTypeFor(parentType, entityType) : undefined
     const containmentEdgeId = parentUrn ? `contains-${parentUrn}-${tempUrn}` : null
 
@@ -110,12 +113,14 @@ export function planBuildStaging(rows: BuildRow[], opts: PlanBuildStagingOptions
       })
     }
 
+    let undone: { node?: LineageNode; edge?: LineageEdge } = {}
+
     // Shared with `patchAfter`/`updateStagedEntity` in useStageEntityCreation:
     // mutated in place post-stage, so `apply` (reading from this same object)
     // observes edits made after staging.
     const afterState = {
       entityType, displayName: row.name, parentUrn, tags, properties,
-      ...(parentUrn && containmentEdgeType ? { containmentEdgeType, parentLabel: parentRow?.name } : {}),
+      ...(parentUrn && containmentEdgeType ? { containmentEdgeType, parentLabel } : {}),
     }
 
     changes.push({
@@ -125,7 +130,7 @@ export function planBuildStaging(rows: BuildRow[], opts: PlanBuildStagingOptions
       targetUrn: tempUrn,
       after: afterState,
       summary: parentUrn
-        ? `Create ${entityType}: '${row.name}' · ${containmentEdgeType}${parentRow ? ` ${parentRow.name}` : ''}`
+        ? `Create ${entityType}: '${row.name}' · ${containmentEdgeType}${parentLabel ? ` ${parentLabel}` : ''}`
         : `Create ${entityType}: '${row.name}'`,
       timestamp: baseTs + i,
       apply: async ({ provider, registerTempIdResolution, resolveTempId }) => {
@@ -166,8 +171,15 @@ export function planBuildStaging(rows: BuildRow[], opts: PlanBuildStagingOptions
         }
       },
       discard: () => {
+        // What a redo draws again: the node and its link as they are now (renamed since, say).
+        const { nodes, edges } = useCanvasStore.getState()
+        undone = { node: nodes.find((n) => n.id === tempUrn), edge: edges.find((e) => e.id === containmentEdgeId) }
         if (containmentEdgeId) useCanvasStore.getState().removeEdge(containmentEdgeId)
         useCanvasStore.getState().removeNode(tempUrn)
+      },
+      reapply: () => {
+        if (undone.node) useCanvasStore.getState().addNodes([undone.node])
+        if (undone.edge) useCanvasStore.getState().addEdges([undone.edge])
       },
     })
   })

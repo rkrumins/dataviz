@@ -45,6 +45,9 @@ interface BranchState {
 
   /** Bumped on publish/merge so live `main` reads refetch (folded into providerVersion). */
   mainEpoch: number
+  /** Bumped when the open draft was rewritten behind the canvas — an import, others' saves taken
+   *  in — so its reads refetch (folded into providerVersion) and the canvas remounts on it. */
+  draftEpoch: number
 
   /** True when the active branch is a draft (not trunk). */
   isDraftMode: () => boolean
@@ -62,6 +65,7 @@ interface BranchState {
   setCommittedDiffHidden: (hidden: boolean) => void
   setActiveChangeSet: (cs: ChangeSet | null) => void
   bumpMainEpoch: () => void
+  bumpDraftEpoch: () => void
   /** Clear all branch context — call when leaving a data source / view. */
   reset: () => void
 }
@@ -78,6 +82,7 @@ const INITIAL = {
   activeChangeSet: null,
   committedDiffHidden: false,
   mainEpoch: 0,
+  draftEpoch: 0,
 } as const
 
 export const useBranchStore = create<BranchState>((set, get) => ({
@@ -147,6 +152,7 @@ export const useBranchStore = create<BranchState>((set, get) => ({
   setActiveChangeSet: (cs) => set({ activeChangeSet: cs }),
 
   bumpMainEpoch: () => set((s) => ({ mainEpoch: s.mainEpoch + 1 })),
+  bumpDraftEpoch: () => set((s) => ({ draftEpoch: s.draftEpoch + 1 })),
 
   reset: () => set({ ...INITIAL }),
 }))

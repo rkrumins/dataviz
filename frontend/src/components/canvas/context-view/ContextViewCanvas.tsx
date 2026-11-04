@@ -363,6 +363,7 @@ import { useLayoutTemplatesEnabled } from '@/hooks/useLayoutTemplates'
 import { fallbackNameFromUrn } from '@/components/views/ViewWizard/useWizardEntityIndex'
 import { ViewEditorContext } from '@/components/layout/viewEditorContext'
 import { invalidateAggregatedEdges } from '@/hooks/useAggregatedLineage'
+import { releaseProviderCaches } from '@/providers/providerPool'
 import { useVersioningPanelStore } from '@/store/versioningPanelStore'
 import { TraceBottomDock } from '../trace/TraceBottomDock'
 import type { TraceSeed } from '../trace/TraceSeedsPopover'
@@ -1022,7 +1023,7 @@ export function ContextViewCanvas({
   const setLayers = useReferenceModelStore(s => s.setLayers)
   const storeLayers = useReferenceModelStore(s => s.layers)
   const assignEntityToLayer = useReferenceModelStore(s => s.assignEntityToLayer)
-  const remapEntityId = useReferenceModelStore(s => s.remapEntityId)
+  const remapEntityIds = useReferenceModelStore(s => s.remapEntityIds)
   const activeWorkspaceId = useWorkspacesStore(s => s.activeWorkspaceId)
 
   // View/Edit mode gates — Published is strictly read-only for everyone;
@@ -1241,50 +1242,54 @@ export function ContextViewCanvas({
   }, [doLayoutSave])
 
   // ─── Branch-aware re-read (BSL Phase 4) ─────────────────────────────────────────────────────────
-  // When the active view or its effective branch changes, re-fetch the BRANCH-EFFECTIVE view
-  // (base ⊕ the branch's layout overlay for a draft; base for Published / other branches — the backend
-  // ?branchId routing) and apply its layout + entityScope so the canvas repopulates for the new branch.
-  // This is the READ side that pairs with the Phase-3 WRITE routing: a draft now SEES its own overlay,
-  // while switching Published↔draft↔draft reloads the correct layout instead of showing the last branch's.
+  // Re-fetch the BRANCH-EFFECTIVE view (base ⊕ the branch's layout overlay for a draft; base for
+  // Published / other branches — the backend ?branchId routing) and apply its layout + entityScope so
+  // the canvas repopulates for the branch. This is the READ side that pairs with the Phase-3 WRITE
+  // routing: a draft SEES its own overlay, while switching Published↔draft↔draft reloads the correct
+  // layout instead of showing the last branch's. Also run after an import, which writes the imported
+  // entities' placements into the draft's overlay server-side (see refreshAfterImport).
+  const rereadBranchView = useCallback(async (viewId: string, cancelled: () => boolean = () => false) => {
+    // FLUSH-ON-SWITCH: the single-slot pendingLayoutSave still holds the PREVIOUS branch's edit (its
+    // payload carries that branch's id). Persist it BEFORE the re-fetch so switching branches within
+    // the debounce window never drops it (the slot would otherwise be overwritten by the next edit).
+    if (pendingLayoutSave.current) await flushLayoutSave()
+    if (cancelled()) return
+    let full
+    try {
+      full = await getView(viewId, effectiveBranchId ?? undefined)
+    } catch (err) {
+      console.error('[ContextViewCanvas] branch-effective view re-fetch failed', err)
+      return
+    }
+    if (cancelled()) return
+    // A local edit for THIS branch landed after we started (a new save is armed) → don't clobber the
+    // optimistic layout. Branch-aware, not presence-based: a pending edit belonging to a DIFFERENT
+    // branch has no claim here (its payload carries the branch it must go back to), and blocking on
+    // it left the previous branch's columns on screen under this branch's name — then wrote them
+    // over this branch's overlay on the next gesture.
+    if (pendingLayoutSave.current?.branchId === effectiveBranchId) return
+    const view = useSchemaStore.getState().getActiveView()
+    if (!view || view.id !== viewId) return   // the active view switched under us
+    const nextRef = full.config?.layout?.referenceLayout
+    // Skip if the branch-effective layout equals what the store already has (no render thrash).
+    const currentNorm = normalizeReferenceLayout(view.layout?.referenceLayout)
+    const nextNorm = normalizeReferenceLayout(nextRef)
+    if (JSON.stringify(currentNorm) === JSON.stringify(nextNorm)) return
+    const nextScope = full.config?.content?.entityScope
+    useSchemaStore.getState().updateView(viewId, {
+      layout: { ...(view.layout ?? {}), referenceLayout: nextRef },
+      content: { ...view.content, entityScope: nextScope ?? view.content?.entityScope },
+    })
+  }, [effectiveBranchId, flushLayoutSave])
+
+  // When the active view or its effective branch changes, re-read the branch-effective view.
   useEffect(() => {
     const viewId = activeView?.id
     if (!viewId) return
     let cancelled = false
-    void (async () => {
-      // FLUSH-ON-SWITCH: the single-slot pendingLayoutSave still holds the PREVIOUS branch's edit (its
-      // payload carries that branch's id). Persist it BEFORE the re-fetch so switching branches within
-      // the debounce window never drops it (the slot would otherwise be overwritten by the next edit).
-      if (pendingLayoutSave.current) await flushLayoutSave()
-      if (cancelled) return
-      let full
-      try {
-        full = await getView(viewId, effectiveBranchId ?? undefined)
-      } catch (err) {
-        console.error('[ContextViewCanvas] branch-effective view re-fetch failed', err)
-        return
-      }
-      if (cancelled) return
-      // A local edit for THIS branch landed after we started (a new save is armed) → don't clobber the
-      // optimistic layout. Branch-aware, not presence-based: a pending edit belonging to a DIFFERENT
-      // branch has no claim here (its payload carries the branch it must go back to), and blocking on
-      // it left the previous branch's columns on screen under this branch's name — then wrote them
-      // over this branch's overlay on the next gesture.
-      if (pendingLayoutSave.current?.branchId === effectiveBranchId) return
-      const view = useSchemaStore.getState().getActiveView()
-      if (!view || view.id !== viewId) return   // the active view switched under us
-      const nextRef = full.config?.layout?.referenceLayout
-      // Skip if the branch-effective layout equals what the store already has (no render thrash).
-      const currentNorm = normalizeReferenceLayout(view.layout?.referenceLayout)
-      const nextNorm = normalizeReferenceLayout(nextRef)
-      if (JSON.stringify(currentNorm) === JSON.stringify(nextNorm)) return
-      const nextScope = full.config?.content?.entityScope
-      useSchemaStore.getState().updateView(viewId, {
-        layout: { ...(view.layout ?? {}), referenceLayout: nextRef },
-        content: { ...view.content, entityScope: nextScope ?? view.content?.entityScope },
-      })
-    })()
+    void rereadBranchView(viewId, () => cancelled)
     return () => { cancelled = true }
-  }, [activeView?.id, effectiveBranchId, flushLayoutSave])
+  }, [activeView?.id, rereadBranchView])
 
   /** The active view's CURRENT canonical layout, read LIVE so successive writes accumulate. Falls back
    *  to the default columns when the view has none, matching the prior `currentLayers()` behaviour. */
@@ -1713,14 +1718,21 @@ export function ContextViewCanvas({
   const applyStagedChanges = useStagedChangesStore(s => s.applyAll)
   const queryClient = useQueryClient()
   // Refresh the canvas + versioning surfaces after an import — but only on dialog exit, and only if
-  // an import happened (re-hydrating while the dialog is open unmounts its preview).
-  const refreshAfterImport = useCallback(() => {
+  // an import happened (re-hydrating while the dialog is open unmounts its preview). In order: the
+  // draft's view first — the import placed its entities in the draft's layout overlay, and a canvas
+  // re-read against the old layout leaves them unplaced (a curated view never shows them) — then the
+  // cached answers the providers hold for the draft before the import, then the draft epoch, which
+  // re-keys every draft read and remounts the canvas.
+  const refreshAfterImport = useCallback(async () => {
     if (!importedRef.current) return
     importedRef.current = false
+    const viewId = useSchemaStore.getState().getActiveView()?.id
+    if (viewId) await rereadBranchView(viewId)
     queryClient.invalidateQueries({ queryKey: VERSIONING_KEYS.all })
     invalidateAggregatedEdges()
-    useBranchStore.getState().bumpMainEpoch()
-  }, [queryClient])
+    releaseProviderCaches()
+    useBranchStore.getState().bumpDraftEpoch()
+  }, [queryClient, rereadBranchView])
   // After a publish/merge, `main@head` moves and the FalkorDB projection (which the canvas +
   // Properties panel read) catches up ASYNCHRONOUSLY. The immediate post-merge re-hydration reads
   // the still-stale projection, so merged properties don't appear until a later refresh. Watch the
@@ -6748,7 +6760,9 @@ export function ContextViewCanvas({
         onExitEdit={handleExitEdit}
         pendingChangeCount={stagedChangeList.length}
         onOpenStagedChanges={openStagedChangesPanel}
-        onImport={() => setShowImportDialog(true)}
+        // A pending layout edit is saved first: the import writes its placements into the same
+        // overlay, and the debounced save landing after it would put the old layout back over them.
+        onImport={() => { void flushLayoutSave().then(() => setShowImportDialog(true)) }}
         onExport={() => setShowExportDialog(true)}
         thisView={thisView}
         canUndo={stagedChangeList.length > 0}
@@ -7052,11 +7066,11 @@ export function ContextViewCanvas({
             graphId={graphId}
             branchId={useBranchStore.getState().currentBranchId ?? undefined}
             viewId={activeView?.id}
-            onClose={() => { setShowImportDialog(false); refreshAfterImport() }}
+            onClose={() => { setShowImportDialog(false); void refreshAfterImport() }}
             onReviewChanges={() => {
               setShowImportDialog(false)
               useVersioningPanelStore.getState().openPanel('changes')
-              refreshAfterImport()
+              void refreshAfterImport()
             }}
             onImported={() => {
               // The import committed to the draft server-side. DON'T refresh the canvas now — that
@@ -7121,27 +7135,26 @@ export function ContextViewCanvas({
                 dataSourceId: bs.dataSourceId,
                 branchId: bs.currentBranchId,
                 provider,
-                // Re-key each new entity's layer assignment temp→real as its create resolves,
-                // so a node created in a layer keeps its layer column after Save — and survives
-                // any later create/commit failure without flashing out of the view. Re-keys BOTH
-                // the canonical view-config entry (assignEntities/onEntityStaged wrote it at
-                // create time, keyed by the temp urn) and the session store mirror.
-                remapEntityId: (oldId, newId) => {
-                  remapEntityId(oldId, newId)
-                  persistReferenceLayout(assignmentOps.remapAssignmentUrn(currentLayout(), oldId, newId))
+                // Re-key every new entity's layer assignment temp→real, so a node created in a
+                // layer keeps its layer column after Save. Re-keys BOTH the canonical view-config
+                // entry (assignEntities/onEntityStaged wrote it at create time, keyed by the temp
+                // urn) and the session store mirror — all of a save's creates at once: one layout
+                // write, which also drops a placement still on a temp urn (a create staged, then
+                // discarded before this Save — see assignmentMutations).
+                remapEntityIds: (ids) => {
+                  remapEntityIds(ids)
+                  persistReferenceLayout(assignmentOps.pruneTempAssignments(
+                    assignmentOps.remapAssignmentUrns(currentLayout(), ids)))
                   // An entity open before the save stays open after it: its expanded state was
                   // keyed by the temp urn, so a saved parent came back collapsed ("my children
                   // vanished").
                   setExpandedNodes(prev => {
-                    if (!prev.has(oldId)) return prev
-                    const next = new Set(prev)
-                    next.delete(oldId)
-                    next.add(newId)
-                    return next
+                    if (![...ids.keys()].some(oldId => prev.has(oldId))) return prev
+                    return new Set([...prev].map(id => ids.get(id) ?? id))
                   })
                 },
-                // After the remaps, drop any placement still keyed by a temp urn — a create that was
-                // staged (writing its placement) then discarded before this Save (see assignmentMutations).
+                // A save that created nothing still drops any placement keyed by a temp urn — a create
+                // that was staged (writing its placement) then discarded before this Save.
                 pruneTempAssignments: () => {
                   persistReferenceLayout(assignmentOps.pruneTempAssignments(currentLayout()))
                 },

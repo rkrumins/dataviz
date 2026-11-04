@@ -16,7 +16,7 @@ import { saveStagedChangesToDraft } from '../saveStagedChangesToDraft'
 import { applyGraphChanges } from '@/services/versioningApiService'
 import { useCanvasStore } from '@/store/canvas'
 import type { StagedChange } from '@/store/stagedChangesStore'
-import { remapAssignmentUrn, pruneTempAssignments } from '@/components/canvas/context-view/assignmentMutations'
+import { remapAssignmentUrns, pruneTempAssignments } from '@/components/canvas/context-view/assignmentMutations'
 import type { NormalizedReferenceLayout } from '@/utils/referenceLayout'
 
 const mockApply = vi.mocked(applyGraphChanges)
@@ -102,7 +102,7 @@ describe('saveStagedChangesToDraft — one atomic commit (creates + edges + upda
       { op: 'create', kind: 'node', ref: 'urn:staged:p', payload: { entityType: 'Layer', displayName: 'P' } },
       { op: 'create', kind: 'node', ref: 'urn:staged:c', payload: { entityType: 'Object', displayName: 'C' } },
       { op: 'create', kind: 'edge', ref: 'contains-urn:staged:c', payload: { edgeType: 'CONTAINS', sourceEntityId: 'urn:staged:p', targetEntityId: 'urn:staged:c' } },
-      // the assign_layer for urn:staged:c does NOT appear — it's view config, remapped temp→real via remapEntityId
+      // the assign_layer for urn:staged:c does NOT appear — it's view config, remapped temp→real via remapEntityIds
     ])
   })
 
@@ -168,7 +168,8 @@ describe('saveStagedChangesToDraft — temp-urn assignment prune (discarded crea
       [sc({ id: 'k', type: 'create_entity', targetId: 'urn:staged:Object:kept', targetUrn: 'urn:staged:Object:kept', after: { entityType: 'Object', displayName: 'Kept' } })],
       {
         ...target,
-        remapEntityId: (oldId, newId) => { layout = remapAssignmentUrn(layout, oldId, newId) },
+        // The canvas's one layout write: every create re-keyed, and what is left on a temp urn pruned.
+        remapEntityIds: (ids) => { layout = pruneTempAssignments(remapAssignmentUrns(layout, ids)) },
         pruneTempAssignments: () => { layout = pruneTempAssignments(layout) },
       },
     )

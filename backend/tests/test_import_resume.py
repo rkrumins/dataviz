@@ -173,6 +173,7 @@ def _windowed(worker, rows_by_start):
     async def lookups(_snap, _rows):
         return {}
     worker._window, worker._node_lookups, worker._edge_lookups = window, lookups, lookups
+    worker._identity_read = True            # the job's identity state: nothing created, no keys
 
 
 async def test_a_window_lands_its_ops_resolutions_and_checkpoint_in_one_transaction(monkeypatch):

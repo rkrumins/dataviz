@@ -50,17 +50,28 @@ function isPendingDelete(n: NodeLike): boolean {
 
 const str = (v: unknown): string | undefined => (typeof v === 'string' && v ? v : undefined)
 
+/** The names the canvas knows a change by: a node by its urn, an edge's ends by urn. An entity id
+ *  need not be a urn (an import's is not), and an edge's `before` names its ends by entity id. */
+const nodeUrn = (c: GraphChange): string => c.urn ?? c.entityId
+function edgeEnds(c: GraphChange): { source?: string; target?: string } {
+  const b = (c.before ?? {}) as Record<string, unknown>
+  return {
+    source: c.sourceUrn ?? str(b.sourceEntityId) ?? str(b.source_entity_id) ?? str(b.source),
+    target: c.targetUrn ?? str(b.targetEntityId) ?? str(b.target_entity_id) ?? str(b.target),
+  }
+}
+
 /** Build a read-only ghost canvas node from a committed `removed` node change's `before` snapshot. */
 export function synthesizeGhostNode(c: GraphChange): GhostNode {
   const b = (c.before ?? {}) as Record<string, unknown>
   return {
-    id: c.entityId,
+    id: nodeUrn(c),
     type: 'generic',
     position: { x: 0, y: 0 },   // LayerColumn lays out its own rows; position is unused here
     data: {
       label: (b.displayName as string) ?? c.label ?? c.entityId,
       type: b.entityType,
-      urn: c.entityId,
+      urn: nodeUrn(c),
       layerAssignment: b.layerAssignment,
       classifications: (b.tags as unknown[]) ?? [],
       properties: (b.properties as Record<string, unknown>) ?? {},
@@ -81,8 +92,7 @@ export function synthesizeGhostEdge(
   isContainmentEdgeType: (edgeType: string) => boolean,
 ): GhostEdge | null {
   const b = (c.before ?? {}) as Record<string, unknown>
-  const source = str(b.sourceEntityId) ?? str(b.source_entity_id) ?? str(b.source)
-  const target = str(b.targetEntityId) ?? str(b.target_entity_id) ?? str(b.target)
+  const { source, target } = edgeEnds(c)
   if (!source || !target) return null
   const edgeType = str(b.edgeType) ?? str(b.edge_type)
   return {
@@ -118,7 +128,7 @@ export function reconcileGhosts(
   const changes = committedHidden ? [] : (changeSet?.changes ?? [])
   const removedNodes = changes.filter((c) => c.kind === 'node' && c.status === 'removed' && c.before)
   const removedEdges = changes.filter((c) => c.kind === 'edge' && c.status === 'removed' && c.before)
-  const desiredNodes = new Set(removedNodes.map((c) => c.entityId))
+  const desiredNodes = new Set(removedNodes.map(nodeUrn))
   const desiredEdges = new Set(removedEdges.map((c) => c.entityId))
 
   const liveUrns = new Set<string>()
@@ -136,7 +146,7 @@ export function reconcileGhosts(
   // a ghost (its optimistic node is removed + re-synthesized), so a just-saved deletion becomes a
   // read-only ghost with Restore immediately — no page refresh — and looks identical before/after reload.
   const nodesToAdd = removedNodes
-    .filter((c) => !liveUrns.has(c.entityId) && !existingGhostNodes.has(c.entityId))
+    .filter((c) => !liveUrns.has(nodeUrn(c)) && !existingGhostNodes.has(nodeUrn(c)))
     .map(synthesizeGhostNode)
   const addedIds = new Set(nodesToAdd.map((n) => n.id))
   const nodesToRemove = [
@@ -177,7 +187,7 @@ export function buildRestoreChange(
 ): RestoreChangeInput | null {
   const changes = changeSet?.changes ?? []
   const nodeChange = changes.find(
-    (c) => c.kind === 'node' && c.status === 'removed' && c.entityId === urn && c.before,
+    (c) => c.kind === 'node' && c.status === 'removed' && nodeUrn(c) === urn && c.before,
   )
   if (!nodeChange?.before) return null
   const b = nodeChange.before as Record<string, unknown>
@@ -186,12 +196,11 @@ export function buildRestoreChange(
   const parentEdge = changes.find((c) => {
     if (c.kind !== 'edge' || c.status !== 'removed' || !c.before) return false
     const e = edgeBefore(c)
-    const tgt = str(e.targetEntityId) ?? str(e.target_entity_id) ?? str(e.target)
     const et = str(e.edgeType) ?? str(e.edge_type) ?? ''
-    return tgt === urn && isContainmentEdgeType(et)
+    return edgeEnds(c).target === urn && isContainmentEdgeType(et)
   })
   const pe = parentEdge ? edgeBefore(parentEdge) : undefined
-  const parentUrn = pe ? (str(pe.sourceEntityId) ?? str(pe.source_entity_id) ?? str(pe.source)) : undefined
+  const parentUrn = parentEdge ? edgeEnds(parentEdge).source : undefined
   const edgeType = pe ? (str(pe.edgeType) ?? str(pe.edge_type)) : undefined
   const nest = !!(parentUrn && edgeType && presentUrns.has(parentUrn))
 
@@ -222,7 +231,7 @@ export function buildRestoreSubtree(
 ): RestoreChangeInput[] {
   const changes = changeSet?.changes ?? []
   const isRemovedNode = (u: string) =>
-    changes.some((c) => c.kind === 'node' && c.status === 'removed' && c.entityId === u && c.before)
+    changes.some((c) => c.kind === 'node' && c.status === 'removed' && nodeUrn(c) === u && c.before)
 
   // parent urn → deleted child urns, from removed CONTAINMENT edges only.
   const childrenOf = new Map<string, string[]>()
@@ -231,8 +240,7 @@ export function buildRestoreSubtree(
     const e = c.before as Record<string, unknown>
     const et = str(e.edgeType) ?? str(e.edge_type) ?? ''
     if (!isContainmentEdgeType(et)) continue
-    const src = str(e.sourceEntityId) ?? str(e.source_entity_id) ?? str(e.source)
-    const tgt = str(e.targetEntityId) ?? str(e.target_entity_id) ?? str(e.target)
+    const { source: src, target: tgt } = edgeEnds(c)
     if (src && tgt) childrenOf.set(src, [...(childrenOf.get(src) ?? []), tgt])
   }
 

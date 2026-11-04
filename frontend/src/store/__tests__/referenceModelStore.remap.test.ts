@@ -1,5 +1,5 @@
 /**
- * remapEntityId re-keys a layer assignment from one id to another — used on Save to move a
+ * remapEntityIds re-keys layer assignments from one id to another — used on Save to move a
  * newly-created entity's assignment off its temporary urn (urn:staged:…) onto the real urn the
  * backend issues. Without it the saved node resolves to no layer and disappears from the view.
  */
@@ -18,7 +18,7 @@ beforeEach(() => {
   } as never)
 })
 
-describe('referenceModelStore.remapEntityId', () => {
+describe('referenceModelStore.remapEntityIds', () => {
   it('moves an instance assignment + layer entry from the temp urn to the real urn', () => {
     const s = useReferenceModelStore.getState()
     useReferenceModelStore.setState({
@@ -26,7 +26,7 @@ describe('referenceModelStore.remapEntityId', () => {
       layers: [{ id: 'L1', name: 'L1', entityAssignments: [assign('urn:staged:x', 'L1')] }],
     } as never)
 
-    s.remapEntityId('urn:staged:x', 'urn:real:1')
+    s.remapEntityIds(new Map([['urn:staged:x', 'urn:real:1']]))
 
     const st = useReferenceModelStore.getState()
     expect(st.instanceAssignments.has('urn:staged:x')).toBe(false)
@@ -38,9 +38,8 @@ describe('referenceModelStore.remapEntityId', () => {
 
   it('is a no-op when nothing is assigned under the old id, or ids are equal/empty', () => {
     const s = useReferenceModelStore.getState()
-    s.remapEntityId('urn:staged:absent', 'urn:real:1')
-    s.remapEntityId('a', 'a')
-    s.remapEntityId('', 'x')
+    s.remapEntityIds(new Map([['urn:staged:absent', 'urn:real:1']]))
+    s.remapEntityIds(new Map([['a', 'a'], ['', 'x']]))
     const st = useReferenceModelStore.getState()
     expect(st.instanceAssignments.size).toBe(0)
   })

@@ -25,6 +25,7 @@ import { useTraceStore } from '@/hooks/useUnifiedTrace'
 import { useBranchStore } from '@/store/branchStore'
 import { useFeature } from '@/store/features'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
+import { useReferenceModelStore } from '@/store/referenceModelStore'
 import { CanvasVersioningBar } from '@/features/versioning/components/CanvasVersioningBar'
 import { useStagedDraftPersistence } from '@/features/canvas-drafts/useStagedDraftPersistence'
 import { RestoredDraftBanner } from '@/features/canvas-drafts/RestoredDraftBanner'
@@ -147,6 +148,15 @@ export function CanvasRouter({ className, layoutType: layoutTypeProp }: CanvasRo
     hydrationPhase === 'complete',
   )
 
+  // A draft rewritten behind the canvas (an import, others' saves taken in) remounts the canvas —
+  // `draftEpoch` is in its key — so its expansion, auto-load and assignment latches start over
+  // against what the draft holds now. The assignment status lives in a store a remount leaves
+  // alone: back to idle with it, or the fresh canvas never places what the rewrite brought in.
+  const draftEpoch = useBranchStore((s) => s.draftEpoch)
+  useEffect(() => {
+    useReferenceModelStore.getState().resetAssignmentStatus()
+  }, [draftEpoch])
+
   // A brand-new blank model opens ready to build: auto-open (or resume) the
   // caller's draft once per graph per session. No-op for every other graph kind.
   useAutoDraftForBlankModel(activeView?.workspaceId ?? null, activeView?.dataSourceId ?? null, activeView?.id ?? null)
@@ -203,7 +213,7 @@ export function CanvasRouter({ className, layoutType: layoutTypeProp }: CanvasRo
             className="absolute inset-0"
           >
             <Suspense fallback={<CanvasLoader />}>
-              <CanvasComponent />
+              <CanvasComponent key={draftEpoch} />
             </Suspense>
           </motion.div>
         </AnimatePresence>

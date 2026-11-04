@@ -33,9 +33,11 @@ export function mapConflicts(
   }
   const out = new Map<string, StagedConflict>()
   for (const raw of err.conflicts) {
-    const entityId = String(raw.entity_id ?? '')
-    const change = byEntity.get(entityId)
-    const current = err.current[entityId]
+    // By the name the save sent (`ref`: the urn an edit named), which `current` is keyed by too — the
+    // server's entity id need not be it.
+    const sent = String(raw.ref ?? raw.entity_id ?? '')
+    const change = byEntity.get(sent.startsWith('gv:') ? sent.slice(3) : sent)
+    const current = err.current[sent]
     if (!change || !current) continue
     const path = Array.isArray(raw.path) ? raw.path.map(String) : []
     const field: ConflictField = { key: path.join('.'), path, base: raw.base, mine: raw.ours, theirs: raw.theirs }

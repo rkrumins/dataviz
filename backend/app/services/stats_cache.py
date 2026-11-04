@@ -430,6 +430,7 @@ async def build_synthetic_schema(
                     "required": f.required,
                     "showInNode": f.show_in_node, "showInPanel": f.show_in_panel,
                     "showInTooltip": f.show_in_tooltip, "displayOrder": f.display_order,
+                    "reconciliationKey": f.reconciliation_key, "unique": f.unique,
                 }
                 for f in ent_def.fields
             ] or [

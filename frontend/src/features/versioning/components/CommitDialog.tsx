@@ -27,11 +27,16 @@ import {
 import { invalidateViewVersions } from '@/hooks/useViewVersions'
 import { VIEW_QUERY_KEY } from '@/hooks/useViewMetadata'
 import { queryClient } from '@/lib/queryClient'
-import { MergeConflictError, NotUpToDateError, PullRequestExistsError } from '@/services/versioningApiService'
+import {
+  describeUniqueViolation, MergeConflictError, NotUpToDateError, PullRequestExistsError, UniqueViolationError,
+} from '@/services/versioningApiService'
 import { ChangeCountChips } from './ChangesPanel'
 import { DraftViewChanges } from './DraftViewChanges'
 import { ReviewerPicker } from './ReviewerPicker'
 import type { ChangeSet } from '../model/changeModel'
+
+/** Shared values a refused publish lists before it says how many more there are. */
+const UNIQUE_SHOWN = 10
 
 export interface CommitDialogProps {
   workspaceId: string
@@ -59,6 +64,8 @@ export function CommitDialog({
   const [reviewers, setReviewers] = useState<string[]>([])
   const [conflicts, setConflicts] = useState<number | null>(null)
   const [notUpToDate, setNotUpToDate] = useState(false)
+  /** A publish refused because values that must be unique are shared: which, said here. */
+  const [unique, setUnique] = useState<UniqueViolationError | null>(null)
   /** A review we discovered only when the server rejected our open (the race backstop). */
   const [raced, setRaced] = useState<{ prId: string; title?: string | null } | null>(null)
   /** "Publish now" while a review is open bypasses it — make that an explicit second step. */
@@ -103,6 +110,8 @@ export function CommitDialog({
       setConflicts(e.conflicts.length)
     } else if (e instanceof NotUpToDateError) {
       setNotUpToDate(true)
+    } else if (e instanceof UniqueViolationError) {
+      setUnique(e)
     } else if (e instanceof PullRequestExistsError) {
       // We lost a race (or the list was stale). Don't dead-end — show the review that won.
       setRaced({ prId: e.prId, title: e.prTitle })
@@ -114,6 +123,7 @@ export function CommitDialog({
   const handleOpenMr = () => {
     setConflicts(null)
     setNotUpToDate(false)
+    setUnique(null)
     openMr.mutate(
       {
         branchId, title: message || undefined, description: description || undefined,
@@ -139,6 +149,7 @@ export function CommitDialog({
     }
     setConflicts(null)
     setNotUpToDate(false)
+    setUnique(null)
     publish.mutate(
       { branchId, message: message || 'Publish draft' },
       {
@@ -298,6 +309,26 @@ export function CommitDialog({
               <div className="text-[11px] text-ink-muted">
                 <span className="font-medium text-amber-500">The Published version changed — {conflicts} conflict{conflicts === 1 ? '' : 's'}.</span>{' '}
                 Submit for review to resolve them, or archive this draft and start again from the latest.
+              </div>
+            </div>
+          )}
+
+          {unique && (
+            <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2.5 flex items-start gap-2">
+              <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
+              <div className="min-w-0 text-[11px] text-ink-muted">
+                <span className="font-medium text-amber-500">
+                  Nothing was published — {unique.total === 1
+                    ? '1 value that must be unique is'
+                    : `${unique.total} values that must be unique are`} used more than once.
+                </span>{' '}
+                Give each entity its own value, then publish.
+                <ul className="mt-1.5 space-y-0.5 text-ink break-words">
+                  {unique.violations.slice(0, UNIQUE_SHOWN).map((v, i) => <li key={i}>{describeUniqueViolation(v)}</li>)}
+                </ul>
+                {unique.total > Math.min(unique.violations.length, UNIQUE_SHOWN) && (
+                  <p className="mt-1">…and {unique.total - Math.min(unique.violations.length, UNIQUE_SHOWN)} more.</p>
+                )}
               </div>
             </div>
           )}

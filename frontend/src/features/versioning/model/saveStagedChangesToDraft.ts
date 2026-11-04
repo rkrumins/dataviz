@@ -7,9 +7,9 @@
  * (not one commit per created entity). The commit is atomic: on any failure nothing is persisted.
  *
  * After the commit succeeds there is NO reload — the canvas keeps its optimistic nodes — so we
- * reconcile it in place from the batch's ref→id map: each create swaps its temp node for the real
- * one (via its `reconcile` hook, childCount-safe), layer assignments are re-keyed temp→real, and
- * user-drawn edges are re-pointed at the real endpoints.
+ * reconcile it in place from the batch's ref→id map, in one pass: each create's temp node becomes
+ * the real one (childCount-safe), user-drawn edges are re-pointed at the real endpoints, and layer
+ * assignments are re-keyed temp→real.
  */
 import {
   applyGraphChanges, BranchClosedError, DraftRoleRequiredError, GraphNotWritableError, IntegrityError,
@@ -19,7 +19,7 @@ import {
 import { newRequestId } from '@/services/viewTransferApiService'
 import type { GraphDataProvider, GraphEdge, GraphNode } from '@/providers/GraphDataProvider'
 import { useStagedChangesStore, type StagedChange } from '@/store/stagedChangesStore'
-import { useCanvasStore } from '@/store/canvas'
+import { useCanvasStore, type LineageEdge } from '@/store/canvas'
 import { markSnapshotCommitting, type PendingSave } from '@/features/canvas-drafts/stagedDraftPersistence'
 import { stagedChangesToOps, unsavedNodeFields } from './stagedChangesToOps'
 
@@ -30,13 +30,17 @@ export interface DraftSaveTarget {
   provider: GraphDataProvider
   message?: string
   /**
-   * Re-key view-config (layer) assignments from a created entity's temp urn onto its real urn,
-   * so a node created in a layer keeps its column after the save reconciles.
+   * Re-key what the canvas keeps by entity id outside the graph — view-config (layer) assignments,
+   * open nodes — from every created entity's temp urn onto its real urn (`ids`: temp → real), so a
+   * node created in a layer keeps its column after the save reconciles. Called ONCE per save with
+   * the whole map: this is the save's one layout write, so it also prunes what `pruneTempAssignments`
+   * would.
    */
-  remapEntityId?: (oldId: string, newId: string) => void
+  remapEntityIds?: (ids: ReadonlyMap<string, string>) => void
   /**
-   * Prune any view-config assignment entries STILL keyed by a temp urn after the remap pass — a
-   * discarded create leaves an inert temp-urn placement behind. Called once, after all remaps.
+   * Prune any view-config assignment entries STILL keyed by a temp urn — a discarded create leaves
+   * an inert temp-urn placement behind. Called instead of `remapEntityIds` by a save that created
+   * nothing.
    */
   pruneTempAssignments?: () => void
 }
@@ -93,8 +97,10 @@ async function settle(save: PendingSave, scope: string | null): Promise<{ res: G
 function rebase(c: StagedChange, sentAfter: unknown, res: GraphChangesResult): StagedChange {
   if (c.type === 'move_entity') return c   // the server moves the node from wherever it is now
   const created = c.type === 'create_entity' ? res.assigned?.[c.targetUrn ?? c.targetId] : undefined
-  const view = res.entities?.[created ?? c.targetUrn ?? c.targetId]
-  const before = { ...(c.before as object), ...(sentAfter as object), version: view?.version ?? undefined }
+  const key = created ?? c.targetUrn ?? c.targetId
+  // `entities` answers for at most 500; `versions` holds every written entity's token.
+  const version = res.entities?.[key]?.version ?? res.versions?.[key] ?? undefined
+  const before = { ...(c.before as object), ...(sentAfter as object), version }
   return created
     ? { ...c, type: 'update_entity', targetId: created, targetUrn: created, before, discard: undefined }
     : { ...c, before }
@@ -112,7 +118,7 @@ export async function saveStagedChangesToDraft(
   // ── Build ONE op batch ──────────────────────────────────────────────────────────────────────
   // Layer placement (assign_layer / move_to_layer / reorder_nodes) is VIEW config, not graph data — it produces
   // ZERO graph ops. It persists to the view's referenceLayout.assignments via persistReferenceLayout;
-  // on save, `remapEntityId` re-keys a created entity's assignment temp→real (see the canvas caller).
+  // on save, `remapEntityIds` re-keys a created entity's assignment temp→real (see the canvas caller).
   const bodyOf = (batch: GraphChangeOp[]) =>
     JSON.stringify([target.wsId, target.dataSourceId, target.branchId, batch, target.message])
   let ops: GraphChangeOp[] = stagedChangesToOps(changes)   // creates + edges + renames/updates/deletes
@@ -171,8 +177,11 @@ export async function saveStagedChangesToDraft(
       if (settled) {
         const carried = changes.filter((c) => settled.sent[c.id] !== undefined)
         const stillEdited = new Set([...edited.values()].map((c) => c.targetUrn ?? c.targetId))
-        reconcileSaved(carried, { ...settled.res, entities: Object.fromEntries(
-          Object.entries(settled.res.entities ?? {}).filter(([id]) => !stillEdited.has(id))) }, target)
+        const notEdited = <T>(byId: Record<string, T> | undefined) =>
+          Object.fromEntries(Object.entries(byId ?? {}).filter(([id]) => !stillEdited.has(id)))
+        reconcileSaved(carried, {
+          ...settled.res, entities: notEdited(settled.res.entities), versions: notEdited(settled.res.versions),
+        }, target)
         useStagedChangesStore.getState().clearSaved(carried.filter((c) => !edited.has(c.id)).map((c) => c.id))
       }
       throw e
@@ -182,64 +191,102 @@ export async function saveStagedChangesToDraft(
       ...next,
       assigned: { ...res.assigned, ...next.assigned },
       entities: { ...res.entities, ...next.entities },
+      versions: { ...res.versions, ...next.versions },
     }
   }
   reconcileSaved(changes, res, target)
   return { commitId: res.commitId ?? null, unsaved }
 }
 
-/** The optimistic canvas, reconciled in place with what a save stored (there is no post-save reload). */
+/** The optimistic canvas, reconciled in place with what a save stored (there is no post-save
+ *  reload) — in ONE pass, however many entities the save created: the temp→real map is built once,
+ *  and the canvas, the layout and the open nodes are each re-keyed by it in a single write. (Swapped
+ *  node by node, every swap rescanned and rewrote the whole canvas and the view's layout: O(n²) on a
+ *  large paste.) */
 function reconcileSaved(changes: StagedChange[], res: GraphChangesResult, target: DraftSaveTarget): void {
   const assigned = res.assigned ?? {}
   const resolveRef = (id: string) => assigned[id] ?? id
 
-  // ── Reconcile the optimistic canvas in place (no post-save reload) ────────────────────────────
-  // Capture user-drawn edges BEFORE the create swaps: canvas.removeNode CASCADES (drops every edge
-  // touching the node), so an edge between two fresh nodes would otherwise be silently dropped.
-  const cs = useCanvasStore.getState()
-  const userEdges = changes.flatMap((c) => {
-    // A user-drawn edge, or the new parent link of a move (its pending id rode as the op's `ref`).
-    const pendingId = c.type === 'create_edge' ? c.targetId
-      : c.type === 'move_entity' ? (c.after as { edgeId?: string | null }).edgeId : null
-    const opt = pendingId ? cs.edges.find((e) => e.id === pendingId) : undefined
-    return opt && pendingId ? [{ c: { ...c, targetId: pendingId }, opt }] : []
-  })
+  // Cosmetic canvas surgery — a glitch here must never fail an already-committed save.
+  try { rekeyCanvas(changes, resolveRef) } catch { /* noop */ }
 
+  // Placements (and open nodes) keyed by a created entity's temp urn move to its real one, in the
+  // save's one layout write — which also prunes a temp urn's placement left by a create discarded
+  // before this save (see the canvas caller). A save that created nothing only prunes.
+  const realIds = new Map<string, string>()
   for (const c of changes) {
-    // create_entity: swap the optimistic temp node for the real minted id. Cosmetic canvas surgery —
-    // a glitch here must never fail an already-committed save.
-    if (c.type === 'create_entity') {
-      try { reconcileCreatedNode(c, resolveRef) } catch { /* noop */ }
-    }
     const tempUrn = c.targetUrn
-    if (tempUrn && resolveRef(tempUrn) !== tempUrn) target.remapEntityId?.(tempUrn, resolveRef(tempUrn))
+    if (tempUrn && resolveRef(tempUrn) !== tempUrn) realIds.set(tempUrn, resolveRef(tempUrn))
   }
-
-  // After every kept create's placement is remapped temp→real, any assignment entry STILL keyed by
-  // a temp urn belonged to a create that was discarded before this save — prune it (see the canvas
-  // caller's pruneTempAssignments, which rewrites referenceLayout.assignments).
-  target.pruneTempAssignments?.()
-
-  // Re-add user-drawn edges with the real edge id + resolved endpoints (the swapped nodes now carry
-  // their real urns).
-  if (userEdges.length > 0) {
-    // Swap, never duplicate: the pending copy goes before the real one is added.
-    for (const { c, opt } of userEdges) {
-      if (resolveRef(c.targetId) !== opt.id) useCanvasStore.getState().removeEdge(opt.id)
-    }
-    useCanvasStore.getState().addEdges(userEdges.map(({ c, opt }) => ({
-      ...opt,
-      id: resolveRef(c.targetId),
-      source: resolveRef(opt.source),
-      target: resolveRef(opt.target),
-      data: { ...opt.data, isPending: undefined },
-    })))
-  }
+  if (realIds.size > 0 && target.remapEntityIds) target.remapEntityIds(realIds)
+  else target.pruneTempAssignments?.()
 
   // Replace the canvas's copies with what was stored — values AND tokens. Without this the next
   // edit of an entity just saved three-way-merged against the value it was READ at, and
-  // conflicted with the user's own save.
+  // conflicted with the user's own save. `entities` answers for at most 500 of them; `versions`
+  // gives the token of every entity written.
   applyServerEntities(res.entities)
+  if (res.versions) useCanvasStore.getState().applyServerVersions(res.versions)
+}
+
+/** Each create's optimistic temp node becomes the real one, generic over how it was staged (single
+ *  add via useStageEntityCreation, build/paste via planBuildStaging: the same shape on `c.after`).
+ *  Its childCount counts the children staged under it — or the first collapse after the save drops
+ *  their (now saved) links, and the expand that follows never asks for them again — and its
+ *  containment link is rebuilt with the ONTOLOGY-resolved type the change carries (never a
+ *  fabricated default: no type ⇒ no edge, as stagedChangesToOps sent). Every user-drawn link — a
+ *  drawn or reversed one, or a move's new parent link (its pending id rode as the op's `ref`) —
+ *  takes its real id and ends; any other edge on a created node is dropped (a created child rebuilds
+ *  its own link). One store write. */
+function rekeyCanvas(changes: StagedChange[], resolveRef: (id: string) => string): void {
+  const created = new Map<string, StagedChange>()   // temp urn → its create
+  const links = new Set<string>()                   // the user-drawn links' pending ids
+  for (const c of changes) {
+    if (c.type === 'create_entity') created.set(c.targetUrn ?? c.targetId, c)
+    const pendingId = c.type === 'create_edge' || c.type === 'reverse_edge' ? c.targetId
+      : c.type === 'move_entity' ? (c.after as { edgeId?: string | null }).edgeId : null
+    if (pendingId) links.add(pendingId)
+  }
+  if (created.size === 0 && links.size === 0) return
+  const cs = useCanvasStore.getState()
+
+  const stagedChildren = new Map<string, number>()
+  for (const e of cs.edges) {
+    if (e.type === 'containment' && e.data?.isPending === 'create' && created.has(e.source)) {
+      stagedChildren.set(e.source, (stagedChildren.get(e.source) ?? 0) + 1)
+    }
+  }
+  const nodes = cs.nodes.map((n) => {
+    if (!created.has(n.id)) return n
+    const id = resolveRef(n.id)
+    return { ...n, id, data: {
+      ...n.data, urn: id, isPending: undefined,
+      childCount: Math.max((n.data?.childCount as number) ?? 0, stagedChildren.get(n.id) ?? 0),
+    } }
+  })
+
+  // First one wins on an id: the edges kept, then the rebuilt containment, then the user's links.
+  const edges: LineageEdge[] = []
+  const seen = new Set<string>()
+  const add = (e: LineageEdge) => { if (!seen.has(e.id)) { seen.add(e.id); edges.push(e) } }
+  for (const e of cs.edges) {
+    if (!links.has(e.id) && !created.has(e.source) && !created.has(e.target)) add(e)
+  }
+  for (const [tempUrn, c] of created) {
+    const after = (c.after ?? {}) as { parentUrn?: string; containmentEdgeType?: string }
+    if (!after.parentUrn || !after.containmentEdgeType) continue
+    const et = after.containmentEdgeType
+    add({
+      id: resolveRef(`contains-${tempUrn}`), source: resolveRef(after.parentUrn), target: resolveRef(tempUrn),
+      type: 'containment', data: { edgeType: et, relationship: et.toLowerCase() },
+    })
+  }
+  for (const e of cs.edges) {
+    if (!links.has(e.id)) continue
+    add({ ...e, id: resolveRef(e.id), source: resolveRef(e.source), target: resolveRef(e.target),
+      data: { ...e.data, isPending: undefined } })
+  }
+  cs.setNodesAndEdges(nodes, edges)
 }
 
 /** The save's answer (`entities`: each addressed entity as it is now) onto the canvas. */
@@ -255,48 +302,4 @@ export function applyServerEntities(entities: Record<string, EntityView> | undef
   const cs = useCanvasStore.getState()
   cs.applyServerNodes(nodes)
   cs.applyServerEdges(edges)
-}
-
-/** Swap a just-created entity's optimistic temp node for its real minted id — generic over how the
- *  create was staged (single-add via useStageEntityCreation OR build/paste via planBuildStaging;
- *  both put the same shape on `c.after`). Preserves the childCount patch so the post-save
- *  collapse→expand cycle never orphans this node's children, and re-points its containment edge at
- *  the real parent/child. `canvas.removeNode` already drops the optimistic containment edge via its
- *  cascade, so we only re-add the resolved one. Called parent-before-child (staging order), so every
- *  node re-adds its own upward edge with endpoints resolved to real ids. */
-function reconcileCreatedNode(c: StagedChange, resolveRef: (id: string) => string): void {
-  const tempUrn = c.targetUrn ?? c.targetId
-  const realUrn = resolveRef(tempUrn)
-  const cs = useCanvasStore.getState()
-  const opt = cs.nodes.find((n) => n.id === tempUrn)
-  const stagedChildCount = cs.edges.filter(
-    (e) => e.source === tempUrn && e.type === 'containment' && e.data?.isPending === 'create',
-  ).length
-  cs.removeNode(tempUrn)   // cascades: drops this node's optimistic containment edges
-  if (opt) {
-    cs.addNodes([{
-      ...opt,
-      id: realUrn,
-      data: {
-        ...opt.data,
-        urn: realUrn,
-        isPending: undefined,
-        childCount: Math.max((opt.data?.childCount as number) ?? 0, stagedChildCount),
-      },
-    }])
-  }
-  const after = (c.after ?? {}) as { parentUrn?: string; containmentEdgeType?: string }
-  // Rebuild the containment edge with the ONTOLOGY-resolved type carried on the staged change — never
-  // a fabricated default. No type ⇒ the ontology defines no containment relationship for this pairing
-  // ⇒ no edge (matches what stagedChangesToOps sent to the backend).
-  if (after.parentUrn && after.containmentEdgeType) {
-    const et = after.containmentEdgeType
-    cs.addEdges([{
-      id: resolveRef(`contains-${tempUrn}`),
-      source: resolveRef(after.parentUrn),
-      target: realUrn,
-      type: 'containment',
-      data: { edgeType: et, relationship: et.toLowerCase() },
-    }])
-  }
 }

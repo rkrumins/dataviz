@@ -143,9 +143,11 @@ describe('stagedChangesToOps', () => {
       [sc({ type: 'reverse_edge', targetId: 'staged-edge-3', before: { edge: { id: 'e9' } }, after: { edge: { edgeType: 'FLOWS_TO', source: 'urn:staged:a', target: 'urn:b' } } })],
       resolve,
     )
+    // The reversed edge is a create under the canvas's temp ref: the server mints its id (and
+    // answers it in `assigned`) — an id the client made up could be one the graph already holds.
     expect(ops).toEqual([
       { op: 'delete', kind: 'edge', id: 'e9' },
-      { op: 'create', kind: 'edge', id: 'staged-edge-3', payload: { edgeType: 'FLOWS_TO', sourceEntityId: 'urn:real:a', targetEntityId: 'urn:b' } },
+      { op: 'create', kind: 'edge', ref: 'staged-edge-3', payload: { edgeType: 'FLOWS_TO', sourceEntityId: 'urn:real:a', targetEntityId: 'urn:b' } },
     ])
   })
 })

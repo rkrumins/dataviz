@@ -9,6 +9,7 @@ import { caseFold } from '@/features/ontology/lib/caseFold'
 import { IconPicker } from '@/components/ui/IconPicker'
 import { NodePreview } from '@/components/schema/NodePreview'
 import { ColorInput } from '@/components/ui/ColorInput'
+import { HoverTip } from '@/components/ui/HoverTip'
 
 // Curated icons surfaced as the "Suggested" row of the full-catalog picker.
 const COMMON_ICONS = [
@@ -534,7 +535,7 @@ function FieldsTab({ form, setForm, readOnly }: {
               </div>
 
               {/* Field options row */}
-              <div className="flex items-center gap-3 px-3 py-1.5 bg-black/[0.015] dark:bg-white/[0.015] border-t border-glass-border/50">
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-1.5 bg-black/[0.015] dark:bg-white/[0.015] border-t border-glass-border/50">
                 {([
                   { key: 'showInNode' as const, label: 'Node' },
                   { key: 'showInPanel' as const, label: 'Panel' },
@@ -551,6 +552,26 @@ function FieldsTab({ form, setForm, readOnly }: {
                     />
                     <span className="text-[10px] text-ink-muted font-medium">{label}</span>
                   </label>
+                ))}
+                {/* What an import and a publish do with the field — said where it is set. */}
+                {([
+                  { key: 'reconciliationKey' as const, label: 'Match imports by this',
+                    tip: 'An import updates the entity with the same value here, instead of adding another' },
+                  { key: 'unique' as const, label: 'Must be unique',
+                    tip: 'No two entities of this type can share a value here — a draft that does can’t be published' },
+                ] as const).map(({ key, label, tip }) => (
+                  <HoverTip key={key} label={tip}>
+                    <label className="flex items-center gap-1 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={field[key] ?? false}
+                        onChange={(e) => updateField(field.id, { [key]: e.target.checked })}
+                        className="w-3 h-3 rounded accent-indigo-500"
+                        disabled={readOnly}
+                      />
+                      <span className="text-[10px] text-ink-muted font-medium">{label}</span>
+                    </label>
+                  </HoverTip>
                 ))}
               </div>
             </Reorder.Item>

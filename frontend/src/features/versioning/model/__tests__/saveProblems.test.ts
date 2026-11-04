@@ -30,6 +30,14 @@ describe('why a save was refused, on the changes that caused it', () => {
     expect(liveProblems([p], new Set())).toEqual([p])
   })
 
+  it('matches a violation by the name the save sent it under — a create\'s temp ref, not the id minted for it', () => {
+    const create = ch('c4', 'create_entity', 'urn:staged:Table:1', { targetUrn: 'urn:staged:Table:1' })
+    const [p] = mapSaveProblems([
+      { entity_id: 'urn:li:table:minted', ref: 'urn:staged:Table:1', name: 'Orders', reason: 'A Table needs a parent.' },
+    ], [create])
+    expect(p.changeIds).toEqual(['c4'])
+  })
+
   it('a problem goes away with the change that caused it', () => {
     const problems = mapSaveProblems([{ entity_id: 'urn:x:3', reason: 'r' }], changes)
     expect(liveProblems(problems, new Set(['c1', 'c2']))).toEqual([])

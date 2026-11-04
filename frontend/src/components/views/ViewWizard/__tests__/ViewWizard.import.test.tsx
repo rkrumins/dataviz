@@ -220,6 +220,7 @@ vi.mock('../steps/ScopeStep', async (importOriginal) => {
 
 import { ViewTransferError, rememberNewSource } from '@/services/viewTransferApiService'
 import { PullRequestExistsError, type BootstrapJob } from '@/services/versioningApiService'
+import { VERSIONING_KEYS } from '@/features/versioning/hooks/useVersioning'
 import { useSchemaStore } from '@/store/schema'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { useAuthStore } from '@/store/auth'
@@ -761,6 +762,40 @@ describe('ViewWizard — importing into a draft', () => {
     expect(await screen.findByText('Waiting in a draft')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: /Open view now/ }))
     expect(screen.getByTestId('location')).toHaveTextContent('/views/view_new?branch=br_9')
+  })
+
+  it('keeps the view as Published has it after an update waits in a draft, and lists that draft before opening it', async () => {
+    inspectMock.mockResolvedValue(inspected({
+      pv_1: [{ viewId: 'view_uat', name: 'Finance (UAT)', workspaceId: 'ws1', workspaceName: 'UAT', dataSourceId: 'ds1', headVersion: 3, canEdit: true, status: 'fast_forward' }],
+    }))
+    getViewMock.mockResolvedValue({ id: 'view_uat', name: 'Finance (UAT)', workspaceId: 'ws1', dataSourceId: 'ds1', viewType: 'reference', config: { icon: 'Layout' }, tags: [], visibility: 'workspace' })
+    reconcileMock.mockResolvedValue(reconciled(FAST_FORWARD))
+    importMock.mockResolvedValue({ ...imported('view_uat'), staged: { branchId: 'br_9' } })
+    const addOrUpdateView = vi.spyOn(useSchemaStore.getState(), 'addOrUpdateView')
+    const invalidate = vi.spyOn(QueryClient.prototype, 'invalidateQueries')
+    renderImport()
+
+    expect(await screen.findByText('Update “Finance (UAT)”')).toBeInTheDocument()
+    await next()
+    for (const step of ['basics-step', 'layout-step', 'assignment-step', 'entities-step', 'preview-step']) {
+      await next()
+      await screen.findByTestId(step)
+    }
+    fireEvent.click(screen.getByRole('button', { name: /Update View/ }))
+    await waitFor(() => expect(importMock).toHaveBeenCalledTimes(1))
+    expect(importMock.mock.calls[0][0]).toMatchObject({ action: 'update', stage: true })
+    expect(await screen.findByText('Waiting in a draft')).toBeInTheDocument()
+
+    // The update is the draft's: handed to the view store, it showed on whatever branch the canvas
+    // had open — Published included — before anyone published it.
+    expect(addOrUpdateView).not.toHaveBeenCalled()
+    // The draft is new: the branch list the link is checked against must be read again first.
+    invalidate.mockClear()
+    fireEvent.click(screen.getByRole('button', { name: /Open view now/ }))
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: [...VERSIONING_KEYS.all, 'branches'] })
+    expect(screen.getByTestId('location')).toHaveTextContent('/views/view_uat?branch=br_9')
+    addOrUpdateView.mockRestore()
+    invalidate.mockRestore()
   })
 
   it('goes live at once when that is chosen', async () => {

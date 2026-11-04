@@ -8,6 +8,7 @@ import { describe, it, expect, beforeEach } from 'vitest'
 import { useEntityChangeDecoration, nodeDecorationClass } from '../useDiffDecoration'
 import { useBranchStore } from '@/store/branchStore'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
+import { buildChangeSet } from '../../model/changeModel'
 
 describe('nodeDecorationClass', () => {
   it('committed = solid colour ring; staged = same ring + dashed halo; none = empty', () => {
@@ -61,5 +62,21 @@ describe('useEntityChangeDecoration', () => {
     const { result } = renderHook(() => useEntityChangeDecoration())
     expect(result.current.for('urn:c')).toBeUndefined()                         // committed hidden
     expect(result.current.for('urn:s')).toEqual({ state: 'staged', status: 'added' }) // staged stays
+  })
+})
+
+describe('useEntityChangeDecoration, entity ids that are not urns', () => {
+  beforeEach(() => {
+    useStagedChangesStore.setState({ changes: [] })
+    useBranchStore.setState({ activeChangeSet: null, committedDiffHidden: false })
+  })
+
+  it('rings a committed node under the urn the canvas names it by', () => {
+    const c = { entityId: 'ent_A', urn: 'urn:A', kind: 'node' as const, status: 'added' as const, label: 'A',
+      origin: { source: 'branch' as const, branchId: 'b' } }
+    act(() => useBranchStore.setState({ activeChangeSet: buildChangeSet([c]) }))
+    const { result } = renderHook(() => useEntityChangeDecoration())
+    expect(result.current.for('urn:A')).toEqual({ state: 'committed', status: 'added' })
+    expect(result.current.for('ent_A')).toBeUndefined()
   })
 })

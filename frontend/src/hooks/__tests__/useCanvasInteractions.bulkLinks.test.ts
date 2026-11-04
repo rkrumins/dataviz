@@ -103,3 +103,35 @@ describe('stageEdgeCreateMany', () => {
     expect(useCanvasStore.getState().edges.some((e) => e.source === 't1' && e.target === 't2')).toBe(true)
   })
 })
+
+describe('a drawn link is unsaved work', () => {
+  it('is marked pending, one link or many, so a collapse keeps it and the save redraws it', () => {
+    const { result } = renderHook(() => useCanvasInteractions())
+    let one: string | null = null
+    act(() => {
+      one = result.current.stageEdgeCreate('t1', 't2', 'FLOWS_TO')
+      result.current.stageEdgeCreateMany([{ source: 't1', target: 'r1' }], 'FLOWS_TO')
+    })
+    const drawn = () => useCanvasStore.getState().edges.filter((e) => e.id !== 'e0')
+    expect(drawn().map((e) => e.id)).toContain(one)
+    expect(drawn()).toHaveLength(2)
+    expect(drawn().every((e) => e.data?.isPending === 'create')).toBe(true)
+    // Collapsing a subtree drops the links a re-expand reads back — never these, which it can't.
+    act(() => useCanvasStore.getState().removeEdgesByNodeIds(['t1']))
+    expect(drawn()).toHaveLength(2)
+  })
+})
+
+describe('reverseEdge', () => {
+  it('draws the reversed line under a temp id, unsaved, for the save to mint its real one', () => {
+    const { result } = renderHook(() => useCanvasInteractions())
+    act(() => { result.current.reverseEdge('e0') })
+    const [change] = useStagedChangesStore.getState().changes
+    expect(change.type).toBe('reverse_edge')
+    expect(change.targetId).toMatch(/^staged-edge/)
+    expect(change.targetId).not.toContain('reversed')
+    const reversed = useCanvasStore.getState().edges.find((e) => e.id === change.targetId)
+    expect(reversed).toMatchObject({ source: 'r1', target: 't2', data: { isPending: 'create' } })
+    expect(useCanvasStore.getState().edges.some((e) => e.id === 'e0')).toBe(false)
+  })
+})

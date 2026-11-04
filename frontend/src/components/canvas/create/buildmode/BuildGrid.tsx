@@ -21,9 +21,11 @@
  * contiguous range (`computeRangeIds`); with 2+ rows selected, a bar also
  * offers setting Type/Parent/Description on every selected row in one
  * action. A single selected row (or more) exposes a delete-selected action;
- * a header checkbox selects/clears every row. Paste-into-cell: pasting
- * multi-line clipboard text into a Name/Description cell fills each
- * subsequent row (`computeDownIds`) instead of collapsing into one cell.
+ * a header checkbox selects/clears every row. Paste-into-cell: a block
+ * pasted into a Name/Description cell lands as a spreadsheet's would
+ * (`gridPaste.ts`) — its tab-separated cells across the Grid's columns, its
+ * lines down the rows and then into new rows up to the Build limit — and
+ * the Grid says what it left out instead of collapsing it into one cell.
  *
  * Layer column: only a TOP-LEVEL (depth 0) row is actually placed by column —
  * its Layer cell defaults to the auto-by-type target, derived from the
@@ -44,6 +46,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { cn } from '@/lib/utils'
 import { DynamicIcon } from '@/components/ui/DynamicIcon'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { useViewEntityTypes } from '@/hooks/useViewSchema'
 import { useLayers } from '@/store/referenceModelStore'
 import type { EntityTypeSchema } from '@/types/schema'
@@ -51,7 +54,8 @@ import type { BuildRow } from './buildRow'
 import { useBuildRowsStore } from './buildRowsStore'
 import { buildTypeLayerMap, resolveRowLayer } from './resolveRowLayer'
 import type { ContractRowLayer } from './BuildPanel'
-import { computeRangeIds, computeDownIds, descendantIds } from './buildGridSelection'
+import { computeRangeIds, descendantIds } from './buildGridSelection'
+import { applyGridPaste, BUILD_ROW_LIMIT, planGridPaste, type GridColumn } from './gridPaste'
 import { TypePickerPopover } from './TypePickerPopover'
 
 export interface BuildGridProps {
@@ -230,12 +234,6 @@ function LayerPickerPopover({
   )
 }
 
-/** Splits pasted clipboard text into lines when it looks like a multi-row spreadsheet paste. */
-function pasteLines(text: string): string[] | null {
-  const lines = text.split(/\r\n|\r|\n/)
-  return lines.length > 1 ? lines : null
-}
-
 interface BuildGridRowProps {
   row: BuildRow
   isSynthetic: boolean
@@ -255,7 +253,9 @@ interface BuildGridRowProps {
   onToggleSelect: (shiftKey: boolean) => void
   onUpdate: (patch: Partial<BuildRow>) => void
   onSetLayer: (layerId: string | undefined) => void
-  onPasteDown: (field: 'name' | 'description', lines: string[]) => void
+  /** Lay a clipboard block onto the Grid from this row's `column` cell; false for a plain cell,
+   *  which the input takes as typed. */
+  onPasteInto: (column: GridColumn, text: string) => boolean
   onAddSibling: () => void
   onAddChild: () => void
   onDuplicate: () => void
@@ -264,7 +264,7 @@ interface BuildGridRowProps {
 
 function BuildGridRow({
   row, isSynthetic, type, typeById, entityTypes, rawRows, layers, typeLayerMap, fallbackLayerId, contractRowLayer, selected,
-  onToggleSelect, onUpdate, onSetLayer, onPasteDown, onAddSibling, onAddChild, onDuplicate, onRemove,
+  onToggleSelect, onUpdate, onSetLayer, onPasteInto, onAddSibling, onAddChild, onDuplicate, onRemove,
 }: BuildGridRowProps) {
   const [openPicker, setOpenPicker] = useState<'type' | 'parent' | 'layer' | null>(null)
   const shiftPressedRef = useRef(false)
@@ -300,11 +300,8 @@ function BuildGridRow({
   const effectiveLayerId = contractRowLayer ? contractRowLayer(row) : resolveRowLayer(row, { typeLayerMap, fallbackLayerId })
   const effectiveLayerName = effectiveLayerId ? layerNameById.get(effectiveLayerId) : undefined
 
-  const handlePaste = (field: 'name' | 'description') => (e: React.ClipboardEvent<HTMLInputElement>) => {
-    const lines = pasteLines(e.clipboardData.getData('text/plain'))
-    if (!lines) return
-    e.preventDefault()
-    onPasteDown(field, lines)
+  const handlePaste = (column: GridColumn) => (e: React.ClipboardEvent<HTMLInputElement>) => {
+    if (onPasteInto(column, e.clipboardData.getData('text/plain'))) e.preventDefault()
   }
 
   return (
@@ -569,7 +566,9 @@ export function BuildGrid({ rows, typeById, fallbackLayerId, contractRowLayer }:
   const addChild = useBuildRowsStore((s) => s.addChild)
   const updateRow = useBuildRowsStore((s) => s.updateRow)
   const removeRow = useBuildRowsStore((s) => s.removeRow)
+  const setRows = useBuildRowsStore((s) => s.setRows)
   const entityTypes = useViewEntityTypes()
+  const { notify } = useAppNotifications()
   const setRowLayer = useBuildRowsStore((s) => s.setRowLayer)
   const duplicateRowSubtree = useBuildRowsStore((s) => s.duplicateRowSubtree)
 
@@ -649,9 +648,26 @@ export function BuildGrid({ rows, typeById, fallbackLayerId, contractRowLayer }:
     setSelectedIds(allSelected ? new Set() : new Set(selectableIds))
   }
 
-  const handlePasteDown = (startId: string, field: 'name' | 'description', lines: string[]) => {
-    const ids = computeDownIds(displayIds, startId, lines.length).filter((id) => rawIdSet.has(id))
-    ids.forEach((id, i) => updateRow(id, { [field]: lines[i] }))
+  // One store write for the whole block, however many rows it fills or adds.
+  const handlePasteInto = (startId: string, column: GridColumn, text: string): boolean => {
+    const paste = planGridPaste(text, { ids: selectableIds, startId, column, rowCount: rawRows.length })
+    if (!paste) return false
+    const named = (value: string) => value.toLowerCase()
+    const { rows: next, unmatched } = applyGridPaste(rawRows, paste, {
+      typeId: (v) => entityTypes.find((t) => named(t.id) === named(v) || named(t.name) === named(v))?.id,
+      layerId: (v) => sortedLayers.find((l) => l.id === v || named(l.name) === named(v))?.id,
+    })
+    setRows(next)
+    const plural = (n: number, one: string, many: string) => `${n.toLocaleString()} ${n === 1 ? one : many}`
+    const left = [
+      paste.skippedLines > 0 && `${plural(paste.skippedLines, 'line', 'lines')} past the ${BUILD_ROW_LIMIT.toLocaleString()}-row limit`,
+      paste.skippedCells > 0 && `${plural(paste.skippedCells, 'cell', 'cells')} past the last column`,
+      unmatched > 0 && `${plural(unmatched, 'value that names', 'values that name')} no type, row or layer here`,
+    ].filter(Boolean)
+    if (left.length > 0) {
+      notify('warning', `Pasted ${plural(paste.rows.length, 'row', 'rows')}. Left out: ${left.join('; ')}.`)
+    }
+    return true
   }
 
   if (rows.length === 0) {
@@ -745,7 +761,7 @@ export function BuildGrid({ rows, typeById, fallbackLayerId, contractRowLayer }:
                   onToggleSelect={(shiftKey) => toggleRowSelection(row.id, shiftKey)}
                   onUpdate={(patch) => updateRow(row.id, patch)}
                   onSetLayer={(layerId) => setRowLayer(row.id, layerId)}
-                  onPasteDown={(field, lines) => handlePasteDown(row.id, field, lines)}
+                  onPasteInto={(column, text) => handlePasteInto(row.id, column, text)}
                   onAddSibling={() => addSibling(row.id)}
                   onAddChild={() => addChild(row.id)}
                   onDuplicate={() => handleDuplicate(row)}

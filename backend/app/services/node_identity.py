@@ -495,6 +495,12 @@ def _bag(value: Any) -> Mapping:
 
 
 @lru_cache(maxsize=64)
+def identity_property(identity: Optional[ResolvedNodeIdentity]) -> Optional[str]:
+    """The node property the data source identifies nodes by, kept equal to the urn —
+    ``None`` for a source identified by ``urn`` itself (or no mapping)."""
+    return _bound_properties(identity)[1] if identity is not None else None
+
+
 def _bound_properties(identity: ResolvedNodeIdentity) -> tuple:
     """``(name property, identity property)`` as ``identity`` binds them, ``None``
     for one it doesn't: a field the platform owns (``urn``, ``displayName``,

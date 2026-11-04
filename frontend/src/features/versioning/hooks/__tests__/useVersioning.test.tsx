@@ -28,12 +28,14 @@ vi.mock('@/services/workspaceService', () => ({
   workspaceService: { listDataSources: (...args: unknown[]) => listDataSources(...args) },
 }))
 vi.mock('@/hooks/useAggregatedLineage', () => ({ invalidateAggregatedEdges: vi.fn() }))
+vi.mock('@/providers/providerPool', () => ({ releaseProviderCaches: vi.fn(() => 0) }))
 
 import { invalidateAggregatedEdges } from '@/hooks/useAggregatedLineage'
+import { releaseProviderCaches } from '@/providers/providerPool'
 import { useBranchStore } from '@/store/branchStore'
 import {
   useCreateFork, useDataSourcesWithForks, useDecideBootstrapDuplicates, useOpenForkPullRequest, usePullLatestDraft,
-  useRebuildProjection, useUpdateFromParent, VERSIONING_KEYS,
+  useRebuildProjection, useRefreshDraftFromOthers, useUpdateFromParent, VERSIONING_KEYS,
 } from '../useVersioning'
 
 describe('useRebuildProjection', () => {
@@ -120,6 +122,25 @@ describe('usePullLatestDraft', () => {
     expect(await pull({ clean: true, conflicts: [], alreadyUpToDate: true })).toBe(0)
     expect(await pull({ clean: false, conflicts: [{ entity_id: 'A' }] })).toBe(0)
     expect(invalidateAggregatedEdges).not.toHaveBeenCalled()
+  })
+})
+
+describe('useRefreshDraftFromOthers', () => {
+  it('reloads the draft, not main: cached reads dropped, the draft epoch bumped', () => {
+    vi.mocked(releaseProviderCaches).mockImplementation(() => {
+      expect(useBranchStore.getState().draftEpoch).toBe(draft)   // dropped before the re-key
+      return 0
+    })
+    const { mainEpoch: main, draftEpoch: draft } = useBranchStore.getState()
+    const qc = new QueryClient()
+    const wrapper = ({ children }: { children: React.ReactNode }) => (
+      <QueryClientProvider client={qc}>{children}</QueryClientProvider>
+    )
+    const { result } = renderHook(() => useRefreshDraftFromOthers('ws1', 'g1'), { wrapper })
+    result.current('br_1', 7)
+    expect(releaseProviderCaches).toHaveBeenCalledTimes(1)
+    expect(useBranchStore.getState().draftEpoch).toBe(draft + 1)
+    expect(useBranchStore.getState().mainEpoch).toBe(main)
   })
 })
 

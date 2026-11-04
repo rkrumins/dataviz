@@ -10,6 +10,7 @@ import type { BranchStatusFilter, DraftLevel, DraftRole, DraftsPolicyChange, Pul
 import { workspaceService } from '@/services/workspaceService'
 import { SYNC_STATUS_KEY } from '@/features/sync-status/useSyncStatus'
 import { invalidateAggregatedEdges } from '@/hooks/useAggregatedLineage'
+import { releaseProviderCaches } from '@/providers/providerPool'
 import { useBranchStore } from '@/store/branchStore'
 import { findLivePrForBranch, isTerminalPr } from '../model/prStatus'
 import { recordEvent } from '@/services/telemetryService'
@@ -299,7 +300,7 @@ export function useBranchFreshness(wsId?: string, graphId?: string | null, branc
  *  and the draft's own views reload, as after a pull. */
 export function useRefreshDraftFromOthers(wsId?: string, graphId?: string | null) {
   const qc = useQueryClient()
-  const bumpMainEpoch = useBranchStore((s) => s.bumpMainEpoch)
+  const bumpDraftEpoch = useBranchStore((s) => s.bumpDraftEpoch)
   return useCallback((branchId: string, headCommitSeq: number) => {
     markDraftCaughtUp(branchId, headCommitSeq)
     qc.invalidateQueries({ queryKey: VERSIONING_KEYS.branchState(wsId, graphId, branchId) })
@@ -307,9 +308,12 @@ export function useRefreshDraftFromOthers(wsId?: string, graphId?: string | null
     qc.invalidateQueries({ queryKey: VERSIONING_KEYS.commitLog(wsId, graphId, branchId) })
     qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'branch', wsId, graphId, branchId] })
     qc.invalidateQueries({ queryKey: VERSIONING_KEYS.branchFreshness(wsId, graphId, branchId) })
-    bumpMainEpoch()
+    // What the providers cached was read before the others' saves: drop it, then re-key the draft's
+    // reads (and remount the canvas) — main did not move, the draft did.
+    releaseProviderCaches()
+    bumpDraftEpoch()
     invalidateAggregatedEdges()
-  }, [qc, bumpMainEpoch, wsId, graphId])
+  }, [qc, bumpDraftEpoch, wsId, graphId])
 }
 
 /** One branch as the lists show it, with who committed to it (`contributors`). */

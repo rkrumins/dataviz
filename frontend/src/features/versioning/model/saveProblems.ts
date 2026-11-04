@@ -15,7 +15,9 @@ export interface SaveProblem {
   changeIds: string[]
 }
 
-interface Violation { entity_id?: string; name?: string; reason?: string }
+/** `ref`: the id the save sent the entity under (a create's temp ref, or the urn an edit named) —
+ *  what a staged change knows it by; `entity_id` is the server's, which need not be that. */
+interface Violation { entity_id?: string; ref?: string; name?: string; reason?: string }
 
 const bare = (id: string) => (id.startsWith('gv:') ? id.slice(3) : id)
 
@@ -35,7 +37,8 @@ export function mapSaveProblems(violations: readonly Violation[], changes: reado
   const problems = new Map<string, SaveProblem>()
   for (const v of violations) {
     const reason = v.reason || 'This change breaks a rule of the ontology.'
-    const matched = v.entity_id ? byKey.get(bare(v.entity_id)) ?? [] : []
+    const sent = v.ref ?? v.entity_id
+    const matched = sent ? byKey.get(bare(sent)) ?? [] : []
     // The name the user knows it by: for a rename that is the name BEFORE it (the server only has
     // the payload's new one).
     const known = (matched[0]?.before as { label?: unknown } | undefined)?.label

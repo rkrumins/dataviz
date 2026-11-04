@@ -60,7 +60,7 @@ describe('fromDiffVsMain', () => {
   it('maps the UI-shaped backend diff into a ChangeSet with payloads + before/after', () => {
     const resp: DiffVsMainResponse = {
       added: [{ entityId: 'urn:new', kind: 'node', after: { displayName: 'New', urn: 'urn:new' } }],
-      removed: [{ entityId: 'urn:gone', kind: 'node', before: { displayName: 'Gone' } }],
+      removed: [{ entityId: 'urn:gone', kind: 'node', before: { displayName: 'Gone', urn: 'urn:gone' } }],
       modified: [
         { entityId: 'e9', kind: 'edge', before: { edgeType: 'LINEAGE', confidence: 0.5 }, after: { edgeType: 'LINEAGE', confidence: 0.9 } },
       ],
@@ -78,11 +78,43 @@ describe('fromDiffVsMain, slim', () => {
     const resp: DiffVsMainResponse = {
       added: [{ entityId: 'urn:new', kind: 'node', after: { displayName: 'New', urn: 'urn:new' } }],
       removed: [],
-      modified: [{ entityId: 'urn:m', kind: 'node' }, { entityId: 'e9', kind: 'edge' }],
+      modified: [{ entityId: 'urn:m', kind: 'node', urn: 'urn:m' }, { entityId: 'e9', kind: 'edge' }],
     }
     const cs = fromDiffVsMain(resp, 'br_x')
     expect(cs.counts).toEqual({ added: 1, modified: 2, removed: 0 })
     expect(cs.byEntityId.get('urn:m')).toMatchObject({ status: 'modified', label: 'urn:m', fields: [] })
     expect(cs.byEntityId.get('urn:new')?.after).toEqual({ displayName: 'New', urn: 'urn:new' })
+  })
+})
+
+describe('fromDiffVsMain, entity ids that are not urns', () => {
+  // An import names its entities by id (`ent_A`), while the canvas names a node by its urn and an
+  // edge's ends by urn. The overlay is looked up by the canvas's names.
+  const resp: DiffVsMainResponse = {
+    added: [
+      { entityId: 'ent_A', kind: 'node', urn: 'urn:A' },                                   // slim: the urn alone
+      { entityId: 'ent_B', kind: 'node', after: { urn: 'urn:B', displayName: 'B' } },      // from its payload
+      { entityId: 'ent_C', kind: 'node' },                                                 // neither: the reader's stand-in
+      { entityId: 'edge_1', kind: 'edge', sourceUrn: 'urn:A', targetUrn: 'urn:B',
+        after: { edgeType: 'CONTAINS', sourceEntityId: 'ent_A', targetEntityId: 'ent_B' } },
+      { entityId: 'edge_2', kind: 'edge', after: { edgeType: 'FLOWS_TO', sourceEntityId: 'urn:A', targetEntityId: 'urn:B' } },
+    ],
+    removed: [],
+    modified: [],
+  }
+
+  it('keys a node by its urn, never by its entity id', () => {
+    const cs = fromDiffVsMain(resp, 'br_x')
+    expect(cs.byEntityId.get('urn:A')).toMatchObject({ entityId: 'ent_A', urn: 'urn:A', status: 'added' })
+    expect(cs.byEntityId.get('urn:B')).toMatchObject({ entityId: 'ent_B', urn: 'urn:B' })
+    expect(cs.byEntityId.get('gv:ent_C')).toMatchObject({ entityId: 'ent_C', urn: 'gv:ent_C' })
+    expect(cs.byEntityId.has('ent_A')).toBe(false)
+  })
+
+  it('names an edge’s ends by urn, from the entry or else its payload', () => {
+    const cs = fromDiffVsMain(resp, 'br_x')
+    expect(cs.byEntityId.get('edge_1')).toMatchObject({ sourceUrn: 'urn:A', targetUrn: 'urn:B' })
+    expect(cs.byEntityId.get('edge_2')).toMatchObject({ sourceUrn: 'urn:A', targetUrn: 'urn:B' })
+    expect(cs.byEntityId.get('edge_1')?.urn).toBeUndefined()
   })
 })

@@ -307,6 +307,47 @@ describe('useHierarchyOutline', () => {
     expect(afterOf(rawChange).properties?.layerAssignment).toBeUndefined()
   })
 
+  it('8b. stageRows stages a pasted outline in ONE pass — one node write, one edge write, one staged batch', () => {
+    const { result } = renderHook(() =>
+      useHierarchyOutline({ scopeParentUrn: null, initialTypeId: null }),
+    )
+    const rows: ParsedOutlineRow[] = Array.from({ length: 40 }, (_, i): ParsedOutlineRow[] => [
+      { name: `Sales ${i}`, typeId: 'domain', explicitType: true, depth: 0, issues: [] },
+      { name: `Analytics ${i}`, typeId: 'dataPlatform', explicitType: true, depth: 1, issues: [] },
+    ]).flat()
+    const graphWrites = vi.fn()
+    const stagedWrites = vi.fn()
+    const offCanvas = useCanvasStore.subscribe((s, prev) => { if (s.nodes !== prev.nodes || s.edges !== prev.edges) graphWrites() })
+    const offStaged = useStagedChangesStore.subscribe(stagedWrites)
+    let count = 0
+    act(() => { count = result.current.stageRows(rows, null) })
+    offCanvas()
+    offStaged()
+
+    expect(count).toBe(80)
+    expect(graphWrites).toHaveBeenCalledTimes(2)
+    expect(stagedWrites).toHaveBeenCalledTimes(1)
+    const changes = staged().filter((c) => c.type === 'create_entity')
+    const sales = changes.find((c) => afterOf(c).displayName === 'Sales 7')!
+    const analytics = changes.find((c) => afterOf(c).displayName === 'Analytics 7')!
+    expect(afterOf(analytics).parentUrn).toBe(sales.targetUrn)
+    expect(useCanvasStore.getState().edges.some((e) => e.source === sales.targetUrn && e.target === analytics.targetUrn)).toBe(true)
+  })
+
+  it('8c. stageRows never makes up a link the ontology allows none of: such a pasted child gets no containment edge', () => {
+    const { result } = renderHook(() =>
+      useHierarchyOutline({ scopeParentUrn: null, initialTypeId: null }),
+    )
+    const rows: ParsedOutlineRow[] = [
+      { name: 'Lake', typeId: 'container', explicitType: true, depth: 0, issues: [] },
+      { name: 'Vault', typeId: 'secretRoom', explicitType: true, depth: 1, issues: [] },
+    ]
+    act(() => { result.current.stageRows(rows, null) })
+    const vault = staged().find((c) => c.type === 'create_entity' && afterOf(c).displayName === 'Vault')!
+    expect(afterOf(vault).containmentEdgeType).toBeUndefined()
+    expect(useCanvasStore.getState().edges.some((e) => e.target === vault.targetUrn)).toBe(false)
+  })
+
   it('9. removeRow cascades: discarding a staged parent also removes its staged child from staged changes + canvas', () => {
     const { result } = renderHook(() =>
       useHierarchyOutline({ scopeParentUrn: null, initialTypeId: null }),

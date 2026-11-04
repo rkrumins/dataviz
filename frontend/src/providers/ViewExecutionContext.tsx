@@ -175,6 +175,7 @@ export function ViewExecutionProvider({
   // change, so a stale/other view's branchId could route this view's reads. ──
   const effectiveBranchId = useEffectiveBranchId(workspaceId, dataSourceId, viewId)
   const mainEpoch = useBranchStore((s) => s.mainEpoch)
+  const draftEpoch = useBranchStore((s) => s.draftEpoch)
 
   // ── Decide whether to reuse the global provider or create a scoped one ──
   // An open view ALWAYS gets a pooled scoped provider: its requests carry the
@@ -204,8 +205,9 @@ export function ViewExecutionProvider({
   }, [workspaceId, dataSourceId, effectiveBranchId, viewId])
 
   // mainEpoch bumps on publish/merge → folds into the version so schema + hydration
-  // (keyed by providerVersion) refetch once main has moved.
-  const providerVersion = (scopeMatchesGlobal ? globalCtx.providerVersion : localVersion) + mainEpoch
+  // (keyed by providerVersion) refetch once main has moved; draftEpoch the same, once the open
+  // draft was rewritten behind the canvas (an import, others' saves taken in).
+  const providerVersion = (scopeMatchesGlobal ? globalCtx.providerVersion : localVersion) + mainEpoch + draftEpoch
 
   // ── Background connectivity check for scoped providers ──
   const [providerReady, setProviderReady] = useState(scopeMatchesGlobal)
