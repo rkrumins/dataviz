@@ -72,7 +72,7 @@ The id is `uuid5(ENTITY_NAMESPACE, "<kind>/<seed>")`.
 |---|---|
 | `POST /graph/changes` with an `Idempotency-Key`: a create whose client `ref` is at least 16 characters (as every canvas temp ref is) | `<graph>/<branch>/<actor>/ref:<ref>`, so a later save that still carries the same staged create names the same entity |
 | Any other create in that save | `<graph>/<branch>/<actor>/key:<key>/<n>`, where `n` is its turn among them |
-| `POST /graph/nodes/create` with `idempotencyKey`, or a `create_node` command of `/commands/batch` | `<data source>/<branch>/<actor>/<key>` |
+| `POST /graph/nodes/create` with `idempotencyKey`, or a `create_node` command of `/commands/batch` | `<data source>/<branch>/<actor>/<key>`. `<branch>` is `main` for every write to the published graph: fresh, catching up, external or versioned. So a retry names the same node while the first write is projected, and after the graph gains version control. A connection's engine uses its connection id in place of the data source. |
 | `POST /graph/edges` with `idempotencyKey`, or a `create_edge` command | the same |
 
 ## 3. Where each id comes from

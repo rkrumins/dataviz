@@ -409,6 +409,7 @@ class ContextEngine:
         connection_id: Optional[str],
         registry: Any,  # ProviderRegistry — avoid circular import
         session: "AsyncSession",
+        actor: Optional[str] = None,
     ) -> "ContextEngine":
         """
         Create a ContextEngine backed by the specified connection.
@@ -429,6 +430,7 @@ class ContextEngine:
         engine = cls(provider=provider)
         engine._connection_id = connection_id
         engine._db_session = session
+        engine._actor = actor
         return engine
 
     # ------------------------------------------------------------------ #
@@ -2316,9 +2318,13 @@ class ContextEngine:
 
     def _key_seed(self, key: str) -> str:
         """What a create's idempotency key names, scoped as a canvas save's key is: one caller's,
-        on one branch of one data source. The same key sent by someone else, or on another draft,
-        is another request and creates its own entity."""
-        return f"{self._data_source_id}/{self._branch_id or 'main'}/{self._actor or ''}/{key}"
+        on one branch of one data source (of one connection, for a connection's engine). The same
+        key sent by someone else, or on another draft, is another request and creates its own
+        entity. Every write to main is ``main``, however main is read — fresh from FalkorDB or,
+        while the first write's projection catches up, from Postgres — and whether the graph is
+        external or versioned, so a retry names what the first request made."""
+        branch = "main" if self._writes_main or not self._branch_id else self._branch_id
+        return f"{self._data_source_id or self._connection_id}/{branch}/{self._actor or ''}/{key}"
 
     async def create_node(self, request: CreateNodeRequest) -> CreateNodeResult:
         """
@@ -2550,7 +2556,12 @@ class ContextEngine:
             await self.provider.create_edge(edge)
         except (NotImplementedError, AttributeError):
             logger.warning("Provider does not support edge creation — returning optimistic result")
-        except HTTP_MAPPED:
+        except HTTP_MAPPED as exc:
+            from backend.app.services.versioning.errors import EntityExists
+            if request.idempotency_key and isinstance(exc, EntityExists) and edge_id in exc.ids:
+                # Sent again: the first request made this edge. A customer's FalkorDB graph keeps
+                # its own id for a link it already had, so the read above can miss it by this one.
+                return EdgeMutationResult(edge=edge, success=True, warnings=val.warnings or [])
             raise                              # e.g. a busy graph (503) or someone else's draft (403)
         except Exception as exc:
             from backend.app.services.versioning.service import OntologyViolation

@@ -237,7 +237,8 @@ async def get_context_engine(
                 actor=(user.id if user else None), branch_id=branchId, viewer=viewer,
             )
         if connectionId:
-            return await ContextEngine.for_connection(connectionId, provider_manager, session)
+            return await ContextEngine.for_connection(
+                connectionId, provider_manager, session, actor=(user.id if user else None))
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     # ProviderUnavailable propagates to FastAPI exception handler → 503
