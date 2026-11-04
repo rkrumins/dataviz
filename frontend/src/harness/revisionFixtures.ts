@@ -117,25 +117,31 @@ export function summaryFor(from: number, to: number) {
 
 const NAMES = ['orders', 'customers', 'invoices', 'events', 'sessions', 'refunds', 'payments', 'accounts', 'leads', 'campaigns']
 
-/** A page of the change list, in its order: by type, then name. */
+/**
+ * A page of the change list, in its order: by type, then name. Like the server's, it holds as many
+ * entries as the summary counts; only the page asked for is made.
+ */
 export function entriesFor(from: number, to: number, kind: string, offset: number, limit: number) {
-  const s = summaryFor(from, to)
-  const types = s.byType.filter((t) => (t.kind === 'structure' ? 'structure' : t.kind) === kind)
-  const rows: Array<Record<string, unknown>> = []
-  for (const t of types) {
-    for (const status of ['added', 'modified', 'removed'] as const) {
-      for (let i = 0; i < Math.min(t[status], 40); i++) {
-        const name = `${NAMES[i % NAMES.length]}_${String(i).padStart(2, '0')}`
-        rows.push(kind === 'node'
-          ? { entityId: `${t.type}:${name}:${status}`, kind: 'node', status, type: t.type, structural: false,
-              displayName: name, qualifiedName: `analytics.${name}`, urn: `urn:${t.type}:${name}` }
-          : { entityId: `${t.type}:${name}:${status}`, kind: 'edge', status, type: t.type, structural: kind === 'structure',
-              sourceEntityId: `urn:${name}`, targetEntityId: `urn:${name}_v2`, sourceName: name, targetName: `${name}_v2` })
-      }
+  const runs = summaryFor(from, to).byType
+    .filter((t) => t.kind === kind)
+    .flatMap((t) => (['added', 'modified', 'removed'] as const).map((status) => ({ type: t.type, status, n: t[status] })))
+  const total = runs.reduce((n, r) => n + r.n, 0)
+  const page: Array<Record<string, unknown>> = []
+  let skip = offset
+  for (const r of runs) {
+    if (page.length >= limit) break
+    if (skip >= r.n) { skip -= r.n; continue }
+    for (let i = skip; i < r.n && page.length < limit; i++) {
+      const name = `${NAMES[i % NAMES.length]}_${String(i).padStart(2, '0')}`
+      page.push(kind === 'node'
+        ? { entityId: `${r.type}:${name}:${r.status}`, kind: 'node', status: r.status, type: r.type, structural: false,
+            displayName: name, qualifiedName: `analytics.${name}`, urn: `urn:${r.type}:${name}` }
+        : { entityId: `${r.type}:${name}:${r.status}`, kind: 'edge', status: r.status, type: r.type, structural: kind === 'structure',
+            sourceEntityId: `urn:${name}`, targetEntityId: `urn:${name}_v2`, sourceName: name, targetName: `${name}_v2` })
     }
+    skip = 0
   }
-  const page = rows.slice(offset, offset + limit)
-  return { entries: page, total: rows.length, offset, limit, hasMore: offset + page.length < rows.length, tooLarge: null }
+  return { entries: page, total, offset, limit, hasMore: offset + page.length < total, tooLarge: null }
 }
 
 /** Answers the versioning routes the revision viewer reads; anything else is a 404. */

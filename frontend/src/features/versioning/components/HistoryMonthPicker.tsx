@@ -123,7 +123,7 @@ export function HistoryMonthPicker({
               {Array.from({ length: 12 }, (_, i) => <Skeleton key={i} className="h-11 rounded-lg" />)}
             </div>
           ) : (
-            <div className="grid grid-cols-4 gap-1.5" role="grid" aria-label={`Revisions in ${shownYear}`}>
+            <div className="grid grid-cols-4 gap-1.5" role="group" aria-label={`Revisions in ${shownYear}`}>
               {yearMonths.map((m, i) => {
                 const key = `${shownYear}-${pad(i + 1)}`
                 const name = new Date(shownYear, i, 1).toLocaleDateString(undefined, { month: 'short' })
@@ -132,8 +132,7 @@ export function HistoryMonthPicker({
                 return (
                   <button
                     key={key}
-                    role="gridcell"
-                    aria-selected={selected}
+                    aria-pressed={selected}
                     aria-label={`${name} ${shownYear}: ${count} ${count === 1 ? 'revision' : 'revisions'}`}
                     disabled={count === 0}
                     onClick={() => setPicked({ month: key })}
@@ -218,16 +217,17 @@ function DayGrid({ month, pickedDay, onPick }: {
   const daysIn = new Date(y, m, 0).getDate()
   const lead = (new Date(y, m - 1, 1).getDay() + 6) % 7
   const max = Math.max(0, ...month.days.map((d) => d.count))
+  const monthLabel = new Date(y, m - 1, 1).toLocaleDateString(undefined, { month: 'long', year: 'numeric' })
   const weekdays = Array.from({ length: 7 }, (_, i) =>
     new Date(2024, 0, 1 + i).toLocaleDateString(undefined, { weekday: 'narrow' }))   // 1 Jan 2024 was a Monday
   return (
     <div className="mt-3">
-      <div className="grid grid-cols-7 gap-1 mb-1">
+      <div className="grid grid-cols-7 gap-1 mb-1" aria-hidden>
         {weekdays.map((w, i) => (
           <span key={i} className="text-center text-[10px] font-semibold text-ink-muted/70">{w}</span>
         ))}
       </div>
-      <div className="grid grid-cols-7 gap-1" role="grid" aria-label="Revisions by day">
+      <div className="grid grid-cols-7 gap-1" role="group" aria-label={`Revisions by day, ${monthLabel}`}>
         {Array.from({ length: lead }, (_, i) => <span key={`lead${i}`} />)}
         {Array.from({ length: daysIn }, (_, i) => {
           const key = `${month.month}-${pad(i + 1)}`
@@ -236,8 +236,7 @@ function DayGrid({ month, pickedDay, onPick }: {
           return (
             <button
               key={key}
-              role="gridcell"
-              aria-selected={pickedDay === key}
+              aria-pressed={pickedDay === key}
               aria-label={`${i + 1}: ${count} ${count === 1 ? 'revision' : 'revisions'}`}
               disabled={count === 0}
               onClick={() => onPick(key)}

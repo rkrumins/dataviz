@@ -41,7 +41,7 @@ export function RevisionPicker({
     <Popover.Root open={open} onOpenChange={setOpen}>
       <Popover.Trigger asChild>
         <button
-          className="group w-full h-full min-w-0 text-left rounded-xl border border-glass-border bg-black/[0.02] dark:bg-white/[0.03] px-3 py-2 hover:border-indigo-500/40 hover:bg-indigo-500/[0.04] transition-colors data-[state=open]:border-indigo-500/60 data-[state=open]:ring-2 data-[state=open]:ring-indigo-500/20"
+          className="group w-full h-full min-w-0 flex flex-col text-left rounded-xl border border-glass-border bg-black/[0.02] dark:bg-white/[0.03] px-3 py-2 hover:border-indigo-500/40 hover:bg-indigo-500/[0.04] transition-colors data-[state=open]:border-indigo-500/60 data-[state=open]:ring-2 data-[state=open]:ring-indigo-500/20"
         >
           <span className="flex items-center justify-between gap-2">
             <span className="text-[10px] font-semibold uppercase tracking-wider text-ink-muted/80">{label}</span>

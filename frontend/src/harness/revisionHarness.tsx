@@ -78,7 +78,7 @@ function Harness() {
       const t = setTimeout(() => {
         document.querySelector<HTMLButtonElement>('[aria-label="Go to a month"]')?.click()
         setTimeout(() => {
-          const oct = [...document.querySelectorAll<HTMLButtonElement>('[role="gridcell"]')]
+          const oct = [...document.querySelectorAll<HTMLButtonElement>('[role="group"] button')]
             .find((b) => b.getAttribute('aria-label')?.includes('2026: 28'))
           oct?.click()
         }, 150)
