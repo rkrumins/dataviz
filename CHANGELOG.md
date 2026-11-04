@@ -9,6 +9,33 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Subset views show where their matches sit, and keep as far as you choose
+
+### Added
+
+- **Show where they sit.** In a subset view, each match is drawn inside the containers its base
+  draws it in: in a layer built by hand, *oracle_orders* sits under *sales* under *oracle_prod*.
+  - The containers show where the matches sit. They aren't matches: never counted, and holding
+    only the matches. Closed, one says how many it holds (**2 inside**).
+  - Containers the base draws in another layer aren't repeated. The top row names them.
+  - **Show where they sit**, in **Display options**, is on unless you turn it off, and it's your
+    own choice, not part of the view. Off, each match is a row of its own, naming where it sits.
+  - It costs no extra graph read: the server already reads every container on a page to name it,
+    and now places them from that same read.
+- **Levels and kinds.** What a subset keeps with its matches can stop at a depth: **Everything
+  inside them** 1, 2, 3 levels or all; **What contains them** their parent, 2, 3 up or to the top.
+  Each can keep only some kinds of entity. It stays live, at any size.
+  - In the API: `contentsLevels`, `containersLevels` (1–20; unset is every level, or to the top),
+    `contentsKinds` and `containersKinds` in `include`. Definitions saved before keep their hashes.
+
+### Changed
+
+- **The view feed** gives each match `inLayer`: how many of its nearest containers share its layer.
+- **A feed page whose container paths ran late** is kept for seconds, not minutes, so the next read
+  draws its containers.
+
+---
+
 ## [Unreleased] — Subset views keep their base view's layers: each match where the base places it
 
 A search for *oracle* across a Context View whose layers are built by hand, saved as a subset view,

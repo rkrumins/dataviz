@@ -91,7 +91,8 @@ describe('LayerColumn — a subset layer', () => {
   })
 
   it('a match says where it sits', () => {
-    renderColumn({ nodes: [node('A', { ancestorPath: ['warehouse', 'sales'] })], subsetFeed: feed({ delivered: 1, total: 1 }) })
+    const step = (urn: string) => ({ urn: `urn:${urn}`, displayName: urn, entityType: 'schema' })
+    renderColumn({ nodes: [node('A', { ancestorPath: [step('warehouse'), step('sales')] })], subsetFeed: feed({ delivered: 1, total: 1 }) })
     expect(screen.getByText('in warehouse › sales')).toBeInTheDocument()
   })
 

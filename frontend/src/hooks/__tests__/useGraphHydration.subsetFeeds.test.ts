@@ -206,7 +206,9 @@ describe('subset view feeds', () => {
     })
     await hydrate()
     const row = useCanvasStore.getState().nodes.find((n) => n.id === 'urn:t1')
-    expect(row?.data.ancestorPath).toEqual(['warehouse', 'sales'])
+    expect(row?.data.ancestorPath).toEqual([
+      { urn: 'urn:wh', displayName: 'warehouse', entityType: 'database' },
+      { urn: 'urn:sales', displayName: 'sales', entityType: 'schema' }])
     expect(urns()).toEqual(['urn:t1'])
   })
 

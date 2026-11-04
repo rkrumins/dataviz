@@ -18,6 +18,7 @@ import {
   ChevronDown,
   Eye,
   EyeOff,
+  FolderTree,
   Maximize,
   Minimize,
   Minus,
@@ -30,6 +31,7 @@ import {
   MemoryStick,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { useSchemaStore } from '@/store/schema'
 import {
   usePreferencesStore,
   CANVAS_ZOOM_MAX,
@@ -284,7 +286,12 @@ export function DisplaySettingsSections({
   const toggleEntityIcons = usePreferencesStore((s) => s.toggleCanvasEntityIcons)
   const showMemoryUsage = usePreferencesStore((s) => s.showMemoryUsage) ?? false
   const toggleMemoryUsage = usePreferencesStore((s) => s.toggleMemoryUsage)
-  const togglesOn = [showEntityIcons, showTypeBadge, subtleTreeLines, showMemoryUsage].filter(Boolean).length
+  // Only a subset view draws its matches inside their containers.
+  const subsetView = useSchemaStore((s) => !!s.getActiveView()?.search)
+  const showWhereTheySit = usePreferencesStore((s) => s.showWhereTheySit) ?? true
+  const toggleWhereTheySit = usePreferencesStore((s) => s.toggleWhereTheySit)
+  const togglesOn = [showEntityIcons, showTypeBadge, subtleTreeLines, showMemoryUsage,
+    subsetView && showWhereTheySit].filter(Boolean).length
 
   return (
     <>
@@ -393,6 +400,18 @@ export function DisplaySettingsSections({
         summary={`${togglesOn} on`}
       >
         <div className="pt-1.5 space-y-1.5">
+        {subsetView && (
+          <ToggleRow
+            label="Show where they sit"
+            description={showWhereTheySit
+              ? 'Each match inside the containers its base view draws it in'
+              : 'Each match a row of its own, naming where it sits'}
+            icon={FolderTree}
+            active={showWhereTheySit}
+            onClick={toggleWhereTheySit}
+            accent="cyan"
+          />
+        )}
         <ToggleRow
           label="Show entity icons"
           description={showEntityIcons ? 'Each row shows its type\'s icon' : 'Names only — no icons'}

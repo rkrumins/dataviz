@@ -2131,6 +2131,8 @@ export function ContextViewCanvas({
   // canvas's own type rules, nor a loaded container's column. Placed where a
   // session's drags would be, which win at any depth; a subset view has none.
   const subsetView = !!activeView?.search
+  // Its matches drawn inside the containers its base draws them in: the reader's choice.
+  const showWhereTheySit = usePreferencesStore((s) => s.showWhereTheySit) ?? true
   const feedPlacements = useMemo(() => {
     if (!subsetView) return null
     const placed = new Map<string, { layerId: string }>()
@@ -2151,6 +2153,7 @@ export function ContextViewCanvas({
     sortOverrides,
     placementSpec,
     placementChains,
+    whereTheySit: subsetView && showWhereTheySit,
   })
   useEffect(() => { renderedLayerRef.current = nodeLayerMap }, [nodeLayerMap])
 
@@ -2230,21 +2233,33 @@ export function ContextViewCanvas({
   const autoOpenedGroupsRef = useRef<Set<string>>(new Set())
   useEffect(() => {
     const unopened: string[] = []
+    const open = (id: string) => {
+      if (autoOpenedGroupsRef.current.has(id)) return
+      autoOpenedGroupsRef.current.add(id)
+      unopened.push(id)
+    }
     nodesByLayer.forEach((roots) => {
       for (const root of roots) {
-        if (!root.isLogical) continue
-        if (autoOpenedGroupsRef.current.has(root.id)) continue
-        autoOpenedGroupsRef.current.add(root.id)
-        unopened.push(root.id)
+        if (root.isLogical) open(root.id)
       }
     })
+    // A subset view's containers, at any depth: drawn to show where its matches
+    // sit, so open, like a group, until collapsed.
+    if (subsetView) {
+      const stack = [...nodesByLayer.values()].flat()
+      while (stack.length > 0) {
+        const node = stack.pop()!
+        if (node.data.context) open(node.id)
+        stack.push(...node.children)
+      }
+    }
     if (unopened.length === 0) return
     setExpandedNodes((prev) => {
       const next = new Set(prev)
       for (const id of unopened) next.add(id)
       return next
     })
-  }, [nodesByLayer])
+  }, [nodesByLayer, subsetView])
 
   // Live context for resolving a parent's effective child-sort direction inside
   // stable callbacks (refs so loadChildrenSorted keeps ONE identity — a dep on
