@@ -17,6 +17,7 @@ import { Link } from 'react-router-dom'
 import * as LucideIcons from 'lucide-react'
 
 import { useAppNotifications } from '@/components/ui/notifications'
+import { LevelPicker } from '@/features/narrow/NarrowComposer'
 import { narrowErrorText } from '@/features/narrow/useNarrowResolve'
 import { cn } from '@/lib/utils'
 import {
@@ -29,21 +30,30 @@ import {
 import { getView, viewToViewConfig, type View } from '@/services/viewApiService'
 import { useFeature } from '@/store/features'
 import { useSchemaStore } from '@/store/schema'
-import type { SearchViewStatus, SearchViewUpdate, SubsetInclude, SubsetLayout } from '@/types/searchView'
+import type { Depth } from '@/types/membership'
+import type { SearchViewStatus, SearchViewUpdate, SubsetLayout } from '@/types/searchView'
 import { isSubsetConfig, NO_INCLUDE } from '@/types/searchView'
 
-import { anyIncluded, chipLabel, describePredicate, includeWords } from './model'
+import { anyIncluded, chipLabel, describePredicate, includeWords, keptInclude, type IncludeChoice } from './model'
 
 /** The layers the chip names before it says how many more. */
 const LAYER_PILLS = 6
 
 /** What a subset can keep beside its matches, as the chip offers it to an editor. */
-const INCLUDE_PILLS: Array<{ key: keyof SubsetInclude; label: string }> = [
+const INCLUDE_PILLS: Array<{ key: IncludeChoice; label: string }> = [
   { key: 'contents', label: 'Everything inside' },
   { key: 'containers', label: 'What contains them' },
   { key: 'upstream', label: 'What feeds them' },
   { key: 'downstream', label: 'What they feed' },
 ]
+
+/** How far what is inside them, and what contains them, reach: a few levels, or the whole way. */
+const LEVEL_ROWS: Array<{ on: IncludeChoice; key: 'contentsLevels' | 'containersLevels'; label: string;
+  names?: { 1: string; all: string } }> = [
+  { on: 'contents', key: 'contentsLevels', label: 'Levels inside them' },
+  { on: 'containers', key: 'containersLevels', label: 'Levels up', names: { 1: 'Parent', all: 'Top' } },
+]
+const LEVELS = [1, 2, 3]
 
 /** The canvas reads the view from the schema store: hand it the view as it now is. */
 async function showLatest(viewId: string) {
@@ -142,10 +152,15 @@ function SearchViewPanel({ view, status, canEdit, onEditSearch, onRefresh }: {
       setBusy(null)
     }
   }
-  const toggleInclude = (key: keyof SubsetInclude) => {
-    const next = { ...include, [key]: !include[key] }
+  const toggleInclude = (key: IncludeChoice) => {
+    const next = keptInclude({ ...include, [key]: !include[key] })
     void change(`include:${key}`, { include: next }, { include },
       anyIncluded(next) ? `It keeps ${includeWords(next)} now` : 'It keeps just the matches now')
+  }
+  const setLevels = (key: 'contentsLevels' | 'containersLevels', levels: Depth) => {
+    if ((include[key] ?? 'all') === levels) return
+    const next = keptInclude({ ...include, [key]: levels === 'all' ? undefined : levels })
+    void change(`levels:${key}`, { include: next }, { include }, `It keeps ${includeWords(next)} now`)
   }
   const shownHolding = status.layers.filter((l) => !l.hidden && (l.rest || l.entityTypes.length > 0))
   // Fewer layers: an editor of a subset that follows its base leaves some out.
@@ -232,6 +247,16 @@ function SearchViewPanel({ view, status, canEdit, onEditSearch, onRefresh }: {
               )
             })}
           </div>
+          {LEVEL_ROWS.filter((row) => include[row.on]).map((row) => (
+            <div key={row.key} className="mt-2.5 flex items-center justify-between gap-3">
+              <span className="inline-flex items-center gap-1.5 text-[11.5px] text-ink-secondary">
+                {busy === `levels:${row.key}` && <LucideIcons.Loader2 className="w-3 h-3 animate-spin" aria-hidden />}
+                {row.label}
+              </span>
+              <LevelPicker label={row.label} value={include[row.key] ?? 'all'} levels={LEVELS} names={row.names}
+                disabled={busy !== null} onChange={(levels) => setLevels(row.key, levels)} />
+            </div>
+          ))}
         </div>
       )}
 

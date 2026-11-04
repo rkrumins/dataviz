@@ -3,7 +3,7 @@
  * are looked for, the layers they start with, a count per layer, and a save that
  * a retry can't double.
  */
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { FromSearchRequest } from '@/types/searchView'
@@ -37,6 +37,14 @@ vi.mock('../useTypeBreakdown', () => ({
   },
 }))
 
+// The view's kinds, by the names its schema gives them.
+vi.mock('@/hooks/useViewSchema', () => ({
+  useViewEntityTypes: () => [
+    { id: 'table', name: 'Table', visual: { color: '#0ea5e9' } },
+    { id: 'column', name: 'Column', visual: { color: '#a855f7' } },
+  ],
+}))
+
 import { SaveSearchAsViewSheet } from '../SaveSearchAsViewSheet'
 
 const pii = { kind: 'tag', values: ['pii'] } as unknown as Predicate
@@ -63,6 +71,9 @@ function renderSheet(over: Partial<Parameters<typeof SaveSearchAsViewSheet>[0]> 
 }
 
 const save = () => fireEvent.click(screen.getByRole('button', { name: /Save view/ }))
+/** What the view finds, as the preview last counted it. */
+const found = () => (counted.mock.calls.at(-1)![0] as Array<{ id: string; predicate: unknown }>)
+  .find((l) => l.id === '__found__')!.predicate
 
 describe('SaveSearchAsViewSheet', () => {
   beforeEach(() => {
@@ -230,6 +241,80 @@ describe('SaveSearchAsViewSheet', () => {
     await waitFor(() => expect(createFromSearch).toHaveBeenCalled())
     expect(createFromSearch.mock.calls[0][0].include).toEqual(
       { contents: true, containers: false, upstream: true, downstream: false })
+  })
+
+  it('keeps a number of levels inside them, and what contains them a number up — counted, said and sent', async () => {
+    renderSheet()
+    expect(screen.queryByRole('radiogroup', { name: 'Levels inside them' })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: /Everything inside them/ }))
+    const inside = screen.getByRole('radiogroup', { name: 'Levels inside them' })
+    expect(within(inside).getAllByRole('radio').map((r) => r.textContent)).toEqual(['1', '2', '3', 'All'])
+    expect(within(inside).getByRole('radio', { name: 'All' })).toHaveAttribute('aria-checked', 'true')
+    fireEvent.click(within(inside).getByRole('radio', { name: '2' }))
+    expect(found()).toEqual({ kind: 'group', op: 'or', children: [pii, { kind: 'related', axis: 'ancestor', where: pii, maxHops: 2 }] })
+    expect(screen.getByRole('button', { name: /Everything inside them/ })).toHaveTextContent('Two levels in')
+
+    fireEvent.click(screen.getByRole('button', { name: /What contains them/ }))
+    const up = screen.getByRole('radiogroup', { name: 'Levels up' })
+    expect(within(up).getAllByRole('radio').map((r) => r.textContent)).toEqual(['Parent', '2', '3', 'Top'])
+    expect(within(up).getByRole('radio', { name: 'Top' })).toHaveAttribute('aria-checked', 'true')
+    fireEvent.click(within(up).getByRole('radio', { name: 'Parent' }))
+    expect(found()).toEqual({ kind: 'group', op: 'or', children: [pii,
+      { kind: 'related', axis: 'ancestor', where: pii, maxHops: 2 },
+      { kind: 'related', axis: 'descendant', where: pii, maxHops: 1 }] })
+    expect(screen.getByRole('button', { name: /What contains them/ })).toHaveTextContent('One level up')
+    expect(screen.getByText('two levels inside them and what contains them, one level up')).toBeInTheDocument()
+    save()
+    await waitFor(() => expect(createFromSearch).toHaveBeenCalled())
+    expect(createFromSearch.mock.calls[0][0].include).toStrictEqual(
+      { contents: true, contentsLevels: 2, containers: true, containersLevels: 1, upstream: false, downstream: false })
+  })
+
+  it('keeps only some kinds inside them, of the view’s kinds — counted, said and sent as a set', async () => {
+    renderSheet()
+    fireEvent.click(screen.getByRole('button', { name: /Everything inside them/ }))
+    const only = screen.getByRole('button', { name: 'Only these kinds inside them' })
+    expect(only).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.queryByRole('group', { name: 'Only these kinds inside them' })).toBeNull()
+    fireEvent.click(only)
+    const chips = screen.getByRole('group', { name: 'Only these kinds inside them' })
+    expect(chips).toHaveTextContent('None chosen: every kind')
+    fireEvent.click(within(chips).getByRole('button', { name: 'Table' }))
+    fireEvent.click(within(chips).getByRole('button', { name: 'Column' }))
+    expect(within(chips).getByRole('button', { name: 'Column' })).toHaveAttribute('aria-pressed', 'true')
+    expect(found()).toEqual({ kind: 'group', op: 'or', children: [pii, { kind: 'group', op: 'and', children: [
+      { kind: 'entityType', op: 'in', values: ['column', 'table'] }, { kind: 'related', axis: 'ancestor', where: pii }] }] })
+    expect(screen.getByText('everything inside them (only Column or Table)')).toBeInTheDocument()
+    // Collapsed again, it still says how many it keeps.
+    fireEvent.click(only)
+    expect(only).toHaveTextContent('2')
+    save()
+    await waitFor(() => expect(createFromSearch).toHaveBeenCalled())
+    expect(createFromSearch.mock.calls[0][0].include).toStrictEqual(
+      { contents: true, contentsKinds: ['column', 'table'], containers: false, upstream: false, downstream: false })
+  })
+
+  it('every level is asked by leaving levels out, and a choice turned off takes its levels with it', async () => {
+    renderSheet()
+    const contents = () => screen.getByRole('button', { name: /Everything inside them/ })
+    fireEvent.click(contents())
+    const inside = screen.getByRole('radiogroup', { name: 'Levels inside them' })
+    fireEvent.click(within(inside).getByRole('radio', { name: '3' }))
+    expect(contents()).toHaveTextContent('Three levels in')
+    fireEvent.click(within(inside).getByRole('radio', { name: 'All' }))
+    expect(found()).toEqual({ kind: 'group', op: 'or', children: [pii, { kind: 'related', axis: 'ancestor', where: pii }] })
+    expect(JSON.stringify(found())).not.toContain('maxHops')
+    expect(contents()).toHaveTextContent('However deep')
+
+    fireEvent.click(within(inside).getByRole('radio', { name: '2' }))
+    fireEvent.click(contents())
+    await waitFor(() => expect(screen.queryByRole('radiogroup', { name: 'Levels inside them' })).toBeNull())
+    fireEvent.click(screen.getByRole('button', { name: /What feeds them/ }))
+    expect(JSON.stringify(found())).not.toContain('maxHops')
+    save()
+    await waitFor(() => expect(createFromSearch).toHaveBeenCalled())
+    expect(createFromSearch.mock.calls[0][0].include).toStrictEqual(
+      { contents: false, containers: false, upstream: true, downstream: false })
   })
 
   it('leaves a layer out, with its matches — but never the last one', async () => {

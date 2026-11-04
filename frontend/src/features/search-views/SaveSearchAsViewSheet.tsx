@@ -8,10 +8,11 @@
  *
  * Following its base, each match is in the layer the base places it in — by hand,
  * by what children inherit, by rules — and "Other matches" holds what the base
- * places nowhere. Beside the matches it can keep what they reach — everything
- * inside them, what contains them, one lineage step either way — still live and
- * any size; and fewer layers: a layer left out in the preview takes its matches
- * with it. More reach than that is a list of members, which Narrow makes.
+ * places nowhere. Beside the matches it can keep what they reach — what is inside
+ * them and what contains them, every level or a few, of every kind or only some;
+ * one lineage step either way — still live and any size; and fewer layers: a
+ * layer left out in the preview takes its matches with it. More reach than that
+ * is a list of members, which Narrow makes.
  */
 import { useEffect, useMemo, useState, type KeyboardEvent, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
@@ -21,13 +22,16 @@ import * as LucideIcons from 'lucide-react'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { Kbd } from '@/components/ui/Kbd'
 import { Segmented } from '@/components/ui/Segmented'
+import { LevelPicker } from '@/features/narrow/NarrowComposer'
 import { narrowErrorText } from '@/features/narrow/useNarrowResolve'
+import { useViewEntityTypes } from '@/hooks/useViewSchema'
 import { MOTION } from '@/lib/motion'
 import { cn } from '@/lib/utils'
 import { httpStatusOf } from '@/services/graphRequestFailure'
 import type { RuleCount } from '@/services/ruleCounts'
 import { createFromSearch } from '@/services/searchViewsApi'
 import type { View } from '@/services/viewApiService'
+import type { EntityTypeSchema } from '@/types/schema'
 import type { Predicate } from '@/types/search'
 import type { SearchViewDefinition, SubsetInclude, SubsetLayer, SubsetWithin } from '@/types/searchView'
 import { NO_INCLUDE, REST_LAYER_ID } from '@/types/searchView'
@@ -39,6 +43,7 @@ import {
   includeWords,
   layerPredicate,
   layersLike,
+  levelsText,
   nameFrom,
   perTypeLayers,
   placesByMoreThanType,
@@ -46,6 +51,7 @@ import {
   REST_LAYER_NAME,
   withInclude,
   type BoardLayer,
+  type IncludeChoice,
   type LayoutChoice,
 } from './model'
 import { useLayerCounts } from './useLayerCounts'
@@ -82,13 +88,31 @@ export interface SaveSearchAsViewSheetProps {
   onSaved: (view: View) => void
 }
 
+/** How far what is inside them, or what contains them, reaches: its levels (named
+ *  on the card once chosen — "Two levels in") and its kinds. */
+interface Reach {
+  levels: 'contentsLevels' | 'containersLevels'
+  kinds: 'contentsKinds' | 'containersKinds'
+  title: string
+  way: 'in' | 'up'
+  names?: { 1: string; all: string }
+  kindsLabel: string
+}
+
 /** What a live view can keep beside the matches, as the sheet offers it. */
-const INCLUDES: Array<{ key: keyof SubsetInclude; label: string; hint: string; icon: keyof typeof LucideIcons }> = [
-  { key: 'contents', label: 'Everything inside them', hint: 'However deep', icon: 'ListTree' },
-  { key: 'containers', label: 'What contains them', hint: 'Up to the top', icon: 'FolderUp' },
+const INCLUDES: Array<{ key: IncludeChoice; label: string; hint: string; icon: keyof typeof LucideIcons; reach?: Reach }> = [
+  { key: 'contents', label: 'Everything inside them', hint: 'However deep', icon: 'ListTree', reach: {
+    levels: 'contentsLevels', kinds: 'contentsKinds', title: 'Levels inside them', way: 'in',
+    kindsLabel: 'Only these kinds inside them' } },
+  { key: 'containers', label: 'What contains them', hint: 'Up to the top', icon: 'FolderUp', reach: {
+    levels: 'containersLevels', kinds: 'containersKinds', title: 'Levels up', way: 'up',
+    names: { 1: 'Parent', all: 'Top' }, kindsLabel: 'Only these kinds of container' } },
   { key: 'upstream', label: 'What feeds them', hint: 'One step upstream', icon: 'ArrowLeftToLine' },
   { key: 'downstream', label: 'What they feed', hint: 'One step downstream', icon: 'ArrowRightToLine' },
 ]
+
+/** The levels offered before the whole way. */
+const LEVELS = [1, 2, 3]
 
 const CARDS: Record<LayoutChoice, { icon: keyof typeof LucideIcons; title: (base: string) => string }> = {
   like: { icon: 'Columns3', title: (b) => `Like “${b}”` },
@@ -134,6 +158,9 @@ export function SaveSearchAsViewSheet({
   const [within, setWithin] = useState<SubsetWithin>(subset?.definition.within ?? initialWithin ?? 'view')
   const [choice, setChoice] = useState<LayoutChoice>('like')
   const [include, setInclude] = useState<SubsetInclude>(initialInclude ?? NO_INCLUDE)
+  // The view's kinds, for "Only these kinds", by the names its schema gives them.
+  const kinds = useViewEntityTypes()
+  const kindName = (type: string) => kinds.find((k) => k.id === type)?.name || type
   const [visibility, setVisibility] = useState<'private' | 'workspace'>('private')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -304,7 +331,7 @@ export function SaveSearchAsViewSheet({
             />
             <p className="mt-1.5 text-[12px] text-ink-muted leading-snug">
               The matches of <span className="text-ink">{subset ? `${describePredicate(subset.definition.predicate, typeLabel)} and ${sentence}` : sentence}</span>
-              {anyIncluded(include) && <>, with <span className="text-ink">{includeWords(include)}</span></>}.
+              {anyIncluded(include) && <>, with <span className="text-ink">{includeWords(include, kindName)}</span></>}.
             </p>
           </Section>
 
@@ -331,6 +358,7 @@ export function SaveSearchAsViewSheet({
               {INCLUDES.map((item) => {
                 const Icon = LucideIcons[item.icon] as LucideIcons.LucideIcon
                 const on = include[item.key]
+                const levels = item.reach && include[item.reach.levels]
                 return (
                   <button
                     key={item.key}
@@ -350,12 +378,24 @@ export function SaveSearchAsViewSheet({
                     </span>
                     <span className="min-w-0">
                       <span className="block text-[12.5px] font-semibold text-ink leading-tight">{item.label}</span>
-                      <span className="block text-[11px] text-ink-muted leading-snug">{item.hint}</span>
+                      <span className="block text-[11px] text-ink-muted leading-snug">
+                        {item.reach && levels ? `${capitalise(levelsText(levels))} ${item.reach.way}` : item.hint}
+                      </span>
                     </span>
                   </button>
                 )
               })}
             </div>
+            {/* How far each reaches, revealed with it. */}
+            <AnimatePresence initial={false}>
+              {INCLUDES.map((item) => item.reach && include[item.key] && (
+                <motion.div key={item.key} className="mt-2" initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0 }} transition={MOTION.collapse}>
+                  <HowFar reach={item.reach} icon={item.icon} include={include} kinds={kinds}
+                    onChange={(patch) => setInclude((was) => ({ ...was, ...patch }))} />
+                </motion.div>
+              ))}
+            </AnimatePresence>
             <p className="mt-2 text-[12px] text-ink-muted leading-snug">
               Kept as part of its search, so it stays current at any size.
               {onNarrowInstead && (
@@ -552,5 +592,71 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
       <p className="text-[11px] font-semibold uppercase tracking-wider text-ink-muted/70 mb-2">{title}</p>
       {children}
     </section>
+  )
+}
+
+/** How far one of them reaches: a few levels or the whole way, and — opened on
+ *  demand — only some of the view's kinds, none chosen being every kind. */
+function HowFar({ reach, icon, include, kinds, onChange }: {
+  reach: Reach
+  icon: keyof typeof LucideIcons
+  include: SubsetInclude
+  kinds: EntityTypeSchema[]
+  onChange: (patch: Partial<SubsetInclude>) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const Icon = LucideIcons[icon] as LucideIcons.LucideIcon
+  const chosen = include[reach.kinds] ?? []
+  const toggleKind = (type: string) => {
+    const next = chosen.includes(type) ? chosen.filter((t) => t !== type) : [...chosen, type]
+    onChange({ [reach.kinds]: next.length ? next : undefined })
+  }
+  return (
+    <div className="rounded-xl border border-glass-border/70 px-3.5 py-2.5">
+      <div className="flex items-center justify-between gap-3">
+        <span className="flex items-center gap-2 min-w-0 text-[12.5px] font-semibold text-ink">
+          <Icon className="w-3.5 h-3.5 flex-none text-accent-lineage" aria-hidden />
+          <span className="truncate">{reach.title}</span>
+        </span>
+        <LevelPicker label={reach.title} value={include[reach.levels] ?? 'all'} levels={LEVELS} names={reach.names}
+          onChange={(levels) => onChange({ [reach.levels]: levels === 'all' ? undefined : levels })} />
+      </div>
+      {kinds.length > 0 && (
+        <>
+          <button type="button" aria-expanded={open} aria-label={reach.kindsLabel} onClick={() => setOpen((was) => !was)}
+            className="mt-1 inline-flex items-center gap-2 h-6 rounded-md text-[11.5px] font-medium text-ink-muted hover:text-ink transition-colors">
+            <LucideIcons.ChevronRight className={cn('w-3.5 h-3.5 transition-transform duration-150', open && 'rotate-90')} aria-hidden />
+            <span>Only these kinds</span>
+            {chosen.length > 0 && (
+              <span className="-ml-1 px-1.5 rounded-md bg-accent-lineage/10 text-[10.5px] font-semibold tabular-nums text-accent-lineage">
+                {chosen.length}
+              </span>
+            )}
+          </button>
+          <AnimatePresence initial={false}>
+            {open && (
+              <motion.div role="group" aria-label={reach.kindsLabel} className="mt-1 pl-[22px] flex flex-wrap items-center gap-1.5"
+                initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} transition={MOTION.collapse}>
+                {kinds.map((kind) => {
+                  const picked = chosen.includes(kind.id)
+                  return (
+                    <button key={kind.id} type="button" aria-pressed={picked} onClick={() => toggleKind(kind.id)}
+                      className={cn('inline-flex items-center gap-1.5 h-6 px-2 rounded-full border text-[11.5px] font-medium transition-colors',
+                        picked ? 'border-accent-lineage/50 bg-accent-lineage/[0.10] text-accent-lineage'
+                          : 'border-black/[0.08] dark:border-white/[0.10] text-ink-secondary hover:border-accent-lineage/40 hover:text-ink')}>
+                      {picked
+                        ? <LucideIcons.Check className="w-3 h-3" strokeWidth={2.6} aria-hidden />
+                        : <span className="w-1.5 h-1.5 rounded-full flex-none" style={{ background: kind.visual.color }} aria-hidden />}
+                      {kind.name || kind.id}
+                    </button>
+                  )
+                })}
+                {chosen.length === 0 && <span className="text-[11px] text-ink-muted">None chosen: every kind</span>}
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </>
+      )}
+    </div>
   )
 }

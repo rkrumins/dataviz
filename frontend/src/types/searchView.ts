@@ -19,12 +19,21 @@ export type SubsetLayout = 'inherit' | 'own'
 export const REST_LAYER_ID = 'other-matches'
 
 /** What a subset keeps beside its search's matches. Each is one relationship to a
- *  match, kept as part of its search, so the view stays live at any size. */
+ *  match, kept as part of its search, so the view stays live at any size. Levels
+ *  and kinds count only while their choice is on; unset, they are never sent. */
 export interface SubsetInclude {
-  /** Everything inside a match, however deep. */
+  /** What is inside a match: every level, or `contentsLevels` of them. */
   contents: boolean
-  /** What contains a match, up to the top. */
+  /** Levels inside (1–20); unset: every level. */
+  contentsLevels?: number
+  /** Only these kinds inside (entity types, a set); unset: every kind. */
+  contentsKinds?: string[]
+  /** What contains a match: up to the top, or `containersLevels` up. */
   containers: boolean
+  /** Levels up (1–20); unset: up to the top. */
+  containersLevels?: number
+  /** Only these kinds of container; unset: every kind. */
+  containersKinds?: string[]
   /** One lineage step upstream: what feeds a match. */
   upstream: boolean
   /** One lineage step downstream: what a match feeds. */

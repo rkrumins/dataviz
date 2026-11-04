@@ -4,7 +4,7 @@
  * view says how many subsets are made from it.
  */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -141,6 +141,46 @@ describe('SearchViewChip — what it keeps, and fewer layers', () => {
     fireEvent.click(await screen.findByRole('button', { name: /Everything inside/ }))
     await waitFor(() => expect(api.putSearch).toHaveBeenCalledWith('v9', {
       ifDefinitionHash: 'h1', include: { contents: true, containers: false, upstream: false, downstream: false } }))
+  })
+
+  it('an editor keeps a number of levels inside them, with Undo', async () => {
+    api.getSearchStatus.mockResolvedValue(status({ definition: { ...status().definition,
+      include: { contents: true, containers: false, upstream: false, downstream: false } } }))
+    renderIn(<SearchViewChip view={SUBSET} canEdit />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Subset of Sales overview' }))
+    const inside = await screen.findByRole('radiogroup', { name: 'Levels inside them' })
+    expect(screen.queryByRole('radiogroup', { name: 'Levels up' })).toBeNull()
+    expect(within(inside).getByRole('radio', { name: 'All' })).toHaveAttribute('aria-checked', 'true')
+    fireEvent.click(within(inside).getByRole('radio', { name: '2' }))
+    await waitFor(() => expect(api.putSearch).toHaveBeenCalledWith('v9', { ifDefinitionHash: 'h1',
+      include: { contents: true, contentsLevels: 2, containers: false, upstream: false, downstream: false } }))
+    await waitFor(() => expect(notify).toHaveBeenCalledWith('success', 'It keeps two levels inside them now',
+      expect.objectContaining({ label: 'Undo' }), 8000))
+    notify.mock.calls.at(-1)![2]!.onClick()
+    await waitFor(() => expect(api.putSearch).toHaveBeenLastCalledWith('v9', { ifDefinitionHash: 'h2',
+      include: { contents: true, containers: false, upstream: false, downstream: false } }))
+  })
+
+  it('an editor keeps what contains them up to the top again, and Undo brings back the parent alone', async () => {
+    api.getSearchStatus.mockResolvedValue(status({ definition: { ...status().definition,
+      include: { contents: false, containers: true, containersLevels: 1, upstream: false, downstream: false } } }))
+    renderIn(<SearchViewChip view={SUBSET} canEdit />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Subset of Sales overview' }))
+    expect(await screen.findByText(/what contains them, one level up/)).toBeInTheDocument()
+    const up = screen.getByRole('radiogroup', { name: 'Levels up' })
+    expect(within(up).getAllByRole('radio').map((r) => r.textContent)).toEqual(['Parent', '2', '3', 'Top'])
+    expect(within(up).getByRole('radio', { name: 'Parent' })).toHaveAttribute('aria-checked', 'true')
+    // What it keeps already: nothing to save.
+    fireEvent.click(within(up).getByRole('radio', { name: 'Parent' }))
+    fireEvent.click(within(up).getByRole('radio', { name: 'Top' }))
+    await waitFor(() => expect(notify).toHaveBeenCalledWith('success', 'It keeps what contains them now',
+      expect.objectContaining({ label: 'Undo' }), 8000))
+    expect(api.putSearch).toHaveBeenCalledTimes(1)
+    expect(api.putSearch).toHaveBeenCalledWith('v9', { ifDefinitionHash: 'h1',
+      include: { contents: false, containers: true, upstream: false, downstream: false } })
+    notify.mock.calls.at(-1)![2]!.onClick()
+    await waitFor(() => expect(api.putSearch).toHaveBeenLastCalledWith('v9', { ifDefinitionHash: 'h2',
+      include: { contents: false, containers: true, containersLevels: 1, upstream: false, downstream: false } }))
   })
 
   it('an editor shows a hidden layer again, and can’t hide the last one', async () => {

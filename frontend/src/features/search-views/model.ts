@@ -166,8 +166,44 @@ export function perTypeLayers(found: Array<{ type: string; count: number }>, lab
 
 // ── What it keeps beside the matches ───────────────────────────────────────
 
+/** One of what a subset keeps beside its matches, each on or off. */
+export type IncludeChoice = 'contents' | 'containers' | 'upstream' | 'downstream'
+
 export function anyIncluded(include: SubsetInclude | null | undefined): boolean {
   return !!include && (include.contents || include.containers || include.upstream || include.downstream)
+}
+
+/** Kinds as the server keeps them: a set, sorted; none named is every kind. */
+function kindsOf(kinds: string[] | null | undefined): string[] | undefined {
+  const set = [...new Set((kinds ?? []).filter(Boolean))].sort()
+  return set.length ? set : undefined
+}
+
+/** ``include`` as the server keeps it (`SubsetInclude`'s own rules): levels and
+ *  kinds only with the choice they go with, kinds a set, nothing unset sent. */
+export function keptInclude(include: SubsetInclude): SubsetInclude {
+  const { contents, containers, upstream, downstream } = include
+  const contentsKinds = contents ? kindsOf(include.contentsKinds) : undefined
+  const containersKinds = containers ? kindsOf(include.containersKinds) : undefined
+  return {
+    contents,
+    ...(contents && include.contentsLevels ? { contentsLevels: include.contentsLevels } : {}),
+    ...(contentsKinds ? { contentsKinds } : {}),
+    containers,
+    ...(containers && include.containersLevels ? { containersLevels: include.containersLevels } : {}),
+    ...(containersKinds ? { containersKinds } : {}),
+    upstream,
+    downstream,
+  }
+}
+
+/** Inside a match (``ancestor``) or containing one (``descendant``), ``levels`` of
+ *  the way (unset: the whole way), of ``kinds`` when some are named — the kind
+ *  first, so a candidate of another kind is never walked (`_of_kinds`). */
+function containment(axis: 'ancestor' | 'descendant', where: Predicate, levels?: number, kinds?: string[]): Node {
+  const related: Node = { kind: 'related', axis, where, ...(levels ? { maxHops: levels } : {}) }
+  const only = kindsOf(kinds)
+  return only ? { kind: 'group', op: 'and', children: [{ kind: 'entityType', op: 'in', values: only }, related] } : related
 }
 
 /** What a subset's entities are found by: its search, or its search and what it
@@ -177,21 +213,35 @@ export function anyIncluded(include: SubsetInclude | null | undefined): boolean 
 export function withInclude(predicate: Predicate, include: SubsetInclude | null | undefined): Predicate {
   if (!include || !anyIncluded(include)) return predicate
   const parts: Node[] = [predicate as unknown as Node]
-  if (include.contents) parts.push({ kind: 'related', axis: 'ancestor', where: predicate })
-  if (include.containers) parts.push({ kind: 'related', axis: 'descendant', where: predicate })
+  if (include.contents) parts.push(containment('ancestor', predicate, include.contentsLevels, include.contentsKinds))
+  if (include.containers) parts.push(containment('descendant', predicate, include.containersLevels, include.containersKinds))
   const reach = { kind: 'group', op: 'or', children: [predicate, { kind: 'related', axis: 'ancestor', where: predicate }] }
   if (include.upstream) parts.push({ kind: 'related', axis: 'downstream', where: reach })
   if (include.downstream) parts.push({ kind: 'related', axis: 'upstream', where: reach })
   return { kind: 'group', op: 'or', children: parts } as unknown as Predicate
 }
 
-/** "everything inside them and what feeds them" — what a subset keeps beside its
- *  matches, in words; '' for just the matches. */
-export function includeWords(include: SubsetInclude | null | undefined): string {
+const LEVEL_WORDS = ['', 'one level', 'two levels', 'three levels']
+
+/** "two levels" — a number of levels, as the server says it. */
+export function levelsText(levels: number): string {
+  return LEVEL_WORDS[levels] ?? `${levels} levels`
+}
+
+/** "two levels inside them (only Column) and what feeds them" — what a subset keeps
+ *  beside its matches, in words, as the server says how far; '' for just the matches. */
+export function includeWords(include: SubsetInclude | null | undefined,
+  typeLabel: (type: string) => string = (t) => t): string {
   if (!include) return ''
+  const only = (words: string, kinds?: string[]) => {
+    const named = kindsOf(kinds)
+    return named ? `${words} (only ${list(named.map(typeLabel))})` : words
+  }
   const words = [
-    include.contents && 'everything inside them',
-    include.containers && 'what contains them',
+    include.contents && only(include.contentsLevels
+      ? `${levelsText(include.contentsLevels)} inside them` : 'everything inside them', include.contentsKinds),
+    include.containers && only(include.containersLevels
+      ? `what contains them, ${levelsText(include.containersLevels)} up` : 'what contains them', include.containersKinds),
     include.upstream && 'what feeds them',
     include.downstream && 'what they feed',
   ].filter((w): w is string => !!w)
@@ -201,7 +251,7 @@ export function includeWords(include: SubsetInclude | null | undefined): string 
 
 /** A narrowing kept live, as a subset view: its search, where it looks, and what it
  *  includes — or why it can only be kept as a list of members. A live view keeps
- *  everything inside the matches or nothing, and one lineage step either way. */
+ *  every level inside the matches or a number of them, and one lineage step either way. */
 export function liveFromNarrowing(spec: MembershipSpec):
   { predicate: Predicate; within: SubsetWithin; include: SubsetInclude } | { reason: string } {
   const query = spec.seeds.query
@@ -209,9 +259,6 @@ export function liveFromNarrowing(spec: MembershipSpec):
   const blocked = unsaveableReason(query)
   if (blocked) return { reason: blocked }
   const { children, upstream, downstream, partnerChildren } = spec.expand
-  if (children !== 0 && children !== 'all') {
-    return { reason: 'It keeps a number of levels inside them. Kept live, it keeps everything inside them, or nothing.' }
-  }
   if ((upstream !== 0 && upstream !== 1) || (downstream !== 0 && downstream !== 1)) {
     return { reason: 'It reaches more than one step of lineage. Kept live, it reaches one step either way.' }
   }
@@ -221,7 +268,8 @@ export function liveFromNarrowing(spec: MembershipSpec):
   return {
     predicate: query,
     within: spec.within,
-    include: { ...NO_INCLUDE, contents: children === 'all', upstream: upstream === 1, downstream: downstream === 1 },
+    include: { ...NO_INCLUDE, contents: children !== 0, ...(children !== 'all' && children ? { contentsLevels: children } : {}),
+      upstream: upstream === 1, downstream: downstream === 1 },
   }
 }
 
@@ -285,7 +333,7 @@ export function requestOf(choices: SaveSearchChoices, ctx: SaveSearchContext): F
     layout,
     ...(layout === 'own' ? { layers, rest } : {}),
     ...(hidden.length ? { hiddenLayers: hidden } : {}),
-    ...(anyIncluded(choices.include) ? { include: choices.include } : {}),
+    ...(choices.include && anyIncluded(choices.include) ? { include: keptInclude(choices.include) } : {}),
     provenance: { origin: 'search', viewId: ctx.viewId },
   }
 }
