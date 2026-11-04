@@ -74,6 +74,15 @@ def _by_name(d: "_OverlayDelta", urns: Iterable[str]) -> List[str]:
     return sorted(urns, key=key)
 
 
+def _created_first(created: List[str], offset: int, limit: int) -> Tuple[List[str], Optional[Dict[str, int]]]:
+    """A listing's page of one order — the draft's new nodes, then main's rows — so that every
+    page is a slice of it and none has to remember an earlier one: the new nodes on the page, and
+    the offset and limit of main's part of it (``None`` when they fill it)."""
+    page = created[offset:offset + limit]
+    room = limit - len(page)
+    return page, ({"offset": max(0, offset - len(created)), "limit": room} if room > 0 else None)
+
+
 class _OverlayDelta:
     """Indexed, reader-shaped view of a draft's patch set vs its main base.
 
@@ -599,10 +608,17 @@ class DraftOverlayProvider:
         return out
 
     async def get_nodes(self, query: NodeQuery) -> List[GraphNode]:
-        base = await self._base.get_nodes(query)
         d = await self._delta_()
         if d.empty:
-            return base
+            return await self._base.get_nodes(query)
+        # Draft-NEW nodes the query asks for: all it names (a lookup), or — a listing — the page's
+        # share of them, ahead of main's rows (_created_first).
+        added = self._created_for(d, query)
+        if query.urns:
+            base = await self._base.get_nodes(query)
+        else:
+            added, rest = _created_first(added, query.offset or 0, query.limit or 100)
+            base = await self._base.get_nodes(query.model_copy(update=rest)) if rest else []
         await d.load(n.urn for n in base)
         seen: set = set()
         out: List[GraphNode] = []
@@ -613,13 +629,7 @@ class DraftOverlayProvider:
             if merged is not None:
                 out.append(merged)
             seen.add(n.urn)
-        # Draft-NEW nodes the query asks for: the ones it names, or — a listing, not a lookup — a
-        # page of the matches, on its first call.
-        added = self._created_for(d, query)
-        if not query.urns:
-            added = added[:query.limit or 100] if not (query.offset or 0) else []
-        out += [d.with_child_count(n) for n in await d.served([u for u in added if u not in seen])]
-        return out
+        return [d.with_child_count(n) for n in await d.served([u for u in added if u not in seen])] + out
 
     async def get_nodes_page(self, query: NodeQuery) -> NodePage:
         """A page in MAIN's order: `has_more` and `next_offset` are the base's, so a
@@ -659,12 +669,17 @@ class DraftOverlayProvider:
         return NodePage(nodes=out, hasMore=has_more, nextOffset=next_offset)
 
     async def search_nodes(self, query: str, limit: int = 10, offset: int = 0) -> List[GraphNode]:
-        base = await self._base.search_nodes(query, limit=limit, offset=offset)
         d = await self._delta_()
         if d.empty:
-            return base
-        await d.load(n.urn for n in base)
+            return await self._base.search_nodes(query, limit=limit, offset=offset)
         q = (query or "").lower()
+        # Draft-NEW matches first, then main's (_created_first): each page its share of them.
+        matches, rest = _created_first(_by_name(d, (urn for urn, n in d.node_index.items()
+                                                    if urn in d.node_new
+                                                    and q in (n.display_name or "").lower())),
+                                       offset, limit)
+        base = await self._base.search_nodes(query, **rest) if rest else []
+        await d.load(n.urn for n in base)
         out: List[GraphNode] = []
         for n in base:
             if n.urn in d.node_remove:
@@ -672,14 +687,8 @@ class DraftOverlayProvider:
             merged = d.overlay_existing(n)
             if merged is not None:
                 out.append(merged)
-        if offset:
-            return out                                       # draft-NEW matches: the first page's
         seen = {n.urn for n in out}
-        matches = _by_name(d, (urn for urn, n in d.node_index.items()
-                               if urn not in seen and urn in d.node_new
-                               and q in (n.display_name or "").lower()))
-        out += await d.served(matches[:limit])
-        return out
+        return await d.served([u for u in matches if u not in seen]) + out
 
     async def get_edges(self, query: EdgeQuery) -> List[GraphEdge]:
         base = await self._base.get_edges(query)

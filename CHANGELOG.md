@@ -28,7 +28,8 @@ that, and the screens move onto the new lists in the next one.
   - the list pages in a fixed order (entities, relationships, structure; by type, then name),
     narrowed by kind, status, type and text, and names an edge's ends;
   - one entity's before and after is two point reads;
-  - the index gives the canvas every change at about 70 bytes each instead of a payload.
+  - the index gives the canvas every change at about 70 bytes each instead of a payload, naming
+    nodes and edge ends by urn where an entity id is not one (an imported node's).
 
   Past `GRAPHVER_CHANGE_LIST_MAX` (250,000) changes a list is counted, not listed.
 - **The history calendar** (`GET …/graphs/{gid}/history/months`): main's revisions by month and
@@ -41,7 +42,9 @@ that, and the screens move onto the new lists in the next one.
   touched (the top level, a container's children, a type's feed) served every created node on its
   first page and loaded each one's value: the canvas asked for 200 roots of a draft holding a
   100,000-entity import and got 100,200. The first page now holds at most a page of them, in name
-  order, and the rest follow main's last page. Forks read the same way.
+  order, and the rest follow main's last page. Forks read the same way. A plain listing or search
+  pages through them first, then main's rows at offsets moved by how many there are: each page a
+  slice of one order, and none of them dropped past the first page.
 - **Loading a draft's created entities by name no longer scans the draft.** Each batch of 100 names
   was tested against every node the draft created, with the batch's set built again for each one:
   at 100,000 created nodes, ten million inserts a batch.

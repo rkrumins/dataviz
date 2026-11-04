@@ -237,3 +237,54 @@ def test_versioning_change_index_e2e():
 if __name__ == "__main__":
     asyncio.run(_run())
     print("versioning change index e2e: OK")
+
+
+async def _run_ids_not_urns() -> None:
+    """The canvas names a node by its urn, which an imported node's id is not: the compact form
+    says each node's urn, and each edge's ends' urns, where they differ from the ids."""
+    await models.create_schema_and_partitions()
+    service_mod._CHANGE_INDEXES.clear()
+    svc = GraphVersioningService()
+    G = await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(), workspace_id="ws1", actor="u")
+    gid = G["graph_id"]
+
+    def imported(eid, urn, etype="Table"):
+        return {"op": "create", "entity_kind": "node", "entity_id": eid,
+                "payload": {"urn": urn, "entityType": etype, "displayName": eid}}
+    await svc.apply_ops(graph_id=gid, actor="u", message="seed",
+                        ops=[_n("urn:canvas:1"), imported("ent_1", "urn:x:1")])
+    head = (await svc.get_graph(gid))["main_head_commit_seq"]
+    d = await svc.open_draft(graph_id=gid, owner="u")
+    await svc.apply_ops(graph_id=gid, branch_id=d, actor="u", message="import", ops=[
+        imported("ent_2", "urn:x:2", "Column"),
+        _e("e1", "ent_1", "ent_2"),                               # both ends imported
+        _e("e2", "urn:canvas:1", "ent_1", "LINEAGE"),            # one end each way
+    ])
+    try:
+        compact = await svc.change_index_compact(graph_id=gid, origin=ChangeOrigin(branch_id=d),
+                                                 containment_edge_types=CONT)
+        rows = {e[0]: e for e in compact["entries"]}
+        assert rows["ent_2"] == ["ent_2", "n", "a", "Column", "urn:x:2"]
+        assert rows["e1"] == ["e1", "e", "a", "CONTAINS", "ent_1", "ent_2", "urn:x:1", "urn:x:2"]
+        assert rows["e2"] == ["e2", "e", "a", "LINEAGE", "urn:canvas:1", "ent_1", "urn:canvas:1", "urn:x:1"]
+
+        await svc.publish(graph_id=gid, branch_id=d, actor="u", message="go")
+        to = (await svc.get_graph(gid))["main_head_commit_seq"]
+        window = await svc.change_index_compact(graph_id=gid, origin=ChangeOrigin(from_seq=head, to_seq=to),
+                                                containment_edge_types=CONT)
+        rows = {e[0]: e for e in window["entries"]}
+        assert rows["e1"][6:] == ["urn:x:1", "urn:x:2"] and rows["ent_2"][4:] == ["urn:x:2"]
+        # A canvas node's id is its urn: nothing follows.
+        await svc.apply_ops(graph_id=gid, actor="u", message="rename",
+                            ops=[_u("urn:canvas:1", "renamed", "Table")])
+        later = await svc.change_index_compact(
+            graph_id=gid, origin=ChangeOrigin(from_seq=to, to_seq=to + 1), containment_edge_types=CONT)
+        assert later["entries"] == [["urn:canvas:1", "n", "m", "Table"]]
+    finally:
+        service_mod._CHANGE_INDEXES.clear()
+        await db.dispose_engine()
+
+
+@pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
+def test_the_compact_form_names_nodes_and_ends_by_urn():
+    asyncio.run(_run_ids_not_urns())

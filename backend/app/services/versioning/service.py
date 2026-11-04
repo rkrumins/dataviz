@@ -7025,8 +7025,10 @@ class GraphVersioningService:
                 heads = await self._heads_from_rows(conn, graph_id, page)
                 before = await self._hashes_at(s, graph_id, main_id, list(heads), base)
                 await asyncio.to_thread(_add_draft_page, builder, heads, before)
-        too_large = None if keep else {"changed": changed, "limit": config.CHANGE_LIST_MAX}
-        return await asyncio.to_thread(builder.finish, too_large=too_large)
+            too_large = None if keep else {"changed": changed, "limit": config.CHANGE_LIST_MAX}
+            index = await asyncio.to_thread(builder.finish, too_large=too_large)
+            index.end_urns = await self._end_urns(s, graph_id, branch_id, index)
+        return index
 
     async def _build_window_change_index(self, graph_id: str, main_id: str, lo: int, hi: int,
                                          cset) -> ChangeIndex:
@@ -7051,7 +7053,22 @@ class GraphVersioningService:
                 before = await self._hashes_at(s, graph_id, main_id, chunk, lo)
                 after = await self._hashes_at(s, graph_id, main_id, chunk, hi)
                 await asyncio.to_thread(_add_window_chunk, builder, chunk, before, after)
-        return await asyncio.to_thread(builder.finish, window=window)
+            index = await asyncio.to_thread(builder.finish, window=window)
+            index.end_urns = await self._end_urns(s, graph_id, main_id, index, as_of_seq=hi)
+        return index
+
+    async def _end_urns(self, s, graph_id: str, branch_id: str, index: ChangeIndex,
+                        as_of_seq: Optional[int] = None) -> Dict[str, str]:
+        """The urns of ``index``'s edge ends where they are not the ends' ids (an imported node's):
+        an end the index itself lists by its entry, the rest as a read of ``branch_id`` (at
+        ``as_of_seq``) names them (:meth:`_current_urns`). Once per index, which is cached."""
+        nodes = {e.entity_id: e.urn or f"gv:{e.entity_id}" for e in index.entries if e.kind == "node"}
+        ends = {x for e in index.entries if e.kind == "edge" for x in (e.src, e.tgt) if x}
+        urns = {i: nodes[i] for i in ends if i in nodes}
+        rest = [i for i in ends if i not in urns]
+        if rest:
+            urns.update(await self._current_urns(s, graph_id, branch_id, rest, as_of_seq))
+        return {i: u for i, u in urns.items() if u != i}
 
     async def _window_commits(self, s, graph_id: str, main_id: str, lo: int,
                               hi: int) -> Tuple[Dict[str, object], Tuple[int, int, int]]:

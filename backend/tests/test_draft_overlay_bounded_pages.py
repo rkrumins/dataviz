@@ -58,10 +58,14 @@ class Main:
                         hasMore=offset + limit < len(self.typed), nextOffset=offset + len(page))
 
     async def get_nodes(self, query):
-        return [_n(u) for u in (query.urns or []) if u in self.roots or u in self.children]
+        if query.urns:
+            return [_n(u) for u in query.urns if u in self.roots or u in self.children]
+        self.calls.append(f"nodes@{query.offset}+{query.limit}")
+        return [_n(u, typ="Table") for u in self.typed[query.offset:query.offset + query.limit]]
 
     async def search_nodes(self, query, limit=10, offset=0):
-        return []
+        self.calls.append(f"search@{offset}+{limit}")
+        return [_n(u, typ="Table") for u in [t for t in self.typed if query in t][offset:offset + limit]]
 
 
 class Svc:
@@ -214,26 +218,37 @@ def test_a_lookup_by_urn_reads_only_the_urns_it_names():
     assert sorted(n.urn for n in asyncio.run(run())) == ["new0007", "new4999"]
 
 
-def test_a_listing_without_urns_gets_a_page_of_new_nodes_on_its_first_call_only():
-    p, _svc = _draft(Main(), roots=_created(300))
+def test_a_listing_pages_the_drafts_new_nodes_then_mains_each_once():
+    """A listing (no urns) is one order — the draft's new nodes, then main's rows — and each page a
+    slice of it. The new nodes were served on the first page only, so a listing never reached past
+    its first ``limit`` of them; main's rows now come at offsets moved by how many there are."""
+    main = Main(typed=[f"main{i:03d}" for i in range(70)])
+    p, _svc = _draft(main, roots=_created(120))
 
     async def run():
-        first = await p.get_nodes(NodeQuery(entityTypes=["Table"], offset=0, limit=50))
-        later = await p.get_nodes(NodeQuery(entityTypes=["Table"], offset=50, limit=50))
-        return first, later
+        pages, offset = [], 0
+        while True:
+            page = await p.get_nodes(NodeQuery(entityTypes=["Table"], offset=offset, limit=50))
+            if not page:
+                return pages
+            pages.append([n.urn for n in page])
+            offset += 50
 
-    first, later = asyncio.run(run())
-    assert len(first) == 50 and [n.urn for n in first] == _created(50)
-    assert later == []
+    pages = asyncio.run(run())
+    assert [u for page in pages for u in page] == _created(120) + [f"main{i:03d}" for i in range(70)]
+    assert [len(page) for page in pages] == [50, 50, 50, 40]
+    assert main.calls == ["nodes@0+30", "nodes@30+50", "nodes@80+50"], "main read only where a page reaches it"
 
 
-def test_search_serves_a_page_of_new_matches_on_its_first_page():
-    p, _svc = _draft(Main(), roots=_created(40))
+def test_search_pages_the_drafts_new_matches_then_mains():
+    main = Main(typed=["newmain1", "newmain2"])
+    p, _svc = _draft(main, roots=_created(15))
 
     async def run():
-        return (await p.search_nodes("new", limit=10, offset=0),
-                await p.search_nodes("new", limit=10, offset=10))
+        return [[n.urn for n in await p.search_nodes("new", limit=10, offset=o)] for o in (0, 10, 20)]
 
-    first, second = asyncio.run(run())
-    assert [n.urn for n in first] == _created(10)
-    assert second == []
+    first, second, third = asyncio.run(run())
+    assert first == _created(10)
+    assert second == _created(15)[10:] + ["newmain1", "newmain2"]
+    assert third == []
+    assert main.calls == ["search@0+5", "search@5+10"]

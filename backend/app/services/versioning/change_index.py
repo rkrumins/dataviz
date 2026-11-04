@@ -182,6 +182,9 @@ class ChangeIndex:
         self.too_large = too_large
         self.window = window
         self.approximate = approximate
+        #: An edge end's urn by its entity id, where the two differ (an imported node's): what the
+        #: canvas names the end by. Filled once, by whoever built the index.
+        self.end_urns: Dict[str, str] = {}
         self._views: "OrderedDict[tuple, array]" = OrderedDict()
         self._lock = threading.Lock()
 
@@ -266,14 +269,20 @@ _STATUS_CODE = {"added": "a", "modified": "m", "removed": "r"}
 def compact_entries(index: ChangeIndex) -> List[list]:
     """Every entry as a short array — ``[entityId, "n"|"e", "a"|"m"|"r", type]``, an edge with
     its ends after — what the canvas decorates by and finds created entities and their parents
-    from, at about 70 bytes an entry instead of a payload."""
+    from, at about 70 bytes an entry instead of a payload. The canvas names a node by its urn,
+    which an imported node's id is not: a node's urn follows its type when the two differ
+    (``gv:<id>`` for one with none), and an edge's ends' urns follow its ends when either does."""
     out: List[list] = []
+    urns = index.end_urns
     for e in index.entries:
         status = _STATUS_CODE[e.status]
         if e.kind == "node":
-            out.append([e.entity_id, "n", status, e.type])
+            urn = e.urn or f"gv:{e.entity_id}"
+            out.append([e.entity_id, "n", status, e.type] + ([urn] if urn != e.entity_id else []))
         else:
-            out.append([e.entity_id, "e", status, e.type, e.src, e.tgt])
+            src, tgt = urns.get(e.src or "", e.src), urns.get(e.tgt or "", e.tgt)
+            out.append([e.entity_id, "e", status, e.type, e.src, e.tgt]
+                       + ([src, tgt] if (src, tgt) != (e.src, e.tgt) else []))
     return out
 
 

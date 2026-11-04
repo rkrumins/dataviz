@@ -134,8 +134,11 @@ def test_rows_name_an_edges_ends_and_compact_entries_are_short():
     n1 = entry_dict(index.entries[index.by_id["n1"]], {})
     assert n1["displayName"] == "orders" and n1["urn"] == "urn:orders" and "sourceName" not in n1
     compact = compact_entries(index)
-    assert ["n1", "n", "a", "Table"] in compact
+    # A node's urn follows where it is not its id; an edge's ends' urns where either is not.
+    assert ["n1", "n", "a", "Table", "urn:orders"] in compact
     assert ["e1", "e", "a", "CONTAINS", "n1", "n3"] in compact
+    index.end_urns = {"n1": "urn:orders"}
+    assert ["e1", "e", "a", "CONTAINS", "n1", "n3", "urn:orders", "n3"] in compact_entries(index)
     assert index.status_of("e3") == "removed" and index.status_of("n4") is None
 
 
