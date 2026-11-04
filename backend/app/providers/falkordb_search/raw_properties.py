@@ -32,6 +32,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Dict, FrozenSet, Iterable, List, Optional, Sequence, Tuple
 
+from backend.app.jobs.metrics import increment
 from backend.common.search_semantics import Comparison, evaluate, fold_case
 
 
@@ -207,6 +208,7 @@ async def graph_raw_labels(provider, run, data_version: str, *, shared=None) -> 
     if reading is not None:
         await asyncio.wait({reading})
         if not reading.cancelled():
+            increment("search_raw_labels_total", answer="joined")
             return reading.result()
         # Its reader failed or gave up: this request reads for itself.
     future: asyncio.Future[FrozenSet[str]] = asyncio.get_running_loop().create_future()
@@ -231,10 +233,12 @@ async def _shared_raw_labels(run, key: Tuple[str, str], shared) -> FrozenSet[str
         try:
             kept = await shared.pointed(name)
             if kept is not None:
+                increment("search_raw_labels_total", answer="shared")
                 return frozenset(json.loads(kept))
         except Exception as exc:  # noqa: BLE001 — the cache Redis, or a value not ours
             logger.debug("raw labels: no shared answer (%s)", exc)
     found = await _read_raw_labels(run)
+    increment("search_raw_labels_total", answer="read")
     if shared is not None:
         try:
             await shared.point(name, json.dumps(sorted(found)), RAW_LABELS_SHARED_TTL_S)

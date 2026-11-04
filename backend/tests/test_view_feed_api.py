@@ -171,12 +171,13 @@ class TestRefusals:
     async def test_only_a_subset_view_has_a_feed(self, on, views, post):
         ws, _base, _sub, plain = await views()
         resp = await post(ws, plain.id, {"layerId": "t"}, FeedEngine())
-        assert resp.status_code == 409 and resp.json()["detail"]["reason"] == "not_a_subset"
+        # One status per reason: 404, as GET /views/{id}/search answers it.
+        assert resp.status_code == 404 and resp.json()["detail"]["reason"] == "not_a_subset"
 
     async def test_a_layer_it_has_not(self, on, views, post):
         ws, _base, sub, _plain = await views()
         resp = await post(ws, sub.id, {"layerId": "nope"}, FeedEngine())
-        assert resp.status_code == 404
+        assert resp.status_code == 404 and resp.json()["detail"]["reason"] == "no_such_layer"
 
     async def test_a_base_gone_is_a_conflict_never_a_wider_search(self, on, views, post):
         ws, _base, sub, _plain = await views(deleted=True)

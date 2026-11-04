@@ -947,6 +947,8 @@ class GraphCache:
         Keyed without a generation, which can't be read. Flow control (shed,
         warming) reaches every follower as the leader got it; another failure
         leaves each follower to compute for itself, as before."""
+        from backend.app.jobs.metrics import increment
+
         key = _build_key(scope, "unreachable", endpoint, params)
         existing = self._bypassing.get(key)
         if existing is not None:
@@ -955,11 +957,13 @@ class GraphCache:
             if not existing.cancelled():
                 exc = existing.exception()
                 if exc is None:
+                    increment("graph_cache_unreachable_total", endpoint=endpoint, outcome="shared")
                     return existing.result()
                 if isinstance(exc, (ProviderBusy, ProviderLoading)):
                     raise exc
         fut: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
         self._bypassing[key] = fut
+        increment("graph_cache_unreachable_total", endpoint=endpoint, outcome="computed")
         try:
             value = await compute()
         except asyncio.CancelledError:

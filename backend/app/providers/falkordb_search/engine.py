@@ -34,6 +34,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any, AsyncContextManager, Callable, Dict, List, Optional, Tuple
 
+from backend.app.jobs.metrics import increment
 from backend.app.providers.falkordb_deep_search import (
     _RESERVED_NODE_KEYS,
     _build_compiler_for_provider,
@@ -188,6 +189,8 @@ async def execute_session_search(
                                  facets=None, wants_facets=False)
 
     async def last_one() -> SearchResultPage:
+        # How often readers were spared a rescan's rows so far.
+        increment("search_last_page_answers_total")
         return await _answer(provider, query, last, 0, context, started, deadline,
                              total=None, cache_hit=True, progressive=progressive,
                              facets=None, wants_facets=False)

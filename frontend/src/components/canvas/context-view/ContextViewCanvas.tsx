@@ -4590,9 +4590,10 @@ export function ContextViewCanvas({
 
   // SUBSET VIEWS (features/search-views) — a search's matches kept as a view of
   // their own; in a subset view, its layers list them. A preview switch
-  // (`searchViewsEnabled`). A subset places by type alone: no entity is placed by
-  // hand, grouped or reordered in it, and while it follows its base its layers
-  // are the base's, changed there.
+  // (`searchViewsEnabled`). The server places its matches — where its base places
+  // them while it follows it, by type in a layout of its own — so no entity is
+  // placed by hand, grouped or reordered in it, and while it follows its base its
+  // layers are the base's, changed there.
   const searchViewsOn = useFeature('searchViewsEnabled')
   const subsetFollows = activeView?.search?.layout === 'inherit'
   const subsetIssue = useCanvasStore((s) => s.subsetIssue)

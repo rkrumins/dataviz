@@ -1,6 +1,7 @@
 /**
  * Subset views — what the screens share: whether a search can be kept, the
- * layers a subset shows (its base's, by type), the request saving one becomes,
+ * layers a subset shows (its base's, each match where the base places it), the
+ * request saving one becomes,
  * the counts a preview asks for, and the words for a layer's matches.
  *
  * Pure: no React, no store. The wire types are `@/types/searchView`; the layer

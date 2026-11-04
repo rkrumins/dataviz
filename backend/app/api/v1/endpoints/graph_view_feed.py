@@ -54,6 +54,7 @@ from backend.app.api.v1.endpoints.graph import (
     get_engine_session,
 )
 from backend.app.api.v1.feature_gate import require_feature
+from backend.app.api.v1.refusal import refusal_responses, refused
 from backend.app.jobs.metrics import increment
 from backend.app.services.context_engine import ContextEngine
 from backend.app.services.deep_search import (
@@ -132,7 +133,7 @@ def _read_cursor(raw: Optional[str], binding: str) -> Dict[str, Any]:
     if (isinstance(state, dict) and isinstance(state.get("c"), str)
             and isinstance(state.get("d"), int) and state["d"] >= 0):
         return state
-    raise HTTPException(status_code=400, detail="cursor is malformed — start from the first page")
+    raise refused(400, "bad_cursor", "cursor is malformed — start from the first page")
 
 
 def _write_cursor(engine_cursor: str, delivered: int, binding: str) -> str:
@@ -185,6 +186,8 @@ def _feed_page(layer: SubsetLayer, placement: Optional[BasePlacement], page: Sea
     "/search/view-feed",
     response_model=ViewFeedPage,
     response_model_by_alias=True,
+    summary='Read one page of one layer of a subset view',
+    responses=refusal_responses(400, 403, 404, 409, 429, 503),
     dependencies=[Depends(require_search_views)],
 )
 async def view_feed(
@@ -205,10 +208,10 @@ async def view_feed(
     ``capped``: more matches than the canvas lists — search in the layer, or
     export, for the rest. Answered from the published graph."""
     if not ws_id:
-        raise HTTPException(status_code=400, detail="workspace_id is required (path param ws_id)")
+        raise refused(400, "workspace_required", "workspace_id is required (path param ws_id)")
     capability = getattr(request.state, "view_capability", None)
     if capability and capability != viewId:
-        raise HTTPException(status_code=403, detail="This link can only read its own view.")
+        raise refused(403, "link_other_view", "This link can only read its own view.")
     from backend.app.services.advanced_search_service import AdvancedSearchService, ValidationError
     svc = AdvancedSearchService(
         engine, session=session, workspace_id=ws_id, data_source_id=dataSourceId,
@@ -224,11 +227,11 @@ async def view_feed(
                 "message": "This subset view's base view is no longer available."}) from exc
         raise _map_validation_error(detail) from exc
     if eff.search is None:
-        raise HTTPException(status_code=409, detail={
-            "reason": "not_a_subset", "message": "This view isn't a subset view."})
+        # One status per reason: 404, as GET /views/{id}/search answers it.
+        raise refused(404, "not_a_subset", "This view isn't a subset view.")
     layer = next((l for l in eff.subset_layers if l.id == body.layer_id), None)
     if layer is None:
-        raise HTTPException(status_code=404, detail=f"This view has no layer {body.layer_id!r}.")
+        raise refused(404, "no_such_layer", f"This view has no layer {body.layer_id!r}.")
 
     settings = get_deep_search_settings()
     max_rows = settings.view_feed_max_rows

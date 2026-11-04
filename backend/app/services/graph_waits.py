@@ -62,14 +62,21 @@ async def waiting() -> AsyncIterator[None]:
     if not held:
         yield
         return
-    async with contextlib.AsyncExitStack() as stack:
-        for step_out in held:
-            await stack.enter_async_context(step_out())
-        inner = _HELD.set(())
-        try:
-            yield
-        finally:
-            _HELD.reset(inner)
+    from backend.app.jobs.metrics import gauge_dec, gauge_inc, increment
+
+    increment("graph_request_waits_total")
+    gauge_inc("graph_requests_waiting")
+    try:
+        async with contextlib.AsyncExitStack() as stack:
+            for step_out in held:
+                await stack.enter_async_context(step_out())
+            inner = _HELD.set(())
+            try:
+                yield
+            finally:
+                _HELD.reset(inner)
+    finally:
+        gauge_dec("graph_requests_waiting")
 
 
 def session_step_out(session) -> StepOut:

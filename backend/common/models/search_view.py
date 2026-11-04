@@ -9,8 +9,10 @@
   as the system, so a reader needs no access to the base; ``dataSource``: the
   matches anywhere in the data source;
 * ``layout`` — ``inherit``: the subset's columns are its base's layers, read
-  live and placed by type, plus "Other matches"; ``own``: its own type layers,
-  stored in the view as any view's are;
+  live, each match in the layer its base places it in (hand placements, what
+  children inherit, rules), plus "Other matches" for what it places in none —
+  by type only past what a subset follows (``placedByTypeReason``); ``own``: its
+  own type layers, stored in the view as any view's are;
 * ``include`` — what it keeps beside the matches: everything inside one, what
   contains one, one lineage step from one either way. Each is a relationship
   asked of one entity, worked out with the search, so the view stays live at

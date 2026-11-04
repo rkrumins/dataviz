@@ -231,6 +231,22 @@ their series are complete: alert on those.
 | `job_events_emitted_total{kind,type}`, `job_events_emit_errors_total{kind,type,stage}` | counter | processes that run jobs | Job progress events, and failures to record or publish them |
 | `graph_store_command_calls{endpoint,role,command}`, `graph_store_command_usec_per_call{…}` | gauge | the process that swept the graph-store topology | Per node and command, since the node started — use `rate()` of the calls with the per-call time beside it |
 | `metrics_series_dropped_total{metric}` | counter | any | A metric reached its cap of 500 label sets and dropped series |
+| `view_feed_answers_total{outcome}` | counter | API | How a subset view's layer was answered: `complete`, `running` (a scan in progress, followed), `stale` (its last complete page, while the data changed or a rescan runs), `scan` (this request moved a scan on), `no_slot` (every feed lane of the process was busy), `busy_recent` (busy, but a recent page answered), `busy` (busy and nothing to give: a `429`) |
+| `search_last_page_answers_total` | counter | API | A reader got a layer's last complete page while the scan replacing it ran, instead of that scan's rows so far |
+| `search_raw_labels_total{answer}` | counter | API | Which labels keep raw properties — a scan of every node — answered: `read` (scanned), `shared` (found, read by another process), `joined` (waited on another request's read). `read` should rise about once per data change, not per request |
+| `graph_request_waits_total`, `graph_requests_waiting` | counter, gauge | API | Requests that waited on another's work — a scan, a cache answer — holding no graph admission and no database connection while they did. The gauge is how many wait right now |
+| `graph_cache_unreachable_total{endpoint,outcome}` | counter | API | The cache's Redis couldn't answer: `computed` (this process worked it out), `shared` (another request's compute answered it). Any rise means Redis is down or slow |
+| `live_view_refresh_total{outcome,trigger}` | counter | API | A list view brought up to date: `applied`, `unchanged`, `current` (opened and already up to date), `held`, `over_cap`, `deferred`, `busy`, `too_soon`; `trigger` is `open` or `manual` |
+
+### Alerts worth having
+
+| Alert | On | Why |
+|---|---|---|
+| Feeds refused | `rate(view_feed_answers_total{outcome="busy"}[5m]) > 0` for 10 minutes | Subset views answer `429` with nothing to show: the feed lanes are too few for the load, or the graph store is slow. See [Subset views and Narrow under load](/docs/runbooks#subset-views-and-narrow-under-load) |
+| Graph reads shed | `rate(provider_manager_events{event="graph_shed_process_full"}[5m]) > 0` | A process is at its ceiling of graph reads: canvases get `429`s |
+| Cache Redis unreachable | `increase(graph_cache_unreachable_total[5m]) > 0` | Every process computes for itself; shared caching, the election and fair share are off until it's back |
+| Label scans per request | `rate(search_raw_labels_total{answer="read"}[5m])` well above the rate of data changes | The scan of every node is no longer shared: check the cache Redis |
+| Lists held | `increase(live_view_refresh_total{outcome="held"}[1h]) > 0` | An auto-updating view would lose half its members: an editor must look |
 
 How to act on the rebuild signals is in
 [Concurrency and Timeout Tuning](/docs/concurrency-tuning#what-to-watch-and-the-one-number-that-means-stop).
