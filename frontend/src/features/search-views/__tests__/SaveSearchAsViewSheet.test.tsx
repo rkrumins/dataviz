@@ -14,6 +14,9 @@ vi.mock('@/services/searchViewsApi', () => ({
   createFromSearch: (body: FromSearchRequest, key: string) => createFromSearch(body, key),
 }))
 const counted = vi.fn()
+/** The last counts asked for: the way of counting in use (the other way asks for none). */
+const lastAsked = () => counted.mock.calls.map((c) => c[0] as Array<{ id: string; predicate: unknown }>)
+  .filter((asked) => asked.length > 0).at(-1)!
 // What the counts answer for each rule: 5 a layer, 12 in all, 2 in a by-type Other matches.
 type Answer = { count: number; complete: boolean; error?: string }
 let answerFor: (id: string) => Answer = (id) =>
@@ -96,7 +99,7 @@ describe('SaveSearchAsViewSheet', () => {
 
   it('following its base, counts what the base places in each layer, Other matches what is left', () => {
     renderSheet()
-    const asked = counted.mock.calls.at(-1)?.[0] as Array<{ id: string; predicate: unknown }>
+    const asked = lastAsked()
     expect(asked.map((l) => l.id)).toEqual(['l1', 'l2', '__found__'])
     expect(asked[0].predicate).toEqual(
       { kind: 'group', op: 'and', children: [pii, { kind: 'layer', layerAssignment: 'l1' }] })
@@ -123,7 +126,7 @@ describe('SaveSearchAsViewSheet', () => {
     const onKeepAsList = vi.fn()
     renderSheet({ onKeepAsList })
     expect(screen.getByText(/A live view can’t follow how “Sales overview” places entities/)).toBeInTheDocument()
-    const asked = counted.mock.calls.at(-1)?.[0] as Array<{ id: string; predicate: unknown }>
+    const asked = lastAsked()
     expect(asked.map((l) => l.id)).toEqual(['l1', 'l2', 'other-matches'])
     expect(asked[0].predicate).toEqual(
       { kind: 'group', op: 'and', children: [pii, { kind: 'entityType', op: 'in', values: ['table'] }] })
@@ -224,7 +227,7 @@ describe('SaveSearchAsViewSheet', () => {
     fireEvent.click(screen.getByRole('button', { name: /Everything inside them/ }))
     fireEvent.click(screen.getByRole('button', { name: /What feeds them/ }))
     expect(screen.getByRole('button', { name: /Everything inside them/ })).toHaveAttribute('aria-pressed', 'true')
-    expect(JSON.stringify(counted.mock.calls.at(-1)![0])).toContain('"axis":"ancestor"')
+    expect(JSON.stringify(lastAsked())).toContain('"axis":"ancestor"')
     expect(screen.getByText(/everything inside them and what feeds them/)).toBeInTheDocument()
     save()
     await waitFor(() => expect(createFromSearch).toHaveBeenCalled())

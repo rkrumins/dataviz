@@ -100,6 +100,8 @@ const NO_TYPES: Array<{ type: string; count: number }> = []
 const NONE_LEFT_OUT: ReadonlySet<string> = new Set()
 /** The count of everything it finds, beside its layers' (Other matches is what is left). */
 const FOUND = '__found__'
+/** No counts asked for: the other way of counting is the one in use. */
+const NOTHING_TO_COUNT: Array<{ id: string; predicate: Predicate }> = []
 
 /** What it finds that its base places in layer ``id``: a layer filter, which the
  *  server resolves as the base's canvas places entities. */
@@ -178,37 +180,34 @@ export function SaveSearchAsViewSheet({
     return next
   })
 
-  // Following its base, a layer holds what the base places there, each counted in
-  // the base as a layer filter; Other matches is what none of them holds. A base
-  // past what a live view can follow (too many entities placed by hand, too many
-  // rules) refuses those counts: its matches are then placed by type, as the
-  // server places them, and counted that way.
-  const [cantFollow, setCantFollow] = useState(false)
-  const follows = choice === 'like' && within === 'view' && !cantFollow
+  // Following its base, a layer holds what the base places there: each counted in
+  // the base as a layer filter, for every one of its layers, left out or not, and
+  // Other matches is what none of them holds. A base past what a live view can
+  // follow (too many entities placed by hand, too many rules) refuses those counts;
+  // its matches are then placed by type, as the server places them, and counted
+  // that way.
+  const likeBase = choice === 'like' && within === 'view'
+  const followToCount = useMemo(() => (likeBase ? [
+    ...layers.filter((l) => l.id !== REST_LAYER_ID).map((l) => ({ id: l.id, predicate: inLayer(found, l.id) })),
+    { id: FOUND, predicate: found },
+  ] : NOTHING_TO_COUNT), [likeBase, layers, found])
+  const followCounts = useLayerCounts(kept.baseViewId, followToCount, false)
+  const followed = (followCounts.status === 'counting' || followCounts.status === 'done') ? followCounts.counts : null
+  const cantFollow = likeBase && followToCount.some((l) => l.id !== FOUND && followed?.get(l.id)?.complete && followed.get(l.id)?.error)
+  const follows = likeBase && !cantFollow
 
-  // What the view finds in each layer it keeps — following its base, in every one
-  // of the base's, left out or not, for what is left.
-  const toCount = useMemo(() => {
-    if (follows) {
-      return [
-        ...layers.filter((l) => l.id !== REST_LAYER_ID).map((l) => ({ id: l.id, predicate: inLayer(found, l.id) })),
-        { id: FOUND, predicate: found },
-      ]
-    }
-    return layers.flatMap((layer) => {
-      if (hidden.has(layer.id)) return []
-      const p = layerPredicate(found, layer)
-      return p ? [{ id: layer.id, predicate: p }] : []
-    })
-  }, [follows, layers, found, hidden])
+  // By type: every other layout, and a base it can't follow.
+  const byTypeToCount = useMemo(() => (follows ? NOTHING_TO_COUNT : layers.flatMap((layer) => {
+    if (hidden.has(layer.id)) return []
+    const p = layerPredicate(found, layer)
+    return p ? [{ id: layer.id, predicate: p }] : []
+  })), [follows, layers, found, hidden])
+  const byTypeCounts = useLayerCounts(kept.baseViewId, byTypeToCount, within === 'dataSource')
+
+  const toCount = follows ? followToCount : byTypeToCount
+  const counts = follows ? followCounts : byTypeCounts
   const keptLayers = layers.filter((l) => !hidden.has(l.id) && (follows || l.rest || l.entityTypes.length > 0))
-  const counts = useLayerCounts(kept.baseViewId, toCount, within === 'dataSource')
   const counted = (counts.status === 'counting' || counts.status === 'done') ? counts.counts : null
-  useEffect(() => {
-    if (follows && toCount.some((l) => l.id !== FOUND && counted?.get(l.id)?.complete && counted.get(l.id)?.error)) {
-      setCantFollow(true)
-    }
-  }, [follows, toCount, counted])
   const countOf = (id: string): RuleCount | undefined => {
     if (!(follows && id === REST_LAYER_ID)) return counted?.get(id)
     // Other matches: what it finds that none of its base's layers holds — once
