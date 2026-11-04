@@ -10,10 +10,14 @@
  * Every count is live, the copy's name is editable, and a copy too big to
  * stage at once is refused in words rather than half made.
  *
+ * It is the canvas menu's one Duplicate: it opens on the quick copy's choices
+ * with the copy's name in hand, so Enter makes the copy ⌘D would, and anything
+ * more is a click away. Tab stays inside it, and focus goes back where it was.
+ *
  * Everything lands in the draft as staged changes: Review & Save shows it all,
  * and Undo takes it back.
  */
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { AnimatePresence, motion } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
@@ -21,6 +25,7 @@ import { cn } from '@/lib/utils'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { Segmented } from '@/components/ui/Segmented'
 import { Kbd } from '@/components/ui/Kbd'
+import { useModalA11y } from '@/hooks/useModalA11y'
 import {
   BOUNDARY_CONFIRM_ABOVE,
   BOUNDARY_MAX,
@@ -54,6 +59,9 @@ export function DuplicateDialog({ nodeId, prepare, commit, onDone, onClose }: Du
   const [outgoing, setOutgoing] = useState(false)
   const [name, setName] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  // Tab stays inside, and focus goes back where it came from.
+  const panelRef = useModalA11y(true, onClose)
+  const nameRef = useRef<HTMLInputElement>(null)
 
   // Load the subtree and read its boundary once; every count after that is local.
   useEffect(() => {
@@ -69,6 +77,16 @@ export function DuplicateDialog({ nodeId, prepare, commit, onDone, onClose }: Du
     )
     return () => { alive = false }
   }, [nodeId, prepare])
+
+  // Read, it is ready as the quick copy: its name in hand and selected, so Enter makes it
+  // and typing renames it — unless the reader has already moved on to a choice.
+  useEffect(() => {
+    if (!prepared) return
+    const active = document.activeElement
+    if (active && active !== panelRef.current && active !== document.body) return
+    nameRef.current?.focus()
+    nameRef.current?.select()
+  }, [prepared, panelRef])
 
   // Escape closes this dialog only — not the drawer or trace behind it.
   useEffect(() => {
@@ -116,14 +134,20 @@ export function DuplicateDialog({ nodeId, prepare, commit, onDone, onClose }: Du
       <Backdrop open={true} onClick={onClose} zClassName="z-50" className="bg-black/50 backdrop-blur-sm" />
       <div className="fixed inset-0 z-50 flex items-center justify-center p-4 pointer-events-none">
         <motion.div
+          ref={panelRef}
+          tabIndex={-1}
           role="dialog"
           aria-modal="true"
           aria-labelledby="duplicate-dialog-title"
           initial={{ opacity: 0, y: 8, scale: 0.98 }}
           animate={{ opacity: 1, y: 0, scale: 1 }}
           transition={{ duration: 0.16, ease: 'easeOut' }}
-          className="pointer-events-auto relative w-full max-w-xl rounded-2xl bg-canvas-elevated border border-glass-border shadow-2xl shadow-black/25 overflow-hidden"
-          onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); submit() } }}
+          className="pointer-events-auto relative w-full max-w-xl rounded-2xl bg-canvas-elevated border border-glass-border shadow-2xl shadow-black/25 overflow-hidden outline-none"
+          onKeyDown={(e) => {
+            // ⌘/Ctrl+Enter from anywhere in it; Enter on the dialog itself, before a choice has focus.
+            if (e.key !== 'Enter') return
+            if (e.metaKey || e.ctrlKey || e.target === e.currentTarget) { e.preventDefault(); submit() }
+          }}
         >
           {/* Header */}
           <div className="flex items-start justify-between px-7 pt-6 pb-4">
@@ -174,6 +198,7 @@ export function DuplicateDialog({ nodeId, prepare, commit, onDone, onClose }: Du
                       title="Links inside the copy"
                       detail="Between the entities copied — recreated between their copies."
                       count={reach?.internal}
+                      loading={!prepared}
                       on={internal && withInside}
                       disabled={!withInside || (reach?.internal ?? 0) === 0}
                       why={!withInside ? 'Only with everything inside.' : undefined}
@@ -184,6 +209,7 @@ export function DuplicateDialog({ nodeId, prepare, commit, onDone, onClose }: Du
                       title="Incoming"
                       detail={`What feeds ${label} feeds the copy too.`}
                       count={reach?.incoming}
+                      loading={!prepared}
                       capped={prepared?.boundaryCapped.incoming}
                       on={incoming}
                       disabled={inOver || (reach?.incoming ?? 0) === 0}
@@ -195,6 +221,7 @@ export function DuplicateDialog({ nodeId, prepare, commit, onDone, onClose }: Du
                       title="Outgoing"
                       detail={`The copy feeds what ${label} feeds.`}
                       count={reach?.outgoing}
+                      loading={!prepared}
                       capped={prepared?.boundaryCapped.outgoing}
                       on={outgoing}
                       disabled={outOver || (reach?.outgoing ?? 0) === 0}
@@ -216,6 +243,8 @@ export function DuplicateDialog({ nodeId, prepare, commit, onDone, onClose }: Du
                 <label className="block">
                   <span className="text-[11px] font-semibold uppercase tracking-wider text-ink-muted/70">Name of the copy</span>
                   <input
+                    ref={nameRef}
+                    aria-label="Name of the copy"
                     value={copyName}
                     onChange={(e) => setName(e.target.value)}
                     onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); submit() } }}
@@ -249,23 +278,29 @@ export function DuplicateDialog({ nodeId, prepare, commit, onDone, onClose }: Du
           </div>
 
           {/* Footer */}
-          <div className="flex items-center justify-end gap-2 px-7 py-4 border-t border-glass-border bg-black/[0.02] dark:bg-white/[0.02]">
-            <button type="button" onClick={onClose} className="h-9 px-4 rounded-xl text-[13px] font-semibold text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors">
-              Cancel
-            </button>
-            <button
-              type="button"
-              onClick={submit}
-              disabled={!ready}
-              className={cn(
-                'h-9 px-4 rounded-xl inline-flex items-center gap-2 text-[13px] font-semibold transition',
-                ready ? 'bg-accent-lineage text-white shadow-sm hover:brightness-110' : 'bg-black/[0.06] dark:bg-white/[0.06] text-ink-muted cursor-not-allowed',
-              )}
-            >
-              <LucideIcons.CopyPlus className="w-4 h-4" />
-              Duplicate
-              {ready && <Kbd shortcut="mod+enter" tone="onAccent" />}
-            </button>
+          <div className="flex items-center justify-between gap-3 px-7 py-4 border-t border-glass-border bg-black/[0.02] dark:bg-white/[0.02]">
+            <p className="hidden sm:flex items-center gap-1.5 min-w-0 text-[11.5px] text-ink-muted">
+              <Kbd shortcut="mod+d" />
+              <span className="truncate">quick copy, without asking</span>
+            </p>
+            <div className="flex items-center gap-2 flex-none ml-auto">
+              <button type="button" onClick={onClose} className="h-9 px-4 rounded-xl text-[13px] font-semibold text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors">
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={submit}
+                disabled={!ready}
+                className={cn(
+                  'h-9 px-4 rounded-xl inline-flex items-center gap-2 text-[13px] font-semibold transition',
+                  ready ? 'bg-accent-lineage text-white shadow-sm hover:brightness-110' : 'bg-black/[0.06] dark:bg-white/[0.06] text-ink-muted cursor-not-allowed',
+                )}
+              >
+                <LucideIcons.CopyPlus className="w-4 h-4" />
+                Duplicate
+                {ready && <Kbd shortcut="mod+enter" tone="onAccent" />}
+              </button>
+            </div>
           </div>
         </motion.div>
       </div>
@@ -275,11 +310,13 @@ export function DuplicateDialog({ nodeId, prepare, commit, onDone, onClose }: Du
 }
 
 /** One relationship choice: what it means, how many, and why not when it can't be had. */
-function ToggleRow({ icon, title, detail, count, capped, on, disabled, why, onChange }: {
+function ToggleRow({ icon, title, detail, count, loading, capped, on, disabled, why, onChange }: {
   icon: ReactNode
   title: string
   detail: string
   count?: number
+  /** Still reading: a placeholder where the count will be. */
+  loading?: boolean
   capped?: boolean
   on: boolean
   disabled?: boolean
@@ -304,7 +341,10 @@ function ToggleRow({ icon, title, detail, count, capped, on, disabled, why, onCh
       <span className="flex-1 min-w-0">
         <span className="flex items-center gap-2">
           <span className="text-[13.5px] font-semibold text-ink">{title}</span>
-          {count !== undefined && (
+          {loading && (
+            <span aria-hidden="true" className="w-7 h-[18px] rounded-md bg-black/[0.06] dark:bg-white/[0.08] animate-pulse" />
+          )}
+          {!loading && count !== undefined && (
             <span className="px-1.5 py-0.5 rounded-md bg-black/[0.05] dark:bg-white/[0.07] text-[11px] font-semibold tabular-nums text-ink-muted">
               {capped ? `${BOUNDARY_MAX.toLocaleString()}+` : count.toLocaleString()}
             </span>

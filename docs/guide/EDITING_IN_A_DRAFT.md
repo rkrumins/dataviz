@@ -137,16 +137,17 @@ All of these are staged too — nothing is saved until **Review & Save**.
   - For many links in a row, turn on **Connect** in the toolbar (or press `C`
     with nothing selected): click where a link starts, then where it goes, and
     repeat. **Done** or `Esc` turns it off.
-- **Copy:** right-click an entity and choose **Duplicate** (`⌘D` / `Ctrl-D`)
-  for a quick copy of it and everything inside it, beside the original, with
-  **Undo** in the message that confirms it. **Duplicate…** (`⌘⇧D` /
-  `Ctrl-Shift-D`) lets you choose: the entity alone or with everything inside
-  it, the links inside the copy, its **Incoming** relationships (what feeds the
-  original feeds the copy too) and its **Outgoing** ones (the copy feeds what
-  the original feeds) — each counted before anything is staged — and the
-  copy's name. A copy of more than 2,000 entities, or more than 500
-  relationships either way, is too big to make in one go and the dialog says
-  so.
+- **Copy:** right-click an entity and choose **Duplicate…** (`⌘⇧D` /
+  `Ctrl-Shift-D`). It opens ready to make a quick copy of the entity and
+  everything inside it, beside the original, with the copy's name selected:
+  `Enter` makes it, or type a new name first. Or choose: the entity alone or
+  with everything inside it, the links inside the copy, its **Incoming**
+  relationships (what feeds the original feeds the copy too) and its
+  **Outgoing** ones (the copy feeds what the original feeds), each counted
+  before anything is staged. `⌘D` / `Ctrl-D` makes the quick copy without
+  asking. The message that confirms a copy offers **Undo**. A copy of more than
+  2,000 entities, or more than 500 relationships either way, is too big to make
+  in one go and the dialog says so.
 - **Move or remove:** right-click an entity for **Move to Layer** and
   **Delete**; right-click a line for **Edit Edge**, **Reverse Direction** and
   **Delete Edge**.

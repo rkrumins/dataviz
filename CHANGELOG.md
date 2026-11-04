@@ -64,6 +64,21 @@ as a list of its members when it can't. Behind the same preview switch, **Subset
 
 ---
 
+## [Unreleased] — One Duplicate… in the canvas menu
+
+### Changed
+
+- **One Duplicate in an entity's right-click menu.** The Context View offered **Duplicate** and
+  **Duplicate…** side by side, told apart only by the "…". There is now one, **Duplicate…**.
+  - It opens ready to make the quick copy, with the copy's name selected, so `Enter` makes it.
+  - Its choices are a click away: the entity alone, the links inside the copy, and incoming and
+    outgoing relationships, each counted first.
+  - `⌘D` / `Ctrl+D` still makes the quick copy without asking, and the dialog says so.
+- **The Duplicate dialog keeps `Tab` inside it, and gives focus back when it closes.** Its counts
+  show placeholders while it reads the entity.
+
+---
+
 ## [Unreleased] — Subset views on the canvas: keep a search's matches as a view
 
 The canvas side of subset views. **Save as view…** on Advanced Search results keeps the
