@@ -40,11 +40,10 @@ from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 from sqlalchemy import BigInteger, Text, bindparam, delete, exists, insert, select, text
 from sqlalchemy.dialects.postgresql import ARRAY
 
-from backend.app.ontology.urn import make_urn
 from backend.app.services.view_placement import NodeFacts, suggest_placement
 
 from .. import config, db
-from ..ids import prefixed_id
+from ..ids import new_entity_id
 from ..job_lease import QUEUED, Lease, Superseded
 from ..models import BranchORM, EdgeVersionORM, ImportRowORM, JobORM
 from ..service import OntologyViolation
@@ -490,9 +489,9 @@ class ImportWorker:
         lookups = await (self._node_lookups if kind == "node" else self._edge_lookups)(snap, rows)
         lookups.update(created_from=self._created_from, keys=self._keys)
         ops, resolutions = await asyncio.to_thread(       # a window of pure-Python matching
-            resolve_rows, rows, lookups, mint_id=lambda: prefixed_id("ent"),
+            resolve_rows, rows, lookups, mint_id=new_entity_id,     # a urn:uuid (UUIDv7) each
             ontology=self._ontology, identity_prop=self._identity_prop,
-            mint_urn=lambda etype: make_urn(etype or "entity", source_system="import"))
+            mint_urn=lambda _etype: new_entity_id())
         processed = pos.processed + len(rows)
 
         async def on_commit(s) -> None:

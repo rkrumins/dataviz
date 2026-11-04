@@ -14,7 +14,6 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
 from backend.app.api.v1.endpoints.graph import _replay_minters, _resolve_change_ops
-from backend.app.ontology.urn import make_urn
 from backend.app.services.versioning import db, models
 from backend.app.services.versioning.errors import BranchNotOpen
 from backend.app.services.versioning.models import CommitORM
@@ -39,7 +38,7 @@ def _ops(gid, bid, key="K"):
         _op("create", "node", ref="b", payload={"entityType": "Table", "displayName": "B"}),
     ]
     ops, _assigned = _resolve_change_ops(
-        request, *_replay_minters(f"{gid}/{bid}/u", key, make_urn), by_ref=True)
+        request, *_replay_minters(f"{gid}/{bid}/u", key), by_ref=True)
     return ops
 
 

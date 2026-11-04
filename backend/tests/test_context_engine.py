@@ -256,6 +256,80 @@ class TestContextEngineCreateNode:
         assert written[0].properties == {"owner": "ana"}
 
 
+class TestContextEngineCreatesAreNamedByTheMinter:
+    """Every node and edge the engine creates is named ``urn:uuid:`` by the platform's minter. A
+    keyed create is idempotent: its id is derived from the key, and sent again it answers with
+    what the first one created instead of writing a second."""
+
+    @staticmethod
+    def _engine(monkeypatch, nodes=()):
+        written = []
+
+        class _Recording(_StubProvider):
+            async def create_node(self, node, containment_edge=None) -> bool:
+                written.append(node)
+                self._nodes[node.urn] = node
+                return True
+
+            async def create_edge(self, edge) -> bool:
+                written.append(edge)
+                self._edges.append(edge)
+                return True
+
+        engine = ContextEngine(provider=_Recording(nodes=list(nodes)))
+
+        async def _resolved():
+            return ResolvedOntology()
+        monkeypatch.setattr(engine, "_resolve_ontology", _resolved)
+        engine._node_identity = None
+        engine._data_source_id = "ds1"
+        return engine, written
+
+    @staticmethod
+    def _v(urn):
+        import uuid
+        from backend.app.services.versioning.ids import uuid_urn
+        assert uuid_urn(urn) == urn, urn
+        return uuid.UUID(urn[len("urn:uuid:"):]).version
+
+    async def test_a_new_node_and_edge_are_urn_uuid_v7(self, monkeypatch):
+        from backend.common.models.graph import CreateEdgeRequest, CreateNodeRequest
+
+        engine, written = self._engine(monkeypatch, [_node("urn:a"), _node("urn:b")])
+        made = await engine.create_node(CreateNodeRequest(entityType="dataset", displayName="Orders"))
+        assert made.success and self._v(made.node.urn) == 7
+        edge = await engine.create_edge(CreateEdgeRequest(
+            sourceUrn="urn:a", targetUrn="urn:b", edgeType="FLOWS_TO"))
+        assert edge.success and self._v(edge.edge.id) == 7
+
+    async def test_a_keyed_create_sent_again_answers_with_what_it_made(self, monkeypatch):
+        from backend.common.models.graph import CreateEdgeRequest, CreateNodeRequest
+
+        engine, written = self._engine(monkeypatch, [_node("urn:a"), _node("urn:b")])
+        ask = CreateNodeRequest(entityType="dataset", displayName="Orders", idempotencyKey="k-1")
+        first, again = await engine.create_node(ask), await engine.create_node(ask)
+        assert self._v(first.node.urn) == 5 and again.node.urn == first.node.urn
+        other = await engine.create_node(CreateNodeRequest(
+            entityType="dataset", displayName="Orders", idempotencyKey="k-2"))
+        assert other.node.urn != first.node.urn
+        link = CreateEdgeRequest(sourceUrn="urn:a", targetUrn="urn:b", edgeType="FLOWS_TO",
+                                 idempotencyKey="e-1")
+        e1, e2 = await engine.create_edge(link), await engine.create_edge(link)
+        assert self._v(e1.edge.id) == 5 and e2.edge.id == e1.edge.id
+        assert len(written) == 3, written                    # two nodes and one edge, once each
+
+    async def test_a_key_is_one_callers_on_one_branch(self, monkeypatch):
+        from backend.common.models.graph import CreateNodeRequest
+
+        ask = CreateNodeRequest(entityType="dataset", displayName="Orders", idempotencyKey="k-1")
+        urns = set()
+        for branch, actor in (("br_1", "alice"), ("br_1", "bob"), ("br_2", "alice")):
+            engine, _written = self._engine(monkeypatch)
+            engine._branch_id, engine._actor = branch, actor
+            urns.add((await engine.create_node(ask)).node.urn)
+        assert len(urns) == 3, urns                          # someone else's, or another draft's
+
+
 class TestContextEngineChildren:
     async def test_get_children_with_explicit_edge_types(self):
         parent = _node("urn:parent", "Parent")

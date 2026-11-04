@@ -225,7 +225,7 @@ minter is injected) that returns `(ops, resolutions)`:
   `qualifiedName`** (urn-less rows; `_match_node`). A value several live entities carry names none
   of them: the row is quarantined, saying so. No match ⇒ a **new node with one identity, the
   server's to decide**: the row's urn (or identifier value) when no entity holds it, the deleted node
-  that held it brought back, else a urn minted here (`urn:synodic:import:<type>:<128-bit hex>`) — the
+  that held it brought back, else a new `urn:uuid:` (a UUIDv7, [18 · Identity](18-identity.md)) — the
   node's `entity_id`, its `urn` and (bound at the write) its identifier property alike, as a canvas
   create's are. A row whose urn and identifier value differ is quarantined. The new node joins the
   window's indexes, and — once its window commits — the job's, by the file's `entity_id` it came from
