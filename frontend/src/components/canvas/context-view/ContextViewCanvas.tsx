@@ -5580,7 +5580,9 @@ export function ContextViewCanvas({
       index,
       count: sortedLayers.length,
       folded: layerFold.folded.has(layer.id),
-      canEdit: layerEditsAllowed,
+      // A subset that follows its base takes its layers from there, as the header says:
+      // nothing here would save (the server refuses it).
+      canEdit: layerEditsAllowed && !subsetFollows,
       onInsert: (side: 'left' | 'right') => insertLayerBeside(layer.id, side),
       onRename: () => requestLayerRename(layer.id),
       onRecolor: (color: string) => recolorLayer(layer.id, color),
@@ -5599,7 +5601,7 @@ export function ContextViewCanvas({
         })
         : undefined,
     }
-  }, [menuLayerId, sortedLayers, layerFold, layerEditsAllowed, insertLayerBeside, requestLayerRename,
+  }, [menuLayerId, sortedLayers, layerFold, layerEditsAllowed, subsetFollows, insertLayerBeside, requestLayerRename,
     recolorLayer, reorderLayer, layerFoldOffered, foldLayersEnabled, deleteLayerWithUndo, isDraft,
     canEnterEdit, handleEnterEdit, narrowEnabled, openNarrow])
 

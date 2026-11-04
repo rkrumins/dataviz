@@ -83,6 +83,25 @@ describe('SearchViewChip', () => {
     await waitFor(() => expect(api.putSearch).toHaveBeenCalledWith('v9', { ifDefinitionHash: 'h1', layout: 'inherit' }))
   })
 
+  it('Undo of following again gives back its own layout as it was, not a fresh copy of the base', async () => {
+    api.getSearchStatus.mockResolvedValue(status({
+      definition: { ...status().definition, layout: 'own' },
+    }))
+    const own = [
+      { id: 'mine', name: 'My tables', order: 0, entityTypes: ['table'], color: '#123456' },
+      { id: 'other-matches', name: 'Everything else', order: 1, entityTypes: [], showUnassigned: true },
+    ]
+    const view = { id: 'v9', name: 'PII', config: { search: { v: 1 }, layout: { referenceLayout: { layers: own } } } } as never
+    renderIn(<SearchViewChip view={view} canEdit />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Subset of Sales overview' }))
+    fireEvent.click(await screen.findByRole('button', { name: /Follow Sales overview again/ }))
+    await waitFor(() => expect(notify).toHaveBeenCalledWith('success', expect.stringContaining('follows Sales overview'),
+      expect.objectContaining({ label: 'Undo' }), 8000))
+    notify.mock.calls.at(-1)![2]!.onClick()
+    await waitFor(() => expect(api.putSearch).toHaveBeenLastCalledWith('v9',
+      { ifDefinitionHash: 'h2', layout: 'own', layers: own }))
+  })
+
   it('Edit search… opens it where the matches are looked for — not where the base can’t be opened', async () => {
     const onEditSearch = vi.fn()
     const { unmount } = renderIn(<SearchViewChip view={SUBSET} canEdit onEditSearch={onEditSearch} />)

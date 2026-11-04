@@ -460,9 +460,23 @@ async def update_view_search(
                 raise HTTPException(status_code=422, detail=problem)
             updated = updated.model_copy(update={"hidden_layers": hidden})
             summary.append("Changed which of its base's layers it shows")
+    if body.layers is not None and body.layout != "own":
+        raise HTTPException(status_code=422, detail=(
+            "Layers come with a layout of its own: send them with layout \"own\"."))
     if body.layout is not None and body.layout != definition.layout:
         ref = config.setdefault("layout", {})
-        if body.layout == "own":
+        if body.layout == "own" and body.layers is not None:
+            # The own layers it had (Undo of Follow again): checked as any own layout.
+            ref["referenceLayout"] = {"layers": body.layers, "assignments": {}}
+            config.pop("referenceLayout", None)
+            config["search"] = updated.model_copy(update={"layout": "own", "hidden_layers": []}).model_dump(
+                mode="json", by_alias=True, exclude_none=True)
+            problem = layout_problems(config)
+            if problem:
+                raise HTTPException(status_code=422, detail=problem)
+            updated = updated.model_copy(update={"hidden_layers": []})
+            summary.append("Gave it back its own layout")
+        elif body.layout == "own":
             base = await _live_base(session, row, definition)
             if base is None:
                 raise HTTPException(status_code=409, detail={

@@ -92,6 +92,9 @@ export interface SearchViewUpdate {
   layout?: SubsetLayout
   include?: SubsetInclude
   hiddenLayers?: string[]
+  /** With `layout: 'own'`: the own layers to have instead of a copy of the base's —
+   *  what Undo of Follow again sends back, so its layout returns as it was. */
+  layers?: Array<Record<string, unknown>>
 }
 
 /** A layer as a subset shows it, and what feeds it. */

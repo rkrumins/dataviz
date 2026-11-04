@@ -72,6 +72,11 @@ export function LiveViewChip({ view, canEdit }: { view: View; canEdit: boolean }
     if (seenRevision.current !== undefined && revision > seenRevision.current) void showLatest(view.id)
     seenRevision.current = revision
   }, [revision, view.id])
+  // Kept up to date while its preview is on: with it off the view keeps its last
+  // members, and says so rather than looking like any other view while they age.
+  if (!enabled && madeFromQuery && (view.config?.membership as { mode?: string } | undefined)?.mode !== 'snapshot') {
+    return <PausedChip />
+  }
   if (!enabled || !madeFromQuery || !status) return null
   const words = statusWords(status)
 
@@ -98,6 +103,44 @@ export function LiveViewChip({ view, canEdit }: { view: View; canEdit: boolean }
           className="z-50 w-[400px] max-w-[calc(100vw-24px)] max-h-[min(640px,calc(100vh-96px))] overflow-y-auto custom-scrollbar rounded-2xl border border-glass-border bg-canvas-elevated shadow-2xl shadow-black/20"
         >
           <LiveViewPanel view={view} status={status} canEdit={canEdit} />
+        </Popover.Content>
+      </Popover.Portal>
+    </Popover.Root>
+  )
+}
+
+/** An auto-updating view while views that keep themselves up to date are turned off. */
+function PausedChip() {
+  return (
+    <Popover.Root>
+      <Popover.Trigger asChild>
+        <button
+          type="button"
+          aria-label="Updates paused — this view shows the members it last had"
+          className="inline-flex shrink-0 items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-semibold border border-slate-400/30 bg-slate-400/[0.08] text-ink-secondary hover:bg-slate-400/15 transition-colors"
+        >
+          <span className={cn('w-1.5 h-1.5 rounded-full', DOT.quiet)} aria-hidden />
+          <LucideIcons.PauseCircle className="w-3 h-3" aria-hidden />
+          <span>Updates paused</span>
+        </button>
+      </Popover.Trigger>
+      <Popover.Portal>
+        <Popover.Content
+          sideOffset={8}
+          align="start"
+          collisionPadding={12}
+          className="z-50 w-[340px] max-w-[calc(100vw-24px)] rounded-2xl border border-glass-border bg-canvas-elevated shadow-2xl shadow-black/20 px-4 py-3 space-y-1.5 text-[12.5px] text-ink-muted"
+        >
+          <p className="font-semibold text-ink">Updates paused</p>
+          <p>
+            This view keeps itself up to date, but views that do are turned off in this workspace.
+            It shows the members it last had, and catches up the next time it's opened once they're
+            turned on again.
+          </p>
+          <p>
+            An administrator turns them on under <span className="font-medium text-ink-secondary">Administration → Features</span>:
+            <span className="font-medium text-ink-secondary"> Narrow: chosen entities and what they reach</span>.
+          </p>
         </Popover.Content>
       </Popover.Portal>
     </Popover.Root>
