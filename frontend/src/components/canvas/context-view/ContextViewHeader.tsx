@@ -318,13 +318,19 @@ export function ContextViewHeader({
             CanvasVersioningBar) and the blueprint-sync signal that used to
             ride the title's subline. */}
         <div ref={leadRef} className="flex items-center gap-2 min-w-0">
-          {/* The Business view reads the published view and needs no switcher
-              there; in a draft it says which draft this is. */}
-          {branchWorkspaceId && (technical || isDraft) && (
-            <BranchSwitcher
-              workspaceId={branchWorkspaceId}
-              dataSourceId={branchDataSourceId ?? null}
-            />
+          {/* The Business view reads the published view and shows no switcher
+              there; in a draft it says which draft this is. Hidden, never
+              unmounted: the switcher is what hands the canvas this view's
+              versioned graph, which Edit waits for, and what opens a shared
+              link to a draft. */}
+          {branchWorkspaceId && (
+            // `contents` only while shown: a display utility would override `hidden`.
+            <div hidden={!(technical || isDraft)} className={technical || isDraft ? 'contents min-w-0' : undefined}>
+              <BranchSwitcher
+                workspaceId={branchWorkspaceId}
+                dataSourceId={branchDataSourceId ?? null}
+              />
+            </div>
           )}
 
           {/* A spinner and an error link, both unexplained: `aria-label` told a

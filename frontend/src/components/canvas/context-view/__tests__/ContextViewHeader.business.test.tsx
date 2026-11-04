@@ -92,7 +92,12 @@ describe('ContextViewHeader — Business view', () => {
     expect(screen.queryByRole('button', { name: 'Properties' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Import / Export' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Trace history' })).not.toBeInTheDocument()
-    expect(screen.queryByTestId('branch-switcher')).not.toBeInTheDocument()
+    expect(screen.getByTestId('branch-switcher')).not.toBeVisible()
+  })
+
+  it('keeps the hidden switcher mounted — it hands the canvas the graph Edit waits for', () => {
+    renderHeader(baseProps())
+    expect(screen.getByTestId('branch-switcher')).toBeInTheDocument()
   })
 
   it('holds what it tucks away in More', async () => {
@@ -116,7 +121,7 @@ describe('ContextViewHeader — Business view', () => {
 
   it('shows the branch switcher in a draft, where it says which draft this is', () => {
     renderHeader(baseProps({ isDraft: true }))
-    expect(screen.getByTestId('branch-switcher')).toBeInTheDocument()
+    expect(screen.getByTestId('branch-switcher')).toBeVisible()
   })
 })
 
@@ -127,7 +132,7 @@ describe('ContextViewHeader — Technical view', () => {
     expect(screen.getByRole('button', { name: 'Properties' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Import / Export' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Trace history' })).toBeInTheDocument()
-    expect(screen.getByTestId('branch-switcher')).toBeInTheDocument()
+    expect(screen.getByTestId('branch-switcher')).toBeVisible()
     expect(screen.queryByRole('button', { name: 'More tools' })).not.toBeInTheDocument()
   })
 })
