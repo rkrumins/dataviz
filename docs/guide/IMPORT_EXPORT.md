@@ -244,6 +244,27 @@ for every View from that source.
 > straight to review; from a file of several Views, each waits in its own draft,
 > and **Submit for review** sends them all, one review each.
 
+### Subset views and views made from a query
+
+A [subset view](/guide/managing-views#subset-views-a-searchs-matches-as-a-view)
+travels as its search, and a
+[view made from a query](/guide/managing-views#views-made-from-a-query) as its
+query. **Match** checks the entities and types their searches name, and remaps
+them as you choose, as it does for any View.
+
+- **A subset view** names its base view as it was where it came from. Imported
+  back into that workspace, it finds its base again. Anywhere else the base
+  isn't there, so it lists no matches and says **Its base view isn’t
+  available**: make it again from a view there. A subset of the whole data
+  source has no base, and works wherever it lands.
+- **An auto-updating view** travels without its members, which follow the data
+  and aren't part of its design. It arrives waiting to update, and works them
+  out against the data there the first time it's opened. Imported over a View
+  that's already there, it keeps that View's members until then. What people
+  chose travels with it: entities kept out or always included, and where they
+  moved members.
+- **A snapshot** travels with its members.
+
 ### Importing a View with its data
 
 Drop a `.view-package.zip` in the same place. The journey is the same, with one
