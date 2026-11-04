@@ -51,6 +51,8 @@ export interface SaveAsViewSheetProps {
   draft: NarrowDraft
   /** How many layers the view it is made from has. */
   sourceLayerCount: number
+  /** Beside the title: keep it live instead, where a live view can (Save as view's switch). */
+  headerExtra?: ReactNode
   onClose: () => void
   onSaved: (view: View) => void
 }
@@ -78,7 +80,7 @@ function saveErrorText(err: unknown): string {
 }
 
 export function SaveAsViewSheet({
-  viewId, viewName, workspaceId, dataSourceId, draft, sourceLayerCount, onClose, onSaved,
+  viewId, viewName, workspaceId, dataSourceId, draft, sourceLayerCount, headerExtra, onClose, onSaved,
 }: SaveAsViewSheetProps) {
   const spec = draft.spec
   const sentence = describeNarrow(spec, draft.seedsLabel)
@@ -157,13 +159,14 @@ export function SaveAsViewSheet({
       >
         {/* Header */}
         <div className="flex items-start justify-between gap-3 px-7 pt-6 pb-4 border-b border-glass-border/60">
-          <div className="flex items-center gap-3.5 min-w-0">
+          <div className="flex items-start gap-3.5 min-w-0">
             <div className="w-11 h-11 rounded-2xl bg-accent-lineage/[0.12] border border-accent-lineage/25 grid place-items-center flex-none">
               <LucideIcons.BookmarkPlus className="w-5 h-5 text-accent-lineage" strokeWidth={2.2} />
             </div>
             <div className="min-w-0">
               <h2 id="save-as-view-title" className="text-xl font-display font-semibold text-ink leading-tight">Save as a view</h2>
               <p className="text-[13px] text-ink-muted mt-0.5 leading-snug">A view of its own on the same data, with its own layers, sharing and history.</p>
+              {headerExtra && <div className="mt-3">{headerExtra}</div>}
             </div>
           </div>
           <button type="button" onClick={onClose} disabled={saving} aria-label="Close" className="p-2 rounded-lg text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors disabled:opacity-40">

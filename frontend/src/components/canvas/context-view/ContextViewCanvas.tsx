@@ -46,8 +46,7 @@ import { PRESETS as NARROW_PRESETS, seedsLabel as narrowSeedsLabel, specFor, spe
 import { canShareNarrow, decodeNarrowShare, narrowLink } from '@/features/narrow/narrowShareCodec'
 import { useNarrowStore, type NarrowDraft } from '@/features/narrow/narrowStore'
 import { narrowErrorText } from '@/features/narrow/useNarrowResolve'
-import { SaveAsViewSheet } from '@/features/live-views/SaveAsViewSheet'
-import { SaveSearchAsViewSheet } from '@/features/search-views/SaveSearchAsViewSheet'
+import { SaveAsView } from '@/features/search-views/SaveAsView'
 import { SubsetIssueBanner } from '@/features/search-views/SubsetIssueBanner'
 import { UpdateSubsetSearchDialog } from '@/features/search-views/UpdateSubsetSearchDialog'
 import { getSearchStatus, putSearch, SEARCH_VIEW_QUERY_KEY } from '@/services/searchViewsApi'
@@ -55,7 +54,7 @@ import type { SearchViewStatus } from '@/types/searchView'
 import { memberActionsFor } from '@/features/live-views/model'
 import { memberOps } from '@/services/liveViewsApi'
 import type { MemberOps, MembershipExpand } from '@/types/membership'
-import type { Predicate, SearchQuery, SearchResultPage } from '@/types/search'
+import type { Predicate, SearchQuery } from '@/types/search'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useBranchStore, useEffectiveBranchId, useGraphId } from '@/store/branchStore'
 import { Link, useNavigate } from 'react-router-dom'
@@ -4576,7 +4575,7 @@ export function ContextViewCanvas({
     enabled: searchViewsOn && subsetView && !!narrowViewId,
     staleTime: 15_000,
   })
-  const [saveSearch, setSaveSearch] = useState<{ query: SearchQuery; result: SearchResultPage } | null>(null)
+  const [saveSearch, setSaveSearch] = useState<{ query: SearchQuery } | null>(null)
   const searchInLayer = useCallback((layerId: string) => {
     // In a subset view the server reads a layer filter as the layer's types, inside the view's search.
     useSearchStore.getState().requestSearchRun({ kind: 'layer', layerAssignment: layerId } as Predicate, 'header')
@@ -4605,9 +4604,9 @@ export function ContextViewCanvas({
       })
       .catch((err) => notify('error', narrowErrorText(err)))
   }, [initialEditSubset, searchViewsOn, narrowViewId, search, notify])
-  const onSaveMatchesAsView = useCallback((query: SearchQuery, result: SearchResultPage) => {
+  const onSaveMatchesAsView = useCallback((query: SearchQuery) => {
     if (editingSubset) setUpdateSubsetQuery(query)
-    else setSaveSearch({ query, result })
+    else setSaveSearch({ query })
   }, [editingSubset, setSaveSearch, setUpdateSubsetQuery])
   const updateSubsetSearch = useCallback(async (query: SearchQuery) => {
     if (!editingSubset) return
@@ -4624,15 +4623,6 @@ export function ContextViewCanvas({
       },
     }, 8000)
   }, [editingSubset, navigateTo, notify, setEditingSubset, setUpdateSubsetQuery])
-  // The types the search found, most common first, from its first page of hits.
-  const typeCountsOf = useCallback((result: SearchResultPage) => {
-    const counts = new Map<string, number>()
-    for (const hit of result.hits ?? []) {
-      const t = String(hit.node?.entityType ?? '')
-      if (t) counts.set(t, (counts.get(t) ?? 0) + 1)
-    }
-    return [...counts].map(([type, count]) => ({ type, count }))
-  }, [])
 
   // MEMBERS (features/live-views) — in a view made from a query, an editor keeps
   // an entity out whatever the query finds, always includes one, or hands one
@@ -8073,32 +8063,40 @@ export function ContextViewCanvas({
         />
       )}
 
-      {/* Save as view — the narrowing kept as a view of its own. */}
+      {/* Save as view — one sheet. A narrowing is kept live where a live view can keep
+          what it reaches, else as a list of its members; the sheet switches between them. */}
       {canSaveAsView && saveAsDraft && narrowViewId && scopeWsId && (
-        <SaveAsViewSheet
+        <SaveAsView
+          source={{ kind: 'narrowing', draft: saveAsDraft }}
           viewId={narrowViewId}
           viewName={activeView?.name ?? 'this view'}
           workspaceId={scopeWsId}
-          dataSourceId={dataSourceId ?? undefined}
-          draft={saveAsDraft}
-          sourceLayerCount={sortedLayers.length}
+          dataSourceId={dataSourceId}
+          boardLayers={sortedLayers}
+          boardConfig={activeView ? { layout: activeView.layout } : null}
+          canKeepLive={searchViewsOn}
+          canKeepList
           onClose={() => setSaveAsDraft(null)}
           onSaved={onViewSaved}
         />
       )}
 
-      {/* Save as view — a search's matches kept as a subset view. */}
+      {/* Save as view — a search's matches, kept live; Narrow first for more reach. */}
       {canSaveSearchAsView && saveSearch && narrowViewId && scopeWsId && (
-        <SaveSearchAsViewSheet
+        <SaveAsView
+          source={{ kind: 'search', predicate: saveSearch.query.predicate }}
           viewId={narrowViewId}
           viewName={activeView?.name ?? 'this view'}
           workspaceId={scopeWsId}
           dataSourceId={dataSourceId}
-          predicate={saveSearch.query.predicate}
           boardLayers={sortedLayers}
           boardConfig={activeView ? { layout: activeView.layout } : null}
           subset={activeView?.search ? { definition: activeView.search, baseName: subsetStatus?.base?.name ?? null } : null}
-          typeCounts={typeCountsOf(saveSearch.result)}
+          canKeepLive
+          canKeepList={narrowEnabled}
+          onNarrowInstead={narrowEnabled
+            ? () => { const query = saveSearch.query; setSaveSearch(null); narrowFromSearch(query) }
+            : undefined}
           onClose={() => setSaveSearch(null)}
           onSaved={(view) => { setSaveSearch(null); onViewSaved(view) }}
         />

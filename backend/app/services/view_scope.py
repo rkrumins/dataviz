@@ -65,7 +65,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.db.models import ViewORM
 from backend.app.db.repositories.view_repo import effective_view_config
 from backend.app.services.layout_config import derive_entity_scope, parse_reference_layout
-from backend.app.services.search_views import boundary_hash, is_subset, subset_layers
+from backend.app.services.search_views import (
+    boundary_hash,
+    is_subset,
+    search_hash,
+    shown_layers,
+    shown_search,
+    subset_layers,
+)
 from backend.app.services.view_placement import PlacementSpec, _num
 from backend.common.models.search import SearchScope
 from backend.common.models.search_view import read_search_definition
@@ -511,7 +518,11 @@ class ViewScopeResolver:
                                          _HARD_MAX_DEPTH))
         effective_root_urns, dropped = _intersect_root_urns(requested.root_urns, allowed_roots)
         effective_entity_types = _intersect_entity_types(requested.entity_types, allowed_types)
-        layers = subset_layers(definition, config, base_config)
+        # Its columns, less those it hides; what it finds — its search and what it
+        # includes — held to what those columns show.
+        every_layer = subset_layers(definition, config, base_config)
+        layers = shown_layers(every_layer)
+        search = shown_search(definition.search_predicate(), every_layer)
         return EffectiveViewScope(
             view_id=view.id,
             workspace_id=view.workspace_id,
@@ -526,10 +537,10 @@ class ViewScopeResolver:
                 view_id=base.id if base is not None else None,
                 data_source_id=view.data_source_id, root_urns=effective_root_urns,
                 entity_types=effective_entity_types, max_depth=effective_max_depth,
-                predicate_hash=definition.predicate_hash()),
+                predicate_hash=search_hash(search)),
             dropped_urns=tuple(dropped),
             layers=tuple((layer.id, layer.name) for layer in layers),
-            search=definition.predicate,
+            search=search,
             read_in_view_id=base.id if base is not None else None,
             redact_roots=bool(base is not None and can_read is not None
                               and not await can_read(base)),

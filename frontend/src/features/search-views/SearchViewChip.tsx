@@ -29,13 +29,21 @@ import {
 import { getView, viewToViewConfig, type View } from '@/services/viewApiService'
 import { useFeature } from '@/store/features'
 import { useSchemaStore } from '@/store/schema'
-import type { SearchViewStatus, SubsetLayout } from '@/types/searchView'
-import { isSubsetConfig } from '@/types/searchView'
+import type { SearchViewStatus, SearchViewUpdate, SubsetInclude, SubsetLayout } from '@/types/searchView'
+import { isSubsetConfig, NO_INCLUDE } from '@/types/searchView'
 
-import { chipLabel, describePredicate } from './model'
+import { anyIncluded, chipLabel, describePredicate, includeWords } from './model'
 
 /** The layers the chip names before it says how many more. */
 const LAYER_PILLS = 6
+
+/** What a subset can keep beside its matches, as the chip offers it to an editor. */
+const INCLUDE_PILLS: Array<{ key: keyof SubsetInclude; label: string }> = [
+  { key: 'contents', label: 'Everything inside' },
+  { key: 'containers', label: 'What contains them' },
+  { key: 'upstream', label: 'What feeds them' },
+  { key: 'downstream', label: 'What they feed' },
+]
 
 /** The canvas reads the view from the schema store: hand it the view as it now is. */
 async function showLatest(viewId: string) {
@@ -111,17 +119,61 @@ function SearchViewPanel({ view, status, canEdit, onEditSearch, onRefresh }: {
   const follows = definition.layout === 'inherit'
   const baseName = base?.name ?? null
 
+  const include = definition.include ?? NO_INCLUDE
+  const hidden = definition.hiddenLayers ?? []
+  // A change to what it keeps or shows: saved against the hash it was read at, with Undo.
+  const change = async (key: string, update: Omit<SearchViewUpdate, 'ifDefinitionHash'>,
+    undo: Omit<SearchViewUpdate, 'ifDefinitionHash'>, done: string) => {
+    setBusy(key)
+    try {
+      const next = await putSearch(view.id, { ifDefinitionHash: status.definitionHash, ...update })
+      await showLatest(view.id)
+      notify('success', done, {
+        label: 'Undo',
+        onClick: () => {
+          void putSearch(view.id, { ifDefinitionHash: next.definitionHash, ...undo })
+            .then(() => showLatest(view.id))
+            .catch((err) => notify('error', narrowErrorText(err)))
+        },
+      }, 8000)
+    } catch (err) {
+      notify('error', narrowErrorText(err))
+    } finally {
+      setBusy(null)
+    }
+  }
+  const toggleInclude = (key: keyof SubsetInclude) => {
+    const next = { ...include, [key]: !include[key] }
+    void change(`include:${key}`, { include: next }, { include },
+      anyIncluded(next) ? `It keeps ${includeWords(next)} now` : 'It keeps just the matches now')
+  }
+  const shownHolding = status.layers.filter((l) => !l.hidden && (l.rest || l.entityTypes.length > 0))
+  // Fewer layers: an editor of a subset that follows its base leaves some out.
+  const editLayers = canEdit && follows && !missing
+  const toggleLayer = (id: string, name: string) => {
+    const leaving = !hidden.includes(id)
+    const next = leaving ? [...hidden, id] : hidden.filter((h) => h !== id)
+    void change(`layer:${id}`, { hiddenLayers: next }, { hiddenLayers: hidden },
+      leaving ? `${name} is left out, with its matches` : `${name} is shown again`)
+  }
+
   const setLayout = async (layout: SubsetLayout) => {
     setBusy(layout)
     try {
       const next = await putSearch(view.id, { ifDefinitionHash: status.definitionHash, layout })
       await showLatest(view.id)
+      // An own layout leaves nothing out: every base layer comes with it, the left-out ones too.
+      const back = layout === 'own' ? hidden.length : 0
       notify('success', layout === 'own'
-        ? 'It has a layout of its own now — its base’s layers, to change as you like'
+        ? back
+          ? `It has a layout of its own now — every one of its base’s layers, so the ${back === 1 ? 'one' : back} it left out ${back === 1 ? 'is' : 'are'} back`
+          : 'It has a layout of its own now — its base’s layers, to change as you like'
         : `It follows ${baseName ?? 'its base view'}’s layers again`, {
         label: 'Undo',
         onClick: () => {
-          void putSearch(view.id, { ifDefinitionHash: next.definitionHash, layout: layout === 'own' ? 'inherit' : 'own' })
+          void putSearch(view.id, layout === 'own'
+            ? { ifDefinitionHash: next.definitionHash, layout: 'inherit', ...(back ? { hiddenLayers: hidden } : {}) }
+            : { ifDefinitionHash: next.definitionHash, layout: 'own' })
             .then(() => showLatest(view.id))
             .catch((err) => notify('error', narrowErrorText(err)))
         },
@@ -141,6 +193,7 @@ function SearchViewPanel({ view, status, canEdit, onEditSearch, onRefresh }: {
         </span>
         <p className="mt-2 text-[13px] text-ink leading-snug">
           Shows the matches of <span className="font-semibold">{describePredicate(definition.predicate)}</span>
+          {anyIncluded(include) && <>, with <span className="font-semibold">{includeWords(include)}</span>,</>}
           {inView ? ' inside its base view.' : ' anywhere in the data source.'}
         </p>
         {inView && (
@@ -158,6 +211,29 @@ function SearchViewPanel({ view, status, canEdit, onEditSearch, onRefresh }: {
         </p>
       </div>
 
+      {canEdit && !missing && (
+        <div className="px-4 py-3 border-b border-glass-border/60">
+          <p className="text-[11px] font-semibold uppercase tracking-wider text-ink-muted/80">Keeps with them</p>
+          <div className="mt-2 flex flex-wrap gap-1.5" role="group" aria-label="Keeps with them">
+            {INCLUDE_PILLS.map((item) => {
+              const on = include[item.key]
+              return (
+                <button key={item.key} type="button" aria-pressed={on} disabled={busy !== null}
+                  onClick={() => toggleInclude(item.key)}
+                  className={cn('inline-flex items-center gap-1 h-7 px-2.5 rounded-full border text-[11.5px] font-medium transition-colors disabled:opacity-60',
+                    on ? 'border-accent-lineage/50 bg-accent-lineage/[0.10] text-accent-lineage'
+                      : 'border-black/[0.08] dark:border-white/[0.10] text-ink-secondary hover:border-accent-lineage/40 hover:text-ink')}>
+                  {busy === `include:${item.key}`
+                    ? <LucideIcons.Loader2 className="w-3 h-3 animate-spin" />
+                    : on ? <LucideIcons.Check className="w-3 h-3" strokeWidth={2.6} /> : <LucideIcons.Plus className="w-3 h-3" />}
+                  {item.label}
+                </button>
+              )
+            })}
+          </div>
+        </div>
+      )}
+
       {missing ? (
         <Note tone="attention" icon="AlertTriangle">
           Its base view was deleted, so there is nothing to look in. Restore the base view and this one shows its matches again.
@@ -171,19 +247,47 @@ function SearchViewPanel({ view, status, canEdit, onEditSearch, onRefresh }: {
           </p>
           {/* Its layers, as the canvas draws them: each holds the matches of its types. */}
           <ul className="flex flex-wrap gap-1.5 pt-0.5" aria-label="Its layers">
-            {status.layers.slice(0, LAYER_PILLS).map((layer) => (
-              <li key={layer.id} title={layer.rest ? 'Every match of a type no other layer holds' : (layer.entityTypes ?? []).join(', ')}
-                className="inline-flex items-center gap-1.5 max-w-[160px] h-6 px-2 rounded-full border border-black/[0.06] dark:border-white/[0.08] bg-black/[0.02] dark:bg-white/[0.03] text-[11.5px] text-ink-secondary">
-                <span className="w-1.5 h-1.5 rounded-full flex-none" style={{ background: layer.color ?? '#94a3b8' }} aria-hidden />
-                <span className="truncate">{layer.name}</span>
-              </li>
-            ))}
-            {status.layers.length > LAYER_PILLS && (
+            {(editLayers ? status.layers : status.layers.filter((l) => !l.hidden)).slice(0, editLayers ? undefined : LAYER_PILLS).map((layer) => {
+              const what = layer.rest ? 'Every match of a type no other layer holds' : (layer.entityTypes ?? []).join(', ')
+              const pill = 'inline-flex items-center gap-1.5 max-w-[180px] h-6 px-2 rounded-full border text-[11.5px] transition-colors'
+              if (!editLayers) {
+                return (
+                  <li key={layer.id} title={what}
+                    className={cn(pill, 'border-black/[0.06] dark:border-white/[0.08] bg-black/[0.02] dark:bg-white/[0.03] text-ink-secondary')}>
+                    <span className="w-1.5 h-1.5 rounded-full flex-none" style={{ background: layer.color ?? '#94a3b8' }} aria-hidden />
+                    <span className="truncate">{layer.name}</span>
+                  </li>
+                )
+              }
+              const lastShown = !layer.hidden && shownHolding.length === 1 && shownHolding[0].id === layer.id
+              return (
+                <li key={layer.id}>
+                  <button type="button" role="switch" aria-checked={!layer.hidden} disabled={busy !== null || lastShown}
+                    onClick={() => toggleLayer(layer.id, layer.name)}
+                    title={lastShown ? 'Keep at least one layer' : `${layer.hidden ? 'Show' : 'Leave out'} ${layer.name} — ${what}`}
+                    className={cn(pill, 'disabled:cursor-not-allowed',
+                      layer.hidden
+                        ? 'border-dashed border-black/[0.12] dark:border-white/[0.14] text-ink-muted hover:text-ink'
+                        : 'border-black/[0.06] dark:border-white/[0.08] bg-black/[0.02] dark:bg-white/[0.03] text-ink-secondary hover:border-accent-lineage/40')}>
+                    {busy === `layer:${layer.id}`
+                      ? <LucideIcons.Loader2 className="w-3 h-3 animate-spin flex-none" />
+                      : layer.hidden
+                        ? <LucideIcons.EyeOff className="w-3 h-3 flex-none" aria-hidden />
+                        : <span className="w-1.5 h-1.5 rounded-full flex-none" style={{ background: layer.color ?? '#94a3b8' }} aria-hidden />}
+                    <span className={cn('truncate', layer.hidden && 'line-through decoration-ink-muted/40')}>{layer.name}</span>
+                  </button>
+                </li>
+              )
+            })}
+            {!editLayers && status.layers.filter((l) => !l.hidden).length > LAYER_PILLS && (
               <li className="inline-flex items-center h-6 px-2 text-[11.5px] text-ink-muted tabular-nums">
-                +{(status.layers.length - LAYER_PILLS).toLocaleString()} more
+                +{(status.layers.filter((l) => !l.hidden).length - LAYER_PILLS).toLocaleString()} more
               </li>
             )}
           </ul>
+          {editLayers && (
+            <p className="text-[11.5px] text-ink-muted leading-snug">Choose a layer to leave it out, with its matches. It keeps following {baseName ?? 'its base'}.</p>
+          )}
           {status.placedByType && (
             <p className="text-[12px] text-amber-700 dark:text-amber-400 leading-snug">
               Placed by type here: its base also places entities by rules on tags or properties, or by hand, which a subset doesn’t follow.

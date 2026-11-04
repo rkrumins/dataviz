@@ -327,21 +327,36 @@ search. It stores the search and its base, never the matches. So it is made at
 once, holds any number of them, and lists what matches each time it opens.
 
 **Make one.** Run an Advanced Search in a Context View, then choose **Save as
-view…** on the results bar. Choose:
+view…** on the results bar. A narrowing is kept the same way: see
+[Keep a narrowing as a view](/guide/exploring-graph#keep-a-narrowing-as-a-view).
+Choose:
 
 - its **name**;
 - where to **look for them**: in this view, or in the **whole data source**;
+- what to **keep with them**, as many as you like:
+  - **Everything inside them**, however deep;
+  - **What contains them**, up to the top;
+  - **What feeds them**, one step upstream;
+  - **What they feed**, one step downstream.
+
+  They are kept as part of its search, so the view stays current at any size. A
+  lineage step is taken from a match or anything inside it, so a table's sources
+  include its columns' sources. For more reach, or for entities you choose,
+  **Narrow first** and save from there.
 - its **layout**:
   - **Like *Sales overview***: the base's layers, followed as they change;
-  - **A layer per type found**;
+  - **A layer per type found**: a layer for each kind of entity it holds, the
+    most common first;
   - **One layer**.
 
   Over the whole data source, *Like* takes a copy of the layers instead.
 - **who can see it**.
 
-The sheet counts what each layer would hold. **Save view** (⌘/Ctrl+Enter) makes
-it and opens it. Saving from inside a subset view keeps both searches, against
-the same base.
+The preview counts what each layer would hold. While the layout follows the
+base, untick a layer to leave it out, with its matches; at least one stays. It
+still follows the base, so a layer the base adds later arrives. **Save view**
+(⌘/Ctrl+Enter) makes it and opens it. Saving from inside a subset view keeps
+both searches, against the same base.
 
 **What its layers show.** Each layer lists the matches of the types it holds.
 **Other matches** holds every other type. A layer's header reads what it lists,
@@ -350,6 +365,9 @@ of how many:
 - **so far** while the count is still rising;
 - **as of 10:42** while it shows a recent answer, because the data has just
   changed.
+
+Under each match, its containers are named, for example *in warehouse ›
+sales*, without loading them.
 
 The canvas lists up to 2,000 rows a layer. Past that, the layer says how many it
 shows, and **Search in this layer** finds the rest. Matches are placed by type:
@@ -361,8 +379,10 @@ shows and where its layers come from. If you can edit the view, it also offers:
 | To… | Do this |
 | --- | --- |
 | Change the search | **Edit search…** opens the search in the base view, with this view's search in it. Run it, then choose **Update *name*…** on the results bar. It shows what the change adds to and takes from each layer (**+120 −35**), and offers **Undo** |
+| Keep more with the matches, or less | Under **Keeps with them**, choose **Everything inside**, **What contains them**, **What feeds them** or **What they feed**. Each change offers **Undo** |
+| Leave a layer out, or bring it back | In a subset that follows its base, choose the layer's pill. A layer left out is struck through, and its matches go with it. At least one layer stays |
 | Ask each layer for a fresh answer | **Refresh** |
-| Change its layers yourself | **Make its own layout**: it keeps the base's current layers as its own |
+| Change its layers yourself | **Make its own layout**: it keeps every one of the base's current layers as its own, the ones it left out too. **Undo** leaves them out again |
 | Take its layers from the base again | **Follow *Sales overview* again** |
 
 Each change is recorded as a version of the view.
@@ -385,7 +405,9 @@ can open it.
   properties, or by hand, the sheet and the chip say so. Entities shown inside
   their container in the base, such as a table's columns, are in **Other
   matches** in the subset.
-- A search that follows lineage can take one step at most.
+- A search that follows lineage can take one step at most, and so can what it
+  keeps with the matches. Two or more steps, or entities you choose, are kept as
+  a list of members: Narrow, then **Save as view**.
 
 > **If you don't see it:** subset views are a preview, **Subset views: a
 > search's matches as a view**, which your administrator turns on in

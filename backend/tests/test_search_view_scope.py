@@ -28,6 +28,7 @@ from backend.common.models.search import (
     TagPredicate,
     TextPredicate,
 )
+from backend.app.services import search_views as sv
 from backend.common.models.search_view import REST_LAYER_ID
 
 P = {"kind": "tag", "values": ["pii"]}
@@ -155,6 +156,27 @@ class TestResolver:
         assert eff.root_urns == () and eff.entity_type_allow_list == frozenset()
         assert [(layer.id, layer.rest) for layer in eff.subset_layers] == [("x", False), ("r", True)]
 
+
+    async def test_what_it_includes_is_part_of_every_search_in_it(self, db_session):
+        ws = await _ws(db_session)
+        base = await _view(db_session, ws, BASE_CONFIG)
+        plain = await _view(db_session, ws, _subset(base.id))
+        inside = await _view(db_session, ws, _subset(base.id, include={"contents": True}), name="Inside")
+        eff = await _resolve(db_session, ws, inside)
+        assert isinstance(eff.search, GroupPredicate) and eff.search.op == "or"
+        assert eff.search.children[0] == TagPredicate(values=["pii"])
+        assert eff.search.children[1].axis == "ancestor"
+        assert eff.scope_hash != (await _resolve(db_session, ws, plain)).scope_hash
+
+    async def test_a_hidden_layer_is_not_its_and_its_matches_are_left_out(self, db_session):
+        ws = await _ws(db_session)
+        base = await _view(db_session, ws, BASE_CONFIG)
+        sub = await _view(db_session, ws, _subset(base.id, hiddenLayers=["d"]))
+        eff = await _resolve(db_session, ws, sub)
+        assert [layer.id for layer in eff.subset_layers] == ["t", REST_LAYER_ID]
+        assert eff.layer_allow_list == frozenset({"t", REST_LAYER_ID})
+        assert eff.search == GroupPredicate(op="and", children=[
+            TagPredicate(values=["pii"]), sv.types_not_in(["dashboard"])])
 
 class _Provider:
     supports_search_sessions = False

@@ -10,7 +10,13 @@
   matches anywhere in the data source;
 * ``layout`` — ``inherit``: the subset's columns are its base's layers, read
   live and placed by type, plus "Other matches"; ``own``: its own type layers,
-  stored in the view as any view's are.
+  stored in the view as any view's are;
+* ``include`` — what it keeps beside the matches: everything inside one, what
+  contains one, one lineage step from one either way. Each is a relationship
+  asked of one entity, worked out with the search, so the view stays live at
+  any size (``search_predicate``);
+* ``hiddenLayers`` — base layers a following subset leaves out, with their
+  matches: fewer columns, still following the base.
 
 Nothing about the matches is stored, so the view is the same size whatever
 they number, and it is current whenever it is read: the search engine
@@ -26,7 +32,7 @@ from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
-from backend.common.models.search import Predicate
+from backend.common.models.search import GroupPredicate, Predicate, RelatedPredicate
 from backend.common.models.view_membership import MembershipProvenance, ReadInView
 
 #: Typed layers a subset view may have, and the types one may name — the
@@ -52,14 +58,34 @@ def _sha(value: object) -> str:
     return hashlib.sha256(blob.encode()).hexdigest()[:32]
 
 
+class SubsetInclude(_Base):
+    """What a subset view keeps beside its search's matches. Each is one
+    relationship asked of one entity, so the view stays live at any size; more
+    reach than this (two lineage steps and further) is a member-list view's."""
+    #: Everything inside a match, however deep.
+    contents: bool = False
+    #: What contains a match: its containers, up to the top.
+    containers: bool = False
+    #: One lineage step upstream: what feeds a match.
+    upstream: bool = False
+    #: One lineage step downstream: what a match feeds.
+    downstream: bool = False
+
+    def any(self) -> bool:
+        return self.contents or self.containers or self.upstream or self.downstream
+
+
 class SearchViewDefinition(_Base):
     """``config.search``: the search a subset view shows the matches of, where
-    they are looked for, and where its columns come from."""
+    they are looked for, what it keeps beside them, and where its columns come
+    from."""
     version: Literal[1] = Field(1, alias="v")
     predicate: Predicate
     within: Within = "view"
     read_in: Optional[str] = Field(None, alias="readIn")
     layout: Layout = "inherit"
+    include: SubsetInclude = Field(default_factory=SubsetInclude)
+    hidden_layers: List[str] = Field(default_factory=list, alias="hiddenLayers", max_length=LAYERS_MAX + 1)
     provenance: MembershipProvenance = Field(default_factory=MembershipProvenance)
 
     @model_validator(mode="after")
@@ -70,15 +96,43 @@ class SearchViewDefinition(_Base):
             raise ValueError("a search of the whole data source has no base view")
         if self.layout == "inherit" and self.within != "view":
             raise ValueError("only a subset of a view can follow that view's layers")
+        if self.hidden_layers and self.layout != "inherit":
+            raise ValueError("only a subset that follows its base hides some of its layers — "
+                             "an own layout has just the layers it keeps")
         return self
+
+    def search_predicate(self):
+        """What the view's entities are found by: its search, or its search and
+        what it includes — the matches, everything inside one, what contains
+        one, and what is one lineage step from one.
+
+        A lineage step is taken from a match or anything inside it, as a trace
+        walks a container — a dataset's lineage runs through its columns — so
+        a narrowing kept live reaches what it reached."""
+        if not self.include.any():
+            return self.predicate
+        matches = self.predicate
+        parts = [matches]
+        if self.include.contents:
+            parts.append(RelatedPredicate(axis="ancestor", where=matches))
+        if self.include.containers:
+            parts.append(RelatedPredicate(axis="descendant", where=matches))
+        if self.include.upstream or self.include.downstream:
+            reach = GroupPredicate(op="or", children=[matches, RelatedPredicate(axis="ancestor", where=matches)])
+            if self.include.upstream:
+                parts.append(RelatedPredicate(axis="downstream", where=reach))
+            if self.include.downstream:
+                parts.append(RelatedPredicate(axis="upstream", where=reach))
+        return GroupPredicate(op="or", children=parts)
 
     def predicate_json(self) -> Dict[str, Any]:
         return self.model_dump(mode="json", by_alias=True, exclude_none=True)["predicate"]
 
     def predicate_hash(self) -> str:
-        """The search's identity, whatever view holds it: two subsets of the same
-        base with the same search share their scans."""
-        return _sha(self.predicate_json())
+        """The identity of what it finds, whatever view holds it: two subsets of
+        the same base with the same search, including the same, share their scans."""
+        found = self.search_predicate()
+        return _sha(found.model_dump(mode="json", by_alias=True, exclude_none=True))
 
     def definition_hash(self) -> str:
         """The identity of the whole definition — the compare-and-swap token of
@@ -125,6 +179,8 @@ class FromSearchRequest(_Base):
     layout: Layout = "inherit"
     layers: Optional[List[SearchLayer]] = Field(None, max_length=LAYERS_MAX)
     rest: Optional[str] = Field(REST_LAYER_NAME, max_length=200)
+    include: SubsetInclude = Field(default_factory=SubsetInclude)
+    hidden_layers: List[str] = Field(default_factory=list, alias="hiddenLayers", max_length=LAYERS_MAX + 1)
     provenance: MembershipProvenance = Field(default_factory=MembershipProvenance)
 
     @model_validator(mode="after")
@@ -134,6 +190,9 @@ class FromSearchRequest(_Base):
                              "send layers only with layout 'own'")
         if self.layout == "own" and not self.layers and not self.rest:
             raise ValueError("an own layout needs a layer: name some layers, or rest")
+        if self.layout == "own" and self.hidden_layers:
+            raise ValueError("an own layout has just the layers it names: hide a layer by leaving "
+                             "it out")
         return self
 
 
@@ -145,6 +204,8 @@ class SearchViewUpdate(_Base):
     if_definition_hash: str = Field(alias="ifDefinitionHash")
     predicate: Optional[Predicate] = None
     layout: Optional[Layout] = None
+    include: Optional[SubsetInclude] = None
+    hidden_layers: Optional[List[str]] = Field(None, alias="hiddenLayers", max_length=LAYERS_MAX + 1)
 
 
 SubsetStatus = Literal["ok", "base_missing"]
@@ -160,6 +221,8 @@ class SubsetLayer(_Base):
     entity_types: List[str] = Field(default_factory=list, alias="entityTypes")
     rest: bool = False
     excluded_types: List[str] = Field(default_factory=list, alias="excludedTypes")
+    #: Left out of a following subset, with its matches (``hiddenLayers``).
+    hidden: bool = False
 
 
 class SearchViewStatus(_Base):

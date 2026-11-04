@@ -5,6 +5,11 @@
  * subset view: always current (it stores the search, never the matches), any
  * size, made at once, laid out like the view it came from and shared like any
  * view. Nothing is saved blind: the preview counts what each layer would hold.
+ *
+ * Beside the matches it can keep what they reach — everything inside them, what
+ * contains them, one lineage step either way — still live and any size; and
+ * fewer layers: a layer left out in the preview takes its matches with it. More
+ * reach than that is a list of members, which Narrow makes.
  */
 import { useMemo, useState, type KeyboardEvent, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
@@ -21,12 +26,14 @@ import { httpStatusOf } from '@/services/graphRequestFailure'
 import { createFromSearch } from '@/services/searchViewsApi'
 import type { View } from '@/services/viewApiService'
 import type { Predicate } from '@/types/search'
-import type { SearchViewDefinition, SubsetLayer, SubsetWithin } from '@/types/searchView'
-import { REST_LAYER_ID } from '@/types/searchView'
+import type { SearchViewDefinition, SubsetInclude, SubsetLayer, SubsetWithin } from '@/types/searchView'
+import { NO_INCLUDE, REST_LAYER_ID } from '@/types/searchView'
 
 import {
+  anyIncluded,
   combinedWith,
   describePredicate,
+  includeWords,
   layerPredicate,
   layersLike,
   nameFrom,
@@ -34,10 +41,12 @@ import {
   placesByMoreThanType,
   requestOf,
   REST_LAYER_NAME,
+  withInclude,
   type BoardLayer,
   type LayoutChoice,
 } from './model'
 import { useLayerCounts } from './useLayerCounts'
+import { useTypeBreakdown } from './useTypeBreakdown'
 
 export interface SaveSearchAsViewSheetProps {
   /** The view the search was run in. */
@@ -53,18 +62,34 @@ export interface SaveSearchAsViewSheetProps {
   boardConfig?: Record<string, unknown> | null
   /** When it was run inside a subset view: that view's search, and its base. */
   subset?: { definition: SearchViewDefinition; baseName: string | null } | null
-  /** The types the search found, most common first, for "A layer per type found". */
-  typeCounts?: Array<{ type: string; count: number }>
   typeLabel?: (type: string) => string
+  /** From a narrowing kept live: what it reaches, and where it looks. */
+  initialInclude?: SubsetInclude
+  initialWithin?: SubsetWithin
+  /** Beside the title: keep it as a list of members instead (from a narrowing). */
+  headerExtra?: ReactNode
+  /** More reach than a live view keeps (two lineage steps, chosen entities): narrow first. */
+  onNarrowInstead?: () => void
   onClose: () => void
   onSaved: (view: View) => void
 }
+
+/** What a live view can keep beside the matches, as the sheet offers it. */
+const INCLUDES: Array<{ key: keyof SubsetInclude; label: string; hint: string; icon: keyof typeof LucideIcons }> = [
+  { key: 'contents', label: 'Everything inside them', hint: 'However deep', icon: 'ListTree' },
+  { key: 'containers', label: 'What contains them', hint: 'Up to the top', icon: 'FolderUp' },
+  { key: 'upstream', label: 'What feeds them', hint: 'One step upstream', icon: 'ArrowLeftToLine' },
+  { key: 'downstream', label: 'What they feed', hint: 'One step downstream', icon: 'ArrowRightToLine' },
+]
 
 const CARDS: Record<LayoutChoice, { icon: keyof typeof LucideIcons; title: (base: string) => string }> = {
   like: { icon: 'Columns3', title: (b) => `Like “${b}”` },
   perType: { icon: 'Shapes', title: () => 'A layer per type found' },
   one: { icon: 'Rows3', title: () => 'One layer' },
 }
+
+const NO_TYPES: Array<{ type: string; count: number }> = []
+const NONE_LEFT_OUT: ReadonlySet<string> = new Set()
 
 const number = new Intl.NumberFormat()
 const capitalise = (s: string) => (s ? s[0].toUpperCase() + s.slice(1) : s)
@@ -82,16 +107,17 @@ function saveErrorText(err: unknown): string {
 }
 
 export function SaveSearchAsViewSheet({
-  viewId, viewName, workspaceId, dataSourceId, predicate, boardLayers, boardConfig, subset, typeCounts = [],
-  typeLabel, onClose, onSaved,
+  viewId, viewName, workspaceId, dataSourceId, predicate, boardLayers, boardConfig, subset,
+  typeLabel, initialInclude, initialWithin, headerExtra, onNarrowInstead, onClose, onSaved,
 }: SaveSearchAsViewSheetProps) {
   const kept = combinedWith(subset?.definition, predicate, viewId)
   const baseName = subset ? (subset.baseName ?? 'its base view') : viewName
   const sentence = describePredicate(predicate, typeLabel)
 
   const [name, setName] = useState(() => capitalise(nameFrom(sentence)))
-  const [within, setWithin] = useState<SubsetWithin>(subset?.definition.within ?? 'view')
+  const [within, setWithin] = useState<SubsetWithin>(subset?.definition.within ?? initialWithin ?? 'view')
   const [choice, setChoice] = useState<LayoutChoice>('like')
+  const [include, setInclude] = useState<SubsetInclude>(initialInclude ?? NO_INCLUDE)
   const [visibility, setVisibility] = useState<'private' | 'workspace'>('private')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -102,26 +128,46 @@ export function SaveSearchAsViewSheet({
     { choice: 'like', available: true, hint: within === 'view'
       ? 'Its layers, followed as they change — each match in the layer of its type'
       : 'A copy of its layers — each match in the layer of its type' },
-    { choice: 'perType', available: typeCounts.length > 0, hint: typeCounts.length
-      ? 'A column for each kind of match, the most common first'
-      : 'Run the search with its breakdown by type to offer this' },
+    { choice: 'perType', available: true, hint: 'A column for each kind it holds, the most common first' },
     { choice: 'one', available: true, hint: 'Every match in one list' },
   ]
+
+  // What the view finds — its search and what it includes.
+  const found = useMemo(() => withInclude(kept.predicate, include), [kept.predicate, include])
+  // The kinds it holds, asked for only while a layer per type is chosen.
+  const breakdown = useTypeBreakdown(choice === 'perType' ? kept.baseViewId : null, found, within === 'dataSource')
+  const typeCounts = breakdown.status === 'done' ? breakdown.types : NO_TYPES
 
   const layers: SubsetLayer[] = useMemo(() => {
     if (choice === 'like') return layersLike(boardLayers)
     if (choice === 'perType') {
+      if (breakdown.status !== 'done') return []
       const { layers: typed } = perTypeLayers(typeCounts, typeLabel)
       return layersLike([...typed.map((l, i) => ({ id: `layer-${i + 1}`, name: l.name, order: i, entityTypes: l.entityTypes })),
         { id: REST_LAYER_ID, name: REST_LAYER_NAME, order: typed.length, showUnassigned: true }])
     }
     return [{ id: REST_LAYER_ID, name: 'Matches', entityTypes: [], rest: true, excludedTypes: [] }]
-  }, [choice, boardLayers, typeCounts, typeLabel])
+  }, [choice, boardLayers, breakdown.status, typeCounts, typeLabel])
 
+  // The base's layers left out, with their matches — by a subset that follows its
+  // base alone: an own layout's left-out type would land in "Other matches".
+  const canHide = choice === 'like' && within === 'view' && layers.length > 1
+  const [leftOut, setLeftOut] = useState<ReadonlySet<string>>(NONE_LEFT_OUT)
+  const hidden = canHide ? leftOut : NONE_LEFT_OUT
+  const toggleLeftOut = (id: string) => setLeftOut((was) => {
+    const next = new Set(was)
+    if (next.has(id)) next.delete(id)
+    else next.add(id)
+    return next
+  })
+
+  // What the view finds in each layer it keeps.
   const toCount = useMemo(() => layers.flatMap((layer) => {
-    const p = layerPredicate(kept.predicate, layer)
+    if (hidden.has(layer.id)) return []
+    const p = layerPredicate(found, layer)
     return p ? [{ id: layer.id, predicate: p }] : []
-  }), [layers, kept.predicate])
+  }), [layers, found, hidden])
+  const keptLayers = layers.filter((l) => !hidden.has(l.id) && (l.rest || l.entityTypes.length > 0))
   const counts = useLayerCounts(kept.baseViewId, toCount, within === 'dataSource')
   const countOf = (id: string) => (counts.status === 'counting' || counts.status === 'done') ? counts.counts.get(id) : undefined
   const total = toCount.reduce((sum, l) => sum + (countOf(l.id)?.count ?? 0), 0)
@@ -130,7 +176,7 @@ export function SaveSearchAsViewSheet({
   const exact = counts.status === 'done' && toCount.every((l) => countOf(l.id)?.complete)
 
   const placedByType = choice === 'like' && !!boardConfig && placesByMoreThanType(boardConfig)
-  const canSave = !!name.trim() && !saving
+  const canSave = !!name.trim() && !saving && keptLayers.length > 0
 
   const save = async () => {
     if (!canSave) return
@@ -138,7 +184,7 @@ export function SaveSearchAsViewSheet({
     setError(null)
     try {
       const out = await createFromSearch(requestOf(
-        { name, visibility, within, choice },
+        { name, visibility, within, choice, include, hidden: [...hidden] },
         { workspaceId, dataSourceId, viewId: kept.baseViewId, predicate: kept.predicate, baseLayers: boardLayers,
           typeCounts, typeLabel },
       ), idempotencyKey)
@@ -178,13 +224,14 @@ export function SaveSearchAsViewSheet({
         }}
       >
         <div className="flex items-start justify-between gap-3 px-7 pt-6 pb-4 border-b border-glass-border/60">
-          <div className="flex items-center gap-3.5 min-w-0">
+          <div className="flex items-start gap-3.5 min-w-0">
             <div className="w-11 h-11 rounded-2xl bg-accent-lineage/[0.12] border border-accent-lineage/25 grid place-items-center flex-none">
               <LucideIcons.ListFilter className="w-5 h-5 text-accent-lineage" strokeWidth={2.2} />
             </div>
             <div className="min-w-0">
               <h2 id="save-search-title" className="text-xl font-display font-semibold text-ink leading-tight">Save as a view</h2>
               <p className="text-[13px] text-ink-muted mt-0.5 leading-snug">These matches as a view of their own: always current, any size, shared like any view.</p>
+              {headerExtra && <div className="mt-3">{headerExtra}</div>}
             </div>
           </div>
           <button type="button" onClick={onClose} disabled={saving} aria-label="Close" className="p-2 rounded-lg text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors disabled:opacity-40">
@@ -204,7 +251,8 @@ export function SaveSearchAsViewSheet({
               className="w-full h-10 px-3.5 rounded-xl bg-black/[0.03] dark:bg-white/[0.04] border border-glass-border text-[14px] text-ink placeholder:text-ink-muted/60 focus:outline-none focus:ring-2 focus:ring-accent-lineage/35 focus:border-accent-lineage/50"
             />
             <p className="mt-1.5 text-[12px] text-ink-muted leading-snug">
-              The matches of <span className="text-ink">{subset ? `${describePredicate(subset.definition.predicate, typeLabel)} and ${sentence}` : sentence}</span>.
+              The matches of <span className="text-ink">{subset ? `${describePredicate(subset.definition.predicate, typeLabel)} and ${sentence}` : sentence}</span>
+              {anyIncluded(include) && <>, with <span className="text-ink">{includeWords(include)}</span></>}.
             </p>
           </Section>
 
@@ -223,6 +271,47 @@ export function SaveSearchAsViewSheet({
               {within === 'view'
                 ? `A subset of “${baseName}”: only what it holds. Its readers don’t need to be able to open it.`
                 : 'Anywhere in the data source, whatever any view holds.'}
+            </p>
+          </Section>
+
+          <Section title="Keep with them">
+            <div className="grid grid-cols-2 gap-2" role="group" aria-label="Keep with them">
+              {INCLUDES.map((item) => {
+                const Icon = LucideIcons[item.icon] as LucideIcons.LucideIcon
+                const on = include[item.key]
+                return (
+                  <button
+                    key={item.key}
+                    type="button"
+                    aria-pressed={on}
+                    onClick={() => setInclude((was) => ({ ...was, [item.key]: !was[item.key] }))}
+                    className={cn(
+                      'group flex items-center gap-2.5 rounded-xl border px-3 py-2.5 text-left transition-colors',
+                      on
+                        ? 'border-accent-lineage/60 bg-accent-lineage/[0.08] ring-1 ring-accent-lineage/25'
+                        : 'border-glass-border/80 hover:border-accent-lineage/40 hover:bg-accent-lineage/[0.03]',
+                    )}
+                  >
+                    <span className={cn('w-7 h-7 rounded-lg grid place-items-center flex-none transition-colors',
+                      on ? 'bg-accent-lineage text-white' : 'bg-black/[0.04] dark:bg-white/[0.06] text-ink-muted group-hover:text-accent-lineage')}>
+                      {on ? <LucideIcons.Check className="w-4 h-4" strokeWidth={2.6} /> : <Icon className="w-4 h-4" />}
+                    </span>
+                    <span className="min-w-0">
+                      <span className="block text-[12.5px] font-semibold text-ink leading-tight">{item.label}</span>
+                      <span className="block text-[11px] text-ink-muted leading-snug">{item.hint}</span>
+                    </span>
+                  </button>
+                )
+              })}
+            </div>
+            <p className="mt-2 text-[12px] text-ink-muted leading-snug">
+              Kept as part of its search, so it stays current at any size.
+              {onNarrowInstead && (
+                <> More reach, or chosen entities?{' '}
+                  <button type="button" onClick={onNarrowInstead}
+                    className="font-semibold text-accent-lineage hover:underline underline-offset-2">Narrow first</button>
+                  {' '}and save from there.</>
+              )}
             </p>
           </Section>
 
@@ -270,27 +359,55 @@ export function SaveSearchAsViewSheet({
 
           <Section title="Preview">
             <ul className="rounded-xl border border-glass-border/70 divide-y divide-glass-border/50" aria-label="What each layer holds">
+              {choice === 'perType' && breakdown.status !== 'done' && (
+                <li className="flex items-center gap-2 px-3.5 py-2.5 text-[12.5px] text-ink-muted" role="status">
+                  {breakdown.status === 'error' ? (
+                    <><LucideIcons.CircleAlert className="w-3.5 h-3.5 flex-none text-amber-600 dark:text-amber-400" aria-hidden />
+                      Couldn’t tell what kinds it holds. Choose another layout, or try again later.</>
+                  ) : (
+                    <><LucideIcons.Loader2 className="w-3.5 h-3.5 flex-none animate-spin" aria-hidden />
+                      Finding the kinds of entity it holds…</>
+                  )}
+                </li>
+              )}
               {layers.map((layer) => {
                 const c = countOf(layer.id)
+                const left = hidden.has(layer.id)
                 const counted = toCount.some((l) => l.id === layer.id)
                 const empty = counted && c?.complete && c.count === 0
+                // Leaving out the last layer that can hold matches would leave nothing to show.
+                const lastKept = !left && keptLayers.length === 1 && keptLayers[0].id === layer.id
                 return (
-                  <li key={layer.id} className={cn('relative overflow-hidden flex items-center justify-between gap-3 px-3.5 py-2', (empty || !counted) && 'opacity-50')}>
+                  <li key={layer.id} className={cn('relative overflow-hidden flex items-center justify-between gap-3 px-3.5 py-2',
+                    (empty || !counted) && !left && 'opacity-50')}>
                     {/* Its share of the matches, in its colour, behind the row. */}
                     {c && c.count > 0 && (
                       <span aria-hidden className="absolute inset-y-0 left-0 opacity-[0.10] dark:opacity-[0.16] transition-[width] duration-500 ease-out"
                         style={{ width: `${Math.max(2, (c.count / most) * 100)}%`, background: layer.color ?? '#94a3b8' }} />
                     )}
                     <span className="relative flex items-center gap-2 min-w-0">
-                      <span className="w-2 h-2 rounded-full flex-none" style={{ background: layer.color ?? 'var(--color-ink-muted, #94a3b8)' }} aria-hidden />
-                      <span className="truncate text-[12.5px] text-ink">{layer.name}</span>
-                      {layer.rest && <span className="text-[11px] text-ink-muted">· every other type</span>}
+                      {canHide ? (
+                        <button type="button" role="switch" aria-checked={!left} disabled={lastKept}
+                          aria-label={left ? `Keep ${layer.name}` : `Leave out ${layer.name}`}
+                          title={lastKept ? 'Keep at least one layer' : left ? 'Keep this layer' : 'Leave this layer and its matches out'}
+                          onClick={() => toggleLeftOut(layer.id)}
+                          className={cn('w-4 h-4 rounded-[5px] border-[1.5px] grid place-items-center flex-none transition-colors disabled:cursor-not-allowed',
+                            left ? 'border-ink-muted/45 bg-transparent hover:border-accent-lineage/60' : 'border-transparent text-white')}
+                          style={left ? undefined : { background: layer.color ?? '#94a3b8' }}>
+                          {!left && <LucideIcons.Check className="w-3 h-3" strokeWidth={3} />}
+                        </button>
+                      ) : (
+                        <span className="w-2 h-2 rounded-full flex-none" style={{ background: layer.color ?? 'var(--color-ink-muted, #94a3b8)' }} aria-hidden />
+                      )}
+                      <span className={cn('truncate text-[12.5px]', left ? 'text-ink-muted line-through decoration-ink-muted/50' : 'text-ink')}>{layer.name}</span>
+                      {layer.rest && <span className={cn('text-[11px] text-ink-muted', left && 'opacity-60')}>· every other type</span>}
                     </span>
                     <span className="relative flex-none text-[12px] font-medium tabular-nums text-ink-secondary">
-                      {!counted ? 'nothing to hold'
-                        : c === undefined ? '…'
-                          : empty ? 'no matches — hidden'
-                            : `${number.format(c.count)}${c.complete ? '' : '+'}`}
+                      {left ? <span className="text-ink-muted font-normal">left out</span>
+                        : !counted ? 'nothing to hold'
+                          : c === undefined ? '…'
+                            : empty ? 'no matches — hidden'
+                              : `${number.format(c.count)}${c.complete ? '' : '+'}`}
                     </span>
                   </li>
                 )
@@ -331,7 +448,7 @@ export function SaveSearchAsViewSheet({
           <div className="flex items-center justify-between gap-3">
             <p className={cn('min-w-0 truncate text-[12px] tabular-nums text-ink-muted', counts.status !== 'done' && 'opacity-70')}>
               {counts.status === 'error' ? 'Couldn’t count the matches — you can still save'
-                : counts.status === 'idle' ? '' : `${number.format(total)}${exact ? '' : '+'} matches`}
+                : counts.status === 'idle' ? '' : `${number.format(total)}${exact ? '' : '+'} ${anyIncluded(include) ? 'in all' : 'matches'}`}
             </p>
             <div className="flex items-center gap-2 flex-none">
               <button type="button" onClick={onClose} disabled={saving} className="h-9 px-4 rounded-xl text-[13px] font-semibold text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors disabled:opacity-40">

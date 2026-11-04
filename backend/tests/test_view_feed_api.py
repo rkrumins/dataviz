@@ -194,6 +194,15 @@ class TestAnswers:
         assert page["nodes"][0]["ancestorPath"][0]["urn"] == "urn:db"
         assert page["totalCount"] == 3 and page["status"] == "complete" and not page["capped"]
 
+    async def test_a_hidden_layer_has_no_feed(self, on, views, post, db_session):
+        ws, _base, sub, _plain = await views()
+        config = json.loads(sub.config)
+        config["search"]["hiddenLayers"] = ["t"]
+        sub.config = json.dumps(config)
+        await db_session.commit()
+        resp = await post(ws, sub.id, {"layerId": "t"}, FeedEngine())
+        assert resp.status_code == 404
+
     async def test_what_is_there_answers_without_a_scan(self, on, views, post, charged):
         ws, _base, sub, _plain = await views()
         engine = FeedEngine()

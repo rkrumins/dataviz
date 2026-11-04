@@ -18,6 +18,21 @@ export type SubsetLayout = 'inherit' | 'own'
 /** The id of the layer a subset adds for matches whose type no layer claims. */
 export const REST_LAYER_ID = 'other-matches'
 
+/** What a subset keeps beside its search's matches. Each is one relationship to a
+ *  match, kept as part of its search, so the view stays live at any size. */
+export interface SubsetInclude {
+  /** Everything inside a match, however deep. */
+  contents: boolean
+  /** What contains a match, up to the top. */
+  containers: boolean
+  /** One lineage step upstream: what feeds a match. */
+  upstream: boolean
+  /** One lineage step downstream: what a match feeds. */
+  downstream: boolean
+}
+
+export const NO_INCLUDE: SubsetInclude = { contents: false, containers: false, upstream: false, downstream: false }
+
 /** `config.search` — written only by the server. */
 export interface SearchViewDefinition {
   v: 1
@@ -25,6 +40,10 @@ export interface SearchViewDefinition {
   within: SubsetWithin
   readIn?: string
   layout: SubsetLayout
+  /** What it keeps beside the matches. */
+  include?: SubsetInclude
+  /** Base layers a following subset leaves out, with their matches. */
+  hiddenLayers?: string[]
   provenance: MembershipProvenance
 }
 
@@ -51,6 +70,9 @@ export interface FromSearchRequest {
   layers?: SubsetLayerSpec[]
   /** The name of the layer for every other match; null: none. */
   rest?: string | null
+  include?: SubsetInclude
+  /** A following subset's base layers to leave out (`inherit` only). */
+  hiddenLayers?: string[]
   provenance: MembershipProvenance
 }
 
@@ -59,6 +81,8 @@ export interface SearchViewUpdate {
   ifDefinitionHash: string
   predicate?: Predicate
   layout?: SubsetLayout
+  include?: SubsetInclude
+  hiddenLayers?: string[]
 }
 
 /** A layer as a subset shows it, and what feeds it. */
@@ -71,6 +95,8 @@ export interface SubsetLayer {
   rest: boolean
   /** The rest layer holds every type but these. */
   excludedTypes: string[]
+  /** Left out of a following subset, with its matches. */
+  hidden?: boolean
 }
 
 export type SubsetStatusKind = 'ok' | 'base_missing'

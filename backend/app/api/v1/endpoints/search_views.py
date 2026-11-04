@@ -47,6 +47,7 @@ from backend.app.services.permission_service import PermissionClaims, has_permis
 from backend.app.services.search_views import (
     SubsetError,
     check_predicate,
+    hidden_layer_problems,
     is_subset,
     layers_of,
     layout_problems,
@@ -185,6 +186,27 @@ async def search_status(session: AsyncSession, row: ViewORM, definition: SearchV
     )
 
 
+def _check_includes(definition: SearchViewDefinition) -> None:
+    """What the view finds — its search and what it includes — must be a search a
+    subset keeps (one entity at a time: one lineage step at most, in all)."""
+    if not definition.include.any():
+        return
+    found = definition.search_predicate().model_dump(mode="json", by_alias=True, exclude_none=True)
+    try:
+        check_predicate(found)
+    except SubsetError as exc:
+        raise HTTPException(status_code=exc.status, detail=(
+            f"What it includes can't be kept with this search: {exc.detail}")) from exc
+
+
+def _include_words(include) -> str:
+    kept = [words for on, words in ((include.contents, "everything inside them"),
+                                     (include.containers, "what contains them"),
+                                     (include.upstream, "one step upstream"),
+                                     (include.downstream, "one step downstream")) if on]
+    return "Keeps " + ", ".join(kept) if kept else "Keeps just the matches"
+
+
 def _subset_config(definition: SearchViewDefinition, layers: List[dict], icon: Optional[str]) -> dict:
     """The new view's config, shaped as the wizard shapes one, so every screen treats
     it as any other view: a reference view of every entity of its layers' types (its
@@ -277,11 +299,18 @@ async def create_view_from_search(
             "A word on its own would have to be looked for in every entity of the data source, on "
             "every open. Add a type, tag or property to the search."))
 
+    hidden = list(dict.fromkeys(body.hidden_layers))
+    if hidden:
+        problem = (hidden_layer_problems(hidden, layers_of(config_of(base), add_rest=True))
+                   if base is not None else "Only a subset of a view hides some of its layers.")
+        if problem:
+            raise HTTPException(status_code=422, detail=problem)
     definition = SearchViewDefinition(
         predicate=predicate, within=body.within, read_in=base.id if base is not None else None,
-        layout=body.layout,
+        layout=body.layout, include=body.include, hidden_layers=hidden,
         provenance=body.provenance.model_copy(update={"created_at": now_iso(), "created_by": actor}),
     )
+    _check_includes(definition)
     config = _subset_config(definition, _layers_from_request(body) if body.layout == "own" else [],
                             body.icon)
     problem = layout_problems(config)
@@ -358,11 +387,13 @@ async def update_view_search(
     claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """Change a subset view's search, or where its layers come from: ``layout``
-    ``own`` gives it its base's layers as they are now, to change as its own;
-    ``inherit`` drops them, and it follows its base again. Sent with the
-    ``definitionHash`` it was read at: a 409 answers a stale one with the current
-    definition. Recorded as a version of the view; made on the published view."""
+    """Change a subset view's search, what it keeps beside the matches
+    (``include``), which of its base's layers it leaves out (``hiddenLayers``), or
+    where its layers come from: ``layout`` ``own`` gives it the layers it shows,
+    as its base has them now, to change as its own; ``inherit`` drops them, and it
+    follows its base again. Sent with the ``definitionHash`` it was read at: a 409
+    answers a stale one with the current definition. Recorded as a version of the
+    view; made on the published view."""
     if branch_id:
         raise HTTPException(status_code=409, detail=(
             "A subset view's search is changed on the published view, not in a draft."))
@@ -392,6 +423,28 @@ async def update_view_search(
         if predicate != definition.predicate:
             updated = updated.model_copy(update={"predicate": predicate})
             summary.append("Changed its search")
+    if body.include is not None and body.include != definition.include:
+        updated = updated.model_copy(update={"include": body.include})
+        summary.append(_include_words(body.include))
+    if updated.include.any() and updated.predicate_hash() != definition.predicate_hash():
+        _check_includes(updated)
+    if body.hidden_layers is not None:
+        hidden = list(dict.fromkeys(body.hidden_layers))
+        if hidden != definition.hidden_layers:
+            if hidden and (body.layout or definition.layout) != "inherit":
+                raise HTTPException(status_code=422, detail=(
+                    "Only a subset that follows its base hides some of its layers: an own layout "
+                    "has just the layers it keeps."))
+            base = await _live_base(session, row, definition) if hidden else None
+            if hidden and base is None:
+                raise HTTPException(status_code=409, detail={
+                    "reason": "base_missing",
+                    "message": "Its base view is no longer available, so it has no layers to choose from."})
+            problem = hidden_layer_problems(hidden, layers_of(config_of(base), add_rest=True)) if hidden else None
+            if problem:
+                raise HTTPException(status_code=422, detail=problem)
+            updated = updated.model_copy(update={"hidden_layers": hidden})
+            summary.append("Changed which of its base's layers it shows")
     if body.layout is not None and body.layout != definition.layout:
         ref = config.setdefault("layout", {})
         if body.layout == "own":
@@ -400,8 +453,12 @@ async def update_view_search(
                 raise HTTPException(status_code=409, detail={
                     "reason": "base_missing",
                     "message": "Its base view is no longer available, so there are no layers to copy."})
+            # Every layer of the base becomes its own, the ones it left out too: an own
+            # layout leaves nothing out, and a type no layer holds would land in "Other
+            # matches" — a left-out layer's matches back, under another name.
             ref["referenceLayout"] = {"layers": own_layers(layers_of(config_of(base), add_rest=True)),
                                       "assignments": {}}
+            updated = updated.model_copy(update={"hidden_layers": []})
             summary.append("Gave it a layout of its own")
         else:
             if definition.within != "view":
@@ -422,7 +479,7 @@ async def update_view_search(
     await view_activity_repo.record_view_activity(
         session, view_id=row.id, workspace_id=row.workspace_id, action="updated", actor=actor,
         summary="; ".join(summary), changes={"search": sorted(
-            k for k in ("predicate", "layout") if getattr(body, k) is not None)},
+            k for k in ("predicate", "layout", "include", "hidden_layers") if getattr(body, k) is not None)},
     )
     await session.commit()
     row, ctx = await _view(session, view_id, user, claims, edit=False)

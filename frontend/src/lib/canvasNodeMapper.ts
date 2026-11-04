@@ -8,8 +8,11 @@
 import type { GraphNode, GraphEdge } from '@/providers/GraphDataProvider'
 import type { LineageNode, LineageEdge } from '@/store/canvas'
 
-/** Convert a backend GraphNode to a canvas LineageNode — every field verbatim. */
+/** Convert a backend GraphNode to a canvas LineageNode — every field verbatim. A node
+ *  a subset view's feed lists carries where it sits (`ancestorPath`, root first): kept
+ *  as its containers' names, which its row shows instead of loading them. */
 export function toCanvasNode(n: GraphNode, opts?: { randomPosition?: boolean }): LineageNode {
+    const path = (n as { ancestorPath?: Array<{ urn: string; displayName?: string }> }).ancestorPath
     return {
         id: n.urn,
         type: 'generic' as const,
@@ -35,6 +38,7 @@ export function toCanvasNode(n: GraphNode, opts?: { randomPosition?: boolean }):
             // Frontend conveniences derived from the property bag / tags
             classifications: n.tags,
             businessLabel: (n.properties?.businessLabel as string) ?? undefined,
+            ...(path && path.length > 0 ? { ancestorPath: path.map(a => a.displayName || a.urn) } : {}),
         },
     }
 }

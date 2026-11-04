@@ -707,9 +707,11 @@ Narrow is a preview your administrator turns on.
 On a Context View, **Save as view…** on the results bar keeps the search's
 matches as a view of their own: a *subset view*. It stores the search, not the
 matches, so it is made at once, holds any number of them, and shows what
-matches each time it opens. It is shared like any view. A search that can't be
-kept says why on the button: for example, one that follows lineage more than one
-step. See
+matches each time it opens. It is shared like any view. It can keep what the
+matches reach too: everything inside them, what contains them, and one lineage
+step either way. For more reach, **Narrow first** and save from the narrowing. A
+search that can't be kept says why on the button: for example, one that follows
+lineage more than one step. See
 [Subset views: a search's matches as a view](/guide/managing-views#subset-views-a-searchs-matches-as-a-view).
 Subset views are a preview your administrator turns on.
 

@@ -1003,6 +1003,15 @@ see the matches, and the base's name only if they can open it.
      and `"rest"` (the name of the layer for the other matches, or `null` for none).
    - `"within": "dataSource"` (with `"layout": "own"` and no `readIn`) looks for the matches in
      the whole data source instead.
+   - `"include"` keeps more than the matches: `{"contents": true}` everything inside one,
+     `"containers"` what contains one, `"upstream"` what feeds one, `"downstream"` what one feeds
+     (each `false` unless sent). A lineage step is one step, taken from a match or anything inside
+     it, as a trace walks a table through its columns. It becomes part of the view's search, so the
+     view stays current at any size; a search it can't be kept with gets `422`.
+   - `"hiddenLayers"`, with `"layout": "inherit"`: the ids of base layers to leave out, with their
+     matches (`"other-matches"` for **Other matches**). The view still follows the base, so a
+     layer the base adds later arrives. An id the base has no layer for, or leaving out every
+     layer that can hold matches, gets `422`.
 
    | Answer | Meaning |
    |---|---|
@@ -1035,7 +1044,7 @@ see the matches, and the base's name only if they can open it.
    | Route | Does |
    |---|---|
    | `GET /api/v1/views/{id}/search` | The search, its base (`viewId`, `name`, `available`), the layers it shows and `status` (`ok` or `base_missing`). Sends an `ETag`; a matching `If-None-Match` gets `304` |
-   | `PUT /api/v1/views/{id}/search` | Change the `predicate`, or `layout`: `own` copies the base's layers as they are now, `inherit` follows the base again. Sent with `ifDefinitionHash`; a stale hash gets `409` with the current definition. Recorded as a version |
+   | `PUT /api/v1/views/{id}/search` | Change the `predicate`, `include` or `hiddenLayers`, or `layout`: `own` copies every one of the base's layers as they are now, the left-out ones too, and `inherit` follows the base again (send `hiddenLayers` with it to leave some out). Sent with `ifDefinitionHash`; a stale hash gets `409` with the current definition. Recorded as a version |
    | `GET /api/v1/views/{id}/subsets` | The subset views made from a view: `count` (what changing or deleting it reaches) and the ones you can open |
 
    A subset view's search is written only through these routes. `POST /api/v1/views` drops a
