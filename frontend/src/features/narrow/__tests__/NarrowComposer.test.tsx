@@ -11,7 +11,7 @@ const resolveMembers = vi.fn<(viewId: string, req: MembershipRequest) => Promise
 vi.mock('@/providers', () => ({ useGraphProvider: () => ({ resolveMembers }) }))
 
 import { specFor } from '../model'
-import { NarrowComposer } from '../NarrowComposer'
+import { LevelPicker, NarrowComposer } from '../NarrowComposer'
 
 function answer(partial: Partial<MembershipResult> = {}): MembershipResult {
   return {
@@ -130,5 +130,16 @@ describe('NarrowComposer', () => {
     expect(screen.getAllByText('the matches of your search')).toHaveLength(2)
     fireEvent.click(screen.getByRole('radio', { name: 'Whole data source' }))
     await waitFor(() => expect(lastSpec().within).toBe('dataSource'))
+  })
+})
+
+describe('LevelPicker', () => {
+  it('names a step, or the whole way, in place of its number', () => {
+    const onChange = vi.fn()
+    render(<LevelPicker label="Levels up" value="all" levels={[1, 2]} names={{ 1: 'Parent', all: 'Top' }} onChange={onChange} />)
+    expect(screen.getAllByRole('radio').map((r) => r.textContent)).toEqual(['Parent', '2', 'Top'])
+    expect(screen.getByRole('radio', { name: 'Top' })).toHaveAttribute('aria-checked', 'true')
+    fireEvent.click(screen.getByRole('radio', { name: 'Parent' }))
+    expect(onChange).toHaveBeenCalledWith(1)
   })
 })

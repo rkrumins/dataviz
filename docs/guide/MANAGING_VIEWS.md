@@ -369,8 +369,17 @@ shows it. A layer's header reads what it lists, of how many:
 - **as of 10:42** while it shows a recent answer, because the data has just
   changed.
 
-Under each match, its containers are named, for example *in warehouse ›
-sales*, without loading them.
+**Where they sit.** Each match is drawn inside the containers its base draws it
+in. In a layer built by hand, *oracle_orders* sits under *sales* under
+*oracle_prod*, as it does in the base.
+- The containers are there to show where the matches sit. They aren't matches:
+  they're never counted, and they hold only the matches. Closed, a container says
+  how many matches it holds, for example **2 inside**.
+- Containers the base draws in another layer aren't repeated. The top row names
+  them, for example *in warehouse › sales*.
+- **Show where they sit**, in **Display options**, is on unless you turn it off,
+  and it's your own choice. Off, each match is a row of its own, naming where it
+  sits.
 
 The canvas lists up to 2,000 rows a layer. Past that, the layer says how many it
 shows, and **Search in this layer** finds the rest. Nothing is placed by hand,
@@ -383,7 +392,7 @@ shows and where its layers come from. If you can edit the view, it also offers:
 | To… | Do this |
 | --- | --- |
 | Change the search | **Edit search…** opens the search in the base view, with this view's search in it. Run it, then choose **Update *name*…** on the results bar. It shows what the change adds to and takes from each layer (**+120 −35**), and offers **Undo** |
-| Keep more with the matches, or less | Under **Keeps with them**, choose **Everything inside**, **What contains them**, **What feeds them** or **What they feed**. Each change offers **Undo** |
+| Keep more with the matches, or less | Under **Keeps with them**, choose **Everything inside**, **What contains them**, **What feeds them** or **What they feed**. **Everything inside** stops at 1, 2 or 3 levels, or takes all of them; **What contains them** at the parent, 2 or 3 up, or the top. Each can keep only some kinds of entity. Each change offers **Undo** |
 | Leave a layer out, or bring it back | In a subset that follows its base, choose the layer's pill. A layer left out is struck through, and its matches go with it. At least one layer stays |
 | Ask each layer for a fresh answer | **Refresh** |
 | Change its layers yourself | **Make its own layout**: it keeps every one of the base's current layers as its own, the ones it left out too. Its own layers hold matches by type, so a match the base places by hand or by a rule may move to **Other matches**. **Undo** leaves them out again |

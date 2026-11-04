@@ -201,11 +201,24 @@ def _check_includes(definition: SearchViewDefinition) -> None:
             f"What it includes can't be kept with this search: {exc.detail}")) from exc
 
 
+_LEVELS = {1: "one level", 2: "two levels", 3: "three levels"}
+
+
+def _reach_words(levels: Optional[int], kinds: Optional[List[str]], *, every: str,
+                 some: str) -> str:
+    """``every``/``some`` (with ``{n}`` for the levels), and the kinds when named."""
+    words = every if levels is None else some.format(n=_LEVELS.get(levels, f"{levels} levels"))
+    return f"{words} (only {', '.join(kinds)})" if kinds else words
+
+
 def _include_words(include) -> str:
-    kept = [words for on, words in ((include.contents, "everything inside them"),
-                                     (include.containers, "what contains them"),
-                                     (include.upstream, "one step upstream"),
-                                     (include.downstream, "one step downstream")) if on]
+    kept = [words for on, words in (
+        (include.contents, _reach_words(include.contents_levels, include.contents_kinds,
+                                        every="everything inside them", some="{n} inside them")),
+        (include.containers, _reach_words(include.containers_levels, include.containers_kinds,
+                                          every="what contains them", some="what contains them, {n} up")),
+        (include.upstream, "one step upstream"),
+        (include.downstream, "one step downstream")) if on]
     return "Keeps " + ", ".join(kept) if kept else "Keeps just the matches"
 
 

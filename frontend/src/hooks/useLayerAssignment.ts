@@ -26,6 +26,74 @@ import { placeCanvasNodes, withSessionPlacements } from './lib/placeCanvasNodes'
 
 const NO_CHAINS: ReadonlyMap<string, readonly string[]> = new Map()
 
+/** One of a subset match's containers, as its feed names it (root first). */
+interface PathStep { urn: string; displayName?: string; entityType?: string }
+
+type Cmp = (a: HierarchyNode, b: HierarchyNode) => number
+
+/**
+ * A subset view's layer, each match drawn inside the containers its base draws it in: the
+ * nearest `inLayer` of its path, which its feed says share its layer. Each container is a row of
+ * context — drawn, never loaded, so a `logical:` row: never counted, selected or fetched — shared
+ * by every match beneath it, holding how many it holds (`data.context.matches`), and naming what
+ * is above it (`data.ancestorPath`). A container that is a loaded row here takes its matches
+ * itself. Pure: it builds new rows and re-parents only rows built for this render.
+ */
+export function nestInContainers(roots: HierarchyNode[], layerId: string, rootCmp: Cmp, childCmp: Cmp): HierarchyNode[] {
+  const loaded = new Map<string, HierarchyNode>()
+  const walk = [...roots]
+  while (walk.length > 0) {
+    const n = walk.pop()!
+    loaded.set(n.urn, n)
+    walk.push(...n.children)
+  }
+  const context = new Map<string, HierarchyNode>()
+  const grown = new Set<HierarchyNode>()
+  const out: HierarchyNode[] = []
+  for (const root of roots) {
+    const path = root.data.ancestorPath as PathStep[] | undefined
+    const shared = Math.min(Number(root.data.inLayer) || 0, path?.length ?? 0)
+    if (!path || shared === 0) { out.push(root); continue }
+    let child = root
+    let placed = false
+    for (let i = path.length - 1; i >= path.length - shared; i--) {
+      const step = path[i]
+      const host = loaded.get(step.urn)
+      if (host) { host.children.push(child); grown.add(host); placed = true; break }
+      let row = context.get(step.urn)
+      const known = !!row
+      if (!row) {
+        const id = `logical:context:${layerId}:${step.urn}`
+        const name = step.displayName || step.urn
+        row = {
+          id, urn: id, typeId: step.entityType || '', name,
+          data: { type: step.entityType, label: name, isLogical: true, context: { urn: step.urn, matches: 0 },
+                  ancestorPath: path.slice(0, i) },
+          children: [], depth: 0, entityTypeOption: step.entityType || '', tags: [], isLogical: true,
+        }
+        context.set(step.urn, row)
+      }
+      row.children.push(child)
+      grown.add(row)
+      child = row
+      if (known) { placed = true; break }      // already drawn where it sits
+    }
+    if (!placed) out.push(child)
+  }
+  grown.forEach((n) => n.children.sort(childCmp))
+  // Depths below the rows moved, and how many matches each container holds.
+  const settle = (n: HierarchyNode, depth: number): number => {
+    n.depth = depth
+    let held = 0
+    for (const c of n.children) held += settle(c, depth + 1)
+    const info = n.data.context as { matches: number } | undefined
+    if (info) { info.matches = held; return held }
+    return held + (n.isLogical ? 0 : 1)
+  }
+  out.forEach((n) => settle(n, 0))
+  return out.sort(rootCmp)
+}
+
 // ============================================
 // Types
 // ============================================
@@ -79,6 +147,9 @@ export interface UseLayerAssignmentOptions {
   placementSpec?: CompiledPlacementSpec | null
   /** Flag-on only: containment chains of loaded nodes whose parent is not loaded (usePlacementChains). */
   placementChains?: ReadonlyMap<string, readonly string[]>
+  /** A subset view showing where its matches sit: each drawn inside the containers its base
+   *  draws it in (`nestInContainers`). */
+  whereTheySit?: boolean
 }
 
 export interface UseLayerAssignmentResult {
@@ -123,6 +194,7 @@ export function useLayerAssignment({
   sortOverrides,
   placementSpec,
   placementChains,
+  whereTheySit = false,
 }: UseLayerAssignmentOptions): UseLayerAssignmentResult {
 
   // Branch-created delta: URNs created in the active branch's draft. Read from
@@ -521,6 +593,12 @@ export function useLayerAssignment({
     // Sort all lists (per-layer comparator; custom mode orders by orderKey)
     grouped.forEach((list, layerId) => list.sort(rootCmpByLayer.get(layerId) ?? alphaAsc))
 
+    // 3b. A subset view's matches, each inside the containers its base draws it in.
+    if (whereTheySit) {
+      grouped.forEach((list, layerId) => grouped.set(layerId, nestInContainers(
+        list, layerId, rootCmpByLayer.get(layerId) ?? alphaAsc, childCmpByLayer.get(layerId) ?? alphaAsc)))
+    }
+
     // 4. Wrap entities in logical groups where configured.
     // Build entityId -> logicalNodeId map from all layer entityAssignments,
     // then for each layer with logicalNodes, create wrapper HierarchyNodes
@@ -600,7 +678,7 @@ export function useLayerAssignment({
 
     return { grouped, promotedAnchors, contract }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nodeEdgeFingerprint, sortedLayers, layerRules, instanceAssignments, nodeMap, childMap, parentMap, effectiveAssignments, branchCreatedDelta, assignments, entityScope, defaultNodeSortMode, sortOverrides, sessionSpec, placementChains])
+  }, [nodeEdgeFingerprint, sortedLayers, layerRules, instanceAssignments, nodeMap, childMap, parentMap, effectiveAssignments, branchCreatedDelta, assignments, entityScope, defaultNodeSortMode, sortOverrides, sessionSpec, placementChains, whereTheySit])
 
   const nodesByLayer = layerGrouping.grouped
 

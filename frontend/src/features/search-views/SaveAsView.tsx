@@ -6,9 +6,10 @@
  * lineage step either way) kept as part of its search — or as a list of members,
  * keeping their places where a live view can't follow how its base places them.
  * A narrowing is kept live when a live view can keep what it reaches; otherwise —
- * chosen entities, levels inside, two or more lineage steps — as a list of its
- * members, brought up to date when it is opened. Where both are possible, the
- * sheet switches between them.
+ * chosen entities, two or more lineage steps, what is inside its sources and
+ * consumers — as a list of its members, brought up to date when it is opened.
+ * Where both are possible, the sheet switches between them, and says what a list
+ * can't keep of what the live sheet chose.
  */
 import { useState } from 'react'
 import * as LucideIcons from 'lucide-react'
@@ -20,7 +21,7 @@ import type { View } from '@/services/viewApiService'
 import type { Predicate } from '@/types/search'
 import type { SearchViewDefinition, SubsetInclude, SubsetWithin } from '@/types/searchView'
 
-import { combinedWith, liveFromNarrowing, type BoardLayer } from './model'
+import { combinedWith, levelsText, liveFromNarrowing, type BoardLayer } from './model'
 import { SaveSearchAsViewSheet } from './SaveSearchAsViewSheet'
 
 export type SaveAsViewSource =
@@ -51,20 +52,43 @@ export interface SaveAsViewProps {
 
 type Kind = 'live' | 'list'
 
+/** The levels inside them a list keeps, past which it keeps everything (`MembershipExpand.children`). */
+const LIST_LEVELS = 2
+
 /** A search's matches, and what it keeps beside them, as a list of members: its
- *  search the starting points, everything inside them, one lineage step either
- *  way. The list draws what contains them itself (Show where they sit). */
+ *  search the starting points, one or two levels inside them or everything, one
+ *  lineage step either way. The list draws what contains them itself (Show where
+ *  they sit), up to the top, and keeps every kind. */
 function listFromSearch(predicate: Predicate, choices: { include?: SubsetInclude; within?: SubsetWithin }): NarrowDraft {
   const { include, within = 'view' } = choices
+  const levels = include?.contentsLevels
   return {
     spec: {
       v: 1, seeds: { query: predicate }, within,
-      expand: { children: include?.contents ? 'all' : 0, upstream: include?.upstream ? 1 : 0,
-                downstream: include?.downstream ? 1 : 0, partnerChildren: 0 },
+      expand: { children: include?.contents ? (levels && levels <= LIST_LEVELS ? levels : 'all') : 0,
+                upstream: include?.upstream ? 1 : 0, downstream: include?.downstream ? 1 : 0, partnerChildren: 0 },
     },
     seedsLabel: 'the matches of your search',
   }
 }
+
+/** What the live sheet chose that a list can't keep, and what it keeps instead, in
+ *  words; null when it keeps it all. */
+function listCantKeep(include?: SubsetInclude): string | null {
+  const inside = include?.contents ? include.contentsLevels ?? 0 : 0
+  const up = include?.containers ? include.containersLevels ?? 0 : 0
+  const kinds = !!(include?.contents && include.contentsKinds?.length) || !!(include?.containers && include.containersKinds?.length)
+  const parts = [
+    inside > LIST_LEVELS && [`${levelsText(inside)} inside them`, 'everything inside them'],
+    up > 0 && [`what contains them ${levelsText(up)} up`, 'what contains them up to the top'],
+    kinds && ['only some kinds', 'every kind'],
+  ].filter((p): p is string[] => !!p)
+  if (!parts.length) return null
+  return `A list can’t keep ${joined(parts.map((p) => p[0]), 'or')}, so it keeps ${joined(parts.map((p) => p[1]), 'and')}.`
+}
+
+const joined = (words: string[], last: string) =>
+  (words.length > 1 ? `${words.slice(0, -1).join(', ')} ${last} ${words[words.length - 1]}` : words[0])
 
 export function SaveAsView({
   source, viewId, viewName, workspaceId, dataSourceId, boardLayers, boardConfig, subset, typeLabel,
@@ -78,6 +102,8 @@ export function SaveAsView({
   // The live sheet's choices, kept to carry them to a list, and back.
   const [choices, setChoices] = useState<{ include?: SubsetInclude; within?: SubsetWithin }>(
     () => ({ include: shaped?.include, within: shaped?.within }))
+
+  const cantKeep = source.kind === 'search' ? listCantKeep(choices.include) : null
 
   // Either way: a switch beside the title, saying why live can't be when it can't.
   const switcher = canKeepList && (source.kind === 'narrowing' || liveReason === null) ? (
@@ -98,7 +124,7 @@ export function SaveAsView({
           : kind === 'live'
             ? 'Live: it keeps the search, never a list, so it is current every time it opens.'
             : source.kind === 'search'
-              ? 'A list of its matches, each where its view places it, brought up to date when it is opened after its data changed.'
+              ? `A list of its matches, each where its view places it, brought up to date when it is opened after its data changed.${cantKeep ? ` ${cantKeep}` : ''}`
               : 'A list of its members, brought up to date when it is opened after its data changed.'}
       </p>
     </div>

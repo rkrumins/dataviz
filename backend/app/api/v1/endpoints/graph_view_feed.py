@@ -60,10 +60,15 @@ from backend.app.services.deep_search import (
     get_deep_search_settings,
 )
 from backend.app.services.graph_cache import ENDPOINT_VIEW_FEED, get_graph_cache
-from backend.app.services.search_views import layer_condition, scope_types
+from backend.app.services.search_views import (
+    BasePlacement,
+    containers_here,
+    layer_condition,
+    scope_types,
+)
 from backend.common.adapters import ProviderBusy
 from backend.common.models.search import SearchOptions, SearchQuery, SearchResultPage, SearchScope
-from backend.common.models.search_view import ViewFeedPage, ViewFeedRequest
+from backend.common.models.search_view import SubsetLayer, ViewFeedPage, ViewFeedRequest
 
 router = APIRouter()
 
@@ -108,21 +113,27 @@ def _write_cursor(engine_cursor: str, delivered: int) -> str:
     return base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
 
 
-def _feed_page(layer_id: str, page: SearchResultPage, delivered_before: int,
-               max_rows: int, reuse_s: int) -> ViewFeedPage:
+def _feed_page(layer: SubsetLayer, placement: Optional[BasePlacement], page: SearchResultPage,
+               delivered_before: int, max_rows: int, reuse_s: int) -> ViewFeedPage:
+    """A page of ``layer``'s matches as the canvas draws them: each with where it
+    sits (``ancestorPath``, root first) and how many of its nearest containers
+    sit in this layer too (``inLayer``), which the canvas draws it inside."""
     hits = (page.hits or [])[:max(0, max_rows - delivered_before)]
+    here = containers_here(layer, placement, [hit.ancestor_path or [] for hit in hits])
     nodes = []
-    for hit in hits:
+    for hit, in_layer in zip(hits, here):
         node = hit.node.model_dump(mode="json", by_alias=True)
         if hit.ancestor_path:
             node["ancestorPath"] = [a.model_dump(mode="json", by_alias=True)
                                     for a in hit.ancestor_path]
+        if in_layer:
+            node["inLayer"] = in_layer
         nodes.append(node)
     delivered = delivered_before + len(nodes)
     running = page.status == "running"
     more = page.cursor is not None
     out = ViewFeedPage(
-        layer_id=layer_id, nodes=nodes,
+        layer_id=layer.id, nodes=nodes,
         cursor=_write_cursor(page.cursor, delivered) if more and delivered < max_rows else None,
         total_count=page.total_count if page.total_count is not None else page.candidate_count,
         count_status="lowerBound" if running or page.count_status == "lowerBound" else "exact",
@@ -135,6 +146,8 @@ def _feed_page(layer_id: str, page: SearchResultPage, delivered_before: int,
         # Kept no longer than its window lets it answer: the window's shortest.
         age = time.time() - datetime.fromisoformat(page.as_of).timestamp()
         out._ttl_s = max(1, int(reuse_s * 0.8 - age))
+    # Where its matches sit ran late: kept for seconds, so the next read draws them.
+    out._paths_left_out = page._paths_left_out
     return out
 
 
@@ -256,7 +269,8 @@ async def view_feed(
                           outcome="stale" if page.stale else page.status or "complete")
             except NothingReusable:
                 page = await (busy() if _lane().locked() else search(scan=True, reuse=reuse_s))
-        return _feed_page(layer.id, page, cursor["d"], max_rows, settings.view_feed_reuse_seconds)
+        return _feed_page(layer, eff.subset_placement, page, cursor["d"], max_rows,
+                          settings.view_feed_reuse_seconds)
 
     scope = _cache_scope(engine)
     try:

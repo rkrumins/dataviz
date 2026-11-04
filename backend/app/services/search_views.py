@@ -29,6 +29,7 @@ from backend.app.services.layout_config import _resolve_raw_layout, parse_refere
 from backend.app.services.view_placement import (
     LayerTarget,
     PlacementSpec,
+    place_all,
     placement_digest,
 )
 from backend.common.models.search import (
@@ -523,3 +524,46 @@ def boundary_hash(*, view_id: Optional[str], data_source_id: Optional[str],
 
 def claimed_types(layers: Sequence[SubsetLayer]) -> Tuple[str, ...]:
     return tuple(_claimed(layers))
+
+
+def containers_here(layer: SubsetLayer, placement: Optional[BasePlacement],
+                    paths: Sequence[Sequence[Any]]) -> List[int]:
+    """For each match's path (its containers, ``AncestorRef``s root first), how
+    many of the nearest sit in ``layer`` as the subset places them, stopping at
+    the first that doesn't: the containers its canvas draws the match inside, as
+    the base draws it. Placed as the base places them, each page's containers
+    are placed together, from the facts read with their names (a path read in
+    part counts 0); placed by type, by their type alone."""
+    folded = {fold_case(t) for t in (layer.excluded_types if layer.rest else layer.entity_types)}
+    placed: Dict[str, Any] = {}
+    if placement is not None:
+        facts: Dict[str, Any] = {}
+        parents: Dict[str, List[str]] = {}
+        for path in paths:
+            if any(getattr(ref, "_facts", None) is None for ref in path):
+                continue
+            for i, ref in enumerate(path):
+                facts[ref.urn] = ref._facts
+                if i and path[i - 1].urn not in parents.setdefault(ref.urn, []):
+                    parents[ref.urn].append(path[i - 1].urn)
+        placed = place_all(placement.spec, facts, parents) if facts else {}
+    nowhere = layer.rest and placement is not None and layer.id not in placement.spec.layer_ids
+
+    def here(ref) -> bool:
+        if placement is None:
+            in_types = fold_case(ref.entity_type or "") in folded
+            return not in_types if layer.rest else in_types
+        where = placed.get(ref.urn)
+        if where is None:
+            return False
+        return not where.member if nowhere else where.layer_id == layer.id
+
+    out: List[int] = []
+    for path in paths:
+        k = 0
+        for ref in reversed(path):
+            if not here(ref):
+                break
+            k += 1
+        out.append(k)
+    return out

@@ -21,9 +21,12 @@ from backend.app.services import graph_cache as graph_cache_mod
 from backend.app.services.deep_search import NothingReusable, get_deep_search_settings
 from backend.app.services.feature_flags import feature_flags
 from backend.common.models.graph import GraphNode
+from backend.app.services.view_placement import NodeFacts
 from backend.common.models.search import AncestorRef, EntityTypePredicate, LayerPredicate, \
     SearchHit, SearchResultPage, TagPredicate
-from backend.common.models.search_view import REST_LAYER_ID, ViewFeedPage
+from backend.common.models.search_view import REST_LAYER_ID, SubsetLayer, ViewFeedPage
+
+TABLES = SubsetLayer(id="t", name="Tables", entityTypes=["table"])
 
 BASE = {
     "layoutType": "reference", "content": {"entityScope": "all"},
@@ -395,11 +398,43 @@ class TestCache:
         as_of = datetime.fromtimestamp(time.time() - 100, tz=timezone.utc).isoformat()
         page = SearchResultPage(hits=_hits(1), status="complete", stale=True, as_of=as_of,
                                 elapsed_ms=1)
-        built = feed._feed_page("t", page, 0, 2000, 300)
+        built = feed._feed_page(TABLES, None, page, 0, 2000, 300)
         assert 130 <= built.cache_ttl_s <= 141 and built.lkg is False
-        fresh = feed._feed_page("t", page.model_copy(update={"stale": False, "as_of": None}),
+        fresh = feed._feed_page(TABLES, None, page.model_copy(update={"stale": False, "as_of": None}),
                                 0, 2000, 300)
         assert fresh.cache_ttl_s is None and fresh.lkg is True
+
+    def test_a_page_whose_paths_ran_late_is_kept_for_seconds(self):
+        page = SearchResultPage(hits=_hits(1), status="complete", elapsed_ms=1)
+        page._paths_left_out = True
+        built = feed._feed_page(TABLES, None, page, 0, 2000, 300)
+        # Degraded: the cache keeps it for seconds, never as last-known-good.
+        assert built.degraded_detail == "paths"
+        assert feed._feed_page(TABLES, None, page.model_copy(), 0, 2000, 300).degraded_detail == "paths"
+
+    async def test_each_row_says_how_many_of_its_containers_share_its_layer(self, on, views, post):
+        # oracle_prod is placed in Source systems by hand; sales inherits it there.
+        base = {**BASE, "layout": {"referenceLayout": {"layers": [
+            {"id": "src", "name": "Source systems"}, {"id": "rep", "name": "Reporting"}],
+            "assignments": {"urn:db:oracle": {"layerId": "src"}, "urn:bi:x": {"layerId": "rep"}}}}}
+        ws, _base, sub, _plain = await views(base_config=base)
+
+        def ref(urn, kind):
+            out = AncestorRef(urn=urn, display_name=urn, entity_type=kind)
+            out._facts = NodeFacts(urn=urn, entity_type=kind)
+            return out
+
+        inside = SearchHit(node=GraphNode(urn="urn:t:orders", displayName="oracle_orders", entityType="table"),
+                           ancestor_path=[ref("urn:db:oracle", "database"), ref("urn:s:sales", "schema")])
+        elsewhere = SearchHit(node=GraphNode(urn="urn:t:x", displayName="x", entityType="table"),
+                              ancestor_path=[ref("urn:bi:x", "folder")])
+        engine = FeedEngine()
+        engine.provider.scanned = SearchResultPage(hits=[inside, elsewhere], total_count=2, candidate_count=2,
+                                                   status="complete", session_id="s1", elapsed_ms=1)
+        page = (await post(ws, sub.id, {"layerId": "src"}, engine)).json()
+        rows = {n["urn"]: n for n in page["nodes"]}
+        assert rows["urn:t:orders"]["inLayer"] == 2
+        assert "inLayer" not in rows["urn:t:x"]          # its container is drawn in Reporting
 
     async def test_the_cache_honours_the_hints(self):
         redis = fakeredis.aioredis.FakeRedis()

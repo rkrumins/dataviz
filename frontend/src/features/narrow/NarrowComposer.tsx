@@ -355,15 +355,17 @@ function ReachRow({ icon, title, hint, added, loading, control }: {
 }
 
 /** Levels inside: a few fixed steps, or everything. */
-function LevelPicker({ label, value, levels, disabled, onChange }: {
+export function LevelPicker({ label, value, levels, names, disabled, onChange }: {
   label: string
   value: Depth
   levels: number[]
+  /** A step's name in place of its number ("Parent"), or the whole way's ("Top"). */
+  names?: { [level: number]: string; all?: string }
   disabled?: boolean
   onChange: (value: Depth) => void
 }) {
-  const options = [...levels.map((l) => ({ value: String(l), label: l === 0 ? 'None' : String(l), disabled })),
-    { value: 'all', label: 'All', disabled }]
+  const options = [...levels.map((l) => ({ value: String(l), label: names?.[l] ?? (l === 0 ? 'None' : String(l)), disabled })),
+    { value: 'all', label: names?.all ?? 'All', disabled }]
   return (
     <Segmented
       label={label}

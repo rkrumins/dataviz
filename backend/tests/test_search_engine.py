@@ -733,6 +733,8 @@ class TestSessions:
         assert not page.deadline_exceeded and not page.truncated
         assert all(h.ancestor_path == [] for h in page.hits)
         assert any("could not be read in time" in n for n in page.scope_diagnostics.notes)
+        # Left out, not roots: a subset's feed keeps such a page for seconds only.
+        assert page._paths_left_out is True
 
     async def test_a_page_learns_where_its_hits_sit(self, scan):
         scan({"A": _rows("a", 2)})
@@ -745,6 +747,10 @@ class TestSessions:
         page = await _search(provider, wait_ms=0, includeAncestorPath=True)
         assert [[a.urn for a in h.ancestor_path] for h in page.hits] == [["urn:parent"]] * 2
         assert not page.deadline_exceeded and page.scope_diagnostics is None
+        # Each container's placement facts come with its name, from the same read.
+        assert all(a._facts is not None and a._facts.urn == "urn:parent"
+                   for h in page.hits for a in h.ancestor_path)
+        assert ["urn:parent"] in provider.fetched and page._paths_left_out is False
 
     async def test_pages_follow_the_order_to_the_end(self, scan):
         scan({"A": _rows("a", 12), "B": _rows("b", 9)})

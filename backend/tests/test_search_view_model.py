@@ -4,7 +4,9 @@ import pytest
 from pydantic import TypeAdapter, ValidationError
 
 from backend.app.services import search_views as sv
+from backend.app.services.view_placement import NodeFacts
 from backend.common.models.search import (
+    AncestorRef,
     EdgesPredicate,
     EntityTypePredicate,
     GroupPredicate,
@@ -292,6 +294,36 @@ class TestIncludeAndHiddenLayers:
             "contents": True, "containers": True, "upstream": True, "downstream": True}))
         sv.check_predicate(definition.search_predicate().model_dump(mode="json", by_alias=True, exclude_none=True))
 
+    def test_levels_and_kinds_narrow_what_comes_with_them(self):
+        definition = SearchViewDefinition.model_validate(_search(include={
+            "contents": True, "contentsLevels": 2, "contentsKinds": ["column", "Column", "table"],
+            "containers": True, "containersLevels": 1}))
+        _matches, inside, contains = definition.search_predicate().children
+        # Of the kinds named, the kind first, so another kind is never walked.
+        kinds, related = inside.children
+        assert inside.op == "and" and kinds.values == ["Column", "column", "table"]
+        assert (related.axis, related.max_hops) == ("ancestor", 2)
+        assert (contains.axis, contains.max_hops) == ("descendant", 1)
+        sv.check_predicate(definition.search_predicate().model_dump(mode="json", by_alias=True, exclude_none=True))
+
+    def test_every_level_stays_unset_so_existing_definitions_keep_their_hashes(self):
+        before = SearchViewDefinition.model_validate(_search(include={"contents": True}))
+        same = SearchViewDefinition.model_validate(_search(include={
+            "contents": True, "contentsLevels": None, "contentsKinds": []}))
+        assert same.definition_hash() == before.definition_hash()
+        assert same.predicate_hash() == before.predicate_hash()
+        assert "contentsLevels" not in before.model_dump(mode="json", by_alias=True, exclude_none=True)["include"]
+        assert SearchViewDefinition.model_validate(_search(include={
+            "contents": True, "contentsLevels": 20})).predicate_hash() != before.predicate_hash()
+
+    def test_levels_and_kinds_go_with_their_choice(self):
+        off = SearchViewDefinition.model_validate(_search(include={
+            "contents": False, "contentsLevels": 2, "containersKinds": ["db"]}))
+        assert off.include.contents_levels is None and off.include.containers_kinds is None
+        assert off.definition_hash() == SearchViewDefinition.model_validate(_search()).definition_hash()
+        with pytest.raises(ValidationError):
+            SearchViewDefinition.model_validate(_search(include={"contents": True, "contentsLevels": 21}))
+
     def test_a_one_step_lineage_search_can_include_a_step_more(self):
         # Each relationship is one step, asked of one entity: the rules a subset keeps allow the chain.
         one_step = {"kind": "related", "axis": "upstream", "where": P}
@@ -424,3 +456,52 @@ class TestFollowingTheBasesPlacement:
               "max_depth": 3, "predicate_hash": "p"}
         assert sv.boundary_hash(**kw) == sv.boundary_hash(**kw, placement="")
         assert sv.boundary_hash(**kw, placement="x") != sv.boundary_hash(**kw)
+
+
+class TestWhereTheySit:
+    """How many of a match's nearest containers its layer holds too: what the
+    canvas draws it inside, as its base draws it."""
+
+    @staticmethod
+    def _ref(urn, kind, facts=True):
+        ref = AncestorRef(urn=urn, display_name=urn, entity_type=kind)
+        if facts:
+            ref._facts = NodeFacts(urn=urn, entity_type=kind)
+        return ref
+
+    def test_placed_as_the_base_places_them(self):
+        base = _config([{"id": "src", "name": "Source systems", "order": 0},
+                        {"id": "rep", "name": "Reporting", "order": 1}],
+                       assignments={"urn:db": {"layerId": "src"}, "urn:bi": {"layerId": "rep"}})
+        placement, _ = sv.follow_placement(base)
+        layers = {layer.id: layer for layer in sv.layers_of(base, add_rest=True)}
+        r = self._ref
+        paths = [
+            [r("urn:db", "database"), r("urn:sales", "schema")],   # both in Source systems
+            [r("urn:bi", "folder")],                                # in Reporting
+            [r("urn:loose", "schema")],                             # placed nowhere
+            [r("urn:db", "database"), r("urn:half", "schema", facts=False)],   # read in part
+            [],                                                     # a root
+        ]
+        assert sv.containers_here(layers["src"], placement, paths) == [2, 0, 0, 0, 0]
+        assert sv.containers_here(layers["rep"], placement, paths) == [0, 1, 0, 0, 0]
+        assert sv.containers_here(layers[REST_LAYER_ID], placement, paths) == [0, 0, 1, 0, 0]
+
+    def test_the_run_stops_at_the_first_container_in_another_layer(self):
+        base = _config([{"id": "a", "order": 0}, {"id": "b", "order": 1}],
+                       assignments={"urn:top": {"layerId": "a"}, "urn:mid": {"layerId": "b"},
+                                    "urn:low": {"layerId": "a", "inheritsChildren": False}})
+        placement, _ = sv.follow_placement(base)
+        layer_a = next(layer for layer in sv.layers_of(base, add_rest=False) if layer.id == "a")
+        r = self._ref
+        path = [r("urn:top", "x"), r("urn:mid", "x"), r("urn:low", "x")]
+        assert sv.containers_here(layer_a, placement, [path]) == [1]
+
+    def test_placed_by_type_by_their_type_alone(self):
+        own = _config([{"id": "t", "name": "Tables", "entityTypes": ["table"]},
+                       {"id": "r", "name": "Rest", "showUnassigned": True}])
+        layers = {layer.id: layer for layer in sv.layers_of(own, add_rest=False)}
+        r = self._ref
+        paths = [[r("urn:db", "database"), r("urn:t1", "Table")], [r("urn:t2", "table"), r("urn:s", "schema")]]
+        assert sv.containers_here(layers["t"], None, paths) == [1, 0]
+        assert sv.containers_here(layers["r"], None, paths) == [0, 1]

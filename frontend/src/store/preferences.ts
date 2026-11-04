@@ -199,6 +199,13 @@ interface PreferencesState {
    */
   showLineageCounts: boolean
   toggleLineageCounts: () => void
+  /**
+   * A subset view draws each match inside the containers its base draws it in.
+   * Off, each match is a row of its own, naming where it sits. On by default;
+   * a reader's own choice, never part of the view.
+   */
+  showWhereTheySit: boolean
+  toggleWhereTheySit: () => void
 
 
   // User avatar
@@ -433,6 +440,9 @@ export const usePreferencesStore = create<PreferencesState>()(
       showLineageCounts: true,
       toggleLineageCounts: () =>
         set((state) => ({ showLineageCounts: !state.showLineageCounts })),
+      showWhereTheySit: true,
+      toggleWhereTheySit: () =>
+        set((state) => ({ showWhereTheySit: !(state.showWhereTheySit ?? true) })),
 
       // User avatar
       avatarId: null,

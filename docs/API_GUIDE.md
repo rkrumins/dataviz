@@ -1007,7 +1007,9 @@ see the matches, and the base's name only if they can open it.
      the whole data source instead.
    - `"include"` keeps more than the matches: `{"contents": true}` everything inside one,
      `"containers"` what contains one, `"upstream"` what feeds one, `"downstream"` what one feeds
-     (each `false` unless sent). A lineage step is one step, taken from a match or anything inside
+     (each `false` unless sent). `"contentsLevels"` and `"containersLevels"` (1–20) stop at a
+     depth; unset is every level, or up to the top. `"contentsKinds"` and `"containersKinds"` keep
+     only those entity types. Each goes with its choice, and is dropped when the choice is off. A lineage step is one step, taken from a match or anything inside
      it, as a trace walks a table through its columns. It becomes part of the view's search, so the
      view stays current at any size; a search it can't be kept with gets `422`.
    - `"hiddenLayers"`, with `"layout": "inherit"`: the ids of base layers to leave out, with their
@@ -1037,6 +1039,9 @@ see the matches, and the base's name only if they can open it.
      write. `"refresh": true` asks for one on the current data.
    - `capped: true`: the layer has more matches than are listed (`DEEP_SEARCH_VIEW_FEED_MAX_ROWS`,
      2,000). Search in the layer, or export, for the rest.
+   - Each node carries `ancestorPath`, its containers root first, and `inLayer`: how many of the
+     nearest share its layer. The canvas draws the match inside those. `inLayer` is absent for
+     none.
    - `409`, `reason: base_missing`: the base was deleted. The subset waits for it to be restored.
    - `429` with `Retry-After`: every feed scan this server runs is busy and there was no recent
      answer to give.
