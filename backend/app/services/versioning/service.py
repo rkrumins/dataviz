@@ -56,7 +56,7 @@ from .errors import (AccessDenied, AmbiguousSpelling, AmbiguousUrn, BranchNotOpe
                      ProjectionKeyInUse, ProjectionKeyInvalid, ProjectionNotAdopted,
                      ResolutionsWithoutConflict, ReviewRequired, SelfMerge, SelfReview,
                      VersionConflict)
-from .ids import prefixed_id
+from .ids import new_entity_id, prefixed_id
 from .merge import three_way_merge
 from .merkle import MerkleTree, content_hash
 from .merkle_store import MerkleStore
@@ -1289,7 +1289,9 @@ class GraphVersioningService:
         """Bulk-append working changes to a draft (plan decision #10).
 
         Each op: ``{ref?, op, entity_kind, entity_id?, payload, change_reason?}``.
-        For ``create`` without an ``entity_id`` a stable ULID is minted.  Returns
+        A ``create`` without an ``entity_id`` is named here: a node by its payload's urn, else a
+        new ``urn:uuid:`` that becomes its urn too (one identity); an edge by a new ``urn:uuid:``.
+        Returns
         ``{ref_or_entity_id: entity_id}`` so the client can reconcile.
 
         With injected ``ontology_rules`` (strict graphs only) staged CREATES are
@@ -1325,12 +1327,19 @@ class GraphVersioningService:
                     # resolved against stored state only by apply_ops) would be misread there.
                     raise ValueError(f"unsupported staged op {op.get('op')!r}: create | update | delete")
                 seq += 1
-                entity_id = op.get("entity_id") or prefixed_id("ent")
+                payload = op.get("payload")
+                # A new node that brings no id is named by its urn: the one it brings, else a new
+                # urn:uuid for both.
+                new_node = (op["op"] == "create" and op["entity_kind"] == "node"
+                            and not op.get("entity_id"))
+                entity_id = (op.get("entity_id") or ((payload or {}).get("urn") if new_node else None)
+                             or new_entity_id())
                 ref = op.get("ref", entity_id)
                 assigned[ref] = entity_id
-                payload = op.get("payload")
                 if op["op"] == "create":
                     payload = strip_deletes(payload)     # a new entity has nothing to remove
+                    if new_node and isinstance(payload, dict) and not payload.get("urn"):
+                        payload = {**payload, "urn": entity_id}
                 if op["entity_kind"] == "node":
                     payload = _sanitize_node_properties(payload)
                 if op["op"] != "delete":
@@ -8226,7 +8235,7 @@ class GraphVersioningService:
                     if not row.get("entityType"):
                         rejected.append({"row": i, "reason": "node missing entityType"})
                         continue
-                    eid = row.get("entity_id") or row.get("id") or prefixed_id("ent")
+                    eid = row.get("entity_id") or row.get("id") or new_entity_id()
                     payload = _sanitize_node_properties(
                         {k: v for k, v in row.items() if k not in ("kind", "id", "entity_id")})
                     node_deltas.append(Delta(eid, "create", payload, None, content_hash(payload)))
@@ -8249,7 +8258,7 @@ class GraphVersioningService:
                 if not (seid and teid):
                     rejected.append({"row": i, "reason": "edge endpoint not found"})
                     continue
-                eid = row.get("entity_id") or row.get("id") or prefixed_id("ent")
+                eid = row.get("entity_id") or row.get("id") or new_entity_id()
                 payload = edge_payload_from_parts(edge_type=et, source_entity_id=seid,
                                                   target_entity_id=teid, row=row)
                 edge_deltas.append(Delta(eid, "create", payload, None, content_hash(payload)))
@@ -8764,7 +8773,7 @@ class GraphVersioningService:
             urn = row.get("urn")
             hit = known.get(urn) if urn else None
             eid = ((hit[0] if hit else None) or row.get("entity_id") or row.get("id")
-                   or (f"sync:{urn}" if urn else prefixed_id("ent")))
+                   or (f"sync:{urn}" if urn else new_entity_id()))
             payload = _sanitize_node_properties(
                 {k: v for k, v in row.items() if k not in ("kind", "id", "entity_id")})
             seen.add(eid)
@@ -8912,7 +8921,7 @@ class GraphVersioningService:
                 continue
             urn = row.get("urn")
             eid = (urn_index.get(urn) or row.get("entity_id") or row.get("id")
-                   or (f"sync:{urn}" if urn else prefixed_id("ent")))
+                   or (f"sync:{urn}" if urn else new_entity_id()))
             payload = _sanitize_node_properties(
                 {k: v for k, v in row.items() if k not in ("kind", "id", "entity_id")})
             theirs[eid] = payload

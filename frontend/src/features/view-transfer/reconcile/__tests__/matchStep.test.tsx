@@ -112,6 +112,18 @@ describe('Remapping an entity', () => {
     expect(searchNodes).not.toHaveBeenCalled()
   })
 
+  it('takes a pasted urn:uuid the same way', async () => {
+    const onPick = vi.fn()
+    render(
+      <QueryClientProvider client={new QueryClient()}>
+        <EntitySearchPicker scope={null} exported={{ name: 'orders_v1', type: 'dataset' }} onPick={onPick} onCancel={vi.fn()} />
+      </QueryClientProvider>,
+    )
+    fireEvent.change(screen.getByRole('combobox', { name: 'URN of the entity here' }), { target: { value: 'urn:uuid:0192f5a4-7b3c-7d2e-8f1a-2b3c4d5e6f70' } })
+    fireEvent.click(screen.getByRole('option', { name: /Use urn:uuid:/ }))
+    expect(onPick).toHaveBeenCalledWith('urn:uuid:0192f5a4-7b3c-7d2e-8f1a-2b3c4d5e6f70')
+  })
+
   it('says when nothing here matches, without picking anything', async () => {
     searchNodes.mockResolvedValue([])
     const onPick = vi.fn()

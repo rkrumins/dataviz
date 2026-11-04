@@ -12,12 +12,14 @@ import json
 import os
 import shutil
 import tempfile
+import uuid
 
 import pytest
 
 from backend.app.services.node_identity import ResolvedNodeIdentity
 from backend.app.services.storage.object_store import LocalFsObjectStore, storage_key
 from backend.app.services.versioning import db, models
+from backend.app.services.versioning.ids import uuid_urn
 from backend.app.services.versioning.import_export.service import ImportExportService
 from backend.app.services.versioning.service import GraphVersioningService
 
@@ -108,7 +110,7 @@ async def _run() -> None:
             v = await value(eid)
             assert v["urn"] == eid and v["properties"]["asset_id"] == eid, v
         f1, = [e for e, h in live.items() if h.name == "F1"]
-        assert f1.startswith("urn:synodic:import:table:"), f1
+        assert uuid_urn(f1) == f1 and uuid.UUID(f1[len("urn:uuid:"):]).version == 7, f1
         v = await value(f1)
         assert v["urn"] == f1 and v["properties"]["asset_id"] == f1, v
         # The urn only a deleted node held brings that node back — never a second urn:D.

@@ -55,6 +55,7 @@ from backend.app.services.advanced_search_service import (
     follows_relationships,
 )
 from backend.app.services.context_engine import ContextEngine
+from backend.app.services.versioning.ids import derived_entity_id, new_entity_id
 from backend.app.services.deep_search import (
     CompileError,
     SearchRunContext,
@@ -4188,22 +4189,22 @@ class GraphChangesResponse(BaseModel):
         populate_by_name = True
 
 
-def _replay_minters(scope: str, key: str, mint_urn):
+def _replay_minters(scope: str, key: str):
     """Id minters for a save sent with an Idempotency-Key, so a retry of it names the entities its
     first attempt created. An op whose client ref is at least 16 characters (every canvas temp ref
     is) is named by that ref, so a later batch that still carries the same staged create names the
     same entity rather than a copy; any other op by the key and its turn in the batch, so a script
     reusing a short ref like ``n1`` under a new key never overwrites what an earlier save created.
-    ``scope`` is graph/branch/actor: two principals never mint each other's ids. The 32-hex tail
-    is 128 bits, make_urn's collision bound. Called with the op's ref (``by_ref``)."""
+    ``scope`` is graph/branch/actor: two principals never mint each other's ids. Each id is the
+    name-based ``urn:uuid:`` (UUIDv5, :func:`derived_entity_id`) of its seed, a node's and an
+    edge's apart. Called with the op's ref (``by_ref``)."""
     n = itertools.count()
 
-    def slug(ref):
-        seed = f"ref:{ref}" if ref and len(ref) >= 16 else f"key:{key}/{next(n)}"
-        return hashlib.sha256(f"{scope}/{seed}".encode()).hexdigest()[:32]
+    def seed(ref):
+        return f"{scope}/" + (f"ref:{ref}" if ref and len(ref) >= 16 else f"key:{key}/{next(n)}")
 
-    return (lambda prefix, ref: f"{prefix}_{slug(ref)}"), (
-        lambda entity_type, ref: mint_urn(entity_type, slug=slug(ref)))
+    return (lambda _prefix, ref: derived_entity_id("edge", seed(ref))), (
+        lambda _entity_type, ref: derived_entity_id("node", seed(ref)))
 
 
 def _resolve_change_ops(request_ops, mint_id, mint_urn, *, by_ref: bool = False):
@@ -4323,7 +4324,6 @@ async def apply_graph_changes(
     so send a new key for a new batch."""
     from backend.app.services.versioning.service import (
         GraphVersioningService, OntologyViolation, MergeConflict, ConcurrencyError)
-    from backend.app.services.versioning.ids import prefixed_id
     actor = user.id
     svc = GraphVersioningService()
     g = await svc.get_graph_by_data_source(dataSourceId)
@@ -4333,13 +4333,13 @@ async def apply_graph_changes(
         await require_forks_enabled()
     graph_id = g["graph_id"]
 
-    from backend.app.ontology.urn import make_urn
     try:
         if idempotency_key:
             ops, assigned = _resolve_change_ops(request.ops, *_replay_minters(
-                f"{graph_id}/{branchId}/{actor}", idempotency_key, make_urn), by_ref=True)
-        else:
-            ops, assigned = _resolve_change_ops(request.ops, prefixed_id, make_urn)
+                f"{graph_id}/{branchId}/{actor}", idempotency_key), by_ref=True)
+        else:                                  # every new entity a urn:uuid (UUIDv7) of its own
+            ops, assigned = _resolve_change_ops(request.ops, lambda _prefix: new_entity_id(),
+                                                lambda _entity_type: new_entity_id())
     except InvalidPatch as exc:
         raise HTTPException(status_code=422, detail={"type": "invalid_patch", "message": str(exc)})
 

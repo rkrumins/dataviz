@@ -254,7 +254,13 @@ function ConditionEditor({ condition, onUpdate, onRemove, isFirst, parentLogic }
                             type="text"
                             value={condition.value}
                             onChange={e => onUpdate({ value: e.target.value })}
-                            placeholder={condition.field === 'tag' ? 'tag name' : 'value'}
+                            placeholder={condition.field === 'tag' ? 'tag name'
+                                : condition.field === 'urn' ? 'a urn, e.g. urn:uuid:…' : 'value'}
+                            // A urn names one entity: new ones are urn:uuid:… and say nothing of a
+                            // type, so a pattern like urn:synodic:*:dataset:* places none of them.
+                            title={condition.field === 'urn'
+                                ? 'A URN names one entity. New ones are urn:uuid:… and carry no type, so to place by type, use Entity Type.'
+                                : undefined}
                             className="px-2 py-1.5 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-sm flex-1 min-w-[120px]"
                         />
                     )}

@@ -763,6 +763,8 @@ class CreateNodeRequest(BaseModel):
     containment_edge_type: Optional[str] = Field(None, alias="containmentEdgeType")
     properties: Dict[str, Any] = Field(default_factory=dict)
     tags: List[str] = Field(default_factory=list)
+    # Idempotency key — sent again, the request answers with the node the first one created.
+    idempotency_key: Optional[str] = Field(None, alias="idempotencyKey")
 
     class Config:
         populate_by_name = True
