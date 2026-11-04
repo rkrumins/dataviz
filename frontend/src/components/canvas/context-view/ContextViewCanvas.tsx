@@ -4590,9 +4590,10 @@ export function ContextViewCanvas({
 
   // SUBSET VIEWS (features/search-views) — a search's matches kept as a view of
   // their own; in a subset view, its layers list them. A preview switch
-  // (`searchViewsEnabled`). A subset places by type alone: no entity is placed by
-  // hand, grouped or reordered in it, and while it follows its base its layers
-  // are the base's, changed there.
+  // (`searchViewsEnabled`). The server places its matches — where its base places
+  // them while it follows it, by type in a layout of its own — so no entity is
+  // placed by hand, grouped or reordered in it, and while it follows its base its
+  // layers are the base's, changed there.
   const searchViewsOn = useFeature('searchViewsEnabled')
   const subsetFollows = activeView?.search?.layout === 'inherit'
   const subsetIssue = useCanvasStore((s) => s.subsetIssue)
@@ -5580,7 +5581,9 @@ export function ContextViewCanvas({
       index,
       count: sortedLayers.length,
       folded: layerFold.folded.has(layer.id),
-      canEdit: layerEditsAllowed,
+      // A subset that follows its base takes its layers from there, as the header says:
+      // nothing here would save (the server refuses it).
+      canEdit: layerEditsAllowed && !subsetFollows,
       onInsert: (side: 'left' | 'right') => insertLayerBeside(layer.id, side),
       onRename: () => requestLayerRename(layer.id),
       onRecolor: (color: string) => recolorLayer(layer.id, color),
@@ -5599,7 +5602,7 @@ export function ContextViewCanvas({
         })
         : undefined,
     }
-  }, [menuLayerId, sortedLayers, layerFold, layerEditsAllowed, insertLayerBeside, requestLayerRename,
+  }, [menuLayerId, sortedLayers, layerFold, layerEditsAllowed, subsetFollows, insertLayerBeside, requestLayerRename,
     recolorLayer, reorderLayer, layerFoldOffered, foldLayersEnabled, deleteLayerWithUndo, isDraft,
     canEnterEdit, handleEnterEdit, narrowEnabled, openNarrow])
 

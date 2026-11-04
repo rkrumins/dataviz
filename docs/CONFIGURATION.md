@@ -213,6 +213,9 @@ The FalkorDB graph store, the other graph providers, and the reads built on them
 |---|---|---|---|
 | `AGGREGATION_IDENTITY_STAMP_PACING_RATIO` | `0.5` | The conformance stamp copies a source's own identity property onto `urn` for any node missing one. | `backend/app/providers/falkordb_provider.py` |
 | `DEEP_SEARCH_CHUNK_TIMEOUT_MS` | `45000` | advanced search: one scan unit's budget (a range unit over it is split); on a Redis Cluster at most two thirds of cluster-node-timeout | `backend/app/services/deep_search/settings.py` |
+| `DEEP_SEARCH_VIEW_FEED_LANE` | `2` | Subset-view layer scans one API process runs at once. With every one busy, a layer answers with its last page, or `429` with `Retry-After` when it has none. The fleet runs up to this × processes; size it to what the graph store takes, not up with the number of viewers. | `backend/app/services/deep_search/settings.py` |
+| `DEEP_SEARCH_VIEW_FEED_MAX_ROWS` | `2000` | Rows one layer of a subset view lists on the canvas (at least 200). The rest are reached by searching inside the layer, or by exporting it. | `backend/app/services/deep_search/settings.py` |
+| `DEEP_SEARCH_VIEW_FEED_REUSE` | `300` | Seconds a subset view's layer keeps answering with its last complete page after the data changes, before it scans again (spread ±20 % per layer, so layers read together don't all rescan at once). Past it the page still answers, marked stale, until the rescan completes. `0` scans on every change. | `backend/app/services/deep_search/settings.py` |
 | `FALKORDB_ADDRESS_REMAP` | — | Cross-cluster address remap: Redis announces the addresses IT knows (the cluster slot map, MOVED redirects, sentinel discover-master) — pod IPs a client in ANOTHER GKE cluster cannot dial. | `backend/app/api/v1/endpoints/redis_config.py`, `backend/app/providers/falkordb_connection.py` |
 | `FALKORDB_BULK_CREATE_TIMEOUT_S` | `60.0` / — *(differs by call site)* | per write/delete batch budget, seconds [writeTimeoutS] | `backend/app/providers/falkordb_materialize.py`, `backend/app/providers/falkordb_provider.py` |
 | `FALKORDB_CLUSTER_NODES` | — | cluster seed nodes | `backend/app/api/v1/endpoints/redis_config.py`, `backend/app/providers/falkordb_connection.py` |
@@ -232,6 +235,8 @@ The FalkorDB graph store, the other graph providers, and the reads built on them
 | `GRAPH_CACHE_CANVAS_BOOTSTRAP_TTL_S` | `3600` | Per-endpoint TTLs, seconds (1-86400). | `backend/app/services/graph_cache.py` |
 | `GRAPH_CACHE_CANVAS_EXPAND_TTL_S` | `3600` | Per-endpoint TTLs, seconds (1-86400). | `backend/app/services/graph_cache.py` |
 | `GRAPH_CACHE_CHILDREN_TTL_S` | `3600` | Per-endpoint TTLs, seconds (1-86400). | `backend/app/services/graph_cache.py` |
+| `GRAPH_CACHE_ENABLED_MEMBERS` | `true` | Keep Narrow's resolutions (`POST /graph/members`) in the graph cache, shared by everyone asking the same question. Off, every Narrow resolves again. | `backend/app/services/graph_cache.py` |
+| `GRAPH_CACHE_ENABLED_VIEW_FEED` | `true` | Keep subset-view layer pages in the graph cache, shared by every viewer and every subset asking the same. Off, each request reads its page from the search session store. | `backend/app/services/graph_cache.py` |
 | `GRAPH_CACHE_LAYER_ASSIGNMENT_TTL_S` | `3600` | Per-endpoint TTLs, seconds (1-86400). | `backend/app/services/graph_cache.py` |
 | `GRAPH_CACHE_LKG_TTL_S` | `86400` | last-known-good fallback; 0 turns it off entirely | `backend/app/services/graph_cache.py` |
 | `GRAPH_CACHE_MAX_PAYLOAD_BYTES` | `4194304` | the compose stack already sets 8 MiB (docker-compose.yml, every service with a cache client). | `backend/app/services/graph_cache.py` |
@@ -297,9 +302,6 @@ The FalkorDB graph store, the other graph providers, and the reads built on them
 | `DEEP_SEARCH_SESSION_TTL` | `900` | `backend/app/services/deep_search/settings.py` |
 | `DEEP_SEARCH_SOFT_DEADLINE_MS` | `60000` | `backend/app/services/deep_search/settings.py` |
 | `DEEP_SEARCH_SUBAGG_PARENT_CAP` | `24` | `backend/app/services/deep_search/settings.py` |
-| `DEEP_SEARCH_VIEW_FEED_LANE` | `2` | `backend/app/services/deep_search/settings.py` |
-| `DEEP_SEARCH_VIEW_FEED_MAX_ROWS` | `2000` | `backend/app/services/deep_search/settings.py` |
-| `DEEP_SEARCH_VIEW_FEED_REUSE` | `300` | `backend/app/services/deep_search/settings.py` |
 | `DEEP_SEARCH_WALK_MAX` | `300000` | `backend/app/services/deep_search/settings.py` |
 | `FALKORDB_ANCESTOR_CACHE_TTL_S` | `604800` | `backend/app/providers/falkordb_provider.py` |
 | `FALKORDB_ANCESTOR_CHUNK_SIZE` | `2000` | `backend/app/providers/falkordb_provider.py` |
@@ -352,14 +354,12 @@ The FalkorDB graph store, the other graph providers, and the reads built on them
 | `GRAPH_CACHE_ENABLED_CHILDREN` | `true` | `backend/app/services/graph_cache.py` |
 | `GRAPH_CACHE_ENABLED_EDGES_BETWEEN` | `true` | `backend/app/services/graph_cache.py` |
 | `GRAPH_CACHE_ENABLED_LAYER_ASSIGNMENT` | `true` | `backend/app/services/graph_cache.py` |
-| `GRAPH_CACHE_ENABLED_MEMBERS` | `true` | `backend/app/services/graph_cache.py` |
 | `GRAPH_CACHE_ENABLED_NODES_DEGREE` | `true` | `backend/app/services/graph_cache.py` |
 | `GRAPH_CACHE_ENABLED_NODES_QUERY` | `true` | `backend/app/services/graph_cache.py` |
 | `GRAPH_CACHE_ENABLED_TOP_LEVEL` | `true` | `backend/app/services/graph_cache.py` |
 | `GRAPH_CACHE_ENABLED_TRACE` | `true` | `backend/app/services/graph_cache.py` |
 | `GRAPH_CACHE_ENABLED_TRACE_CLOSURE` | `true` | `backend/app/services/graph_cache.py` |
 | `GRAPH_CACHE_ENABLED_TRACE_EXPAND` | `true` | `backend/app/services/graph_cache.py` |
-| `GRAPH_CACHE_ENABLED_VIEW_FEED` | `true` | `backend/app/services/graph_cache.py` |
 | `GRAPH_CACHE_LEADER_TTL_S` | `15` | `backend/app/services/graph_cache.py` |
 | `GRAPH_CACHE_LEADER_WAIT_S` | `10` / — *(differs by call site)* | `backend/app/services/graph_cache.py` |
 | `GRAPH_CACHE_PROMOTE_UNCHANGED` | `1` | `backend/app/services/graph_cache.py` |
@@ -729,6 +729,8 @@ Timeouts, circuit breakers, per-workspace fair share and other safety limits.
 | Variable | Default | Description | Read in |
 |---|---|---|---|
 | `AGGREGATED_EDGE_PAGE_FLOOR` | `500` | narrowest page the canvas's rollup read halves down to under the store's per-query limits before it reports the loss | `backend/app/config/resilience.py` |
+| `FAIR_SHARE_VIEW_FEED_BURST` | `10` | With `FAIR_SHARE_ENABLED`: how many subset-view layer scans a workspace may start at once before `FAIR_SHARE_VIEW_FEED_RATE` paces it. | `backend/app/services/fair_share.py` |
+| `FAIR_SHARE_VIEW_FEED_RATE` | `5.0` | With `FAIR_SHARE_ENABLED`: subset-view layer scans a workspace may start per second, across the fleet. A request answered from a cached or last page takes none. | `backend/app/services/fair_share.py` |
 | `FALKORDB_AGGREGATED_READ_TIMEOUT_SECS` | `60` | /edges/aggregated per query; the whole read gets 0.8 x HTTP_TIMEOUT_AGGREGATION_SECS | `backend/app/config/resilience.py` |
 | `FALKORDB_CHILDREN_QUERY_TIMEOUT` | `30` | get_children / get_children_with_edges | `backend/app/config/resilience.py` |
 | `FALKORDB_EDGES_BETWEEN_TIMEOUT` | `80` | /edges/between urn-set edge resolve | `backend/app/config/resilience.py` |
@@ -770,8 +772,6 @@ Timeouts, circuit breakers, per-workspace fair share and other safety limits.
 | `FAIR_SHARE_ENABLED` | `false` | `backend/app/services/fair_share.py` |
 | `FAIR_SHARE_TRACE_CLOSURE_BURST` | `20` | `backend/app/services/fair_share.py` |
 | `FAIR_SHARE_TRACE_CLOSURE_RATE` | `10.0` | `backend/app/services/fair_share.py` |
-| `FAIR_SHARE_VIEW_FEED_BURST` | `10` | `backend/app/services/fair_share.py` |
-| `FAIR_SHARE_VIEW_FEED_RATE` | `5.0` | `backend/app/services/fair_share.py` |
 | `FALKORDB_AGGREGATED_READ_BUDGET_SECS` | `0` | `backend/app/config/resilience.py` |
 | `FALKORDB_AGGREGATED_READ_MIN_ATTEMPT_SECS` | `2` | `backend/app/config/resilience.py` |
 | `FALKORDB_HEALTH_CHECK_INTERVAL` | `30` | `backend/app/config/resilience.py` |

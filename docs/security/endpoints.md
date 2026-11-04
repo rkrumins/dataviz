@@ -496,7 +496,7 @@
 | `GET` | `/api/v1/views/{view_id}/membership` | viewMembershipEnabled + read access to the view; changing it: edit access (in handler) | n/a | resource |
 | `PUT` | `/api/v1/views/{view_id}/membership` | viewMembershipEnabled + read access to the view; changing it: edit access (in handler) | enforced | resource |
 | `POST` | `/api/v1/views/{view_id}/membership/members` | viewMembershipEnabled + edit access to the view (in handler) | enforced | resource |
-| `POST` | `/api/v1/views/{view_id}/membership/refresh` | viewMembershipEnabled + edit access to the view (in handler) | enforced | resource |
+| `POST` | `/api/v1/views/{view_id}/membership/refresh` | viewMembershipEnabled + edit access to the view; with ?trigger=open, read access — it applies the stored definition and edits nothing, at most once per 30 s per view (in handler) | enforced | resource |
 | `DELETE` | `/api/v1/views/{view_id}/publish-request` | authenticated | enforced | resource |
 | `POST` | `/api/v1/views/{view_id}/publish-request` | authenticated | enforced | resource |
 | `POST` | `/api/v1/views/{view_id}/publish-request/approve` | authenticated | enforced | refused |
@@ -568,7 +568,7 @@
 | `GET` | `/api/v1/{ws_id}/graph/nodes/{urn}/ancestors` | workspace:datasource:read (ws:ws_id) (or view capability) | n/a | resource |
 | `GET` | `/api/v1/{ws_id}/graph/nodes/{urn}/children` | workspace:datasource:read (ws:ws_id) (or view capability) | n/a | resource |
 | `GET` | `/api/v1/{ws_id}/graph/nodes/{urn}/children-with-edges` | workspace:datasource:read (ws:ws_id) (or view capability) | n/a | resource |
-| `GET` | `/api/v1/{ws_id}/graph/nodes/{urn}/delete-impact` | workspace:datasource:read (ws:ws_id) (or view capability) | n/a | resource |
+| `GET` | `/api/v1/{ws_id}/graph/nodes/{urn}/delete-impact` | workspace:datasource:manage (ws:ws_id), workspace:datasource:read (ws:ws_id) (or view capability) | n/a | resource |
 | `GET` | `/api/v1/{ws_id}/graph/nodes/{urn}/descendants` | workspace:datasource:read (ws:ws_id) (or view capability) | n/a | resource |
 | `GET` | `/api/v1/{ws_id}/graph/nodes/{urn}/parent` | workspace:datasource:read (ws:ws_id) (or view capability) | n/a | resource |
 | `POST` | `/api/v1/{ws_id}/graph/resync` | workspace:datasource:manage (ws:ws_id), workspace:datasource:publish (ws:ws_id), workspace:datasource:read (ws:ws_id) (or view capability) | enforced | refused |

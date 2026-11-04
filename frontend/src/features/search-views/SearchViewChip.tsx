@@ -55,6 +55,13 @@ const LEVEL_ROWS: Array<{ on: IncludeChoice; key: 'contentsLevels' | 'containers
 ]
 const LEVELS = [1, 2, 3]
 
+/** A subset's own layers, as it stores them — none while it follows its base. */
+function ownLayersOf(view: View): Array<Record<string, unknown>> | null {
+  const config = view.config as { layout?: { referenceLayout?: { layers?: unknown } } } | undefined
+  const layers = config?.layout?.referenceLayout?.layers
+  return Array.isArray(layers) && layers.length > 0 ? (layers as Array<Record<string, unknown>>) : null
+}
+
 /** The canvas reads the view from the schema store: hand it the view as it now is. */
 async function showLatest(viewId: string) {
   const fresh = await getView(viewId).catch(() => null)
@@ -174,6 +181,8 @@ function SearchViewPanel({ view, status, canEdit, onEditSearch, onRefresh }: {
 
   const setLayout = async (layout: SubsetLayout) => {
     setBusy(layout)
+    // Following again drops its own layers: kept here, Undo gives them back as they were.
+    const ownLayers = layout === 'inherit' ? ownLayersOf(view) : null
     try {
       const next = await putSearch(view.id, { ifDefinitionHash: status.definitionHash, layout })
       await showLatest(view.id)
@@ -189,7 +198,7 @@ function SearchViewPanel({ view, status, canEdit, onEditSearch, onRefresh }: {
         onClick: () => {
           void putSearch(view.id, layout === 'own'
             ? { ifDefinitionHash: next.definitionHash, layout: 'inherit', ...(back ? { hiddenLayers: hidden } : {}) }
-            : { ifDefinitionHash: next.definitionHash, layout: 'own' })
+            : { ifDefinitionHash: next.definitionHash, layout: 'own', ...(ownLayers ? { layers: ownLayers } : {}) })
             .then(() => showLatest(view.id))
             .catch((err) => notify('error', narrowErrorText(err)))
         },
@@ -262,7 +271,7 @@ function SearchViewPanel({ view, status, canEdit, onEditSearch, onRefresh }: {
 
       {missing ? (
         <Note tone="attention" icon="AlertTriangle">
-          Its base view was deleted, so there is nothing to look in. Restore the base view and this one shows its matches again.
+          Its base view isn’t available — deleted, or not in this workspace — so there is nothing to look in. Restored, it shows its matches again: a workspace admin restores a deleted view from Deleted in the Explorer.
         </Note>
       ) : (
         <div className="px-4 py-3 border-b border-glass-border/60 space-y-1.5">

@@ -2284,7 +2284,9 @@ async def _provider_busy_handler(request, exc: _ProviderBusy):
             "detail": {
                 "code": "PROVIDER_BUSY",
                 "providerName": exc.provider_name,
+                # Prose, kept for older clients; ``message`` is the words to show.
                 "reason": exc.reason,
+                "message": "The graph is busy right now. Try again in a moment.",
                 "retryAfterSeconds": exc.retry_after_seconds,
             }
         },

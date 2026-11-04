@@ -55,7 +55,10 @@ hashed.
    - legacy `entityAssignments` and exact-URN rules fold into the flat `assignments` map;
    - side fields (`displayRules`, `defaultNodeSortMode`, and anything newer) are kept as they are;
    - `urn:staged:*` keys (entities that were never saved) are dropped;
-   - a `null` inside an assignment entry is dropped, since it means the same as the key being absent.
+   - a `null` inside an assignment entry is dropped, since it means the same as the key being absent;
+   - for a view kept up to date by its query (`membership.mode` `live`), the entries the server
+     owns (`assignedBy: "query"`) are dropped: they follow the graph, so they are data, not design
+     (see [Subset views and views made from a query](#subset-views-and-views-made-from-a-query)).
 3. Fill in the implicit: `content.entityScope` is made explicit, and `layout.type` is set.
 4. Keep every other key verbatim, including keys this code has never heard of.
 5. Serialise canonically: sorted keys, compact separators, UTF-8, no NaN. Hash with SHA-256.
@@ -152,10 +155,54 @@ choices (remap an entity, drop it, map a type).
 
 | Kind | Where |
 |---|---|
-| URNs | assignment keys; `layers[].anchorUrn`; exact-URN `urnPattern` rules on layers and logical nodes; `content.rootUrns`; display-rule predicates (`descendantOf.urns`, `withinHops.urns`, `path.source_urns` / `target_urns`) |
-| Entity types | `layers[].entityTypes`; `rules[].entityTypes`; `content.visibleEntityTypes` and `rootEntityTypes`; `filters.entityTypeFilters`; `lod.levels[].visibleEntityTypes`; `projection.targetGranularityType` and `containerTypes`; `entityOverrides` keys; entity-type predicates |
-| Relationship types | `content.visibleRelationshipTypes`; `layers[].scopeEdges.edgeTypes` and `excludeEdgeTypes`; `projection.containmentEdgeTypes` |
+| URNs | assignment keys; `layers[].anchorUrn`; exact-URN `urnPattern` rules on layers and logical nodes; `content.rootUrns`; predicates (`descendantOf.urns`, `withinHops.urns`, `path.source_urns` / `target_urns`, and a name reference's `urn`) in display rules, a membership source's query and a subset view's `search.predicate`; `membership.sources[].spec.seeds.urns`, `membership.exclude` and `membership.overrides` keys |
+| Entity types | `layers[].entityTypes`; `rules[].entityTypes`; `content.visibleEntityTypes` and `rootEntityTypes`; `filters.entityTypeFilters`; `lod.levels[].visibleEntityTypes`; `projection.targetGranularityType` and `containerTypes`; `entityOverrides` keys; entity-type predicates and a name reference's `entityType` |
+| Relationship types | `content.visibleRelationshipTypes`; `layers[].scopeEdges.edgeTypes` and `excludeEdgeTypes`; `projection.containmentEdgeTypes`; predicate `edgeTypes` |
 | Glob URN patterns | Listed, not checked exactly |
+
+Predicates and a membership source's starting URNs are remapped but never pruned: a predicate's
+list can't be empty, and a starting URN the target doesn't hold is reported as missing when the
+view is worked out.
+
+---
+
+## Subset views and views made from a query
+
+Both are ordinary views with one more key in their definition, and both travel in a view file.
+
+**`config.search`, a subset view.** Its search (`predicate`), where it looks (`within`), its base
+(`readIn`), where its layers come from (`layout`: `inherit` or `own`), what it keeps beside its
+matches (`include`) and the layers it leaves out (`hiddenLayers`).
+
+- Its predicate is checked and remapped as above.
+- `readIn` is the base view's id in the environment the file came from. Import keeps it as it is:
+  view ids aren't mapped between environments. The base must be live, in the subset's workspace
+  and data source, and not a subset itself. Otherwise the subset lists no matches:
+  `GET /views/{id}/search` answers `status: base_missing`, its layer feed answers
+  `409 base_missing`, and the canvas says **Its base view isn’t available**. A subset imported
+  back into the workspace it came from finds its base again; anywhere else, make it again from
+  a view there.
+- A subset of the whole data source (`within: dataSource`) has no `readIn`, so it works wherever
+  it lands.
+- Import holds its search to what `POST /views/from-search` holds one to (`422` otherwise). A
+  subset view replaces only a subset view, and an ordinary view only an ordinary one (`422`).
+
+**`config.membership`, a view made from a query (a list view).** Its sources (`sources[].spec`,
+with `readIn` for a query searched in a view), `mode`, `layout`, `exclude` and `overrides`.
+
+- Its starting URNs, `exclude` and `overrides` keys, and its sources' predicates are checked and
+  remapped as above.
+- A source's `readIn` is a view id too, kept as it is. Where that view isn't live in the same
+  workspace and data source, the view is `source_missing`, and its chip says **Can’t search**.
+- **Auto-updating** (`mode: live`): its members, the entries with `assignedBy: "query"`, are left
+  out of the definition, its hash, its versions and its files, so an update never makes the view
+  "changed". People's own entries (**Always include**), `exclude` and `overrides` stay. A new view
+  arrives with no members, marked pending (`reason: imported`), and works them out against the
+  target's data the first time it is opened. Imported over a view kept up to date, the view keeps
+  its current members in the new layers until then (`reason: design_replaced`). A package's data
+  follows the members the view holds when the package is made.
+- **Snapshot** (`mode: snapshot`): its members are part of its design, and travel as any view's
+  placements do.
 
 ---
 
@@ -418,6 +465,9 @@ The transfer routes run under a 120-second timeout tier (`_TimeoutMiddleware`), 
 
 - **URNs are not rewritten between environments.** A view matches where the environments share
   URNs; anything else is shown as not found, and can be remapped by hand on the Match step.
+- **A subset view's base isn't mapped.** `search.readIn` keeps the id the base had where the file
+  came from, so a subset imported into another environment or workspace doesn't find its base
+  (see [above](#subset-views-and-views-made-from-a-query)).
 - **Files are not signed.** The hashes prove a file wasn't changed since it was exported, not who
   exported it.
 - **A package brings one view with its data** (see above).

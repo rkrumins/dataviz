@@ -505,9 +505,16 @@ it. Watch `connected_clients` in `INFO clients`.
 - **Fair share is opt-in.** `FAIR_SHARE_ENABLED=true` gives every workspace its own token
   bucket in Redis `STREAMS`, so one workspace running "expand all" only slows itself. The
   buckets (rate per second / burst) are children 30/60, aggregated 5/10, canvas bootstrap
-  5/10, canvas expand 10/20 and trace closure 10/20, set by
-  `FAIR_SHARE_<BUCKET>_RATE` and `_BURST`. Turn it on for multi-tenant deployments from
-  about 500 users.
+  5/10, canvas expand 10/20, trace closure 10/20 and view feed 5/10, set by
+  `FAIR_SHARE_<BUCKET>_RATE` and `_BURST`. Narrow, Save as view's preview and list views'
+  updates take trace-closure tokens, as the lineage lens does; a subset view's layer takes a
+  view-feed token only for a request that moves a scan on — one answered from the cache or its
+  last page takes none. Turn it on for multi-tenant deployments from about 500 users.
+- **Subset views stay cheap for many readers.** A layer's scan is shared by everyone asking the
+  same, its last complete page answers while the data changes, and a request waiting on someone
+  else's scan or answer holds no graph admission or database connection. The scans one API
+  process runs at once are `DEEP_SEARCH_VIEW_FEED_LANE` (2); size the fleet's (lane × processes)
+  to the graph store. See [Subset views and Narrow under load](/docs/runbooks#subset-views-and-narrow-under-load).
 - **Auth routes are rate-limited per client IP:** `RATELIMIT_LOGIN_PER_IP` 1000/minute,
   `RATELIMIT_SENSITIVE_PER_IP` 200/minute, `RATELIMIT_REFRESH_PER_SESSION` 30/minute and
   `RATELIMIT_LOGIN_PER_ACCOUNT` 10 per 15 minutes. The counters live on `STREAMS` (or at

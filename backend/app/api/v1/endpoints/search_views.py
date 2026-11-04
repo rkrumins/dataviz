@@ -35,6 +35,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.api.v1.endpoints.view_membership import _view
 from backend.app.api.v1.endpoints.views import _compute_ontology_digest, _user_id, authorize_view_create
 from backend.app.api.v1.feature_gate import ensure_view_mode_allowed, require_feature
+from backend.app.api.v1.refusal import refusal_responses, refused
 from backend.app.api.v1.view_read_scope import viewer_context
 from backend.app.auth.dependencies import get_optional_user, get_permission_claims, rbac_flag
 from backend.app.db.engine import get_db_session
@@ -84,7 +85,7 @@ class ViewWithSearch(BaseModel):
 
 
 def _refused(exc: SubsetError) -> HTTPException:
-    return HTTPException(status_code=exc.status, detail=exc.detail)
+    return refused(exc.status, "invalid_search", exc.detail)
 
 
 def _may_author(ctx: view_access.ViewerContext, workspace_id: str) -> bool:
@@ -96,9 +97,9 @@ def _may_author(ctx: view_access.ViewerContext, workspace_id: str) -> bool:
 
 def _require_author(ctx: view_access.ViewerContext, workspace_id: str) -> None:
     if not _may_author(ctx, workspace_id):
-        raise HTTPException(status_code=403, detail={
-            "error": "missing_permission", "permission": "workspace:datasource:read",
-            "message": "A subset view's search is written by someone who can read its data source."})
+        raise refused(403, "missing_permission",
+                      "A subset view's search is written by someone who can read its data source.",
+                      error="missing_permission", permission="workspace:datasource:read")
 
 
 def _search_of(row: ViewORM) -> SearchViewDefinition:
@@ -116,22 +117,22 @@ async def _base_for(session: AsyncSession, ctx: view_access.ViewerContext, base_
     workspace and data source, not the subset itself, and not a subset (a subset
     of a subset is its base's, with both searches — edit the search instead)."""
     if not base_id:
-        raise HTTPException(status_code=422, detail="Name the view the subset is made from (readIn).")
+        raise refused(422, "read_in_required", "Name the view the subset is made from (readIn).")
     if base_id == self_id:
-        raise HTTPException(status_code=422, detail="A view can't be a subset of itself.")
+        raise refused(422, "read_in_self", "A view can't be a subset of itself.")
     base = (await session.execute(
         select(ViewORM).where(ViewORM.id == base_id, view_is_live()))).scalar_one_or_none()
     if base is None or (rbac_flag("RBAC_ENFORCE_VIEWS")
                         and not await view_access.can_read_view(session, ctx, base)):
-        raise HTTPException(status_code=404, detail=f"View '{base_id}' not found")
+        raise refused(404, "base_not_found", f"View '{base_id}' not found")
     if base.workspace_id != workspace_id:
-        raise HTTPException(status_code=422, detail="That view is in another workspace.")
+        raise refused(422, "base_other_workspace", "That view is in another workspace.")
     if is_subset(config_of(base)):
-        raise HTTPException(status_code=422, detail=(
+        raise refused(422, "base_is_subset", (
             "That view is a subset view already: narrow it further by editing its search, or make "
             "the subset from its base."))
     if await effective_data_source(session, base.workspace_id, base.data_source_id) != data_source_id:
-        raise HTTPException(status_code=422, detail="That view shows a different data source.")
+        raise refused(422, "base_other_data_source", "That view shows a different data source.")
     return base
 
 
@@ -197,8 +198,8 @@ def _check_includes(definition: SearchViewDefinition) -> None:
     try:
         check_predicate(found)
     except SubsetError as exc:
-        raise HTTPException(status_code=exc.status, detail=(
-            f"What it includes can't be kept with this search: {exc.detail}")) from exc
+        raise refused(exc.status, "invalid_include",
+                      f"What it includes can't be kept with this search: {exc.detail}") from exc
 
 
 _LEVELS = {1: "one level", 2: "two levels", 3: "three levels"}
@@ -257,8 +258,9 @@ async def _replayed(session: AsyncSession, request_id: str, actor: str) -> Optio
     row = (await session.execute(select(ViewORM).where(ViewORM.id == version.view_id, view_is_live()))
            ).scalar_one_or_none()
     if version.source != "create" or version.created_by != actor or row is None or not is_subset(config_of(row)):
-        raise HTTPException(status_code=409, detail={
-            "type": "request_id_taken", "message": "This request id was already used. Try again."})
+        raise refused(409, "request_id_taken", (
+            "This Idempotency-Key was already used for another request. Send a new key for a new "
+            "request."), type="request_id_taken")
     view = await view_repo.get_view_enriched(session, row.id, user_id=actor)
     return ViewWithSearch(view=view, search=await search_status(session, row, _search_of(row)))
 
@@ -267,6 +269,8 @@ async def _replayed(session: AsyncSession, request_id: str, actor: str) -> Optio
 
 @router.post(
     "/from-search", response_model=ViewWithSearch, response_model_by_alias=True, status_code=201,
+    summary="Make a subset view of a search's matches",
+    responses=refusal_responses(403, 404, 409, 422),
     dependencies=[Depends(require_search_views)],
 )
 async def create_view_from_search(
@@ -282,8 +286,9 @@ async def create_view_from_search(
     ``within`` ``view`` (the default): the matches inside ``readIn``, the view the
     search was run in — the subset's base; ``dataSource``: anywhere in the data
     source. ``layout`` ``inherit`` (the default for a subset of a view): its layers
-    are its base's, read live and placed by type, plus "Other matches"; ``own``:
-    ``layers`` of types, and ``rest`` for every other match.
+    are its base's, read live, each match where its base places it, plus "Other
+    matches" for what it places in none; ``own``: ``layers`` of types, and ``rest``
+    for every other match.
 
     Nothing about the matches is worked out here, so a subset is made at once,
     however many there are. ``Idempotency-Key`` makes a retry safe: the same caller
@@ -310,7 +315,7 @@ async def create_view_from_search(
     base = (await _base_for(session, ctx, body.read_in, workspace_id=body.workspace_id, data_source_id=ds)
             if body.within == "view" else None)
     if _unbounded(predicate, config_of(base) if base is not None else None):
-        raise HTTPException(status_code=422, detail=(
+        raise refused(422, "unbounded_text", (
             "A word on its own would have to be looked for in every entity of the data source, on "
             "every open. Add a type, tag or property to the search."))
 
@@ -319,7 +324,7 @@ async def create_view_from_search(
         problem = (hidden_layer_problems(hidden, layers_of(config_of(base), add_rest=True))
                    if base is not None else "Only a subset of a view hides some of its layers.")
         if problem:
-            raise HTTPException(status_code=422, detail=problem)
+            raise refused(422, "layout_not_allowed", problem)
     definition = SearchViewDefinition(
         predicate=predicate, within=body.within, read_in=base.id if base is not None else None,
         layout=body.layout, include=body.include, hidden_layers=hidden,
@@ -330,7 +335,7 @@ async def create_view_from_search(
                             body.icon)
     problem = layout_problems(config)
     if problem:
-        raise HTTPException(status_code=422, detail=problem)
+        raise refused(422, "layout_not_allowed", problem)
 
     view = await view_repo.create_view(session, ViewCreateRequest(
         name=body.name, description=body.description, workspace_id=body.workspace_id,
@@ -350,7 +355,7 @@ async def create_view_from_search(
         response.status_code = 200
         replayed = await _replayed(session, request_id, actor) if request_id else None
         if replayed is None:
-            raise HTTPException(status_code=409, detail="This view was just made by another request.")
+            raise refused(409, "made_by_another_request", "This view was just made by another request.")
         return replayed
     await view_activity_repo.record_view_activity(
         session, view_id=row.id, workspace_id=row.workspace_id, action="created", actor=actor,
@@ -365,6 +370,8 @@ async def create_view_from_search(
 
 @router.get(
     "/{view_id}/search", response_model=SearchViewStatus, response_model_by_alias=True,
+    summary="Read a subset view's search, and where its layers come from",
+    responses=refusal_responses(304, 403, 404),
     dependencies=[Depends(require_search_views)],
 )
 async def get_view_search(
@@ -392,6 +399,8 @@ async def get_view_search(
 
 @router.put(
     "/{view_id}/search", response_model=SearchViewStatus, response_model_by_alias=True,
+    summary="Change a subset view's search, or where its layers come from",
+    responses=refusal_responses(403, 404, 409, 422),
     dependencies=[Depends(require_search_views)],
 )
 async def update_view_search(
@@ -410,8 +419,8 @@ async def update_view_search(
     answers a stale one with the current definition. Recorded as a version of the
     view; made on the published view."""
     if branch_id:
-        raise HTTPException(status_code=409, detail=(
-            "A subset view's search is changed on the published view, not in a draft."))
+        raise refused(409, "draft_refused",
+                      "A subset view's search is changed on the published view, not in a draft.")
     actor = _user_id(user)
     row, ctx = await _view(session, view_id, user, claims, edit=True, lock=True)
     definition = _search_of(row)
@@ -432,7 +441,7 @@ async def update_view_search(
             raise _refused(exc) from exc
         base = await _live_base(session, row, definition)
         if _unbounded(predicate, config_of(base) if base is not None else None):
-            raise HTTPException(status_code=422, detail=(
+            raise refused(422, "unbounded_text", (
                 "A word on its own would have to be looked for in every entity of the data source. "
                 "Add a type, tag or property to the search."))
         if predicate != definition.predicate:
@@ -447,7 +456,7 @@ async def update_view_search(
         hidden = list(dict.fromkeys(body.hidden_layers))
         if hidden != definition.hidden_layers:
             if hidden and (body.layout or definition.layout) != "inherit":
-                raise HTTPException(status_code=422, detail=(
+                raise refused(422, "hidden_layers_need_follow", (
                     "Only a subset that follows its base hides some of its layers: an own layout "
                     "has just the layers it keeps."))
             base = await _live_base(session, row, definition) if hidden else None
@@ -457,12 +466,26 @@ async def update_view_search(
                     "message": "Its base view is no longer available, so it has no layers to choose from."})
             problem = hidden_layer_problems(hidden, layers_of(config_of(base), add_rest=True)) if hidden else None
             if problem:
-                raise HTTPException(status_code=422, detail=problem)
+                raise refused(422, "layout_not_allowed", problem)
             updated = updated.model_copy(update={"hidden_layers": hidden})
             summary.append("Changed which of its base's layers it shows")
+    if body.layers is not None and body.layout != "own":
+        raise refused(422, "layers_need_own_layout",
+                      "Layers come with a layout of its own: send them with layout \"own\".")
     if body.layout is not None and body.layout != definition.layout:
         ref = config.setdefault("layout", {})
-        if body.layout == "own":
+        if body.layout == "own" and body.layers is not None:
+            # The own layers it had (Undo of Follow again): checked as any own layout.
+            ref["referenceLayout"] = {"layers": body.layers, "assignments": {}}
+            config.pop("referenceLayout", None)
+            config["search"] = updated.model_copy(update={"layout": "own", "hidden_layers": []}).model_dump(
+                mode="json", by_alias=True, exclude_none=True)
+            problem = layout_problems(config)
+            if problem:
+                raise refused(422, "layout_not_allowed", problem)
+            updated = updated.model_copy(update={"hidden_layers": []})
+            summary.append("Gave it back its own layout")
+        elif body.layout == "own":
             base = await _live_base(session, row, definition)
             if base is None:
                 raise HTTPException(status_code=409, detail={
@@ -477,8 +500,8 @@ async def update_view_search(
             summary.append("Gave it a layout of its own")
         else:
             if definition.within != "view":
-                raise HTTPException(status_code=422, detail=(
-                    "Only a subset of a view can follow that view's layers."))
+                raise refused(422, "follow_needs_view",
+                              "Only a subset of a view can follow that view's layers.")
             ref["referenceLayout"] = {"layers": [], "assignments": {}}
             summary.append("Follows its base view's layers again")
         config.pop("referenceLayout", None)
@@ -505,6 +528,8 @@ async def update_view_search(
 
 @router.get(
     "/{view_id}/subsets", response_model=SubsetList, response_model_by_alias=True,
+    summary='List the subset views made from a view',
+    responses=refusal_responses(403, 404),
     dependencies=[Depends(require_search_views)],
 )
 async def list_view_subsets(

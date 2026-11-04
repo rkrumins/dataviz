@@ -189,6 +189,79 @@ class TestRawLabels:
         assert len(asked) == 2
 
 
+    async def test_concurrent_requests_scan_the_graph_once(self):
+        """The read is a scan of every node: requests arriving while one runs
+        wait for its answer."""
+        import asyncio
+
+        provider = type("P", (), {"_graph_name": "g"})()
+        asked = []
+        release = asyncio.Event()
+
+        async def run(cypher, params):
+            asked.append(cypher)
+            await release.wait()
+            return _Result([["Dataset"]])
+
+        waiting = [asyncio.ensure_future(graph_raw_labels(provider, run, "7.a")) for _ in range(5)]
+        await asyncio.sleep(0.01)
+        release.set()
+        assert {frozenset(r) for r in await asyncio.gather(*waiting)} == {frozenset({"Dataset"})}
+        assert len(asked) == 1
+
+    async def test_a_failed_read_leaves_the_others_to_read_for_themselves(self):
+        import asyncio
+
+        provider = type("P", (), {"_graph_name": "g"})()
+        calls = []
+        gate = asyncio.Event()
+
+        async def run(cypher, params):
+            calls.append(cypher)
+            if len(calls) == 1:
+                await gate.wait()
+                raise RuntimeError("the store went away")
+            return _Result([["Legacy"]])
+
+        first = asyncio.ensure_future(graph_raw_labels(provider, run, "7.a"))
+        await asyncio.sleep(0.01)
+        second = asyncio.ensure_future(graph_raw_labels(provider, run, "7.a"))
+        await asyncio.sleep(0.01)
+        gate.set()
+        with pytest.raises(RuntimeError):
+            await first
+        assert await second == frozenset({"Legacy"})
+
+    async def test_one_process_reads_it_for_all_of_them(self, monkeypatch):
+        """Shared through the search session store: another process (here, this
+        one with its memory cleared) finds the answer without scanning."""
+        from backend.app.providers.falkordb_search.session import MemorySessionStore
+
+        provider = type("P", (), {"_graph_name": "g"})()
+        shared = MemorySessionStore()
+        asked = []
+
+        async def run(cypher, params):
+            asked.append(cypher)
+            return _Result([["Dataset"], ["Legacy"]])
+
+        assert await graph_raw_labels(provider, run, "7.a", shared=shared) == {"Dataset", "Legacy"}
+        monkeypatch.setattr(raw_properties, "_RAW_LABELS", {})
+        assert await graph_raw_labels(provider, run, "7.a", shared=shared) == {"Dataset", "Legacy"}
+        assert len(asked) == 1
+        # A store that can't answer is a read like any other, never a failure.
+        class _Down:
+            async def pointed(self, name):
+                raise ConnectionError("cache Redis down")
+
+            async def point(self, name, value, ttl_s):
+                raise ConnectionError("cache Redis down")
+
+        monkeypatch.setattr(raw_properties, "_RAW_LABELS", {})
+        assert await graph_raw_labels(provider, run, "7.a", shared=_Down()) == {"Dataset", "Legacy"}
+        assert len(asked) == 2
+
+
 async def test_a_unit_asks_for_its_raw_values_before_its_statements():
     from backend.app.providers.falkordb_search.engine import _run_unit
     from backend.app.providers.falkordb_search.keys import SortKey, SortSpec

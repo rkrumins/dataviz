@@ -826,6 +826,62 @@ async def test_redis_get_failure_falls_through_to_compute() -> None:
 
 
 @pytest.mark.asyncio
+async def test_with_its_redis_down_everyone_asking_the_same_shares_one_compute() -> None:
+    """An outage turned every identical request into its own compute against
+    the graph store — the election, the fleet slot and fair share fail open
+    with Redis. In this process, everyone asking the same still waits on one."""
+    redis = _make_redis()
+    redis.get = AsyncMock(side_effect=RedisError("connection refused"))
+    cache = GraphCache(redis)
+    release = asyncio.Event()
+    calls = []
+
+    async def compute():
+        calls.append(1)
+        await release.wait()
+        return _Result(value=5)
+
+    asked = [asyncio.ensure_future(cache.get_or_compute(
+        scope=CacheScope("ws1", "ds1"), endpoint=ENDPOINT_CHILDREN, params={"p": 1},
+        compute=compute, model_cls=_Result)) for _ in range(6)]
+    await asyncio.sleep(0.01)
+    release.set()
+    assert [r.value for r in await asyncio.gather(*asked)] == [5] * 6
+    assert len(calls) == 1
+    # Something else asked computes on its own.
+    other = await cache.get_or_compute(
+        scope=CacheScope("ws1", "ds1"), endpoint=ENDPOINT_CHILDREN, params={"p": 2},
+        compute=AsyncMock(return_value=_Result(value=6)), model_cls=_Result)
+    assert other.value == 6 and len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_with_its_redis_down_a_shed_reaches_every_follower() -> None:
+    """Flow control: a leader shed by the store sheds its followers too, rather
+    than turning one refusal into as many computes."""
+    from backend.common.adapters.circuit import ProviderBusy
+
+    redis = _make_redis()
+    redis.get = AsyncMock(side_effect=RedisError("connection refused"))
+    cache = GraphCache(redis)
+    release = asyncio.Event()
+    calls = []
+
+    async def compute():
+        calls.append(1)
+        await release.wait()
+        raise ProviderBusy(provider_name="p", reason="full", retry_after_seconds=1)
+
+    asked = [asyncio.ensure_future(cache.get_or_compute(
+        scope=CacheScope("ws1", "ds1"), endpoint=ENDPOINT_CHILDREN, params={},
+        compute=compute, model_cls=_Result)) for _ in range(4)]
+    await asyncio.sleep(0.01)
+    release.set()
+    results = await asyncio.gather(*asked, return_exceptions=True)
+    assert all(isinstance(r, ProviderBusy) for r in results) and len(calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_redis_set_failure_does_not_fail_request() -> None:
     redis = _make_redis()
     redis.set = AsyncMock(side_effect=RedisError("write failed"))

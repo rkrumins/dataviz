@@ -285,19 +285,23 @@ If you can edit the view, the chip also offers:
 
 | To… | Do this |
 | --- | --- |
-| Catch up with the data now, without reopening it | **Refresh now**, at most every 30 seconds |
+| Catch up with the data now, without reopening it | **Refresh now**, at most every 30 seconds. Sooner, it says how long to wait |
 | Stop it changing | **Freeze as it is** — it becomes a snapshot. **Resume updates** brings it back in step with the data |
 | Keep an entity out, whatever the query finds | Right-click it on the canvas → **Keep out of this view**. Bring it back from **Kept out** in the chip |
 | Keep an entity, even if the query stops finding it | Right-click it → **Always include**. Stop from **Always included** in the chip |
 
 Each of these changes the view straight away, and the message offers **Undo**.
 Moves you make to its entities, and the order you give them, stay through every
-update.
+update. If someone else changed the view since you opened the chip, your change
+is refused in the server's words: *Someone changed what this view is made of.
+Review it and try again.* The chip then shows the view as it is now, so the next
+try works on the latest.
 
 **When an update would remove a lot.** An update that would take away at least
-half of the view (and at least 50 entities) waits for you: *An update would
-remove 812 of 1,020*. Check that the query is still what you want, then choose
-**Apply** or **Keep as is** (which freezes the view).
+half of the view (and at least 50 entities) waits for someone who can edit it.
+The chip says **An update is waiting for you**, and opening it shows *An update
+would remove 812 of 1,020.* Check that the query is still what you want, then
+choose **Apply** or **Keep as is** (which freezes the view).
 
 What the chip can say:
 
@@ -306,10 +310,12 @@ What the chip can say:
 | **Up to date** | The members follow the data |
 | **Up to date, within limits** | The last update reached a limit; what it reached is shown |
 | **Waiting to update** | A change waits to be worked out, or the graph didn't answer in full last time. **Refresh now** |
+| **An update is waiting for you** | An update would remove a lot, and waits for an editor to **Apply** it or **Keep as is** |
 | **Too many to keep** | The query now reaches more than 5,000 entries. The view keeps its last members until the query is narrowed |
 | **Couldn't update** | The graph couldn't be read. The view keeps its last members |
 | **Can't search** | The view its search runs in has gone. The view keeps its last members |
 | **Snapshot** | Its members stay as they are |
+| **Updates paused** | Views that keep themselves up to date are turned off. It shows the members it last had, and catches up the next time it's opened once they're on again |
 
 An update changes the view's data, not its design: it doesn't count as an edit,
 and doesn't add a version. Restoring a version of the view, or importing it
@@ -318,7 +324,9 @@ over itself, keeps the members it has until it next updates.
 > **If you don't see it:** views made from a query are part of the
 > **Narrow: chosen entities and what they reach** preview, which your
 > administrator turns on in **Administration → Features**. With the preview
-> off, these views stay as they are.
+> off, **Narrow** and saving as a list aren't offered, and these views keep the
+> members they last had. An auto-updating one's chip reads **Updates paused**;
+> a snapshot shows no chip.
 
 ## Subset views: a search's matches as a view
 
@@ -369,6 +377,9 @@ shows it. A layer's header reads what it lists, of how many:
 - **as of 10:42** while it shows a recent answer, because the data has just
   changed.
 
+When the graph is busy, a layer waits as long as the server asks, then carries
+on by itself.
+
 **Where they sit.** Each match is drawn inside the containers its base draws it
 in. In a layer built by hand, *oracle_orders* sits under *sales* under
 *oracle_prod*, as it does in the base.
@@ -384,7 +395,8 @@ in. In a layer built by hand, *oracle_orders* sits under *sales* under
 The canvas lists up to 2,000 rows a layer. Past that, the layer says how many it
 shows, and **Search in this layer** finds the rest. Nothing is placed by hand,
 grouped or reordered in a subset view itself: its matches go where its base puts
-them.
+them. In a draft of a subset that follows its base, neither the column headers
+nor a layer's right-click menu offer layer edits: its layers come from its base.
 
 **Its header chip** reads **Subset of *Sales overview***. It says what the view
 shows and where its layers come from. If you can edit the view, it also offers:
@@ -396,9 +408,12 @@ shows and where its layers come from. If you can edit the view, it also offers:
 | Leave a layer out, or bring it back | In a subset that follows its base, choose the layer's pill. A layer left out is struck through, and its matches go with it. At least one layer stays |
 | Ask each layer for a fresh answer | **Refresh** |
 | Change its layers yourself | **Make its own layout**: it keeps every one of the base's current layers as its own, the ones it left out too. Its own layers hold matches by type, so a match the base places by hand or by a rule may move to **Other matches**. **Undo** leaves them out again |
-| Take its layers from the base again | **Follow *Sales overview* again** |
+| Take its layers from the base again | **Follow *Sales overview* again**. Its own layers are dropped; **Undo** gives them back exactly as they were |
 
-Each change is recorded as a version of the view.
+Each change is recorded as a version of the view. If someone else changed the
+view since you opened the chip, your change is refused in the server's words:
+*Someone changed this view's search. Review it and try again.* The chip then
+shows the view as it is now, so the next try works on the latest.
 
 **On the base view**, **Subsets · 3** lists the subset views made from it.
 Before you save changes to its layers in the view editor, or delete it, you're
@@ -406,6 +421,14 @@ told how many subset views that reaches:
 
 - **changed layers** change the layers of the subsets that follow it;
 - **a deleted base** leaves its subsets showing nothing until it is restored.
+
+**When its base isn't available.** A subset whose base was deleted, or isn't in
+this workspace, lists no matches. That happens to a subset imported from another
+environment, which arrives without its base. Its canvas says **Its base view
+isn’t available**, and its chip reads **Subset · base view gone**. Deleted views
+are kept under **Deleted** in the Explorer, and a workspace admin can restore
+one: **Open deleted views** goes there. Restored, the subset shows its matches
+again.
 
 **Who sees what.** A subset view is shared like any view. Its readers see its
 matches without needing to open the base, and see the base's name only if they
@@ -432,8 +455,8 @@ can open it.
 
 > **If you don't see it:** subset views are a preview, **Subset views: a
 > search's matches as a view**, which your administrator turns on in
-> **Administration → Features**. With it off, a subset view says so instead of
-> listing matches.
+> **Administration → Features**. With it off, a subset view's canvas says
+> **Subset views are turned off** instead of listing matches.
 
 ## See who uses a View
 
@@ -517,6 +540,11 @@ See [Ways of Working](/guide/ways-of-working) for conventions and cadence.
 | You can't change a View | You can open it but not edit it | Ask its creator or a workspace admin for the **Editor** role |
 | **Restore** fails on a deleted View | Only workspace admins can restore | Ask a workspace admin |
 | No **Versions**, **Export** or **Import view** | They're a preview, off until your administrator turns it on | **Administration → Features → View versions, import and export**; **Export views** and **Import views** each have their own switch too |
+| A subset view says **Its base view isn’t available** | Its base was deleted, or isn't in this workspace, as for a subset imported from another environment | A workspace admin can restore a deleted base from **Deleted** in the Explorer (**Open deleted views**). A base that was never here can't be restored: make the subset again from a view here |
+| A subset view says **Subset views are turned off** | The preview is off | Ask your administrator: **Administration → Features → Subset views: a search's matches as a view** |
+| A view made from a query says **Updates paused** | Views that keep themselves up to date are turned off | Nothing to do: it keeps its last members, and catches up once your administrator turns **Narrow: chosen entities and what they reach** back on |
+| "Someone changed this view's search. Review it and try again." | Another editor changed the view after you opened its chip | The chip now shows their change. Check it, then try again |
+| The **Save as a view** panel says it's more than a view can hold | Kept as a list, a view holds at most 5,000 entries | Narrow the query, reach everything inside rather than a number of levels, or turn off **Show where they sit**. A subset view (**Live · any size**) has no limit. See [Troubleshooting](/guide/troubleshooting#save-as-view-says-more-than-a-view-can-hold) |
 
 More in [Troubleshooting](/guide/troubleshooting).
 

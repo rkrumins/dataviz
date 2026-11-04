@@ -1,4 +1,5 @@
 from typing import Any, Dict, List, Optional
+import contextlib
 import hashlib
 import inspect
 import itertools
@@ -90,6 +91,7 @@ from backend.app.auth.dependencies import requires
 from backend.app.db.engine import get_db_session, get_graph_read_db_session
 from backend.app.providers.manager import provider_manager
 from backend.app.services import graph_reads as _graph_reads
+from backend.app.services import graph_waits
 from backend.app.auth.dependencies import (
     get_current_user,
     get_optional_user,
@@ -154,13 +156,38 @@ async def _admit_graph_request(
     before the gate: two data sources in one workspace count apart, and many
     workspaces on one shared source count together (the direction that errs
     safe — it can shed earlier, never later).
+
+    On a workspace route that scope is the ``dataSourceId`` the read gate has
+    checked. A ``connectionId`` there selects nothing (``get_context_engine``
+    ignores it), so it picks no share either: a fresh one per request would
+    otherwise be a new source per request, each holding a reserve back from the
+    real ones until every one of them is shed.
     """
-    source_key = f"{ws_id or ''}/{dataSourceId or connectionId or ''}"
+    source = dataSourceId if ws_id else (dataSourceId or connectionId)
+    source_key = f"{ws_id or ''}/{source or ''}"
     provider_manager.admit_graph_request(source_key)
+    admitted = True
+
+    @contextlib.asynccontextmanager
+    async def step_out():
+        # Waiting on another request's work: this admission is given back for
+        # the wait and taken again after (``services/graph_waits``).
+        nonlocal admitted
+        provider_manager.release_graph_request(source_key)
+        admitted = False
+        try:
+            yield
+        finally:
+            provider_manager.readmit_graph_request(source_key)
+            admitted = True
+
+    held = graph_waits.hold(step_out)
     try:
         yield
     finally:
-        provider_manager.release_graph_request(source_key)
+        graph_waits.let_go(held)
+        if admitted:
+            provider_manager.release_graph_request(source_key)
 
 
 async def get_context_engine(
@@ -196,6 +223,9 @@ async def get_context_engine(
     viewer is built as ``versioning.viewer_ctx`` builds it (under an API key,
     the key's owner with the key's narrowed claims).
     """
+    # Its session's connection goes back to the pool while it waits on another
+    # request's work (``services/graph_waits``) — as its admission does.
+    graph_waits.hold(graph_waits.session_step_out(session))
     try:
         if ws_id:
             viewer = Viewer(actor=user.id if user else "",
@@ -2120,6 +2150,8 @@ async def search_advanced(
         data_source_id=dataSourceId,
         branch_id=branchId,
         can_read_view=can_read_view,
+        # A share link's reader: names resolve inside the view, as in every rule route.
+        confined=bool(getattr(request.state, "view_capability", None)),
     )
     try:
         if get_deep_search_settings().engine == "v2":
@@ -2200,6 +2232,8 @@ async def search_explain(
         data_source_id=dataSourceId,
         branch_id=branchId,
         can_read_view=can_read_view,
+        # A share link's reader: names resolve inside the view, as in every rule route.
+        confined=bool(getattr(request.state, "view_capability", None)),
     )
     try:
         return await svc.explain(query)
@@ -4365,19 +4399,24 @@ class DeleteImpactResponse(BaseModel):
         populate_by_name = True
 
 
-@router.get("/nodes/{urn}/delete-impact", response_model=DeleteImpactResponse)
+@router.get("/nodes/{urn}/delete-impact", response_model=DeleteImpactResponse,
+            dependencies=[Depends(require_edit_mode), Depends(require_ws_manage)])
 async def delete_impact(
     urn: str,
     ws_id: str,
     dataSourceId: str = Query(..., description="Data source whose versioned graph to inspect."),
     branchId: str = Query(..., description="Draft branch to compute the impact on."),
-    user=Depends(get_optional_user),
+    user=Depends(get_current_user),
     engine: ContextEngine = Depends(get_context_engine),
 ):
     """Preview the cascade for deleting ``urn`` on a draft: the containment subtree + all
     incident edges that would be removed. Read-only, computed on demand (the lazy-loaded
     canvas needn't hold the subtree) via the SAME helper the commit uses — so the preview
-    matches the result. Ontology containment edge types are resolved live."""
+    matches the result. Ontology containment edge types are resolved live.
+
+    Gated as the delete it previews (``POST /changes``): edit mode on, and a caller who may
+    manage the data source. It lists a whole subtree's entities with their values, and costs
+    what the cascade costs — not a read for a share link or a read-only key."""
     from backend.app.services.versioning.service import GraphVersioningService
     svc = GraphVersioningService()
     g = await svc.get_graph_by_data_source(dataSourceId)

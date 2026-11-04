@@ -509,6 +509,30 @@ def _subset_search(eff_scope):
 SUBSET_BASE_HIDDEN = ("Looked for inside this subset view's base view, which you can't open — "
                       "its contents aren't listed here.")
 
+#: What a search in a view that shows nothing is told (``EffectiveViewScope.holds_nothing``).
+VIEW_HOLDS_NOTHING = ("This view holds nothing yet — nothing is placed in it — so a search in "
+                      "it finds nothing.")
+
+
+def _finds_nothing(scope: SearchScope, eff_scope: EffectiveViewScope) -> bool:
+    """A search bounded by a view that shows nothing: in view mode, where the
+    view's roots bound a search, a curated view with none holds no matches."""
+    return scope.scope_mode == "view" and eff_scope.holds_nothing
+
+
+def _resolved_scope_summary(eff_scope: EffectiveViewScope) -> dict:
+    """What explain says a search in this view is bounded by."""
+    return {
+        "viewId": eff_scope.view_id,
+        "canvasKind": eff_scope.canvas_kind,
+        "rootUrns": [] if eff_scope.redact_roots else list(eff_scope.root_urns),
+        "entityTypes": sorted(eff_scope.entity_type_allow_list),
+        "layerIds": sorted(eff_scope.layer_allow_list),
+        "maxDepth": eff_scope.max_depth,
+        "scopeHash": eff_scope.scope_hash,
+        "droppedUrns": list(eff_scope.dropped_urns),
+    }
+
 
 def follows_relationships(predicate) -> bool:
     """Whether any condition in the tree walks the graph's edges (one
@@ -919,14 +943,17 @@ class AdvancedSearchService:
         # was dropped by the resolver (none belonged to this view), we
         # must NOT silently widen the search to "no scope clamp" — that
         # would leak data from outside the view. Return an empty page
-        # instead, so the FE can show "no matches in this view".
-        if client_requested_urns and not eff_scope.root_urns:
+        # instead, so the FE can show "no matches in this view". A view
+        # that holds nothing has no roots either, and the same answer.
+        nothing_here = _finds_nothing(query.scope, eff_scope)
+        if nothing_here or (client_requested_urns and not eff_scope.root_urns):
             logger.info(
-                "search.all_root_urns_dropped view=%s ws=%s n=%d",
+                "search.%s view=%s ws=%s n=%d",
+                "view_holds_nothing" if nothing_here else "all_root_urns_dropped",
                 eff_scope.view_id, eff_scope.workspace_id,
                 len(eff_scope.dropped_urns),
             )
-            extra_notes = [
+            extra_notes = [VIEW_HOLDS_NOTHING] if nothing_here else [
                 "All client-supplied root URNs were dropped — none "
                 "belonged to this view. Search short-circuited to "
                 "an empty page (security guard).",
@@ -1300,7 +1327,7 @@ class AdvancedSearchService:
         await self._guard_view_data_source(eff_scope)
         stamped, _note = _stamp_resolved_scope(
             SearchQuery(predicate=MatchAllPredicate(), scope=requested), eff_scope)
-        if client_requested_urns and not eff_scope.root_urns:
+        if _finds_nothing(requested, eff_scope) or (client_requested_urns and not eff_scope.root_urns):
             return None, eff_scope
         return stamped.scope, eff_scope
 
@@ -1319,6 +1346,10 @@ class AdvancedSearchService:
         self._refuse_outside_subset(eff_scope, "show the statement a search in this view runs",
                                     based_only=True)
         query, entity_types_note = _stamp_resolved_scope(query, eff_scope)
+        if _finds_nothing(query.scope, eff_scope):
+            # Nothing to explain: a search here runs no statement at all.
+            return {"cypher": "", "params": {}, "notes": [VIEW_HOLDS_NOTHING],
+                    "resolvedScope": _resolved_scope_summary(eff_scope)}
         query = await self._subset_query(query, eff_scope, None)
         _reject_unbounded_text_any(
             query, entity_types_capped=entity_types_note is not None,
@@ -1349,16 +1380,7 @@ class AdvancedSearchService:
                 "matches. The candidate cap applies only to facets."
             )
         if isinstance(result, dict):
-            result["resolvedScope"] = {
-                "viewId": eff_scope.view_id,
-                "canvasKind": eff_scope.canvas_kind,
-                "rootUrns": [] if eff_scope.redact_roots else list(eff_scope.root_urns),
-                "entityTypes": sorted(eff_scope.entity_type_allow_list),
-                "layerIds": sorted(eff_scope.layer_allow_list),
-                "maxDepth": eff_scope.max_depth,
-                "scopeHash": eff_scope.scope_hash,
-                "droppedUrns": list(eff_scope.dropped_urns),
-            }
+            result["resolvedScope"] = _resolved_scope_summary(eff_scope)
             if eff_scope.redact_roots:
                 # The statement names what the base view holds, and the
                 # caller can't open it: say how it searched, not where.
@@ -1475,7 +1497,7 @@ class AdvancedSearchService:
         redact = getattr(eff_scope, "redact_roots", False)
         if redact:
             notes.append(SUBSET_BASE_HIDDEN)
-        elif not eff_scope.root_urns:
+        elif not eff_scope.root_urns and not eff_scope.holds_nothing:
             notes.append(
                 f"View '{eff_scope.view_id}' has no rootUrns configured "
                 "and the client supplied none — search ran across the "

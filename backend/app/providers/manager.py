@@ -1214,6 +1214,15 @@ class ProviderManager:
         if self._graph_inflight_total > self.stats["graph_inflight_peak"]:
             self.stats["graph_inflight_peak"] = self._graph_inflight_total
 
+    def readmit_graph_request(self, source_key: str) -> None:
+        """Take back an admission a request gave up while it waited on another's
+        work (``services/graph_waits``). Never refused: the request was admitted
+        once, and refusing it now would fail it halfway — so the count can run
+        over the ceiling for as long as it finishes, and newcomers are shed."""
+        self._graph_inflight[source_key] = self._graph_inflight.get(source_key, 0) + 1
+        self._graph_inflight_total += 1
+        self._graph_activity[source_key] = time.monotonic()
+
     def release_graph_request(self, source_key: str) -> None:
         """Release an admission taken by :meth:`admit_graph_request`."""
         current = self._graph_inflight.get(source_key, 0)

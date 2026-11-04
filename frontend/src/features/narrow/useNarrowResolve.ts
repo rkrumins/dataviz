@@ -22,15 +22,27 @@ export type ResolveState =
 
 const DEBOUNCE_MS = 250
 
-/** The server's words where it gave some (a switch that is off says which). */
+/** A refusal's own words in a body's `detail`: the text itself, or its `message`. */
+function detailMessage(detail: unknown): string | null {
+  if (typeof detail === 'string') return detail.trim() || null
+  if (detail && typeof detail === 'object') {
+    const message = (detail as { message?: unknown }).message
+    if (typeof message === 'string' && message.trim()) return message
+  }
+  return null
+}
+
+/** The server's words where it gave some (a switch that is off says which,
+ *  someone else's edit says so). Errors from `authFetch` keep the body's
+ *  `detail`; the graph provider's carry the body in the message. */
 function serverMessage(err: unknown): string | null {
-  const m = err instanceof Error ? /^API Error \d+: (.*)$/s.exec(err.message) : null
+  if (!(err instanceof Error)) return null
+  const kept = detailMessage((err as { detail?: unknown }).detail)
+  if (kept) return kept
+  const m = /^API Error \d+: (.*)$/s.exec(err.message)
   if (!m) return null
   try {
-    const detail = (JSON.parse(m[1]) as { detail?: unknown }).detail
-    if (detail && typeof detail === 'object' && typeof (detail as { message?: unknown }).message === 'string') {
-      return (detail as { message: string }).message
-    }
+    return detailMessage((JSON.parse(m[1]) as { detail?: unknown }).detail)
   } catch { /* not JSON */ }
   return null
 }

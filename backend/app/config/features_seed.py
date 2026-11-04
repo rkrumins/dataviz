@@ -1228,18 +1228,23 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
         "description": (
             "Narrow a Context View to the entities you choose and what they reach — what is "
             "inside them, their sources and consumers one step out or the whole way — worked "
-            "out on the server, so it is the same answer for everyone and for any script."
+            "out on the server, so it is the same answer for everyone and for any script. "
+            "Save as view keeps a narrowing as a view of its own: a list of its members, "
+            "auto-updating or a snapshot."
         ),
         "impact_when_off": (
-            "Narrow is not offered on the canvas and POST /graph/members is refused. Nothing "
-            "saved changes: views, searches, Isolate and traces work exactly as before. This is "
-            "a preview; it ships off until you switch it on."
+            "Narrow and Save as view (as a list) are not offered, and POST /graph/members, "
+            "/graph/members/plan, /views/from-members and a list view's membership routes are "
+            "refused. Views already made as lists keep the members they last had and stop "
+            "updating; an auto-updating one says its updates are paused, and catches up when it "
+            "is opened with this on again. Other views, searches, Isolate and traces work exactly "
+            "as before. This is a preview; it ships off until you switch it on."
         ),
         "category_id": "experimental",
         "type": "boolean",
         "default_value": json.dumps(False),
         "options": None,
-        "help_url": None,
+        "help_url": "/guide/exploring-graph#show-only-some-entities-and-what-they-reach",
         "admin_hint": (
             "Sources and consumers also need Lineage trace on. Each narrowing is one resolution, "
             "cached and shared by everyone who asks the same question, and paced by the trace's "
@@ -1266,7 +1271,7 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
         "type": "boolean",
         "default_value": json.dumps(False),
         "options": None,
-        "help_url": None,
+        "help_url": "/guide/managing-views#subset-views-a-searchs-matches-as-a-view",
         "admin_hint": (
             "Turn it on once the web app that ships with it is deployed. Each layer of a subset "
             "view is one search, shared by every view and viewer asking the same question, served "

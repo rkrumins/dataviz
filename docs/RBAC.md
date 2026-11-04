@@ -173,10 +173,44 @@ Reading a view implies **read-only** access to its data plane: the
 graph/canvas routers accept a `?viewId=` capability context
 (`backend/app/api/v1/capability_gate.py`) pinned to the view's
 resolved data source. Mutations always require
-`workspace:datasource:manage`. Workspace-metadata surfaces (assets
+`workspace:datasource:manage`. So does
+`GET /graph/nodes/{urn}/delete-impact`, the preview of a delete, which
+also needs **Edit mode** on, as the delete it previews does: it lists a
+whole subtree's entities with their values. Workspace-metadata surfaces (assets
 rule-sets) use an unpinned variant of the gate — they have no
 data-source dimension, so a capability holder on ANY readable view in
 the workspace can read them; the router is GET-only or manage-gated.
+
+For a capability caller (a share link, or an API key limited to the
+view), the search routes stay inside the view
+(`_guard_capability_scope` in `backend/app/api/v1/endpoints/graph.py`):
+
+* `POST /search/advanced` and `/search/explain`, like the rule routes
+  (`membership`, `resolve`, `counts`, `catalog`, `exports`,
+  `ancestor-counts`), refuse a body that names another view, a
+  `data_source` or `visible` scope, or a condition that follows lineage
+  or relationships, and resolve names inside the view (`confined`).
+  `discover` and `values` refuse a capability caller outright.
+* A subset view's layer feed (`POST /search/view-feed`) reads only the
+  capability's own view (`403 link_other_view`). Its cursor is signed
+  with the platform key ring and bound to that layer's search in its
+  scope, so a cursor the server didn't issue for that layer is refused
+  (`400 bad_cursor`).
+* The other graph and canvas reads are not confined to the view yet:
+  node and edge reads, traces, Narrow from chosen entities, metadata and
+  the canvas bootstrap read the view's whole data source. See the
+  [Security Overview](/docs/security-overview#who-can-see-a-view).
+
+For every reader, a curated view with nothing placed in it holds
+nothing: a search, count, export or membership check in it finds
+nothing, and so does one in a subset view of it
+(`EffectiveViewScope.holds_nothing`). Before, no roots meant no clamp,
+and such a view could read its whole data source.
+
+A subset view's readers see the matches its search finds inside its
+base view without being able to open the base. That is by design:
+sharing a subset view shares what it shows. The base's name is hidden
+from a reader who can't open the base.
 
 `workspace:view:publish` gates every transition **to or from**
 `enterprise` (including creating a view directly as enterprise) — the

@@ -267,6 +267,36 @@ class TestReadAndEdit:
         await db_session.refresh(row)
         assert json.loads(row.config)["layout"]["referenceLayout"]["layers"] == []
 
+    async def test_undo_of_following_again_gives_its_own_layout_back_as_it_was(
+            self, test_client, on, db_session):
+        """Following again drops its own layers; Undo sends them back, and they are
+        checked as any own layout is — never a fresh copy of the base's."""
+        ws = await workspace(test_client)
+        made = await make(test_client, ws, await base_view(test_client, ws))
+        sub = made["view"]["id"]
+        own = (await test_client.put(f"/api/v1/views/{sub}/search", json={
+            "ifDefinitionHash": made["search"]["definitionHash"], "layout": "own"})).json()
+        mine = [{"id": "mine", "name": "My tables", "order": 0, "entityTypes": ["table"], "color": "#123456"},
+                {"id": REST_LAYER_ID, "name": "Everything else", "order": 1, "entityTypes": [],
+                 "showUnassigned": True}]
+        followed = (await test_client.put(f"/api/v1/views/{sub}/search", json={
+            "ifDefinitionHash": own["definitionHash"], "layout": "inherit"})).json()
+        # Layers only come with a layout of its own.
+        refused = await test_client.put(f"/api/v1/views/{sub}/search", json={
+            "ifDefinitionHash": followed["definitionHash"], "layout": "inherit", "layers": mine})
+        assert refused.status_code == 422
+        # Layers that aren't a subset's — a rule — are refused as any layout write is.
+        ruled = [{**mine[0], "rules": [{"kind": "tag", "values": ["x"]}]}, mine[1]]
+        refused = await test_client.put(f"/api/v1/views/{sub}/search", json={
+            "ifDefinitionHash": followed["definitionHash"], "layout": "own", "layers": ruled})
+        assert refused.status_code == 422 and "rule" in refused.text
+        back = (await test_client.put(f"/api/v1/views/{sub}/search", json={
+            "ifDefinitionHash": followed["definitionHash"], "layout": "own", "layers": mine})).json()
+        assert back["definition"]["layout"] == "own"
+        row = (await db_session.execute(select(ViewORM).where(ViewORM.id == sub))).scalar_one()
+        await db_session.refresh(row)
+        assert json.loads(row.config)["layout"]["referenceLayout"]["layers"] == mine
+
     async def test_no_layers_to_copy_without_its_base(self, test_client, on):
         ws = await workspace(test_client)
         base = await base_view(test_client, ws)

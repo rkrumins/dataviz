@@ -9,6 +9,82 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Hardening: security holes closed, steady under hundreds of readers, clearer refusals
+
+### Security
+
+- **A curated view with nothing placed in it holds nothing.** A search, count, membership check,
+  export or explain in it — a share link's too — finds nothing. Before, no roots meant no limit,
+  and it read the whole data source. A subset of such a base holds nothing either.
+- **`GET /graph/nodes/{urn}/delete-impact` is gated as the delete it previews:** edit mode on and
+  `workspace:datasource:manage`. It listed a subtree's values on `main` to any reader.
+- **A share link's advanced search and explain are confined to its view,** as every rule route
+  already was: names in them resolve inside the view.
+- **The view feed's cursor is signed** with the platform key ring and good for its own layer
+  only: no paging past the row cap, no made-up positions starting scans.
+- **Admission on a workspace route keys on the data source the read gate checked.** A
+  `connectionId` there selects nothing, and no longer takes a share of its own.
+- **A failed layer assignment no longer sends the server's error text,** and the unmounted v2
+  graph router carries the read gate.
+
+### Changed
+
+- **A request that only waits holds nothing.** Waiting on a scan another request moves on, or an
+  answer another request or pod computes, it gives back its graph admission and returns its
+  database connection to the pool. A burst of such waits used to shed every other graph read on
+  that process, ordinary canvases included.
+- **A subset view's layer answers its last complete page until the scan that replaces it
+  completes** — past its reuse window too — never that scan's rows so far. A request moves the
+  rescan on if it can, and never waits on another's turn at it.
+- **Which labels keep raw properties — a scan of every node — is read once per data change,**
+  shared across processes, and only when a scan starts.
+- **With the cache's Redis down, everyone in a process asking the same shares one compute,** and
+  a shed reaches every follower.
+- **The browser retries the view feed, Narrow and the plan preview in place** on `429` or `503`,
+  honouring `Retry-After`. A followed layer shed past its retries picks up again after the
+  server says.
+- **Refusals read in the server's words.** The chips and dialogs show the reason the server
+  gave — someone else's edit, a switch that is off, a base that is gone. A refused edit reads the
+  view again, so the next try has the hash stored now.
+- **Undo of Follow again gives a subset its own layout back as it was,** rather than a fresh copy
+  of its base: `PUT /views/{id}/search` takes `layers` with `layout: "own"`.
+- **In a draft of a subset that follows its base, the layer menu offers no layer edit,** as its
+  header doesn't.
+- **An auto-updating list view whose switch is off says Updates paused.** The switch's admin text
+  names what it gates: list views, their routes and their chip.
+- **A subset whose base isn't available says who can restore it** and links to the Explorer's
+  deleted views.
+- **One refusal shape** on Narrow, list views, subset views and the view feed:
+  `{"detail": {"reason", "message", …}}`. `not_a_subset` is `404` on the feed too, as on
+  `GET /views/{id}/search`. The busy answer carries a `message`.
+- **The OpenAPI entries of those routes** have summaries, and list each status they answer
+  with.
+
+### Added
+
+- **Metrics:** `search_last_page_answers_total`, `search_raw_labels_total{answer}`,
+  `graph_request_waits_total` and `graph_requests_waiting`,
+  `graph_cache_unreachable_total{endpoint,outcome}` and `live_view_refresh_total{outcome,trigger}`,
+  documented with `view_feed_answers_total` and suggested alerts in
+  [Observability](/docs/observability).
+- **Runbook:** [Subset views and Narrow under load](/docs/runbooks#subset-views-and-narrow-under-load).
+- **Docs:** descriptions for the view-feed, Narrow-cache and view-feed fair-share settings in
+  [Configuration](/docs/configuration); in the API guide, the refusal shape, every refusal of
+  the subset and list routes, a retry loop and a safe edit with `ifDefinitionHash`.
+
+### Known limitations
+
+- **A share link still reads the whole data source through the browse routes** — node and edge
+  reads, trace, metadata, canvas bootstrap, and Narrow from chosen entities — though search,
+  counts, membership, export and subset feeds are confined. Confining those is the next change.
+- **The feed lane is still per process** (`DEEP_SEARCH_VIEW_FEED_LANE`), and a viewer following a
+  running scan still reads its rows and edges for itself. A request with a last page to show no
+  longer waits, which removes most of that following.
+- **Not load-tested here.** The changes are covered by tests that measure each one; a run of
+  hundreds of concurrent readers is still to do.
+
+---
+
 ## [Unreleased] — Subset views show where their matches sit, and keep as far as you choose
 
 ### Added
@@ -185,9 +261,11 @@ a view* in Managing Views.
 
 ### Changed
 
-- **No hand placement in a subset view.** Its entities are placed by type, so the canvas offers no
-  assigning, grouping, reordering, adding children, or adding entities to a layer. While it follows
-  its base, its layers can't be added, renamed, removed or reordered: they are the base's.
+- **No hand placement in a subset view.** The server places its matches — where its base places
+  them while it follows it (see the entry above), by type in a layout of its own — so the canvas
+  offers no assigning, grouping, reordering, adding children, or adding entities to a layer. While
+  it follows its base, its layers can't be added, renamed, removed or reordered: they are the
+  base's.
 - **The view editor edits a subset view's details only.** Its search and layers change from its
   header chip.
 - **A subset view never lists every entity of its types.** With the preview off, or on a data
@@ -267,10 +345,10 @@ search's matches inside another view* in the API Guide.
 
 ### Known limitations
 
-- **Placed by type.** A match goes to the layer that claims its own type, or to **Other matches**.
-  A base that places by tag or property rules, or by hand, isn't followed in those placements. So
-  are entities that sit in their container's layer in the base, such as a table's columns: in a
-  subset they are in **Other matches**.
+- **Placed by type** — no longer: a following subset now puts each match in the layer its base
+  places it in, hand placements and rules included (see *Subset views keep their base view's
+  layers* above). Past what a subset follows (1,000 entities placed by hand, or rules too costly to
+  read), it still places by type, and says why.
 - **Published data only.** Subset views read the published graph: entities created in a draft
   appear once it is published.
 - **Up to 2,000 rows a layer** are listed (`DEEP_SEARCH_VIEW_FEED_MAX_ROWS`). Past them, a layer

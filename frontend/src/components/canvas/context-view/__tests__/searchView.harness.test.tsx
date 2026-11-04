@@ -152,6 +152,20 @@ describe('A subset view on the canvas', () => {
     expect(screen.queryByText('Add layer')).toBeNull()
   }, 40000)
 
+  it('its layer menu, in a draft, offers no layer edit its base would refuse', async () => {
+    setPreview(true)
+    const h = await renderCanvasWithTrace(cfoEstate(), { focus: 'cfo', deferTrace: true, draft: true, entityScope: 'all', subset: SEARCH })
+    await h.settle()
+    const header = document.querySelector<HTMLElement>('[data-layer-id="warehouse"].group\\/column .sticky.top-0')
+    expect(header).not.toBeNull()
+    await act(async () => { fireEvent.contextMenu(header!) })
+    await h.settle()
+    // The header hides these while it follows its base; so does its menu.
+    for (const edit of ['Insert layer to the left', 'Insert layer to the right', 'Rename', 'Delete layer']) {
+      expect(screen.queryByText(edit)).toBeNull()
+    }
+  }, 40000)
+
   it('an ordinary view in a draft still offers Add layer', async () => {
     const h = await renderCanvasWithTrace(cfoEstate(), { focus: 'cfo', deferTrace: true, draft: true })
     await h.settle()

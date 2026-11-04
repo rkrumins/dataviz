@@ -163,6 +163,10 @@ class EffectiveViewScope:
     subset_placement: Any = None
     """How a subset that follows its base places its matches in those layers
     (``search_views.BasePlacement``): as the base's canvas does. None: by type."""
+    holds_nothing: bool = False
+    """A curated view with nothing placed in it (or a subset of one): it shows
+    nothing, so a search in it finds nothing. No roots here never means "no clamp"
+    — that is a view of every entity of its types, which a curated view is not."""
 
 
 # --------------------------------------------------------------------------- #
@@ -479,6 +483,7 @@ class ViewScopeResolver:
             placement=placement,
             layers=layers,
             placement_digest=placement_digest,
+            holds_nothing=derive_entity_scope(config) == "curated" and not allowed_root_urns,
         )
 
     async def _resolve_subset(
@@ -553,6 +558,8 @@ class ViewScopeResolver:
                               and not await can_read(base)),
             subset_layers=tuple(layers),
             subset_placement=placement,
+            holds_nothing=(base_config is not None and not allowed_roots
+                           and derive_entity_scope(base_config) == "curated"),
         )
 
     async def _load_view(self, view_id: str) -> Optional[ViewORM]:

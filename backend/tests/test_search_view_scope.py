@@ -86,6 +86,20 @@ def _not(p):
 
 
 class TestResolver:
+    async def test_a_subset_of_a_view_that_holds_nothing_holds_nothing(self, db_session):
+        # Its base is curated with nothing placed: its scope is empty, never the
+        # whole data source with the subset's search over it.
+        ws = await _ws(db_session)
+        base = await _view(db_session, ws, {
+            "layoutType": "reference", "content": {"entityScope": "curated"},
+            "layout": {"referenceLayout": {"layers": [{"id": "s", "name": "Stages"}],
+                                           "assignments": {}}}})
+        sub = await _view(db_session, ws, _subset(base.id))
+        eff = await _resolve(db_session, ws, sub)
+        assert eff.holds_nothing and eff.root_urns == ()
+        full = await _view(db_session, ws, _subset((await _view(db_session, ws, BASE_CONFIG)).id))
+        assert not (await _resolve(db_session, ws, full)).holds_nothing
+
     async def test_the_base_scope_and_layers_read_as_the_system(self, db_session):
         ws = await _ws(db_session)
         base = await _view(db_session, ws, BASE_CONFIG)

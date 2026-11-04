@@ -46,6 +46,8 @@ keep working with what's there.
 | **The graph store refused part of this read at its per-query memory limit** (or **The graph store timed out on part of this read**) | Part of the read hit a graph store limit. | Narrow the selection. System administrators also see **Adjust graph store limits** — see [Rollup Capacity & Large Graphs](/guide/rollup-capacity). |
 | **Some relationships could not be loaded — the canvas may be incomplete.** | Fetching the connections failed. | Select **Retry** on the banner. |
 | **No containment types configured.** | The semantic layer doesn't say which relationships mean "contains", so nothing nests. | Ask whoever looks after the [semantic layer](/guide/semantic-layer). |
+| **Its base view isn’t available** | This is a subset view, and the view it looks in was deleted, or isn't in this workspace: a subset imported from another environment arrives without its base. Its header chip reads **Subset · base view gone**, and it lists no matches. | Deleted views are kept under **Deleted** in the Explorer: **Open deleted views** goes there, and a workspace admin can restore one. Restored, the subset shows its matches again. A subset whose base was never here can't find it: make it again from a view here. |
+| **Subset views are turned off** | This is a subset view, and the preview that lists its matches is off for everyone. Nothing saved is lost. | Ask an administrator to turn on **Subset views: a search's matches as a view** under **Administration → Features**. |
 
 ### On the Explorer, for one data source
 
@@ -92,6 +94,8 @@ switch on **Administration → Features** — see
 | "View versions, import and export are a preview…" | **View versions, import and export** |
 | "Exporting views to a file is turned off…" | **Export views** |
 | "Importing views from a file is turned off…" | **Import views** |
+| "Narrow — showing a view's chosen entities…" | **Narrow: chosen entities and what they reach** |
+| "Subset views — a view of a search's matches…" | **Subset views: a search's matches as a view** |
 | "Building a lineage model from scratch is turned off…" | **Build lineage from scratch** |
 | "Semantic layers are read-only…" | **Edit semantic layers** |
 | "Only administrators can change semantic layers…" | **Let non-admins edit layers** |
@@ -131,6 +135,21 @@ reads the latest version of its data. Select it for each step, with times. See
 | **Summaries need attention**, **Summaries missing**, or a chip starting **Summaries:** | Lineage summaries failed, are missing, or aren't being served. | Tell your administrator. |
 | **Changed since the last refresh** or **Not read for 2h** | An external graph has changed, or hasn't been read recently. | Wait; tell your administrator if it stays. |
 | **Checking sync…** or **Sync not reported yet** | No status yet. | Wait a moment. |
+
+### Subset views and views made from a query
+
+The header chip of a [subset view](/guide/managing-views#subset-views-a-searchs-matches-as-a-view)
+or of a [view made from a query](/guide/managing-views#views-made-from-a-query),
+and the **Save as a view** panel, say what went wrong in the server's own words.
+
+| Message (exact text) | What it means | What to do |
+|---|---|---|
+| **Updates paused** (the chip of an auto-updating view) | Views that keep themselves up to date are turned off for everyone. This one shows the members it last had. | Nothing is lost: it catches up the next time it's opened once an administrator turns **Narrow: chosen entities and what they reach** back on, under **Administration → Features**. |
+| "Someone changed this view's search. Review it and try again." (or "Someone changed what this view is made of…") | Another editor changed the view after you opened its chip, so your change wasn't saved. | The chip now shows the view as it is. Check their change, then try yours again. You don't need to reload. |
+| **An update is waiting for you** | An update would remove at least half of the view, and at least 50 entities, so it waits for someone who can edit the view. The view keeps its members meanwhile. | If you can edit the view, open the chip: *An update would remove 812 of 1,020*. Check the query is still what you want, then choose **Apply** or **Keep as is**. |
+| "This view was just updated. Try again in 20 seconds." | **Refresh now** works at most once every 30 seconds for each view. | Wait as long as it says, then try again. |
+| "The graph is busy right now. Try again in a moment." | The graph is answering too many requests, and the server asked your browser to wait. | Wait. The canvas, **Narrow** and the **Save as a view** preview ask again by themselves when the server allows, and a subset layer still counting **so far** carries on by itself. |
+| **More than a view can hold, so it can’t be saved as it is.** (or "This would hold 6,200 entries…") | A list holds at most 5,000 entries, and this one is over. Nothing was saved. | See [Save as view says "More than a view can hold"](#save-as-view-says-more-than-a-view-can-hold). |
 
 ---
 
@@ -248,6 +267,10 @@ doesn't include it.
    - No **Import a view** in the Create View wizard — **View versions, import
      and export** (off by default) and **Import views**.
    - A view type missing from the wizard — **View modes**.
+   - No **Narrow**, or no **As a list · up to 5,000** in the **Save as a view**
+     panel — **Narrow: chosen entities and what they reach** (off by default).
+   - No **Save as view…** on search results — **Subset views: a search's
+     matches as a view** (off by default).
    - **Enterprise** visibility unavailable — **Publishing views to everyone**.
    - No guided tours in **Help** — **Guided product tours** (off by default).
 
@@ -362,6 +385,24 @@ sooner at busy times.
 2. If this view is slow every time, split it into focused views that each answer
    one question. See [Creating Views](/guide/creating-views).
 3. If every view is slow at busy times, tell your administrator.
+
+### Save as view says "More than a view can hold"
+
+**Likely cause:** kept as a list, a view holds at most 5,000 entries: its
+entities, the containers drawn around them, and anything always included. This
+one is over, so nothing was saved. The panel says by how much, and which of
+these would help:
+
+1. Narrow the query, or start from fewer entities.
+2. Reach everything inside them (**All** under **Levels inside them**) rather
+   than a number of levels. Each starting point is then one entry, however much
+   is inside it.
+3. Turn off **Show where they sit**, so the containers around them aren't
+   counted.
+4. For a very large set, choose **Live · any size** under **Keep it**, where
+   it's offered. That makes a subset view, which has no limit.
+
+See [Keep a narrowing as a view](/guide/exploring-graph#keep-a-narrowing-as-a-view).
 
 ### Teammates can't discover my View
 

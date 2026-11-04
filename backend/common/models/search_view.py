@@ -9,8 +9,10 @@
   as the system, so a reader needs no access to the base; ``dataSource``: the
   matches anywhere in the data source;
 * ``layout`` — ``inherit``: the subset's columns are its base's layers, read
-  live and placed by type, plus "Other matches"; ``own``: its own type layers,
-  stored in the view as any view's are;
+  live, each match in the layer its base places it in (hand placements, what
+  children inherit, rules), plus "Other matches" for what it places in none —
+  by type only past what a subset follows (``placedByTypeReason``); ``own``: its
+  own type layers, stored in the view as any view's are;
 * ``include`` — what it keeps beside the matches: everything inside one, what
   contains one, one lineage step from one either way. Each is a relationship
   asked of one entity, worked out with the search, so the view stays live at
@@ -253,12 +255,18 @@ class SearchViewUpdate(_Base):
     """``PUT /views/{id}/search`` — change the search, or where the columns come
     from, against the hash the definition was read at. ``layout`` ``own`` copies
     the base's layers as they are now; ``inherit`` drops the view's own and
-    follows its base again."""
+    follows its base again.
+
+    ``layers``, with ``layout`` ``own`` only, are the own layers to have instead
+    of a copy of the base's — what Undo of **Follow again** sends back, so the
+    layout it had returns as it was. Checked as any own layout is: type layers
+    alone, at most ``LAYERS_MAX`` typed and one for the rest."""
     if_definition_hash: str = Field(alias="ifDefinitionHash")
     predicate: Optional[Predicate] = None
     layout: Optional[Layout] = None
     include: Optional[SubsetInclude] = None
     hidden_layers: Optional[List[str]] = Field(None, alias="hiddenLayers", max_length=LAYERS_MAX + 1)
+    layers: Optional[List[Dict[str, Any]]] = Field(None, max_length=LAYERS_MAX + 1)
 
 
 SubsetStatus = Literal["ok", "base_missing"]

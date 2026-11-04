@@ -180,7 +180,9 @@ async def test_the_views_it_names_must_be_there_and_in_its_workspace(
 
     elsewhere = await test_client.post(URL, json=body(ws, src, sources=[{**query, "readIn": foreign}]))
     assert elsewhere.status_code == 422
-    assert "another workspace" in elsewhere.json()["detail"]
+    # One shape for every refusal: a reason to branch on, words to show.
+    assert elsewhere.json()["detail"]["reason"] == "view_other_workspace"
+    assert "another workspace" in elsewhere.json()["detail"]["message"]
 
     no_layers_named = await test_client.post(URL, json=body(ws, src, layout={"kind": "source"}))
     assert no_layers_named.status_code == 422
