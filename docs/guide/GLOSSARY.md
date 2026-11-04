@@ -64,7 +64,7 @@ screen.
 | **Impact** | Everything downstream of an entity — what a change to it could affect. **Impact** in the entity drawer traces it. | [Tracing Lineage on the Canvas](/guide/exploring-graph) |
 | **Inbox** | The bell in the top bar. It lists views shared with you, requests to publish a view or join a workspace, and the answers to your own requests. | [Managing & Sharing Views](/guide/managing-views) |
 | **Invite link** | A sign-up link an administrator creates, carrying a role and groups. The **Invite links** switch can stop every link at once. | [Users & Access](/guide/users-access) |
-| **Layer** | A column of a Context View, holding the entity types or entities placed in it. | [Navigating Layers](/guide/navigating-layers) |
+| **Layer** | A column of a Context View, holding the entity types or entities placed in it. A layer can carry properties of its own, such as an owner, which its card shows. | [Navigating Layers](/guide/navigating-layers) |
 | **Lineage** | How data flows from where it starts to where it's used. | [Reading Lineage](/guide/reading-lineage) |
 | **Lineage Lens** | A focused picture of one entity's connections over the canvas, walked one hop at a time. Open it with **Focus Lens**, or **Focus Connections** on the right-click menu. | [The Lineage Lens & Context View](/guide/lineage-lens) |
 

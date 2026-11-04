@@ -50,6 +50,14 @@ export interface LayerMenuModel {
     onStartEditing?: () => void
     /** Narrow the canvas to what is in this layer (and what that reaches). */
     onNarrow?: () => void
+    /** The layer's settings — its essentials and its own properties; its
+     *  details, read-only, outside a draft. */
+    onOpenSettings?: () => void
+    /** The header's own actions, where the header keeps to the essentials (the
+     *  Business view's): add an entity, start a group, build many at once. */
+    onAddEntity?: () => void
+    onNewGroup?: () => void
+    onBuild?: () => void
 }
 
 export interface ContextMenuAction {
@@ -180,6 +188,19 @@ export function CanvasContextMenu({
     // Reset submenu when menu closes
     useEffect(() => {
         if (!isOpen) setSubmenu(null)
+    }, [isOpen])
+
+    // Opened from a button (the Business layer header's ⋯), not a right-click:
+    // the keyboard follows into the menu, and back to the button when it closes,
+    // unless what was chosen took the focus somewhere of its own.
+    useEffect(() => {
+        if (!isOpen) return
+        const trigger = document.activeElement
+        if (!(trigger instanceof HTMLElement) || !trigger.matches('[data-canvas-menu-trigger]')) return
+        listRef.current?.querySelector<HTMLElement>('button:not(:disabled)')?.focus()
+        return () => {
+            if (trigger.isConnected && (!document.activeElement || document.activeElement === document.body)) trigger.focus()
+        }
     }, [isOpen])
 
     // The Business view's entity menu reads and walks; copying an identifier
@@ -383,6 +404,23 @@ export function CanvasContextMenu({
             }
         } else if (target.type === 'layer' && layerMenu) {
             const m = layerMenu
+            if (m.onOpenSettings) {
+                result.push({
+                    id: 'layer-settings',
+                    label: m.canEdit ? 'Layer settings…' : 'Layer details…',
+                    icon: 'SlidersHorizontal',
+                    dividerAfter: true,
+                    onClick: () => { m.onOpenSettings?.(); onClose() },
+                })
+            }
+            if (m.canEdit) {
+                const adds: ContextMenuAction[] = []
+                if (m.onAddEntity) adds.push({ id: 'layer-add-entity', label: 'Add entity', icon: 'Plus', onClick: () => { m.onAddEntity?.(); onClose() } })
+                if (m.onNewGroup) adds.push({ id: 'layer-new-group', label: 'New group', icon: 'FolderPlus', onClick: () => { m.onNewGroup?.(); onClose() } })
+                if (m.onBuild) adds.push({ id: 'layer-build', label: 'Build a lot at once', icon: 'LayoutGrid', onClick: () => { m.onBuild?.(); onClose() } })
+                if (adds.length > 0) adds[adds.length - 1] = { ...adds[adds.length - 1], dividerAfter: true }
+                result.push(...adds)
+            }
             if (m.onNarrow) {
                 result.push({
                     id: 'narrow-layer',

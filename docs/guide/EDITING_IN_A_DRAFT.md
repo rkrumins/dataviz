@@ -199,9 +199,18 @@ takes them back.
   entities move to the first remaining layer, and the message that confirms it
   offers **Undo**.
 - **Add a layer at the end:** choose **Add layer** after the last column.
+- **Edit a layer's settings:** choose **Layer settings…** in its menu. A panel
+  opens beside the canvas with the layer's essentials — name, description,
+  colour and icon — then its **Custom properties**, which its card shows every
+  reader, and under **More**, **Show unassigned entities** and **Delete layer**.
+  **Stage changes** keeps what you changed for **Review & Save**.
+- **In the Business view**, a column's header keeps to the layer itself: its
+  name, count and sort. Choose **⋯** on the header for the layer's menu, which
+  also holds **Add entity**, **New group** and **Build a lot at once**.
 
 Outside a draft, the menu says layers change in a draft and offers **Start
-editing to change layers**.
+editing to change layers**. **Layer details…** shows a layer's settings,
+read-only.
 
 ## Review & Save
 

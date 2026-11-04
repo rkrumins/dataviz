@@ -460,6 +460,26 @@ class TestNodeOrderingFields:
         assert "urn:x" not in result["assignments"]
 
 
+class TestLayerProperties:
+    """A layer's own `properties` (an owner, a purpose, an SLA) ride the
+    whole-value keyed merge with the rest of the layer."""
+
+    def test_draft_properties_survive_promote(self):
+        props = {"owner": "data-eng", "sla": {"hours": 4}, "tags": ["gold"]}
+        f = _layout(layers=[_layer("l1", "A", 0)])
+        p = _layout(layers=[_layer("l1", "A", 0)])
+        d = _layout(layers=[_layer("l1", "A", 0, properties=props)])
+        result = merge_layout_3way(f, p, d)
+        assert result["layers"][0]["properties"] == props
+
+    def test_untouched_draft_keeps_published_properties(self):
+        f = _layout(layers=[_layer("l1", "A", 0)])
+        p = _layout(layers=[_layer("l1", "A", 0, properties={"owner": "finance"})])
+        d = _layout(layers=[_layer("l1", "A", 0)])
+        result = merge_layout_3way(f, p, d)
+        assert result["layers"][0]["properties"] == {"owner": "finance"}
+
+
 class TestMergeDefaultSort3Way:
     def test_draft_changed_wins_over_published(self):
         f = {"layers": [], "assignments": {}}

@@ -79,6 +79,7 @@ import { LayerStrip } from './LayerStrip'
 import { CanvasEdgeFades } from './CanvasEdgeFades'
 import { SelectionBar } from './SelectionBar'
 import { BulkEditPanel } from './BulkEditPanel'
+import { LayerSettingsPanel } from './LayerSettingsPanel'
 import { useRevealNode, type RevealOptions } from '@/hooks/useRevealNode'
 import { useLocateManyOnCanvas } from '@/hooks/useLocateManyOnCanvas'
 import { useRevealPartners, REVEAL_PARTNERS_CAP } from '@/hooks/useRevealPartners'
@@ -464,6 +465,17 @@ const measureLegendHeader = (el: HTMLElement): number => {
 function paintedRow(nodeId: string): HTMLElement | null {
   const el = document.getElementById(`layer-node-${nodeId}`)
   return el && !el.hasAttribute('data-fold-anchor') ? el : null
+}
+
+
+/** Give the right rail to a panel of the canvas's own (several entities, a
+ *  layer's settings) in place of the drawers there — once an unsaved edit in
+ *  one of them is settled, as any move of the drawer waits for. */
+function takeRail(open: () => void) {
+  useCanvasStore.getState().requestDrawerMove(() => {
+    useCanvasStore.getState().closeNodeDrawer()
+    open()
+  })
 }
 
 export function ContextViewCanvas({
@@ -2309,12 +2321,13 @@ export function ContextViewCanvas({
   const [bulkEditFor, setBulkEditFor] = useState<string[] | null>(null)
   // Adjusted while rendering, not in an effect: the two never paint together.
   if (bulkEditFor && (drawerNodeId || drawerEdge)) setBulkEditFor(null)
+  // One layer's settings (LayerSettingsPanel), in the same rail.
+  const [layerSettingsFor, setLayerSettingsFor] = useState<string | null>(null)
+  if (layerSettingsFor && (drawerNodeId || drawerEdge || bulkEditFor)) setLayerSettingsFor(null)
+
   const openShared = () => {
     const ids = [...bulkSelection]
-    useCanvasStore.getState().requestDrawerMove(() => {
-      useCanvasStore.getState().closeNodeDrawer()
-      setBulkEditFor(ids)
-    })
+    takeRail(() => setBulkEditFor(ids))
   }
   const bulkSelectionCount = bulkSelection.length
   // The server refuses trace requests when this is off; the header hides its
@@ -3234,7 +3247,7 @@ export function ContextViewCanvas({
     targetId: string,
     before: NormalizedReferenceLayout,
     after: NormalizedReferenceLayout,
-    action: 'add' | 'rename' | 'recolor' | 'delete' | 'reorder' | 'sort' | 'move',
+    action: 'add' | 'rename' | 'recolor' | 'edit' | 'delete' | 'reorder' | 'sort' | 'move',
     summary: string,
   ) => {
     useStagedChangesStore.getState().stage({
@@ -3279,6 +3292,11 @@ export function ContextViewCanvas({
   const requestLayerRename = useCallback((layerId: string) => {
     setRenameRequest((r) => ({ layerId, nonce: (r?.nonce ?? 0) + 1 }))
   }, [])
+  // New group, asked for from the layer menu: the column opens the group's name.
+  const [newGroupRequest, setNewGroupRequest] = useState<{ layerId: string; nonce: number } | null>(null)
+  const requestNewGroup = useCallback((layerId: string) => {
+    setNewGroupRequest((r) => ({ layerId, nonce: (r?.nonce ?? 0) + 1 }))
+  }, [])
   const insertLayerAt = useCallback((index: number) => {
     if (traceWriteLockedRef.current()) return
     const taken = new Set(currentLayout().layers.map((l) => l.name.toLowerCase()))
@@ -3307,6 +3325,17 @@ export function ContextViewCanvas({
     const after = { ...before, layers }
     persistReferenceLayout(after)
     stageLayerChange(`layer:${id}`, before, after, 'recolor', `Recoloured layer “${target.name}”`)
+  }, [currentLayout, persistReferenceLayout, stageLayerChange])
+
+  // Several of a layer's fields at once — its settings panel's Stage.
+  const editLayer = useCallback((id: string, patch: layerOps.LayerPatch) => {
+    const before = currentLayout()
+    const target = before.layers.find((l) => l.id === id)
+    const layers = layerOps.updateLayer(before.layers, id, patch)
+    if (!target || layers === before.layers) return
+    const after = { ...before, layers }
+    persistReferenceLayout(after)
+    stageLayerChange(`layer:${id}`, before, after, 'edit', `Edited layer “${target.name}”`)
   }, [currentLayout, persistReferenceLayout, stageLayerChange])
 
   // ── Groups: view-only containers inside a layer (the wizard's logicalNodes), managed here ──────
@@ -5600,6 +5629,13 @@ export function ContextViewCanvas({
         : undefined,
       onDelete: () => deleteLayerWithUndo(layer.id),
       onStartEditing: !isDraft && canEnterEdit ? handleEnterEdit : undefined,
+      onOpenSettings: () => takeRail(() => { setBulkEditFor(null); setLayerSettingsFor(layer.id) }),
+      // The Business view's header keeps to the essentials; its own actions are here.
+      ...(personaMode !== 'technical' && {
+        onAddEntity: canEditGraph && !subsetView ? () => openBuilderForLayer(layer.id) : undefined,
+        onNewGroup: isDraft && !traceActive && !subsetView ? () => requestNewGroup(layer.id) : undefined,
+        onBuild: canEditGraph && !subsetView ? () => openBuildForLayer(layer.id) : undefined,
+      }),
       // Everything the view places in this layer, found as search's Layer filter finds it.
       onNarrow: narrowEnabled
         ? () => openNarrow({
@@ -5610,7 +5646,8 @@ export function ContextViewCanvas({
     }
   }, [menuLayerId, sortedLayers, layerFold, layerEditsAllowed, insertLayerBeside, requestLayerRename,
     recolorLayer, reorderLayer, layerFoldOffered, foldLayersEnabled, deleteLayerWithUndo, isDraft,
-    canEnterEdit, handleEnterEdit, narrowEnabled, openNarrow])
+    canEnterEdit, handleEnterEdit, narrowEnabled, openNarrow, personaMode, canEditGraph, subsetView,
+    openBuilderForLayer, openBuildForLayer, traceActive, requestNewGroup, setBulkEditFor, setLayerSettingsFor])
 
   // What each folded layer holds of the lineage on screen:
   //   * `ports` — its rows with a line to an OPEN layer, which LayerColumn
@@ -7785,6 +7822,7 @@ export function ContextViewCanvas({
                 onHeaderContextMenu={openLayerMenu}
                 onInsertLayerBefore={layerEditsAllowed && !subsetFollows ? insertLayerBefore : undefined}
                 renameNonce={renameRequest?.layerId === layer.id ? renameRequest.nonce : 0}
+                newGroupNonce={newGroupRequest?.layerId === layer.id ? newGroupRequest.nonce : 0}
                 isNew={newLayerId === layer.id}
                 // Node sorting — the menu is available to everyone (viewers get a
                 // device-local override); persisted actions are draft-gated
@@ -7941,6 +7979,20 @@ export function ContextViewCanvas({
             onStartEditing={drawerStartEditing}
           />
         )}
+        {!builderOpen && !buildOpen && !drawerNodeId && !drawerEdge && !bulkEditFor && layerSettingsFor
+          && sortedLayers.some((l) => l.id === layerSettingsFor) && (
+          <LayerSettingsPanel
+            // Afresh when a draft starts or ends: its fields are that layout's.
+            key={`layer-settings-${layerSettingsFor}-${layerEditsAllowed && !subsetFollows}`}
+            layer={sortedLayers.find((l) => l.id === layerSettingsFor)!}
+            // A layer's settings are the view's layout: a draft's, never during a trace.
+            canEdit={layerEditsAllowed && !subsetFollows}
+            onSave={(patch) => editLayer(layerSettingsFor, patch)}
+            onDelete={isDraft && !subsetFollows ? () => { setLayerSettingsFor(null); deleteLayerWithUndo(layerSettingsFor) } : undefined}
+            onStartEditing={!isDraft && canEnterEdit ? handleEnterEdit : undefined}
+            onClose={() => setLayerSettingsFor(null)}
+          />
+        )}
         {!builderOpen && !buildOpen && !drawerNodeId && !drawerEdge && bulkEditFor && (
           <BulkEditPanel
             key="bulk-edit-panel"
@@ -7951,7 +8003,7 @@ export function ContextViewCanvas({
             onClose={() => setBulkEditFor(null)}
           />
         )}
-        {!builderOpen && !buildOpen && !drawerNodeId && !drawerEdge && !bulkEditFor && isEdgePanelOpen && (
+        {!builderOpen && !buildOpen && !drawerNodeId && !drawerEdge && !bulkEditFor && !layerSettingsFor && isEdgePanelOpen && (
           <EdgeDetailPanel
             key="edge-detail-panel"
             isOpen={isEdgePanelOpen}

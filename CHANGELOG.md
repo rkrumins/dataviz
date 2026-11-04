@@ -54,9 +54,20 @@ than build it; **Technical** is the full toolset, as before. Business stays the 
   line whose source sits in a layer to the right of its target in an alert colour (**Red**,
   **Amber** or **Magenta**). Its hover card says **Points back**, and **Flows** counts them in the
   same colour. Off by default, in both views.
+- **A layer's own properties.** A Context View's layer can carry properties — an owner, a purpose,
+  an SLA. A tag icon and a number after its name say it has some, and hovering the name opens the
+  layer's card: its name and description in full, and its properties, formatted. They are part of
+  the View, so drafts, versions and view files keep them.
+- **Layer settings**, in a panel of its own: **Layer settings…** in a layer's menu opens its
+  essentials (name, description, colour, icon), then its **Custom properties**, then, under
+  **More**, **Show unassigned entities** and **Delete layer**. **Stage changes** keeps only the
+  fields changed in the panel, for Review & Save. Outside a draft it is **Layer details…**,
+  read-only, with **Start editing**.
 - API: a display rule carries an optional `style` — `{"chip": bool, "fill": bool, "frame":
   "solid" | "dashed"}`. `PUT /api/v1/views/{view_id}/library/rules/{rule_id}`, library files and
   `view-library.v1.json` accept it; any other `frame` is a `422`.
+- API: a layer in `referenceLayout.layers` may carry `properties`, an object kept as written —
+  through a draft's merge on publish, view files and versions.
 
 ### Changed
 
@@ -81,6 +92,10 @@ than build it; **Technical** is the full toolset, as before. Business stays the 
   **Copy URN** and the **JSON** tab are the Technical view's, and **Customize** brings any back.
 - **View & Edit** and `Enter` open an entity's details without deselecting it when it was already
   the selection.
+- **A Context View's layer headers in the Business view** keep to the layer itself: its name,
+  count and sort. **⋯** opens the layer's menu, which now also holds **Add entity**, **New group**
+  and **Build a lot at once**; opened from the keyboard, the menu takes the focus and gives it back.
+  The Technical view keeps them on the header.
 - The switch, its tip and the command palette say what each view now does.
 
 ### Known limitations
@@ -89,6 +104,8 @@ than build it; **Technical** is the full toolset, as before. Business stays the 
   stored from reader to read — `CONSUMES` in the demo data — points back whenever the reader sits to
   the right of what it reads. A line standing for flows both ways, and a line inside one layer, are
   never marked; a trace keeps its own colours. The Graph canvas doesn't mark them.
+- A layer's properties are listed in the order they were added, until a version of the view is
+  restored: a version keeps them in alphabetical order, and so lists them after a restore.
 
 ### Upgrading
 

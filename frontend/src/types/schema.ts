@@ -356,6 +356,14 @@ export interface ViewLayerConfig {
    */
   anchorUrn?: string;
 
+  /**
+   * The layer's own properties — an owner, a purpose, an SLA: whatever the
+   * view's builders want a reader to know about the column. Shown on the
+   * layer's card and edited in Layer settings. Part of the view definition,
+   * so it travels with the view (drafts, view files, versions, templates).
+   */
+  properties?: Record<string, unknown>;
+
   // Advanced assignment rules (overrides entityTypes)
   rules?: LayerAssignmentRuleConfig[];
 
