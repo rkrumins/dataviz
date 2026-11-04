@@ -30,6 +30,15 @@ limitations** — a changelog that only lists good news is not worth reading.
   dropped and the canvas starts fresh.
 - **A create never replaces what holds its id** (`409 entity_exists`), nor turns an edge into a
   node; an edge with one end is refused, never stored as a node.
+- **Links made on the canvas survive until saved.** A drawn, bulk-linked, duplicated or reversed
+  link is kept through a collapse and redrawn under its real id by the save; redo of a create draws
+  it again; a reversed link is saved as a new edge the server names (never `…-reversed`); "Link
+  to…" offers no deleted node. A save's problems and conflicts point at the change that caused them,
+  new items included.
+- **Restoring a deleted imported node brings that node back,** never a copy named by its id.
+- **The view-package wizard:** an update's data places its new roots in the view's draft, and the
+  staged view keeps them; the staged view no longer shows on whatever branch is open; "Open now"
+  finds the new draft.
 
 ### Added
 
@@ -48,6 +57,9 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 - `diff-vs-main?payloads=changes` entries carry `urn` (nodes) and `sourceUrn` / `targetUrn` (edges).
 - Overlay edge lookups walk only the edges at the ends asked about.
+- A save reconciles the canvas in one pass, however many items it created (it was quadratic), and
+  the outline rail stages a paste in one pass as Build does. A block pasted into Build's grid
+  fills its columns from tab-separated cells and adds rows up to 2,000, saying what it left out.
 
 ### Known limitations
 
@@ -55,6 +67,8 @@ limitations** — a changelog that only lists good news is not worth reading.
 - Unique fields aren't checked on canvas saves; a duplicate typed by hand surfaces at publish. The
   publish check reads the keyed types' rows on `main` once.
 - An import that uses team keys reads the draft's live nodes once.
+- A package imported as a **new** view places what its own layout names; roots its data adds
+  beside that layout go unplaced in a curated view until placed by hand.
 
 ---
 

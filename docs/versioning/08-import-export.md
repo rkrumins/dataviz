@@ -292,7 +292,11 @@ write to the view — so the view must be in the workspace, not deleted, and edi
 **the import's draft's copy of the view** (its layout overlay, made from Published when the draft
 has none — `_write_view_import_assignments` → `view_repo.update_overlay_layout`): a curated view
 shows the new roots on the draft at once, and publishing promotes them with the draft's other
-layout edits. Published is never written before review.
+layout edits. Published is never written before review. A view package's data for an update
+(`/packages/{uploadId}/data` with `viewId`) is such an import too, and the view staged into the
+same draft after it (`importing.stage_update`, the file's design) keeps the placements an import
+made there (`assignedBy: 'import'`) that the file does not place itself, on a layer it has. A new
+view's package places what the file's own layout names: roots its data adds beside it go unplaced.
 
 An `idempotencyKey` makes `POST …/imports` and `POST …/exports` safe to send again. The route stores
 it as its sender's (`<user id>:<key>`), and `ix_jobs_idem_active` keeps one job per key on a graph,
