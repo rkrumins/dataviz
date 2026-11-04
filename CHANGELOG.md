@@ -23,6 +23,19 @@ than build it; **Technical** is the full toolset, as before. Business stays the 
   which switches to the Technical view.
 - **A first-run note** by the switch, once per browser, in the Business view: what it keeps and
   how to reach every tool. It goes when dismissed or when the view is switched.
+- **Details on demand.** In the Business view a click picks an entity out, and its details open
+  when asked for: **Details** in the selection bar, `Enter`, or **View & Edit**. On a Graph canvas
+  **Open details** sits above the selected card; in a Hierarchy view, at the end of its row. Once
+  open, the details follow the selection, in either view.
+- **Entity details** under Preferences: whether a click opens an entity's details, for each view —
+  off for Business, on for Technical.
+- **A resizable details panel.** Drag its left edge, or step it from the keyboard; the entity,
+  relationship and orphans panels all keep the width, and the canvas keeps at least 480 px.
+- **At a glance**, the first section of an entity's details in the Business view: the view's tags
+  on it, its description, and tiles for its ID (with a copy button), what sits inside it, its
+  layer and source, and the properties its type features, such as an owner.
+- **Customize** in the details panel: show, hide and reorder sections for the view you're in, and
+  choose the featured properties for each entity type. **Reset** puts them back.
 
 ### Changed
 
@@ -42,6 +55,11 @@ than build it; **Technical** is the full toolset, as before. Business stays the 
   - **Selecting**, **Connect**, an open Property Manager and open **Edge Details** stay on screen
     while they are on;
   - **Data loads** and **Flows** start minimized, until you open or minimize them yourself.
+- **The details panel in the Business view** opens on **At a glance**, then **Properties**,
+  **Classifications** and **Lineage**. The identifier block, raw details, placement, history,
+  **Copy URN** and the **JSON** tab are the Technical view's, and **Customize** brings any back.
+- **View & Edit** and `Enter` open an entity's details without deselecting it when it was already
+  the selection.
 - The switch, its tip and the command palette say what each view now does.
 
 ### Upgrading

@@ -32,8 +32,9 @@ flowchart LR
 2. Type part of the entity's name. When it appears under **Top matches**, click
    it (or highlight it with the arrow keys and press **Enter**). The canvas
    opens whatever the entity sits inside and scrolls to it.
-3. Click the entity's row. It's highlighted, and its details panel opens on the
-   right.
+3. Click the entity's row. It's highlighted — and, in the Technical view, its
+   details panel opens on the right (in the Business view, choose **Details**
+   in the bar at the bottom of the canvas, or press `Enter`).
 4. Click **Trace Lineage** in the header, or press `T`. The details panel
    closes to give the trace room, a progress capsule appears at the top of the
    canvas, and the trace dock opens at the bottom.

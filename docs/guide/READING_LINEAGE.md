@@ -142,12 +142,28 @@ people who care about *what* and *why*.
 
 ## Inspecting a single node
 
-Click any row (or, on a Graph or Hierarchy view, any node) to open its
-**details panel** on the right. It shows:
+An entity's **details panel** opens on the right:
+
+- **In the Technical view**, click any row (or, on a Graph or Hierarchy view,
+  any node) and its details open.
+- **In the Business view**, a click picks the entity out, and its details open
+  when you ask: **Details** in the bar at the bottom of the canvas, `Enter`, or
+  **View & Edit** when you right-click it. On a Graph view, it's **Open details**
+  above the selected card; in a Hierarchy view, the button at the end of the row.
+
+Once the panel is open, it follows what you select, in either view. To change
+whether a click opens it, see **Entity details** under
+[Preferences](/guide/users-access#preferences). Drag the panel's left edge to
+make it wider or narrower; every details panel keeps the width you choose.
+
+The panel shows:
 
 - its type and name, with buttons to trace it — **Root Cause** (upstream),
   **Impact** (downstream) and **Full Lineage** (both) — and **Focus** to open
   the Lineage Lens on it;
+- **At a glance** — the view's tags on it, its description, its ID (with a copy
+  button), how much sits inside it, its layer and source, and the properties its
+  type features, such as an owner;
 - **Identifier** — its URN, with **Copy URN**;
 - **Details** — its qualified name, description, source system, layer and
   when it last synced, whichever are known;
@@ -157,9 +173,19 @@ Click any row (or, on a Graph or Hierarchy view, any node) to open its
 - **Lineage** — its **Data Sources** and **Data Consumers**;
 - **History** — its recorded changes, when version control is turned on.
 
-The **JSON** tab shows the entity's raw data. This is the quickest way to
-answer *"what is this, and what's it connected to?"* without changing the
-picture.
+The Business view opens on **At a glance**, then **Properties**,
+**Classifications** and **Lineage**; the Technical view shows every section
+except **At a glance**, and adds the **JSON** tab with the entity's raw data.
+**Customize** in the panel's header changes this for the view you're in:
+
+- show or hide each section, and move it up or down;
+- choose the **featured properties** shown at a glance, for this type of
+  entity — an owner and an SLA for a table, a steward for a domain. A property
+  you feature that an entity lacks reads **Not set**;
+- **Reset** puts the view's sections and the type's properties back.
+
+This is the quickest way to answer *"what is this, and what's it connected
+to?"* without changing the picture.
 
 ---
 

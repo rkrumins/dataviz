@@ -72,3 +72,37 @@ describe('ResizeHandle dragged', () => {
         expect(localStorage.getItem('advanced-search:panel-width')).toBe('544')
     })
 })
+
+
+describe('ResizeHandle on the left edge of a panel docked on the right', () => {
+    beforeEach(() => localStorage.clear())
+
+    it('widens as it is dragged left, and keeps the width where it is told to', () => {
+        const onResize = vi.fn()
+        const onCommit = vi.fn()
+        render(<ResizeHandle edge="left" label="Resize details panel" min={360} max={900}
+                             width={480} onResize={onResize} onCommit={onCommit} />)
+        const edge = screen.getByRole('separator', { name: 'Resize details panel' })
+        expect(edge).toHaveAttribute('aria-valuemin', '360')
+        fireEvent.pointerDown(edge, { clientX: 1000 })
+        fireEvent.pointerMove(window, { clientX: 900 })
+        expect(onResize).toHaveBeenLastCalledWith(580)
+        fireEvent.pointerUp(window, { clientX: 900 })
+        expect(onCommit).toHaveBeenLastCalledWith(580)
+        expect(localStorage.getItem('advanced-search:panel-width')).toBeNull()
+    })
+
+    it('widens with ArrowLeft, narrows with ArrowRight, and stops at its own narrowest', () => {
+        const onResize = vi.fn()
+        const onCommit = vi.fn()
+        render(<ResizeHandle edge="left" min={360} width={480} onResize={onResize} onCommit={onCommit} />)
+        const edge = screen.getByRole('separator')
+        fireEvent.keyDown(edge, { key: 'ArrowLeft' })
+        expect(onResize).toHaveBeenLastCalledWith(496)
+        fireEvent.keyDown(edge, { key: 'ArrowRight', shiftKey: true })
+        expect(onResize).toHaveBeenLastCalledWith(400)
+        fireEvent.keyDown(edge, { key: 'Home' })
+        expect(onResize).toHaveBeenLastCalledWith(360)
+        expect(onCommit).toHaveBeenLastCalledWith(360)
+    })
+})

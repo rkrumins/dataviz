@@ -6,6 +6,7 @@ import { useSchemaStore } from '@/store/schema'
 import { useViewEntityType, useViewEntityVisual } from '@/hooks/useViewSchema'
 import { useCanvasStore } from '@/store/canvas'
 import { usePersonaMode } from '@/store/persona'
+import { useOpensDetailsOnSelect } from '@/store/detailsOnSelect'
 import { resolveEntityName, technicalIdentity } from '@/lib/entityDisplayName'
 import { useCanvasIdentityProperty } from '@/components/dataSource/NodeIdentity'
 import { cn } from '@/lib/utils'
@@ -65,6 +66,9 @@ export const GenericNode = memo(function GenericNode({
   // simultaneous reveals (multi-locate) can all pulse at once. Auto-clears
   // per-id after the animation duration (~900ms).
   const isPulsing = useCanvasStore((s) => s.pulseNodeIds.has(id))
+  // Where a click doesn't open an entity's details, the selected card's
+  // toolbar offers them.
+  const offerDetails = !useOpensDetailsOnSelect() && !!selected
   // Handle both nested (data.data) and flat (data) structures
   const rawData = (data as Record<string, unknown>)
   const entityData: GenericNodeData = rawData.data
@@ -213,12 +217,25 @@ export const GenericNode = memo(function GenericNode({
           traceable OR can contain children. The trace/pin/more cluster keeps
           its traceable gate; the Add-inside button is ontology-gated on
           canContain and opens the Hierarchy Builder scoped to this node. */}
-      {(canTrace || canAddChild) && (
+      {(canTrace || canAddChild || offerDetails) && (
         <NodeToolbar
           isVisible={!!selected}
           position={Position.Top}
           className="flex items-center gap-1 glass-panel-subtle rounded-lg p-1"
         >
+          {offerDetails && (
+            <>
+              <ToolbarButton
+                icon="PanelRightOpen"
+                label="Open details"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  useCanvasStore.getState().openNodeDrawer(id)
+                }}
+              />
+              {(canTrace || canAddChild) && <div className="w-px h-4 bg-glass-border mx-0.5" />}
+            </>
+          )}
           {canTrace && (
             <>
               <ToolbarButton icon="ArrowUpRight" label="Trace Upstream" />

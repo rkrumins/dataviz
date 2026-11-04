@@ -3,6 +3,9 @@
  *
  * `DrawerFrame` is the rail itself — it slides in and out, and lives as long as the drawer is
  * open, whatever it shows:
+ * - **Width.** Its left edge drags (or steps, from the keyboard) to the width the reader wants,
+ *   kept for every drawer that opens here; until then, the panel's default. It never grows so
+ *   wide that the canvas beside it drops below `CANVAS_MIN_WIDTH`.
  * - **Keys.** It is a keyboard scope: the canvas's shortcuts never see keys typed here
  *   (Backspace is not "delete the selected node").
  * - **Focus.** When the drawer closes with focus inside, focus returns to where it came from.
@@ -16,11 +19,15 @@
  *   than being dropped.
  */
 import {
-  createContext, useCallback, useContext, useEffect, useRef, useState,
+  createContext, useCallback, useContext, useEffect, useLayoutEffect, useRef, useState,
   type CSSProperties, type KeyboardEvent, type ReactNode, type RefObject,
 } from 'react'
 import { motion } from 'framer-motion'
 import { useCanvasStore } from '@/store/canvas'
+import { usePreferencesStore } from '@/store/preferences'
+import { ResizeHandle } from '@/components/canvas/search/panel/ResizeHandle'
+import { useHostRect } from '@/components/canvas/search/studio/useHostRect'
+import { CANVAS_MIN_WIDTH, DRAWER_MAX_WIDTH, DRAWER_MIN_WIDTH, defaultDrawerPx, drawerWidthCss } from './drawerWidth'
 import { keyboardScopeProps } from '@/lib/keyboardScope'
 import { hasPrimaryModifier } from '@/lib/platform'
 import { MOTION } from '@/lib/motion'
@@ -28,7 +35,6 @@ import { cn } from '@/lib/utils'
 import { UnsavedChangesDialog } from './UnsavedChangesDialog'
 import { DrawerScrollContext, DrawerScrollSetter } from './drawerScroll'
 
-const DRAWER_WIDTH = 'clamp(420px, 32vw, 560px)'
 
 const FrameContext = createContext<RefObject<HTMLElement | null> | null>(null)
 
@@ -55,6 +61,26 @@ export function DrawerFrame({ panel, label, children }: {
   }, [])
 
   const [scrollEl, setScrollEl] = useState<HTMLElement | null>(null)
+
+  // ── Width: dragged at the left edge, kept for every drawer that opens here ──
+  const storedWidth = usePreferencesStore((s) => s.drawerWidth)
+  const setStoredWidth = usePreferencesStore((s) => s.setDrawerWidth)
+  const [liveWidth, setLiveWidth] = useState<number | null>(null)
+  const [dragging, setDragging] = useState(false)
+  const [rowEl, setRowEl] = useState<Element | null>(null)
+  useLayoutEffect(() => setRowEl(asideRef.current?.parentElement ?? null), [])
+  const row = useHostRect(rowEl)
+  const maxWidth = row && row.width > 0
+    ? Math.max(DRAWER_MIN_WIDTH, Math.min(DRAWER_MAX_WIDTH, row.width - CANVAS_MIN_WIDTH))
+    : DRAWER_MAX_WIDTH
+  const chosen = liveWidth ?? storedWidth
+  const width = chosen === null ? null : Math.max(DRAWER_MIN_WIDTH, Math.min(maxWidth, chosen))
+  const widthCss = drawerWidthCss(width)
+  const commitWidth = useCallback((w: number) => {
+    setStoredWidth(w)
+    setLiveWidth(null)
+  }, [setStoredWidth])
+
   return (
     <motion.aside
       ref={asideRef}
@@ -63,9 +89,10 @@ export function DrawerFrame({ panel, label, children }: {
       {...keyboardScopeProps(panel)}
       onFocusCapture={onFocusCapture}
       initial={{ width: 0, opacity: 0 }}
-      animate={{ width: DRAWER_WIDTH, opacity: 1 }}
+      animate={{ width: widthCss, opacity: 1 }}
       exit={{ width: 0, opacity: 0 }}
-      transition={MOTION.drawerSlide}
+      // No easing while dragging: the edge follows the pointer.
+      transition={dragging ? { duration: 0 } : MOTION.drawerSlide}
       className={cn(
         'relative h-full flex-shrink-0 overflow-hidden',
         // Opaque, no backdrop-blur: the drawer pushes the canvas aside, so nothing paints behind
@@ -76,12 +103,22 @@ export function DrawerFrame({ panel, label, children }: {
       <FrameContext.Provider value={asideRef}>
         <DrawerScrollContext.Provider value={scrollEl}>
           <DrawerScrollSetter.Provider value={setScrollEl}>
-            <div className="relative h-full flex flex-col overflow-hidden" style={{ width: DRAWER_WIDTH }}>
+            <div className="relative h-full flex flex-col overflow-hidden" style={{ width: widthCss }}>
               {children}
             </div>
           </DrawerScrollSetter.Provider>
         </DrawerScrollContext.Provider>
       </FrameContext.Provider>
+      <ResizeHandle
+        edge="left"
+        label="Resize details panel"
+        width={width ?? Math.min(maxWidth, defaultDrawerPx())}
+        min={DRAWER_MIN_WIDTH}
+        max={maxWidth}
+        onResize={setLiveWidth}
+        onDragChange={setDragging}
+        onCommit={commitWidth}
+      />
     </motion.aside>
   )
 }

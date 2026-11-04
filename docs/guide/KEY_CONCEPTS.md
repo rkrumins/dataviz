@@ -103,9 +103,10 @@ lineage runs two ways:
   radius*: everything a change to it would touch.
 
 To **trace** an entity is to have {brand} follow its lineage for you and
-highlight the whole chain. Click the entity, then use **Root Cause** (upstream),
-**Impact** (downstream) or **Full Lineage** (both) in its details panel — or
-right-click it and choose **Trace Lineage**. In a Context View there's also a
+highlight the whole chain. Click the entity (in the Business view, then
+**Details**), then use **Root Cause** (upstream), **Impact** (downstream) or
+**Full Lineage** (both) in its details panel — or right-click it and choose
+**Trace Lineage**. In a Context View there's also a
 **Trace Lineage** button in the header.
 
 Each trace has an **upstream depth** and a **downstream depth**: how many hops
@@ -222,6 +223,7 @@ What the Business view tucks away is a click away, not gone:
 | The view's header | Its name, where it lives, **Share**, **Details**, **Activity**, and any request waiting on it | Versions, export, reviews, the type count and usage are the Technical view's |
 | An entity's right-click menu | **View & Edit**, **Trace Lineage**, **Focus Connections** | **Copy URN** and **Narrow to this…** are the Technical view's |
 | A trace bar (Graph canvas) | Its directions and **Exit** | Statistics, settings, **Copy URNs** and export are the Technical view's |
+| An entity's details panel | Opens when you ask (**Details**, `Enter`), on **At a glance**: its description, ID, owner and featured properties | The identifier block, raw details, placement, history, **Copy URN** and the **JSON** tab are the Technical view's; **Customize** brings any section back |
 
 A tool that is on stays on screen in either view, so you can always turn it off —
 **Selecting**, **Connect**, an open Property Manager. The branch switcher shows

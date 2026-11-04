@@ -107,6 +107,7 @@ import { useSearchStore } from '@/store/searchStore'
 import { fetchWithTimeout } from '@/services/fetchWithTimeout'
 import { usePreferencesStore } from '@/store/preferences'
 import { usePersonaMode } from '@/store/persona'
+import { drawerWidthCss } from '@/components/panels/shell/drawerWidth'
 import { useFeature } from '@/store/features'
 
 // Types
@@ -161,7 +162,7 @@ export function GraphCanvas({ className }: { className?: string }) {
   const relationshipTypes = useViewRelationshipTypes()
   const schemaEntityTypes = useViewEntityTypes()
   const edgeTypeMetadata = useEdgeTypeMetadataMap()
-  const { showMinimap, showGrid } = usePreferencesStore()
+  const { showMinimap, showGrid, drawerWidth } = usePreferencesStore()
   // The Business view keeps the canvas's own zoom, minimap and search; the
   // extra control panel, the layout-direction switch and the edge-details
   // panel are the Technical view's.
@@ -1601,11 +1602,13 @@ export function GraphCanvas({ className }: { className?: string }) {
       </div>
 
       {/* Edge Legend */}
+      {/* Clear of the details drawer, at whatever width it is dragged to. */}
       <div
         className={cn(
           'absolute bottom-40 z-30 w-64 pointer-events-auto transition-all duration-300 ease-out',
-          selectedNodeId ? 'right-[420px]' : 'right-4',
+          !(drawerNodeId || drawerEdge) && 'right-4',
         )}
+        style={drawerNodeId || drawerEdge ? { right: `calc(${drawerWidthCss(drawerWidth)} + 1rem)` } : undefined}
       >
         <EdgeLegend defaultExpanded={false} visibleEdges={allVisibleEdges} />
       </div>

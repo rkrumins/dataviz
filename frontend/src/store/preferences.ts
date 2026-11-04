@@ -2,8 +2,19 @@ import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import type { LayerNodeSortAlgo } from '@/types/schema'
 import { DEFAULT_LINEAGE_DIRECTION_COLORS, type LineageDirectionColors } from '@/lib/lineageDirectionColors'
+import type { PersonaMode } from './persona'
 
 export type ThemeMode = 'light' | 'dark' | 'system'
+
+/** The entity drawer's sections, as its Customize panel names them. */
+export type DrawerSectionId =
+  | 'overview' | 'identifier' | 'details' | 'relationship' | 'properties' | 'classifications' | 'lineage' | 'history'
+
+/** A view's own order and choice of the entity drawer's sections. */
+export interface DrawerLayout {
+  order: DrawerSectionId[]
+  hidden: DrawerSectionId[]
+}
 
 /** Visual density of list/grid items in the Explorer page. */
 export type ExplorerDensity = 'compact' | 'comfortable' | 'spacious'
@@ -113,6 +124,23 @@ interface PreferencesState {
   // the identifier most readers need, and one line says the rest.
   drawerIdentityDetailsOpen: boolean
   toggleDrawerIdentityDetails: () => void
+  // Whether selecting an entity opens its details, per view
+  // (store/detailsOnSelect.ts): the Technical view's follow every click, the
+  // Business view's open when asked for. Either can be changed.
+  openDetailsOnSelect: Record<PersonaMode, boolean>
+  setOpenDetailsOnSelect: (mode: PersonaMode, open: boolean) => void
+  // The right-hand details panel's width in px, shared by every drawer that
+  // sits there. Null until the reader drags it: the panel's own default.
+  drawerWidth: number | null
+  setDrawerWidth: (width: number | null) => void
+  // The entity drawer's sections — which show, in what order — per view.
+  // Null is that view's default (panels/entity/drawerLayout.ts).
+  drawerLayout: Record<PersonaMode, DrawerLayout | null>
+  setDrawerLayout: (mode: PersonaMode, layout: DrawerLayout | null) => void
+  // The properties featured at the top of an entity's details, per entity
+  // type, in order. A type absent from the map features its defaults.
+  drawerPinnedProperties: Record<string, string[]>
+  setDrawerPinnedProperties: (typeId: string, keys: string[] | null) => void
 
   // Canvas preferences
   showMinimap: boolean
@@ -390,6 +418,23 @@ export const usePreferencesStore = create<PreferencesState>()(
       })),
       drawerIdentityDetailsOpen: false,
       toggleDrawerIdentityDetails: () => set((state) => ({ drawerIdentityDetailsOpen: !state.drawerIdentityDetailsOpen })),
+      openDetailsOnSelect: { business: false, technical: true },
+      setOpenDetailsOnSelect: (mode, open) => set((state) => ({
+        openDetailsOnSelect: { ...state.openDetailsOnSelect, [mode]: open },
+      })),
+      drawerWidth: null,
+      setDrawerWidth: (drawerWidth) => set({ drawerWidth }),
+      drawerLayout: { business: null, technical: null },
+      setDrawerLayout: (mode, layout) => set((state) => ({
+        drawerLayout: { ...state.drawerLayout, [mode]: layout },
+      })),
+      drawerPinnedProperties: {},
+      setDrawerPinnedProperties: (typeId, keys) => set((state) => {
+        const next = { ...state.drawerPinnedProperties }
+        if (keys === null) delete next[typeId]
+        else next[typeId] = keys
+        return { drawerPinnedProperties: next }
+      }),
 
       // Canvas
       showMinimap: true,

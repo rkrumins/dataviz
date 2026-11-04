@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import type { Node, Edge, Viewport } from '@xyflow/react'
 import type { HydrationPhase, HydrationStatus } from '@/hooks/useGraphHydration'
 import { useStagedChangesStore } from './stagedChangesStore'
+import { opensDetailsOnSelect } from './detailsOnSelect'
 import { filterIncomingEdges, overlayOnReplace } from './stagedOverlay'
 import { toCanvasEdge, toCanvasNode } from '@/lib/canvasNodeMapper'
 import type { GraphEdge, GraphNode } from '@/providers/GraphDataProvider'
@@ -657,7 +658,13 @@ export const useCanvasStore = create<CanvasState>()(
       selectedEdgeIds: [],
       selectNode: (id, multi = false) => {
         const s = get()
-        const swapsDrawer = !multi && !id.startsWith('logical:') && (s.drawerNodeId !== id || !!s.drawerEdge)
+        // A single real entity opens its details where this view opens them on
+        // a click (detailsOnSelect.ts); details already open follow the
+        // selection, the way an inspector does. Only a click that moves an
+        // open drawer is held by the unsaved-edit gate.
+        const opens = !multi && !id.startsWith('logical:')
+          && (opensDetailsOnSelect() || !!s.drawerNodeId || !!s.drawerEdge)
+        const swapsDrawer = opens && (s.drawerNodeId !== id || !!s.drawerEdge)
         if (holdDrawerMove(swapsDrawer, () => get().selectNode(id, multi))) return
         set((state) => ({
         selectedNodeIds: multi
@@ -681,8 +688,9 @@ export const useCanvasStore = create<CanvasState>()(
         // A single-select click opens the drawer on that entity, so it is a
         // move like any other — otherwise Back would skip the steps taken on
         // the canvas. A multi-selection never touches the drawer, so it is
-        // not a move.
-        ...(!multi && !id.startsWith('logical:')
+        // not a move; nor is a click in a view whose details open on demand
+        // while they are closed.
+        ...(opens
           ? { drawerNodeId: id, drawerEdge: null, drawerHistory: pushDrawerHistory(state.drawerHistory, { kind: 'node', id }) }
           : {}),
         }))
@@ -704,16 +712,18 @@ export const useCanvasStore = create<CanvasState>()(
       setSelection: (ids) => {
         const next = [...new Set(ids.filter(isSelectableNode))]
         const s = get()
-        const swapsDrawer = next.length === 1 && (s.drawerNodeId !== next[0] || !!s.drawerEdge)
+        const opens = next.length === 1 && (opensDetailsOnSelect() || !!s.drawerNodeId || !!s.drawerEdge)
+        const swapsDrawer = opens && (s.drawerNodeId !== next[0] || !!s.drawerEdge)
         if (holdDrawerMove(swapsDrawer, () => get().setSelection(ids))) return
         set(() => ({
           selectedNodeIds: next,
           // Node and edge selections are mutually exclusive, as in selectNode.
           selectedEdgeIds: [],
           // One node set this way reads as a plain click and opens the sticky
-          // drawer; a set of several must not, because the drawer shows ONE
-          // entity and a selection of five is not one entity.
-          ...(next.length === 1 ? { drawerNodeId: next[0], drawerEdge: null } : {}),
+          // drawer (where clicks do, or it is open already); a set of several
+          // must not, because the drawer shows ONE entity and a selection of
+          // five is not one entity.
+          ...(opens ? { drawerNodeId: next[0], drawerEdge: null } : {}),
         }))
       },
       multiSelectArmed: false,

@@ -1,8 +1,10 @@
 /**
- * Drag handle on the right edge of the panel that lets the user
- * resize it. Width is clamped to [MIN, max] — `max` is MAX, or less
- * when the canvas beside the panel needs the room — and persisted to
- * localStorage so the panel re-opens at the user's chosen width.
+ * Drag handle on the edge of a panel that lets the user resize it — the
+ * right edge of the search panel by default, or the left edge of a panel
+ * docked on the right (the details drawer). Width is clamped to [min, max] —
+ * `max` is MAX, or less when the canvas beside the panel needs the room — and
+ * kept, so the panel re-opens at the user's chosen width: in localStorage for
+ * the search panel, or wherever `onCommit` keeps it.
  *
  * The handle is invisible by default and surfaces a subtle accent
  * stripe on hover/drag — premium feel without visual noise.
@@ -49,11 +51,27 @@ export interface ResizeHandleProps {
     /** A drag starts or ends — the panel follows the pointer without
      *  easing while one is under way. */
     onDragChange?: (dragging: boolean) => void
+    /** Which edge of the panel the handle sits on. On the left edge (a panel
+     *  docked on the right), dragging left and ArrowLeft widen it. */
+    edge?: 'left' | 'right'
+    /** The narrowest it may go; MIN when not given. */
+    min?: number
+    /** Names the handle for assistive tech. */
+    label?: string
+    /** Keeps the width it was let go at (or stepped to); the search panel's
+     *  localStorage entry when not given. */
+    onCommit?: (width: number) => void
 }
 
 
-export const ResizeHandle: FC<ResizeHandleProps> = ({ width, onResize, max = MAX_WIDTH, onDragChange }) => {
+export const ResizeHandle: FC<ResizeHandleProps> = ({
+    width, onResize, max = MAX_WIDTH, onDragChange,
+    edge = 'right', min = MIN_WIDTH, label = 'Resize search panel', onCommit,
+}) => {
     const [dragging, setDragging] = useState(false)
+    // How far the pointer moved, as a change of width: a handle on the left
+    // edge widens the panel as it is dragged left.
+    const sign = edge === 'left' ? -1 : 1
     const startXRef = useRef(0)
     const startWidthRef = useRef(width)
 
@@ -70,9 +88,9 @@ export const ResizeHandle: FC<ResizeHandleProps> = ({ width, onResize, max = MAX
     useEffect(() => {
         if (!dragging) return
         const handleMove = (e: PointerEvent) => {
-            const dx = e.clientX - startXRef.current
+            const dx = (e.clientX - startXRef.current) * sign
             const next = Math.max(
-                MIN_WIDTH,
+                min,
                 Math.min(max, startWidthRef.current + dx),
             )
             onResize(next)
@@ -81,12 +99,13 @@ export const ResizeHandle: FC<ResizeHandleProps> = ({ width, onResize, max = MAX
         // the drag STARTED from straight after, so a dragged width was
         // never remembered.)
         const persist = (e: PointerEvent) => {
-            const dx = e.clientX - startXRef.current
+            const dx = (e.clientX - startXRef.current) * sign
             const next = Math.max(
-                MIN_WIDTH,
+                min,
                 Math.min(max, startWidthRef.current + dx),
             )
-            try {
+            if (onCommit) onCommit(next)
+            else try {
                 window.localStorage.setItem(STORAGE_KEY, String(next))
             } catch {
                 // localStorage may be unavailable (e.g. in incognito); silently ignore.
@@ -100,20 +119,21 @@ export const ResizeHandle: FC<ResizeHandleProps> = ({ width, onResize, max = MAX
             window.removeEventListener('pointermove', handleMove)
             window.removeEventListener('pointerup', persist)
         }
-    }, [dragging, onResize, max, onDragChange])
+    }, [dragging, onResize, max, onDragChange, min, sign, onCommit])
 
     const handleKeyDown = (e: React.KeyboardEvent) => {
-        const step = e.shiftKey ? KEY_STEP_BIG : KEY_STEP
+        const step = (e.shiftKey ? KEY_STEP_BIG : KEY_STEP) * sign
         const target = e.key === 'ArrowRight' ? width + step
             : e.key === 'ArrowLeft' ? width - step
-                : e.key === 'Home' ? MIN_WIDTH
+                : e.key === 'Home' ? min
                     : e.key === 'End' ? max
                         : null
         if (target === null) return
         e.preventDefault()
-        const next = Math.max(MIN_WIDTH, Math.min(max, target))
+        const next = Math.max(min, Math.min(max, target))
         onResize(next)
-        try {
+        if (onCommit) onCommit(next)
+        else try {
             window.localStorage.setItem(STORAGE_KEY, String(next))
         } catch {
             // ignore
@@ -124,17 +144,17 @@ export const ResizeHandle: FC<ResizeHandleProps> = ({ width, onResize, max = MAX
         <div
             role="separator"
             aria-orientation="vertical"
-            aria-label="Resize search panel"
+            aria-label={label}
             aria-valuenow={width}
-            aria-valuemin={MIN_WIDTH}
+            aria-valuemin={min}
             aria-valuemax={max}
             aria-valuetext={`${width} pixels wide`}
             tabIndex={0}
             onPointerDown={handlePointerDown}
             onKeyDown={handleKeyDown}
             className={cn(
-                "absolute top-0 right-0 z-30 h-full",
-                "w-1.5 -mr-0.5 cursor-col-resize",
+                edge === 'left' ? "absolute top-0 left-0 z-30 h-full" : "absolute top-0 right-0 z-30 h-full",
+                edge === 'left' ? "w-1.5 -ml-0.5 cursor-col-resize" : "w-1.5 -mr-0.5 cursor-col-resize",
                 "group flex items-center justify-center",
                 "select-none touch-none focus-visible:outline-none",
             )}

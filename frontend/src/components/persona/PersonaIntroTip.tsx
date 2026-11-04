@@ -56,9 +56,10 @@ export function PersonaIntroTip({ anchor }: {
             <div role="status" style={{ top: rect.top + rect.height + 10, left, width: WIDTH }}
                  className="fixed z-50 rounded-xl border border-accent-business/40 bg-canvas-elevated py-3 pl-3.5 pr-8 text-xs leading-snug text-ink shadow-xl shadow-black/30">
                 <span className="font-semibold text-accent-business">New — a simpler Business view.</span>{' '}
-                Menus and toolbars keep to the essentials, and names read the way people say them.
-                Every other tool is one switch away: <span className="font-medium">Technical</span>, or
-                press <Kbd shortcut="mod+/" />.
+                Menus and toolbars keep to the essentials, names read the way people say them, and an
+                entity’s details open when you ask — <span className="font-medium">Details</span>, or
+                Enter. Every other tool is one switch away: <span className="font-medium">Technical</span>,
+                or press <Kbd shortcut="mod+/" />.
                 <div className="mt-2.5 flex items-center gap-3">
                     <button type="button"
                             onClick={() => { markPersonaIntroSeen(); setMode('technical') }}

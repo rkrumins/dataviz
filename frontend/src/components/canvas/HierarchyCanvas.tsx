@@ -17,6 +17,7 @@ import { fetchWithTimeout } from '@/services/fetchWithTimeout'
 import { useSchemaStore, isContainmentEdgeType } from '@/store/schema'
 import { useViewContainmentEdgeTypes, useViewLineageEdgeTypes, useViewRelationshipTypes } from '@/hooks/useViewSchema'
 import { useCanvasStore } from '@/store/canvas'
+import { useOpensDetailsOnSelect } from '@/store/detailsOnSelect'
 import { useFeature } from '@/store/features'
 import { useSearchStore } from '@/store/searchStore'
 import { useGraphHydration } from '@/hooks/useGraphHydration'
@@ -720,6 +721,8 @@ function HierarchyContainer({
   const isExpanded = expandedNodes.has(node.id)
   const isSelected = selectedNodeId === node.id
   const isSearchResult = searchResults.includes(node.id)
+  // Where a click doesn't open an entity's details, its row offers them.
+  const offerDetails = !useOpensDetailsOnSelect()
 
   // W2.1 — advanced-search match decoration. Lights up the row when
   // the URN is a direct match, surfaces an N-level subtree count
@@ -908,6 +911,23 @@ function HierarchyContainer({
           {/* Display-rule tags — shared premium chip cluster (same as the
               other canvases). */}
           <DisplayRuleTagChips urn={node.urn ?? node.id} size="xs" />
+
+          {/* Details on demand — hover-visible, and kept on the selected row. */}
+          {offerDetails && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation()
+                useCanvasStore.getState().openNodeDrawer(node.id)
+              }}
+              className={cn(
+                'flex items-center justify-center w-6 h-6 rounded-md hover:bg-black/10 dark:hover:bg-white/10 transition-all hover:scale-110 active:scale-95',
+                isSelected ? 'opacity-100' : 'opacity-0 group-hover/row:opacity-100 focus-visible:opacity-100',
+              )}
+              aria-label={`Open details of ${node.name}`}
+            >
+              <LucideIcons.PanelRightOpen className="w-4 h-4 text-ink-muted" />
+            </button>
+          )}
 
           {/* Add child — hover-visible; direct store import so the recursive
               render never threads an onAddChild prop down every level. */}

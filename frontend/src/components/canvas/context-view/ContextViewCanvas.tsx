@@ -40,6 +40,7 @@ import { useReparentNode } from './useReparentNode'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { usePreferencesStore } from '@/store/preferences'
 import { usePersonaMode } from '@/store/persona'
+import { useOpensDetailsOnSelect } from '@/store/detailsOnSelect'
 import { useFeature } from '@/store/features'
 import { NarrowChip } from '@/features/narrow/NarrowChip'
 import { NarrowComposer } from '@/features/narrow/NarrowComposer'
@@ -858,7 +859,8 @@ export function ContextViewCanvas({
 
   const interactions = useCanvasInteractions({
     onTraceNode: (nodeId) => startTraceRef.current(nodeId),
-    onNodeCreated: (nodeId) => selectNode(nodeId),
+    // A new entity is one to fill in: its details open, whatever a click does.
+    onNodeCreated: (nodeId) => { selectNode(nodeId); useCanvasStore.getState().openNodeDrawer(nodeId) },
     duplicateSubtree,
     // Reveal the copy and offer Undo. Mirrors GraphCanvas's onNodeDuplicated,
     // using this file's parentMap / setExpandedNodes (via the forward-ref).
@@ -1815,7 +1817,10 @@ export function ContextViewCanvas({
     // user was still choosing from. Building a selection across columns is
     // exactly when the ground must stay put.
     if (selectedNodeIds.length > 1) return
-    if (lastAutoScrolledForSelectionRef.current === selectedNodeId) return
+    // Once per selection — and once more when its details open after the
+    // click (on demand), since the drawer then covers part of the canvas.
+    const scrollKey = `${selectedNodeId}:${drawerNodeId === selectedNodeId ? 'details' : ''}`
+    if (lastAutoScrolledForSelectionRef.current === scrollKey) return
 
     const layerId = effectiveAssignments.get(selectedNodeId)?.layerId
     if (!layerId && !placementContractOn) return
@@ -1865,7 +1870,7 @@ export function ContextViewCanvas({
           // smooth scroll has settled so trace edges follow the column.
           settleTimer = setTimeout(() => triggerEdgeRedrawRef.current?.(), 350)
         }
-        lastAutoScrolledForSelectionRef.current = selectedNodeId
+        lastAutoScrolledForSelectionRef.current = scrollKey
       })
     })
     return () => {
@@ -1875,7 +1880,7 @@ export function ContextViewCanvas({
       // change left redraws queued against a scroll that had been superseded.
       if (settleTimer != null) clearTimeout(settleTimer)
     }
-  }, [selectedNodeId, selectedNodeIds.length, isEdgePanelOpen, effectiveAssignments, placementContractOn])
+  }, [selectedNodeId, selectedNodeIds.length, isEdgePanelOpen, effectiveAssignments, placementContractOn, drawerNodeId])
 
   const handleLayerScroll = useCallback(() => {
     if (triggerEdgeRedrawRef.current) {
@@ -2293,6 +2298,10 @@ export function ContextViewCanvas({
   // The selection a bulk action reads — trace included: a logical group has
   // no urn to walk, so a lone one must not light up Trace.
   const bulkSelection = useMemo(() => selectedNodeIds.filter(isSelectableNode), [selectedNodeIds])
+  // Where a click doesn't open an entity's details, the selection bar offers
+  // them for one held entity while the drawer is closed.
+  const opensDetailsOnSelect = useOpensDetailsOnSelect()
+  const offerDetails = !opensDetailsOnSelect && bulkSelection.length === 1 && !drawerNodeId && !drawerEdge
   const bulkSelectionCount = bulkSelection.length
   // The server refuses trace requests when this is off; the header hides its
   // Trace and Focus for it, and the SelectionBar follows suit.
@@ -7189,6 +7198,7 @@ export function ContextViewCanvas({
             onLink={canvasWritable ? () => useBulkLinkStore.getState().openPanel() : undefined}
             onNarrow={narrowEnabled ? () => openNarrow(narrowDraftFor(bulkSelection)) : undefined}
             lineage={selectionLineage}
+            onOpenDetails={offerDetails ? () => useCanvasStore.getState().openNodeDrawer(bulkSelection[0]) : undefined}
           />
         )}
         {/* Link the selection to other entities in one go — a draft being
