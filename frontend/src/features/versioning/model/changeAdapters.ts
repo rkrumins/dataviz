@@ -114,10 +114,12 @@ export function fromChangeIndex(index: ChangeListIndex, branchId: string, counts
   const origin: ChangeOrigin = { source: 'branch', branchId }
   const changes: GraphChange[] = index.entries.map((e) => {
     const status = INDEX_STATUS[e[2]]
-    if (e[1] === 'n') return { entityId: e[0], kind: 'node', status, label: e[0], origin }
+    // By the canvas's names: a node's urn, an edge's ends' urns — given where they are not the ids.
+    if (e[1] === 'n') return { entityId: e[0], urn: e[4] ?? e[0], kind: 'node', status, label: e[0], origin }
     const ends = { edgeType: e[3], sourceEntityId: e[4], targetEntityId: e[5] }
     return {
       entityId: e[0], kind: 'edge', status, label: e[3] ?? e[0], origin,
+      sourceUrn: e[6] ?? e[4] ?? undefined, targetUrn: e[7] ?? e[5] ?? undefined,
       ...(status === 'removed' ? { before: ends } : { after: ends }),
     }
   })
@@ -126,7 +128,7 @@ export function fromChangeIndex(index: ChangeListIndex, branchId: string, counts
 }
 
 /** Counts alone, for a surface that says how much a draft changes and lists none of it. */
-export function fromChangeCounts(counts: ChangeCounts, branchId: string): ChangeSet {
+export function fromChangeCounts(counts: ChangeCounts, _branchId: string): ChangeSet {
   const any = counts.added + counts.modified + counts.removed > 0
   return { changes: [], byEntityId: new Map(), counts, origin: any ? 'branch' : 'empty' }
 }

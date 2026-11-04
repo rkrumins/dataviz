@@ -40,7 +40,8 @@ arrive at once.
     changes and a few hundred rows, tens of millions of steps and gigabytes held. They now share
     one.
   - A draft past 20,000 changes is ringed from a compact list of its changes, about 70 bytes each,
-    where the whole diff was tens of megabytes.
+    where the whole diff was tens of megabytes. It names an imported node, and the ends of its
+    links, by urn, as the canvas does.
   - A View that lists its own entities loaded every entity the draft created at its top level, a
     thousand requests for 100,000 of them. It now loads the first 200, and the bar's **+N new** chip
     says how many more there are and opens **Changes**.

@@ -142,6 +142,22 @@ describe('fromChangeIndex (a draft too large for the whole diff)', () => {
     expect([...committedCreatedChildUrns(cs, ['CONTAINS'])]).toEqual(['urn:c'])
   })
 
+  it('names an imported node, and the ends of its links, by the urns the index gives', () => {
+    const cs = fromChangeIndex({
+      origin: { branchId: 'br_x' }, total: 3, truncated: false,
+      entries: [
+        ['urn:p', 'n', 'm', 'Schema'],
+        ['ent_c', 'n', 'a', 'Column', 'urn:c'],
+        ['e1', 'e', 'a', 'CONTAINS', 'urn:p', 'ent_c', 'urn:p', 'urn:c'],
+      ],
+    }, 'br_x')
+    expect(cs.byEntityId.get('urn:c')).toMatchObject({ entityId: 'ent_c', urn: 'urn:c', status: 'added' })
+    expect(cs.byEntityId.has('ent_c')).toBe(false)
+    expect(cs.byEntityId.get('e1')).toMatchObject({ sourceUrn: 'urn:p', targetUrn: 'urn:c' })
+    expect([...committedCreatedUrns(cs)]).toEqual(['urn:c'])
+    expect([...committedCreatedChildUrns(cs, ['CONTAINS'])]).toEqual(['urn:c'])
+  })
+
   it('takes its counts from the summary when the index is too large to list', () => {
     const counts = { added: 300_000, modified: 2, removed: 1 }
     const cs = fromChangeIndex({ origin: { branchId: 'br_x' }, total: 300_003, truncated: true, entries: [] }, 'br_x', counts)

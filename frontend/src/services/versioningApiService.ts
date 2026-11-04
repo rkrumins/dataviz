@@ -1979,10 +1979,11 @@ export interface ChangeListEntry {
 }
 
 /** `[entityId, 'n', status, type]` for a node, `[entityId, 'e', status, type, source, target]` for
- *  an edge; status `a` / `m` / `r`. */
+ *  an edge; status `a` / `m` / `r`. The canvas names a node by its urn, which an imported node's id
+ *  is not: where they differ, a node's urn follows its type, and an edge's ends' urns its ends. */
 export type ChangeIndexEntry =
-  | [string, 'n', 'a' | 'm' | 'r', string | null]
-  | [string, 'e', 'a' | 'm' | 'r', string | null, string | null, string | null]
+  | [string, 'n', 'a' | 'm' | 'r', string | null, string?]
+  | [string, 'e', 'a' | 'm' | 'r', string | null, string | null, string | null, (string | null)?, (string | null)?]
 
 export interface ChangeListIndex {
   origin: Record<string, unknown>
