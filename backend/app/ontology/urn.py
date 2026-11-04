@@ -16,6 +16,12 @@ Rules
   themselves contain colons (e.g. DataHub URNs nested inside a Synodic URN).
 - Parsing is lenient: any string that starts with "urn:" is considered valid.
 
+New entities
+------------
+No write path names a new entity here any more: every new node and edge is a ``urn:uuid:``
+minted by ``backend/app/services/versioning/ids.py`` (docs/versioning/18-identity.md). Graphs
+still hold urns of this form, so the parsers below stay.
+
 Design note
 -----------
 External provider IDs (DataHub, OpenMetadata) are kept verbatim inside <slug>

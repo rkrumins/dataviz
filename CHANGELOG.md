@@ -9,6 +9,56 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Every new id is a standard UUID
+
+### Changed
+
+- **New nodes and edges are named `urn:uuid:<UUIDv7>`** ([RFC 9562](https://www.rfc-editor.org/rfc/rfc9562)),
+  on every path that names one:
+  - canvas saves, `/graph/nodes/create`, `/graph/edges` and `/commands/batch`;
+  - a draft's `…/changes`;
+  - imports;
+  - bulk-ingest and sync rows that bring no id.
+
+  A node's id, urn and identifier property stay one value. An id no longer says anything about
+  type or origin, so it never goes stale. Before, ids came in many shapes:
+  `urn:synodic:<source>:<type>:<hex>` for nodes, and `ent_<ulid>`, `edge-<hex>` or
+  `contains-<parent>-<child>` for edges. Ids derived from a source keep their form: provider urns,
+  `sync:<urn>`, bootstrap edges and package seeds.
+- **A save retried with its `Idempotency-Key`** still names the same entities, now with UUIDv5s
+  derived from its key.
+- **`/graph/edges` with an `idempotencyKey`** names the edge with a UUIDv5 derived from the key,
+  not with the key itself. Sent again, it answers with the edge it made. The key is the caller's
+  on that branch.
+- **Searching by part of a urn** no longer finds new nodes by their type or origin.
+- **Placement rules by urn pattern** (`urn:synodic:*:dataset:*`) don't place new nodes; place by
+  entity type. The rule editor says so.
+
+### Added
+
+- **`/graph/nodes/create` takes `idempotencyKey`.** Sent again, it answers with the node the first
+  request created and writes nothing. This also works in `/commands/batch`.
+- **[18 · Entity Identity](docs/versioning/18-identity.md),** the identity spec. It covers:
+  - the id form;
+  - how ids are minted, and which are kept;
+  - sending a request again;
+  - adding, changing and removing properties by import, export and the API, at any size.
+- **A test that fails the build** when a write path mints an entity id other than through
+  `versioning/ids.py`.
+
+### Upgrading
+
+- Nothing to migrate: existing ids stay valid as they are.
+- Integrations that read a type or origin out of a urn must read `entityType` and the properties
+  instead.
+
+### Known limitations
+
+- Existing entities keep the ids they have.
+- An import still keeps the urn a row brings when nothing holds it, whatever its form.
+
+---
+
 ## [Unreleased] — What you import or create in a draft shows on its canvas, with one identity
 
 ### Fixed
