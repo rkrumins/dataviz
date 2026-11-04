@@ -278,6 +278,21 @@ class TestReadAndEdit:
 
 
 
+class TestLevelsAndKinds:
+    async def test_how_far_is_kept_and_said_in_words(self, test_client, on, db_session):
+        ws = await workspace(test_client)
+        base = await base_view(test_client, ws)
+        made = await make(test_client, ws, base, include={
+            "contents": True, "contentsLevels": 2, "containers": True, "containersKinds": ["database"]})
+        include = made["search"]["definition"]["include"]
+        assert include["contentsLevels"] == 2 and include["containersKinds"] == ["database"]
+        assert "containersLevels" not in include          # to the top
+        from backend.app.api.v1.endpoints.search_views import _include_words
+        from backend.common.models.search_view import SubsetInclude
+        words = _include_words(SubsetInclude.model_validate(include))
+        assert words == "Keeps two levels inside them, what contains them (only database)"
+
+
 class TestPlacedAsItsBasePlaces:
     async def test_a_base_placing_by_hand_is_followed(self, test_client, on):
         ws = await workspace(test_client)

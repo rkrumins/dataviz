@@ -1024,6 +1024,7 @@ async def _answer(provider, query: SearchQuery, session: Session, pos: int,
     remaining = max(_HYDRATE_FLOOR_S, deadline - time.monotonic())
     hits = await _hydrate_hits(provider, query, [r[-1] for r in rows], timeout_s=remaining)
     path_notes: List[str] = []
+    paths_left_out = False
     if hits and options.include_ancestor_path:
         # Where each hit sits finishes the page, whatever the wait spent on
         # the scan. Running late leaves the paths out — the hits and the
@@ -1035,6 +1036,7 @@ async def _answer(provider, query: SearchQuery, session: Session, pos: int,
         except asyncio.TimeoutError:
             for hit in hits:
                 hit.ancestor_path = []
+            paths_left_out = True
             path_notes.append("Where each match sits could not be read in time; "
                               "run the search again to see them grouped.")
 
@@ -1087,4 +1089,5 @@ async def _answer(provider, query: SearchQuery, session: Session, pos: int,
         # Carried to the service, which builds the response's diagnostics
         # and folds these in (``AdvancedSearchService.search``).
         page.scope_diagnostics = ScopeDiagnostics(effective_max_depth=0, notes=notes)
+    page._paths_left_out = paths_left_out
     return page

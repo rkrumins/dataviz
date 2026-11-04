@@ -30,9 +30,15 @@ import hashlib
 import json
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_serializer, model_validator
 
-from backend.common.models.search import GroupPredicate, Predicate, RelatedPredicate
+from backend.common.models.search import (
+    RELATION_DEPTH_MAX,
+    EntityTypePredicate,
+    GroupPredicate,
+    Predicate,
+    RelatedPredicate,
+)
 from backend.common.models.view_membership import MembershipProvenance, ReadInView
 
 #: Typed layers a subset view may have, and the types one may name — the
@@ -62,14 +68,39 @@ class SubsetInclude(_Base):
     """What a subset view keeps beside its search's matches. Each is one
     relationship asked of one entity, so the view stays live at any size; more
     reach than this (two lineage steps and further) is a member-list view's."""
-    #: Everything inside a match, however deep.
+    #: What is inside a match: every level, or ``contentsLevels`` of them, of
+    #: every kind, or only ``contentsKinds``.
     contents: bool = False
-    #: What contains a match: its containers, up to the top.
+    contents_levels: Optional[int] = Field(None, alias="contentsLevels", ge=1, le=RELATION_DEPTH_MAX)
+    contents_kinds: Optional[List[str]] = Field(None, alias="contentsKinds", max_length=32)
+    #: What contains a match: its containers up to the top, or ``containersLevels``
+    #: up, of every kind, or only ``containersKinds``.
     containers: bool = False
+    containers_levels: Optional[int] = Field(None, alias="containersLevels", ge=1, le=RELATION_DEPTH_MAX)
+    containers_kinds: Optional[List[str]] = Field(None, alias="containersKinds", max_length=32)
     #: One lineage step upstream: what feeds a match.
     upstream: bool = False
     #: One lineage step downstream: what a match feeds.
     downstream: bool = False
+
+    @model_validator(mode="after")
+    def _levels_and_kinds_go_with_their_choice(self) -> "SubsetInclude":
+        """Levels and kinds belong to a choice that is on, and kinds are a set: so
+        one choice has one shape, and one hash."""
+        for on, levels, kinds in (("contents", "contents_levels", "contents_kinds"),
+                                  ("containers", "containers_levels", "containers_kinds")):
+            if not getattr(self, on):
+                setattr(self, levels, None)
+                setattr(self, kinds, None)
+            elif getattr(self, kinds) is not None:
+                setattr(self, kinds, sorted({k for k in getattr(self, kinds) if k}) or None)
+        return self
+
+    @model_serializer(mode="wrap")
+    def _without_unset_reach(self, handler):
+        """Every level and every kind are unset, never sent: a definition made
+        before levels and kinds reads, and hashes, as it did."""
+        return {k: v for k, v in handler(self).items() if v is not None}
 
     def any(self) -> bool:
         return self.contents or self.containers or self.upstream or self.downstream
@@ -113,10 +144,17 @@ class SearchViewDefinition(_Base):
             return self.predicate
         matches = self.predicate
         parts = [matches]
-        if self.include.contents:
-            parts.append(RelatedPredicate(axis="ancestor", where=matches))
-        if self.include.containers:
-            parts.append(RelatedPredicate(axis="descendant", where=matches))
+        include = self.include
+        if include.contents:
+            # Inside a match, ``contentsLevels`` down (unset: every level).
+            parts.append(_of_kinds(RelatedPredicate(axis="ancestor", where=matches,
+                                                    max_hops=include.contents_levels),
+                                   include.contents_kinds))
+        if include.containers:
+            # Containing a match, ``containersLevels`` up (unset: to the top).
+            parts.append(_of_kinds(RelatedPredicate(axis="descendant", where=matches,
+                                                    max_hops=include.containers_levels),
+                                   include.containers_kinds))
         if self.include.upstream or self.include.downstream:
             reach = GroupPredicate(op="or", children=[matches, RelatedPredicate(axis="ancestor", where=matches)])
             if self.include.upstream:
@@ -138,6 +176,14 @@ class SearchViewDefinition(_Base):
         """The identity of the whole definition — the compare-and-swap token of
         an edit."""
         return _sha(self.model_dump(mode="json", by_alias=True, exclude_none=True))
+
+
+def _of_kinds(related, kinds: Optional[List[str]]):
+    """``related``, of ``kinds`` only when some are named: the kind first, so a
+    candidate of another kind is never walked."""
+    if not kinds:
+        return related
+    return GroupPredicate(op="and", children=[EntityTypePredicate(values=kinds), related])
 
 
 def read_search_definition(config: Dict[str, Any]) -> Optional[SearchViewDefinition]:
@@ -296,12 +342,17 @@ class ViewFeedPage(_Base):
     #: How long a cache may keep this page (a recent one: what is left of its
     #: window), set by the route that built it. Never serialized.
     _ttl_s: Optional[int] = PrivateAttr(default=None)
+    #: Where its matches sit couldn't be read in time: they are drawn flat until
+    #: it is asked again. Never serialized.
+    _paths_left_out: bool = PrivateAttr(default=False)
 
     @property
     def degraded_detail(self) -> Optional[str]:
         """Why this page may change if asked again, else None. The graph cache
         keeps a degraded page for seconds and never as last-known-good."""
-        return "running" if self.status == "running" else None
+        if self.status == "running":
+            return "running"
+        return "paths" if self._paths_left_out else None
 
     @property
     def cache_ttl_s(self) -> Optional[int]:

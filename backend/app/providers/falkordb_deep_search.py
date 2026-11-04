@@ -70,6 +70,7 @@ from backend.app.providers.falkordb_provider import (
     platform_property_names,
 )
 from backend.app.providers.falkordb_placement import layer_test
+from backend.app.services.view_placement import facts_from_graph_node
 from backend.app.providers.falkordb_search.raw_properties import RawLeaf
 from backend.app.providers.falkordb_typed_ops import compile_comparison, compile_key_comparison, text_of
 from backend.app.services.deep_search import CompileError, get_deep_search_settings
@@ -4729,12 +4730,14 @@ async def _ancestor_refs(provider, urns: List[str]) -> Dict[str, List[AncestorRe
     # 2. Single batched node fetch for every unique ancestor URN —
     # collapses what was N round-trips into one.
     summaries: Dict[str, Tuple[str, str]] = {}
+    read: Dict[str, Any] = {}
     if needed_urns:
         try:
             nodes = await provider.get_nodes_batch(list(needed_urns))
             for anc in nodes:
                 if anc and anc.urn:
                     summaries[anc.urn] = (anc.display_name, anc.entity_type)
+                    read[anc.urn] = anc
         except Exception:
             # If batch fetch fails, leave ancestor_path empty rather
             # than fall back to N single-fetches — the page still
@@ -4755,5 +4758,10 @@ async def _ancestor_refs(provider, urns: List[str]) -> Dict[str, List[AncestorRe
                 refs.append(AncestorRef(
                     urn=anc, display_name=name, entity_type=etype,
                 ))
+        if len(refs) == len(chain):
+            # Read whole: each container's placement facts, from the same read
+            # (a subset view places its matches' containers with them).
+            for ref in refs:
+                ref._facts = facts_from_graph_node(read[ref.urn])
         paths[urn] = refs
     return paths
