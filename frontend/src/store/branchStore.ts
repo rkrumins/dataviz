@@ -116,6 +116,9 @@ const INITIAL = {
   highlight: null,
 } as const
 
+/** A draft is the branch open: its rings are its own diff's. */
+const draftOpen = (s: BranchState) => !!s.currentBranchId && s.currentBranchId !== s.mainBranchId
+
 export const useBranchStore = create<BranchState>((set, get) => ({
   ...INITIAL,
 
@@ -202,9 +205,11 @@ export const useBranchStore = create<BranchState>((set, get) => ({
       activeChangeSet: null,
     })),
 
-  closeRevision: () => set({ revision: null, highlight: null, activeChangeSet: null }),
+  // Leaving a revision, or changing a highlight, clears the rings it drew — never a draft's own,
+  // which the bar sets from the draft's diff only when that changes.
+  closeRevision: () => set((s) => ({ revision: null, highlight: null, ...(draftOpen(s) ? {} : { activeChangeSet: null }) })),
 
-  setHighlight: (highlight) => set({ highlight, activeChangeSet: null }),
+  setHighlight: (highlight) => set((s) => ({ highlight, ...(draftOpen(s) ? {} : { activeChangeSet: null }) })),
 
   reset: () => set({ ...INITIAL }),
 }))

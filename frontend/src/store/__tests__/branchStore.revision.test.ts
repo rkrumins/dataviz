@@ -8,6 +8,7 @@ import { describe, it, expect, beforeEach } from 'vitest'
 import { renderHook } from '@testing-library/react'
 import { useBranchStore, useEffectiveRevision } from '../branchStore'
 import type { ResolveResponse } from '@/services/versioningApiService'
+import { buildChangeSet } from '@/features/versioning/model/changeModel'
 
 const resolved: ResolveResponse = { graphId: 'g1', mainBranchId: 'br_main', mainHeadCommitSeq: 40 }
 const SCOPE = { workspaceId: 'ws1', dataSourceId: 'ds1', viewId: 'v1' }
@@ -52,6 +53,21 @@ describe('branchStore — a past revision', () => {
     expect(renderHook(() => useEffectiveRevision('ws1', 'ds1')).result.current).toBe(7)
     expect(renderHook(() => useEffectiveRevision('ws1', 'ds1', 'v2')).result.current).toBeNull()
     expect(renderHook(() => useEffectiveRevision('ws1', 'ds2', 'v1')).result.current).toBeNull()
+  })
+
+  it('never clears the rings of the draft that is open, when a highlight changes or a revision closes', () => {
+    const s = useBranchStore.getState()
+    s.switchToDraft('br_1', 'v1')
+    const draftRings = buildChangeSet([])
+    useBranchStore.getState().setActiveChangeSet(draftRings)
+    useBranchStore.getState().setHighlight(null)
+    useBranchStore.getState().closeRevision()
+    expect(useBranchStore.getState().activeChangeSet).toBe(draftRings)
+    // On Published they were a comparison's, and go with it.
+    useBranchStore.getState().switchToMain()
+    useBranchStore.getState().setActiveChangeSet(buildChangeSet([]))
+    useBranchStore.getState().setHighlight(null)
+    expect(useBranchStore.getState().activeChangeSet).toBeNull()
   })
 
   it('keeps a highlight only while it shows the revision on the canvas', () => {

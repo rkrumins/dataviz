@@ -169,9 +169,12 @@ export function CanvasVersioningBar({
   // New entities a curated view could not draw: it draws a page of what the draft created.
   const createdNotLoaded = useCanvasStore((s) => s.createdRootsNotLoaded)
   const loadingChanges = diffQ.isLoading || (large && (indexQ.isLoading || countsQ.isLoading))
+  // A draft's rings are its own diff's: whatever replaced them (a revision closed, a highlight
+  // cleared) gives way to them again.
+  const activeChangeSet = useBranchStore((s) => s.activeChangeSet)
   useEffect(() => {
-    if (isDraft) setActiveChangeSet(changeSet)
-  }, [isDraft, changeSet, setActiveChangeSet])
+    if (isDraft && activeChangeSet !== changeSet) setActiveChangeSet(changeSet)
+  }, [isDraft, changeSet, activeChangeSet, setActiveChangeSet])
   // Two revisions compared, ringed on the canvas showing the newer one.
   useEffect(() => {
     if (isDraft || !highlightOrigin || !highlightIndexQ.data) return
