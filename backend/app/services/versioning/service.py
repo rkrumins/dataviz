@@ -10366,6 +10366,12 @@ class GraphVersioningService:
         known = await self._current_skeletons(s, graph_id, bid, asked | creates)
         unknown = (asked | creates) - set(known)          # no entity of the branch has that id
         mapping: Dict[str, str] = {}
+        # A node with no urn reads as ``gv:<id>`` (``_current_urns``): that names its id.
+        gv = {n: n[3:] for n in unknown if n.startswith("gv:")}
+        if gv:
+            held = await self._current_skeletons(s, graph_id, bid, set(gv.values()))
+            mapping.update({n: e for n, e in gv.items() if e in held})
+            unknown -= set(mapping)
         if written_by is not None and unknown:
             # A retry: what the first attempt wrote, by the urn each of its nodes carried.
             wrote = (await s.execute(select(NodeVersionORM.entity_id).where(
@@ -10404,7 +10410,11 @@ class GraphVersioningService:
             if _node(o) and o["entity_id"] in mapping:
                 o2["entity_id"] = mapping[o["entity_id"]]
                 names[o2["entity_id"]] = o["entity_id"]
-            p = o.get("payload")
+                p = o.get("payload") or {}
+                if o["entity_id"].startswith("gv:") and p.get("urn") == o["entity_id"]:
+                    # Restored as it was: a node with no urn, not one with ``gv:`` in it.
+                    o2["payload"] = {k: v for k, v in p.items() if k != "urn"}
+            p = o2.get("payload")
             if p:
                 keys = (("parentEntityId",) if o.get("op") == "move" else ()) + (
                     () if _node(o) else ("sourceEntityId", "source_entity_id",

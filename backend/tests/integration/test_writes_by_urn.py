@@ -166,3 +166,24 @@ def test_restoring_a_deleted_imported_node_by_urn_brings_the_same_entity_back():
         assert vals["ent_L"] is not None and vals["ent_L"]["urn"] == "urn:L"
         assert "urn:L" not in vals, "a second entity with the same urn"
     _run(case)
+
+
+def test_a_node_with_no_urn_is_named_gv_and_restored_as_itself():
+    """A node with no urn reads as ``gv:<id>``: a link to it, and a restore of it once deleted, name
+    it so — and land on it, never on a new node, and never write ``gv:`` into its urn."""
+    async def case(svc):
+        gid, draft = await _seeded(svc)
+        await svc.apply_ops(graph_id=gid, branch_id=draft, actor="alice", message="urn-less",
+                            ops=[{"op": "create", "entity_kind": "node", "entity_id": "ent_U",
+                                  "payload": {"entityType": "Table", "displayName": "U"}}])
+        await _save(svc, gid, draft, [_edge("lin_u", "gv:ent_U", "urn:L", "LINEAGE")])
+        vals = await _values(svc, gid, draft, ["lin_u"])
+        assert vals["lin_u"]["sourceEntityId"] == "ent_U"
+        await _save(svc, gid, draft, [_d("gv:ent_U")])
+        await _save(svc, gid, draft, [{"op": "create", "entity_kind": "node", "entity_id": "gv:ent_U",
+                                       "payload": {"urn": "gv:ent_U", "entityType": "Table",
+                                                   "displayName": "U"}}])
+        vals = await _values(svc, gid, draft, ["ent_U", "gv:ent_U"])
+        assert vals["ent_U"] is not None and "urn" not in vals["ent_U"], vals
+        assert "gv:ent_U" not in vals, "a second entity for the urn-less node"
+    _run(case)
