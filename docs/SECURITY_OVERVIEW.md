@@ -507,9 +507,9 @@ view's activity log records it.
 
 Someone who can open a view but can't read its workspace's data sources (a person it is shared
 with or published to, or an API key limited to the view) reads its data through the view: a
-*share link*. For a share link, searches stay inside the view. Searches, counts, display-rule
-membership checks, exports and a subset view's layers find only what the view holds, and a
-condition that follows lineage or relationships is refused. A subset view's layers page with a
+*share link*. For a share link, searches, counts, display-rule membership checks, exports and a
+subset view's layers find only what the view holds, and a condition that follows lineage or
+relationships is refused. A subset view's layers page with a
 cursor that is signed and bound to the layer, so a made-up cursor is refused.
 
 For everyone, a curated view with nothing placed in it holds nothing: a search, count, export

@@ -271,7 +271,7 @@ function SearchViewPanel({ view, status, canEdit, onEditSearch, onRefresh }: {
 
       {missing ? (
         <Note tone="attention" icon="AlertTriangle">
-          Its base view was deleted, so there is nothing to look in. Restore the base view and this one shows its matches again.
+          Its base view isn’t available — deleted, or not in this workspace — so there is nothing to look in. Restored, it shows its matches again: a workspace admin restores a deleted view from Deleted in the Explorer.
         </Note>
       ) : (
         <div className="px-4 py-3 border-b border-glass-border/60 space-y-1.5">

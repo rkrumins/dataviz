@@ -75,8 +75,8 @@ limitations** — a changelog that only lists good news is not worth reading.
 ### Known limitations
 
 - **A share link still reads the whole data source through the browse routes** — node and edge
-  reads, trace, metadata, canvas bootstrap — though search, counts, membership, export and
-  subset feeds are confined. Confining those is the next change.
+  reads, trace, metadata, canvas bootstrap, and Narrow from chosen entities — though search,
+  counts, membership, export and subset feeds are confined. Confining those is the next change.
 - **The feed lane is still per process** (`DEEP_SEARCH_VIEW_FEED_LANE`), and a viewer following a
   running scan still reads its rows and edges for itself. A request with a last page to show no
   longer waits, which removes most of that following.

@@ -133,7 +133,7 @@ function PausedChip() {
         >
           <p className="font-semibold text-ink">Updates paused</p>
           <p>
-            This view keeps itself up to date, but views that do are turned off in this workspace.
+            This view keeps itself up to date, but views that do are turned off for this deployment.
             It shows the members it last had, and catches up the next time it's opened once they're
             turned on again.
           </p>

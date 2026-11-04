@@ -192,8 +192,8 @@ with `readIn` for a query searched in a view), `mode`, `layout`, `exclude` and `
 
 - Its starting URNs, `exclude` and `overrides` keys, and its sources' predicates are checked and
   remapped as above.
-- A source's `readIn` is a view id too, kept as it is. Where that view isn't live, the view is
-  `source_missing`, and its chip says **Can’t search**.
+- A source's `readIn` is a view id too, kept as it is. Where that view isn't live in the same
+  workspace and data source, the view is `source_missing`, and its chip says **Can’t search**.
 - **Auto-updating** (`mode: live`): its members, the entries with `assignedBy: "query"`, are left
   out of the definition, its hash, its versions and its files, so an update never makes the view
   "changed". People's own entries (**Always include**), `exclude` and `overrides` stay. A new view

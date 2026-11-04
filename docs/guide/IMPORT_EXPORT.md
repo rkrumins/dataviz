@@ -262,7 +262,9 @@ them as you choose, as it does for any View.
   out against the data there the first time it's opened. Imported over a View
   that's already there, it keeps that View's members until then. What people
   chose travels with it: entities kept out or always included, and where they
-  moved members.
+  moved members. One made from a search names the view it searches in, as a
+  subset names its base: where that view isn't there, it says **Can’t search**
+  and works out no members.
 - **A snapshot** travels with its members.
 
 ### Importing a View with its data

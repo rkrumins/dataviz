@@ -189,8 +189,8 @@ view), the search routes stay inside the view
   (`membership`, `resolve`, `counts`, `catalog`, `exports`,
   `ancestor-counts`), refuse a body that names another view, a
   `data_source` or `visible` scope, or a condition that follows lineage
-  or relationships, and resolve names inside the view (`confined`). `discover` and `values`
-  refuse a capability caller outright.
+  or relationships, and resolve names inside the view (`confined`).
+  `discover` and `values` refuse a capability caller outright.
 * A subset view's layer feed (`POST /search/view-feed`) reads only the
   capability's own view (`403 link_other_view`). Its cursor is signed
   with the platform key ring and bound to that layer's search in its

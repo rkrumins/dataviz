@@ -315,7 +315,7 @@ What the chip can say:
 | **Couldn't update** | The graph couldn't be read. The view keeps its last members |
 | **Can't search** | The view its search runs in has gone. The view keeps its last members |
 | **Snapshot** | Its members stay as they are |
-| **Updates paused** | Views like it are turned off. It shows the members it last had, and catches up the next time it's opened once they're on again |
+| **Updates paused** | Views that keep themselves up to date are turned off. It shows the members it last had, and catches up the next time it's opened once they're on again |
 
 An update changes the view's data, not its design: it doesn't count as an edit,
 and doesn't add a version. Restoring a version of the view, or importing it
@@ -544,7 +544,7 @@ See [Ways of Working](/guide/ways-of-working) for conventions and cadence.
 | A subset view says **Subset views are turned off** | The preview is off | Ask your administrator: **Administration → Features → Subset views: a search's matches as a view** |
 | A view made from a query says **Updates paused** | Views that keep themselves up to date are turned off | Nothing to do: it keeps its last members, and catches up once your administrator turns **Narrow: chosen entities and what they reach** back on |
 | "Someone changed this view's search. Review it and try again." | Another editor changed the view after you opened its chip | The chip now shows their change. Check it, then try again |
-| **Save as view** says it's more than a view can hold | Kept as a list, a view holds at most 5,000 entries | Narrow the query, reach everything inside rather than a number of levels, or turn off **Show where they sit**. A subset view (**Live · any size**) has no limit. See [Troubleshooting](/guide/troubleshooting#save-as-view-says-more-than-a-view-can-hold) |
+| The **Save as a view** panel says it's more than a view can hold | Kept as a list, a view holds at most 5,000 entries | Narrow the query, reach everything inside rather than a number of levels, or turn off **Show where they sit**. A subset view (**Live · any size**) has no limit. See [Troubleshooting](/guide/troubleshooting#save-as-view-says-more-than-a-view-can-hold) |
 
 More in [Troubleshooting](/guide/troubleshooting).
 

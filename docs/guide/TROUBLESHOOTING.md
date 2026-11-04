@@ -140,7 +140,7 @@ reads the latest version of its data. Select it for each step, with times. See
 
 The header chip of a [subset view](/guide/managing-views#subset-views-a-searchs-matches-as-a-view)
 or of a [view made from a query](/guide/managing-views#views-made-from-a-query),
-and the **Save as view** panel, say what went wrong in the server's own words.
+and the **Save as a view** panel, say what went wrong in the server's own words.
 
 | Message (exact text) | What it means | What to do |
 |---|---|---|
@@ -148,7 +148,7 @@ and the **Save as view** panel, say what went wrong in the server's own words.
 | "Someone changed this view's search. Review it and try again." (or "Someone changed what this view is made of…") | Another editor changed the view after you opened its chip, so your change wasn't saved. | The chip now shows the view as it is. Check their change, then try yours again. You don't need to reload. |
 | **An update is waiting for you** | An update would remove at least half of the view, and at least 50 entities, so it waits for someone who can edit the view. The view keeps its members meanwhile. | If you can edit the view, open the chip: *An update would remove 812 of 1,020*. Check the query is still what you want, then choose **Apply** or **Keep as is**. |
 | "This view was just updated. Try again in 20 seconds." | **Refresh now** works at most once every 30 seconds for each view. | Wait as long as it says, then try again. |
-| "The graph is busy right now. Try again in a moment." | The graph is answering too many requests, and the server asked your browser to wait. | Wait. The canvas, **Narrow** and the **Save as view** preview ask again by themselves when the server allows, and a subset layer still counting **so far** carries on by itself. |
+| "The graph is busy right now. Try again in a moment." | The graph is answering too many requests, and the server asked your browser to wait. | Wait. The canvas, **Narrow** and the **Save as a view** preview ask again by themselves when the server allows, and a subset layer still counting **so far** carries on by itself. |
 | **More than a view can hold, so it can’t be saved as it is.** (or "This would hold 6,200 entries…") | A list holds at most 5,000 entries, and this one is over. Nothing was saved. | See [Save as view says "More than a view can hold"](#save-as-view-says-more-than-a-view-can-hold). |
 
 ---
@@ -267,8 +267,8 @@ doesn't include it.
    - No **Import a view** in the Create View wizard — **View versions, import
      and export** (off by default) and **Import views**.
    - A view type missing from the wizard — **View modes**.
-   - No **Narrow**, or no **As a list** in **Save as view** — **Narrow: chosen
-     entities and what they reach** (off by default).
+   - No **Narrow**, or no **As a list · up to 5,000** in the **Save as a view**
+     panel — **Narrow: chosen entities and what they reach** (off by default).
    - No **Save as view…** on search results — **Subset views: a search's
      matches as a view** (off by default).
    - **Enterprise** visibility unavailable — **Publishing views to everyone**.

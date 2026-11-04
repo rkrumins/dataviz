@@ -121,7 +121,7 @@ describe('SearchViewChip', () => {
     api.getSearchStatus.mockResolvedValue(status({ status: 'base_missing' }))
     renderIn(<SearchViewChip view={SUBSET} canEdit onEditSearch={vi.fn()} onRefresh={vi.fn()} />)
     fireEvent.click(await screen.findByRole('button', { name: 'Subset · base view gone' }))
-    expect(await screen.findByText(/Its base view was deleted/)).toBeInTheDocument()
+    expect(await screen.findByText(/Its base view isn’t available/)).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /Edit search…/ })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /Refresh/ })).not.toBeInTheDocument()
   })
