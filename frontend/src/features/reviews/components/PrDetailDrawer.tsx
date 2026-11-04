@@ -36,6 +36,8 @@ import {
 import { DraftViewChanges } from '../../versioning/components/DraftViewChanges'
 import { fromPrDiff } from '../../versioning/model/changeAdapters'
 import { ChangesPanel, ChangeCountChips } from '../../versioning/components/ChangesPanel'
+import { ChangeList } from '../../versioning/components/ChangeList'
+import { DiffTooLargeError } from '@/services/versioningApiService'
 import { CommitRow } from '../../versioning/components/CommitRow'
 import { RevertDialog } from '../../versioning/components/RollbackDialogs'
 import { IncomingChangesSheet } from '../../versioning/components/IncomingChangesSheet'
@@ -491,7 +493,20 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
               )}
 
               <Section icon={FileDiff} title="Files changed" right={changeSet ? <ChangeCountChips changeSet={changeSet} /> : undefined}>
-                {diffQ.isLoading ? (
+                {diffQ.error instanceof DiffTooLargeError && isDraftPr ? (
+                  // Too large to merge in a request for its diff: the draft's own changes, listed a
+                  // page at a time — exactly what merging changes once it is up to date.
+                  <>
+                    {pr.behind && (
+                      <p className="text-[11.5px] text-ink-muted mb-2 leading-relaxed">
+                        What this draft changes where it branched off. Once it pulls the latest from{' '}
+                        <strong>main</strong>, this is exactly what merging it changes.
+                      </p>
+                    )}
+                    <ChangeList wsId={wsId} graphId={pr.graphId} origin={{ branchId: pr.sourceBranchId }}
+                      emptyHint="No changes in this PR." />
+                  </>
+                ) : diffQ.isLoading ? (
                   <div className="flex items-center gap-2 text-sm text-ink-muted py-6 justify-center">
                     <Loader2 className="w-4 h-4 animate-spin" /> Computing diff…
                   </div>

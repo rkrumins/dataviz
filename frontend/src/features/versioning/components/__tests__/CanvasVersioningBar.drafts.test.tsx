@@ -40,6 +40,8 @@ vi.mock('../../hooks/useVersioning', () => ({
   useBranch: () => ({ data: branchData }),
   useRefreshDraftFromOthers: () => vi.fn(),
   useDiffVsMain: () => ({ data: undefined, isLoading: false }),
+  useChangeIndex: () => ({ data: undefined, isLoading: false }),
+  useChangeSummary: () => ({ data: undefined, isLoading: false }),
   useBranchViewChanges: () => ({ data: undefined }),
   useAbandonDraft: () => ({ mutate: vi.fn(), isPending: false }),
 }))

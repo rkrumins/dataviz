@@ -2623,10 +2623,15 @@ class GraphVersioningService:
         lets "what came in when I pulled" be reviewed in the same visual language as every other diff.
 
         **O(changed)**, same two-phase technique as `diff_commits`: scan only the version rows in
-        ``(from_seq, to_seq]``, then resolve those entities at each endpoint."""
+        ``(from_seq, to_seq]``, then resolve those entities at each endpoint. A window past
+        ``DIFF_TREE_MAX_CHANGES`` entities is :class:`DiffTooLarge`; its change list
+        (:meth:`change_entries`) pages it instead."""
         async with self._session() as s:
             branch = await self._get_branch(s, graph_id, branch_id)
             await self._assert_branch_readable(s, branch, viewer)
+            too_large = await self._window_too_large(s, graph_id, branch_id, from_seq, to_seq)
+            if too_large is not None:
+                raise DiffTooLarge(too_large, config.DIFF_TREE_MAX_CHANGES)
             changed = await self._changed_in_window(s, graph_id, branch_id, from_seq, to_seq)
             if not changed:
                 return {"added": [], "removed": [], "modified": []}
@@ -6382,10 +6387,17 @@ class GraphVersioningService:
         ``payloads="changes"`` classifies the same way from content hashes, without loading a
         modified entity's payloads: a modified entry is its ``entityId`` and ``kind`` alone, while
         added and removed entries keep the payload the canvas draws them from. It is what the
-        draft bar needs — counts and which nodes to ring — at any draft size."""
+        draft bar needs — counts and which nodes to ring — up to ``DIFF_TREE_MAX_CHANGES`` changes.
+
+        A draft past it is :class:`DiffTooLarge` in either mode, before anything is read: a payload
+        per added and removed entity is tens of megabytes at 100,000. Its readers use its change
+        list (:meth:`change_summary`, :meth:`change_index_compact`) instead."""
         async with self._session() as s:
             branch = await self._get_branch(s, graph_id, branch_id)
             await self._assert_branch_readable(s, branch, viewer)
+            changed_n = await self._change_count(s, graph_id, branch_id)
+            if changed_n > config.DIFF_TREE_MAX_CHANGES:
+                raise DiffTooLarge(changed_n, config.DIFF_TREE_MAX_CHANGES)
             main_id = await self._main_branch_id(s, graph_id)
             base_seq = branch.base_commit_seq or 0
             if payloads == "changes":
@@ -7234,16 +7246,24 @@ class GraphVersioningService:
             raise ValueError(f"unknown commit {commit_id}")
         branch = await self._get_branch(s, graph_id, commit.branch_id)
         await self._assert_branch_readable(s, branch, viewer)
+        changed = await self._window_too_large(s, graph_id, commit.branch_id,
+                                               commit.commit_seq - 1, commit.commit_seq)
+        return None if changed is None else (commit, branch, changed)
+
+    async def _window_too_large(self, s, graph_id: str, branch_id: str, lo: int,
+                                hi: int) -> Optional[int]:
+        """How many entities ``(lo, hi]`` on a branch touched, when that is past
+        ``DIFF_TREE_MAX_CHANGES`` (a fork's window counts its parent's too) — else None. Decided
+        by a count capped at the limit, so a small window costs a small count; past it, one exact
+        count over the window's rows says how many."""
         cap = config.DIFF_TREE_MAX_CHANGES
-        lo, hi = commit.commit_seq - 1, commit.commit_seq
-        changed = await self._own_change_count(s, graph_id, commit.branch_id, lo, hi, cap)
-        parent = await self._parent_window(s, graph_id, commit.branch_id, lo, hi)
+        changed = await self._own_change_count(s, graph_id, branch_id, lo, hi, cap)
+        parent = await self._parent_window(s, graph_id, branch_id, lo, hi)
         if parent is not None and changed <= cap:
             changed += await self._own_change_count(s, *parent, cap)
         if changed <= cap:
             return None
-        # Past the cap, say how many exactly: one count over the window's rows.
-        return commit, branch, await self._count_changed_in_window(s, graph_id, commit.branch_id, lo, hi)
+        return await self._count_changed_in_window(s, graph_id, branch_id, lo, hi)
 
     async def _branch_diff_states(self, s, graph_id, branch_id, containment_edge_types, viewer=None):
         """``(merged, theirs)`` for a draft restricted to its own changes PLUS the unchanged

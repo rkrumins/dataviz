@@ -161,6 +161,7 @@ export function ViewVersioningPanel({
                     origin={{ source: 'branch', branchId }}
                     emptyHint="Nothing committed to this branch yet — saved canvas edits show up here."
                     summaryFirst
+                    list={{ wsId, graphId, origin: { branchId } }}
                   />
                 </div>
               </div>

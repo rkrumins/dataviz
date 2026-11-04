@@ -6,7 +6,7 @@
 import { useCallback } from 'react'
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import * as api from '@/services/versioningApiService'
-import type { BranchStatusFilter, DraftLevel, DraftRole, DraftsPolicyChange, PullRequest, ResolutionMap, StageOp, Watermark } from '@/services/versioningApiService'
+import type { BranchStatusFilter, ChangeListFilter, ChangeListOrigin, DraftLevel, DraftRole, DraftsPolicyChange, PullRequest, ResolutionMap, StageOp, Watermark } from '@/services/versioningApiService'
 import { workspaceService } from '@/services/workspaceService'
 import { SYNC_STATUS_KEY } from '@/features/sync-status/useSyncStatus'
 import { invalidateAggregatedEdges } from '@/hooks/useAggregatedLineage'
@@ -64,6 +64,14 @@ export const VERSIONING_KEYS = {
     [...VERSIONING_KEYS.all, 'branchViewChanges', ws, gid, bid] as const,
   commitDiffSummary: (ws?: string, gid?: string | null, cid?: string | null) =>
     [...VERSIONING_KEYS.all, 'commitDiffSummary', ws, gid, cid] as const,
+  // A change list (/graphs/{gid}/diff/*). A draft's sits under its `diffVsMain` key, so every save,
+  // pull and refresh that invalidates the draft's diff invalidates its lists too; main between two
+  // revisions never changes.
+  changeList: (ws?: string, gid?: string | null, origin?: ChangeListOrigin | null) =>
+    origin && 'branchId' in origin
+      ? ([...VERSIONING_KEYS.diffVsMain(ws, gid, origin.branchId), 'changes'] as const)
+      : ([...VERSIONING_KEYS.all, 'changes', ws, gid,
+          origin ? `${origin.fromSeq}-${origin.toSeq}` : 'none'] as const),
   viewPrs: (ws?: string, viewId?: string | null, status?: string | null) =>
     [...VERSIONING_KEYS.all, 'viewPrs', ws, viewId, status ?? 'all'] as const,
   dataSourcePrs: (ws?: string, dsId?: string | null, status?: string | null) =>
@@ -335,6 +343,9 @@ export function useDiffVsMain(
     queryFn: () => api.getDiffVsMain(wsId!, graphId!, branchId!, { slim }),
     enabled: !!wsId && !!graphId && !!branchId,
     staleTime: 10_000,
+    // A draft past the tree's cap says so at once (409 too_large_for_tree): its readers move to
+    // its change list (`/diff/index`, `/diff/summary`), and asking again changes nothing.
+    retry: (n, err) => !(err instanceof api.DiffTooLargeError) && n < 1,
   })
 }
 
@@ -450,21 +461,6 @@ export function useMergeRequest(wsId?: string, prId?: string | null) {
   })
 }
 
-/** The renderable diff of a branch between two seqs. Used for "what came in when I pulled": the
- *  window is main between the draft's old and new base. Immutable history → cache it hard. */
-export function useDiffWindow(
-  wsId?: string, graphId?: string | null, branchId?: string | null,
-  fromSeq?: number | null, toSeq?: number | null,
-) {
-  const on = !!wsId && !!graphId && !!branchId && fromSeq != null && toSeq != null && toSeq > fromSeq
-  return useQuery({
-    queryKey: [...VERSIONING_KEYS.all, 'diffWindow', wsId, graphId, branchId, fromSeq, toSeq],
-    queryFn: () => api.getDiffWindow(wsId!, graphId!, branchId!, fromSeq!, toSeq!),
-    enabled: on,
-    staleTime: Infinity,   // a closed commit window never changes
-  })
-}
-
 /** A PR's itemised Files Changed (for the unified ChangesPanel). */
 export function usePullRequestDiff(wsId?: string, prId?: string | null) {
   return useQuery({
@@ -472,6 +468,8 @@ export function usePullRequestDiff(wsId?: string, prId?: string | null) {
     queryFn: () => api.getMergeRequestDiff(wsId!, prId!),
     enabled: !!wsId && !!prId,
     staleTime: 15_000,
+    // A review too large to diff in a request says so at once; asking again changes nothing.
+    retry: (n, err) => !(err instanceof api.DiffTooLargeError) && n < 1,
   })
 }
 
@@ -527,6 +525,63 @@ export function useCommitDiffSummary(wsId?: string, graphId?: string | null, com
     queryFn: () => api.getCommitDiffSummary(wsId!, graphId!, commitId!),
     enabled: !!wsId && !!graphId && !!commitId,
     staleTime: 60_000,   // a commit is immutable
+  })
+}
+
+// ── Change lists: a draft's changes, or main's between two revisions, at any size ──────────────
+
+/** A draft's lists move with it; main between two revisions is fixed for good. */
+const changeListStale = (origin?: ChangeListOrigin | null) =>
+  origin && !('branchId' in origin) ? Infinity : 10_000
+
+/** Rows a change list page holds. */
+export const CHANGE_LIST_PAGE = 100
+
+/** A change list's counts by kind, status and type (the same index its pages come from). */
+export function useChangeSummary(wsId?: string, graphId?: string | null, origin?: ChangeListOrigin | null) {
+  return useQuery({
+    queryKey: [...VERSIONING_KEYS.changeList(wsId, graphId, origin), 'summary'],
+    queryFn: () => api.getChangeSummary(wsId!, graphId!, origin!),
+    enabled: !!wsId && !!graphId && !!origin,
+    staleTime: changeListStale(origin),
+  })
+}
+
+/** A change list a page at a time, narrowed by `filter`; `fetchNextPage` follows the server's offset. */
+export function useChangeEntries(
+  wsId: string | undefined, graphId: string | null | undefined, origin: ChangeListOrigin | null | undefined,
+  filter: ChangeListFilter = {}, { enabled = true }: { enabled?: boolean } = {},
+) {
+  return useInfiniteQuery({
+    queryKey: [...VERSIONING_KEYS.changeList(wsId, graphId, origin), 'entries', filter.kind ?? 'all',
+      (filter.statuses ?? []).join(','), filter.type ?? '', (filter.q ?? '').trim()],
+    queryFn: ({ pageParam }) => api.getChangeEntries(wsId!, graphId!, origin!, filter, pageParam, CHANGE_LIST_PAGE),
+    initialPageParam: 0,
+    getNextPageParam: (last) => (last.hasMore ? last.offset + last.entries.length : undefined),
+    enabled: enabled && !!wsId && !!graphId && !!origin,
+    staleTime: changeListStale(origin),
+  })
+}
+
+/** One entity before and after, fetched when its row is opened. */
+export function useChangeEntry(
+  wsId?: string, graphId?: string | null, origin?: ChangeListOrigin | null, entityId?: string | null,
+) {
+  return useQuery({
+    queryKey: [...VERSIONING_KEYS.changeList(wsId, graphId, origin), 'entry', entityId],
+    queryFn: () => api.getChangeEntry(wsId!, graphId!, origin!, entityId!),
+    enabled: !!wsId && !!graphId && !!origin && !!entityId,
+    staleTime: changeListStale(origin),
+  })
+}
+
+/** Every change of an origin, compact — what the canvas marks entities by. */
+export function useChangeIndex(wsId?: string, graphId?: string | null, origin?: ChangeListOrigin | null) {
+  return useQuery({
+    queryKey: [...VERSIONING_KEYS.changeList(wsId, graphId, origin), 'index'],
+    queryFn: () => api.getChangeIndex(wsId!, graphId!, origin!),
+    enabled: !!wsId && !!graphId && !!origin,
+    staleTime: changeListStale(origin),
   })
 }
 

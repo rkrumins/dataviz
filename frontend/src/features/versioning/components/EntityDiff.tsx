@@ -2,8 +2,9 @@
  * Field-level before/after detail for one changed entity. Replaces the raw
  * `JSON.stringify` blocks the old dialogs showed with a real two-column diff.
  */
+import { useMemo } from 'react'
 import { cn } from '@/lib/utils'
-import type { FieldDelta, GraphChange } from '../model/changeModel'
+import { deriveFieldDeltas, type FieldDelta, type GraphChange } from '../model/changeModel'
 
 function fmt(v: unknown): string {
   if (v === undefined || v === null) return '—'
@@ -29,12 +30,16 @@ function payloadRows(payload: Record<string, unknown> | undefined): FieldDelta[]
 }
 
 export function EntityDiff({ change }: { change: GraphChange }) {
-  const rows: FieldDelta[] =
-    change.status === 'modified'
-      ? change.fields ?? []
+  // A modified entity's fields are compared here, for the row someone opened — not up front for
+  // every change of a list, which at 100,000 changes was seconds of JSON before anything drew.
+  const rows: FieldDelta[] = useMemo(
+    () => change.status === 'modified'
+      ? change.fields ?? deriveFieldDeltas(change.before, change.after)
       : change.status === 'added'
       ? payloadRows(change.after)
-      : payloadRows(change.before)
+      : payloadRows(change.before),
+    [change],
+  )
 
   if (rows.length === 0) {
     return <p className="text-[11px] text-ink-muted px-2 py-1.5">No field-level detail.</p>

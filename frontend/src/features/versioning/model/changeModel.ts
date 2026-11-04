@@ -28,6 +28,8 @@ export type ChangeOrigin =
   | { source: 'branch'; branchId: string }
   | { source: 'commit'; commitId: string }
   | { source: 'pr'; prId: string }
+  /** main between two revisions: `fromSeq` not included, `toSeq` included. */
+  | { source: 'compare'; fromSeq: number; toSeq: number }
 
 export interface GraphChange {
   /** Stable id of the entity: node URN / entityId, or edge id. */

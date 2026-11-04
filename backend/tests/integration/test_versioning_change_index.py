@@ -204,6 +204,14 @@ async def _run() -> None:
         assert review["tooLarge"]["limit"] == 2 and review["counts"] == again["counts"]
         with pytest.raises(DiffTooLarge):
             await svc.diff_pr(pr_id=pr)
+        # ...and the whole-payload diffs the screens moved off, in either mode.
+        for mode in ("changes", "all"):
+            with pytest.raises(DiffTooLarge):
+                await svc.diff_branch_vs_base(graph_id=gid, branch_id=d, payloads=mode)
+        with pytest.raises(DiffTooLarge):
+            await svc.diff_window(graph_id=gid, branch_id=main, from_seq=0, to_seq=head)
+        assert (await svc.diff_window(graph_id=gid, branch_id=main, from_seq=head - 1, to_seq=head))[
+            "modified"]                                   # one entity: well inside the cap
     finally:
         config.CHANGE_LIST_MAX, config.DIFF_TREE_MAX_CHANGES = saved_list, saved_tree
         service_mod._CHANGE_INDEXES.clear()

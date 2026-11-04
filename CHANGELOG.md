@@ -9,6 +9,59 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — A 100,000-change draft opens: every screen lists changes a page at a time
+
+The screens side of change lists. After an import of 100,000 entities into a draft, the canvas,
+the Changes tab, the review drawer, the publish dialog and the incoming-changes sheet each hung
+or downloaded tens of megabytes; they now show the changes a page at a time, with counts that
+arrive at once.
+
+### Changed
+
+- **Changes lists every change, a page at a time.** A draft past 20,000 changes was counted and
+  then "too many to list here". The Changes tab, a revision's drill-down in Commits, a review's
+  **Files changed** and "here's what came in" after a pull now list it:
+  - **Entities**, **Relationships** and **Structure**, each with its count;
+  - **Added**, **Modified** and **Removed** to narrow it, and a type;
+  - a search by name, urn or type;
+  - more rows load as you scroll;
+  - expand a row to compare its values before and after, fetched for that row alone.
+- **The publish dialog counts the draft**, where it downloaded the draft's whole diff to show three
+  numbers.
+- **Smaller lists draw a page at a time too.** A status group in a list under 20,000 changes shows
+  its first 200 rows, then **Show more**.
+- **Field-by-field comparison waits until a row is opened**, where it ran for every modified entity
+  before the list could draw.
+
+### Fixed
+
+- **The canvas of a draft holding a large import stays responsive.**
+  - Each node and row on the canvas built its own map of every change in the draft: at 100,000
+    changes and a few hundred rows, tens of millions of steps and gigabytes held. They now share
+    one.
+  - A draft past 20,000 changes is ringed from a compact list of its changes, about 70 bytes each,
+    where the whole diff was tens of megabytes.
+  - A View that lists its own entities loaded every entity the draft created at its top level, a
+    thousand requests for 100,000 of them. It now loads the first 200, and the bar's **+N new** chip
+    says how many more there are and opens **Changes**.
+- **Restoring a large deleted subtree takes linear time**, where every restored entity scanned
+  every change.
+
+### Upgrading
+
+- Nothing to do. `GET …/branches/{bid}/diff-vs-main` (either mode) and `…/diff-window` now answer
+  409 `too_large_for_tree` past `GRAPHVER_DIFF_TREE_MAX_CHANGES` (20,000): a script reading a draft
+  or a window that large reads its change list instead (`…/graphs/{gid}/diff/*`).
+
+### Known limitations
+
+- **No ghosts on the canvas past 20,000 changes.** A draft that large shows no ghosts for the
+  entities it removed; **Changes** lists them.
+- **In a View that lists its own entities**, only the first 200 new top-level entities of a draft
+  are drawn.
+
+---
+
 ## [Unreleased] — Change lists at any size: a draft's changes, a revision's, two revisions compared (API)
 
 The first part of browsing the graph's history: lists of what changed that open at any size, and

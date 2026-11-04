@@ -30,14 +30,16 @@ import { useDataSourceProviderMap } from '@/hooks/useDataSourceProviderMap'
 import { useActiveView } from '@/store/schema'
 import { useBranchStore, useEffectiveBranchId } from '@/store/branchStore'
 import { useStagedChangeCount } from '@/store/stagedChangesStore'
+import { CREATED_ROOTS_LOADED, useCanvasStore } from '@/store/canvas'
 import { useVersioningPanelStore } from '@/store/versioningPanelStore'
 import {
   useAbandonDraft, useBranch, useBranchFreshness, useDiffVsMain, useRefreshDraftFromOthers, useResolveGraph,
-  useBranchViewChanges,
+  useBranchViewChanges, useChangeIndex, useChangeSummary,
 } from '../hooks/useVersioning'
+import { DiffTooLargeError } from '@/services/versioningApiService'
 import { useActiveDraftAccess } from '../hooks/useActiveDraftAccess'
 import { useActiveBranchGuard, type BranchEviction } from '../hooks/useActiveBranchGuard'
-import { fromDiffVsMain } from '../model/changeAdapters'
+import { fromChangeIndex, fromDiffVsMain } from '../model/changeAdapters'
 import { EMPTY_CHANGE_SET } from '../model/changeModel'
 import { useBootstrapWatch } from '../model/useBootstrapWatch'
 import { BRANCH_VOCAB, ownerName } from '../model/branchVocab'
@@ -109,13 +111,26 @@ export function CanvasVersioningBar({
   // Slim: modified entities by id alone — the bar counts changes and rings nodes, and never reads
   // a modified entity's payloads, which a large draft would ship by the hundred megabytes.
   const diffQ = useDiffVsMain(workspaceId, graphId, isDraft ? branchId : null, { slim: true })
+  // Past the tree's cap the slim diff is refused (409): the draft's compact change index — about
+  // 70 bytes a change, no payloads — rings its nodes and finds what it created instead. Its
+  // removed nodes, which only a payload can draw, go undrawn (no ghosts).
+  const large = diffQ.error instanceof DiffTooLargeError
+  const draftOrigin = useMemo(() => (isDraft && branchId ? { branchId } : null), [isDraft, branchId])
+  const indexQ = useChangeIndex(workspaceId, graphId, large ? draftOrigin : null)
+  // An index too large to list holds no entries: the counts come from the summary.
+  const countsQ = useChangeSummary(workspaceId, graphId, large && indexQ.data?.truncated ? draftOrigin : null)
   // Views the draft creates or changes (imports staged in it, layer edits) go live with it too.
   const viewChangesQ = useBranchViewChanges(workspaceId, graphId, isDraft ? branchId : null)
   const viewChangeCount = (viewChangesQ.data?.views.length ?? 0) + (viewChangesQ.data?.hidden ?? 0)
-  const changeSet = useMemo(
-    () => (diffQ.data && branchId ? fromDiffVsMain(diffQ.data, branchId) : EMPTY_CHANGE_SET),
-    [diffQ.data, branchId],
-  )
+  const changeSet = useMemo(() => {
+    if (!branchId) return EMPTY_CHANGE_SET
+    if (large) return indexQ.data ? fromChangeIndex(indexQ.data, branchId, countsQ.data?.counts) : EMPTY_CHANGE_SET
+    return diffQ.data ? fromDiffVsMain(diffQ.data, branchId) : EMPTY_CHANGE_SET
+  }, [branchId, large, indexQ.data, countsQ.data, diffQ.data])
+  const changeCount = changeSet.counts.added + changeSet.counts.modified + changeSet.counts.removed
+  // New entities a curated view could not draw: it draws a page of what the draft created.
+  const createdNotLoaded = useCanvasStore((s) => s.createdRootsNotLoaded)
+  const loadingChanges = diffQ.isLoading || (large && (indexQ.isLoading || countsQ.isLoading))
   useEffect(() => {
     if (isDraft) setActiveChangeSet(changeSet)
   }, [isDraft, changeSet, setActiveChangeSet])
@@ -322,14 +337,14 @@ export function CanvasVersioningBar({
 
         {isDraft && branchId && (
           <div className="flex items-center gap-2 text-ink-muted">
-            {diffQ.isLoading ? (
+            {loadingChanges ? (
               <Loader2 className="w-3.5 h-3.5 animate-spin" />
             ) : (
               <>
                 {/* The distinction the whole draft model hinges on — saved to
                     the draft vs. not saved at all — was spelled out in OS
                     chrome after a one-second wait. */}
-                {changeSet.changes.length > 0 ? (
+                {changeCount > 0 ? (
                   <HoverTip
                     className="inline-flex"
                     label={`Saved to this ${BRANCH_VOCAB.draft.toLowerCase()}, not published yet`}
@@ -343,6 +358,21 @@ export function CanvasVersioningBar({
                 ) : uncommitted === 0 && viewChangeCount === 0 ? (
                   <span className="text-xs">No changes yet</span>
                 ) : null}
+                {createdNotLoaded > 0 && (
+                  <HoverTip
+                    className="inline-flex"
+                    label={`${createdNotLoaded.toLocaleString()} more new ${createdNotLoaded === 1 ? 'entity isn’t' : 'entities aren’t'} drawn here`}
+                    detail={`This view draws the first ${CREATED_ROOTS_LOADED} of what the ${BRANCH_VOCAB.draft.toLowerCase()} created. Changes lists every one.`}
+                  >
+                    <button
+                      type="button"
+                      onClick={() => setPanelTab('changes')}
+                      className="inline-flex items-center rounded-md border border-emerald-500/25 bg-emerald-500/[0.06] px-1.5 py-0.5 text-[11px] font-medium text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/[0.12] transition-colors"
+                    >
+                      +{createdNotLoaded.toLocaleString()} new
+                    </button>
+                  </HoverTip>
+                )}
                 {viewChangeCount > 0 && (
                   <HoverTip
                     className="inline-flex"

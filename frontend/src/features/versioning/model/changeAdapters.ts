@@ -10,6 +10,7 @@ import {
   buildChangeSet,
   deriveFieldDeltas,
   labelForPayload,
+  type ChangeCounts,
   type ChangeKind,
   type ChangeOrigin,
   type ChangeSet,
@@ -17,7 +18,7 @@ import {
   type GraphChange,
 } from './changeModel'
 import { stagedChangeColor, type StagedChange } from '@/store/stagedChangesStore'
-import type { DiffEntry, DiffVsMainResponse } from '@/services/versioningApiService'
+import type { ChangeListIndex, DiffEntry, DiffVsMainResponse } from '@/services/versioningApiService'
 
 const asRecord = (v: unknown): Record<string, unknown> | undefined =>
   v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : undefined
@@ -63,6 +64,8 @@ export function fromDiffEntries(
   modified: DiffEntry[],
   origin: ChangeOrigin,
 ): ChangeSet {
+  // Field deltas are left to the row that is opened (EntityDiff): computed here for every
+  // modified entity, a 100,000-change diff spent seconds in JSON before the list could draw.
   const mk = (e: DiffEntry, status: ChangeStatus): GraphChange => {
     const before = asRecord(e.before)
     const after = asRecord(e.after)
@@ -78,7 +81,6 @@ export function fromDiffEntries(
       kind: e.kind,
       status,
       label: labelForPayload(e.entityId, after ?? before, e.kind),
-      fields: status === 'modified' ? deriveFieldDeltas(before, after) : undefined,
       before,
       after,
       origin,
@@ -101,9 +103,30 @@ export function fromPrDiff(resp: DiffVsMainResponse, prId: string): ChangeSet {
   return fromDiffEntries(resp.added, resp.removed, resp.modified, { source: 'pr', prId })
 }
 
-/** What a pull brought in from Published — attributed to the `pull` commit that recorded it, so it
- *  renders in the same visual language as every other diff (emerald added / amber modified / rose
- *  removed, per useDiffDecoration). */
-export function fromIncomingDiff(resp: DiffVsMainResponse, pullCommitId: string): ChangeSet {
-  return fromDiffEntries(resp.added, resp.removed, resp.modified, { source: 'commit', commitId: pullCommitId })
+const INDEX_STATUS = { a: 'added', m: 'modified', r: 'removed' } as const
+
+/** A draft's compact change index (`/diff/index`) → the ChangeSet the canvas marks entities by, for a
+ *  draft too large for the whole diff. No payloads: a node carries its id and status, an edge its
+ *  type and ends — what finds a draft's created children and draws a removed link — so nothing here
+ *  can reconstruct a removed node (no ghost). `counts` stands in for the entries of an index too
+ *  large to list (`truncated`). */
+export function fromChangeIndex(index: ChangeListIndex, branchId: string, counts?: ChangeCounts): ChangeSet {
+  const origin: ChangeOrigin = { source: 'branch', branchId }
+  const changes: GraphChange[] = index.entries.map((e) => {
+    const status = INDEX_STATUS[e[2]]
+    if (e[1] === 'n') return { entityId: e[0], kind: 'node', status, label: e[0], origin }
+    const ends = { edgeType: e[3], sourceEntityId: e[4], targetEntityId: e[5] }
+    return {
+      entityId: e[0], kind: 'edge', status, label: e[3] ?? e[0], origin,
+      ...(status === 'removed' ? { before: ends } : { after: ends }),
+    }
+  })
+  const set = buildChangeSet(changes)
+  return counts && index.truncated ? { ...set, counts } : set
+}
+
+/** Counts alone, for a surface that says how much a draft changes and lists none of it. */
+export function fromChangeCounts(counts: ChangeCounts, branchId: string): ChangeSet {
+  const any = counts.added + counts.modified + counts.removed > 0
+  return { changes: [], byEntityId: new Map(), counts, origin: any ? 'branch' : 'empty' }
 }

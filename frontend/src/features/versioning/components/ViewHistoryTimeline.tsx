@@ -120,6 +120,7 @@ export function ViewHistoryTimeline({
                   // "This view" and "Whole graph" show the published timeline, so a squash
                   // drills down to its raw commits. "This draft" already IS raw commits.
                   allowSquashDrilldown={scope !== 'draft'}
+                  published={scope !== 'draft'}
                   userNames={q.data?.userNames}
                   expanded={expandedId === cid}
                   onToggle={toggle}

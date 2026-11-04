@@ -867,7 +867,19 @@ type RefusalDetail = string | {
   headCommitId?: string | null
   /** Whose staged edits could not be saved first (`staged_changes_unsaved`). */
   actors?: string[]
+  /** How many entities a change too large to read whole here changes (`too_large_for_tree`). */
+  changed?: number
 } | null | undefined
+
+/** A change too large to read whole here (409 `too_large_for_tree`): a tree's children, or a
+ *  review's itemised diff, past `GRAPHVER_DIFF_TREE_MAX_CHANGES`. List it with a change list. */
+export class DiffTooLargeError extends Error {
+  readonly status = 409
+  constructor(readonly changed: number, readonly limit: number, message?: string) {
+    super(message ?? `${changed} changes — more than ${limit} are listed a page at a time`)
+    this.name = 'DiffTooLargeError'
+  }
+}
 
 /** The error a versioning API refusal (`status`, `detail`) raises — the same whether it came back
  *  from the request or from a job the request queued (a large draft's publish). */
@@ -914,6 +926,9 @@ function versioningError(status: number, detail: RefusalDetail, fallback: string
   }
   if (status === 409 && d?.type === 'review_required') {
     return new ReviewRequiredError(d)
+  }
+  if (status === 409 && d?.type === 'too_large_for_tree') {
+    return new DiffTooLargeError(d.changed ?? 0, d.limit ?? 0, d.message)
   }
   if (status === 409 && d?.type === 'graph_not_writable') {
     return new GraphNotWritableError(d.message)
@@ -1778,21 +1793,6 @@ export function getDiff(
   )
 }
 
-/** A branch's changes between two seqs with whole-payload before/after — the renderable shape
- *  (`getDiff` is id-keyed: countable, not showable). Backs the "what came in" review after a pull:
- *  the window is main between the draft's old and new base. */
-export function getDiffWindow(
-  wsId: string,
-  graphId: string,
-  branchId: string,
-  fromSeq: number,
-  toSeq: number,
-): Promise<DiffVsMainResponse> {
-  return vfetch<DiffVsMainResponse>(
-    `${base(wsId)}/graphs/${graphId}/branches/${branchId}/diff-window?fromSeq=${fromSeq}&toSeq=${toSeq}`,
-  )
-}
-
 /** UI-shaped diff of a draft vs its base (whole payloads + before/after). */
 /** `slim`: a modified entity by id and kind alone, without its before/after payloads — enough to
  *  count a draft's changes and ring its nodes, at any draft size. */
@@ -1882,6 +1882,165 @@ export function getCommitDiffChildren(
   return vfetch<DiffChildrenResponse>(
     `${base(wsId)}/graphs/${graphId}/commits/${encodeURIComponent(commitId)}/diff/children?${sp}`,
   )
+}
+
+// ============================================
+// Change lists — a draft's changes, or main's between two revisions, at any size
+// ============================================
+
+/** Whose changes a change list is of: a draft (against main where it branched off), or main between
+ *  two revisions — `fromSeq` not included, `toSeq` included, so one revision K is `K-1 → K`. */
+export type ChangeListOrigin = { branchId: string } | { fromSeq: number; toSeq: number }
+
+/** `node` an entity, `edge` a relationship, `structure` a containment link (what is inside what). */
+export type ChangeListKind = 'node' | 'edge' | 'structure'
+export type ChangeListStatus = 'added' | 'modified' | 'removed'
+
+export interface ChangeListCounts { added: number; modified: number; removed: number }
+
+export interface ChangeListTypeCount extends ChangeListCounts {
+  kind: ChangeListKind
+  type: string | null
+}
+
+/** A revision at one end of a window of main. */
+export interface ChangeWindowEnd {
+  seq: number
+  commitId: string
+  kind: string
+  message?: string | null
+  actor?: string | null
+  createdAt?: string | null
+}
+
+/** The revisions a window of main spans, and who made them. */
+export interface ChangeWindow {
+  commitCount: number
+  contributors: string[]
+  contributorCount: number
+  firstAt?: string | null
+  lastAt?: string | null
+  from?: ChangeWindowEnd | null
+  to?: ChangeWindowEnd | null
+}
+
+export interface ChangeListSummary {
+  origin: Record<string, unknown>
+  counts: ChangeListCounts
+  /** `null` for a window too large to list, counted from what its revisions recorded. */
+  entityCounts?: ChangeListCounts | null
+  edgeCounts?: ChangeListCounts | null
+  structureCounts?: ChangeListCounts | null
+  /** Changed entities by type. */
+  impact: Record<string, number>
+  byType: ChangeListTypeCount[]
+  total: number
+  /** How many the list holds: `total`, or 0 when it is too large to list. */
+  listed: number
+  /** An upper bound: a window too large to list, over more than one revision. */
+  approximate: boolean
+  tooLarge?: { changed: number; limit: number } | null
+  window?: ChangeWindow | null
+  userNames?: Record<string, string>
+}
+
+/** One row of a change list — what its version row says, no payload. */
+export interface ChangeListRow {
+  entityId: string
+  kind: 'node' | 'edge'
+  status: ChangeListStatus
+  type?: string | null
+  structural: boolean
+  displayName?: string | null
+  qualifiedName?: string | null
+  urn?: string | null
+  sourceEntityId?: string | null
+  targetEntityId?: string | null
+  sourceName?: string | null
+  targetName?: string | null
+}
+
+export interface ChangeListPage {
+  entries: ChangeListRow[]
+  total: number
+  offset: number
+  limit: number
+  hasMore: boolean
+  tooLarge?: { changed: number; limit: number } | null
+}
+
+/** One entity before and after, for the row a person opened. */
+export interface ChangeListEntry {
+  entityId: string
+  kind: 'node' | 'edge'
+  status: ChangeListStatus | 'unchanged'
+  before?: Record<string, unknown> | null
+  after?: Record<string, unknown> | null
+}
+
+/** `[entityId, 'n', status, type]` for a node, `[entityId, 'e', status, type, source, target]` for
+ *  an edge; status `a` / `m` / `r`. */
+export type ChangeIndexEntry =
+  | [string, 'n', 'a' | 'm' | 'r', string | null]
+  | [string, 'e', 'a' | 'm' | 'r', string | null, string | null, string | null]
+
+export interface ChangeListIndex {
+  origin: Record<string, unknown>
+  entries: ChangeIndexEntry[]
+  total: number
+  /** Too large to list: no entries. */
+  truncated: boolean
+}
+
+export interface ChangeListFilter {
+  kind?: ChangeListKind
+  statuses?: ChangeListStatus[]
+  type?: string
+  q?: string
+}
+
+function changeOriginParams(origin: ChangeListOrigin): URLSearchParams {
+  return 'branchId' in origin
+    ? new URLSearchParams({ branchId: origin.branchId })
+    : new URLSearchParams({ fromSeq: String(origin.fromSeq), toSeq: String(origin.toSeq) })
+}
+
+/** A change list's counts by kind, status and type — the same index its pages come from. */
+export function getChangeSummary(
+  wsId: string, graphId: string, origin: ChangeListOrigin,
+): Promise<ChangeListSummary> {
+  return vfetch<ChangeListSummary>(`${base(wsId)}/graphs/${graphId}/diff/summary?${changeOriginParams(origin)}`)
+}
+
+/** A page of a change list in its fixed order (entities, relationships, structure; by type, then name). */
+export function getChangeEntries(
+  wsId: string, graphId: string, origin: ChangeListOrigin, filter: ChangeListFilter = {},
+  offset = 0, limit = 100,
+): Promise<ChangeListPage> {
+  const sp = changeOriginParams(origin)
+  if (filter.kind) sp.set('kind', filter.kind)
+  if (filter.statuses?.length) sp.set('status', filter.statuses.join(','))
+  if (filter.type) sp.set('type', filter.type)
+  if (filter.q?.trim()) sp.set('q', filter.q.trim())
+  sp.set('offset', String(offset))
+  sp.set('limit', String(limit))
+  return vfetch<ChangeListPage>(`${base(wsId)}/graphs/${graphId}/diff/entries?${sp}`)
+}
+
+/** One entity's value before and after, for the same origin as its list. */
+export function getChangeEntry(
+  wsId: string, graphId: string, origin: ChangeListOrigin, entityId: string,
+): Promise<ChangeListEntry> {
+  return vfetch<ChangeListEntry>(
+    `${base(wsId)}/graphs/${graphId}/diff/entries/${encodeURIComponent(entityId)}?${changeOriginParams(origin)}`,
+  )
+}
+
+/** Every change of an origin as a short array — what the canvas marks entities by. */
+export function getChangeIndex(
+  wsId: string, graphId: string, origin: ChangeListOrigin,
+): Promise<ChangeListIndex> {
+  return vfetch<ChangeListIndex>(`${base(wsId)}/graphs/${graphId}/diff/index?${changeOriginParams(origin)}`)
 }
 
 /** Top-level groups of a PR's Files Changed as a containment tree. */

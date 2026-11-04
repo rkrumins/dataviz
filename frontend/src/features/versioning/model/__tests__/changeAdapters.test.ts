@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { buildChangeSet, deriveFieldDeltas } from '../changeModel'
-import { fromStagedChanges, fromDiffVsMain } from '../changeAdapters'
+import { fromStagedChanges, fromDiffVsMain, fromChangeIndex, fromChangeCounts } from '../changeAdapters'
+import { committedCreatedChildUrns, committedCreatedUrns } from '@/hooks/useBranchCreatedDelta'
 import type { StagedChange } from '@/store/stagedChangesStore'
 import type { DiffVsMainResponse } from '@/services/versioningApiService'
 
@@ -68,7 +69,10 @@ describe('fromDiffVsMain', () => {
     const cs = fromDiffVsMain(resp, 'br_x')
     expect(cs.counts).toEqual({ added: 1, modified: 1, removed: 1 })
     expect(cs.byEntityId.get('urn:new')?.label).toBe('New')
-    expect(cs.byEntityId.get('e9')?.fields).toEqual([{ field: 'confidence', before: 0.5, after: 0.9 }])
+    // Its fields are compared when its row is opened (EntityDiff), not for every change up front.
+    const e9 = cs.byEntityId.get('e9')!
+    expect(e9.fields).toBeUndefined()
+    expect(deriveFieldDeltas(e9.before, e9.after)).toEqual([{ field: 'confidence', before: 0.5, after: 0.9 }])
     expect(cs.byEntityId.get('urn:gone')?.origin).toEqual({ source: 'branch', branchId: 'br_x' })
   })
 })
@@ -82,7 +86,7 @@ describe('fromDiffVsMain, slim', () => {
     }
     const cs = fromDiffVsMain(resp, 'br_x')
     expect(cs.counts).toEqual({ added: 1, modified: 2, removed: 0 })
-    expect(cs.byEntityId.get('urn:m')).toMatchObject({ status: 'modified', label: 'urn:m', fields: [] })
+    expect(cs.byEntityId.get('urn:m')).toMatchObject({ status: 'modified', label: 'urn:m' })
     expect(cs.byEntityId.get('urn:new')?.after).toEqual({ displayName: 'New', urn: 'urn:new' })
   })
 })
@@ -118,3 +122,38 @@ describe('fromDiffVsMain, entity ids that are not urns', () => {
     expect(cs.byEntityId.get('edge_1')?.urn).toBeUndefined()
   })
 })
+
+describe('fromChangeIndex (a draft too large for the whole diff)', () => {
+  it('marks every change by id, and finds what the draft created and where it put it', () => {
+    const cs = fromChangeIndex({
+      origin: { branchId: 'br_x' }, total: 4, truncated: false,
+      entries: [
+        ['urn:t', 'n', 'a', 'Table'],
+        ['urn:c', 'n', 'a', 'Column'],
+        ['e1', 'e', 'a', 'CONTAINS', 'urn:t', 'urn:c'],
+        ['e2', 'e', 'r', 'FLOWS_TO', 'urn:a', 'urn:b'],
+      ],
+    }, 'br_x')
+    expect(cs.counts).toEqual({ added: 3, modified: 0, removed: 1 })
+    expect(cs.byEntityId.get('urn:t')).toMatchObject({ kind: 'node', status: 'added' })
+    expect(cs.byEntityId.get('e2')?.before).toEqual({ edgeType: 'FLOWS_TO', sourceEntityId: 'urn:a', targetEntityId: 'urn:b' })
+    // What hydration reads: the created entities, and which of them were created as children.
+    expect([...committedCreatedUrns(cs)].sort()).toEqual(['urn:c', 'urn:t'])
+    expect([...committedCreatedChildUrns(cs, ['CONTAINS'])]).toEqual(['urn:c'])
+  })
+
+  it('takes its counts from the summary when the index is too large to list', () => {
+    const counts = { added: 300_000, modified: 2, removed: 1 }
+    const cs = fromChangeIndex({ origin: { branchId: 'br_x' }, total: 300_003, truncated: true, entries: [] }, 'br_x', counts)
+    expect(cs.changes).toEqual([])
+    expect(cs.counts).toEqual(counts)
+  })
+
+  it('counts alone, for a surface that lists nothing', () => {
+    expect(fromChangeCounts({ added: 2, modified: 0, removed: 0 }, 'br_x')).toMatchObject({
+      changes: [], counts: { added: 2, modified: 0, removed: 0 }, origin: 'branch',
+    })
+    expect(fromChangeCounts({ added: 0, modified: 0, removed: 0 }, 'br_x').origin).toBe('empty')
+  })
+})
+

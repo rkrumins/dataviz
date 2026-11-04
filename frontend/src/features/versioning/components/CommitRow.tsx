@@ -96,6 +96,7 @@ export function CommitRow({
   onToggle,
   onRevert,
   onRestore,
+  published = false,
 }: {
   commit: Record<string, unknown>
   wsId: string
@@ -111,6 +112,8 @@ export function CommitRow({
   onRevert?: (commit: Record<string, unknown>) => void
   /** When provided: "Restore graph to here" (valid on every revision incl. genesis = empty). */
   onRestore?: (commit: Record<string, unknown>) => void
+  /** A revision of Published (main): too many changes for its tree are listed a page at a time. */
+  published?: boolean
 }) {
   const commitId = commit.commit_id as string
   const stats = (commit.stats ?? {}) as Record<string, unknown>
@@ -272,6 +275,9 @@ export function CommitRow({
             origin={{ source: 'commit', commitId }}
             emptyHint="No changes in this commit."
             summaryFirst
+            list={published && typeof commit.commit_seq === 'number' && commit.commit_seq > 0
+              ? { wsId, graphId, origin: { fromSeq: commit.commit_seq - 1, toSeq: commit.commit_seq } }
+              : undefined}
           />
         </div>
       )}

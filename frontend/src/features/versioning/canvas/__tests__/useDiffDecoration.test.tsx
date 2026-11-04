@@ -8,7 +8,7 @@ import { describe, it, expect, beforeEach } from 'vitest'
 import { useEntityChangeDecoration, nodeDecorationClass } from '../useDiffDecoration'
 import { useBranchStore } from '@/store/branchStore'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
-import { buildChangeSet } from '../../model/changeModel'
+import { buildChangeSet, type GraphChange } from '../../model/changeModel'
 
 describe('nodeDecorationClass', () => {
   it('committed = solid colour ring; staged = same ring + dashed halo; none = empty', () => {
@@ -62,6 +62,23 @@ describe('useEntityChangeDecoration', () => {
     const { result } = renderHook(() => useEntityChangeDecoration())
     expect(result.current.for('urn:c')).toBeUndefined()                         // committed hidden
     expect(result.current.for('urn:s')).toEqual({ state: 'staged', status: 'added' }) // staged stays
+  })
+
+  it('costs a node a lookup, not the change set: 300 rows over 100,000 changes', () => {
+    // Each row used to build its own map of every change (30M inserts here). One index serves all.
+    const changes: GraphChange[] = Array.from({ length: 100_000 }, (_, i) => ({
+      entityId: `urn:${i}`, kind: 'node', status: i % 3 === 0 ? 'added' : 'modified', label: '',
+      origin: { source: 'branch', branchId: 'b' },
+    }))
+    act(() => useBranchStore.setState({ activeChangeSet: buildChangeSet(changes) }))
+    act(() => useStagedChangesStore.setState({ changes: [staged('urn:7', 'delete_entity')] }))
+    const started = performance.now()
+    const rows = Array.from({ length: 300 }, () => renderHook(() => useEntityChangeDecoration()))
+    expect(performance.now() - started).toBeLessThan(1500)
+    expect(rows[0].result.current.for('urn:3')).toEqual({ state: 'committed', status: 'added' })
+    expect(rows[299].result.current.for('urn:4')).toEqual({ state: 'committed', status: 'modified' })
+    expect(rows[150].result.current.for('urn:7')).toEqual({ state: 'staged', status: 'removed' })
+    rows.forEach((r) => r.unmount())
   })
 })
 

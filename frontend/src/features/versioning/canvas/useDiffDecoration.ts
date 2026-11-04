@@ -15,7 +15,7 @@
  */
 import { useMemo } from 'react'
 import { useBranchStore } from '@/store/branchStore'
-import { useStagedChangesStore, type StagedChangeType } from '@/store/stagedChangesStore'
+import { useStagedChangesStore, type StagedChange, type StagedChangeType } from '@/store/stagedChangesStore'
 import type { ChangeStatus } from '../model/changeModel'
 
 export type ChangeState = 'staged' | 'committed'
@@ -27,38 +27,54 @@ export interface EntityDecoration {
 const stagedStatus = (t: StagedChangeType): ChangeStatus =>
   t.startsWith('create') ? 'added' : t.startsWith('delete') ? 'removed' : 'modified'
 
-export function useEntityChangeDecoration() {
-  const committedHidden = useBranchStore((s) => s.committedDiffHidden)
-  const changeSet = useBranchStore((s) => s.activeChangeSet)
-  const stagedChanges = useStagedChangesStore((s) => s.changes)
+const COMMITTED: Record<ChangeStatus, EntityDecoration> = {
+  added: { state: 'committed', status: 'added' },
+  modified: { state: 'committed', status: 'modified' },
+  removed: { state: 'committed', status: 'removed' },
+}
 
-  const lookup = useMemo(() => {
-    const m = new Map<string, EntityDecoration>()
-    // Committed (lower precedence) — only when not hidden.
-    if (!committedHidden && changeSet) {
-      for (const c of changeSet.changes) {
-        // A node under its urn — the canvas's id for it, which an imported entity's id is not.
-        const id = c.urn ?? c.entityId
-        if (id) m.set(id, { state: 'committed', status: c.status })
-      }
-    }
-    // Staged (always on, higher precedence). Keyed by both id and urn so canvas urns and temp ids
-    // both resolve.
-    for (const sc of stagedChanges) {
+// Every node and row on the canvas runs this hook, so nothing in it may cost the size of the change
+// set: each one used to build its own map of every committed change — at 100,000 changes and a few
+// hundred rows mounted, tens of millions of inserts and gigabytes held. Committed changes are read
+// from the change set's own index (`byEntityId`, built once), and the staged edits' map is built
+// once per version of the staged list and shared by everything that asks.
+const stagedLookups = new WeakMap<readonly StagedChange[], Map<string, EntityDecoration>>()
+
+function stagedLookup(staged: readonly StagedChange[]): Map<string, EntityDecoration> {
+  let m = stagedLookups.get(staged)
+  if (!m) {
+    m = new Map()
+    // Keyed by both id and urn so canvas urns and temp ids both resolve; the last edit wins.
+    for (const sc of staged) {
       const d: EntityDecoration = { state: 'staged', status: stagedStatus(sc.type) }
       if (sc.targetUrn) m.set(sc.targetUrn, d)
       if (sc.targetId) m.set(sc.targetId, d)
     }
-    return m
-  }, [committedHidden, changeSet, stagedChanges])
+    stagedLookups.set(staged, m)
+  }
+  return m
+}
+
+export function useEntityChangeDecoration() {
+  const committedHidden = useBranchStore((s) => s.committedDiffHidden)
+  const changeSet = useBranchStore((s) => s.activeChangeSet)
+  const stagedChanges = useStagedChangesStore((s) => s.changes)
+  const staged = useMemo(() => stagedLookup(stagedChanges), [stagedChanges])
 
   return {
     /** Whether any committed change exists for this branch (drives the show/hide toggle's relevance). */
     hasCommitted: !!changeSet && changeSet.changes.length > 0,
     committedHidden,
-    /** The decoration for a node urn / edge id, or undefined when unchanged / hidden. */
-    for: (entityId?: string | null): EntityDecoration | undefined =>
-      entityId ? lookup.get(entityId) : undefined,
+    /** The decoration for a node urn / edge id, or undefined when unchanged / hidden. Staged
+     *  (unsaved) edits take precedence over committed ones, which show unless hidden. */
+    for: (entityId?: string | null): EntityDecoration | undefined => {
+      if (!entityId) return undefined
+      const s = staged.get(entityId)
+      if (s) return s
+      if (committedHidden || !changeSet) return undefined
+      const c = changeSet.byEntityId.get(entityId)
+      return c ? COMMITTED[c.status] : undefined
+    },
   }
 }
 
