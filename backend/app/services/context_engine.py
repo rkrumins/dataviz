@@ -66,6 +66,13 @@ def _real_lineage_types(edge_types: Iterable[str]) -> List[str]:
     ]
 
 
+def _not_enabled():
+    """What a write to a data source without version control raises. It is passed through, so
+    the caller gets 409 ``versioning_not_enabled`` (main.py), not a 200 saying it failed."""
+    from ..providers.versioned_write_provider import VersioningNotEnabled
+    return VersioningNotEnabled
+
+
 class ContextEngine:
     _ONTOLOGY_CACHE_TTL = 300  # 5 minutes
 
@@ -2480,6 +2487,8 @@ class ContextEngine:
             logger.warning("Provider does not support node creation - returning optimistic result")
         except HTTP_MAPPED:
             raise                              # e.g. a busy graph (503) or someone else's draft (403)
+        except _not_enabled():
+            raise
         except Exception as e:
             return CreateNodeResult(
                 node=None,
@@ -2563,6 +2572,8 @@ class ContextEngine:
                 # its own id for a link it already had, so the read above can miss it by this one.
                 return EdgeMutationResult(edge=edge, success=True, warnings=val.warnings or [])
             raise                              # e.g. a busy graph (503) or someone else's draft (403)
+        except _not_enabled():
+            raise
         except Exception as exc:
             from backend.app.services.versioning.service import OntologyViolation
             if isinstance(exc, OntologyViolation):       # surface the per-edge reasons, not the count
@@ -2589,6 +2600,8 @@ class ContextEngine:
             return EdgeMutationResult(success=False, error="Provider does not support edge updates")
         except HTTP_MAPPED:
             raise                              # e.g. a busy graph (503) or someone else's draft (403)
+        except _not_enabled():
+            raise
         except Exception as exc:
             return EdgeMutationResult(success=False, error=str(exc))
 

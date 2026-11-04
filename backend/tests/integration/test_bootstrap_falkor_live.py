@@ -444,6 +444,21 @@ async def test_an_edge_whose_id_was_a_node_keeps_it_and_a_delete_reaches_it(grap
     assert (named["X"][0], named["Y"]) == ("edge:X", None) and "Z" not in named, named
 
 
+async def test_an_anchor_an_earlier_graph_left_on_the_key_is_put_right(graph):
+    """A key a projection wrote carries each node's entity id as ``n.entityId``, which the
+    tombstone sweep matches on. Enabled again, the copy names every node by its urn, so the
+    backfill sets the anchor to the urn where an earlier graph's id was left, not only where
+    none was."""
+    name, client = graph
+    await client.query("CREATE (:Table {urn: 'urn:a', entityId: 'ent_from_before'}), "
+                       "(:Table {urn: 'urn:b'})")
+    ds, gid, job_id = await _enable(name)
+    out = await BootstrapRunner(lambda _n, _p=None: client).run_job(await _take(job_id))
+    assert out["status"] == "completed", out
+    assert await _rows(client, "MATCH (n:Table) RETURN n.urn, n.entityId ORDER BY n.urn") == [
+        ["urn:a", "urn:a"], ["urn:b", "urn:b"]]
+
+
 # ── L7: something else keeps writing to the graph ────────────────────────────
 
 async def _drift(gid):

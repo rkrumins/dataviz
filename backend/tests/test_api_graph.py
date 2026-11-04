@@ -1627,3 +1627,39 @@ async def test_nodes_query_with_an_assigned_ontology_keeps_its_hierarchy_and_no_
     assert node["childCount"] == 2
     assert "[:CONTAINS]" in cyphers[-1]
     assert "X-Graph-Notice" not in resp.headers
+
+
+async def test_a_write_to_a_source_without_version_control_answers_409(test_client: AsyncClient):
+    """Every write needs version control. A create on a source without it answers
+    409 versioning_not_enabled, as a save does, not a 200 that says it failed; so does a batch
+    none of whose commands could land."""
+    from backend.app.main import app
+    from backend.app.api.v1.endpoints.graph import get_context_engine
+    from backend.app.providers.versioned_write_provider import VersioningNotEnabled
+
+    class _Unversioned(_StubProvider):
+        async def create_node(self, node, containment_edge=None):
+            raise VersioningNotEnabled("Version control isn't enabled for this data source yet")
+
+        async def create_edge(self, edge):
+            raise VersioningNotEnabled("Version control isn't enabled for this data source yet")
+
+    engine = ContextEngine(provider=_Unversioned())
+    a, b = list(engine.provider._nodes)[:2]
+
+    async def _override():
+        return engine
+
+    app.dependency_overrides[get_context_engine] = _override
+    node = {"entityType": "dataset", "displayName": "Orders"}
+    try:
+        for path, body in (
+            ("/nodes/create", node),
+            ("/edges", {"sourceUrn": a, "targetUrn": b, "edgeType": "TRANSFORMS"}),
+            ("/commands/batch", {"commands": [{"op": "create_node", "payload": node}]}),
+        ):
+            resp = await test_client.post(f"/api/v1/test-ws/graph{path}", json=body)
+            assert resp.status_code == 409, (path, resp.status_code, resp.text)
+            assert resp.json()["detail"]["type"] == "versioning_not_enabled", resp.text
+    finally:
+        app.dependency_overrides.pop(get_context_engine, None)

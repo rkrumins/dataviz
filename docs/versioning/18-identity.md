@@ -74,6 +74,7 @@ The id is `uuid5(ENTITY_NAMESPACE, "<kind>/<seed>")`.
 | Any other create in that save | `<graph>/<branch>/<actor>/key:<key>/<n>`, where `n` is its turn among them |
 | `POST /graph/nodes/create` with `idempotencyKey`, or a `create_node` command of `/commands/batch` | `<data source>/<branch>/<actor>/<key>`. `<branch>` is `main` for every write to the published graph: fresh, catching up, external or versioned. So a retry names the same node while the first write is projected, and after the graph gains version control. A connection's engine uses its connection id in place of the data source. |
 | `POST /graph/edges` with `idempotencyKey`, or a `create_edge` command | the same |
+| A view package seed's line with no id | `<upload>:<offset>`, its place in the upload, so a resumed seed derives the same id |
 
 ## 3. Where each id comes from
 
@@ -84,18 +85,46 @@ The id is `uuid5(ENTITY_NAMESPACE, "<kind>/<seed>")`.
 | `POST /graph/edges`, a `create_edge` command | — | v7, or v5 with `idempotencyKey` |
 | A draft's `POST …/branches/{bid}/changes` | the create's `entityId`, else its payload's `urn`, else v7, which becomes its urn too | its `entityId`, else v7 |
 | Import, `POST …/imports` ([08 §3b](08-import-export.md#3b-resolve-a-window-at-a-time)) | The entity a row matches. Otherwise: the row's urn (or its identifier value) when nothing holds it; else the deleted node that held it, brought back; else v7. | v7 |
-| `…/bulk-ingest`, `…/sync` | the row's own id, else v7 | the same |
+| `…/bulk-ingest` | The row's own id, else its urn, else v7. A node with no urn is given its id as its urn. A second row naming the same node is refused. | the row's own id, else v7 |
+| `…/sync` | The node already holding the row's urn, else the row's own id, else its urn, else v7, which becomes its urn too | the edge already joining the two ends with that type, else the row's own id, else `sync:e:…` |
+| Enabling version control (`/graph/bootstrap`) | the node's urn, as the graph holds it | the edge's own id, else `<source>|<TYPE>|<target>` |
+| A view package seed | the line's entity id, else v5; a line with neither an id nor a urn is named by that id, its urn too | the line's entity id, else v5 |
 
-**Kept: ids derived from a source.** A re-sync or a resumed seed finds what it made by these ids,
-so they stay:
+**Kept: ids derived from a source.** A re-sync finds what it made by these ids, so they stay:
 
-- a provider's urn (DataHub, OpenMetadata, FalkorDB);
-- a sync's `sync:<urn>`, for a row that brings a urn but no id;
-- a bootstrap edge's `<source>|<TYPE>|<target>`;
-- a view package seed's `stable_prefixed_id("ent", …)`, for a line with no id.
+- a provider's urn (DataHub, OpenMetadata, FalkorDB), which is also a node's id once its graph
+  gains version control;
+- a bootstrap edge's `<source>|<TYPE>|<target>`, for an edge with no id of its own;
+- a sync's `sync:e:…`, for an edge with no id;
+- `sync:<urn>`, which syncs gave nodes before a new node was named by its urn. A later sync finds
+  such a node by its urn and keeps its id.
 
 `tests/test_identity_minting_guard.py` lists each one, with the reason. Any other way of minting
 an id fails the build.
+
+## 3a. Across the lifecycle: external and versioned graphs
+
+An id is the same opaque string at every stage of a data source's life. Nothing reads a type or
+an origin out of it.
+
+| Stage | What happens to ids |
+|---|---|
+| **External graph** | Read live. The provider keys a node by `urn` and an edge by its `id`, as exact strings. A write needs version control (`409 versioning_not_enabled` without it). |
+| **Enabling version control** | Each node's id becomes its urn, as the graph spells it, so a `urn:uuid:` keeps one identity. Edges keep their ids. The backfill sets each node's anchor (`n.entityId`) to that id, including where an earlier graph of the key left another. |
+| **Operating** | The projection writes nodes by urn and edges by id. Forks read their root's store, so they share its ids. Freezing or moving a graph's key leaves ids alone. |
+| **Abandoning a conversion** | The data source keeps its id. Enabling version control again makes a new graph, and its nodes are again named by their urns. |
+| **Trash and restore** | Both ids stay. |
+| **Purge** | The data source and its graph go. The customer's own key is never dropped. A new data source on that key names its nodes by their urns again. |
+
+**Scopes that last.** A keyed create's id is scoped to the data source, not the graph, and
+writes to main are always `main`. So a retry names the same entity while the first write is
+projected, and after the graph gains version control. Across data sources (a new data source on a
+key, or another environment), match an entity by its platform urn, which an export carries, or by a
+team key.
+
+**Not built yet:** detach, release of the original key and drift sync (doc 14). The rules above
+keep them working once they are built: id = urn everywhere, the projection keyed by urn, and scopes
+held by the data source.
 
 ## 4. Sending a request again
 

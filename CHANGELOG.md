@@ -9,6 +9,36 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — One identity on every path that seeds a graph
+
+### Changed
+
+- **Bulk ingest names a node by its urn** when the row brings no id, and a node with no urn gets
+  its id as its urn. A second row naming the same node is refused in `rejected`; before, it was
+  stored as another node with the same urn.
+- **An NDJSON sync names a new node by its urn,** not `sync:<urn>`. A node an earlier sync named
+  that way is found by its urn and keeps its id.
+- **A view package line with no id** gets a `urn:uuid:` derived from its place in the upload
+  (before, `ent_<hash>`). If the line has no urn either, that id becomes its urn. A resumed seed
+  derives the same id.
+
+### Fixed
+
+- **Writes to a data source without version control are refused properly.** `/graph/nodes/create`,
+  `/graph/edges` and `/commands/batch` on such a source now answer `409 versioning_not_enabled`,
+  as a save does. Before, `/graph/nodes/create` answered `500`, and the others a `200` that said
+  they failed.
+- **Enabling version control again on a key a projection wrote** sets each node's anchor to its new
+  id. Before, an anchor an earlier graph left behind could make a later delete miss the node.
+
+### Known limitations
+
+- Nodes stored before this release keep their ids, including `sync:<urn>` and `ent_…`.
+- A legacy node with no urn, enabled again from a projected key, keeps `gv:<id>` as its urn.
+- Detach, release and drift sync are still design only ([14 · Lifecycle](docs/versioning/14-graph-lifecycle-v2.md)).
+
+---
+
 ## [Unreleased] — Every new id is a standard UUID
 
 ### Changed

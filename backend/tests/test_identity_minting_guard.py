@@ -7,9 +7,9 @@ other way drifted into a dozen shapes (``urn:synodic:<source>:<type>:<hex>``, ``
 build the moment a write path mints one again.
 
 Ids a path DERIVES FROM ITS SOURCE are not minted and stay as they are — a provider's urn, a
-sync's ``sync:<urn>``, a bootstrap's ``<src>|<TYPE>|<tgt>``, a package seed's stable id for a
-line with none — because that is how a re-sync or a resumed seed finds what it made. They are
-listed below, each with why.
+bootstrap's ``<src>|<TYPE>|<tgt>``, a sync's ``sync:e:…`` for an edge with no id — because that
+is how a re-sync finds what it made. A package seed's line with no id is given a ``urn:uuid:``
+derived from its place in the upload, so a resumed seed derives it again.
 """
 import pathlib
 import re
@@ -29,9 +29,6 @@ _MINTS = {
 # (path relative to app/, mint) → why it is allowed.
 _ALLOWED = {
     ("ontology/urn.py", "make_urn("): "its definition: no write path calls it",
-    ("services/versioning/package_seed.py", 'stable_prefixed_id("ent", …)'):
-        "a package line with no entity id, keyed by its place in the upload: a resumed seed "
-        "derives the same id again",
 }
 
 

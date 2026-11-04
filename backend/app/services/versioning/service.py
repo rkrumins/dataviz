@@ -8228,6 +8228,7 @@ class GraphVersioningService:
             node_deltas: List[Delta] = []
             edge_src: List[tuple] = []
             urn_to_eid: Dict[str, str] = {}
+            node_eids: set = set()
 
             for i, row in enumerate(rows):
                 kind = (row or {}).get("kind")
@@ -8235,9 +8236,17 @@ class GraphVersioningService:
                     if not row.get("entityType"):
                         rejected.append({"row": i, "reason": "node missing entityType"})
                         continue
-                    eid = row.get("entity_id") or row.get("id") or new_entity_id()
+                    # One identity: a node is named by its urn when it brings no id, and a node
+                    # that brings neither is given a urn:uuid that is its urn too.
+                    eid = row.get("entity_id") or row.get("id") or row.get("urn") or new_entity_id()
+                    if eid in node_eids:
+                        rejected.append({"row": i, "reason": f"another node in this file is '{eid}'"})
+                        continue
+                    node_eids.add(eid)
                     payload = _sanitize_node_properties(
                         {k: v for k, v in row.items() if k not in ("kind", "id", "entity_id")})
+                    if not payload.get("urn"):
+                        payload["urn"] = eid
                     node_deltas.append(Delta(eid, "create", payload, None, content_hash(payload)))
                     if row.get("urn"):
                         urn_to_eid[row["urn"]] = eid
@@ -8772,10 +8781,14 @@ class GraphVersioningService:
                 continue
             urn = row.get("urn")
             hit = known.get(urn) if urn else None
-            eid = ((hit[0] if hit else None) or row.get("entity_id") or row.get("id")
-                   or (f"sync:{urn}" if urn else new_entity_id()))
+            # A new node is named by its urn, as the bootstrap names every node; an earlier
+            # sync's ``sync:<urn>`` is found by its urn (``known``) and kept.
+            eid = (hit[0] if hit else None) or row.get("entity_id") or row.get("id") or urn
             payload = _sanitize_node_properties(
                 {k: v for k, v in row.items() if k not in ("kind", "id", "entity_id")})
+            if not eid:                        # neither a urn nor an id: a urn:uuid for both
+                eid = new_entity_id()
+                payload["urn"] = eid
             seen.add(eid)
             if urn:
                 urn_to_eid[urn] = eid

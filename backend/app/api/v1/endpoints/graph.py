@@ -4577,7 +4577,8 @@ async def batch_commands(
                 ))
             break
         except Exception as exc:
-            if isinstance(exc, GraphNotWritable) and succeeded == 0:
+            from backend.app.providers.versioned_write_provider import VersioningNotEnabled
+            if isinstance(exc, (GraphNotWritable, VersioningNotEnabled)) and succeeded == 0:
                 raise                              # nothing landed: the 409 says why
             failed += 1
             results.append(BatchCommandResult(
