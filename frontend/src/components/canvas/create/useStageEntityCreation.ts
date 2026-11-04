@@ -15,7 +15,7 @@
  * `resolveTempId` before calling `createNode`.
  */
 import { useCallback } from 'react'
-import { useCanvasStore } from '@/store/canvas'
+import { useCanvasStore, type LineageEdge, type LineageNode } from '@/store/canvas'
 import { useContainmentEdgeTypes } from '@/store/schema'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { toCanvasNode } from '@/lib/canvasNodeMapper'
@@ -117,6 +117,8 @@ export function useStageEntityCreation() {
         }])
       }
 
+      let undone: { node?: LineageNode; edge?: LineageEdge } = {}
+
       // Shared with `patchAfter`/`updateStagedEntity`: mutated in place post-stage, so
       // `apply` (which reads from this same object) observes edits made after staging.
       const afterState = {
@@ -188,8 +190,15 @@ export function useStageEntityCreation() {
           }
         },
         discard: () => {
+          // What a redo draws again: the node and its link as they are now (renamed since, say).
+          const { nodes, edges } = useCanvasStore.getState()
+          undone = { node: nodes.find((n) => n.id === tempUrn), edge: edges.find((e) => e.id === containmentEdgeId) }
           if (containmentEdgeId) removeEdge(containmentEdgeId)
           removeNode(tempUrn)
+        },
+        reapply: () => {
+          if (undone.node) addNodes([undone.node])
+          if (undone.edge) addEdges([undone.edge])
         },
       })
 

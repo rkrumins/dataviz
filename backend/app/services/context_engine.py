@@ -225,8 +225,14 @@ class ContextEngine:
                     from ..providers.draft_overlay_provider import DraftOverlayProvider
                     base = provider if main_fresh else main_reader or VersionedBranchProvider(
                         svc, graph_id=gid, branch_id=main_id, actor=actor)
+                    # The draft's version (its head, branch point, main's head, status) keys every
+                    # cached read of it (``read_ns`` → ``graph_ns``): a commit to the draft from
+                    # anywhere — an import window, another tab, the API — moves it, so no reader is
+                    # served what the draft held before. The overlay reads it first thing anyway.
+                    version = await svc.overlay_version(graph_id=gid, branch_id=norm)
                     read_provider = DraftOverlayProvider(
-                        base, svc=svc, graph_id=gid, branch_id=norm, actor=actor)
+                        base, svc=svc, graph_id=gid, branch_id=norm, actor=actor, version=version,
+                        read_ns="draft@" + ":".join(str(v) for v in version))
                     read_branch = norm
                 elif not main_fresh:
                     # Stale main (e.g. right after a merge): serve from Postgres so the change shows
@@ -2080,6 +2086,7 @@ class ContextEngine:
                         required=f.required,
                         showInNode=f.show_in_node, showInPanel=f.show_in_panel,
                         showInTooltip=f.show_in_tooltip, displayOrder=f.display_order,
+                        reconciliationKey=f.reconciliation_key, unique=f.unique,
                     )
                     for f in ent_def.fields
                 ] or [

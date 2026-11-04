@@ -38,7 +38,7 @@ vi.mock('@/providers/providerPool', () => ({
 }))
 
 vi.mock('@/store/branchStore', () => ({
-  useBranchStore: (sel: (s: unknown) => unknown) => sel({ mainEpoch: 0 }),
+  useBranchStore: (sel: (s: unknown) => unknown) => sel({ mainEpoch: 0, draftEpoch: 0 }),
   useEffectiveBranchId: () => null,
 }))
 

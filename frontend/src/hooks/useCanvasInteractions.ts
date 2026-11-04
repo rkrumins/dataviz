@@ -164,7 +164,9 @@ function edgeCreateChange(sourceUrn: string, targetUrn: string, edgeType: string
         source: sourceUrn,
         target: targetUrn,
         type: 'lineage' as const,
-        data: { edgeType, relationship: edgeType.toLowerCase() },
+        // Unsaved, like a containment create: a collapse has no way to read it back, so it keeps
+        // it, and the save's reconcile redraws it under its real id (clearing the flag).
+        data: { edgeType, relationship: edgeType.toLowerCase(), isPending: 'create' as const },
     }
     const change: Omit<StagedChange, 'id' | 'timestamp'> = {
         type: 'create_edge',
@@ -184,6 +186,8 @@ function edgeCreateChange(sourceUrn: string, targetUrn: string, edgeType: string
             if (!res.success) throw new Error(res.error || 'Failed to create edge')
         },
         discard: () => useCanvasStore.getState().removeEdge(tempId),
+        // Redo stages the change again; this draws its line again.
+        reapply: () => useCanvasStore.getState().addEdges([optimistic]),
     }
     return { optimistic, change }
 }
@@ -460,12 +464,15 @@ export function useCanvasInteractions(
             return
         }
 
-        const reversedId = `${edgeId}-reversed`
+        // A temp id: the save sends the reversed edge as a create, and the server mints its real one.
+        const reversedId = generateId('staged-edge')
         const reversed = {
             ...edge,
             id: reversedId,
             source: edge.target,
             target: edge.source,
+            // Unsaved, as a drawn link is: a collapse keeps it, the save redraws it under its real id.
+            data: { ...edge.data, isPending: 'create' as const },
         }
         useCanvasStore.getState().removeEdge(edgeId)
         useCanvasStore.getState().addEdges([reversed])

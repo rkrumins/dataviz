@@ -32,6 +32,15 @@ describe('mapConflicts', () => {
     expect(out.get('e')!.current).toBe(edgeNow)
   })
 
+  it('matches a conflict by the name the save sent — an entity id need not be the urn an edit names', () => {
+    const out = mapConflicts({
+      conflicts: [{ entity_id: 'ent_A', ref: 'urn:A', path: ['displayName'], base: 1, ours: 2, theirs: 3 }],
+      current: { 'urn:A': nodeNow },
+    }, [sc({ id: 'n', targetId: 'urn:A', targetUrn: 'urn:A' })])
+    expect(out.get('n')?.current).toBe(nodeNow)
+    expect(out.get('n')?.fields.map((f) => f.key)).toEqual(['displayName'])
+  })
+
   it('addresses a gv:-prefixed id as the entity itself', () => {
     const out = mapConflicts({
       conflicts: [{ entity_id: 'ent_1', path: ['displayName'], base: 1, ours: 2, theirs: 3 }],

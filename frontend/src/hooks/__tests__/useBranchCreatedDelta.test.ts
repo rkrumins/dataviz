@@ -10,7 +10,7 @@
  * constraint this feeds).
  */
 import { describe, it, expect } from 'vitest'
-import { branchCreatedUrns, committedCreatedUrns } from '../useBranchCreatedDelta'
+import { branchCreatedUrns, committedCreatedChildUrns, committedCreatedUrns } from '../useBranchCreatedDelta'
 import type { StagedChange, StagedChangeType } from '@/store/stagedChangesStore'
 import { buildChangeSet, type GraphChange } from '@/features/versioning/model/changeModel'
 
@@ -87,5 +87,24 @@ describe('committedCreatedUrns', () => {
     expect(branchCreatedUrns([]).size).toBe(0)
     const cs = buildChangeSet([gc('urn:synodic:manual:layer:15be1c2b02ba', 'node', 'added')])
     expect([...committedCreatedUrns(cs)]).toEqual(['urn:synodic:manual:layer:15be1c2b02ba'])
+  })
+
+  it('names an imported entity by its urn, not its entity id — what the canvas loads it by', () => {
+    const cs = buildChangeSet([{ ...gc('ent_A', 'node', 'added'), urn: 'urn:A' }])
+    expect([...committedCreatedUrns(cs)]).toEqual(['urn:A'])
+  })
+})
+
+describe('committedCreatedChildUrns', () => {
+  const link = (over: Partial<GraphChange>): GraphChange => ({
+    entityId: 'edge_1', kind: 'edge', status: 'added', label: 'CONTAINS',
+    after: { edgeType: 'CONTAINS', sourceEntityId: 'ent_P', targetEntityId: 'ent_C' },
+    origin: { source: 'branch', branchId: 'b1' }, ...over,
+  })
+
+  it('names a created child by its urn when the change says it, else by the link’s payload', () => {
+    expect([...committedCreatedChildUrns(buildChangeSet([link({ sourceUrn: 'urn:P', targetUrn: 'urn:C' })]), ['CONTAINS'])])
+      .toEqual(['urn:C'])
+    expect([...committedCreatedChildUrns(buildChangeSet([link({})]), ['CONTAINS'])]).toEqual(['ent_C'])
   })
 })

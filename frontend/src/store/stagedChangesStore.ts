@@ -343,11 +343,11 @@ export const useStagedChangesStore = create<StagedChangesState>((set, get) => ({
     const victimIds = new Set(ordered.map((v) => v.id))
     set((s) => ({
       changes: s.changes.filter((c) => !victimIds.has(c.id)),
-      // `redo` only re-stages the change record; it cannot re-create the optimistic
-      // canvas node/edge a create's discard hook removed. Re-staging a create would
-      // leave a phantom entry pointing at a node that no longer exists, so creates are
-      // not redoable — only non-create changes (delete/rename/edge edits) go on the stack.
-      redoStack: [...s.redoStack, ...ordered.filter((c) => c.type !== 'create_entity')],
+      // A discarded entity create is not redoable, and neither is anything its discard took with
+      // it: its staged children, and the links staged to it — redoing one of those would draw a
+      // line to a node that no longer exists. Everything else goes on the stack (a link discarded
+      // on its own is redrawn by its `reapply`).
+      redoStack: root.type === 'create_entity' ? s.redoStack : [...s.redoStack, ...ordered],
     }))
   },
 

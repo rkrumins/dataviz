@@ -133,6 +133,13 @@ describe('useDuplicateSubtree', () => {
     expect(lineageChanges[0].after).toMatchObject({ edgeType: 'FLOWS_TO', source: child1Urn, target: child2Urn })
   })
 
+  it('draws a copied link as unsaved work, so a collapse keeps it until the save redraws it', async () => {
+    const { result } = renderHook(() => useDuplicateSubtree())
+    await act(async () => { await result.current.duplicateSubtree('r') })
+    const link = useStagedChangesStore.getState().changes.find((c) => c.type === 'create_edge')!
+    expect(useCanvasStore.getState().edges.find((e) => e.id === link.targetId)?.data?.isPending).toBe('create')
+  })
+
   it('fires onNodeCopied once per staged node (root + every descendant), with (originalId, originalUrn, copyUrn)', async () => {
     const calls: Array<[string, string, string]> = []
     const { result } = renderHook(() => useDuplicateSubtree({

@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.api.v1.endpoints import versioning as versioning_ep
 from backend.app.api.v1.endpoints.versioning import _write_view_import_assignments
+from backend.app.db.repositories import view_repo
 from backend.app.db.models import ViewORM, WorkspaceORM
 from backend.app.services.versioning import db as ver_db
 from backend.app.services.versioning.import_export import service as service_mod
@@ -171,11 +172,14 @@ async def test_hook_adds_root_preserving_existing_and_other_config(
 
     created = [_node("root", "urn:new-root"), _node("child", "urn:new-child")]
     edges = [("root", "child", "CONTAINS")]
-    result = await _write_view_import_assignments("ws", "ds", view.id, created, edges)
+    published = (await db_session.get(ViewORM, view.id)).config
+    result = await _write_view_import_assignments("ws", "ds", view.id, "br1", created, edges)
     assert result == {"added": 1}, result
 
-    refreshed = await db_session.get(ViewORM, view.id)
-    cfg = json.loads(refreshed.config)
+    # Published is untouched before review: the roots go into the draft's own copy of the view,
+    # which publishing promotes with the draft's other layout edits.
+    assert (await db_session.get(ViewORM, view.id)).config == published
+    cfg = await view_repo.effective_view_config(db_session, view.id, "br1")
     ref = cfg["layout"]["referenceLayout"]
     assignments = ref["assignments"]
 
@@ -199,17 +203,18 @@ async def test_hook_noop_when_view_has_no_layers(
     before = (await db_session.get(ViewORM, view.id)).config
 
     result = await _write_view_import_assignments(
-        "ws", "ds", view.id, [_node("r", "urn:r")], [])
+        "ws", "ds", view.id, "br1", [_node("r", "urn:r")], [])
     assert result == {"added": 0}
     after = (await db_session.get(ViewORM, view.id)).config
     assert after == before                                          # config untouched
+    assert await view_repo.get_overlay(db_session, view.id, "br1") is None   # no copy made
 
 
 async def test_hook_missing_view_returns_zero(
     _route_hook_to_test_db, db_session: AsyncSession
 ):
     result = await _write_view_import_assignments(
-        "ws", "ds", "does-not-exist", [_node("r", "urn:r")], [])
+        "ws", "ds", "does-not-exist", "br1", [_node("r", "urn:r")], [])
     assert result == {"added": 0}
 
 
@@ -234,12 +239,12 @@ async def test_apply_view_layout_records_added_on_summary(monkeypatch):
     row = SimpleNamespace(summary={}, updated_at=None)
     monkeypatch.setattr(ver_db, "graphver_session", lambda: _session_yielding(row))
 
-    async def _writer(ws, ds, view_id, nodes, edges):
+    async def _writer(ws, ds, view_id, branch_id, nodes, edges):
         return {"added": 3}
 
     svc = _service(_writer)
     worker = SimpleNamespace(created_node_facts=[_node("e", "urn:e")], batch_edge_facts=[])
-    await svc._apply_view_layout("job1", "ws", "ds", "v1", worker)
+    await svc._apply_view_layout("job1", "ws", "ds", "v1", "br1", worker)
     assert row.summary["viewAssignments"] == {"added": 3}
 
 
@@ -249,12 +254,12 @@ async def test_apply_view_layout_isolates_writer_failure(monkeypatch):
     row = SimpleNamespace(summary={"new": 1}, updated_at=None)
     monkeypatch.setattr(ver_db, "graphver_session", lambda: _session_yielding(row))
 
-    async def _boom(ws, ds, view_id, nodes, edges):
+    async def _boom(ws, ds, view_id, branch_id, nodes, edges):
         raise RuntimeError("layout boom")
 
     svc = _service(_boom)
     worker = SimpleNamespace(created_node_facts=[_node("e", "urn:e")], batch_edge_facts=[])
-    await svc._apply_view_layout("job1", "ws", "ds", "v1", worker)   # must not raise
+    await svc._apply_view_layout("job1", "ws", "ds", "v1", "br1", worker)   # must not raise
     assert row.summary["viewAssignments"] == {"error": "layout boom"}
     assert row.summary["new"] == 1                                   # pre-existing tally preserved
 
@@ -263,8 +268,8 @@ async def test_run_import_skips_layout_write_without_view_id(monkeypatch):
     """No scope_view_id on the job → the layout writer is never called (item 4)."""
     calls = []
 
-    async def _spy(ws, ds, view_id, nodes, edges):
-        calls.append(view_id)
+    async def _spy(ws, ds, view_id, branch_id, nodes, edges):
+        calls.append((view_id, branch_id))
         return {"added": 1}
 
     class _FakeWorker:
@@ -299,8 +304,8 @@ async def test_run_import_calls_layout_write_with_view_id(monkeypatch):
     view_id gate is the only thing suppressing it in the test above."""
     calls = []
 
-    async def _spy(ws, ds, view_id, nodes, edges):
-        calls.append(view_id)
+    async def _spy(ws, ds, view_id, branch_id, nodes, edges):
+        calls.append((view_id, branch_id))
         return {"added": 2}
 
     class _FakeWorker:
@@ -313,11 +318,11 @@ async def test_run_import_calls_layout_write_with_view_id(monkeypatch):
 
     row = SimpleNamespace(
         workspace_id="ws", data_source_id="ds", scope_view_id="v1",
-        reconcile_mode="upsert", branch_id=None, summary={}, updated_at=None)
+        reconcile_mode="upsert", branch_id="br1", summary={}, updated_at=None)
     monkeypatch.setattr(ver_db, "graphver_session", lambda: _session_yielding(row))
     monkeypatch.setattr(service_mod, "ImportWorker", _FakeWorker)
 
     summary = await _service(_spy).run_import("job1")
     assert summary["new"] == 1
-    assert calls == ["v1"]
+    assert calls == [("v1", "br1")]                # into the import's own draft
     assert row.summary["viewAssignments"] == {"added": 2}

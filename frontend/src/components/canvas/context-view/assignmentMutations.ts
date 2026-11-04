@@ -228,17 +228,20 @@ export function pruneTempAssignments(layout: NormalizedReferenceLayout): Normali
   return { ...layout, assignments }
 }
 
-/** Re-key one assignment from `oldUrn` to `newUrn` (temp→real on Save). No-op if `oldUrn` is unassigned. */
-export function remapAssignmentUrn(
+/** Re-key assignments from old urns to new ones (`ids`: temp→real on Save) in ONE copy, however
+ *  many a save created. Returns the SAME layout when none of the old urns is assigned. */
+export function remapAssignmentUrns(
   layout: NormalizedReferenceLayout,
-  oldUrn: string,
-  newUrn: string,
+  ids: ReadonlyMap<string, string>,
 ): NormalizedReferenceLayout {
-  if (oldUrn === newUrn || !layout.assignments[oldUrn]) return layout
-  const assignments = { ...layout.assignments }
-  assignments[newUrn] = assignments[oldUrn]
-  delete assignments[oldUrn]
-  return { ...layout, assignments }
+  let assignments: NormalizedReferenceLayout['assignments'] | null = null
+  for (const [oldUrn, newUrn] of ids) {
+    if (oldUrn === newUrn || !layout.assignments[oldUrn]) continue
+    assignments ??= { ...layout.assignments }
+    assignments[newUrn] = assignments[oldUrn]
+    delete assignments[oldUrn]
+  }
+  return assignments ? { ...layout, assignments } : layout
 }
 
 /**

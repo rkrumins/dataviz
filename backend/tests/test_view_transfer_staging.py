@@ -11,6 +11,7 @@ draft does.
 """
 from __future__ import annotations
 
+import json
 from contextlib import asynccontextmanager
 
 import pytest
@@ -254,6 +255,45 @@ async def test_an_update_is_proposed_in_the_draft_and_merges_when_published(test
 
     activity = (await test_client.get(f"/api/v1/views/{here}/activity")).json()
     assert any("published from a draft" in (a.get("summary") or "") for a in activity)
+
+
+async def test_an_update_keeps_the_roots_its_data_placed_in_the_draft(test_client, db_session, graph, versioning):
+    """A package's data goes into the draft before its view does, and places the roots it created
+    in the draft's copy of the view. The view staged after it is the file's design, which never
+    names those roots: they stay placed, or a curated view shows none of them."""
+    dev, uat = await _workspace(test_client, "Dev"), await _workspace(test_client, "UAT")
+    ds = await _data_source(db_session, uat)
+    versioning.track(uat, ds)
+    source_id = await _view(test_client, dev)
+    first = await _file(test_client, source_id)
+    here = (await _import(test_client, first, {"workspaceId": uat, "dataSourceId": ds})).json()["viewId"]
+    branch = (await _stage(test_client, first, {"viewId": here}, action="update",
+                           request_id="req-upd-0001")).json()["staged"]["branchId"]
+
+    # What the data job's layout writer leaves in the draft's copy, beside one the person made.
+    overlay = await view_repo.ensure_overlay(db_session, here, branch)
+    layout = json.loads(overlay.reference_layout)
+    layout["assignments"].update({
+        "urn:new": {"layerId": "l2", "inheritsChildren": True, "assignedBy": "import"},
+        "urn:nowhere": {"layerId": "gone", "inheritsChildren": True, "assignedBy": "import"},
+        "urn:a": {"layerId": "l2", "inheritsChildren": True, "assignedBy": "import"},
+        "urn:mine": {"layerId": "l1", "inheritsChildren": True},
+    })
+    overlay.reference_layout = json.dumps(layout)
+    await db_session.flush()
+
+    await _edit(test_client, source_id, "urn:x")
+    resp = await _stage(test_client, await _file(test_client, source_id), {"viewId": here}, action="update",
+                        request_id="req-upd-0002")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["staged"]["branchId"] == branch
+    drafted = (await test_client.get(f"/api/v1/views/{here}", params={"branchId": branch})).json()
+    assignments = drafted["config"]["layout"]["referenceLayout"]["assignments"]
+    assert "urn:x" in assignments, "the file's design is staged"
+    assert assignments["urn:new"]["layerId"] == "l2", "the root the data placed stays placed"
+    assert assignments["urn:a"]["layerId"] == "l1", "where the file places an entity itself, it wins"
+    assert "urn:nowhere" not in assignments, "never kept on a layer the file's view does not have"
+    assert "urn:mine" not in assignments, "the draft reads the file's design: only an import's are kept"
 
 
 async def test_a_retried_staged_import_answers_with_what_it_staged(test_client, db_session, graph, versioning):

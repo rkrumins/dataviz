@@ -21,6 +21,7 @@ import type { DiffEntry, DiffVsMainResponse } from '@/services/versioningApiServ
 
 const asRecord = (v: unknown): Record<string, unknown> | undefined =>
   v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : undefined
+const str = (v: unknown): string | undefined => (typeof v === 'string' && v ? v : undefined)
 
 /** green → added, red → removed, amber → modified (the existing tint convention). */
 function statusFromStaged(change: StagedChange): ChangeStatus {
@@ -65,8 +66,15 @@ export function fromDiffEntries(
   const mk = (e: DiffEntry, status: ChangeStatus): GraphChange => {
     const before = asRecord(e.before)
     const after = asRecord(e.after)
+    const payload = after ?? before
+    // The canvas names a node by its urn and an edge's ends by urn; an entity id need not be one
+    // (an import's is not). A node without a urn reads as the reader's stand-in, `gv:<entity id>`.
+    const names = e.kind === 'node'
+      ? { urn: e.urn ?? str(payload?.urn) ?? `gv:${e.entityId}` }
+      : { sourceUrn: e.sourceUrn ?? str(payload?.sourceEntityId), targetUrn: e.targetUrn ?? str(payload?.targetEntityId) }
     return {
       entityId: e.entityId,
+      ...names,
       kind: e.kind,
       status,
       label: labelForPayload(e.entityId, after ?? before, e.kind),

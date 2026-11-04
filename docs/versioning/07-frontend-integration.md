@@ -165,8 +165,8 @@ containment edge and remaps the optimistic temp id. Each create is attempted **i
 ontology rejection is attributed to the *specific* entity; on any failure the code drops
 already-persisted creates (retry-safe), skips children of a failed parent (`blockedParentUrns`), flags
 the failures, and **stops before Phase 2** — never persisting a partial hierarchy. Layer assignments
-are re-keyed temp→real in the same tick as each create's node swap (`remapEntityId`,
-`saveStagedChangesToDraft.ts:71-75`) so a later failure can't strand a node out of its layer.
+are re-keyed temp→real for all of a save's creates at once, in one layout write (`remapEntityIds`,
+in `reconcileSaved`), as the canvas swaps every temp node for its real one in one store write.
 
 ### Phase 2 — mutations + user-drawn edges as ONE atomic commit (`saveStagedChangesToDraft.ts:102-115`)
 `stagedChangesToOps(changes without creates, resolveTempId)` → `applyGraphChanges(ws, ds, branchId,
@@ -298,12 +298,30 @@ in the same resolver.
 
 ## 10. Import-triggered refresh (brief)
 
-Import/export dialogs are mounted in the canvas (`ContextViewCanvas.tsx:2343-2362`) and hand off to the
-same review surfaces. Because an import commits **server-side** on the draft (no optimistic canvas),
-`ContextViewCanvas` uses an `importedRef` + `refreshAfterImport()` (`:884-894`) that invalidates
-`VERSIONING_KEYS.all`, refetches aggregated edges, and `bumpMainEpoch()`s — but **only when the dialog
-closes**, so the import preview stays visible instead of the canvas flipping mid-flow. Full detail in
-[08 · Import / Export](08-import-export.md).
+Import/export dialogs are mounted in the canvas (`ContextViewCanvas.tsx`) and hand off to the same
+review surfaces. An import commits **server-side** on the draft (no optimistic canvas), and the canvas
+refreshes **only when the dialog closes**, so the import preview stays visible instead of the canvas
+flipping mid-flow. `ContextViewCanvas` keeps an `importedRef`, and `refreshAfterImport()` runs, in order:
+
+1. **`rereadBranchView`** — the draft's view again: the import placed its new roots in the draft's
+   copy of the view's layout, and a canvas read against the old layout leaves them unplaced (a curated
+   view never shows them);
+2. invalidate `VERSIONING_KEYS.all`, refetch aggregated edges, and **`releaseProviderCaches()`** — the
+   answers the providers cached for the draft before the import;
+3. **`bumpDraftEpoch()`** — `branchStore.draftEpoch` is folded into `providerVersion` (§3) and keys the
+   canvas in `CanvasRouter`, so every draft read refetches, the canvas remounts (its expansion,
+   auto-load and assignment latches start over) and the assignment status resets.
+
+Opening the dialog first saves a pending layout edit: the import writes its placements into the same
+overlay, and a debounced save landing after it would put the old layout back. "Refresh from others"
+(`useRefreshDraftFromOthers`) takes the same path — release, then `bumpDraftEpoch()` — since the draft
+moved, not `main`. Full detail in [08 · Import / Export](08-import-export.md).
+
+> **Invariant — the canvas names a node by its urn.** An imported node's entity id is not its urn, so
+> committed changes carry `urn` / `sourceUrn` / `targetUrn` (from the diff) and the change set, tints,
+> ghosts and created-node lists key by those (`changeAdapters.ts`, `changeModel.ts`,
+> `deletionGhosts.ts`, `useBranchCreatedDelta.ts`). A node with no urn reads as `gv:<entity id>`, as
+> the server names it.
 
 ---
 

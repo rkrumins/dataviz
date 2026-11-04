@@ -37,7 +37,9 @@ export function useEntityChangeDecoration() {
     // Committed (lower precedence) — only when not hidden.
     if (!committedHidden && changeSet) {
       for (const c of changeSet.changes) {
-        if (c.entityId) m.set(c.entityId, { state: 'committed', status: c.status })
+        // A node under its urn — the canvas's id for it, which an imported entity's id is not.
+        const id = c.urn ?? c.entityId
+        if (id) m.set(id, { state: 'committed', status: c.status })
       }
     }
     // Staged (always on, higher precedence). Keyed by both id and urn so canvas urns and temp ids

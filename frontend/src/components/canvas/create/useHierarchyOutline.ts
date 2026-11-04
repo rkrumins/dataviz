@@ -34,6 +34,8 @@ import {
 } from '@/services/ontologyPreflightService'
 import { useStageEntityCreation, type StageEntityInput } from './useStageEntityCreation'
 import { useHierarchyBuilderStore } from './hierarchyBuilderStore'
+import { planBuildStaging } from './buildmode/stageBuildRows'
+import { toBuildRows } from './buildmode/BuildPaste'
 import type { ParsedOutlineRow } from './outlineParser'
 import type { EntityTypeSchema } from '@/types/schema'
 import { splitNodeFields } from '@/lib/nodeFields'
@@ -395,51 +397,43 @@ export function useHierarchyOutline(opts: {
 
   const stageRows = useCallback(
     (rows: ParsedOutlineRow[], baseParentUrn: string | null): number => {
-      let count = 0
-      // Per-depth parent-urn stack starting at baseParentUrn, plus a local
-      // type map for rows staged WITHIN this call — `tree`/`parentTypeOf` are
-      // snapshots from the last render and don't see these staged-mid-loop rows.
-      const parentAt: Record<number, string | null> = { 0: baseParentUrn }
-      const skipAt: Record<number, boolean> = {}
-      const typeByTempUrn = new Map<string, string>()
-
-      const resolveParentType = (parentUrn: string | null): string | null =>
-        parentUrn ? (typeByTempUrn.get(parentUrn) ?? parentTypeOf(parentUrn)) : null
-
-      for (const row of rows) {
-        const parentUrn = row.depth === 0 ? baseParentUrn : (parentAt[row.depth] ?? null)
-        const ancestorSkipped = row.depth > 0 && !!skipAt[row.depth]
-
-        if (row.issues.length > 0 || !row.typeId || ancestorSkipped) {
-          skipAt[row.depth + 1] = true
-          continue
-        }
-        skipAt[row.depth + 1] = false
-
-        const parentType = resolveParentType(parentUrn)
-        const edgeOpts = parentUrn && parentType
-          ? deriveContainmentEdges(parentType, row.typeId, relationshipTypes, containmentEdgeTypes).filter((o) => o.allowed)
+      // Staged in ONE pass, as Build's rows are (planBuildStaging): one addNodes, one addEdges and
+      // one stageMany for the whole paste. Row by row, each create rescanned and copied the canvas
+      // and the staged list — O(n²) on a long paste. Rows with an issue or no type are left out,
+      // with everything under them (their parent never lands).
+      const buildRows = toBuildRows(rows)
+      if (buildRows.length === 0) return 0
+      // The batch nests under the base only when it is a node on the canvas (a staged one counts),
+      // as stageEntity has it: under anything else it would hang from a parent that isn't there.
+      const baseNode = baseParentUrn == null ? undefined : useCanvasStore.getState().nodes.find(
+        (n) => n.id === baseParentUrn || (n.data?.urn as string) === baseParentUrn,
+      )
+      const rootParentUrn = baseNode ? baseParentUrn : null
+      const rootParentType = parentTypeOf(rootParentUrn) ?? ''
+      // The ontology's containment for the pairing, CONTAINS first; none allowed ⇒ none, and the row
+      // is created at the root (planBuildStaging names a batch-root row's parent type '': the base's).
+      const containmentEdgeTypeFor = (parentType: string, childType: string): string | undefined => {
+        const pt = parentType || rootParentType
+        const allowed = pt
+          ? deriveContainmentEdges(pt, childType, relationshipTypes, containmentEdgeTypes).filter((o) => o.allowed)
           : []
-        const contains = edgeOpts.find((o) => o.edgeType.toUpperCase() === 'CONTAINS')
-        const edgeType = edgeOpts.length > 0 ? (contains ?? edgeOpts[0]).edgeType : undefined
-
-        const tempUrn = stageEntity({
-          entityType: row.typeId,
-          displayName: row.name,
-          parentUrn: parentUrn ?? undefined,
-          containmentEdgeType: edgeType,
-        })
-
-        typeByTempUrn.set(tempUrn, row.typeId)
-        parentAt[row.depth + 1] = tempUrn
-        count++
-        registerBatchUrn(tempUrn)
-        onEntityStaged?.(tempUrn, parentUrn ?? undefined)
+        return (allowed.find((o) => o.edgeType.toUpperCase() === 'CONTAINS') ?? allowed[0])?.edgeType
       }
+      const plan = planBuildStaging(buildRows, {
+        rootParentUrn, containmentEdgeTypeFor, rootParentLabel: (baseNode?.data?.label as string) || undefined,
+      })
+      useCanvasStore.getState().addNodes(plan.nodes)
+      useCanvasStore.getState().addEdges(plan.edges)
+      useStagedChangesStore.getState().stageMany(plan.changes)
 
-      return count
+      for (const row of buildRows) {
+        const tempUrn = plan.rowUrn.get(row.id)!
+        registerBatchUrn(tempUrn)
+        onEntityStaged?.(tempUrn, row.parentId != null ? plan.rowUrn.get(row.parentId) : (baseParentUrn ?? undefined))
+      }
+      return buildRows.length
     },
-    [stageEntity, parentTypeOf, relationshipTypes, containmentEdgeTypes, onEntityStaged, registerBatchUrn],
+    [parentTypeOf, relationshipTypes, containmentEdgeTypes, onEntityStaged, registerBatchUrn],
   )
 
   return {

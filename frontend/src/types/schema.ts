@@ -52,6 +52,8 @@ export interface EntityFieldDefinition {
   showInTooltip: boolean;              // Display in hover tooltip
   displayOrder: number;                // Order of display
   format?: FieldFormat;                // How to format the value
+  reconciliationKey?: boolean;         // An import matches entities of this type by this field's value
+  unique?: boolean;                    // No two entities of this type share a value (publish refuses one that does)
 }
 
 export type FieldType =

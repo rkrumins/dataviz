@@ -154,6 +154,10 @@ that backs `dataSourceId`.
 | `ResolutionsWithoutConflict` | **422** | `{type: "resolutions_without_conflict", ids: […], message}` — Update from parent was sent resolutions for entities it found in no conflict; a resolution settles only a conflict the update raised. Nothing was written |
 | `PullRequestExists` | **409** | `{type: "pull_request_exists", prId, branchId, title, message}` — the branch already has a live request ([03](/docs/versioning-branching-and-merge)); `prId` is the one that exists, so send the user *to* it |
 | `ConcurrencyError` | **409** | `{type: "integrity", message}` |
+| `AmbiguousUrn` | **422** | `{type: "ambiguous_urn", urns, message}` — a save named a node by a urn several live nodes carry; refer to it by its id. Nothing was written |
+| `EntityExists` | **409** | `{type: "entity_exists", ids, refs, message}` — a create named an id a live entity holds (a node or an edge), or a urn a live node carries: refused rather than it be silently replaced or turned into the other kind. `refs` names each as the client sent it |
+| `EdgeEndsMissing` | **422** | `{type: "invalid_patch", ids, message}` — an edge create with no source or no target |
+| `UniqueViolation` | **409** | `{type: "unique_violation", violations: [{type, field, value, entities}], total, message}` — a publish (or review or fork merge) would leave two live nodes of a type with the same value in a field the type keeps unique; the first 100 |
 | `DiffTooLarge` | **409** | `{type: "too_large_for_tree", changed, limit, message}` — the draft changes more entities than the Changes tree lays out |
 | `ValueError` | **404** | `str(message)` — an unknown id, and also a request the state doesn't allow: a pull or merge request already merged or closed, a commit to revert or restore that isn't on `main`, the genesis commit given to revert, `main` where a draft is needed (abandoning or editing it, or raising a merge request from it), a graph that isn't a fork. A closed draft answers `branch_closed` instead, and `main` given to a write, checkpoint or pull `main_write_forbidden` (above). Read `detail` before treating it as missing |
 
@@ -297,7 +301,7 @@ See [04 · Projection & Cache](/docs/versioning-projection-and-cache) for what t
 | `GET …/entities/{eid}/summary` | `_READ` | Who created the entity and who last changed it, on the line being read: `?branchId&kind&include=value` → `{entityId, kind, exists, version?, inherited, created?, updated?, revisions, changedOnMainSinceBranch, baseCommitSeq?, value?, userNames}`. `include=value` adds the entity and its concurrency token |
 | `GET …/branches/{bid}/diff` | `_READ` | `?fromSeq&toSeq` → `{added, removed, modified}` — **id-keyed**: enough to *count* what changed, not to *show* it |
 | `GET …/branches/{bid}/diff-window` | `_READ` | The same window with **whole-payload before and after** (`DiffVsMainResponse`) — the renderable shape. Backs "what came in when I pulled": the window is `main` between the draft's old and new base, both recorded on the `pull` commit |
-| `GET …/branches/{bid}/diff-vs-main` | `_READ` | The draft against its base as whole node and edge payloads with `before` and `after` — what the canvas overlay and the Changes panel use. `?payloads=changes` leaves out the payloads of modified entities (enough to count and highlight) |
+| `GET …/branches/{bid}/diff-vs-main` | `_READ` | The draft against its base as whole node and edge payloads with `before` and `after` — what the canvas overlay and the Changes panel use. `?payloads=changes` leaves out the payloads of modified entities (enough to count and highlight), and names each entry as the canvas does: a node's `urn`, an edge's `sourceUrn` and `targetUrn` (an imported node's `entityId` is not its urn) |
 | `GET …/branches/{bid}/diff-vs-main/summary · /children` | `_READ` | The changes as a containment tree: `{groups, groupTotal, counts, entityCounts, edgeCounts, impact, tooLarge?}`, then each container's children by `?containerKey` (`limit` up to 1,000). Past 20,000 changed entities (`GRAPHVER_DIFF_TREE_MAX_CHANGES`) the summary is counts only with `tooLarge: {changed, limit}`, and `/children` answers **409 `too_large_for_tree`** |
 | `GET …/commits/{cid}/diff/summary · /children` | `_READ` | The same tree for one commit (the History drill-down) |
 
@@ -552,7 +556,14 @@ is still being enabled; **409 `main_write_forbidden`** for `main`; **503 `lock_b
 `invalid_patch`** for an edge update or delete whose id names only an item on the draft. An edge
 copied in as `edge:<id>`, because an item has `<id>`, is still `<id>` in the graph, and that id
 finds it; the ids are matched only once the draft is found writable by you, and a retry is aimed
-as its first attempt was. It:
+as its first attempt was.
+
+The canvas names a node by its **urn**; a node an import created may be keyed by another id. So a
+node op's id, a move's parent and an edge's ends that are no entity id on the draft but the urn of
+one live node go to that node (a create, to the one deleted node holding the urn: a restore); a urn
+several carry is **422 `ambiguous_urn`**. A create never replaces a live entity (**409
+`entity_exists`**), and an edge create needs both ends (**422 `invalid_patch`**). The answer and its
+refusals name each entity as it was sent (violations and conflicts carry `ref`). It:
 
 1. Finds the data source's versioned graph and asserts it is in `ws_id` (else **404**).
 2. Translates each op into a service op: `create` mints or echoes `ref → entityId`; `delete` passes
@@ -565,8 +576,9 @@ as its first attempt was. It:
 4. Maps `OntologyViolation` → **422**, `MergeConflict` → **409** (with `current`: each conflicting
    entity as it is now, to rebase the edit onto), `ConcurrencyError` → **409**.
 5. Bumps the draft branch's read-cache generation so the next read reflects the commit, and returns
-   `{commitId, assigned, entities, entitiesTruncated}` — `entities` is every entity the save touched,
-   as a reader sees it now, with its new `version` token.
+   `{commitId, assigned, entities, entitiesTruncated, versions}` — `entities` is every entity the
+   save touched, as a reader sees it now, with its new `version` token (the first 500); `versions`
+   is every written entity's token, past that cap too, keyed as `entities` is.
 
 > **Decision — patch semantics live in the service, not the client.** `update` ops carry only the
 > changed fields plus a `baseVersion` concurrency token; the service patches them onto the current

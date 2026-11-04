@@ -98,6 +98,15 @@ describe('planBuildStaging', () => {
     expect(rootEdge?.source).toBe('urn:real:existing-parent')
   })
 
+  it('names the external parent in a batch-root row’s summary when given its label, as a single create does', () => {
+    const plan = planBuildStaging(threeLevelRows(), {
+      rootParentUrn: 'urn:real:existing-parent', containmentEdgeTypeFor, rootParentLabel: 'Sales',
+    })
+    const root = plan.changes.find((c) => c.targetUrn === plan.rowUrn.get('d1'))!
+    expect(root.summary).toBe("Create domain: 'Domain' · CONTAINS Sales")
+    expect(root.after).toMatchObject({ parentLabel: 'Sales' })
+  })
+
   it('never stamps layerAssignment into node.data.properties or the create_entity\'s after.properties (placement is canonical view-config, written by the caller via onRowStaged)', () => {
     const rows = threeLevelRows()
     const plan = planBuildStaging(rows, { rootParentUrn: null, containmentEdgeTypeFor })

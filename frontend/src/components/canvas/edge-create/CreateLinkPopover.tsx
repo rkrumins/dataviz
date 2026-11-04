@@ -21,6 +21,7 @@ import { useViewEntityTypes, useViewRelationshipTypes, useViewContainmentEdgeTyp
 import { deriveConnectableEdges, connectedEdgeTypes, type AllowedEdgeOption } from '@/services/ontologyPreflightService'
 import { relationshipLabel } from '@/lib/relationshipLabel'
 import { useAppNotifications } from '@/components/ui/notifications'
+import { isGhostNode } from '@/features/versioning/canvas/deletionGhosts'
 import type { EntityTypeSchema } from '@/types/schema'
 import { useCreateLinkStore } from './createLinkStore'
 
@@ -120,11 +121,13 @@ export function CreateLinkPopover({ onCreateLink }: CreateLinkPopoverProps) {
     return () => window.clearTimeout(t)
   }, [isOpen, targetUrn])
 
-  // Target candidates: every canvas node (visible + staged) except the source,
-  // filtered by name or type name as the user types.
+  // Target candidates: every canvas node (visible + staged) except the source, filtered by name or
+  // type name as the user types. Never a deleted one: a ghost is a deletion the draft already
+  // saved, and a node marked for deletion goes on the next save — a link to either is refused.
   const targets = useMemo(() => {
     const list = nodes
       .filter((n) => (n.data?.urn as string) !== sourceUrn && n.id !== sourceUrn)
+      .filter((n) => !isGhostNode(n) && n.data?.isPending !== 'delete')
       .map((n) => ({
         urn: (n.data?.urn as string) || n.id,
         name: (n.data?.label as string) || n.id,

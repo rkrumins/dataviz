@@ -142,3 +142,34 @@ describe('deletionGhosts — restore', () => {
     expect(subtree[2].after.parentUrn).toBe('urn:p')
   })
 })
+
+describe('deletionGhosts — entity ids that are not urns', () => {
+  // An imported entity's id (`ent_X`) is not the urn the canvas names it by (`urn:X`), and an edge's
+  // `before` names its ends by entity id. The ghosts, and their restore, use the canvas's names.
+  const cs = () => buildChangeSet([
+    { ...removedNode('ent_X', { displayName: 'X', entityType: 'Column' }), urn: 'urn:X' },
+    { ...removedEdge('edge_1', { sourceEntityId: 'ent_P', targetEntityId: 'ent_X', edgeType: 'CONTAINS' }),
+      sourceUrn: 'urn:P', targetUrn: 'urn:X' },
+  ])
+
+  it('ghosts the node under its urn and nests it under its live parent, by urn', () => {
+    const optimistic = { ...liveNode('urn:X'), data: { urn: 'urn:X', isPending: 'delete' } }
+    const { nodesToAdd, nodesToRemove, edgesToAdd } = reconcileGhosts(cs(), [liveNode('urn:P'), optimistic], [], false, CONTAINS)
+    expect(nodesToAdd.map((n) => [n.id, n.data.urn])).toEqual([['urn:X', 'urn:X']])
+    expect(nodesToRemove).toEqual(['urn:X'])    // the optimistic delete becomes the ghost
+    expect(edgesToAdd.map((e) => [e.id, e.source, e.target])).toEqual([['edge_1', 'urn:P', 'urn:X']])
+  })
+
+  it('keeps a ghost already drawn under its urn, rather than ghosting it again', () => {
+    const ghost = synthesizeGhostNode(cs().changes[0])
+    const { nodesToAdd, nodesToRemove } = reconcileGhosts(cs(), [liveNode('urn:P'), ghost], [], false, CONTAINS)
+    expect(nodesToAdd).toEqual([])
+    expect(nodesToRemove).toEqual([])
+  })
+
+  it('restores it by urn, re-nested under its parent by urn', () => {
+    const [r] = buildRestoreSubtree('urn:X', cs(), new Set(['urn:P']), CONTAINS)
+    expect(r).toMatchObject({ targetId: 'urn:X', targetUrn: 'urn:X' })
+    expect(r.after).toMatchObject({ urn: 'urn:X', parentUrn: 'urn:P', containmentEdgeType: 'CONTAINS' })
+  })
+})

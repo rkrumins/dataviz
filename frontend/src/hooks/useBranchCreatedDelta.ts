@@ -44,7 +44,8 @@ export function committedCreatedUrns(changeSet: ChangeSet | null): Set<string> {
   const urns = new Set<string>()
   if (!changeSet) return urns
   for (const c of changeSet.changes) {
-    if (c.status === 'added' && c.kind === 'node' && c.entityId) urns.add(c.entityId)
+    const urn = c.urn ?? c.entityId   // the name the canvas loads a node by; an imported entity's id is not it
+    if (c.status === 'added' && c.kind === 'node' && urn) urns.add(urn)
   }
   return urns
 }
@@ -65,7 +66,7 @@ export function committedCreatedChildUrns(
     if (c.status !== 'added' || c.kind !== 'edge') continue
     const after = (c.after ?? {}) as Record<string, unknown>
     const type = String(after.edgeType ?? after.edge_type ?? '').toUpperCase()
-    const target = after.targetEntityId ?? after.target_entity_id
+    const target = c.targetUrn ?? after.targetEntityId ?? after.target_entity_id
     if (cset.has(type) && typeof target === 'string') urns.add(target)
   }
   return urns

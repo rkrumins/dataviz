@@ -40,6 +40,7 @@ from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 from sqlalchemy import BigInteger, Text, bindparam, delete, exists, insert, select, text
 from sqlalchemy.dialects.postgresql import ARRAY
 
+from backend.app.ontology.urn import make_urn
 from backend.app.services.view_placement import NodeFacts, suggest_placement
 
 from .. import config, db
@@ -48,7 +49,7 @@ from ..job_lease import QUEUED, Lease, Superseded
 from ..models import BranchORM, EdgeVersionORM, ImportRowORM, JobORM
 from ..service import OntologyViolation
 from .formats import get_adapter
-from .resolve import resolve_rows
+from .resolve import KeyIndex, _canonical_map, key_value, resolve_rows
 from .rowmodel import PROP_DELETE, normalize
 from .snapshot import open_snapshot
 from .stream import view_entities
@@ -286,6 +287,14 @@ class ImportWorker:
         self._cursor: Optional[str] = None
         # Rows of the file a previous run of the job already staged: a resumed parse skips them.
         self._skip = 0
+        # The job's identity state (``_identity_state``): the file entity ids of the nodes its
+        # committed windows created, by the ids the server gave them; the property the data
+        # source identifies nodes by; the team keys of the file's values.
+        self._created_from: Dict[str, str] = {}
+        self._identity_prop: Optional[str] = None
+        self._keys: Optional[KeyIndex] = None
+        self._canon: Dict[str, str] = _canonical_map((ontology or {}).get("node_types"))
+        self._identity_read = False
 
     async def run(self, job_id: str, *, lease: Optional[Lease] = None) -> Dict[str, int]:
         """Run the import job to the end on ``lease`` — the transfer lane's; called without one,
@@ -475,10 +484,15 @@ class ImportWorker:
             kind, rows = "edge", await self._window(job_id, "edge", -1)
         if not rows:
             return False
+        if not self._identity_read:                # once a run, before its first window
+            await self._identity_state(job_id, snap, graph_id, branch_id)
+            self._identity_read = True
         lookups = await (self._node_lookups if kind == "node" else self._edge_lookups)(snap, rows)
+        lookups.update(created_from=self._created_from, keys=self._keys)
         ops, resolutions = await asyncio.to_thread(       # a window of pure-Python matching
             resolve_rows, rows, lookups, mint_id=lambda: prefixed_id("ent"),
-            ontology=self._ontology)
+            ontology=self._ontology, identity_prop=self._identity_prop,
+            mint_urn=lambda etype: make_urn(etype or "entity", source_system="import"))
         processed = pos.processed + len(rows)
 
         async def on_commit(s) -> None:
@@ -493,7 +507,74 @@ class ImportWorker:
                 progress=min(99, processed * 100 // pos.total) if pos.total else 0)
 
         await self._apply_window(graph_id, branch_id, actor, ops, resolutions, on_commit)
+        if kind == "node":
+            self._remember_created(rows, ops, resolutions)
         return True
+
+    async def _identity_state(self, job_id: str, snap, graph_id: str, branch_id: str) -> None:
+        """What every window resolves new nodes and named ends against, read once a run (a resumed
+        job reads it again): the nodes earlier windows created, by the file entity id each came
+        from; the data source's identifier property; and the team keys — the fields each type
+        matches imports by or keeps unique — holding the values the file uses, from one pass over
+        the draft's live nodes of those types (none when the file uses none)."""
+        from backend.app.services.node_identity import identity_property
+        self._graph_id, self._branch_id = graph_id, branch_id
+        self._identity_prop = identity_property(self._node_identity)
+        async with db.graphver_session() as s:
+            created = (await s.execute(
+                select(ImportRowORM.raw["entity_id"].astext, ImportRowORM.matched_entity_id)
+                .where(ImportRowORM.job_id == job_id, ImportRowORM.kind == "node",
+                       ImportRowORM.resolved_op == "create"))).all()
+        self._created_from = {f: e for f, e in created if f and e}
+        onto = self._ontology or {}
+        keys = KeyIndex(onto.get("keys"), onto.get("unique"))
+        self._keys = keys if keys else None
+        if self._keys is None:
+            return
+        wanted: Dict[str, set] = {}
+        async with db.graphver_session() as s:
+            result = await s.stream(select(ImportRowORM.kind, ImportRowORM.raw)
+                                    .where(ImportRowORM.job_id == job_id))
+            async for kind, raw in result:
+                if kind == "node":
+                    pairs = keys.values(self._canon.get(str(raw.get("entityType") or "").lower(),
+                                                        raw.get("entityType")), raw.get("properties"))
+                else:
+                    pairs = [(f, key_value(v)) for end in ("source", "target")
+                             for f, v in (raw.get(f"{end}Keys") or {}).items()]
+                for field, value in pairs:
+                    if value is not None:
+                        wanted.setdefault(field, set()).add(value)
+        if not wanted:
+            return
+        types = set(keys.match) | set(keys.unique)
+        async with contextlib.aclosing(snap.iter_live("node", payload=True)) as pages:
+            async for page in pages:
+                for w in page:
+                    if w.entity_type not in types or not w.payload:
+                        continue
+                    props = (json.loads(w.payload) or {}).get("properties") or {}
+                    held = {f: v for f, v in keys.values(w.entity_type, props) if v in wanted.get(f, ())}
+                    if held:
+                        keys.add(w.entity_type, held, w.entity_id, w.urn)
+
+    def _remember_created(self, rows, ops, resolutions) -> None:
+        """A committed node window's creates, for the windows after it: by the file entity id each
+        came from, and by the values of its team keys. Only what landed — a row the write gate
+        turned away created nothing any later row may point at."""
+        by_index = {r["_row_index"]: r for r in rows}
+        urn_of = {o["entity_id"]: (o.get("payload") or {}).get("urn") for o in ops
+                  if o.get("op") == "create"}
+        for res in resolutions:
+            eid = res.get("matched_entity_id")
+            if res.get("resolved_op") != "create" or not eid:
+                continue
+            row = by_index.get(res["_row_index"]) or {}
+            if row.get("entity_id"):
+                self._created_from[row["entity_id"]] = eid
+            if self._keys is not None:
+                etype = self._canon.get(str(row.get("entityType") or "").lower(), row.get("entityType"))
+                self._keys.add(etype, row.get("properties"), eid, urn_of.get(eid))
 
     async def _apply_window(self, graph_id, branch_id, actor, ops, resolutions, on_commit) -> None:
         """Apply a window's ``ops`` with its ``on_commit`` (which commits alone when there are none).
@@ -535,30 +616,51 @@ class ImportWorker:
 
     async def _node_lookups(self, snap, rows) -> Dict[str, Any]:
         """What ``resolve_rows`` needs to match these node rows: the live nodes they name by
-        entity_id, urn or — a row without a urn — qualifiedName, and each one's current payload."""
+        entity_id, urn (or the identifier property's value) or — a row without a urn —
+        qualifiedName, each one's current payload; and, of the identities the rows that match
+        nothing would take, which are taken and which a deleted node held."""
+        ident = self._identity_prop
+        wanted = {w for r in rows if (w := r.get("urn") or (
+            key_value((r.get("properties") or {}).get(ident)) if ident else None))}
         by_id = await snap.lookup_live("node", {r["entity_id"] for r in rows if r.get("entity_id")})
-        urn_to_eid = await snap.nodes_by_urn(r.get("urn") for r in rows)
+        urn_to_eid = await snap.nodes_by_urn(wanted)
         qname_to_eid = await snap.nodes_by_qname(r.get("qualifiedName") for r in rows if not r.get("urn"))
         named = set(by_id) | set(urn_to_eid.values()) | {e for e in qname_to_eid.values() if e}
+        if self._keys is not None:          # a node a team key names, with its current value
+            named |= {e for r in rows if (e := self._keys.node(
+                self._canon.get(str(r.get("entityType") or "").lower(), r.get("entityType")),
+                r.get("properties"))[0])}
+        taken, restore = await self._svc.identities_taken(
+            graph_id=self._graph_id, branch_id=self._branch_id, names=wanted - set(urn_to_eid))
         return {"urn_to_eid": urn_to_eid, "qname_to_eid": qname_to_eid, "node_eids": named,
-                "current": await _payloads(snap, "node", named)}
+                "current": await _payloads(snap, "node", named), "taken": taken, "restore": restore}
 
     async def _edge_lookups(self, snap, rows) -> Dict[str, Any]:
         """What ``resolve_rows`` needs for these edge rows: the live nodes their endpoints name (by
         entity_id, urn, or — an end without a urn — qualifiedName), the live edges between those
         nodes, and each such edge's current payload."""
         ends = {}
+        ident = self._identity_prop
         for end in ("source", "target"):
             by_id = await snap.lookup_live("node", {r[f"{end}_entity_id"] for r in rows
                                                     if r.get(f"{end}_entity_id")})
             by_qname = await snap.nodes_by_qname(r.get(f"{end}QualifiedName") for r in rows
                                                  if not r.get(f"{end}Urn"))
-            by_urn = await snap.nodes_by_urn(r.get(f"{end}Urn") for r in rows)
-            ends[end] = (by_id, by_qname, by_urn)
-        (src_ids, src_qnames, src_urns), (tgt_ids, tgt_qnames, tgt_urns) = ends["source"], ends["target"]
+            # An end named by its urn, or by the identifier property's value, read as the urn.
+            by_urn = await snap.nodes_by_urn(
+                r.get(f"{end}Urn") or (key_value((r.get(f"{end}Keys") or {}).get(ident)) if ident else None)
+                for r in rows)
+            # Ends named by the file's id of a node this job created, or by a team key: the
+            # edges already between them are found too (a second import updates, never doubles).
+            more = {self._created_from.get(r.get(f"{end}_entity_id") or "") for r in rows}
+            if self._keys is not None:
+                more |= {self._keys.end(r.get(f"{end}Keys") or {})[0] for r in rows}
+            ends[end] = (by_id, by_qname, by_urn, {e for e in more if e})
+        (src_ids, src_qnames, src_urns, src_more), (tgt_ids, tgt_qnames, tgt_urns, tgt_more) = (
+            ends["source"], ends["target"])
         edge_to_eid = await snap.edges_between(
-            set(src_ids) | {e for e in src_qnames.values() if e} | set(src_urns.values()),
-            set(tgt_ids) | {e for e in tgt_qnames.values() if e} | set(tgt_urns.values()))
+            set(src_ids) | {e for e in src_qnames.values() if e} | set(src_urns.values()) | src_more,
+            set(tgt_ids) | {e for e in tgt_qnames.values() if e} | set(tgt_urns.values()) | tgt_more)
         return {"urn_to_eid": {**src_urns, **tgt_urns}, "qname_to_eid": {**src_qnames, **tgt_qnames},
                 "node_eids": set(src_ids) | set(tgt_ids), "edge_to_eid": edge_to_eid,
                 "current": await _payloads(snap, "edge", edge_to_eid.values())}
