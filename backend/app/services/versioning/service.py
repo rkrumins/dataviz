@@ -7021,7 +7021,7 @@ class GraphVersioningService:
             keep = changed <= config.CHANGE_LIST_MAX
             builder = ChangeIndexBuilder(cset, keep=keep)
             conn = await s.connection()
-            async for page in self._head_pages(conn, graph_id, branch_id):
+            async for page in self._head_row_pages(conn, graph_id, branch_id):
                 heads = await self._heads_from_rows(conn, graph_id, page)
                 before = await self._hashes_at(s, graph_id, main_id, list(heads), base)
                 await asyncio.to_thread(_add_draft_page, builder, heads, before)
@@ -10260,12 +10260,12 @@ class GraphVersioningService:
         result plus 200k ``_Head`` built in one go was half a second the loop served nothing else."""
         conn = await s.connection()
         heads: List[tuple] = []
-        async for page in self._head_pages(conn, graph_id, branch_id):
+        async for page in self._head_row_pages(conn, graph_id, branch_id):
             heads.extend(page)
         return await self._heads_from_rows(conn, graph_id, heads)
 
     @staticmethod
-    async def _head_pages(conn, graph_id: str, branch_id: str):
+    async def _head_row_pages(conn, graph_id: str, branch_id: str):
         """A branch's head-pointer rows (entity id, kind, version id, content hash, tombstone),
         ``_HEAD_PAGE`` at a time in entity-id order — a keyset on the primary key — for readers
         that classify a large draft a page at a time (:meth:`_head_index`, the change index)."""
