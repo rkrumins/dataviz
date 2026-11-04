@@ -36,6 +36,16 @@ than build it; **Technical** is the full toolset, as before. Business stays the 
   layer and source, and the properties its type features, such as an owner.
 - **Customize** in the details panel: show, hide and reorder sections for the view you're in, and
   choose the featured properties for each entity type. **Reset** puts them back.
+- **Display rules that colour and frame.** Besides its chip, a rule can colour the cards it matches
+  (**Colour the card**) and draw a frame round them (**Solid** or **Dashed**), and can leave its
+  chip off. The rule editor's **Appearance** shows a card as it will look, and the rule list says
+  what each rule paints. Chips still stack; where two rules colour or frame one card, the one
+  higher in the list wins. In Context View rows and on Graph and Hierarchy cards.
+- **Blue** and **slate** rule colours, for a status read at a glance — "starting points blue, the
+  rest grey" is a recipe in Display Rules.
+- API: a display rule carries an optional `style` — `{"chip": bool, "fill": bool, "frame":
+  "solid" | "dashed"}`. `PUT /api/v1/views/{view_id}/library/rules/{rule_id}`, library files and
+  `view-library.v1.json` accept it; any other `frame` is a `422`.
 
 ### Changed
 

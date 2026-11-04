@@ -194,6 +194,17 @@ function RuleCountLine({ enabled, count }: {
 }
 
 
+/** A rule's look beyond its chip, in words: "Tints · dashed frame · no chip". */
+function lookSummary(style: NonNullable<DisplayRuleConfig['style']>): string {
+    const parts = [
+        style.fill && 'tints',
+        style.frame && `${style.frame} frame`,
+        style.chip === false && 'no chip',
+    ].filter(Boolean) as string[]
+    const text = parts.join(' · ')
+    return text.charAt(0).toUpperCase() + text.slice(1)
+}
+
 function RuleCard({
     rule, isFirst, isLast, readOnly, onEdit, onToggle, onDelete, onReveal, onMoveUp, onMoveDown,
 }: {
@@ -279,6 +290,19 @@ function RuleCard({
                         {rule.icon && <DynamicIcon name={rule.icon} className="w-3 h-3 shrink-0" />}
                         <span className="truncate">{rule.name}</span>
                     </span>
+                    {rule.style && (rule.style.fill || rule.style.frame || rule.style.chip === false) && (
+                        <span className="ml-1.5 inline-flex items-center gap-1 align-middle text-[10.5px] text-ink-muted">
+                            <span
+                                aria-hidden
+                                className="inline-block h-3 w-4 rounded-[4px]"
+                                style={{
+                                    backgroundColor: rule.style.fill ? `${rule.color}26` : 'transparent',
+                                    ...(rule.style.frame && { outline: `1.5px ${rule.style.frame} ${rule.color}`, outlineOffset: -1.5 }),
+                                }}
+                            />
+                            {lookSummary(rule.style)}
+                        </span>
+                    )}
                     <div className="mt-1 text-[10.5px] text-ink-muted tabular-nums" aria-live="polite">
                         <RuleCountLine enabled={rule.enabled} count={count} />
                     </div>

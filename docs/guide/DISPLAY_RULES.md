@@ -3,8 +3,9 @@
 *For Builders.*
 
 A display rule puts a coloured tag on every entity that matches criteria you
-write — **PII**, **Needs owner**, **Certified** — so the canvas answers a
-question at a glance. This page shows you how to create rules, keep them in
+write — **PII**, **Needs owner**, **Certified** — and, if you choose, colours
+its card or draws a frame round it, so the canvas answers a question at a
+glance. This page shows you how to create rules, keep them in
 order, and share them with other Views.
 
 > **Before you start:** Rules belong to a View: everyone who opens it sees the
@@ -13,8 +14,9 @@ order, and share them with other Views.
 > [Who sees rules, and who can change them](#who-sees-rules-and-who-can-change-them).
 
 > **Note:** *The one-sentence model* — A rule is a **label, a colour, an
-> optional icon and a search**. Every entity the search matches, inside the
-> View, wears the rule's chip.
+> optional icon, a look and a search**. Every entity the search matches, inside
+> the View, wears the rule's chip — and its tint and frame, when the rule has
+> them.
 
 ---
 
@@ -40,18 +42,24 @@ order, and share them with other Views.
 | Part | What it does |
 | --- | --- |
 | **Tag label** | The chip's text. Unique in the View (ignoring case), up to 120 characters |
-| **Colour** | The chip's colour, from eight swatches |
+| **Colour** | The chip's colour — and the tint's and frame's — from ten swatches |
 | **Icon** | Optional: one of twelve icons (Tag, ShieldCheck, AlertTriangle, Star, Flag, Lock, Eye, Database, Users, Sparkles, CircleDot, Bookmark) |
+| **Appearance** | **Show the tag chip** (on unless you turn it off), **Colour the card** in the rule's colour, and a **Frame** round the card — **Solid** or **Dashed**. The preview shows a card as it will look |
 | **Criteria** | The same filters as [Advanced Search](/guide/advanced-search) — types, tags, properties, text, lineage shape, relationships, entities by name, groups |
 | **On / off** | A rule that's off is kept, but tags nothing |
 
 **Every rule that matches adds its chip** — there's no winner and no priority.
-The order of the rules is the order of the chips. An entity shows up to three
+The order of the rules is the order of the chips. A card has one tint and one
+frame, though: where two rules colour or frame the same card, **the one higher
+in the list wins** — move it up to choose. A rule needs at least one of a chip,
+a tint or a frame; with all three off, it can't be saved. An entity shows up to three
 chips; the rest collapse into **+N**, which lists them all on hover.
 
 A rule only ever tags entities **inside its View**, whatever its criteria say.
-Chips appear in the rows of a Context View and on the cards of the Graph and
-Hierarchy canvases (a Graph card at its smallest zoom leaves them out).
+Chips, tints and frames appear in the rows of a Context View and on the cards of
+the Graph and Hierarchy canvases (a Graph card at its smallest zoom leaves chips
+out). While a change in a draft, a trace or a focus decorates a card, it paints
+over the rule's tint and frame, and they come back when it ends.
 
 ---
 
@@ -276,6 +284,24 @@ follows lineage one hop.
 ]}}
 ```
 
+**Starting points blue, the rest grey.** Two rules colour the whole canvas by
+status. The first, `Starting point`, blue, **Colour the card** on and **Show the
+tag chip** off: `status` **is** `seed`. The second, `Standard`, slate, **Colour
+the card** on and the chip off: a **NOT group** around the same condition. Keep
+`Starting point` first, so it wins wherever both could apply.
+
+```json
+{"kind": "property", "key": "status", "op": "eq", "value": "seed"}
+```
+
+**Box the critical ones.** Red, **AlertTriangle**, **Frame → Dashed**: `tier`
+**is** `critical`. The frame draws a box round each match without hiding the
+card's own colour, and the chip says why.
+
+```json
+{"kind": "property", "key": "tier", "op": "eq", "value": "critical"}
+```
+
 ---
 
 ## Limits
@@ -306,6 +332,9 @@ follows lineage one hop.
 | A rule matches nothing | A property name or value differs, the rule names a type the View doesn't show, or the rule is off | **Show every match in search** and adjust the criteria there; check the switch |
 | A colleague doesn't see your new rule | Their View was open before you saved | They reopen the View |
 | Chips missing on the Graph canvas | Cards at the smallest zoom leave chips out | Zoom in |
+| A card shows the wrong rule's tint or frame | Another rule higher in the list colours or frames it too | Move the rule you want above the other |
+| A rule's tint or frame is missing on a card | A change in a draft, a trace or a focus is decorating that card | It comes back when the draft is published, the trace ends or the focus moves |
+| **Create rule** stays greyed out | The chip, the tint and the frame are all off, so the rule would show nothing | Turn one of them on |
 
 ---
 

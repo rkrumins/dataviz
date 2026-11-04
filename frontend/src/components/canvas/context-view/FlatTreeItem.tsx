@@ -26,6 +26,7 @@ import { SearchMatchBadge } from '../search/SearchMatchBadge'
 import { NarrowRowMark } from '@/features/narrow/NarrowRowMark'
 import { useSearchHighlight } from '../search/useSearchHighlight'
 import { DisplayRuleTagChips } from '../property-manager/DisplayRuleTagChips'
+import { useDisplayRuleLook } from '@/store/displayRuleMatchStore'
 import { NodeConnectionHandle } from './NodeConnectionHandle'
 import { useReparentNode } from './useReparentNode'
 import { LineEndTag } from './LineEndTag'
@@ -215,6 +216,10 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   // as the graph canvas, so "saved vs not" reads identically everywhere. Cascade (a descendant has a
   // staged change) keeps its muted left stripe.
   const directDeco = useEntityChangeDecoration().for(node.urn ?? node.id)
+  // How the view's display rules paint this card: a tint and a frame, each
+  // from the first rule in the list that matches. A change decoration
+  // (staged or committed) paints the same channels, and wins.
+  const ruleLook = useDisplayRuleLook(directDeco ? undefined : (node.urn ?? node.id))
   const isPendingDelete = directDeco?.status === 'removed'
   const stagedSummary = directChange?.summary
     ?? (directDeco?.state === 'committed' ? `${directDeco.status} vs main` : undefined)
@@ -423,6 +428,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
       data-selected={isSelected || undefined}
       data-canvas-interactive
       data-trace-focus={isFocusNode ? 'true' : 'false'}
+      data-rule-fill={ruleLook.fillColor ? '' : undefined}
       onDragOver={(e) => {
         // Accept a node drag (reparent / reorder). The id can't be read during
         // dragover, so we can't exclude self here — drop handlers guard that.
@@ -553,6 +559,14 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         // Subtle left border accent for root items
         ...(depth === 0 && {
           borderLeft: `3px solid ${nodeColor}40`,
+        }),
+        // A rule's tint (globals.css `.nx-row-card[data-rule-fill]`) and frame —
+        // drawn inside the card, so it never reaches a neighbouring row and
+        // changes no row's height.
+        ...(ruleLook.fillColor && { '--nx-rule-fill': ruleLook.fillColor } as React.CSSProperties),
+        ...(ruleLook.frameKind && {
+          outline: `2px ${ruleLook.frameKind} ${ruleLook.frameColor}`,
+          outlineOffset: -2,
         }),
       }}
       // Shift-click takes a range; without this the browser also paints a

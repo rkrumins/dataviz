@@ -489,6 +489,23 @@ export interface DisplayRuleConfig {
   /** Set by the server's library on a stored rule a rule may not be (one a
    *  bundle import or version restore stored as given): why. Never saved. */
   invalid?: string;
+  /** How the rule paints what it matches, besides its chip. Absent: the chip
+   *  alone, as every rule did before styles. */
+  style?: DisplayRuleStyle;
+}
+
+/**
+ * A display rule's look on the entities it matches. Chips stack — every
+ * matching rule adds its own — but a card has one tint and one frame: where
+ * two rules paint the same card, the one first in the view's list wins.
+ */
+export interface DisplayRuleStyle {
+  /** Show the rule's tag chip. Absent: shown. */
+  chip?: boolean;
+  /** Tint the card in the rule's colour. */
+  fill?: boolean;
+  /** Draw a frame round the card, in the rule's colour. */
+  frame?: 'solid' | 'dashed';
 }
 
 export interface LogicalNodeConfig {

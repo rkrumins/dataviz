@@ -73,6 +73,39 @@ async def test_rules_are_added_replaced_in_place_and_removed(test_client: AsyncC
     assert _names(view["config"]["layout"]["referenceLayout"]["displayRules"]) == ["PII data"]
 
 
+async def test_a_rule_keeps_how_it_paints_what_it_matches(test_client: AsyncClient):
+    """A rule's style — its chip on or off, a tint, a frame — is stored with it, read back as it
+    was written, and travels with it in a pack."""
+    view_id = await _view(test_client)
+    base = f"/api/v1/views/{view_id}/library"
+    style = {"chip": False, "fill": True, "frame": "dashed"}
+    resp = await test_client.put(f"{base}/rules/r1", json=_rule("r1", "Seed", style=style))
+    assert resp.status_code == 200, resp.text
+    assert resp.json()[0]["style"] == style
+    assert (await _library(test_client, view_id))["displayRules"][0]["style"] == style
+
+    pack = (await test_client.get(f"{base}/export")).json()
+    assert pack["displayRules"][0]["style"] == style
+    target = await _view(test_client, "Target")
+    done = await test_client.post(f"/api/v1/views/{target}/library/import",
+                                  params={"dryRun": "false"}, json=pack)
+    assert done.json()["library"]["displayRules"][0]["style"] == style
+
+
+async def test_a_rule_without_a_style_is_stored_without_one(test_client: AsyncClient):
+    view_id = await _view(test_client)
+    resp = await test_client.put(f"/api/v1/views/{view_id}/library/rules/r1", json=_rule("r1", "PII"))
+    assert resp.status_code == 200
+    assert "style" not in resp.json()[0]
+
+
+async def test_a_style_the_canvas_cannot_draw_is_refused(test_client: AsyncClient):
+    view_id = await _view(test_client)
+    resp = await test_client.put(f"/api/v1/views/{view_id}/library/rules/r1",
+                                 json=_rule("r1", "PII", style={"frame": "wavy"}))
+    assert resp.status_code == 422
+
+
 async def test_the_path_names_the_rule(test_client: AsyncClient):
     view_id = await _view(test_client)
     resp = await test_client.put(f"/api/v1/views/{view_id}/library/rules/r9", json=_rule("other", "PII"))

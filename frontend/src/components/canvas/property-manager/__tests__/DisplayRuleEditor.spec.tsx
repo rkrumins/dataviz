@@ -132,6 +132,48 @@ describe('DisplayRuleEditor', () => {
         expect(saved.predicate).toEqual(tagPredicate)
     })
 
+    it('saves no style for a chip alone — and the look it is given, shown before it is saved', async () => {
+        const user = userEvent.setup()
+        const onSave = vi.fn()
+        render(
+            <DisplayRuleEditor
+                {...props({ onSave })}
+                rule={{
+                    id: 'r1', name: 'Seed', color: '#3b82f6', predicate: tagPredicate,
+                    enabled: true, createdAt: '2026-01-01T00:00:00Z',
+                }}
+            />,
+        )
+        await user.click(screen.getByRole('button', { name: /save rule|create rule/i }))
+        expect(onSave.mock.calls[0][0].style).toBeUndefined()
+
+        await user.click(screen.getByRole('switch', { name: 'Colour the card' }))
+        await user.click(screen.getByRole('radio', { name: 'Dashed' }))
+        await user.click(screen.getByRole('switch', { name: 'Show the tag chip' }))
+        const preview = screen.getByTestId('rule-look-preview')
+        expect(preview.style.outline).toContain('dashed')
+        expect(preview.textContent).not.toContain('Seed')       // the chip is off
+
+        await user.click(screen.getByRole('button', { name: /save rule|create rule/i }))
+        expect(onSave.mock.calls[1][0].style).toEqual({ chip: false, fill: true, frame: 'dashed' })
+    })
+
+    it('will not save a rule that would show nothing', async () => {
+        const user = userEvent.setup()
+        render(
+            <DisplayRuleEditor
+                {...props()}
+                rule={{
+                    id: 'r1', name: 'Quiet', color: '#64748b', predicate: tagPredicate,
+                    enabled: true, createdAt: '2026-01-01T00:00:00Z',
+                }}
+            />,
+        )
+        await user.click(screen.getByRole('switch', { name: 'Show the tag chip' }))
+        expect(screen.getByText(/otherwise the rule shows nothing/)).toBeInTheDocument()
+        expect(screen.getByRole('button', { name: /save rule|create rule/i })).toBeDisabled()
+    })
+
     it('strips the FE-only uiScope hint from descendantOf before save', async () => {
         const user = userEvent.setup()
         const onSave = vi.fn()

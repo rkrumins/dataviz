@@ -683,6 +683,20 @@
     backdrop-filter: blur(4px);
   }
 
+  /* A display rule's tint (DisplayRuleStyle.fill): the card washed in the
+   * rule's colour, `--nx-rule-fill`, set on the card. A background COLOUR, so
+   * the state tints — background images — still paint over it. */
+  .nx-row-card[data-rule-fill] {
+    background-color: color-mix(in srgb, var(--nx-rule-fill) 14%, var(--nx-bg-canvas));
+  }
+  /* A dark ground needs more of the colour to read as the same tint. */
+  .dark .nx-row-card[data-rule-fill] {
+    background-color: color-mix(in srgb, var(--nx-rule-fill) 20%, var(--nx-bg-canvas));
+  }
+  [data-frosted-cards] .nx-row-card[data-rule-fill] {
+    background-color: color-mix(in srgb, var(--nx-rule-fill) 16%, transparent);
+  }
+
   /* Hover spotlight (LineageFlowOverlay, hoverSpotlight.ts). While a hover
    * lights an entity's connections, every other card dims; the overlay marks
    * the lit ones `data-spot-lit`, which restores them and adds this glow.

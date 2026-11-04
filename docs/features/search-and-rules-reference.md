@@ -661,11 +661,31 @@ primary data source; one outside the workspace is `404`) and `branchId`.
 | `predicate` | object | A predicate, [with restrictions](#what-a-rules-predicate-may-not-use) |
 | `enabled` | boolean (true) | Off: kept, not evaluated |
 | `createdAt` | string ≤ 64, optional | Stamped by the server; kept when a rule is replaced |
+| `style` | object, optional | How the rule paints what it matches, besides its chip — see [A rule's look](#a-rules-look). Absent: the chip alone |
 | `invalid` | read-only | On read only: why a stored rule can't run as a rule |
 
 Rules have no priority, description, owner or scope field. Narrow a rule with
 its predicate (`entityType`, `descendantOf`); the View's own boundary always
 applies.
+
+### A rule's look
+
+| `style` field | Type | Notes |
+| --- | --- | --- |
+| `chip` | boolean (true) | Show the rule's tag chip |
+| `fill` | boolean (false) | Tint each matching card in the rule's `color` |
+| `frame` | `"solid"` \| `"dashed"`, optional | Draw a box round each matching card, in the rule's `color` |
+
+Any other `frame` is a `422`. A rule saved without a `style` reads back without
+one, and the UI saves none for a chip alone. A `style` travels with its rule
+everywhere the rule goes: a library file, a View file, a draft's publish, a View
+version.
+
+```json
+{"id": "rule_seed", "name": "Starting point", "color": "#3b82f6", "enabled": true,
+ "style": {"chip": false, "fill": true},
+ "predicate": {"kind": "property", "key": "status", "op": "eq", "value": "seed"}}
+```
 
 ### What a rule's predicate may not use
 
@@ -691,12 +711,17 @@ sent to be matched.
 ### How rules are evaluated
 
 - **All-match.** Every enabled rule that matches adds its chip; the rules'
-  order is the chips' order.
+  order is the chips' order. A rule with `chip: false` adds none.
+- **First-match for the look.** A card has one tint and one frame: the first
+  enabled rule in the list that matches it with `fill` gives the tint, and the
+  first with a `frame` gives the frame. A change decoration on a draft, a trace
+  or a focus paints over both while it lasts.
 - **Always in the View.** Membership and counts resolve the View's scope on the
   server; an entity outside the View never matches.
 - **Chips** come from `POST /search/membership` for the entities loaded on the
   canvas, in batches of up to 1,000 URNs × 32 rules, asked again when a rule's
-  predicate or the set of enabled rules changes (not on a rename or recolour).
+  predicate or the set of enabled rules changes (not on a rename, a recolour or
+  a change of its look).
 - **Counts** come from `POST /search/counts` in groups of 32, repeated with the
   returned `sessions` until complete.
 

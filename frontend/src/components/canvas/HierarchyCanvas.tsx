@@ -18,6 +18,7 @@ import { useSchemaStore, isContainmentEdgeType } from '@/store/schema'
 import { useViewContainmentEdgeTypes, useViewLineageEdgeTypes, useViewRelationshipTypes } from '@/hooks/useViewSchema'
 import { useCanvasStore } from '@/store/canvas'
 import { useOpensDetailsOnSelect } from '@/store/detailsOnSelect'
+import { useDisplayRuleLook } from '@/store/displayRuleMatchStore'
 import { useFeature } from '@/store/features'
 import { useSearchStore } from '@/store/searchStore'
 import { useGraphHydration } from '@/hooks/useGraphHydration'
@@ -742,6 +743,9 @@ function HierarchyContainer({
   // Trace highlighting
   const isHighlighted = isTraceActive && traceContextSet.has(node.id)
   const isFocusNode = traceFocusId === node.id
+  // The view's display rules: a tint and a frame for this card. A focus, a
+  // trace highlight or a change decoration paints the same card, and wins.
+  const ruleLook = useDisplayRuleLook(changeDeco || isFocusNode || isHighlighted ? undefined : (node.urn ?? node.id))
   const isDimmed = (isTraceActive && !isHighlighted) || isSpotlightDim
 
   // Canvas filter Isolate / Hide modes drop this row entirely. Same
@@ -813,6 +817,13 @@ function HierarchyContainer({
           borderColor: isFocusNode ? '#fbbf24' : isHighlighted ? '#c084fc' : visual?.color ?? '#6b7280',
           borderLeftWidth: '4px',
           ['--tw-ring-color' as string]: isFocusNode ? '#fbbf24' : isHighlighted ? '#c084fc' : visual?.color ?? '#6b7280',
+          ...(ruleLook.fillColor && {
+            backgroundColor: `color-mix(in srgb, ${ruleLook.fillColor} 14%, var(--nx-bg-elevated))`,
+          }),
+          ...(ruleLook.frameKind && {
+            outline: `2px ${ruleLook.frameKind} ${ruleLook.frameColor}`,
+            outlineOffset: 2,
+          }),
         }}
       >
         {/* Header (always visible) */}

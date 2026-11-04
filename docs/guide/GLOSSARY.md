@@ -31,7 +31,7 @@ screen.
 | **Data health** | A tab of a view's versioning panel, shown only to people who manage the data source. It checks the graph against its published versions and can rebuild it. | [Data Freshness & Ingestion](/guide/data-freshness) |
 | **Data source** | A graph added to a workspace together with the semantic layer that describes it. Every view is built on one. | [Admin Setup](/guide/admin-setup) |
 | **Density** | The Lineage Lens control for how much is folded away: **Overview**, **Grouped** or **Every card**. | [The Lineage Lens & Context View](/guide/lineage-lens) |
-| **Display rule** | A rule that tags every entity matching a search with a coloured chip; found under **Properties → Display rules**. | [Display Rules](/guide/display-rules) |
+| **Display rule** | A rule that tags every entity matching a search with a coloured chip — and, if you choose, colours its card or frames it; found under **Properties → Display rules**. | [Display Rules](/guide/display-rules) |
 | **Downstream** | What a piece of data feeds — follow the arrows forwards. | [Reading Lineage](/guide/reading-lineage) |
 | **Draft** | Your private working copy of a data source's graph. Edits go there; the published version stays untouched until the draft is published. | [Editing in a Draft](/guide/editing-in-a-draft) |
 | **Drift** | Something changed after it was last built. **Graph Drift Detected** means the graph changed since its last aggregation. | [Data Freshness & Ingestion](/guide/data-freshness) |
