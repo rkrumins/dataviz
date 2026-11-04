@@ -556,6 +556,26 @@ def _staged_result(row: ViewORM, branch_id: str, staged: Dict[str, Any], *, repl
     }
 
 
+def _with_import_placements(layout: dict, overlay_layout: Optional[str]) -> dict:
+    """``layout`` plus the roots an import placed in the draft's copy of the view
+    (``assignedBy: 'import'``) that it does not place itself, in a layer it has. A package's data
+    job runs before its view is staged and places the roots it created there; the file's layout
+    never names them, so writing it over the copy would leave them on no layer."""
+    try:
+        before = json.loads(overlay_layout) if overlay_layout else None
+    except ValueError:
+        return layout
+    placed = before.get("assignments") if isinstance(before, dict) else None
+    if not isinstance(placed, dict) or not isinstance(layout.get("layers"), list):
+        return layout
+    layers = {layer.get("id") for layer in layout["layers"] if isinstance(layer, dict)}
+    own = layout.get("assignments") if isinstance(layout.get("assignments"), dict) else {}
+    kept = {urn: entry for urn, entry in placed.items()
+            if urn not in own and isinstance(entry, dict) and entry.get("assignedBy") == "import"
+            and entry.get("layerId") in layers}
+    return {**layout, "assignments": {**own, **kept}} if kept else layout
+
+
 async def stage_update(
     session: AsyncSession,
     item: ImportItem,
@@ -590,6 +610,7 @@ async def stage_update(
     def encoded() -> Tuple[str, str, Any, str, str, Any, str]:
         base_rest, base_layout, base_scope = split_definition(published.definition)
         rest, layout, scope = split_definition(definition)
+        layout = _with_import_placements(layout, overlay.reference_layout)
         return (json.dumps(base_rest), json.dumps(base_layout), base_scope,
                 json.dumps(rest), json.dumps(layout), scope, content_hash(definition))
 

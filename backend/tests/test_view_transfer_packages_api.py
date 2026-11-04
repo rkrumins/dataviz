@@ -440,6 +440,30 @@ async def test_a_packages_data_is_imported_where_it_is_into_any_target(
     assert row.draft_branch_id == started["branchId"]
 
 
+async def test_a_packages_data_for_a_view_places_what_it_creates_in_that_view(
+        test_client, db_session, graph, services, small_parts):
+    """Into a view (an update), the data job is scoped to it: the roots it creates are placed in
+    the draft's copy of that view, which the view staged after it keeps. Into none, it places none."""
+    versioning, jobs = services
+    dev, uat = await _workspace(test_client, "Dev"), await _workspace(test_client, "UAT")
+    ds = await _data_source(db_session, uat)
+    versioning.track(uat, ds)
+    upload = await _upload(test_client, await _package_file(test_client, await _view(test_client, dev)))
+    await jobs.inspect_queued()
+    here = await _view(test_client, uat)
+    (await db_session.get(ViewORM, here)).data_source_id = ds
+    await db_session.flush()
+
+    url = f"{_TRANSFER}/packages/{upload}/data"
+    into_view = await test_client.post(url, json={"workspaceId": uat, "dataSourceId": ds, "viewId": here})
+    assert into_view.status_code == 200, into_view.text
+    plain = await test_client.post(url, json={"workspaceId": uat, "dataSourceId": ds})
+    assert plain.status_code == 200, plain.text
+    by_key = {j["idempotency_key"]: j for j in jobs.of("imp")}
+    assert by_key[f"pkgdata:{upload}:{here}"]["scope_view_id"] == here
+    assert by_key[f"pkgdata:{upload}:-"]["scope_view_id"] is None
+
+
 async def test_an_upload_near_its_expiry_takes_no_new_import(
         test_client, db_session, graph, services, small_parts, monkeypatch):
     versioning, jobs = services
