@@ -312,6 +312,11 @@ export interface DiffResponse {
 export interface DiffEntry {
   entityId: string
   kind: 'node' | 'edge'
+  /** A node's urn — what the canvas names it by, which an entity id need not be (an import's). */
+  urn?: string
+  /** An edge's ends by urn; its payload names them by entity id. */
+  sourceUrn?: string
+  targetUrn?: string
   before?: Record<string, unknown> | null
   after?: Record<string, unknown> | null
 }
@@ -584,6 +589,35 @@ export class OntologyViolationError extends Error {
   }
 }
 
+/** One value a field must hold uniquely, shared on publish: the type, the field, the value, and
+ *  the entities holding it. */
+export interface UniqueViolation {
+  type: string
+  field: string
+  value: unknown
+  entities: string[]
+}
+
+/** "sap_id 'X' is used by 3 Table entities" — one shared value, as the publish refusal names it. */
+export function describeUniqueViolation(v: UniqueViolation): string {
+  return `${v.field} '${String(v.value)}' is used by ${v.entities.length} ${v.type} entities`
+}
+
+/** A publish refused because values that must be unique (a field the ontology marks so) are shared.
+ *  Nothing was published. `total`: how many such values there are — `violations` may list fewer. */
+export class UniqueViolationError extends Error {
+  violations: UniqueViolation[]
+  total: number
+  constructor(violations: UniqueViolation[], total?: number) {
+    const n = total ?? violations.length
+    super(`${n === 1 ? 'A value that must be unique is' : `${n} values that must be unique are`} used more than once. `
+      + violations.slice(0, 2).map(describeUniqueViolation).join('; '))
+    this.name = 'UniqueViolationError'
+    this.violations = violations
+    this.total = n
+  }
+}
+
 /** A fork's review merges only up to date with its parent: the parent has changed since the fork
  *  last took its changes, so it updates from its parent first. `behind`: the entities the parent
  *  changed that the fork has not taken in; `graphId`: the fork. Not a draft's NotUpToDateError: a
@@ -847,6 +881,9 @@ function versioningError(status: number, detail: RefusalDetail, fallback: string
   }
   if (status === 422 && d?.type === 'ontology_violation') {
     return new OntologyViolationError(d.violations ?? [])
+  }
+  if (status === 409 && d?.type === 'unique_violation') {
+    return new UniqueViolationError((d.violations ?? []) as unknown as UniqueViolation[], d.total)
   }
   if (status === 409 && d?.type === 'not_up_to_date' && d.reason === 'parent_moved') {
     return new ForkNotUpToDateError(d)
@@ -1593,6 +1630,10 @@ export interface GraphChangesResult {
   entities?: Record<string, EntityView>
   /** The save touched more entities than it answers for; re-read the rest. */
   entitiesTruncated?: boolean
+  /** The version token of EVERY entity the save wrote — past the `entities` cap too — keyed as
+   *  `entities` is: a node by the name the save sent (its urn), an edge by the id it was written
+   *  under (`edge:X` for an edge the canvas calls `X`). */
+  versions?: Record<string, string | null>
 }
 
 /**

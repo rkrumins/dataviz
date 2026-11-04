@@ -29,6 +29,8 @@ export function entityDefToSchema(id: string, def: Record<string, unknown>): Ent
       showInPanel: (f.show_in_panel as boolean) ?? true,
       showInTooltip: (f.show_in_tooltip as boolean) ?? false,
       displayOrder: (f.display_order as number) ?? 0,
+      reconciliationKey: ((f.reconciliation_key ?? f.reconciliationKey) as boolean) ?? false,
+      unique: (f.unique as boolean) ?? false,
     })),
     hierarchy: {
       level: (hierarchy.level as number) ?? 0,
@@ -86,6 +88,9 @@ export function entitySchemaToBackend(et: EntityTypeSchema): Record<string, unkn
       show_in_panel: f.showInPanel,
       show_in_tooltip: f.showInTooltip,
       display_order: f.displayOrder,
+      // Stored only when on (off is the default): a type saved unchanged must read as unchanged.
+      ...(f.reconciliationKey ? { reconciliation_key: true } : {}),
+      ...(f.unique ? { unique: true } : {}),
     })),
   }
 }

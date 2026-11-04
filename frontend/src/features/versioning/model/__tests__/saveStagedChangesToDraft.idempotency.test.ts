@@ -93,6 +93,14 @@ describe('saveStagedChangesToDraft — Idempotency-Key', () => {
     expect(opsOf(2)).toEqual([{ op: 'update', kind: 'edge', id: 'e1', payload: { properties: { a: 2 } }, baseVersion: 'v1' }])
   })
 
+  it('takes that token from `versions` when the save wrote more entities than `entities` answers for', async () => {
+    mockApply.mockRejectedValueOnce(timeout())
+    await expect(saveStagedChangesToDraft([edgeEdit(1)], target)).rejects.toThrow()
+    mockApply.mockResolvedValueOnce({ commitId: 'x', assigned: {}, entities: {}, versions: { e1: 'v1' } } as never)
+    await saveStagedChangesToDraft([edgeEdit(2)], target)
+    expect(opsOf(2)).toEqual([{ op: 'update', kind: 'edge', id: 'e1', payload: { properties: { a: 2 } }, baseVersion: 'v1' }])
+  })
+
   it('renames the entity an unanswered save created when the create was renamed since — never creates it twice', async () => {
     const TEMP = 'urn:staged:1'
     const create: StagedChange = {

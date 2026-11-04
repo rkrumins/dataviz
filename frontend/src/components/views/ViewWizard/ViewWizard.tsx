@@ -120,6 +120,7 @@ import { DataTargetToggle, MadeSourceCard, NewSourceTargetPanel, type NewSourceD
 import { PackageOntologyPicker } from './import/PackageOntologyPicker'
 import { NewSourceSeedStep } from './import/NewSourceSeedStep'
 import { PublishDraftDialog } from '@/features/versioning/components/PublishDraftDialog'
+import { VERSIONING_KEYS } from '@/features/versioning/hooks/useVersioning'
 import { ImportStep } from './import/ImportStep'
 import { PackageDataStep } from './import/PackageDataStep'
 import { ReconcileStep } from './import/ReconcileStep'
@@ -1532,7 +1533,10 @@ function ViewWizardBody({
                 createdBranchRef.current = result.staged?.branchId ?? null
                 setImportResult(result)
                 const saved = viewToViewConfig(result.view)
-                useSchemaStore.getState().addOrUpdateView(saved)
+                // An update waiting in a draft is the draft's view: in the view store it would show on
+                // whatever branch the canvas has open, Published included. The view opens on its draft,
+                // which reads it from there.
+                if (!(isImportUpdate && result.staged)) useSchemaStore.getState().addOrUpdateView(saved)
                 createdViewRef.current = saved
                 invalidateViewVersions(queryClient, result.viewId)
                 // Its display rules are the file's: a canvas that has it open reads them again.
@@ -1894,13 +1898,16 @@ function ViewWizardBody({
     // user just asked for.
     const handleOpenNow = useCallback(() => {
         const id = createdViewIdRef.current
-        // A view waiting in a draft opens on that draft.
+        // A view waiting in a draft opens on that draft. The draft may be new: the branch lists the
+        // `?branch=` link is checked against are read again first, or a list cached before the
+        // import turns the link away as a draft that isn't there.
         const branch = createdBranchRef.current
+        if (branch) void queryClient.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'branches'] })
         if (id) navigate(branch ? `/views/${id}?branch=${branch}` : `/views/${id}`)
         const saved = createdViewRef.current
         if (saved) onComplete?.(saved)
         onClose()
-    }, [navigate, onComplete, onClose])
+    }, [navigate, onComplete, onClose, queryClient])
 
     const handleStayHere = useCallback(() => {
         const saved = createdViewRef.current

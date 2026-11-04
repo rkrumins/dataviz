@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest'
 import {
   assignEntities,
   unassignEntities,
-  remapAssignmentUrn,
+  remapAssignmentUrns,
   pruneTempAssignments,
   isTempUrn,
   setAssignmentOrderKey,
@@ -85,23 +85,34 @@ describe('assignmentMutations — unassignEntities', () => {
   })
 })
 
-describe('assignmentMutations — remapAssignmentUrn', () => {
+describe('assignmentMutations — remapAssignmentUrns', () => {
   it('moves an existing entry from old to new key', () => {
     const before = layout({ 'urn:staged:a': { layerId: 'l1', inheritsChildren: true, assignedBy: 'user' } })
-    const next = remapAssignmentUrn(before, 'urn:staged:a', 'urn:real:a')
+    const next = remapAssignmentUrns(before, new Map([['urn:staged:a', 'urn:real:a']]))
     expect(next.assignments['urn:staged:a']).toBeUndefined()
     expect(next.assignments['urn:real:a']).toMatchObject({ layerId: 'l1', assignedBy: 'user' })
   })
 
   it('is a no-op when the old key is not assigned (returns input unchanged)', () => {
     const before = layout({ 'urn:other': { layerId: 'l1', inheritsChildren: true } })
-    const next = remapAssignmentUrn(before, 'urn:missing', 'urn:real')
+    const next = remapAssignmentUrns(before, new Map([['urn:missing', 'urn:real']]))
     expect(next).toBe(before)
   })
 
   it('is a no-op when old === new', () => {
     const before = layout({ 'urn:a': { layerId: 'l1', inheritsChildren: true } })
-    expect(remapAssignmentUrn(before, 'urn:a', 'urn:a')).toBe(before)
+    expect(remapAssignmentUrns(before, new Map([['urn:a', 'urn:a']]))).toBe(before)
+  })
+
+  it('re-keys every entry a save created in one copy, and leaves the rest', () => {
+    const before = layout({
+      'urn:staged:a': { layerId: 'l1', inheritsChildren: true },
+      'urn:staged:b': { layerId: 'l2', inheritsChildren: true },
+      'urn:kept': { layerId: 'l1', inheritsChildren: true },
+    })
+    const next = remapAssignmentUrns(before, new Map([['urn:staged:a', 'urn:real:a'], ['urn:staged:b', 'urn:real:b']]))
+    expect(Object.keys(next.assignments).sort()).toEqual(['urn:kept', 'urn:real:a', 'urn:real:b'])
+    expect(next.assignments['urn:real:b'].layerId).toBe('l2')
   })
 })
 
@@ -136,7 +147,7 @@ describe('assignmentMutations — create -> move -> undo (documents the ContextV
     const afterCreate = assignEntities(layout(), ['urn:staged:x'], 'A')
     const afterMove = assignEntities(afterCreate, ['urn:staged:x'], 'B')
 
-    const remapped = remapAssignmentUrn(afterMove, 'urn:staged:x', 'urn:real:x')
+    const remapped = remapAssignmentUrns(afterMove, new Map([['urn:staged:x', 'urn:real:x']]))
     expect(remapped.assignments['urn:staged:x']).toBeUndefined()
     expect(remapped.assignments['urn:real:x'].layerId).toBe('B')
   })
@@ -197,7 +208,7 @@ describe('assignmentMutations — orderKey (custom node ordering)', () => {
 
   it('orderKey survives temp→real urn remap (created node keeps its slot after Save)', () => {
     const before = layout({ 'urn:staged:table:x': entry('l1', 'a2') })
-    const next = remapAssignmentUrn(before, 'urn:staged:table:x', 'urn:real:table:x')
+    const next = remapAssignmentUrns(before, new Map([['urn:staged:table:x', 'urn:real:table:x']]))
     expect(next.assignments['urn:real:table:x'].orderKey).toBe('a2')
     expect(next.assignments['urn:staged:table:x']).toBeUndefined()
   })

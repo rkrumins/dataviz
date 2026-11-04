@@ -194,10 +194,12 @@ export function stagedChangesToOps(
         const before = asObj(asObj(c.before).edge)
         const after = asObj(asObj(c.after).edge)
         if (before.id) ops.push({ op: 'delete', kind: 'edge', id: String(before.id) })
+        // Under the canvas's temp ref, as a drawn link is: the server mints its id (an id made up
+        // here could be one the graph already holds) and answers it in `assigned`.
         ops.push({
           op: 'create',
           kind: 'edge',
-          id: c.targetId,
+          ref: c.targetId,
           payload: {
             edgeType: after.edgeType ?? asObj(after.data).edgeType,
             sourceEntityId: after.source != null ? resolveId(String(after.source)) : after.source,

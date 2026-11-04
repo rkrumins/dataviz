@@ -27,7 +27,7 @@
  * `duplicateSubtree` is both at once with today's defaults (⌘D).
  */
 import { useCallback } from 'react'
-import { useCanvasStore } from '@/store/canvas'
+import { useCanvasStore, type LineageEdge } from '@/store/canvas'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { useStageEntityCreation } from '@/components/canvas/create/useStageEntityCreation'
 import { useGraphHydration } from '@/hooks/useGraphHydration'
@@ -346,13 +346,15 @@ export function useDuplicateSubtree(opts?: UseDuplicateSubtreeOptions): UseDupli
       if (!src || !tgt) continue
 
       const tempId = generateId('staged-edge')
-      useCanvasStore.getState().addEdges([{
+      const copy: LineageEdge = {
         id: tempId,
         source: src,
         target: tgt,
         type: 'lineage',
-        data: { edgeType: edgeStep.edgeType, relationship: edgeStep.edgeType.toLowerCase() },
-      }])
+        // Unsaved, as a drawn link is: a collapse keeps it, the save redraws it under its real id.
+        data: { edgeType: edgeStep.edgeType, relationship: edgeStep.edgeType.toLowerCase(), isPending: 'create' },
+      }
+      useCanvasStore.getState().addEdges([copy])
       useStagedChangesStore.getState().stage({
         type: 'create_edge',
         targetId: tempId,
@@ -366,6 +368,7 @@ export function useDuplicateSubtree(opts?: UseDuplicateSubtreeOptions): UseDupli
           if (!res.success) throw new Error(res.error || 'Failed to create edge')
         },
         discard: () => useCanvasStore.getState().removeEdge(tempId),
+        reapply: () => useCanvasStore.getState().addEdges([copy]),   // redo draws it again
       })
     }
 

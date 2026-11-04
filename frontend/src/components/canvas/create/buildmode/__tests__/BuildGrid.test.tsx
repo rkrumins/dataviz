@@ -14,6 +14,7 @@ import { describe, it, expect, beforeEach, beforeAll, vi } from 'vitest'
 import { compilePlacementSpec, factsFromCanvasData, suggestPlacement } from '@/lib/placement/placement'
 import type { EntityTypeSchema, ViewLayerConfig } from '@/types/schema'
 import { useReferenceModelStore } from '@/store/referenceModelStore'
+import { useNotificationStore } from '@/components/ui/notifications'
 import { useBuildRowsStore } from '../buildRowsStore'
 import { makeRow, type BuildRow } from '../buildRow'
 import type { ContractRowLayer } from '../BuildPanel'
@@ -255,5 +256,41 @@ describe('BuildGrid selection', () => {
     fireEvent.click(screen.getByRole('button', { name: /delete/i }))
 
     expect(useBuildRowsStore.getState().rows.map((r) => r.id)).toEqual(['b'])
+  })
+})
+
+// A block copied from a spreadsheet: its cells land across the Grid's columns, its extra lines
+// become rows — and anything left out is said, not dropped.
+describe('BuildGrid paste', () => {
+  beforeEach(() => {
+    useBuildRowsStore.getState().reset()
+    useNotificationStore.setState({ notifications: [], history: [] } as never)
+  })
+
+  const paste = (input: HTMLElement, text: string) =>
+    fireEvent.paste(input, { clipboardData: { getData: () => text } })
+
+  it('splits columns into the Grid’s columns and adds rows for the extra lines', () => {
+    useBuildRowsStore.getState().setRows([makeRow({ id: 'a', name: 'Alpha' })])
+    render(<BuildGrid rows={useBuildRowsStore.getState().rows} typeById={typeById} />)
+
+    paste(screen.getByDisplayValue('Alpha'), 'Sales\tDomain\r\nOps\tdomain\r\n')
+
+    const rows = useBuildRowsStore.getState().rows
+    expect(rows.map((r) => [r.name, r.typeId])).toEqual([['Sales', 'domain'], ['Ops', 'domain']])
+    expect(useNotificationStore.getState().notifications).toEqual([])
+  })
+
+  it('says what it left out', () => {
+    useBuildRowsStore.getState().setRows([makeRow({ id: 'a', name: 'Alpha' })])
+    render(<BuildGrid rows={useBuildRowsStore.getState().rows} typeById={typeById} />)
+
+    paste(screen.getByDisplayValue('Alpha'), 'Sales\tWidget\t\t\tTop\tExtra')
+
+    expect(useBuildRowsStore.getState().rows[0]).toMatchObject({ name: 'Sales', typeId: null, description: 'Top' })
+    const [note] = useNotificationStore.getState().notifications
+    expect(note.type).toBe('warning')
+    expect(note.message).toMatch(/1 cell past the last column/)
+    expect(note.message).toMatch(/1 value that names no type, row or layer here/)
   })
 })

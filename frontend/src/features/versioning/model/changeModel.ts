@@ -30,8 +30,14 @@ export type ChangeOrigin =
   | { source: 'pr'; prId: string }
 
 export interface GraphChange {
-  /** Stable id of the entity: node URN / entityId, or edge id. The canvas keys tints by this. */
+  /** Stable id of the entity: node URN / entityId, or edge id. */
   entityId: string
+  /** A node's urn, when it differs from — or may differ from — its entity id: the canvas names a
+   *  node by its urn, so this is what it is looked up by (see `ChangeSet.byEntityId`). */
+  urn?: string
+  /** An edge's ends by urn — the canvas's names for them (its payload names them by entity id). */
+  sourceUrn?: string
+  targetUrn?: string
   kind: ChangeKind
   status: ChangeStatus
   /** Human label for the structured panel. */
@@ -52,7 +58,8 @@ export interface ChangeCounts {
 
 export interface ChangeSet {
   changes: GraphChange[]
-  /** O(1) lookup the canvas uses per node/edge to pick a tint / decide a ghost. */
+  /** O(1) lookup the canvas uses per node/edge to pick a tint / decide a ghost — by the canvas's id:
+   *  a node's urn (`urn ?? entityId`), an edge's id. */
   byEntityId: Map<string, GraphChange>
   counts: ChangeCounts
   origin: ChangeOrigin['source'] | 'mixed' | 'empty'
@@ -71,7 +78,7 @@ export function buildChangeSet(changes: GraphChange[]): ChangeSet {
   const counts: ChangeCounts = { added: 0, removed: 0, modified: 0 }
   for (const c of changes) {
     // Last write wins for the canvas index — a node can only carry one tint.
-    byEntityId.set(c.entityId, c)
+    byEntityId.set(c.urn ?? c.entityId, c)
     counts[c.status] += 1
   }
   const sources = new Set(changes.map((c) => c.origin.source))
