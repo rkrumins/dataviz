@@ -27,6 +27,8 @@ screens that open a revision and compare two come next.
   - Opening the same revision again after the graph moved on adds what changed since, rather
     than starting over.
   - Its answers are cached per revision, apart from the graph as it is now.
+  - Edge ends are named by urn, as the graph store names them, also where an imported node's id
+    is not its urn. A draft's read undoes main's later changes the same way.
 - **What a revision can't answer, it refuses.**
   - A write, or a read that plans one, answers 409 `revision_read_only`.
   - Search, traces, Narrow, subset-view layers, metadata and statistics read the graph as it is

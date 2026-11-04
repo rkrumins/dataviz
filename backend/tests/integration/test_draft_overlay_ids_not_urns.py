@@ -118,3 +118,26 @@ def test_the_slim_diff_names_entities_and_edge_ends_by_urn():
         removed, = diff["removed"]
         assert (removed["sourceUrn"], removed["targetUrn"]) == ("urn:T", "urn:L")
     _run(case)
+
+
+def test_main_moving_on_after_the_draft_is_rewound_by_urn():
+    """The rewind — main's changes since the draft branched off, undone in the draft's read — is
+    told from version rows, which name an edge's ends by entity id: an edge main added between
+    imported nodes is hidden, and one it deleted is back, under their urns."""
+    async def case(svc):
+        gid, _main, draft = await _seeded(svc)
+        await svc.apply_ops(graph_id=gid, actor="alice", message="main moves on",
+                            containment_edge_types=CONT,
+                            ops=[_edge("ent_lPL", "ent_P", "ent_L", "LINEAGE"),
+                                 _d("ent_cT", kind="edge")])
+        delta = await svc.branch_overlay_delta(graph_id=gid, branch_id=draft)
+        hidden = {e["id"]: (e["sourceUrn"], e["targetUrn"]) for e in delta["edgesRemove"]}
+        back = {e["id"]: (e["sourceUrn"], e["targetUrn"]) for e in delta["edgesUpsert"]}
+        assert hidden["ent_lPL"] == ("urn:P", "urn:L"), delta
+        assert back["ent_cT"] == ("urn:P", "urn:T"), delta
+        # And a reader of the draft sees the draft's main: T still under P, no P → L.
+        overlay = _overlay(svc, gid, _main, draft)
+        edges = await overlay.get_edges(EdgeQuery(any_urns=["urn:P"], limit=100))
+        assert ("ent_cT", "urn:P", "urn:T", "CONTAINS") in _ends(edges)
+        assert not any(e.id == "ent_lPL" for e in edges)
+    _run(case)
