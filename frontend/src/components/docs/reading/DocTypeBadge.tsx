@@ -73,6 +73,7 @@ export const DOC_TYPES: Record<string, DocType> = {
   'versioning-shared-contracts': 'reference',
   'versioning-go-live-stages-1-2': 'explanation',
   'versioning-forks-and-residency': 'explanation',
+  'versioning-identity': 'reference',
   'testing-and-ci': 'reference',
   configuration: 'reference',
   'sso-backchannel-contract': 'reference',

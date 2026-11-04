@@ -605,6 +605,13 @@ export const docEntries: DocEntry[] = [
     importFn: () => import('@docs/versioning/17-forks-and-residency.md?raw'),
   },
   {
+    slug: 'versioning-identity',
+    section: 'versioning',
+    title: 'Versioning: Entity Identity',
+    description: 'Every id one standard, urn:uuid: how ids are minted and derived, retries, and properties by import, export and API',
+    importFn: () => import('@docs/versioning/18-identity.md?raw'),
+  },
+  {
     slug: 'versioning-e2e',
     section: 'versioning',
     title: 'Versioning: End-to-End Walkthrough',
