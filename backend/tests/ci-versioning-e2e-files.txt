@@ -58,6 +58,7 @@ tests/integration/test_import_branch_validation.py
 tests/integration/test_import_draft_identity.py
 tests/integration/test_import_idempotency_live.py
 tests/integration/test_import_one_active.py
+tests/integration/test_import_pointers.py
 tests/integration/test_import_resume_e2e.py
 tests/integration/test_import_windows.py
 tests/integration/test_import_worker.py

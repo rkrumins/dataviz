@@ -144,9 +144,12 @@ def test_no_layers_means_nothing_to_place():
 # ── the worker collects what the contract reads ─────────────────────────
 
 async def test_worker_derives_the_row_facts(monkeypatch):
-    """From the created node rows as staged; a create's PROP_DELETE marker is no property."""
+    """From the created node rows as staged, each keyed by the urn its node was stored with (the
+    file's urn is a pointer); a create's PROP_DELETE marker is no property."""
     results = [[("ent_1", "urn:x", "l1", "table", "X", ["pii"],
-                 {"owner": "finance", "gone": PROP_DELETE})], []]  # node rows, then edge ids
+                 {"owner": "finance", "gone": PROP_DELETE})],    # node rows,
+               [("ent_1", "urn:uuid:stored")],                    # their stored urns,
+               []]                                                 # then edge ids
 
     class _Session:
         async def execute(self, _stmt):
@@ -161,7 +164,7 @@ async def test_worker_derives_the_row_facts(monkeypatch):
     worker = ImportWorker(versioning=None, store=None)
     await worker._derive_facts("vjob_1", "g1", "br1")
     assert worker.created_node_facts == [{
-        "eid": "ent_1", "urn": "urn:x", "layer_signal": "l1", "entity_type": "table",
+        "eid": "ent_1", "urn": "urn:uuid:stored", "layer_signal": "l1", "entity_type": "table",
         "display_name": "X", "tags": ["pii"], "properties": {"owner": "finance"}}]
 
 

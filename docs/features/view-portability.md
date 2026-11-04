@@ -251,6 +251,13 @@ The importer's **resolutions** (`remap`, `drop`, `typeMap`, `dropTypes`, `relTyp
 `dropRelTypes`) are applied *before* reconciling, so the report always describes the definition
 that would be written.
 
+**Checked against a draft** (`target.branchId`), a URN the draft doesn't hold is looked for again
+as the id an import derives from it: an import names a new node by a `urn:uuid:` derived from the
+file's urn, which is only a pointer ([18 · Identity](../versioning/18-identity.md)). A hit is
+remapped automatically, before the report, so a package's view finds the nodes its data was
+imported as. A "View only" import checked against published data gets no such second look: remap
+by hand on the Match step.
+
 ### 3. Import
 
 `POST /api/v1/views/transfer/import` writes one view per call, in one transaction: the view, its
@@ -368,7 +375,8 @@ download is named for the package.
    request asks for `another` copy on purpose. The copy skips the platform's rollup connections
    (`AGGREGATED`), which are rebuilt from the others, and its report counts them.
 3. The view is reconciled against **that draft** (`target.branchId`), so the entities the data
-   brought count as found, then imported into it with `stage` set. A new view claims the draft as
+   brought count as found — under the ids the import derived from the package's urns, onto which
+   the view's urns are remapped — then imported into it with `stage` set. A new view claims the draft as
    its own. The view and its data are reviewed and published together.
 
 A package brings its data with **one** view, because a draft belongs to one view. The other views

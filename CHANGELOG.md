@@ -9,6 +9,54 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — The ids a file carries are pointers; importing it again changes nothing
+
+### Changed
+
+- **A file's urns and identifier values are pointers, not stored.** A row's `urn`, and its value
+  of the data source's identifier property, find the node that carries one as its urn, or the node
+  an earlier import made from it. A new node's id is a `urn:uuid:` v5 derived from its first pointer
+  and the data source (at the root of the graph's fork lineage).
+  - So the same file imported again creates nothing: in the same draft, a later draft, a fork, or
+    after the graph is made again.
+  - A free `urn:uuid:` a row brings is kept as the id, so an entity keeps its id from one
+    environment to the next.
+  - A deleted node a pointer names is brought back.
+- **The identifier property is reserved:** it holds the node's urn. A matched row never writes its
+  pointer over the node's own urn or identifier. Keep a team's own reference in any other property,
+  and mark it "Match imports by this" to match on it.
+- **A row whose urn and identifier value differ** is no longer refused: both point at its node,
+  and the identifier value is a second name within that import. A row is refused only when the two
+  point at two different entities.
+- **Exports copied into another graph get new ids there.** An export's legacy urns become new ids
+  in that graph, and `urn:uuid:` ids are kept.
+- **A file's urn is not searchable** on the node it made, because it isn't stored.
+
+### Fixed
+
+- **Re-imports no longer quarantine edges named by the file's own id.** An import now remembers
+  which node each row matched or made, so on a re-import, and in a later window, an edge that names
+  its end by the file's own `entity_id`, or by a second name, still lands on it.
+- **Placements of an import's new roots** are keyed by each node's stored urn. Before, a urn-less
+  node was keyed `gv:<id>`.
+- **A deleted node's free `urn:uuid:` brings it back** on import, instead of minting another node.
+- **A view package's view, checked against its data's draft,** finds the nodes the data was imported
+  as: its urns are remapped onto the derived ids automatically.
+
+### Upgrading
+
+- Nodes made by earlier imports keep their ids. A file that names them by urn still finds them,
+  wherever the urn was stored.
+
+### Known limitations
+
+- A row that points by nothing but the file's own `entity_id` is created again on each import.
+  Under `replace`, each run deletes the previous run's node.
+- A "View only" import of a multi-view package against published data doesn't remap the package's
+  urns; remap them on the Match step.
+
+---
+
 ## [Unreleased] — One identity on every path that seeds a graph
 
 ### Changed
@@ -85,7 +133,6 @@ limitations** — a changelog that only lists good news is not worth reading.
 ### Known limitations
 
 - Existing entities keep the ids they have.
-- An import still keeps the urn a row brings when nothing holds it, whatever its form.
 
 ---
 

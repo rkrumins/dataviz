@@ -10522,8 +10522,12 @@ class GraphVersioningService:
         if not wanted:
             return set(), {}
         async with self._session() as s:
-            taken = set(await self._current_skeletons(s, graph_id, branch_id, wanted))
-            holders = await self._holders_by_urn(s, graph_id, branch_id, wanted - taken)
+            held = await self._current_skeletons(s, graph_id, branch_id, wanted)
+            taken = set(held)
+            # A name only a deleted entity holds as its id can still be one a deleted node carried
+            # as its urn — a urn:uuid, whose id and urn are one — and so is brought back too.
+            live = {e for e, skeleton in held.items() if skeleton is not None}
+            holders = await self._holders_by_urn(s, graph_id, branch_id, wanted - live)
             state = await self._current_skeletons(
                 s, graph_id, branch_id, {e for ids in holders.values() for e in ids})
         restore: Dict[str, str] = {}
@@ -10533,6 +10537,16 @@ class GraphVersioningService:
             elif len(ids) == 1 and next(iter(ids)) in state and state[next(iter(ids))] is None:
                 restore[name] = next(iter(ids))
         return taken, restore
+
+    async def identity_scope(self, graph_id: str) -> str:
+        """What an import derives node ids in: the data source at the root of the graph's fork
+        lineage. A data source keeps its id while its graph is made again — a conversion
+        abandoned and redone — and a fork shares its root's ids, so a file imported again lands
+        on the nodes it made, wherever in the lineage it goes."""
+        async with self._session() as s:
+            root = (await self._layer_graph_ids(s, graph_id))[-1]
+            graph = await s.get(GraphORM, root)
+        return (graph.data_source_id if graph is not None else None) or root
 
     async def _holders_by_urn(self, s, graph_id: str, bid: str, urns) -> Dict[str, set]:
         """``{urn: entity ids}`` of the nodes whose rows on the branch — its own and ``main``'s,

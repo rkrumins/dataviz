@@ -220,18 +220,29 @@ whole-state importer (~4.4 KB per entity) reached 1.4 GB.
 Each window goes through `resolve_rows` (`resolve.py`) — a **pure, deterministic** function (the id
 minter is injected) that returns `(ops, resolutions)`:
 
-- **Nodes** match an existing entity by **`entity_id` → `urn` (or the data source's identifier
-  property, `prop.<identifier>`, read as the urn) → a field the type matches imports by →
-  `qualifiedName`** (urn-less rows; `_match_node`). A value several live entities carry names none
-  of them: the row is quarantined, saying so. No match ⇒ a **new node with one identity, the
-  server's to decide**: the row's urn (or identifier value) when no entity holds it, the deleted node
-  that held it brought back, else a new `urn:uuid:` (a UUIDv7, [18 · Identity](18-identity.md)) — the
-  node's `entity_id`, its `urn` and (bound at the write) its identifier property alike, as a canvas
-  create's are. A row whose urn and identifier value differ is quarantined. The new node joins the
-  window's indexes, and — once its window commits — the job's, by the file's `entity_id` it came from
-  and by its key values, so a later window's rows and edges find it.
+- **Nodes** match an existing entity by **`entity_id` → its pointers → a field the type matches
+  imports by → `qualifiedName`** (rows that point by nothing; `_named`). A row's **pointers** are its
+  `urn` and its value of the data source's identifier property (`prop.<identifier>`), each also in
+  canonical form when it is a `urn:uuid:` (`pointers`). They are not stored: a pointer finds the node
+  that carries it as its urn, the node an earlier import derived its id from it (`pointer_id`), or,
+  for an identifier value given beside a different urn, the node a row of this job gave it to. Two
+  pointers that name two entities refuse the row, and so does a value several live entities carry.
+  No match ⇒ a **new node with one identity, the server's to decide**:
+  1. the deleted node its pointer names, brought back;
+  2. else a free `urn:uuid:` the row brings, kept;
+  3. else `urn:uuid:` v5 of the graph's identity scope (the data source at the root of its fork
+     lineage, `identity_scope`) and its first pointer, which a re-import derives again;
+  4. else (it points by nothing) a new `urn:uuid:` (a UUIDv7).
+
+  That one value is the node's `entity_id`, its `urn` and (bound at the write) its identifier
+  property alike, as a canvas create's are ([18 · Identity](18-identity.md)). A matched row never
+  writes its pointers over the node's own urn or identifier. The row joins the window's indexes, and
+  — once its window commits — the job's, by the file's `entity_id` it came with and any second name,
+  whether it matched or made its node, so a later window's rows and edges (and those of the same
+  file imported again) find it.
 - **Edges** resolve each endpoint the same way (`entity_id` — an entity's, or the file's own id of a
-  node the job created — → `urn` or `source.<identifier>` → `source.<key>` → `qualifiedName`,
+  node the job matched or created — → the pointers `urn` and `source.<identifier>` → `source.<key>`
+  → `qualifiedName`,
   `_resolve_endpoint`) and key on the `(source_eid, target_eid, edge_type)` triple — the same keying
   `sync_ingest` uses.
 - **Team keys and unique fields** are flags on an entity type's fields in the ontology ("Match
@@ -319,12 +330,13 @@ back).
 The single most important correctness property: **re-importing an unchanged export changes nothing.**
 Two mechanisms deliver it.
 
-- **Stable identity, not fragile keys.** Matching prefers the stable `entity_id`, then the `urn`
-  (or identifier value), then a team's key, then `qualifiedName` — `qualifiedName` is a *field*, not
-  an identity, so a rename doesn't fork the entity. A node matched by a team key keeps its own urn.
-  Since a new node's id **is** its urn, re-importing a file whose rows carry urns (an export does)
-  updates the nodes it created instead of adding them again. (Glossary: `entity_id` in
-  [`README.md`](README.md).)
+- **Stable identity, not fragile keys.** Matching prefers the stable `entity_id`, then the row's
+  pointers (`urn`, identifier value), then a team's key, then `qualifiedName` — `qualifiedName` is a
+  *field*, not an identity, so a rename doesn't fork the entity. A matched node keeps its own urn.
+  Since a new node's id is derived from its pointer, re-importing the same file — or an export,
+  whose rows carry the nodes' own ids — updates the nodes it created instead of adding them again.
+  A row that points by nothing but the file's own `entity_id` is created again. (Glossary:
+  `entity_id` in [`README.md`](README.md).)
 - **Type-tolerant, field-level diff.** `_changed_fields` / `_changed_props` (`resolve.py:41-84`)
   compare each provided field against the current stored value with `_scalar_eq`
   (`resolve.py:31-38`), which treats `5 == "5"` and `True == "True"` — essential because CSV

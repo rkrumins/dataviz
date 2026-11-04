@@ -75,6 +75,7 @@ The id is `uuid5(ENTITY_NAMESPACE, "<kind>/<seed>")`.
 | `POST /graph/nodes/create` with `idempotencyKey`, or a `create_node` command of `/commands/batch` | `<data source>/<branch>/<actor>/<key>`. `<branch>` is `main` for every write to the published graph: fresh, catching up, external or versioned. So a retry names the same node while the first write is projected, and after the graph gains version control. A connection's engine uses its connection id in place of the data source. |
 | `POST /graph/edges` with `idempotencyKey`, or a `create_edge` command | the same |
 | A view package seed's line with no id | `<upload>:<offset>`, its place in the upload, so a resumed seed derives the same id |
+| An imported node, named from its row's pointer | `<data source>/pointer:<pointer>`: the data source at the root of the graph's fork lineage, and the row's urn, else its identifier value (a `urn:uuid:` in canonical form). The same file imported again names the same nodes, in a fork or after the graph is made again. |
 
 ## 3. Where each id comes from
 
@@ -84,7 +85,7 @@ The id is `uuid5(ENTITY_NAMESPACE, "<kind>/<seed>")`.
 | `POST /graph/nodes/create`, a `create_node` command | v7, or v5 with `idempotencyKey`. Its containment edge is v7. | — |
 | `POST /graph/edges`, a `create_edge` command | — | v7, or v5 with `idempotencyKey` |
 | A draft's `POST …/branches/{bid}/changes` | the create's `entityId`, else its payload's `urn`, else v7, which becomes its urn too | its `entityId`, else v7 |
-| Import, `POST …/imports` ([08 §3b](08-import-export.md#3b-resolve-a-window-at-a-time)) | The entity a row matches. Otherwise: the row's urn (or its identifier value) when nothing holds it; else the deleted node that held it, brought back; else v7. | v7 |
+| Import, `POST …/imports` ([08 §3b](08-import-export.md#3b-resolve-a-window-at-a-time)) | The entity a row points at. Otherwise: the deleted node its urn names, brought back; else a free `urn:uuid:` the row brings, kept; else v5 derived from the row's urn or identifier value; else (it points by neither) v7. The file's urn and identifier value are pointers, not stored. | v7 |
 | `…/bulk-ingest` | The row's own id, else its urn, else v7. A node with no urn is given its id as its urn. A second row naming the same node is refused. | the row's own id, else v7 |
 | `…/sync` | The node already holding the row's urn, else the row's own id, else its urn, else v7, which becomes its urn too | the edge already joining the two ends with that type, else the row's own id, else `sync:e:…` |
 | Enabling version control (`/graph/bootstrap`) | the node's urn, as the graph holds it | the edge's own id, else `<source>|<TYPE>|<target>` |
@@ -139,15 +140,18 @@ held by the data source.
 A key belongs to one caller on one branch. The same key from someone else, or on another draft, is
 a new request.
 
-**Running an import again** starts a new job. What happens to each row depends on how it names its
-entity:
+**Running an import again** starts a new job. What happens to each row depends on how it points at
+its entity:
 
-- A row that names an entity by `entity_id` or `urn` updates it. Every row of an export names its
-  entity this way.
-- A row from which the earlier import kept a urn (or an identifier value) is found by that value.
+- A row that names an entity by its `entity_id` updates it. Every row of an export does.
+- A row's `urn`, or its value of the identifier property, is a **pointer**. It finds the node that
+  carries it as its urn, or the node an earlier import made from it, whose id was derived from it.
+  So the same file imported again updates what it made, and creates nothing.
 - A row whose field is marked as a team key ("Match imports by this") is matched by that field.
 - A row that brings only the file's own `entity_id` is created again, because that id links the
-  file's rows to each other and nothing more.
+  file's rows to each other and nothing more. Under `reconcileMode=replace`, each run then deletes
+  the node the previous run made.
+- A row whose urn and identifier value point at two different entities is refused.
 
 ## 5. Adding, changing and removing properties
 
@@ -189,7 +193,10 @@ Absent properties and blank cells are left as they are.
   - It imports and exports as `prop.<name>`.
   - Mark the field "Match imports by this" to match rows by it.
   - Mark it "Must be unique" to keep it unique.
-  - Keep it out of the identifier property, which holds the node's urn.
+  - Keep it out of the identifier property, which is reserved: it holds the node's urn, and a
+    file's value there is a pointer, never stored.
+- **An identifier value beside a different urn** is a second name for the row's node, but only
+  within that import. Later imports find the node by its urn.
 
 ## 7. Guarantees and non-goals
 

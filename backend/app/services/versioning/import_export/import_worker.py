@@ -37,7 +37,8 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
-from sqlalchemy import BigInteger, Text, bindparam, delete, exists, insert, select, text
+from sqlalchemy import (BigInteger, Text, and_, bindparam, delete, exists, false, insert, null,
+                        or_, select, text)
 from sqlalchemy.dialects.postgresql import ARRAY
 
 from backend.app.services.view_placement import NodeFacts, suggest_placement
@@ -45,10 +46,11 @@ from backend.app.services.view_placement import NodeFacts, suggest_placement
 from .. import config, db
 from ..ids import new_entity_id
 from ..job_lease import QUEUED, Lease, Superseded
-from ..models import BranchORM, EdgeVersionORM, ImportRowORM, JobORM
+from ..models import BranchORM, EdgeVersionORM, ImportRowORM, JobORM, NodeVersionORM
 from ..service import OntologyViolation
 from .formats import get_adapter
-from .resolve import KeyIndex, _canonical_map, key_value, resolve_rows
+from .resolve import (KeyIndex, _canonical_map, key_value, pointer_id, pointer_seed, pointers,
+                      resolve_rows)
 from .rowmodel import PROP_DELETE, normalize
 from .snapshot import open_snapshot
 from .stream import view_entities
@@ -66,6 +68,8 @@ _RESOLVE_ROWS = text(
     "WHERE r.job_id = :job_id AND r.row_index = v.row_index",
 ).bindparams(bindparam("idx", type_=ARRAY(BigInteger)),
              *(bindparam(name, type_=ARRAY(Text)) for name in ("eids", "ops", "statuses", "reasons")))
+# A node row's resolutions that leave it naming a node later rows may point at.
+_LANDED = ("create", "update", "unchanged")
 # What an import's summary tallies, per row by its resolution (``deleted`` also counts what a
 # replace deleted because no row named it).
 _TALLIES = ("new", "updated", "unchanged", "deleted", "invalid")
@@ -287,9 +291,13 @@ class ImportWorker:
         # Rows of the file a previous run of the job already staged: a resumed parse skips them.
         self._skip = 0
         # The job's identity state (``_identity_state``): the file entity ids of the nodes its
-        # committed windows created, by the ids the server gave them; the property the data
-        # source identifies nodes by; the team keys of the file's values.
+        # committed windows matched or created, by the ids the server gave them; the second names
+        # (an identifier value beside a different urn) rows gave those nodes; what the graph
+        # derives node ids in; the property the data source identifies nodes by; the team keys
+        # of the file's values.
         self._created_from: Dict[str, str] = {}
+        self._aliases: Dict[str, str] = {}
+        self._id_scope: str = ""
         self._identity_prop: Optional[str] = None
         self._keys: Optional[KeyIndex] = None
         self._canon: Dict[str, str] = _canonical_map((ontology or {}).get("node_types"))
@@ -488,10 +496,12 @@ class ImportWorker:
             self._identity_read = True
         lookups = await (self._node_lookups if kind == "node" else self._edge_lookups)(snap, rows)
         lookups.update(created_from=self._created_from, keys=self._keys)
+        scope = self._id_scope
         ops, resolutions = await asyncio.to_thread(       # a window of pure-Python matching
             resolve_rows, rows, lookups, mint_id=new_entity_id,     # a urn:uuid (UUIDv7) each
             ontology=self._ontology, identity_prop=self._identity_prop,
-            mint_urn=lambda _etype: new_entity_id())
+            mint_urn=lambda _etype: new_entity_id(),
+            derive_urn=lambda seed: pointer_id(scope, seed))
         processed = pos.processed + len(rows)
 
         async def on_commit(s) -> None:
@@ -512,19 +522,29 @@ class ImportWorker:
 
     async def _identity_state(self, job_id: str, snap, graph_id: str, branch_id: str) -> None:
         """What every window resolves new nodes and named ends against, read once a run (a resumed
-        job reads it again): the nodes earlier windows created, by the file entity id each came
-        from; the data source's identifier property; and the team keys — the fields each type
-        matches imports by or keeps unique — holding the values the file uses, from one pass over
-        the draft's live nodes of those types (none when the file uses none)."""
+        job reads it again): what the graph derives node ids in (its data source); the nodes
+        earlier windows matched or created, by the file entity id and the second name each row
+        gave its node; the data source's identifier property; and the team keys — the fields each
+        type matches imports by or keeps unique — holding the values the file uses, from one pass
+        over the draft's live nodes of those types (none when the file uses none)."""
         from backend.app.services.node_identity import identity_property
         self._graph_id, self._branch_id = graph_id, branch_id
-        self._identity_prop = identity_property(self._node_identity)
+        self._id_scope = await self._svc.identity_scope(graph_id)
+        self._identity_prop = ident = identity_property(self._node_identity)
+        self._created_from, self._aliases = {}, {}
+        # Only the rows that leave a link: a file id that is not the node's own, or an identifier
+        # value beside a urn — never a whole row, which a large job has millions of.
+        fid, urn = ImportRowORM.raw["entity_id"].astext, ImportRowORM.raw["urn"].astext
+        value = ImportRowORM.raw["properties"][ident].astext if ident else null()
+        links = or_(and_(fid != "", fid != ImportRowORM.matched_entity_id),
+                    and_(urn.isnot(None), value.isnot(None)) if ident else false())
         async with db.graphver_session() as s:
-            created = (await s.execute(
-                select(ImportRowORM.raw["entity_id"].astext, ImportRowORM.matched_entity_id)
+            landed = (await s.execute(
+                select(fid, urn, value, ImportRowORM.matched_entity_id)
                 .where(ImportRowORM.job_id == job_id, ImportRowORM.kind == "node",
-                       ImportRowORM.resolved_op == "create"))).all()
-        self._created_from = {f: e for f, e in created if f and e}
+                       ImportRowORM.resolved_op.in_(_LANDED), links))).all()
+        for row_fid, row_urn, row_value, eid in landed:
+            self._link(row_fid, row_urn, row_value, eid)
         onto = self._ontology or {}
         keys = KeyIndex(onto.get("keys"), onto.get("unique"))
         self._keys = keys if keys else None
@@ -557,21 +577,35 @@ class ImportWorker:
                     if held:
                         keys.add(w.entity_type, held, w.entity_id, w.urn)
 
+    def _link(self, fid: Optional[str], urn: Optional[str], value: Any, eid: str) -> None:
+        """What later windows find ``eid`` by, for a row that matched or made it: the file's own
+        entity id ``fid`` (when it is not the node's id), and the identifier ``value`` the row
+        gave it beside a different ``urn`` — a second name, which no stored urn or derived id
+        answers to."""
+        if fid and fid != eid:
+            self._created_from[fid] = eid
+        ident = key_value(value)
+        if ident and urn and pointer_seed(ident) != pointer_seed(urn):
+            for name in pointers(ident):
+                self._aliases[name] = eid
+
     def _remember_created(self, rows, ops, resolutions) -> None:
-        """A committed node window's creates, for the windows after it: by the file entity id each
-        came from, and by the values of its team keys. Only what landed — a row the write gate
-        turned away created nothing any later row may point at."""
+        """A committed node window's rows, for the windows after it: the node each matched or
+        created, by the file entity id and second name it came with; and a create's team key
+        values. Only what landed — a row the write gate turned away named nothing any later row
+        may point at."""
         by_index = {r["_row_index"]: r for r in rows}
         urn_of = {o["entity_id"]: (o.get("payload") or {}).get("urn") for o in ops
                   if o.get("op") == "create"}
         for res in resolutions:
             eid = res.get("matched_entity_id")
-            if res.get("resolved_op") != "create" or not eid:
+            if res.get("resolved_op") not in _LANDED or not eid:
                 continue
             row = by_index.get(res["_row_index"]) or {}
-            if row.get("entity_id"):
-                self._created_from[row["entity_id"]] = eid
-            if self._keys is not None:
+            self._link(row.get("entity_id"), row.get("urn"),
+                       (row.get("properties") or {}).get(self._identity_prop)
+                       if self._identity_prop else None, eid)
+            if res["resolved_op"] == "create" and self._keys is not None:
                 etype = self._canon.get(str(row.get("entityType") or "").lower(), row.get("entityType"))
                 self._keys.add(etype, row.get("properties"), eid, urn_of.get(eid))
 
@@ -613,16 +647,28 @@ class ImportWorker:
                 .order_by(ImportRowORM.row_index).limit(config.IMPORT_COMMIT_WINDOW))).all()
         return [{**raw, "_row_index": idx} for idx, raw in rows]
 
+    async def _pointer_hits(self, snap, names) -> Dict[str, str]:
+        """``{name: node id}`` for the names rows point at nodes by: the live node that carries the
+        name as its urn; else the live node whose id the name derives (one an import made from it);
+        else the node a row of this job gave it to as a second name."""
+        names = {n for n in names if n}
+        hits = dict(await snap.nodes_by_urn(names))
+        derived = {n: pointer_id(self._id_scope, pointer_seed(n)) for n in names - set(hits)}
+        live = await snap.lookup_live("node", set(derived.values()))
+        hits.update({n: d for n, d in derived.items() if d in live})
+        hits.update({n: self._aliases[n] for n in names - set(hits) if n in self._aliases})
+        return hits
+
     async def _node_lookups(self, snap, rows) -> Dict[str, Any]:
         """What ``resolve_rows`` needs to match these node rows: the live nodes they name by
         entity_id, urn (or the identifier property's value) or — a row without a urn —
         qualifiedName, each one's current payload; and, of the identities the rows that match
         nothing would take, which are taken and which a deleted node held."""
         ident = self._identity_prop
-        wanted = {w for r in rows if (w := r.get("urn") or (
-            key_value((r.get("properties") or {}).get(ident)) if ident else None))}
+        wanted = {n for r in rows for n in pointers(
+            r.get("urn"), (r.get("properties") or {}).get(ident) if ident else None)}
         by_id = await snap.lookup_live("node", {r["entity_id"] for r in rows if r.get("entity_id")})
-        urn_to_eid = await snap.nodes_by_urn(wanted)
+        urn_to_eid = await self._pointer_hits(snap, wanted)
         qname_to_eid = await snap.nodes_by_qname(r.get("qualifiedName") for r in rows if not r.get("urn"))
         named = set(by_id) | set(urn_to_eid.values()) | {e for e in qname_to_eid.values() if e}
         if self._keys is not None:          # a node a team key names, with its current value
@@ -645,10 +691,9 @@ class ImportWorker:
                                                     if r.get(f"{end}_entity_id")})
             by_qname = await snap.nodes_by_qname(r.get(f"{end}QualifiedName") for r in rows
                                                  if not r.get(f"{end}Urn"))
-            # An end named by its urn, or by the identifier property's value, read as the urn.
-            by_urn = await snap.nodes_by_urn(
-                r.get(f"{end}Urn") or (key_value((r.get(f"{end}Keys") or {}).get(ident)) if ident else None)
-                for r in rows)
+            # An end pointed at by its urn, or by the identifier property's value.
+            by_urn = await self._pointer_hits(snap, {n for r in rows for n in pointers(
+                r.get(f"{end}Urn"), (r.get(f"{end}Keys") or {}).get(ident) if ident else None)})
             # Ends named by the file's id of a node this job created, or by a team key: the
             # edges already between them are found too (a second import updates, never doubles).
             more = {self._created_from.get(r.get(f"{end}_entity_id") or "") for r in rows}
@@ -680,6 +725,15 @@ class ImportWorker:
                        ImportRowORM.raw["displayName"].astext, ImportRowORM.raw["tags"],
                        ImportRowORM.raw["properties"])
                 .where(*created, ImportRowORM.kind == "node").order_by(ImportRowORM.row_index))).all()
+            # Each created node's projection key is the urn it was stored with — the file's urn
+            # is only a pointer — read from the draft's versions, as the edges are below.
+            stored: Dict[str, Optional[str]] = {}
+            for chunk in _chunks([n[0] for n in nodes], _PERSIST_BATCH):
+                stored.update((await s.execute(
+                    select(NodeVersionORM.entity_id, NodeVersionORM.urn)
+                    .where(NodeVersionORM.graph_id == graph_id,
+                           NodeVersionORM.branch_id == branch_id,
+                           NodeVersionORM.entity_id.in_(chunk), NodeVersionORM.op == "create"))).all())
             edge_ids = (await s.execute(select(ImportRowORM.matched_entity_id)
                                         .where(*created, ImportRowORM.kind == "edge"))).scalars().all()
             edges = []
@@ -691,7 +745,7 @@ class ImportWorker:
                            EdgeVersionORM.entity_id.in_(chunk), EdgeVersionORM.op == "create"))).all()
         # A create drops a PROP_DELETE marker (resolve._no_deletes): no property the entity has.
         self.created_node_facts = [
-            {"eid": eid, "urn": urn, "layer_signal": signal, "entity_type": etype,
+            {"eid": eid, "urn": stored.get(eid) or urn, "layer_signal": signal, "entity_type": etype,
              "display_name": name, "tags": tags,
              "properties": {k: v for k, v in (props or {}).items() if v != PROP_DELETE}}
             for eid, urn, signal, etype, name, tags, props in nodes]
