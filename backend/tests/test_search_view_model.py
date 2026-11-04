@@ -123,14 +123,6 @@ class TestLayers:
         assert [layer.id for layer in layers] == ["a", "u"]
         assert layers[1].rest and layers[1].excluded_types == ["t"]
 
-    def test_places_by_more_than_type(self):
-        assert sv.places_by_more_than_type(BASE)                     # Gold's rule and anchor
-        typed = _config([{"id": "a", "entityTypes": ["t"]}])
-        assert not sv.places_by_more_than_type(typed)
-        assert sv.places_by_more_than_type(_config([{"id": "a", "entityTypes": ["t"]}],
-                                                   assignments={"urn:1": {"layerId": "a"}}))
-        assert sv.places_by_more_than_type(_config([{"id": "a", "logicalNodes": [{"id": "n"}]}]))
-
     def test_a_followed_layout_looks_like_the_base_and_holds_by_type(self):
         base = {**BASE, "layout": {"referenceLayout": {
             **BASE["layout"]["referenceLayout"], "displayRules": [{"id": "d"}],
@@ -244,10 +236,10 @@ class TestSearches:
 
     def test_a_layer_filter_is_the_types_the_layer_holds(self):
         layers = list(self.LAYERS.values())
-        by_name = sv.layer_filter_as_types(PRED.validate_python(
+        by_name = sv.layer_filters_in_subset(PRED.validate_python(
             {"kind": "layer", "layerAssignment": "silver"}), layers)
         assert by_name == EntityTypePredicate(op="in", values=["dashboard"])
-        nested = sv.layer_filter_as_types(PRED.validate_python({"kind": "group", "op": "or", "children": [
+        nested = sv.layer_filters_in_subset(PRED.validate_python({"kind": "group", "op": "or", "children": [
             {"kind": "layer", "layerAssignment": REST_LAYER_ID},
             {"kind": "related", "axis": "parent", "where": {"kind": "layer", "layerAssignment": "nope"}},
         ]}), layers)
@@ -342,3 +334,93 @@ class TestIncludeAndHiddenLayers:
         assert sv.hidden_layer_problems(["s"], layers) is None
         assert "no layer 'x'" in sv.hidden_layer_problems(["x"], layers)
         assert "at least one" in sv.hidden_layer_problems(["b", "s", "g", REST_LAYER_ID], layers)
+
+
+class TestFollowingTheBasesPlacement:
+    """A subset that follows its base places its matches as the base's canvas
+    does: by hand, by what children inherit, by stamps and by rules."""
+    HAND = _config([{"id": "src", "name": "Source systems", "order": 0},
+                    {"id": "rep", "name": "Reporting", "order": 1, "entityTypes": ["dashboard"]}],
+                   assignments={"urn:db:oracle": {"layerId": "src"},
+                                "urn:db:legacy": {"layerId": "src", "inheritsChildren": False}})
+
+    def _layers(self, config=None):
+        return {layer.id: layer for layer in sv.layers_of(config or self.HAND, add_rest=True)}
+
+    def test_it_follows_a_base_that_has_layers(self):
+        placement, why = sv.follow_placement(self.HAND)
+        assert why is None and placement.spec.explicit["urn:db:oracle"].layer_id == "src"
+        assert sv.follow_placement(_config([])) == (None, None)
+
+    def test_each_layer_holds_what_the_base_places_there(self):
+        placement, _ = sv.follow_placement(self.HAND)
+        layers = self._layers()
+        src = sv.layer_condition(layers["src"], placement)
+        assert src._placement.layer_id == "src" and src._placement.digest == placement.digest
+        assert sv.feed_predicate(PRED.validate_python(P), layers["src"], placement).children[0] is not None
+        # Other matches: what it places in none of its layers.
+        rest = sv.layer_condition(layers[REST_LAYER_ID], placement)
+        assert rest.op == "not" and rest.children[0]._placement.layer_id is None
+        # Any type its base reads can be placed in any layer.
+        assert sv.scope_types(layers["src"], frozenset({"table", "db"}), placement) == ["db", "table"]
+        assert sv.scope_types(layers["src"], frozenset(), placement) is None
+
+    def test_a_base_fallback_layer_holds_what_it_draws(self):
+        base = _config([{"id": "a", "entityTypes": ["t"]},
+                        {"id": "u", "name": "Unplaced", "showUnassigned": True}])
+        placement, _ = sv.follow_placement(base)
+        layers = self._layers(base)
+        assert set(layers) == {"a", "u"}
+        assert sv.layer_condition(layers["u"], placement)._placement.layer_id == "u"
+
+    def test_a_left_out_layer_leaves_out_what_the_base_places_there(self):
+        placement, _ = sv.follow_placement(self.HAND)
+        layers = [layer.model_copy(update={"hidden": layer.id in ("rep", REST_LAYER_ID)})
+                  for layer in sv.layers_of(self.HAND, add_rest=True)]
+        pii, no_rep, placed = sv.shown_search(PRED.validate_python(P), layers, placement).children
+        assert pii == TagPredicate(values=["pii"])
+        assert no_rep.op == "not" and no_rep.children[0]._placement.layer_id == "rep"
+        # Leaving Other matches out keeps what the base places somewhere.
+        assert placed._placement.layer_id is None
+
+    def test_a_layer_filter_inside_is_where_the_base_places(self):
+        placement, _ = sv.follow_placement(self.HAND)
+        layers = list(self._layers().values())
+        named = sv.layer_filters_in_subset(
+            PRED.validate_python({"kind": "layer", "layerAssignment": "source systems"}),
+            layers, placement)
+        assert named._placement.layer_id == "src"
+        other = sv.layer_filters_in_subset(
+            PRED.validate_python({"kind": "layer", "layerAssignment": "Other matches"}),
+            layers, placement)
+        assert other.op == "not" and other.children[0]._placement.layer_id is None
+        # The server's own, already resolved, stands.
+        resolved = sv.placed_in(placement, None)
+        assert sv.layer_filters_in_subset(resolved, layers, placement) is resolved
+
+    def test_past_what_a_search_follows_it_places_by_type_and_says_why(self, monkeypatch):
+        from backend.app.services import advanced_search_service as svc_mod
+        monkeypatch.setattr(svc_mod, "LAYER_FILTER_MAX_HAND_PLACED", 1)
+        placement, why = sv.follow_placement(self.HAND)
+        assert placement is None and "places 2 entities by hand" in why and "by type" in why
+
+    def test_its_digest_follows_what_places_and_not_how_it_looks(self):
+        def digest(layers, assignments):
+            return sv.follow_placement(_config(layers, assignments=assignments))[0].digest
+
+        layers = [{"id": "src", "name": "Source systems", "order": 0},
+                  {"id": "rep", "name": "Reporting", "order": 1, "entityTypes": ["dashboard"]}]
+        placed = {"urn:db:oracle": {"layerId": "src"}}
+        before = digest(layers, placed)
+        looks = [{**layers[0], "name": "Sources", "color": "#f00", "width": 320}, layers[1]]
+        assert digest(looks, {"urn:db:oracle": {"layerId": "src", "assignedAt": "2026-11-04"}}) == before
+        assert digest(layers, {"urn:db:oracle": {"layerId": "rep"}}) != before
+        assert digest([{**layers[0], "order": 2}, layers[1]], placed) != before
+        ruled = [layers[0], {**layers[1], "rules": [{"id": "r", "tags": ["bi"]}]}]
+        assert digest(ruled, placed) != before
+
+    def test_the_boundary_hash_carries_the_placement(self):
+        kw = {"view_id": "b", "data_source_id": "ds", "root_urns": [], "entity_types": [],
+              "max_depth": 3, "predicate_hash": "p"}
+        assert sv.boundary_hash(**kw) == sv.boundary_hash(**kw, placement="")
+        assert sv.boundary_hash(**kw, placement="x") != sv.boundary_hash(**kw)

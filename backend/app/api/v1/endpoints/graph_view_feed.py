@@ -190,8 +190,8 @@ async def view_feed(
     settings = get_deep_search_settings()
     max_rows = settings.view_feed_max_rows
     cursor = _read_cursor(body.cursor)
-    condition = layer_condition(layer)
-    types = scope_types(layer, eff.entity_type_allow_list)
+    condition = layer_condition(layer, eff.subset_placement)
+    types = scope_types(layer, eff.entity_type_allow_list, eff.subset_placement)
     if condition is None or types == [] or cursor["d"] >= max_rows:
         # A layer that can hold nothing here — or a client past the cap — is
         # answered without searching.

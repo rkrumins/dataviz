@@ -21,8 +21,8 @@ from backend.app.services import graph_cache as graph_cache_mod
 from backend.app.services.deep_search import NothingReusable, get_deep_search_settings
 from backend.app.services.feature_flags import feature_flags
 from backend.common.models.graph import GraphNode
-from backend.common.models.search import AncestorRef, EntityTypePredicate, GroupPredicate, SearchHit, \
-    SearchResultPage, TagPredicate
+from backend.common.models.search import AncestorRef, EntityTypePredicate, LayerPredicate, \
+    SearchHit, SearchResultPage, TagPredicate
 from backend.common.models.search_view import REST_LAYER_ID, ViewFeedPage
 
 BASE = {
@@ -44,6 +44,13 @@ def _subset(base_id):
             "layout": {"referenceLayout": {"layers": [], "assignments": {}}},
             "search": {"v": 1, "predicate": {"kind": "tag", "values": ["pii"]},
                        "within": "view", "readIn": base_id, "layout": "inherit"}}
+
+
+def _placed(p):
+    """A layer filter resolved against the base: the layer its placement names
+    (None: any of the base's layers)."""
+    assert isinstance(p, LayerPredicate) and p._placement is not None, p
+    return p._placement.layer_id
 
 
 def _hits(n, prefix="n"):
@@ -177,15 +184,18 @@ class TestRefusals:
 
 
 class TestAnswers:
-    async def test_the_layer_is_the_views_search_and_the_layers_types(self, on, views, post, charged):
+    async def test_the_layer_is_the_views_search_placed_as_its_base_places(self, on, views, post,
+                                                                            charged):
         ws, _base, sub, _plain = await views()
         engine = FeedEngine()
         resp = await post(ws, sub.id, {"layerId": "t", "waitMs": 2500}, engine)
         assert resp.status_code == 200, resp.text
         query, context = engine.provider.calls[-1]
-        assert query.predicate == GroupPredicate(op="and", children=[
-            EntityTypePredicate(values=["table"]), TagPredicate(values=["pii"])])
-        assert query.scope.entity_types == ["table"] and query.scope.scope_mode == "view"
+        placed, pii = query.predicate.children
+        assert _placed(placed) == "t" and pii == TagPredicate(values=["pii"])
+        # Placed as the base places them, a layer can hold any type the base does.
+        assert query.scope.entity_types == ["dashboard", "table"]
+        assert query.scope.scope_mode == "view"
         options = query.options
         assert (options.page_size, options.sort, options.sort_dir) == (200, "displayName", "asc")
         assert options.include_ancestor_path and options.wait_ms == 2500
@@ -287,30 +297,52 @@ class TestAnswers:
         resp = await post(ws, sub.id, {"layerId": "t"}, engine)
         assert resp.status_code == 200 and len(resp.json()["nodes"]) == 2 and charged == []
 
-    async def test_a_layer_that_can_hold_nothing_is_not_searched(self, on, views, post):
+    async def test_a_layer_placed_by_hand_holds_what_its_base_places_there(self, on, views, post,
+                                                                            charged):
+        # The "oracle" case: layers that list no types, their entities placed by hand.
+        base = {**BASE, "layout": {"referenceLayout": {"layers": [
+            {"id": "src", "name": "Source systems"}, {"id": "rep", "name": "Reporting"}],
+            "assignments": {"urn:db:oracle": {"layerId": "src"},
+                            "urn:bi:sales": {"layerId": "rep"}}}}}
+        ws, _base, sub, _plain = await views(base_config=base)
+        engine = FeedEngine()
+        page = (await post(ws, sub.id, {"layerId": "src"}, engine)).json()
+        placed, pii = engine.provider.calls[-1][0].predicate.children
+        assert _placed(placed) == "src" and pii == TagPredicate(values=["pii"])
+        assert placed._placement.spec.explicit["urn:db:oracle"].layer_id == "src"
+        assert page["totalCount"] == 3
+        # Other matches: what the base places in none of its layers.
+        await post(ws, sub.id, {"layerId": REST_LAYER_ID}, engine)
+        rest = engine.provider.calls[-1][0].predicate.children[0]
+        assert rest.op == "not" and _placed(rest.children[0]) is None
+
+    async def test_other_matches_reads_every_type_its_base_does(self, on, views, post, charged):
+        wider = {**BASE, "content": {"entityScope": "all",
+                                     "visibleEntityTypes": ["table", "dashboard", "column"]}}
+        ws, _base, sub, _plain = await views(base_config=wider)
+        engine = FeedEngine()
+        await post(ws, sub.id, {"layerId": REST_LAYER_ID}, engine)
+        query = engine.provider.calls[-1][0]
+        rest = query.predicate.children[0]
+        assert rest.op == "not" and _placed(rest.children[0]) is None
+        assert query.scope.entity_types == ["column", "dashboard", "table"]
+
+    async def test_placed_by_type_a_layer_that_can_hold_nothing_is_not_searched(
+            self, on, views, post, monkeypatch):
+        from backend.app.services import advanced_search_service as svc_mod
+        monkeypatch.setattr(svc_mod, "LAYER_FILTER_MAX_HAND_PLACED", 0)
         base = {**BASE, "layout": {"referenceLayout": {"layers": [
             {"id": "t", "name": "Tables", "entityTypes": ["table"]},
-            {"id": "e", "name": "Empty", "entityTypes": []}]}}}
+            {"id": "e", "name": "Empty", "entityTypes": []}],
+            "assignments": {"urn:t:1": {"layerId": "e"}}}}}
         ws, _base, sub, _plain = await views(base_config=base)
         engine = FeedEngine()
         page = (await post(ws, sub.id, {"layerId": "e"}, engine)).json()
         assert engine.provider.calls == [] and page["totalCount"] == 0 and page["nodes"] == []
-
-    async def test_other_matches_reads_every_type_but_the_claimed(self, on, views, post, charged):
-        # The base shows only the types its layers claim: Other matches has nothing to read.
-        ws, _base, sub, _plain = await views()
-        engine = FeedEngine()
-        page = (await post(ws, sub.id, {"layerId": REST_LAYER_ID}, engine)).json()
-        assert engine.provider.calls == [] and page["totalCount"] == 0
-        # A base that shows columns too: they are the other matches.
-        wider = {**BASE, "content": {"entityScope": "all",
-                                     "visibleEntityTypes": ["table", "dashboard", "column"]}}
-        ws, _base, sub, _plain = await views(base_config=wider)
-        await post(ws, sub.id, {"layerId": REST_LAYER_ID}, engine)
-        query = engine.provider.calls[-1][0]
-        assert query.predicate.children[0] == EntityTypePredicate(
-            op="notIn", values=["table", "dashboard"])
-        assert query.scope.entity_types == ["column"]
+        # The rest of its layers, by type.
+        await post(ws, sub.id, {"layerId": "t"}, engine)
+        assert engine.provider.calls[-1][0].predicate.children[0] == EntityTypePredicate(
+            values=["table"])
 
     async def test_a_layer_lists_no_more_than_the_cap(self, on, views, post, charged, monkeypatch):
         monkeypatch.setenv("DEEP_SEARCH_VIEW_FEED_MAX_ROWS", "200")

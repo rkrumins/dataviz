@@ -278,6 +278,29 @@ class TestReadAndEdit:
 
 
 
+class TestPlacedAsItsBasePlaces:
+    async def test_a_base_placing_by_hand_is_followed(self, test_client, on):
+        ws = await workspace(test_client)
+        base = await base_view(test_client, ws, layers=[{"id": "src", "name": "Source systems"}])
+        search = (await make(test_client, ws, base))["search"]
+        assert not search["placedByType"] and search["placedByTypeReason"] is None
+
+    async def test_past_what_a_subset_follows_it_says_why(self, test_client, on, db_session,
+                                                          monkeypatch):
+        from backend.app.services import advanced_search_service as svc_mod
+        monkeypatch.setattr(svc_mod, "LAYER_FILTER_MAX_HAND_PLACED", 1)
+        ws = await workspace(test_client)
+        base = await base_view(test_client, ws)
+        row = (await db_session.execute(select(ViewORM).where(ViewORM.id == base))).scalar_one()
+        config = json.loads(row.config)
+        config["layout"]["referenceLayout"]["assignments"] = {
+            "urn:t:1": {"layerId": "t"}, "urn:t:2": {"layerId": "d"}}
+        row.config = json.dumps(config)
+        await db_session.commit()
+        search = (await make(test_client, ws, base))["search"]
+        assert search["placedByType"] and "places 2 entities by hand" in search["placedByTypeReason"]
+
+
 class TestIncludeAndFewerLayers:
     """What a subset keeps beside its matches, and the base layers it leaves out:
     stored in its definition, served without the hidden layers, and changed

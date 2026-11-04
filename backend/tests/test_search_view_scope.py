@@ -73,6 +73,18 @@ async def _resolve(session, ws, view, **kw):
         workspace_id=ws.id, requested=SearchScope(view_id=view.id, **kw.pop("scope", {})), **kw)
 
 
+def _placed(p):
+    """A layer filter resolved against the base: the layer its placement names
+    (None: any of the base's layers)."""
+    assert isinstance(p, LayerPredicate) and p._placement is not None, p
+    return p._placement.layer_id
+
+
+def _not(p):
+    assert isinstance(p, GroupPredicate) and p.op == "not" and len(p.children) == 1, p
+    return p.children[0]
+
+
 class TestResolver:
     async def test_the_base_scope_and_layers_read_as_the_system(self, db_session):
         ws = await _ws(db_session)
@@ -175,8 +187,70 @@ class TestResolver:
         eff = await _resolve(db_session, ws, sub)
         assert [layer.id for layer in eff.subset_layers] == ["t", REST_LAYER_ID]
         assert eff.layer_allow_list == frozenset({"t", REST_LAYER_ID})
+        # Left out as its base places them: whatever the base puts in Dashboards.
+        pii, left_out = eff.search.children
+        assert pii == TagPredicate(values=["pii"]) and _placed(_not(left_out)) == "d"
+
+    async def test_its_matches_are_placed_as_its_base_places_them(self, db_session):
+        ws = await _ws(db_session)
+        base = await _view(db_session, ws, BASE_CONFIG)
+        sub = await _view(db_session, ws, _subset(base.id))
+        eff = await _resolve(db_session, ws, sub)
+        placement = eff.subset_placement
+        assert placement is not None and placement.spec.layer_ids == frozenset({"t", "d"})
+        assert set(placement.spec.explicit) == {"urn:db:A", "urn:db:B"}
+        assert eff.search == TagPredicate(values=["pii"])
+
+    async def test_its_scans_follow_what_places_and_not_how_it_looks(self, db_session):
+        ws = await _ws(db_session)
+        base = await _view(db_session, ws, BASE_CONFIG)
+        sub = await _view(db_session, ws, _subset(base.id))
+        before = (await _resolve(db_session, ws, sub)).scope_hash
+
+        async def rewrite(change):
+            config = json.loads(base.config)
+            change(config["referenceLayout"])
+            base.config = json.dumps(config)
+            await db_session.flush()
+            return (await _resolve(db_session, ws, sub)).scope_hash
+
+        def recolour(layout):
+            layout["layers"][0].update(name="Tabellen", color="#ff0000")
+            layout["assignments"]["urn:db:A"]["assignedAt"] = "2026-11-04T00:00:00Z"
+        assert await rewrite(recolour) == before
+
+        def move(layout):
+            layout["assignments"]["urn:db:A"]["layerId"] = "d"
+        moved = await rewrite(move)
+        assert moved != before
+
+        def stop_inheriting(layout):
+            layout["assignments"]["urn:db:A"]["inheritsChildren"] = False
+        assert await rewrite(stop_inheriting) not in (before, moved)
+
+    async def test_a_base_past_what_a_search_follows_is_placed_by_type(self, db_session, monkeypatch):
+        from backend.app.services import advanced_search_service as svc_mod
+        monkeypatch.setattr(svc_mod, "LAYER_FILTER_MAX_HAND_PLACED", 1)
+        ws = await _ws(db_session)
+        base = await _view(db_session, ws, BASE_CONFIG)
+        sub = await _view(db_session, ws, _subset(base.id, hiddenLayers=["d"]))
+        eff = await _resolve(db_session, ws, sub)
+        assert eff.subset_placement is None
         assert eff.search == GroupPredicate(op="and", children=[
             TagPredicate(values=["pii"]), sv.types_not_in(["dashboard"])])
+        _placement, why = sv.follow_placement(BASE_CONFIG)
+        assert _placement is None and "places 2 entities by hand" in why
+
+    async def test_its_own_layout_places_by_type(self, db_session):
+        ws = await _ws(db_session)
+        base = await _view(db_session, ws, BASE_CONFIG)
+        own = _subset(base.id, layout="own")
+        own["layout"]["referenceLayout"]["layers"] = [
+            {"id": "t", "name": "Tables", "entityTypes": ["table"]},
+            {"id": REST_LAYER_ID, "name": "Other matches", "showUnassigned": True}]
+        sub = await _view(db_session, ws, own)
+        eff = await _resolve(db_session, ws, sub)
+        assert eff.subset_placement is None and eff.search == TagPredicate(values=["pii"])
 
 class _Provider:
     supports_search_sessions = False
@@ -237,15 +311,16 @@ class TestService:
         layer = LayerPredicate(layer_assignment="Dashboards")
         await svc.search(SearchQuery(predicate=layer,
                                      scope=SearchScope(view_id=sub.id, scope_mode="data_source")))
-        # No subset search added; the layer filter is the types the layer holds.
-        assert provider.searched[-1].predicate == EntityTypePredicate(values=["dashboard"])
+        # No subset search added; the layer filter is what its base places in that layer.
+        assert _placed(provider.searched[-1].predicate) == "d"
 
-    async def test_a_layer_filter_inside_is_its_types(self, db_session):
+    async def test_a_layer_filter_inside_is_where_its_base_places(self, db_session):
         svc, provider, _base, sub = await _service(db_session)
         await svc.search(SearchQuery(predicate=LayerPredicate(layer_assignment=REST_LAYER_ID),
                                      scope=SearchScope(view_id=sub.id)))
         rest, pii = provider.searched[-1].predicate.children
-        assert rest == EntityTypePredicate(op="notIn", values=["table", "dashboard"])
+        # Other matches: what its base places in none of its layers.
+        assert _placed(_not(rest)) is None
         assert pii == TagPredicate(values=["pii"])
 
     async def test_its_search_names_entities_across_its_base_unconfined(self, db_session):
@@ -284,6 +359,14 @@ class TestService:
             scope=SearchScope(view_id=sub.id),
             items=[SearchRuleItem(id="r", predicate=EntityTypePredicate(values=["table"]))]))
         assert provider.counted[-1].predicate.children[1] == TagPredicate(values=["pii"])
+
+    async def test_a_layer_counted_inside_is_where_its_base_places(self, db_session):
+        svc, provider, _base, sub = await _service(db_session)
+        await svc.counts(SearchCountsRequest(
+            scope=SearchScope(view_id=sub.id),
+            items=[SearchRuleItem(id="r", predicate=LayerPredicate(layer_assignment="Tables"))]))
+        placed, pii = provider.counted[-1].predicate.children
+        assert _placed(placed) == "t" and pii == TagPredicate(values=["pii"])
 
     async def test_explain_hides_the_base_from_a_reader_who_cant_open_it(self, db_session):
         async def not_the_base(view):

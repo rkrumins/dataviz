@@ -58,9 +58,15 @@ MAX_TEST_COST = MAX_PARSE_COST // 4
 def layer_test(target: LayerTarget, var: str, *, name: Callable[[], str], bind: Bind,
                containment: Sequence[str]) -> str:
     """Whether the entity ``var`` is in ``target.layer_id`` as the canvas places it: true or
-    false, never null. ``name`` gives the comprehensions a suffix no other part of the statement
-    uses; ``containment`` is every containment edge type as the graph spells it."""
+    false, never null. With no layer (``None``), whether it is in any of the view's layers as a
+    member: every tier that places it counts but the fallback, which is display only. ``name``
+    gives the comprehensions a suffix no other part of the statement uses; ``containment`` is
+    every containment edge type as the graph spells it."""
     spec, goal = target.spec, target.layer_id
+
+    def hit(layer_id: Optional[str]) -> bool:
+        return goal is None or layer_id == goal
+
     curated = spec.scope == "curated"
     groups = _explicit_groups(spec)
     if curated and not groups:
@@ -69,37 +75,38 @@ def layer_test(target: LayerTarget, var: str, *, name: Callable[[], str], bind: 
     hand_placed = sorted(u for _, _, urns in groups for u in urns)
     tiers: List[str] = []
     if groups:
-        tiers.append(_explicit(var, groups, goal, bind))
+        tiers.append(_explicit(var, groups, hit, bind))
         inheriting = [g for g in groups if g[1]]
         if inheriting and rel:
             def handed(a: str) -> str:
                 # Every route here is topped by an entity placed by hand.
                 whens = [f"WHEN {a}.urn IN {bind(urns)} THEN {code}" for code, urns in (
-                    ("'y'", sorted(u for layer, _, us in inheriting if layer == goal for u in us)),
-                    ("'n'", sorted(u for layer, _, us in inheriting if layer != goal for u in us)),
+                    ("'y'", sorted(u for layer, _, us in inheriting if hit(layer) for u in us)),
+                    ("'n'", sorted(u for layer, _, us in inheriting if not hit(layer) for u in us)),
                 ) if urns]
                 return f"CASE {' '.join(whens)} ELSE 'x' END"
             tiers.append(_cascade(var, f"_xh{k}", rel, decides=handed,
                                   tops=lambda a: f"{a}.urn IN {bind(hand_placed)}"))
     if not curated:
         layers = bind(sorted(spec.layer_ids))
-        tiers.append(f"CASE WHEN {var}.layerAssignment IN {layers} "
-                     f"THEN {var}.layerAssignment = {bind(goal)} END")
+        here = "true" if goal is None else f"{var}.layerAssignment = {bind(goal)}"
+        tiers.append(f"CASE WHEN {var}.layerAssignment IN {layers} THEN {here} END")
         if spec.rules:
-            whens = _rule_whens(var, spec.rules, lambda r: str(r.layer_id == goal).lower(), bind,
+            whens = _rule_whens(var, spec.rules, lambda r: str(hit(r.layer_id)).lower(), bind,
                                 f"{k}o")
             tiers.append(f"CASE {' '.join(whens)} END")
         if rel:
             def soft(a: str) -> str:
                 whens = ([f"WHEN {a}.urn IN {bind(hand_placed)} THEN 'x'"] if hand_placed else [])
-                whens += [f"WHEN {a}.layerAssignment = {bind(goal)} THEN 'y'",
-                          f"WHEN {a}.layerAssignment IN {layers} THEN 'n'"]
+                whens += ([f"WHEN {a}.layerAssignment IN {layers} THEN 'y'"] if goal is None else
+                          [f"WHEN {a}.layerAssignment = {bind(goal)} THEN 'y'",
+                           f"WHEN {a}.layerAssignment IN {layers} THEN 'n'"])
                 whens += _rule_whens(a, spec.rules, lambda r: (
-                    ("'y'" if r.layer_id == goal else "'n'") if r.cascades_soft else "'x'"),
+                    ("'y'" if hit(r.layer_id) else "'n'") if r.cascades_soft else "'x'"),
                     bind, f"{k}c")
                 return f"CASE {' '.join(whens)} END"
             tiers.append(_cascade(var, f"_xs{k}", rel, decides=soft))
-        if spec.fallback_layer_id:
+        if spec.fallback_layer_id and goal is not None:
             tiers.append(str(spec.fallback_layer_id == goal).lower())
     test = f"coalesce({', '.join(operand(t) for t in tiers)}, false)"
     if parse_cost(f"RETURN {operand(test)}") > MAX_TEST_COST:      # as callers write it
@@ -110,6 +117,38 @@ def layer_test(target: LayerTarget, var: str, *, name: Callable[[], str], bind: 
             + " too many for a layer filter to follow quickly. Filter by type, tag or container "
             "instead.")
     return test
+
+
+#: ``placement_cost_problem``'s answers by placement digest: a subset reads it on every request.
+_COST_PROBLEMS: Dict[str, Optional[str]] = {}
+
+
+def placement_cost_problem(spec: PlacementSpec, digest: str) -> Optional[str]:
+    """Why a search can't follow ``spec``'s layers, as ``layer_test`` would refuse them, or
+    None: asked of every layer before any search, so a subset knows up front whether it can
+    place its matches as its base does."""
+    if digest in _COST_PROBLEMS:
+        return _COST_PROBLEMS[digest]
+    counter = iter(range(1 << 30))
+
+    def name() -> str:
+        return str(next(counter))
+
+    def bind(_value: Any) -> str:
+        return f"$p{next(counter)}"
+
+    problem = None
+    for goal in [None, *sorted(spec.layer_ids)]:
+        try:
+            layer_test(LayerTarget(spec, goal, digest), "n", name=name, bind=bind,
+                       containment=["CONTAINS"])
+        except CompileError as exc:
+            problem = str(exc)
+            break
+    if len(_COST_PROBLEMS) >= 512:
+        _COST_PROBLEMS.clear()
+    _COST_PROBLEMS[digest] = problem
+    return problem
 
 
 def _cascade(var: str, v: str, rel: str, *, decides: Callable[[str], str],
@@ -130,10 +169,11 @@ def _cascade(var: str, v: str, rel: str, *, decides: Callable[[str], str],
     return f"[{r} IN [{decided} + []] + [] | {first} = 'y'][0]"
 
 
-def _explicit(x: str, groups: List[Tuple[str, bool, List[str]]], goal: str, bind: Bind) -> str:
-    """Whether ``x``'s explicit entry is the target layer; null for no entry."""
-    here = sorted(u for layer, _, urns in groups if layer == goal for u in urns)
-    elsewhere = sorted(u for layer, _, urns in groups if layer != goal for u in urns)
+def _explicit(x: str, groups: List[Tuple[str, bool, List[str]]], hit: Callable[[str], bool],
+              bind: Bind) -> str:
+    """Whether ``x``'s explicit entry is a target layer (``hit``); null for no entry."""
+    here = sorted(u for layer, _, urns in groups if hit(layer) for u in urns)
+    elsewhere = sorted(u for layer, _, urns in groups if not hit(layer) for u in urns)
     whens = ([f"WHEN {x}.urn IN {bind(here)} THEN true"] if here else []) + (
         [f"WHEN {x}.urn IN {bind(elsewhere)} THEN false"] if elsewhere else [])
     return f"CASE {' '.join(whens)} END"
