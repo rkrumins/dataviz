@@ -1,4 +1,5 @@
 from typing import Any, Dict, List, Optional
+import contextlib
 import hashlib
 import inspect
 import itertools
@@ -90,6 +91,7 @@ from backend.app.auth.dependencies import requires
 from backend.app.db.engine import get_db_session, get_graph_read_db_session
 from backend.app.providers.manager import provider_manager
 from backend.app.services import graph_reads as _graph_reads
+from backend.app.services import graph_waits
 from backend.app.auth.dependencies import (
     get_current_user,
     get_optional_user,
@@ -164,10 +166,28 @@ async def _admit_graph_request(
     source = dataSourceId if ws_id else (dataSourceId or connectionId)
     source_key = f"{ws_id or ''}/{source or ''}"
     provider_manager.admit_graph_request(source_key)
+    admitted = True
+
+    @contextlib.asynccontextmanager
+    async def step_out():
+        # Waiting on another request's work: this admission is given back for
+        # the wait and taken again after (``services/graph_waits``).
+        nonlocal admitted
+        provider_manager.release_graph_request(source_key)
+        admitted = False
+        try:
+            yield
+        finally:
+            provider_manager.readmit_graph_request(source_key)
+            admitted = True
+
+    held = graph_waits.hold(step_out)
     try:
         yield
     finally:
-        provider_manager.release_graph_request(source_key)
+        graph_waits.let_go(held)
+        if admitted:
+            provider_manager.release_graph_request(source_key)
 
 
 async def get_context_engine(
@@ -203,6 +223,9 @@ async def get_context_engine(
     viewer is built as ``versioning.viewer_ctx`` builds it (under an API key,
     the key's owner with the key's narrowed claims).
     """
+    # Its session's connection goes back to the pool while it waits on another
+    # request's work (``services/graph_waits``) — as its admission does.
+    graph_waits.hold(graph_waits.session_step_out(session))
     try:
         if ws_id:
             viewer = Viewer(actor=user.id if user else "",

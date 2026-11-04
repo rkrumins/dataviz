@@ -173,6 +173,26 @@ describe('subset view feeds', () => {
     expect(continued).toBe(2)
   })
 
+  it('a follow shed past its retries is asked again after the server says, not left at "so far"', async () => {
+    let continued = 0
+    serve({
+      L1: (req) => {
+        if (!req.sessionId) return page('L1', { nodes: [node('urn:t1')], status: 'running', sessionId: 's-1', delivered: 1 })
+        continued += 1
+        if (continued === 1) {
+          // Shed: the provider already retried it in place, and gave up.
+          throw Object.assign(new Error('API Error 429: busy'), { status: 429, retryAfterMs: 50 })
+        }
+        return page('L1', { nodes: [node('urn:t1'), node('urn:t2')], delivered: 2, totalCount: 2 })
+      },
+      'other-matches': () => page('other-matches', {}),
+    })
+    await hydrate()
+    await waitFor(() => expect(feed('L1')?.search?.status).toBe('complete'), { timeout: 3000 })
+    expect(continued).toBe(2)
+    expect(urns()).toEqual(['urn:t1', 'urn:t2'])
+  })
+
   it('a tab out of sight asks nothing until it is seen again', async () => {
     let visibility: DocumentVisibilityState = 'hidden'
     const real = Object.getOwnPropertyDescriptor(Document.prototype, 'visibilityState')

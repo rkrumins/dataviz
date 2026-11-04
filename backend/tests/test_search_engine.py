@@ -1830,6 +1830,62 @@ class TestReuse:
         assert len(s.runs) == 1 and later.session_id == stale.session_id
         assert [h.node.urn for h in later.hits][0] == "urn:a005"
 
+    async def test_an_answer_from_a_session_already_there_compiles_nothing(self, scan, monkeypatch):
+        """Compiling reads which labels keep raw properties — a scan of every node.
+        A page answered from a session already there needs none of it."""
+        s = scan({"A": _rows("a", 7)})
+        provider = _Provider()
+        await _feed(provider)
+        compiled = []
+        real = engine_mod._compiler_for
+
+        async def counting(*args, **kwargs):
+            compiled.append(1)
+            return await real(*args, **kwargs)
+
+        monkeypatch.setattr(engine_mod, "_compiler_for", counting)
+        again = await _feed(provider)                         # this data's page
+        stale = await _feed(provider, data_version="2")       # a recent one's
+        assert again.cache_hit and stale.stale and compiled == [] and len(s.runs) == 1
+
+    async def test_past_the_window_the_last_page_answers_until_its_rescan_completes(self, scan):
+        """Stale-while-revalidate: once the window has closed, a reader still gets
+        the last complete page — never the rows the rescan has found so far."""
+        from backend.app.services.deep_search import NothingReusable
+        s = scan({f"L{i}": _rows(f"n{i}_", 1) for i in range(4)}, delay=0.05)
+        provider = _Provider()
+        first = await _feed(provider, reuse_s=1e-9, waitMs=5000)
+        assert first.status == "complete" and len(s.runs) == 4
+        # The data changes and the window is long closed: a rescan starts, and is
+        # moved on as far as this request's wait allows.
+        during = await _feed(provider, data_version="2", reuse_s=1e-9, waitMs=40)
+        assert during.status == "complete" and during.stale and during.as_of
+        assert during.session_id == first.session_id
+        assert [h.node.urn for h in during.hits] == [h.node.urn for h in first.hits]
+        assert 4 < len(s.runs) < 8, "the rescan was started and moved on, not finished"
+        # Read without scanning (the feed's first try), the running rescan is
+        # handed back to be moved on — not answered with its rows so far.
+        with pytest.raises(NothingReusable):
+            await _feed(provider, data_version="2", reuse_s=1e-9, scan=False)
+        # Finished, the rescan answers, fresh.
+        done = await _feed(provider, data_version="2", reuse_s=1e-9, waitMs=5000)
+        assert done.status == "complete" and not done.stale and done.session_id != first.session_id
+
+    async def test_with_a_page_to_answer_it_never_waits_on_anothers_turn(self, scan, fresh_memory_store):
+        """Another request holds the rescan: this one answers at once with the last
+        complete page instead of waiting out its own deadline on that one's commit."""
+        s = scan({f"L{i}": _rows(f"n{i}_", 1) for i in range(4)}, delay=0.05)
+        provider = _Provider()
+        first = await _feed(provider, reuse_s=1e-9, waitMs=5000)
+        await _feed(provider, data_version="2", reuse_s=1e-9, waitMs=40)   # starts the rescan
+        rescan = next(sid for sid in fresh_memory_store._sessions if sid != first.session_id)
+        assert await fresh_memory_store.lease(rescan, 60_000)               # someone else's turn
+        runs = len(s.runs)
+        began = time.monotonic()
+        page = await _feed(provider, data_version="2", reuse_s=1e-9, waitMs=3000)
+        assert time.monotonic() - began < 1.0, "it waited on the other request"
+        assert page.stale and page.session_id == first.session_id and len(s.runs) == runs
+
     def test_windows_are_spread_per_query(self):
         windows = {engine_mod.reuse_window(q, 100.0) for q in ("00000000aa", "ffffffffbb", "80000000cc")}
         assert min(windows) == pytest.approx(80.0) and max(windows) == pytest.approx(120.0)

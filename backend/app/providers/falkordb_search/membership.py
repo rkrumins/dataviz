@@ -33,6 +33,7 @@ from backend.app.providers.falkordb_deep_search import (
     _searchable_labels,
 )
 from backend.app.providers.falkordb_search.plan import _labels_in_scope, _quote, _rel
+from backend.app.providers.falkordb_search.session import store_for
 from backend.app.providers.falkordb_search.raw_properties import (
     RawLeaf, answered, empty_params, evaluate_rows, graph_raw_labels, probe_condition,
 )
@@ -59,7 +60,8 @@ async def evaluate_membership(
     urns = list(dict.fromkeys(u for u in urns if u))
     if not urns:
         return _result(matches, errors, started)
-    raw_labels = await graph_raw_labels(provider, run, data_version)
+    raw_labels = await graph_raw_labels(provider, run, data_version,
+                                        shared=store_for(provider))
     columns, params, hoisted, raw_leaves = _compile(provider, items, errors,
                                                     raw=bool(raw_labels), scope_depth=scope.max_depth)
     if not columns:

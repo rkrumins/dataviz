@@ -227,8 +227,11 @@ const READ_ONLY_POST_PATHS = [
   /^\/edges\/aggregated$/,
   // membership and the counts only read: a replayed counts request just
   // picks its sessions up where they have got to. So does an export's:
-  // the same request always continues the same export.
-  /^\/search(\/advanced|\/explain|\/membership|\/counts|\/ancestor-counts|\/catalog|\/exports)?$/,
+  // the same request always continues the same export. A subset view's
+  // layer feed reads its stored search, and a replay continues its scan.
+  /^\/search(\/advanced|\/explain|\/membership|\/counts|\/ancestor-counts|\/catalog|\/exports|\/view-feed)?$/,
+  // Narrow's resolution and Save as view's preview resolve, and save nothing.
+  /^\/members(\/plan)?$/,
   /^\/trace(\/v2|\/closure|\/expand|\/expand-batch)?$/,
   /^\/assignments\/compute$/,
 ]

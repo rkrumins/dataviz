@@ -149,7 +149,7 @@ describe('isIdempotentGraphRead', () => {
   const ws = '/api/v1/ws_1/graph'
   it('every GET, and the POSTs that only query', () => {
     expect(isIdempotentGraphRead('GET', `${ws}/stats?dataSourceId=ds`)).toBe(true)
-    for (const path of ['/nodes/query', '/edges/between', '/nodes/degree', '/nodes/ancestor-chains', '/search/advanced', '/search/membership', '/search/counts', '/search/ancestor-counts', '/search/catalog', '/search/exports', '/trace/v2', '/trace/closure', '/edges/aggregated', '/assignments/compute']) {
+    for (const path of ['/nodes/query', '/edges/between', '/nodes/degree', '/nodes/ancestor-chains', '/search/advanced', '/search/membership', '/search/counts', '/search/ancestor-counts', '/search/catalog', '/search/exports', '/search/view-feed', '/members', '/members/plan', '/trace/v2', '/trace/closure', '/edges/aggregated', '/assignments/compute']) {
       expect(isIdempotentGraphRead('POST', `${ws}${path}?dataSourceId=ds&viewId=v`)).toBe(true)
     }
   })
@@ -159,6 +159,7 @@ describe('isIdempotentGraphRead', () => {
     expect(isIdempotentGraphRead('POST', `${ws}/edges`)).toBe(false)
     expect(isIdempotentGraphRead('POST', `${ws}/save`)).toBe(false)
     expect(isIdempotentGraphRead('DELETE', `${ws}/nodes/x`)).toBe(false)
+    expect(isIdempotentGraphRead('POST', `${ws}/members/x`)).toBe(false)
   })
 
   it('never a native query: each run that reaches the server is recorded', () => {

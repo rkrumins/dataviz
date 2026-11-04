@@ -26,7 +26,9 @@ statement per graph and data version.
 """
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 from dataclasses import dataclass
 from typing import Any, Dict, FrozenSet, Iterable, List, Optional, Sequence, Tuple
 
@@ -176,21 +178,72 @@ def _comparable(value: Any) -> Any:
 
 _RAW_LABELS: Dict[Tuple[str, str], FrozenSet[str]] = {}
 _RAW_LABELS_MAX = 512
+#: The reads under way in this process, by key: a request arriving while one
+#: runs waits for its answer instead of scanning the whole graph again.
+_RAW_LABELS_READING: Dict[Tuple[str, str], asyncio.Future[FrozenSet[str]]] = {}
+#: How long the answer is kept for the other processes (it is per data version,
+#: so a change to the graph is a new key, never a stale answer).
+RAW_LABELS_SHARED_TTL_S = 3600
+
+logger = logging.getLogger(__name__)
 
 
-async def graph_raw_labels(provider, run, data_version: str) -> FrozenSet[str]:
+async def graph_raw_labels(provider, run, data_version: str, *, shared=None) -> FrozenSet[str]:
     """The labels of the provider's graph whose nodes keep any property raw,
     as of ``data_version`` — none, usually; read again for every call
-    without one. ``run(cypher, params)`` executes one statement."""
+    without one. ``run(cypher, params)`` executes one statement.
+
+    Reading it scans every node, so it is read once per graph and data version:
+    by one request in a process while the others wait for it, and — when
+    ``shared`` (the search session store) is given — once for every process,
+    which then finds it there. An answer that can't be shared is still read."""
     key = (str(getattr(provider, "_graph_name", "") or ""), str(data_version or ""))
-    known = _RAW_LABELS.get(key) if data_version else None
+    if not data_version:
+        return await _read_raw_labels(run)
+    known = _RAW_LABELS.get(key)
     if known is not None:
         return known
+    reading = _RAW_LABELS_READING.get(key)
+    if reading is not None:
+        await asyncio.wait({reading})
+        if not reading.cancelled():
+            return reading.result()
+        # Its reader failed or gave up: this request reads for itself.
+    future: asyncio.Future[FrozenSet[str]] = asyncio.get_running_loop().create_future()
+    _RAW_LABELS_READING[key] = future
+    try:
+        found = await _shared_raw_labels(run, key, shared)
+    except BaseException:
+        future.cancel()
+        raise
+    finally:
+        _RAW_LABELS_READING.pop(key, None)
+    future.set_result(found)
+    if len(_RAW_LABELS) >= _RAW_LABELS_MAX:
+        _RAW_LABELS.pop(next(iter(_RAW_LABELS)))
+    _RAW_LABELS[key] = found
+    return found
+
+
+async def _shared_raw_labels(run, key: Tuple[str, str], shared) -> FrozenSet[str]:
+    name = f"rawlabels:{key[0]}:{key[1]}"
+    if shared is not None:
+        try:
+            kept = await shared.pointed(name)
+            if kept is not None:
+                return frozenset(json.loads(kept))
+        except Exception as exc:  # noqa: BLE001 — the cache Redis, or a value not ours
+            logger.debug("raw labels: no shared answer (%s)", exc)
+    found = await _read_raw_labels(run)
+    if shared is not None:
+        try:
+            await shared.point(name, json.dumps(sorted(found)), RAW_LABELS_SHARED_TTL_S)
+        except Exception as exc:  # noqa: BLE001 — never a hard dependency
+            logger.debug("raw labels: not shared (%s)", exc)
+    return found
+
+
+async def _read_raw_labels(run) -> FrozenSet[str]:
     res = await run("MATCH (n) WHERE n.propertiesRaw IS NOT NULL AND n.propertiesRaw <> '{}' "
                     "UNWIND labels(n) AS _l RETURN DISTINCT _l", {})
-    found = frozenset(str(row[0]) for row in res.result_set or [] if row and row[0])
-    if data_version:
-        if len(_RAW_LABELS) >= _RAW_LABELS_MAX:
-            _RAW_LABELS.pop(next(iter(_RAW_LABELS)))
-        _RAW_LABELS[key] = found
-    return found
+    return frozenset(str(row[0]) for row in res.result_set or [] if row and row[0])

@@ -37,6 +37,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 from redis.exceptions import RedisError, WatchError
 
 from backend.app.providers.falkordb_search.plan import Plan, Unit
+from backend.app.services import graph_waits
 from backend.app.services.deep_search import SessionStoreUnavailable
 
 logger = logging.getLogger(__name__)
@@ -478,15 +479,17 @@ def store_for(provider) -> SessionStore:
 async def wait_for_commit(store: SessionStore, sid: str, seen: Optional[Session],
                           deadline: float, poll_s: float = 0.15) -> Optional[Session]:
     """Another request holds the lease: answer with its next commit, or
-    with what is there when this request's wait runs out."""
+    with what is there when this request's wait runs out. It waits holding no
+    graph admission and no database connection (``graph_waits``)."""
     latest = seen
-    while time.monotonic() < deadline:
-        await asyncio.sleep(min(poll_s, max(0.0, deadline - time.monotonic())))
-        current = await store.load(sid)
-        if current is None:
-            continue      # the holder has not made its first commit yet
-        if (latest is None or current.status != RUNNING
-                or current.scanned != latest.scanned or current.count != latest.count):
-            return current
-        latest = current
+    async with graph_waits.waiting():
+        while time.monotonic() < deadline:
+            await asyncio.sleep(min(poll_s, max(0.0, deadline - time.monotonic())))
+            current = await store.load(sid)
+            if current is None:
+                continue      # the holder has not made its first commit yet
+            if (latest is None or current.status != RUNNING
+                    or current.scanned != latest.scanned or current.count != latest.count):
+                return current
+            latest = current
     return latest

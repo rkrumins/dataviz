@@ -21,7 +21,9 @@ import type { GraphNode, GraphEdge, EntityTypeDefinition, NodeQuery, NodePage } 
 import type { ViewLayerConfig } from '@/types/schema'
 import { caseFold } from '@/features/ontology/lib/caseFold'
 import { BoundedQueue, mapWithConcurrency } from '@/lib/concurrency'
-import { classifyGraphFailure, isFailoverFailure } from '@/services/graphRequestFailure'
+import {
+    classifyGraphFailure, isFailoverFailure, isRetryableGraphFailure, MAX_READ_RETRIES, retryDelayMs,
+} from '@/services/graphRequestFailure'
 import { toCanvasNode, toCanvasEdge, withFeedLayer } from '@/lib/canvasNodeMapper'
 import { useBranchCreatedDelta, committedCreatedUrns, committedCreatedChildUrns } from '@/hooks/useBranchCreatedDelta'
 import { useIsDraftMode, useBranchStore } from '@/store/branchStore'
@@ -1614,6 +1616,14 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                 } catch (err) {
                     console.error(`[useGraphHydration] Failed to load more of feed ${feedKey}`, err)
                     setFailedNodes(prev => new Set(prev).add(key))
+                    if (feed.search && isRetryableGraphFailure(err)) {
+                        // Shed or busy past its retries: a followed layer is asked again
+                        // after the server's Retry-After, not left at "so far" until
+                        // someone clicks Retry.
+                        setTimeout(() => setFailedNodes(prev => {
+                            const next = new Set(prev); next.delete(key); return next
+                        }), retryDelayMs(err, MAX_READ_RETRIES))
+                    }
                 } finally {
                     setLoadingNodes(prev => { const next = new Set(prev); next.delete(key); return next })
                 }
