@@ -9,6 +9,72 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Change lists at any size: a draft's changes, a revision's, two revisions compared (API)
+
+The first part of browsing the graph's history: lists of what changed that open at any size, and
+guards that stop a large change being read whole in a web process. A 100,000-entity import made
+the canvas, the review drawer and the History drill-down hang; this change fixes the server side of
+that, and the screens move onto the new lists in the next one.
+
+### Added
+
+- **Change lists** (`GET /api/v1/{ws}/versioning/graphs/{gid}/diff/summary`, `/diff/entries`,
+  `/diff/entries/{entityId}` and `/diff/index`). A list is either a draft's changes against main
+  where it branched off (`branchId`), or main's between two revisions (`fromSeq`, `toSeq`): one
+  revision, two compared, or what came in since one. It is classified once from content hashes,
+  without reading a payload, and kept for its pages:
+  - the summary counts entities, relationships and structure, by status and by type; for two
+    revisions it also names them and the people who made the changes between;
+  - the list pages in a fixed order (entities, relationships, structure; by type, then name),
+    narrowed by kind, status, type and text, and names an edge's ends;
+  - one entity's before and after is two point reads;
+  - the index gives the canvas every change at about 70 bytes each instead of a payload.
+
+  Past `GRAPHVER_CHANGE_LIST_MAX` (250,000) changes a list is counted, not listed.
+- **The history calendar** (`GET …/graphs/{gid}/history/months`): main's revisions by month and
+  day in the reader's time zone. A month's last revision is the graph as it was at its end.
+- API keys can read both, as they read the commit log.
+
+### Fixed
+
+- **A draft that created thousands of entities lists them a page at a time.** Every listing it
+  touched (the top level, a container's children, a type's feed) served every created node on its
+  first page and loaded each one's value: the canvas asked for 200 roots of a draft holding a
+  100,000-entity import and got 100,200. The first page now holds at most a page of them, in name
+  order, and the rest follow main's last page. Forks read the same way.
+- **Loading a draft's created entities by name no longer scans the draft.** Each batch of 100 names
+  was tested against every node the draft created, with the batch's set built again for each one:
+  at 100,000 created nodes, ten million inserts a batch.
+- **A large revision's drill-down no longer reads it whole.** Opening a revision that wrote more
+  than 20,000 entities (`GRAPHVER_DIFF_TREE_MAX_CHANGES`) in History, such as the publish of a large
+  import, loaded every payload it wrote at both ends in the web process. It is now counted by type
+  from the revision's change list, as a large draft is.
+- **A large draft's review no longer merges inside the request to show its diff.** Its summary,
+  which every row of the review inbox asks for, is counted from the draft's change list, and its
+  itemised diff answers 409 `too_large_for_tree`, as the tree's children already did. A fork's
+  review is unchanged.
+- **Pull latest counts what came in from content hashes**, instead of loading every payload at both
+  ends just to count them.
+- **Restoring over a large change says how large.** Past 200,000 touched entities the restore
+  dialog's preview is approximate, but the route dropped `approximate` and `touchedEstimate`, so the
+  dialog said nothing would change.
+
+### Upgrading
+
+- Nothing to do. Three settings tune it: `GRAPHVER_CHANGE_LIST_MAX`,
+  `GRAPHVER_CHANGE_INDEX_CACHE_ENTRIES` and `GRAPHVER_CHANGE_INDEX_STATEMENT_TIMEOUT_MS`
+  (`docs/CONFIGURATION.md`).
+
+### Known limitations
+
+- The Changes tab, the review drawer, the publish dialogs, the incoming-changes sheet and the
+  canvas's highlights still read the old diffs. They move onto change lists in the next change.
+- Two revisions more than `GRAPHVER_CHANGE_LIST_MAX` changes apart are counted from what each
+  revision recorded of itself: no split by kind, and an upper bound across more than one revision.
+- A fork's review is still merged inside the request at any size.
+
+---
+
 ## [Unreleased] — What you import or create in a draft shows on its canvas, with one identity
 
 ### Fixed

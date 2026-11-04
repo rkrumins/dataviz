@@ -45,6 +45,35 @@ DRAFT_ON_FORK_SEARCH_NOTE = ("draft-only changes and the fork's own changes are 
                              "yet: results come from the parent data source's published graph")
 
 
+#: Where an overlay listing's tail starts. A listing's first page holds at most a page of what the
+#: overlay added there, in name order; the rest come after the store's last page, at positions the
+#: overlay owns — offsets from here (far past any store's row count, so never taken for a store's
+#: position, and 2**40 is still an integer a browser holds exactly) or, for a listing paged by
+#: cursor, cursors with this prefix. A 100k-node import used to arrive on the first page whole.
+_TAIL_OFFSET = 1 << 40
+_TAIL_CURSOR = "~overlay-tail:"
+
+
+def _tail_index(offset: Optional[int] = 0, cursor: Optional[str] = None) -> Optional[int]:
+    """How far into an overlay listing's tail a position is, or None for the store's own."""
+    if cursor and cursor.startswith(_TAIL_CURSOR):
+        try:
+            return max(0, int(cursor[len(_TAIL_CURSOR):]))
+        except ValueError:
+            return 0
+    if (offset or 0) >= _TAIL_OFFSET:
+        return (offset or 0) - _TAIL_OFFSET
+    return None
+
+
+def _by_name(d: "_OverlayDelta", urns: Iterable[str]) -> List[str]:
+    """``urns`` in name order (then urn), by the names the patch set holds for them."""
+    def key(u: str):
+        n = d.node_index.get(u)
+        return ((n.display_name or "").casefold() if n is not None else "", u)
+    return sorted(urns, key=key)
+
+
 class _OverlayDelta:
     """Indexed, reader-shaped view of a draft's patch set vs its main base.
 
@@ -197,7 +226,7 @@ class _OverlayDelta:
 
     def compose_page(
         self, base_items: List[GraphNode], added: List[GraphNode], *, first_page: bool,
-        base_total: Optional[int], removed: int,
+        base_total: Optional[int], removed: int, added_total: Optional[int] = None,
     ) -> "tuple[List[GraphNode], Optional[int]]":
         """ONE rule for every listing the draft patches (a container's children, the
         top-level set): main's page with each item overlaid or dropped, the draft's NEW
@@ -211,7 +240,11 @@ class _OverlayDelta:
         repeated them; counting them into the position skipped a row of main per item
         (a new child pushed an existing sibling out of view, and "Load N more" asked
         past the end forever); reporting the page length as the total invented or hid
-        a remainder."""
+        a remainder.
+
+        ``added`` is what this page serves of the draft's new items — at most a page; the rest
+        follow the store's last page (``_TAIL_OFFSET``) — and ``added_total`` how many there are,
+        which the listing's size counts (default: ``added``'s)."""
         items: List[GraphNode] = []
         for n in base_items:
             merged = self.overlay_existing(n)
@@ -223,7 +256,8 @@ class _OverlayDelta:
                 if n.urn not in present:
                     items.append(n)
                     present.add(n.urn)
-        total = None if base_total is None else max(0, base_total + len(added) - removed)
+        n_added = len(added) if added_total is None else added_total
+        total = None if base_total is None else max(0, base_total + n_added - removed)
         return items, total
 
     def overlay_existing(self, base_node: GraphNode) -> Optional[GraphNode]:
@@ -504,14 +538,32 @@ class DraftOverlayProvider:
             raise
 
     @staticmethod
-    def _matches(node: GraphNode, query: NodeQuery) -> bool:
-        if query.urns and node.urn not in set(query.urns):
-            return False
-        if query.entity_types and node.entity_type not in set(query.entity_types):
+    def _kept(node: GraphNode, query: NodeQuery) -> bool:
+        """Whether ``node`` has a type and a name ``query`` asks for (its urns aside)."""
+        if query.entity_types and node.entity_type not in query.entity_types:
             return False
         if query.search_query and query.search_query.lower() not in (node.display_name or "").lower():
             return False
         return True
+
+    @classmethod
+    def _created_for(cls, d: _OverlayDelta, query: NodeQuery) -> List[str]:
+        """The nodes the patch set adds (``nodesNew``) that ``query`` asks for: those it names, in
+        its order, when it names urns — looked up, not matched against every node the patch set
+        holds (a 100-urn batch against a 100k-node draft was 10M set inserts) — else every match,
+        in name order, kept on the patch set for the next page when the query has no text."""
+        if query.urns:
+            return [u for u in dict.fromkeys(query.urns)
+                    if u in d.node_new and u in d.node_index and cls._kept(d.node_index[u], query)]
+        key = ("created", tuple(sorted(query.entity_types or ())))
+        if query.search_query:
+            return _by_name(d, (u for u, n in d.node_index.items()
+                                if u in d.node_new and cls._kept(n, query)))
+        hit = d.shared.get(key)
+        if hit is None:
+            hit = d.shared[key] = _by_name(d, (u for u, n in d.node_index.items()
+                                              if u in d.node_new and cls._kept(n, query)))
+        return hit
 
     # ---- reads: base ⊕ delta ------------------------------------------- #
     async def get_node(self, urn: str) -> Optional[GraphNode]:
@@ -561,19 +613,33 @@ class DraftOverlayProvider:
             if merged is not None:
                 out.append(merged)
             seen.add(n.urn)
-        added = [urn for urn, n in d.node_index.items()      # draft-NEW nodes matching the query
-                 if urn not in seen and urn in d.node_new and self._matches(n, query)]
-        out += [d.with_child_count(n) for n in await d.served(added)]
+        # Draft-NEW nodes the query asks for: the ones it names, or — a listing, not a lookup — a
+        # page of the matches, on its first call.
+        added = self._created_for(d, query)
+        if not query.urns:
+            added = added[:query.limit or 100] if not (query.offset or 0) else []
+        out += [d.with_child_count(n) for n in await d.served([u for u in added if u not in seen])]
         return out
 
     async def get_nodes_page(self, query: NodeQuery) -> NodePage:
         """A page in MAIN's order: `has_more` and `next_offset` are the base's, so a
         draft that deletes rows can't end paging early and the draft's new nodes —
-        on the first page only — can't push the next page past rows of main."""
-        base = await self._base.get_nodes_page(query)
+        on the first page only — can't push the next page past rows of main. That page holds
+        at most ``limit`` of them; the rest follow main's last page, at ``_TAIL_OFFSET``."""
         d = await self._delta_()
         if d.empty:
-            return base
+            return await self._base.get_nodes_page(query)
+        offset, limit = query.offset or 0, query.limit or 100
+        created = self._created_for(d, query)
+        head = len(created) if query.urns else limit        # a lookup serves all it names at once
+        tail = _tail_index(offset)
+        if tail is not None:
+            rest = created[head:]
+            urns = rest[tail:tail + limit]
+            nodes = [d.with_child_count(n) for n in await d.served(urns)]
+            done = tail + len(urns)
+            return NodePage(nodes=nodes, hasMore=done < len(rest), nextOffset=_TAIL_OFFSET + done)
+        base = await self._base.get_nodes_page(query)
         await d.load(n.urn for n in base.nodes)
         seen: set = set()
         out: List[GraphNode] = []
@@ -584,11 +650,13 @@ class DraftOverlayProvider:
             if merged is not None:
                 out.append(merged)
             seen.add(n.urn)
-        if not (query.offset or 0):
-            added = [urn for urn, n in d.node_index.items()
-                     if urn not in seen and urn in d.node_new and self._matches(n, query)]
-            out += [d.with_child_count(n) for n in await d.served(added)]
-        return NodePage(nodes=out, hasMore=base.has_more, nextOffset=base.next_offset)
+        if not offset:
+            out += [d.with_child_count(n) for n in await d.served(
+                [u for u in created[:head] if u not in seen])]
+        has_more, next_offset = base.has_more, base.next_offset
+        if not has_more and len(created) > head:            # main is done; the rest of what it added
+            has_more, next_offset = True, _TAIL_OFFSET
+        return NodePage(nodes=out, hasMore=has_more, nextOffset=next_offset)
 
     async def search_nodes(self, query: str, limit: int = 10, offset: int = 0) -> List[GraphNode]:
         base = await self._base.search_nodes(query, limit=limit, offset=offset)
@@ -604,10 +672,13 @@ class DraftOverlayProvider:
             merged = d.overlay_existing(n)
             if merged is not None:
                 out.append(merged)
+        if offset:
+            return out                                       # draft-NEW matches: the first page's
         seen = {n.urn for n in out}
-        out += await d.served([urn for urn, n in d.node_index.items()     # draft-NEW matches only
+        matches = _by_name(d, (urn for urn, n in d.node_index.items()
                                if urn not in seen and urn in d.node_new
-                               and q in (n.display_name or "").lower()])
+                               and q in (n.display_name or "").lower()))
+        out += await d.served(matches[:limit])
         return out
 
     async def get_edges(self, query: EdgeQuery) -> List[GraphEdge]:
@@ -655,48 +726,62 @@ class DraftOverlayProvider:
         sort_direction: str = "asc", lineage_scope: str = "page",
     ) -> ChildrenWithEdgesResult:
         scope_kw = {"lineage_scope": lineage_scope} if lineage_scope != "page" else {}
-        base = await self._base.get_children_with_edges(
-            parent_urn, edge_types=edge_types, lineage_edge_types=lineage_edge_types,
-            search_query=search_query, offset=offset, limit=limit,
-            include_lineage_edges=include_lineage_edges, sort_property=sort_property, cursor=cursor,
-            sort_direction=sort_direction, **scope_kw)
         d = await self._delta_()
         if d.empty:
-            return base
+            return await self._base.get_children_with_edges(
+                parent_urn, edge_types=edge_types, lineage_edge_types=lineage_edge_types,
+                search_query=search_query, offset=offset, limit=limit,
+                include_lineage_edges=include_lineage_edges, sort_property=sort_property,
+                cursor=cursor, sort_direction=sort_direction, **scope_kw)
         first_page = offset == 0 and not cursor
-        targets = [e.target_urn for e in d.cont_added if e.source_urn == parent_urn]
-        # A child the overlay took away from this parent (its edge from here removed, or moved
-        # elsewhere) and did not give back is not listed here, though the store lists it.
-        gone = {e.target_urn for e in d.cont_removed if e.source_urn == parent_urn} - set(targets)
-        # The draft's new children are served on the first page only (compose_page); past it they
-        # are only counted, which a created child's skeleton is enough for.
-        await d.load([c.urn for c in base.children]
-                     + [u for u in targets if first_page or u not in d.node_index])
-        # children: main's page overlaid (a renamed child keeps its base childCount so it
-        # isn't orphaned), the draft's new children of THIS parent — see compose_page.
-        added = [d.with_child_count(d.node_upsert[u] if u in d.node_upsert else d.node_index[u])
-                 for u in targets
-                 if (u in d.node_upsert or u in d.node_index) and u not in d.node_remove]
-        # A main node the draft moved here has only its edge in the draft, so read it from
-        # main. Else a fixed orphan, dropped from the top-level page, showed nowhere.
-        moved = list(dict.fromkeys(u for u in targets if u not in d.node_upsert
-                                   and u not in d.node_index and u not in d.node_remove))
-        if moved:
-            added += [d.with_child_count(n) for n in await self._base.get_nodes(
-                NodeQuery(urns=moved, limit=len(moved)))]
+        tail = _tail_index(offset, cursor)
+        gained, gone, removed = self._parent_delta(d, parent_urn)
         if search_query:
             q = search_query.lower()
-            added = [n for n in added
-                     if q in (n.display_name or "").lower() or q in (n.urn or "").lower()]
-        removed = sum(1 for e in d.cont_removed if e.source_urn == parent_urn)
+            gained = [u for u in gained if u not in d.node_index or q in (
+                d.node_index[u].display_name or "").lower() or q in u.lower()]
+        # What the overlay added under THIS parent, a page at a time: the first page of it with
+        # main's first page, the rest after main's last (``_TAIL_OFFSET``) — see compose_page.
+        if tail is not None:
+            serve = gained[limit + tail:limit + tail + limit]
+            base = (await self._base.get_children_with_edges(
+                parent_urn, edge_types=edge_types, search_query=search_query, offset=0, limit=1,
+                include_lineage_edges=False, sort_property=sort_property,
+                sort_direction=sort_direction)).model_copy(update={
+                    "children": [], "containment_edges": [], "lineage_edges": []})
+        else:
+            serve = gained[:limit] if first_page else []
+            base = await self._base.get_children_with_edges(
+                parent_urn, edge_types=edge_types, lineage_edge_types=lineage_edge_types,
+                search_query=search_query, offset=offset, limit=limit,
+                include_lineage_edges=include_lineage_edges, sort_property=sort_property,
+                cursor=cursor, sort_direction=sort_direction, **scope_kw)
+        await d.load([c.urn for c in base.children] + [u for u in serve if u in d.node_index])
+        # children: main's page overlaid (a renamed child keeps its base childCount so it
+        # isn't orphaned), and this page's share of the draft's new children of THIS parent.
+        added = [d.with_child_count(d.node_upsert[u] if u in d.node_upsert else d.node_index[u])
+                 for u in serve if u in d.node_upsert or u in d.node_index]
+        # A main node the draft moved here has only its edge in the draft, so read it from
+        # main. Else a fixed orphan, dropped from the top-level page, showed nowhere.
+        moved = [u for u in serve if u not in d.node_upsert and u not in d.node_index]
+        if moved:
+            found = await self._base.get_nodes(NodeQuery(urns=moved, limit=len(moved)))
+            if search_query:
+                q = search_query.lower()
+                found = [n for n in found
+                         if q in (n.display_name or "").lower() or q in (n.urn or "").lower()]
+            added += [d.with_child_count(n) for n in found]
         children, total_children = d.compose_page(
-            [c for c in base.children if c.urn not in gone], added, first_page=first_page,
-            base_total=base.total_children, removed=removed)
+            [c for c in base.children if c.urn not in gone], added,
+            first_page=first_page or tail is not None,
+            base_total=base.total_children, removed=removed, added_total=len(gained))
         present = {c.urn for c in children}
-        # containment edges under this parent
+        # containment edges under this parent: main's on this page, and the draft's to the
+        # children this page serves (the rest come with the pages that serve them)
         cont = [e for e in base.containment_edges
                 if e.id not in d.edge_remove and e.target_urn not in gone]
-        cont = await d.edges(cont + [e for e in d.cont_added if e.source_urn == parent_urn])
+        cont = await d.edges(cont + [e for e in d.cont_added
+                                     if e.source_urn == parent_urn and e.target_urn in present])
         # lineage edges among the (now overlaid) visible child scope
         lineage = base.lineage_edges
         if include_lineage_edges:
@@ -717,15 +802,54 @@ class DraftOverlayProvider:
             lineage = await d.edges(lineage)
         # Where the next page starts and whether there is one are facts about MAIN's
         # order, which only the base knows — a draft that drops a page's rows must
-        # neither end paging nor move the next page.
+        # neither end paging nor move the next page. Past main's last page, the overlay's tail.
+        rest = max(0, len(gained) - limit)
+        if tail is not None:
+            done = tail + len(serve)
+            more = done < rest
+            has_more, next_cursor, next_offset = (
+                more, f"{_TAIL_CURSOR}{done}" if more else None, _TAIL_OFFSET + done)
+        elif not base.has_more and rest:
+            has_more, next_cursor, next_offset = True, f"{_TAIL_CURSOR}0", _TAIL_OFFSET
+        else:
+            has_more, next_cursor = base.has_more, base.next_cursor
+            next_offset = base.next_offset if base.next_offset is not None else offset + len(base.children)
         return ChildrenWithEdgesResult(
             children=children, containmentEdges=cont, lineageEdges=lineage,
             totalChildren=total_children if total_children is not None else len(children),
-            hasMore=base.has_more, nextCursor=base.next_cursor,
-            nextOffset=base.next_offset if base.next_offset is not None else offset + len(base.children),
+            hasMore=has_more, nextCursor=next_cursor, nextOffset=next_offset,
             # A base page whose lineage could not be read stays marked as such:
             # the draft's answer is cached too, and must not pass for complete.
             degradedDetail=base.degraded_detail)
+
+    @staticmethod
+    def _parent_delta(d: _OverlayDelta, parent_urn: str) -> "tuple[List[str], set, int]":
+        """What the patch set changes under one parent, kept on it for the parent's next page:
+        the children it added there — created ones in name order, then main's nodes it moved
+        there — those it took away and did not give back (``gone``), and how many containment
+        links from the parent it removed. Indexed once per patch set, not scanned per page."""
+        index = d.shared.get("children-delta")
+        if index is None:
+            added: Dict[str, List[str]] = {}
+            taken: Dict[str, List[str]] = {}
+            for e in d.cont_added:
+                added.setdefault(e.source_urn, []).append(e.target_urn)
+            for e in d.cont_removed:
+                taken.setdefault(e.source_urn, []).append(e.target_urn)
+            index = d.shared["children-delta"] = ({}, added, taken)
+        orders, added, taken = index
+        hit = orders.get(parent_urn)
+        if hit is None:
+            targets = list(dict.fromkeys(added.get(parent_urn, ())))
+            live = [u for u in targets if u not in d.node_remove]
+            known = [u for u in live if u in d.node_upsert or u in d.node_index]
+            moved = sorted(u for u in live if u not in d.node_upsert and u not in d.node_index)
+            # A child the overlay took away from this parent (its edge from here removed, or
+            # moved elsewhere) and did not give back is not listed here, though the store lists it.
+            gone = set(taken.get(parent_urn, ())) - set(targets)
+            hit = orders[parent_urn] = (_by_name(d, known) + moved, gone,
+                                        len(taken.get(parent_urn, ())))
+        return hit
 
     async def get_children(
         self, parent_urn: str, entity_types: Optional[List[str]] = None,
@@ -745,36 +869,45 @@ class DraftOverlayProvider:
         limit: int = 100, cursor: Optional[str] = None, include_child_count: bool = True,
         sort_direction: str = "asc",
     ) -> TopLevelNodesResult:
-        base = await self._base.get_top_level_or_orphan_nodes(
-            root_entity_types=root_entity_types, entity_types=entity_types,
-            search_query=search_query, limit=limit, cursor=cursor, include_child_count=include_child_count,
-            sort_direction=sort_direction)
         d = await self._delta_()
         if d.empty:
-            return base
-        await d.load(n.urn for n in base.nodes)
+            return await self._base.get_top_level_or_orphan_nodes(
+                root_entity_types=root_entity_types, entity_types=entity_types,
+                search_query=search_query, limit=limit, cursor=cursor,
+                include_child_count=include_child_count, sort_direction=sort_direction)
         # Overlay main's top-level set: drop removed, merge modified (keeping base childCount). A
         # draft-CREATED node becomes a new root only when no draft containment targets it. Crucially a
         # MODIFIED existing node (e.g. a rename) is NOT hoisted to top-level — its parent edge lives on
         # main (outside the draft delta), so it keeps its real position; hoisting it was what made a
         # single rename "break the containment tree" (the node jumped to the root with childCount 0).
-        has_parent = {e.target_urn for e in d.cont_added}
+        has_parent = d.shared.get("has-parent")
+        if has_parent is None:
+            has_parent = d.shared["has-parent"] = {e.target_urn for e in d.cont_added}
+        roots = self._created_roots(d, has_parent, entity_types, search_query)
+        # A page of them with main's first page, the rest after main's last (``_TAIL_CURSOR``).
+        tail = _tail_index(cursor=cursor)
+        if tail is not None:
+            serve = roots[limit + tail:limit + tail + limit]
+            done = tail + len(serve)
+            more = done < max(0, len(roots) - limit)
+            return TopLevelNodesResult(
+                nodes=[d.with_child_count(n) for n in await d.served(serve)], totalCount=None,
+                hasMore=more, nextCursor=f"{_TAIL_CURSOR}{done}" if more else None)
+        base = await self._base.get_top_level_or_orphan_nodes(
+            root_entity_types=root_entity_types, entity_types=entity_types,
+            search_query=search_query, limit=limit, cursor=cursor, include_child_count=include_child_count,
+            sort_direction=sort_direction)
+        await d.load(n.urn for n in base.nodes)
         et = set(entity_types or [])
         q = (search_query or "").lower()
-        roots = [urn for urn, n in d.node_index.items()
-                 if urn in d.node_new and urn not in has_parent and urn not in d.node_remove
-                 and (not et or n.entity_type in et)
-                 and (not q or q in (n.display_name or "").lower() or q in urn.lower())]
-        # Served on the first page only (compose_page); past it only counted, by their skeletons.
-        added = [d.with_child_count(n) for n in (
-            await d.served(roots) if not cursor else [d.node_index[u] for u in roots])]
+        added = [d.with_child_count(n) for n in await d.served(roots[:limit])] if not cursor else []
         # A node of main the overlay took every parent edge from, and gave none, is a root here
         # though the store lists it under a parent: its chain on the overlay's state says so.
         lost = sorted({e.target_urn for e in d.cont_removed} - has_parent - d.node_remove)
         if lost:
             chains = await self._chains(d, "lost_parents", lost)
             lost = [u for u in lost if chains.get(u) == []]
-        if lost:
+        if lost and not cursor:
             found = await self._base.get_nodes(NodeQuery(urns=lost, limit=len(lost)))
             await d.load(n.urn for n in found)
             for n in found:
@@ -791,8 +924,32 @@ class DraftOverlayProvider:
         base_nodes = [n for n in base.nodes if n.urn not in has_parent]
         nodes, total = d.compose_page(
             base_nodes, added, first_page=not cursor,
-            base_total=base.total_count, removed=removed)
-        return base.model_copy(update={"nodes": nodes, "total_count": total})
+            base_total=base.total_count, removed=removed,
+            added_total=len(roots) + (len(added) - min(len(roots), limit) if not cursor else len(lost)))
+        out = base.model_copy(update={"nodes": nodes, "total_count": total})
+        if not base.has_more and len(roots) > limit:        # main is done; the rest of what it added
+            out = out.model_copy(update={"has_more": True, "next_cursor": f"{_TAIL_CURSOR}0"})
+        return out
+
+    @staticmethod
+    def _created_roots(d: _OverlayDelta, has_parent: set, entity_types: Optional[List[str]],
+                       search_query: Optional[str]) -> List[str]:
+        """The nodes the patch set adds that no containment link of its own points at — new roots
+        — of the given types and text, in name order; kept on the patch set when there is no text."""
+        et = set(entity_types or [])
+        q = (search_query or "").lower()
+        key = ("roots", tuple(sorted(et)))
+        if not q:
+            hit = d.shared.get(key)
+            if hit is not None:
+                return hit
+        roots = _by_name(d, (urn for urn, n in d.node_index.items()
+                             if urn in d.node_new and urn not in has_parent and urn not in d.node_remove
+                             and (not et or n.entity_type in et)
+                             and (not q or q in (n.display_name or "").lower() or q in urn.lower())))
+        if not q:
+            d.shared[key] = roots
+        return roots
 
     async def get_aggregated_edges_between(
         self, source_urns: List[str], target_urns: Optional[List[str]],

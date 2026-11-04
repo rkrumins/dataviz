@@ -69,6 +69,7 @@ from backend.app.services.permission_service import PermissionClaims, has_permis
 from backend.app.services.projection_target import repair_projection_target
 from backend.app.services.versioning import config as vconfig
 from backend.app.services.versioning.cache_manager import acquire_lease, release_lease
+from backend.app.services.versioning.change_index import ChangeOrigin
 from backend.app.services.versioning.errors import (HTTP_MAPPED, DraftNotReadable, IneligibleMember,
                                                    IneligibleOwner, ReviewRequired, SelfMerge,
                                                    ServiceAccountMember)
@@ -773,10 +774,14 @@ class RevertRequest(_ApiModel):
 
 
 class RestorePreviewResponse(_ApiModel):
-    """Exact impact of restoring main to a commit (same compute as the write)."""
+    """Exact impact of restoring main to a commit (same compute as the write) — or, past
+    ``_RESTORE_PREVIEW_MAX_TOUCHED`` entities, ``approximate`` with ``touchedEstimate`` and zero
+    per-kind counts (the dialog then says "roughly N items")."""
     commits_undone: int = Field(alias="commitsUndone")
     nodes: Dict[str, int]
     edges: Dict[str, int]
+    approximate: bool = False
+    touched_estimate: Optional[int] = Field(default=None, alias="touchedEstimate")
 
 
 class RebaseRequest(_ApiModel):
@@ -1269,6 +1274,117 @@ class DiffSummaryResponse(_ApiModel):
 class DiffChildrenResponse(_ApiModel):
     entries: List[DiffTreeNode]
     total: int
+
+
+# A change list (/graphs/{gid}/diff/*): a draft's changes, or main's between two revisions,
+# classified once and paged (services/versioning/change_index.py).
+class ChangeCounts(_ApiModel):
+    added: int = 0
+    modified: int = 0
+    removed: int = 0
+
+
+class ChangeTypeCount(ChangeCounts):
+    kind: str                       # node | edge | structure
+    type: Optional[str] = None
+
+
+class ChangeWindowEnd(_ApiModel):
+    seq: int
+    commit_id: str = Field(alias="commitId")
+    kind: str
+    message: Optional[str] = None
+    actor: Optional[str] = None
+    created_at: Optional[str] = Field(default=None, alias="createdAt")
+
+
+class ChangeWindow(_ApiModel):
+    commit_count: int = Field(alias="commitCount")
+    contributors: List[str] = Field(default_factory=list)
+    contributor_count: int = Field(0, alias="contributorCount")
+    first_at: Optional[str] = Field(default=None, alias="firstAt")
+    last_at: Optional[str] = Field(default=None, alias="lastAt")
+    from_: Optional[ChangeWindowEnd] = Field(default=None, alias="from")
+    to: Optional[ChangeWindowEnd] = None
+
+
+class ChangeSummaryResponse(_ApiModel):
+    origin: Dict[str, Any]
+    counts: ChangeCounts
+    entity_counts: Optional[ChangeCounts] = Field(default=None, alias="entityCounts")
+    edge_counts: Optional[ChangeCounts] = Field(default=None, alias="edgeCounts")
+    structure_counts: Optional[ChangeCounts] = Field(default=None, alias="structureCounts")
+    impact: Dict[str, int] = Field(default_factory=dict)
+    by_type: List[ChangeTypeCount] = Field(default_factory=list, alias="byType")
+    total: int
+    listed: int
+    approximate: bool = False
+    too_large: Optional[Dict[str, int]] = Field(default=None, alias="tooLarge")
+    window: Optional[ChangeWindow] = None
+    user_names: Dict[str, str] = Field(default_factory=dict, alias="userNames")
+
+
+class ChangeRow(_ApiModel):
+    entity_id: str = Field(alias="entityId")
+    kind: str
+    status: str
+    type: Optional[str] = None
+    structural: bool = False
+    display_name: Optional[str] = Field(default=None, alias="displayName")
+    qualified_name: Optional[str] = Field(default=None, alias="qualifiedName")
+    urn: Optional[str] = None
+    source_entity_id: Optional[str] = Field(default=None, alias="sourceEntityId")
+    target_entity_id: Optional[str] = Field(default=None, alias="targetEntityId")
+    source_name: Optional[str] = Field(default=None, alias="sourceName")
+    target_name: Optional[str] = Field(default=None, alias="targetName")
+
+
+class ChangeEntriesResponse(_ApiModel):
+    entries: List[ChangeRow]
+    total: int
+    offset: int
+    limit: int
+    has_more: bool = Field(alias="hasMore")
+    too_large: Optional[Dict[str, int]] = Field(default=None, alias="tooLarge")
+
+
+class ChangeEntryResponse(_ApiModel):
+    entity_id: str = Field(alias="entityId")
+    kind: str
+    status: str
+    before: Optional[dict] = None
+    after: Optional[dict] = None
+
+
+class ChangeIndexResponse(_ApiModel):
+    origin: Dict[str, Any]
+    # [entityId, "n", status, type] for a node; [entityId, "e", status, type, source, target]
+    # for an edge; status is a(dded) | m(odified) | r(emoved).
+    entries: List[List[Any]]
+    total: int
+    truncated: bool
+
+
+class HistoryDay(_ApiModel):
+    day: str
+    count: int
+    first_seq: int = Field(alias="firstSeq")
+    last_seq: int = Field(alias="lastSeq")
+
+
+class HistoryMonth(_ApiModel):
+    month: str
+    count: int
+    first_seq: int = Field(alias="firstSeq")
+    last_seq: int = Field(alias="lastSeq")
+    last_at: Optional[str] = Field(default=None, alias="lastAt")
+    days: List[HistoryDay]
+
+
+class HistoryMonthsResponse(_ApiModel):
+    head_seq: int = Field(alias="headSeq")
+    tz: str
+    months: List[HistoryMonth]
 
 
 class ViewPrCountResponse(_ApiModel):
@@ -2956,6 +3072,166 @@ async def get_commit_diff_children(
         return await svc.diff_commit_children(
             graph_id=graph_id, commit_id=commit_id, container_key=container_key,
             containment_edge_types=cset, limit=limit, offset=offset, viewer=viewer)
+
+
+# --------------------------------------------------------------------------- #
+# Change lists at any size: a draft's changes, or main's between two revisions  #
+# --------------------------------------------------------------------------- #
+_ChangeKind = Literal["node", "edge", "structure"]
+_CHANGE_STATUSES = frozenset({"added", "modified", "removed"})
+
+
+def _change_origin(branch_id: Optional[str], from_seq: Optional[int],
+                   to_seq: Optional[int]) -> ChangeOrigin:
+    """Whose changes a list is of: a draft (``branchId``), or ``main`` between two of its
+    revisions (``fromSeq`` exclusive, ``toSeq`` inclusive) — one of them, never both."""
+    window = from_seq is not None or to_seq is not None
+    if (branch_id is None) == (not window):
+        raise HTTPException(status_code=422, detail=(
+            "Name a draft (branchId), or two revisions of main (fromSeq and toSeq) — one of them"))
+    if window:
+        if from_seq is None or to_seq is None or from_seq >= to_seq:
+            raise HTTPException(status_code=422, detail="fromSeq must be lower than toSeq")
+        return ChangeOrigin(from_seq=from_seq, to_seq=to_seq)
+    return ChangeOrigin(branch_id=branch_id)
+
+
+def _change_statuses(raw: Optional[str]) -> tuple:
+    statuses = tuple(s for s in (p.strip() for p in (raw or "").split(",")) if s)
+    unknown = [s for s in statuses if s not in _CHANGE_STATUSES]
+    if unknown:
+        raise HTTPException(status_code=422, detail=(
+            f"status takes added, modified and removed, comma-separated; not {', '.join(unknown)}"))
+    return statuses
+
+
+_ORIGIN_DOC = {
+    "branch_id": "A draft: its changes against main where it branched off.",
+    "from_seq": "Main between two revisions: the earlier one's commit_seq (not included).",
+    "to_seq": "Main between two revisions: the later one's commit_seq (included).",
+}
+
+
+@router.get("/graphs/{graph_id}/diff/summary", response_model=ChangeSummaryResponse)
+async def get_change_summary(
+    ws_id: str, graph_id: str,
+    branch_id: Optional[str] = Query(None, alias="branchId", description=_ORIGIN_DOC["branch_id"]),
+    from_seq: Optional[int] = Query(None, alias="fromSeq", ge=0, description=_ORIGIN_DOC["from_seq"]),
+    to_seq: Optional[int] = Query(None, alias="toSeq", ge=1, description=_ORIGIN_DOC["to_seq"]),
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    viewer: Viewer = Depends(viewer_ctx),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """What a draft changes, or what changed on main between two revisions — one revision is
+    ``fromSeq=K-1&toSeq=K`` — counted by kind (entities, relationships, structure), status and
+    type. Read from the same index ``/diff/entries`` pages through, so the two agree. Past
+    ``GRAPHVER_CHANGE_LIST_MAX`` changes it is counted and not listed (``tooLarge``); a window
+    that large is counted from what its revisions recorded (``approximate`` over several)."""
+    origin = _change_origin(branch_id, from_seq, to_seq)
+    cset = await _live_containment_types(session, ws_id, _meta.get("data_source_id"))
+    with _domain_errors():
+        summary = await svc.change_summary(graph_id=graph_id, origin=origin,
+                                           containment_edge_types=cset, viewer=viewer)
+    window = summary.get("window") or {}
+    people = set(window.get("contributors") or ())
+    people |= {end["actor"] for end in (window.get("from"), window.get("to")) if end and end.get("actor")}
+    resolved = await resolve_user_ids(session, people) if people else {}
+    return {**summary, "userNames": {uid: disp for uid, (disp, _email) in resolved.items() if disp}}
+
+
+@router.get("/graphs/{graph_id}/diff/entries", response_model=ChangeEntriesResponse)
+async def get_change_entries(
+    ws_id: str, graph_id: str,
+    branch_id: Optional[str] = Query(None, alias="branchId", description=_ORIGIN_DOC["branch_id"]),
+    from_seq: Optional[int] = Query(None, alias="fromSeq", ge=0, description=_ORIGIN_DOC["from_seq"]),
+    to_seq: Optional[int] = Query(None, alias="toSeq", ge=1, description=_ORIGIN_DOC["to_seq"]),
+    kind: Optional[_ChangeKind] = Query(None, description="node, edge (a relationship) or "
+                                        "structure (a containment link)"),
+    status: Optional[str] = Query(None, description="added, modified, removed; comma-separated"),
+    entity_type: Optional[str] = Query(None, alias="type", max_length=256),
+    q: Optional[str] = Query(None, max_length=200, description="Text in a name, qualified name, "
+                             "urn, type or id; any case"),
+    offset: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    viewer: Viewer = Depends(viewer_ctx),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """A page of a change list, in a fixed order: entities, then relationships, then
+    structure; by type, then name. ``offset`` counts into the filtered list, which holds still
+    for its key (a draft's head, or two revisions), so paging neither skips nor repeats. No
+    payloads: open one row with ``/diff/entries/{entityId}``."""
+    origin = _change_origin(branch_id, from_seq, to_seq)
+    statuses = _change_statuses(status)
+    cset = await _live_containment_types(session, ws_id, _meta.get("data_source_id"))
+    with _domain_errors():
+        return await svc.change_entries(
+            graph_id=graph_id, origin=origin, containment_edge_types=cset, viewer=viewer,
+            kind=kind, statuses=statuses, type_=entity_type, q=q, offset=offset, limit=limit)
+
+
+@router.get("/graphs/{graph_id}/diff/entries/{entity_id}", response_model=ChangeEntryResponse)
+async def get_change_entry(
+    ws_id: str, graph_id: str, entity_id: str,
+    branch_id: Optional[str] = Query(None, alias="branchId", description=_ORIGIN_DOC["branch_id"]),
+    from_seq: Optional[int] = Query(None, alias="fromSeq", ge=0, description=_ORIGIN_DOC["from_seq"]),
+    to_seq: Optional[int] = Query(None, alias="toSeq", ge=1, description=_ORIGIN_DOC["to_seq"]),
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    viewer: Viewer = Depends(viewer_ctx),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+):
+    """One entity's value before and after, for the same origin as its list — the row a
+    person opened."""
+    origin = _change_origin(branch_id, from_seq, to_seq)
+    with _domain_errors():
+        return await svc.change_entry(graph_id=graph_id, origin=origin, entity_id=entity_id,
+                                      viewer=viewer)
+
+
+@router.get("/graphs/{graph_id}/diff/index", response_model=ChangeIndexResponse)
+async def get_change_index(
+    ws_id: str, graph_id: str,
+    branch_id: Optional[str] = Query(None, alias="branchId", description=_ORIGIN_DOC["branch_id"]),
+    from_seq: Optional[int] = Query(None, alias="fromSeq", ge=0, description=_ORIGIN_DOC["from_seq"]),
+    to_seq: Optional[int] = Query(None, alias="toSeq", ge=1, description=_ORIGIN_DOC["to_seq"]),
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    viewer: Viewer = Depends(viewer_ctx),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Every change of an origin as a short array, without names or payloads — what the canvas
+    marks entities by and finds a draft's new entities and their parents from: about 70 bytes a
+    change, where the full diff was a kilobyte or more. ``truncated`` past
+    ``GRAPHVER_CHANGE_LIST_MAX``, with no entries."""
+    origin = _change_origin(branch_id, from_seq, to_seq)
+    cset = await _live_containment_types(session, ws_id, _meta.get("data_source_id"))
+    with _domain_errors():
+        return await svc.change_index_compact(graph_id=graph_id, origin=origin,
+                                              containment_edge_types=cset, viewer=viewer)
+
+
+@router.get("/graphs/{graph_id}/history/months", response_model=HistoryMonthsResponse)
+async def get_history_months(
+    ws_id: str, graph_id: str,
+    tz: str = Query("UTC", max_length=64, description="An IANA time zone, e.g. Europe/Berlin: "
+                    "the days and months revisions are counted in"),
+    originating_view_id: Optional[str] = Query(None, alias="originatingViewId",
+                                               description="Count what this view's history lists"),
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+):
+    """Main's revisions by month and day in the reader's time zone: how many, the first and last
+    of each. A month's ``lastSeq`` is the graph as it was at that month's end."""
+    with _domain_errors():
+        return await svc.history_months(graph_id=graph_id, tz=tz,
+                                        originating_view_id=originating_view_id)
 
 
 @router.get("/graphs/{graph_id}/graph/neighbors", response_model=GraphReadResponse)

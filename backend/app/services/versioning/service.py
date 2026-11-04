@@ -30,11 +30,12 @@ import sys
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from typing import (Any, Awaitable, Callable, Collection, Dict, Iterable, List, Mapping, NamedTuple,
                     Optional, Sequence, Set, Tuple)
 
-from sqlalchemy import (Boolean, Text, TextClause, any_, bindparam, insert, select, func, delete, null,
-                        literal, text, update, or_, tuple_, and_, case)
+from sqlalchemy import (TIMESTAMP, Boolean, Text, TextClause, any_, bindparam, cast, insert, select, func,
+                        delete, null, literal, text, update, or_, tuple_, and_, case)
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import DBAPIError, IntegrityError
@@ -45,7 +46,9 @@ from .changeset import Delta, fold_batch_ops, materialize, net_delta, diff_state
 from backend.common.property_patch import apply_patch, compose_patches, strip_deletes
 from backend.common.service_accounts import is_service_account
 from .entity_serde import edge_payload_from_parts
-from .errors import (AccessDenied, AmbiguousSpelling, AmbiguousUrn, BranchNotOpen,
+from .change_index import (ChangeIndex, ChangeIndexBuilder, ChangeOrigin, IndexCache, compact_entries,
+                           entry_dict, stat_changes)
+from .errors import (AccessDenied, AmbiguousSpelling, AmbiguousUrn, BranchNotOpen, ChangeListBusy,
                      ContentionExhausted, CrossesUpdate, CurationAtRisk, DraftNotReadable,
                      EdgeEndsMissing, EntityExists, StagedChangesUnsaved, UniqueViolation,
                      DraftRoleRequired, ForkLimit, ForkNotRestorable, ForkNotUpToDate,
@@ -2671,15 +2674,17 @@ class GraphVersioningService:
         stats = {"create": 0, "update": 0, "delete": 0}
         changed = await self._changed_in_window(s, graph_id, main_id, from_seq, to_seq)
         if changed:
-            before = await self._values_at(s, graph_id, main_id, changed, from_seq)
-            after = await self._values_at(s, graph_id, main_id, changed, to_seq)
+            # Told from content hashes, as the change index tells them — a pull after a large
+            # publish counts what came in without loading every payload at both ends.
+            before = await self._hashes_at(s, graph_id, main_id, changed, from_seq)
+            after = await self._hashes_at(s, graph_id, main_id, changed, to_seq)
             for eid in changed:
                 was, now = before.get(eid), after.get(eid)
                 if was is None and now is not None:
                     stats["create"] += 1
                 elif was is not None and now is None:
                     stats["delete"] += 1
-                elif was is not None and now is not None and was != now:
+                elif was is not None and now is not None and was.content_hash != now.content_hash:
                     stats["update"] += 1
         return {
             # The window is a range of MAIN's commit_seqs, and commit_seq is per-BRANCH — so the
@@ -4233,6 +4238,9 @@ class GraphVersioningService:
             pr = await s.get(MergeRequestORM, pr_id)
             if pr is None:
                 raise ValueError(f"unknown pull request {pr_id}")
+            big = await self._pr_too_large(s, pr)
+            if big is not None:
+                raise DiffTooLarge(big[1], config.DIFF_TREE_MAX_CHANGES)
             merged, theirs = await self._pr_merge_states(s, pr)
         return _deltas_to_diff_vs_main(net_delta(theirs, merged), theirs)
 
@@ -4248,7 +4256,17 @@ class GraphVersioningService:
             pr = await s.get(MergeRequestORM, pr_id)
             if pr is None:
                 raise ValueError(f"unknown pull request {pr_id}")
-            merged, theirs = await self._pr_merge_states(s, pr, containment_edge_types)
+            big = await self._pr_too_large(s, pr)
+            if big is None:
+                merged, theirs = await self._pr_merge_states(s, pr, containment_edge_types)
+        if big is not None:
+            # Counted from the draft's change index — what the draft changes where it branched
+            # off, which is what merging it changes once it is up to date — instead of merging
+            # every changed entity in the web process for a row of the review inbox.
+            draft, changed = big
+            index = await self._change_index(pr.target_graph_id, ChangeOrigin(branch_id=draft.id),
+                                             containment_edge_types, viewer=None)
+            return _counted_tree_summary(index, changed)
         index = _build_diff_hierarchy(merged, theirs, containment_edge_types)
         return _hierarchy_summary_view(index, limit)
 
@@ -4263,9 +4281,33 @@ class GraphVersioningService:
             pr = await s.get(MergeRequestORM, pr_id)
             if pr is None:
                 raise ValueError(f"unknown pull request {pr_id}")
+            big = await self._pr_too_large(s, pr)
+            if big is not None:
+                raise DiffTooLarge(big[1], config.DIFF_TREE_MAX_CHANGES)
             merged, theirs = await self._pr_merge_states(s, pr, containment_edge_types)
         index = _build_diff_hierarchy(merged, theirs, containment_edge_types)
         return _hierarchy_children_view(index, container_key, limit, offset)
+
+    async def _pr_too_large(self, s, pr) -> Optional[Tuple[BranchORM, int]]:
+        """A draft's review too large to merge inside a request for its diff: ``(draft, at
+        least how many)`` past ``DIFF_TREE_MAX_CHANGES`` — the draft's own changes, and main's
+        since the draft branched off when it is behind (the merge composes both) — else None.
+        Its list is the draft's change list (``/graphs/{gid}/diff/*``). A fork's review is merged
+        in the request at any size, as before."""
+        if not self._is_draft_mr(pr):
+            return None
+        draft = await s.get(BranchORM, pr.source_branch_id)
+        if draft is None:
+            return None
+        cap = config.DIFF_TREE_MAX_CHANGES
+        changed = await self._change_count(s, pr.target_graph_id, draft.id)
+        if changed <= cap:
+            graph = await s.get(GraphORM, pr.target_graph_id)
+            base, head = draft.base_commit_seq or 0, (graph.main_head_commit_seq or 0) if graph else 0
+            if head > base:
+                main_id = await self._main_branch_id(s, pr.target_graph_id)
+                changed += await self._own_change_count(s, pr.target_graph_id, main_id, base, head, cap)
+        return (draft, changed) if changed > cap else None
 
     async def merge_mr(
         self, *, mr_id: str, actor: str, message: str,
@@ -6835,6 +6877,294 @@ class GraphVersioningService:
                 "edgeCounts": edge_counts, "impact": impact,
                 "tooLarge": {"changed": changed, "limit": config.DIFF_TREE_MAX_CHANGES}}
 
+    # ------------------------------------------------------------------ #
+    # Change lists at any size (change_index.py)                          #
+    # ------------------------------------------------------------------ #
+    async def change_summary(
+        self, *, graph_id: str, origin: ChangeOrigin, containment_edge_types,
+        viewer: Optional[Viewer] = None,
+    ) -> Dict[str, object]:
+        """What an origin changes — a draft against ``main`` at its branch point, or ``main``
+        between two revisions — counted by kind, status and type, from the same index its list
+        pages through, so the two always agree. Payload-free at any size; past
+        ``CHANGE_LIST_MAX`` the origin is counted, not listed (``tooLarge``)."""
+        index = await self._change_index(graph_id, origin, containment_edge_types, viewer)
+        return index.summary(origin)
+
+    async def change_entries(
+        self, *, graph_id: str, origin: ChangeOrigin, containment_edge_types,
+        viewer: Optional[Viewer] = None, kind: Optional[str] = None,
+        statuses: Sequence[str] = (), type_: Optional[str] = None, q: Optional[str] = None,
+        offset: int = 0, limit: int = 100,
+    ) -> Dict[str, object]:
+        """A page of an origin's changes in the index's fixed order (entities, then
+        relationships, then structure; by type, then name), narrowed by kind, status, type and
+        text. No payload: what a row shows comes from version-row columns, and an edge's ends are
+        named for the page it is on."""
+        index = await self._change_index(graph_id, origin, containment_edge_types, viewer)
+        positions = await asyncio.to_thread(index.view, kind=kind, statuses=statuses,
+                                            type_=type_, q=q)
+        page = index.page(positions, offset, limit)
+        names = await self._end_names(graph_id, origin, index, page)
+        return {"entries": [entry_dict(e, names) for e in page], "total": len(positions),
+                "offset": offset, "limit": limit,
+                "hasMore": offset + len(page) < len(positions), "tooLarge": index.too_large}
+
+    async def change_entry(
+        self, *, graph_id: str, origin: ChangeOrigin, entity_id: str,
+        viewer: Optional[Viewer] = None,
+    ) -> Dict[str, object]:
+        """One entity's value before and after, for an origin — what a row of a change list
+        shows when it is opened: two point reads, whatever the origin's size."""
+        async with self._session() as s:
+            if origin.branch_id is not None:
+                branch = await self._draft_of(s, graph_id, origin.branch_id, viewer)
+                main_id = await self._main_branch_id(s, graph_id)
+                before = (await self._values_at(s, graph_id, main_id, [entity_id],
+                                                branch.base_commit_seq or 0)).get(entity_id)
+                after = (await self._current_values(s, graph_id, branch.id, [entity_id])).get(entity_id)
+            else:
+                main_id = await self._window_main(s, graph_id, origin)
+                before = (await self._values_at(s, graph_id, main_id, [entity_id],
+                                                origin.from_seq)).get(entity_id)
+                after = (await self._values_at(s, graph_id, main_id, [entity_id],
+                                               origin.to_seq)).get(entity_id)
+        before, after = before or None, after or None        # an empty payload is no entity
+        if before is None and after is None:
+            raise ValueError(f"{entity_id} is not in this change list")
+        status = ("added" if before is None else "removed" if after is None else
+                  "modified" if before != after else "unchanged")
+        kind = "edge" if _is_edge_payload(after or before) else "node"
+        return {"entityId": entity_id, "kind": kind, "status": status,
+                "before": before, "after": after}
+
+    async def change_index_compact(
+        self, *, graph_id: str, origin: ChangeOrigin, containment_edge_types,
+        viewer: Optional[Viewer] = None,
+    ) -> Dict[str, object]:
+        """Every change of an origin as a short array (:func:`compact_entries`) — what the canvas
+        decorates entities by, and finds a draft's created entities and their parents from — at
+        about 70 bytes an entity. Past ``CHANGE_LIST_MAX``, ``truncated`` and no entries."""
+        index = await self._change_index(graph_id, origin, containment_edge_types, viewer)
+        return {"origin": origin.as_dict(), "entries": await asyncio.to_thread(compact_entries, index),
+                "total": sum(index.counts.values()), "truncated": index.too_large is not None}
+
+    async def _change_index(self, graph_id: str, origin: ChangeOrigin, containment_edge_types,
+                            viewer: Optional[Viewer]) -> ChangeIndex:
+        """The origin's index from this process's cache, built once per version of it: a draft's
+        by its head, branch point and status; a window by its two seqs, which never change. The
+        viewer's access is checked on every request, before the cache is."""
+        cset = tuple(sorted({(t or "").upper() for t in (containment_edge_types or [])}))
+        async with self._session() as s:
+            if origin.branch_id is not None:
+                branch = await self._draft_of(s, graph_id, origin.branch_id, viewer)
+                key = ("draft", graph_id, branch.id, branch.head_commit_id,
+                       branch.base_commit_seq or 0, branch.status, cset)
+                branch_id = branch.id
+
+                def build():
+                    return self._build_draft_change_index(graph_id, branch_id, cset)
+            else:
+                main_id = await self._window_main(s, graph_id, origin)
+                lo, hi = origin.from_seq, origin.to_seq
+                key = ("window", graph_id, main_id, lo, hi, cset)
+
+                def build():
+                    return self._build_window_change_index(graph_id, main_id, lo, hi, cset)
+        return await _CHANGE_INDEXES.get(key, build)
+
+    async def _draft_of(self, s, graph_id: str, branch_id: str, viewer: Optional[Viewer]) -> BranchORM:
+        """The draft a change list of a branch is of, once the viewer may read it. ``main``'s
+        changes are listed between two of its revisions instead."""
+        branch = await self._get_branch(s, graph_id, branch_id)
+        if branch.kind == "main":
+            raise ValueError("main's changes are listed between two of its revisions: "
+                             "name fromSeq and toSeq instead of the branch")
+        await self._assert_branch_readable(s, branch, viewer)
+        return branch
+
+    async def _window_main(self, s, graph_id: str, origin: ChangeOrigin) -> str:
+        """``main``'s id, once ``origin`` names two of its revisions: ``0 <= from < to <= head``."""
+        graph = await s.get(GraphORM, graph_id)
+        if graph is None:
+            raise ValueError(f"unknown graph {graph_id}")
+        head = graph.main_head_commit_seq or 0
+        lo, hi = origin.from_seq, origin.to_seq
+        if lo is None or hi is None or not 0 <= lo < hi <= head:
+            raise ValueError(f"no such revisions: compare 0 <= fromSeq < toSeq <= {head}, "
+                             "main's newest")
+        return await self._main_branch_id(s, graph_id)
+
+    @contextlib.asynccontextmanager
+    async def _bounded_session(self):
+        """A session whose every statement Postgres cancels past
+        ``CHANGE_INDEX_STATEMENT_TIMEOUT_MS``, answered as :class:`ChangeListBusy`: for the reads a
+        person waits on that a bad plan could otherwise stretch to minutes on a pooled connection."""
+        try:
+            async with self._session() as s:
+                await s.execute(_STATEMENT_TIMEOUT, {"ms": str(config.CHANGE_INDEX_STATEMENT_TIMEOUT_MS)})
+                yield s
+        except DBAPIError as exc:
+            if getattr(exc.orig, "sqlstate", None) == _QUERY_CANCELED:
+                raise ChangeListBusy() from exc
+            raise
+
+    async def _build_draft_change_index(self, graph_id: str, branch_id: str, cset) -> ChangeIndex:
+        """A draft's changes against ``main`` at its branch point — its heads a page at a time,
+        each classified against main's value there from content hashes. Holds the entries of a
+        draft up to ``CHANGE_LIST_MAX``; past it, counts them a page at a time and keeps none."""
+        async with self._bounded_session() as s:
+            branch = await self._get_branch(s, graph_id, branch_id)
+            main_id = await self._main_branch_id(s, graph_id)
+            base = branch.base_commit_seq or 0
+            changed = await self._change_count(s, graph_id, branch_id)
+            keep = changed <= config.CHANGE_LIST_MAX
+            builder = ChangeIndexBuilder(cset, keep=keep)
+            conn = await s.connection()
+            async for page in self._head_pages(conn, graph_id, branch_id):
+                heads = await self._heads_from_rows(conn, graph_id, page)
+                before = await self._hashes_at(s, graph_id, main_id, list(heads), base)
+                await asyncio.to_thread(_add_draft_page, builder, heads, before)
+        too_large = None if keep else {"changed": changed, "limit": config.CHANGE_LIST_MAX}
+        return await asyncio.to_thread(builder.finish, too_large=too_large)
+
+    async def _build_window_change_index(self, graph_id: str, main_id: str, lo: int, hi: int,
+                                         cset) -> ChangeIndex:
+        """``main``'s changes in ``(lo, hi]``: the entities its commits there touched
+        (:meth:`_changed_in_window`), each resolved at both ends from content hashes, a chunk at a
+        time. A window past ``CHANGE_LIST_MAX`` entities is counted from what its revisions
+        recorded of themselves instead, without reading its entities."""
+        cap = config.CHANGE_LIST_MAX
+        async with self._bounded_session() as s:
+            window, stats = await self._window_commits(s, graph_id, main_id, lo, hi)
+            ids: Optional[set] = None
+            if await self._own_change_count(s, graph_id, main_id, lo, hi, cap) <= cap:
+                ids = await self._changed_in_window(s, graph_id, main_id, lo, hi)
+            if ids is None or len(ids) > cap:
+                create, update, delete = stats
+                return ChangeIndex.counted(
+                    {"added": create, "modified": update, "removed": delete},
+                    too_large={"changed": max(create + update + delete, cap + 1), "limit": cap},
+                    window=window, approximate=window["commitCount"] > 1)
+            builder = ChangeIndexBuilder(cset)
+            for chunk in _chunks(list(ids), _IN_LIST_MAX):
+                before = await self._hashes_at(s, graph_id, main_id, chunk, lo)
+                after = await self._hashes_at(s, graph_id, main_id, chunk, hi)
+                await asyncio.to_thread(_add_window_chunk, builder, chunk, before, after)
+        return await asyncio.to_thread(builder.finish, window=window)
+
+    async def _window_commits(self, s, graph_id: str, main_id: str, lo: int,
+                              hi: int) -> Tuple[Dict[str, object], Tuple[int, int, int]]:
+        """The revisions a window of ``main`` spans — how many, by whom, when, and the revisions
+        at its two ends — and the ``(create, update, delete)`` they recorded of themselves."""
+        rows = (await s.execute(
+            select(CommitORM.commit_seq, CommitORM.id, CommitORM.kind, CommitORM.message,
+                   CommitORM.actor, CommitORM.contributors, CommitORM.created_at, CommitORM.stats)
+            .where(CommitORM.graph_id == graph_id, CommitORM.branch_id == main_id,
+                   CommitORM.commit_seq >= lo, CommitORM.commit_seq <= hi)
+            .order_by(CommitORM.commit_seq)
+        )).all()
+
+        def end(r) -> Dict[str, object]:
+            return {"seq": r.commit_seq, "commitId": r.id, "kind": r.kind, "message": r.message,
+                    "actor": r.actor, "createdAt": r.created_at}
+
+        start = next((r for r in rows if r.commit_seq == lo), None)
+        inside = [r for r in rows if r.commit_seq > lo]
+        people: Dict[str, None] = {}
+        create = update = delete = 0
+        for r in inside:
+            for person in [r.actor, *(r.contributors or [])]:
+                if person:
+                    people.setdefault(person, None)
+            c, u, d = stat_changes(r.stats)
+            create, update, delete = create + c, update + u, delete + d
+        window = {
+            "commitCount": len(inside),
+            "contributors": list(people)[:_WINDOW_CONTRIBUTORS_LISTED],
+            "contributorCount": len(people),
+            "firstAt": inside[0].created_at if inside else None,
+            "lastAt": inside[-1].created_at if inside else None,
+            "from": end(start) if start is not None else None,
+            "to": end(inside[-1]) if inside and inside[-1].commit_seq == hi else None,
+        }
+        return window, (create, update, delete)
+
+    async def _end_names(self, graph_id: str, origin: ChangeOrigin, index: ChangeIndex,
+                         page: Sequence) -> Dict[str, Optional[str]]:
+        """Display names of the ends of a page's edges: from the index where the origin changed
+        the node (as it is now, or as it was if removed), else from ``main`` where the origin
+        left it (a draft's branch point, a window's end) — one lookup for the page."""
+        ends = {x for e in page if e.kind == "edge" for x in (e.src, e.tgt) if x}
+        names: Dict[str, Optional[str]] = {}
+        rest: List[str] = []
+        for eid in ends:
+            i = index.by_id.get(eid)
+            if i is not None and index.entries[i].kind == "node":
+                names[eid] = index.entries[i].name or index.entries[i].urn
+            else:
+                rest.append(eid)
+        if rest:
+            async with self._session() as s:
+                main_id = await self._main_branch_id(s, graph_id)
+                if origin.branch_id is not None:
+                    seq = (await self._get_branch(s, graph_id, origin.branch_id)).base_commit_seq or 0
+                else:
+                    seq = origin.to_seq
+                stored = await self._hashes_at(s, graph_id, main_id, rest, seq)
+            names.update({eid: v.name or v.urn for eid, v in stored.items() if v.kind == "node"})
+        return names
+
+    async def history_months(
+        self, *, graph_id: str, tz: str, originating_view_id: Optional[str] = None,
+    ) -> Dict[str, object]:
+        """``main``'s revisions by month and day in the reader's time zone — the History tab's
+        calendar, and how "the graph at the end of October" finds its revision (a month's
+        ``lastSeq``). One grouped read of main's commits up to its head, kept per head.
+        ``originating_view_id`` counts what the "This view" timeline lists: the view's publishes
+        and the graph-wide revisions every view shares."""
+        try:
+            ZoneInfo(tz)
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            raise ValueError(f"unknown time zone {tz!r}") from exc
+        async with self._bounded_session() as s:
+            graph = await s.get(GraphORM, graph_id)
+            if graph is None:
+                raise ValueError(f"unknown graph {graph_id}")
+            head = graph.main_head_commit_seq or 0
+            key = (graph_id, head, tz, originating_view_id)
+            hit = _HISTORY_MONTHS.get(key)
+            if hit is not None:
+                _HISTORY_MONTHS.move_to_end(key)
+                return hit
+            main_id = await self._main_branch_id(s, graph_id)
+            local = func.timezone(tz, cast(CommitORM.created_at, TIMESTAMP(timezone=True)))
+            inner = select(func.to_char(local, "YYYY-MM-DD").label("day"),
+                           CommitORM.commit_seq.label("seq"), CommitORM.created_at.label("at")
+                           ).where(CommitORM.graph_id == graph_id, CommitORM.branch_id == main_id,
+                                   CommitORM.commit_seq <= head)
+            if originating_view_id is not None:
+                inner = inner.where(or_(CommitORM.originating_view_id == originating_view_id,
+                                        CommitORM.originating_view_id.is_(None)))
+            days = inner.subquery()
+            rows = (await s.execute(
+                select(days.c.day, func.count(), func.min(days.c.seq), func.max(days.c.seq),
+                       func.max(days.c.at)).group_by(days.c.day).order_by(days.c.day)
+            )).all()
+        months: "OrderedDict[str, Dict[str, object]]" = OrderedDict()
+        for day, count, first, last, last_at in rows:
+            month = months.setdefault(day[:7], {"month": day[:7], "count": 0, "firstSeq": first,
+                                                "lastSeq": last, "lastAt": last_at, "days": []})
+            month["count"] += int(count)
+            month["firstSeq"] = min(month["firstSeq"], first)
+            month["lastSeq"], month["lastAt"] = max(month["lastSeq"], last), last_at
+            month["days"].append({"day": day, "count": int(count), "firstSeq": first, "lastSeq": last})
+        answer = {"headSeq": head, "tz": tz, "months": list(months.values())}
+        _HISTORY_MONTHS[key] = answer
+        while len(_HISTORY_MONTHS) > _HISTORY_MONTHS_KEPT:
+            _HISTORY_MONTHS.popitem(last=False)
+        return answer
+
     async def diff_commit_summary(
         self, *, graph_id: str, commit_id: str, containment_edge_types, limit: int = 200,
         viewer: Optional[Viewer] = None,
@@ -6843,7 +7173,22 @@ class GraphVersioningService:
         containment tree as the draft/PR diff, scoped to exactly the rows this commit wrote; the
         global counts equal the flat ``diff_commits`` tally for the commit's window."""
         async with self._session() as s:
-            merged, theirs = await self._commit_diff_states(s, graph_id, commit_id, containment_edge_types, viewer=viewer)
+            big = await self._commit_too_large(s, graph_id, commit_id, viewer)
+            if big is None:
+                merged, theirs = await self._commit_diff_states(s, graph_id, commit_id, containment_edge_types, viewer=viewer)
+        if big is not None:
+            commit, branch, changed = big
+            if branch.kind == "main":
+                # Counted by type from the revision's change index, which lists it a page at a time.
+                index = await self._change_index(
+                    graph_id, ChangeOrigin(from_seq=commit.commit_seq - 1, to_seq=commit.commit_seq),
+                    containment_edge_types, viewer=None)
+                return _counted_tree_summary(index, changed)
+            create, update, delete = stat_changes(commit.stats)
+            return {"groups": [], "groupTotal": 0, "counts": {"added": create, "modified": update,
+                                                              "removed": delete},
+                    "entityCounts": {}, "edgeCounts": {}, "impact": {},
+                    "tooLarge": {"changed": changed, "limit": config.DIFF_TREE_MAX_CHANGES}}
         index = _build_diff_hierarchy(merged, theirs, containment_edge_types)
         return _hierarchy_summary_view(index, limit)
 
@@ -6851,11 +7196,37 @@ class GraphVersioningService:
         self, *, graph_id: str, commit_id: str, container_key: str, containment_edge_types,
         limit: int = 200, offset: int = 0, viewer: Optional[Viewer] = None,
     ) -> Dict[str, object]:
-        """One container's direct children in a commit's hierarchical diff (lazy-load step)."""
+        """One container's direct children in a commit's hierarchical diff (lazy-load step).
+        :class:`DiffTooLarge` for a commit the tree doesn't lay out."""
         async with self._session() as s:
+            big = await self._commit_too_large(s, graph_id, commit_id, viewer)
+            if big is not None:
+                raise DiffTooLarge(big[2], config.DIFF_TREE_MAX_CHANGES)
             merged, theirs = await self._commit_diff_states(s, graph_id, commit_id, containment_edge_types, viewer=viewer)
         index = _build_diff_hierarchy(merged, theirs, containment_edge_types)
         return _hierarchy_children_view(index, container_key, limit, offset)
+
+    async def _commit_too_large(self, s, graph_id: str, commit_id: str,
+                                viewer: Optional[Viewer]) -> Optional[Tuple[CommitORM, BranchORM, int]]:
+        """A commit too large for its tree — ``(commit, branch, at least how many)`` past
+        ``DIFF_TREE_MAX_CHANGES`` entities written (a fork's Update from parent counts its
+        parent's window too) — else None. The tree reads every payload the commit wrote at both
+        ends; a publish of a large import is the whole import."""
+        commit = await s.get(CommitORM, (graph_id, commit_id))
+        if commit is None:
+            raise ValueError(f"unknown commit {commit_id}")
+        branch = await self._get_branch(s, graph_id, commit.branch_id)
+        await self._assert_branch_readable(s, branch, viewer)
+        cap = config.DIFF_TREE_MAX_CHANGES
+        lo, hi = commit.commit_seq - 1, commit.commit_seq
+        changed = await self._own_change_count(s, graph_id, commit.branch_id, lo, hi, cap)
+        parent = await self._parent_window(s, graph_id, commit.branch_id, lo, hi)
+        if parent is not None and changed <= cap:
+            changed += await self._own_change_count(s, *parent, cap)
+        if changed <= cap:
+            return None
+        # Past the cap, say how many exactly: one count over the window's rows.
+        return commit, branch, await self._count_changed_in_window(s, graph_id, commit.branch_id, lo, hi)
 
     async def _branch_diff_states(self, s, graph_id, branch_id, containment_edge_types, viewer=None):
         """``(merged, theirs)`` for a draft restricted to its own changes PLUS the unchanged
@@ -9872,6 +10243,15 @@ class GraphVersioningService:
         result plus 200k ``_Head`` built in one go was half a second the loop served nothing else."""
         conn = await s.connection()
         heads: List[tuple] = []
+        async for page in self._head_pages(conn, graph_id, branch_id):
+            heads.extend(page)
+        return await self._heads_from_rows(conn, graph_id, heads)
+
+    @staticmethod
+    async def _head_pages(conn, graph_id: str, branch_id: str):
+        """A branch's head-pointer rows (entity id, kind, version id, content hash, tombstone),
+        ``_HEAD_PAGE`` at a time in entity-id order — a keyset on the primary key — for readers
+        that classify a large draft a page at a time (:meth:`_head_index`, the change index)."""
         after = ""
         while True:
             page = (await conn.execute(
@@ -9882,11 +10262,11 @@ class GraphVersioningService:
                        EntityHeadORM.entity_id > after)
                 .order_by(EntityHeadORM.entity_id).limit(_HEAD_PAGE)
             )).all()
-            heads.extend(page)
+            if page:
+                yield page
             if len(page) < _HEAD_PAGE:
-                break
+                return
             after = page[-1][0]
-        return await self._heads_from_rows(conn, graph_id, heads)
 
     async def _heads_from_rows(self, conn, graph_id: str, heads: Sequence[tuple]) -> Dict[str, "_Head"]:
         """:meth:`_head_index`'s :class:`_Head` for each of ``heads`` (head-pointer rows: entity
@@ -11012,6 +11392,43 @@ _HEADS_PER_READ = _PG_MAX_BIND_PARAMS // 5
 # on the web process's event loop, and each statement's rows are turned into Python objects there
 # in one uninterrupted step — 20k at a time was a few hundred milliseconds of nothing else served.
 _HEAD_PAGE = 5000
+
+#: This process's change indexes (change_index.py), bounded by the entries they hold together.
+_CHANGE_INDEXES = IndexCache(lambda: config.CHANGE_INDEX_CACHE_ENTRIES)
+#: History calendars by (graph, main head, time zone, view): a new revision moves the head, so an
+#: answer is never served for a head it was not counted at.
+_HISTORY_MONTHS: "OrderedDict[tuple, Dict[str, object]]" = OrderedDict()
+_HISTORY_MONTHS_KEPT = 256
+#: Bounds every statement of a session a person waits on (``_bounded_session``). SET LOCAL takes
+#: no parameter; set_config(..., is_local => true) is SET LOCAL, and keeps the value bound.
+_STATEMENT_TIMEOUT = text("SELECT set_config('statement_timeout', :ms, true)")
+_QUERY_CANCELED = "57014"
+#: Contributors a window's summary names; past this it counts them.
+_WINDOW_CONTRIBUTORS_LISTED = 50
+
+
+def _add_draft_page(builder: ChangeIndexBuilder, heads: Mapping[str, "_Head"],
+                    before: Mapping[str, "_Stored"]) -> None:
+    """A page of a draft's heads into its change index: each against ``main`` at the branch
+    point, a head that is not live as gone. Pure CPU, run in a thread."""
+    builder.add_pairs((eid, before.get(eid), h if h.live else None) for eid, h in heads.items())
+
+
+def _counted_tree_summary(index: ChangeIndex, changed: int) -> Dict[str, object]:
+    """The Changes tree's summary (``DiffSummaryResponse``) of an origin too large to lay out
+    as a tree — no groups, its counts from the change index, ``tooLarge`` naming the tree's cap
+    — so the panel says how much changed and lists it from ``/graphs/{gid}/diff/entries``."""
+    return {"groups": [], "groupTotal": 0, "counts": dict(index.counts),
+            "entityCounts": dict(index.entity_counts or {}), "edgeCounts": dict(index.edge_counts or {}),
+            "impact": dict(index.impact),
+            "tooLarge": {"changed": changed, "limit": config.DIFF_TREE_MAX_CHANGES}}
+
+
+def _add_window_chunk(builder: ChangeIndexBuilder, ids: Sequence[str],
+                      before: Mapping[str, "_Stored"], after: Mapping[str, "_Stored"]) -> None:
+    """A chunk of the entities a window of ``main`` touched into its change index, each as it
+    was at the window's start and at its end. Pure CPU, run in a thread."""
+    builder.add_pairs((eid, before.get(eid), after.get(eid)) for eid in ids)
 
 # Upper bound on a single cascade-delete's containment subtree, so a pathological graph
 # can't run unbounded. Generous; the chunked writes handle the volume.

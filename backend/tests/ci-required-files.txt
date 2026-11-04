@@ -70,6 +70,7 @@ tests/test_bring_into_history.py
 tests/test_bulkhead.py
 tests/test_cache_refresh_route.py
 tests/test_canvas_endpoints.py
+tests/test_change_index_unit.py
 tests/test_changeset_materialize.py
 tests/test_ci_required_list.py
 tests/test_cleanup_graph_indices.py
@@ -86,6 +87,7 @@ tests/test_data_source_transfers.py
 tests/test_default_data_source_ids.py
 tests/test_diff_too_large_api.py
 tests/test_discovery_never_creates_graphs.py
+tests/test_draft_overlay_bounded_pages.py
 tests/test_draft_overlay_edge_index.py
 tests/test_draft_overlay_lazy.py
 tests/test_draft_overlay_paging.py
@@ -234,6 +236,7 @@ tests/test_residency_graph_routes.py
 tests/test_residency_plan.py
 tests/test_residency_policy.py
 tests/test_residency_reads.py
+tests/test_restore_preview_api.py
 tests/test_rollup_health.py
 tests/test_rollup_rebuild_hook_proxy.py
 tests/test_run_step_ledger.py
@@ -294,6 +297,7 @@ tests/test_versioning_commit_log_api.py
 tests/test_versioning_concurrency.py
 tests/test_versioning_core.py
 tests/test_versioning_create_graph_route.py
+tests/test_versioning_diff_api.py
 tests/test_versioning_domain_errors.py
 tests/test_versioning_feature_gate.py
 tests/test_versioning_fork_lifecycle_route.py

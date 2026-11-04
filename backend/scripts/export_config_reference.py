@@ -436,6 +436,27 @@ NOTES: dict[str, tuple[str, str | None]] = {
         "entries.",
         None,
     ),
+    "GRAPHVER_CHANGE_LIST_MAX": (
+        "Changed entities a change list — a draft's changes, one revision's, two revisions "
+        "compared — lists, a page at a time; past it the list is counted, not listed. Each list "
+        "is classified once from content hashes, no payload, and kept for its pages at about 300 "
+        "bytes an entity, so the default, 250,000, holds about 75 MB while a list is in use.",
+        None,
+    ),
+    "GRAPHVER_CHANGE_INDEX_CACHE_ENTRIES": (
+        "Entries the change lists of each web process may hold together; the least recently "
+        "read go first, and the newest is kept whatever its size. About 90 MB at the default, "
+        "300,000. An evicted list is classified again on its next read: about a second at "
+        "100,000 changes.",
+        None,
+    ),
+    "GRAPHVER_CHANGE_INDEX_STATEMENT_TIMEOUT_MS": (
+        "Longest, in milliseconds, one statement building a change list or the history calendar "
+        "may run before Postgres cancels it and the reader is told to try again (503 "
+        "`change_list_busy`). Each is an index range that finishes well inside a second at "
+        "100,000 changes.",
+        None,
+    ),
     "GRAPHVER_DROP_FORK_COPIES": (
         "Set `true` once every pod runs a release whose forks read through their parent's graph: "
         "the versioning worker then drops the FalkorDB copies earlier releases made of forks "

@@ -121,8 +121,9 @@ the graph:
 fork's value of just what it serves, for that request (`overlay_payloads`, which reads through the
 layers: the fork's own row, or its parent's at the base): a page of what the root has costs a page
 of payloads, however much the fork changed. A listing serves the nodes the fork created that it
-lists on its first page, all of them, as a draft's does (`compose_page`), so a fork that created
-many nodes at its top level, or a listing with no filter, loads each of those on every request
+lists a page at a time, as a draft's does (`compose_page`): at most a page of them on its first
+page, in name order, and the rest after the store's last page, at positions the overlay owns
+(`_TAIL_OFFSET`, `_TAIL_CURSOR`) — so a page loads a page of values however many the fork created
 ([09](09-scale-limits-and-roadmap.md) §4.1).
 
 **Cached, then extended.** A process keeps a patch set per fork head, base and root head. When only

@@ -263,6 +263,19 @@ DRAFT_SWEEP_SECS: int = int(os.getenv("GRAPHVER_DRAFT_SWEEP_SECS", "86400"))
 # containment tree: the tree is built from every changed payload and their ancestors, in the
 # web process, per request.
 DIFF_TREE_MAX_CHANGES: int = int(os.getenv("GRAPHVER_DIFF_TREE_MAX_CHANGES", "20000"))
+# Change lists — a draft's changes, a revision's, two revisions compared (change_index.py) — are
+# classified once from content hashes and version-row columns, no payload, and kept for their
+# pages: about 300 bytes an entity. Past this many changed entities an origin is counted, not listed.
+CHANGE_LIST_MAX: int = int(os.getenv("GRAPHVER_CHANGE_LIST_MAX", "250000"))
+# Entries the change lists a web process keeps may hold together: the least recently read go
+# first, the newest is kept whatever its size. About 90 MB at the default.
+CHANGE_INDEX_CACHE_ENTRIES: int = int(os.getenv("GRAPHVER_CHANGE_INDEX_CACHE_ENTRIES", "300000"))
+# Longest one statement building a change list or the history calendar may run before Postgres
+# cancels it and the reader is told to try again. Each is an index range that finishes well inside
+# a second at 100k changes; one that runs this long has a bad plan, and a web process should not
+# hold its connection while it does.
+CHANGE_INDEX_STATEMENT_TIMEOUT_MS: int = int(
+    os.getenv("GRAPHVER_CHANGE_INDEX_STATEMENT_TIMEOUT_MS", "15000"))
 # A draft changing more entities than this publishes (or has its review merged) as a job on the
 # versioning worker, not inside the request: the squash holds every changed payload and hashes
 # them all, which a web pod's memory and event loop can't spare at that size.

@@ -102,6 +102,7 @@ tests/integration/test_versioning_branch_list.py
 tests/integration/test_versioning_branch_per_view.py
 tests/integration/test_versioning_branch_provider_stats.py
 tests/integration/test_versioning_bulk_ingest.py
+tests/integration/test_versioning_change_index.py
 tests/integration/test_versioning_commit_diff.py
 tests/integration/test_versioning_commit_log.py
 tests/integration/test_versioning_data_source_lifecycle.py

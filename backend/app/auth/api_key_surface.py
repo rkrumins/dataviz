@@ -193,6 +193,8 @@ SURFACE: dict[tuple[str, str], Rule] = {
         "list_branch_members", "merge_preview", "branch_view_changes",
         "get_commit_log", "get_commit_state", "get_commit_diff_summary",
         "get_commit_diff_children", "get_squashed_commits",
+        "get_change_summary", "get_change_entries", "get_change_entry", "get_change_index",
+        "get_history_months",
         "get_restore_preview",
         "get_entity_history", "get_entity_summary",
         "bulk_ingest", "get_publish_job",

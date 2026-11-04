@@ -122,6 +122,9 @@ held the graph's publish lock, and how much Postgres and FalkorDB grew.
 | **Full re-projection** | `O(N + E)` reads; a page of each side at a time above `GRAPHVER_PROJECTION_RECONCILE_STREAMED_ABOVE` | §4.2 |
 | Schema counts of `main` read from Postgres | counted in Postgres, once per commit | `schema_counts` |
 | Reconcile (drift scan) | `O(N)` streamed, bounded memory | operator tool |
+| A change list (a draft's changes, one revision's, two revisions compared) | `O(changed)` index-only reads to build — no payload — kept per process; a page `O(page)`; one entity's before and after, two point reads | counted, not listed, past `GRAPHVER_CHANGE_LIST_MAX` (250,000) |
+| History calendar (`/history/months`) | one grouped read of `main`'s commits, kept per head | |
+| One commit's or a draft review's tree | `O(changed)` payloads; counted from the change list past `GRAPHVER_DIFF_TREE_MAX_CHANGES` (20,000) | the review's merge is not run for it |
 
 ## 4. The sharp edges (`O(graph)` hotspots)
 
@@ -137,10 +140,12 @@ patch set of what either side changed since they parted laid over it, with no Fa
 - **A fork past `GRAPHVER_FORK_REWIND_MAX`** (200,000) entities to classify is read from its layered
   rows in Postgres instead, and search does not reach it; its fork-list item recommends an update from
   its parent.
-- **A listing serves every node the fork created that it lists**, on its first page, as a draft's
-  does, and loads each for every request: an unfiltered listing of 500 through a fork that created
-  12,500 nodes serves all 12,500, in 0.75 s each time. A fork that created many nodes at its top
-  level reads that level the same way.
+- **A listing scans what the fork created there to page it.** A listing's first page holds at
+  most a page of the nodes the fork (or a draft) created that it lists, in name order, and the rest
+  follow the store's last page at positions the overlay owns, so a page loads a page of values
+  however many it created. Ordering them is `O(created)` once per patch set and listing; until
+  2026-11 every one came on the first page, loaded each time (an unfiltered listing of 500 through
+  a fork that created 12,500 nodes served all 12,500, in 0.75 s each time).
 - **A fork's review is merged inside the request**, holding what the fork changed since its last merged
   review (about 1.5 KB a change); a draft that large is published by a job on the versioning worker.
 

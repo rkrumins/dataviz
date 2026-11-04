@@ -214,6 +214,19 @@ class ContentionExhausted(LockBusy):
         super().__init__(message, retry_after)
 
 
+class ChangeListBusy(_HttpMapped, RuntimeError):
+    """A statement building a change list (or the history calendar) ran past
+    ``GRAPHVER_CHANGE_INDEX_STATEMENT_TIMEOUT_MS`` and Postgres cancelled it. Answered as a busy
+    store the reader may retry, not as the database being down (the generic 503)."""
+
+    status_code = 503
+
+    def __init__(self, retry_after: int = 5):
+        super().__init__("this list is taking too long to prepare; try again in a moment",
+                         {"type": "change_list_busy", "retryable": True},
+                         {"Retry-After": str(retry_after)})
+
+
 class JobActive(_HttpMapped, RuntimeError):
     """Another job of the same kind is already running on this branch.
     Same shape as ``BootstrapConflict``'s ``job_active``."""
@@ -532,7 +545,7 @@ class ReviewRequired(_HttpMapped, RuntimeError):
 
 HTTP_MAPPED = (BranchNotOpen, MainWriteForbidden, NotDraftOwner, DraftRoleRequired, SelfReview,
                PersonRequired, GroupsUnavailable, IneligibleMember, ServiceAccountMember, HeadMoved,
-               LockBusy, JobActive, CurationAtRisk, MassDeleteBlocked, ForkLimit, NotAFork, LiveForks,
+               LockBusy, ChangeListBusy, JobActive, CurationAtRisk, MassDeleteBlocked, ForkLimit, NotAFork, LiveForks,
                ForkNotRestorable, GraphMoved, ProjectionNotAdopted, ProjectionAlreadyAdopted,
                ProjectionPassInFlight, ProjectionKeyInUse,
                ProjectionKeyInvalid, PublishRequired, GraphNotWritable, VersionConflict,
