@@ -1244,7 +1244,7 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
         "type": "boolean",
         "default_value": json.dumps(False),
         "options": None,
-        "help_url": None,
+        "help_url": "/guide/exploring-graph#show-only-some-entities-and-what-they-reach",
         "admin_hint": (
             "Sources and consumers also need Lineage trace on. Each narrowing is one resolution, "
             "cached and shared by everyone who asks the same question, and paced by the trace's "
@@ -1271,7 +1271,7 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
         "type": "boolean",
         "default_value": json.dumps(False),
         "options": None,
-        "help_url": None,
+        "help_url": "/guide/managing-views#subset-views-a-searchs-matches-as-a-view",
         "admin_hint": (
             "Turn it on once the web app that ships with it is deployed. Each layer of a subset "
             "view is one search, shared by every view and viewer asking the same question, served "

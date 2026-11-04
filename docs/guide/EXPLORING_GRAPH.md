@@ -377,6 +377,9 @@ Context View features.
 | `⌘I` / `Ctrl-I` | Expand or compact the trace dock (during a trace) |
 | `Esc` | During a trace, close any open popover, then leave the trace |
 | `⌘0` / `Ctrl-0` | Fit every layer into the window width |
+| `C` | In a draft: start a link from the selected entity, as **Connect To…** does. With no entity or several selected, turn **Connect** on or off |
+| `⌘D` / `Ctrl-D` | In a draft: make a quick copy of each selected entity and everything inside it, without asking |
+| `⌘⇧D` / `Ctrl-Shift-D` | In a draft: open **Duplicate…** for the selected entity |
 | `⌘/` / `Ctrl-/` | Switch between **Business** and **Technical** names (anywhere in the app) |
 
 ## Where to next
