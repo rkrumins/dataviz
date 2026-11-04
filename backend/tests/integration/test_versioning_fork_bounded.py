@@ -123,8 +123,10 @@ async def _a_forks_drafts_read_only_what_they_change(svc):
         pv = await svc.preview_merge(graph_id=fg, branch_id=a)
         assert pv["clean"] and pv["changes"] == {"create": 2, "update": 1, "delete": 3}, pv
         overlay = await svc.branch_overlay_delta(graph_id=fg, branch_id=a)      # main's N100 rewound
-        rewound = {n.get("entityId"): n for n in overlay["nodesUpsert"]}["N100"]
-        assert rewound["displayName"] == "N100 name", overlay
+        # Named, and its value at the fork point loaded when a read serves it.
+        assert "N100" in {n["entityId"] for n in overlay["nodesModified"]}, overlay
+        rewound, = await svc.overlay_payloads(graph_id=fg, branch_id=a, entity_ids=["N100"])
+        assert rewound["displayName"] == "N100 name", rewound
         diff = await svc.diff_branch_vs_base(graph_id=fg, branch_id=a)
         assert {e["entityId"] for e in diff["removed"]} == {"N50", "E49", "E50"}, diff
         pulled = await svc.rebase_draft(graph_id=fg, branch_id=a, actor="bob")
