@@ -69,6 +69,9 @@ class _OverlayDelta:
         self.node_new: set = set(raw.get("nodesNew", []))   # urns CREATED in the draft (vs modified)
         self.node_remove: set = set()
         self.edge_upsert: Dict[str, GraphEdge] = {}
+        # Each of edge_upsert by the urn of either end, once per patch set: a read naming its ends
+        # walks the edges it asks about, never every edge a 100k-edge import added.
+        self.edges_at: Dict[str, List[GraphEdge]] = {}
         self.edge_lazy: set = set()                         # ids of the skeletons among edge_upsert
         self.edge_remove: Dict[str, GraphEdge] = {}
         self.lineage_added: List[GraphEdge] = []
@@ -112,6 +115,8 @@ class _OverlayDelta:
             else:
                 e = GraphEdge(**fields)
             self.edge_upsert[e.id] = e
+            for end in {e.source_urn, e.target_urn}:
+                self.edges_at.setdefault(end, []).append(e)
             if was is not None:
                 held = GraphEdge.model_construct(id=e.id, sourceUrn=was["sourceUrn"],
                                                  targetUrn=was["targetUrn"],
@@ -617,7 +622,11 @@ class DraftOverlayProvider:
         anyu = set(query.any_urns or [])
         ets = set(query.edge_types or [])
         added = 0
-        for eid, e in d.edge_upsert.items():
+        named = src or tgt or anyu                     # the ends asked about: walk just theirs
+        pool = ((e for u in sorted(named) for e in d.edges_at.get(u, ())) if named
+                else d.edge_upsert.values())
+        for e in pool:
+            eid = e.id
             if eid in seen:
                 continue
             if src and e.source_urn not in src:
@@ -634,6 +643,7 @@ class DraftOverlayProvider:
             if query.limit and added >= query.limit:
                 break
             out.append(e)
+            seen.add(eid)                              # an edge both of whose ends were named
             added += 1
         return await d.edges(out)
 
@@ -1093,21 +1103,21 @@ class DraftOverlayProvider:
         return [by_urn[u] for u in chain if u in by_urn]
 
     async def create_node(self, node: GraphNode, containment_edge: Optional[GraphEdge] = None) -> bool:
-        self._delta = None
+        self._delta = self._version = None              # the write moves the draft's version
         return await self._writer.create_node(node, containment_edge)
 
     async def create_edge(self, edge: GraphEdge) -> bool:
-        self._delta = None
+        self._delta = self._version = None              # the write moves the draft's version
         return await self._writer.create_edge(edge)
 
     async def update_edge(self, edge_id: str, properties: Dict[str, Any]) -> Optional[GraphEdge]:
-        self._delta = None
+        self._delta = self._version = None              # the write moves the draft's version
         return await self._writer.update_edge(edge_id, properties)
 
     async def delete_edge(self, edge_id: str) -> bool:
-        self._delta = None
+        self._delta = self._version = None              # the write moves the draft's version
         return await self._writer.delete_edge(edge_id)
 
     async def save_custom_graph(self, nodes: List[GraphNode], edges: List[GraphEdge]) -> bool:
-        self._delta = None
+        self._delta = self._version = None              # the write moves the draft's version
         return await self._writer.save_custom_graph(nodes, edges)

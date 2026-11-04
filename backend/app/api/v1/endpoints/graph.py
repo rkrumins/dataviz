@@ -4180,6 +4180,9 @@ class GraphChangesResponse(BaseModel):
     # the same entity is not a conflict with its own last save. Capped (`entitiesTruncated`).
     entities: dict = Field(default_factory=dict)
     entities_truncated: bool = Field(default=False, alias="entitiesTruncated")
+    # Every entity the save wrote — past the cap too — → its version token (`null` once gone),
+    # keyed as `entities` is: a canvas that saved thousands keeps every token current.
+    versions: dict = Field(default_factory=dict)
 
     class Config:
         populate_by_name = True
@@ -4344,7 +4347,18 @@ async def apply_graph_changes(
         return {"commitId": None, "assigned": assigned}
 
     from backend.app.services.versioning.entity_audit import ENTITY_VIEW_CAP, entity_views
-    from backend.app.services.versioning.errors import NotAnEdge
+    from backend.app.services.versioning.errors import (AmbiguousUrn, EdgeEndsMissing,
+                                                        EntityExists, NotAnEdge)
+    from backend.app.services.versioning.merkle import content_hash
+    # A create's ref by the id minted for it: what the canvas knows a refused new entity by.
+    ref_of = {eid: ref for ref, eid in assigned.items() if ref != eid}
+
+    def _refs(entries):
+        for e in entries:
+            if "ref" not in e and e.get("entity_id") in ref_of:
+                e["ref"] = ref_of[e["entity_id"]]
+        return entries
+
     try:
         result = await svc.apply_ops_detailed(
             graph_id=graph_id, branch_id=branchId, ops=ops, actor=actor,
@@ -4357,16 +4371,26 @@ async def apply_graph_changes(
             # An edge copied in whose id was also an item's is ``edge:<id>`` in history, while
             # the graph the canvas reads still calls it ``<id>``: each edge update or delete goes
             # to the edge its id names, never to an item that shares it.
-            aim_edges=True)
-    except NotAnEdge as exc:
+            aim_edges=True,
+            # The canvas names a node by its urn, and an imported node's id is not its urn: each
+            # op goes to the node its urn names, and a create never replaces what holds its id.
+            from_client=True)
+    except (NotAnEdge, AmbiguousUrn, EdgeEndsMissing) as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+    except EntityExists as exc:
+        raise HTTPException(status_code=exc.status_code, detail={
+            **exc.detail, "refs": [ref_of.get(i, r) for i, r in zip(exc.ids, exc.detail["refs"])]})
     except OntologyViolation as exc:
-        raise HTTPException(status_code=422, detail={"type": "ontology_violation", "violations": exc.violations})
+        raise HTTPException(status_code=422, detail={"type": "ontology_violation",
+                                                     "violations": _refs(exc.violations)})
     except MergeConflict as exc:
-        # `current`: each conflicting entity as it is now, for the client to rebase the edit onto.
+        # `current`: each conflicting entity as it is now, for the client to rebase the edit onto
+        # — under the name the client sent it by.
+        conflicts = _refs(exc.conflicts)
+        named = {c["entity_id"]: c.get("ref", c["entity_id"]) for c in conflicts}
         raise HTTPException(status_code=409, detail={
-            "type": "merge_conflict", "conflicts": exc.conflicts,
-            "current": entity_views(exc.current)[0]})
+            "type": "merge_conflict", "conflicts": conflicts,
+            "current": {named.get(k, k): v for k, v in entity_views(exc.current)[0].items()}})
     except ConcurrencyError as exc:
         raise HTTPException(status_code=409, detail={"type": "integrity", "message": str(exc)})
 
@@ -4382,8 +4406,12 @@ async def apply_graph_changes(
         CacheScope(workspace_id=ws_id, data_source_id=dataSourceId, branch_id=branchId)
     )
     entities, truncated = entity_views(result.written, result.urns, cap=ENTITY_VIEW_CAP)
+    # Under the names the canvas sent — a node by its urn — never an id it never saw.
+    entities = {result.names.get(k, k): v for k, v in entities.items()}
+    versions = {result.names.get(eid, eid): (content_hash(v) if v is not None else None)
+                for eid, (_kind, v) in result.written.items()}
     return {"commitId": result.commit_id, "assigned": assigned,
-            "entities": entities, "entitiesTruncated": truncated}
+            "entities": entities, "entitiesTruncated": truncated, "versions": versions}
 
 
 class DeleteImpactResponse(BaseModel):

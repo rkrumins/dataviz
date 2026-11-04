@@ -76,6 +76,8 @@ def _entity_def_from_dict(data: Dict[str, Any]) -> EntityTypeDefEntry:
                 show_in_tooltip=f.get("show_in_tooltip", f.get("showInTooltip", False)),
                 display_order=f.get("display_order", f.get("displayOrder", 0)),
                 format=f.get("format"),
+                reconciliation_key=bool(f.get("reconciliation_key", f.get("reconciliationKey", False))),
+                unique=bool(f.get("unique", False)),
             )
             for f in raw_fields
         ],

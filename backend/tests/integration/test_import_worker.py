@@ -70,10 +70,10 @@ async def _run() -> None:
         a, = await svc.overlay_payloads(graph_id=gid, branch_id=branch_id, entity_ids=[modified["urn:A"]])
         assert a["displayName"] == "A renamed"
 
-        # edge A->B created (branch_overlay_delta reports endpoints as entity_ids)
-        b_eid = next(n["entityId"] for n in delta["nodesUpsert"] if n["urn"] == "urn:B")
+        # edge A->B created, its ends named by urn as a reader matches them (and the projector
+        # names them) — never by the entity ids its version row holds
         edges = [(e["sourceUrn"], e["targetUrn"], e["edgeType"]) for e in delta["edgesUpsert"]]
-        assert ("ent_A", b_eid, "LINEAGE") in edges, delta
+        assert ("urn:A", "urn:B", "LINEAGE") in edges, delta
 
         # job records the tally + terminal state, and how far it got: every row, at its one attempt
         got = await ie.get_job(job["job_id"])

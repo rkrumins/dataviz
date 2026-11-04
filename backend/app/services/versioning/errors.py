@@ -423,6 +423,55 @@ class NotAnEdge(_HttpMapped, ValueError):
                          {"type": "invalid_patch"})
 
 
+class AmbiguousUrn(_HttpMapped, ValueError):
+    """A save named an entity by a urn that several live entities carry: which one it meant can't
+    be told, so nothing is written rather than the wrong one changed."""
+
+    status_code = 422
+
+    def __init__(self, urns):
+        self.urns = sorted(urns)
+        super().__init__(
+            f"{', '.join(self.urns[:5])} names more than one item here — refer to it by its id.",
+            {"type": "ambiguous_urn", "urns": self.urns})
+
+
+class EntityExists(_HttpMapped, ValueError):
+    """A create named an id a live entity already holds: refused rather than that entity be
+    silently replaced — or an edge turned into a node, or the other way round."""
+
+    def __init__(self, ids, refs: Optional[Dict[str, str]] = None):
+        self.ids = sorted(ids)
+        named = [(refs or {}).get(i, i) for i in self.ids]
+        super().__init__(f"{', '.join(named[:5])} already exists — it can be edited, not created.",
+                         {"type": "entity_exists", "ids": self.ids, "refs": named})
+
+
+class UniqueViolation(_HttpMapped, RuntimeError):
+    """A publish would leave two live nodes of a type with the same value in a field the type
+    keeps unique: refused, naming each value and who carries it (the first 100, and how many)."""
+
+    def __init__(self, violations):
+        self.violations = list(violations)
+        first = self.violations[0] if self.violations else {}
+        super().__init__(
+            f"{first.get('field')} '{first.get('value')}' is carried by {len(first.get('entities') or [])} "
+            f"{first.get('type')} entities — a unique field's value can be on one only.",
+            {"type": "unique_violation", "violations": self.violations[:100],
+             "total": len(self.violations)})
+
+
+class EdgeEndsMissing(_HttpMapped, ValueError):
+    """An edge create named no source or no target: stored, it would read as a node."""
+
+    status_code = 422
+
+    def __init__(self, ids):
+        self.ids = sorted(ids)
+        super().__init__(f"A connection needs both its ends: {', '.join(self.ids[:5])}.",
+                         {"type": "invalid_patch", "ids": self.ids})
+
+
 class GraphNotWritable(_HttpMapped, RuntimeError):
     """A content write reached a graph that is not live: editing is paused (``frozen``), or it is
     in the trash (``trashed``) or being permanently deleted (``purging``). A state a later schema
@@ -489,4 +538,4 @@ HTTP_MAPPED = (BranchNotOpen, MainWriteForbidden, NotDraftOwner, DraftRoleRequir
                ProjectionKeyInvalid, PublishRequired, GraphNotWritable, VersionConflict,
                AmbiguousSpelling, NotAnEdge, StagedChangesUnsaved, SelfMerge, ReviewRequired,
                IneligibleOwner, ForkUpdateConflicts, ResolutionsWithoutConflict, ForkNotUpToDate,
-               CrossesUpdate)
+               CrossesUpdate, AmbiguousUrn, EntityExists, EdgeEndsMissing, UniqueViolation)

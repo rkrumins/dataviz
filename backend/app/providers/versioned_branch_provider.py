@@ -681,14 +681,17 @@ class VersionedBranchProvider:
             containment_edge_types=self._containment_types, as_of_seq=self._as_of)
 
     # ---- writes: one audited commit on this branch via apply_ops -------- #
-    async def _commit(self, ops: List[dict], message: str) -> Optional[str]:
+    async def _commit(self, ops: List[dict], message: str, from_client: bool = True) -> Optional[str]:
         if self._as_of is not None:
             raise PermissionError("cannot write to a historical (as-of) view")
         # allow_main: ContextEngine serves a stale main through this provider, and its writes are
-        # the ordinary main write-through (a draft id is unaffected by the flag).
+        # the ordinary main write-through (a draft id is unaffected by the flag). from_client: the
+        # graph API names a node by its urn, which an imported node's id is not; a create never
+        # replaces what holds its id. A whole-graph save replaces by design and opts out.
         return await self._svc.apply_ops(
             graph_id=self._gid, branch_id=self._branch, ops=ops, actor=self._actor, message=message,
-            containment_edge_types=self._containment_types, allow_main=True)
+            containment_edge_types=self._containment_types, allow_main=True,
+            from_client=from_client)
 
     async def create_node(self, node: GraphNode, containment_edge: Optional[GraphEdge] = None) -> bool:
         ops = [{"op": "create", "entity_kind": "node", "entity_id": node.urn,
@@ -737,5 +740,5 @@ class VersionedBranchProvider:
                 "payload": _node_payload(n)} for n in nodes]
         ops += [{"op": "create", "entity_kind": "edge", "entity_id": e.id,
                  "payload": _edge_payload(e)} for e in edges]
-        await self._commit(ops, "save custom graph")
+        await self._commit(ops, "save custom graph", from_client=False)
         return True

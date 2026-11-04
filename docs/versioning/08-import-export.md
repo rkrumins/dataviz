@@ -220,10 +220,26 @@ whole-state importer (~4.4 KB per entity) reached 1.4 GB.
 Each window goes through `resolve_rows` (`resolve.py`) — a **pure, deterministic** function (the id
 minter is injected) that returns `(ops, resolutions)`:
 
-- **Nodes** match an existing entity by **`entity_id` → `urn` → `qualifiedName`** (`_match_node`);
-  no match ⇒ mint a new `entity_id` and register it in the window's indexes for later rows.
-- **Edges** resolve each endpoint (`entity_id` → `qualifiedName` → `urn`, `_resolve_endpoint`) and
-  key on the `(source_eid, target_eid, edge_type)` triple — the same keying `sync_ingest` uses.
+- **Nodes** match an existing entity by **`entity_id` → `urn` (or the data source's identifier
+  property, `prop.<identifier>`, read as the urn) → a field the type matches imports by →
+  `qualifiedName`** (urn-less rows; `_match_node`). A value several live entities carry names none
+  of them: the row is quarantined, saying so. No match ⇒ a **new node with one identity, the
+  server's to decide**: the row's urn (or identifier value) when no entity holds it, the deleted node
+  that held it brought back, else a urn minted here (`urn:synodic:import:<type>:<128-bit hex>`) — the
+  node's `entity_id`, its `urn` and (bound at the write) its identifier property alike, as a canvas
+  create's are. A row whose urn and identifier value differ is quarantined. The new node joins the
+  window's indexes, and — once its window commits — the job's, by the file's `entity_id` it came from
+  and by its key values, so a later window's rows and edges find it.
+- **Edges** resolve each endpoint the same way (`entity_id` — an entity's, or the file's own id of a
+  node the job created — → `urn` or `source.<identifier>` → `source.<key>` → `qualifiedName`,
+  `_resolve_endpoint`) and key on the `(source_eid, target_eid, edge_type)` triple — the same keying
+  `sync_ingest` uses.
+- **Team keys and unique fields** are flags on an entity type's fields in the ontology ("Match
+  imports by this", "Must be unique"). The worker reads the values the file uses once a run and
+  finds their holders in one pass over the draft's live nodes of those types (`KeyIndex`), so memory
+  follows the file. A create carrying a unique field's value a live node already holds is matched
+  to it when the field is also a match key, else quarantined; an update that would take another's is
+  quarantined too. Publish checks unique fields again (`409 unique_violation`).
 
 The lookups by `qualifiedName`, and replace's check of which entities some row matched, use two
 indexes (migration `20260927_1000_import_indexes`).
@@ -272,7 +288,11 @@ to finish. `POST …/imports` (the file as the request body, up to 100 MB) stays
 
 An import that names a view (`viewId`) places the entities it creates in that view's layout — a
 write to the view — so the view must be in the workspace, not deleted, and editable by the caller
-(`_check_import_view`): with an API key, one with **Views: read & write**.
+(`_check_import_view`): with an API key, one with **Views: read & write**. The placements go into
+**the import's draft's copy of the view** (its layout overlay, made from Published when the draft
+has none — `_write_view_import_assignments` → `view_repo.update_overlay_layout`): a curated view
+shows the new roots on the draft at once, and publishing promotes them with the draft's other
+layout edits. Published is never written before review.
 
 An `idempotencyKey` makes `POST …/imports` and `POST …/exports` safe to send again. The route stores
 it as its sender's (`<user id>:<key>`), and `ix_jobs_idem_active` keeps one job per key on a graph,
@@ -295,9 +315,12 @@ back).
 The single most important correctness property: **re-importing an unchanged export changes nothing.**
 Two mechanisms deliver it.
 
-- **Stable identity, not fragile keys.** Matching prefers the stable `entity_id`, then the mutable
-  `urn`, then `qualifiedName` — `qualifiedName` is a *field*, not an identity, so a rename doesn't
-  fork the entity. (Glossary: `entity_id` in [`README.md`](README.md).)
+- **Stable identity, not fragile keys.** Matching prefers the stable `entity_id`, then the `urn`
+  (or identifier value), then a team's key, then `qualifiedName` — `qualifiedName` is a *field*, not
+  an identity, so a rename doesn't fork the entity. A node matched by a team key keeps its own urn.
+  Since a new node's id **is** its urn, re-importing a file whose rows carry urns (an export does)
+  updates the nodes it created instead of adding them again. (Glossary: `entity_id` in
+  [`README.md`](README.md).)
 - **Type-tolerant, field-level diff.** `_changed_fields` / `_changed_props` (`resolve.py:41-84`)
   compare each provided field against the current stored value with `_scalar_eq`
   (`resolve.py:31-38`), which treats `5 == "5"` and `True == "True"` — essential because CSV

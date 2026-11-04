@@ -49,8 +49,10 @@ class Ontology:
 
 @dataclass(frozen=True)
 class EntityRule:
-    """Per-entity-type rules. Empty ``can_contain`` = may contain anything."""
+    """Per-entity-type rules. Empty ``can_contain`` = may contain anything. ``unique_fields``:
+    the fields no two live nodes of the type may share a value of (checked at publish)."""
     can_contain: FrozenSet[str] = frozenset()
+    unique_fields: FrozenSet[str] = frozenset()
 
 
 @dataclass(frozen=True)

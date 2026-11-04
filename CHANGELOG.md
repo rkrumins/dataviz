@@ -9,6 +9,55 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — What you import or create in a draft shows on its canvas, with one identity
+
+### Fixed
+
+- **Imported nodes and edges show on a draft's canvas.** An import keys new nodes by ids that
+  aren't their urns, and a draft's reads named edge ends by those ids while every reader matches
+  urns: a new child under an existing container was counted but never served, its parent read as
+  empty, the child as a root, and lineage to it matched nothing — until publish. Reads now name
+  every end by its node's urn, as the graph store does, for drafts, forks and their diffs.
+- **Edits of imported nodes land.** The canvas names a node by its urn: a link to an imported node,
+  a child under one or a move failed the whole save as dangling, a rename was "not on this draft",
+  a delete did nothing yet said saved. A save now resolves a urn to the node carrying it, and
+  answers in the names it was sent.
+- **An import's placements go into its draft's copy of the view,** so a curated view shows the new
+  roots on the draft, and Published is no longer changed before review.
+- **A draft's reads follow its version.** An import job's commits bumped no cache, so a draft could
+  be read as it was before for up to an hour.
+- **The canvas refreshes after an import:** the draft's view is read again, provider caches are
+  dropped and the canvas starts fresh.
+- **A create never replaces what holds its id** (`409 entity_exists`), nor turns an edge into a
+  node; an edge with one end is refused, never stored as a node.
+
+### Added
+
+- **One identity per new node, the server's to decide.** An import keeps a row's urn (or its value
+  of the data source's identifier property) when nothing holds it, brings back the deleted node
+  that held it, else mints `urn:synodic:import:<type>:<id>` — the node's id, urn and identifier
+  property alike. Re-importing a file updates what it created.
+- **Team reconciliation keys and unique fields.** A field of an entity type can be marked "Match
+  imports by this" and "Must be unique". Imports match rows, and edge ends (`source.<field>`,
+  `target.<field>`), by the identifier property and those keys; a value several nodes carry refuses
+  only that row. Unique fields are checked on import and at publish (`409 unique_violation`).
+- An import file's edges can name a node the same file creates by the file's own `entity_id`.
+- `/graph/changes` answers `versions`: every written entity's token, past the 500-entity cap.
+
+### Changed
+
+- `diff-vs-main?payloads=changes` entries carry `urn` (nodes) and `sourceUrn` / `targetUrn` (edges).
+- Overlay edge lookups walk only the edges at the ends asked about.
+
+### Known limitations
+
+- Nodes created by earlier imports keep their stored ids; reads and writes reach them by urn.
+- Unique fields aren't checked on canvas saves; a duplicate typed by hand surfaces at publish. The
+  publish check reads the keyed types' rows on `main` once.
+- An import that uses team keys reads the draft's live nodes once.
+
+---
+
 ## [Unreleased] — Hardening: security holes closed, steady under hundreds of readers, clearer refusals
 
 ### Security

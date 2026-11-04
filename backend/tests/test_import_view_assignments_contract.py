@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.api.v1.endpoints import versioning as versioning_ep
 from backend.app.api.v1.endpoints.versioning import _write_view_import_assignments
+from backend.app.db.repositories import view_repo
 from backend.app.db.models import ViewORM, WorkspaceORM
 from backend.app.services.feature_flags import feature_flags
 from backend.app.services.versioning.import_export import import_worker
@@ -231,10 +232,11 @@ async def test_hook_places_roots_through_the_contract(_contract_on, db_session: 
     })
     created = [_node("t", "urn:term"), _node("g", "urn:glossary")]
 
-    result = await _write_view_import_assignments("ws", "ds", view.id, created, [("t", "g", "BELONGS_TO")])
+    result = await _write_view_import_assignments("ws", "ds", view.id, "br1", created,
+                                                  [("t", "g", "BELONGS_TO")])
 
     assert result == {"added": 1}
-    ref = json.loads((await db_session.get(ViewORM, view.id)).config)["layout"]["referenceLayout"]
+    ref = (await view_repo.effective_view_config(db_session, view.id, "br1"))["layout"]["referenceLayout"]
     assert set(ref["assignments"]) == {"urn:old", "urn:glossary"}
     assert ref["assignments"]["urn:glossary"]["layerId"] == "l0"
     assert ref["layers"][0]["rules"] == [{"id": "empty", "priority": 1}]
@@ -251,7 +253,7 @@ async def test_hook_writes_nothing_an_open_view_already_places(_contract_on, db_
     before = (await db_session.get(ViewORM, view.id)).config
 
     result = await _write_view_import_assignments(
-        "ws", "ds", view.id, [_node("r", "urn:r", entity_type="table")], [])
+        "ws", "ds", view.id, "br1", [_node("r", "urn:r", entity_type="table")], [])
 
     assert result == {"added": 0}
     assert (await db_session.get(ViewORM, view.id)).config == before

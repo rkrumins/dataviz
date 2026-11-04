@@ -1217,6 +1217,11 @@ class DiffEntry(_ApiModel):
     kind: str                              # "node" | "edge"
     before: Optional[dict] = None
     after: Optional[dict] = None
+    # As the canvas names it: a node by its urn, an edge's ends by their nodes' urns. An imported
+    # node's entity id is not its urn; the slim diff fills these, the full-payload one may not.
+    urn: Optional[str] = None
+    source_urn: Optional[str] = Field(default=None, alias="sourceUrn")
+    target_urn: Optional[str] = Field(default=None, alias="targetUrn")
 
 
 class DiffVsMainResponse(_ApiModel):
@@ -3241,7 +3246,13 @@ async def _resolve_ontology_types(workspace_id, data_source_id):
         edge_types += list(getattr(resolved, "lineage_edge_types", []) or [])
         if not node_types and not edge_types:
             return None
-        return {"node_types": node_types, "edge_types": edge_types}
+        # The fields each type matches imports by, and those it keeps unique (a team's own keys).
+        defs = getattr(resolved, "entity_type_definitions", {}) or {}
+        flagged = lambda flag: {t: [f.id for f in getattr(d, "fields", []) or [] if getattr(f, flag, False)]
+                                for t, d in defs.items()}
+        return {"node_types": node_types, "edge_types": edge_types,
+                "keys": {t: fs for t, fs in flagged("reconciliation_key").items() if fs},
+                "unique": {t: fs for t, fs in flagged("unique").items() if fs}}
     except Exception:
         logger.exception("ontology type resolution failed for import (ds=%s)", data_source_id)
         return None
@@ -3260,13 +3271,14 @@ async def _resolve_node_identity_for_import(workspace_id, data_source_id):
         return None
 
 
-async def _write_view_import_assignments(ws, ds, view_id, created_nodes, batch_edges):
+async def _write_view_import_assignments(ws, ds, view_id, branch_id, created_nodes, batch_edges):
     """Layout-writer hook (injected into ImportExportService): after a view-scoped import creates new
-    top-level entities, add canonical ``assignments`` entries (``assignedBy: 'import'``) to the view's
-    stored reference-layout so a **curated** view renders them immediately — in the draft (its
-    projection has the new entities) and after merge (they land on main). Reads the view's CURRENT
-    config, merges ONLY the new roots (never overwriting an existing urn's entry, preserving every
-    other config key), and writes via ``view_repo.update_view_layout`` in one update. Does NOT touch
+    top-level entities, add canonical ``assignments`` entries (``assignedBy: 'import'``) to the
+    **draft's** copy of the view's reference-layout (its overlay, made from Published when it has
+    none) so a **curated** view renders them in the draft at once, and publishing promotes them with
+    the draft's other layout edits — never to Published before review. Reads the view as the draft
+    has it, merges ONLY the new roots (never overwriting an existing urn's entry, preserving every
+    other layout key), and writes via ``view_repo.update_overlay_layout`` in one update. Does NOT touch
     ``entityScope`` (sticky-scope) — harmless placement overrides on an 'all' view, the payoff on a
     'curated' one. Runs in the worker's background context, so it opens its own management-DB session.
     Returns ``{added: N}``; the service isolates any error onto the job summary."""
@@ -3282,7 +3294,7 @@ async def _write_view_import_assignments(ws, ds, view_id, created_nodes, batch_e
         view = await session.get(ViewORM, view_id)
         if view is None:
             return {"added": 0}
-        config = json.loads(view.config or "{}")
+        config = await view_repo.effective_view_config(session, view, branch_id)
         raw = (config.get("layout") or {}).get("referenceLayout")
         if not isinstance(raw, dict):
             raw = config.get("referenceLayout")        # legacy top-level spelling
@@ -3303,8 +3315,8 @@ async def _write_view_import_assignments(ws, ds, view_id, created_nodes, batch_e
         # Rewrite the whole referenceLayout (update_view_layout replaces it wholesale) — preserve its
         # layers + every other key (displayRules, …), only extending the assignments map.
         new_ref = {**raw, "layers": raw.get("layers"), "assignments": merged}
-        await view_repo.update_view_layout(
-            session, view_id, ViewLayoutUpdateRequest(reference_layout=new_ref))
+        await view_repo.update_overlay_layout(
+            session, view_id, branch_id, ViewLayoutUpdateRequest(reference_layout=new_ref))
     return {"added": len(new_entries)}
 
 

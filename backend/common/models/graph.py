@@ -575,6 +575,10 @@ class FieldSchema(BaseModel):
     show_in_panel: bool = Field(default=True, alias="showInPanel")
     show_in_tooltip: bool = Field(default=False, alias="showInTooltip")
     display_order: int = Field(default=0, alias="displayOrder")
+    # Imports match a row to the node carrying this field's value (a team's own key); ``unique``:
+    # no two nodes of the type share it (checked on import and at publish).
+    reconciliation_key: bool = Field(default=False, alias="reconciliationKey")
+    unique: bool = False
 
     class Config:
         populate_by_name = True

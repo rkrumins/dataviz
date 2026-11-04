@@ -86,7 +86,7 @@ class ImportExportService:
         # data source's node-identity mapping, so imported nodes get their own name and identity
         # properties (``node_identity.bind_node_write``). Injected the same way.
         self._identity_resolver = identity_resolver
-        # Optional async ``(workspace_id, data_source_id, view_id, created_node_facts,
+        # Optional async ``(workspace_id, data_source_id, view_id, branch_id, created_node_facts,
         # batch_edge_facts) -> {added: N}`` — writes canonical layer assignments for a view-scoped
         # import's newly-created top-level entities. Injected at the API layer (management-DB access).
         self._layout_writer = layout_writer
@@ -424,10 +424,10 @@ class ImportExportService:
         # Post-commit: a view-scoped import that created new top-level entities writes canonical layer
         # assignments so the curated view shows them right away. Best-effort — never fails the import.
         if view_id and self._layout_writer is not None and worker.created_node_facts:
-            await self._apply_view_layout(job_id, ws, ds, view_id, worker)
+            await self._apply_view_layout(job_id, ws, ds, view_id, branch_id, worker)
         return summary
 
-    async def _apply_view_layout(self, job_id, ws, ds, view_id, worker) -> None:
+    async def _apply_view_layout(self, job_id, ws, ds, view_id, branch_id, worker) -> None:
         """Hand the import's newly-created top-level entities to the injected layout writer and record
         the outcome on ``job.summary`` (``viewAssignments: {added: N}`` or ``{error: ...}``). The
         import is already committed and marked ``completed`` by the worker before this runs, so any
@@ -436,7 +436,7 @@ class ImportExportService:
         try:
             try:
                 result = await self._layout_writer(
-                    ws, ds, view_id, worker.created_node_facts, worker.batch_edge_facts)
+                    ws, ds, view_id, branch_id, worker.created_node_facts, worker.batch_edge_facts)
                 note = {"added": int((result or {}).get("added", 0))}
             except Exception as exc:  # pragma: no cover - defensive; recorded on the job row
                 logger.exception("view layout write-back failed for import job %s", job_id)

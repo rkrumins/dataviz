@@ -45,8 +45,9 @@ from .changeset import Delta, fold_batch_ops, materialize, net_delta, diff_state
 from backend.common.property_patch import apply_patch, compose_patches, strip_deletes
 from backend.common.service_accounts import is_service_account
 from .entity_serde import edge_payload_from_parts
-from .errors import (AccessDenied, AmbiguousSpelling, BranchNotOpen, ContentionExhausted,
-                     CrossesUpdate, CurationAtRisk, DraftNotReadable, StagedChangesUnsaved,
+from .errors import (AccessDenied, AmbiguousSpelling, AmbiguousUrn, BranchNotOpen,
+                     ContentionExhausted, CrossesUpdate, CurationAtRisk, DraftNotReadable,
+                     EdgeEndsMissing, EntityExists, StagedChangesUnsaved, UniqueViolation,
                      DraftRoleRequired, ForkLimit, ForkNotRestorable, ForkNotUpToDate,
                      ForkUpdateConflicts, GraphMoved, GraphNotWritable,
                      GroupsUnavailable, HeadMoved, IneligibleMember, JobActive, LiveForks, LockBusy,
@@ -145,11 +146,56 @@ def _heads_of(heads, rows: Dict[str, tuple]) -> Dict[str, _Head]:
     return out
 
 
-def _overlay_patch(heads: Dict[str, _Head], node_ids, edge_ids, base_nodes, held) -> tuple:
+def _ends(values: Mapping[str, Any]) -> set:
+    """The entity ids the edges among ``values`` (:class:`_Head` or :class:`_Stored`) run between."""
+    return {x for v in values.values() if v.kind != "node" for x in (v.src, v.tgt) if x}
+
+
+def _payload_ends(values: Mapping[str, Optional[dict]]) -> set:
+    """The entity ids the edge payloads among ``values`` run between."""
+    return {x for v in values.values() if v and _is_edge_payload(v) for x in _edge_src_tgt(v) if x}
+
+
+def _end(urns: Mapping[str, str], eid: Optional[str]) -> str:
+    """An edge end as a reader names it: its node's urn (:meth:`GraphVersioningService._current_urns`)."""
+    return urns.get(eid, eid) if eid else ""
+
+
+def _with_refs(entries: List[dict], names: Mapping[str, str]) -> List[dict]:
+    """Each entry of a refusal that names an entity by id, with the name the batch sent it by
+    (``ref``), so a client finds its own change in it."""
+    for e in entries:
+        if e.get("entity_id") in names:
+            e["ref"] = names[e["entity_id"]]
+    return entries
+
+
+def _key_text(v: Any) -> Optional[str]:
+    """A field value as a unique field compares it: a scalar's text, trimmed (``None``: no value).
+    The import's ``key_value``, which this module can't import."""
+    if v is None or isinstance(v, (dict, list)):
+        return None
+    s = str(v).strip()
+    return s or None
+
+
+def _refuse_bad_creates(ops: Sequence[Mapping]) -> None:
+    """An edge create naming no source or no target is refused: stored, its payload reads as a
+    node's (:func:`_is_edge_payload`) and every reader takes it for one."""
+    missing = [o["entity_id"] for o in ops
+               if o.get("op") == "create" and o.get("entity_kind") == "edge"
+               and not all(_edge_src_tgt(o.get("payload") or {}))]
+    if missing:
+        raise EdgeEndsMissing(missing)
+
+
+def _overlay_patch(heads: Dict[str, _Head], node_ids, edge_ids, base_nodes, held,
+                   urns: Mapping[str, str], held_urns: Mapping[str, str]) -> tuple:
     """The draft's own part of :meth:`GraphVersioningService.branch_overlay_delta`, from hashes and
     version-row columns: ``(nodesUpsert, nodesModified, nodesRemove, edgesUpsert, edgesRemove,
     nodesNew)`` — pure CPU, run in a thread. ``held``: each of the draft's edges as its store holds
-    it, main at its head, which a removal takes out and an edit counts against (``was``)."""
+    it, main at its head, which a removal takes out and an edit counts against (``was``). Edge ends
+    are named by urn: ``urns`` as the draft holds its ends, ``held_urns`` as main's head does."""
     nodes_upsert: List[dict] = []
     nodes_modified: List[dict] = []    # {urn, entityId}: the reader loads the payload it serves
     nodes_remove: List[dict] = []
@@ -175,23 +221,25 @@ def _overlay_patch(heads: Dict[str, _Head], node_ids, edge_ids, base_nodes, held
         h, b = heads[eid], held.get(eid)
         if not h.live and b is None:
             continue
-        # Edge endpoints are entity ids, read as urns, as _graphedge_dict gives them.
+        # A version row holds an edge's ends as entity ids; a reader matches them by urn, and an
+        # imported node's id is not its urn.
         if not h.live:                                 # removed on the draft → its type and ends
-            edges_remove.append({"id": eid, "sourceUrn": b.src or "", "targetUrn": b.tgt or "",
-                                 "edgeType": b.type or "unknown"})
+            edges_remove.append({"id": eid, "sourceUrn": _end(held_urns, b.src),
+                                 "targetUrn": _end(held_urns, b.tgt), "edgeType": b.type or "unknown"})
         else:                                          # added/modified → loaded when a read serves it
-            edges_upsert.append({"id": eid, "sourceUrn": h.src or "", "targetUrn": h.tgt or "",
-                                 "edgeType": h.type or "unknown", "lazy": True, **_was(b)})
+            edges_upsert.append({"id": eid, "sourceUrn": _end(urns, h.src),
+                                 "targetUrn": _end(urns, h.tgt), "edgeType": h.type or "unknown",
+                                 "lazy": True, **_was(b, held_urns)})
     return nodes_upsert, nodes_modified, nodes_remove, edges_upsert, edges_remove, nodes_new
 
 
-def _was(held: Optional[_Stored]) -> dict:
-    """An overlay edge's ``was``: where the base holds it (its ends and type), so a reader serves
-    the overlay's value and counts the edge where it runs — once, never on top of the base's count.
-    Nothing for an edge the base does not hold."""
+def _was(held: Optional[_Stored], urns: Mapping[str, str]) -> dict:
+    """An overlay edge's ``was``: where the base holds it (its ends, by urn, and type), so a reader
+    serves the overlay's value and counts the edge where it runs — once, never on top of the base's
+    count. Nothing for an edge the base does not hold."""
     if held is None:
         return {}
-    return {"was": {"sourceUrn": held.src or "", "targetUrn": held.tgt or "",
+    return {"was": {"sourceUrn": _end(urns, held.src), "targetUrn": _end(urns, held.tgt),
                     "edgeType": held.type or "unknown"}}
 
 
@@ -201,12 +249,13 @@ _PATCH_KEYS = (("nodesUpsert", "entityId"), ("nodesModified", "entityId"),
                ("nodesRemove", "entityId"), ("edgesUpsert", "id"), ("edgesRemove", "id"))
 
 
-def _fork_patch(ids, ours: Dict[str, _Stored], theirs: Dict[str, _Stored]) -> Dict[str, list]:
+def _fork_patch(ids, ours: Dict[str, _Stored], theirs: Dict[str, _Stored],
+                our_urns: Mapping[str, str], their_urns: Mapping[str, str]) -> Dict[str, list]:
     """A fork's ``main`` against its root's store, for ``ids``: ``ours`` the fork's live value of
     each at its head, ``theirs`` the root's at the root's head (absent: not live there) — as
     :func:`_overlay_patch` gives a draft's, from hashes and version-row columns. Only the fork has
     it: created (a skeleton); only the root: removed; both, as different values: modified; equal:
-    nothing. Pure CPU, run in a thread."""
+    nothing. Edge ends by urn, as each side names them. Pure CPU, run in a thread."""
     out: Dict[str, list] = {key: [] for key, _k in _PATCH_KEYS}
     out["nodesNew"] = []
     for eid in ids:
@@ -228,11 +277,14 @@ def _fork_patch(ids, ours: Dict[str, _Stored], theirs: Dict[str, _Stored]) -> Di
             else:
                 out["nodesModified"].append({"entityId": eid, "urn": f.urn or r.urn or f"gv:{eid}"})
         elif f is None:
-            out["edgesRemove"].append({"id": eid, "sourceUrn": r.src or "", "targetUrn": r.tgt or "",
+            out["edgesRemove"].append({"id": eid, "sourceUrn": _end(their_urns, r.src),
+                                       "targetUrn": _end(their_urns, r.tgt),
                                        "edgeType": r.type or "unknown"})
         else:
-            out["edgesUpsert"].append({"id": eid, "sourceUrn": f.src or "", "targetUrn": f.tgt or "",
-                                       "edgeType": f.type or "unknown", "lazy": True, **_was(r)})
+            out["edgesUpsert"].append({"id": eid, "sourceUrn": _end(our_urns, f.src),
+                                       "targetUrn": _end(our_urns, f.tgt),
+                                       "edgeType": f.type or "unknown", "lazy": True,
+                                       **_was(r, their_urns)})
     return out
 
 
@@ -378,6 +430,9 @@ class ApplyResult:
     written: Dict[str, Tuple[str, Optional[dict]]]
     #: node entity_id → urn for every node the batch read or wrote (edge endpoints included).
     urns: Dict[str, str] = field(default_factory=dict)
+    #: entity_id → the name the batch called it by, for each op a urn was resolved for
+    #: (``from_client``): what the caller answers and refers to it as.
+    names: Dict[str, str] = field(default_factory=dict)
 
 
 class OntologyViolation(RuntimeError):
@@ -1703,6 +1758,10 @@ class GraphVersioningService:
                  for d in deltas if d.op != "delete"], ontology)
             if viol:
                 raise OntologyViolation(viol)
+        unique = await self._unique_violations(
+            s, graph.id, main_id, {d.entity_id: d.payload for d in deltas}, ontology_rules)
+        if unique:
+            raise UniqueViolation(unique)
         # Re-gated at merge time against CURRENT main, with rules resolved from the CURRENT
         # published ontology by the caller — the same gate as every other write path, on what the
         # publish writes: a draft opened before an ontology tightening cannot merge violating
@@ -1910,6 +1969,10 @@ class GraphVersioningService:
             s, gid, main_id, written, prior, kind_by_entity,
             containment_edge_types=containment_edge_types or [],
             ontology_rules=ontology_rules, strict=strict, known=known)
+        unique = await self._unique_violations(s, gid, main_id, written, ontology_rules,
+                                               source=(gid, draft.id))
+        if unique:
+            raise UniqueViolation(unique)
         del written, prior, known, heads, main, live, ends, standing   # per change: not into the writes
 
         await self._copy_versions(s, gid, main_id, squash, copies, actor)
@@ -1992,6 +2055,8 @@ class GraphVersioningService:
                      else ontology_rules.canonical_edge_type(h.type))
             return bool(canon) and canon != h.type
 
+        unique_seen: Dict[Tuple[str, str, str], set] = {}    # unique values the pages wrote
+
         async def judge(heads, copies, deltas, kinds):
             """The gates on what a page writes (:meth:`_squash_up_to_date`'s), against ``main`` as
             the pages before it left it."""
@@ -2009,6 +2074,10 @@ class GraphVersioningService:
                 s, gid, main_id, written, prior, kinds, containment_edge_types=cset,
                 ontology_rules=ontology_rules, strict=strict, also_writing=draft.id,
                 parentless=False)
+            unique = await self._unique_violations(s, gid, main_id, written, ontology_rules,
+                                                   seen=unique_seen, source=(gid, draft.id))
+            if unique:
+                raise UniqueViolation(unique)
 
         # 1. What the draft deleted, and the edges on it that the draft left alone.
         async for heads in self._head_pages(s, gid, draft.id, live=False):
@@ -2278,6 +2347,10 @@ class GraphVersioningService:
             await self._enforce_written(
                 s, gid, parent_main, written, prior, kinds, containment_edge_types=cset,
                 ontology_rules=ontology_rules, strict=strict, review=merged_view, parentless=False)
+            unique = await self._unique_violations(s, gid, parent_main, written, ontology_rules,
+                                                   source=(fork.id, fork_main))
+            if unique:
+                raise UniqueViolation(unique)
 
         async def planned(heads, held, gone=()):
             rows, slow = await asyncio.to_thread(_plan_squash, heads, held, gone, reread)
@@ -6325,12 +6398,31 @@ class GraphVersioningService:
                 modified.append({"entityId": eid, "kind": b.kind})
         after = await self._payloads_by_version(s, added_refs.values())
         gone = await self._values_at(s, graph_id, main_id, removed_ids, base_seq)
+        # Each entity named as the canvas names it — a node by its urn, an edge's ends by their
+        # nodes' urns — the draft's as the draft holds them, a removed one's as main did at the
+        # branch point. Entity ids stay ``entityId``: an imported node's is not its urn.
+        now_ends = _payload_ends({vid: after.get(vid) for _k, _g, vid in added_refs.values()})
+        now_ends |= {x for m in modified if m["kind"] != "node"
+                     for x in (heads[m["entityId"]].src, heads[m["entityId"]].tgt) if x}
+        now_urns = await self._current_urns(s, graph_id, branch_id, now_ends, known=heads)
+        was_urns = await self._current_urns(s, graph_id, main_id, _payload_ends(gone), as_of_seq=base_seq)
+
+        def _named(eid: str, kind: str, value: Optional[dict], urns: Mapping[str, str]) -> dict:
+            h, b = heads.get(eid), before.get(eid)
+            if kind == "node":
+                return {"urn": (value or {}).get("urn") or (h and h.urn) or (b and b.urn)
+                        or f"gv:{eid}"}
+            src, tgt = _edge_src_tgt(value) if value else (h.src, h.tgt)
+            return {"sourceUrn": _end(urns, src), "targetUrn": _end(urns, tgt)}
+
         return {
-            "added": [{"entityId": eid, "kind": kind, "after": after[vid]}
+            "added": [{"entityId": eid, "kind": kind, "after": after[vid],
+                       **_named(eid, kind, after[vid], now_urns)}
                       for eid, (kind, _, vid) in added_refs.items() if after.get(vid)],
-            "removed": [{"entityId": eid, "kind": before[eid].kind, "before": gone[eid]}
+            "removed": [{"entityId": eid, "kind": before[eid].kind, "before": gone[eid],
+                         **_named(eid, before[eid].kind, gone[eid], was_urns)}
                         for eid in removed_ids if gone.get(eid)],
-            "modified": modified,
+            "modified": [{**m, **_named(m["entityId"], m["kind"], None, now_urns)} for m in modified],
         }
 
     async def branch_overlay_delta(self, *, graph_id: str, branch_id: str,
@@ -6347,8 +6439,9 @@ class GraphVersioningService:
         (another branch merged into it), this patch also rewinds those advances — main-added
         entities are removed, main-modified/deleted ones restored to their fork-point value — for
         every entity the draft did not itself touch. Without this a draft silently reflects changes
-        it never merged (a commit-less "pull"). Edge endpoints are urns (node ``entity_id`` == urn),
-        so no extra resolution is needed by the caller.
+        it never merged (a commit-less "pull"). Edge endpoints are named by their nodes' urns
+        (:meth:`_current_urns`), as the projector names them in FalkorDB: an imported node's
+        ``entity_id`` is not its urn.
 
         A node the draft MODIFIED comes as ``nodesModified`` — its urn and entity id, never its
         payload: a reader loads the payloads of just the nodes it is about to serve
@@ -6401,17 +6494,28 @@ class GraphVersioningService:
             # point, where an edge main deleted or re-pointed since would be counted nowhere.
             base_nodes = await self._hashes_at(s, graph_id, main_id, node_ids, base_seq)
             held = await self._hashes_at(s, graph_id, main_id, edge_ids, head_seq) if edge_ids else {}
+            # Edge ends by urn: the draft's edges as the draft holds their ends (its own nodes,
+            # then main at the branch point); the store's as main's head holds them.
+            urns = await self._current_urns(s, graph_id, branch_id, _ends(heads), known=heads)
+            held_urns = await self._current_urns(s, graph_id, main_id, _ends(held), as_of_seq=head_seq)
             # For the rewind: each advanced entity's value at the fork point (base) vs main head.
             rewind_base: Dict[str, Optional[dict]] = {}
             rewind_head: Dict[str, Optional[dict]] = {}
+            base_urns: Dict[str, str] = {}
+            head_urns: Dict[str, str] = {}
             if advanced:
                 # A fork's: its parent's at the fork point for what its main has no row of.
                 rewind_base = await self._values_at(s, graph_id, main_id, advanced, base_seq)
                 rewind_head = await self._values_at(s, graph_id, main_id, advanced, head_seq)
+                base_urns = await self._current_urns(s, graph_id, main_id, _payload_ends(rewind_base),
+                                                     as_of_seq=base_seq)
+                head_urns = await self._current_urns(s, graph_id, main_id, _payload_ends(rewind_head),
+                                                     as_of_seq=head_seq)
         # One dict per entity the draft changed: built in a thread, as its head index was — on a
         # draft's first read this runs in the web process, and 200k of them are a stall of their own.
         nodes_upsert, nodes_modified, nodes_remove, edges_upsert, edges_remove, nodes_new = (
-            await asyncio.to_thread(_overlay_patch, heads, node_ids, edge_ids, base_nodes, held))
+            await asyncio.to_thread(_overlay_patch, heads, node_ids, edge_ids, base_nodes, held,
+                                    urns, held_urns))
         # ── Fork-point rewind ── undo main's post-fork advances so the read reflects main@base_seq
         # ⊕ the draft (never live main). For each entity main changed after the fork that the draft
         # did NOT touch: main-ADDED (absent at base) → REMOVE it from the read; main-DELETED (absent
@@ -6428,14 +6532,11 @@ class GraphVersioningService:
                 # draft's own edit is, and counted where it runs at the fork point rather than
                 # where main's head counts it (``was``): never twice in a rollup or a child count.
                 if bv is None:                             # main ADDED after fork → hide from the read
-                    src, tgt = _edge_src_tgt(hv)
-                    edges_remove.append(_graphedge_dict(eid, hv, {src: src, tgt: tgt}))
+                    edges_remove.append(_graphedge_dict(eid, hv, head_urns))
                 elif hv is None:                           # main DELETED after fork → restore fork-point edge
-                    src, tgt = _edge_src_tgt(bv)
-                    edges_upsert.append(_graphedge_dict(eid, bv, {src: src, tgt: tgt}))
+                    edges_upsert.append(_graphedge_dict(eid, bv, base_urns))
                 elif bv != hv:                             # main CHANGED it after fork → fork-point value
-                    at, now = (_graphedge_dict(eid, v, {e: e for e in _edge_src_tgt(v)})
-                               for v in (bv, hv))
+                    at, now = _graphedge_dict(eid, bv, base_urns), _graphedge_dict(eid, hv, head_urns)
                     edges_upsert.append({**{k: at[k] for k in ("id", "sourceUrn", "targetUrn",
                                                                "edgeType")}, "lazy": True,
                                          "was": {k: now[k] for k in ("sourceUrn", "targetUrn",
@@ -6499,7 +6600,10 @@ class GraphVersioningService:
                 ours.update(await self._hashes_at(s, *layers[1][:2], rest, layers[1][2]))
         root_id, root_main, _base = layers[-1]
         theirs = await self._hashes_at(s, root_id, root_main, ids, root_head)
-        return await asyncio.to_thread(_fork_patch, ids, ours, theirs)
+        our_urns = await self._current_urns(s, fork_id, fork_main, _ends(ours), known=ours)
+        their_urns = await self._current_urns(s, root_id, root_main, _ends(theirs),
+                                              as_of_seq=root_head, known=theirs)
+        return await asyncio.to_thread(_fork_patch, ids, ours, theirs, our_urns, their_urns)
 
     async def _own_changes(self, s, graph_id: str, branch_id: str, at: int) -> set:
         """Entity ids a branch's own commits up to ``at`` touched — its rows alone, where
@@ -6625,9 +6729,10 @@ class GraphVersioningService:
         ``kind='edge'``, the edges a read loads for the page it serves."""
         async with self._session() as s:
             values = await self._current_values(s, graph_id, branch_id, list(entity_ids))
+            urns = (await self._current_urns(s, graph_id, branch_id, _payload_ends(values))
+                    if kind == "edge" else {})
         if kind == "edge":
-            return [_graphedge_dict(eid, v, {e: e for e in _edge_src_tgt(v)})
-                    for eid, v in values.items() if v]
+            return [_graphedge_dict(eid, v, urns) for eid, v in values.items() if v]
         return [_graphnode_dict(eid, v.get("urn") or f"gv:{eid}", v) for eid, v in values.items() if v]
 
     async def diff_branch_summary(
@@ -8943,6 +9048,7 @@ class GraphVersioningService:
         on_commit: Optional[Callable[[Any], Awaitable[None]]] = None,
         allow_main: bool = False,
         node_identity: Optional[ResolvedNodeIdentity] = None,
+        from_client: bool = False,
     ) -> Optional[str]:
         """Apply create/update/delete ops as ONE audited commit (default on ``main``) —
         the 'versioned write' primitive behind provider write-through, so an ordinary
@@ -8975,11 +9081,19 @@ class GraphVersioningService:
         name and identity properties in step with its ``displayName`` / ``urn``
         (``node_identity.bind_node_write``); a node create op marked ``minted`` had its urn
         minted for this write. ``None`` binds nothing.
+
+        ``from_client``: the ops are a client's — the canvas, the graph API — which names a node
+        by its urn. An op id, a move's parent or an edge's end that is no entity id but the urn of
+        one live node is resolved to that node (a create, to the one deleted node holding it: a
+        restore); a urn several live nodes carry is refused (:class:`AmbiguousUrn`). A create
+        never replaces a live entity (:class:`EntityExists`), and an edge create needs both ends
+        (:class:`EdgeEndsMissing`). An import and the system's own writes leave it off.
         """
         result = await self.apply_ops_detailed(
             graph_id=graph_id, ops=ops, actor=actor, message=message, branch_id=branch_id,
             containment_edge_types=containment_edge_types, ontology_rules=ontology_rules,
-            on_commit=on_commit, allow_main=allow_main, node_identity=node_identity)
+            on_commit=on_commit, allow_main=allow_main, node_identity=node_identity,
+            from_client=from_client)
         return result.commit_id
 
     async def apply_ops_detailed(
@@ -8992,6 +9106,7 @@ class GraphVersioningService:
         idempotency_key: Optional[str] = None,
         aim_edges: bool = False,
         node_identity: Optional[ResolvedNodeIdentity] = None,
+        from_client: bool = False,
     ) -> ApplyResult:
         """:meth:`apply_ops`, answering with every addressed entity's value after the batch.
 
@@ -9010,7 +9125,7 @@ class GraphVersioningService:
                 branch_id=branch_id, containment_edge_types=containment_edge_types,
                 ontology_rules=ontology_rules, on_commit=on_commit, allow_main=allow_main,
                 idempotency_key=idempotency_key, aim_edges=aim_edges,
-                node_identity=node_identity),
+                node_identity=node_identity, from_client=from_client),
         )
 
     async def _apply_ops_once(
@@ -9023,6 +9138,7 @@ class GraphVersioningService:
         idempotency_key: Optional[str] = None,
         aim_edges: bool = False,
         node_identity: Optional[ResolvedNodeIdentity] = None,
+        from_client: bool = False,
     ) -> ApplyResult:
         async with self._session() as s:
             await self._assert_not_bootstrapping(s, graph_id)
@@ -9069,12 +9185,15 @@ class GraphVersioningService:
                 if prior is not None:
                     if aim_edges:                  # at the edges that save wrote, as it aimed them
                         ops = await self._aimed_as_written(s, graph_id, prior, ops)
+                    names: Dict[str, str] = {}
+                    if from_client:                # at the nodes that save wrote, as it named them
+                        ops, names = await self._by_entity_id(s, graph_id, bid, ops, written_by=prior)
                     kinds = {o["entity_id"]: o.get("entity_kind", "node") for o in ops}
                     cur = await self._current_values(s, graph_id, bid, list(kinds))
                     return ApplyResult(
                         prior, {eid: (k, cur.get(eid)) for eid, k in kinds.items()},
                         {eid: (v.get("urn") or eid) for eid, v in cur.items()
-                         if v is not None and not _is_edge_payload(v)})
+                         if v is not None and not _is_edge_payload(v)}, names)
             if refusal is not None:
                 raise refusal
             if bid != main_id:
@@ -9082,6 +9201,13 @@ class GraphVersioningService:
                 await self._require_edit(s, branch, actor, ())
             if aim_edges:
                 ops = await self._aimed(s, graph_id, bid, ops)
+            names = {}
+            if from_client:
+                # Inside the lock and after the open/edit checks: the names resolve against what
+                # this batch composes on, on every retry, and never read a draft the actor can't
+                # edit. Before the moves expand and the fold, which key on entity ids.
+                ops, names = await self._by_entity_id(s, graph_id, bid, ops)
+                _refuse_bad_creates(ops)
 
             ops = await self._expand_moves(s, graph_id, bid, ops, containment_edge_types)
 
@@ -9100,6 +9226,17 @@ class GraphVersioningService:
 
             # Prior values of just the affected entities (bounded; base+overlay for a draft).
             cur_vals = await self._current_values(s, graph_id, bid, list(new_vals))
+            if from_client:
+                # A create that holds a live entity's id would replace it whole (the fold reads a
+                # create as a full replace) or turn an edge into a node. A deleted one's is a
+                # restore. One the batch deleted first is a replace the client asked for.
+                first: Dict[str, str] = {}
+                for o in ops:
+                    first.setdefault(o["entity_id"], o.get("op", "update"))
+                taken = [eid for eid, op in first.items()
+                         if op == "create" and cur_vals.get(eid) is not None]
+                if taken:
+                    raise EntityExists(taken, names)
 
             # An `update` is a field-level PATCH onto the entity's current value (a version row stores
             # the FULL payload, composed last-writer-wins per ENTITY), preserving fields the op didn't
@@ -9131,7 +9268,7 @@ class GraphVersioningService:
             if occ_conflicts:
                 # Each conflicting entity's CURRENT value rides along, so the client can rebase the
                 # user's edit onto it without another read.
-                raise MergeConflict(occ_conflicts, current={
+                raise MergeConflict(_with_refs(occ_conflicts, names), current={
                     c["entity_id"]: (c["entity_kind"], cur_vals.get(c["entity_id"]))
                     for c in occ_conflicts})
 
@@ -9200,12 +9337,16 @@ class GraphVersioningService:
 
             # Untyped creations, hierarchy integrity and the ontology — judged on what is WRITTEN
             # (a patch of nothing is a creation; a retype or a re-pointed edge is judged in full).
-            await self._enforce_written(
-                s, graph_id, bid, new_vals, cur_vals, kind_by_entity,
-                containment_edge_types=containment_edge_types or [],
-                ontology_rules=ontology_rules,
-                strict=graph.ontology_enforcement == "strict",
-                edited=update_ids)
+            try:
+                await self._enforce_written(
+                    s, graph_id, bid, new_vals, cur_vals, kind_by_entity,
+                    containment_edge_types=containment_edge_types or [],
+                    ontology_rules=ontology_rules,
+                    strict=graph.ontology_enforcement == "strict",
+                    edited=update_ids)
+            except OntologyViolation as exc:            # in the names the batch was sent in
+                _with_refs(exc.violations, names)
+                raise
 
             ontology = Ontology.from_spec(graph.ontology_spec)   # write-through ontology gate
             if ontology is not None and graph.ontology_enforcement == "strict":
@@ -9213,7 +9354,7 @@ class GraphVersioningService:
                     [(eid, kind_by_entity.get(eid, "node"), v)
                      for eid, v in new_vals.items() if v is not None], ontology)
                 if viol:
-                    raise OntologyViolation(viol)
+                    raise OntologyViolation(_with_refs(viol, names))
 
             # Canonicalize entity/edge-type casing to the ontology's declared spelling before
             # the delta is content-hashed and written, so a write-through (or the repair script)
@@ -9231,7 +9372,7 @@ class GraphVersioningService:
             if not deltas:
                 if on_commit is not None:
                     await on_commit(s)
-                return ApplyResult(None, written, urns)
+                return ApplyResult(None, written, urns, names)
             for d in deltas:
                 kind_by_entity.setdefault(
                     d.entity_id, "edge" if _is_edge_payload(cur_vals.get(d.entity_id) or {}) else "node")
@@ -9267,7 +9408,7 @@ class GraphVersioningService:
                 # the last statement and holds that row's lock only until the commit.
                 await s.flush()
                 await on_commit(s)
-            return ApplyResult(commit.id, written, urns)
+            return ApplyResult(commit.id, written, urns, names)
 
     async def _bulk_insert_versions(self, s, graph_id, branch_id, commit, node_deltas, edge_deltas, actor) -> None:
         """Chunked multi-row INSERTs into the version tables + a bulk head upsert
@@ -9836,6 +9977,66 @@ class GraphVersioningService:
         out.update(await self._skeletons_at(s, graph_id, branch_id, ids, overlay_seq))
         return out
 
+    async def _current_urns(
+        self, s, graph_id: str, branch_id: str, ids, as_of_seq: Optional[int] = None,
+        known: Optional[Mapping[str, Any]] = None,
+    ) -> Dict[str, str]:
+        """The urn a read of ``branch_id`` names each node id by — :meth:`_current_values`'s
+        layering (``main`` at the seq, or a draft's own rows over ``main`` at its branch point),
+        from version-row columns, no payload. ``known``: values in hand (:class:`_Head` or
+        :class:`_Stored`) whose node urn decides. A node with no urn is ``gv:<id>``, as the
+        projector names it (``_node_urn``); an id no layer holds as a node takes the last urn any
+        row of it carried, else stands for itself, as it did before ids and urns could differ.
+
+        Version rows hold an edge's ends as entity ids and readers match them by urn: an imported
+        node's id (``ent_…``) is not its urn, where a canvas or bootstrap node's is."""
+        want = [i for i in dict.fromkeys(ids) if i]
+        out: Dict[str, str] = {}
+        for i in want:
+            v = (known or {}).get(i)
+            if v is not None and v.kind == "node" and v.urn:
+                out[i] = v.urn
+        rest = [i for i in want if i not in out]
+        if rest:
+            main_id = await self._main_branch_id(s, graph_id)
+            if branch_id == main_id:
+                graph = await s.get(GraphORM, graph_id)
+                at = [(main_id, graph.main_head_commit_seq if as_of_seq is None else as_of_seq)]
+            else:
+                base = (await s.get(BranchORM, branch_id)).base_commit_seq or 0
+                at = [(branch_id, (1 << 62) if as_of_seq is None else as_of_seq),
+                      (main_id, base if as_of_seq is None else min(base, as_of_seq))]
+            for bid, seq in at:
+                for i, v in (await self._hashes_at(s, graph_id, bid, rest, seq)).items():
+                    if v.kind == "node":
+                        out[i] = v.urn or f"gv:{i}"
+                rest = [i for i in rest if i not in out]
+                if not rest:
+                    break
+        if rest:
+            out.update(await self._last_urns(s, graph_id, rest))
+        return {i: out.get(i, i) for i in want}
+
+    async def _last_urns(self, s, graph_id: str, ids: Sequence[str]) -> Dict[str, str]:
+        """The last urn any row of each node id carried, here or up a fork's parents: the name of
+        an end its layers no longer hold live (an edge removed with its node)."""
+        graph_ids = [gid for gid, _b, _at in await self._layers(
+            s, graph_id, await self._main_branch_id(s, graph_id), 1 << 62)]
+        stmt = (select(NodeVersionORM.entity_id, NodeVersionORM.urn)
+                .where(NodeVersionORM.graph_id == bindparam("gid"),
+                       NodeVersionORM.entity_id == any_(bindparam("ids", type_=ARRAY(Text))),
+                       NodeVersionORM.urn.isnot(None))
+                .order_by(NodeVersionORM.entity_id, NodeVersionORM.created_at.desc())
+                .distinct(NodeVersionORM.entity_id))
+        out: Dict[str, str] = {}
+        for gid in graph_ids:
+            rest = [i for i in ids if i not in out]
+            for chunk in _chunks(rest, _IN_LIST_MAX):
+                out.update((await s.execute(stmt, {"gid": gid, "ids": list(chunk)})).all())
+            if len(out) == len(ids):
+                break
+        return out
+
     async def _incident_edge_ids(
         self, s, graph_id: str, branch_id: str, node_ids, *, sides=("source", "target"),
         edge_types: Optional[Collection[str]] = None,
@@ -10093,7 +10294,11 @@ class GraphVersioningService:
         fork-aware)."""
         async with self._session() as s:
             main_id = await self._main_branch_id(s, graph_id)
-            return entity_id in await self._current_skeletons(s, graph_id, main_id, [entity_id])
+            if entity_id in await self._current_skeletons(s, graph_id, main_id, [entity_id]):
+                return True
+            # An imported node is keyed by a minted id and carries its urn on its rows: a
+            # write-through naming it by that urn names something main has recorded too.
+            return bool((await self._holders_by_urn(s, graph_id, main_id, [entity_id])).get(entity_id))
 
     async def entity_value(
         self, *, graph_id: str, entity_id: str, branch_id: Optional[str] = None,
@@ -10127,6 +10332,195 @@ class GraphVersioningService:
                 out[i] = (eid, vals[eid])
             elif vals.get(i) is not None:
                 out[i] = None
+        return out
+
+    async def _by_entity_id(self, s, graph_id: str, bid: str, ops: Sequence[Mapping],
+                            written_by: Optional[str] = None) -> Tuple[List[Mapping], Dict[str, str]]:
+        """``ops`` with each node they name by urn named by its entity id, and ``{entity id: the
+        name sent}`` for the ops' own ids it changed. A client names a node by its urn; canvas and
+        bootstrap nodes are keyed by it, an imported node by a minted id (``ent_…``).
+
+        A node op's id, a move's parent and an edge's ends that are no entity id on the branch and
+        are the urn of one live node become that node's id; of several, the batch is refused
+        (:class:`AmbiguousUrn`); of none, they go as they came (today's errors). A create's id that
+        is a live node's urn is refused (:class:`EntityExists`); one only a single deleted node
+        held restores that node. Ids this batch creates are its own. ``written_by``, a retry's
+        first commit: the names resolve to what it wrote, as they did then."""
+        def _node(o: Mapping) -> bool:
+            return o.get("entity_kind", "node") != "edge"
+
+        created = {o["entity_id"] for o in ops if o.get("op") == "create"}
+        asked: set = set()
+        for o in ops:
+            p = o.get("payload") or {}
+            if _node(o) and o.get("op") != "create":
+                asked.add(o["entity_id"])
+            if o.get("op") == "move" and p.get("parentEntityId"):
+                asked.add(p["parentEntityId"])
+            if not _node(o) and o.get("op") in ("create", "update"):
+                asked.update(x for x in _edge_src_tgt(p) if x)
+        asked -= created
+        creates = {o["entity_id"] for o in ops if o.get("op") == "create" and _node(o)}
+        if not asked and not creates:
+            return list(ops), {}
+        known = await self._current_skeletons(s, graph_id, bid, asked | creates)
+        unknown = (asked | creates) - set(known)          # no entity of the branch has that id
+        mapping: Dict[str, str] = {}
+        if written_by is not None and unknown:
+            # A retry: what the first attempt wrote, by the urn each of its nodes carried.
+            wrote = (await s.execute(select(NodeVersionORM.entity_id).where(
+                NodeVersionORM.graph_id == graph_id,
+                NodeVersionORM.commit_id == written_by))).scalars().all()
+            by_urn = {u: e for e, u in (await self._last_urns(s, graph_id, list(wrote))).items()}
+            mapping.update({n: by_urn[n] for n in unknown if n in by_urn})
+        rest = unknown - set(mapping)
+        if rest:
+            holders = await self._holders_by_urn(s, graph_id, bid, rest)
+            state = await self._current_skeletons(
+                s, graph_id, bid, {e for ids in holders.values() for e in ids})
+            ambiguous, existing = [], []
+            for name in sorted(rest):
+                ids = holders.get(name, set())
+                live = [e for e in ids if (state.get(e) or {}).get("urn") == name]
+                if name in creates:
+                    if live:
+                        existing.append(name)              # a second node with a live one's urn
+                    elif len(ids) == 1:
+                        mapping[name] = next(iter(ids))    # the one node that held it: restored
+                elif len(live) == 1:
+                    mapping[name] = live[0]
+                elif len(live) > 1:
+                    ambiguous.append(name)
+            if ambiguous:
+                raise AmbiguousUrn(ambiguous)
+            if existing:
+                raise EntityExists(existing)
+        if not mapping:
+            return list(ops), {}
+        out: List[Mapping] = []
+        names: Dict[str, str] = {}
+        for o in ops:
+            o2 = dict(o)
+            if _node(o) and o["entity_id"] in mapping:
+                o2["entity_id"] = mapping[o["entity_id"]]
+                names[o2["entity_id"]] = o["entity_id"]
+            p = o.get("payload")
+            if p:
+                keys = (("parentEntityId",) if o.get("op") == "move" else ()) + (
+                    () if _node(o) else ("sourceEntityId", "source_entity_id",
+                                         "targetEntityId", "target_entity_id"))
+                if any(p.get(k) in mapping for k in keys):
+                    o2["payload"] = {**p, **{k: mapping[p[k]] for k in keys if p.get(k) in mapping}}
+            out.append(o2)
+        return out, names
+
+    async def _unique_violations(self, s, graph_id: str, main_id: str,
+                                 written: Mapping[str, Optional[dict]],
+                                 ontology_rules: Optional[OntologyRules],
+                                 seen: Optional[Dict[Tuple[str, str, str], set]] = None,
+                                 source: Optional[Tuple[str, str]] = None) -> List[dict]:
+        """Each value of a field its type keeps unique (``EntityRule.unique_fields``) that a node
+        ``written`` carries and another live node of the type carries too — another written here,
+        or one on ``main`` this write leaves as it is: ``[{type, field, value, entities}]``. One
+        query a type and field over ``main``'s rows (its layers, a fork's), kept to the values asked,
+        then those nodes' current values. Nothing when no type keeps a field unique. ``seen``: what
+        the pages before this one wrote, for a publish written a page at a time. ``source``: the
+        ``(graph, branch)`` a squash copies rows from, whose values ``written`` holds only as their
+        identity columns — read in full for the types that keep a field unique."""
+        if ontology_rules is None or not any(r.unique_fields for r in ontology_rules.entity_types.values()):
+            return []
+
+        def _keys(v: Optional[dict]) -> List[Tuple[str, str, str]]:
+            if not v or _is_edge_payload(v):
+                return []
+            etype = ontology_rules.canonical_entity_type(v.get("entityType"))
+            rule = ontology_rules.entity_types.get(etype) if etype else None
+            props = v.get("properties") or {}
+            return [(etype, f, val) for f in sorted(rule.unique_fields if rule else ())
+                    if (val := _key_text(props.get(f))) is not None]
+
+        if source is not None:
+            need = [eid for eid, v in written.items()
+                    if v and not _is_edge_payload(v) and "properties" not in v
+                    and (r := ontology_rules.entity_types.get(
+                        ontology_rules.canonical_entity_type(v.get("entityType")) or ""))
+                    and r.unique_fields]
+            if need:
+                full = await self._current_values(s, source[0], source[1], need)
+                written = {**written, **{e: full[e] for e in need if full.get(e) is not None}}
+        holders: Dict[Tuple[str, str, str], set] = {}
+        for eid, v in written.items():
+            for key in _keys(v):
+                holders.setdefault(key, set()).add(eid)
+        if not holders:
+            return []
+        if seen is not None:
+            for key, ids in holders.items():
+                earlier = seen.setdefault(key, set())
+                ids |= earlier - set(written)
+                earlier |= ids
+        wanted: Dict[Tuple[str, str], set] = {}
+        for etype, field_, val in holders:
+            wanted.setdefault((etype, field_), set()).add(val)
+        graph = await s.get(GraphORM, graph_id)
+        found: set = set()
+        for gid, bid, at in await self._layers(s, graph_id, main_id, graph.main_head_commit_seq):
+            for (etype, field_), vals in wanted.items():
+                found.update((await s.execute(
+                    select(NodeVersionORM.entity_id).where(
+                        NodeVersionORM.graph_id == gid, NodeVersionORM.branch_id == bid,
+                        NodeVersionORM.commit_seq <= at, NodeVersionORM.entity_type == etype,
+                        NodeVersionORM.payload["properties"][field_].astext
+                        == any_(bindparam("vals", type_=ARRAY(Text)))).distinct(),
+                    {"vals": sorted(vals)})).scalars().all())
+        for eid, v in (await self._current_values(s, graph_id, main_id, found - set(written))).items():
+            for key in _keys(v):
+                if key in holders:
+                    holders[key].add(eid)
+        return [{"type": t, "field": f, "value": val, "entities": sorted(ids)}
+                for (t, f, val), ids in sorted(holders.items()) if len(ids) > 1]
+
+    async def identities_taken(self, *, graph_id: str, branch_id: str,
+                               names: Collection[str]) -> Tuple[set, Dict[str, str]]:
+        """For the names new nodes would take as their id and urn: those taken — an entity of the
+        branch holds the id (live or deleted, node or edge), or a live node carries the urn — and
+        ``{name: id}`` for each only one deleted node ever carried as its urn, which a create of it
+        brings back rather than a second entity with that urn (the projector deletes by urn)."""
+        wanted = {n for n in names if n}
+        if not wanted:
+            return set(), {}
+        async with self._session() as s:
+            taken = set(await self._current_skeletons(s, graph_id, branch_id, wanted))
+            holders = await self._holders_by_urn(s, graph_id, branch_id, wanted - taken)
+            state = await self._current_skeletons(
+                s, graph_id, branch_id, {e for ids in holders.values() for e in ids})
+        restore: Dict[str, str] = {}
+        for name, ids in holders.items():
+            if any((state.get(e) or {}).get("urn") == name for e in ids):
+                taken.add(name)
+            elif len(ids) == 1 and next(iter(ids)) in state and state[next(iter(ids))] is None:
+                restore[name] = next(iter(ids))
+        return taken, restore
+
+    async def _holders_by_urn(self, s, graph_id: str, bid: str, urns) -> Dict[str, set]:
+        """``{urn: entity ids}`` of the nodes whose rows on the branch — its own and ``main``'s,
+        and up a fork's parents — ever carried each urn (``ix_nv_urn``). Who holds it now is the
+        caller's to judge (:meth:`_current_skeletons`)."""
+        main_id = await self._main_branch_id(s, graph_id)
+        scopes = [(graph_id, sorted({bid, main_id}))] + [
+            (gid, [b]) for gid, b, _at in (await self._layers(s, graph_id, main_id, 1 << 62))[1:]]
+        stmt = (select(NodeVersionORM.urn, NodeVersionORM.entity_id)
+                .where(NodeVersionORM.graph_id == bindparam("gid"),
+                       NodeVersionORM.branch_id == any_(bindparam("bids", type_=ARRAY(Text))),
+                       NodeVersionORM.urn == any_(bindparam("urns", type_=ARRAY(Text))))
+                .distinct())
+        out: Dict[str, set] = {}
+        wanted = sorted(urns)
+        for gid, bids in scopes:
+            for chunk in _chunks(wanted, _IN_LIST_MAX):
+                for urn, eid in (await s.execute(stmt, {"gid": gid, "bids": bids,
+                                                        "urns": list(chunk)})).all():
+                    out.setdefault(urn, set()).add(eid)
         return out
 
     async def _aimed(self, s, graph_id: str, bid: str, ops: Sequence[Mapping]) -> List[Mapping]:

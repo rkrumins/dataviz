@@ -302,6 +302,8 @@ def _entity_def_to_dict(e: EntityTypeDefEntry) -> dict:
                 "show_in_tooltip": f.show_in_tooltip,
                 "display_order": f.display_order,
                 "format": f.format,
+                "reconciliation_key": f.reconciliation_key,
+                "unique": f.unique,
             }
             for f in e.fields
         ],

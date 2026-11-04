@@ -138,8 +138,11 @@ class VersionedWriteProvider:
                     self._gid = res["graph_id"]
         return self._gid
 
-    async def _record(self, ops: List[dict], message: str) -> Optional[ApplyResult]:
-        """Commit the ops to main, then nudge the projector to carry them to FalkorDB."""
+    async def _record(self, ops: List[dict], message: str,
+                      from_client: bool = True) -> Optional[ApplyResult]:
+        """Commit the ops to main, then nudge the projector to carry them to FalkorDB.
+        ``from_client``: urns resolve to the nodes they name and a create never replaces what holds
+        its id (:meth:`GraphVersioningService.apply_ops`); a whole-graph save opts out."""
         ops = [o for o in ops if o is not None]
         if not ops:
             return None
@@ -147,7 +150,7 @@ class VersionedWriteProvider:
         res = await self._svc.apply_ops_detailed(
             graph_id=gid, ops=ops, actor=self._actor,
             message=message, containment_edge_types=self._containment_types,
-            ontology_rules=self._ontology_rules)
+            ontology_rules=self._ontology_rules, from_client=from_client)
         if res.commit_id is not None:
             await nudge_projection(gid)
         return res
@@ -225,5 +228,5 @@ class VersionedWriteProvider:
                for n in nodes]
         ops += [{"op": "create", "entity_kind": "edge", "entity_id": e.id, "payload": _edge_payload(e)}
                 for e in edges]
-        await self._record(ops, "save custom graph")
+        await self._record(ops, "save custom graph", from_client=False)
         return True

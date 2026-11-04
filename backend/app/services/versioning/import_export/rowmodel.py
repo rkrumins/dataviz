@@ -124,6 +124,14 @@ def normalize(raw: Dict[str, Any], kind: str, *, native: bool = False) -> Dict[s
         ]
     if kind == "edge" and not _blank(raw.get("confidence")):
         out["confidence"] = float(raw["confidence"])
+    if kind == "edge":
+        # An end named by a property of its node: the data source's identifier property or a
+        # field its type matches imports by (``source.sap_id``, ``target.sap_id``).
+        for end in ("source", "target"):
+            keys = {k[len(end) + 1:]: _clean(v) for k, v in raw.items()
+                    if k.startswith(f"{end}.") and len(k) > len(end) + 1 and not _blank(v)}
+            if keys:
+                out[f"{end}Keys"] = keys
 
     out["properties"] = _assemble_properties(raw)
     return out
