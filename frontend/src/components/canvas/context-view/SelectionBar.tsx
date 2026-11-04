@@ -134,11 +134,17 @@ export function SelectionBar({
             </span>
 
             {/* What they touch, together — in the colours the lines wear. */}
+            {/* On a tight canvas (a panel open beside it) the pair gives way
+                before the actions: it wraps onto a clipped second line and is
+                gone whole, as the hint below does, rather than sliding under
+                the buttons. */}
             {showLineage && (
               <span
-                className="flex items-center gap-1 shrink-0"
+                className="flex flex-wrap items-center h-[23px] min-w-0 overflow-hidden"
                 title="Entities on the canvas that feed the selection, and that it feeds"
               >
+                <span className="w-0 h-[23px]" aria-hidden />
+                <span className="flex items-center gap-1 whitespace-nowrap">
                 <span className={cn(LINEAGE_PILL, 'text-lineage-in bg-lineage-in/10 border border-lineage-in/25')}>
                   <LucideIcons.ArrowUpLeft className="w-3 h-3" strokeWidth={2.4} aria-hidden />
                   {lineage.upstream} in
@@ -148,12 +154,16 @@ export function SelectionBar({
                   <LucideIcons.ArrowDownRight className="w-3 h-3" strokeWidth={2.4} aria-hidden />
                   {lineage.downstream} out
                 </span>
+                </span>
               </span>
             )}
 
             <span className="h-4 w-px bg-glass-border shrink-0" aria-hidden />
 
-            <ul className="flex items-center gap-1.5 min-w-0 overflow-hidden">
+            {/* Only whole names: one that no longer fits wraps onto the clipped
+                second line rather than being squeezed to a sliver. */}
+            <ul className="flex flex-wrap items-center gap-1.5 h-[29px] min-w-0 overflow-hidden">
+              <li className="w-0 h-[29px]" aria-hidden />
               {named.map((id) => (
                 <li key={id} className="min-w-0 max-w-[11rem]">
                   <span
