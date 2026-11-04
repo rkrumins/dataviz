@@ -30,7 +30,14 @@ import hashlib
 import json
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_serializer, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PrivateAttr,
+    model_serializer,
+    model_validator,
+)
 
 from backend.common.models.search import (
     RELATION_DEPTH_MAX,
