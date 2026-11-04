@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Search, Settings, User, Moon, Sun, Monitor, LogOut, Pencil, Shield, Sparkles, Check, HelpCircle, UserCog, Link2, KeySquare, SlidersHorizontal } from 'lucide-react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { PersonaToggle } from '@/components/persona/PersonaToggle'
+import { PersonaIntroTip } from '@/components/persona/PersonaIntroTip'
 import { BrandLogo } from '@/components/brand/BrandLogo'
 import { BrandName } from '@/components/brand/BrandName'
 import { BookmarksPopover } from '@/components/layout/BookmarksPopover'
@@ -54,6 +55,8 @@ export function TopBar({ onOpenCommandPalette }: TopBarProps) {
   const location = useLocation()
   const navigate = useNavigate()
   const [avatarPickerOpen, setAvatarPickerOpen] = useState(false)
+  // The persona toggle — where the Business view's first-run tip points.
+  const [personaEl, setPersonaEl] = useState<HTMLSpanElement | null>(null)
   const avatarId = usePreferencesStore((s) => s.avatarId)
   const setAvatarId = usePreferencesStore((s) => s.setAvatarId)
   const applyProfile = useAuthStore((s) => s.applyProfile)
@@ -204,9 +207,10 @@ export function TopBar({ onOpenCommandPalette }: TopBarProps) {
         {/* Right: Actions — 3 groups separated by dividers */}
         <div className="flex items-center gap-2">
           {/* Group 1: Mode */}
-          <span data-tour="persona" className="inline-flex">
+          <span ref={setPersonaEl} data-tour="persona" className="inline-flex">
             <PersonaToggle />
           </span>
+          <PersonaIntroTip anchor={personaEl} />
 
           <div className="w-px h-6 bg-glass-border mx-1" />
 

@@ -106,6 +106,7 @@ import { useCanvasStore, type LineageNode, type LineageEdge as LineageEdgeType }
 import { useSearchStore } from '@/store/searchStore'
 import { fetchWithTimeout } from '@/services/fetchWithTimeout'
 import { usePreferencesStore } from '@/store/preferences'
+import { usePersonaMode } from '@/store/persona'
 import { useFeature } from '@/store/features'
 
 // Types
@@ -161,6 +162,10 @@ export function GraphCanvas({ className }: { className?: string }) {
   const schemaEntityTypes = useViewEntityTypes()
   const edgeTypeMetadata = useEdgeTypeMetadataMap()
   const { showMinimap, showGrid } = usePreferencesStore()
+  // The Business view keeps the canvas's own zoom, minimap and search; the
+  // extra control panel, the layout-direction switch and the edge-details
+  // panel are the Technical view's.
+  const technical = usePersonaMode() === 'technical'
 
   // 4. Local state
   const [showLineageFlow, setShowLineageFlow] = useState(true)
@@ -1517,7 +1522,7 @@ export function GraphCanvas({ className }: { className?: string }) {
               className="opacity-40"
             />
           )}
-          <CanvasControls />
+          {technical && <CanvasControls />}
           {showMinimap && (
             <MiniMap
               nodeColor={minimapNodeColor}
@@ -1551,6 +1556,7 @@ export function GraphCanvas({ className }: { className?: string }) {
 
       {/* Stats Bar */}
       <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-10 flex items-center gap-3">
+        {technical && (
         <button
           onClick={toggleDirection}
           className="glass-panel-subtle rounded-lg px-3 py-1.5 flex items-center gap-2 hover:bg-accent-lineage/10 transition-colors"
@@ -1563,6 +1569,7 @@ export function GraphCanvas({ className }: { className?: string }) {
           )}
           <span className="text-2xs text-ink-muted">{direction}</span>
         </button>
+        )}
         {isLayouting && (
           <div className="glass-panel-subtle rounded-lg px-3 py-1.5 flex items-center gap-2">
             <Loader2 className="w-3 h-3 text-accent-lineage animate-spin" />
@@ -1579,6 +1586,7 @@ export function GraphCanvas({ className }: { className?: string }) {
             })()} &middot; {displayEdges.length} relationships
           </span>
         </div>
+        {(technical || isEdgePanelOpen) && (
         <button
           onClick={toggleEdgePanel}
           className={cn(
@@ -1589,6 +1597,7 @@ export function GraphCanvas({ className }: { className?: string }) {
           <GitBranch className="w-3.5 h-3.5 text-accent-lineage" />
           <span className="text-2xs text-ink-muted">Edge Details</span>
         </button>
+        )}
       </div>
 
       {/* Edge Legend */}

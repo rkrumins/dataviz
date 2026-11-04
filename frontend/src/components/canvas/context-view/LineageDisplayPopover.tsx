@@ -244,6 +244,9 @@ interface LineageDisplaySectionsProps {
   /** When true, every control renders inert (native `disabled`) and muted —
    *  used by the header's DisplayMenu when Lineage is off. */
   disabled?: boolean
+  /** The Business view's short form: how many lines are drawn, and nothing
+   *  about how they look. */
+  simple?: boolean
 }
 
 /**
@@ -259,6 +262,7 @@ export function LineageDisplaySections({
   lineagePortSides,
   onSetLineagePortSides,
   disabled = false,
+  simple = false,
 }: LineageDisplaySectionsProps) {
   return (
     <div className={cn(disabled && 'opacity-50')}>
@@ -330,6 +334,7 @@ export function LineageDisplaySections({
         {lineageRenderMode === 'auto' && <FlowRibbonsToggle disabled={disabled} />}
       </CollapsibleSection>
 
+      {!simple && <>
       <div className="h-px bg-black/[0.08] dark:bg-white/[0.06] mx-3" />
 
       <AppearanceSection disabled={disabled} />
@@ -468,6 +473,7 @@ export function LineageDisplaySections({
       <div className="h-px bg-black/[0.08] dark:bg-white/[0.06] mx-3" />
 
       <ExternalPreviewToggle disabled={disabled} />
+      </>}
     </div>
   )
 }

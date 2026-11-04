@@ -222,6 +222,12 @@ export async function login(evalJs, goto) {
     return r.status
   `)
   if (status !== 200) throw new Error(`login failed: HTTP ${status}`)
+  // Probes and guide shots walk the full toolset: the Technical view, with
+  // the Business view's first-run note already seen.
+  await evalJs(`
+    localStorage.setItem('nexus-persona', JSON.stringify({ state: { mode: 'technical' }, version: 0 }))
+    localStorage.setItem('synodic.persona.intro.v1', '1')
+    return true`)
   // The redirect that follows destroys this execution context; anything
   // evaluated before the next navigation dies with "Failed to fetch".
   await goto(`${APP_ORIGIN}/dashboard`)

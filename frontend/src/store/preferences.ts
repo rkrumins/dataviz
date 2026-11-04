@@ -90,8 +90,10 @@ interface PreferencesState {
 
   // Canvas bottom-right dock (Data loads + Flows). Collapsed individually
   // each is still a header; minimizing folds the pair into one slim strip
-  // so the columns get their width and height back.
-  canvasDockMinimized: boolean
+  // so the columns get their width and height back. Null until the reader
+  // chooses: then it follows the view — minimized in the Business view,
+  // open in the Technical one.
+  canvasDockMinimized: boolean | null
   setCanvasDockMinimized: (minimized: boolean) => void
 
   // Context View: when the layers do not all fit, the ones outside the open
@@ -372,7 +374,7 @@ export const usePreferencesStore = create<PreferencesState>()(
       sidebarCollapsed: false,
       toggleSidebar: () => set((state) => ({ sidebarCollapsed: !state.sidebarCollapsed })),
 
-      canvasDockMinimized: false,
+      canvasDockMinimized: null,
       setCanvasDockMinimized: (canvasDockMinimized) => set({ canvasDockMinimized }),
 
       canvasFoldLayers: false,
@@ -577,7 +579,10 @@ export const usePreferencesStore = create<PreferencesState>()(
       // v10 (2026-09-21): the lineage direction pair's default is blue / green.
       // The sky / amber stored for the hour before was that default, not a
       // choice — reset it.
-      version: 10,
+      // v11 (2026-11-04): the canvas dock follows the view until the reader
+      // chooses (null) — minimized in the Business view. A stored `false` was
+      // the old default, not a choice: reset it. A stored `true` was a choice.
+      version: 11,
       migrate: (persisted, version) => {
         let state = persisted as Record<string, unknown>
         if (version < 2) state = { ...state, lensFrameChildren: 'connected' }
@@ -592,6 +597,7 @@ export const usePreferencesStore = create<PreferencesState>()(
         if (version < 8) state = { ...state, canvasFoldLayers: false }
         if (version < 9) state = { ...state, showFlowRibbons: false }
         if (version < 10) state = { ...state, lineageDirectionColors: DEFAULT_LINEAGE_DIRECTION_COLORS }
+        if (version < 11 && state.canvasDockMinimized === false) state = { ...state, canvasDockMinimized: null }
         return state
       },
     }

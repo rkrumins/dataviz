@@ -267,7 +267,7 @@ see.
    [Tracing Lineage on the Canvas](/guide/exploring-graph).
 4. In a Context View, use **Display** for zoom, density and badges, and ⌘0 /
    Ctrl-0 to fit every column on screen.
-5. Switch the top bar's toggle to **Business** to show names only.
+5. Switch the top bar's toggle to **Business** to show names only, and fewer tools.
 
 ---
 

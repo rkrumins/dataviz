@@ -95,6 +95,7 @@ import {
 } from '@/services/viewApiService'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { DEFAULT_FEATURES, useFeaturesStore } from '@/store/features'
+import { usePersonaStore } from '@/store/persona'
 import { getViewVersionStatus } from '@/services/viewVersionsApiService'
 import type { WorkspaceResponse } from '@/services/workspaceService'
 
@@ -667,5 +668,44 @@ describe('Versions and Export, a preview behind one admin switch', () => {
     fireEvent.change(input, { target: { value: 'Renamed' } })
     fireEvent.keyDown(input, { key: 'Enter' })
     await waitFor(() => expect(mockVersionStatus).toHaveBeenCalledTimes(2))
+  })
+})
+
+describe('the Business view keeps the bar to what a reader needs', () => {
+  beforeEach(() => {
+    usePersonaStore.setState({ mode: 'business' })
+    useFeaturesStore.setState({ values: { ...DEFAULT_FEATURES, viewPortabilityEnabled: true } })
+  })
+  afterEach(() => useFeaturesStore.setState({ values: { ...DEFAULT_FEATURES } }))
+
+  it('tucks away Versions, Export, Reviews and the type count — and asks for no version status', async () => {
+    renderHeader(viewResponse({
+      access: OWNER_ACCESS,
+      config: { content: { visibleEntityTypes: ['table', 'column'] } },
+    }))
+    await screen.findByText('Test View')
+    expect(screen.queryByRole('button', { name: /^Versions/ })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Export' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Reviews' })).toBeNull()
+    expect(screen.queryByText('2 types')).toBeNull()
+    expect(mockVersionStatus).not.toHaveBeenCalled()
+  })
+
+  it('keeps Share, Details, Activity, the kind of view and what it is built on', async () => {
+    renderHeader(viewResponse({
+      access: OWNER_ACCESS,
+      dataSourceId: 'ds_1',
+      dataSourceName: 'Production Warehouse',
+    }))
+    expect(await screen.findByRole('button', { name: /^Share/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Details' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Activity' })).toBeInTheDocument()
+    expect(screen.getByText('Graph')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /what this view is built on: Production Warehouse/i })).toBeInTheDocument()
+  })
+
+  it('still shows a request waiting on the view', async () => {
+    renderHeader(viewResponse({ access: OWNER_ACCESS, publishRequest: PENDING }))
+    expect(await screen.findByText('Publication requested')).toBeInTheDocument()
   })
 })

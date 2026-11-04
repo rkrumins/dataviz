@@ -15,6 +15,7 @@ import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { LAYER_COLORS } from '@/components/views/ViewWizard/layerColors'
 import { placeMenu } from './menuPlacement'
+import { usePersonaMode } from '@/store/persona'
 
 // ============================================
 // Types
@@ -181,6 +182,10 @@ export function CanvasContextMenu({
         if (!isOpen) setSubmenu(null)
     }, [isOpen])
 
+    // The Business view's entity menu reads and walks; copying an identifier
+    // and narrowing the canvas are the Technical view's.
+    const technical = usePersonaMode() === 'technical'
+
     // Build actions based on target type
     const actions = useCallback((): ContextMenuAction[] => {
         if (!target) return []
@@ -219,7 +224,7 @@ export function CanvasContextMenu({
                 })
             }
 
-            if (narrowActions.length > 0) {
+            if (technical && narrowActions.length > 0) {
                 result.push({
                     id: 'narrow',
                     label: 'Narrow to this…',
@@ -228,7 +233,11 @@ export function CanvasContextMenu({
                 })
             }
 
-            if (onCopyUrn) {
+            if (!technical && result.length > 0) {
+                // Copy URN closes the reading group in the Technical view.
+                result[result.length - 1] = { ...result[result.length - 1], dividerAfter: true }
+            }
+            if (technical && onCopyUrn) {
                 result.push({
                     id: 'copy-urn',
                     label: 'Copy URN',
@@ -454,7 +463,7 @@ export function CanvasContextMenu({
         return result
     }, [target, onEditNode, onDuplicateNode, onDuplicateWithOptions, onDeleteNode, onCreateChild, onTraceNode, onFocusConnections,
         onCopyUrn, onConnect, onLinkNode, onEditEdge, onDeleteEdge, onReverseEdge, onCreateNode, onPaste,
-        onSelectAll, customActions, queryActions, layers, onMoveToLayer, layerMenu, onClose, narrowActions.length])
+        onSelectAll, customActions, queryActions, layers, onMoveToLayer, layerMenu, onClose, narrowActions.length, technical])
 
     // Get icon component
     const getIcon = (iconName: keyof typeof LucideIcons) => {

@@ -34,7 +34,7 @@ export const TOURS: TourDefinition[] = [
         target: '[data-tour="persona"]',
         placement: 'bottom',
         title: 'Business or technical?',
-        body: 'Flip between a **business** and a **technical** lens — the same graph, described in the language that suits you.',
+        body: '**Business** keeps to the essentials: fewer tools, plain names, the rest a click away under **More**. **Technical** shows every tool and each entity’s identifier. Same graph, either way.',
       },
       {
         target: '[data-tour="help"]',
@@ -229,7 +229,7 @@ TOURS.push(
         target: '[data-tour="canvas-display"]',
         placement: 'bottom',
         title: 'Tune the display',
-        body: 'Open **Display** to adjust zoom, density, edge direction, and how lineage is drawn — the canvas your way.',
+        body: 'Open **Display** to adjust zoom, density and how lineage is drawn — the canvas your way.',
       },
       {
         title: "You've got the canvas",

@@ -39,6 +39,7 @@ import { mapSaveProblems } from '@/features/versioning/model/saveProblems'
 import { useReparentNode } from './useReparentNode'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { usePreferencesStore } from '@/store/preferences'
+import { usePersonaMode } from '@/store/persona'
 import { useFeature } from '@/store/features'
 import { NarrowChip } from '@/features/narrow/NarrowChip'
 import { NarrowComposer } from '@/features/narrow/NarrowComposer'
@@ -477,7 +478,10 @@ export function ContextViewCanvas({
   const removeStoreNodes = useCanvasStore((s) => s.removeNodes)
   const selectNode = useCanvasStore((s) => s.selectNode)
   const setSelection = useCanvasStore((s) => s.setSelection)
-  const canvasDockMinimized = usePreferencesStore((s) => s.canvasDockMinimized)
+  // Until the reader chooses, the dock follows the view: the Business view
+  // starts it minimized, so the columns have the room.
+  const personaMode = usePersonaMode()
+  const canvasDockMinimized = usePreferencesStore((s) => s.canvasDockMinimized) ?? personaMode === 'business'
   const setCanvasDockMinimized = usePreferencesStore((s) => s.setCanvasDockMinimized)
   const multiSelectArmed = useCanvasStore((s) => s.multiSelectArmed)
   const setMultiSelectArmed = useCanvasStore((s) => s.setMultiSelectArmed)

@@ -115,7 +115,8 @@ it away.
 1. Click the first entity's row.
 2. Hold `⌘` (Mac) or `Ctrl` (Windows) and click each extra entity, or hold
    Shift and click to add a range. Prefer plain clicks? Click **Select** in the
-   header (it changes to **Selecting**), then click rows.
+   header (in the Business view, **More → Select several**); it changes to
+   **Selecting**. Then click rows.
 3. A bar appears at the bottom of the canvas, naming what you've selected
    (*N entities*) and how much feeds it and flows from it.
 4. Click **Trace all N** in the bar, **Trace N Entities** in the header, or
@@ -361,7 +362,7 @@ Context View features.
 | `⌘I` / `Ctrl-I` | Expand or compact the trace dock (during a trace) |
 | `Esc` | During a trace, close any open popover, then leave the trace |
 | `⌘0` / `Ctrl-0` | Fit every layer into the window width |
-| `⌘/` / `Ctrl-/` | Switch between **Business** and **Technical** names (anywhere in the app) |
+| `⌘/` / `Ctrl-/` | Switch between the **Business** and **Technical** views (anywhere in the app) |
 
 ## Where to next
 

@@ -9,6 +9,47 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Business and Technical views: a simpler workspace for readers
+
+The **Business** / **Technical** switch in the top bar now sets how much the app shows, not only
+how entities are named. **Business** keeps to the essentials for people who read lineage rather
+than build it; **Technical** is the full toolset, as before. Business stays the default. See
+*Business or Technical view* in Key Concepts.
+
+### Added
+
+- **More** (`⋯`) in a Context View's header, in the Business view: **Select several**,
+  **Properties & display rules**, **Export view…**, **Export data…**, and **Show every tool**,
+  which switches to the Technical view.
+- **A first-run note** by the switch, once per browser, in the Business view: what it keeps and
+  how to reach every tool. It goes when dismissed or when the view is switched.
+
+### Changed
+
+- **The Business view shows fewer tools.** What it tucks away stays reachable:
+  - the canvas header keeps **Lineage**, **Display**, **Focus Lens**, **Trace Lineage** and
+    **Edit**; **Select**, **Properties** and **Import / Export** move under **More**, and trace
+    history is the Technical view's;
+  - the branch switcher shows only in a draft; search's **Look in** and **Match** menus show once
+    a search uses them;
+  - **Display** keeps the canvas settings and **Edge Density**; how lines move, their arrows and
+    markers, and **Advanced** are the Technical view's;
+  - the view's header leaves out **Versions**, **Export**, **Reviews**, the type count, usage, and
+    the template-update and subsets chips; a request waiting on the view still shows;
+  - an entity's menu leaves out **Copy URN** and **Narrow to this…**; the trace bar keeps its
+    directions and **Exit**; the Graph canvas leaves out its extra control panel, its layout
+    direction and **Edge Details**;
+  - **Selecting**, **Connect**, an open Property Manager and open **Edge Details** stay on screen
+    while they are on;
+  - **Data loads** and **Flows** start minimized, until you open or minimize them yourself.
+- The switch, its tip and the command palette say what each view now does.
+
+### Upgrading
+
+- Nothing to do. People who never chose a view are in the Business view, as before, and now see
+  fewer tools. **Show every tool**, the switch or `⌘/` / `Ctrl-/` brings them back, and the choice
+  is kept.
+
 ## [Unreleased] — Subset views on the canvas: keep a search's matches as a view
 
 The canvas side of subset views. **Save as view…** on Advanced Search results keeps the

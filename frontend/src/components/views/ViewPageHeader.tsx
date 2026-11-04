@@ -109,6 +109,7 @@ import { workspaceColor } from '@/lib/workspaceColor'
 import { getView, updateView, type View } from '@/services/viewApiService'
 import { useBrand } from '@/store/branding'
 import { useCanvasStore } from '@/store/canvas'
+import { usePersonaMode } from '@/store/persona'
 import { useSchemaStore } from '@/store/schema'
 import { useWorkspacesStore } from '@/store/workspaces'
 
@@ -216,11 +217,15 @@ export function ViewPageHeader({ viewId, workspaceName }: {
     const [exportOpen, setExportOpen] = useState(false)
     // Versions and Export are a preview behind one switch (Admin → Features).
     const portability = useViewPortability()
+    // The Business view keeps this bar to what a reader needs: what the view is, where it
+    // lives, who can see it, and any request waiting on it. The builder's chrome — versions,
+    // export, reviews, counts and usage — is the Technical view's.
+    const technical = usePersonaMode() === 'technical'
     const exportEnabled = portability.canExport
     const [versionsOpen, setVersionsOpen] = useState(false)
     // The latest version of the view's design, and whether it has changed since: the chip's
     // "v8 •". Above the `!view` guard, like every hook here.
-    const { data: versionStatus } = useViewVersionStatus(viewId, portability.versions)
+    const { data: versionStatus } = useViewVersionStatus(viewId, portability.versions && technical)
     // Double-click the name to rename it — the affordance came up with the name
     // when the canvas toolbar's duplicate title was removed. The long way round
     // (Details → Name) is unchanged; this is the shortcut people already had.
@@ -475,7 +480,7 @@ export function ViewPageHeader({ viewId, workspaceName }: {
                                 </span>
                             </HoverTip>
                         ))}
-                        <TemplateUpdateChip view={view} canEdit={canEditDetails} />
+                        {technical && <TemplateUpdateChip view={view} canEdit={canEditDetails} />}
                         <LiveViewChip view={view} canEdit={canEditDetails} />
                         <SearchViewChip
                             view={view}
@@ -488,7 +493,7 @@ export function ViewPageHeader({ viewId, workspaceName }: {
                             }}
                             onRefresh={() => useCanvasStore.getState().refreshSubsetFeeds()}
                         />
-                        <SubsetsChip view={view} />
+                        {technical && <SubsetsChip view={view} />}
                     </div>
 
                     {/* 2 — where it lives. A KIND, a PLACE and a SOURCE are
@@ -511,7 +516,7 @@ export function ViewPageHeader({ viewId, workspaceName }: {
 
                         {/* How much of the model this view shows — next to the
                             KIND of view, which is the fact it qualifies. */}
-                        {entityTypeCount > 0 && (
+                        {technical && entityTypeCount > 0 && (
                             <>
                                 <Dot />
                                 <HoverTip
@@ -607,7 +612,7 @@ export function ViewPageHeader({ viewId, workspaceName }: {
                         The platform always knew; it only ever said so on a
                         dashboard the person who built this has no reason to
                         open. Renders nothing while loading or on failure. */}
-                    <ViewUsageBadge viewId={viewId} className="mt-1 hidden md:inline-flex" />
+                    {technical && <ViewUsageBadge viewId={viewId} className="mt-1 hidden md:inline-flex" />}
                 </div>
 
                 {/* The action cluster, and UNDER IT the review chip.
@@ -694,7 +699,7 @@ export function ViewPageHeader({ viewId, workspaceName }: {
                     {/* The history of the view's DESIGN, which every view has; not the
                         graph's drafts and commits, which Reviews opens. The dot says the
                         design has changed since its latest version. */}
-                    {portability.versions && (
+                    {technical && portability.versions && (
                         <HoverTip
                             className="inline-flex"
                             label="Versions of this view’s design: its layers, placements and settings"
@@ -724,7 +729,7 @@ export function ViewPageHeader({ viewId, workspaceName }: {
                     {/* Anyone who can read the view can take a copy of its design
                         elsewhere; the admin switch withdraws the button and the
                         server refuses the file together. */}
-                    {exportEnabled && (
+                    {technical && exportEnabled && (
                         <HoverTip
                             className="inline-flex"
                             label="Download this view as a file to import into another environment"
@@ -746,7 +751,7 @@ export function ViewPageHeader({ viewId, workspaceName }: {
                         branch switcher and nothing else. A read-only session
                         gets no versioning chrome at all (CanvasRouter mounts
                         none), so it must not get a route into it either. */}
-                    {!readOnly && (
+                    {technical && !readOnly && (
                         <ViewReviewsButton
                             workspaceId={view.workspaceId}
                             dataSourceId={view.dataSourceId ?? null}

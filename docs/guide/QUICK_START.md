@@ -58,9 +58,9 @@ sidebar are **Getting started** (your checklist), **User Guide** and
 
 | Control | What it does |
 | --- | --- |
-| The {brandShort} name, with **Business View** or **Technical View** under it | Shows which naming mode is on |
+| The {brandShort} name, with **Business View** or **Technical View** under it | Shows which view is on |
 | **Search pages, views, workspaces, docs…** (`⌘K` / `Ctrl-K`) | Opens the command palette: jump to any page, view, workspace or guide page |
-| **Business** / **Technical** | Switches how entities are named — Technical adds each one's identifier (`⌘/` / `Ctrl-/`) |
+| **Business** / **Technical** | Switches between the essentials (Business) and every tool, with each entity's identifier (Technical) — `⌘/` / `Ctrl-/` |
 | The star (**Favorites**) | Your favourite views, plus the ones you opened recently |
 | The bell (**Inbox**) | Messages for you — for example, a view someone shared with you |
 | The theme button | Cycles between light, dark and your system's theme |

@@ -44,6 +44,7 @@ import * as LucideIcons from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { HoverTip } from '@/components/ui/HoverTip'
+import { usePersonaMode } from '@/store/persona'
 import { useRecentSearches } from '@/hooks/useRecentSearches'
 import type { SearchHit } from '@/types/search'
 import { useDiscovery } from '../../search/builder/useDiscovery'
@@ -119,6 +120,10 @@ export function HeaderSearch() {
     inputRef, viewId, resultMatchesQuick, advanced, resolveLayer, layers,
     revealHit, prefetchHit,
   } = useViewSearchSession()
+  // The Business view searches everything, by its words: its own Look in and
+  // Match menus show only once they are set to something else (a recent
+  // search can bring one back), so a narrowed search is never hidden.
+  const technical = usePersonaMode() === 'technical'
   const scope = quick.scope
   const view = advanced.view
 
@@ -503,7 +508,7 @@ export function HeaderSearch() {
             </span>
           )}
 
-          <AnchoredMenu
+          {(technical || quick.lookIn !== 'everything') && <AnchoredMenu
             icon={LucideIcons.ScanSearch}
             current={lookInLabel(quick.lookIn)}
             label="Look in"
@@ -516,9 +521,9 @@ export function HeaderSearch() {
                 onPick={(lookIn) => { setQuick({ lookIn }); close() }}
               />
             )}
-          </AnchoredMenu>
+          </AnchoredMenu>}
 
-          <AnchoredMenu
+          {(technical || quick.match !== 'substring') && <AnchoredMenu
             icon={LucideIcons.WholeWord}
             current={MATCH_OPTIONS.find((o) => o.value === quick.match)?.label ?? 'Contains'}
             label="Match"
@@ -536,7 +541,7 @@ export function HeaderSearch() {
                 ))}
               </>
             )}
-          </AnchoredMenu>
+          </AnchoredMenu>}
 
           <HoverTip label="Refine — build this query out in the results panel">
             <button

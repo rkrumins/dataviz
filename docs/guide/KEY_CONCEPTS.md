@@ -200,21 +200,42 @@ See [Versioning & Change Control](/guide/versioning-change-control),
 [Editing in a Draft](/guide/editing-in-a-draft) and
 [The Review Center](/guide/review-center).
 
-## Business or Technical names
+## Business or Technical view
 
-The **Business** / **Technical** switch in the top bar changes how entities are
-named, everywhere at once:
+The **Business** / **Technical** switch in the top bar sets how much the app
+shows you, everywhere at once:
 
-- **Business** — the name people use, and nothing else.
-- **Technical** — the same name, with each entity's identifier underneath (its
-  data source's identifier property, such as `id`, or its URN), on the canvas
-  and in the entity's details panel.
+- **Business** — the essentials, for reading lineage. Menus and toolbars keep to
+  what reading a view needs, and entities go by the name people use, and
+  nothing else.
+- **Technical** — every tool on every row, and each entity's identifier under
+  its name (its data source's identifier property, such as `id`, or its URN),
+  on the canvas and in the entity's details panel.
 
-It changes labels only: the graph, its lineage and your access stay the same.
-The words **Business View** or **Technical View** under the {brandShort} name at
-the top left show which one is on, and the `⌘K` / `Ctrl-K` palette can switch
-it too (**Switch to Technical View** / **Switch to Business View**). Or press
-`⌘/` / `Ctrl-/` anywhere outside a text field.
+What the Business view tucks away is a click away, not gone:
+
+| Where | What the Business view keeps | Where the rest is |
+| --- | --- | --- |
+| A Context View's header | **Lineage**, **Display**, **Focus Lens**, **Trace Lineage**, **Edit** | **More** (`⋯`): **Select several**, **Properties & display rules**, **Export view…**, **Export data…** |
+| Search in the header | The search box | **Look in** and **Match** appear once a search uses them |
+| **Display** | The canvas settings and **Edge Density** | How lines move, arrows, marker sides and **Advanced** are the Technical view's |
+| The view's header | Its name, where it lives, **Share**, **Details**, **Activity**, and any request waiting on it | Versions, export, reviews, the type count and usage are the Technical view's |
+| An entity's right-click menu | **View & Edit**, **Trace Lineage**, **Focus Connections** | **Copy URN** and **Narrow to this…** are the Technical view's |
+| A trace bar (Graph canvas) | Its directions and **Exit** | Statistics, settings, **Copy URNs** and export are the Technical view's |
+
+A tool that is on stays on screen in either view, so you can always turn it off —
+**Selecting**, **Connect**, an open Property Manager. The branch switcher shows
+while you're in a draft. The **Data loads** and **Flows** panels start minimized
+in the Business view until you open or minimize them yourself.
+
+The graph, its lineage and your access are the same in both. The words
+**Business View** or **Technical View** under the {brandShort} name at the top
+left show which one is on, and the `⌘K` / `Ctrl-K` palette can switch it too
+(**Switch to Technical View** / **Switch to Business View**). Or press
+`⌘/` / `Ctrl-/` anywhere outside a text field, or choose **Show every tool** at
+the bottom of **More**. The first time you open the app in the Business view, a
+short note by the switch says what it keeps; it goes when you dismiss it or
+switch.
 
 ---
 

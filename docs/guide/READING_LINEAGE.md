@@ -132,10 +132,11 @@ is named:
   entities by, such as `id` (set on the data source, its provider or its
   workspace), or the entity's URN when the source uses the platform's own.
 
-Nothing else changes — the same entities, the same lines. Switch to
-**Technical** when you need an exact identifier to look something up in another
-system, and back to **Business** when you're sharing your screen with people
-who care about *what* and *why*.
+The entities and lines are the same in both. The Business view also shows fewer
+tools — see [Business or Technical view](/guide/key-concepts#business-or-technical-view).
+Switch to **Technical** when you need an exact identifier to look something up in
+another system, and back to **Business** when you're sharing your screen with
+people who care about *what* and *why*.
 
 ---
 
