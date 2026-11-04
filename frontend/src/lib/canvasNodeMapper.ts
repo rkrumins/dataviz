@@ -8,11 +8,19 @@
 import type { GraphNode, GraphEdge } from '@/providers/GraphDataProvider'
 import type { LineageNode, LineageEdge } from '@/store/canvas'
 
+/** ``n`` as the feed of a subset view's layer ``layerId`` listed it: its row is drawn in
+ *  that layer, where the server placed it (as the view's base places it, or by type). */
+export function withFeedLayer(n: GraphNode, layerId: string): GraphNode {
+    return { ...n, feedLayerId: layerId } as GraphNode
+}
+
 /** Convert a backend GraphNode to a canvas LineageNode — every field verbatim. A node
  *  a subset view's feed lists carries where it sits (`ancestorPath`, root first): kept
- *  as its containers' names, which its row shows instead of loading them. */
+ *  as its containers' names, which its row shows instead of loading them — and the
+ *  layer whose feed listed it (`withFeedLayer`). */
 export function toCanvasNode(n: GraphNode, opts?: { randomPosition?: boolean }): LineageNode {
     const path = (n as { ancestorPath?: Array<{ urn: string; displayName?: string }> }).ancestorPath
+    const feedLayerId = (n as { feedLayerId?: string }).feedLayerId
     return {
         id: n.urn,
         type: 'generic' as const,
@@ -39,6 +47,7 @@ export function toCanvasNode(n: GraphNode, opts?: { randomPosition?: boolean }):
             classifications: n.tags,
             businessLabel: (n.properties?.businessLabel as string) ?? undefined,
             ...(path && path.length > 0 ? { ancestorPath: path.map(a => a.displayName || a.urn) } : {}),
+            ...(feedLayerId ? { feedLayerId } : {}),
         },
     }
 }

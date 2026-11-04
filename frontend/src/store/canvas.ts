@@ -45,6 +45,9 @@ export interface LineageNode extends Node {
     /** Where a subset view's match sits: its containers' names, root first, as its
      *  feed delivered them — shown under its row instead of loading them. */
     ancestorPath?: string[]
+    /** The layer of a subset view whose feed listed it: its row is drawn there, where
+     *  the server placed it. */
+    feedLayerId?: string
   }
 }
 

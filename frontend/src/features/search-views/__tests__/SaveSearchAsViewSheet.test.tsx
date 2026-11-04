@@ -14,13 +14,14 @@ vi.mock('@/services/searchViewsApi', () => ({
   createFromSearch: (body: FromSearchRequest, key: string) => createFromSearch(body, key),
 }))
 const counted = vi.fn()
+// What the counts answer for each rule: 5 a layer, 12 in all, 2 in a by-type Other matches.
+type Answer = { count: number; complete: boolean; error?: string }
+let answerFor: (id: string) => Answer = (id) =>
+  ({ count: id === '__found__' ? 12 : id === 'other-matches' ? 2 : 5, complete: true })
 vi.mock('../useLayerCounts', () => ({
   useLayerCounts: (_viewId: string, layers: Array<{ id: string; predicate: unknown }>) => {
     counted(layers)
-    return {
-      status: 'done',
-      counts: new Map(layers.map((l) => [l.id, { count: l.id === 'other-matches' ? 2 : 5, complete: true }])),
-    }
+    return { status: 'done', counts: new Map(layers.map((l) => [l.id, answerFor(l.id)])) }
   },
 }))
 
@@ -69,6 +70,7 @@ describe('SaveSearchAsViewSheet', () => {
     createFromSearch.mockResolvedValue({ view: { id: 'v-new', name: 'PII' } })
     askedTypes.mockReset()
     breakdownOf = () => ({ status: 'done', types: [{ type: 'table', count: 3 }, { type: 'column', count: 9 }] })
+    answerFor = (id) => ({ count: id === '__found__' ? 12 : id === 'other-matches' ? 2 : 5, complete: true })
   })
 
   it('by default makes a subset that follows its base’s layers', async () => {
@@ -90,6 +92,43 @@ describe('SaveSearchAsViewSheet', () => {
     expect(list).toHaveTextContent('Tables')
     expect(list).toHaveTextContent('Other matches')
     expect(screen.getByText('12 matches')).toBeInTheDocument()
+  })
+
+  it('following its base, counts what the base places in each layer, Other matches what is left', () => {
+    renderSheet()
+    const asked = counted.mock.calls.at(-1)?.[0] as Array<{ id: string; predicate: unknown }>
+    expect(asked.map((l) => l.id)).toEqual(['l1', 'l2', '__found__'])
+    expect(asked[0].predicate).toEqual(
+      { kind: 'group', op: 'and', children: [pii, { kind: 'layer', layerAssignment: 'l1' }] })
+    expect(asked[2].predicate).toEqual(pii)
+    const rest = screen.getByText('Other matches').closest('li') as HTMLElement
+    expect(rest).toHaveTextContent('2')
+    expect(rest).toHaveTextContent('the rest')
+  })
+
+  it('a layer its base fills by hand, listing no types, is kept and counted', async () => {
+    const props = renderSheet({ boardLayers: [
+      { id: 'src', name: 'Source systems', order: 0 }, { id: 'rep', name: 'Reporting', order: 1 }] })
+    const src = screen.getByText('Source systems').closest('li') as HTMLElement
+    expect(src).toHaveTextContent('5')
+    expect(src).not.toHaveTextContent('nothing to hold')
+    save()
+    await waitFor(() => expect(props.onSaved).toHaveBeenCalled())
+  })
+
+  it('a base a live view can’t follow is counted by type, says why, and offers a list', () => {
+    answerFor = (id) => (id === 'l1' || id === 'l2'
+      ? { count: 0, complete: true, error: 'This view places 1,200 entities by hand, and a layer filter can follow at most 1,000.' }
+      : { count: id === 'other-matches' ? 2 : 5, complete: true })
+    const onKeepAsList = vi.fn()
+    renderSheet({ onKeepAsList })
+    expect(screen.getByText(/A live view can’t follow how “Sales overview” places entities/)).toBeInTheDocument()
+    const asked = counted.mock.calls.at(-1)?.[0] as Array<{ id: string; predicate: unknown }>
+    expect(asked.map((l) => l.id)).toEqual(['l1', 'l2', 'other-matches'])
+    expect(asked[0].predicate).toEqual(
+      { kind: 'group', op: 'and', children: [pii, { kind: 'entityType', op: 'in', values: ['table'] }] })
+    fireEvent.click(screen.getByRole('button', { name: /Keep their places as a list/ }))
+    expect(onKeepAsList).toHaveBeenCalled()
   })
 
   it('over the whole data source, keeps a copy of the layers', async () => {

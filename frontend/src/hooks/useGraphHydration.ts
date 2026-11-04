@@ -22,7 +22,7 @@ import type { ViewLayerConfig } from '@/types/schema'
 import { caseFold } from '@/features/ontology/lib/caseFold'
 import { BoundedQueue, mapWithConcurrency } from '@/lib/concurrency'
 import { classifyGraphFailure, isFailoverFailure } from '@/services/graphRequestFailure'
-import { toCanvasNode, toCanvasEdge } from '@/lib/canvasNodeMapper'
+import { toCanvasNode, toCanvasEdge, withFeedLayer } from '@/lib/canvasNodeMapper'
 import { useBranchCreatedDelta, committedCreatedUrns, committedCreatedChildUrns } from '@/hooks/useBranchCreatedDelta'
 import { useIsDraftMode, useBranchStore } from '@/store/branchStore'
 import { normalizeReferenceLayout, deriveEntityScope } from '@/utils/referenceLayout'
@@ -826,7 +826,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                                 for (const node of outcome.value.nodes) {
                                     if (seen.has(node.urn)) continue
                                     seen.add(node.urn)
-                                    allNodes.push(node)
+                                    allNodes.push(withFeedLayer(node, layerIds[i]))
                                 }
                                 typeFeedSeeds.push([subsetFeedKey(layerIds[i]), subsetFeedAfter(layerIds[i], outcome.value)])
                             })
@@ -1571,11 +1571,12 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                         const now = store.typeFeeds[feedKey]?.search
                         if (now && (now.delivered !== s.delivered || now.sessionId !== s.sessionId)) {
                             // Another instance moved this layer on meanwhile: the rows land, its position stands.
-                            store.addGraph(fresh.map(n => toCanvasNode(n)), edges.map(e => toCanvasEdge(e)))
+                            store.addGraph(fresh.map(n => toCanvasNode(withFeedLayer(n, s.layerId))),
+                                edges.map(e => toCanvasEdge(e)))
                             return
                         }
                         store.addFeedPage(feedKey, subsetFeedAfter(s.layerId, result),
-                            fresh.map(n => toCanvasNode(n)), edges.map(e => toCanvasEdge(e)))
+                            fresh.map(n => toCanvasNode(withFeedLayer(n, s.layerId))), edges.map(e => toCanvasEdge(e)))
                         return
                     }
                     // One ask makes progress or proves there is none: a page whose

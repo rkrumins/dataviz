@@ -9,6 +9,7 @@
  *  - a layer whose scan is still running is followed through its session until
  *    it completes, its rows landing once;
  *  - a complete layer pages on by the server's cursor;
+ *  - each row keeps the layer whose feed listed it: where the server placed it;
  *  - with the preview off nothing is listed, and the canvas is told why; a
  *    deleted base says so too.
  */
@@ -121,6 +122,20 @@ describe('subset view feeds', () => {
     expect(mockProvider.getNodes).not.toHaveBeenCalled()
     expect(urns()).toEqual(['urn:c1', 'urn:t1', 'urn:t2'])
     expect(feed('L1')).toMatchObject({ hasMore: false, total: 2, search: { status: 'complete', delivered: 2 } })
+  })
+
+  it('each row keeps the layer whose feed listed it, as the server placed it', async () => {
+    // A table the base places in its "other" layer by hand, against its type.
+    serve({
+      L1: (req) => req.cursor === 'c-1'
+        ? page('L1', { nodes: [node('urn:t2')], delivered: 2, totalCount: 2 })
+        : page('L1', { nodes: [node('urn:t1')], cursor: 'c-1', delivered: 1, totalCount: 2 }),
+      'other-matches': () => page('other-matches', { nodes: [node('urn:t9')], delivered: 1, totalCount: 1 }),
+    })
+    const canvas = await hydrate()
+    await act(async () => { await canvas.result.current.loadMoreFeeds(['layer:L1']) })
+    const layerOf = Object.fromEntries(useCanvasStore.getState().nodes.map((n) => [n.id, n.data.feedLayerId]))
+    expect(layerOf).toEqual({ 'urn:t1': 'L1', 'urn:t2': 'L1', 'urn:t9': 'other-matches' })
   })
 
   it('follows a running scan through its session until it completes', async () => {

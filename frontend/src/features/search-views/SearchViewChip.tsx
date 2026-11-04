@@ -164,11 +164,12 @@ function SearchViewPanel({ view, status, canEdit, onEditSearch, onRefresh }: {
       await showLatest(view.id)
       // An own layout leaves nothing out: every base layer comes with it, the left-out ones too.
       const back = layout === 'own' ? hidden.length : 0
+      // An own layout is layers of types: its matches are placed by type from now on.
       notify('success', layout === 'own'
         ? back
-          ? `It has a layout of its own now — every one of its base’s layers, so the ${back === 1 ? 'one' : back} it left out ${back === 1 ? 'is' : 'are'} back`
-          : 'It has a layout of its own now — its base’s layers, to change as you like'
-        : `It follows ${baseName ?? 'its base view'}’s layers again`, {
+          ? `It has a layout of its own now — every one of its base’s layers, its matches placed by type, so the ${back === 1 ? 'one' : back} it left out ${back === 1 ? 'is' : 'are'} back`
+          : 'It has a layout of its own now — its base’s layers, its matches placed by type, to change as you like'
+        : `It follows ${baseName ?? 'its base view'}’s layers again, its matches where it places them`, {
         label: 'Undo',
         onClick: () => {
           void putSearch(view.id, layout === 'own'
@@ -290,7 +291,7 @@ function SearchViewPanel({ view, status, canEdit, onEditSearch, onRefresh }: {
           )}
           {status.placedByType && (
             <p className="text-[12px] text-amber-700 dark:text-amber-400 leading-snug">
-              Placed by type here: its base also places entities by rules on tags or properties, or by hand, which a subset doesn’t follow.
+              {status.placedByTypeReason ?? 'Its base places entities in more ways than a subset can follow, so it places its matches by type.'}
             </p>
           )}
         </div>
