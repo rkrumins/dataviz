@@ -58,7 +58,7 @@ const SCHEMA: ResolvedViewSchema = {
 const BANNER = ['banner', 'opening', 'rewinding'].includes(fixture)
 const COMPARE: Record<string, CompareRequest> = {
   compare: { fromSeq: SEQ, toSeq: null },
-  toofar: { fromSeq: 120, toSeq: null, notice: 'too_far' },
+  toofar: { fromSeq: 40, toSeq: null, notice: 'too_far' },
 }
 
 function Harness() {

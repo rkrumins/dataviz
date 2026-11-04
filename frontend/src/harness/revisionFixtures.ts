@@ -9,8 +9,8 @@ export const HARNESS_DS = 'ds-harness'
 export const HARNESS_GRAPH = 'g-harness'
 export const HARNESS_VIEW = 'view-harness'
 export const HEAD = 214
-/** Revisions before this are too far back to draw (more than the rewind ceiling since). */
-export const TOO_FAR_BELOW = 160
+/** The rewind ceiling (GRAPHVER_REVISION_REWIND_MAX): a revision more changes back than this isn't drawn. */
+const REWIND_MAX = 100_000
 
 const PEOPLE = ['u_ana', 'u_ben', 'u_chen', 'u_dee']
 export const USER_NAMES: Record<string, string> = {
@@ -74,10 +74,12 @@ export function revisionInfo(seq: number) {
     commit_id: `cmt_${seq}`, commit_seq: seq, kind: 'squash_publish', message: MESSAGES[seq % MESSAGES.length],
     actor: PEOPLE[seq % 4], created_at: new Date(Date.UTC(2026, 5, 1 + (seq % 28), 10)).toISOString(), stats: {},
   }
-  const changed = seq < TOO_FAR_BELOW ? 100_001 : (HEAD - seq) * 380
+  // The same count the comparison with now shows, as the server's plan and summary share one.
+  const changed = seq >= HEAD ? 0 : changedBetween(seq, HEAD)
+  const tooFar = changed > REWIND_MAX
   return {
-    commit, userNames: USER_NAMES, headSeq: HEAD, changedSince: changed, limit: 100_000,
-    openable: seq < TOO_FAR_BELOW ? false : seq <= HEAD, reason: seq < TOO_FAR_BELOW ? 'too_far' : null,
+    commit, userNames: USER_NAMES, headSeq: HEAD, changedSince: changed, limit: REWIND_MAX,
+    openable: !tooFar && seq <= HEAD, reason: tooFar ? 'too_far' : null,
   }
 }
 
@@ -88,13 +90,22 @@ const TYPES: Array<[string, 'node' | 'edge' | 'structure', number, number, numbe
   ['FLOWS_TO', 'edge', 0.12, 0.02, 0.01], ['CONTAINS', 'structure', 0.09, 0, 0.005],
 ]
 
-/** What changed after `from`, up to and including `to`: about 380 entities a revision. */
-export function summaryFor(from: number, to: number) {
-  const span = Math.max(1, to - from)
-  const total = span * 380
-  const byType = TYPES.map(([type, kind, a, m, r]) => ({
+/** What changed after `from`, up to and including `to`, by type: about 600 changes a revision. */
+function byTypeBetween(from: number, to: number) {
+  const total = Math.max(1, to - from) * 380
+  return TYPES.map(([type, kind, a, m, r]) => ({
     kind, type, added: Math.round(total * a), modified: Math.round(total * m), removed: Math.round(total * r),
   }))
+}
+
+function changedBetween(from: number, to: number) {
+  return byTypeBetween(from, to).reduce((n, t) => n + t.added + t.modified + t.removed, 0)
+}
+
+/** What changed after `from`, up to and including `to`. */
+export function summaryFor(from: number, to: number) {
+  const span = Math.max(1, to - from)
+  const byType = byTypeBetween(from, to)
   const sum = (k: 'added' | 'modified' | 'removed', kind?: string) =>
     byType.filter((t) => !kind || t.kind === kind).reduce((n, t) => n + t[k], 0)
   const counts = (kind?: string) => ({ added: sum('added', kind), modified: sum('modified', kind), removed: sum('removed', kind) })
