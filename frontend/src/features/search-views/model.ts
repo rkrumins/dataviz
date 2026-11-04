@@ -1,22 +1,25 @@
 /**
  * Subset views — what the screens share: whether a search can be kept, the
- * layers a subset shows (its base's, by type), the request saving one becomes,
+ * layers a subset shows (its base's, each match where the base places it), the
+ * request saving one becomes,
  * the counts a preview asks for, and the words for a layer's matches.
  *
  * Pure: no React, no store. The wire types are `@/types/searchView`; the layer
  * rules mirror `backend/app/services/search_views.py`, which is the authority.
  */
+import type { MembershipSpec } from '@/types/membership'
 import type { Predicate } from '@/types/search'
 import type {
   FromSearchRequest,
   SearchViewDefinition,
   SearchViewStatus,
+  SubsetInclude,
   SubsetLayer,
   SubsetLayerSpec,
   SubsetLayout,
   SubsetWithin,
 } from '@/types/searchView'
-import { REST_LAYER_ID } from '@/types/searchView'
+import { NO_INCLUDE, REST_LAYER_ID } from '@/types/searchView'
 
 /** Layers of types a subset's own layout may have, and the types one may name. */
 export const LAYERS_MAX = 12
@@ -162,6 +165,115 @@ export function perTypeLayers(found: Array<{ type: string; count: number }>, lab
   }
 }
 
+// ── What it keeps beside the matches ───────────────────────────────────────
+
+/** One of what a subset keeps beside its matches, each on or off. */
+export type IncludeChoice = 'contents' | 'containers' | 'upstream' | 'downstream'
+
+export function anyIncluded(include: SubsetInclude | null | undefined): boolean {
+  return !!include && (include.contents || include.containers || include.upstream || include.downstream)
+}
+
+/** Kinds as the server keeps them: a set, sorted; none named is every kind. */
+function kindsOf(kinds: string[] | null | undefined): string[] | undefined {
+  const set = [...new Set((kinds ?? []).filter(Boolean))].sort()
+  return set.length ? set : undefined
+}
+
+/** ``include`` as the server keeps it (`SubsetInclude`'s own rules): levels and
+ *  kinds only with the choice they go with, kinds a set, nothing unset sent. */
+export function keptInclude(include: SubsetInclude): SubsetInclude {
+  const { contents, containers, upstream, downstream } = include
+  const contentsKinds = contents ? kindsOf(include.contentsKinds) : undefined
+  const containersKinds = containers ? kindsOf(include.containersKinds) : undefined
+  return {
+    contents,
+    ...(contents && include.contentsLevels ? { contentsLevels: include.contentsLevels } : {}),
+    ...(contentsKinds ? { contentsKinds } : {}),
+    containers,
+    ...(containers && include.containersLevels ? { containersLevels: include.containersLevels } : {}),
+    ...(containersKinds ? { containersKinds } : {}),
+    upstream,
+    downstream,
+  }
+}
+
+/** Inside a match (``ancestor``) or containing one (``descendant``), ``levels`` of
+ *  the way (unset: the whole way), of ``kinds`` when some are named — the kind
+ *  first, so a candidate of another kind is never walked (`_of_kinds`). */
+function containment(axis: 'ancestor' | 'descendant', where: Predicate, levels?: number, kinds?: string[]): Node {
+  const related: Node = { kind: 'related', axis, where, ...(levels ? { maxHops: levels } : {}) }
+  const only = kindsOf(kinds)
+  return only ? { kind: 'group', op: 'and', children: [{ kind: 'entityType', op: 'in', values: only }, related] } : related
+}
+
+/** What a subset's entities are found by: its search, or its search and what it
+ *  includes — composed as the server composes it (`search_predicate`), so a
+ *  preview counts what the view will hold. A lineage step is taken from a match
+ *  or anything inside it, as a trace walks a container. */
+export function withInclude(predicate: Predicate, include: SubsetInclude | null | undefined): Predicate {
+  if (!include || !anyIncluded(include)) return predicate
+  const parts: Node[] = [predicate as unknown as Node]
+  if (include.contents) parts.push(containment('ancestor', predicate, include.contentsLevels, include.contentsKinds))
+  if (include.containers) parts.push(containment('descendant', predicate, include.containersLevels, include.containersKinds))
+  const reach = { kind: 'group', op: 'or', children: [predicate, { kind: 'related', axis: 'ancestor', where: predicate }] }
+  if (include.upstream) parts.push({ kind: 'related', axis: 'downstream', where: reach })
+  if (include.downstream) parts.push({ kind: 'related', axis: 'upstream', where: reach })
+  return { kind: 'group', op: 'or', children: parts } as unknown as Predicate
+}
+
+const LEVEL_WORDS = ['', 'one level', 'two levels', 'three levels']
+
+/** "two levels" — a number of levels, as the server says it. */
+export function levelsText(levels: number): string {
+  return LEVEL_WORDS[levels] ?? `${levels} levels`
+}
+
+/** "two levels inside them (only Column) and what feeds them" — what a subset keeps
+ *  beside its matches, in words, as the server says how far; '' for just the matches. */
+export function includeWords(include: SubsetInclude | null | undefined,
+  typeLabel: (type: string) => string = (t) => t): string {
+  if (!include) return ''
+  const only = (words: string, kinds?: string[]) => {
+    const named = kindsOf(kinds)
+    return named ? `${words} (only ${list(named.map(typeLabel))})` : words
+  }
+  const words = [
+    include.contents && only(include.contentsLevels
+      ? `${levelsText(include.contentsLevels)} inside them` : 'everything inside them', include.contentsKinds),
+    include.containers && only(include.containersLevels
+      ? `what contains them, ${levelsText(include.containersLevels)} up` : 'what contains them', include.containersKinds),
+    include.upstream && 'what feeds them',
+    include.downstream && 'what they feed',
+  ].filter((w): w is string => !!w)
+  if (words.length <= 1) return words[0] ?? ''
+  return `${words.slice(0, -1).join(', ')} and ${words[words.length - 1]}`
+}
+
+/** A narrowing kept live, as a subset view: its search, where it looks, and what it
+ *  includes — or why it can only be kept as a list of members. A live view keeps
+ *  every level inside the matches or a number of them, and one lineage step either way. */
+export function liveFromNarrowing(spec: MembershipSpec):
+  { predicate: Predicate; within: SubsetWithin; include: SubsetInclude } | { reason: string } {
+  const query = spec.seeds.query
+  if (!query) return { reason: 'It starts from chosen entities, not a search, so it is kept as a list of them.' }
+  const blocked = unsaveableReason(query)
+  if (blocked) return { reason: blocked }
+  const { children, upstream, downstream, partnerChildren } = spec.expand
+  if ((upstream !== 0 && upstream !== 1) || (downstream !== 0 && downstream !== 1)) {
+    return { reason: 'It reaches more than one step of lineage. Kept live, it reaches one step either way.' }
+  }
+  if (partnerChildren !== 0) {
+    return { reason: 'It keeps what is inside its sources and consumers, which only a list of them can.' }
+  }
+  return {
+    predicate: query,
+    within: spec.within,
+    include: { ...NO_INCLUDE, contents: children !== 0, ...(children !== 'all' && children ? { contentsLevels: children } : {}),
+      upstream: upstream === 1, downstream: downstream === 1 },
+  }
+}
+
 // ── The request a search becomes ───────────────────────────────────────────
 
 export type LayoutChoice = 'like' | 'perType' | 'one'
@@ -171,6 +283,11 @@ export interface SaveSearchChoices {
   visibility: FromSearchRequest['visibility']
   within: SubsetWithin
   choice: LayoutChoice
+  /** What it keeps beside the matches. */
+  include?: SubsetInclude
+  /** The base layers a subset that follows its base leaves out, with their matches
+   *  (their ids, or `other-matches`). */
+  hidden?: string[]
 }
 
 export interface SaveSearchContext {
@@ -193,6 +310,7 @@ export function requestOf(choices: SaveSearchChoices, ctx: SaveSearchContext): F
   let layers: SubsetLayerSpec[] | undefined
   let rest: string | null | undefined
   if (choices.choice === 'like' && inView) {
+    // It follows its base: what it leaves out is named, so new base layers still arrive.
     layout = 'inherit'
   } else if (choices.choice === 'like') {
     ({ layers, rest } = ownLayersFrom(layersLike(ctx.baseLayers)))
@@ -202,6 +320,9 @@ export function requestOf(choices: SaveSearchChoices, ctx: SaveSearchContext): F
     layers = []
     rest = 'Matches'
   }
+  // Only a subset that follows its base leaves layers out: an own layout's left-out
+  // type would belong to no layer, and its matches would land in "Other matches".
+  const hidden = layout === 'inherit' ? [...new Set(choices.hidden ?? [])] : []
   return {
     name: choices.name.trim(),
     visibility: choices.visibility,
@@ -212,6 +333,8 @@ export function requestOf(choices: SaveSearchChoices, ctx: SaveSearchContext): F
     ...(inView ? { readIn: ctx.viewId } : {}),
     layout,
     ...(layout === 'own' ? { layers, rest } : {}),
+    ...(hidden.length ? { hiddenLayers: hidden } : {}),
+    ...(choices.include && anyIncluded(choices.include) ? { include: keptInclude(choices.include) } : {}),
     provenance: { origin: 'search', viewId: ctx.viewId },
   }
 }

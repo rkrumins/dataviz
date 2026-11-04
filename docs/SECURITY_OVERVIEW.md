@@ -505,11 +505,36 @@ an optional restriction on the data source, and the platform-wide **Publishing v
 everyone** switch. When a platform administrator opens someone else's private view, the
 view's activity log records it.
 
+Someone who can open a view but can't read its workspace's data sources (a person it is shared
+with or published to, or an API key limited to the view) reads its data through the view: a
+*share link*. For a share link, searches, counts, display-rule membership checks, exports and a
+subset view's layers find only what the view holds, and a condition that follows lineage or
+relationships is refused. A subset view's layers page with a
+cursor that is signed and bound to the layer, so a made-up cursor is refused.
+
+For everyone, a curated view with nothing placed in it holds nothing: a search, count, export
+or membership check in it finds nothing. Before, such a view could read its whole data source.
+Previewing a delete (`GET /graph/nodes/{urn}/delete-impact`) needs what the delete needs:
+**Edit mode** on and `workspace:datasource:manage`.
+
+A subset view's readers see the matches inside its base view without being able to open the
+base. That is by design: sharing a subset view shares what it shows. The base's name is shown
+only to someone who can open the base.
+
+**Known limitation.** A share link is held inside the view for search, counts, membership,
+export and subset views' layers. The other browse routes still read the whole data source:
+node and edge reads, traces, Narrow from chosen entities, metadata and the canvas bootstrap.
+Confining those is planned. Until then, a share link to a view of a sensitive data source
+exposes more than the view.
+
 **How to configure it.** For people sharing views: [Who can see a View](/guide/managing-views#who-can-see-a-view).
 For the exact rules: [RBAC](/docs/rbac#view-visibility-and-sharing).
 
 **Where in the code.** `backend/app/services/view_access.py` (`can_read_view`,
-`resolve_publish_gate`), `backend/app/api/v1/capability_gate.py`.
+`resolve_publish_gate`), `backend/app/api/v1/capability_gate.py`,
+`backend/app/api/v1/endpoints/graph.py` (`_guard_capability_scope`),
+`backend/app/services/view_scope.py` (`holds_nothing`),
+`backend/app/api/v1/endpoints/graph_view_feed.py` (`_read_cursor`).
 
 ### Feature switches
 

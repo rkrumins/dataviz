@@ -13,13 +13,17 @@ import {
   cappedText,
   combinedWith,
   feedCountText,
+  keptInclude,
   layerPredicate,
   layersLike,
   nameFrom,
   ownLayersFrom,
+  includeWords,
+  liveFromNarrowing,
   perTypeLayers,
   requestOf,
   unsaveableReason,
+  withInclude,
 } from '../model'
 
 const P = { kind: 'tag', values: ['pii'] } as unknown as Predicate
@@ -158,5 +162,124 @@ describe('describePredicate', () => {
       .toBe('not with no lineage')
     expect(describePredicate({ kind: 'mystery' } as unknown as Predicate)).toBe('a search')
     expect(describePredicate(null)).toBe('a search')
+  })
+})
+
+
+describe('what a subset keeps beside its matches', () => {
+  it('is composed as the server composes it', () => {
+    const REACH = { kind: 'group', op: 'or', children: [P, { kind: 'related', axis: 'ancestor', where: P }] }
+    expect(withInclude(P, null)).toBe(P)
+    expect(withInclude(P, { contents: true, containers: true, upstream: true, downstream: true })).toEqual({
+      kind: 'group', op: 'or', children: [
+        P,
+        { kind: 'related', axis: 'ancestor', where: P },
+        { kind: 'related', axis: 'descendant', where: P },
+        // A lineage step from a match or anything inside it, as a trace walks a container.
+        { kind: 'related', axis: 'downstream', where: REACH },
+        { kind: 'related', axis: 'upstream', where: REACH },
+      ],
+    })
+  })
+  it('says it in words', () => {
+    expect(includeWords(null)).toBe('')
+    expect(includeWords({ contents: true, containers: false, upstream: false, downstream: false })).toBe('everything inside them')
+    expect(includeWords({ contents: true, containers: true, upstream: true, downstream: false }))
+      .toBe('everything inside them, what contains them and what feeds them')
+  })
+
+  const NONE = { contents: false, containers: false, upstream: false, downstream: false }
+
+  it('keeps a number of levels, and only some kinds, as the server composes them', () => {
+    const inside = { kind: 'related', axis: 'ancestor', where: P, maxHops: 2 }
+    expect(withInclude(P, { ...NONE, contents: true, contentsLevels: 2, containers: true, containersLevels: 1 }))
+      .toEqual({ kind: 'group', op: 'or', children: [P, inside, { kind: 'related', axis: 'descendant', where: P, maxHops: 1 }] })
+    // Of the kinds named — a set, sorted as the server keeps it — the kind first, so another kind is never walked.
+    expect(withInclude(P, { ...NONE, contents: true, contentsLevels: 2, contentsKinds: ['column', 'Column', 'table', 'column'] }))
+      .toEqual({ kind: 'group', op: 'or', children: [P, { kind: 'group', op: 'and', children: [
+        { kind: 'entityType', op: 'in', values: ['Column', 'column', 'table'] }, inside] }] })
+    expect(withInclude(P, { ...NONE, containers: true, containersKinds: ['database'] }))
+      .toEqual({ kind: 'group', op: 'or', children: [P, { kind: 'group', op: 'and', children: [
+        { kind: 'entityType', op: 'in', values: ['database'] }, { kind: 'related', axis: 'descendant', where: P }] }] })
+  })
+  it('asks every level, and every kind, by leaving them out', () => {
+    // Never maxHops 20 for every level: the same search as one made before levels.
+    expect(withInclude(P, { ...NONE, contents: true, contentsKinds: [] }))
+      .toStrictEqual({ kind: 'group', op: 'or', children: [P, { kind: 'related', axis: 'ancestor', where: P }] })
+    // Levels and kinds count only while their choice is on.
+    expect(withInclude(P, { ...NONE, contentsLevels: 2, containersKinds: ['db'], upstream: true }))
+      .toEqual(withInclude(P, { ...NONE, upstream: true }))
+  })
+  it('says how far in words, and of what kinds', () => {
+    expect(includeWords({ ...NONE, contents: true, contentsLevels: 2, containers: true, containersKinds: ['database'] }))
+      .toBe('two levels inside them and what contains them (only database)')
+    expect(includeWords({ ...NONE, containers: true, containersLevels: 1, downstream: true }))
+      .toBe('what contains them, one level up and what they feed')
+    expect(includeWords({ ...NONE, contents: true, contentsLevels: 3 })).toBe('three levels inside them')
+    expect(includeWords({ ...NONE, contents: true, contentsLevels: 7 })).toBe('7 levels inside them')
+    expect(includeWords({ ...NONE, contents: true, contentsKinds: ['table', 'column'] }, (t) => t.toUpperCase()))
+      .toBe('everything inside them (only COLUMN or TABLE)')
+    expect(includeWords({ ...NONE, contentsLevels: 2, upstream: true })).toBe('what feeds them')
+  })
+  it('sends what the server keeps: levels and kinds with their choice, kinds a set, nothing unset', () => {
+    expect(keptInclude({ ...NONE, contents: true, contentsLevels: 2, contentsKinds: ['table', 'column', 'table'],
+      containersLevels: 3, containersKinds: ['db'], upstream: true }))
+      .toStrictEqual({ contents: true, contentsLevels: 2, contentsKinds: ['column', 'table'], containers: false,
+        upstream: true, downstream: false })
+    expect(keptInclude({ ...NONE, containers: true, containersLevels: undefined, containersKinds: [] }))
+      .toStrictEqual({ contents: false, containers: true, upstream: false, downstream: false })
+    const ctx = { workspaceId: 'ws', viewId: 'base', predicate: P, baseLayers: BOARD, typeCounts: [] }
+    expect(requestOf({ name: 'x', visibility: 'private', within: 'view', choice: 'like',
+      include: { ...NONE, contentsLevels: 2, containers: true, containersLevels: 1 } }, ctx).include)
+      .toStrictEqual({ contents: false, containers: true, containersLevels: 1, upstream: false, downstream: false })
+  })
+  it('goes with the request, as do the layers left out', () => {
+    const ctx = { workspaceId: 'ws', viewId: 'base', predicate: P, baseLayers: BOARD, typeCounts: [
+      { type: 'table', count: 3 }, { type: 'column', count: 9 }] }
+    const include = { contents: true, containers: false, upstream: false, downstream: false }
+    const following = requestOf({ name: 'x', visibility: 'private', within: 'view', choice: 'like', include,
+      hidden: ['s', REST_LAYER_ID] }, ctx)
+    expect(following).toMatchObject({ layout: 'inherit', include, hiddenLayers: ['s', REST_LAYER_ID] })
+    // An own layout leaves nothing out: a left-out type would land in "Other matches".
+    const perType = requestOf({ name: 'x', visibility: 'private', within: 'view', choice: 'perType',
+      hidden: ['layer-1', REST_LAYER_ID] }, ctx)
+    expect(perType).toMatchObject({ layout: 'own', rest: 'Other matches' })
+    expect(perType.layers?.flatMap((l) => l.entityTypes)).toEqual(['column', 'table'])
+    expect(perType).not.toHaveProperty('hiddenLayers')
+    const copied = requestOf({ name: 'x', visibility: 'private', within: 'dataSource', choice: 'like', hidden: ['b'] }, ctx)
+    expect(copied.layers?.map((l) => l.name)).toEqual(['Bronze', 'Silver'])
+    expect(copied).not.toHaveProperty('hiddenLayers')
+  })
+})
+
+describe('a narrowing kept live', () => {
+  const spec = (over: Record<string, unknown> = {}, expand: Record<string, unknown> = {}) => ({
+    v: 1 as const, seeds: { query: P }, within: 'view' as const,
+    expand: { children: 0, upstream: 0, downstream: 0, partnerChildren: 0, ...expand }, ...over,
+  }) as never
+
+  it('is its search and what it reaches, when a live view can reach it', () => {
+    expect(liveFromNarrowing(spec({}, { children: 'all', upstream: 1 }))).toEqual({
+      predicate: P, within: 'view',
+      include: { contents: true, containers: false, upstream: true, downstream: false },
+    })
+  })
+  it.each([
+    [1, { contents: true, contentsLevels: 1 }],
+    [2, { contents: true, contentsLevels: 2 }],
+    ['all', { contents: true }],
+    [0, { contents: false }],
+  ])('keeps %s levels inside them live', (children, kept) => {
+    const out = liveFromNarrowing(spec({}, { children }))
+    expect('include' in out && out.include)
+      .toStrictEqual({ containers: false, upstream: false, downstream: false, ...kept })
+  })
+  it.each([
+    ['chosen entities', spec({ seeds: { urns: ['u'] } }), 'chosen entities'],
+    ['two steps of lineage', spec({}, { downstream: 2 }), 'more than one step'],
+    ['what is inside its sources', spec({}, { upstream: 1, partnerChildren: 1 }), 'sources and consumers'],
+  ])('is kept as a list for %s, and says why', (_what, s, words) => {
+    const out = liveFromNarrowing(s)
+    expect('reason' in out && out.reason).toContain(words)
   })
 })

@@ -32,6 +32,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import hashlib
+import hmac
 import json
 import time
 from datetime import datetime
@@ -52,6 +54,7 @@ from backend.app.api.v1.endpoints.graph import (
     get_engine_session,
 )
 from backend.app.api.v1.feature_gate import require_feature
+from backend.app.api.v1.refusal import refusal_responses, refused
 from backend.app.jobs.metrics import increment
 from backend.app.services.context_engine import ContextEngine
 from backend.app.services.deep_search import (
@@ -60,10 +63,15 @@ from backend.app.services.deep_search import (
     get_deep_search_settings,
 )
 from backend.app.services.graph_cache import ENDPOINT_VIEW_FEED, get_graph_cache
-from backend.app.services.search_views import layer_condition, scope_types
+from backend.app.services.search_views import (
+    BasePlacement,
+    containers_here,
+    layer_condition,
+    scope_types,
+)
 from backend.common.adapters import ProviderBusy
 from backend.common.models.search import SearchOptions, SearchQuery, SearchResultPage, SearchScope
-from backend.common.models.search_view import ViewFeedPage, ViewFeedRequest
+from backend.common.models.search_view import SubsetLayer, ViewFeedPage, ViewFeedRequest
 
 router = APIRouter()
 
@@ -90,40 +98,74 @@ def _lane() -> asyncio.Semaphore:
     return lane
 
 
-def _read_cursor(raw: Optional[str]) -> Dict[str, Any]:
-    """A feed cursor: the engine's, and how many rows the layer has listed."""
+def _cursor_binding(scope_hash: str, condition: Any, types: Any) -> str:
+    """What a feed cursor is good for: this layer's search in this scope. The feed
+    cache's own key, so a page shared by identical subsets keeps a cursor every one
+    of them can use, and no other layer's or view's."""
+    raw = json.dumps({"s": scope_hash,
+                      "c": condition.model_dump(mode="json", by_alias=True) if condition is not None else None,
+                      "t": types}, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+
+def _cursor_tag(payload: str, binding: str, key: str) -> str:
+    return hmac.new(key.encode(), f"view-feed.{binding}.{payload}".encode(),
+                    hashlib.sha256).hexdigest()[:32]
+
+
+def _read_cursor(raw: Optional[str], binding: str) -> Dict[str, Any]:
+    """A feed cursor: the engine's, and how many rows the layer has listed —
+    signed, so neither can be made up. A count reset to page past the cap, or a
+    position nobody was given (each would start a scan of its own), is refused
+    like any cursor this server didn't issue for this layer."""
     if not raw:
         return {"c": None, "d": 0}
-    try:
-        state = json.loads(base64.urlsafe_b64decode(raw.encode() + b"=" * (-len(raw) % 4)))
-    except (ValueError, TypeError):
-        state = None  # not base64, or not JSON: malformed, answered below
-    if isinstance(state, dict) and isinstance(state.get("c"), str) and isinstance(state.get("d"), int):
+    from backend.auth_service.core import config as auth_config
+
+    payload, sep, tag = raw.partition(".")
+    state = None
+    if sep and any(hmac.compare_digest(tag, _cursor_tag(payload, binding, key))
+                   for _kid, key in auth_config.JWT_VERIFICATION_KEYS):
+        try:
+            state = json.loads(base64.urlsafe_b64decode(payload.encode() + b"=" * (-len(payload) % 4)))
+        except (ValueError, TypeError):
+            state = None  # not base64, or not JSON: malformed, answered below
+    if (isinstance(state, dict) and isinstance(state.get("c"), str)
+            and isinstance(state.get("d"), int) and state["d"] >= 0):
         return state
-    raise HTTPException(status_code=400, detail="cursor is malformed — start from the first page")
+    raise refused(400, "bad_cursor", "cursor is malformed — start from the first page")
 
 
-def _write_cursor(engine_cursor: str, delivered: int) -> str:
+def _write_cursor(engine_cursor: str, delivered: int, binding: str) -> str:
+    from backend.auth_service.core import config as auth_config
+
     raw = json.dumps({"c": engine_cursor, "d": delivered}, separators=(",", ":"))
-    return base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
+    payload = base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
+    return f"{payload}.{_cursor_tag(payload, binding, auth_config.JWT_SECRET_KEY)}"
 
 
-def _feed_page(layer_id: str, page: SearchResultPage, delivered_before: int,
-               max_rows: int, reuse_s: int) -> ViewFeedPage:
+def _feed_page(layer: SubsetLayer, placement: Optional[BasePlacement], page: SearchResultPage,
+               delivered_before: int, max_rows: int, reuse_s: int, binding: str) -> ViewFeedPage:
+    """A page of ``layer``'s matches as the canvas draws them: each with where it
+    sits (``ancestorPath``, root first) and how many of its nearest containers
+    sit in this layer too (``inLayer``), which the canvas draws it inside."""
     hits = (page.hits or [])[:max(0, max_rows - delivered_before)]
+    here = containers_here(layer, placement, [hit.ancestor_path or [] for hit in hits])
     nodes = []
-    for hit in hits:
+    for hit, in_layer in zip(hits, here):
         node = hit.node.model_dump(mode="json", by_alias=True)
         if hit.ancestor_path:
             node["ancestorPath"] = [a.model_dump(mode="json", by_alias=True)
                                     for a in hit.ancestor_path]
+        if in_layer:
+            node["inLayer"] = in_layer
         nodes.append(node)
     delivered = delivered_before + len(nodes)
     running = page.status == "running"
     more = page.cursor is not None
     out = ViewFeedPage(
-        layer_id=layer_id, nodes=nodes,
-        cursor=_write_cursor(page.cursor, delivered) if more and delivered < max_rows else None,
+        layer_id=layer.id, nodes=nodes,
+        cursor=_write_cursor(page.cursor, delivered, binding) if more and delivered < max_rows else None,
         total_count=page.total_count if page.total_count is not None else page.candidate_count,
         count_status="lowerBound" if running or page.count_status == "lowerBound" else "exact",
         status="running" if running else "complete",
@@ -135,6 +177,8 @@ def _feed_page(layer_id: str, page: SearchResultPage, delivered_before: int,
         # Kept no longer than its window lets it answer: the window's shortest.
         age = time.time() - datetime.fromisoformat(page.as_of).timestamp()
         out._ttl_s = max(1, int(reuse_s * 0.8 - age))
+    # Where its matches sit ran late: kept for seconds, so the next read draws them.
+    out._paths_left_out = page._paths_left_out
     return out
 
 
@@ -142,6 +186,8 @@ def _feed_page(layer_id: str, page: SearchResultPage, delivered_before: int,
     "/search/view-feed",
     response_model=ViewFeedPage,
     response_model_by_alias=True,
+    summary='Read one page of one layer of a subset view',
+    responses=refusal_responses(400, 403, 404, 409, 429, 503),
     dependencies=[Depends(require_search_views)],
 )
 async def view_feed(
@@ -162,10 +208,10 @@ async def view_feed(
     ``capped``: more matches than the canvas lists — search in the layer, or
     export, for the rest. Answered from the published graph."""
     if not ws_id:
-        raise HTTPException(status_code=400, detail="workspace_id is required (path param ws_id)")
+        raise refused(400, "workspace_required", "workspace_id is required (path param ws_id)")
     capability = getattr(request.state, "view_capability", None)
     if capability and capability != viewId:
-        raise HTTPException(status_code=403, detail="This link can only read its own view.")
+        raise refused(403, "link_other_view", "This link can only read its own view.")
     from backend.app.services.advanced_search_service import AdvancedSearchService, ValidationError
     svc = AdvancedSearchService(
         engine, session=session, workspace_id=ws_id, data_source_id=dataSourceId,
@@ -181,17 +227,18 @@ async def view_feed(
                 "message": "This subset view's base view is no longer available."}) from exc
         raise _map_validation_error(detail) from exc
     if eff.search is None:
-        raise HTTPException(status_code=409, detail={
-            "reason": "not_a_subset", "message": "This view isn't a subset view."})
+        # One status per reason: 404, as GET /views/{id}/search answers it.
+        raise refused(404, "not_a_subset", "This view isn't a subset view.")
     layer = next((l for l in eff.subset_layers if l.id == body.layer_id), None)
     if layer is None:
-        raise HTTPException(status_code=404, detail=f"This view has no layer {body.layer_id!r}.")
+        raise refused(404, "no_such_layer", f"This view has no layer {body.layer_id!r}.")
 
     settings = get_deep_search_settings()
     max_rows = settings.view_feed_max_rows
-    cursor = _read_cursor(body.cursor)
-    condition = layer_condition(layer)
-    types = scope_types(layer, eff.entity_type_allow_list)
+    condition = layer_condition(layer, eff.subset_placement)
+    types = scope_types(layer, eff.entity_type_allow_list, eff.subset_placement)
+    binding = _cursor_binding(eff.scope_hash, condition, types)
+    cursor = _read_cursor(body.cursor, binding)
     if condition is None or types == [] or cursor["d"] >= max_rows:
         # A layer that can hold nothing here — or a client past the cap — is
         # answered without searching.
@@ -256,7 +303,8 @@ async def view_feed(
                           outcome="stale" if page.stale else page.status or "complete")
             except NothingReusable:
                 page = await (busy() if _lane().locked() else search(scan=True, reuse=reuse_s))
-        return _feed_page(layer.id, page, cursor["d"], max_rows, settings.view_feed_reuse_seconds)
+        return _feed_page(layer, eff.subset_placement, page, cursor["d"], max_rows,
+                          settings.view_feed_reuse_seconds, binding)
 
     scope = _cache_scope(engine)
     try:

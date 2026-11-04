@@ -15,8 +15,9 @@ import pytest
 from pydantic import TypeAdapter
 
 from backend.app.providers.falkordb_deep_search import _Compiler, _relation_cost, match_hash
-from backend.app.providers.falkordb_placement import glob_test, layer_test, _value
+from backend.app.providers.falkordb_placement import glob_test, layer_test, placement_cost_problem, _value
 from backend.app.services import advanced_search_service as svc_mod
+from backend.app.services import search_views as sv
 from backend.app.services.advanced_search_service import (
     AdvancedSearchService,
     ValidationError,
@@ -29,11 +30,12 @@ from backend.app.services.view_placement import (
     NodeFacts,
     PlacementSpec,
     place_all,
+    placement_digest,
 )
 from backend.app.services.deep_search import CompileError
 from backend.app.services.native_query.parse_cost import operand, parse_cost
 from backend.app.services.view_scope import EffectiveViewScope, _compute_scope_hash, _placement_inputs
-from backend.common.models.search import Predicate, SearchQuery, SearchRuleItem
+from backend.common.models.search import GroupPredicate, Predicate, SearchQuery, SearchRuleItem
 from backend.graph.adapters.stub_deep_search import StubDeepSearchProvider
 
 P = TypeAdapter(Predicate).validate_python
@@ -246,6 +248,26 @@ class TestCypher:
             compile_for(rules(60, lambda i: {"rules": [{"id": f"r{i}", "conditions": [
                 {"field": "owner", "operator": "equals", "value": f"o{i}"}]}]}))
 
+    def test_in_any_layer_costs_no_more_than_one_layer(self):
+        spec = PlacementSpec.from_config(CONFIG)
+
+        def cost(goal):
+            test = layer_test(LayerTarget(spec, goal, "d"), "n", name=lambda: "1",
+                              bind=lambda v: "$p", containment=["CONTAINS"])
+            return parse_cost(f"RETURN {operand(test)}")
+
+        assert cost(None) <= max(cost(layer_id) for layer_id in spec.layer_ids)
+
+    def test_whether_a_subset_can_follow_its_bases_layers_is_known_before_it_searches(self):
+        def comparing(n):
+            return PlacementSpec.from_config(view([
+                {"id": f"l{i}", "name": f"L{i}", "order": i, "rules": [{"id": f"r{i}", "conditions": [
+                    {"field": "owner", "operator": "equals", "value": f"o{i}"}]}]} for i in range(n)]))
+
+        fine, dear = comparing(20), comparing(60)
+        assert placement_cost_problem(fine, placement_digest(fine)) is None
+        assert "60 rules" in placement_cost_problem(dear, placement_digest(dear))
+
     def test_a_curated_view_with_nothing_placed_by_hand_places_nothing(self):
         target = LayerTarget(PlacementSpec.from_config(view(LAYERS, scope="curated")), "core", "d")
         assert layer_test(target, "n", name=lambda: "1", bind=lambda v: "$p",
@@ -381,6 +403,16 @@ class TestTheReference:
         got, _ = await _urns(_service(), {"kind": "group", "op": "not",
                                           "children": [layer("core")]})
         assert got == ["dash:1", "ds:handchild", "job:1", "loose", "sys:a", "sys:hand"]
+
+    async def test_in_none_of_its_layers_is_what_only_the_fallback_draws(self):
+        """What a subset's "Other matches" holds: no layer of its base places it,
+        whatever the base's fallback layer draws for display."""
+        spec = PlacementSpec.from_config(CONFIG)
+        anywhere = sv.placed_in(sv.BasePlacement(spec, placement_digest(spec)), None)
+        got, _ = await _urns(_service(), GroupPredicate(op="not", children=[anywhere]))
+        assert got == ["loose"]
+        got, _ = await _urns(_service(), anywhere)
+        assert got == sorted(u for u in _canvas() if u != "loose")
 
     async def test_a_value_no_layer_has_is_the_stamp_with_a_note(self):
         got, page = await _urns(_service(), layer("bronze"))

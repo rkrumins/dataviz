@@ -184,6 +184,10 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   const itemRef = useRef<HTMLDivElement>(null)
   const [isHovered, setIsHovered] = useState(false)
   const isLogical = node.isLogical === true
+  // A subset view's container, drawn for where its matches sit: never loaded, so a
+  // `logical:` row, quiet, holding `context.matches` of them.
+  const contextOf = node.data.context as { matches?: number } | undefined
+  const isContext = !!contextOf
 
   // Staged-change indicator: a *direct* match wins, but if any descendant is
   // staged the row also tints (lighter) so the user can spot pending work
@@ -284,7 +288,8 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   // The trace pill is a dock setting (on by default) for readers who want a
   // quieter board; the browse "+N" is not a setting.
   const showLineageCounts = usePreferencesStore(s => s.showLineageCounts) ?? true
-  const descendantCount = hasChildren && !isExpanded
+  // A subset view's container says how many matches it holds instead ("N inside").
+  const descendantCount = hasChildren && !isExpanded && !isContext
     ? (isTracing ? (showLineageCounts ? onLineageCount : 0) : (childCount || node.children.length))
     : 0
   // THE COARSE FIRST PAINT (Part G): a partner known only from a rollup
@@ -320,7 +325,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   const technical = technicalIdentity(node.data, personaMode, {
     identityProperty, urn: node.isLogical ? undefined : node.urn, name: displayName,
   })
-  const isRoot = depth === 0
+  const isRoot = depth === 0 && !isContext
   const sizing = densityRowTokens(density, isRoot)
   const minRowHeightPx = isRoot ? sizing.rootHeight : sizing.childHeight
   const paddingClass = sizing.paddingClass
@@ -768,7 +773,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         style={{
           background: `linear-gradient(135deg, ${nodeColor}25 0%, ${nodeColor}10 100%)`,
           boxShadow: isSelected ? `0 4px 12px ${nodeColor}30` : `0 2px 4px ${nodeColor}15`,
-          ...(isLogical && { border: `1px dashed ${nodeColor}50` }),
+          ...(isLogical && !isContext && { border: `1px dashed ${nodeColor}50` }),
         }}
       >
         {/* One of several selected. A positive mark, not a tint: the row has
@@ -809,7 +814,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         <span className={cn(
           "font-medium tracking-tight transition-colors duration-200",
           textClass,
-          (isHighlighted || isOnLineage) ? "text-accent-lineage" : isSelected ? "text-ink" : "text-ink/90",
+          (isHighlighted || isOnLineage) ? "text-accent-lineage" : isSelected ? "text-ink" : isContext ? "text-ink-secondary" : "text-ink/90",
           isHovered && !isSelected && "text-ink",
           // Strikethrough for a delete (staged or committed) makes the destruction intent unmissable
           isPendingDelete && "line-through decoration-rose-300/80 decoration-2",
@@ -857,9 +862,15 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
               className="w-1.5 h-1.5 rounded-full flex-shrink-0"
               style={{ backgroundColor: nodeColor }}
             />
-            {isLogical ? `${node.typeId.charAt(0).toUpperCase()}${node.typeId.slice(1)} (group)` : (entityType?.name ?? node.typeId)}
+            {isLogical && !isContext ? `${node.typeId.charAt(0).toUpperCase()}${node.typeId.slice(1)} (group)` : (entityType?.name ?? node.typeId)}
           </span>
         )}
+        {/* Where a subset view's match sits, its containers named rather than loaded: on the
+            top row of what is drawn, naming what is above it. */}
+        {!placement && depth === 0 && Array.isArray(node.data?.ancestorPath) && (node.data.ancestorPath as unknown[]).length > 0 && (() => {
+          const where = (node.data.ancestorPath as Array<{ displayName: string }>).map((step) => step.displayName).join(' › ')
+          return <span className="text-[10px] text-ink-muted/55 truncate mt-0.5" title={where}>in {where}</span>
+        })()}
         {placement && (
           <PlacementPath
             placement={placement}
@@ -922,6 +933,12 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
             breakdown={ancestorMatchBreakdown}
             schema={schema}
           />
+        )}
+        {isContext && !isExpanded && (contextOf?.matches ?? 0) > 0 && (
+          <span className="flex-none ml-1.5 inline-flex items-center h-5 px-1.5 rounded-full text-[10.5px] font-medium tabular-nums text-ink-secondary bg-black/[0.05] dark:bg-white/[0.08]"
+            title={`${(contextOf?.matches ?? 0).toLocaleString()} ${contextOf?.matches === 1 ? 'match' : 'matches'} inside`}>
+            {(contextOf?.matches ?? 0).toLocaleString()} inside
+          </span>
         )}
       </div>
 

@@ -4,10 +4,11 @@
  * base view was deleted. Never an empty canvas left to explain itself.
  */
 import * as LucideIcons from 'lucide-react'
+import { Link } from 'react-router-dom'
 
 export type SubsetIssue = 'off' | 'unsupported' | 'base_missing'
 
-const WORDS: Record<SubsetIssue, { title: string; detail: string }> = {
+const WORDS: Record<SubsetIssue, { title: string; detail: string; action?: { label: string; to: string } }> = {
   off: {
     title: 'Subset views are turned off',
     detail: 'This view shows a search’s matches, and the preview that lists them is off for this deployment. An administrator can turn it on under Administration → Features.',
@@ -17,8 +18,10 @@ const WORDS: Record<SubsetIssue, { title: string; detail: string }> = {
     detail: 'Subset views are read by the server’s search, which this data source doesn’t offer.',
   },
   base_missing: {
-    title: 'Its base view was deleted',
-    detail: 'This view shows a search’s matches inside another view, which has been deleted. Restore that view and this one shows its matches again.',
+    title: 'Its base view isn’t available',
+    // Deleted — or, for a view brought in from another environment, never here.
+    detail: 'This view shows a search’s matches inside another view, which was deleted or isn’t in this workspace. Restored, it shows its matches again: deleted views are kept under Deleted in the Explorer, and a workspace admin can restore one.',
+    action: { label: 'Open deleted views', to: '/explorer?category=deleted' },
   },
 }
 
@@ -32,6 +35,15 @@ export function SubsetIssueBanner({ issue }: { issue: SubsetIssue | null }) {
         <div className="min-w-0">
           <p className="text-[13px] font-semibold text-ink">{words.title}</p>
           <p className="mt-0.5 text-[12px] leading-snug text-ink-muted">{words.detail}</p>
+          {words.action && (
+            <Link
+              to={words.action.to}
+              className="mt-1.5 inline-flex items-center gap-1 text-[12px] font-semibold text-accent-lineage hover:underline"
+            >
+              {words.action.label}
+              <LucideIcons.ArrowRight className="h-3 w-3" aria-hidden />
+            </Link>
+          )}
         </div>
       </div>
     </div>

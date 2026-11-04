@@ -53,6 +53,7 @@ from redis import asyncio as aioredis
 from redis.exceptions import RedisError
 
 from backend.app.services.aggregation.redis_client import get_redis
+from backend.app.services import graph_waits
 from backend.common.adapters import (
     ProviderBusy, ProviderLoading, ProviderUnavailable,
 )
@@ -389,6 +390,8 @@ class GraphCache:
         # Concurrent callers awaiting an in-flight future read the same
         # answer with no extra provider work.
         self._inflight: dict[str, asyncio.Future[Any]] = {}
+        # Computes under way while the cache's Redis can't answer (``_bypassed``).
+        self._bypassing: dict[str, asyncio.Future[Any]] = {}
 
     # ─── Public surface ───────────────────────────────────────────────
 
@@ -439,7 +442,7 @@ class GraphCache:
         except RedisError as exc:
             logger.warning("graph_cache: gen read failed (%s); bypassing cache", exc)
             _stats_recorder.record(self, scope, endpoint, "bypass")
-            return await compute()
+            return await self._bypassed(scope, endpoint, params, compute)
 
         # ── 1. Redis cache lookup ─────────────────────────────────────
         try:
@@ -447,7 +450,7 @@ class GraphCache:
         except RedisError as exc:
             logger.warning("graph_cache: GET failed (%s); bypassing cache", exc)
             _stats_recorder.record(self, scope, endpoint, "bypass")
-            return await compute()
+            return await self._bypassed(scope, endpoint, params, compute)
 
         if cached is not None:
             try:
@@ -471,7 +474,9 @@ class GraphCache:
         existing = self._inflight.get(cache_key)
         if existing is not None:
             try:
-                outcome: _SingleflightOutcome = await asyncio.shield(existing)
+                # Riding the leader's compute: wait holding nothing (``graph_waits``).
+                async with graph_waits.waiting():
+                    outcome: _SingleflightOutcome = await asyncio.shield(existing)
                 if outcome.served_stale and on_stale is not None:
                     try:
                         on_stale()
@@ -929,6 +934,51 @@ class GraphCache:
         except Exception as exc:                    # noqa: BLE001 — the TTL cleans up
             logger.debug("graph_cache: leader release failed (%s)", exc)
 
+    async def _bypassed(
+        self, scope: CacheScope, endpoint: str, params: dict[str, Any],
+        compute: Callable[[], Awaitable[T]],
+    ) -> T:
+        """The cache's Redis can't answer: compute — but once in this process for
+        everyone asking the same thing, as the cache does when it can. Without it
+        an outage turned every identical request into its own compute against the
+        graph store, right behind the Redis that went away: the election, the fleet
+        slot and fair share all fail open with it, and this is the guard left.
+
+        Keyed without a generation, which can't be read. Flow control (shed,
+        warming) reaches every follower as the leader got it; another failure
+        leaves each follower to compute for itself, as before."""
+        from backend.app.jobs.metrics import increment
+
+        key = _build_key(scope, "unreachable", endpoint, params)
+        existing = self._bypassing.get(key)
+        if existing is not None:
+            async with graph_waits.waiting():
+                await asyncio.wait({existing})
+            if not existing.cancelled():
+                exc = existing.exception()
+                if exc is None:
+                    increment("graph_cache_unreachable_total", endpoint=endpoint, outcome="shared")
+                    return existing.result()
+                if isinstance(exc, (ProviderBusy, ProviderLoading)):
+                    raise exc
+        fut: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
+        self._bypassing[key] = fut
+        increment("graph_cache_unreachable_total", endpoint=endpoint, outcome="computed")
+        try:
+            value = await compute()
+        except asyncio.CancelledError:
+            fut.cancel()
+            raise
+        except BaseException as exc:
+            fut.set_exception(exc)
+            _swallow_if_unobserved(fut)
+            raise
+        finally:
+            if self._bypassing.get(key) is fut:
+                del self._bypassing[key]
+        fut.set_result(value)
+        return value
+
     async def _await_leader(
         self, cache_key: str, model_cls: type[T], *, deadline_s: float,
     ) -> Optional[T]:
@@ -951,36 +1001,39 @@ class GraphCache:
         """
         lock_key = f"{_LEADER_PREFIX}:{cache_key}"
         started = time.monotonic()
-        while True:
-            waited = time.monotonic() - started
-            if waited >= deadline_s:
-                return None
-            await asyncio.sleep(_poll_interval(waited))
-            try:
-                cached, lock = await asyncio.gather(
-                    self._cache_redis.get(cache_key),
-                    self._cache_redis.get(lock_key),
-                )
-                if cached is None:
-                    # Nothing yet. Either the leader is still working, or it
-                    # finished without an answer — shed, failed, died. The
-                    # leader releases its election in a ``finally``, so a
-                    # missing lock means there is no longer anyone to wait
-                    # for, and sitting out the rest of the deadline would
-                    # turn ONE refusal into a wait for every follower. Read
-                    # the key once more before giving up: the leader may have
-                    # written and stepped down between the two reads above.
-                    if lock is not None:
-                        continue
-                    cached = await self._cache_redis.get(cache_key)
+        # Another pod's compute may take its whole budget: watched holding
+        # nothing of this request's (``graph_waits``).
+        async with graph_waits.waiting():
+            while True:
+                waited = time.monotonic() - started
+                if waited >= deadline_s:
+                    return None
+                await asyncio.sleep(_poll_interval(waited))
+                try:
+                    cached, lock = await asyncio.gather(
+                        self._cache_redis.get(cache_key),
+                        self._cache_redis.get(lock_key),
+                    )
                     if cached is None:
-                        return None
-            except Exception:                       # noqa: BLE001 — go compute
-                return None
-            try:
-                return await _deserialize(model_cls, cached)
-            except Exception:                       # noqa: BLE001 — treat as a miss
-                return None
+                        # Nothing yet. Either the leader is still working, or it
+                        # finished without an answer — shed, failed, died. The
+                        # leader releases its election in a ``finally``, so a
+                        # missing lock means there is no longer anyone to wait
+                        # for, and sitting out the rest of the deadline would
+                        # turn ONE refusal into a wait for every follower. Read
+                        # the key once more before giving up: the leader may have
+                        # written and stepped down between the two reads above.
+                        if lock is not None:
+                            continue
+                        cached = await self._cache_redis.get(cache_key)
+                        if cached is None:
+                            return None
+                except Exception:                       # noqa: BLE001 — go compute
+                    return None
+                try:
+                    return await _deserialize(model_cls, cached)
+                except Exception:                       # noqa: BLE001 — treat as a miss
+                    return None
 
     async def content_generation(self, scope: CacheScope) -> str:
         """The scope's content generation — what a search session records as

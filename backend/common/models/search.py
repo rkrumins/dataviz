@@ -1203,6 +1203,10 @@ class AncestorRef(_Base):
     urn: str
     display_name: str = Field(alias="displayName")
     entity_type: str = Field(alias="entityType")
+    #: What a view's placement reads of it (``view_placement.NodeFacts``), from
+    #: the same read as its name, on a path read whole: where a subset view
+    #: places the container. Never sent.
+    _facts: Any = PrivateAttr(default=None)
 
 
 class SearchHit(_Base):
@@ -1406,6 +1410,9 @@ class SearchProgress(_Base):
 class SearchResultPage(_Base):
     """Provider + service response. One inner list in ``aggregates`` per
     requested AggregationSpec."""
+    #: Where each hit sits was asked for, and couldn't be read in time: the
+    #: paths are empty, not roots. Never sent.
+    _paths_left_out: bool = PrivateAttr(default=False)
     aggregates: Optional[List[List[SearchAggregateBucket]]] = None
     hits: Optional[List[SearchHit]] = Field(
         None,

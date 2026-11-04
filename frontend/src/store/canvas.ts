@@ -43,6 +43,14 @@ export interface LineageNode extends Node {
      *  delivered by a child page. `loadChildren` excludes these from its page
      *  offset and clears the flag once a real page delivers the child. */
     viaReveal?: boolean
+    /** Where a subset view's match sits: its containers, root first, as its feed
+     *  delivered them — named under its row, or drawn around it, never loaded. */
+    ancestorPath?: Array<{ urn: string; displayName: string; entityType?: string }>
+    /** How many of its nearest containers share its layer: drawn around it. */
+    inLayer?: number
+    /** The layer of a subset view whose feed listed it: its row is drawn there, where
+     *  the server placed it. */
+    feedLayerId?: string
   }
 }
 

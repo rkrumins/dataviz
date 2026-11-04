@@ -246,6 +246,9 @@ async def test_capability_cannot_mutate(test_client: AsyncClient, db_session):
          {**q, "declared": "x"}),
         ("POST", f"/api/v1/{WS_A}/graph/changes",
          {**q, "branchId": "br_x"}),
+        # Not a mutation, but it lists a whole subtree on main with its values.
+        ("GET", f"/api/v1/{WS_A}/graph/nodes/urn:x/delete-impact",
+         {**q, "branchId": "br_x"}),
         ("DELETE", f"/api/v1/{WS_A}/assets/rule-sets/rs_x", q),
         ("POST", f"/api/v1/{WS_A}/graph/save", q),
     ]
@@ -263,16 +266,21 @@ async def test_capability_cannot_mutate(test_client: AsyncClient, db_session):
      {"dataSourceId": DS_A1, "declared": "x"}),
     ("POST", f"/api/v1/{WS_A}/graph/changes",
      {"dataSourceId": DS_A1, "branchId": "br_x"}),
+    # The preview of a delete is gated as the delete is.
+    ("GET", f"/api/v1/{WS_A}/graph/nodes/urn:x/delete-impact",
+     {"dataSourceId": DS_A1, "branchId": "br_x"}),
 ])
 async def test_write_under_read_holes_closed(
     test_client: AsyncClient, db_session, method, path, params,
 ):
-    """These two state-changing routes previously required only the
-    read baseline. A read-only member must now get 403."""
+    """These routes previously required only the read baseline. A
+    read-only member must now get 403 — for want of the permission, not
+    because a feature switch happens to be off."""
     await _seed(db_session)
     with _auth(user=MEMBER, claims=MEMBER_CLAIMS):
         r = await _request(test_client, method, path, params)
     assert r.status_code == 403, f"{method} {path} → {r.status_code}: {r.text[:200]}"
+    assert "feature_disabled" not in r.text, r.text[:200]
 
 
 # ── assignments/compute is a READ, not a write ───────────────────────
@@ -307,3 +315,51 @@ async def test_assignments_compute_is_read_gated(test_client: AsyncClient, db_se
             json=body,
         )
     assert member.status_code not in (401, 403), member.text
+
+
+# ── latent surfaces carry the gate too ───────────────────────────────
+
+def test_the_v2_graph_router_is_read_gated():
+    """Not mounted today, but its docstring says how it will be: whoever mounts
+    it must not open a data source past the read gate."""
+    from fastapi import FastAPI
+
+    from backend.app.api.v1.capability_gate import require_ds_read_or_view
+    from backend.app.api.v2.api import api_v2_router
+    from backend.app.auth.api_key_surface import routes
+
+    def calls(dependant):
+        for dep in dependant.dependencies:
+            yield dep.call
+            yield from calls(dep)
+
+    app = FastAPI()
+    app.include_router(api_v2_router, prefix="/api/v2")
+    mounted = list(routes(app))
+    assert mounted
+    for method, path, _route, dependant in mounted:
+        assert require_ds_read_or_view in set(calls(dependant)), f"{method} {path}"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_layer_assignment_sends_no_server_text(monkeypatch):
+    """The exception's text is the server's — a statement, a host. It is logged;
+    the reader gets words."""
+    from fastapi import HTTPException, Response
+
+    from backend.app.api.v1.endpoints import assignments as mod
+
+    async def _boom(*_a, **_k):
+        raise RuntimeError("MATCH (n) ... on falkordb-0.internal:6379")
+
+    async def _off():
+        return False
+
+    monkeypatch.setattr(mod.assignment_engine, "compute_assignments", _boom)
+    monkeypatch.setattr(mod, "contract_enabled", _off)
+    monkeypatch.setattr(mod, "_cache_scope", lambda _engine: None)
+    monkeypatch.setattr(mod, "_provider_health_header", lambda _engine: "ok")
+    with pytest.raises(HTTPException) as caught:
+        await mod.compute_assignments(response=Response(), request=object(), engine=object())
+    assert caught.value.status_code == 500
+    assert "falkordb" not in str(caught.value.detail) and "MATCH" not in str(caught.value.detail)

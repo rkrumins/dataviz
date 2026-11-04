@@ -18,6 +18,30 @@ export type SubsetLayout = 'inherit' | 'own'
 /** The id of the layer a subset adds for matches whose type no layer claims. */
 export const REST_LAYER_ID = 'other-matches'
 
+/** What a subset keeps beside its search's matches. Each is one relationship to a
+ *  match, kept as part of its search, so the view stays live at any size. Levels
+ *  and kinds count only while their choice is on; unset, they are never sent. */
+export interface SubsetInclude {
+  /** What is inside a match: every level, or `contentsLevels` of them. */
+  contents: boolean
+  /** Levels inside (1–20); unset: every level. */
+  contentsLevels?: number
+  /** Only these kinds inside (entity types, a set); unset: every kind. */
+  contentsKinds?: string[]
+  /** What contains a match: up to the top, or `containersLevels` up. */
+  containers: boolean
+  /** Levels up (1–20); unset: up to the top. */
+  containersLevels?: number
+  /** Only these kinds of container; unset: every kind. */
+  containersKinds?: string[]
+  /** One lineage step upstream: what feeds a match. */
+  upstream: boolean
+  /** One lineage step downstream: what a match feeds. */
+  downstream: boolean
+}
+
+export const NO_INCLUDE: SubsetInclude = { contents: false, containers: false, upstream: false, downstream: false }
+
 /** `config.search` — written only by the server. */
 export interface SearchViewDefinition {
   v: 1
@@ -25,6 +49,10 @@ export interface SearchViewDefinition {
   within: SubsetWithin
   readIn?: string
   layout: SubsetLayout
+  /** What it keeps beside the matches. */
+  include?: SubsetInclude
+  /** Base layers a following subset leaves out, with their matches. */
+  hiddenLayers?: string[]
   provenance: MembershipProvenance
 }
 
@@ -51,6 +79,9 @@ export interface FromSearchRequest {
   layers?: SubsetLayerSpec[]
   /** The name of the layer for every other match; null: none. */
   rest?: string | null
+  include?: SubsetInclude
+  /** A following subset's base layers to leave out (`inherit` only). */
+  hiddenLayers?: string[]
   provenance: MembershipProvenance
 }
 
@@ -59,6 +90,11 @@ export interface SearchViewUpdate {
   ifDefinitionHash: string
   predicate?: Predicate
   layout?: SubsetLayout
+  include?: SubsetInclude
+  hiddenLayers?: string[]
+  /** With `layout: 'own'`: the own layers to have instead of a copy of the base's —
+   *  what Undo of Follow again sends back, so its layout returns as it was. */
+  layers?: Array<Record<string, unknown>>
 }
 
 /** A layer as a subset shows it, and what feeds it. */
@@ -71,6 +107,8 @@ export interface SubsetLayer {
   rest: boolean
   /** The rest layer holds every type but these. */
   excludedTypes: string[]
+  /** Left out of a following subset, with its matches. */
+  hidden?: boolean
 }
 
 export type SubsetStatusKind = 'ok' | 'base_missing'
@@ -83,8 +121,10 @@ export interface SearchViewStatus {
   /** The base view; its name is null for a reader who can't open it. */
   base: ReadInView | null
   layers: SubsetLayer[]
-  /** The base places by more than type (rules, entities placed by hand): here it's by type. */
+  /** It follows its base, but the base's placement is more than a search can follow
+   *  (`placedByTypeReason` says why): here its matches are placed by type. */
   placedByType: boolean
+  placedByTypeReason?: string | null
 }
 
 export interface SubsetSummary {

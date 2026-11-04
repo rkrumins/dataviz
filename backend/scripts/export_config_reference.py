@@ -77,6 +77,45 @@ TAG = "[export_config_reference]"
 #: second item, when present, is the setting's row in "Must set in production"
 #: (rows appear in this order, so ``ENV`` leads).
 NOTES: dict[str, tuple[str, str | None]] = {
+    # ── Subset views and Narrow, at scale ───────────────────────────────────────
+    "DEEP_SEARCH_VIEW_FEED_REUSE": (
+        "Seconds a subset view's layer keeps answering with its last complete page after the data "
+        "changes, before it scans again (spread ±20 % per layer, so layers read together don't all "
+        "rescan at once). Past it the page still answers, marked stale, until the rescan completes. "
+        "`0` scans on every change.",
+        None,
+    ),
+    "DEEP_SEARCH_VIEW_FEED_LANE": (
+        "Subset-view layer scans one API process runs at once. With every one busy, a layer answers "
+        "with its last page, or `429` with `Retry-After` when it has none. The fleet runs up to this "
+        "× processes; size it to what the graph store takes, not up with the number of viewers.",
+        None,
+    ),
+    "DEEP_SEARCH_VIEW_FEED_MAX_ROWS": (
+        "Rows one layer of a subset view lists on the canvas (at least 200). The rest are reached "
+        "by searching inside the layer, or by exporting it.",
+        None,
+    ),
+    "GRAPH_CACHE_ENABLED_VIEW_FEED": (
+        "Keep subset-view layer pages in the graph cache, shared by every viewer and every subset "
+        "asking the same. Off, each request reads its page from the search session store.",
+        None,
+    ),
+    "GRAPH_CACHE_ENABLED_MEMBERS": (
+        "Keep Narrow's resolutions (`POST /graph/members`) in the graph cache, shared by everyone "
+        "asking the same question. Off, every Narrow resolves again.",
+        None,
+    ),
+    "FAIR_SHARE_VIEW_FEED_RATE": (
+        "With `FAIR_SHARE_ENABLED`: subset-view layer scans a workspace may start per second, "
+        "across the fleet. A request answered from a cached or last page takes none.",
+        None,
+    ),
+    "FAIR_SHARE_VIEW_FEED_BURST": (
+        "With `FAIR_SHARE_ENABLED`: how many subset-view layer scans a workspace may start at "
+        "once before `FAIR_SHARE_VIEW_FEED_RATE` paces it.",
+        None,
+    ),
     "ENV": (
         "Deployment type. `production` (or `prod`) turns on the safeguards listed under "
         "[Must set in production](#must-set-in-production); any other value relaxes them for "

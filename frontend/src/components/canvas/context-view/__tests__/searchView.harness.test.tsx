@@ -4,6 +4,11 @@
  *  - a layer's header reads what it lists of how many; a capped layer says how
  *    many it shows and offers Search in this layer for the rest;
  *  - a layer with no matches says so;
+ *  - each row is drawn in the layer whose feed listed it, as its base places it
+ *    — never moved by its type, nor into a loaded container's column;
+ *  - its matches are drawn inside the containers its base draws them in, open,
+ *    each saying how many it holds when closed — or flat, each naming where it
+ *    sits, when the reader turns that off;
  *  - while it follows its base, its layers are the base's: no Add layer, even
  *    in a draft;
  *  - with the preview off, the canvas says why it lists nothing.
@@ -14,8 +19,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { useSearchStore } from '@/store/searchStore'
 import { useCanvasStore } from '@/store/canvas'
 import { useFeaturesStore } from '@/store/features'
+import { usePreferencesStore } from '@/store/preferences'
 import { renderCanvasWithTrace } from '@/test/canvasHarness'
 import { cfoEstate } from '@/test/fixtures/traceEstates'
+import { toCanvasEdge, toCanvasNode, withFeedLayer } from '@/lib/canvasNodeMapper'
+import type { GraphNode } from '@/providers/GraphDataProvider'
 import type { SearchViewDefinition } from '@/types/searchView'
 
 const SEARCH: SearchViewDefinition = {
@@ -82,11 +90,80 @@ describe('A subset view on the canvas', () => {
     }
   }, 40000)
 
+  it('draws each row in the layer whose feed listed it, whatever its type or its container', async () => {
+    setPreview(true)
+    const h = await renderCanvasWithTrace(cfoEstate(), {
+      focus: 'cfo', deferTrace: true, entityScope: 'all', subset: SEARCH,
+    })
+    // Two matches the base places by hand: a database in Warehouse, and a table
+    // inside it in Report, though Warehouse holds its type.
+    const row = (urn: string, label: string, layerId: string) =>
+      toCanvasNode(withFeedLayer({ urn, displayName: label, entityType: 'container' } as GraphNode, layerId))
+    await act(async () => {
+      useCanvasStore.getState().addGraph(
+        [row('urn:oracle', 'oracle_prod', 'warehouse'), row('urn:orders', 'oracle_orders', 'report')],
+        [toCanvasEdge({ id: 'c:oracle>orders', sourceUrn: 'urn:oracle', targetUrn: 'urn:orders',
+                        edgeType: 'CONTAINS' } as never)])
+    })
+    await h.settle()
+    expect(within(column('Warehouse')).getByText('oracle_prod')).toBeInTheDocument()
+    expect(within(column('Report')).getByText('oracle_orders')).toBeInTheDocument()
+    expect(within(column('Warehouse')).queryByText('oracle_orders')).toBeNull()
+  }, 40000)
+
+  it('draws its matches inside the containers its base draws them in, or flat as the reader chooses', async () => {
+    setPreview(true)
+    const h = await renderCanvasWithTrace(cfoEstate(), {
+      focus: 'cfo', deferTrace: true, entityScope: 'all', subset: SEARCH,
+    })
+    const path = [{ urn: 'urn:oracle_prod', displayName: 'oracle_prod', entityType: 'container' },
+                  { urn: 'urn:sales', displayName: 'sales', entityType: 'container' }]
+    const match = (urn: string, label: string) => toCanvasNode(withFeedLayer(
+      { urn, displayName: label, entityType: 'dataset', ancestorPath: path, inLayer: 2 } as unknown as GraphNode, 'warehouse'))
+    await act(async () => {
+      useCanvasStore.getState().addGraph([match('urn:o1', 'oracle_orders'), match('urn:o2', 'oracle_customers')], [])
+    })
+    await h.settle()
+    const warehouse = () => column('Warehouse')
+    for (const text of ['oracle_prod', 'sales', 'oracle_orders', 'oracle_customers']) {
+      expect(within(warehouse()).getByText(text)).toBeInTheDocument()
+    }
+    // Closed, a container says how many matches it holds.
+    const container = document.getElementById('layer-node-logical:context:warehouse:urn:oracle_prod')
+    await act(async () => { fireEvent.click(container!.querySelector('button')!) })
+    await h.settle()
+    expect(within(warehouse()).queryByText('oracle_orders')).toBeNull()
+    expect(within(warehouse()).getByText('2 inside')).toBeInTheDocument()
+
+    await act(async () => { usePreferencesStore.getState().toggleWhereTheySit() })
+    try {
+      await h.settle()
+      expect(within(warehouse()).queryByText('oracle_prod')).toBeNull()
+      expect(within(warehouse()).getAllByText('in oracle_prod › sales')).toHaveLength(2)
+    } finally {
+      await act(async () => { usePreferencesStore.getState().toggleWhereTheySit() })
+    }
+  }, 40000)
+
   it('takes its layers from its base while it follows it: no Add layer, even in a draft', async () => {
     setPreview(true)
     const h = await renderCanvasWithTrace(cfoEstate(), { focus: 'cfo', deferTrace: true, draft: true, entityScope: 'all', subset: SEARCH })
     await h.settle()
     expect(screen.queryByText('Add layer')).toBeNull()
+  }, 40000)
+
+  it('its layer menu, in a draft, offers no layer edit its base would refuse', async () => {
+    setPreview(true)
+    const h = await renderCanvasWithTrace(cfoEstate(), { focus: 'cfo', deferTrace: true, draft: true, entityScope: 'all', subset: SEARCH })
+    await h.settle()
+    const header = document.querySelector<HTMLElement>('[data-layer-id="warehouse"].group\\/column .sticky.top-0')
+    expect(header).not.toBeNull()
+    await act(async () => { fireEvent.contextMenu(header!) })
+    await h.settle()
+    // The header hides these while it follows its base; so does its menu.
+    for (const edit of ['Insert layer to the left', 'Insert layer to the right', 'Rename', 'Delete layer']) {
+      expect(screen.queryByText(edit)).toBeNull()
+    }
   }, 40000)
 
   it('an ordinary view in a draft still offers Add layer', async () => {

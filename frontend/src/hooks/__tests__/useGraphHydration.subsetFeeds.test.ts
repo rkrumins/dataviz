@@ -9,6 +9,7 @@
  *  - a layer whose scan is still running is followed through its session until
  *    it completes, its rows landing once;
  *  - a complete layer pages on by the server's cursor;
+ *  - each row keeps the layer whose feed listed it: where the server placed it;
  *  - with the preview off nothing is listed, and the canvas is told why; a
  *    deleted base says so too.
  */
@@ -123,6 +124,20 @@ describe('subset view feeds', () => {
     expect(feed('L1')).toMatchObject({ hasMore: false, total: 2, search: { status: 'complete', delivered: 2 } })
   })
 
+  it('each row keeps the layer whose feed listed it, as the server placed it', async () => {
+    // A table the base places in its "other" layer by hand, against its type.
+    serve({
+      L1: (req) => req.cursor === 'c-1'
+        ? page('L1', { nodes: [node('urn:t2')], delivered: 2, totalCount: 2 })
+        : page('L1', { nodes: [node('urn:t1')], cursor: 'c-1', delivered: 1, totalCount: 2 }),
+      'other-matches': () => page('other-matches', { nodes: [node('urn:t9')], delivered: 1, totalCount: 1 }),
+    })
+    const canvas = await hydrate()
+    await act(async () => { await canvas.result.current.loadMoreFeeds(['layer:L1']) })
+    const layerOf = Object.fromEntries(useCanvasStore.getState().nodes.map((n) => [n.id, n.data.feedLayerId]))
+    expect(layerOf).toEqual({ 'urn:t1': 'L1', 'urn:t2': 'L1', 'urn:t9': 'other-matches' })
+  })
+
   it('follows a running scan through its session until it completes', async () => {
     serve({
       L1: (req) => req.sessionId
@@ -158,6 +173,26 @@ describe('subset view feeds', () => {
     expect(continued).toBe(2)
   })
 
+  it('a follow shed past its retries is asked again after the server says, not left at "so far"', async () => {
+    let continued = 0
+    serve({
+      L1: (req) => {
+        if (!req.sessionId) return page('L1', { nodes: [node('urn:t1')], status: 'running', sessionId: 's-1', delivered: 1 })
+        continued += 1
+        if (continued === 1) {
+          // Shed: the provider already retried it in place, and gave up.
+          throw Object.assign(new Error('API Error 429: busy'), { status: 429, retryAfterMs: 50 })
+        }
+        return page('L1', { nodes: [node('urn:t1'), node('urn:t2')], delivered: 2, totalCount: 2 })
+      },
+      'other-matches': () => page('other-matches', {}),
+    })
+    await hydrate()
+    await waitFor(() => expect(feed('L1')?.search?.status).toBe('complete'), { timeout: 3000 })
+    expect(continued).toBe(2)
+    expect(urns()).toEqual(['urn:t1', 'urn:t2'])
+  })
+
   it('a tab out of sight asks nothing until it is seen again', async () => {
     let visibility: DocumentVisibilityState = 'hidden'
     const real = Object.getOwnPropertyDescriptor(Document.prototype, 'visibilityState')
@@ -179,6 +214,22 @@ describe('subset view feeds', () => {
       delete (document as unknown as Record<string, unknown>).visibilityState
       if (real) Object.defineProperty(Document.prototype, 'visibilityState', real)
     }
+  })
+
+  it('a row carries where its match sits, its containers named rather than loaded', async () => {
+    const placed = { ...node('urn:t1'), ancestorPath: [
+      { urn: 'urn:wh', displayName: 'warehouse', entityType: 'database' },
+      { urn: 'urn:sales', displayName: 'sales', entityType: 'schema' }] } as unknown as ReturnType<typeof node>
+    serve({
+      L1: () => page('L1', { nodes: [placed], delivered: 1, totalCount: 1 }),
+      'other-matches': () => page('other-matches', {}),
+    })
+    await hydrate()
+    const row = useCanvasStore.getState().nodes.find((n) => n.id === 'urn:t1')
+    expect(row?.data.ancestorPath).toEqual([
+      { urn: 'urn:wh', displayName: 'warehouse', entityType: 'database' },
+      { urn: 'urn:sales', displayName: 'sales', entityType: 'schema' }])
+    expect(urns()).toEqual(['urn:t1'])
   })
 
   it('pages a complete layer on by the server cursor', async () => {

@@ -43,6 +43,7 @@ from backend.app.api.v1.endpoints.views import (
     authorize_view_create,
 )
 from backend.app.api.v1.feature_gate import ensure_view_mode_allowed, feature_disabled, require_feature
+from backend.app.api.v1.refusal import refusal_responses, refused
 from backend.app.api.v1.view_read_scope import viewer_context
 from backend.app.auth.dependencies import get_optional_user, get_permission_claims, rbac_flag
 from backend.app.config import resilience
@@ -51,6 +52,7 @@ from backend.app.db.engine import get_db_session, get_graph_read_session
 from backend.app.db.models import ViewORM, view_is_live
 from backend.app.db.repositories import view_activity_repo, view_membership_repo, view_repo, view_version_repo
 from backend.app.db.repositories.view_membership_repo import dumps, loads, now_iso
+from backend.app.jobs.metrics import increment
 from backend.app.providers.manager import provider_manager
 from backend.app.services import template_access, view_access
 from backend.app.services.feature_flags import feature_flags
@@ -153,23 +155,23 @@ async def _check_views(
     layout = definition.layout
     if layout.kind == "source":
         if not layout.source_view_id:
-            raise HTTPException(status_code=422, detail="Name the view whose layers to copy (sourceViewId).")
+            raise refused(422, "source_view_required", "Name the view whose layers to copy (sourceViewId).")
         names.add(layout.source_view_id)
     copied: Optional[dict] = None
     for view_id in sorted(names):
         if view_id == self_id:
-            raise HTTPException(status_code=422, detail=(
-                "A view's query is searched in another view, not in itself."))
+            raise refused(422, "read_in_self",
+                          "A view's query is searched in another view, not in itself.")
         other = (await session.execute(
             select(ViewORM).where(ViewORM.id == view_id, view_is_live()))).scalar_one_or_none()
         if other is None or (rbac_flag("RBAC_ENFORCE_VIEWS") and not await view_access.can_read_view(
                 session, ctx, other)):
-            raise HTTPException(status_code=404, detail=f"View '{view_id}' not found")
+            raise refused(404, "view_not_found", f"View '{view_id}' not found")
         if other.workspace_id != workspace_id:
-            raise HTTPException(status_code=422, detail="That view is in another workspace.")
+            raise refused(422, "view_other_workspace", "That view is in another workspace.")
         theirs = await pipeline.effective_data_source(session, other.workspace_id, other.data_source_id)
         if theirs != data_source_id:
-            raise HTTPException(status_code=422, detail="That view shows a different data source.")
+            raise refused(422, "view_other_data_source", "That view shows a different data source.")
         if view_id == layout.source_view_id:
             copied = pipeline.config_of(other)
     return copied
@@ -223,9 +225,10 @@ async def _view(
     row = (await session.execute(query)).scalar_one_or_none()
     ctx = await viewer_context(session, user, claims)
     if row is None or (rbac_flag("RBAC_ENFORCE_VIEWS") and not await view_access.can_read_view(session, ctx, row)):
-        raise HTTPException(status_code=404, detail=f"View '{view_id}' not found")
+        raise refused(404, "view_not_found", f"View '{view_id}' not found")
     if edit and rbac_flag("RBAC_ENFORCE_VIEWS") and not await view_access.can_edit_view(session, ctx, row):
-        raise HTTPException(status_code=403, detail="Missing permission: workspace:view:edit")
+        raise refused(403, "missing_permission", "Missing permission: workspace:view:edit",
+                      error="missing_permission", permission="workspace:view:edit")
     return row, ctx
 
 
@@ -246,8 +249,9 @@ async def _replayed(session: AsyncSession, request_id: str, actor: str) -> Optio
     row = (await session.execute(select(ViewORM).where(ViewORM.id == version.view_id, view_is_live()))
            ).scalar_one_or_none()
     if version.source != "create" or version.created_by != actor or row is None:
-        raise HTTPException(status_code=409, detail={
-            "type": "request_id_taken", "message": "This request id was already used. Try again."})
+        raise refused(409, "request_id_taken", (
+            "This Idempotency-Key was already used for another request. Send a new key for a new "
+            "request."), type="request_id_taken")
     definition = _definition_of(row)
     view = await view_repo.get_view_enriched(session, row.id, user_id=actor)
     return ViewWithMembership(view=view, membership=await membership_status(session, row, definition))
@@ -281,6 +285,8 @@ async def _record_update(session: AsyncSession, row: ViewORM, outcome: Optional[
 
 @router.post(
     "/from-members", response_model=ViewWithMembership, response_model_by_alias=True, status_code=201,
+    summary="Make a list view of a narrowing's members",
+    responses=refusal_responses(403, 404, 409, 422, 429, 503),
     dependencies=[Depends(require_membership)],
 )
 async def create_view_from_members(
@@ -333,7 +339,7 @@ async def create_view_from_members(
         provenance=body.provenance.model_copy(update={"created_at": now_iso(), "created_by": actor}),
     )
     if body.layout.kind in ("template", "custom") and not body.layers:
-        raise HTTPException(status_code=422, detail="Send the layers the view starts with.")
+        raise refused(422, "layers_required", "Send the layers the view starts with.")
     _, _, copied_from = await authorize()
     await session.commit()                 # nothing held while the graph answers
 
@@ -370,7 +376,7 @@ async def create_view_from_members(
     try:
         await view_repo.check_layer_rules(session, view_repo._base_reference_layout(config), {})
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise refused(422, "invalid_layers", str(exc)) from exc
     template_id = body.context_model_id or body.layout.template_id
     if template_id:
         template_id = await template_access.usable_template_id(
@@ -393,7 +399,7 @@ async def create_view_from_members(
         response.status_code = 200
         replayed = await _replayed(session, request_id, actor) if request_id else None
         if replayed is None:
-            raise HTTPException(status_code=409, detail="This view was just made by another request.")
+            raise refused(409, "made_by_another_request", "This view was just made by another request.")
         return replayed
     state = await view_membership_repo.ensure(session, row)
     status = "frozen" if draft.definition.mode != "live" else ("partial" if resolved.truncated() else "ok")
@@ -412,6 +418,8 @@ async def create_view_from_members(
 
 @router.get(
     "/{view_id}/membership", response_model=MembershipStatus, response_model_by_alias=True,
+    summary="Read a list view's members, and how its updates stand",
+    responses=refusal_responses(304, 403, 404),
     dependencies=[Depends(require_membership)],
 )
 async def get_view_membership(
@@ -453,6 +461,8 @@ def _older_than(stamp: Optional[str], seconds: float) -> bool:
 
 @router.put(
     "/{view_id}/membership", response_model=MembershipStatus, response_model_by_alias=True,
+    summary='Change what a list view is made of, or freeze or resume it',
+    responses=refusal_responses(403, 404, 409, 422),
     dependencies=[Depends(require_membership)],
 )
 async def update_view_membership(
@@ -473,8 +483,8 @@ async def update_view_membership(
     when the graph can answer; otherwise the view stays ``pending`` and says so.
     Made on the published view only — a draft changes its layout, not this."""
     if branch_id:
-        raise HTTPException(status_code=409, detail=(
-            "What a view is made of is changed on the published view, not in a draft."))
+        raise refused(409, "draft_refused",
+                      "What a view is made of is changed on the published view, not in a draft.")
     actor = _user_id(user)
     row, ctx = await _view(session, view_id, user, claims, edit=True, lock=True)
     definition = _definition_of(row)
@@ -487,7 +497,7 @@ async def update_view_membership(
     changes = body.model_dump(by_alias=False, exclude_none=True, exclude={"if_definition_hash"})
     if body.layout is not None and (body.layout.kind, body.layout.source_view_id, body.layout.template_id) != (
             definition.layout.kind, definition.layout.source_view_id, definition.layout.template_id):
-        raise HTTPException(status_code=422, detail=(
+        raise refused(422, "layout_fixed", (
             "A view keeps the layout it was made with. To arrange the same query another way, make a new view."))
     updated = MembershipDefinition.model_validate({
         **definition.model_dump(by_alias=False), **changes,
@@ -509,7 +519,7 @@ async def update_view_membership(
                 assignments, definition.exclude, MemberOps(exclude=gone, unexclude=back),
                 layer_ids=layer_ids_of(ref), now=now_iso())
         except MemberOpError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
+            raise refused(422, "invalid_member_ops", str(exc)) from exc
     config["membership"] = updated.model_dump(mode="json", by_alias=True, exclude_none=True)
     row.config = json.dumps(config)
     row.updated_by = actor
@@ -551,6 +561,8 @@ def _definition_summary(before: MembershipDefinition, after: MembershipDefinitio
 
 @router.post(
     "/{view_id}/membership/members", response_model=ViewWithMembership, response_model_by_alias=True,
+    summary='Keep entities out of a list view, bring them back, or always include them',
+    responses=refusal_responses(403, 404, 409, 422),
     dependencies=[Depends(require_membership)],
 )
 async def change_view_members(
@@ -576,7 +588,7 @@ async def change_view_members(
         ref["assignments"], exclude = apply_member_ops(
             assignments, definition.exclude, body, layer_ids=layer_ids_of(ref), now=now_iso())
     except MemberOpError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise refused(422, "invalid_member_ops", str(exc)) from exc
     config.setdefault("content", {})["entityScope"] = "curated"
     updated = definition.model_copy(update={"exclude": exclude})
     config["membership"] = updated.model_dump(mode="json", by_alias=True, exclude_none=True)
@@ -613,6 +625,8 @@ def _ops_summary(ops: MemberOps) -> str:
 
 @router.post(
     "/{view_id}/membership/refresh", response_model=RefreshResult, response_model_by_alias=True,
+    summary="Work a list view's members out again",
+    responses={202: {"description": "Another request is updating it now: `outcome` is `busy`, and the status answers as it stands.", "model": RefreshResult}, **refusal_responses(403, 404, 409, 429, 503)},
     dependencies=[Depends(require_membership)],
 )
 async def refresh_view_membership(
@@ -653,6 +667,7 @@ async def refresh_view_membership(
                                                                          REFRESH_MIN_INTERVAL_SECS)
                   else None)
         if reason:
+            increment("live_view_refresh_total", outcome="current", trigger="open")
             return RefreshResult(outcome="current", detail={"reason": reason},
                                  membership=await membership_status(session, row, definition, ctx))
     # A change waiting to be worked out, or a held update being confirmed, goes straight
@@ -665,6 +680,7 @@ async def refresh_view_membership(
             wait = max(1, int(REFRESH_MIN_INTERVAL_SECS - (datetime.now(timezone.utc) - started).total_seconds()))
         except (TypeError, ValueError):
             pass
+        increment("live_view_refresh_total", outcome="too_soon", trigger="manual")
         raise HTTPException(status_code=429, headers={"Retry-After": str(wait)}, detail={
             "reason": "too_soon", "message": f"This view was just updated. Try again in {wait} seconds."})
     if definition.mode != "live":
@@ -680,6 +696,7 @@ async def refresh_view_membership(
     except PipelineError as exc:
         raise _refused(exc) from exc
     await _record_update(session, row, outcome, actor)
+    increment("live_view_refresh_total", outcome=outcome.outcome, trigger="open" if opened else "manual")
     if outcome.outcome == "busy":
         response.status_code = 202
     row, ctx = await _view(session, view_id, user, claims, edit=False)

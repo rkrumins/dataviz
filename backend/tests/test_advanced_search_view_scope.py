@@ -784,6 +784,70 @@ async def test_all_client_urns_dropped_text_any_returns_empty_page(
     assert eff_scope.dropped_urns == ("urn:hostile:somewhere-else",)
 
 
+async def test_a_curated_view_with_nothing_placed_finds_nothing(
+    db_session: AsyncSession,
+):
+    """A curated view shows only what is placed in it. With nothing placed it
+    shows nothing, so a search in it — a share link's too — finds nothing.
+    No roots must not mean "no clamp": that would search the whole data source.
+    """
+    from backend.app.services.advanced_search_service import (
+        VIEW_HOLDS_NOTHING,
+        AdvancedSearchService,
+    )
+    from backend.common.models.search import (
+        MatchAllPredicate,
+        SearchOptions,
+        SearchQuery,
+        SearchScope,
+    )
+
+    ws = await _seed_workspace(db_session)
+    # A member-list view's stages layout: curated, its layers name no types.
+    empty = await _seed_view(db_session, ws, view_type="reference", config={
+        "layoutType": "reference", "content": {"entityScope": "curated"},
+        "layout": {"referenceLayout": {"layers": [{"id": "s1", "name": "Sources"}],
+                                       "assignments": {}}},
+    })
+    resolver = ViewScopeResolver(db_session)
+    eff = await resolver.resolve(workspace_id=ws.id, requested=SearchScope(view_id=empty.id))
+    assert eff.holds_nothing and eff.root_urns == () and not eff.entity_type_allow_list
+
+    engine = _FakeEngine(raise_on_provider_call=True)
+    svc = AdvancedSearchService(engine, session=db_session, workspace_id=ws.id)
+    page, _eff = await svc.search(SearchQuery(
+        predicate=MatchAllPredicate(), scope=SearchScope(view_id=empty.id),
+        options=SearchOptions(results="both"),
+    ))
+    assert page.candidate_count == 0 and page.hits == [] and page.aggregates == []
+    notes = page.scope_diagnostics.notes
+    assert VIEW_HOLDS_NOTHING in notes
+    assert not any("entire data source" in note for note in notes)
+    # Counts, membership, catalog, export and resolve are evaluated in no scope.
+    scope, _ = await svc._rule_scope(SearchScope(view_id=empty.id))
+    assert scope is None
+    # Explain runs nothing either: no statement, no reference resolved.
+    out = await svc.explain(SearchQuery(predicate=MatchAllPredicate(),
+                                        scope=SearchScope(view_id=empty.id)))
+    assert out["notes"] == [VIEW_HOLDS_NOTHING] and out["cypher"] == ""
+    assert engine.provider.calls == []
+
+    # The rest stands: a view of every entity of its types has no roots by
+    # design, and a curated view with something placed is bounded by it.
+    open_view = await _seed_view(db_session, ws, view_type="reference", config={
+        "layoutType": "reference",
+        "layout": {"referenceLayout": {"layers": [{"id": "t", "entityTypes": ["table"]}]}},
+    })
+    placed = await _seed_view(db_session, ws, view_type="reference", config={
+        "layoutType": "reference", "content": {"entityScope": "curated"},
+        "layout": {"referenceLayout": {"layers": [{"id": "s1"}],
+                                       "assignments": {"urn:db:A": {"layerId": "s1"}}}},
+    })
+    for view in (open_view, placed):
+        eff = await resolver.resolve(workspace_id=ws.id, requested=SearchScope(view_id=view.id))
+        assert not eff.holds_nothing
+
+
 async def test_service_passes_resolved_scope_to_provider(
     db_session: AsyncSession,
 ):

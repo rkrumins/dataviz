@@ -322,10 +322,11 @@ Routes the explorer marks **deprecated** still answer, but build nothing new on 
 ### Errors
 
 Errors come back as `{"detail": …}`. `detail` is a sentence, a list (for a request that
-doesn't match the model, `422`), or an object that names the reason in one of three keys:
+doesn't match the model, `422`), or an object that names the reason in one of four keys:
 
 | Key | Examples | Who sends it |
 |---|---|---|
+| `reason` | `changed`, `base_missing`, `over_cap`, `too_soon`, `frozen`, `not_a_subset`, `no_such_layer`, `bad_cursor`, `request_id_taken`, `draft_refused` | Narrow, views made from a query and subset views — always with `message`, the words to show |
 | `type` | `feature_disabled`, `merge_conflict`, `ontology_violation`, `not_up_to_date`, `graph_too_large_to_sync`, `access_denied` | Feature switches and the versioned graph |
 | `code` | `PROVIDER_BUSY`, `PROVIDER_UNAVAILABLE`, `PROVIDER_TIMEOUT`, `REQUEST_TIMEOUT`, `EXPORTS_BUSY`, `busy`, `DB_UNAVAILABLE`, `SEARCH_FAILED`, `CONFLICT`, `VALIDATION` | The graph store's health, timeouts, exports, the database, the feature-switch API |
 | `error` | `csrf_failed`, `local_login_disabled`, `session_foreign`, `sso_reauth_required`, `password_change_required`, `missing_permission`, `api_key_expired`, `api_key_out_of_scope`, `rate_limited` | Sign-in and sign-up, the session, permissions and API keys |
@@ -336,6 +337,19 @@ A feature an administrator switched off answers the same way everywhere:
 {"detail": {"type": "feature_disabled", "feature": "traceEnabled",
             "message": "Lineage tracing is turned off for this deployment. An administrator can enable it under Admin → Features."}}
 ```
+
+Narrow (`/graph/members`), views made from a query (`/views/from-members`, `…/membership`),
+subset views (`/views/from-search`, `…/search`, `…/subsets`) and the view feed answer every
+refusal in one shape: `reason`, a code to branch on whose wording never changes; `message`, the
+words to show; and whatever that reason carries — `definitionHash` and `definition` with
+`changed`, the counts with `over_cap`, `permission` with `missing_permission`:
+
+```json
+{"detail": {"reason": "changed", "message": "Someone changed this view's search. Review it and try again.",
+            "definitionHash": "9f2c…", "definition": {"v": 1, "predicate": {"kind": "tag", "values": ["pii"]}}}}
+```
+
+Their OpenAPI entries list each status they answer with, and what it means.
 
 Two answers break the envelope: the retired trace route answers `{"error": {"code", "message",
 "details"}}` (below), and a per-address rate limit answers `{"error": "Rate limit exceeded: …"}`.
@@ -376,6 +390,20 @@ sentence in `detail` and no `Retry-After`: wait a few seconds before you retry.
 
 A `429` with no `Retry-After` comes from a per-address limit: back off for a while before you
 retry. Never retry a `400`, `403`, `404` or `422` unchanged — it will fail the same way.
+`PROVIDER_BUSY` answers carry a `message` to show, beside the older prose `reason`.
+
+A retry loop that honours the server, with a cap and jitter:
+
+```bash
+for attempt in 1 2 3 4 5; do
+  status=$(curl -s -o out.json -D headers.txt -w '%{http_code}' "$@")
+  case "$status" in
+    429|503) wait=$(awk 'tolower($1)=="retry-after:" {print $2+0}' headers.txt)
+             sleep $(( ${wait:-2} + RANDOM % 2 )) ;;     # the server's wait, or 2 s, and a jitter
+    *) break ;;
+  esac
+done
+```
 
 > **Warning:** A `504` means the server stopped waiting, not that nothing happened: the write
 > may have landed. Read the state again before you send a write a second time.
@@ -922,9 +950,11 @@ up to date (`"mode": "live"`): what newly matches arrives, and what stops matchi
    - `stages`: by lineage distance;
    - `template` or `custom`: the `layers` you send.
 
-   A view holds at most `limit` entries (5,000): its members, the containers drawn around them
-   (`"nest": false` leaves those out), and anything always included. A starting point whose
-   whole inside is in scope (`"children": "all"`) is one entry, however much is inside it.
+   A view holds at most `limit` entries (5,000, lower if `DEEP_SEARCH_SCOPE_ROOT_URNS_CAP` is
+   set lower): its members, the containers drawn around them (`"nest": false` leaves those out),
+   and anything always included. A starting point whose whole inside is in scope
+   (`"children": "all"`) is one entry, however much is inside it. A request names at most 5,000
+   URNs, 8 sources and 2,000 entities kept out.
 
 2. Save it. Send an `Idempotency-Key`, so that a retry answers with the view the first attempt
    made:
@@ -946,7 +976,8 @@ up to date (`"mode": "live"`): what newly matches arrives, and what stops matchi
    | `201` | Saved: `{view, membership}`. A replay of the same key answers `200` |
    | `422`, `reason: over_cap` | More entries than a view holds: `keys`, `members`, `containers` and `limit` say by how much. Nothing is saved |
    | `503` + `Retry-After` | The graph couldn't answer in full in time. Nothing is saved |
-   | `404` | A view it names doesn't exist, or you can't read it |
+   | `404`, `reason: view_not_found` | A view it names doesn't exist, or you can't read it |
+   | `409`, `reason: request_id_taken` | The `Idempotency-Key` was used for another request: send a new key |
 
 3. Keep it. Each route works on the view in the path:
 
@@ -966,7 +997,10 @@ up to date (`"mode": "live"`): what newly matches arrives, and what stops matchi
      `?confirmRemovals=true` to apply it;
    - `over_cap`;
    - `deferred`: the graph answered short, and the view kept its members;
-   - `busy`: another update is working on it.
+   - `busy`: another update is working on it — answered `202`, with the status as it stands.
+
+   A refresh too soon after the last one answers `429`, `reason: too_soon`, with `Retry-After`;
+   a snapshot answers `409`, `reason: frozen` — resume updates first.
 
    An update stamps the view's data freshness, not its "last edited". It writes no version: for
    an auto-updating view, the members are data, not design.
@@ -995,20 +1029,35 @@ see the matches, and the base's name only if they can open it.
 
    - `predicate` is an Advanced Search predicate asked of one entity at a time: no path, no
      *within hops*, no Connections search, and no layer filter (a subset's layers are its base's).
-   - `"layout": "inherit"` (the default): its layers are the base's, read live and placed by type,
-     plus **Other matches** for every match whose type no layer claims. When the base's layers
-     change, the subset's do too. `placedByType: true` in the answer says the base places by more
-     than type (tag or property rules, entities placed by hand), which a subset doesn't follow.
+   - `"layout": "inherit"` (the default): its layers are the base's, read live, each holding the
+     matches the base places there (by hand, by what children inherit, by stamps and rules), plus
+     **Other matches** for the matches the base places in none of them. When the base's layers or
+     placements change, the subset's do too. `placedByType: true` in the answer, with
+     `placedByTypeReason`, says the base's placement is more than a search follows (over 1,000
+     entities placed by hand, or rules too costly to read), so its matches are placed by type.
    - `"layout": "own"` with `"layers": [{"name", "color"?, "entityTypes": [...]}]` (at most 12)
      and `"rest"` (the name of the layer for the other matches, or `null` for none).
    - `"within": "dataSource"` (with `"layout": "own"` and no `readIn`) looks for the matches in
      the whole data source instead.
+   - `"include"` keeps more than the matches: `{"contents": true}` everything inside one,
+     `"containers"` what contains one, `"upstream"` what feeds one, `"downstream"` what one feeds
+     (each `false` unless sent). `"contentsLevels"` and `"containersLevels"` (1–20) stop at a
+     depth; unset is every level, or up to the top. `"contentsKinds"` and `"containersKinds"` keep
+     only those entity types. Each goes with its choice, and is dropped when the choice is off. A lineage step is one step, taken from a match or anything inside
+     it, as a trace walks a table through its columns. It becomes part of the view's search, so the
+     view stays current at any size; a search it can't be kept with gets `422`.
+   - `"hiddenLayers"`, with `"layout": "inherit"`: the ids of base layers to leave out, with their
+     matches (`"other-matches"` for **Other matches**). The view still follows the base, so a
+     layer the base adds later arrives. An id the base has no layer for, or leaving out every
+     layer that can hold matches, gets `422`.
 
    | Answer | Meaning |
    |---|---|
    | `201` | Made: `{view, search}`. A replay of the same key answers `200` |
-   | `422` | A search a subset view can't keep, a base that is itself a subset view, a base in another workspace or of another data source, or a word on its own with nothing to bound it |
-   | `404` | The base doesn't exist, or you can't read it |
+   | `422` | A search a subset view can't keep (`invalid_search`), a base that is itself a subset view (`base_is_subset`), a base in another workspace or of another data source (`base_other_workspace`, `base_other_data_source`), or a word on its own with nothing to bound it (`unbounded_text`) |
+   | `404`, `reason: base_not_found` | The base doesn't exist, or you can't read it |
+   | `403`, `reason: missing_permission` | You can't read the data source: a subset's search is written by someone who can |
+   | `409`, `reason: request_id_taken` | The `Idempotency-Key` was used for another request: send a new key for a new request |
 
 2. Read a layer's matches, page by page. The view's own search decides what matches: nothing you
    send can widen it.
@@ -1021,22 +1070,48 @@ see the matches, and the base's name only if they can open it.
    - `status: running`: the scan isn't finished. The matches so far are already in order; send the
      same body with `sessionId` until it reads `complete`.
    - `cursor`: send it back for the next page, 200 rows at a time.
-   - `stale: true` with `asOf`: a recent answer, read before the data last changed. It answers for a
-     few minutes after a change (`DEEP_SEARCH_VIEW_FEED_REUSE`) rather than rescanning on every
-     write. `"refresh": true` asks for one on the current data.
+   - `stale: true` with `asOf`: the last complete answer, read before the data last changed. It
+     answers for a few minutes after a change (`DEEP_SEARCH_VIEW_FEED_REUSE`) rather than
+     rescanning on every write — and past that, still, while the rescan that replaces it runs: a
+     reader never gets a rescan's rows so far. `"refresh": true` asks for one on the current data.
+   - `waitMs` (at most 10,000) is how long the request waits on a running scan.
    - `capped: true`: the layer has more matches than are listed (`DEEP_SEARCH_VIEW_FEED_MAX_ROWS`,
      2,000). Search in the layer, or export, for the rest.
+   - Each node carries `ancestorPath`, its containers root first, and `inLayer`: how many of the
+     nearest share its layer. The canvas draws the match inside those. `inLayer` is absent for
+     none.
    - `409`, `reason: base_missing`: the base was deleted. The subset waits for it to be restored.
    - `429` with `Retry-After`: every feed scan this server runs is busy and there was no recent
      answer to give.
+   - `400`, `reason: bad_cursor`: a cursor this server didn't issue for this layer. Cursors are
+     signed and good for their own layer only: start again from the first page.
+   - `404`, `reason: no_such_layer` or `not_a_subset`; `403`, `reason: link_other_view` (a share
+     link reads its own view only).
 
 3. Keep it:
 
    | Route | Does |
    |---|---|
    | `GET /api/v1/views/{id}/search` | The search, its base (`viewId`, `name`, `available`), the layers it shows and `status` (`ok` or `base_missing`). Sends an `ETag`; a matching `If-None-Match` gets `304` |
-   | `PUT /api/v1/views/{id}/search` | Change the `predicate`, or `layout`: `own` copies the base's layers as they are now, `inherit` follows the base again. Sent with `ifDefinitionHash`; a stale hash gets `409` with the current definition. Recorded as a version |
+   | `PUT /api/v1/views/{id}/search` | Change the `predicate`, `include` or `hiddenLayers`, or `layout`: `own` copies every one of the base's layers as they are now, the left-out ones too — or, with `layers`, takes those (what an Undo of following again sends back, checked as any own layout is) — and `inherit` follows the base again (send `hiddenLayers` with it to leave some out). Sent with `ifDefinitionHash`; a stale hash gets `409` with the current definition. Recorded as a version |
    | `GET /api/v1/views/{id}/subsets` | The subset views made from a view: `count` (what changing or deleting it reaches) and the ones you can open |
+
+   **Change it without overwriting someone else's change.** Send the hash you read; on `409`
+   `changed`, the answer carries the definition stored now and its hash. Look at what changed,
+   then send yours against that hash:
+
+   ```bash
+   read=$(api GET "/api/v1/views/$SUBSET/search")
+   out=$(api PUT "/api/v1/views/$SUBSET/search" -d '{
+     "ifDefinitionHash": "'"$(jq -r .definitionHash <<<"$read")"'",
+     "include": {"contents": true, "contentsLevels": 2}}')
+   if [ "$(jq -r '.detail.reason // empty' <<<"$out")" = changed ]; then
+     jq '.detail.definition' <<<"$out"          # what someone else saved: review it first
+     api PUT "/api/v1/views/$SUBSET/search" -d '{
+       "ifDefinitionHash": "'"$(jq -r .detail.definitionHash <<<"$out")"'",
+       "include": {"contents": true, "contentsLevels": 2}}'
+   fi
+   ```
 
    A subset view's search is written only through these routes. `POST /api/v1/views` drops a
    `search` sent with it, a settings save keeps the stored one, and a layout save holds a

@@ -48,16 +48,21 @@ export async function getMembershipStatus(viewId: string): Promise<MembershipSta
 
 /** Change the queries, freeze or resume — against the hash the definition was read at. */
 export async function putMembership(viewId: string, body: MembershipUpdate): Promise<MembershipStatus> {
-  const status = await authFetch<MembershipStatus>(base(viewId), { method: 'PUT', body: JSON.stringify(body) })
-  invalidate(viewId)
-  return status
+  try {
+    return await authFetch<MembershipStatus>(base(viewId), { method: 'PUT', body: JSON.stringify(body) })
+  } finally {
+    // Read again either way: a refusal (someone else's edit, 409) leaves the hash stale.
+    invalidate(viewId)
+  }
 }
 
 /** Keep entities out, bring them back, always include them, or stop. */
 export async function memberOps(viewId: string, ops: MemberOps): Promise<ViewWithMembership> {
-  const out = await authFetch<ViewWithMembership>(`${base(viewId)}/members`, { method: 'POST', body: JSON.stringify(ops) })
-  invalidate(viewId)
-  return out
+  try {
+    return await authFetch<ViewWithMembership>(`${base(viewId)}/members`, { method: 'POST', body: JSON.stringify(ops) })
+  } finally {
+    invalidate(viewId)
+  }
 }
 
 /** Work the members out again now. A large removal waits for `confirmRemovals`. */

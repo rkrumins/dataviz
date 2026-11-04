@@ -113,6 +113,222 @@ than build it; **Technical** is the full toolset, as before. Business stays the 
   fewer tools. **Show every tool**, the switch or `⌘/` / `Ctrl-/` brings them back, and the choice
   is kept.
 
+---
+
+## [Unreleased] — Hardening: security holes closed, steady under hundreds of readers, clearer refusals
+
+### Security
+
+- **A curated view with nothing placed in it holds nothing.** A search, count, membership check,
+  export or explain in it — a share link's too — finds nothing. Before, no roots meant no limit,
+  and it read the whole data source. A subset of such a base holds nothing either.
+- **`GET /graph/nodes/{urn}/delete-impact` is gated as the delete it previews:** edit mode on and
+  `workspace:datasource:manage`. It listed a subtree's values on `main` to any reader.
+- **A share link's advanced search and explain are confined to its view,** as every rule route
+  already was: names in them resolve inside the view.
+- **The view feed's cursor is signed** with the platform key ring and good for its own layer
+  only: no paging past the row cap, no made-up positions starting scans.
+- **Admission on a workspace route keys on the data source the read gate checked.** A
+  `connectionId` there selects nothing, and no longer takes a share of its own.
+- **A failed layer assignment no longer sends the server's error text,** and the unmounted v2
+  graph router carries the read gate.
+
+### Changed
+
+- **A request that only waits holds nothing.** Waiting on a scan another request moves on, or an
+  answer another request or pod computes, it gives back its graph admission and returns its
+  database connection to the pool. A burst of such waits used to shed every other graph read on
+  that process, ordinary canvases included.
+- **A subset view's layer answers its last complete page until the scan that replaces it
+  completes** — past its reuse window too — never that scan's rows so far. A request moves the
+  rescan on if it can, and never waits on another's turn at it.
+- **Which labels keep raw properties — a scan of every node — is read once per data change,**
+  shared across processes, and only when a scan starts.
+- **With the cache's Redis down, everyone in a process asking the same shares one compute,** and
+  a shed reaches every follower.
+- **The browser retries the view feed, Narrow and the plan preview in place** on `429` or `503`,
+  honouring `Retry-After`. A followed layer shed past its retries picks up again after the
+  server says.
+- **Refusals read in the server's words.** The chips and dialogs show the reason the server
+  gave — someone else's edit, a switch that is off, a base that is gone. A refused edit reads the
+  view again, so the next try has the hash stored now.
+- **Undo of Follow again gives a subset its own layout back as it was,** rather than a fresh copy
+  of its base: `PUT /views/{id}/search` takes `layers` with `layout: "own"`.
+- **In a draft of a subset that follows its base, the layer menu offers no layer edit,** as its
+  header doesn't.
+- **An auto-updating list view whose switch is off says Updates paused.** The switch's admin text
+  names what it gates: list views, their routes and their chip.
+- **A subset whose base isn't available says who can restore it** and links to the Explorer's
+  deleted views.
+- **One refusal shape** on Narrow, list views, subset views and the view feed:
+  `{"detail": {"reason", "message", …}}`. `not_a_subset` is `404` on the feed too, as on
+  `GET /views/{id}/search`. The busy answer carries a `message`.
+- **The OpenAPI entries of those routes** have summaries, and list each status they answer
+  with.
+
+### Added
+
+- **Metrics:** `search_last_page_answers_total`, `search_raw_labels_total{answer}`,
+  `graph_request_waits_total` and `graph_requests_waiting`,
+  `graph_cache_unreachable_total{endpoint,outcome}` and `live_view_refresh_total{outcome,trigger}`,
+  documented with `view_feed_answers_total` and suggested alerts in
+  [Observability](/docs/observability).
+- **Runbook:** [Subset views and Narrow under load](/docs/runbooks#subset-views-and-narrow-under-load).
+- **Docs:** descriptions for the view-feed, Narrow-cache and view-feed fair-share settings in
+  [Configuration](/docs/configuration); in the API guide, the refusal shape, every refusal of
+  the subset and list routes, a retry loop and a safe edit with `ifDefinitionHash`.
+
+### Known limitations
+
+- **A share link still reads the whole data source through the browse routes** — node and edge
+  reads, trace, metadata, canvas bootstrap, and Narrow from chosen entities — though search,
+  counts, membership, export and subset feeds are confined. Confining those is the next change.
+- **The feed lane is still per process** (`DEEP_SEARCH_VIEW_FEED_LANE`), and a viewer following a
+  running scan still reads its rows and edges for itself. A request with a last page to show no
+  longer waits, which removes most of that following.
+- **Not load-tested here.** The changes are covered by tests that measure each one; a run of
+  hundreds of concurrent readers is still to do.
+
+---
+
+## [Unreleased] — Subset views show where their matches sit, and keep as far as you choose
+
+### Added
+
+- **Show where they sit.** In a subset view, each match is drawn inside the containers its base
+  draws it in: in a layer built by hand, *oracle_orders* sits under *sales* under *oracle_prod*.
+  - The containers show where the matches sit. They aren't matches: never counted, and holding
+    only the matches. Closed, one says how many it holds (**2 inside**).
+  - Containers the base draws in another layer aren't repeated. The top row names them.
+  - **Show where they sit**, in **Display options**, is on unless you turn it off, and it's your
+    own choice, not part of the view. Off, each match is a row of its own, naming where it sits.
+  - It costs no extra graph read: the server already reads every container on a page to name it,
+    and now places them from that same read.
+- **Levels and kinds.** What a subset keeps with its matches can stop at a depth: **Everything
+  inside them** 1, 2, 3 levels or all; **What contains them** their parent, 2, 3 up or to the top.
+  Each can keep only some kinds of entity. It stays live, at any size.
+  - In the API: `contentsLevels`, `containersLevels` (1–20; unset is every level, or to the top),
+    `contentsKinds` and `containersKinds` in `include`. Definitions saved before keep their hashes.
+
+### Changed
+
+- **The view feed** gives each match `inLayer`: how many of its nearest containers share its layer.
+- **A feed page whose container paths ran late** is kept for seconds, not minutes, so the next read
+  draws its containers.
+
+---
+
+## [Unreleased] — Subset views keep their base view's layers: each match where the base places it
+
+A search for *oracle* across a Context View whose layers are built by hand, saved as a subset view,
+used to put every match in **Other matches**. A subset that follows its base now places each match
+as the base's canvas does.
+
+### Fixed
+
+- **Each match is in the layer its base puts it in**, not the layer of its type. That holds for
+  entities placed by hand, for what children inherit from their container, and for the base's
+  stamps and rules on types, tags and properties, whatever the search found them by. **Other
+  matches** holds what the base places in none of its layers.
+- **A match stays in its own column when its container is a match too.** Before, the canvas moved
+  it into its container's column.
+
+### Changed
+
+- **Leaving a layer out, Search in this layer, counts and export** all go by where the base places
+  each match.
+- **The save sheet counts what the base places in each layer.** **Other matches** is what is left.
+- **A subset rescans when its base's placements change** (a hand placement, a rule, the layers'
+  order), and not when a layer is renamed or recoloured.
+- **Save as view keeps a search's matches as a list too.** **Keep it · As a list** keeps them as
+  a list of members, up to 5,000, each where its view places it. Saved from inside a subset view,
+  the list is made from its base, with both searches. What the live sheet chose comes with it.
+- **Make its own layout** says that its own layers hold matches by type.
+
+### Known limitations
+
+- A subset follows at most 1,000 entities placed by hand, and rules up to what a search can read
+  quickly. Past that it places its matches by type, as before. The chip and the status
+  (`placedByTypeReason`) say why, and the save sheet offers to keep their places as a list.
+- A followed layer reads every match of the search and places each one as the base does, where it
+  used to read only its own types. A broad search over a big base costs more per layer. The feed
+  lane, fair share and the shared cache bound it, as they bound every feed.
+- With **One placement rule for every view surface** off, the base's canvas places a few cases
+  differently from its subset: a child with its own type rule, a stamped child, the child of an
+  entity in the fallback layer. Entities placed by hand, and what their children inherit, agree.
+
+---
+
+## [Unreleased] — Subset views keep what their matches reach, in fewer layers; one Save as view
+
+A subset view can now keep more than its matches: everything inside them, what contains them,
+and one lineage step either way. It can also leave some of its base's layers out. Both are part of
+its search, so it stays current at any size, and its layers, counts, search and export all follow
+them. **Save as view** is now one sheet. A narrowing is kept live when what it reaches can be, and
+as a list of its members when it can't. Behind the same preview switch, **Subset views**
+(`searchViewsEnabled`). See *Subset views: a search's matches as a view* in Managing Views.
+
+### Added
+
+- **Keep with them.** Beside its matches, a subset view can keep:
+  - everything inside them, however deep;
+  - what contains them, up to the top;
+  - what feeds them, and what they feed, one step.
+
+  A lineage step is taken from a match or anything inside it, as a trace walks a table through its
+  columns. Chosen in **Save as view…**, and changed from the **Subset of** chip with **Undo**. In
+  the API, this is `include` on `POST /views/from-search` and `PUT /views/{id}/search`.
+- **Fewer layers.** In a subset that follows its base, untick a layer in the sheet's preview to
+  leave it out, with its matches.
+  - It keeps following the base, so a layer the base adds later still arrives.
+  - Editors leave a layer out, or bring it back, from the chip.
+  - **Make its own layout** copies every base layer, the left-out ones too: an own layout leaves
+    nothing out. The message says so, and **Undo** leaves them out again.
+  - In the API, this is `hiddenLayers`. The view feed answers `404` for a layer the view leaves
+    out.
+- **Where each match sits.** A row in a subset view names its containers (*in warehouse ›
+  sales*) without loading them.
+
+### Changed
+
+- **One Save as view**, from search results or from a narrowing.
+  - **A narrowing is kept live** as a subset view of any size when what it reaches can be kept
+    that way, with that reach already chosen. Otherwise it is kept as a list of its members, up to
+    5,000.
+  - **Keep it** switches between the two, and when live isn't possible the sheet says why.
+  - **From search results**, **Narrow first** leads to more reach: two or more lineage steps, or
+    chosen entities.
+- **A layer per type found** asks the server for the kinds of entity the view holds, where it
+  looks, including what it keeps with the matches. Before, it counted the first page of results.
+  It is offered when saving a narrowing too.
+
+### Known limitations
+
+- **A layer per type found** ranks kinds by sampling the search's capped candidates (10,000 by
+  default) on a very large result. The rarer kinds land in **Other matches**.
+- What a subset keeps with its matches reaches one lineage step. Two or more steps, or what is
+  inside the sources and consumers, are kept as a list of members, up to 5,000.
+- Only a subset that follows its base leaves layers out. In an own layout (a layer per type, or
+  a copy of the base's layers), a type no layer holds lands in **Other matches**. To leave a kind
+  of entity out there, refine the search.
+
+---
+
+## [Unreleased] — One Duplicate… in the canvas menu
+
+### Changed
+
+- **One Duplicate in an entity's right-click menu.** The Context View offered **Duplicate** and
+  **Duplicate…** side by side, told apart only by the "…". There is now one, **Duplicate…**.
+  - It opens ready to make the quick copy, with the copy's name selected, so `Enter` makes it.
+  - Its choices are a click away: the entity alone, the links inside the copy, and incoming and
+    outgoing relationships, each counted first.
+  - `⌘D` / `Ctrl+D` still makes the quick copy without asking, and the dialog says so.
+- **The Duplicate dialog keeps `Tab` inside it, and gives focus back when it closes.** Its counts
+  show placeholders while it reads the entity.
+
+---
+
 ## [Unreleased] — Subset views on the canvas: keep a search's matches as a view
 
 The canvas side of subset views. **Save as view…** on Advanced Search results keeps the
@@ -151,9 +367,11 @@ a view* in Managing Views.
 
 ### Changed
 
-- **No hand placement in a subset view.** Its entities are placed by type, so the canvas offers no
-  assigning, grouping, reordering, adding children, or adding entities to a layer. While it follows
-  its base, its layers can't be added, renamed, removed or reordered: they are the base's.
+- **No hand placement in a subset view.** The server places its matches — where its base places
+  them while it follows it (see the entry above), by type in a layout of its own — so the canvas
+  offers no assigning, grouping, reordering, adding children, or adding entities to a layer. While
+  it follows its base, its layers can't be added, renamed, removed or reordered: they are the
+  base's.
 - **The view editor edits a subset view's details only.** Its search and layers change from its
   header chip.
 - **A subset view never lists every entity of its types.** With the preview off, or on a data
@@ -233,10 +451,10 @@ search's matches inside another view* in the API Guide.
 
 ### Known limitations
 
-- **Placed by type.** A match goes to the layer that claims its own type, or to **Other matches**.
-  A base that places by tag or property rules, or by hand, isn't followed in those placements. So
-  are entities that sit in their container's layer in the base, such as a table's columns: in a
-  subset they are in **Other matches**.
+- **Placed by type** — no longer: a following subset now puts each match in the layer its base
+  places it in, hand placements and rules included (see *Subset views keep their base view's
+  layers* above). Past what a subset follows (1,000 entities placed by hand, or rules too costly to
+  read), it still places by type, and says why.
 - **Published data only.** Subset views read the published graph: entities created in a draft
   appear once it is published.
 - **Up to 2,000 rows a layer** are listed (`DEEP_SEARCH_VIEW_FEED_MAX_ROWS`). Past them, a layer

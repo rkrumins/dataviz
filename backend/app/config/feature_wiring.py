@@ -798,14 +798,21 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
         server_gates=(
             "POST /graph/members — resolves a scope: seeds, what is inside them, their sources "
             "and consumers",
+            "POST /graph/members/plan — previews what a list view would hold",
+            "POST /views/from-members — makes a list view of a narrowing",
+            ("GET/PUT /views/{id}/membership, POST /views/{id}/membership/members and "
+             "/views/{id}/membership/refresh — a list view's members and its updates"),
         ),
         ui_surfaces=(
             "Context View: Narrow… on a selection, Narrow to this in an entity's right-click "
             "menu, Narrow… on Advanced Search's matches, and the Narrowed chip",
+            "Save as view… as a list, from the Narrowed chip, Narrow and search results",
+            ("A list view's Auto-updating / Snapshot chip, which reads Updates paused while "
+             "this is off"),
         ),
         still_allowed=(
-            "Views, searches, Isolate and traces work as before — Narrow only filters the canvas "
-            "and saves nothing",
+            "Other views, searches, Isolate and traces work as before. Views already made as "
+            "lists keep the members they last had, and stop updating until this is on again",
         ),
     ),
     "searchViewsEnabled": FeatureWiring(

@@ -300,16 +300,9 @@ export function CanvasContextMenu({
                 })
             }
 
-            if (onDuplicateNode) {
-                result.push({
-                    id: 'duplicate',
-                    label: 'Duplicate',
-                    icon: 'Copy',
-                    shortcut: '⌘D',
-                    onClick: () => { onDuplicateNode(target.id); onClose() }
-                })
-            }
-
+            // One Duplicate. Where the canvas offers the dialog, it is the item: it opens on
+            // the quick copy's choices, so Enter makes the copy ⌘D would, and anything more
+            // is a click away. ⌘D still copies at once from the keyboard.
             if (onDuplicateWithOptions) {
                 result.push({
                     id: 'duplicate-options',
@@ -317,6 +310,14 @@ export function CanvasContextMenu({
                     icon: 'CopyPlus',
                     shortcut: '⇧⌘D',
                     onClick: () => { onDuplicateWithOptions(target.id); onClose() }
+                })
+            } else if (onDuplicateNode) {
+                result.push({
+                    id: 'duplicate',
+                    label: 'Duplicate',
+                    icon: 'Copy',
+                    shortcut: '⌘D',
+                    onClick: () => { onDuplicateNode(target.id); onClose() }
                 })
             }
 

@@ -665,3 +665,39 @@ async def test_discover_maps_a_refusal_to_501(monkeypatch):
 
     assert exc.value.status_code == 501
     assert exc.value.detail == REFUSAL
+
+
+# ---------------------------------------------------------------------------
+# Share-link confinement
+# ---------------------------------------------------------------------------
+
+async def test_a_share_links_search_and_explain_are_confined(slot, monkeypatch, legacy_engine):
+    """A share link's reader names entities inside the view only. The names a
+    search or explain resolves never come from the whole data source, as in
+    every rule route; a member's search is unchanged."""
+    from backend.app.services.advanced_search_service import (
+        AdvancedSearchService,
+    )
+
+    seen: list = []
+
+    async def _fake_search(self, query, **kwargs):
+        seen.append(("search", self._confined))
+        return _page(), _eff_scope()
+
+    async def _fake_explain(self, query):
+        seen.append(("explain", self._confined))
+        return {}
+
+    monkeypatch.setattr(AdvancedSearchService, "search", _fake_search)
+    monkeypatch.setattr(AdvancedSearchService, "explain", _fake_explain)
+    for capability in ("view-1", None):
+        await graph_mod.search_advanced(
+            query=_query(), request=_request(view_capability=capability),
+            response=Response(), ws_id="ws-1", engine=_FakeEngine(), session=None,
+        )
+        await graph_mod.search_explain(
+            query=_query(), request=_request(view_capability=capability),
+            ws_id="ws-1", engine=_FakeEngine(), session=None,
+        )
+    assert seen == [("search", True), ("explain", True), ("search", False), ("explain", False)]

@@ -22,7 +22,8 @@ vi.mock('@/services/liveViewsApi', () => ({
   memberOps: (...a: unknown[]) => api.memberOps(...a),
 }))
 vi.mock('@/services/viewApiService', () => ({ getView: vi.fn().mockResolvedValue(null), viewToViewConfig: (v: unknown) => v }))
-vi.mock('@/store/features', () => ({ useFeature: () => true }))
+const feature = vi.hoisted(() => ({ on: true }))
+vi.mock('@/store/features', () => ({ useFeature: () => feature.on }))
 // Opening's own refresh is pinned in useRefreshOnOpen.test; here the chip's actions are.
 vi.mock('../useRefreshOnOpen', () => ({ useRefreshOnOpen: () => {}, showLatest: async () => {} }))
 
@@ -53,6 +54,24 @@ describe('LiveViewChip', () => {
   beforeEach(() => {
     Object.values(api).forEach((f) => f.mockReset())
     api.getMembershipStatus.mockResolvedValue(status())
+    feature.on = true
+  })
+
+  it('with its preview off, an auto-updating view says its updates are paused — and asks nothing', async () => {
+    feature.on = false
+    renderChip()
+    const chip = screen.getByRole('button', { name: /Updates paused/ })
+    fireEvent.click(chip)
+    expect(await screen.findByText(/shows the members it last had/)).toBeInTheDocument()
+    expect(api.getMembershipStatus).not.toHaveBeenCalled()
+  })
+
+  it('with its preview off, a snapshot shows nothing to pause', () => {
+    feature.on = false
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const snapshot = { id: 'v8', name: 'Frozen', config: { membership: { v: 1, mode: 'snapshot' } } } as never
+    render(<QueryClientProvider client={client}><LiveViewChip view={snapshot} canEdit /></QueryClientProvider>)
+    expect(screen.queryByRole('button', { name: /Updates paused/ })).toBeNull()
   })
 
   it('names the view auto-updating with its count, and opens what it is made of', async () => {

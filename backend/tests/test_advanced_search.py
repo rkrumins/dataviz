@@ -2870,10 +2870,13 @@ class TestHydrateAncestorsBatched:
         }
 
         class _FakeAnc:
+            # A GraphNode's fields the path reads: its name and type, and the
+            # placement facts kept with them (properties, tags, stamp).
             def __init__(self, urn, display_name, entity_type):
                 self.urn = urn
                 self.display_name = display_name
                 self.entity_type = entity_type
+                self.properties, self.tags, self.layer_assignment = {}, [], None
 
         class _StubProvider:
             async def _get_ancestor_chain(self, urn):
@@ -2934,6 +2937,7 @@ class TestHydrateAncestorsBatched:
         class _Anc:
             def __init__(self, urn):
                 self.urn, self.display_name, self.entity_type = urn, urn.upper(), "domain"
+                self.properties, self.tags, self.layer_assignment = {}, [], None
 
         class _BulkProvider:
             async def get_ancestor_chains(self, urns):

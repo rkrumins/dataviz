@@ -402,6 +402,29 @@ async def test_dependency_counts_data_sources_apart_within_one_workspace(limits,
     assert mgr._graph_inflight == {"ws1/dsA": 1, "ws1/dsB": 1}
 
 
+async def test_a_connection_id_on_a_workspace_route_picks_no_share(limits, monkeypatch) -> None:
+    """A workspace route's source is the data source the read gate checked; a
+    ``connectionId`` there selects nothing. A client sending a fresh one each
+    time must not become a fresh source each time — each would hold a reserve
+    back from the real sources until they are shed."""
+    from backend.app.api.v1.endpoints import graph as graph_mod
+
+    mgr = ProviderManager()
+    monkeypatch.setattr(graph_mod, "provider_manager", mgr)
+
+    held = []
+    for n in range(3):
+        gen = graph_mod._admit_graph_request(ws_id="ws1", dataSourceId=None, connectionId=f"junk{n}")
+        await gen.asend(None)
+        held.append(gen)
+    assert mgr._graph_inflight == {"ws1/": 3}
+    assert set(mgr._graph_activity) == {"ws1/"}
+    # A named data source still counts apart.
+    gen = graph_mod._admit_graph_request(ws_id="ws1", dataSourceId="dsA", connectionId="junk")
+    await gen.asend(None)
+    assert mgr._graph_inflight == {"ws1/": 3, "ws1/dsA": 1}
+
+
 def test_the_gate_runs_before_the_graph_read_session_is_checked_out() -> None:
     """Load-bearing ordering: FastAPI resolves sub-dependencies in declaration
     order, so a shed request must never have taken a session."""

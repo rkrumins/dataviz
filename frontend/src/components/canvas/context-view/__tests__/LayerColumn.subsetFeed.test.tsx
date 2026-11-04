@@ -90,6 +90,12 @@ describe('LayerColumn — a subset layer', () => {
     expect(onExportLayer).toHaveBeenCalledWith('L1')
   })
 
+  it('a match says where it sits', () => {
+    const step = (urn: string) => ({ urn: `urn:${urn}`, displayName: urn, entityType: 'schema' })
+    renderColumn({ nodes: [node('A', { ancestorPath: [step('warehouse'), step('sales')] })], subsetFeed: feed({ delivered: 1, total: 1 }) })
+    expect(screen.getByText('in warehouse › sales')).toBeInTheDocument()
+  })
+
   it('an uncapped layer offers no foot', () => {
     renderColumn({ subsetFeed: feed(), onSearchInLayer: vi.fn() })
     expect(screen.queryByRole('button', { name: /Search in this layer/ })).not.toBeInTheDocument()

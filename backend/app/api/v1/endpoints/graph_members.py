@@ -39,6 +39,7 @@ from backend.app.api.v1.endpoints.graph import (
     get_engine_session,
 )
 from backend.app.api.v1.feature_gate import feature_disabled, require_feature
+from backend.app.api.v1.refusal import refusal_responses, refused
 from backend.app.config import resilience
 from backend.app.config.feature_wiring import fail_safe_default
 from backend.app.services.context_engine import ContextEngine
@@ -83,6 +84,8 @@ def _answered_as_search(search):
     "/members",
     response_model=MembershipResult,
     response_model_by_alias=True,
+    summary='Resolve a scope: its seeds, and what they reach',
+    responses=refusal_responses(403, 404, 422, 429, 503),
     dependencies=[Depends(require_membership)],
 )
 async def resolve_members(
@@ -154,13 +157,15 @@ async def resolve_members(
     except NotImplementedError as exc:
         raise _map_not_implemented(engine, exc) from exc
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise refused(422, "invalid_scope", str(exc)) from exc
 
 
 @router.post(
     "/members/plan",
     response_model=MembershipPlan,
     response_model_by_alias=True,
+    summary='Preview what a list view of a narrowing would hold',
+    responses=refusal_responses(403, 404, 422, 429, 503),
     dependencies=[Depends(require_membership)],
 )
 async def plan_members(
@@ -199,7 +204,7 @@ async def plan_members(
         source_view = (await session.execute(select(ViewORM).where(
             ViewORM.id == (body.layout.source_view_id or viewId), view_is_live()))).scalar_one_or_none()
         if source_view is None or source_view.workspace_id != ws_id or not await can_read_view(source_view):
-            raise HTTPException(status_code=404, detail="View not found")
+            raise refused(404, "view_not_found", "View not found")
         copied_from = pipeline.config_of(source_view)
 
     await _enforce_fair_share(engine, ENDPOINT_TRACE_CLOSURE)

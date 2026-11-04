@@ -4,7 +4,7 @@
  * view says how many subsets are made from it.
  */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -24,6 +24,9 @@ vi.mock('@/services/searchViewsApi', () => ({
 }))
 vi.mock('@/services/viewApiService', () => ({ getView: vi.fn().mockResolvedValue(null), viewToViewConfig: (v: unknown) => v }))
 vi.mock('@/store/features', () => ({ useFeature: () => true }))
+// What the chip tells the user, with the action it offers.
+const notify = vi.fn<(tone: string, message: string, action?: { label: string; onClick: () => void }) => void>()
+vi.mock('@/components/ui/notifications', () => ({ useAppNotifications: () => ({ notify }) }))
 
 import { SearchViewChip, SubsetsChip } from '../SearchViewChip'
 
@@ -80,6 +83,25 @@ describe('SearchViewChip', () => {
     await waitFor(() => expect(api.putSearch).toHaveBeenCalledWith('v9', { ifDefinitionHash: 'h1', layout: 'inherit' }))
   })
 
+  it('Undo of following again gives back its own layout as it was, not a fresh copy of the base', async () => {
+    api.getSearchStatus.mockResolvedValue(status({
+      definition: { ...status().definition, layout: 'own' },
+    }))
+    const own = [
+      { id: 'mine', name: 'My tables', order: 0, entityTypes: ['table'], color: '#123456' },
+      { id: 'other-matches', name: 'Everything else', order: 1, entityTypes: [], showUnassigned: true },
+    ]
+    const view = { id: 'v9', name: 'PII', config: { search: { v: 1 }, layout: { referenceLayout: { layers: own } } } } as never
+    renderIn(<SearchViewChip view={view} canEdit />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Subset of Sales overview' }))
+    fireEvent.click(await screen.findByRole('button', { name: /Follow Sales overview again/ }))
+    await waitFor(() => expect(notify).toHaveBeenCalledWith('success', expect.stringContaining('follows Sales overview'),
+      expect.objectContaining({ label: 'Undo' }), 8000))
+    notify.mock.calls.at(-1)![2]!.onClick()
+    await waitFor(() => expect(api.putSearch).toHaveBeenLastCalledWith('v9',
+      { ifDefinitionHash: 'h2', layout: 'own', layers: own }))
+  })
+
   it('Edit search… opens it where the matches are looked for — not where the base can’t be opened', async () => {
     const onEditSearch = vi.fn()
     const { unmount } = renderIn(<SearchViewChip view={SUBSET} canEdit onEditSearch={onEditSearch} />)
@@ -99,7 +121,7 @@ describe('SearchViewChip', () => {
     api.getSearchStatus.mockResolvedValue(status({ status: 'base_missing' }))
     renderIn(<SearchViewChip view={SUBSET} canEdit onEditSearch={vi.fn()} onRefresh={vi.fn()} />)
     fireEvent.click(await screen.findByRole('button', { name: 'Subset · base view gone' }))
-    expect(await screen.findByText(/Its base view was deleted/)).toBeInTheDocument()
+    expect(await screen.findByText(/Its base view isn’t available/)).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /Edit search…/ })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /Refresh/ })).not.toBeInTheDocument()
   })
@@ -115,6 +137,97 @@ describe('SearchViewChip', () => {
     const { container } = renderIn(<SearchViewChip view={BASE} canEdit />)
     expect(container).toBeEmptyDOMElement()
     expect(api.getSearchStatus).not.toHaveBeenCalled()
+  })
+})
+
+describe('SearchViewChip — what it keeps, and fewer layers', () => {
+  beforeEach(() => {
+    Object.values(api).forEach((f) => f.mockReset())
+    notify.mockReset()
+    api.getSearchStatus.mockResolvedValue(status({
+      layers: [
+        { id: 'l1', name: 'Tables', entityTypes: ['table'], rest: false, excludedTypes: [] },
+        { id: 'l2', name: 'Dashboards', entityTypes: ['dashboard'], rest: false, excludedTypes: [], hidden: true },
+      ],
+      definition: { ...status().definition, hiddenLayers: ['l2'] } as never,
+    }))
+    api.putSearch.mockResolvedValue(status({ definitionHash: 'h2' }))
+  })
+
+  it('an editor keeps what the matches reach with one tap', async () => {
+    renderIn(<SearchViewChip view={SUBSET} canEdit />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Subset of Sales overview' }))
+    fireEvent.click(await screen.findByRole('button', { name: /Everything inside/ }))
+    await waitFor(() => expect(api.putSearch).toHaveBeenCalledWith('v9', {
+      ifDefinitionHash: 'h1', include: { contents: true, containers: false, upstream: false, downstream: false } }))
+  })
+
+  it('an editor keeps a number of levels inside them, with Undo', async () => {
+    api.getSearchStatus.mockResolvedValue(status({ definition: { ...status().definition,
+      include: { contents: true, containers: false, upstream: false, downstream: false } } }))
+    renderIn(<SearchViewChip view={SUBSET} canEdit />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Subset of Sales overview' }))
+    const inside = await screen.findByRole('radiogroup', { name: 'Levels inside them' })
+    expect(screen.queryByRole('radiogroup', { name: 'Levels up' })).toBeNull()
+    expect(within(inside).getByRole('radio', { name: 'All' })).toHaveAttribute('aria-checked', 'true')
+    fireEvent.click(within(inside).getByRole('radio', { name: '2' }))
+    await waitFor(() => expect(api.putSearch).toHaveBeenCalledWith('v9', { ifDefinitionHash: 'h1',
+      include: { contents: true, contentsLevels: 2, containers: false, upstream: false, downstream: false } }))
+    await waitFor(() => expect(notify).toHaveBeenCalledWith('success', 'It keeps two levels inside them now',
+      expect.objectContaining({ label: 'Undo' }), 8000))
+    notify.mock.calls.at(-1)![2]!.onClick()
+    await waitFor(() => expect(api.putSearch).toHaveBeenLastCalledWith('v9', { ifDefinitionHash: 'h2',
+      include: { contents: true, containers: false, upstream: false, downstream: false } }))
+  })
+
+  it('an editor keeps what contains them up to the top again, and Undo brings back the parent alone', async () => {
+    api.getSearchStatus.mockResolvedValue(status({ definition: { ...status().definition,
+      include: { contents: false, containers: true, containersLevels: 1, upstream: false, downstream: false } } }))
+    renderIn(<SearchViewChip view={SUBSET} canEdit />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Subset of Sales overview' }))
+    expect(await screen.findByText(/what contains them, one level up/)).toBeInTheDocument()
+    const up = screen.getByRole('radiogroup', { name: 'Levels up' })
+    expect(within(up).getAllByRole('radio').map((r) => r.textContent)).toEqual(['Parent', '2', '3', 'Top'])
+    expect(within(up).getByRole('radio', { name: 'Parent' })).toHaveAttribute('aria-checked', 'true')
+    // What it keeps already: nothing to save.
+    fireEvent.click(within(up).getByRole('radio', { name: 'Parent' }))
+    fireEvent.click(within(up).getByRole('radio', { name: 'Top' }))
+    await waitFor(() => expect(notify).toHaveBeenCalledWith('success', 'It keeps what contains them now',
+      expect.objectContaining({ label: 'Undo' }), 8000))
+    expect(api.putSearch).toHaveBeenCalledTimes(1)
+    expect(api.putSearch).toHaveBeenCalledWith('v9', { ifDefinitionHash: 'h1',
+      include: { contents: false, containers: true, upstream: false, downstream: false } })
+    notify.mock.calls.at(-1)![2]!.onClick()
+    await waitFor(() => expect(api.putSearch).toHaveBeenLastCalledWith('v9', { ifDefinitionHash: 'h2',
+      include: { contents: false, containers: true, containersLevels: 1, upstream: false, downstream: false } }))
+  })
+
+  it('an editor shows a hidden layer again, and can’t hide the last one', async () => {
+    renderIn(<SearchViewChip view={SUBSET} canEdit />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Subset of Sales overview' }))
+    expect(await screen.findByRole('switch', { name: /Tables/ })).toBeDisabled()
+    fireEvent.click(screen.getByRole('switch', { name: /Dashboards/ }))
+    await waitFor(() => expect(api.putSearch).toHaveBeenCalledWith('v9', { ifDefinitionHash: 'h1', hiddenLayers: [] }))
+  })
+
+  it('its own layout brings back what it left out, and Undo leaves it out again', async () => {
+    renderIn(<SearchViewChip view={SUBSET} canEdit />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Subset of Sales overview' }))
+    fireEvent.click(await screen.findByRole('button', { name: /Make its own layout/ }))
+    await waitFor(() => expect(notify).toHaveBeenCalledWith('success',
+      expect.stringContaining('the one it left out is back'), expect.objectContaining({ label: 'Undo' }), 8000))
+    notify.mock.calls.at(-1)![2]!.onClick()
+    await waitFor(() => expect(api.putSearch).toHaveBeenLastCalledWith('v9', {
+      ifDefinitionHash: 'h2', layout: 'inherit', hiddenLayers: ['l2'] }))
+  })
+
+  it('readers see what it shows, and nothing to change it with', async () => {
+    renderIn(<SearchViewChip view={SUBSET} canEdit={false} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Subset of Sales overview' }))
+    expect(await screen.findByText('Tables')).toBeInTheDocument()
+    expect(screen.queryByText('Dashboards')).toBeNull()
+    expect(screen.queryByRole('switch')).toBeNull()
+    expect(screen.queryByRole('group', { name: 'Keeps with them' })).toBeNull()
   })
 })
 

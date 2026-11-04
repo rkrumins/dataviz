@@ -8,8 +8,21 @@
 import type { GraphNode, GraphEdge } from '@/providers/GraphDataProvider'
 import type { LineageNode, LineageEdge } from '@/store/canvas'
 
-/** Convert a backend GraphNode to a canvas LineageNode — every field verbatim. */
+/** ``n`` as the feed of a subset view's layer ``layerId`` listed it: its row is drawn in
+ *  that layer, where the server placed it (as the view's base places it, or by type). */
+export function withFeedLayer(n: GraphNode, layerId: string): GraphNode {
+    return { ...n, feedLayerId: layerId } as GraphNode
+}
+
+/** Convert a backend GraphNode to a canvas LineageNode — every field verbatim. A node
+ *  a subset view's feed lists carries where it sits (`ancestorPath`, root first): its
+ *  containers, named and never loaded; how many of the nearest share its layer
+ *  (`inLayer`), which the canvas draws it inside; and the layer whose feed listed it
+ *  (`withFeedLayer`). */
 export function toCanvasNode(n: GraphNode, opts?: { randomPosition?: boolean }): LineageNode {
+    const path = (n as { ancestorPath?: Array<{ urn: string; displayName?: string; entityType?: string }> }).ancestorPath
+    const inLayer = (n as { inLayer?: number }).inLayer
+    const feedLayerId = (n as { feedLayerId?: string }).feedLayerId
     return {
         id: n.urn,
         type: 'generic' as const,
@@ -35,6 +48,10 @@ export function toCanvasNode(n: GraphNode, opts?: { randomPosition?: boolean }):
             // Frontend conveniences derived from the property bag / tags
             classifications: n.tags,
             businessLabel: (n.properties?.businessLabel as string) ?? undefined,
+            ...(path && path.length > 0 ? { ancestorPath: path.map(a => (
+                { urn: a.urn, displayName: a.displayName || a.urn, entityType: a.entityType })) } : {}),
+            ...(inLayer ? { inLayer } : {}),
+            ...(feedLayerId ? { feedLayerId } : {}),
         },
     }
 }

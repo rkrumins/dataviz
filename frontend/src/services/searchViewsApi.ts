@@ -50,11 +50,15 @@ export async function getSearchStatus(viewId: string): Promise<SearchViewStatus>
 
 /** Change the search, or where its layers come from — against the hash it was read at. */
 export async function putSearch(viewId: string, body: SearchViewUpdate): Promise<SearchViewStatus> {
-  const status = await authFetch<SearchViewStatus>(`${base(viewId)}/search`, {
-    method: 'PUT', body: JSON.stringify(body),
-  })
-  invalidate(viewId)
-  return status
+  try {
+    return await authFetch<SearchViewStatus>(`${base(viewId)}/search`, {
+      method: 'PUT', body: JSON.stringify(body),
+    })
+  } finally {
+    // Read again either way: refused because someone else changed it (409), the
+    // hash this was sent with is stale, and the next try needs the one stored now.
+    invalidate(viewId)
+  }
 }
 
 /** The subset views made from a view: what changing or deleting it reaches. */

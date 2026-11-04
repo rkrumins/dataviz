@@ -65,7 +65,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.db.models import ViewORM
 from backend.app.db.repositories.view_repo import effective_view_config
 from backend.app.services.layout_config import derive_entity_scope, parse_reference_layout
-from backend.app.services.search_views import boundary_hash, is_subset, subset_layers
+from backend.app.services.search_views import (
+    boundary_hash,
+    follow_placement,
+    is_subset,
+    search_hash,
+    shown_layers,
+    shown_search,
+    subset_layers,
+)
 from backend.app.services.view_placement import PlacementSpec, _num
 from backend.common.models.search import SearchScope
 from backend.common.models.search_view import read_search_definition
@@ -151,7 +159,14 @@ class EffectiveViewScope:
     see, only what the subset shows."""
     subset_layers: Tuple[Any, ...] = ()
     """A subset view's layers (``search_views.SubsetLayer``): what a layer filter in
-    it means — the types the layer holds."""
+    it means (``search_views.layer_condition``)."""
+    subset_placement: Any = None
+    """How a subset that follows its base places its matches in those layers
+    (``search_views.BasePlacement``): as the base's canvas does. None: by type."""
+    holds_nothing: bool = False
+    """A curated view with nothing placed in it (or a subset of one): it shows
+    nothing, so a search in it finds nothing. No roots here never means "no clamp"
+    — that is a view of every entity of its types, which a curated view is not."""
 
 
 # --------------------------------------------------------------------------- #
@@ -468,6 +483,7 @@ class ViewScopeResolver:
             placement=placement,
             layers=layers,
             placement_digest=placement_digest,
+            holds_nothing=derive_entity_scope(config) == "curated" and not allowed_root_urns,
         )
 
     async def _resolve_subset(
@@ -511,7 +527,13 @@ class ViewScopeResolver:
                                          _HARD_MAX_DEPTH))
         effective_root_urns, dropped = _intersect_root_urns(requested.root_urns, allowed_roots)
         effective_entity_types = _intersect_entity_types(requested.entity_types, allowed_types)
-        layers = subset_layers(definition, config, base_config)
+        # Its columns, less those it hides; what it finds — its search and what it
+        # includes — held to what those columns show.
+        every_layer = subset_layers(definition, config, base_config)
+        layers = shown_layers(every_layer)
+        placement = (follow_placement(base_config)[0]
+                     if definition.layout == "inherit" and base_config is not None else None)
+        search = shown_search(definition.search_predicate(), every_layer, placement)
         return EffectiveViewScope(
             view_id=view.id,
             workspace_id=view.workspace_id,
@@ -526,14 +548,18 @@ class ViewScopeResolver:
                 view_id=base.id if base is not None else None,
                 data_source_id=view.data_source_id, root_urns=effective_root_urns,
                 entity_types=effective_entity_types, max_depth=effective_max_depth,
-                predicate_hash=definition.predicate_hash()),
+                predicate_hash=search_hash(search),
+                placement=placement.digest if placement is not None else ""),
             dropped_urns=tuple(dropped),
             layers=tuple((layer.id, layer.name) for layer in layers),
-            search=definition.predicate,
+            search=search,
             read_in_view_id=base.id if base is not None else None,
             redact_roots=bool(base is not None and can_read is not None
                               and not await can_read(base)),
             subset_layers=tuple(layers),
+            subset_placement=placement,
+            holds_nothing=(base_config is not None and not allowed_roots
+                           and derive_entity_scope(base_config) == "curated"),
         )
 
     async def _load_view(self, view_id: str) -> Optional[ViewORM]:

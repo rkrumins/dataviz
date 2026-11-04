@@ -48,8 +48,7 @@ import { PRESETS as NARROW_PRESETS, seedsLabel as narrowSeedsLabel, specFor, spe
 import { canShareNarrow, decodeNarrowShare, narrowLink } from '@/features/narrow/narrowShareCodec'
 import { useNarrowStore, type NarrowDraft } from '@/features/narrow/narrowStore'
 import { narrowErrorText } from '@/features/narrow/useNarrowResolve'
-import { SaveAsViewSheet } from '@/features/live-views/SaveAsViewSheet'
-import { SaveSearchAsViewSheet } from '@/features/search-views/SaveSearchAsViewSheet'
+import { SaveAsView } from '@/features/search-views/SaveAsView'
 import { SubsetIssueBanner } from '@/features/search-views/SubsetIssueBanner'
 import { UpdateSubsetSearchDialog } from '@/features/search-views/UpdateSubsetSearchDialog'
 import { getSearchStatus, putSearch, SEARCH_VIEW_QUERY_KEY } from '@/services/searchViewsApi'
@@ -57,7 +56,7 @@ import type { SearchViewStatus } from '@/types/searchView'
 import { memberActionsFor } from '@/features/live-views/model'
 import { memberOps } from '@/services/liveViewsApi'
 import type { MemberOps, MembershipExpand } from '@/types/membership'
-import type { Predicate, SearchQuery, SearchResultPage } from '@/types/search'
+import type { Predicate, SearchQuery } from '@/types/search'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useBranchStore, useEffectiveBranchId, useGraphId } from '@/store/branchStore'
 import { Link, useNavigate } from 'react-router-dom'
@@ -2149,10 +2148,26 @@ export function ContextViewCanvas({
 
   useEffect(() => { fitToWidthRef.current = handleFitToWidth }, [handleFitToWidth])
 
+  // A subset view's rows are drawn in the layer whose feed listed them: the server
+  // placed them there (as the view's base places them, or by type). Never this
+  // canvas's own type rules, nor a loaded container's column. Placed where a
+  // session's drags would be, which win at any depth; a subset view has none.
+  const subsetView = !!activeView?.search
+  // Its matches drawn inside the containers its base draws them in: the reader's choice.
+  const showWhereTheySit = usePreferencesStore((s) => s.showWhereTheySit) ?? true
+  const feedPlacements = useMemo(() => {
+    if (!subsetView) return null
+    const placed = new Map<string, { layerId: string }>()
+    for (const n of nodes) {
+      if (n.data?.feedLayerId) placed.set(n.id, { layerId: n.data.feedLayerId })
+    }
+    return placed
+  }, [subsetView, nodes])
+
   // Layer assignment: rules, nodesByLayer, displayFlat, displayMap, urnToIdMap, nodeLayerMap
   const { nodesByLayer, displayFlat, displayMap, urnToIdMap, nodeLayerMap, nodeGroupMap, unassignedNodes, promotedAnchors, contractPlacements } = useLayerAssignment({
     nodes, sortedLayers, nodeEdgeFingerprint,
-    instanceAssignments, effectiveAssignments,
+    instanceAssignments: feedPlacements ?? instanceAssignments, effectiveAssignments,
     nodeMap, childMap, parentMap,
     assignments: activeReferenceLayout.assignments,
     entityScope: activeEntityScope,
@@ -2160,6 +2175,7 @@ export function ContextViewCanvas({
     sortOverrides,
     placementSpec,
     placementChains,
+    whereTheySit: subsetView && showWhereTheySit,
   })
   useEffect(() => { renderedLayerRef.current = nodeLayerMap }, [nodeLayerMap])
 
@@ -2239,21 +2255,33 @@ export function ContextViewCanvas({
   const autoOpenedGroupsRef = useRef<Set<string>>(new Set())
   useEffect(() => {
     const unopened: string[] = []
+    const open = (id: string) => {
+      if (autoOpenedGroupsRef.current.has(id)) return
+      autoOpenedGroupsRef.current.add(id)
+      unopened.push(id)
+    }
     nodesByLayer.forEach((roots) => {
       for (const root of roots) {
-        if (!root.isLogical) continue
-        if (autoOpenedGroupsRef.current.has(root.id)) continue
-        autoOpenedGroupsRef.current.add(root.id)
-        unopened.push(root.id)
+        if (root.isLogical) open(root.id)
       }
     })
+    // A subset view's containers, at any depth: drawn to show where its matches
+    // sit, so open, like a group, until collapsed.
+    if (subsetView) {
+      const stack = [...nodesByLayer.values()].flat()
+      while (stack.length > 0) {
+        const node = stack.pop()!
+        if (node.data.context) open(node.id)
+        stack.push(...node.children)
+      }
+    }
     if (unopened.length === 0) return
     setExpandedNodes((prev) => {
       const next = new Set(prev)
       for (const id of unopened) next.add(id)
       return next
     })
-  }, [nodesByLayer])
+  }, [nodesByLayer, subsetView])
 
   // Live context for resolving a parent's effective child-sort direction inside
   // stable callbacks (refs so loadChildrenSorted keeps ONE identity — a dep on
@@ -3897,7 +3925,6 @@ export function ContextViewCanvas({
   // never loads more.
   const typeFeeds = useCanvasStore(s => s.typeFeeds)
   // A subset view's layer pages its own feed (`layer:<id>`): its search's matches.
-  const subsetView = !!activeView?.search
   const feedTypesByLayer = useMemo(() => {
     const out = new Map<string, string[]>()
     if (subsetView) {
@@ -4619,9 +4646,10 @@ export function ContextViewCanvas({
 
   // SUBSET VIEWS (features/search-views) — a search's matches kept as a view of
   // their own; in a subset view, its layers list them. A preview switch
-  // (`searchViewsEnabled`). A subset places by type alone: no entity is placed by
-  // hand, grouped or reordered in it, and while it follows its base its layers
-  // are the base's, changed there.
+  // (`searchViewsEnabled`). The server places its matches — where its base places
+  // them while it follows it, by type in a layout of its own — so no entity is
+  // placed by hand, grouped or reordered in it, and while it follows its base its
+  // layers are the base's, changed there.
   const searchViewsOn = useFeature('searchViewsEnabled')
   const subsetFollows = activeView?.search?.layout === 'inherit'
   const subsetIssue = useCanvasStore((s) => s.subsetIssue)
@@ -4632,7 +4660,7 @@ export function ContextViewCanvas({
     enabled: searchViewsOn && subsetView && !!narrowViewId,
     staleTime: 15_000,
   })
-  const [saveSearch, setSaveSearch] = useState<{ query: SearchQuery; result: SearchResultPage } | null>(null)
+  const [saveSearch, setSaveSearch] = useState<{ query: SearchQuery } | null>(null)
   const searchInLayer = useCallback((layerId: string) => {
     // In a subset view the server reads a layer filter as the layer's types, inside the view's search.
     useSearchStore.getState().requestSearchRun({ kind: 'layer', layerAssignment: layerId } as Predicate, 'header')
@@ -4661,9 +4689,9 @@ export function ContextViewCanvas({
       })
       .catch((err) => notify('error', narrowErrorText(err)))
   }, [initialEditSubset, searchViewsOn, narrowViewId, search, notify])
-  const onSaveMatchesAsView = useCallback((query: SearchQuery, result: SearchResultPage) => {
+  const onSaveMatchesAsView = useCallback((query: SearchQuery) => {
     if (editingSubset) setUpdateSubsetQuery(query)
-    else setSaveSearch({ query, result })
+    else setSaveSearch({ query })
   }, [editingSubset, setSaveSearch, setUpdateSubsetQuery])
   const updateSubsetSearch = useCallback(async (query: SearchQuery) => {
     if (!editingSubset) return
@@ -4680,15 +4708,6 @@ export function ContextViewCanvas({
       },
     }, 8000)
   }, [editingSubset, navigateTo, notify, setEditingSubset, setUpdateSubsetQuery])
-  // The types the search found, most common first, from its first page of hits.
-  const typeCountsOf = useCallback((result: SearchResultPage) => {
-    const counts = new Map<string, number>()
-    for (const hit of result.hits ?? []) {
-      const t = String(hit.node?.entityType ?? '')
-      if (t) counts.set(t, (counts.get(t) ?? 0) + 1)
-    }
-    return [...counts].map(([type, count]) => ({ type, count }))
-  }, [])
 
   // MEMBERS (features/live-views) — in a view made from a query, an editor keeps
   // an entity out whatever the query finds, always includes one, or hands one
@@ -5618,7 +5637,9 @@ export function ContextViewCanvas({
       index,
       count: sortedLayers.length,
       folded: layerFold.folded.has(layer.id),
-      canEdit: layerEditsAllowed,
+      // A subset that follows its base takes its layers from there, as the header says:
+      // nothing here would save (the server refuses it).
+      canEdit: layerEditsAllowed && !subsetFollows,
       onInsert: (side: 'left' | 'right') => insertLayerBeside(layer.id, side),
       onRename: () => requestLayerRename(layer.id),
       onRecolor: (color: string) => recolorLayer(layer.id, color),
@@ -5644,7 +5665,7 @@ export function ContextViewCanvas({
         })
         : undefined,
     }
-  }, [menuLayerId, sortedLayers, layerFold, layerEditsAllowed, insertLayerBeside, requestLayerRename,
+  }, [menuLayerId, sortedLayers, layerFold, layerEditsAllowed, subsetFollows, insertLayerBeside, requestLayerRename,
     recolorLayer, reorderLayer, layerFoldOffered, foldLayersEnabled, deleteLayerWithUndo, isDraft,
     canEnterEdit, handleEnterEdit, narrowEnabled, openNarrow, personaMode, canEditGraph, subsetView,
     openBuilderForLayer, openBuildForLayer, traceActive, requestNewGroup, setBulkEditFor, setLayerSettingsFor])
@@ -8165,32 +8186,40 @@ export function ContextViewCanvas({
         />
       )}
 
-      {/* Save as view — the narrowing kept as a view of its own. */}
+      {/* Save as view — one sheet. A narrowing is kept live where a live view can keep
+          what it reaches, else as a list of its members; the sheet switches between them. */}
       {canSaveAsView && saveAsDraft && narrowViewId && scopeWsId && (
-        <SaveAsViewSheet
+        <SaveAsView
+          source={{ kind: 'narrowing', draft: saveAsDraft }}
           viewId={narrowViewId}
           viewName={activeView?.name ?? 'this view'}
           workspaceId={scopeWsId}
-          dataSourceId={dataSourceId ?? undefined}
-          draft={saveAsDraft}
-          sourceLayerCount={sortedLayers.length}
+          dataSourceId={dataSourceId}
+          boardLayers={sortedLayers}
+          boardConfig={activeView ? { layout: activeView.layout } : null}
+          canKeepLive={searchViewsOn}
+          canKeepList
           onClose={() => setSaveAsDraft(null)}
           onSaved={onViewSaved}
         />
       )}
 
-      {/* Save as view — a search's matches kept as a subset view. */}
+      {/* Save as view — a search's matches, kept live; Narrow first for more reach. */}
       {canSaveSearchAsView && saveSearch && narrowViewId && scopeWsId && (
-        <SaveSearchAsViewSheet
+        <SaveAsView
+          source={{ kind: 'search', predicate: saveSearch.query.predicate }}
           viewId={narrowViewId}
           viewName={activeView?.name ?? 'this view'}
           workspaceId={scopeWsId}
           dataSourceId={dataSourceId}
-          predicate={saveSearch.query.predicate}
           boardLayers={sortedLayers}
           boardConfig={activeView ? { layout: activeView.layout } : null}
           subset={activeView?.search ? { definition: activeView.search, baseName: subsetStatus?.base?.name ?? null } : null}
-          typeCounts={typeCountsOf(saveSearch.result)}
+          canKeepLive
+          canKeepList={narrowEnabled}
+          onNarrowInstead={narrowEnabled
+            ? () => { const query = saveSearch.query; setSaveSearch(null); narrowFromSearch(query) }
+            : undefined}
           onClose={() => setSaveSearch(null)}
           onSaved={(view) => { setSaveSearch(null); onViewSaved(view) }}
         />

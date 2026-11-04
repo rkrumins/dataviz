@@ -5,8 +5,16 @@
  * subset view: always current (it stores the search, never the matches), any
  * size, made at once, laid out like the view it came from and shared like any
  * view. Nothing is saved blind: the preview counts what each layer would hold.
+ *
+ * Following its base, each match is in the layer the base places it in — by hand,
+ * by what children inherit, by rules — and "Other matches" holds what the base
+ * places nowhere. Beside the matches it can keep what they reach — what is inside
+ * them and what contains them, every level or a few, of every kind or only some;
+ * one lineage step either way — still live and any size; and fewer layers: a
+ * layer left out in the preview takes its matches with it. More reach than that
+ * is a list of members, which Narrow makes.
  */
-import { useMemo, useState, type KeyboardEvent, type ReactNode } from 'react'
+import { useEffect, useMemo, useState, type KeyboardEvent, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { AnimatePresence, motion } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
@@ -14,30 +22,40 @@ import * as LucideIcons from 'lucide-react'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { Kbd } from '@/components/ui/Kbd'
 import { Segmented } from '@/components/ui/Segmented'
+import { LevelPicker } from '@/features/narrow/NarrowComposer'
 import { narrowErrorText } from '@/features/narrow/useNarrowResolve'
+import { useViewEntityTypes } from '@/hooks/useViewSchema'
 import { MOTION } from '@/lib/motion'
 import { cn } from '@/lib/utils'
 import { httpStatusOf } from '@/services/graphRequestFailure'
+import type { RuleCount } from '@/services/ruleCounts'
 import { createFromSearch } from '@/services/searchViewsApi'
 import type { View } from '@/services/viewApiService'
+import type { EntityTypeSchema } from '@/types/schema'
 import type { Predicate } from '@/types/search'
-import type { SearchViewDefinition, SubsetLayer, SubsetWithin } from '@/types/searchView'
-import { REST_LAYER_ID } from '@/types/searchView'
+import type { SearchViewDefinition, SubsetInclude, SubsetLayer, SubsetWithin } from '@/types/searchView'
+import { NO_INCLUDE, REST_LAYER_ID } from '@/types/searchView'
 
 import {
+  anyIncluded,
   combinedWith,
   describePredicate,
+  includeWords,
   layerPredicate,
   layersLike,
+  levelsText,
   nameFrom,
   perTypeLayers,
   placesByMoreThanType,
   requestOf,
   REST_LAYER_NAME,
+  withInclude,
   type BoardLayer,
+  type IncludeChoice,
   type LayoutChoice,
 } from './model'
 import { useLayerCounts } from './useLayerCounts'
+import { useTypeBreakdown } from './useTypeBreakdown'
 
 export interface SaveSearchAsViewSheetProps {
   /** The view the search was run in. */
@@ -53,18 +71,66 @@ export interface SaveSearchAsViewSheetProps {
   boardConfig?: Record<string, unknown> | null
   /** When it was run inside a subset view: that view's search, and its base. */
   subset?: { definition: SearchViewDefinition; baseName: string | null } | null
-  /** The types the search found, most common first, for "A layer per type found". */
-  typeCounts?: Array<{ type: string; count: number }>
   typeLabel?: (type: string) => string
+  /** From a narrowing kept live: what it reaches, and where it looks. */
+  initialInclude?: SubsetInclude
+  initialWithin?: SubsetWithin
+  /** Beside the title: keep it as a list of members instead. */
+  headerExtra?: ReactNode
+  /** Its choices as they change, so Save as view can keep them as a list instead. */
+  onChoicesChange?: (choices: { include: SubsetInclude; within: SubsetWithin }) => void
+  /** Keep their places as a list of members instead: offered when a live view can't
+   *  follow how its base places entities. */
+  onKeepAsList?: () => void
+  /** More reach than a live view keeps (two lineage steps, chosen entities): narrow first. */
+  onNarrowInstead?: () => void
   onClose: () => void
   onSaved: (view: View) => void
 }
+
+/** How far what is inside them, or what contains them, reaches: its levels (named
+ *  on the card once chosen — "Two levels in") and its kinds. */
+interface Reach {
+  levels: 'contentsLevels' | 'containersLevels'
+  kinds: 'contentsKinds' | 'containersKinds'
+  title: string
+  way: 'in' | 'up'
+  names?: { 1: string; all: string }
+  kindsLabel: string
+}
+
+/** What a live view can keep beside the matches, as the sheet offers it. */
+const INCLUDES: Array<{ key: IncludeChoice; label: string; hint: string; icon: keyof typeof LucideIcons; reach?: Reach }> = [
+  { key: 'contents', label: 'Everything inside them', hint: 'However deep', icon: 'ListTree', reach: {
+    levels: 'contentsLevels', kinds: 'contentsKinds', title: 'Levels inside them', way: 'in',
+    kindsLabel: 'Only these kinds inside them' } },
+  { key: 'containers', label: 'What contains them', hint: 'Up to the top', icon: 'FolderUp', reach: {
+    levels: 'containersLevels', kinds: 'containersKinds', title: 'Levels up', way: 'up',
+    names: { 1: 'Parent', all: 'Top' }, kindsLabel: 'Only these kinds of container' } },
+  { key: 'upstream', label: 'What feeds them', hint: 'One step upstream', icon: 'ArrowLeftToLine' },
+  { key: 'downstream', label: 'What they feed', hint: 'One step downstream', icon: 'ArrowRightToLine' },
+]
+
+/** The levels offered before the whole way. */
+const LEVELS = [1, 2, 3]
 
 const CARDS: Record<LayoutChoice, { icon: keyof typeof LucideIcons; title: (base: string) => string }> = {
   like: { icon: 'Columns3', title: (b) => `Like “${b}”` },
   perType: { icon: 'Shapes', title: () => 'A layer per type found' },
   one: { icon: 'Rows3', title: () => 'One layer' },
 }
+
+const NO_TYPES: Array<{ type: string; count: number }> = []
+const NONE_LEFT_OUT: ReadonlySet<string> = new Set()
+/** The count of everything it finds, beside its layers' (Other matches is what is left). */
+const FOUND = '__found__'
+/** No counts asked for: the other way of counting is the one in use. */
+const NOTHING_TO_COUNT: Array<{ id: string; predicate: Predicate }> = []
+
+/** What it finds that its base places in layer ``id``: a layer filter, which the
+ *  server resolves as the base's canvas places entities. */
+const inLayer = (found: Predicate, id: string): Predicate =>
+  ({ kind: 'group', op: 'and', children: [found, { kind: 'layer', layerAssignment: id }] }) as unknown as Predicate
 
 const number = new Intl.NumberFormat()
 const capitalise = (s: string) => (s ? s[0].toUpperCase() + s.slice(1) : s)
@@ -82,55 +148,113 @@ function saveErrorText(err: unknown): string {
 }
 
 export function SaveSearchAsViewSheet({
-  viewId, viewName, workspaceId, dataSourceId, predicate, boardLayers, boardConfig, subset, typeCounts = [],
-  typeLabel, onClose, onSaved,
+  viewId, viewName, workspaceId, dataSourceId, predicate, boardLayers, boardConfig, subset,
+  typeLabel, initialInclude, initialWithin, headerExtra, onChoicesChange, onKeepAsList, onNarrowInstead,
+  onClose, onSaved,
 }: SaveSearchAsViewSheetProps) {
   const kept = combinedWith(subset?.definition, predicate, viewId)
   const baseName = subset ? (subset.baseName ?? 'its base view') : viewName
   const sentence = describePredicate(predicate, typeLabel)
 
   const [name, setName] = useState(() => capitalise(nameFrom(sentence)))
-  const [within, setWithin] = useState<SubsetWithin>(subset?.definition.within ?? 'view')
+  const [within, setWithin] = useState<SubsetWithin>(subset?.definition.within ?? initialWithin ?? 'view')
   const [choice, setChoice] = useState<LayoutChoice>('like')
+  const [include, setInclude] = useState<SubsetInclude>(initialInclude ?? NO_INCLUDE)
+  // The view's kinds, for "Only these kinds", by the names its schema gives them.
+  const kinds = useViewEntityTypes()
+  const kindName = (type: string) => kinds.find((k) => k.id === type)?.name || type
   const [visibility, setVisibility] = useState<'private' | 'workspace'>('private')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   // One per sheet: a retry of this save answers with the view the first attempt made.
   const [idempotencyKey] = useState(() => (globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`))
+  useEffect(() => { onChoicesChange?.({ include, within }) }, [include, within, onChoicesChange])
 
   const offers: Array<{ choice: LayoutChoice; available: boolean; hint: string }> = [
     { choice: 'like', available: true, hint: within === 'view'
-      ? 'Its layers, followed as they change — each match in the layer of its type'
+      ? 'Its layers, followed as they change — each match where it places it'
       : 'A copy of its layers — each match in the layer of its type' },
-    { choice: 'perType', available: typeCounts.length > 0, hint: typeCounts.length
-      ? 'A column for each kind of match, the most common first'
-      : 'Run the search with its breakdown by type to offer this' },
+    { choice: 'perType', available: true, hint: 'A column for each kind it holds, the most common first' },
     { choice: 'one', available: true, hint: 'Every match in one list' },
   ]
+
+  // What the view finds — its search and what it includes.
+  const found = useMemo(() => withInclude(kept.predicate, include), [kept.predicate, include])
+  // The kinds it holds, asked for only while a layer per type is chosen.
+  const breakdown = useTypeBreakdown(choice === 'perType' ? kept.baseViewId : null, found, within === 'dataSource')
+  const typeCounts = breakdown.status === 'done' ? breakdown.types : NO_TYPES
 
   const layers: SubsetLayer[] = useMemo(() => {
     if (choice === 'like') return layersLike(boardLayers)
     if (choice === 'perType') {
+      if (breakdown.status !== 'done') return []
       const { layers: typed } = perTypeLayers(typeCounts, typeLabel)
       return layersLike([...typed.map((l, i) => ({ id: `layer-${i + 1}`, name: l.name, order: i, entityTypes: l.entityTypes })),
         { id: REST_LAYER_ID, name: REST_LAYER_NAME, order: typed.length, showUnassigned: true }])
     }
     return [{ id: REST_LAYER_ID, name: 'Matches', entityTypes: [], rest: true, excludedTypes: [] }]
-  }, [choice, boardLayers, typeCounts, typeLabel])
+  }, [choice, boardLayers, breakdown.status, typeCounts, typeLabel])
 
-  const toCount = useMemo(() => layers.flatMap((layer) => {
-    const p = layerPredicate(kept.predicate, layer)
+  // The base's layers left out, with their matches — by a subset that follows its
+  // base alone: an own layout's left-out type would land in "Other matches".
+  const canHide = choice === 'like' && within === 'view' && layers.length > 1
+  const [leftOut, setLeftOut] = useState<ReadonlySet<string>>(NONE_LEFT_OUT)
+  const hidden = canHide ? leftOut : NONE_LEFT_OUT
+  const toggleLeftOut = (id: string) => setLeftOut((was) => {
+    const next = new Set(was)
+    if (next.has(id)) next.delete(id)
+    else next.add(id)
+    return next
+  })
+
+  // Following its base, a layer holds what the base places there: each counted in
+  // the base as a layer filter, for every one of its layers, left out or not, and
+  // Other matches is what none of them holds. A base past what a live view can
+  // follow (too many entities placed by hand, too many rules) refuses those counts;
+  // its matches are then placed by type, as the server places them, and counted
+  // that way.
+  const likeBase = choice === 'like' && within === 'view'
+  const followToCount = useMemo(() => (likeBase ? [
+    ...layers.filter((l) => l.id !== REST_LAYER_ID).map((l) => ({ id: l.id, predicate: inLayer(found, l.id) })),
+    { id: FOUND, predicate: found },
+  ] : NOTHING_TO_COUNT), [likeBase, layers, found])
+  const followCounts = useLayerCounts(kept.baseViewId, followToCount, false)
+  const followed = (followCounts.status === 'counting' || followCounts.status === 'done') ? followCounts.counts : null
+  const cantFollow = likeBase && followToCount.some((l) => l.id !== FOUND && followed?.get(l.id)?.complete && followed.get(l.id)?.error)
+  const follows = likeBase && !cantFollow
+
+  // By type: every other layout, and a base it can't follow.
+  const byTypeToCount = useMemo(() => (follows ? NOTHING_TO_COUNT : layers.flatMap((layer) => {
+    if (hidden.has(layer.id)) return []
+    const p = layerPredicate(found, layer)
     return p ? [{ id: layer.id, predicate: p }] : []
-  }), [layers, kept.predicate])
-  const counts = useLayerCounts(kept.baseViewId, toCount, within === 'dataSource')
-  const countOf = (id: string) => (counts.status === 'counting' || counts.status === 'done') ? counts.counts.get(id) : undefined
-  const total = toCount.reduce((sum, l) => sum + (countOf(l.id)?.count ?? 0), 0)
-  // Each layer's share, drawn against the fullest one so a small layer still shows.
-  const most = Math.max(1, ...toCount.map((l) => countOf(l.id)?.count ?? 0))
-  const exact = counts.status === 'done' && toCount.every((l) => countOf(l.id)?.complete)
+  })), [follows, layers, found, hidden])
+  const byTypeCounts = useLayerCounts(kept.baseViewId, byTypeToCount, within === 'dataSource')
 
-  const placedByType = choice === 'like' && !!boardConfig && placesByMoreThanType(boardConfig)
-  const canSave = !!name.trim() && !saving
+  const toCount = follows ? followToCount : byTypeToCount
+  const counts = follows ? followCounts : byTypeCounts
+  const keptLayers = layers.filter((l) => !hidden.has(l.id) && (follows || l.rest || l.entityTypes.length > 0))
+  const counted = (counts.status === 'counting' || counts.status === 'done') ? counts.counts : null
+  const countOf = (id: string): RuleCount | undefined => {
+    if (!(follows && id === REST_LAYER_ID)) return counted?.get(id)
+    // Other matches: what it finds that none of its base's layers holds — once
+    // every count is exact, as floors say nothing of what is left.
+    const all = counted?.get(FOUND)
+    const parts = toCount.filter((l) => l.id !== FOUND).map((l) => counted?.get(l.id))
+    if (!all?.complete || parts.some((c) => !c?.complete)) return undefined
+    return { count: Math.max(0, all.count - parts.reduce((sum, c) => sum + (c?.count ?? 0), 0)), complete: true, percent: 100 }
+  }
+  const shownLayers = layers.filter((l) => !hidden.has(l.id))
+  const total = shownLayers.reduce((sum, l) => sum + (countOf(l.id)?.count ?? 0), 0)
+  // Each layer's share, drawn against the fullest one so a small layer still shows.
+  const most = Math.max(1, ...layers.map((l) => countOf(l.id)?.count ?? 0))
+  const exact = counts.status === 'done' && toCount.every((l) => counted?.get(l.id)?.complete)
+
+  // Placed by type: a copy of its layers (a whole data source's subset) of a base
+  // that places by more, or a live view that can't follow its base.
+  const copiedByType = choice === 'like' && within === 'dataSource' && !!boardConfig && placesByMoreThanType(boardConfig)
+  const unfollowed = choice === 'like' && within === 'view' && cantFollow
+  const canSave = !!name.trim() && !saving && keptLayers.length > 0
 
   const save = async () => {
     if (!canSave) return
@@ -138,7 +262,7 @@ export function SaveSearchAsViewSheet({
     setError(null)
     try {
       const out = await createFromSearch(requestOf(
-        { name, visibility, within, choice },
+        { name, visibility, within, choice, include, hidden: [...hidden] },
         { workspaceId, dataSourceId, viewId: kept.baseViewId, predicate: kept.predicate, baseLayers: boardLayers,
           typeCounts, typeLabel },
       ), idempotencyKey)
@@ -178,13 +302,14 @@ export function SaveSearchAsViewSheet({
         }}
       >
         <div className="flex items-start justify-between gap-3 px-7 pt-6 pb-4 border-b border-glass-border/60">
-          <div className="flex items-center gap-3.5 min-w-0">
+          <div className="flex items-start gap-3.5 min-w-0">
             <div className="w-11 h-11 rounded-2xl bg-accent-lineage/[0.12] border border-accent-lineage/25 grid place-items-center flex-none">
               <LucideIcons.ListFilter className="w-5 h-5 text-accent-lineage" strokeWidth={2.2} />
             </div>
             <div className="min-w-0">
               <h2 id="save-search-title" className="text-xl font-display font-semibold text-ink leading-tight">Save as a view</h2>
               <p className="text-[13px] text-ink-muted mt-0.5 leading-snug">These matches as a view of their own: always current, any size, shared like any view.</p>
+              {headerExtra && <div className="mt-3">{headerExtra}</div>}
             </div>
           </div>
           <button type="button" onClick={onClose} disabled={saving} aria-label="Close" className="p-2 rounded-lg text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors disabled:opacity-40">
@@ -204,7 +329,8 @@ export function SaveSearchAsViewSheet({
               className="w-full h-10 px-3.5 rounded-xl bg-black/[0.03] dark:bg-white/[0.04] border border-glass-border text-[14px] text-ink placeholder:text-ink-muted/60 focus:outline-none focus:ring-2 focus:ring-accent-lineage/35 focus:border-accent-lineage/50"
             />
             <p className="mt-1.5 text-[12px] text-ink-muted leading-snug">
-              The matches of <span className="text-ink">{subset ? `${describePredicate(subset.definition.predicate, typeLabel)} and ${sentence}` : sentence}</span>.
+              The matches of <span className="text-ink">{subset ? `${describePredicate(subset.definition.predicate, typeLabel)} and ${sentence}` : sentence}</span>
+              {anyIncluded(include) && <>, with <span className="text-ink">{includeWords(include, kindName)}</span></>}.
             </p>
           </Section>
 
@@ -223,6 +349,60 @@ export function SaveSearchAsViewSheet({
               {within === 'view'
                 ? `A subset of “${baseName}”: only what it holds. Its readers don’t need to be able to open it.`
                 : 'Anywhere in the data source, whatever any view holds.'}
+            </p>
+          </Section>
+
+          <Section title="Keep with them">
+            <div className="grid grid-cols-2 gap-2" role="group" aria-label="Keep with them">
+              {INCLUDES.map((item) => {
+                const Icon = LucideIcons[item.icon] as LucideIcons.LucideIcon
+                const on = include[item.key]
+                const levels = item.reach && include[item.reach.levels]
+                return (
+                  <button
+                    key={item.key}
+                    type="button"
+                    aria-pressed={on}
+                    onClick={() => setInclude((was) => ({ ...was, [item.key]: !was[item.key] }))}
+                    className={cn(
+                      'group flex items-center gap-2.5 rounded-xl border px-3 py-2.5 text-left transition-colors',
+                      on
+                        ? 'border-accent-lineage/60 bg-accent-lineage/[0.08] ring-1 ring-accent-lineage/25'
+                        : 'border-glass-border/80 hover:border-accent-lineage/40 hover:bg-accent-lineage/[0.03]',
+                    )}
+                  >
+                    <span className={cn('w-7 h-7 rounded-lg grid place-items-center flex-none transition-colors',
+                      on ? 'bg-accent-lineage text-white' : 'bg-black/[0.04] dark:bg-white/[0.06] text-ink-muted group-hover:text-accent-lineage')}>
+                      {on ? <LucideIcons.Check className="w-4 h-4" strokeWidth={2.6} /> : <Icon className="w-4 h-4" />}
+                    </span>
+                    <span className="min-w-0">
+                      <span className="block text-[12.5px] font-semibold text-ink leading-tight">{item.label}</span>
+                      <span className="block text-[11px] text-ink-muted leading-snug">
+                        {item.reach && levels ? `${capitalise(levelsText(levels))} ${item.reach.way}` : item.hint}
+                      </span>
+                    </span>
+                  </button>
+                )
+              })}
+            </div>
+            {/* How far each reaches, revealed with it. */}
+            <AnimatePresence initial={false}>
+              {INCLUDES.map((item) => item.reach && include[item.key] && (
+                <motion.div key={item.key} className="mt-2" initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0 }} transition={MOTION.collapse}>
+                  <HowFar reach={item.reach} icon={item.icon} include={include} kinds={kinds}
+                    onChange={(patch) => setInclude((was) => ({ ...was, ...patch }))} />
+                </motion.div>
+              ))}
+            </AnimatePresence>
+            <p className="mt-2 text-[12px] text-ink-muted leading-snug">
+              Kept as part of its search, so it stays current at any size.
+              {onNarrowInstead && (
+                <> More reach, or chosen entities?{' '}
+                  <button type="button" onClick={onNarrowInstead}
+                    className="font-semibold text-accent-lineage hover:underline underline-offset-2">Narrow first</button>
+                  {' '}and save from there.</>
+              )}
             </p>
           </Section>
 
@@ -260,37 +440,83 @@ export function SaveSearchAsViewSheet({
                 )
               })}
             </div>
-            {placedByType && (
+            {copiedByType && (
               <p className="mt-2.5 flex gap-2 text-[12px] text-amber-700 dark:text-amber-400 leading-snug">
                 <LucideIcons.Info className="w-3.5 h-3.5 flex-none mt-0.5" aria-hidden />
-                “{baseName}” also places entities by rules on tags or properties, or by hand. A subset places them by type.
+                “{baseName}” also places entities by rules on tags or properties, or by hand. A copy of its layers places them by type.
               </p>
+            )}
+            {unfollowed && (
+              <div className="mt-2.5 flex gap-2 text-[12px] text-amber-700 dark:text-amber-400 leading-snug" role="status">
+                <LucideIcons.Info className="w-3.5 h-3.5 flex-none mt-0.5" aria-hidden />
+                <div>
+                  <p>
+                    A live view can’t follow how “{baseName}” places entities: it places too many by hand, or by too
+                    many rules. Here its matches would be placed by type.
+                  </p>
+                  {onKeepAsList && (
+                    <button type="button" onClick={onKeepAsList}
+                      className="mt-1.5 inline-flex items-center gap-1.5 h-7 px-2.5 rounded-lg text-[12px] font-medium text-accent-lineage bg-accent-lineage/10 hover:bg-accent-lineage/15 transition-colors">
+                      <LucideIcons.ListChecks className="w-3.5 h-3.5" aria-hidden />
+                      Keep their places as a list
+                    </button>
+                  )}
+                </div>
+              </div>
             )}
           </Section>
 
           <Section title="Preview">
             <ul className="rounded-xl border border-glass-border/70 divide-y divide-glass-border/50" aria-label="What each layer holds">
+              {choice === 'perType' && breakdown.status !== 'done' && (
+                <li className="flex items-center gap-2 px-3.5 py-2.5 text-[12.5px] text-ink-muted" role="status">
+                  {breakdown.status === 'error' ? (
+                    <><LucideIcons.CircleAlert className="w-3.5 h-3.5 flex-none text-amber-600 dark:text-amber-400" aria-hidden />
+                      Couldn’t tell what kinds it holds. Choose another layout, or try again later.</>
+                  ) : (
+                    <><LucideIcons.Loader2 className="w-3.5 h-3.5 flex-none animate-spin" aria-hidden />
+                      Finding the kinds of entity it holds…</>
+                  )}
+                </li>
+              )}
               {layers.map((layer) => {
                 const c = countOf(layer.id)
-                const counted = toCount.some((l) => l.id === layer.id)
-                const empty = counted && c?.complete && c.count === 0
+                const left = hidden.has(layer.id)
+                const held = (follows && layer.id === REST_LAYER_ID) || toCount.some((l) => l.id === layer.id)
+                const empty = held && c?.complete && c.count === 0
+                // Leaving out the last layer that can hold matches would leave nothing to show.
+                const lastKept = !left && keptLayers.length === 1 && keptLayers[0].id === layer.id
                 return (
-                  <li key={layer.id} className={cn('relative overflow-hidden flex items-center justify-between gap-3 px-3.5 py-2', (empty || !counted) && 'opacity-50')}>
+                  <li key={layer.id} className={cn('relative overflow-hidden flex items-center justify-between gap-3 px-3.5 py-2',
+                    (empty || !held) && !left && 'opacity-50')}>
                     {/* Its share of the matches, in its colour, behind the row. */}
                     {c && c.count > 0 && (
                       <span aria-hidden className="absolute inset-y-0 left-0 opacity-[0.10] dark:opacity-[0.16] transition-[width] duration-500 ease-out"
                         style={{ width: `${Math.max(2, (c.count / most) * 100)}%`, background: layer.color ?? '#94a3b8' }} />
                     )}
                     <span className="relative flex items-center gap-2 min-w-0">
-                      <span className="w-2 h-2 rounded-full flex-none" style={{ background: layer.color ?? 'var(--color-ink-muted, #94a3b8)' }} aria-hidden />
-                      <span className="truncate text-[12.5px] text-ink">{layer.name}</span>
-                      {layer.rest && <span className="text-[11px] text-ink-muted">· every other type</span>}
+                      {canHide ? (
+                        <button type="button" role="switch" aria-checked={!left} disabled={lastKept}
+                          aria-label={left ? `Keep ${layer.name}` : `Leave out ${layer.name}`}
+                          title={lastKept ? 'Keep at least one layer' : left ? 'Keep this layer' : 'Leave this layer and its matches out'}
+                          onClick={() => toggleLeftOut(layer.id)}
+                          className={cn('w-4 h-4 rounded-[5px] border-[1.5px] grid place-items-center flex-none transition-colors disabled:cursor-not-allowed',
+                            left ? 'border-ink-muted/45 bg-transparent hover:border-accent-lineage/60' : 'border-transparent text-white')}
+                          style={left ? undefined : { background: layer.color ?? '#94a3b8' }}>
+                          {!left && <LucideIcons.Check className="w-3 h-3" strokeWidth={3} />}
+                        </button>
+                      ) : (
+                        <span className="w-2 h-2 rounded-full flex-none" style={{ background: layer.color ?? 'var(--color-ink-muted, #94a3b8)' }} aria-hidden />
+                      )}
+                      <span className={cn('truncate text-[12.5px]', left ? 'text-ink-muted line-through decoration-ink-muted/50' : 'text-ink')}>{layer.name}</span>
+                      {layer.rest && <span className={cn('text-[11px] text-ink-muted', left && 'opacity-60')}>{follows ? '· the rest' : '· every other type'}</span>}
                     </span>
                     <span className="relative flex-none text-[12px] font-medium tabular-nums text-ink-secondary">
-                      {!counted ? 'nothing to hold'
-                        : c === undefined ? '…'
-                          : empty ? 'no matches — hidden'
-                            : `${number.format(c.count)}${c.complete ? '' : '+'}`}
+                      {left ? <span className="text-ink-muted font-normal">left out</span>
+                        : !held ? 'nothing to hold'
+                          : c === undefined ? (held && follows && layer.id === REST_LAYER_ID && counts.status === 'done' ? 'the rest' : '…')
+                            : empty ? 'no matches — hidden'
+                              : `${number.format(c.count)}${c.complete ? '' : '+'}`}
                     </span>
                   </li>
                 )
@@ -331,7 +557,7 @@ export function SaveSearchAsViewSheet({
           <div className="flex items-center justify-between gap-3">
             <p className={cn('min-w-0 truncate text-[12px] tabular-nums text-ink-muted', counts.status !== 'done' && 'opacity-70')}>
               {counts.status === 'error' ? 'Couldn’t count the matches — you can still save'
-                : counts.status === 'idle' ? '' : `${number.format(total)}${exact ? '' : '+'} matches`}
+                : counts.status === 'idle' ? '' : `${number.format(total)}${exact ? '' : '+'} ${anyIncluded(include) ? 'in all' : 'matches'}`}
             </p>
             <div className="flex items-center gap-2 flex-none">
               <button type="button" onClick={onClose} disabled={saving} className="h-9 px-4 rounded-xl text-[13px] font-semibold text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors disabled:opacity-40">
@@ -365,5 +591,71 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
       <p className="text-[11px] font-semibold uppercase tracking-wider text-ink-muted/70 mb-2">{title}</p>
       {children}
     </section>
+  )
+}
+
+/** How far one of them reaches: a few levels or the whole way, and — opened on
+ *  demand — only some of the view's kinds, none chosen being every kind. */
+function HowFar({ reach, icon, include, kinds, onChange }: {
+  reach: Reach
+  icon: keyof typeof LucideIcons
+  include: SubsetInclude
+  kinds: EntityTypeSchema[]
+  onChange: (patch: Partial<SubsetInclude>) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const Icon = LucideIcons[icon] as LucideIcons.LucideIcon
+  const chosen = include[reach.kinds] ?? []
+  const toggleKind = (type: string) => {
+    const next = chosen.includes(type) ? chosen.filter((t) => t !== type) : [...chosen, type]
+    onChange({ [reach.kinds]: next.length ? next : undefined })
+  }
+  return (
+    <div className="rounded-xl border border-glass-border/70 px-3.5 py-2.5">
+      <div className="flex items-center justify-between gap-3">
+        <span className="flex items-center gap-2 min-w-0 text-[12.5px] font-semibold text-ink">
+          <Icon className="w-3.5 h-3.5 flex-none text-accent-lineage" aria-hidden />
+          <span className="truncate">{reach.title}</span>
+        </span>
+        <LevelPicker label={reach.title} value={include[reach.levels] ?? 'all'} levels={LEVELS} names={reach.names}
+          onChange={(levels) => onChange({ [reach.levels]: levels === 'all' ? undefined : levels })} />
+      </div>
+      {kinds.length > 0 && (
+        <>
+          <button type="button" aria-expanded={open} aria-label={reach.kindsLabel} onClick={() => setOpen((was) => !was)}
+            className="mt-1 inline-flex items-center gap-2 h-6 rounded-md text-[11.5px] font-medium text-ink-muted hover:text-ink transition-colors">
+            <LucideIcons.ChevronRight className={cn('w-3.5 h-3.5 transition-transform duration-150', open && 'rotate-90')} aria-hidden />
+            <span>Only these kinds</span>
+            {chosen.length > 0 && (
+              <span className="-ml-1 px-1.5 rounded-md bg-accent-lineage/10 text-[10.5px] font-semibold tabular-nums text-accent-lineage">
+                {chosen.length}
+              </span>
+            )}
+          </button>
+          <AnimatePresence initial={false}>
+            {open && (
+              <motion.div role="group" aria-label={reach.kindsLabel} className="mt-1 pl-[22px] flex flex-wrap items-center gap-1.5"
+                initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} transition={MOTION.collapse}>
+                {kinds.map((kind) => {
+                  const picked = chosen.includes(kind.id)
+                  return (
+                    <button key={kind.id} type="button" aria-pressed={picked} onClick={() => toggleKind(kind.id)}
+                      className={cn('inline-flex items-center gap-1.5 h-6 px-2 rounded-full border text-[11.5px] font-medium transition-colors',
+                        picked ? 'border-accent-lineage/50 bg-accent-lineage/[0.10] text-accent-lineage'
+                          : 'border-black/[0.08] dark:border-white/[0.10] text-ink-secondary hover:border-accent-lineage/40 hover:text-ink')}>
+                      {picked
+                        ? <LucideIcons.Check className="w-3 h-3" strokeWidth={2.6} aria-hidden />
+                        : <span className="w-1.5 h-1.5 rounded-full flex-none" style={{ background: kind.visual.color }} aria-hidden />}
+                      {kind.name || kind.id}
+                    </button>
+                  )
+                })}
+                {chosen.length === 0 && <span className="text-[11px] text-ink-muted">None chosen: every kind</span>}
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </>
+      )}
+    </div>
   )
 }

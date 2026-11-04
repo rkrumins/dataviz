@@ -24,7 +24,9 @@ Pure: it reads no database and no graph. ``contract_enabled`` imports the flag s
 """
 from __future__ import annotations
 
+import hashlib
 import heapq
+import json
 import math
 import re
 from dataclasses import dataclass, field, replace
@@ -229,10 +231,33 @@ class PlacementSpec:
 @dataclass(frozen=True)
 class LayerTarget:
     """A search's layer filter resolved against its view: the view's compiled placement and the
-    layer the filter names. ``digest`` identifies the placement's inputs, for result caches."""
+    layer the filter names. ``digest`` identifies the placement's inputs, for result caches.
+    ``layer_id`` None: in any of the view's layers, as a member (``Placement.member``): what a
+    subset's "Other matches" holds the matches outside of."""
     spec: PlacementSpec
-    layer_id: str
+    layer_id: Optional[str]
     digest: str
+
+
+def placement_digest(spec: PlacementSpec) -> str:
+    """What decides where ``spec`` places entities, as a short id: its scope, layers, rules in
+    their order with what each reads, the fallback and the hand placements, never names, colours
+    or when something was placed. So a rename or a recolour keeps it, and anything that can move
+    an entity changes it."""
+    canonical = {
+        "scope": spec.scope,
+        "layers": sorted(spec.layer_ids),
+        "first": spec.first_layer_id,
+        "fallback": spec.fallback_layer_id,
+        "rules": [[r.layer_id, list(r.key), sorted(r.types) if r.types is not None else None,
+                   sorted(r.tags) if r.tags is not None else None, r.urn_pattern,
+                   [[name, repr(cmp)] for name, cmp in r.comparisons], r.cascades_soft]
+                  for r in spec.rules],
+        "explicit": sorted([urn, e.layer_id, e.inherits_children]
+                           for urn, e in spec.explicit.items() if e.layer_id in spec.layer_ids),
+    }
+    blob = json.dumps(canonical, sort_keys=True, separators=(",", ":"), default=repr)
+    return hashlib.sha1(blob.encode("utf-8")).hexdigest()[:12]
 
 
 def _num(v: Any) -> Any:

@@ -260,12 +260,28 @@ it, keep it as a view of its own: **Save as view** on the **Narrowed to N
 entities** bar, or **Save as view…** in the Narrow window. You need permission
 to create views in the workspace.
 
-The **Save as a view** panel:
+The **Save as a view** panel keeps it one of two ways, under **Keep it** at its
+top:
+
+- **Live · any size**, chosen when it can be: the view keeps the narrowing's
+  search, never a list, so it is current every time it opens, however many
+  entities it holds. It is a *subset view*, saved as in
+  [Subset views](/guide/managing-views#subset-views-a-searchs-matches-as-a-view),
+  with what the narrowing reaches already chosen under **Keep with them**.
+  Offered when the narrowing starts from a search, keeps everything inside the
+  matches or nothing inside them, and follows lineage one step at most either
+  way.
+- **As a list · up to 5,000**: the view keeps a list of its members. Chosen
+  entities, a number of levels inside, two or more lineage steps, and what is
+  inside the sources and consumers are kept this way. When **Live** isn't
+  offered, the panel says why.
+
+Kept as a list, the panel offers:
 
 1. **Name**, filled in from what the narrowing shows.
-2. **Keeps itself up to date** is on by default. As the data changes, what newly
-   matches arrives and what stops matching leaves. Turn it off for a
-   **snapshot**, which keeps the members it has now.
+2. **Keeps itself up to date** is on by default. When the view is opened after
+   its data changed, what newly matches arrives and what stops matching leaves.
+   Turn it off for a **snapshot**, which keeps the members it has now.
 3. **Layout** sets the layers the view starts with:
    - **Like** the view you are in: its layers, each entity placed where that
      view places it. **With results** keeps only the layers something lands
@@ -372,6 +388,9 @@ Context View features.
 | `⌘I` / `Ctrl-I` | Expand or compact the trace dock (during a trace) |
 | `Esc` | During a trace, close any open popover, then leave the trace |
 | `⌘0` / `Ctrl-0` | Fit every layer into the window width |
+| `C` | In a draft: start a link from the selected entity, as **Connect To…** does. With no entity or several selected, turn **Connect** on or off |
+| `⌘D` / `Ctrl-D` | In a draft: make a quick copy of each selected entity and everything inside it, without asking |
+| `⌘⇧D` / `Ctrl-Shift-D` | In a draft: open **Duplicate…** for the selected entity |
 | `⌘/` / `Ctrl-/` | Switch between the **Business** and **Technical** views (anywhere in the app) |
 
 ## Where to next

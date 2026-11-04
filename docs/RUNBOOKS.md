@@ -25,6 +25,7 @@ each section links to the page with the full background.
 | [Check what the placement switch would change](#check-what-the-placement-switch-would-change) | Before you turn on **One placement rule for every view surface** |
 | [Recover the graph store](#recover-the-graph-store) | FalkorDB lost data, won't start, or a shard or region is gone |
 | [Fix slow or timed-out graphs](#fix-slow-or-timed-out-graphs) | Users report slow canvases, `429`s or timeouts |
+| [Subset views and Narrow under load](#subset-views-and-narrow-under-load) | Subset views say "so far" for long, answer `429`, or Narrow is slow |
 
 ## Back up and restore
 
@@ -276,6 +277,34 @@ In it, `resilience.breaker` shows whether slow queries are being counted as outa
 healthy shape under load is `deadline_timeouts_not_counted` rising while `breaker_opens`
 stays flat), and `dependencies.event_loop` says whether one process is wedged. For trends,
 use the metrics in [Observability](/docs/observability).
+
+## Subset views and Narrow under load
+
+A subset view's layer is one search, shared by every viewer and every subset asking the same,
+and answered from its last complete page while the data changes. Narrow's answers are cached and
+shared the same way. A request that waits on another's scan or answer holds no graph admission
+and no database connection while it does.
+
+1. **Find which part is short**, from [Observability](/docs/observability):
+   - `view_feed_answers_total{outcome="busy"}` or `{outcome="no_slot"}` rising: the feed lanes
+     are all scanning. Each API process runs `DEEP_SEARCH_VIEW_FEED_LANE` scans (2) at once.
+   - `provider_manager_events{event="graph_shed_process_full"}` rising: processes are at their
+     ceiling of graph reads. It is sized from the graph-read pool
+     (`DB_GRAPH_READ_POOL_SIZE` + `DB_GRAPH_READ_POOL_MAX_OVERFLOW`).
+   - `graph_cache_unreachable_total` rising: the cache's Redis is down or slow. Each process now
+     computes for itself; bring Redis back first.
+   - `search_raw_labels_total{answer="read"}` rising with every request rather than every data
+     change: the label scan isn't being shared, which also points at the cache's Redis.
+2. **If the lanes are short and the graph store has room**, raise
+   `DEEP_SEARCH_VIEW_FEED_LANE` a step at a time. The fleet runs lane × API processes scans at
+   once: size it to what FalkorDB takes, not up with the number of viewers.
+3. **If the data changes often**, raise `DEEP_SEARCH_VIEW_FEED_REUSE` (300 s): layers answer
+   their last page for longer before they scan again. Readers never see a rescan's rows so far.
+4. **If one workspace takes the store's time**, turn on `FAIR_SHARE_ENABLED` and set
+   `FAIR_SHARE_VIEW_FEED_RATE` / `_BURST` (feeds) and the trace bucket (Narrow, previews and
+   list views' updates use it).
+5. **A list view stuck on "Updating"** is let go when its lease lapses (5 minutes); the next
+   opening takes it on.
 
 ## Where to next
 
