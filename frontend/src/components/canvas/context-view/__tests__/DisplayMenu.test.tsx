@@ -272,3 +272,18 @@ describe('DisplayMenu — Business view, in plain words', () => {
     expect(screen.getByText('Turn on Lineage to change how lines are drawn')).toBeInTheDocument()
   })
 })
+
+describe('DisplayMenu — Minimal density', () => {
+  it('offers Minimal first, the tightest, and choosing it stores the density', () => {
+    const setCanvasDensity = usePreferencesStore.getState().setCanvasDensity
+    render(<DisplayMenu {...baseProps()} onSetCanvasDensity={setCanvasDensity} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Display' }))
+
+    const options = within(screen.getByRole('radiogroup', { name: 'Canvas density' })).getAllByRole('radio')
+    expect(options.map((o) => o.textContent)).toEqual(['Minimal', 'Compact', 'Comfortable', 'Spacious'])
+
+    fireEvent.click(screen.getByRole('radio', { name: 'Minimal' }))
+    expect(usePreferencesStore.getState().canvasDensity).toBe('minimal')
+    usePreferencesStore.setState({ canvasDensity: 'spacious' })
+  })
+})

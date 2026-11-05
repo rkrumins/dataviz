@@ -19,8 +19,9 @@ export interface DrawerLayout {
 /** Visual density of list/grid items in the Explorer page. */
 export type ExplorerDensity = 'compact' | 'comfortable' | 'spacious'
 
-/** Visual density of layer column tree items in the Context View canvas. */
-export type CanvasDensity = 'compact' | 'comfortable' | 'spacious'
+/** Visual density of layer column tree items in the Context View canvas.
+ *  `minimal` is one line per entity. */
+export type CanvasDensity = 'minimal' | 'compact' | 'comfortable' | 'spacious'
 
 // Canvas zoom range — wide enough to support both tiny-overview ("zoom out
 // to see the whole hierarchy") and large-text accessibility ("zoom in for

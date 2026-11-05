@@ -3,7 +3,7 @@
  * toolbar. Houses four grouped controls:
  *
  *   1. Zoom — CSS scale on the layers area (75–150%)
- *   2. Density — compact / comfortable / spacious row sizing
+ *   2. Density — minimal / compact / comfortable / spacious row sizing
  *   3. Entity type badge — show/hide the type pill under each row
  *   4. Subtle tree lines — dim the indent connectors
  *
@@ -25,6 +25,7 @@ import {
   Plus,
   RotateCcw,
   Rows3,
+  Rows4,
   Settings2,
   Sparkles,
   ZoomIn,
@@ -60,7 +61,8 @@ interface DensityOption {
 }
 
 const DENSITY_OPTIONS: DensityOption[] = [
-  { mode: 'compact', label: 'Compact', description: 'Tightest rows — fit more on screen', icon: Minimize },
+  { mode: 'minimal', label: 'Minimal', description: 'One line per entity — the most on screen', icon: Rows4 },
+  { mode: 'compact', label: 'Compact', description: 'Tighter rows', icon: Minimize },
   { mode: 'comfortable', label: 'Comfortable', description: 'Balanced spacing', icon: Rows3 },
   { mode: 'spacious', label: 'Spacious', description: 'Larger rows and icons for readability (default)', icon: Maximize },
 ]
@@ -367,7 +369,7 @@ export function DisplaySettingsSections({
         <p className="px-1 pt-1 pb-2 text-[11px] text-ink-muted/80 leading-snug">
           Row height, padding, and icon size in every layer column.
         </p>
-        <div role="radiogroup" aria-label="Canvas density" className="grid grid-cols-3 gap-1.5">
+        <div role="radiogroup" aria-label="Canvas density" className="grid grid-cols-4 gap-1.5">
           {DENSITY_OPTIONS.map(opt => {
             const active = canvasDensity === opt.mode
             const Icon = opt.icon

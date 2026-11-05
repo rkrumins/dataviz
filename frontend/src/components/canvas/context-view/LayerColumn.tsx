@@ -1137,8 +1137,9 @@ export const LayerColumn = React.memo(function LayerColumn({
   // has never mounted contributes to `getTotalSize()` and to every
   // `scrollToIndex` offset. The chrome rows below (search box, search hit,
   // skeleton, load-more, error) render no technical line and keep their size.
+  // Minimal sets the identifier on the name's line, so its rows do not grow.
   const personaMode = usePersonaMode()
-  const technicalExtra = personaMode === 'technical' ? TECHNICAL_LINE_HEIGHT : 0
+  const technicalExtra = personaMode === 'technical' && density !== 'minimal' ? TECHNICAL_LINE_HEIGHT : 0
   const virtualizer = useVirtualizer({
     count: flatTree.length,
     getScrollElement: () => scrollContainerRef.current,
