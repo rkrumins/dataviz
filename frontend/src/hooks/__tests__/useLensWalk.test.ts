@@ -783,6 +783,134 @@ describe('useLensWalk — the walk completes hands-free (both modes)', () => {
     expect(peak).toBeLessThanOrEqual(FULL_WALK_CONCURRENCY)
     expect(peak).toBeGreaterThan(1)
   })
+
+  /**
+   * NEVER THE SAME REQUEST TWICE. Reported live: a trace "gets stuck in
+   * /trace/closure — it retrieves the same response and keeps looping". A
+   * page that came back without moving on (with the cursor it was sent, or a
+   * re-seed re-listing every anchor it named) was asked for again and again,
+   * the server's cache answering each time with the same page, until the
+   * request failsafe. Each fake below gives the same answer every time and
+   * refuses a sixth ask, so a walk that repeats itself fails here fast
+   * instead of spinning.
+   */
+  describe('never the same request twice', () => {
+    const sameEveryTime = (page: () => TraceV2Result & LensClosureExtras) => {
+      let asked = 0
+      return () => {
+        asked += 1
+        if (asked > 5) throw new Error('asked for the same page again and again')
+        return page()
+      }
+    }
+    const asked = (traceClosure: { mock: { calls: unknown[][] } }, pick: (r: Record<string, unknown>) => boolean) =>
+      fineCalls(traceClosure).map(c => c[0] as Record<string, unknown>).filter(pick)
+
+    it('a seed page that comes back with the cursor it was sent is asked once; the walk says a step failed, and Try again asks once more', async () => {
+      const firstPage = () => closureResult({
+        focus: f('a'), nodes: [gn('a'), gn('c1')],
+        truncated: true, truncationReason: 'max_nodes', seedTruncated: true, seedCursor: 's:c2',
+      })
+      const again = sameEveryTime(firstPage)
+      const { provider, traceClosure } = providerByUrn({ a: (req) => (req.seedCursor ? again() : firstPage()) })
+      const { result } = renderHook(() => useLensWalk('a', provider, 1, false))
+      await waitFor(() => expect(result.current.walkProgressFor('a')?.phase).toBe('error'))
+      await new Promise(r => setTimeout(r, 20))
+
+      expect(asked(traceClosure, r => r.seedCursor === 's:c2')).toHaveLength(1)
+      expect(result.current.walkProgressFor('a')).toMatchObject({
+        phase: 'error', pending: 1, error: 'the server returned the same page twice',
+      })
+      expect(result.current.walkFor('a')!.model.truncated).toBe(true)   // the picture still says what it lacks
+
+      act(() => result.current.retryWalk('a'))
+      await waitFor(() => expect(asked(traceClosure, r => r.seedCursor === 's:c2')).toHaveLength(2))
+      await waitFor(() => expect(result.current.walkProgressFor('a')?.phase).toBe('error'))
+      await new Promise(r => setTimeout(r, 20))
+      expect(asked(traceClosure, r => r.seedCursor === 's:c2')).toHaveLength(2)
+    })
+
+    it('a hub page that comes back with the cursor it was sent is asked once', async () => {
+      const { provider, traceClosure } = providerByUrn({
+        a: () => closureResult({ focus: f('a'), nodes: [gn('a'), gn('h')], truncated: true, truncationReason: 'max_nodes', frontierDown: [cut('h', 9, 'e:7')] }),
+        h: sameEveryTime(() => closureResult({ focus: f('h'), truncated: true, truncationReason: 'timeout', frontierDown: [cut('h', 9, 'e:7')] })),
+      })
+      const { result } = renderHook(() => useLensWalk('a', provider, 1, false))
+      await waitFor(() => expect(result.current.walkProgressFor('a')?.phase).toBe('error'))
+      await new Promise(r => setTimeout(r, 20))
+
+      expect(asked(traceClosure, r => r.afterCursor === 'e:7')).toHaveLength(1)
+      expect(result.current.walkProgressFor('a')).toMatchObject({ phase: 'error', pending: 1 })
+    })
+
+    it('a re-seed that leaves every anchor it named still owed: those anchors are not asked for again', async () => {
+      const { provider, traceClosure } = providerByUrn({
+        a: () => closureResult({ focus: f('a'), nodes: [gn('a'), gn('b'), gn('c')], truncated: true, truncationReason: 'max_nodes', frontierDown: [cut('b', 2), cut('c', 2)] }),
+        b: sameEveryTime(() => closureResult({ focus: f('b'), truncated: true, truncationReason: 'timeout', frontierDown: [cut('b', 2), cut('c', 2)] })),
+      })
+      const { result } = renderHook(() => useLensWalk('a', provider, 1, false))
+      await waitFor(() => expect(result.current.walkProgressFor('a')?.phase).toBe('error'))
+      await new Promise(r => setTimeout(r, 20))
+
+      expect(asked(traceClosure, r => Array.isArray(r.seedUrns))).toHaveLength(1)
+      expect(result.current.walkProgressFor('a')).toMatchObject({ phase: 'error', pending: 2 })
+    })
+
+    it('full flow: a partner found again after its own hop was walked is not walked twice, and nothing reads as missing', async () => {
+      // p and q feed each other, upstream of the focus. Past the exclude cap
+      // the server cannot know the client already holds them, so each walk
+      // lists the other again as a fresh depth entry.
+      const { provider, traceClosure } = providerByUrn({
+        a: () => closureResult({ focus: f('a'), nodes: [gn('a'), gn('p')], frontierUp: [depth('p')] }),
+        p: sameEveryTime(() => closureResult({ focus: f('p'), nodes: [gn('q')], frontierUp: [depth('q')] })),
+        q: sameEveryTime(() => closureResult({ focus: f('q'), nodes: [gn('p')], frontierUp: [depth('p')] })),
+      })
+      const { result } = renderHook(() => useLensWalk('a', provider, 1, true))
+      await waitFor(() => expect(result.current.walkProgressFor('a')?.phase).toBe('done'))
+      await new Promise(r => setTimeout(r, 20))
+
+      expect(asked(traceClosure, r => Array.isArray(r.seedUrns)).map(r => r.seedUrns)).toEqual([['p'], ['q']])
+      expect(result.current.walkProgressFor('a')).toMatchObject({ phase: 'done', pending: 0 })
+    })
+
+    it('a card ⊕ whose next page comes back with the cursor it was sent is followed once, and that ⊕ failed', async () => {
+      const { provider, traceClosure } = providerByUrn({
+        a: () => closureResult({ focus: f('a'), nodes: [gn('a'), gn('tbl')], frontierUp: [depth('tbl', 30)] }),
+        tbl: sameEveryTime(() => closureResult({ focus: f('tbl'), nodes: [gn('c1')], truncated: true, truncationReason: 'max_nodes', seedTruncated: true, seedCursor: 's:c20' })),
+      })
+      const { result } = renderHook(() => useLensWalk('a', provider, 1, false))
+      await waitFor(() => expect(result.current.walkProgressFor('a')?.phase).toBe('done'))
+
+      act(() => result.current.extend('tbl', 'up', ['tbl']))
+      await waitFor(() => expect(result.current.walkFor('a')!.extendStatus.get('up:tbl')).toBe('error'))
+      await new Promise(r => setTimeout(r, 20))
+      expect(asked(traceClosure, r => r.seedCursor === 's:c20')).toHaveLength(1)
+    })
+
+    it('a walk whose every page moves on is unchanged: each page asked once, then done', async () => {
+      const { provider, traceClosure } = providerByUrn({
+        a: (req) => req.seedCursor === 's:c2'
+          ? closureResult({ focus: f('a'), nodes: [gn('c2')], truncated: true, truncationReason: 'max_nodes', seedTruncated: true, seedCursor: 's:c3' })
+          : req.seedCursor === 's:c3'
+            ? closureResult({ focus: f('a'), nodes: [gn('c3')] })
+            : closureResult({
+              focus: f('a'), nodes: [gn('a'), gn('c1'), gn('h'), gn('b')],
+              truncated: true, truncationReason: 'max_nodes', seedTruncated: true, seedCursor: 's:c2',
+              frontierDown: [cut('h', 9, 'e:7'), cut('b', 2)],
+            }),
+        h: (req) => req.afterCursor === 'e:7'
+          ? closureResult({ focus: f('h'), nodes: [gn('x1')], truncated: true, truncationReason: 'max_nodes', frontierDown: [cut('h', 9, 'e:9')] })
+          : closureResult({ focus: f('h'), nodes: [gn('x2')] }),
+        b: () => closureResult({ focus: f('b'), nodes: [gn('b1')] }),
+      })
+      const { result } = renderHook(() => useLensWalk('a', provider, 1, false))
+      await waitFor(() => expect(result.current.walkProgressFor('a')?.phase).toBe('done'))
+
+      expectFineCalls(traceClosure, 6)   // the first page, two seed pages, two hub pages, one re-seed
+      expect(result.current.walkProgressFor('a')).toMatchObject({ phase: 'done', pending: 0, error: null })
+      expect(result.current.walkFor('a')!.model.nodes.map(n => n.urn).sort()).toEqual(['a', 'b', 'b1', 'c1', 'c2', 'c3', 'h', 'x1', 'x2'])
+    })
+  })
 })
 
 describe('useLensWalk — full flow flips on MID-SESSION', () => {

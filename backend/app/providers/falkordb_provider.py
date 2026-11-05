@@ -11572,11 +11572,12 @@ class FalkorDBProvider(GraphDataProvider):
                 after_id, max_nodes, st.query_timeout(),
             )
             if rows is None:
-                # The page could not be read: say so, and hand the SAME cursor
-                # back so the client resumes exactly where it was.
+                # The page could not be read: say so. The hub stays owed as a
+                # cursor-less CUT entry, never with the cursor it was given —
+                # a page handed back unmoved is a request the client sends
+                # again, and the cache answers it with this same page.
                 st.reasons.append("timeout")
                 (st.cut_up if up else st.cut_down)[urn] = None
-                st.paged[(urn, side)] = after_cursor
             else:
                 # The anchor and the client's known set are "already visited":
                 # their edges still ship (the seam), the nodes are not
@@ -12921,11 +12922,16 @@ class FalkorDBProvider(GraphDataProvider):
                 budget -= spent
                 pos = j
             if pos < len(chunk):
-                # Budget or deadline ended the chunk mid-way.
-                if keyset:
-                    return idx + pos
+                # Budget or deadline ended the chunk mid-way — and the reason
+                # says which in BOTH modes. A keyset page the deadline ended
+                # before its first anchor otherwise read as a budget cut and
+                # handed back the very cursor it was given (``trace_closure``
+                # ships no cursor from a page that timed out having walked
+                # nothing).
                 if time.monotonic() >= st.walk_deadline:
                     st.reasons.append("timeout")
+                if keyset:
+                    return idx + pos
                 self._file_cut(st, chunk[pos:], up=up, down=down)
             idx += len(chunk)
         return n
