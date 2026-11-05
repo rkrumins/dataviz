@@ -31,6 +31,12 @@ words and a way to see what a view is for. The Business / Technical switch is re
   edit, in both views.
 - **A view's description** shows under its title. People who can't edit get **About**, which leads
   with what the view is for.
+- **A trace's Lines choice** (**Trace settings → Lines**, on a Context View): **On hover**,
+  **Adaptive** or **Every line**, the density modes **Display** already has. The Business view
+  starts on **On hover**: the trace lays out its cards, and a card's lines draw when you point at it
+  or pick it. The Technical view starts on **Every line**, as traces always drew. Once you choose,
+  the choice holds in both views.
+- **N of M lines · Show every line** in the trace bar, whenever a trace leaves lines undrawn.
 
 ### Changed
 
@@ -51,6 +57,8 @@ words and a way to see what a view is for. The Business / Technical switch is re
   database names or revision ids.
 - **Reading first**: the dashboard leads Business readers to browse views. The empty Explorer and an
   empty model offer building only to people who can build.
+- **A trace's lines** take their colour from each card's place on the trace. A line between two
+  closed containers is drawn upstream or downstream, no longer faint as if it were off the trace.
 
 ### Fixed
 

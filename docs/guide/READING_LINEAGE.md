@@ -113,7 +113,7 @@ your question:
 | --- | --- |
 | Brief someone on the big picture | Keep containers closed, so their lineage rolls up onto them |
 | Find exactly which columns are involved | Open the table's chevron |
-| See every line at once, not only on hover | **Display → Lineage appearance → Edge Density → All Edges** |
+| See every line at once, not only on hover | **Display → Lineage appearance → Edge Density → All Edges**; during a trace, **Show every line** in the trace dock |
 | Read one busy entity, grouped by container | Open the [Lineage Lens](/guide/lineage-lens) and choose a **Density** |
 | Limit how far a trace reaches | During a trace, set **Depth** — see [Narrow a trace by direction and depth](/guide/exploring-graph#narrow-a-trace-by-direction-and-depth) |
 
@@ -132,7 +132,10 @@ is named:
   entities by, such as `id` (set on the data source, its provider or its
   workspace), or the entity's URN when the source uses the platform's own.
 
-The entities and lines are the same in both. The Business view also shows fewer
+The entities and lines are the same in both; only a trace starts drawing them
+differently. In the Business view a trace's lines appear as you point at or pick
+a card; in the Technical view it draws every line (**Trace settings → Lines**
+changes either). The Business view also shows fewer
 tools — see [Business or Technical view](/guide/key-concepts#business-or-technical-view).
 Switch to **Technical** when you need an exact identifier to look something up in
 another system, and back to **Business** when you're sharing your screen with

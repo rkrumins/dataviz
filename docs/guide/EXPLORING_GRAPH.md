@@ -73,6 +73,12 @@ going and no "load more".
 - **The trace dock** at the bottom names the direction you're reading
   (**Root Cause**, **Impact** or **Full Lineage**), the traced entity, and how
   many entities lie upstream (↑) and downstream (↓).
+- **The lines** start differently in each view. In the Business view a trace
+  draws none at first: point at a card to draw its lines, or click it to keep
+  them drawn. The dock says how many are drawn, for example *0 of 61 lines*,
+  and **Show every line** draws them all, for this trace and the next. Each
+  card's side markers show where its lineage goes either way. In the Technical
+  view a trace draws every line.
 
 Tracing a table follows all of its columns, so you see every partner of any of
 its columns at once. Partners the view can't place in any of its layers are
@@ -101,6 +107,14 @@ fetches anything again.
   **Downstream** (Impact) sliders, or pick a preset: **Direct** (1), **Nearby**
   (5) or **All hops** (25). A side set to 0 is hidden. The dock's **Settings**
   tab has the same **Upstream depth** and **Downstream depth** sliders.
+- **Lines:** in the same **Trace settings**, under **Display**, choose how many
+  lines the trace draws. **On hover** draws a card's lines when you point at it
+  or pick it, the strongest first, up to the **Lines per entity** set in
+  **Display**. **Adaptive** keeps the strongest lines drawn, up to the **Edge
+  Budget**, with the traced entity's own first. **Every line** draws them all.
+  The Business view starts on **On hover** and the Technical view on **Every
+  line**; once you choose, your choice holds in both. A shared link doesn't
+  carry it: whoever opens one sees the trace their own way.
 - **Detail:** open or close containers to move between columns, tables and
   bigger groupings; there is no separate level setting (see
   [Changing the level of detail](/guide/reading-lineage#changing-the-level-of-detail)).
@@ -320,7 +334,7 @@ the view itself.
 
 | If you want to… | In **Display**, set… |
 | --- | --- |
-| See lines without hovering | **Edge Density** to **Adaptive** (strongest flows stay visible) or **All Edges**. **On Hover** is the default |
+| See lines without hovering | **Edge Density** to **Adaptive** (strongest flows stay visible) or **All Edges**. **On Hover** is the default. A trace has its own choice: **Trace settings → Lines** |
 | Draw more or fewer lines on a busy view | The **Edge Budget** slider (**Lines per entity** in On Hover), from 100 to 2,000 |
 | Hide the arrowheads | **Direction → Arrow markers** off |
 | Spot dependencies that run against the layers | **Highlight lines that point back** on: a line whose source sits in a layer to the right of its target is drawn in an alert colour — **Red** (the default), **Amber** or **Magenta**. Its hover card says **Points back**, and **Flows** counts them (**←**) in the same colour |
@@ -330,12 +344,13 @@ the view itself.
 | Make rows, icons and badges smaller | **Canvas → Density** (**Minimal**, **Compact**, **Comfortable** or **Spacious**) and **Display options**. **Minimal** puts each entity on one line — its identifier after the name in the Technical view, display-rule chips as coloured dots — so about three times as many rows fit |
 
 The lineage settings work only while **Lineage** in the header is on; when it's
-off, the menu says *Turn on Lineage to adjust edge appearance*. A trace draws
-every line it walks, whatever **Edge Density** is set to. In the Business view,
-**Display** keeps the canvas settings, **How many lines** (Edge Density, in plain
-words: **On hover**, **Adaptive** or **All lines**), **Lineage colours**,
-**Missing-link alerts** and **Highlight lines that point back**; the rest are
-the Technical view's.
+off, the menu says *Turn on Lineage to adjust edge appearance*. A trace has its
+own choice, whatever **Edge Density** is set to: **Trace settings → Lines** (see
+[Narrow a trace by direction and depth](#narrow-a-trace-by-direction-and-depth)).
+In the Business view, **Display** keeps the canvas settings, **How many lines**
+(Edge Density, in plain words: **On hover**, **Adaptive** or **All lines**),
+**Lineage colours**, **Missing-link alerts** and **Highlight lines that point
+back**; the rest are the Technical view's.
 
 Lines that point back follow each relationship's stored direction, the same one
 the arrowheads show. A trace keeps its own colours, and a line standing for
