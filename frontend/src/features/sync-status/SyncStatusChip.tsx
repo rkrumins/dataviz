@@ -16,6 +16,7 @@ import { timeAgo } from '@/lib/timeAgo'
 import { HoverTip } from '@/components/ui/HoverTip'
 import { ProgressBar } from '@/components/ui/ProgressBar'
 import { usePermission } from '@/store/auth'
+import { usePersonaMode } from '@/store/persona'
 import { useVersioningPanelStore } from '@/store/versioningPanelStore'
 import { deriveSync, shortRevision, type SyncLane, type SyncTone } from './deriveSync'
 import { useSyncStatus } from './useSyncStatus'
@@ -175,11 +176,33 @@ export function SyncStatusChip({ workspaceId, dataSourceId, viewId, className }:
   }, [])
   const canManage = usePermission('workspace:datasource:manage', workspaceId)
   const openPanel = useVersioningPanelStore((s) => s.openPanel)
+  const technical = usePersonaMode() === 'technical'
 
   // Memoised: the header re-renders with the canvas, and the verdict formats dates and numbers.
   const verdict = useMemo(() => deriveSync(q.data, now), [q.data, now])
   if (q.isError && !q.data) return null        // not readable here — say nothing rather than guess
   const t = TONE[verdict.tone]
+
+  // The Business view keeps the verdict and drops the path: the same pill, colour and mark, in
+  // words a reader acts on, with no card behind it — so no store names, no revision ids and no
+  // account of how this kind of graph stays in sync.
+  if (!technical) {
+    const words = verdict.tone === 'busy' ? 'Updating…'
+      : verdict.tone === 'ok' ? `Up to date · checked ${timeAgo(q.data!.checkedAt)}`
+      : verdict.tone === 'idle' ? verdict.chip
+      : 'May be out of date'
+    return (
+      <span className={cn(
+        'inline-flex items-center gap-1.5 h-5 px-2 rounded-full border text-[11px] font-medium leading-none whitespace-nowrap',
+        t.pill,
+        className,
+      )}>
+        <SyncMark tone={verdict.tone} size={13} />
+        <span>{words}</span>
+      </span>
+    )
+  }
+
   const lanes = verdict.lanes
   const record = lanes.find((l) => l.key === 'record')
 

@@ -205,3 +205,94 @@ describe('DisplayMenu — Business view', () => {
     usePreferencesStore.setState({ highlightBackPointers: false, backPointerColor: '#ef4444' })
   })
 })
+
+describe('DisplayMenu — Business view, in plain words', () => {
+  it('says how many lines it draws, with no engine names and no budget', () => {
+    usePersonaStore.setState({ mode: 'business' })
+    render(<DisplayMenu {...baseProps()} lineageRenderMode="auto" />)
+    fireEvent.click(screen.getByRole('button', { name: 'Display' }))
+
+    expect(screen.getByText('How many lines')).toBeInTheDocument()
+    expect(screen.getByText(/How many lines the canvas draws at once\./)).toBeInTheDocument()
+    expect(screen.getByText('A trace draws every line it walks, whatever this is set to.')).toBeInTheDocument()
+    expect(screen.queryByText(/\((Stubs|Auto|Raw)\)/)).not.toBeInTheDocument()
+    expect(screen.queryByText('Edge Budget')).not.toBeInTheDocument()
+    expect(screen.getByRole('radio', { name: /All lines/ })).toBeInTheDocument()
+    // Screen readers hear the same plain name.
+    expect(screen.getByRole('radiogroup', { name: 'How many lines' })).toBeInTheDocument()
+    expect(screen.queryByRole('radiogroup', { name: 'Edge density' })).not.toBeInTheDocument()
+  })
+
+  it('on Adaptive, offers no budget, and no ribbons or memory switch while they are off', () => {
+    usePersonaStore.setState({ mode: 'business' })
+    usePreferencesStore.setState({ showFlowRibbons: false, showMemoryUsage: false })
+    render(<DisplayMenu {...baseProps()} lineageRenderMode="auto" />)
+    fireEvent.click(screen.getByRole('button', { name: 'Display' }))
+
+    expect(screen.queryByRole('slider', { name: 'Adaptive edge budget' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('switch', { name: /flow ribbons/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('switch', { name: /show memory usage/i })).not.toBeInTheDocument()
+  })
+
+  it('keeps a switch that is on, so it can be turned off', () => {
+    usePersonaStore.setState({ mode: 'business' })
+    usePreferencesStore.setState({ showFlowRibbons: true, showMemoryUsage: true })
+    render(<DisplayMenu {...baseProps()} lineageRenderMode="auto" />)
+    fireEvent.click(screen.getByRole('button', { name: 'Display' }))
+
+    fireEvent.click(screen.getByRole('switch', { name: /flow ribbons/i }))
+    expect(usePreferencesStore.getState().showFlowRibbons).toBe(false)
+    fireEvent.click(screen.getByRole('switch', { name: /show memory usage/i }))
+    expect(usePreferencesStore.getState().showMemoryUsage).toBe(false)
+  })
+
+  it('keeps the lineage colours', () => {
+    usePersonaStore.setState({ mode: 'business' })
+    render(<DisplayMenu {...baseProps()} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Display' }))
+
+    expect(screen.getByRole('radiogroup', { name: 'Lineage colours' })).toBeInTheDocument()
+  })
+
+  it('offers the missing-link alerts, on by default, and turns them off', () => {
+    usePersonaStore.setState({ mode: 'business' })
+    usePreferencesStore.setState({ showMissingConnectionIndicators: true })
+    render(<DisplayMenu {...baseProps()} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Display' }))
+
+    const alerts = screen.getByRole('switch', { name: /missing-link alerts/i })
+    expect(alerts).toHaveAttribute('aria-checked', 'true')
+    fireEvent.click(alerts)
+    expect(usePreferencesStore.getState().showMissingConnectionIndicators).toBe(false)
+    usePreferencesStore.setState({ showMissingConnectionIndicators: true })
+  })
+
+  it('says what turning Lineage on is for', () => {
+    usePersonaStore.setState({ mode: 'business' })
+    render(<DisplayMenu {...baseProps()} lineageEnabled={false} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Display' }))
+
+    expect(screen.getByText('Turn on Lineage to change how lines are drawn')).toBeInTheDocument()
+  })
+})
+
+describe('DisplayMenu — Minimal density', () => {
+  it('offers Minimal first, the tightest, and choosing it stores the density', () => {
+    const setCanvasDensity = usePreferencesStore.getState().setCanvasDensity
+    render(<DisplayMenu {...baseProps()} onSetCanvasDensity={setCanvasDensity} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Display' }))
+
+    const options = within(screen.getByRole('radiogroup', { name: 'Canvas density' })).getAllByRole('radio')
+    expect(options.map((o) => o.textContent)).toEqual(['Minimal', 'Compact', 'Comfortable', 'Spacious'])
+
+    fireEvent.click(screen.getByRole('radio', { name: 'Minimal' }))
+    expect(usePreferencesStore.getState().canvasDensity).toBe('minimal')
+    usePreferencesStore.setState({ canvasDensity: 'spacious' })
+  })
+  it('says the type badge is not shown on Minimal rows', () => {
+    render(<DisplayMenu {...baseProps()} canvasDensity="minimal" />)
+    fireEvent.click(screen.getByRole('button', { name: 'Display' }))
+
+    expect(screen.getByText('Not shown on Minimal rows')).toBeInTheDocument()
+  })
+})

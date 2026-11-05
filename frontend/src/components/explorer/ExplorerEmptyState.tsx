@@ -3,7 +3,8 @@
  * either because a search/filter returned nothing or the user has no views yet.
  */
 
-import { Compass, SearchX, FilterX, Plus, LayoutGrid, Check } from 'lucide-react'
+import { Link } from 'react-router-dom'
+import { Compass, SearchX, FilterX, Plus, LayoutGrid, Check, ArrowRight } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { DocsLink } from '@/components/help/DocsLink'
@@ -55,6 +56,36 @@ export function ExplorerEmptyState({
 }: ExplorerEmptyStateProps) {
   /* ── No views exist yet ── */
   if (type === 'no-views') {
+    // Someone who cannot create a view has nothing to start here: views reach
+    // them by being shared, so say that, and where to see what they can reach.
+    if (!onCreateView) {
+      return (
+        <div className="flex flex-col items-center justify-center py-24 text-center">
+          <div className="relative mb-8">
+            <div className="absolute inset-0 rounded-full bg-accent-lineage/10 blur-2xl" />
+            <div className="relative w-20 h-20 rounded-2xl border border-glass-border glass-panel flex items-center justify-center">
+              <Compass
+                className="h-10 w-10 text-accent-lineage"
+                strokeWidth={1.2}
+              />
+            </div>
+          </div>
+
+          <h3 className="text-2xl font-bold mb-3 bg-gradient-to-r from-accent-lineage to-violet-600 bg-clip-text text-transparent">
+            Nothing shared with you yet
+          </h3>
+
+          <p className="text-ink-muted text-sm max-w-md mb-8 leading-relaxed">
+            Views appear here once someone shares one with you or your workspace.
+          </p>
+
+          <Link to="/my/access" className="inline-flex items-center gap-1.5 text-sm font-semibold text-ink-secondary hover:text-ink">
+            See your access <ArrowRight className="w-3.5 h-3.5" />
+          </Link>
+        </div>
+      )
+    }
+
     const activeWorkspace = useWorkspacesStore.getState().getActiveWorkspace()
     const activeDataSource = useWorkspacesStore.getState().getActiveDataSource()
     const hasOntology = !!activeDataSource?.ontologyId

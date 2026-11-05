@@ -46,7 +46,11 @@ vi.mock('../PullLatestButton', () => ({
   PullLatestButton: ({ branchId }: { branchId: string }) => <span data-testid={`pull-${branchId}`} />,
 }))
 vi.mock('../BranchSettingsModal', () => ({ BranchSettingsModal: () => null }))
-vi.mock('../BranchManager', () => ({ BranchManager: () => null }))
+vi.mock('../BranchManager', () => ({
+  BranchManager: ({ onClose }: { onClose: () => void }) => (
+    <button type="button" data-testid="branch-manager" onClick={onClose}>Close manager</button>
+  ),
+}))
 
 import { BranchSwitcher } from '../BranchSwitcher'
 
@@ -162,5 +166,17 @@ describe('BranchSwitcher menu', () => {
     expect(screen.getAllByRole('button', { name: 'Draft settings' })).toHaveLength(1)   // not the editor's
     expect(screen.getByText(/Bob Stone · .*view only/)).toBeInTheDocument()
     expect(screen.getAllByText(/view only/)).toHaveLength(2)
+  })
+
+  it('lets the host hold the drafts manager open — and hands it the close', () => {
+    const onManagerOpenChange = vi.fn()
+    const { rerender } = render(
+      <BranchSwitcher workspaceId="ws1" dataSourceId="ds1" managerOpen={false} onManagerOpenChange={onManagerOpenChange} />,
+    )
+    expect(screen.queryByTestId('branch-manager')).not.toBeInTheDocument()
+
+    rerender(<BranchSwitcher workspaceId="ws1" dataSourceId="ds1" managerOpen onManagerOpenChange={onManagerOpenChange} />)
+    fireEvent.click(screen.getByTestId('branch-manager'))
+    expect(onManagerOpenChange).toHaveBeenCalledWith(false)
   })
 })

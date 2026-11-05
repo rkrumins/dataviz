@@ -96,14 +96,18 @@ export interface ComprehensionToolsProps {
   /** Open the orphaned-entities panel (the Display menu's Advanced section).
    *  Optional — hosts that don't wire it show no such section. */
   onOpenOrphans?: () => void
+  /** Open the view's changes and history (the Business view's More). Optional. */
+  onOpenHistory?: () => void
+  /** Open the drafts of this view (the Business view's More). Optional. */
+  onOpenDrafts?: () => void
 
   // Property Manager — optional so canvases that don't wire it omit the button.
   onTogglePropertyManager?: () => void
   propertyManagerOpen?: boolean
 
-  // Import / Export — one combined dropdown, shown in BOTH modes (Export is always reachable). The
-  // Import item disables with an explainer when not editing (`isDraft` false), since import writes to
-  // the working draft.
+  // Import / Export — one combined dropdown in the Technical view, More's File group in the Business
+  // view; shown in BOTH modes (Export is always reachable). The Import item disables with an
+  // explainer when not editing (`isDraft` false), since import writes to the working draft.
   onImport?: () => void
   onExport?: () => void
   isDraft: boolean
@@ -156,6 +160,8 @@ export function ComprehensionTools({
   onCopyTraceHistoryLink,
   onOpenLens,
   onOpenOrphans,
+  onOpenHistory,
+  onOpenDrafts,
 }: ComprehensionToolsProps) {
   const { notify } = useAppNotifications()
   const [traceHistoryOpen, setTraceHistoryOpen] = useState(false)
@@ -469,8 +475,9 @@ export function ComprehensionTools({
         />
       )}
 
-      {/* Import / Export — one dropdown, both modes. Import is disabled with an explainer outside
-          Edit mode; Export is always available (published state is a valid, re-importable backup). */}
+      {/* Import / Export — one dropdown in the Technical view, under More in the Business view; both
+          modes. Import is disabled with an explainer outside Edit mode; Export is always available
+          (published state is a valid, re-importable backup). */}
       {technical ? (
         <ImportExportMenu onImport={onImport} onExport={onExport} isDraft={isDraft} thisView={thisView} />
       ) : (
@@ -479,6 +486,11 @@ export function ComprehensionTools({
           multiSelectArmed={multiSelectArmed}
           onTogglePropertyManager={onTogglePropertyManager}
           propertyManagerOpen={propertyManagerOpen}
+          onOpenOrphans={isDraft ? onOpenOrphans : undefined}
+          onOpenHistory={onOpenHistory}
+          onOpenDrafts={onOpenDrafts}
+          onImport={onImport}
+          isDraft={isDraft}
           onExport={onExport}
           thisView={thisView}
         />

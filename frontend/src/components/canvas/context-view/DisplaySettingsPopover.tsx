@@ -3,7 +3,7 @@
  * toolbar. Houses four grouped controls:
  *
  *   1. Zoom — CSS scale on the layers area (75–150%)
- *   2. Density — compact / comfortable / spacious row sizing
+ *   2. Density — minimal / compact / comfortable / spacious row sizing
  *   3. Entity type badge — show/hide the type pill under each row
  *   4. Subtle tree lines — dim the indent connectors
  *
@@ -25,6 +25,7 @@ import {
   Plus,
   RotateCcw,
   Rows3,
+  Rows4,
   Settings2,
   Sparkles,
   ZoomIn,
@@ -60,7 +61,8 @@ interface DensityOption {
 }
 
 const DENSITY_OPTIONS: DensityOption[] = [
-  { mode: 'compact', label: 'Compact', description: 'Tightest rows — fit more on screen', icon: Minimize },
+  { mode: 'minimal', label: 'Minimal', description: 'One line per entity — the most on screen', icon: Rows4 },
+  { mode: 'compact', label: 'Compact', description: 'Tighter rows', icon: Minimize },
   { mode: 'comfortable', label: 'Comfortable', description: 'Balanced spacing', icon: Rows3 },
   { mode: 'spacious', label: 'Spacious', description: 'Larger rows and icons for readability (default)', icon: Maximize },
 ]
@@ -258,6 +260,9 @@ interface DisplaySettingsSectionsProps {
   onToggleSubtleTreeLines: () => void
   /** Fit all layer columns into the viewport width (Cmd/Ctrl+0). */
   onFitToWidth?: () => void
+  /** The Business view's short form: the memory switch only while it is on,
+   *  so it can still be turned off. */
+  simple?: boolean
 }
 
 /**
@@ -275,6 +280,7 @@ export function DisplaySettingsSections({
   subtleTreeLines,
   onToggleSubtleTreeLines,
   onFitToWidth,
+  simple = false,
 }: DisplaySettingsSectionsProps) {
   const zoomPct = formatZoom(canvasZoom)
   const canZoomOut = canvasZoom > CANVAS_ZOOM_MIN + 0.001
@@ -363,7 +369,7 @@ export function DisplaySettingsSections({
         <p className="px-1 pt-1 pb-2 text-[11px] text-ink-muted/80 leading-snug">
           Row height, padding, and icon size in every layer column.
         </p>
-        <div role="radiogroup" aria-label="Canvas density" className="grid grid-cols-3 gap-1.5">
+        <div role="radiogroup" aria-label="Canvas density" className="grid grid-cols-4 gap-1.5">
           {DENSITY_OPTIONS.map(opt => {
             const active = canvasDensity === opt.mode
             const Icon = opt.icon
@@ -422,20 +428,22 @@ export function DisplaySettingsSections({
         />
         <ToggleRow
           label="Show entity type badge"
-          description={showTypeBadge ? 'Type label shown under each row' : 'Type label hidden'}
+          description={canvasDensity === 'minimal' ? 'Not shown on Minimal rows' : showTypeBadge ? 'Type label shown under each row' : 'Type label hidden'}
           icon={showTypeBadge ? Eye : EyeOff}
           active={showTypeBadge}
           onClick={onToggleTypeBadge}
           accent="cyan"
         />
-        <ToggleRow
-          label="Show memory usage"
-          description={showMemoryUsage ? 'Always shown, bottom right' : 'Shown only when the tab is heavy'}
-          icon={MemoryStick}
-          active={showMemoryUsage}
-          onClick={toggleMemoryUsage}
-          accent="purple"
-        />
+        {(!simple || showMemoryUsage) && (
+          <ToggleRow
+            label="Show memory usage"
+            description={showMemoryUsage ? 'Always shown, bottom right' : 'Shown only when the tab is heavy'}
+            icon={MemoryStick}
+            active={showMemoryUsage}
+            onClick={toggleMemoryUsage}
+            accent="purple"
+          />
+        )}
         <ToggleRow
           label="Subtle tree lines"
           description={subtleTreeLines ? 'Connectors dimmed' : 'Connectors at full intensity'}

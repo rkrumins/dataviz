@@ -6,12 +6,13 @@
  */
 
 import { useState, useCallback } from 'react'
-import { useCanvasStore } from '@/store/canvas'
+import { useCanvasStore, type LineageNode } from '@/store/canvas'
 import { useSchemaStore } from '@/store/schema'
 import { topmostOf } from './planDuplicate'
 import { useGraphProvider } from '@/providers/GraphProviderContext'
 import { useStagedChangesStore, type StagedChange } from '@/store/stagedChangesStore'
 import { stageNodeEdit } from '@/features/versioning/model/stageNodeEdit'
+import { writeBusinessLabel } from '@/lib/nodeFields'
 import { useBranchStore } from '@/store/branchStore'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { getDeleteImpact } from '@/services/versioningApiService'
@@ -45,6 +46,8 @@ export interface CanvasInteractionState {
         nodeId: string | null
         value: string
         position: { x: number; y: number }
+        /** The name being edited — the one the row shows. */
+        field: 'label' | 'businessLabel'
     }
     // Command Palette
     commandPalette: {
@@ -100,7 +103,7 @@ export interface UseCanvasInteractionsResult {
     closeContextMenu: () => void
     
     // Inline Edit Actions
-    startInlineEdit: (nodeId: string, value: string, position: { x: number; y: number }) => void
+    startInlineEdit: (nodeId: string, value: string, position: { x: number; y: number }, field?: 'label' | 'businessLabel') => void
     saveInlineEdit: (nodeId: string, newValue: string) => void
     cancelInlineEdit: () => void
     
@@ -229,6 +232,7 @@ export function useCanvasInteractions(
         nodeId: null,
         value: '',
         position: { x: 0, y: 0 },
+        field: 'label',
     })
     
     const [commandPalette, setCommandPalette] = useState<CanvasInteractionState['commandPalette']>({
@@ -262,23 +266,27 @@ export function useCanvasInteractions(
     // Inline Edit
     // ===================
     
-    const startInlineEdit = useCallback((nodeId: string, value: string, position: { x: number; y: number }) => {
-        setInlineEdit({ nodeId, value, position })
+    const startInlineEdit = useCallback((nodeId: string, value: string, position: { x: number; y: number }, field: 'label' | 'businessLabel' = 'label') => {
+        setInlineEdit({ nodeId, value, position, field })
     }, [])
     
     const saveInlineEdit = useCallback((nodeId: string, newValue: string) => {
         const node = useCanvasStore.getState().nodes.find(n => n.id === nodeId)
-        const previousLabel = (node?.data?.label as string) ?? ''
-        setInlineEdit({ nodeId: null, value: '', position: { x: 0, y: 0 } })
-        if (!node || previousLabel === newValue) return
+        const field = inlineEdit.field
+        const previous = node?.data?.[field] ?? ''
+        setInlineEdit({ nodeId: null, value: '', position: { x: 0, y: 0 }, field: 'label' })
+        if (!node || previous === newValue) return
         // One staged edit per node: a rename after a drawer edit (or before one) joins it,
-        // keeping the node as first read as the diff base and the discard target.
-        stageNodeEdit(nodeId, node.data, { ...node.data, label: newValue })
+        // keeping the node as first read as the diff base and the discard target. A business
+        // label is written as the drawer writes it, into the node's properties too.
+        stageNodeEdit(nodeId, node.data, field === 'businessLabel'
+            ? writeBusinessLabel(node.data, newValue) as LineageNode['data']
+            : { ...node.data, label: newValue })
         onInlineEditSave?.(nodeId, newValue)
-    }, [onInlineEditSave])
+    }, [onInlineEditSave, inlineEdit.field])
     
     const cancelInlineEdit = useCallback(() => {
-        setInlineEdit({ nodeId: null, value: '', position: { x: 0, y: 0 } })
+        setInlineEdit({ nodeId: null, value: '', position: { x: 0, y: 0 }, field: 'label' })
     }, [])
     
     // ===================

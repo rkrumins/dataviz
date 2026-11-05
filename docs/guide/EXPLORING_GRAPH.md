@@ -327,13 +327,15 @@ the view itself.
 | Change the upstream and downstream colours | **Appearance → Lineage colours**: pick a preset, or set **Incoming** and **Outgoing** yourself |
 | Stop the off-screen partner lists opening | **Appearance → Off-screen partners** off (a small hint shows instead) |
 | Hide alerts about links to entities outside the view | **Missing Connections → Missing-link alerts** off |
-| Make rows, icons and badges smaller | **Canvas → Density** (**Compact**, **Comfortable** or **Spacious**) and **Display options** |
+| Make rows, icons and badges smaller | **Canvas → Density** (**Minimal**, **Compact**, **Comfortable** or **Spacious**) and **Display options**. **Minimal** puts each entity on one line — its identifier after the name in the Technical view, display-rule chips as coloured dots — so about three times as many rows fit |
 
 The lineage settings work only while **Lineage** in the header is on; when it's
 off, the menu says *Turn on Lineage to adjust edge appearance*. A trace draws
 every line it walks, whatever **Edge Density** is set to. In the Business view,
-**Display** keeps the canvas settings, **Edge Density** and **Highlight lines
-that point back**; the rest are the Technical view's.
+**Display** keeps the canvas settings, **How many lines** (Edge Density, in plain
+words: **On hover**, **Adaptive** or **All lines**), **Lineage colours**,
+**Missing-link alerts** and **Highlight lines that point back**; the rest are
+the Technical view's.
 
 Lines that point back follow each relationship's stored direction, the same one
 the arrowheads show. A trace keeps its own colours, and a line standing for

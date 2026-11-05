@@ -8,6 +8,11 @@ import type { CanvasDensity } from '@/store/preferences'
  * Heights are the `min-h-[…]` floor in pixels; the virtualizer uses the same
  * values as `estimateSize`. Other tokens are Tailwind class strings consumed
  * by FlatTreeItem.
+ *
+ * `minimal` is one line per entity: FlatTreeItem drops the icon's tile, sets
+ * Technical's identifier beside the name and shows rule chips as dots, so
+ * nothing in the row is taller than its line and these heights are the
+ * row's own.
  */
 export interface DensityRowTokens {
   rootHeight: number
@@ -19,6 +24,14 @@ export interface DensityRowTokens {
 }
 
 const DENSITY_TOKENS: Record<CanvasDensity, DensityRowTokens> = {
+  minimal: {
+    rootHeight: 30,
+    childHeight: 26,
+    paddingClass: 'py-0.5',
+    textClass: 'text-[12px]',
+    iconSize: 'w-3.5 h-3.5',
+    iconContainerSize: 'w-4 h-4',
+  },
   compact: {
     rootHeight: 40,
     childHeight: 34,
@@ -46,12 +59,19 @@ const DENSITY_TOKENS: Record<CanvasDensity, DensityRowTokens> = {
 }
 
 const ROOT_BOOST_HEIGHT: Record<CanvasDensity, number> = {
+  minimal: 0,
   compact: 4,
   comfortable: 0,
   spacious: 4,
 }
 
 const ROOT_TOKENS_OVERRIDE: Record<CanvasDensity, Pick<DensityRowTokens, 'paddingClass' | 'textClass' | 'iconSize' | 'iconContainerSize'>> = {
+  minimal: {
+    paddingClass: 'py-1',
+    textClass: 'text-[12.5px]',
+    iconSize: 'w-4 h-4',
+    iconContainerSize: 'w-4 h-4',
+  },
   compact: {
     paddingClass: 'py-2',
     textClass: 'text-[13px]',
@@ -94,7 +114,8 @@ export function densityRowTokens(density: CanvasDensity, isRoot: boolean): Densi
  * every `scrollToIndex` offset, so leaving it out under-reports the scroll
  * height by 17px per unmeasured row and lands a reveal off-screen. Only rows
  * rendered by `FlatTreeItem` carry the line — search-hit, load-more, skeleton
- * and error rows do not.
+ * and error rows do not — and none does under `minimal`, which sets the
+ * identifier on the name's line.
  */
 export const TECHNICAL_LINE_HEIGHT = 17
 

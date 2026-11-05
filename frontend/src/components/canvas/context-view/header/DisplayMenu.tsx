@@ -227,6 +227,7 @@ export function DisplayMenu({
                 subtleTreeLines={subtleTreeLines}
                 onToggleSubtleTreeLines={onToggleSubtleTreeLines}
                 onFitToWidth={onFitToWidth}
+                simple={!technical}
               />
 
               <div className="h-px bg-black/[0.08] dark:bg-white/[0.06] mx-3" />
@@ -241,7 +242,7 @@ export function DisplayMenu({
 
               {!lineageEnabled && (
                 <p className="px-3 pt-2 pb-1 text-[11px] text-ink-muted/70 leading-snug">
-                  Turn on Lineage to adjust edge appearance
+                  {technical ? 'Turn on Lineage to adjust edge appearance' : 'Turn on Lineage to change how lines are drawn'}
                 </p>
               )}
 

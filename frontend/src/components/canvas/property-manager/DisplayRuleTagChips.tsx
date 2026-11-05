@@ -20,6 +20,7 @@ import { useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 
 import { DynamicIcon } from '@/components/ui/DynamicIcon'
+import { HoverTip } from '@/components/ui/HoverTip'
 import { cn } from '@/lib/utils'
 import { useDisplayRuleTags, type DisplayRuleTag } from '@/store/displayRuleMatchStore'
 
@@ -27,8 +28,9 @@ import { useDisplayRuleTags, type DisplayRuleTag } from '@/store/displayRuleMatc
 export interface DisplayRuleTagChipsProps {
     /** Node URN (or fallback id) to resolve tags for. */
     urn: string | undefined
-    /** Visual density. ``xs`` for dense tree rows, ``sm`` for graph cards. */
-    size?: 'xs' | 'sm'
+    /** Visual density. ``xs`` for dense tree rows, ``sm`` for graph cards,
+     *  ``dot`` for one-line rows: a colour dot per tag, named by its tooltip. */
+    size?: 'xs' | 'sm' | 'dot'
     /** Max chips shown inline before collapsing into a "+N" pill. */
     max?: number
     className?: string
@@ -44,11 +46,14 @@ export function DisplayRuleTagChips({
     const inline = tags.slice(0, max)
     const overflow = tags.slice(max)
 
+    // Dots sit on a one-line row: squeezed, they must not wrap onto a second.
     return (
-        <div className={cn('flex flex-wrap items-center gap-1', className)}>
+        <div className={cn('flex flex-wrap items-center gap-1', size === 'dot' && 'flex-nowrap', className)}>
             <AnimatePresence initial={false}>
                 {inline.map((tag) => (
-                    <Chip key={tag.id} tag={tag} size={size} />
+                    size === 'dot'
+                        ? <Dot key={tag.id} tag={tag} />
+                        : <Chip key={tag.id} tag={tag} size={size} />
                 ))}
             </AnimatePresence>
             {overflow.length > 0 && (
@@ -86,17 +91,33 @@ function Chip({ tag, size }: { tag: DisplayRuleTag; size: 'xs' | 'sm' }) {
 }
 
 
+/** A tag with no room for its words: its colour, and its name as the tooltip
+ *  and the accessible name. */
+function Dot({ tag }: { tag: DisplayRuleTag }) {
+    return (
+        <HoverTip label={tag.name} className="flex">
+            <span
+                role="img"
+                aria-label={tag.name}
+                className="w-1.5 h-1.5 rounded-full"
+                style={{ backgroundColor: tag.color }}
+            />
+        </HoverTip>
+    )
+}
+
+
 function OverflowPill({
     count, all, size,
 }: {
     count: number
     all: ReadonlyArray<DisplayRuleTag>
-    size: 'xs' | 'sm'
+    size: 'xs' | 'sm' | 'dot'
 }) {
     const [hovered, setHovered] = useState(false)
     const ref = useRef<HTMLSpanElement>(null)
     const [coords, setCoords] = useState<{ top: number; left: number; placeAbove: boolean; anchorX: number } | null>(null)
-    const px = size === 'xs' ? 'px-1.5 py-0.5 text-[9px]' : 'px-2 py-0.5 text-[10px]'
+    const px = size === 'xs' ? 'px-1.5 py-0.5 text-[9px]' : size === 'dot' ? 'px-1 py-px text-[9px]' : 'px-2 py-0.5 text-[10px]'
 
     useLayoutEffect(() => {
         if (!hovered) { setCoords(null); return }
