@@ -79,6 +79,7 @@ export function CanvasStatusChips({
   selectedExternal,
   onPreviewExternal,
   notFoundPlacements = [],
+  canEdit = false,
 }: {
   /** Flows from a drawn row whose other end is outside the view: none in a
    *  view open to its whole data source (useEdgeProjection). */
@@ -117,6 +118,9 @@ export function CanvasStatusChips({
   onPreviewExternal?: () => void
   /** Placements the load asked the graph for and didn't get: kept in the view, marked not found. */
   notFoundPlacements?: NotFoundPlacement[]
+  /** The viewer can edit the view. Without it the chips state the facts, and
+   *  leave out what editing the view would do about them. */
+  canEdit?: boolean
 }) {
   const [unassignedOpen, setUnassignedOpen] = useState(false)
   const [notFoundOpen, setNotFoundOpen] = useState(false)
@@ -163,8 +167,8 @@ export function CanvasStatusChips({
                 {selectedExternal!.out.toLocaleString()} downstream{' '}
                 {unitNoun(selectedExternal!.in + selectedExternal!.out, 'flows')} exist in the
                 data source but lead to entities outside this view&apos;s scope.
-                That&apos;s expected for a curated view — it is NOT missing data.
-                Add those entities to the view, or run a Trace, to see them.
+                That&apos;s expected for a curated view — it is NOT missing data.{' '}
+                {canEdit ? 'Add those entities to the view, or run a Trace, to see them.' : 'Run a Trace to see them.'}
               </p>
             </div>
           }
@@ -290,10 +294,15 @@ export function CanvasStatusChips({
                 lead outside this view
               </p>
               <p className="text-ink-muted">
-                This view is a curated subset of the data source — these links
-                reference entities that aren&apos;t part of the view&apos;s
-                assignments. That&apos;s expected; add those entities to the
-                view to see the flows.
+                {canEdit ? <>
+                  This view is a curated subset of the data source — these links
+                  reference entities that aren&apos;t part of the view&apos;s
+                  assignments. That&apos;s expected; add those entities to the
+                  view to see the flows.
+                </> : <>
+                  This view is a curated subset of the data source — these flows
+                  lead to entities it leaves out. That&apos;s expected.
+                </>}
               </p>
             </div>
           }
@@ -326,8 +335,8 @@ export function CanvasStatusChips({
             >
               <p className="px-1.5 pb-1.5 text-[10px] font-semibold uppercase tracking-wider text-ink-muted/60">
                 {viewScope === 'curated'
-                  ? 'Loaded but not part of this view — assign to include'
-                  : 'Loaded but not rendered — assign to a layer to show'}
+                  ? (canEdit ? 'Loaded but not part of this view — assign to include' : 'Loaded but not part of this view')
+                  : (canEdit ? 'Loaded but not rendered — assign to a layer to show' : 'Loaded but not in any layer')}
               </p>
               <div className="max-h-64 overflow-y-auto custom-scrollbar">
                 {unassignedEntities.slice(0, UNASSIGNED_LIST_CAP).map(e => (
@@ -372,7 +381,7 @@ export function CanvasStatusChips({
               <p className="px-1.5 text-[11.5px] font-semibold text-ink">Placed in this view, but not in this graph</p>
               <p className="px-1.5 pt-0.5 pb-2 text-[11px] text-ink-muted leading-relaxed">
                 Usually a view brought in from another environment. They’re kept, and appear as soon as the entity
-                arrives here. To remove them, edit the view and see Assignments.
+                arrives here.{canEdit && ' To remove them, edit the view and see Assignments.'}
               </p>
               <div className="max-h-64 overflow-y-auto custom-scrollbar">
                 {notFoundPlacements.slice(0, UNASSIGNED_LIST_CAP).map(p => (

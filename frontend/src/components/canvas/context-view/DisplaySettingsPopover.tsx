@@ -258,6 +258,9 @@ interface DisplaySettingsSectionsProps {
   onToggleSubtleTreeLines: () => void
   /** Fit all layer columns into the viewport width (Cmd/Ctrl+0). */
   onFitToWidth?: () => void
+  /** The Business view's short form: the memory switch only while it is on,
+   *  so it can still be turned off. */
+  simple?: boolean
 }
 
 /**
@@ -275,6 +278,7 @@ export function DisplaySettingsSections({
   subtleTreeLines,
   onToggleSubtleTreeLines,
   onFitToWidth,
+  simple = false,
 }: DisplaySettingsSectionsProps) {
   const zoomPct = formatZoom(canvasZoom)
   const canZoomOut = canvasZoom > CANVAS_ZOOM_MIN + 0.001
@@ -428,14 +432,16 @@ export function DisplaySettingsSections({
           onClick={onToggleTypeBadge}
           accent="cyan"
         />
-        <ToggleRow
-          label="Show memory usage"
-          description={showMemoryUsage ? 'Always shown, bottom right' : 'Shown only when the tab is heavy'}
-          icon={MemoryStick}
-          active={showMemoryUsage}
-          onClick={toggleMemoryUsage}
-          accent="purple"
-        />
+        {(!simple || showMemoryUsage) && (
+          <ToggleRow
+            label="Show memory usage"
+            description={showMemoryUsage ? 'Always shown, bottom right' : 'Shown only when the tab is heavy'}
+            icon={MemoryStick}
+            active={showMemoryUsage}
+            onClick={toggleMemoryUsage}
+            accent="purple"
+          />
+        )}
         <ToggleRow
           label="Subtle tree lines"
           description={subtleTreeLines ? 'Connectors dimmed' : 'Connectors at full intensity'}

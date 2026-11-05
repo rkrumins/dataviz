@@ -48,6 +48,9 @@ interface DensityOption {
   label: string
   technical: string
   description: string
+  /** The Business view's words for the same choice. */
+  plainLabel: string
+  plainDescription: string
 }
 
 const DENSITY_OPTIONS: DensityOption[] = [
@@ -56,18 +59,24 @@ const DENSITY_OPTIONS: DensityOption[] = [
     label: 'On Hover',
     technical: 'Stubs',
     description: 'Edges appear when you hover or select a node',
+    plainLabel: 'On hover',
+    plainDescription: 'Lines appear when you point at or pick an entity',
   },
   {
     mode: 'auto',
     label: 'Adaptive',
     technical: 'Auto',
     description: 'Strongest flows stay visible on dense graphs; markers summarize the rest — hover or select to focus',
+    plainLabel: 'Adaptive',
+    plainDescription: 'The strongest lines stay drawn; small markers stand in for the rest',
   },
   {
     mode: 'raw',
     label: 'All Edges',
     technical: 'Raw',
     description: 'Render every projected edge (heavy on dense workspaces)',
+    plainLabel: 'All lines',
+    plainDescription: 'Every line, all the time — slower on big views',
   },
 ]
 
@@ -244,8 +253,8 @@ interface LineageDisplaySectionsProps {
   /** When true, every control renders inert (native `disabled`) and muted —
    *  used by the header's DisplayMenu when Lineage is off. */
   disabled?: boolean
-  /** The Business view's short form: how many lines are drawn, and nothing
-   *  about how they look. */
+  /** The Business view's short form, in plain words: how many lines are
+   *  drawn, their colours and the alerts — not how they move or attach. */
   simple?: boolean
 }
 
@@ -264,17 +273,20 @@ export function LineageDisplaySections({
   disabled = false,
   simple = false,
 }: LineageDisplaySectionsProps) {
+  const density = DENSITY_OPTIONS.find(o => o.mode === lineageRenderMode)
+  // The short form keeps a switch that is on, so it can still be turned off.
+  const showFlowRibbons = usePreferencesStore((s) => s.showFlowRibbons) ?? false
   return (
     <div className={cn(disabled && 'opacity-50')}>
-      {/* Edge Density */}
+      {/* Edge Density — one section id under either title, so its open state carries */}
       <CollapsibleSection
         id="edge-density"
         icon={Layers}
-        title="Edge Density"
-        summary={DENSITY_OPTIONS.find(o => o.mode === lineageRenderMode)?.label ?? 'Adaptive'}
+        title={simple ? 'How many lines' : 'Edge Density'}
+        summary={(simple ? density?.plainLabel : density?.label) ?? 'Adaptive'}
       >
         <p className="px-1 pt-1 pb-2 text-[11px] text-ink-muted/80 leading-snug">
-          How many edges materialise on the canvas at once.
+          {simple ? 'How many lines the canvas draws at once.' : 'How many edges materialise on the canvas at once.'}
           <span className="block mt-0.5">A trace draws every line it walks, whatever this is set to.</span>
         </p>
         <div
@@ -317,21 +329,23 @@ export function LineageDisplaySections({
                       active ? 'text-accent-lineage' : 'text-ink',
                     )}
                   >
-                    <span>{opt.label}</span>
-                    <span className="text-[10px] text-ink-muted/60 font-normal">
-                      ({opt.technical})
-                    </span>
+                    <span>{simple ? opt.plainLabel : opt.label}</span>
+                    {!simple && (
+                      <span className="text-[10px] text-ink-muted/60 font-normal">
+                        ({opt.technical})
+                      </span>
+                    )}
                   </div>
                   <div className="text-[11px] text-ink-muted/80 leading-snug mt-0.5">
-                    {opt.description}
+                    {simple ? opt.plainDescription : opt.description}
                   </div>
                 </div>
               </button>
             )
           })}
         </div>
-        {lineageRenderMode !== 'raw' && <AdaptiveBudgetSlider disabled={disabled} mode={lineageRenderMode} />}
-        {lineageRenderMode === 'auto' && <FlowRibbonsToggle disabled={disabled} />}
+        {!simple && lineageRenderMode !== 'raw' && <AdaptiveBudgetSlider disabled={disabled} mode={lineageRenderMode} />}
+        {lineageRenderMode === 'auto' && (!simple || showFlowRibbons) && <FlowRibbonsToggle disabled={disabled} />}
       </CollapsibleSection>
 
       <div className="h-px bg-black/[0.08] dark:bg-white/[0.06] mx-3" />
@@ -466,14 +480,26 @@ export function LineageDisplaySections({
           })}
         </div>
       </CollapsibleSection>
+      </>}
+
+      {/* The short form's lineage colours; the long form has them under Appearance. */}
+      {simple && <>
+      <div className="h-px bg-black/[0.08] dark:bg-white/[0.06] mx-3" />
+
+      <div className="px-3 pb-3">
+        <DirectionColors disabled={disabled} />
+      </div>
+      </>}
 
       <div className="h-px bg-black/[0.08] dark:bg-white/[0.06] mx-3" />
 
       {/* Missing connections — Views are subsets of a Data Source, so a
           curated view legitimately excludes upstream/downstream partners.
-          This switch shows/hides the "connections not on canvas" alerts. */}
+          This switch shows/hides the "connections not on canvas" alerts, in
+          either form: they are on by default. */}
       <MissingConnectionsToggle disabled={disabled} />
 
+      {!simple && <>
       <div className="h-px bg-black/[0.08] dark:bg-white/[0.06] mx-3" />
 
       <ExternalPreviewToggle disabled={disabled} />

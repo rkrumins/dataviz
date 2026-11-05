@@ -7423,6 +7423,7 @@ export function ContextViewCanvas({
           aggDetailTotal={aggDetailStatus.total}
           onLoadMoreDetail={handleLoadMoreAggDetail}
           viewScope={activeEntityScope}
+          canEdit={canEditGraph}
           focusShown={edgePresentation.focusShown}
           focusTotal={edgePresentation.focusTotal}
           searchShown={edgePresentation.searchShown}

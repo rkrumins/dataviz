@@ -13,6 +13,7 @@ import { useState, useMemo, useCallback, useRef, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { formatShortcut } from '@/lib/platform'
 import { fetchWithTimeout } from '@/services/fetchWithTimeout'
 import { useSchemaStore, isContainmentEdgeType } from '@/store/schema'
 import { useViewContainmentEdgeTypes, useViewLineageEdgeTypes, useViewRelationshipTypes } from '@/hooks/useViewSchema'
@@ -409,20 +410,14 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
 
       {/* Header */}
       <div className="flex-shrink-0 bg-canvas-elevated/95 backdrop-blur border-b border-glass-border px-6 py-3">
-        <div className="flex items-center gap-4">
-          <h2 className="text-lg font-display font-semibold text-ink">Physical Fabric</h2>
-          <span className="px-2 py-1 rounded-md bg-accent-lineage/10 text-accent-lineage text-xs font-medium">
-            Context View
-          </span>
-          <div className="flex-1" />
-
+        <div className="flex items-center justify-end gap-4">
           {/* Search */}
           <div className="relative">
             <LucideIcons.Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-ink-muted" />
             <input
               ref={searchInputRef}
               type="text"
-              placeholder="Search entities... (⌘F)"
+              placeholder={`Search entities… (${formatShortcut('mod+f')})`}
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               className="input pl-9 pr-8 py-1.5 w-64 text-sm"
@@ -453,11 +448,6 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
             >
               <LucideIcons.ChevronsDownUp className="w-4 h-4" />
             </button>
-          </div>
-
-          <div className="flex items-center gap-2 text-sm text-ink-muted">
-            <span>Flow: Left → Right</span>
-            <LucideIcons.ArrowRight className="w-4 h-4" />
           </div>
         </div>
 

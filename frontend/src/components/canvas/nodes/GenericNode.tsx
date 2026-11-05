@@ -45,6 +45,11 @@ interface GenericNodeData extends EntityInstance {
   // Canvas-agnostic callbacks (injected by the canvas host)
   onLoadMore?: () => void
   onToggleExpanded?: (nodeId: string) => void
+  onTraceUpstream?: (id: string) => void
+  onTraceDownstream?: (id: string) => void
+  onOpenMenu?: (e: React.MouseEvent, id: string) => void
+  // The host lets this person add entities here (a draft, for an editor)
+  canAddInside?: boolean
 }
 
 import type { Node } from '@xyflow/react'
@@ -81,6 +86,9 @@ export const GenericNode = memo(function GenericNode({
   // Canvas-agnostic callbacks — injected via data props by the host canvas
   const onLoadMore = entityData.onLoadMore
   const onToggleExpanded = entityData.onToggleExpanded
+  const onTraceUpstream = entityData.onTraceUpstream
+  const onTraceDownstream = entityData.onTraceDownstream
+  const onOpenMenu = entityData.onOpenMenu
 
   const hiddenCount = (entityData as any)._hiddenCount || 0
   const paginationId = (entityData as any)._paginationId
@@ -181,6 +189,9 @@ export const GenericNode = memo(function GenericNode({
   // mutated in place); its toolbar is just Restore.
   const canAddChild = !isGhost && (entityType?.hierarchy?.canContain?.length ?? 0) > 0
   const canTrace = !isGhost && (entityType?.behavior?.traceable ?? false)
+  // Adding inside stages an entity, so it's offered only where the host lets
+  // this person edit.
+  const offerAddInside = canAddChild && !!entityData.canAddInside
   const restoreGhost = useRestoreGhost()
 
   // W2.1 — advanced-search row decoration. ``entityFields['urn']`` is
@@ -220,10 +231,12 @@ export const GenericNode = memo(function GenericNode({
   return (
     <>
       {/* Node Toolbar (appears on selection). Rendered when the type is
-          traceable OR can contain children. The trace/pin/more cluster keeps
-          its traceable gate; the Add-inside button is ontology-gated on
-          canContain and opens the Hierarchy Builder scoped to this node. */}
-      {(canTrace || canAddChild || offerDetails) && (
+          traceable, or when it offers Add inside or Open details. The
+          trace/more cluster keeps its traceable gate, and More (the card's
+          right-click menu) is the Technical view's; the Add-inside button is
+          ontology-gated on canContain, offered only where the host allows
+          editing, and opens the Hierarchy Builder scoped to this node. */}
+      {(canTrace || offerAddInside || offerDetails) && (
         <NodeToolbar
           isVisible={!!selected}
           position={Position.Top}
@@ -239,19 +252,43 @@ export const GenericNode = memo(function GenericNode({
                   useCanvasStore.getState().openNodeDrawer(id)
                 }}
               />
-              {(canTrace || canAddChild) && <div className="w-px h-4 bg-glass-border mx-0.5" />}
+              {(canTrace || offerAddInside) && <div className="w-px h-4 bg-glass-border mx-0.5" />}
             </>
           )}
           {canTrace && (
             <>
-              <ToolbarButton icon="ArrowUpRight" label="Trace Upstream" />
-              <ToolbarButton icon="ArrowDownLeft" label="Trace Downstream" />
-              <div className="w-px h-4 bg-glass-border mx-0.5" />
-              <ToolbarButton icon="Pin" label="Pin" />
-              <ToolbarButton icon="MoreHorizontal" label="More" />
+              <ToolbarButton
+                icon="ArrowUpRight"
+                label="Trace Upstream"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  onTraceUpstream?.(id)
+                }}
+              />
+              <ToolbarButton
+                icon="ArrowDownLeft"
+                label="Trace Downstream"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  onTraceDownstream?.(id)
+                }}
+              />
+              {persona === 'technical' && onOpenMenu && (
+                <>
+                  <div className="w-px h-4 bg-glass-border mx-0.5" />
+                  <ToolbarButton
+                    icon="MoreHorizontal"
+                    label="More"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      onOpenMenu(e, id)
+                    }}
+                  />
+                </>
+              )}
             </>
           )}
-          {canAddChild && (
+          {offerAddInside && (
             <ToolbarButton
               icon="Plus"
               label={`Add inside ${primaryLabel}`}
@@ -588,7 +625,16 @@ export const GenericNode = memo(function GenericNode({
     prevD.childCount === nextD.childCount &&
     prevD._hiddenCount === nextD._hiddenCount &&
     prevD.onLoadMore === nextD.onLoadMore &&
-    prevD.onToggleExpanded === nextD.onToggleExpanded
+    prevD.onToggleExpanded === nextD.onToggleExpanded &&
+    // The toolbar's props: only a selected card shows it, and the trace
+    // callbacks change whenever the canvas's nodes, edges or expansion do, so
+    // only a selected card re-renders for them (selecting one re-renders it).
+    (!next.selected || (
+      prevD.onTraceUpstream === nextD.onTraceUpstream &&
+      prevD.onTraceDownstream === nextD.onTraceDownstream &&
+      prevD.onOpenMenu === nextD.onOpenMenu &&
+      prevD.canAddInside === nextD.canAddInside
+    ))
   )
 })
 

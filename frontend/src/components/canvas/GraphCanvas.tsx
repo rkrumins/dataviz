@@ -951,6 +951,22 @@ export function GraphCanvas({ className }: { className?: string }) {
   }, [allVisibleEdges, showLineageFlow, trace.isTracing, trace.result, isHighlightActive, mergedHighlightEdges, enabledEdgeTypes, directionEdgeIds, isolateMode, highlightedEdgeIds, openLine, searchLines])
   // (trace.isTracing/trace.result kept in deps because the map step inside reads them for isTraced flagging)
 
+  // Graph mutations (create/update/delete node + edge) 403 server-side when the admin turns
+  // editModeEnabled off (graph.py's require_edit_mode), so the affordances that reach those
+  // routes are hidden rather than left to fail.
+  const editModeEnabled = useFeature('editModeEnabled')
+
+  // A card's More button opens the menu its right-click does. interactions is
+  // defined later, so this and the edge menu below reach it through a ref.
+  const interactionsRef = useRef<any>(null)
+  const openNodeMenu = useCallback((e: React.MouseEvent, id: string) => {
+    interactionsRef.current?.openContextMenu(e, {
+      type: 'node',
+      id,
+      data: useCanvasStore.getState().nodes.find((n) => n.id === id)?.data,
+    })
+  }, [])
+
   // 16. Display nodes with visual state — only VISIBLE nodes (expand/collapse aware)
   const displayNodes = useMemo(() => {
     const base = layoutedNodes.length > 0 ? layoutedNodes : visibleNodes
@@ -972,6 +988,11 @@ export function GraphCanvas({ className }: { className?: string }) {
         _hiddenCount: hiddenChildCounts.get(node.id) ?? 0,
         onLoadMore: stableOnLoadMore,
         onToggleExpanded: stableOnToggle,
+        onTraceUpstream: trace.traceUpstream,
+        onTraceDownstream: trace.traceDownstream,
+        onOpenMenu: openNodeMenu,
+        // Add inside stages an entity: offered in a draft, with editing on.
+        canAddInside: editModeEnabled && !!libraryBranchId,
       },
     }))
 
@@ -1023,6 +1044,9 @@ export function GraphCanvas({ className }: { className?: string }) {
     mergedHighlightNodes,
     stableOnLoadMore,
     stableOnToggle,
+    openNodeMenu,
+    editModeEnabled,
+    libraryBranchId,
     viewportBounds,
     expandedNodes,
     hiddenChildCounts,
@@ -1088,7 +1112,6 @@ export function GraphCanvas({ className }: { className?: string }) {
   )
 
   // Edge context menu — uses ref because interactions is defined later
-  const interactionsRef = useRef<any>(null)
   const onEdgeContextMenu: EdgeMouseHandler = useCallback(
     (event, edge) => {
       event.preventDefault()
@@ -1296,10 +1319,6 @@ export function GraphCanvas({ className }: { className?: string }) {
   }, [trace])
 
   // 19. Canvas interactions (context menu, inline edit, quick create, command palette)
-  // Graph mutations (create/update/delete node + edge) 403 server-side when the admin turns
-  // editModeEnabled off (graph.py's require_edit_mode), so the affordances that reach those
-  // routes are hidden rather than left to fail.
-  const editModeEnabled = useFeature('editModeEnabled')
   const { duplicateSubtree } = useDuplicateSubtree()
   const interactions = useCanvasInteractions({
     onTraceNode: (nodeId) => trace.startTrace(nodeId),
