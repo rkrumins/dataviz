@@ -237,6 +237,14 @@ interface PreferencesState {
   showLineageCounts: boolean
   toggleLineageCounts: () => void
   /**
+   * How many of a trace's lines the Context View draws (Trace settings →
+   * Lines): the density modes, applied to the trace. Null until the reader
+   * chooses: then it follows the view (store/traceLineMode.ts). A reader's
+   * own choice, never part of a trace's history or its link.
+   */
+  traceLineMode: LineageRenderMode | null
+  setTraceLineMode: (mode: LineageRenderMode) => void
+  /**
    * A subset view draws each match inside the containers its base draws it in.
    * Off, each match is a row of its own, naming where it sits. On by default;
    * a reader's own choice, never part of the view.
@@ -498,6 +506,8 @@ export const usePreferencesStore = create<PreferencesState>()(
       showLineageCounts: true,
       toggleLineageCounts: () =>
         set((state) => ({ showLineageCounts: !state.showLineageCounts })),
+      traceLineMode: null,
+      setTraceLineMode: (traceLineMode) => set({ traceLineMode }),
       showWhereTheySit: true,
       toggleWhereTheySit: () =>
         set((state) => ({ showWhereTheySit: !(state.showWhereTheySit ?? true) })),

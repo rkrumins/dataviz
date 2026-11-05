@@ -17,13 +17,15 @@
  */
 import { describe, it, expect, beforeEach, afterAll } from 'vitest'
 import { act, fireEvent, screen } from '@testing-library/react'
-import { renderCanvasWithTrace } from '@/test/canvasHarness'
-import { cfoEstate, coarseThenFineEstate } from '@/test/fixtures/traceEstates'
+import { renderCanvasWithTrace, type TraceCanvasHarness } from '@/test/canvasHarness'
+import { cfoEstate, coarseThenFineEstate, wideFanEstate } from '@/test/fixtures/traceEstates'
 import { decodeTraceShare, encodeTraceShare } from '@/hooks/lib/traceShareCodec'
+import { usePreferencesStore } from '@/store/preferences'
+import { DEFAULT_LINEAGE_DIRECTION_COLORS } from '@/lib/lineageDirectionColors'
 import { countTest, expectTestsRan } from '@/test/canary'
 
 beforeEach(() => countTest())
-afterAll(() => expectTestsRan(25))
+afterAll(() => expectTestsRan(30))
 
 describe('the trace overlay on the real canvas', () => {
   it('CFO trace: dashboard chain open, partners closed with counts, two rolled wires, zero store writes, exit restores', async () => {
@@ -706,6 +708,141 @@ describe('the trace overlay on the real canvas', () => {
     await h.settle()
     expect(h.isTracing()).toBe(false)     // …and the next one leaves it
     expect(h.dockPresent()).toBe(false)
+    expect(h.consoleErrors()).toEqual([])
+  }, 30000)
+})
+
+// ── A TRACE'S LINES (Trace settings → Lines) ────────────────────────────
+//
+// A table with thirty partners each side is a trace that buries the canvas
+// in lines when every one of them draws. A trace now takes Display's density
+// modes as a choice of its own: the Business view starts on On hover, the
+// Technical view on every line, which is how a trace has always drawn.
+describe("a trace's Lines choice", () => {
+  beforeEach(() => usePreferencesStore.setState({ traceLineMode: null, autoStubThreshold: 500 }))
+  afterAll(() => usePreferencesStore.setState({ traceLineMode: null, autoStubThreshold: 500 }))
+
+  const linesChip = () => screen.queryByRole('button', { name: /show every line/i })
+  // What the chip says, in reading order: its name.
+  const chipSays = () => linesChip()?.getAttribute('aria-label') ?? null
+  const port = (id: string, side: 'left' | 'right') =>
+    document.getElementById(`layer-node-${id}`)?.querySelector(`[data-lineage-port="${side}"]`) ?? null
+  const fill = (source: string, target: string) =>
+    document.querySelector(`g[data-edge-src="${source}"][data-edge-tgt="${target}"] circle`)?.getAttribute('fill') ?? null
+  // Pointing is what the rows write on the document; the overlay draws from it.
+  const pointAt = async (h: TraceCanvasHarness, id: string) => {
+    await act(async () => { fireEvent.mouseEnter(document.getElementById(`layer-node-${id}`)!) })
+    await h.settle()
+  }
+  // A hover's lines linger a moment after the pointer leaves, and a new set of
+  // lines is drawn once it settles: both well inside half a second.
+  const pastTheMoment = async (h: TraceCanvasHarness) => {
+    await act(async () => { await new Promise(r => setTimeout(r, 500)) })
+    await h.settle()
+  }
+  const pointAway = async (h: TraceCanvasHarness, id: string) => {
+    await act(async () => { fireEvent.mouseLeave(document.getElementById(`layer-node-${id}`)!) })
+    await pastTheMoment(h)
+  }
+
+  it('Business: the cards are laid out and no line draws until a card is pointed at or picked', async () => {
+    usePreferencesStore.setState({ autoStubThreshold: 20 })   // Lines per entity
+    const h = await renderCanvasWithTrace(wideFanEstate(), { focus: 'hub', persona: 'business' })
+    await h.startTrace('hub')
+
+    // Every partner table is on the board, closed, as a trace lands…
+    expect(h.visibleCardIds()).toEqual(expect.arrayContaining(['RAW', 'in00', 'in29', 'hub', 'out00', 'out29']))
+    // …with not one line drawn, and the bar saying so.
+    expect(h.wires()).toEqual([])
+    expect(chipSays()).toBe('0 of 61 lines. Show every line')
+    // The cards' markers still say where the lineage goes.
+    expect(port('in05', 'right')).not.toBeNull()
+    expect(port('hub', 'left')).not.toBeNull()
+    expect(port('hub', 'right')).not.toBeNull()
+
+    // Pointing at a partner draws its line, and only its line.
+    await pointAt(h, 'in05')
+    expect(h.wires()).toEqual([{ source: 'in05', target: 'hub' }])
+    await pointAway(h, 'in05')
+    expect(h.wires()).toEqual([])
+
+    // Picking the traced table keeps its lines drawn, the strongest first, up
+    // to Lines per entity.
+    await h.clickCard('hub')
+    const picked = h.wires()
+    expect(picked).toHaveLength(20)
+    expect(picked.every(w => w.source === 'hub' || w.target === 'hub')).toBe(true)
+    expect(chipSays()).toBe('20 of 61 lines. Show every line')
+    expect(h.storeWrites()).toBe(0)
+    expect(h.consoleErrors()).toEqual([])
+  }, 30000)
+
+  it('"Show every line" draws every line the trace walks, and the next trace keeps it', async () => {
+    const h = await renderCanvasWithTrace(wideFanEstate(), { focus: 'hub', persona: 'business' })
+    await h.startTrace('hub')
+    expect(h.wires()).toEqual([])
+
+    await act(async () => { fireEvent.click(linesChip()!) })
+    await pastTheMoment(h)
+    expect(h.wires()).toHaveLength(61)
+    expect(linesChip()).toBeNull()
+    expect(usePreferencesStore.getState().traceLineMode).toBe('raw')
+
+    h.pressEscape()
+    await h.settle()
+    expect(h.isTracing()).toBe(false)
+    await h.startTrace('hub')
+    expect(h.wires()).toHaveLength(61)
+    expect(linesChip()).toBeNull()
+    expect(h.storeWrites()).toBe(0)
+    expect(h.consoleErrors()).toEqual([])
+  }, 30000)
+
+  it("Adaptive draws at most its budget, the traced table's own lines first", async () => {
+    usePreferencesStore.setState({ autoStubThreshold: 20 })   // the budget
+    const h = await renderCanvasWithTrace(wideFanEstate(), { focus: 'hub', persona: 'business' })
+    await h.setTraceLines('auto')
+    await h.startTrace('hub')
+
+    const drawn = h.wires()
+    expect(drawn).toHaveLength(20)
+    expect(drawn.every(w => w.source === 'hub' || w.target === 'hub')).toBe(true)
+    // RAW → in00 carries three hops, the strongest line on the board — and
+    // still waits for a hover: the budget goes to what the trace is about.
+    expect(drawn).not.toContainEqual({ source: 'RAW', target: 'in00' })
+    expect(chipSays()).toBe('20 of 61 lines. Show every line')
+
+    await pointAt(h, 'RAW')
+    expect(h.wires()).toContainEqual({ source: 'RAW', target: 'in00' })
+    expect(h.storeWrites()).toBe(0)
+    expect(h.consoleErrors()).toEqual([])
+  }, 30000)
+
+  // The walk names columns, so a line between two closed containers has
+  // neither end among them, and drew faint violet, as if off the trace. Each
+  // card's place on the trace colours it now.
+  it('a revealed line between two containers on the trace is drawn as part of it', async () => {
+    const h = await renderCanvasWithTrace(wideFanEstate(), { focus: 'hub', persona: 'business' })
+    await h.startTrace('hub')
+    await pointAt(h, 'RAW')
+
+    const line = document.querySelector<SVGGElement>('g[data-edge-src="RAW"][data-edge-tgt="in00"]')
+    expect(line).not.toBeNull()
+    expect(line!.classList.contains('nx-edge-trace')).toBe(true)
+    expect(fill('RAW', 'in00')).toBe(DEFAULT_LINEAGE_DIRECTION_COLORS.in)
+    expect(h.consoleErrors()).toEqual([])
+  }, 30000)
+
+  it('Technical: the same trace draws every line, in its direction colours, with no chip', async () => {
+    const h = await renderCanvasWithTrace(wideFanEstate(), { focus: 'hub' })
+    await h.startTrace('hub')
+
+    expect(h.wires()).toHaveLength(61)
+    expect(linesChip()).toBeNull()
+    expect(fill('in05', 'hub')).toBe(DEFAULT_LINEAGE_DIRECTION_COLORS.in)
+    expect(fill('hub', 'out05')).toBe(DEFAULT_LINEAGE_DIRECTION_COLORS.out)
+    expect(fill('RAW', 'in00')).toBe(DEFAULT_LINEAGE_DIRECTION_COLORS.in)
+    expect(h.storeWrites()).toBe(0)
     expect(h.consoleErrors()).toEqual([])
   }, 30000)
 })

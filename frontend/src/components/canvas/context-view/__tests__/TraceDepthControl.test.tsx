@@ -85,4 +85,18 @@ describe('TraceDepthControl — the trace settings live here', () => {
     expect(screen.getByRole('switch', { name: 'Lineage counts on cards' }).getAttribute('aria-checked')).toBe('false')
     usePreferencesStore.setState({ showLineageCounts: true })
   })
+
+  it('carries the Lines choice: the view’s own until one is picked, then the pick, kept', () => {
+    usePreferencesStore.setState({ traceLineMode: null })
+    open()
+    const lines = screen.getByRole('radiogroup', { name: 'Lines' })
+    // The suite runs in the Technical view, whose traces draw every line.
+    expect(within(lines).getByRole('radio', { name: /^Every line/ }).getAttribute('aria-checked')).toBe('true')
+    fireEvent.click(within(lines).getByRole('radio', { name: /^On hover/ }))
+    expect(usePreferencesStore.getState().traceLineMode).toBe('stubs')
+    expect(within(lines).getByRole('radio', { name: /^On hover/ }).getAttribute('aria-checked')).toBe('true')
+    fireEvent.click(within(lines).getByRole('radio', { name: /^Adaptive/ }))
+    expect(usePreferencesStore.getState().traceLineMode).toBe('auto')
+    usePreferencesStore.setState({ traceLineMode: null })
+  })
 })

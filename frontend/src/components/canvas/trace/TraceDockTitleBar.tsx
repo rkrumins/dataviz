@@ -21,6 +21,16 @@ import { TraceRecentPopover } from './TraceRecentPopover'
 import { TraceModeIndicator, deriveTraceMode } from './TraceModeIndicator'
 import { TraceSharePopover, type TraceShareSummary } from './TraceSharePopover'
 import { TraceSeedsPopover, type TraceSeed } from './TraceSeedsPopover'
+import { HoverTip } from '@/components/ui/HoverTip'
+import { unitNoun } from '../context-view/connections/connectionUnits'
+
+/** The lines a trace draws now of every line it walks, while its Lines
+ *  choice (Trace settings → Lines) leaves some undrawn, and the way to all. */
+export interface TraceLines {
+  shown: number
+  total: number
+  onShowAll: () => void
+}
 
 export interface TraceDockTitleBarProps {
   trace: UseUnifiedTraceResult
@@ -49,6 +59,9 @@ export interface TraceDockTitleBarProps {
    *  "Tracing N entities", which lists them and drops one on request. */
   seeds?: readonly TraceSeed[]
   onRemoveSeed?: (urn: string) => void
+  /** Lines left undrawn: "N of M lines · Show every line". Absent, every
+   *  line is drawn and there is no chip. */
+  lines?: TraceLines
 }
 
 type Direction = 'up' | 'both' | 'down'
@@ -88,6 +101,7 @@ export function TraceDockTitleBar({
   focusLabel,
   seeds,
   onRemoveSeed,
+  lines,
 }: TraceDockTitleBarProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const recentTriggerRef = useRef<HTMLButtonElement>(null)
@@ -396,6 +410,40 @@ export function TraceDockTitleBar({
           />
         </div>
       </LayoutGroup>
+
+      {/* What the trace's Lines choice leaves undrawn — the cards' markers
+          still show where it goes — and the way to every line. */}
+      {lines && (
+        <HoverTip
+          label="Draw every line this trace walks"
+          detail="Kept for your next trace too. Trace settings → Lines changes it back"
+          className="min-w-0"
+        >
+          <button
+            type="button"
+            data-trace-control
+            aria-label={`${lines.shown.toLocaleString()} of ${lines.total.toLocaleString()} ${unitNoun(lines.total, 'lines')}. Show every line`}
+            onClick={lines.onShowAll}
+            className={cn(
+              'inline-flex items-center px-3 h-9 rounded-xl text-sm min-w-0 max-w-full',
+              'bg-white/[0.06] border border-white/[0.12] hover:bg-white/[0.12] hover:border-accent-lineage/40',
+              'transition-all duration-200',
+              'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+            )}
+          >
+            {/* The count gives way before the action does: in a clipped,
+                wrapping row-reverse line it is the item that drops to the
+                hidden second line, as the seeds chip's "Tracing" does. */}
+            <span aria-hidden className="flex flex-row-reverse flex-wrap justify-end h-5 overflow-hidden min-w-0">
+              <span className="min-w-0 truncate font-semibold text-accent-lineage">Show every line</span>
+              <span className="whitespace-nowrap pr-1.5 tabular-nums text-ink-muted">
+                {lines.shown.toLocaleString()} of {lines.total.toLocaleString()} {unitNoun(lines.total, 'lines')}{' '}
+                <span className="text-ink-muted/50">·</span>
+              </span>
+            </span>
+          </button>
+        </HoverTip>
+      )}
 
       <div className="flex-1 min-w-2" />
 

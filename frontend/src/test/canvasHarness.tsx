@@ -46,7 +46,7 @@ import { ContextViewCanvas } from '@/components/canvas/context-view/ContextViewC
 import { toCanvasNode } from '@/lib/canvasNodeMapper'
 import { useCanvasStore, type LineageEdge, type LineageNode } from '@/store/canvas'
 import { useSchemaStore } from '@/store/schema'
-import { usePreferencesStore } from '@/store/preferences'
+import { usePreferencesStore, type LineageRenderMode } from '@/store/preferences'
 import { useBranchStore } from '@/store/branchStore'
 import { useFeaturesStore } from '@/store/features'
 import { usePersonaStore, type PersonaMode } from '@/store/persona'
@@ -197,6 +197,9 @@ export interface TraceCanvasHarness {
   isTracing(): boolean
   /** Flip the trace dock's "Lineage counts on cards" preference and let the rows repaint. */
   setLineageCounts(on: boolean): Promise<void>
+  /** Set the trace's Lines choice (Trace settings → Lines; null follows the
+   *  view) and let the lines repaint. */
+  setTraceLines(mode: LineageRenderMode | null): Promise<void>
   /** Let every pending promise and effect settle. */
   settle(): Promise<void>
   /** Everything the canvas logged as an error. Checked automatically at the
@@ -1127,6 +1130,10 @@ export async function renderCanvasWithTrace(
     },
     setLineageCounts: async (on: boolean) => {
       act(() => { usePreferencesStore.setState({ showLineageCounts: on }) })
+      await settle()
+    },
+    setTraceLines: async (mode: LineageRenderMode | null) => {
+      act(() => { usePreferencesStore.setState({ traceLineMode: mode }) })
       await settle()
     },
   }

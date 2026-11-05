@@ -1467,15 +1467,16 @@ export function LineageFlowOverlay({
   // per row the pointer crossed (measured 2026-09-21).
   //
   // A `MutationObserver` on the one attribute the rows write drives it — no
-  // polling. No spotlight during a trace, or while a selection's own
-  // highlight is on: a click highlight wins over hover, as it always has.
+  // polling. No spotlight during a trace that draws every line (it hands
+  // over no hover pool), or while a selection's own highlight is on: a click
+  // highlight wins over hover, as it always has.
   const hotEdgesRef = useRef<SVGGElement[]>([])
   const spotlightScrollerRef = useRef<HTMLElement | null>(null)
   // Latest inputs for the observer callback, which is bound once. Synced
   // before the recompute effect below, which reads them.
   const spotlightInputs = useRef({ edges, childMap, allowed: true, hoverLinesFor })
   useEffect(() => {
-    spotlightInputs.current = { edges, childMap, allowed: !isTracing && !isHighlightActive, hoverLinesFor }
+    spotlightInputs.current = { edges, childMap, allowed: (!isTracing || !!hoverPool) && !isHighlightActive, hoverLinesFor }
   })
 
   /** Mark the lit lines. Re-run after every render too: React may have

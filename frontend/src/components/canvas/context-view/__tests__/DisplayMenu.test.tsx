@@ -115,11 +115,11 @@ describe('DisplayMenu', () => {
     expect(screen.getByText(/the most a hovered or selected entity draws/)).toBeInTheDocument()
   })
 
-  it('the Edge Density section says a trace draws every line', () => {
+  it('the Edge Density section says a trace has its own choice', () => {
     render(<DisplayMenu {...baseProps()} />)
     fireEvent.click(screen.getByRole('button', { name: 'Display' }))
 
-    expect(screen.getByText('A trace draws every line it walks, whatever this is set to.')).toBeInTheDocument()
+    expect(screen.getByText('A trace has its own choice: Trace settings → Lines.')).toBeInTheDocument()
   })
 
   it('Marker sides: incoming left, outgoing right by default; a choice is stored', () => {
@@ -214,7 +214,7 @@ describe('DisplayMenu — Business view, in plain words', () => {
 
     expect(screen.getByText('How many lines')).toBeInTheDocument()
     expect(screen.getByText(/How many lines the canvas draws at once\./)).toBeInTheDocument()
-    expect(screen.getByText('A trace draws every line it walks, whatever this is set to.')).toBeInTheDocument()
+    expect(screen.getByText('A trace has its own choice: Trace settings → Lines.')).toBeInTheDocument()
     expect(screen.queryByText(/\((Stubs|Auto|Raw)\)/)).not.toBeInTheDocument()
     expect(screen.queryByText('Edge Budget')).not.toBeInTheDocument()
     expect(screen.getByRole('radio', { name: /All lines/ })).toBeInTheDocument()

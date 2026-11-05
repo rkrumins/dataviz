@@ -287,7 +287,7 @@ export function LineageDisplaySections({
       >
         <p className="px-1 pt-1 pb-2 text-[11px] text-ink-muted/80 leading-snug">
           {simple ? 'How many lines the canvas draws at once.' : 'How many edges materialise on the canvas at once.'}
-          <span className="block mt-0.5">A trace draws every line it walks, whatever this is set to.</span>
+          <span className="block mt-0.5">A trace has its own choice: Trace settings → Lines.</span>
         </p>
         <div
           role="radiogroup"
