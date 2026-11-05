@@ -174,6 +174,43 @@ async def test_a_publish_job_holds_to_the_policy_as_it_is_when_it_runs(monkeypat
     assert svc.releases == [{"graph_id": "g1", "branch_id": "br1"}]
 
 
+async def test_an_import_publishing_itself_holds_its_owner_to_publish_when_it_runs(monkeypatch, set_off):
+    """An import that asked to publish itself (``autoPublish``) was allowed to when it was asked,
+    perhaps hours before its publish job runs: its owner must still hold publish then (an API key
+    acts as its owner), or the publish is refused as the route refuses it, and the draft is handed
+    back."""
+    from backend.app.services import permission_service
+    from backend.app.services.permission_service import PermissionClaims
+
+    grants = {"usr_1": ("workspace:datasource:read", "workspace:datasource:manage")}
+
+    async def resolve(_session, user_id, *_args, **_kwargs):
+        return PermissionClaims(sid="", ws_perms={"ws1": grants[user_id]})
+
+    monkeypatch.setattr(permission_service, "resolve", resolve)
+    row = SimpleNamespace(field_scope={"actor": "usr_1", "message": "ship it", "autoPublish": True},
+                          graph_id="g1", branch_id="br1", workspace_id="ws1", data_source_id="ds1")
+
+    class _Session:
+        async def get(self, _orm, _key):
+            return row
+
+    @contextlib.asynccontextmanager
+    async def job_session():
+        yield _Session()
+    monkeypatch.setattr(ver_db, "graphver_session", job_session)
+
+    svc = _Versioning(merged=[None, None], publish="cmt_new")
+    result = await _service(monkeypatch, svc).run_publish("vjob_1", _Lease())
+    assert result["error"]["status"] == 403
+    assert result["error"]["detail"]["code"] == "publish_required"
+    assert svc.published == [] and svc.releases == [{"graph_id": "g1", "branch_id": "br1"}]
+
+    grants["usr_1"] += ("workspace:datasource:publish",)
+    svc = _Versioning(merged=[None], publish="cmt_new")
+    assert await _service(monkeypatch, svc).run_publish("vjob_1", _Lease()) == {"commitId": "cmt_new"}
+
+
 async def test_a_job_whose_draft_already_merged_publishes_nothing_and_sets_off_the_rest(
         monkeypatch, set_off):
     """The worker died after its squash committed: the next attempt completes with that commit,

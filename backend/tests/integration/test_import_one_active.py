@@ -214,8 +214,8 @@ async def _a_broken_upload_lets_go(svc, ie, root):
     user = type("U", (), {"id": "u"})()
     with pytest.raises(ConnectionResetError):
         await create_import("ws1", gid, _CutOff(), format="ndjson", reconcile_mode="upsert",
-                            branch_id=draft, view_id=None, idempotency_key=None, user=user,
-                            claims=None, meta={"data_source_id": gid}, ie=ie, session=None)
+                            branch_id=draft, view_id=None, idempotency_key=None, auto_publish=False,
+                            user=user, claims=None, meta={"data_source_id": gid}, ie=ie, session=None)
     async with db.graphver_session() as s:
         (job_id,) = (await s.execute(select(JobORM.id).where(JobORM.branch_id == draft))).scalars()
     job = await ie.get_job(job_id)
@@ -225,7 +225,8 @@ async def _a_broken_upload_lets_go(svc, ie, root):
 
 def _post(ie, gid, body, draft, key, actor):
     return create_import("ws1", gid, body, format="ndjson", reconcile_mode="upsert", branch_id=draft,
-                         view_id=None, idempotency_key=key, user=type("U", (), {"id": actor})(),
+                         view_id=None, idempotency_key=key, auto_publish=False,
+                         user=type("U", (), {"id": actor})(),
                          claims=None, meta={"data_source_id": gid}, ie=ie, session=None)
 
 
@@ -387,8 +388,8 @@ async def _a_replayed_key_answers_with_its_import(svc, ie, root):
 
     def post(branch_id=None):
         return create_import("ws1", gid, _Body(), format="ndjson", reconcile_mode="upsert",
-                             branch_id=branch_id, view_id=None, idempotency_key="k1", user=user,
-                             claims=None, meta={"data_source_id": gid}, ie=ie,
+                             branch_id=branch_id, view_id=None, idempotency_key="k1",
+                             auto_publish=False, user=user, claims=None, meta={"data_source_id": gid}, ie=ie,
                              session=type("S", (), {"get": staticmethod(no_source_row)})())
     first = await post()
     same = (first["jobId"], first["branchId"], first["sourceUri"])

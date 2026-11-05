@@ -26,7 +26,7 @@ from backend.app.services.storage.object_store import get_object_store, storage_
 from .. import config, db
 from ..errors import JobActive, MainWriteForbidden
 from ..job_lease import Draining, Lease, Superseded, friendly_infra_error, is_transient
-from ..models import GraphORM, ImportRowORM, JobORM, MergeRequestORM
+from ..models import BranchORM, GraphORM, ImportRowORM, JobORM, MergeRequestORM
 from ..service import AccessDenied, GraphVersioningService, NotUpToDate, Viewer
 from . import contract, stream
 from ..ids import new_entity_id, uuid_urn
@@ -57,6 +57,19 @@ def _never_arrived(row) -> bool:
     broke off before storing it, or the reaper failed it once that request had gone."""
     return (row is not None and row.job_type == "ingest" and row.status == "failed"
             and row.current_phase is None and row.error_message == config.JOB_NEVER_QUEUED)
+
+
+def _refusal(exc: Exception) -> Dict[str, Any]:
+    """Why an import's draft wasn't published (``summary.publish.reason``), shaped as the publish
+    route would have answered: a mapped refusal's own detail; a draft behind main, by how far."""
+    if isinstance(exc, NotUpToDate):
+        return {"type": "not_up_to_date", "behindBy": exc.behind_by,
+                "message": "Main changed while the file was imported, so the draft is behind it. "
+                           "Update the draft from main and publish it, or import the file again."}
+    detail = getattr(exc, "detail", None)
+    if isinstance(detail, dict) and detail.get("type"):
+        return detail
+    return {"type": "refused", "message": str(exc)[:500]}
 
 
 #: How many changed rows a dry run lists (its summary counts them all).
@@ -420,9 +433,9 @@ class ImportExportService:
         scope, so absence-deletes stay confined to the view's own entities."""
         async with db.graphver_session() as s:
             row = await s.get(JobORM, job_id)
-            ws, ds, view_id, mode, branch_id = (
+            ws, ds, view_id, mode, branch_id, graph_id, auto_publish = (
                 (row.workspace_id, row.data_source_id, row.scope_view_id, row.reconcile_mode,
-                 row.branch_id) if row else (None, None, None, None, None))
+                 row.branch_id, row.graph_id, row.auto_publish) if row else (None,) * 7)
         scope = None
         if mode == "replace" and view_id:
             if self._replace_scope_resolver is not None:
@@ -447,7 +460,51 @@ class ImportExportService:
         # assignments so the curated view shows them right away. Best-effort — never fails the import.
         if view_id and self._layout_writer is not None and worker.created_node_facts:
             await self._apply_view_layout(job_id, ws, ds, view_id, branch_id, worker)
+        if auto_publish:          # after the layout, so the placements are published with the data
+            await asyncio.shield(self._auto_publish(job_id, ws, ds, graph_id, branch_id, summary))
         return summary
+
+    async def _auto_publish(self, job_id, ws, ds, graph_id, branch_id, summary) -> None:
+        """Publish the draft a completed import opened, as it asked (``autoPublish``), and record
+        how that went on its summary (``publish``), as :meth:`_apply_view_layout` records the
+        layout:
+
+        * ``queued``, with ``jobId``: the draft's publish job, which runs as a large publish does —
+          the review policy read again, the import's owner held to publish again;
+        * ``unchanged``: the import changed nothing, so its draft, empty, is closed;
+        * ``skipped``, with ``reason``: rows weren't imported, or the draft can't be published
+          (it fell behind main while the file was imported, …). The draft waits for review.
+
+        Never raised: the import is complete whatever happens here."""
+        refused = int(summary.get("invalid") or 0) + int(summary.get("skipped") or 0)
+        try:
+            if refused:
+                note = {"state": "skipped", "reason": {
+                    "type": "rows_refused", "rows": refused,
+                    "message": f"{refused} row(s) of the file weren't imported, so the draft "
+                               "waits for someone to review it."}}
+            else:
+                async with db.graphver_session() as s:
+                    owner = (await s.get(BranchORM, branch_id)).owner
+                if not any(summary.get(k) for k in ("new", "updated", "deleted")):
+                    await self._svc.abandon_draft(graph_id=graph_id, branch_id=branch_id, actor=owner)
+                    note = {"state": "unchanged"}
+                else:
+                    job = await self.create_publish_job(
+                        workspace_id=ws, data_source_id=ds, graph_id=graph_id, branch_id=branch_id,
+                        actor=owner, message=f"Import {job_id}", auto_publish=True)
+                    note = {"state": "queued", "jobId": job["job_id"]}
+        except Exception as exc:  # noqa: BLE001 — a refusal, or an outage: the draft is kept
+            logger.warning("import job %s did not publish itself: %s", job_id, exc)
+            note = {"state": "skipped", "reason": _refusal(exc)}
+        try:
+            async with db.graphver_session() as s:
+                row = await s.get(JobORM, job_id)
+                if row is not None:
+                    row.summary = {**(row.summary or {}), "publish": note}
+                    row.updated_at = _now()
+        except Exception:  # pragma: no cover - defensive; must never fail the completed import
+            logger.exception("recording the publish of import job %s failed", job_id)
 
     async def _apply_view_layout(self, job_id, ws, ds, view_id, branch_id, worker) -> None:
         """Hand the import's newly-created top-level entities to the injected layout writer and record
@@ -587,7 +644,7 @@ class ImportExportService:
     async def create_publish_job(
         self, *, workspace_id: str, data_source_id: Optional[str], graph_id: str, branch_id: str,
         actor: str, message: str, resolutions: Optional[Dict[str, Any]] = None,
-        merge_request_id: Optional[str] = None,
+        merge_request_id: Optional[str] = None, auto_publish: bool = False,
     ) -> Dict[str, str]:
         """A publish of a draft too large to publish inside a request — or the merge of its review
         (``merge_request_id``), queued like an export. The request rides in ``field_scope``.
@@ -599,12 +656,15 @@ class ImportExportService:
         or a maintainer :class:`DraftRoleRequired`. A merge its reviewers have not approved is
         :class:`ApprovalRequired` here, before the draft is closed for it, and a draft behind ``main``
         :class:`NotUpToDate`, as a publish inside the request is; the job checks both again. The job
-        is stored already queued: it has no input to wait for."""
+        is stored already queued: it has no input to wait for. ``auto_publish``: an import publishes
+        its draft (:meth:`_auto_publish`), and the job holds its actor to publish again."""
         fields: Dict[str, Any] = {"actor": actor, "message": message}
         if resolutions:
             fields["resolutions"] = resolutions
         if merge_request_id:
             fields["mergeRequestId"] = merge_request_id
+        if auto_publish:
+            fields["autoPublish"] = True
         async with db.graphver_session() as s:
             await self._svc._lock_lifecycle(s, graph_id, shared=True)
             await self._lock_in_workspace(s, graph_id, workspace_id)

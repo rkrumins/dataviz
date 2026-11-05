@@ -72,8 +72,8 @@ from backend.app.services.versioning import config as vconfig
 from backend.app.services.versioning.cache_manager import acquire_lease, release_lease
 from backend.app.services.versioning.change_index import ChangeOrigin
 from backend.app.services.versioning.errors import (HTTP_MAPPED, DraftNotReadable, IneligibleMember,
-                                                   IneligibleOwner, ReviewRequired, SelfMerge,
-                                                   ServiceAccountMember)
+                                                   IneligibleOwner, PublishRequired, ReviewRequired,
+                                                   SelfMerge, ServiceAccountMember)
 from backend.app.services.versioning.messaging import nudge_projection
 from backend.app.services.versioning.service import (
     AccessDenied,
@@ -2386,6 +2386,12 @@ async def _publish_from_job(job: dict) -> dict:
                     identity = await _node_identity_for_meta(session, meta)
                     # As it is now: a rule tightened since the job was queued holds.
                     policy = await _drafts_policy_of(session, (meta or {}).get("data_source_id"))
+                    # An import publishing itself was allowed to when it was asked for, perhaps
+                    # hours ago: its owner must still hold publish (an API key's too).
+                    if job.get("autoPublish") and not has_permission(
+                            await permission_service.resolve(session, actor), _PUBLISH,
+                            workspace_id=job["workspaceId"]):
+                        raise PublishRequired(_AUTO_PUBLISH_NEEDS)
                 if job.get("mergeRequestId"):
                     commit_id = await svc.merge_mr(
                         mr_id=job["mergeRequestId"], actor=actor, message=job["message"],
@@ -3706,6 +3712,37 @@ async def _check_import_view(session, ws_id: str, view_id: Optional[str], user, 
             raise HTTPException(status_code=403, detail="Missing permission: workspace:view:edit")
 
 
+async def _may_auto_publish(session, claims: PermissionClaims, ws_id: str, meta: dict,
+                            branch_id: Optional[str]) -> None:
+    """An import that publishes itself (``autoPublish``) is held to what its publish will be held
+    to, before anything is created or stored: the caller holds publish (an API key: its owner,
+    403 ``publish_required``), and the data source's policy lets them merge their own changes
+    (409 ``review_required``). It opens a draft of its own, so it publishes nobody else's: 422 with
+    ``branchId``. The publish job checks again when it runs."""
+    if branch_id:
+        raise HTTPException(status_code=422, detail={
+            "type": "auto_publish_needs_own_draft",
+            "message": "An import that publishes itself opens a draft of its own: leave out branchId, "
+                       "or leave out autoPublish and publish that draft yourself."})
+    try:
+        require_publish_for_main(claims, ws_id)
+    except PublishRequired:
+        raise PublishRequired(_AUTO_PUBLISH_NEEDS) from None
+    if not (await _drafts_policy_of(session, meta.get("data_source_id"))).self_merge:
+        raise ReviewRequired(None)
+
+
+_AUTO_PUBLISH_NEEDS = ("an import that publishes itself needs publish permission (for an API key, "
+                       "its owner's); leave out autoPublish to import into a draft for review")
+
+
+_AUTO_PUBLISH = Query(False, alias="autoPublish", description=(
+    "Publish the import's draft once it has finished with every row applied (see the job's "
+    "``summary.publish``). Needs publish (for an API key, its owner's) and a data source whose "
+    "policy lets you merge your own changes. The import opens a draft of its own, so not with "
+    "``branchId``."))
+
+
 class CreateImportResponse(_ApiModel):
     jobId: str
     branchId: str
@@ -3724,6 +3761,7 @@ async def create_import(
     idempotency_key: Optional[str] = Query(None, alias="idempotencyKey", description=(
         "Makes the request safe to send again: the same key, from the same caller, answers "
         "with the job it started")),
+    auto_publish: bool = _AUTO_PUBLISH,
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
     claims: PermissionClaims = Depends(get_permission_claims),
     meta: dict = Depends(graph_in_workspace),
@@ -3733,7 +3771,8 @@ async def create_import(
     """Create a bulk import: open/append the user's working **draft**, stream the uploaded file to
     the object store, and dispatch the worker. The file is the raw request body (ndjson/csv/…);
     params are query args, so a client can drive the whole thing with one authenticated ``curl``.
-    Review + publish/PR happen through the existing draft endpoints — this never writes to ``main``.
+    Review + publish/PR happen through the existing draft endpoints — the import itself never
+    writes to ``main`` — unless ``autoPublish`` asks it to publish its draft once it has finished.
     ``branchId`` stacks onto an existing draft (repeat imports, like manual edits)."""
     from backend.app.services.versioning.import_export.formats import get_adapter
     try:
@@ -3741,6 +3780,8 @@ async def create_import(
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     await _check_import_view(session, ws_id, view_id, user, claims)
+    if auto_publish:
+        await _may_auto_publish(session, claims, ws_id, meta, branch_id)
     key = _callers_key(user, idempotency_key)
     job = await _job_for_key(ie, graph_id, key, "ingest")
     if job is None:
@@ -3750,7 +3791,7 @@ async def create_import(
                     workspace_id=ws_id, data_source_id=meta.get("data_source_id"), graph_id=graph_id,
                     actor=user.id, import_format=format, provider_id=meta.get("provider_id"),
                     branch_id=branch_id, reconcile_mode=reconcile_mode, scope_view_id=view_id,
-                    idempotency_key=key, draft_visibility=(
+                    idempotency_key=key, auto_publish=auto_publish, draft_visibility=(
                         await draft_level(session, meta.get("data_source_id")) if branch_id is None else None))
         except IntegrityError:
             # A request with the same key got there first: answer with its job.
@@ -3815,9 +3856,11 @@ def _upload_errors():
 
 
 def _upload_view(record: dict, received: List[int]) -> dict:
+    from backend.app.services.versioning.import_export import uploads
     return {"uploadId": record["uploadId"], "fileName": record["fileName"], "size": record["size"],
             "format": record["format"], "partBytes": record["partBytes"], "parts": record["parts"],
-            "received": received, "jobId": record.get("jobId")}
+            "received": received, "jobId": record.get("jobId"),
+            "expiresAt": uploads.expires_at(record).isoformat()}
 
 
 async def _load_upload(ie, ws_id: str, graph_id: str, meta: dict, upload_id: str, user: User) -> dict:
@@ -3869,9 +3912,12 @@ async def put_import_upload_part(
     meta: dict = Depends(graph_in_workspace),
     ie=Depends(get_import_export_service),
 ):
-    """One part of the file, the raw request body. Sending a part again replaces it."""
+    """One part of the file, the raw request body. Sending a part again replaces it — until the
+    upload is completed: what is imported is what was there then."""
     from backend.app.services.versioning.import_export import uploads
     record = await _load_upload(ie, ws_id, graph_id, meta, upload_id, user)
+    if record.get("jobId"):
+        raise HTTPException(status_code=409, detail="This upload is complete. Upload the file again to change it.")
     with _upload_errors():
         size = await uploads.put_part(ie.store, record, part, request.stream())
     return {"part": part, "size": size}
@@ -3884,6 +3930,7 @@ async def complete_import_upload(
     reconcile_mode: str = Query("upsert", alias="reconcileMode", pattern="^(upsert|replace)$"),
     branch_id: Optional[str] = Query(None, alias="branchId"),
     view_id: Optional[str] = Query(None, alias="viewId"),
+    auto_publish: bool = _AUTO_PUBLISH,
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
     claims: PermissionClaims = Depends(get_permission_claims),
     meta: dict = Depends(graph_in_workspace),
@@ -3891,33 +3938,62 @@ async def complete_import_upload(
     session: AsyncSession = Depends(get_db_session),
 ):
     """Import the uploaded file, once every part is in: as ``POST /imports`` does with a request
-    body. Asking again answers with the import already started."""
+    body. An upload is imported once, however often it is completed: asking again — at the same
+    time, or after an answer that was lost — answers with that import, and one whose completion
+    broke off before it was queued is queued now."""
     from backend.app.services.versioning.import_export import uploads
     record = await _load_upload(ie, ws_id, graph_id, meta, upload_id, user)
     await _check_import_view(session, ws_id, view_id, user, claims)
-    if record.get("jobId"):
-        job = await ie.get_job(record["jobId"]) or {}
-        return {"jobId": record["jobId"], "branchId": record.get("branchId"),
-                "sourceUri": uploads.record_key(record), "status": job.get("status") or "pending"}
-    missing = record["parts"] - len(await uploads.received(ie.store, record))
-    if missing:
-        raise HTTPException(status_code=409, detail=f"{missing} of the file's {record['parts']} parts haven't "
-                                                    "arrived yet. Send them, then complete the upload.")
-    with _domain_errors():
-        created = await ie.create_import_job(
-            workspace_id=ws_id, data_source_id=meta.get("data_source_id"), graph_id=graph_id,
-            actor=user.id, import_format=record["format"], provider_id=meta.get("provider_id"),
-            source_uri=uploads.record_key(record), branch_id=branch_id, reconcile_mode=reconcile_mode,
-            scope_view_id=view_id, draft_visibility=(
-                await draft_level(session, meta.get("data_source_id")) if branch_id is None else None))
+    if auto_publish:
+        await _may_auto_publish(session, claims, ws_id, meta, branch_id)
+    key = f"upload:{upload_id}"
+    job = await ie.get_job(record["jobId"]) if record.get("jobId") else None
+    if job is None:
+        missing = record["parts"] - len(await uploads.received(ie.store, record))
+        if missing:
+            raise HTTPException(status_code=409, detail=f"{missing} of the file's {record['parts']} parts haven't "
+                                                        "arrived yet. Send them, then complete the upload.")
+        try:
+            with _domain_errors():
+                created = await ie.create_import_job(
+                    workspace_id=ws_id, data_source_id=meta.get("data_source_id"), graph_id=graph_id,
+                    actor=user.id, import_format=record["format"], provider_id=meta.get("provider_id"),
+                    source_uri=uploads.record_key(record), branch_id=branch_id, reconcile_mode=reconcile_mode,
+                    scope_view_id=view_id, idempotency_key=key, auto_publish=auto_publish,
+                    draft_visibility=(
+                        await draft_level(session, meta.get("data_source_id")) if branch_id is None else None))
+        except IntegrityError:
+            # A completion sent at the same time got there first: answer with its import.
+            job = await _job_for_key(ie, graph_id, key, "ingest")
+            if job is None:
+                raise
+        else:
+            return await _start_upload_import(ie, record, created["job_id"], created["branch_id"])
+    if _never_arrived(job):
+        # Its completion broke off before the import was queued: taken back, under the rules a new
+        # import meets, and queued now.
+        with _domain_errors():
+            if await ie.reclaim_import(job["jobId"], actor=user.id, workspace_id=ws_id):
+                return await _start_upload_import(ie, record, job["jobId"], job["branchId"])
+        job = await ie.get_job(job["jobId"]) or job                  # another completion took it back
+    if record.get("jobId") != job["jobId"]:     # the completion that made it broke off before saving it
+        await uploads.save(ie.store, {**record, "jobId": job["jobId"], "branchId": job["branchId"]})
+    return {"jobId": job["jobId"], "branchId": job["branchId"], "sourceUri": uploads.record_key(record),
+            "status": job["status"]}
+
+
+async def _start_upload_import(ie, record: dict, job_id: str, branch_id: str) -> dict:
+    """Record import ``job_id`` on its upload, then queue it. A completion that breaks off before
+    the job is queued fails it there and then (:func:`_abandon_unqueued`): completing the upload
+    again takes it back."""
+    from backend.app.services.versioning.import_export import uploads
     try:
-        await uploads.save(ie.store, {**record, "jobId": created["job_id"], "branchId": created["branch_id"]})
-        status = await ie.start_import(created["job_id"])
+        await uploads.save(ie.store, {**record, "jobId": job_id, "branchId": branch_id})
+        status = await ie.start_import(job_id)
     except BaseException:
-        await _abandon_unqueued(ie, created["job_id"])
+        await _abandon_unqueued(ie, job_id)
         raise
-    return {"jobId": created["job_id"], "branchId": created["branch_id"],
-            "sourceUri": created["source_uri"], "status": status}
+    return {"jobId": job_id, "branchId": branch_id, "sourceUri": uploads.record_key(record), "status": status}
 
 
 @router.get("/graphs/{graph_id}/imports")
