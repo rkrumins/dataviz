@@ -223,6 +223,7 @@ What the Business view tucks away is a click away, not gone:
 | The view's header | Its name and description, where it lives, **Share**, **Details** (or **About**, for people who can't edit), **Activity**, and any request waiting on it | Versions, export, reviews, the type count and usage are the Technical view's |
 | An entity's right-click menu | **View & Edit**, **Trace Lineage**, **Focus Connections** | **Copy URN** and **Narrow to this…** are the Technical view's |
 | A trace bar (Graph canvas) | Its directions and **Exit** | Statistics, settings, **Copy URNs** and export are the Technical view's |
+| A trace bar (Context View) | Every control. The trace draws a card's lines as you point at or pick it, and **N of M lines · Show every line** says what isn't drawn | Every line from the start is the Technical view's; **Trace settings → Lines** sets either |
 | An entity's details panel | Opens when you ask (**Details**, `Enter`), on **At a glance**: its description, ID, owner and featured properties | The identifier block, raw details, placement, history, **Copy URN** and the **JSON** tab are the Technical view's; **Customize** brings any section back |
 
 A tool that is on stays on screen in either view, so you can always turn it off —
@@ -231,7 +232,8 @@ in both. The branch switcher shows
 while you're in a draft. The **Data loads** and **Flows** panels start minimized
 in the Business view until you open or minimize them yourself.
 
-The graph, its lineage and your access are the same in both. Choose a view in
+The graph, its lineage and your access are the same in both; only a trace on a
+Context View starts drawing its lines differently, as the table says. Choose a view in
 the switch, or use the arrow keys once it has focus. The words
 **Business View** or **Technical View** under the {brandShort} name at the top
 left show which one is on, and the `⌘K` / `Ctrl-K` palette can switch it too

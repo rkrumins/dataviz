@@ -15,6 +15,7 @@ import type { GranularityOption } from './TraceDockControls'
 import { useTraceEscStack } from './useTraceEscStack'
 import type { TraceShareSummary } from './TraceSharePopover'
 import type { TraceSeed } from './TraceSeedsPopover'
+import type { TraceLines } from './TraceDockTitleBar'
 
 export interface TraceBottomDockProps {
   trace: UseUnifiedTraceResult
@@ -47,6 +48,9 @@ export interface TraceBottomDockProps {
   /** A combined trace's seeds, and dropping one (see the title bar). */
   seeds?: readonly TraceSeed[]
   onRemoveSeed?: (urn: string) => void
+  /** The lines the trace leaves undrawn, and the way to all of them (see the
+   *  title bar). */
+  lines?: TraceLines
 }
 
 const COMPACT_HEIGHT = 64
@@ -100,6 +104,7 @@ export function TraceBottomDock({
   focusLabel,
   seeds,
   onRemoveSeed,
+  lines,
 }: TraceBottomDockProps) {
   const [expandedHeight, setExpandedHeight] = useState(lastExpandedHeight)
   const [tab, setTab] = useState<TraceDockTab>('overview')
@@ -277,6 +282,7 @@ export function TraceBottomDock({
           focusLabel={focusLabel}
           seeds={seeds}
           onRemoveSeed={onRemoveSeed}
+          lines={lines}
           nativeMode={nativeMode}
         />
 

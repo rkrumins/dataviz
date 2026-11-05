@@ -26,10 +26,13 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { motion } from 'framer-motion'
-import { ArrowUp, ArrowDown, ChevronDown, Eye, Minus, Plus, Workflow } from 'lucide-react'
+import { ArrowUp, ArrowDown, ChevronDown, Eye, Minus, Plus, Sliders, Workflow } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { FULL_WALK_INITIAL_DEPTH } from '@/hooks/useLensWalk'
+import { usePreferencesStore } from '@/store/preferences'
+import { useTraceLineMode } from '@/store/traceLineMode'
 import { LineageCountsToggle } from '../trace/LineageCountsToggle'
+import { TraceLinesChoice } from '../trace/TraceLinesChoice'
 
 export interface TraceDepthControlProps {
   upstreamDepth: number
@@ -223,12 +226,15 @@ export function TraceDepthControl({
 
               <div className="h-px bg-black/[0.08] dark:bg-white/[0.06] mx-3" />
 
-              {/* Display — what the trace shows on its cards. */}
+              {/* Display — how many of its lines the trace draws, and what
+                  it shows on its cards. */}
               <div className="px-3 pt-2.5 pb-3">
                 <div className="px-1 pb-1.5 flex items-center gap-1.5 text-[10.5px] uppercase tracking-[0.12em] font-bold text-ink-muted/70">
                   <Eye className="w-3 h-3" strokeWidth={2.2} />
                   Display
                 </div>
+                <TraceLinesChoice />
+                <LineBudgets />
                 <LineageCountsToggle />
               </div>
             </motion.div>
@@ -348,6 +354,81 @@ function DepthRow({
             <Plus className="w-3 h-3" strokeWidth={2.4} />
           </button>
         </div>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * The trace's own budgets, apart from Display's browse one: Lines kept, how
+ * many of the strongest lines Adaptive keeps drawn, and Lines per card, the
+ * most a card draws when it is pointed at or picked. Every line has neither.
+ */
+function LineBudgets() {
+  const mode = useTraceLineMode()
+  const kept = usePreferencesStore((s) => s.traceLinesKept)
+  const setKept = usePreferencesStore((s) => s.setTraceLinesKept)
+  const perCard = usePreferencesStore((s) => s.traceLinesPerCard)
+  const setPerCard = usePreferencesStore((s) => s.setTraceLinesPerCard)
+  return (
+    <>
+      {mode === 'auto' && (
+        <BudgetSlider
+          label="Lines kept"
+          detail={`The strongest ${kept.toLocaleString()} lines stay drawn`}
+          min={10}
+          max={2000}
+          step={10}
+          value={kept}
+          onChange={setKept}
+        />
+      )}
+      {mode !== 'raw' && (
+        <BudgetSlider
+          label="Lines per card"
+          detail="Lines a card draws when you point at or pick it"
+          min={5}
+          max={500}
+          step={5}
+          value={perCard}
+          onChange={setPerCard}
+        />
+      )}
+    </>
+  )
+}
+
+/** One budget — Display's Edge Budget slider, in the trace's words. */
+function BudgetSlider({ label, detail, min, max, step, value, onChange }: {
+  label: string
+  detail: string
+  min: number
+  max: number
+  step: number
+  value: number
+  onChange: (n: number) => void
+}) {
+  return (
+    <div className="mb-2 px-2.5 py-2 rounded-lg bg-black/[0.02] dark:bg-white/[0.02] border border-black/[0.06] dark:border-white/[0.05]">
+      <div className="flex items-center gap-1.5 text-[10px] font-semibold tracking-[0.1em] uppercase text-ink-muted/80">
+        <Sliders className="w-3 h-3" />
+        <span>{label}</span>
+        <span className="ml-auto tabular-nums text-accent-lineage/80">{value.toLocaleString()}</span>
+      </div>
+      <p className="pt-1 pb-1.5 text-[11px] text-ink-muted/80 leading-snug">{detail}</p>
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        onChange={(e) => onChange(parseInt(e.target.value, 10))}
+        className="w-full accent-accent-lineage"
+        aria-label={label}
+      />
+      <div className="flex justify-between text-[9.5px] text-ink-muted/60 tabular-nums">
+        <span>{min}</span>
+        <span>{max.toLocaleString()}</span>
       </div>
     </div>
   )

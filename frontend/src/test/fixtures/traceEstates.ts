@@ -180,6 +180,57 @@ export function coarseCellsEstate() {
   return { model, layers, assignments }
 }
 
+/**
+ * A WIDE FAN: one table with thirty tables feeding it and thirty it feeds.
+ * The lineage lives on columns, as a real walk reports it — `upstreamUrns`
+ * and `downstreamUrns` name the columns, never the tables or containers they
+ * sit in.
+ *
+ *   RAW ⊃ feed ⊃ {feed.a, feed.b, feed.c}            ← column "Raw", two hops up
+ *   CRM ⊃ in00 … in14,  ERP ⊃ in15 … in29            ← columns "CRM", "ERP"
+ *   WH ⊃ hub ⊃ {hub.c00 … hub.c29}                   ← column "Warehouse": the focus
+ *   SALES ⊃ out00 … out14,  FINANCE ⊃ out15 … out29  ← columns "Sales", "Finance"
+ *   feed.a, feed.b, feed.c → in00.c;  inNN.c → hub.cNN → outNN.c
+ *
+ * Fifteen tables a column, because a harness column mounts sixteen rows.
+ * The hub holds more lineage-bearing columns than a trace opens on landing,
+ * so it lands closed: sixty lines, one per partner table. RAW lands closed
+ * too, two hops out, so feed's three hops draw as ONE line from the RAW
+ * container to in00 — a line on the trace with neither end a traced column.
+ */
+export function wideFanEstate() {
+  const fan = Array.from({ length: 30 }, (_, i) => String(i).padStart(2, '0'))
+  const upHost = (i: string) => (Number(i) < 15 ? 'CRM' : 'ERP')
+  const downHost = (i: string) => (Number(i) < 15 ? 'SALES' : 'FINANCE')
+  const nodes = [
+    wn('RAW', 'container', 1), wn('feed', 'dataset', 3), wn('feed.a', 'schemaField'), wn('feed.b', 'schemaField'), wn('feed.c', 'schemaField'),
+    wn('CRM', 'container', 15), wn('ERP', 'container', 15), ...fan.flatMap(i => [wn(`in${i}`, 'dataset', 1), wn(`in${i}.c`, 'schemaField')]),
+    wn('WH', 'container', 1), wn('hub', 'dataset', 30), ...fan.map(i => wn(`hub.c${i}`, 'schemaField')),
+    wn('SALES', 'container', 15), wn('FINANCE', 'container', 15), ...fan.flatMap(i => [wn(`out${i}`, 'dataset', 1), wn(`out${i}.c`, 'schemaField')]),
+  ]
+  const containmentEdges = [
+    has('RAW', 'feed'), has('feed', 'feed.a'), has('feed', 'feed.b'), has('feed', 'feed.c'),
+    ...fan.flatMap(i => [has(upHost(i), `in${i}`), has(`in${i}`, `in${i}.c`)]),
+    has('WH', 'hub'), ...fan.map(i => has('hub', `hub.c${i}`)),
+    ...fan.flatMap(i => [has(downHost(i), `out${i}`), has(`out${i}`, `out${i}.c`)]),
+  ]
+  const lineageEdges = [
+    raw('feed.a', 'in00.c'), raw('feed.b', 'in00.c'), raw('feed.c', 'in00.c'),
+    ...fan.flatMap(i => [raw(`in${i}.c`, `hub.c${i}`), raw(`hub.c${i}`, `out${i}.c`)]),
+  ]
+  const model: LensWalkModel = {
+    focusUrn: 'hub', nodes, lineageEdges, containmentEdges,
+    upstreamUrns: new Set(['feed.a', 'feed.b', 'feed.c', ...fan.map(i => `in${i}.c`)]),
+    downstreamUrns: new Set(fan.map(i => `out${i}.c`)),
+    frontierUp: [], frontierDown: [], truncated: false, truncationReason: null, seedTruncated: false, seedCursor: null,
+  }
+  const columns = ['Raw', 'CRM', 'ERP', 'Warehouse', 'Sales', 'Finance']
+  const layers: ViewLayerConfig[] = columns.map((name, order) => ({ id: name.toLowerCase(), name, order, entityTypes: [] }))
+  const assignments = Object.fromEntries(['RAW', 'CRM', 'ERP', 'WH', 'SALES', 'FINANCE']
+    .map((container, i) => [container, { layerId: layers[i].id }]))
+  return { model, layers, assignments }
+}
+
 /** `coarseCellsEstate` once the raw pages have landed too: the focus's
  *  columns, the partners' columns, and the real flows — three into
  *  `journal`, one into `balances`. The harness serves the cells as the

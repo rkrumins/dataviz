@@ -33,6 +33,7 @@ import { CollapsibleSection } from './DisplaySettingsPopover'
 import { usePreferencesStore, type LineageMotion, type LineagePortSides, type LineageRenderMode } from '@/store/preferences'
 import { LINEAGE_DIRECTION_PRESETS, resolveLineageDirectionColors } from '@/lib/lineageDirectionColors'
 import { PortLegend } from './LineageGuide'
+import { TraceLinesChoice } from '../trace/TraceLinesChoice'
 
 interface LineageDisplayPopoverProps {
   lineageRenderMode: LineageRenderMode
@@ -287,7 +288,6 @@ export function LineageDisplaySections({
       >
         <p className="px-1 pt-1 pb-2 text-[11px] text-ink-muted/80 leading-snug">
           {simple ? 'How many lines the canvas draws at once.' : 'How many edges materialise on the canvas at once.'}
-          <span className="block mt-0.5">A trace draws every line it walks, whatever this is set to.</span>
         </p>
         <div
           role="radiogroup"
@@ -346,6 +346,10 @@ export function LineageDisplaySections({
         </div>
         {!simple && lineageRenderMode !== 'raw' && <AdaptiveBudgetSlider disabled={disabled} mode={lineageRenderMode} />}
         {lineageRenderMode === 'auto' && (!simple || showFlowRibbons) && <FlowRibbonsToggle disabled={disabled} />}
+        {/* A trace has its own choice, the one Trace settings → Lines makes. */}
+        <div className="mt-3">
+          <TraceLinesChoice label="While tracing" disabled={disabled} />
+        </div>
       </CollapsibleSection>
 
       <div className="h-px bg-black/[0.08] dark:bg-white/[0.06] mx-3" />

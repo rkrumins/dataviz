@@ -1,8 +1,9 @@
 /**
  * Preferences: the Dashboard's Needs attention stays off until someone turns it
  * on here, and the switch says plainly when there would be nothing to show.
+ * Entity details and a trace's lines are set for each view.
  */
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -57,5 +58,28 @@ describe('PreferencesPage', () => {
         expect(usePreferencesStore.getState().openDetailsOnSelect).toEqual({ business: true, technical: true })
         fireEvent.click(technical)
         expect(usePreferencesStore.getState().openDetailsOnSelect).toEqual({ business: true, technical: false })
+    })
+
+    it('trace lines per view: On hover for Business, Every line for Technical, each changeable, and Reset', () => {
+        usePreferencesStore.setState({ traceLinesKept: 40, traceLinesPerCard: 5 })
+        renderPage()
+        const business = screen.getByRole('radiogroup', { name: 'Trace lines, in the business view' })
+        const technical = screen.getByRole('radiogroup', { name: 'Trace lines, in the technical view' })
+        expect(within(business).getByRole('radio', { name: 'On hover' })).toHaveAttribute('aria-checked', 'true')
+        expect(within(technical).getByRole('radio', { name: 'Every line' })).toHaveAttribute('aria-checked', 'true')
+
+        fireEvent.click(within(business).getByRole('radio', { name: 'Adaptive' }))
+        expect(usePreferencesStore.getState().traceLineMode).toEqual({ business: 'auto', technical: 'raw' })
+        fireEvent.click(within(technical).getByRole('radio', { name: 'On hover' }))
+        expect(usePreferencesStore.getState().traceLineMode).toEqual({ business: 'auto', technical: 'stubs' })
+        expect(within(business).getByRole('radio', { name: 'Adaptive' })).toHaveAttribute('aria-checked', 'true')
+
+        // Reset puts back both views, and the trace's budgets with them.
+        fireEvent.click(screen.getByRole('button', { name: 'Reset to defaults' }))
+        expect(usePreferencesStore.getState()).toMatchObject({
+            traceLineMode: { business: 'stubs', technical: 'raw' }, traceLinesKept: 500, traceLinesPerCard: 500,
+        })
+        expect(within(business).getByRole('radio', { name: 'On hover' })).toHaveAttribute('aria-checked', 'true')
+        expect(within(technical).getByRole('radio', { name: 'Every line' })).toHaveAttribute('aria-checked', 'true')
     })
 })
