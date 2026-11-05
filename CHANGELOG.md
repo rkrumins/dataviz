@@ -9,6 +9,77 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — A connector sends a multi-gigabyte file, and its import publishes itself
+
+### Added
+
+- **An import can publish itself:** `autoPublish=true` on `POST …/imports` or on
+  `…/imports/uploads/{id}/complete`.
+  - Once the import has applied every row, its draft goes to a publish job, the same one a large
+    manual publish takes, and the file's deltas land on the published graph.
+  - The import's `summary.publish` says how it went:
+    - `queued`, with the publish job's `jobId`;
+    - `unchanged`: nothing changed, and the empty draft was closed;
+    - `skipped`, with a `reason`: rows were refused, or the published graph moved during the
+      import (`not_up_to_date`). The draft then waits for review.
+  - It needs publish (for an API key, its owner's), a data source whose policy lets people merge
+    their own changes, and a draft of the import's own. All three are checked before anything is
+    stored, and publish again when the publish job runs.
+- **API keys publish and merge** where the person or service account they belong to holds
+  publish: `POST …/branches/{id}/publish` and `POST …/merge-requests/{id}/merge`. That is the rule
+  that already let a key write the published graph directly (bulk ingest). Elsewhere a key gets
+  `403 publish_required`. A fork's review, revert, restore and sync stay closed to keys.
+- **A resumable upload says when it expires** (`expiresAt`, 24 hours after it was started).
+- **[Building a Connector](docs/CONNECTOR_GUIDE.md), rewritten.** It covers keys and roles, finding
+  ids, every column, sending gigabyte files, the upload protocol, publishing, the job's fields,
+  errors and retries, idempotency, one table of every limit, sizing measured at 500 MB, curl and
+  Python walkthroughs, and troubleshooting.
+- **The reference connector sends large files:**
+  - it streams from disk, 4 resumable parts at a time, honouring `Retry-After`;
+  - it resumes a run that stopped, from a state file keyed on the file's sha256;
+  - with `--publish`, it follows the import and then its publish;
+  - it sends an existing file with `--file`.
+
+### Changed
+
+- **A delete of what isn't in the graph is done already.** Whether it was deleted before (a delta
+  sent again) or was never there, the row is `unchanged`, with the note "nothing to delete", and
+  the dry run counts such rows in a hint. Before, the row was refused ("delete target not found"),
+  so a re-sent delta could never publish itself. A mistyped name in a delete row now gets a note,
+  not a refusal.
+- **A read-only API key can dry-run an import** (`POST …/imports/validate`, which writes nothing),
+  as the docs already said.
+
+### Fixed
+
+- **Completing an upload twice, or at once from two clients, started two imports.** An upload is
+  now imported once, and a completion that broke off before its import was queued is queued by the
+  next completion. Before, that upload stayed tied to a failed job.
+- **A part sent after its upload was completed replaced what the import was reading.** It is now
+  refused with `409`.
+- **A file with CR-only line endings, or a CSV quote left open, read the rest of the file into the
+  worker's memory.** A multi-gigabyte one ran the worker out of memory, the next too, and failed
+  only after three takeovers. A line or quoted record longer than 16 MB now fails the import at
+  once, naming the line.
+
+### Upgrading
+
+- `tests/fixtures/api_key_surface.txt` and `docs/security/endpoints.md` list the two routes keys
+  may now call (publish, and merge a draft's merge request), and the dry run as read-only.
+- **Size Postgres for gigabyte imports.** An import writes far more into the graph than its file
+  holds: about 27 times an NDJSON file of short rows, kept as both the draft's and the published
+  copy, plus the staged rows. See [Building a Connector → Large files](docs/CONNECTOR_GUIDE.md).
+
+### Known limitations
+
+- **An import that publishes itself needs the published graph not to move while it runs.** One
+  that fell behind is kept for review. Bringing a draft of millions of changes up to date reads them
+  all at once, so for a large file the answer is to import it again.
+- **A worker that stops between an import's finish and its publish job** leaves `summary.publish`
+  missing. Publish the draft then; the reference connector does.
+
+---
+
 ## [Unreleased] — See the graph as it was at any revision, and compare any two (preview)
 
 The screens of the revision history viewer, behind the preview switch **Revision history viewer:
@@ -272,8 +343,8 @@ that, and the screens move onto the new lists in the next one.
 
 ### Known limitations
 
-- A file sent again after its `_op=delete` rows applied refuses them ("delete target not found").
-  Nothing changes.
+- ~~A file sent again after its `_op=delete` rows applied refuses them ("delete target not
+  found").~~ Since changed: such a delete is done already (the entry above).
 - A row whose `baseVersion` this graph doesn't hold (another graph's export) sets what it carries.
 
 ---

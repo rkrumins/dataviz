@@ -281,21 +281,27 @@ A file of up to `IMPORT_MAX_BYTES` (10 GiB; NDJSON, CSV and TSV, which are read 
 arrives in parts (`import_export/uploads.py`), since one request that size would outlast every proxy
 and timeout on the way, and a dropped connection would start it over:
 
-1. `POST …/imports/uploads` `{fileName, size, format}` → `{uploadId, partBytes, parts}` (16 MiB parts).
-   A file too large for its format is refused here (413), before any of it is sent.
+1. `POST …/imports/uploads` `{fileName, size, format}` → `{uploadId, partBytes, parts, expiresAt}`
+   (16 MiB parts). A file too large for its format is refused here (413), before any of it is sent.
 2. `PUT …/imports/uploads/{uploadId}/parts/{n}`, the part as the body: several at once, in any order.
    Each is its own write-once object in the store (a bucket mount never appends or renames), and
-   must hold exactly its share of the file; sending a part again replaces it.
+   must hold exactly its share of the file; sending a part again replaces it — until the upload is
+   completed (409): what is imported is what was there then.
 3. `GET …/imports/uploads/{uploadId}` → `received`: what a resumed upload doesn't send again.
-4. `POST …/imports/uploads/{uploadId}/complete?reconcileMode&branchId&viewId` → 202, the import job
-   (409 while a part is missing). It reads the parts in order as one file; asking again answers with
-   the same job.
+4. `POST …/imports/uploads/{uploadId}/complete?reconcileMode&branchId&viewId&autoPublish` → 202, the
+   import job (409 while a part is missing). It reads the parts in order as one file. An upload is
+   imported once: its job's idempotency key is `upload:{uploadId}`, so asking again — after a lost
+   answer, or two completions at once — answers with the same job, and a job whose completion broke
+   off before it was queued is taken back (`reclaim_import`) and queued then.
 
 The Import dialog sends three parts at a time, retries a part the server failed on (not one it
 refused), shows how much is up, and resumes: the same file chosen again (name, size and modification
 time) after a failure or a reload sends only the missing parts. An upload is its owner's only, and
 its parts are swept with every other artifact after `OBJECT_STORE_TTL_HOURS` (24), so it has a day
-to finish. `POST …/imports` (the file as the request body, up to 100 MB) stays for scripts.
+to finish (`expiresAt`). `POST …/imports` (the file as the request body, up to 100 MB; 32 MB through
+the Helm chart's ingress) stays for small files. A line — or a quoted CSV record — longer than
+`formats.MAX_RECORD_BYTES` (16 MiB) fails the import with the line's number: a file with CR-only line
+endings, or a quote left open, would otherwise be read whole into the worker's memory.
 
 An import that names a view (`viewId`) places the entities it creates in that view's layout — a
 write to the view — so the view must be in the workspace, not deleted, and editable by the caller
@@ -574,10 +580,10 @@ restore or clone the graph.
 
 All import/export blobs (uploaded source, export result, preview/rejected reports, view packages and
 their uploads) are stored under a self-describing `{workspace}/{data_source}/{graph}/{job}/{name}`
-key (`storage_key`, `object_store.py:40-42`), attributable to their origin at a glance. Everything
+key (`storage_key`, `object_store.py:48-50`), attributable to their origin at a glance. Everything
 streams at a 1 MiB chunk size, so a 5M-row file is never buffered whole.
 
-**The store is the management database** (`DatabaseObjectStore`, `object_store.py:202-330`; the
+**The store is the management database** (`DatabaseObjectStore`, `object_store.py:231-367`; the
 default, `OBJECT_STORE_BACKEND=database`). Production runs several API pods with no shared volume,
 so an artifact written to one pod's disk was missing on the others: an export download, or a view
 package's data import (`/packages/inspect` keeps the upload, `/packages/{uploadId}/data` reads it
@@ -611,8 +617,11 @@ wrote, so a reader never takes half a file for the whole one. A path-escape guar
 resolve outside the root, and the same sweep deletes files by age.
 
 **Which store.** The database is right for artifacts of up to about 1 GB each. Above that (a large
-export, or a view package with a big graph), use `local` on a shared mount or `s3` (below), which
-keep multi-GB blobs out of Postgres.
+export, a view package with a big graph, or a multi-GB import's upload), use `local` on a shared
+mount or `s3` (below), which keep multi-GB blobs out of Postgres. Every shipped config defaults to
+`database`, and in-cluster Postgres volumes are 10–20 Gi, so size them for gigabyte imports: what an
+import writes into the graph is far larger than its file ([Building a Connector → Large
+files](/docs/connector-guide#9-large-files)).
 
 ### Optional S3/GCS object store
 
@@ -768,8 +777,11 @@ tests/integration/test_s3_store_minio.py tests/test_object_store.py`.
 
 ## 11. Limitations & open items (candid)
 
-- **A delete sent again finds nothing.** A file whose `_op=delete` rows already applied refuses
-  them on its next import ("delete target not found"); nothing changes.
+- **A delete of what isn't there is done already.** A file whose `_op=delete` rows already
+  applied — or name something that was never there — finds nothing to delete: the row is
+  `unchanged`, with the note "nothing to delete", and the dry run counts such rows in a hint. So a
+  delta sent again is safe, and publishes itself; a mistyped name in a delete row only gets that
+  note.
 - **A taken-over export starts over.** An import resumes from its last window and a publish runs
   again safely, but an export rewrites its file from the start under a new key (§2). A job whose
   worker keeps dying fails once it has been taken over more than 3 times.
@@ -787,9 +799,13 @@ tests/integration/test_s3_store_minio.py tests/test_object_store.py`.
   Presigned URLs serve package uploads and stored downloads, but not yet a data source's own import
   uploads (`…/imports/uploads`), whose parts still go through the API.
 - **Row-scoped export is API-only** — the UI sends only `props` (`importExportApiService.ts:135-151`).
-- **`auto_publish` and a custom draft `name`** exist on `JobORM` / `create_import_job`
-  (`service.py:75-77`) but the `create_import` endpoint doesn't expose them — imports always flow
-  through the manual review/publish path (the draft is named "Import").
+- **An import that publishes itself (`autoPublish`) needs `main` not to move while it runs.** Its
+  publish needs the draft up to date with `main`; one that fell behind is kept for review
+  (`summary.publish.reason.type: not_up_to_date`). Bringing a draft of millions of changes up to
+  date (`rebase_draft`) reads them all at once, so for a large import the answer is to import the
+  file again. A worker that stops between an import's finish and its publish job leaves
+  `summary.publish` missing: publish the draft then. A custom draft `name` exists on
+  `create_import_job` but no route exposes it (the draft is named "Import").
 - **`INLINE_IMPORT_MAX` (5,000) two-tier threshold** exists in config as the intended
   "stage small imports client-side, run large ones async" split, but the endpoint currently always
   dispatches the async worker.

@@ -49,7 +49,9 @@ changed on the way, and **Back** never loses what you filled in.
    everyone, and say whether *you* can edit or only read each.
 3. **Permissions** — for **Views** and for **Data**: no access, read, or read
    & write. Each level says what a script holding the key could do. **Publish
-   views to everyone** needs read & write on views. When the key asks for more
+   views to everyone** needs read & write on views. It is about views only: a
+   **Data: read & write** key publishes data — a draft, a merge, an import
+   that publishes itself — wherever *you* hold publish. When the key asks for more
    than you have on something — write access to a view you can only read —
    the step says so: the key will only read it.
 4. **Safety** — when it expires (the date is shown; **Never** only where your
@@ -152,11 +154,11 @@ the day comes.
 ### What a key can call
 
 Keys are for the data plane: reading and changing views and the data behind
-them, proposing changes, and following what changed. People and access,
-sharing, settings and switches, layout templates and saved filters are not
-available to keys, nor importing a view file, turning version control on,
-creating or forking a graph, or publishing, merging, reverting, restoring or
-syncing one. The API reference marks every operation a key
+them, proposing and publishing changes, and following what changed. People and
+access, sharing, settings and switches, layout templates and saved filters are
+not available to keys, nor importing a view file, turning version control on,
+creating or forking a graph, merging a fork's review, or reverting, restoring
+or syncing a graph. The API reference marks every operation a key
 may call — see [Find the endpoint you need](/docs/api-guide#find-the-endpoint-you-need).
 
 | To… | Use |
@@ -167,7 +169,7 @@ may call — see [Find the endpoint you need](/docs/api-guide#find-the-endpoint-
 | Read or change a data source's graph | `/api/v1/{workspace}/graph/…?dataSourceId={id}` |
 | List a workspace's graphs, and which are versioned | `GET /api/v1/admin/workspaces/{workspace}/data-sources?include=versioning` — a key covering the whole workspace |
 | Propose a change | open a draft, stage the change, open a merge request (`/versioning/…`) |
-| Publish a change | not with a key: a person with publish merges the request, or publishes the draft |
+| Publish a change | publish the draft, merge its merge request, or have an import publish itself (`autoPublish`) — only where you hold **publish** in that workspace (a Publisher); a key with **Data: read & write** can then do it as you. Otherwise a person with publish merges the request |
 | Follow what changed | the view's activity (`GET /views/{id}/activity`), the commit log and watermark of its graph (`/versioning/graphs/{id}/commits`, `/watermark` — see [Graph Metadata & History API](/docs/graph-metadata-api)), a data source's jobs and their event stream |
 
 Searches, traces and exports are reads made with `POST`: a read-only key may

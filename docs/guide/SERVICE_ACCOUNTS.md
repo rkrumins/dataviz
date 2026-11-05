@@ -329,11 +329,15 @@ after its maker stops managing the account. Both answer `403` with
 `"type": "access_denied"`: `person_required` for the account's key,
 `self_review` for its manager or a key's maker.
 
-Given **Publisher** (or **Data engineer**) in a workspace, its keys may write a
-version-controlled data source's Published version directly — a bulk ingest,
-or an edit with no draft — since that check reads the account's own roles.
-Like every key, they never publish, merge, revert, restore or sync: a person
-with publish lands the drafts it proposes.
+Given **Publisher** (or **Data engineer**) in a workspace, its keys may change
+a version-controlled data source's Published version there — a bulk ingest, an
+edit with no draft, publishing a draft, merging a draft's merge request, or an
+import that publishes itself (`autoPublish`) — since that check reads the
+account's own roles. Give an account Publisher only where its automation should
+publish with no person in the loop. Like every key, they never merge a fork's
+review, revert, restore or sync; and where a data source's review policy says
+nobody merges their own changes, a person merges what the account proposes.
+See [Building a Connector](/docs/connector-guide).
 
 ---
 
