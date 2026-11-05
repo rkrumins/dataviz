@@ -193,8 +193,8 @@ async def test_a_window_lands_its_ops_resolutions_and_checkpoint_in_one_transact
     assert [entry[0] for entry in log] == ["ops", "sql", "checkpoint"], \
         "the resolutions, then the checkpoint, inside the ops' transaction"
     _kind, stmt, params = log[1]
-    assert stmt is import_worker._RESOLVE_ROWS and params["idx"] == [0, 2]
-    assert params["statuses"] == ["new", "invalid"]
+    assert stmt is import_worker._RECORD_RESULTS and params["idx"] == [0, 2]
+    assert (params["kinds"], params["ops"]) == (["node", "node"], ["create", "invalid"])
     assert _checkpoints(log) == [{
         "expect_cursor": "node:-1", "last_cursor": "node:2", "processed": 2, "progress": 50,
         "current_phase": "nodes", "summary": {**_NO_TALLIES, "takeovers": 1, "new": 1, "invalid": 1}}]
@@ -309,6 +309,9 @@ def _finishing_worker(log, *, facts, finishes=True):
     async def owner(*_args):
         return "usr_1"
 
+    async def carry(*_args):
+        log.append(("carry over",))
+
     async def stage(*_args):
         log.append(("stage",))
 
@@ -319,8 +322,8 @@ def _finishing_worker(log, *, facts, finishes=True):
     async def derive(*_args):
         log.append(("facts",))
 
-    for name, fake in (("_job", job), ("_branch_owner", owner), ("_stage", stage),
-                       ("_resolve_and_build", build), ("_derive_facts", derive)):
+    for name, fake in (("_job", job), ("_branch_owner", owner), ("_carry_over_results", carry),
+                       ("_stage", stage), ("_resolve_and_build", build), ("_derive_facts", derive)):
         setattr(worker, name, fake)
     return worker, lease
 
@@ -329,7 +332,8 @@ async def test_an_import_finishes_through_its_fenced_finish():
     log = []
     worker, lease = _finishing_worker(log, facts=True)
     assert await worker.run("vjob_1", lease=lease) == {**_NO_TALLIES, "new": 3}
-    assert log == [("stage",), ("build",), ("facts",)], "the layout facts come from the whole import"
+    assert log == [("carry over",), ("stage",), ("build",), ("facts",)], \
+        "an older release's outcomes are carried over before any window; the facts come from the whole import"
     assert lease.finished == ("completed", {"summary": {**_NO_TALLIES, "new": 3}, "progress": 100})
 
     log.clear()

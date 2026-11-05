@@ -461,6 +461,8 @@ class PurgeRunner:
             for sql in (
                 f'DELETE FROM "{sch}"."branch_members" WHERE branch_id IN '
                 f'  (SELECT id FROM "{sch}"."branches" WHERE graph_id = :g)',
+                f'DELETE FROM "{sch}"."import_results" WHERE job_id IN '
+                f'  (SELECT id FROM "{sch}"."jobs" WHERE graph_id = :g)',
                 f'DELETE FROM "{sch}"."import_rows" WHERE job_id IN '
                 f'  (SELECT id FROM "{sch}"."jobs" WHERE graph_id = :g)',
                 f'DELETE FROM "{sch}"."merge_requests" WHERE graph_id = :g',

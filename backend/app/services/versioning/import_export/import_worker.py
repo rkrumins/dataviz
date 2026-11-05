@@ -37,8 +37,8 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
-from sqlalchemy import (BigInteger, Text, and_, bindparam, delete, exists, false, func, insert,
-                        null, or_, select, text, tuple_)
+from sqlalchemy import (BigInteger, Text, and_, any_, bindparam, delete, exists, false, func,
+                        insert, null, or_, select, text, tuple_)
 from sqlalchemy.dialects.postgresql import ARRAY
 
 from backend.app.services.view_placement import NodeFacts, suggest_placement
@@ -46,7 +46,8 @@ from backend.app.services.view_placement import NodeFacts, suggest_placement
 from .. import config, db
 from ..ids import new_entity_id
 from ..job_lease import QUEUED, Lease, Superseded
-from ..models import BranchORM, EdgeVersionORM, ImportRowORM, JobORM, NodeVersionORM
+from ..models import (BranchORM, EdgeVersionORM, ImportResultORM, ImportRowORM, JobORM,
+                      NodeVersionORM)
 from ..service import OntologyViolation
 from .formats import get_adapter
 from .resolve import (KeyIndex, _canonical_map, key_value, pointer_id, pointer_seed, pointers,
@@ -60,14 +61,22 @@ logger = logging.getLogger(__name__)
 
 _PARSE_BATCH = 2000
 _PERSIST_BATCH = 5000
-# Record a batch of resolutions: each column one array parameter, so the statement never changes.
-_RESOLVE_ROWS = text(
-    f"UPDATE {ImportRowORM.__table__.fullname} AS r SET matched_entity_id = v.eid, resolved_op = v.op, "
-    "status = v.status, reasons = v.reasons::jsonb "
-    "FROM unnest(:idx, :eids, :ops, :statuses, :reasons) AS v(row_index, eid, op, status, reasons) "
-    "WHERE r.job_id = :job_id AND r.row_index = v.row_index",
+_RESULT_COLUMNS = "job_id, row_index, kind, matched_entity_id, resolved_op, reasons"
+# Record a batch of outcomes: each column one array parameter, so the statement never changes.
+_RECORD_RESULTS = text(
+    f"INSERT INTO {ImportResultORM.__table__.fullname} ({_RESULT_COLUMNS}) "
+    "SELECT :job_id, v.row_index, v.kind, v.eid, v.op, v.reasons::jsonb "
+    "FROM unnest(:idx, :kinds, :eids, :ops, :reasons) AS v(row_index, kind, eid, op, reasons)",
 ).bindparams(bindparam("idx", type_=ARRAY(BigInteger)),
-             *(bindparam(name, type_=ARRAY(Text)) for name in ("eids", "ops", "statuses", "reasons")))
+             *(bindparam(name, type_=ARRAY(Text)) for name in ("kinds", "eids", "ops", "reasons")))
+# The outcomes a worker of the release before ``import_results`` recorded on a job's staged rows,
+# copied across for the job it staged and this one resumes (``ImportWorker._carry_over_results``).
+_CARRY_OVER_RESULTS = text(
+    f"INSERT INTO {ImportResultORM.__table__.fullname} ({_RESULT_COLUMNS}) "
+    f"SELECT {_RESULT_COLUMNS} FROM {ImportRowORM.__table__.fullname} "
+    "WHERE job_id = :job_id AND resolved_op IS NOT NULL ON CONFLICT DO NOTHING")
+# A list of ids, as one array: the statement is the same whatever the list's length.
+_IDS = any_(bindparam("ids", type_=ARRAY(Text)))
 # A node row's resolutions that leave it naming a node later rows may point at.
 _LANDED = ("create", "update", "unchanged")
 # What an import's summary tallies, per row by its resolution (``deleted`` also counts what a
@@ -131,6 +140,11 @@ def _sniff_format(declared: str, head: bytes) -> str | None:
 def _chunks(seq: List[Any], size: int):
     for i in range(0, len(seq), size):
         yield seq[i:i + size]
+
+
+def _staged(res):
+    """An outcome's own staged row (``res`` is ``ImportResultORM``), to join for its raw fields."""
+    return and_(ImportRowORM.job_id == res.job_id, ImportRowORM.row_index == res.row_index)
 
 
 def _first_layer_id(layers: List[dict]) -> str:
@@ -312,6 +326,7 @@ class ImportWorker:
         graph_id, branch_id = job["graph_id"], job["branch_id"]
         actor = await self._branch_owner(graph_id, branch_id)
 
+        await self._lease.retry_transient(lambda: self._carry_over_results(job_id))
         await self._lease.retry_transient(
             lambda: self._stage(job_id, job["source_uri"], job["import_format"]))
         summary = await self._resolve_and_build(
@@ -347,6 +362,17 @@ class ImportWorker:
         self._cursor = row.last_cursor
         return _Position(row.last_cursor, dict(row.summary) if isinstance(row.summary, dict) else {},
                          row.processed or 0, row.total or 0)
+
+    async def _carry_over_results(self, job_id: str) -> None:
+        """A job a worker of the release before ``import_results`` staged, which this one resumes,
+        has its rows' outcomes on the rows themselves: copy them across, once, before any window
+        reads them. One indexed probe for any other job (no staged row of its names an entity).
+        Goes with ``ix_import_rows_matched`` in the release after."""
+        async with db.graphver_session() as s:
+            older = await s.scalar(select(ImportRowORM.row_index).where(
+                ImportRowORM.job_id == job_id, ImportRowORM.matched_entity_id.is_not(None)).limit(1))
+            if older is not None:
+                await s.execute(_CARRY_OVER_RESULTS, {"job_id": job_id})
 
     async def _branch_owner(self, graph_id: str, branch_id: str) -> str:
         async with db.graphver_session() as s:
@@ -537,14 +563,15 @@ class ImportWorker:
         # value beside a urn — never a whole row, which a large job has millions of.
         fid, urn = ImportRowORM.raw["entity_id"].astext, ImportRowORM.raw["urn"].astext
         value = ImportRowORM.raw["properties"][ident].astext if ident else null()
-        links = or_(and_(fid != "", fid != ImportRowORM.matched_entity_id),
+        res = ImportResultORM
+        links = or_(and_(fid != "", fid != res.matched_entity_id),
                     and_(urn.isnot(None), value.isnot(None)) if ident else false())
         async with db.graphver_session() as s:
             landed = (await s.execute(
-                select(fid, urn, value, ImportRowORM.matched_entity_id)
-                .where(ImportRowORM.job_id == job_id, ImportRowORM.kind == "node",
-                       ImportRowORM.resolved_op.in_(_LANDED), links,
-                       ImportRowORM.matched_entity_id.is_not(None)))).all()   # not a delete of nothing
+                select(fid, urn, value, res.matched_entity_id)
+                .join_from(res, ImportRowORM, _staged(res))
+                .where(res.job_id == job_id, res.kind == "node", res.resolved_op.in_(_LANDED), links,
+                       res.matched_entity_id.is_not(None)))).all()   # not a delete of nothing
         for row_fid, row_urn, row_value, eid in landed:
             self._link(row_fid, row_urn, row_value, eid)
         onto = self._ontology or {}
@@ -668,15 +695,14 @@ class ImportWorker:
         eids = (lookups.get("node_eids") or set()) if kind == "node" else (
             set((lookups.get("edge_to_eid") or {}).values()) | (lookups.get("edge_eids") or set()))
         out: Dict[str, int] = {}
+        res = ImportResultORM
+        stmt = (select(res.matched_entity_id, func.min(res.row_index))
+                .where(res.job_id == job_id, res.kind == kind, res.row_index < before,
+                       res.matched_entity_id == _IDS, res.resolved_op != "invalid")
+                .group_by(res.matched_entity_id))
         async with db.graphver_session() as s:
             for chunk in _chunks(sorted(e for e in eids if e), _PERSIST_BATCH):
-                out.update((await s.execute(
-                    select(ImportRowORM.matched_entity_id, func.min(ImportRowORM.row_index))
-                    .where(ImportRowORM.job_id == job_id, ImportRowORM.kind == kind,
-                           ImportRowORM.row_index < before,
-                           ImportRowORM.matched_entity_id.in_(chunk),
-                           ImportRowORM.resolved_op != "invalid")
-                    .group_by(ImportRowORM.matched_entity_id))).all())
+                out.update((await s.execute(stmt, {"ids": chunk})).all())
         return out
 
     async def _window(self, job_id: str, kind: str, after: int) -> List[Dict[str, Any]]:
@@ -769,14 +795,16 @@ class ImportWorker:
         order), and the endpoints of the edges it created as the draft holds them. The layout writer
         maps each eid to its projection key (urn or gv:<eid>) and reasons about parentage from the
         created edges."""
-        created = (ImportRowORM.job_id == job_id, ImportRowORM.resolved_op == "create")
+        res = ImportResultORM
+        created = (res.job_id == job_id, res.resolved_op == "create")
         async with db.graphver_session() as s:
             nodes = (await s.execute(
-                select(ImportRowORM.matched_entity_id, ImportRowORM.raw["urn"].astext,
+                select(res.matched_entity_id, ImportRowORM.raw["urn"].astext,
                        ImportRowORM.raw["layerAssignment"], ImportRowORM.raw["entityType"].astext,
                        ImportRowORM.raw["displayName"].astext, ImportRowORM.raw["tags"],
                        ImportRowORM.raw["properties"])
-                .where(*created, ImportRowORM.kind == "node").order_by(ImportRowORM.row_index))).all()
+                .join_from(res, ImportRowORM, _staged(res))
+                .where(*created, res.kind == "node").order_by(res.row_index))).all()
             # Each created node's projection key is the urn it was stored with — the file's urn
             # is only a pointer — read from the draft's versions, as the edges are below.
             stored: Dict[str, Optional[str]] = {}
@@ -786,8 +814,8 @@ class ImportWorker:
                     .where(NodeVersionORM.graph_id == graph_id,
                            NodeVersionORM.branch_id == branch_id,
                            NodeVersionORM.entity_id.in_(chunk), NodeVersionORM.op == "create"))).all())
-            edge_ids = (await s.execute(select(ImportRowORM.matched_entity_id)
-                                        .where(*created, ImportRowORM.kind == "edge"))).scalars().all()
+            edge_ids = (await s.execute(select(res.matched_entity_id)
+                                        .where(*created, res.kind == "edge"))).scalars().all()
             edges = []
             for chunk in _chunks(edge_ids, _PERSIST_BATCH):
                 edges += (await s.execute(
@@ -841,21 +869,22 @@ class ImportWorker:
         """Those of ``eids`` no row of this import matched."""
         async with db.graphver_session() as s:
             matched = set((await s.execute(
-                select(ImportRowORM.matched_entity_id).where(
-                    ImportRowORM.job_id == job_id, ImportRowORM.matched_entity_id.in_(eids))
-            )).scalars())
+                select(ImportResultORM.matched_entity_id).where(
+                    ImportResultORM.job_id == job_id, ImportResultORM.matched_entity_id == _IDS),
+                {"ids": list(eids)})).scalars())
         return [eid for eid in eids if eid not in matched]
 
     @staticmethod
     async def _persist_resolutions(s, job_id: str, resolutions) -> None:
-        """Record each row's resolution, in the window's transaction: one UPDATE per few thousand
-        rows, each column as one array (unnest), rather than a round trip per row (which took over
-        a third of an import)."""
+        """Record each row's outcome in ``import_results``, in the window's transaction: one INSERT
+        per few thousand rows, each column as one array (unnest), rather than a round trip per row
+        (which took over a third of an import). The staged rows themselves are never written again."""
         for chunk in _chunks(resolutions, _PERSIST_BATCH):
-            await s.execute(_RESOLVE_ROWS, {
+            await s.execute(_RECORD_RESULTS, {
                 "job_id": job_id, "idx": [r["_row_index"] for r in chunk],
+                "kinds": [r["kind"] for r in chunk],
                 "eids": [r["matched_entity_id"] for r in chunk],
-                "ops": [r["resolved_op"] for r in chunk], "statuses": [r["status"] for r in chunk],
+                "ops": [r["resolved_op"] for r in chunk],
                 "reasons": [json.dumps(r["reasons"]) if r["reasons"] else None for r in chunk]})
 
 
@@ -879,9 +908,9 @@ async def _analyze_graph(graph_id: str) -> None:
 
 
 async def sweep_staged_rows(*, older_than_days: float, batch: int = 50_000) -> int:
-    """Delete the staged rows of import jobs that finished more than ``older_than_days`` ago, a
-    batch per transaction (a large import stages millions). Their preview sample goes with them;
-    the draft's changes, the review surface, stay. Returns how many rows went."""
+    """Delete the staged rows of import jobs that finished more than ``older_than_days`` ago, with
+    their outcomes, a batch per transaction (a large import stages millions). Their preview sample
+    goes with them; the draft's changes, the review surface, stay. Returns how many rows went."""
     cutoff = (datetime.now(timezone.utc) - timedelta(days=older_than_days)).isoformat()
     async with db.graphver_session() as s:
         jobs = (await s.execute(select(JobORM.id).where(
@@ -892,7 +921,12 @@ async def sweep_staged_rows(*, older_than_days: float, batch: int = 50_000) -> i
     for job_id in jobs:
         while True:
             async with db.graphver_session() as s:
-                first = select(ImportRowORM.row_index).where(ImportRowORM.job_id == job_id).limit(batch)
+                # In row order, so both statements name the same rows: the batch's outcomes, then
+                # the rows. An outcome is never left behind without its row.
+                first = (select(ImportRowORM.row_index).where(ImportRowORM.job_id == job_id)
+                         .order_by(ImportRowORM.row_index).limit(batch))
+                await s.execute(delete(ImportResultORM).where(
+                    ImportResultORM.job_id == job_id, ImportResultORM.row_index.in_(first)))
                 gone = (await s.execute(delete(ImportRowORM).where(
                     ImportRowORM.job_id == job_id, ImportRowORM.row_index.in_(first)))).rowcount
             removed += gone
