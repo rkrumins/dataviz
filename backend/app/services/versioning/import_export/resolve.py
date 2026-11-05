@@ -3,8 +3,9 @@
 Pure and deterministic (``mint_id`` injected). Two passes so an edge can reference a node created
 earlier in the same import:
 
-* **nodes** match an existing entity by ``entity_id`` -> ``urn`` -> ``qualifiedName`` (else mint a
-  new id and register it in the local indexes for later edges);
+* **nodes** match an existing entity by ``entity_id`` -> their pointers (``urn``, the identifier
+  value; not stored) -> ``qualifiedName`` (else a new node — its id derived from its first pointer,
+  or minted — registered in the local indexes for later edges);
 * **edges** resolve endpoints the same way and key by the ``(src_eid, tgt_eid, EDGE_TYPE)`` triple
   (the type upper-cased, as the edge-integrity gate compares it), keeping the stored spelling.
 
@@ -25,6 +26,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
+from ..ids import derived_entity_id, uuid_urn
 from .rowmodel import PROP_DELETE
 
 _NODE_FIELDS = (
@@ -247,6 +249,35 @@ def key_value(v: Any) -> Optional[str]:
     return s or None
 
 
+def pointers(*values: Any) -> List[str]:
+    """What a row (or an edge end) points at its node by — its urn, then its value of the data
+    source's identifier property — each as given and, a ``urn:uuid:`` in any case, in canonical
+    form too, so a stored urn spelled either way is found. Blanks and repeats dropped."""
+    out: List[str] = []
+    for v in values:
+        given = key_value(v)
+        for name in (given, uuid_urn(given)):
+            if name and name not in out:
+                out.append(name)
+    return out
+
+
+def pointer_seed(*values: Any) -> Optional[str]:
+    """The name a new node's id is derived from: the first pointer, in canonical form."""
+    for v in values:
+        given = key_value(v)
+        if given:
+            return uuid_urn(given) or given
+    return None
+
+
+def pointer_id(scope: str, name: str) -> str:
+    """The id of a node an import makes from ``name``: a ``urn:uuid:`` (v5) of the graph's
+    identity scope — its data source — and the name, so a file imported again names the same
+    node however often it is sent. ``pointer:`` keeps these seeds apart from a create's key."""
+    return derived_entity_id("node", f"{scope}/pointer:{name}")
+
+
 def resolve_rows(
     rows: Sequence[Mapping[str, Any]],
     indexes: Mapping[str, Any],
@@ -255,6 +286,7 @@ def resolve_rows(
     ontology: Optional[Mapping[str, Any]] = None,
     mint_urn: Optional[Callable[[str], str]] = None,
     identity_prop: Optional[str] = None,
+    derive_urn: Optional[Callable[[str], str]] = None,
 ) -> Tuple[List[dict], List[dict]]:
     """Return ``(ops, resolutions)`` for the given normalized ``rows``.
 
@@ -263,13 +295,18 @@ def resolve_rows(
     ontology defines is quarantined (invalid) rather than written — partial acceptance, so a few bad
     rows don't fail the batch. Absent/empty type lists → the gate is skipped (best-effort).
 
-    ``mint_urn(entityType)``: a new node takes ONE identity, its id and its urn alike — the urn the
-    row brings (or its value of the data source's identifier property, ``identity_prop``) when no
-    entity holds it (``indexes["taken"]``), else a urn the server mints; a urn only a deleted node
-    held brings that node back (``indexes["restore"]``). Without it, a new node keeps the row's urn
-    under an id from ``mint_id``. ``indexes["keys"]`` (:class:`KeyIndex`) matches rows and edge ends
-    by the fields their types match imports by, and keeps unique fields unique.
-    ``indexes["created_from"]``: the job's file entity ids of nodes earlier windows created."""
+    The ids a file carries are POINTERS (:func:`pointers`): a row's urn and its value of the data
+    source's identifier property (``identity_prop``) name a node that holds one as its urn, or
+    whose id an earlier import derived from it (``indexes["urn_to_eid"]`` maps both, and a second
+    name a row gave a node in this job), and are not stored. Two that name different entities
+    refuse the row. ``mint_urn(entityType)``: a new node takes ONE identity, the server's — a
+    pointer only a deleted node held brings that node back (``indexes["restore"]``); else a free
+    ``urn:uuid:`` pointer is kept; else ``derive_urn(seed)`` derives it from the first pointer, so
+    a re-import names it again; else (no pointer) a new urn is minted. Its identifier property
+    takes the urn at the write. Without ``mint_urn``, a new node keeps the row's urn under an id
+    from ``mint_id``. ``indexes["keys"]`` (:class:`KeyIndex`) matches rows and edge ends by the
+    fields their types match imports by, and keeps unique fields unique.
+    ``indexes["created_from"]``: the job's file entity ids of nodes it matched or created."""
     urn_to_eid: Dict[str, str] = dict(indexes.get("urn_to_eid") or {})
     qname_to_eid: Dict[str, Optional[str]] = dict(indexes.get("qname_to_eid") or {})   # None: several
     edge_to_eid: Dict[tuple, str] = {(s, t, _etype_key(et)): eid
@@ -301,10 +338,12 @@ def resolve_rows(
     for row in node_rows:
         props = row.get("properties") or {}
         ident = key_value(props.get(identity_prop)) if identity_prop else None
+        names = pointers(row.get("urn"), ident)
         etype = _canon(row.get("entityType"), node_type_canon) if row.get("entityType") else None
         by_key = (lambda t=etype, p=props: keys.node(t, p)) if keys else None
-        matched_eid, ambiguous, by = _match_node(row, ident, urn_to_eid, qname_to_eid, node_eids,
-                                                 created_from, qname_from, by_key)
+        matched_eid, ambiguous, by = _named(row.get("entity_id"), names, row.get("qualifiedName"),
+                                            node_eids, urn_to_eid, qname_to_eid, created_from,
+                                            qname_from, by_key)
         if row.get("op") == "invalid":
             # Still names what it matched: a replace must not read that entity as absent.
             resolutions.append(_resolution(row, "invalid", None if ambiguous else matched_eid,
@@ -331,13 +370,22 @@ def resolve_rows(
             if "entityType" in np:                                # normalize casing before diffing
                 np["entityType"] = _canon(np["entityType"], node_type_canon)
             cur = current.get(matched_eid) or {}
-            if by == "key":                                       # a team's key named it: the
-                np.pop("urn", None)                               # node keeps its own identity
+            if by == "key" or mint_urn is not None:               # the file's ids point at the
+                np.pop("urn", None)                               # node: it keeps its own
+                held = np.get("properties") or {}
+                if (mint_urn is not None and identity_prop in held
+                        and key_value(held[identity_prop]) != cur.get("urn")):
+                    np["properties"] = {k: v for k, v in held.items() if k != identity_prop}
             clash = keys.clash(np.get("entityType") or cur.get("entityType"), props,
                                but=matched_eid) if keys else None
             if clash:
                 resolutions.append(_resolution(row, "invalid", matched_eid, reasons=[clash]))
                 continue
+            # Later rows of this window that point at it the same way find it too.
+            if row.get("entity_id") and row["entity_id"] != matched_eid:
+                created_from.setdefault(row["entity_id"], matched_eid)
+            for name in names:
+                urn_to_eid.setdefault(name, matched_eid)
             changed = _changed_fields(np, cur)
             if not changed:                                       # a true no-op (e.g. an unchanged round-trip)
                 resolutions.append(_resolution(row, "unchanged", matched_eid))
@@ -350,24 +398,28 @@ def resolve_rows(
             resolutions.append(_resolution(row, "invalid", None, reasons=["node create requires entityType"]))
             continue
         urn = row.get("urn")
-        if mint_urn is not None and urn and ident and ident != urn:
-            resolutions.append(_resolution(row, "invalid", None, reasons=[
-                f"urn '{urn}' and {identity_prop} '{ident}' differ — a new item has one identity"]))
-            continue
         clash = keys.clash(etype, props) if keys else None
         if clash:
             resolutions.append(_resolution(row, "invalid", None, reasons=[clash]))
             continue
-        # One identity, the server's to decide: the row's urn (or identifier value) when nothing
-        # holds it, the deleted node that held it brought back, else a urn minted here — the id,
-        # the urn and (bound at the write) the identifier property alike.
-        wanted, minted = urn or ident, False
+        # One identity, the server's to decide — the id, the urn and (bound at the write) the
+        # identifier property alike: the deleted node a pointer names brought back; else a free
+        # urn:uuid the row brings, so an entity keeps its id from one environment to the next;
+        # else one derived from the row's first pointer, which a re-import derives again; else
+        # (it points by nothing) a urn minted here.
+        minted = False
+        restored = next((n for n in names if n in restore), None)
+        free = next((n for n in names if uuid_urn(n) == n and n not in taken
+                     and n not in node_eids), None)
+        seed = pointer_seed(urn, ident)
         if mint_urn is None:
             eid, node_urn = mint_id(), urn
-        elif wanted and wanted in restore:
-            eid, node_urn = restore.pop(wanted), wanted
-        elif wanted and wanted not in taken and wanted not in node_eids:
-            eid = node_urn = wanted
+        elif restored:
+            eid, node_urn = restore.pop(restored), restored
+        elif free:
+            eid = node_urn = free
+        elif seed and derive_urn is not None:
+            eid = node_urn = derive_urn(seed)
         else:
             eid = node_urn = mint_urn(etype)
             minted = True
@@ -375,7 +427,7 @@ def resolve_rows(
         taken.add(eid)
         if row.get("entity_id"):
             created_from[row["entity_id"]] = eid
-        for name in {node_urn, wanted} - {None}:          # the file's urn names it in this file too
+        for name in set(names) | {node_urn} - {None}:     # what the file calls it names it here
             urn_to_eid[name] = eid
         if row.get("qualifiedName"):                      # another entity's too: it names neither
             qn = row["qualifiedName"]
@@ -386,6 +438,9 @@ def resolve_rows(
             p["entityType"] = _canon(p["entityType"], node_type_canon)
         if mint_urn is not None:
             p["urn"] = node_urn
+            if identity_prop in (p.get("properties") or {}):          # a pointer, not a value:
+                p["properties"] = {k: v for k, v in p["properties"].items()   # the write binds
+                                   if k != identity_prop}                     # it to the urn
         op = {"op": "create", "entity_kind": "node", "entity_id": eid, "payload": p}
         if minted:
             op["minted"] = True                           # the identifier property takes the urn
@@ -450,26 +505,31 @@ def _etype_key(edge_type) -> str:
     return str(edge_type or "").upper()
 
 
-def _named(eid, urn, qname, node_eids, urn_to_eid, qname_to_eid, created_from,
+def _named(eid, names, qname, node_eids, urn_to_eid, qname_to_eid, created_from,
            qname_from, by_key=None) -> Tuple[str | None, str | None, str | None]:
     """The entity a row (or an edge end) names: by ``eid`` (an entity's, or the file's own id of a
-    node this job created), then ``urn`` (or the identifier property's value), then a field its
-    type matches imports by (``by_key``), then — only when it has no urn — ``qname``.
-    ``(entity_id | None, None, by)``, or ``(None, reason, None)`` when its qualifiedName or key
-    value is carried by several entities, or by a node this batch created from another of the
+    node this job matched or created), then the ``names`` it points at its node by
+    (:func:`pointers`: its urn, its identifier value), then a field its type matches imports by
+    (``by_key``), then — only when it points by no name — ``qname``. ``(entity_id | None, None,
+    by)``, or ``(None, reason, None)`` when its names point at two entities, or its qualifiedName
+    or key value is carried by several, or by a node this batch created from another of the
     file's entity ids. ``by`` says how it matched."""
     if eid and eid in node_eids:
         return eid, None, "entity_id"
     if eid and eid in created_from:
         return created_from[eid], None, "entity_id"
-    if urn and urn in urn_to_eid:
-        return urn_to_eid[urn], None, "urn"
+    hits = {urn_to_eid[n] for n in names if n in urn_to_eid}
+    if len(hits) > 1:
+        return None, ("its urn and its identifier value name two different entities — "
+                      "give it one of them"), None
+    if hits:
+        return next(iter(hits)), None, "urn"
     if by_key is not None:
         hit, why = by_key()
         if hit or why:
             return hit, why, "key" if hit else None
-    if urn:
-        return None, None, None             # a urn that matches nothing: a new entity
+    if names:
+        return None, None, None             # names that match nothing: a new entity
     if qname and qname in qname_to_eid:
         if qname_to_eid[qname] is None:
             return None, (f"qualifiedName '{qname}' matches more than one entity — "
@@ -481,20 +541,14 @@ def _named(eid, urn, qname, node_eids, urn_to_eid, qname_to_eid, created_from,
     return None, None, None
 
 
-def _match_node(row, ident, urn_to_eid, qname_to_eid, node_eids, created_from,
-                qname_from, by_key=None) -> Tuple[str | None, str | None, str | None]:
-    return _named(row.get("entity_id"), row.get("urn") or ident, row.get("qualifiedName"),
-                  node_eids, urn_to_eid, qname_to_eid, created_from, qname_from, by_key)
-
-
 def _resolve_endpoint(row, which, node_eids, qname_to_eid, urn_to_eid, created_from,
                       qname_from, keys=None, identity_prop=None) -> Tuple[str | None, str | None]:
     """An edge end: by its entity_id, urn or qualifiedName, or by a property of its node
     (``source.<field>``): the identifier property, read as the urn, or a field its type matches by."""
     named = dict(row.get(f"{which}Keys") or {})
-    ident = key_value(named.pop(identity_prop, None)) if identity_prop else None
+    ident = named.pop(identity_prop, None) if identity_prop else None
     by_key = (lambda: keys.end(named)) if keys and named else None
-    eid, why, _by = _named(row.get(f"{which}_entity_id"), row.get(f"{which}Urn") or ident,
+    eid, why, _by = _named(row.get(f"{which}_entity_id"), pointers(row.get(f"{which}Urn"), ident),
                            row.get(f"{which}QualifiedName"), node_eids, urn_to_eid, qname_to_eid,
                            created_from, qname_from, by_key)
     return eid, why

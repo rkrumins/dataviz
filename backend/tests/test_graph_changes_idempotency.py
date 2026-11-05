@@ -5,7 +5,9 @@ save creates deterministically: by the op's client ref when it is at least 16 ch
 canvas temp ref is), otherwise by the key and the op's turn in the batch. So a retry of the same
 batch names the same entities, a later batch that still carries the same staged create names the
 same entity, and a script that reuses a short ref like ``n1`` under a new key never overwrites
-what an earlier save created. The actor is part of every seed. No database needed.
+what an earlier save created. The actor is part of every seed, and each id is the name-based
+``urn:uuid:`` (UUIDv5) of its seed — a standard UUID that a retry derives again. No database
+needed.
 """
 import re
 from types import SimpleNamespace
@@ -14,10 +16,10 @@ import pytest
 
 from backend.app.api.v1.endpoints import graph
 from backend.app.api.v1.endpoints.graph import _replay_minters, _resolve_change_ops
-from backend.app.ontology.urn import make_urn
 from backend.app.services.versioning import service
 
 _STAGED = "urn:staged:3f9a1c7b-2e4d-4a8f"          # a canvas temp ref (>= 16 characters)
+_V5 = r"urn:uuid:[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"
 
 
 def _op(op, kind, id=None, ref=None, payload=None):
@@ -37,15 +39,17 @@ def _batch():
 
 
 def _resolve(scope, key, ops=None):
-    return _resolve_change_ops(ops or _batch(), *_replay_minters(scope, key, make_urn), by_ref=True)
+    return _resolve_change_ops(ops or _batch(), *_replay_minters(scope, key), by_ref=True)
 
 
 def test_a_retry_of_the_same_batch_names_the_same_entities():
     first, second = _resolve("g/b/u", "k1"), _resolve("g/b/u", "k1")
     assert first == second
     _ops, assigned = first
-    assert re.fullmatch(r"urn:synodic:manual:table:[0-9a-f]{32}", assigned[_STAGED])
-    assert re.fullmatch(r"ent_[0-9a-f]{32}", assigned["staged-edge_0123456789"])
+    assert re.fullmatch(_V5, assigned[_STAGED])                 # a node's id, and its urn
+    assert re.fullmatch(_V5, assigned["staged-edge_0123456789"])
+    node = next(o for o in _ops if o["entity_kind"] == "node" and o["op"] == "create")
+    assert node["entity_id"] == node["payload"]["urn"] == assigned[_STAGED]
 
 
 def test_a_long_ref_names_the_same_entity_under_any_key():

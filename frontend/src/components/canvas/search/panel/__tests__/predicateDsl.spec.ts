@@ -640,6 +640,7 @@ describe('predicateDsl — relationships and names', () => {
         ['@"Country/United Kingdom"', named('Country', 'United Kingdom')],
         ['@"a\\/b/c"', named('a/b', 'c')],
         ['@"urn:li:dataset:1"', { kind: 'is', refs: [{ urn: 'urn:li:dataset:1' }] }],
+        ['@"urn:uuid:0192f5a4-7b3c-7d2e-8f1a-2b3c4d5e6f70"', { kind: 'is', refs: [{ urn: 'urn:uuid:0192f5a4-7b3c-7d2e-8f1a-2b3c4d5e6f70' }] }],
         ['inside @"Country/**/London"', { kind: 'descendantOf', urns: [],
             refs: [{ path: ['Country', '**', 'London'] }], uiScope: 'name' } as Predicate],
     ])('reads and writes %s', (text, p) => {

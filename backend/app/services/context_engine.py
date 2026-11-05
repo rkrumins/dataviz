@@ -66,6 +66,13 @@ def _real_lineage_types(edge_types: Iterable[str]) -> List[str]:
     ]
 
 
+def _not_enabled():
+    """What a write to a data source without version control raises. It is passed through, so
+    the caller gets 409 ``versioning_not_enabled`` (main.py), not a 200 saying it failed."""
+    from ..providers.versioned_write_provider import VersioningNotEnabled
+    return VersioningNotEnabled
+
+
 class ContextEngine:
     _ONTOLOGY_CACHE_TTL = 300  # 5 minutes
 
@@ -82,6 +89,10 @@ class ContextEngine:
         self._workspace_id: Optional[str] = None
         self._data_source_id: Optional[str] = None
         self._db_session: Optional["AsyncSession"] = None
+        # The branch a versioned graph's engine reads and writes, and who is asking: with the data
+        # source, the scope of a create's idempotency key.
+        self._branch_id: Optional[str] = None
+        self._actor: Optional[str] = None
         # Writes commit to a versioned graph's main (no draft named): the routes need publish.
         self._writes_main = False
         # Single ontology cache slot (resolved form, includes flat projection fields).
@@ -294,6 +305,7 @@ class ContextEngine:
                     engine._data_source_id = data_source_id
                     engine._db_session = session
                     engine._branch_id = read_branch
+                    engine._actor = actor
                     engine._writes_main = not is_draft and revision is None
                     try:
                         await engine._resolve_ontology()
@@ -337,6 +349,7 @@ class ContextEngine:
         engine._workspace_id = workspace_id
         engine._data_source_id = data_source_id
         engine._db_session = session
+        engine._actor = actor
         engine._writes_main = bool(data_source_id) and graph is not None
 
         # Eagerly resolve ontology so the provider is configured before
@@ -450,6 +463,7 @@ class ContextEngine:
         connection_id: Optional[str],
         registry: Any,  # ProviderRegistry — avoid circular import
         session: "AsyncSession",
+        actor: Optional[str] = None,
     ) -> "ContextEngine":
         """
         Create a ContextEngine backed by the specified connection.
@@ -470,6 +484,7 @@ class ContextEngine:
         engine = cls(provider=provider)
         engine._connection_id = connection_id
         engine._db_session = session
+        engine._actor = actor
         return engine
 
     # ------------------------------------------------------------------ #
@@ -2355,13 +2370,23 @@ class ContextEngine:
                     "total_source_edges": sum(e.edge_count for e in kept)})
         return result
 
+    def _key_seed(self, key: str) -> str:
+        """What a create's idempotency key names, scoped as a canvas save's key is: one caller's,
+        on one branch of one data source (of one connection, for a connection's engine). The same
+        key sent by someone else, or on another draft, is another request and creates its own
+        entity. Every write to main is ``main``, however main is read — fresh from FalkorDB or,
+        while the first write's projection catches up, from Postgres — and whether the graph is
+        external or versioned, so a retry names what the first request made."""
+        branch = "main" if self._writes_main or not self._branch_id else self._branch_id
+        return f"{self._data_source_id or self._connection_id}/{branch}/{self._actor or ''}/{key}"
+
     async def create_node(self, request: CreateNodeRequest) -> CreateNodeResult:
         """
         Create a new node with optional automatic containment edge.
         Validates against the resolved ontology before creation.
         """
         from datetime import datetime
-        from backend.app.ontology.urn import make_urn
+        from backend.app.services.versioning.ids import derived_entity_id, new_entity_id
         from backend.app.ontology.mutation_validator import (
             MutationOp,
             validate_node_mutation,
@@ -2401,8 +2426,15 @@ class ContextEngine:
             )
         validation_warnings = result.warnings or []
 
-        # Generate a canonical Synodic URN
-        urn = make_urn(entity_type=str(request.entity_type), source_system="manual")
+        # One identity, the platform's: its id and its urn, a urn:uuid — derived from the request's
+        # key when it has one, so a request sent again answers with the node the first one created.
+        if request.idempotency_key:
+            urn = derived_entity_id("node", self._key_seed(request.idempotency_key))
+            existing = await self.provider.get_node(urn)
+            if existing is not None:
+                return CreateNodeResult(node=existing, success=True, warnings=validation_warnings)
+        else:
+            urn = new_entity_id()
 
         if request.parent_urn and parent_entity_type:
 
@@ -2455,7 +2487,7 @@ class ContextEngine:
             # root instead of under a synthesized edge the ontology never declared.
             if containment_type:
                 containment_edge = GraphEdge(
-                    id=f"contains-{request.parent_urn}-{urn}",
+                    id=new_entity_id(),
                     sourceUrn=request.parent_urn,
                     targetUrn=urn,
                     edgeType=containment_type,
@@ -2502,6 +2534,8 @@ class ContextEngine:
             logger.warning("Provider does not support node creation - returning optimistic result")
         except HTTP_MAPPED:
             raise                              # e.g. a busy graph (503) or someone else's draft (403)
+        except _not_enabled():
+            raise
         except Exception as e:
             return CreateNodeResult(
                 node=None,
@@ -2527,8 +2561,8 @@ class ContextEngine:
         Create a directed edge with ontology-driven source/target validation.
         Returns an EdgeMutationResult.
         """
-        import uuid as _uuid
         from backend.app.ontology.mutation_validator import MutationOp, validate_edge_mutation
+        from backend.app.services.versioning.ids import derived_entity_id, new_entity_id
         from backend.common.models.graph import EdgeMutationResult
         from backend.common.property_patch import strip_deletes
 
@@ -2554,7 +2588,17 @@ class ContextEngine:
         if not val.ok:
             return EdgeMutationResult(success=False, error="; ".join(val.errors), warnings=val.warnings)
 
-        edge_id = request.idempotency_key or f"edge-{_uuid.uuid4().hex[:12]}"
+        # A key names the same edge however often it is sent (an existing one is answered as it is);
+        # otherwise the edge is new: a urn:uuid either way.
+        edge_id = (derived_entity_id("edge", self._key_seed(request.idempotency_key))
+                   if request.idempotency_key else new_entity_id())
+        if request.idempotency_key:
+            from backend.common.models.graph import EdgeQuery
+            for existing in await self.provider.get_edges(EdgeQuery(
+                    sourceUrns=[request.source_urn], targetUrns=[request.target_urn],
+                    edgeTypes=[request.edge_type], limit=100)):
+                if existing.id == edge_id:
+                    return EdgeMutationResult(edge=existing, success=True, warnings=val.warnings or [])
         edge = GraphEdge(
             id=edge_id,
             sourceUrn=request.source_urn,
@@ -2568,8 +2612,15 @@ class ContextEngine:
             await self.provider.create_edge(edge)
         except (NotImplementedError, AttributeError):
             logger.warning("Provider does not support edge creation — returning optimistic result")
-        except HTTP_MAPPED:
+        except HTTP_MAPPED as exc:
+            from backend.app.services.versioning.errors import EntityExists
+            if request.idempotency_key and isinstance(exc, EntityExists) and edge_id in exc.ids:
+                # Sent again: the first request made this edge. A customer's FalkorDB graph keeps
+                # its own id for a link it already had, so the read above can miss it by this one.
+                return EdgeMutationResult(edge=edge, success=True, warnings=val.warnings or [])
             raise                              # e.g. a busy graph (503) or someone else's draft (403)
+        except _not_enabled():
+            raise
         except Exception as exc:
             from backend.app.services.versioning.service import OntologyViolation
             if isinstance(exc, OntologyViolation):       # surface the per-edge reasons, not the count
@@ -2596,6 +2647,8 @@ class ContextEngine:
             return EdgeMutationResult(success=False, error="Provider does not support edge updates")
         except HTTP_MAPPED:
             raise                              # e.g. a busy graph (503) or someone else's draft (403)
+        except _not_enabled():
+            raise
         except Exception as exc:
             return EdgeMutationResult(success=False, error=str(exc))
 

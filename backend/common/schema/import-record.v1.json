@@ -1,0 +1,438 @@
+{
+  "$defs": {
+    "ImportEdgeRecord": {
+      "additionalProperties": false,
+      "description": "An edge row. Each end is found the way a node row is — by an entity id, a pointer\n(``sourceUrn``, or ``source.<identifier property>``), a field matched by \"Match imports by\nthis\" (``source.<field>``), or a qualifiedName — and the edge by its two ends and its type.",
+      "patternProperties": {
+        "^(prop|source|target)\\.[^.].*$": {
+          "anyOf": [
+            {
+              "items": {
+                "type": [
+                  "string",
+                  "number",
+                  "boolean"
+                ]
+              },
+              "type": "array"
+            },
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "properties": {
+        "_op": {
+          "anyOf": [
+            {
+              "enum": [
+                "",
+                "upsert",
+                "delete"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Blank or `upsert` creates or updates; `delete` deletes the entity the row names.",
+          "title": "Op"
+        },
+        "baseVersion": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "default": null,
+          "description": "The entity's content hash, as an export writes it. Informational: an import doesn't check it.",
+          "title": "Baseversion"
+        },
+        "confidence": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "default": null,
+          "description": "A number from 0 to 1.",
+          "title": "Confidence"
+        },
+        "edgeType": {
+          "description": "The edge's type, one of the data source's relationship types.",
+          "title": "Edgetype",
+          "type": "string"
+        },
+        "entity_id": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "default": null,
+          "description": "The node or edge's own id, as an export writes it: a row with one updates that entity. Any other value is the file's own id for the row — it links the file's rows to each other (an edge to a node) and nothing more.",
+          "title": "Entity Id"
+        },
+        "kind": {
+          "const": "edge",
+          "title": "Kind",
+          "type": "string"
+        },
+        "properties_json": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "default": null,
+          "description": "Properties too nested for a column, as a JSON object. A `null` value removes the property.",
+          "title": "Properties Json"
+        },
+        "sourceQualifiedName": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "default": null,
+          "description": "The source node's qualifiedName, for an end named by nothing else.",
+          "title": "Sourcequalifiedname"
+        },
+        "sourceUrn": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "default": null,
+          "description": "The source node's urn. A pointer, not stored: it finds the node that carries it as its urn, or the node an earlier import made from it — whose id is derived from it, so importing the same file again updates what it made. A `urn:uuid:` no node holds is kept as the new node's id.",
+          "title": "Sourceurn"
+        },
+        "source_entity_id": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "default": null,
+          "description": "The source node's entity id, or the file's own id of a node row.",
+          "title": "Source Entity Id"
+        },
+        "targetQualifiedName": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "default": null,
+          "description": "The target node's qualifiedName, for an end named by nothing else.",
+          "title": "Targetqualifiedname"
+        },
+        "targetUrn": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "default": null,
+          "description": "The target node's urn. A pointer, not stored: it finds the node that carries it as its urn, or the node an earlier import made from it — whose id is derived from it, so importing the same file again updates what it made. A `urn:uuid:` no node holds is kept as the new node's id.",
+          "title": "Targeturn"
+        },
+        "target_entity_id": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "default": null,
+          "description": "The target node's entity id, or the file's own id of a node row.",
+          "title": "Target Entity Id"
+        }
+      },
+      "required": [
+        "kind",
+        "edgeType"
+      ],
+      "title": "ImportEdgeRecord",
+      "type": "object"
+    },
+    "ImportNodeRecord": {
+      "additionalProperties": false,
+      "description": "A node row. ``prop.<name>`` columns set its properties: a value sets one, a blank cell\nleaves it as it is, and ``\\N`` removes it.",
+      "patternProperties": {
+        "^prop\\.[^.].*$": {
+          "anyOf": [
+            {
+              "items": {
+                "type": [
+                  "string",
+                  "number",
+                  "boolean"
+                ]
+              },
+              "type": "array"
+            },
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "properties": {
+        "_op": {
+          "anyOf": [
+            {
+              "enum": [
+                "",
+                "upsert",
+                "delete"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Blank or `upsert` creates or updates; `delete` deletes the entity the row names.",
+          "title": "Op"
+        },
+        "baseVersion": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "default": null,
+          "description": "The entity's content hash, as an export writes it. Informational: an import doesn't check it.",
+          "title": "Baseversion"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "default": null,
+          "description": "The node's description.",
+          "title": "Description"
+        },
+        "displayName": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "default": null,
+          "description": "The node's name.",
+          "title": "Displayname"
+        },
+        "entityType": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "default": null,
+          "description": "The node's type, one of the data source's entity types. Required for a new node.",
+          "title": "Entitytype"
+        },
+        "entity_id": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "default": null,
+          "description": "The node or edge's own id, as an export writes it: a row with one updates that entity. Any other value is the file's own id for the row — it links the file's rows to each other (an edge to a node) and nothing more.",
+          "title": "Entity Id"
+        },
+        "kind": {
+          "const": "node",
+          "title": "Kind",
+          "type": "string"
+        },
+        "layerAssignment": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "default": null,
+          "description": "The layer of the view an import into a view places a new node in.",
+          "title": "Layerassignment"
+        },
+        "properties_json": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "default": null,
+          "description": "Properties too nested for a column, as a JSON object. A `null` value removes the property.",
+          "title": "Properties Json"
+        },
+        "qualifiedName": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "default": null,
+          "description": "A dotted path naming the node. A row with no urn and no identifier value finds the node by it, if exactly one node carries it.",
+          "title": "Qualifiedname"
+        },
+        "sourceSystem": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "default": null,
+          "description": "Where the node comes from.",
+          "title": "Sourcesystem"
+        },
+        "tags": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "default": null,
+          "description": "Tags: a list, or one comma-separated text.",
+          "title": "Tags"
+        },
+        "urn": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "default": null,
+          "description": "The node's urn. A pointer, not stored: it finds the node that carries it as its urn, or the node an earlier import made from it — whose id is derived from it, so importing the same file again updates what it made. A `urn:uuid:` no node holds is kept as the new node's id.",
+          "title": "Urn"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "title": "ImportNodeRecord",
+      "type": "object"
+    }
+  },
+  "$id": "https://synodic.dev/schemas/import-record.v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "One node or edge of an import or export file: a CSV/TSV/XLSX row (every cell text), an NDJSON line or a JSON object. Imported with POST …/versioning/graphs/{graphId}/imports; checked without writing with POST …/imports/validate. Version 1 only gains columns. See docs/CONNECTOR_GUIDE.md.",
+  "discriminator": {
+    "mapping": {
+      "edge": "#/$defs/ImportEdgeRecord",
+      "node": "#/$defs/ImportNodeRecord"
+    },
+    "propertyName": "kind"
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/ImportNodeRecord"
+    },
+    {
+      "$ref": "#/$defs/ImportEdgeRecord"
+    }
+  ],
+  "title": "Import record v1",
+  "x-format-version": 1
+}

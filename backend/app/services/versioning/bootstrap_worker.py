@@ -272,12 +272,13 @@ _SCAN_EDGES = (
 )
 _SCANS = {"preflight": _PREFLIGHT_NODES, "nodes": _SCAN_NODES, "edges": _SCAN_EDGES}
 _SAMPLE_NODES = "UNWIND $urns AS u MATCH (n {urn: u}) RETURN ID(n), labels(n), properties(n)"
-# Backfill: additive, idempotent, and scoped to the same entities we copied. Each says how many
-# keys it set: a window with nothing left to stamp (any graph the platform wrote) held no write
-# lock worth pausing after.
+# Backfill: idempotent, and scoped to the same entities we copied. Each says how many keys it
+# set: a window with nothing left to stamp (any graph the platform wrote) held no write lock worth
+# pausing after. A node's anchor is its new id, its urn: one a projection left from an earlier
+# graph of this key is put right, or the tombstone sweep, which matches on it, misses its deletes.
 _BACKFILL_NODES = (
     f"MATCH (n) WHERE ID(n) >= $lo AND ID(n) < $hi AND {_not_derived('n')} "
-    "AND n.entityId IS NULL AND n.urn IS NOT NULL "
+    "AND n.urn IS NOT NULL AND (n.entityId IS NULL OR n.entityId <> n.urn) "
     "SET n.entityId = n.urn RETURN count(n)"
 )
 _BACKFILL_EDGES = (

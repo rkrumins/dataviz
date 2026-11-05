@@ -115,6 +115,7 @@ GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/exports/{job_id}/download resou
 GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/graph/neighbors resource
 GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/history/months resource
 GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/imports resource
+GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/imports/schema resource
 GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/imports/template resource
 GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/imports/uploads/{upload_id} resource
 GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/imports/{job_id} resource
@@ -206,6 +207,7 @@ POST /api/v1/{ws_id}/versioning/graphs/{graph_id}/exports/{job_id}/cancel resour
 POST /api/v1/{ws_id}/versioning/graphs/{graph_id}/imports resource
 POST /api/v1/{ws_id}/versioning/graphs/{graph_id}/imports/uploads resource
 POST /api/v1/{ws_id}/versioning/graphs/{graph_id}/imports/uploads/{upload_id}/complete resource
+POST /api/v1/{ws_id}/versioning/graphs/{graph_id}/imports/validate resource
 POST /api/v1/{ws_id}/versioning/graphs/{graph_id}/pulls resource
 POST /api/v1/{ws_id}/versioning/merge-requests/{pr_id}/approve resource
 POST /api/v1/{ws_id}/versioning/merge-requests/{pr_id}/close resource

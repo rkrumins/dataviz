@@ -37,6 +37,7 @@ describe('NodeRefPicker — text', () => {
         ['Country / United Kingdom', { path: ['Country', 'United Kingdom'] }],
         ['  ** / London', { path: ['**', 'London'] }],
         ['urn:li:dataset:1', { urn: 'urn:li:dataset:1' }],
+        ['urn:uuid:0192f5a4-7b3c-7d2e-8f1a-2b3c4d5e6f70', { urn: 'urn:uuid:0192f5a4-7b3c-7d2e-8f1a-2b3c4d5e6f70' }],
         ['  ', null],
         [' / ', null],
     ])('reads %j', (text, ref) => {

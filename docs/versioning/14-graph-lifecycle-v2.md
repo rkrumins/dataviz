@@ -323,6 +323,13 @@ Every transition goes through `lifecycle_state.transition(s, gid, frm, to, *, op
 
 ### 9. Lossless conversion rules (`entity_serde`, `identity.py`)
 
+> **As built (2026-11):** the copy names every node by its urn, verbatim
+> (`bootstrap_worker.py`), and an edge by its own id, else `<s>|<T>|<t>`. The platform's own
+> ids are `urn:uuid:`, so a node made here keeps one identity through conversion. The backfill
+> sets each node's anchor to its id, including where an earlier graph of the key left another.
+> The synthetic `gv:src:<ID>` identity below is not built: a node with no identifier stops the
+> enable. See [18 · Entity Identity §3a](18-identity.md#3a-across-the-lifecycle-external-and-versioned-graphs).
+
 **Nodes (§13)**
 - Identity: `urn`, else `n[identity_property]`, else synthetic `urn='gv:src:<ID>'` with **`entity_id='src:<ID>'`**.
 - So `urn == 'gv:' + eid`, which matches the stand-in convention stripped by `graph.py:3664-3671 _ref`. Today `bootstrap_worker.py:955` sets `eid = node.urn`; v2 keeps that for URN nodes only.

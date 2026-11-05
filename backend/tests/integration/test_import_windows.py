@@ -78,10 +78,19 @@ async def _import(ie, store, gid, lines, *, mode="upsert", scope=None, branch_id
 
 
 async def _state(svc, gid, branch_id):
-    """Live nodes (urn -> displayName) and edges ((source urn, target urn, type)) of the draft."""
+    """Live nodes (urn -> displayName) and edges ((source urn, target urn, type)) of the draft. A
+    node an import made from a file urn — a pointer, which the node's id is derived from — is
+    shown under that file urn, as the import's rows recorded it."""
     state = await svc.materialize_state(graph_id=gid, branch_id=branch_id)
-    urn = {eid: p.get("urn") for eid, p in state["nodes"].items()}
-    nodes = {p.get("urn"): p.get("displayName") for p in state["nodes"].values()}
+    async with db.graphver_session() as s:
+        made = dict((await s.execute(
+            select(ImportRowORM.matched_entity_id, ImportRowORM.raw["urn"].astext)
+            .join(JobORM, JobORM.id == ImportRowORM.job_id)
+            .where(JobORM.graph_id == gid, ImportRowORM.kind == "node",
+                   ImportRowORM.resolved_op == "create"))).all())
+    named = {eid: made.get(p.get("urn")) or p.get("urn") for eid, p in state["nodes"].items()}
+    urn = named
+    nodes = {named[eid]: p.get("displayName") for eid, p in state["nodes"].items()}
     edges = {(urn.get(p["sourceEntityId"]), urn.get(p["targetEntityId"]), p["edgeType"])
              for p in state["edges"].values()}
     return nodes, edges

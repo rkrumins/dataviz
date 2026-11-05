@@ -15,6 +15,7 @@ import pytest
 
 from backend.app.services.storage.object_store import LocalFsObjectStore
 from backend.app.services.versioning import db, models
+from backend.app.services.versioning.import_export.resolve import pointer_id
 from backend.app.services.versioning.import_export.service import ImportExportService
 from backend.app.services.versioning.service import GraphVersioningService
 
@@ -74,8 +75,12 @@ async def _run() -> None:
         s2 = await ie.run_import(imp["job_id"])
         assert s2 == {"new": 3, "updated": 0, "unchanged": 0, "deleted": 0, "invalid": 0}, s2
 
+        # In another graph the export's ids name nothing, and its urns are pointers: the nodes
+        # are named anew, by ids derived from them — the same ids each time it is imported there.
+        scope = await svc.identity_scope(gB)
         delta = await svc.branch_overlay_delta(graph_id=gB, branch_id=imp["branch_id"])
-        assert {n["urn"] for n in delta["nodesUpsert"]} == {"urn:A", "urn:B"}, delta
+        assert {n["urn"] for n in delta["nodesUpsert"]} == {
+            pointer_id(scope, "urn:A"), pointer_id(scope, "urn:B")}, delta
         assert len(delta["edgesUpsert"]) == 1 and delta["edgesUpsert"][0]["edgeType"] == "LINEAGE"
     finally:
         shutil.rmtree(root, ignore_errors=True)

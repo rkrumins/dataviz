@@ -59,7 +59,7 @@ from .errors import (AccessDenied, AmbiguousSpelling, AmbiguousUrn, BranchNotOpe
                      ProjectionKeyInUse, ProjectionKeyInvalid, ProjectionNotAdopted,
                      ResolutionsWithoutConflict, ReviewRequired, SelfMerge, SelfReview,
                      VersionConflict)
-from .ids import prefixed_id
+from .ids import new_entity_id, prefixed_id
 from .merge import three_way_merge
 from .merkle import MerkleTree, content_hash
 from .merkle_store import MerkleStore
@@ -1292,7 +1292,9 @@ class GraphVersioningService:
         """Bulk-append working changes to a draft (plan decision #10).
 
         Each op: ``{ref?, op, entity_kind, entity_id?, payload, change_reason?}``.
-        For ``create`` without an ``entity_id`` a stable ULID is minted.  Returns
+        A ``create`` without an ``entity_id`` is named here: a node by its payload's urn, else a
+        new ``urn:uuid:`` that becomes its urn too (one identity); an edge by a new ``urn:uuid:``.
+        Returns
         ``{ref_or_entity_id: entity_id}`` so the client can reconcile.
 
         With injected ``ontology_rules`` (strict graphs only) staged CREATES are
@@ -1328,12 +1330,19 @@ class GraphVersioningService:
                     # resolved against stored state only by apply_ops) would be misread there.
                     raise ValueError(f"unsupported staged op {op.get('op')!r}: create | update | delete")
                 seq += 1
-                entity_id = op.get("entity_id") or prefixed_id("ent")
+                payload = op.get("payload")
+                # A new node that brings no id is named by its urn: the one it brings, else a new
+                # urn:uuid for both.
+                new_node = (op["op"] == "create" and op["entity_kind"] == "node"
+                            and not op.get("entity_id"))
+                entity_id = (op.get("entity_id") or ((payload or {}).get("urn") if new_node else None)
+                             or new_entity_id())
                 ref = op.get("ref", entity_id)
                 assigned[ref] = entity_id
-                payload = op.get("payload")
                 if op["op"] == "create":
                     payload = strip_deletes(payload)     # a new entity has nothing to remove
+                    if new_node and isinstance(payload, dict) and not payload.get("urn"):
+                        payload = {**payload, "urn": entity_id}
                 if op["entity_kind"] == "node":
                     payload = _sanitize_node_properties(payload)
                 if op["op"] != "delete":
@@ -8679,6 +8688,7 @@ class GraphVersioningService:
             node_deltas: List[Delta] = []
             edge_src: List[tuple] = []
             urn_to_eid: Dict[str, str] = {}
+            node_eids: set = set()
 
             for i, row in enumerate(rows):
                 kind = (row or {}).get("kind")
@@ -8686,9 +8696,17 @@ class GraphVersioningService:
                     if not row.get("entityType"):
                         rejected.append({"row": i, "reason": "node missing entityType"})
                         continue
-                    eid = row.get("entity_id") or row.get("id") or prefixed_id("ent")
+                    # One identity: a node is named by its urn when it brings no id, and a node
+                    # that brings neither is given a urn:uuid that is its urn too.
+                    eid = row.get("entity_id") or row.get("id") or row.get("urn") or new_entity_id()
+                    if eid in node_eids:
+                        rejected.append({"row": i, "reason": f"another node in this file is '{eid}'"})
+                        continue
+                    node_eids.add(eid)
                     payload = _sanitize_node_properties(
                         {k: v for k, v in row.items() if k not in ("kind", "id", "entity_id")})
+                    if not payload.get("urn"):
+                        payload["urn"] = eid
                     node_deltas.append(Delta(eid, "create", payload, None, content_hash(payload)))
                     if row.get("urn"):
                         urn_to_eid[row["urn"]] = eid
@@ -8709,7 +8727,7 @@ class GraphVersioningService:
                 if not (seid and teid):
                     rejected.append({"row": i, "reason": "edge endpoint not found"})
                     continue
-                eid = row.get("entity_id") or row.get("id") or prefixed_id("ent")
+                eid = row.get("entity_id") or row.get("id") or new_entity_id()
                 payload = edge_payload_from_parts(edge_type=et, source_entity_id=seid,
                                                   target_entity_id=teid, row=row)
                 edge_deltas.append(Delta(eid, "create", payload, None, content_hash(payload)))
@@ -9223,10 +9241,14 @@ class GraphVersioningService:
                 continue
             urn = row.get("urn")
             hit = known.get(urn) if urn else None
-            eid = ((hit[0] if hit else None) or row.get("entity_id") or row.get("id")
-                   or (f"sync:{urn}" if urn else prefixed_id("ent")))
+            # A new node is named by its urn, as the bootstrap names every node; an earlier
+            # sync's ``sync:<urn>`` is found by its urn (``known``) and kept.
+            eid = (hit[0] if hit else None) or row.get("entity_id") or row.get("id") or urn
             payload = _sanitize_node_properties(
                 {k: v for k, v in row.items() if k not in ("kind", "id", "entity_id")})
+            if not eid:                        # neither a urn nor an id: a urn:uuid for both
+                eid = new_entity_id()
+                payload["urn"] = eid
             seen.add(eid)
             if urn:
                 urn_to_eid[urn] = eid
@@ -9372,7 +9394,7 @@ class GraphVersioningService:
                 continue
             urn = row.get("urn")
             eid = (urn_index.get(urn) or row.get("entity_id") or row.get("id")
-                   or (f"sync:{urn}" if urn else prefixed_id("ent")))
+                   or (f"sync:{urn}" if urn else new_entity_id()))
             payload = _sanitize_node_properties(
                 {k: v for k, v in row.items() if k not in ("kind", "id", "entity_id")})
             theirs[eid] = payload
@@ -10969,8 +10991,12 @@ class GraphVersioningService:
         if not wanted:
             return set(), {}
         async with self._session() as s:
-            taken = set(await self._current_skeletons(s, graph_id, branch_id, wanted))
-            holders = await self._holders_by_urn(s, graph_id, branch_id, wanted - taken)
+            held = await self._current_skeletons(s, graph_id, branch_id, wanted)
+            taken = set(held)
+            # A name only a deleted entity holds as its id can still be one a deleted node carried
+            # as its urn — a urn:uuid, whose id and urn are one — and so is brought back too.
+            live = {e for e, skeleton in held.items() if skeleton is not None}
+            holders = await self._holders_by_urn(s, graph_id, branch_id, wanted - live)
             state = await self._current_skeletons(
                 s, graph_id, branch_id, {e for ids in holders.values() for e in ids})
         restore: Dict[str, str] = {}
@@ -10980,6 +11006,16 @@ class GraphVersioningService:
             elif len(ids) == 1 and next(iter(ids)) in state and state[next(iter(ids))] is None:
                 restore[name] = next(iter(ids))
         return taken, restore
+
+    async def identity_scope(self, graph_id: str) -> str:
+        """What an import derives node ids in: the data source at the root of the graph's fork
+        lineage. A data source keeps its id while its graph is made again — a conversion
+        abandoned and redone — and a fork shares its root's ids, so a file imported again lands
+        on the nodes it made, wherever in the lineage it goes."""
+        async with self._session() as s:
+            root = (await self._layer_graph_ids(s, graph_id))[-1]
+            graph = await s.get(GraphORM, root)
+        return (graph.data_source_id if graph is not None else None) or root
 
     async def _holders_by_urn(self, s, graph_id: str, bid: str, urns) -> Dict[str, set]:
         """``{urn: entity ids}`` of the nodes whose rows on the branch — its own and ``main``'s,

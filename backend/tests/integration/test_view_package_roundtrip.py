@@ -23,6 +23,7 @@ from backend.app.providers.versioned_branch_provider import VersionedBranchProvi
 from backend.app.services.storage.object_store import LocalFsObjectStore
 from backend.app.services.versioning import db, models
 from backend.app.services.versioning.import_export import stream, uploads
+from backend.app.services.versioning.import_export.resolve import pointer_id
 from backend.app.services.versioning.import_export.service import ImportExportService
 from backend.app.services.versioning.import_export.snapshot import open_snapshot
 from backend.app.services.versioning.service import GraphVersioningService
@@ -174,10 +175,13 @@ async def _run(root: str, monkeypatch) -> None:
     assert len(again["nodes"]) == 121 and len(again["edges"]) == 120, "another target, the same upload"
 
     # ── A view checked against the draft finds what the package brought ─────────
+    # (The package's urns are pointers: what it made is named by the ids derived from them, and
+    # reconcile remaps a view's urns onto those — test_view_transfer_import covers that.)
+    revenue = pointer_id(await svc.identity_scope(uat_gid), "urn:revenue")
     base = VersionedBranchProvider(svc, graph_id=uat_gid, branch_id=main_id, actor="bob")
     overlay = DraftOverlayProvider(base, svc=svc, graph_id=uat_gid, branch_id=draft, actor="bob")
-    found = await overlay.resolve_identities(["urn:t000", "urn:revenue", "urn:missing"])
-    assert found["urn:revenue"] is not None and found["urn:revenue"]["type"] == "Metric"
+    found = await overlay.resolve_identities(["urn:t000", revenue, "urn:missing"])
+    assert found[revenue] is not None and found[revenue]["type"] == "Metric"
     assert found["urn:t000"] is not None and found["urn:missing"] is None
 
     # ── Older packages: no typeStats (format 1), and format 2's native lines ─────
@@ -201,9 +205,10 @@ async def _run(root: str, monkeypatch) -> None:
     native = await _bytes(stream.native_pages(snap, stream.Selection.of()))
     _g, _d, v2_state = await _import(svc, ie, await _upload(store, ie, await written(native, 2)))
     dev_state = await svc.materialize_state(graph_id=dev["graph_id"], branch_id=dev["main_branch_id"])
-    by_urn = lambda state: {p["urn"]: p for p in state["nodes"].values()}  # noqa: E731
-    assert {u: p.get("properties") or {} for u, p in by_urn(v2_state).items()} == \
-        {u: p.get("properties") or {} for u, p in by_urn(dev_state).items()}, "format 2 carries each payload whole"
+    # Named anew in the other graph (its urns are pointers there): matched by name.
+    by_name = lambda state: {p["displayName"]: p for p in state["nodes"].values()}  # noqa: E731
+    assert {n: p.get("properties") or {} for n, p in by_name(v2_state).items()} == \
+        {n: p.get("properties") or {} for n, p in by_name(dev_state).items()}, "format 2 carries each payload whole"
     assert len(v2_state["edges"]) == 120
 
     await db.dispose_engine()

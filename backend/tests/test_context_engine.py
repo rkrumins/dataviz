@@ -256,6 +256,137 @@ class TestContextEngineCreateNode:
         assert written[0].properties == {"owner": "ana"}
 
 
+class TestContextEngineCreatesAreNamedByTheMinter:
+    """Every node and edge the engine creates is named ``urn:uuid:`` by the platform's minter. A
+    keyed create is idempotent: its id is derived from the key, and sent again it answers with
+    what the first one created instead of writing a second."""
+
+    @staticmethod
+    def _engine(monkeypatch, nodes=()):
+        written = []
+
+        class _Recording(_StubProvider):
+            async def create_node(self, node, containment_edge=None) -> bool:
+                written.append(node)
+                self._nodes[node.urn] = node
+                return True
+
+            async def create_edge(self, edge) -> bool:
+                written.append(edge)
+                self._edges.append(edge)
+                return True
+
+        engine = ContextEngine(provider=_Recording(nodes=list(nodes)))
+
+        async def _resolved():
+            return ResolvedOntology()
+        monkeypatch.setattr(engine, "_resolve_ontology", _resolved)
+        engine._node_identity = None
+        engine._data_source_id = "ds1"
+        return engine, written
+
+    @staticmethod
+    def _v(urn):
+        import uuid
+        from backend.app.services.versioning.ids import uuid_urn
+        assert uuid_urn(urn) == urn, urn
+        return uuid.UUID(urn[len("urn:uuid:"):]).version
+
+    async def test_a_new_node_and_edge_are_urn_uuid_v7(self, monkeypatch):
+        from backend.common.models.graph import CreateEdgeRequest, CreateNodeRequest
+
+        engine, written = self._engine(monkeypatch, [_node("urn:a"), _node("urn:b")])
+        made = await engine.create_node(CreateNodeRequest(entityType="dataset", displayName="Orders"))
+        assert made.success and self._v(made.node.urn) == 7
+        edge = await engine.create_edge(CreateEdgeRequest(
+            sourceUrn="urn:a", targetUrn="urn:b", edgeType="FLOWS_TO"))
+        assert edge.success and self._v(edge.edge.id) == 7
+
+    async def test_a_keyed_create_sent_again_answers_with_what_it_made(self, monkeypatch):
+        from backend.common.models.graph import CreateEdgeRequest, CreateNodeRequest
+
+        engine, written = self._engine(monkeypatch, [_node("urn:a"), _node("urn:b")])
+        ask = CreateNodeRequest(entityType="dataset", displayName="Orders", idempotencyKey="k-1")
+        first, again = await engine.create_node(ask), await engine.create_node(ask)
+        assert self._v(first.node.urn) == 5 and again.node.urn == first.node.urn
+        other = await engine.create_node(CreateNodeRequest(
+            entityType="dataset", displayName="Orders", idempotencyKey="k-2"))
+        assert other.node.urn != first.node.urn
+        link = CreateEdgeRequest(sourceUrn="urn:a", targetUrn="urn:b", edgeType="FLOWS_TO",
+                                 idempotencyKey="e-1")
+        e1, e2 = await engine.create_edge(link), await engine.create_edge(link)
+        assert self._v(e1.edge.id) == 5 and e2.edge.id == e1.edge.id
+        assert len(written) == 3, written                    # two nodes and one edge, once each
+
+    async def test_a_key_is_one_callers_on_one_branch(self, monkeypatch):
+        from backend.common.models.graph import CreateNodeRequest
+
+        ask = CreateNodeRequest(entityType="dataset", displayName="Orders", idempotencyKey="k-1")
+        urns = set()
+        for branch, actor in (("br_1", "alice"), ("br_1", "bob"), ("br_2", "alice")):
+            engine, _written = self._engine(monkeypatch)
+            engine._branch_id, engine._actor = branch, actor
+            urns.add((await engine.create_node(ask)).node.urn)
+        assert len(urns) == 3, urns                          # someone else's, or another draft's
+
+    async def test_a_key_names_one_node_on_a_fresh_or_a_stale_main(self, monkeypatch):
+        """The first keyed create leaves main stale until it is projected, and the engine then
+        reads main from Postgres under main's branch id. A retry made meanwhile, or after the graph
+        gained version control, names the same node."""
+        from backend.common.models.graph import CreateNodeRequest
+
+        ask = CreateNodeRequest(entityType="dataset", displayName="Orders", idempotencyKey="k-1")
+        fresh, _ = self._engine(monkeypatch)
+        fresh._writes_main, fresh._actor = True, "alice"                   # main read from FalkorDB
+        stale, _ = self._engine(monkeypatch)
+        stale._writes_main, stale._branch_id, stale._actor = True, "br_main", "alice"
+        external, _ = self._engine(monkeypatch)
+        external._actor = "alice"                                           # no version control
+        urns = {(await e.create_node(ask)).node.urn for e in (fresh, stale, external)}
+        assert len(urns) == 1, urns
+
+    async def test_a_connections_keys_are_its_own_and_each_callers(self, monkeypatch):
+        """A connection's engine has no data source: its keys are scoped by the connection and by
+        who sends them, never shared by every caller of every connection."""
+        from backend.common.models.graph import CreateNodeRequest
+
+        ask = CreateNodeRequest(entityType="dataset", displayName="Orders", idempotencyKey="k-1")
+        urns = []
+        for conn, actor in (("conn-1", "alice"), ("conn-1", "bob"), ("conn-2", "alice"),
+                            ("conn-1", "alice")):
+            provider = self._engine(monkeypatch)[0].provider
+
+            class _Registry:
+                async def get_provider(self, connection_id, session):
+                    return provider
+            engine = await ContextEngine.for_connection(conn, _Registry(), None, actor=actor)
+
+            async def _resolved():
+                return ResolvedOntology()
+            monkeypatch.setattr(engine, "_resolve_ontology", _resolved)
+            urns.append((await engine.create_node(ask)).node.urn)
+        assert len(set(urns[:3])) == 3 and urns[3] == urns[0], urns
+
+    async def test_a_keyed_edge_the_store_already_holds_is_answered(self, monkeypatch):
+        """A customer's FalkorDB graph keeps its own id for a link it already had, so a retry's
+        read misses the edge by its derived id and the write is refused as existing: the answer
+        is the edge the first request made. An unkeyed create is still refused."""
+        from backend.app.services.versioning.errors import EntityExists
+        from backend.common.models.graph import CreateEdgeRequest
+
+        engine, _written = self._engine(monkeypatch, [_node("urn:a"), _node("urn:b")])
+
+        async def _exists(edge):
+            raise EntityExists([edge.id])
+        monkeypatch.setattr(engine.provider, "create_edge", _exists)
+        made = await engine.create_edge(CreateEdgeRequest(
+            sourceUrn="urn:a", targetUrn="urn:b", edgeType="FLOWS_TO", idempotencyKey="e-1"))
+        assert made.success and self._v(made.edge.id) == 5
+        with pytest.raises(EntityExists):
+            await engine.create_edge(CreateEdgeRequest(
+                sourceUrn="urn:a", targetUrn="urn:b", edgeType="FLOWS_TO"))
+
+
 class TestContextEngineChildren:
     async def test_get_children_with_explicit_edge_types(self):
         parent = _node("urn:parent", "Parent")

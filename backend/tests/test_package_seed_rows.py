@@ -15,12 +15,13 @@ Pinned without a database (``package_seed``'s pure conversions; the job end to e
 * a package seed runs its own phases and the bootstrap's shared ones, in its own order.
 """
 import json
+import uuid
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from backend.app.services.versioning import bootstrap_worker as bw
 from backend.app.services.versioning import package_seed as ps
-from backend.app.services.versioning.ids import stable_prefixed_id
+from backend.app.services.versioning.ids import derived_entity_id, uuid_urn
 from backend.app.services.versioning.merkle import content_hash
 
 CTX = SimpleNamespace(commit_id="cmt_1", commit_seq=2, main_id="br_main", actor="bob")
@@ -88,15 +89,18 @@ def test_a_format_1_record_is_read_as_an_import_reads_it():
 
 def test_a_line_with_no_id_gets_the_same_minted_id_every_time():
     lines = _lines({"kind": "node", "payload": {"urn": "urn:x", "entityType": "T"}},
-                   {"kind": "node", "payload": {"urn": "urn:y", "entityType": "T"}})
+                   {"kind": "node", "payload": {"entityType": "T"}})
     once = ps.node_rows(lines, ctx=CTX, graph_id="g", rules=None, upload_id="up_1")
     again = ps.node_rows(lines, ctx=CTX, graph_id="g", rules=None, upload_id="up_1")
     ids = [r["entity_id"] for r in once.dicts]
     assert ids == [r["entity_id"] for r in again.dicts] and len(set(ids)) == 2
-    assert ids[0] == stable_prefixed_id("ent", f"up_1:{lines[0][0]}") and once.minted == 2
-    assert ids[0].startswith("ent_") and len(ids[0]) == 4 + 26
+    assert ids[0] == derived_entity_id("node", f"up_1:{lines[0][0]}") and once.minted == 2
+    assert uuid_urn(ids[0]) == ids[0] and uuid.UUID(ids[0][len("urn:uuid:"):]).version == 5
     other_upload = ps.node_rows(lines, ctx=CTX, graph_id="g", rules=None, upload_id="up_2")
     assert other_upload.dicts[0]["entity_id"] != ids[0]
+    # A line with a urn keeps it; one with none is named by its id, its urn too.
+    assert [r["urn"] for r in once.dicts] == ["urn:x", ids[1]]
+    assert once.dicts[1]["payload"]["urn"] == ids[1]
 
 
 def test_the_nodes_pass_accounts_for_every_line_and_notes_the_first_edge():

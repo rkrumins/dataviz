@@ -58,7 +58,9 @@ tests/integration/test_import_branch_validation.py
 tests/integration/test_import_draft_identity.py
 tests/integration/test_import_idempotency_live.py
 tests/integration/test_import_one_active.py
+tests/integration/test_import_pointers.py
 tests/integration/test_import_resume_e2e.py
+tests/integration/test_import_validate.py
 tests/integration/test_import_windows.py
 tests/integration/test_import_worker.py
 tests/integration/test_layered_lineage_schema_ingest.py
@@ -87,6 +89,7 @@ tests/integration/test_resync_identity_invariant.py
 tests/integration/test_review_inbox_open_prs.py
 tests/integration/test_review_policy.py
 tests/integration/test_revision_overlay_reads.py
+tests/integration/test_seed_identity.py
 tests/integration/test_shared_draft_members.py
 tests/integration/test_stage2_collaboration_story.py
 tests/integration/test_sync_curation_guard.py

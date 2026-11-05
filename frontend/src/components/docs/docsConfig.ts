@@ -148,7 +148,7 @@ export const docPersonas: DocPersona[] = [
       'Get a key, make your first calls and handle every answer, then follow the API’s conventions and automate the jobs people script most.',
     sectionId: 'reference',
     startSlug: 'integration-quickstart',
-    path: ['integration-quickstart', 'api-guide', 'key-management-api', 'graph-metadata-api', 'feature-search-and-rules-reference', 'versioning-api-reference', 'versioning-import-export', 'feature-view-portability', 'api-features'],
+    path: ['integration-quickstart', 'api-guide', 'key-management-api', 'graph-metadata-api', 'feature-search-and-rules-reference', 'versioning-api-reference', 'versioning-import-export', 'connector-guide', 'feature-view-portability', 'api-features'],
     accent: {
       gradient: 'from-violet-500 to-purple-600',
       text: 'text-violet-600 dark:text-violet-400',
@@ -368,6 +368,13 @@ export const docEntries: DocEntry[] = [
     title: 'API Guide',
     description: 'Sign in from a script, find endpoints, follow the conventions, and automate common jobs',
     importFn: () => import('@docs/API_GUIDE.md?raw'),
+  },
+  {
+    slug: 'connector-guide',
+    section: 'reference',
+    title: 'Building a Connector',
+    description: 'Send another system\'s catalog into a graph: the record format and schema, pointers, deltas, the dry run, and a reference connector',
+    importFn: () => import('@docs/CONNECTOR_GUIDE.md?raw'),
   },
   {
     slug: 'key-management-api',
@@ -603,6 +610,13 @@ export const docEntries: DocEntry[] = [
     title: 'Versioning: Forks & Residency',
     description: "A fork as a data source of its own: settings, lifecycle, reads through its root's store, and the per-commit parent base",
     importFn: () => import('@docs/versioning/17-forks-and-residency.md?raw'),
+  },
+  {
+    slug: 'versioning-identity',
+    section: 'versioning',
+    title: 'Versioning: Entity Identity',
+    description: 'Every id one standard, urn:uuid: how ids are minted and derived, retries, and properties by import, export and API',
+    importFn: () => import('@docs/versioning/18-identity.md?raw'),
   },
   {
     slug: 'versioning-e2e',

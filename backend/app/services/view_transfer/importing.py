@@ -50,6 +50,9 @@ class Target:
     #: A draft of the data source to check against (and, when staging, to stage into): its
     #: entities count as there, e.g. the data a view package brought with it.
     branch_id: Optional[str] = None
+    #: What the data source's imports derive node ids in (set with a draft): a urn of the view's
+    #: that the draft doesn't hold is looked for again as the id an import derived from it.
+    identity_scope: Optional[str] = None
 
 
 @dataclass
@@ -72,6 +75,7 @@ class Prepared:
     effective: dict
     update: Optional[Dict[str, Any]] = None
     conflicts: List[str] = field(default_factory=list)
+    working: Optional[dict] = None        # the view's working definition, when updating
 
 
 async def _policy(session: AsyncSession, view_type: str) -> Policy:
@@ -141,12 +145,16 @@ async def _prepare(session: AsyncSession, item: ReconcileItem) -> Prepared:
     if update is not None and working is not None:
         update["diff"] = await asyncio.to_thread(
             diff_definitions, working.definition, effective, sample_limit=50)
-    return Prepared(item=item, effective=effective, update=update, conflicts=conflicts)
+    return Prepared(item=item, effective=effective, update=update, conflicts=conflicts,
+                    working=working.definition if working is not None else None)
 
 
 async def _target_facts(session: AsyncSession, target: Target, urns: List[str]):
-    """One identity lookup and one ontology read for a target data source."""
+    """One identity lookup and one ontology read for a target data source, and ``remap``: each
+    urn the target doesn't hold that names, by the id an import derived from it, a node the
+    target does — the urns a view package's data was imported from, which are pointers."""
     lookup: Dict[str, Optional[dict]] = {}
+    remap: Dict[str, str] = {}
     types = TargetTypes()
     try:
         engine = await engine_for(session, target.workspace_id, target.data_source_id,
@@ -154,10 +162,18 @@ async def _target_facts(session: AsyncSession, target: Target, urns: List[str]):
     except Exception as exc:  # noqa: BLE001 — every entity becomes "unknown", never "missing"
         logger.warning("reconcile: target %s/%s unreachable: %s",
                        target.workspace_id, target.data_source_id, exc)
-        return lookup, types
+        return lookup, types, remap
     if urns:
         try:
             lookup = await engine.provider.resolve_identities(urns)
+            missing = [u for u in urns if u in lookup and lookup[u] is None]
+            if target.identity_scope and missing:
+                from backend.app.services.versioning.import_export.resolve import (
+                    pointer_id, pointer_seed)
+                derived = {u: pointer_id(target.identity_scope, pointer_seed(u)) for u in missing}
+                found = await engine.provider.resolve_identities(sorted(set(derived.values())))
+                remap = {u: d for u, d in derived.items() if found.get(d) is not None}
+                lookup.update({d: found[d] for d in remap.values()})
         except Exception as exc:  # noqa: BLE001
             logger.warning("reconcile: identity lookup failed: %s", exc)
     try:
@@ -174,7 +190,18 @@ async def _target_facts(session: AsyncSession, target: Target, urns: List[str]):
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("reconcile: ontology unavailable: %s", exc)
-    return lookup, types
+    return lookup, types, remap
+
+
+async def _remap(p: Prepared, remap: Dict[str, str]) -> None:
+    """Point ``p`` at the nodes the data under it was imported as: the view names them by the
+    urns its file gave, which the import's ids were derived from."""
+    p.effective = await asyncio.to_thread(
+        lambda: portable_definition(rewrite(p.effective, Rewrite(urn_map=remap)), p.item.view_type))
+    p.item.exported = {remap.get(u, u): facts for u, facts in p.item.exported.items()}
+    if p.update is not None and p.working is not None:
+        p.update["diff"] = await asyncio.to_thread(
+            diff_definitions, p.working, p.effective, sample_limit=50)
 
 
 async def reconcile_items(session: AsyncSession, items: List[ReconcileItem]) -> Dict[str, Any]:
@@ -193,11 +220,14 @@ async def reconcile_items(session: AsyncSession, items: List[ReconcileItem]) -> 
         urns = await asyncio.to_thread(
             lambda ms=members: sorted({u for m in ms for u in collect(m.effective).urns}))
         facts[key] = await _target_facts(session, members[0].item.target, urns)
+        remap = facts[key][2]
+        for m in members if remap else ():
+            await _remap(m, remap)
 
     results = []
     reports = []
     for p in prepared:
-        lookup, types = facts[graph_of(p)]
+        lookup, types, _ = facts[graph_of(p)]
         policy = await _policy(session, p.item.view_type)
         report, effective_hash = await asyncio.to_thread(
             lambda p=p, lookup=lookup, types=types, policy=policy: (
@@ -349,7 +379,7 @@ async def _facts_for(session: AsyncSession, item: ImportItem, definition: dict, 
     during which a canvas save to that view would wait. Writing never changes which entities a
     design names, so the answer holds for what is then written."""
     urns = await asyncio.to_thread(lambda: sorted(collect(definition).urns))
-    lookup, types = await _target_facts(
+    lookup, types, _ = await _target_facts(
         session, Target(item.target.workspace_id, item.target.data_source_id, branch_id=item.target.branch_id),
         urns)
     return _Facts(lookup=lookup, types=types, policy=await _policy(session, view_type))

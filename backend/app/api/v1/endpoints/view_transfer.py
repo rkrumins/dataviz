@@ -1114,6 +1114,7 @@ async def _resolve_target(
         with _domain_errors():
             await svc.claim_draft(graph_id=graph["graph_id"], branch_id=target.branchId, actor=user.id)
         resolved.branch_id = target.branchId
+        resolved.identity_scope = await svc.identity_scope(graph["graph_id"])
     return resolved
 
 
