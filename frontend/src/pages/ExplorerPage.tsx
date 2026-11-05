@@ -127,7 +127,10 @@ export function ExplorerPage() {
   const markVisitSeen = useVisitWindowsStore(s => s.markSeen)
   const { openViewEditor } = useViewEditorModal()
   // The empty Explorer offers to create a view only to someone who may create one somewhere.
+  // Until their permissions arrive it offers it as before, so a creator never reads
+  // "Nothing shared with you yet" on a reload.
   const canCreateViews = useAnyWorkspacePermission('workspace:view:create')
+  const permissionsReady = useAuthStore((s) => s.permissionsStatus === 'ready')
   // A view from another environment: the wizard's Import journey, from the button or a file
   // dropped anywhere on the page.
   const { canImport: importEnabled, canExport: exportEnabled } = useViewPortability()
@@ -883,7 +886,7 @@ export function ExplorerPage() {
                 hasFilters={hasActiveFilters}
                 activeCategory={filterState.category}
                 onClearFilters={clearAllFilters}
-                onCreateView={canCreateViews ? () => openViewEditor() : undefined}
+                onCreateView={canCreateViews || !permissionsReady ? () => openViewEditor() : undefined}
                 relaxations={relaxations}
                 onRelax={next => { setFilterState(next); setSearchInput(next.search) }}
                 activeFilterCount={activeDimensions(filterState).length}

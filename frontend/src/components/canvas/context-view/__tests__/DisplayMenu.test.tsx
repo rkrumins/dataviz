@@ -218,6 +218,9 @@ describe('DisplayMenu — Business view, in plain words', () => {
     expect(screen.queryByText(/\((Stubs|Auto|Raw)\)/)).not.toBeInTheDocument()
     expect(screen.queryByText('Edge Budget')).not.toBeInTheDocument()
     expect(screen.getByRole('radio', { name: /All lines/ })).toBeInTheDocument()
+    // Screen readers hear the same plain name.
+    expect(screen.getByRole('radiogroup', { name: 'How many lines' })).toBeInTheDocument()
+    expect(screen.queryByRole('radiogroup', { name: 'Edge density' })).not.toBeInTheDocument()
   })
 
   it('on Adaptive, offers no budget, and no ribbons or memory switch while they are off', () => {
@@ -285,5 +288,11 @@ describe('DisplayMenu — Minimal density', () => {
     fireEvent.click(screen.getByRole('radio', { name: 'Minimal' }))
     expect(usePreferencesStore.getState().canvasDensity).toBe('minimal')
     usePreferencesStore.setState({ canvasDensity: 'spacious' })
+  })
+  it('says the type badge is not shown on Minimal rows', () => {
+    render(<DisplayMenu {...baseProps()} canvasDensity="minimal" />)
+    fireEvent.click(screen.getByRole('button', { name: 'Display' }))
+
+    expect(screen.getByText('Not shown on Minimal rows')).toBeInTheDocument()
   })
 })

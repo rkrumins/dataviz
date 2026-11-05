@@ -291,7 +291,7 @@ export function LineageDisplaySections({
         </p>
         <div
           role="radiogroup"
-          aria-label="Edge density"
+          aria-label={simple ? 'How many lines' : 'Edge density'}
           className="flex flex-col gap-1"
         >
           {DENSITY_OPTIONS.map(opt => {

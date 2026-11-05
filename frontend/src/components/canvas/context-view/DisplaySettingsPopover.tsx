@@ -428,7 +428,7 @@ export function DisplaySettingsSections({
         />
         <ToggleRow
           label="Show entity type badge"
-          description={showTypeBadge ? 'Type label shown under each row' : 'Type label hidden'}
+          description={canvasDensity === 'minimal' ? 'Not shown on Minimal rows' : showTypeBadge ? 'Type label shown under each row' : 'Type label hidden'}
           icon={showTypeBadge ? Eye : EyeOff}
           active={showTypeBadge}
           onClick={onToggleTypeBadge}
