@@ -350,6 +350,36 @@ Two mechanisms deliver it.
 > entities by importing a one-row, one-column file — this is what makes "edit in Excel, re-import"
 > viable at scale.
 
+### 4a. Offline edits are reconciled, never silently lost
+
+A file edited offline — an export opened in Excel, a script's output — can be stale by the time it
+is imported, and can ask for things an import won't do. Each such row is reconciled, or refused
+with its reason; none is applied or dropped in silence.
+
+- **A stale row applies only its own edits.** An export writes each row's `baseVersion`: the content
+  hash of the version it was exported at. When the entity has changed since and the graph holds
+  that version, the row is compared with it field by field (`_rebase` in `resolve.py`):
+  - a cell still at its exported value isn't an edit, so the current value stands;
+  - a cell only the file changed applies;
+  - one both sides changed alike is a no-op;
+  - one both changed differently refuses the row: *"changed since you exported it: owner — export
+    again, or clear baseVersion to overwrite"*.
+
+  Tags merge as a set. A stale `_op=delete` is refused. A row with no `baseVersion` (a script's)
+  sets what it carries, as before; so does one whose version the graph doesn't hold (another
+  graph's export).
+- **A pointer is never stored.** A matched row whose `urn` or identifier value names nothing gets a
+  note, *"urn '…' isn't stored: an import never changes a node's urn"*, and its other edits apply.
+  One that names another entity refuses the row.
+- **An exported edge keeps its ends.** An edge row whose `entity_id` is a live edge, but whose ends
+  or type resolve to another triple, is refused rather than added as a second edge. To re-point an
+  edge, delete its row and add a new one. A row whose ends match updates that edge, even beside a
+  parallel one.
+- **One row per entity.** A second row that names an entity an earlier row of the file named, in
+  this window or an earlier one (`import_rows.matched_entity_id`), is refused when it says
+  otherwise (*"row 3 of this file already names this node"*). It is `unchanged` when it says the
+  same.
+
 ---
 
 ## 5. The tabular column model (each property is its own column)
@@ -738,6 +768,8 @@ tests/integration/test_s3_store_minio.py tests/test_object_store.py`.
 
 ## 11. Limitations & open items (candid)
 
+- **A delete sent again finds nothing.** A file whose `_op=delete` rows already applied refuses
+  them on its next import ("delete target not found"); nothing changes.
 - **A taken-over export starts over.** An import resumes from its last window and a publish runs
   again safely, but an export rewrites its file from the start under a new key (§2). A job whose
   worker keeps dying fails once it has been taken over more than 3 times.

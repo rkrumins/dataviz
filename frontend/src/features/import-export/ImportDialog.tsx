@@ -522,8 +522,10 @@ function DoneStep({ summary, previewRows }: { summary: ImportSummary | null; pre
                     <span className="text-xs font-medium text-ink truncate">{r.label || `Row ${r.rowIndex + 1}`}</span>
                     <span className="text-[10px] uppercase tracking-wide text-ink-muted flex-shrink-0">{r.kind}</span>
                   </div>
-                  {r.status === 'invalid' && r.reasons?.[0] && (
-                    <p className="text-[11px] text-amber-600 dark:text-amber-400 mt-0.5 leading-relaxed">{r.reasons[0]}</p>
+                  {/* Why a row was refused — or a note on one that applied (e.g. a urn it doesn't store). */}
+                  {r.reasons?.[0] && (
+                    <p className={cn('text-[11px] mt-0.5 leading-relaxed', r.status === 'invalid'
+                      ? 'text-amber-600 dark:text-amber-400' : 'text-ink-muted')}>{r.reasons[0]}</p>
                   )}
                 </div>
                 <span className={cn('text-[10px] font-semibold uppercase tracking-wide flex-shrink-0 mt-0.5', PREVIEW_TONE[r.status || ''] || 'text-ink-muted')}>

@@ -33,7 +33,9 @@ _SCALAR = {"anyOf": [{"type": "string"}, {"type": "number"}, {"type": "boolean"}
 
 _POINTER = ("A pointer, not stored: it finds the node that carries it as its urn, or the node an "
             "earlier import made from it — whose id is derived from it, so importing the same file "
-            "again updates what it made. A `urn:uuid:` no node holds is kept as the new node's id.")
+            "again updates what it made. A `urn:uuid:` no node holds is kept as the new node's id. "
+            "To see your own id on the node, keep it in a property marked \"Match imports by "
+            "this\" too.")
 
 
 class _Record(BaseModel):
@@ -44,8 +46,9 @@ class _Record(BaseModel):
         "updates that entity. Any other value is the file's own id for the row — it links the "
         "file's rows to each other (an edge to a node) and nothing more.")
     baseVersion: Optional[str] = Field(
-        None, description="The entity's content hash, as an export writes it. Informational: an "
-        "import doesn't check it.")
+        None, description="The entity's content hash, as an export writes it. If the entity has "
+        "changed since, only the cells you changed apply, and a row whose cell someone else also "
+        "changed is refused, naming it. Leave it out to set what the row carries.")
     properties_json: Optional[Union[Dict[str, Any], str]] = Field(
         None, description="Properties too nested for a column, as a JSON object. A `null` value "
         "removes the property.")

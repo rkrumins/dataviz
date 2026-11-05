@@ -9,6 +9,42 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — An offline edit is reconciled, never silently lost
+
+### Changed
+
+- **An export edited offline merges with what changed since.** Each row an export writes carries
+  `baseVersion`, the version it was exported at. When that entity has changed before the file is
+  imported:
+  - only the cells the file changed apply;
+  - a cell both sides changed refuses the row, naming the field: *"changed since you exported it:
+    description"*;
+  - tags merge as a set;
+  - a stale `_op=delete` is refused.
+
+  Before, the file's old values overwrote every change made since, on every row in it. A row with
+  no `baseVersion`, such as a script's, still sets what it carries.
+- **Two rows that name one node or edge and say different things:** the second is refused with
+  "row N of this file already names this node". Before, the last silently won. Two rows that say
+  the same thing are fine.
+- **An exported edge row whose source, target or type was changed is refused.** Before, it was
+  added as a second edge and the old one stayed. To re-point an edge, delete its row and add a new
+  one.
+- **A urn or identifier cell edited on an existing row is reported on that row.** It isn't
+  applied, because an import never changes a node's urn. Before, it was dropped in silence. A urn
+  that names another node refuses the row.
+- **The import preview shows a note on rows that applied,** not only the reason a row was refused.
+- **The dry run says when new nodes are named by urns they won't carry,** and how to keep your own
+  id in a property.
+
+### Known limitations
+
+- A file sent again after its `_op=delete` rows applied refuses them ("delete target not found").
+  Nothing changes.
+- A row whose `baseVersion` this graph doesn't hold (another graph's export) sets what it carries.
+
+---
+
 ## [Unreleased] — A connector-ready import and export contract
 
 ### Added

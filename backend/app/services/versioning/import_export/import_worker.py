@@ -37,8 +37,8 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
-from sqlalchemy import (BigInteger, Text, and_, bindparam, delete, exists, false, insert, null,
-                        or_, select, text)
+from sqlalchemy import (BigInteger, Text, and_, bindparam, delete, exists, false, func, insert,
+                        null, or_, select, text, tuple_)
 from sqlalchemy.dialects.postgresql import ARRAY
 
 from backend.app.services.view_placement import NodeFacts, suggest_placement
@@ -495,7 +495,8 @@ class ImportWorker:
             await self._identity_state(job_id, snap, graph_id, branch_id)
             self._identity_read = True
         lookups = await (self._node_lookups if kind == "node" else self._edge_lookups)(snap, rows)
-        lookups.update(created_from=self._created_from, keys=self._keys)
+        lookups.update(created_from=self._created_from, keys=self._keys,
+                       earlier=await self._earlier(job_id, kind, rows[0]["_row_index"], lookups))
         scope = self._id_scope
         ops, resolutions = await asyncio.to_thread(       # a window of pure-Python matching
             resolve_rows, rows, lookups, mint_id=new_entity_id,     # a urn:uuid (UUIDv7) each
@@ -659,6 +660,24 @@ class ImportWorker:
                             "applied again", len(ops) - len(rest), len(rest))
                 ops = rest
 
+    async def _earlier(self, job_id: str, kind: str, before: int, lookups) -> Dict[str, int]:
+        """``{entity id: row}`` for the entities this window's rows may name that a row of this
+        job before ``before`` already named (its first), so a second row for one is seen as one
+        whichever window it falls in. One indexed read of the job's resolved rows per chunk."""
+        eids = (lookups.get("node_eids") or set()) if kind == "node" else (
+            set((lookups.get("edge_to_eid") or {}).values()) | (lookups.get("edge_eids") or set()))
+        out: Dict[str, int] = {}
+        async with db.graphver_session() as s:
+            for chunk in _chunks(sorted(e for e in eids if e), _PERSIST_BATCH):
+                out.update((await s.execute(
+                    select(ImportRowORM.matched_entity_id, func.min(ImportRowORM.row_index))
+                    .where(ImportRowORM.job_id == job_id, ImportRowORM.kind == kind,
+                           ImportRowORM.row_index < before,
+                           ImportRowORM.matched_entity_id.in_(chunk),
+                           ImportRowORM.resolved_op != "invalid")
+                    .group_by(ImportRowORM.matched_entity_id))).all())
+        return out
+
     async def _window(self, job_id: str, kind: str, after: int) -> List[Dict[str, Any]]:
         """The next ``IMPORT_COMMIT_WINDOW`` staged rows of ``kind`` after ``after``, in file order."""
         async with db.graphver_session() as s:
@@ -693,14 +712,19 @@ class ImportWorker:
         urn_to_eid = await self._pointer_hits(snap, wanted)
         qname_to_eid = await snap.nodes_by_qname(r.get("qualifiedName") for r in rows if not r.get("urn"))
         named = set(by_id) | set(urn_to_eid.values()) | {e for e in qname_to_eid.values() if e}
+        # A node an earlier window of this job made, by the file's id for it: read with the rest,
+        # so a later row for it is diffed against what it now holds.
+        named |= {self._created_from[f] for r in rows if (f := r.get("entity_id")) in self._created_from}
         if self._keys is not None:          # a node a team key names, with its current value
             named |= {e for r in rows if (e := self._keys.node(
                 self._canon.get(str(r.get("entityType") or "").lower(), r.get("entityType")),
                 r.get("properties"))[0])}
         taken, restore = await self._svc.identities_taken(
             graph_id=self._graph_id, branch_id=self._branch_id, names=wanted - set(urn_to_eid))
+        current, hash_of = await _heads(snap, "node", named)
         return {"urn_to_eid": urn_to_eid, "qname_to_eid": qname_to_eid, "node_eids": named,
-                "current": await _payloads(snap, "node", named), "taken": taken, "restore": restore}
+                "current": current, "hash_of": hash_of,
+                "bases": await _bases(snap, "node", rows, hash_of), "taken": taken, "restore": restore}
 
     async def _edge_lookups(self, snap, rows) -> Dict[str, Any]:
         """What ``resolve_rows`` needs for these edge rows: the live nodes their endpoints name (by
@@ -727,9 +751,14 @@ class ImportWorker:
         edge_to_eid = await snap.edges_between(
             set(src_ids) | {e for e in src_qnames.values() if e} | set(src_urns.values()) | src_more,
             set(tgt_ids) | {e for e in tgt_qnames.values() if e} | set(tgt_urns.values()) | tgt_more)
+        # And the edges rows name by their own id, as an export writes them: such a row updates
+        # that edge, and one whose ends differ from it is refused rather than made a second edge.
+        own = {r["entity_id"] for r in rows if r.get("entity_id")}
+        current, hash_of = await _heads(snap, "edge", set(edge_to_eid.values()) | own)
         return {"urn_to_eid": {**src_urns, **tgt_urns}, "qname_to_eid": {**src_qnames, **tgt_qnames},
                 "node_eids": set(src_ids) | set(tgt_ids), "edge_to_eid": edge_to_eid,
-                "current": await _payloads(snap, "edge", edge_to_eid.values())}
+                "edge_eids": own & set(hash_of), "current": current, "hash_of": hash_of,
+                "bases": await _bases(snap, "edge", rows, hash_of)}
 
     async def _derive_facts(self, job_id: str, graph_id: str, branch_id: str) -> None:
         """The raw facts for the post-commit view layout write-back (created top-level entities),
@@ -921,10 +950,34 @@ def _normalize_page(page: List[Dict[str, Any]], native: bool = False) -> Tuple[L
     return out, skipped
 
 
-async def _payloads(snap, kind: str, eids) -> Dict[str, dict]:
-    """The current payload of each live entity among ``eids``."""
+async def _heads(snap, kind: str, eids) -> Tuple[Dict[str, dict], Dict[str, str]]:
+    """The current payload of each live entity among ``eids``, and its content hash."""
     live = await snap.lookup_live(kind, set(eids), payload=True)
-    return {eid: json.loads(w.payload) for eid, w in live.items() if w.payload is not None}
+    return ({eid: json.loads(w.payload) for eid, w in live.items() if w.payload is not None},
+            {eid: w.content_hash for eid, w in live.items() if w.payload is not None})
+
+
+async def _bases(snap, kind: str, rows, hash_of: Dict[str, str]) -> Dict[tuple, dict]:
+    """``{(entity id, baseVersion): payload}``: the versions stale rows were exported at — rows
+    naming a live entity by its id with a ``baseVersion`` its head has since moved past — that
+    this graph holds, in any of its layers. Bounded by the window; a version it doesn't hold
+    (another graph's export) is left out, and its row applies as it stands."""
+    wanted = sorted({(r["entity_id"], r["baseVersion"]) for r in rows
+                     if r.get("baseVersion") and r.get("entity_id") in hash_of
+                     and hash_of[r["entity_id"]] != r["baseVersion"]})
+    if not wanted:
+        return {}
+    model = NodeVersionORM if kind == "node" else EdgeVersionORM
+    graphs = sorted({layer.graph_id for layer in snap.layers})
+    out: Dict[tuple, dict] = {}
+    async with db.graphver_session() as s:
+        for chunk in _chunks(wanted, _PERSIST_BATCH):
+            out.update({(eid, at): payload for eid, at, payload in (await s.execute(
+                select(model.entity_id, model.content_hash, model.payload)
+                .where(model.graph_id.in_(graphs),
+                       tuple_(model.entity_id, model.content_hash).in_(chunk),
+                       model.payload.is_not(None)))).all()})
+    return out
 
 
 async def _in_scope(snap, kind: str, keep):

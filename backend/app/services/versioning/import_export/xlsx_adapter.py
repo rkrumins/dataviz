@@ -257,11 +257,15 @@ _INSTRUCTION_LINES = [
      " OWN COLUMN (prop.<name>). Edit a cell to change a value.", _PLAIN),
     ("• Greyed columns (entity_id, urn, baseVersion, source/target_entity_id) are the identity"
      " — leave them exactly as-is so your edits match the right item.", _PLAIN),
+    ("• baseVersion records the version you exported: if someone changes an item before you import,"
+     " only the cells you changed are applied, and a row whose cell they changed too is refused,"
+     " naming it.", _PLAIN),
     ("• You only need the ROWS and COLUMNS you're changing. Deleting rows or columns from this"
      " file changes nothing — untouched entities and fields are left exactly as they are.", _PLAIN),
     ("• Add a NEW property = add a column named 'prop.<name>' (e.g. prop.owner) and fill only the"
      " rows it applies to. Add a new entity = a new row: give it a urn of your own (a pointer —"
-     " importing the file again updates that entity) or leave entity_id/urn blank.", _PLAIN),
+     " importing the file again updates that entity; it isn't stored, so keep your own id in a"
+     " property to see it) or leave entity_id/urn blank.", _PLAIN),
     ("• DELETE a property value with the token \\N in its cell (or delete the whole row's entity"
      " by setting _op to 'delete').", _PLAIN),
     ("• Save as .xlsx and import — you'll review every change before anything is published.", _PLAIN),

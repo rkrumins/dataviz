@@ -26,6 +26,8 @@ from __future__ import annotations
 
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
+from backend.common.property_patch import apply_patch
+
 from ..ids import derived_entity_id, uuid_urn
 from .rowmodel import PROP_DELETE
 
@@ -92,6 +94,93 @@ def _changed_fields(new_payload: Mapping[str, Any], cur: Mapping[str, Any]) -> D
         elif not _scalar_eq(value, cur.get(field)):
             changed[field] = value
     return changed
+
+
+_ABSENT = object()
+
+
+def _same(a: Any, b: Any) -> bool:
+    if a is _ABSENT or b is _ABSENT:
+        return a is b
+    return _scalar_eq(a, b)
+
+
+def _stale(row: Mapping[str, Any], eid: str, hash_of: Mapping[str, str],
+           bases: Mapping[tuple, dict]) -> Optional[dict]:
+    """The version a row was exported at (its baseVersion) when the entity has changed since
+    and this graph holds that version; else None — the row is current, carries no
+    baseVersion, or names a version from elsewhere (another graph's export) — and it applies as
+    it stands."""
+    at = row.get("baseVersion")
+    if not at or eid not in hash_of or hash_of[eid] == at:
+        return None
+    return bases.get((eid, at))
+
+
+def _rebase(patch: Mapping[str, Any], base: Mapping[str, Any],
+            cur: Mapping[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
+    """patch cut to its user's own edits since base, the version its row was exported at,
+    and the fields both sides changed differently. A cell still at its base value isn't an edit,
+    so cur's value stands; one only the row changed applies; one both changed alike is a no-op;
+    one both changed differently clashes. Tags merge as a set, keeping both sides' changes."""
+    out: Dict[str, Any] = {}
+    clashes: List[str] = []
+    for field, value in patch.items():
+        if field == "properties":
+            was_props, now_props, props = base.get("properties") or {}, cur.get("properties") or {}, {}
+            for k, v in value.items():
+                mine = _ABSENT if v == PROP_DELETE else v
+                was, now = was_props.get(k, _ABSENT), now_props.get(k, _ABSENT)
+                if _same(mine, was):
+                    continue
+                if _same(now, was) or _same(mine, now):
+                    props[k] = v
+                else:
+                    clashes.append(k)
+            if props:
+                out["properties"] = props
+        elif field == "tags":
+            mine, was = set(value or []), set(base.get("tags") or [])
+            if mine != was:
+                now = list(cur.get("tags") or [])
+                out["tags"] = [t for t in now if t not in was - mine] + sorted(mine - was - set(now))
+        elif not _scalar_eq(value, base.get(field)):
+            if _scalar_eq(cur.get(field), base.get(field)) or _scalar_eq(value, cur.get(field)):
+                out[field] = value
+            else:
+                clashes.append(field)
+    return out, clashes
+
+
+def _changed_since(fields: List[str]) -> str:
+    return (f"changed since you exported it: {', '.join(fields)} — export again, or clear "
+            "baseVersion to overwrite")
+
+
+_STALE_DELETE = ("changed since you exported it — export again, or clear baseVersion to delete it "
+                 "anyway")
+
+
+def _named_already(first: int, noun: str) -> str:
+    return f"row {first + 1} of this file already names this {noun} — give each {noun} one row"
+
+
+def _identity_edit(given: Optional[str], eid: str, cur: Mapping[str, Any],
+                   urn_to_eid: Mapping[str, str]) -> Optional[str]:
+    """What a matched row's pointer given says of its node eid: None when it names it
+    (as its urn, or by a name this import knows it by), "other" when it names another entity,
+    "new" when it names nothing — a rename an import doesn't make: a node's urn is its
+    identity."""
+    if not given:
+        return None
+    hits = {urn_to_eid[n] for n in pointers(given) if n in urn_to_eid}
+    own = cur.get("urn")
+    if eid in hits or (own and (uuid_urn(own) or own) == (uuid_urn(given) or given)):
+        return None
+    return "other" if hits else "new"
+
+
+_BY = {"entity_id": "its entity_id", "key": "the field it matches by"}
 
 
 def _node_payload(row: Mapping[str, Any]) -> Dict[str, Any]:
@@ -323,6 +412,14 @@ def resolve_rows(
     keys: Optional[KeyIndex] = base_keys.overlay() if base_keys else None
     node_eids: set = set(indexes.get("node_eids") or set())
     current: Dict[str, dict] = dict(indexes.get("current") or {})   # eid -> current payload
+    # An offline edit is reconciled, never silently lost: a stale row (its entity changed since its
+    # baseVersion) applies only its own edits; and one entity takes one row of a file.
+    hash_of: Mapping[str, str] = indexes.get("hash_of") or {}      # eid -> its head's content hash
+    bases: Mapping[tuple, dict] = indexes.get("bases") or {}        # (eid, hash) -> that version
+    edge_eids: set = set(indexes.get("edge_eids") or ())           # live edges rows name by id
+    earlier: Mapping[str, int] = indexes.get("earlier") or {}       # eid -> an earlier window's row
+    seen: Dict[str, int] = {}                                       # eid -> this window's row for it
+    after: Dict[str, dict] = {}                                     # eid -> as that row left it
     node_types = _lc(ontology.get("node_types")) if ontology else None   # lowercased valid sets | None
     edge_types = _lc(ontology.get("edge_types")) if ontology else None
     node_type_canon = _canonical_map(ontology.get("node_types")) if ontology else {}
@@ -354,10 +451,17 @@ def resolve_rows(
                 qname_to_eid[row["qualifiedName"]] = None   # two items carry it: it names neither
             resolutions.append(_resolution(row, "invalid", None, reasons=[ambiguous]))
             continue
+        first = earlier.get(matched_eid, seen.get(matched_eid)) if matched_eid else None
         if row.get("op") == "delete":
-            if matched_eid:
+            if matched_eid and first is not None:
+                resolutions.append(_resolution(row, "invalid", matched_eid,
+                                               reasons=[_named_already(first, "node")]))
+            elif matched_eid and _stale(row, matched_eid, hash_of, bases) is not None:
+                resolutions.append(_resolution(row, "invalid", matched_eid, reasons=[_STALE_DELETE]))
+            elif matched_eid:
                 ops.append({"op": "delete", "entity_kind": "node", "entity_id": matched_eid, "payload": None})
                 resolutions.append(_resolution(row, "delete", matched_eid))
+                seen[matched_eid] = row.get("_row_index")
             else:
                 resolutions.append(_resolution(row, "invalid", None, reasons=["delete target not found"]))
             continue
@@ -369,7 +473,22 @@ def resolve_rows(
             np = _node_payload(row)
             if "entityType" in np:                                # normalize casing before diffing
                 np["entityType"] = _canon(np["entityType"], node_type_canon)
-            cur = current.get(matched_eid) or {}
+            cur = after.get(matched_eid) or current.get(matched_eid) or {}
+            notes: List[str] = []
+            other = None
+            if mint_urn is not None:                              # a pointer is never stored
+                for column, given in (("urn", key_value(row.get("urn"))), (identity_prop, ident)):
+                    said = _identity_edit(given, matched_eid, cur, urn_to_eid)
+                    if said == "other":
+                        other = column
+                    elif said == "new":
+                        notes.append(f"{column} '{given}' isn't stored: an import never changes a "
+                                     "node's urn — keep your own id in another property")
+            if other:
+                resolutions.append(_resolution(row, "invalid", matched_eid, reasons=[(
+                    f"{_BY.get(by, 'it')} and its {other} name two different entities — "
+                    "give it one of them")]))
+                continue
             if by == "key" or mint_urn is not None:               # the file's ids point at the
                 np.pop("urn", None)                               # node: it keeps its own
                 held = np.get("properties") or {}
@@ -386,13 +505,27 @@ def resolve_rows(
                 created_from.setdefault(row["entity_id"], matched_eid)
             for name in names:
                 urn_to_eid.setdefault(name, matched_eid)
+            base = _stale(row, matched_eid, hash_of, bases)
+            if base is not None:                                  # changed since it was exported
+                np, clashes = _rebase(np, base, cur)
+                if clashes:                                   # a second row's clash is its own
+                    resolutions.append(_resolution(row, "invalid", matched_eid, reasons=[
+                        _named_already(first, "node") if first is not None
+                        else _changed_since(clashes), *notes]))
+                    continue
             changed = _changed_fields(np, cur)
-            if not changed:                                       # a true no-op (e.g. an unchanged round-trip)
-                resolutions.append(_resolution(row, "unchanged", matched_eid))
+            if changed and first is not None:                     # a second row, saying otherwise
+                resolutions.append(_resolution(row, "invalid", matched_eid,
+                                               reasons=[_named_already(first, "node")]))
                 continue
+            seen.setdefault(matched_eid, row.get("_row_index"))
+            if not changed:                                       # a true no-op (e.g. an unchanged round-trip)
+                resolutions.append(_resolution(row, "unchanged", matched_eid, reasons=notes))
+                continue
+            after[matched_eid] = apply_patch(cur, changed)
             ops.append({"op": "update", "entity_kind": "node", "entity_id": matched_eid, "payload": changed})
             resolutions.append(_resolution(row, "update", matched_eid,
-                                           reasons=[f"matched by {by}"] if by == "key" else None))
+                                           reasons=[*notes, *([f"matched by {by}"] if by == "key" else [])]))
             continue
         if not row.get("entityType"):
             resolutions.append(_resolution(row, "invalid", None, reasons=["node create requires entityType"]))
@@ -446,6 +579,7 @@ def resolve_rows(
             op["minted"] = True                           # the identifier property takes the urn
         if keys:
             keys.add(etype, props, eid, node_urn)
+        seen[eid], after[eid] = row.get("_row_index"), p
         ops.append(op)
         resolutions.append(_resolution(row, "create", eid))
 
@@ -470,10 +604,27 @@ def resolve_rows(
         etype = _canon(row["edgeType"], edge_type_canon)   # declared casing for a new edge
         key = (seid, teid, _etype_key(etype))
         matched_eid = edge_to_eid.get(key)
+        named = row.get("entity_id")
+        if named and named in edge_eids:                  # an exported edge, by its own id
+            held = current.get(named) or {}
+            if (held.get("sourceEntityId"), held.get("targetEntityId"),
+                    _etype_key(held.get("edgeType"))) != key:
+                resolutions.append(_resolution(row, "invalid", named, reasons=[(
+                    f"its ends or type differ from edge {named}'s — to re-point an edge, mark its "
+                    "row _op=delete and add a new row without an entity_id")]))
+                continue
+            matched_eid = named                           # that edge, beside any parallel one
+        first = earlier.get(matched_eid, seen.get(matched_eid)) if matched_eid else None
         if row.get("op") == "delete":
-            if matched_eid:
+            if matched_eid and first is not None:
+                resolutions.append(_resolution(row, "invalid", matched_eid,
+                                               reasons=[_named_already(first, "edge")]))
+            elif matched_eid and _stale(row, matched_eid, hash_of, bases) is not None:
+                resolutions.append(_resolution(row, "invalid", matched_eid, reasons=[_STALE_DELETE]))
+            elif matched_eid:
                 ops.append({"op": "delete", "entity_kind": "edge", "entity_id": matched_eid, "payload": None})
                 resolutions.append(_resolution(row, "delete", matched_eid))
+                seen[matched_eid] = row.get("_row_index")
             else:
                 resolutions.append(_resolution(row, "invalid", None, reasons=["delete edge not found"]))
             continue
@@ -482,10 +633,25 @@ def resolve_rows(
             # The matched edge keeps its spelling: a case variant is the same edge, not a retype.
             ep["edgeType"] = (edge_type_of.get(matched_eid)
                               or (current.get(matched_eid) or {}).get("edgeType") or etype)
-            changed = _changed_fields(ep, current.get(matched_eid) or {})
+            cur = after.get(matched_eid) or current.get(matched_eid) or {}
+            base = _stale(row, matched_eid, hash_of, bases)
+            if base is not None:                          # changed since it was exported
+                ep, clashes = _rebase(ep, base, cur)
+                if clashes:
+                    resolutions.append(_resolution(row, "invalid", matched_eid, reasons=[
+                        _named_already(first, "edge") if first is not None
+                        else _changed_since(clashes)]))
+                    continue
+            changed = _changed_fields(ep, cur)
+            if changed and first is not None:             # a second row, saying otherwise
+                resolutions.append(_resolution(row, "invalid", matched_eid,
+                                               reasons=[_named_already(first, "edge")]))
+                continue
+            seen.setdefault(matched_eid, row.get("_row_index"))
             if not changed:
                 resolutions.append(_resolution(row, "unchanged", matched_eid))
                 continue
+            after[matched_eid] = apply_patch(cur, changed)
             ops.append({"op": "update", "entity_kind": "edge", "entity_id": matched_eid, "payload": changed})
             resolutions.append(_resolution(row, "update", matched_eid))
         else:
@@ -494,6 +660,7 @@ def resolve_rows(
             edge_type_of[eid] = etype
             ep = _no_deletes(_edge_payload(row, seid, teid))
             ep["edgeType"] = etype
+            seen[eid], after[eid] = row.get("_row_index"), ep
             ops.append({"op": "create", "entity_kind": "edge", "entity_id": eid, "payload": ep})
             resolutions.append(_resolution(row, "create", eid))
 
