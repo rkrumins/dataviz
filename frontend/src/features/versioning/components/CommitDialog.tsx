@@ -90,7 +90,9 @@ export function CommitDialog({
   const viewChangesQ = useBranchViewChanges(workspaceId, graphId, branchId)
   const viewChanges = viewChangesQ.data
   const viewChangeCount = (viewChanges?.views.length ?? 0) + (viewChanges?.hidden ?? 0)
-  const hasChanges = changeSet.changes.length > 0 || viewChangeCount > 0
+  // Counted, not listed: the dialog is handed a draft's counts, whatever its size.
+  const changeCount = changeSet.counts.added + changeSet.counts.modified + changeSet.counts.removed
+  const hasChanges = changeCount > 0 || viewChangeCount > 0
   // Edits still staged on the canvas are not on the draft: publishing would leave them behind. A
   // review is not blocked — it tracks the branch, so edits saved later land in it.
   const unsaved = useUnsavedCountOnBranch(branchId)
@@ -201,7 +203,7 @@ export function CommitDialog({
         </div>
 
         <div className="px-6 pb-4 space-y-3">
-          {changeSet.changes.length > 0 && (
+          {changeCount > 0 && (
             <div className="flex items-center gap-2">
               <span className="text-xs text-ink-muted">This draft changes</span>
               <ChangeCountChips changeSet={changeSet} />
@@ -210,7 +212,7 @@ export function CommitDialog({
           {viewChanges && viewChangeCount > 0 && (
             <div className="space-y-1.5">
               <p className="text-xs text-ink-muted">
-                {changeSet.changes.length > 0 ? 'And views, which go live with it:' : 'This draft changes views, which go live with it:'}
+                {changeCount > 0 ? 'And views, which go live with it:' : 'This draft changes views, which go live with it:'}
               </p>
               <DraftViewChanges changes={viewChanges} branchId={branchId} onNavigate={() => { onClose(); onLeave?.() }}
                 className="max-h-40 overflow-y-auto" />
@@ -234,8 +236,8 @@ export function CommitDialog({
                     {existingPr!.title?.trim() || 'Open review'}
                   </p>
                   <p className="text-[11px] text-ink-muted mt-1 leading-relaxed">
-                    Everything you’ve saved on this draft — including the {changeSet.changes.length} change
-                    {changeSet.changes.length === 1 ? '' : 's'} above — is already part of this review.
+                    Everything you’ve saved on this draft — including the {changeCount.toLocaleString()} change
+                    {changeCount === 1 ? '' : 's'} above — is already part of this review.
                     There’s nothing else to submit.
                   </p>
                 </div>

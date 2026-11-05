@@ -137,7 +137,7 @@ async def _run() -> None:
     parent = "P3"
     want = await reference.get_children_with_edges(parent, edge_types=CONT, limit=5000)
     pages, offset, cursor = [], 0, None
-    for page_no in range(100):
+    for page_no in range(1000):                      # a page of 2: main's 5, then 1,000 new ones
         counting.loads.clear()
         page = await overlay.get_children_with_edges(parent, edge_types=CONT, limit=2, offset=offset,
                                                      cursor=cursor)
@@ -145,10 +145,11 @@ async def _run() -> None:
         loaded = {e for _k, ids in counting.loads if _k == "node" for e in ids}
         served = {c.urn for c in page.children}
         assert loaded <= served, (page_no, sorted(loaded - served)[:5])
-        if page_no == 0:
-            assert {u for u in served if ".n" in u} <= loaded, "the new children it serves were loaded"
-        else:
-            assert not {u for u in loaded if ".n" in u}, "a later page loads no new child"
+        # The new children a page serves were loaded for it, and they are at most a page of them:
+        # the first page's share, then the rest after main's last page (the overlay's tail).
+        new = {u for u in served if ".n" in u}
+        assert new <= loaded, (page_no, sorted(new - loaded)[:5])
+        assert len(new) <= 2, (page_no, len(new))
         if not page.has_more:
             break
         offset, cursor = page.next_offset, page.next_cursor

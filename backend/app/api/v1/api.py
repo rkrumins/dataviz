@@ -5,6 +5,7 @@ from backend.app.api.v1.capability_gate import (
     require_ws_read_or_view,
 )
 from backend.app.auth.dependencies import requires
+from .revision_gate import revision_gate
 from .versioning_gate import versioning_write_gate
 from .endpoints import (
     metrics as metrics_endpoint,
@@ -495,34 +496,35 @@ api_router.include_router(
 # workspace:datasource:read itself: a whole data source is more than a view's reach.
 api_router.include_router(
     graph_export.router, prefix="/{ws_id}/graph/export", tags=["graph:workspace"],
+    dependencies=[Depends(revision_gate)],
 )
 # Membership (POST /{ws_id}/graph/members): a scope's seeds and reach, resolved. Behind the
 # same data-source-or-view gate as every graph read.
 api_router.include_router(
     graph_members.router, prefix="/{ws_id}/graph", tags=["graph:workspace"],
-    dependencies=[Depends(require_ds_read_or_view)],
+    dependencies=[Depends(require_ds_read_or_view), Depends(revision_gate)],
 )
 # A subset view's layer feed (POST /{ws_id}/graph/search/view-feed): its stored search's
 # matches, page by page. Behind the same gate; the view's own search decides what matches.
 api_router.include_router(
     graph_view_feed.router, prefix="/{ws_id}/graph", tags=["graph:workspace"],
-    dependencies=[Depends(require_ds_read_or_view)],
+    dependencies=[Depends(require_ds_read_or_view), Depends(revision_gate)],
 )
 api_router.include_router(
     graph.router, prefix="/{ws_id}/graph", tags=["graph:workspace"],
-    dependencies=[Depends(require_ds_read_or_view)],
+    dependencies=[Depends(require_ds_read_or_view), Depends(revision_gate)],
 )
 # Assignment compute — reads graph data for one data source, so it takes
 # the ds-pinned read gate (a capability viewer may compute assignments
 # for the view's own source, nothing else).
 api_router.include_router(
     assignments.router, prefix="/{ws_id}/graph/assignments", tags=["assignments:workspace"],
-    dependencies=[Depends(require_ds_read_or_view)],
+    dependencies=[Depends(require_ds_read_or_view), Depends(revision_gate)],
 )
 # Batched canvas contract (open/expand) — /api/v1/{ws_id}/graph/canvas/*
 api_router.include_router(
     canvas.router, prefix="/{ws_id}/graph", tags=["canvas:workspace"],
-    dependencies=[Depends(require_ds_read_or_view)],
+    dependencies=[Depends(require_ds_read_or_view), Depends(revision_gate)],
 )
 # Asset endpoints: /api/v1/{ws_id}/assets/rule-sets
 api_router.include_router(

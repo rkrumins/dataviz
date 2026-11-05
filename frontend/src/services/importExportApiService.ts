@@ -474,14 +474,16 @@ export interface ExportPlan {
 }
 
 /** Which data an export reads. A version-controlled data source exports from its versioned graph
- *  (`graphId`): published, a draft (`branchId`), or one view's entities (`viewId`). One without
- *  version control (`graphId` null) exports its whole live graph, a cold copy. */
+ *  (`graphId`): published, a draft (`branchId`), Published as it was at a past revision
+ *  (`asOfSeq`), or one view's entities (`viewId`). One without version control (`graphId` null)
+ *  exports its whole live graph, a cold copy. */
 export interface ExportTarget {
   wsId: string
   dataSourceId: string
   graphId: string | null
   viewId?: string
   branchId?: string
+  asOfSeq?: number
 }
 
 function exportQuery(target: ExportTarget, format: ImportFormat, extra: Record<string, string | undefined> = {}): string {
@@ -489,6 +491,7 @@ function exportQuery(target: ExportTarget, format: ImportFormat, extra: Record<s
   if (!target.graphId) q.set('dataSourceId', target.dataSourceId)
   if (target.graphId && target.viewId) q.set('viewId', target.viewId)
   if (target.graphId && target.branchId) q.set('branchId', target.branchId)
+  else if (target.graphId && target.asOfSeq != null) q.set('asOfSeq', String(target.asOfSeq))
   for (const [k, v] of Object.entries(extra)) if (v) q.set(k, v)
   return q.toString()
 }

@@ -115,6 +115,275 @@ than build it; **Technical** is the full toolset, as before. Business stays the 
 
 ---
 
+## [Unreleased] — See the graph as it was at any revision, and compare any two (preview)
+
+The screens of the revision history viewer, behind the preview switch **Revision history viewer:
+the graph as it was** (`revisionViewerEnabled`), which ships off. The history itself now lists
+every revision, for everyone.
+
+### Added
+
+- **Open the graph as it was at any revision.** In **Reviews → History**, a revision's **⋯** menu
+  → **Open on canvas**.
+  - The canvas shows the published graph as it was then, read-only.
+  - A banner says when that was, which revision it is, who made it, and how much has changed
+    since. It says *Opening…* until the graph is ready, and *Rewinding 12,400 changes…* while a
+    long one draws.
+  - **Back to Published**, or **Esc**, returns to the graph as it is now.
+  - The menu says before you choose whether a revision can be opened.
+  - Exporting while a revision is open exports the graph as it was.
+- **A link to the graph as it was.** The address carries the revision (`?rev=128`), and **Copy
+  link** on a revision copies one. Either opens that revision for anyone who can read the data
+  source.
+- **Go to any month.** **Months** shows a year at a time, each month shaded by how many revisions it
+  saw, and a month opens to its days. From the end of any month or day you can open the graph as it
+  was, compare it with now, or bring the list to it.
+- **Compare two revisions.** Choose **Compare with now**, or **Compare with…** and then the other
+  revision. You see:
+  - how much was added, modified and removed, over how many revisions and by whom;
+  - which types changed most;
+  - every change, a page at a time.
+
+  **Highlight on canvas** rings the changes on the graph.
+- **A revision too far back to draw** (more than 100,000 changes since) opens as its comparison
+  with now instead, with **Export as it was then**.
+
+### Changed
+
+- **The history lists every revision.** It used to stop at 500. It now loads older revisions as you
+  scroll, newest first, grouped by month and day in your time zone, with the month you're reading
+  pinned at the top. Only the rows on screen are drawn, so years of history scroll as smoothly as a
+  week's.
+- With the preview on, the **Commits** tab is called **History**.
+
+### Known limitations
+
+- **At a past revision**, search, traces, Narrow, display rules and subset views are off, because
+  they read the graph as it is now. The layout and the ontology are today's.
+- **Publishing while a past revision is open** makes the canvas read that revision again: the same
+  past data, fetched twice.
+
+---
+
+## [Unreleased] — The published graph as it was at any past revision (API, preview)
+
+The server side of the revision history viewer. A graph read can name a past revision of a data
+source's published graph and get the graph as it was then, read-only. It is a preview behind
+**Revision history viewer: the graph as it was** (`revisionViewerEnabled`), which ships off; the
+screens that open a revision and compare two come next.
+
+### Added
+
+- **`?asOfSeq=K` on the `/{ws_id}/graph` reads.** The nodes, edges, children, ancestors, degrees,
+  rollups, the canvas's batched open and expand, and layer assignment answer as the graph was at
+  revision K.
+  - It costs what changed since K, never the graph: the published graph's store, with the
+    entities changed since put back as they were then, told apart from their content hashes and
+    loaded only for the page a read serves. No copy of the graph is made, in FalkorDB or anywhere.
+  - Opening the same revision again after the graph moved on adds what changed since, rather
+    than starting over.
+  - Its answers are cached per revision, apart from the graph as it is now.
+  - Edge ends are named by urn, as the graph store names them, also where an imported node's id
+    is not its urn. A draft's read undoes main's later changes the same way.
+- **What a revision can't answer, it refuses.**
+  - A write, or a read that plans one, answers 409 `revision_read_only`.
+  - Search, traces, Narrow, subset-view layers, metadata and statistics read the graph as it is
+    now, so they answer 501 `revision_unsupported`. So does any graph route added later, until it
+    is checked and listed.
+  - A rollup under containment that moved since the revision says it may be stale
+    (`staleReason: "revision_structure_moved"`).
+- **A revision too far back is refused, not drawn.** More than `GRAPHVER_REVISION_REWIND_MAX`
+  (100,000) entities changed since: 409 `revision_too_far`, with how many changed. Its change list,
+  a comparison and an export still reach it.
+- **`GET …/versioning/graphs/{gid}/revisions/{seq}`**: one revision's commit and what opening it
+  takes, before anything is drawn — how many entities changed since, and whether it can be opened
+  (`openable`; `reason` `too_far` or `fork`).
+- **The preview switch** `revisionViewerEnabled` (Admin → Features → Experimental). Off, a request
+  that names a revision answers 403 `feature_disabled`, and one that names none is unaffected. It
+  needs Version control, and a reader of the data source itself: a view's share link reaches the
+  graph as it is now, not its history.
+
+### Fixed
+
+- **A draft still open while someone publishes a large change no longer stalls.** Its next read
+  put back everything published since it branched off, loading each changed entity's value twice:
+  after an import of 100,000 entities, 200,000 values, in the web process, for every draft still
+  open. It now tells what changed from content hashes, as a past revision does, and loads only
+  what a read shows.
+
+### Upgrading
+
+- Nothing to do: the switch ships off. Turn it on once the web app that ships with it is deployed.
+  Each revision open in a web process holds about 1.2 KB per entity changed since it, in the same
+  cache as drafts' and forks' reads (`GRAPHVER_OVERLAY_CACHE_ENTRIES`).
+
+### Known limitations
+
+- **Forks and drafts have no past revisions to open yet**, nor do data sources without version
+  control: 501 `revision_unsupported`, with `reason` saying which.
+- **At a past revision, layout, layers, display rules and the ontology are today's.**
+
+---
+
+## [Unreleased] — A 100,000-change draft opens: every screen lists changes a page at a time
+
+The screens side of change lists. After an import of 100,000 entities into a draft, the canvas,
+the Changes tab, the review drawer, the publish dialog and the incoming-changes sheet each hung
+or downloaded tens of megabytes; they now show the changes a page at a time, with counts that
+arrive at once.
+
+### Changed
+
+- **Changes lists every change, a page at a time.** A draft past 20,000 changes was counted and
+  then "too many to list here". The Changes tab, a revision's drill-down in Commits, a review's
+  **Files changed** and "here's what came in" after a pull now list it:
+  - **Entities**, **Relationships** and **Structure**, each with its count;
+  - **Added**, **Modified** and **Removed** to narrow it, and a type;
+  - a search by name, urn or type;
+  - more rows load as you scroll;
+  - expand a row to compare its values before and after, fetched for that row alone.
+- **The publish dialog counts the draft**, where it downloaded the draft's whole diff to show three
+  numbers.
+- **Smaller lists draw a page at a time too.** A status group in a list under 20,000 changes shows
+  its first 200 rows, then **Show more**.
+- **Field-by-field comparison waits until a row is opened**, where it ran for every modified entity
+  before the list could draw.
+
+### Fixed
+
+- **The canvas of a draft holding a large import stays responsive.**
+  - Each node and row on the canvas built its own map of every change in the draft: at 100,000
+    changes and a few hundred rows, tens of millions of steps and gigabytes held. They now share
+    one.
+  - A draft past 20,000 changes is ringed from a compact list of its changes, about 70 bytes each,
+    where the whole diff was tens of megabytes. It names an imported node, and the ends of its
+    links, by urn, as the canvas does.
+  - A View that lists its own entities loaded every entity the draft created at its top level, a
+    thousand requests for 100,000 of them. It now loads the first 200, and the bar's **+N new** chip
+    says how many more there are and opens **Changes**.
+- **Restoring a large deleted subtree takes linear time**, where every restored entity scanned
+  every change.
+
+### Upgrading
+
+- Nothing to do. `GET …/branches/{bid}/diff-vs-main` (either mode) and `…/diff-window` now answer
+  409 `too_large_for_tree` past `GRAPHVER_DIFF_TREE_MAX_CHANGES` (20,000): a script reading a draft
+  or a window that large reads its change list instead (`…/graphs/{gid}/diff/*`).
+
+### Known limitations
+
+- **No ghosts on the canvas past 20,000 changes.** A draft that large shows no ghosts for the
+  entities it removed; **Changes** lists them.
+- **In a View that lists its own entities**, only the first 200 new top-level entities of a draft
+  are drawn.
+
+---
+
+## [Unreleased] — Change lists at any size: a draft's changes, a revision's, two revisions compared (API)
+
+The first part of browsing the graph's history: lists of what changed that open at any size, and
+guards that stop a large change being read whole in a web process. A 100,000-entity import made
+the canvas, the review drawer and the History drill-down hang; this change fixes the server side of
+that, and the screens move onto the new lists in the next one.
+
+### Added
+
+- **Change lists** (`GET /api/v1/{ws}/versioning/graphs/{gid}/diff/summary`, `/diff/entries`,
+  `/diff/entries/{entityId}` and `/diff/index`). A list is either a draft's changes against main
+  where it branched off (`branchId`), or main's between two revisions (`fromSeq`, `toSeq`): one
+  revision, two compared, or what came in since one. It is classified once from content hashes,
+  without reading a payload, and kept for its pages:
+  - the summary counts entities, relationships and structure, by status and by type; for two
+    revisions it also names them and the people who made the changes between;
+  - the list pages in a fixed order (entities, relationships, structure; by type, then name),
+    narrowed by kind, status, type and text, and names an edge's ends;
+  - one entity's before and after is two point reads;
+  - the index gives the canvas every change at about 70 bytes each instead of a payload, naming
+    nodes and edge ends by urn where an entity id is not one (an imported node's).
+
+  Past `GRAPHVER_CHANGE_LIST_MAX` (250,000) changes a list is counted, not listed.
+- **The history calendar** (`GET …/graphs/{gid}/history/months`): main's revisions by month and
+  day in the reader's time zone. A month's last revision is the graph as it was at its end.
+- API keys can read both, as they read the commit log.
+
+### Fixed
+
+- **A draft that created thousands of entities lists them a page at a time.** Every listing it
+  touched (the top level, a container's children, a type's feed) served every created node on its
+  first page and loaded each one's value: the canvas asked for 200 roots of a draft holding a
+  100,000-entity import and got 100,200. The first page now holds at most a page of them, in name
+  order, and the rest follow main's last page. Forks read the same way. A plain listing or search
+  pages through them first, then main's rows at offsets moved by how many there are: each page a
+  slice of one order, and none of them dropped past the first page.
+- **Loading a draft's created entities by name no longer scans the draft.** Each batch of 100 names
+  was tested against every node the draft created, with the batch's set built again for each one:
+  at 100,000 created nodes, ten million inserts a batch.
+- **A large revision's drill-down no longer reads it whole.** Opening a revision that wrote more
+  than 20,000 entities (`GRAPHVER_DIFF_TREE_MAX_CHANGES`) in History, such as the publish of a large
+  import, loaded every payload it wrote at both ends in the web process. It is now counted by type
+  from the revision's change list, as a large draft is.
+- **A large draft's review no longer merges inside the request to show its diff.** Its summary,
+  which every row of the review inbox asks for, is counted from the draft's change list, and its
+  itemised diff answers 409 `too_large_for_tree`, as the tree's children already did. A fork's
+  review is unchanged.
+- **Pull latest counts what came in from content hashes**, instead of loading every payload at both
+  ends just to count them.
+- **Restoring over a large change says how large.** Past 200,000 touched entities the restore
+  dialog's preview is approximate, but the route dropped `approximate` and `touchedEstimate`, so the
+  dialog said nothing would change.
+
+### Upgrading
+
+- Nothing to do. Three settings tune it: `GRAPHVER_CHANGE_LIST_MAX`,
+  `GRAPHVER_CHANGE_INDEX_CACHE_ENTRIES` and `GRAPHVER_CHANGE_INDEX_STATEMENT_TIMEOUT_MS`
+  (`docs/CONFIGURATION.md`).
+
+### Known limitations
+
+- The Changes tab, the review drawer, the publish dialogs, the incoming-changes sheet and the
+  canvas's highlights still read the old diffs. They move onto change lists in the next change.
+- Two revisions more than `GRAPHVER_CHANGE_LIST_MAX` changes apart are counted from what each
+  revision recorded of itself: no split by kind, and an upper bound across more than one revision.
+- A fork's review is still merged inside the request at any size.
+
+---
+
+## [Unreleased] — An offline edit is reconciled, never silently lost
+
+### Changed
+
+- **An export edited offline merges with what changed since.** Each row an export writes carries
+  `baseVersion`, the version it was exported at. When that entity has changed before the file is
+  imported:
+  - only the cells the file changed apply;
+  - a cell both sides changed refuses the row, naming the field: *"changed since you exported it:
+    description"*;
+  - tags merge as a set;
+  - a stale `_op=delete` is refused.
+
+  Before, the file's old values overwrote every change made since, on every row in it. A row with
+  no `baseVersion`, such as a script's, still sets what it carries.
+- **Two rows that name one node or edge and say different things:** the second is refused with
+  "row N of this file already names this node". Before, the last silently won. Two rows that say
+  the same thing are fine.
+- **An exported edge row whose source, target or type was changed is refused.** Before, it was
+  added as a second edge and the old one stayed. To re-point an edge, delete its row and add a new
+  one.
+- **A urn or identifier cell edited on an existing row is reported on that row.** It isn't
+  applied, because an import never changes a node's urn. Before, it was dropped in silence. A urn
+  that names another node refuses the row.
+- **The import preview shows a note on rows that applied,** not only the reason a row was refused.
+- **The dry run says when new nodes are named by urns they won't carry,** and how to keep your own
+  id in a property.
+
+### Known limitations
+
+- A file sent again after its `_op=delete` rows applied refuses them ("delete target not found").
+  Nothing changes.
+- A row whose `baseVersion` this graph doesn't hold (another graph's export) sets what it carries.
+
+---
+
 ## [Unreleased] — A connector-ready import and export contract
 
 ### Added

@@ -12,6 +12,7 @@ Version 1 only ever gains columns: a connector written against it keeps working.
 """
 from __future__ import annotations
 
+import json
 import re
 from typing import Annotated, Any, Dict, List, Literal, Mapping, Optional, Sequence, Tuple, Union
 
@@ -32,7 +33,9 @@ _SCALAR = {"anyOf": [{"type": "string"}, {"type": "number"}, {"type": "boolean"}
 
 _POINTER = ("A pointer, not stored: it finds the node that carries it as its urn, or the node an "
             "earlier import made from it — whose id is derived from it, so importing the same file "
-            "again updates what it made. A `urn:uuid:` no node holds is kept as the new node's id.")
+            "again updates what it made. A `urn:uuid:` no node holds is kept as the new node's id. "
+            "To see your own id on the node, keep it in a property marked \"Match imports by "
+            "this\" too.")
 
 
 class _Record(BaseModel):
@@ -43,8 +46,9 @@ class _Record(BaseModel):
         "updates that entity. Any other value is the file's own id for the row — it links the "
         "file's rows to each other (an edge to a node) and nothing more.")
     baseVersion: Optional[str] = Field(
-        None, description="The entity's content hash, as an export writes it. Informational: an "
-        "import doesn't check it.")
+        None, description="The entity's content hash, as an export writes it. If the entity has "
+        "changed since, only the cells you changed apply, and a row whose cell someone else also "
+        "changed is refused, naming it. Leave it out to set what the row carries.")
     properties_json: Optional[Union[Dict[str, Any], str]] = Field(
         None, description="Properties too nested for a column, as a JSON object. A `null` value "
         "removes the property.")
@@ -167,7 +171,7 @@ def json_schema(ontology: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
         **schema,
     }
     if not ontology:
-        return schema
+        return _canonical(schema)
     defs = schema["$defs"]
     node, edge = defs["ImportNodeRecord"], defs["ImportEdgeRecord"]
     if ontology.get("node_types"):
@@ -179,7 +183,21 @@ def json_schema(ontology: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
             **edge["properties"]["edgeType"], "enum": sorted(set(ontology["edge_types"]))}
     for prop, spec in sorted(_typed_properties(ontology).items()):
         node["properties"][prop] = spec
-    return schema
+    return _canonical(schema)
+
+
+def _canonical(node: Any) -> Any:
+    """``node`` with every ``anyOf`` in one order, by content. typing hands a union back in the
+    member order of an equal one created earlier anywhere in the process, so pydantic's order
+    would depend on what was imported first."""
+    if isinstance(node, dict):
+        out = {key: _canonical(value) for key, value in node.items()}
+        if isinstance(out.get("anyOf"), list):
+            out["anyOf"] = sorted(out["anyOf"], key=lambda m: json.dumps(m, sort_keys=True))
+        return out
+    if isinstance(node, list):
+        return [_canonical(value) for value in node]
+    return node
 
 
 def _typed_properties(ontology: Mapping[str, Any]) -> Dict[str, Dict[str, Any]]:

@@ -7,7 +7,8 @@
  *     never as a finished import;
  *   - an import queued for the server's workers says it is waiting, and how many are ahead of it;
  *   - a running import says how far it has got, and that it resumed when a server took it over;
- *   - closing the dialog stops following the import (it carries on on the server).
+ *   - closing the dialog stops following the import (it carries on on the server);
+ *   - the preview says why a row was refused, and shows a note on a row that applied.
  */
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -145,5 +146,22 @@ describe('ImportDialog', () => {
     expect(await screen.findByText('4 changes ready to review')).toBeInTheDocument()
     expect(screen.queryByText(/already visible/i)).not.toBeInTheDocument()
     expect(screen.getByText(/when this closes/i)).toBeInTheDocument()
+  })
+
+  it('says why a row was refused, and shows a note on a row that applied', async () => {
+    vi.mocked(importInParts).mockResolvedValue({ jobId: 'j1', branchId: 'br1', sourceUri: 's', status: 'pending' })
+    vi.mocked(pollJob).mockResolvedValue({ jobId: 'j1', jobType: 'ingest', graphId: 'g1', status: 'completed',
+      summary: { new: 0, updated: 1, deleted: 0, invalid: 1 } } as Job)
+    vi.mocked(getImportPreview).mockResolvedValue({ sample: [
+      { rowIndex: 0, kind: 'node', status: 'updated', label: 'orders',
+        reasons: ["urn 'urn:li:renamed' isn't stored: an import never changes a node's urn"] },
+      { rowIndex: 1, kind: 'node', status: 'invalid', label: 'revenue',
+        reasons: ['changed since you exported it: description'] },
+    ] } as never)
+    await userEvent.upload(open(), file('graph.csv', 2048))
+    await userEvent.click(screen.getByRole('button', { name: /^Import$/ }))
+
+    expect(await screen.findByText(/urn 'urn:li:renamed' isn't stored/)).toBeInTheDocument()
+    expect(screen.getByText('changed since you exported it: description')).toBeInTheDocument()
   })
 })

@@ -447,7 +447,8 @@ provider per request:
 | `main`, projection **fresh** | live **FalkorDB** provider (hot path; the only place materialized rollups live) | `context_engine.py:142` (`base = provider`) |
 | `main`, projection **lagging** (just after a merge) | `VersionedBranchProvider` (Postgres composition — read-your-writes) | `context_engine.py:147-151` |
 | a live **draft** | `DraftOverlayProvider` wrapping whatever serves main | `context_engine.py:130-146` |
-| **as-of / historical** | `VersionedBranchProvider(as_of_seq=…)` (read-only snapshot) — routed through the versioning service, not constructed here | `versioned_branch_provider.py:50` |
+| `main` **at a past revision** (`?asOfSeq=K`, the revision history viewer) | `DraftOverlayProvider(as_of_seq=K)` wrapping whatever serves main, with the patch set of everything main changed since K put back; read-only | `context_engine.py` (`revision`) |
+| **as-of / historical** (versioning routes) | `VersionedBranchProvider(as_of_seq=…)` (read-only snapshot) — routed through the versioning service, not constructed here | `versioned_branch_provider.py:50` |
 
 - **`DraftOverlayProvider`** (`draft_overlay_provider.py:97`) serves a draft as **main ⊕ sparse
   delta**. Every read short-circuits `if delta.empty: return base` (`_OverlayDelta.empty`,
@@ -456,6 +457,20 @@ provider per request:
   (`:310`) returns main's rollups verbatim when there is no lineage delta, else adjusts them by the
   draft's delta. Writes reset the cached delta and delegate to an internal `VersionedBranchProvider`
   writer (`:387-403`).
+- **A past revision of main** is read as a fork of main at that revision with no changes of its
+  own: main's store at its head (FalkorDB while the projection holds the head, else the Postgres
+  reader) with `revision_overlay_delta`'s patch set over it — the entities main changed since K,
+  told apart by content hashes at K and at the head, their values loaded as of K for the page a
+  read serves. So opening one costs what changed since, never the graph, and no FalkorDB copy is
+  made. Its delta is a line of its own (`main@K`) in the shared delta cache, extended when the head
+  moves; its answers are cached under the branch `main@K`, so the published top level's
+  materialized payload never serves one. Ancestor chains are walked at K; search and traces
+  refuse (`RevisionUnsupported`, 501), writes too (`RevisionReadOnly`, 409); a rollup under
+  containment that moved since K is flagged `stale` (`revision_structure_moved`). Which graph
+  routes read a revision is decided in one place, `api/v1/revision_gate.py` (see doc 06); past
+  `GRAPHVER_REVISION_REWIND_MAX` changes since K, the engine refuses (`RevisionTooFar`, 409).
+  Forks, drafts and data sources without version control have no revisions to open
+  (`RevisionUnsupported`).
 - **`VersionedBranchProvider`** (`versioned_branch_provider.py:45`) is an ordinary provider over one
   `(graph_id, branch_id[, as_of_seq])`, composing base+overlay from Postgres. Its
   `get_aggregated_edges_between` returns **empty** (a draft/Postgres read has no materialized rollups;

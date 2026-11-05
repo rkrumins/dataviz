@@ -1,10 +1,11 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react'
-import { useCanvasStore, type ChildPageState, type LineageEdge, type LineageNode, type TypeFeedState } from '@/store/canvas'
+import { CREATED_ROOTS_LOADED, useCanvasStore, type ChildPageState, type LineageEdge, type LineageNode, type TypeFeedState } from '@/store/canvas'
 import { featureEnabled } from '@/store/features'
 import type { ViewFeedPage } from '@/types/searchView'
 import { httpStatusOf } from '@/services/graphRequestFailure'
 import { primeLineageFor } from '@/lib/primeLineageFor'
 import { useGraphProvider, useGraphProviderContext } from '@/providers/GraphProviderContext'
+import { useViewExecutionContext } from '@/providers/ViewExecutionContext'
 import {
     useActiveView,
     isContainmentEdgeType,
@@ -122,6 +123,21 @@ export function pagerAfter(
 /** Page size for top-level (root) entity loading — roots page exactly
  *  like node children so no layer size silently caps the canvas. */
 const ROOT_PAGE_SIZE = 200
+
+/** A key that changes exactly when a set of URNs does — its size and two order-independent sums of
+ *  each URN's hash — without sorting the set or joining it into one string (at 100,000 URNs, a
+ *  multi-megabyte string built again for every new change set). */
+export function urnSetKey(urns: Iterable<string>): string {
+    let n = 0, sum = 0, xor = 0
+    for (const u of urns) {
+        let h = 0x811c9dc5                       // FNV-1a, 32-bit
+        for (let i = 0; i < u.length; i++) h = Math.imul(h ^ u.charCodeAt(i), 0x01000193) >>> 0
+        sum = (sum + h) >>> 0
+        xor = (xor ^ Math.imul(h, 0x9e3779b1)) >>> 0
+        n++
+    }
+    return n === 0 ? '' : `${n}:${sum.toString(36)}:${xor.toString(36)}`
+}
 
 const CHILD_LOAD_CONCURRENCY = (() => {
     const fromEnv = Number(import.meta.env?.VITE_CHILD_LOAD_CONCURRENCY)
@@ -458,6 +474,8 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
 
     const provider = useGraphProvider()
     const { providerVersion, workspaceId: providerWsId, dataSourceId: providerDsId } = useGraphProviderContext()
+    // A past revision: a subset view's layers are a search's matches, which reads the graph as it is.
+    const atRevision = (useViewExecutionContext()?.asOfSeq ?? null) != null
 
     // Force the client-side circuit breakers closed so a re-attempt actually
     // probes the provider. Without this, an OPEN breaker (it opens for ~15s
@@ -498,7 +516,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
     // yet, so the refetch wouldn't bring it back).
     const activeChangeSet = useBranchStore((s) => s.activeChangeSet)
     const committedDeltaKey = useMemo(
-        () => (isDraft ? [...committedCreatedUrns(activeChangeSet)].sort().join('|') : ''),
+        () => (isDraft ? urnSetKey(committedCreatedUrns(activeChangeSet)) : ''),
         [isDraft, activeChangeSet],
     )
     // Content-stable keys for the hydration effect deps: the schema store
@@ -712,6 +730,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
         useCanvasStore.getState().clearEdgeFetchFailures()
         useCanvasStore.getState().setEdgesTruncated(false)
         useCanvasStore.getState().clearNodeFetchFailures()
+        useCanvasStore.getState().setCreatedRootsNotLoaded(0)
         useCanvasStore.getState().setPlacementsNotFound(null)
         useCanvasStore.getState().setSubsetIssue(null)
         // A refresh asks each layer for an answer on the current data, not a recent one.
@@ -760,7 +779,15 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                     // committedCreatedChildUrns); only its new ROOTS load flat. Empty delta /
                     // non-draft ⇒ assigned-only.
                     const createdChildren = committedCreatedChildUrns(activeChangeSet, containmentEdgeTypes)
-                    const createdRoots = new Set([...branchCreatedDelta].filter((u) => !createdChildren.has(u)))
+                    // A page of them: the rest are counted, and listed in the draft's Changes. An
+                    // open view's type feeds page them in as well, so only a curated view leaves
+                    // the rest undrawn.
+                    const createdRootsAll = isDraft
+                        ? [...branchCreatedDelta].filter((u) => !createdChildren.has(u) && !assignedUrns.has(u))
+                        : []
+                    const createdRoots = new Set(createdRootsAll.slice(0, CREATED_ROOTS_LOADED))
+                    useCanvasStore.getState().setCreatedRootsNotLoaded(
+                        loadByUrn ? createdRootsAll.length - createdRoots.size : 0)
                     const urnArray = closedScopeLoadUrns(assignedUrns, createdRoots, isDraft)
                     deltaLoadedCount = urnArray.length - assignedUrns.size
 
@@ -808,7 +835,9 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                         // type, which would list every entity of the layer's types. With
                         // the preview off it lists nothing and says why.
                         const viewFeed = provider.viewFeedPage?.bind(provider)
-                        if (!featureEnabled('searchViewsEnabled') || !viewFeed || !activeView?.id) {
+                        if (atRevision) {
+                            useCanvasStore.getState().setSubsetIssue('revision')
+                        } else if (!featureEnabled('searchViewsEnabled') || !viewFeed || !activeView?.id) {
                             useCanvasStore.getState().setSubsetIssue(
                                 featureEnabled('searchViewsEnabled') ? 'unsupported' : 'off')
                         } else {
@@ -1271,7 +1300,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
             }
         }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [enableHydration, provider, providerVersion, activeView?.id, activeView?.layout.type, rootTypesKey, schemaTypesKey, isSchemaReady, committedDeltaKey, retryEpoch, subsetKey])
+    }, [enableHydration, provider, providerVersion, activeView?.id, activeView?.layout.type, rootTypesKey, schemaTypesKey, isSchemaReady, committedDeltaKey, retryEpoch, subsetKey, atRevision])
 
     // Explicit, user-triggered retry (the overlay's "Retry" button, or when a
     // background tab is brought back to the foreground). Re-arms a fresh round

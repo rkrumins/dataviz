@@ -17,6 +17,21 @@ import { EntityDiff } from './EntityDiff'
 
 const STATUS_ORDER: ChangeStatus[] = ['added', 'modified', 'removed']
 const KIND_TITLE: Record<ChangeKind, string> = { node: 'Entities', edge: 'Relationships' }
+/** Rows a status group draws before "Show more": a 20,000-change set draws a page, not 200,000
+ *  elements. A set past the tree's cap is a change list (ChangeList) instead. */
+const ROWS_SHOWN = 200
+
+type Grouped = Record<ChangeKind, Record<ChangeStatus, GraphChange[]>>
+
+/** Every change into its kind and status, in one pass. */
+function group(changes: GraphChange[]): Grouped {
+  const out: Grouped = {
+    node: { added: [], modified: [], removed: [] },
+    edge: { added: [], modified: [], removed: [] },
+  }
+  for (const c of changes) out[c.kind][c.status].push(c)
+  return out
+}
 
 function ChangeRow({
   change,
@@ -68,17 +83,43 @@ function ChangeRow({
   )
 }
 
+function StatusRows({
+  items,
+  onDiscard,
+}: {
+  items: GraphChange[]
+  onDiscard?: (stagedChangeId: string) => void
+}) {
+  const [shown, setShown] = useState(ROWS_SHOWN)
+  const rest = items.length - shown
+  return (
+    <div className="space-y-1">
+      {items.slice(0, shown).map((c) => (
+        <ChangeRow key={c.entityId} change={c} onDiscard={onDiscard} />
+      ))}
+      {rest > 0 && (
+        <button
+          type="button"
+          onClick={() => setShown((n) => n + ROWS_SHOWN)}
+          className="w-full text-left px-2.5 py-1 text-[11.5px] font-medium text-accent-lineage hover:underline"
+        >
+          Show {Math.min(rest, ROWS_SHOWN).toLocaleString()} more of {rest.toLocaleString()}
+        </button>
+      )}
+    </div>
+  )
+}
+
 function KindGroup({
   kind,
-  changes,
+  byStatus,
   onDiscard,
 }: {
   kind: ChangeKind
-  changes: GraphChange[]
+  byStatus: Record<ChangeStatus, GraphChange[]>
   onDiscard?: (stagedChangeId: string) => void
 }) {
-  if (changes.length === 0) return null
-  const byStatus = (s: ChangeStatus) => changes.filter((c) => c.status === s)
+  if (STATUS_ORDER.every((s) => byStatus[s].length === 0)) return null
   return (
     <div>
       <p className="text-[10px] font-semibold text-ink-muted/80 uppercase tracking-wider mb-1.5">
@@ -86,7 +127,7 @@ function KindGroup({
       </p>
       <div className="space-y-2.5">
         {STATUS_ORDER.map((status) => {
-          const items = byStatus(status)
+          const items = byStatus[status]
           if (items.length === 0) return null
           const meta = STATUS_META[status]
           return (
@@ -95,13 +136,9 @@ function KindGroup({
                 <span className={cn('text-[11px] font-semibold uppercase tracking-wider', meta.text)}>
                   {meta.label}
                 </span>
-                <span className="text-[11px] text-ink-muted tabular-nums">{items.length}</span>
+                <span className="text-[11px] text-ink-muted tabular-nums">{items.length.toLocaleString()}</span>
               </div>
-              <div className="space-y-1">
-                {items.map((c) => (
-                  <ChangeRow key={c.entityId} change={c} onDiscard={onDiscard} />
-                ))}
-              </div>
+              <StatusRows items={items} onDiscard={onDiscard} />
             </div>
           )
         })}
@@ -122,13 +159,7 @@ export function ChangesPanel({
   className?: string
   emptyHint?: string
 }) {
-  const { nodes, edges } = useMemo(
-    () => ({
-      nodes: changeSet.changes.filter((c) => c.kind === 'node'),
-      edges: changeSet.changes.filter((c) => c.kind === 'edge'),
-    }),
-    [changeSet],
-  )
+  const grouped = useMemo(() => group(changeSet.changes), [changeSet])
 
   if (changeSet.changes.length === 0) {
     return (
@@ -140,8 +171,8 @@ export function ChangesPanel({
 
   return (
     <div className={cn('space-y-4', className)}>
-      <KindGroup kind="node" changes={nodes} onDiscard={onDiscard} />
-      <KindGroup kind="edge" changes={edges} onDiscard={onDiscard} />
+      <KindGroup kind="node" byStatus={grouped.node} onDiscard={onDiscard} />
+      <KindGroup kind="edge" byStatus={grouped.edge} onDiscard={onDiscard} />
     </div>
   )
 }

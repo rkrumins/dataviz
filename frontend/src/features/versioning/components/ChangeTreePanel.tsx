@@ -10,7 +10,8 @@ import { useMemo, useState } from 'react'
 import { ChevronRight, Loader2, AlertCircle, Folder, Boxes, Spline } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { ChangeOrigin } from '../model/changeModel'
-import type { DiffSummaryResponse, DiffTreeNode } from '@/services/versioningApiService'
+import type { ChangeListOrigin, DiffSummaryResponse, DiffTreeNode } from '@/services/versioningApiService'
+import { ChangeList } from './ChangeList'
 import { STATUS_META, NodeDiffBadge } from './NodeDiffBadge'
 import { EntityDiff } from './EntityDiff'
 import { entityTypeStyle } from '@/components/canvas/property-manager/entityTypeStyles'
@@ -229,6 +230,7 @@ export function ChangeTreePanel({
   emptyHint = 'No changes yet.',
   className,
   summaryFirst = false,
+  list,
 }: {
   summary?: DiffSummaryResponse
   isLoading?: boolean
@@ -236,6 +238,9 @@ export function ChangeTreePanel({
   origin: ChangeOrigin
   emptyHint?: string
   className?: string
+  /** The same changes as a change list, which lists them a page at a time once they are too many
+   *  to lay out as a tree. Without it, a set that large is counted and not listed. */
+  list?: { wsId: string; graphId: string; origin: ChangeListOrigin }
   /** Show only the impact summary, with the detail tree behind a toggle (the cumulative branch
    *  view). Off for already-drilled-in contexts like a single commit's diff. */
   summaryFirst?: boolean
@@ -254,14 +259,18 @@ export function ChangeTreePanel({
     )
   }
   if (summary?.tooLarge) {
-    // Counted, but too many to lay out as a tree here: each change is in the draft's commits.
+    // Counted, but too many to lay out as a tree: listed a page at a time instead, where a list of
+    // the same changes exists.
     return (
       <div className={cn('space-y-2.5', className)}>
         <ImpactHeader summary={summary} />
-        <p className="text-[12px] text-ink-muted px-1">
-          This draft changes {summary.tooLarge.changed.toLocaleString()} entities — too many to list here.
-          Each change is listed under Commits.
-        </p>
+        {list ? (
+          <ChangeList wsId={list.wsId} graphId={list.graphId} origin={list.origin} emptyHint={emptyHint} />
+        ) : (
+          <p className="text-[12px] text-ink-muted px-1">
+            {summary.tooLarge.changed.toLocaleString()} entities changed — too many to lay out here.
+          </p>
+        )}
       </div>
     )
   }

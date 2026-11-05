@@ -23,6 +23,7 @@ import { cn } from '@/lib/utils'
 import { formatShortcut } from '@/lib/platform'
 import { useFeature } from '@/store/features'
 import { usePersonaMode } from '@/store/persona'
+import { useViewExecutionContext } from '@/providers/ViewExecutionContext'
 import { useAppNotifications } from '@/components/ui/notifications'
 import type { CanvasDensity, LineageRenderMode } from '@/store/preferences'
 import { TraceDepthControl } from '../TraceDepthControl'
@@ -180,7 +181,9 @@ export function ComprehensionTools({
   // the button here would hand the user an action that 403s. HIDDEN, not disabled: a greyed-out
   // control invites a click and explains nothing, and an admin who switched the feature off
   // wants it gone, not merely inert.
-  const traceEnabled = useFeature('traceEnabled')
+  // A trace reads the graph as it is now: none over a past revision, as none with the switch off.
+  const atRevision = (useViewExecutionContext()?.asOfSeq ?? null) != null
+  const traceEnabled = useFeature('traceEnabled') && !atRevision
 
   // Warn the user when they try to trace before the lineage data has
   // finished hydrating. Keyed so rapid repeat clicks coalesce instead of

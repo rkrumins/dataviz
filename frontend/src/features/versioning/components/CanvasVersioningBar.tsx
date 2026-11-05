@@ -21,23 +21,30 @@
  * (the Context View). Every other canvas has no toolbar slot for it and keeps it here.
  */
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Eye, EyeOff, GitPullRequest, Trash2, Loader2, GitBranch, Sparkles, LayoutTemplate } from 'lucide-react'
+import { Eye, EyeOff, GitPullRequest, Trash2, Loader2, GitBranch, Sparkles, LayoutTemplate, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { HoverTip } from '@/components/ui/HoverTip'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { usePermission } from '@/store/auth'
 import { useDataSourceProviderMap } from '@/hooks/useDataSourceProviderMap'
 import { useActiveView } from '@/store/schema'
-import { useBranchStore, useEffectiveBranchId } from '@/store/branchStore'
+import { useBranchStore, useEffectiveBranchId, useEffectiveRevision, useRevisionHighlight } from '@/store/branchStore'
 import { useStagedChangeCount } from '@/store/stagedChangesStore'
-import { useVersioningPanelStore } from '@/store/versioningPanelStore'
+import { CREATED_ROOTS_LOADED, useCanvasStore } from '@/store/canvas'
+import { useVersioningPanelStore, type CompareRequest } from '@/store/versioningPanelStore'
+import { useFeature } from '@/store/features'
+import { ExportDialog } from '@/features/import-export/ExportDialog'
+import { useRevisionDeepLink } from '../hooks/useRevisionDeepLink'
+import { useRevisionViewer } from '../hooks/useRevisionViewer'
+import { RevisionBanner } from './RevisionBanner'
 import {
   useAbandonDraft, useBranch, useBranchFreshness, useDiffVsMain, useRefreshDraftFromOthers, useResolveGraph,
-  useBranchViewChanges,
+  useBranchViewChanges, useChangeIndex, useChangeSummary,
 } from '../hooks/useVersioning'
+import { DiffTooLargeError } from '@/services/versioningApiService'
 import { useActiveDraftAccess } from '../hooks/useActiveDraftAccess'
 import { useActiveBranchGuard, type BranchEviction } from '../hooks/useActiveBranchGuard'
-import { fromDiffVsMain } from '../model/changeAdapters'
+import { fromChangeIndex, fromDiffVsMain } from '../model/changeAdapters'
 import { EMPTY_CHANGE_SET } from '../model/changeModel'
 import { useBootstrapWatch } from '../model/useBootstrapWatch'
 import { BRANCH_VOCAB, ownerName } from '../model/branchVocab'
@@ -104,21 +111,76 @@ export function CanvasVersioningBar({
 
   const [showPublish, setShowPublish] = useState(false)
   const [panelTab, setPanelTab] = useState<ViewPanelTab | null>(null)
+  // A comparison of two revisions to open History on, and a revision to export as it was.
+  const [compare, setCompare] = useState<CompareRequest | null>(null)
+  const [exportAt, setExportAt] = useState<number | null>(null)
+
+  // Travelling in time (the revision viewer, a preview): the past revision this view reads, its
+  // `?rev=` link, and two revisions highlighted on the canvas.
+  const revisionViewer = useRevisionViewer(workspaceId)
+  const revisionSeq = useEffectiveRevision(workspaceId, dataSourceId, viewId)
+  const openRevision = useBranchStore((s) => s.openRevision)
+  const scopeViewId = useBranchStore((s) => s.viewId)
+  useRevisionDeepLink({
+    enabled: revisionViewer && !!graphId,
+    headSeq: resolve.data?.mainHeadCommitSeq ?? null,
+    revisionSeq,
+    scopeViewId,
+    activeViewId: viewId,
+    openRevision,
+  })
+  const highlight = useRevisionHighlight()
+  const setHighlight = useBranchStore((s) => s.setHighlight)
+  const highlightOrigin = useMemo(
+    () => (revisionViewer && !isDraft && highlight ? { fromSeq: highlight.fromSeq, toSeq: highlight.toSeq } : null),
+    [revisionViewer, isDraft, highlight],
+  )
+  const highlightIndexQ = useChangeIndex(workspaceId, graphId, highlightOrigin)
+  const highlightCountsQ = useChangeSummary(workspaceId, graphId,
+    highlightOrigin && highlightIndexQ.data?.truncated ? highlightOrigin : null)
+  const canPublish = usePermission('workspace:datasource:publish', workspaceId)
+  const versioningEnabled = useFeature('versioningEnabled')
+  const openCompare = useCallback((fromSeq: number, toSeq: number | null) => {
+    setCompare({ fromSeq, toSeq })
+    setPanelTab('history')
+  }, [])
   const uncommitted = useStagedChangeCount()
 
   // Slim: modified entities by id alone — the bar counts changes and rings nodes, and never reads
   // a modified entity's payloads, which a large draft would ship by the hundred megabytes.
   const diffQ = useDiffVsMain(workspaceId, graphId, isDraft ? branchId : null, { slim: true })
+  // Past the tree's cap the slim diff is refused (409): the draft's compact change index — about
+  // 70 bytes a change, no payloads — rings its nodes and finds what it created instead. Its
+  // removed nodes, which only a payload can draw, go undrawn (no ghosts).
+  const large = diffQ.error instanceof DiffTooLargeError
+  const draftOrigin = useMemo(() => (isDraft && branchId ? { branchId } : null), [isDraft, branchId])
+  const indexQ = useChangeIndex(workspaceId, graphId, large ? draftOrigin : null)
+  // An index too large to list holds no entries: the counts come from the summary.
+  const countsQ = useChangeSummary(workspaceId, graphId, large && indexQ.data?.truncated ? draftOrigin : null)
   // Views the draft creates or changes (imports staged in it, layer edits) go live with it too.
   const viewChangesQ = useBranchViewChanges(workspaceId, graphId, isDraft ? branchId : null)
   const viewChangeCount = (viewChangesQ.data?.views.length ?? 0) + (viewChangesQ.data?.hidden ?? 0)
-  const changeSet = useMemo(
-    () => (diffQ.data && branchId ? fromDiffVsMain(diffQ.data, branchId) : EMPTY_CHANGE_SET),
-    [diffQ.data, branchId],
-  )
+  const changeSet = useMemo(() => {
+    if (!branchId) return EMPTY_CHANGE_SET
+    if (large) return indexQ.data ? fromChangeIndex(indexQ.data, { source: 'branch', branchId }, countsQ.data?.counts) : EMPTY_CHANGE_SET
+    return diffQ.data ? fromDiffVsMain(diffQ.data, branchId) : EMPTY_CHANGE_SET
+  }, [branchId, large, indexQ.data, countsQ.data, diffQ.data])
+  const changeCount = changeSet.counts.added + changeSet.counts.modified + changeSet.counts.removed
+  // New entities a curated view could not draw: it draws a page of what the draft created.
+  const createdNotLoaded = useCanvasStore((s) => s.createdRootsNotLoaded)
+  const loadingChanges = diffQ.isLoading || (large && (indexQ.isLoading || countsQ.isLoading))
+  // A draft's rings are its own diff's: whatever replaced them (a revision closed, a highlight
+  // cleared) gives way to them again.
+  const activeChangeSet = useBranchStore((s) => s.activeChangeSet)
   useEffect(() => {
-    if (isDraft) setActiveChangeSet(changeSet)
-  }, [isDraft, changeSet, setActiveChangeSet])
+    if (isDraft && activeChangeSet !== changeSet) setActiveChangeSet(changeSet)
+  }, [isDraft, changeSet, activeChangeSet, setActiveChangeSet])
+  // Two revisions compared, ringed on the canvas showing the newer one.
+  useEffect(() => {
+    if (isDraft || !highlightOrigin || !highlightIndexQ.data) return
+    setActiveChangeSet(fromChangeIndex(highlightIndexQ.data, { source: 'compare', ...highlightOrigin },
+      highlightCountsQ.data?.counts))
+  }, [isDraft, highlightOrigin, highlightIndexQ.data, highlightCountsQ.data, setActiveChangeSet])
 
   // One-shot bridge: the Context View header's "Changes" button (far from this bar)
   // asks to open the versioning panel via useVersioningPanelStore. Honour the request
@@ -126,12 +188,16 @@ export function CanvasVersioningBar({
   // graph yet (the panel needs graphId) — harmless, since the header button only shows
   // in a draft, where a graph necessarily exists.
   const requestedTab = useVersioningPanelStore((s) => s.requestedTab)
+  const requestedCompare = useVersioningPanelStore((s) => s.requestedCompare)
   const clearPanelRequest = useVersioningPanelStore((s) => s.clearRequest)
   useEffect(() => {
     if (!requestedTab) return
-    if (graphId) setPanelTab(requestedTab)
+    if (graphId) {
+      setPanelTab(requestedTab)
+      if (requestedCompare) setCompare(requestedCompare)
+    }
     clearPanelRequest()
-  }, [requestedTab, graphId, clearPanelRequest])
+  }, [requestedTab, requestedCompare, graphId, clearPanelRequest])
 
   const abandon = useAbandonDraft(workspaceId, graphId ?? '')
 
@@ -296,6 +362,15 @@ export function CanvasVersioningBar({
       {/* "Your changes are now live" — sits ABOVE the controls: it announces what happened, it isn't
           something to operate. Survives the navigation back from the Reviews inbox. */}
       <PublishReceiptBanner graphId={graphId} onViewCommit={() => setPanelTab('history')} />
+      {/* The graph as it was: when, which revision, how far behind now — and the ways on. */}
+      {revisionViewer && revisionSeq != null && graphId && (
+        <RevisionBanner
+          workspaceId={workspaceId}
+          graphId={graphId}
+          canRestore={canManage && canPublish && versioningEnabled}
+          onCompare={openCompare}
+        />
+      )}
       <div
         className={cn(
           // empty:hidden is what collapses the band. On main every child below is
@@ -313,6 +388,16 @@ export function CanvasVersioningBar({
         )}
       >
         {showBranchSwitcher && <BranchSwitcher workspaceId={workspaceId} dataSourceId={dataSourceId} />}
+        {highlightOrigin && (
+          <span className="inline-flex items-center gap-1.5 pl-2 pr-1 py-0.5 rounded-full text-[11px] font-medium bg-indigo-500/10 text-indigo-700 dark:text-indigo-300 border border-indigo-500/20">
+            <Sparkles className="w-3 h-3" />
+            {highlightIndexQ.isLoading ? 'Highlighting…' : `What changed after #${highlightOrigin.fromSeq} up to #${highlightOrigin.toSeq}`}
+            <HoverTip className="inline-flex" label="Stop highlighting">
+              <button onClick={() => setHighlight(null)} aria-label="Stop highlighting"
+                className="p-0.5 rounded-full hover:bg-indigo-500/15"><X className="w-3 h-3" /></button>
+            </HoverTip>
+          </span>
+        )}
         <RefreshingBadge workspaceId={workspaceId} graphId={graphId} />
         {/* Which store serves reads: says nothing while published is on FalkorDB. */}
         <ReadRouteChip workspaceId={workspaceId} graphId={graphId} isDraft={isDraft} />
@@ -322,14 +407,14 @@ export function CanvasVersioningBar({
 
         {isDraft && branchId && (
           <div className="flex items-center gap-2 text-ink-muted">
-            {diffQ.isLoading ? (
+            {loadingChanges ? (
               <Loader2 className="w-3.5 h-3.5 animate-spin" />
             ) : (
               <>
                 {/* The distinction the whole draft model hinges on — saved to
                     the draft vs. not saved at all — was spelled out in OS
                     chrome after a one-second wait. */}
-                {changeSet.changes.length > 0 ? (
+                {changeCount > 0 ? (
                   <HoverTip
                     className="inline-flex"
                     label={`Saved to this ${BRANCH_VOCAB.draft.toLowerCase()}, not published yet`}
@@ -343,6 +428,21 @@ export function CanvasVersioningBar({
                 ) : uncommitted === 0 && viewChangeCount === 0 ? (
                   <span className="text-xs">No changes yet</span>
                 ) : null}
+                {createdNotLoaded > 0 && (
+                  <HoverTip
+                    className="inline-flex"
+                    label={`${createdNotLoaded.toLocaleString()} more new ${createdNotLoaded === 1 ? 'entity isn’t' : 'entities aren’t'} drawn here`}
+                    detail={`This view draws the first ${CREATED_ROOTS_LOADED} of what the ${BRANCH_VOCAB.draft.toLowerCase()} created. Changes lists every one.`}
+                  >
+                    <button
+                      type="button"
+                      onClick={() => setPanelTab('changes')}
+                      className="inline-flex items-center rounded-md border border-emerald-500/25 bg-emerald-500/[0.06] px-1.5 py-0.5 text-[11px] font-medium text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/[0.12] transition-colors"
+                    >
+                      +{createdNotLoaded.toLocaleString()} new
+                    </button>
+                  </HoverTip>
+                )}
                 {viewChangeCount > 0 && (
                   <HoverTip
                     className="inline-flex"
@@ -478,7 +578,20 @@ export function CanvasVersioningBar({
           viewName={viewName}
           initialTab={panelTab}
           canManage={canManage}
-          onClose={() => setPanelTab(null)}
+          compare={compare}
+          onExport={(seq) => { setPanelTab(null); setCompare(null); setExportAt(seq) }}
+          onClose={() => { setPanelTab(null); setCompare(null) }}
+        />
+      )}
+      {exportAt != null && graphId && dataSourceId && (
+        <ExportDialog
+          wsId={workspaceId}
+          dataSourceId={dataSourceId}
+          graphId={graphId}
+          viewId={viewId ?? undefined}
+          viewName={viewName ?? undefined}
+          asOfSeq={exportAt}
+          onClose={() => setExportAt(null)}
         />
       )}
     </>

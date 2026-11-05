@@ -1067,7 +1067,9 @@ export function ContextViewCanvas({
   // for this caller (shared/enterprise view opened without membership).
   const viewExecCtx = useViewExecutionContext()
   const readOnly = viewExecCtx?.readOnly ?? false
-  const canEnterEdit = !!graphId && !readOnly
+  // A past revision is read-only too, but keeps the versioning bar: it is the way back.
+  const atRevision = (viewExecCtx?.asOfSeq ?? null) != null
+  const canEnterEdit = !!graphId && !readOnly && !atRevision
   // The branch switcher moved down here out of CanvasVersioningBar, into the slot
   // the duplicated title block used to occupy. It must appear on exactly the terms
   // the bar did — CanvasRouter mounts that bar only when versioning is on, the view
@@ -1532,7 +1534,8 @@ export function ContextViewCanvas({
   const [propertyManagerOpen, setPropertyManagerOpen] = useState(false)
   // Orphaned entities (Display menu → Advanced): a power-user panel, closed by default.
   const [orphansOpen, setOrphansOpen] = useState(false)
-  useDisplayRuleEngine(activeView?.id ?? null)
+  // Display rules match through search, which reads the graph as it is now: off at a past revision.
+  useDisplayRuleEngine(atRevision ? null : activeView?.id ?? null)
   // The view's display rules (the draft's own, on a draft) and saved queries, from its library.
   useViewLibrary(activeView?.id ?? null, effectiveBranchId)
 
@@ -2372,7 +2375,8 @@ export function ContextViewCanvas({
   const bulkSelectionCount = bulkSelection.length
   // The server refuses trace requests when this is off; the header hides its
   // Trace and Focus for it, and the SelectionBar follows suit.
-  const traceEnabled = useFeature('traceEnabled')
+  // …and a trace reads the graph as it is now: off over a past revision too.
+  const traceEnabled = useFeature('traceEnabled') && !atRevision
   // Closes itself when the canvas or the selection stops allowing it.
   useEffect(() => {
     if (bulkLinkSurface && (!canvasWritable || bulkSelectionCount < 2)) useBulkLinkStore.getState().close()
@@ -2457,7 +2461,8 @@ export function ContextViewCanvas({
   // opens normally: a link arrives from outside and must never be able to
   // break the canvas.
   const [initialTraceShare] = useState(() => {
-    const raw = new URLSearchParams(window.location.search).get('trace')
+    // A trace reads the graph as it is now: a link's is not opened over a past revision.
+    const raw = atRevision ? null : new URLSearchParams(window.location.search).get('trace')
     return raw ? decodeTraceShare(raw) : null
   })
   // Direction visibility — the dock's upstream/downstream toggles. Reset
@@ -4576,7 +4581,8 @@ export function ContextViewCanvas({
   // they reach: what is inside them, their sources and consumers, and what is
   // inside those, resolved on the server and shared by everyone asking the same
   // thing. A preview switch (`viewMembershipEnabled`); nothing is saved.
-  const narrowEnabled = useFeature('viewMembershipEnabled')
+  // Narrowing reads the graph as it is now: off over a past revision.
+  const narrowEnabled = useFeature('viewMembershipEnabled') && !atRevision
   const narrowViewId = activeView?.id ?? null
   const narrowComposer = useNarrowStore((s) => s.composer)
   const narrowApplied = useNarrowStore((s) => (s.viewId === narrowViewId ? s.applied : null))
@@ -4609,7 +4615,8 @@ export function ContextViewCanvas({
   // known to be on, and the param stripped so a refresh or a copied URL stays
   // clean. A malformed token decodes to null and the view opens normally.
   const [initialNarrowShare] = useState(() => {
-    const raw = new URLSearchParams(window.location.search).get('narrow')
+    // Narrowing reads the graph as it is now: not over a past revision.
+    const raw = atRevision ? null : new URLSearchParams(window.location.search).get('narrow')
     return raw ? decodeNarrowShare(raw) : null
   })
   const narrowShareUsed = useRef(false)
@@ -6093,7 +6100,7 @@ export function ContextViewCanvas({
     // A link that carries both opens the TRACE: it is the more specific
     // state, and two overlays racing each other on arrival is nobody's
     // intent. The lens token is dropped with the param strip below.
-    if (initialTraceShare) return null
+    if (initialTraceShare || atRevision) return null
     const raw = new URLSearchParams(window.location.search).get('lens')
     return raw ? decodeLensShare(raw) : null
   })
@@ -7091,6 +7098,8 @@ export function ContextViewCanvas({
             viewId={activeView?.id}
             viewName={activeView?.name}
             branchId={effectiveBranchId ?? undefined}
+            // At a past revision, exporting exports the graph as it was then: what is on screen.
+            asOfSeq={viewExecCtx?.asOfSeq ?? null}
             onClose={() => setShowExportDialog(false)}
           />
         )}

@@ -88,6 +88,10 @@ editing dozens of nodes on the canvas.
    deleted, or need fixing — and a preview of the actual rows. Nothing has
    touched Published. Choose **Review changes**: the **Changes & Reviews**
    panel opens on **Changes**, listing everything the import put in your draft.
+   Up to 20,000 changes are laid out by container. A larger import is counted
+   by type, then listed a page at a time: switch between **Entities** and
+   **Relationships**, narrow by status or type, search by name, and expand any
+   row to see its values before and after.
 9. Publish the draft, or submit it for review, exactly as you would for any
    other change — see
    [Submit your draft for review](/guide/editing-in-a-draft#submit-your-draft-for-review).
@@ -96,7 +100,22 @@ editing dozens of nodes on the canvas.
 If an import fails, **Try again** takes you back to choose the file.
 
 New top-level entities that an import creates are placed in the View's layers,
-so you see them on the canvas straight away.
+so you see them on the canvas straight away. A View that lists its own entities
+draws the first 200 of them; the draft bar's **+N new** chip says how many more
+there are and opens **Changes**, which lists every one.
+
+### Editing an export offline
+
+An export you edit in Excel can be imported days later. If someone changed the
+same items in the meantime, only the cells you changed are applied, so their
+changes stay. If you both changed the same cell, that row isn't imported: the
+preview names the field, and you can export again and redo that edit. Two rows
+for one item, or an edge whose ends you changed, are refused the same way. To
+point an edge somewhere else, delete its row (set `_op` to `delete`) and add a
+new one.
+
+A `urn` you give a new item finds it again on the next import, but isn't kept
+on the item. To see your own id on it, put the id in a property too.
 
 ### Choosing a reconcile mode
 

@@ -375,6 +375,45 @@ param with the active branch, making a view+branch shareable and bookmarkable.
 
 ---
 
+## 12a. A past revision on the canvas (`?rev=`, the revision viewer)
+
+Behind the **`revisionViewerEnabled`** preview (`useRevisionViewer`: the switch, and
+`workspace:datasource:read` — a view's share link never reaches history), a view can read the
+published graph **as it was at revision K**, read-only — like checking out a commit.
+
+- **State** — `branchStore.revision: OpenRevision | null` (`openRevision` / `closeRevision`), scoped
+  like a draft (`useEffectiveRevision(ws, ds, viewId)`) and cleared by a draft switch, Published, a
+  scope change and `reset`. A revision is of Published: opening one leaves the draft, and opening a
+  draft closes it. `branchStore.highlight` holds a comparison ringed on the canvas.
+- **Reads** — `ViewExecutionContext` asks what opening K takes first (`useRevision` →
+  `GET …/graphs/{gid}/revisions/{K}`) and only then puts the view on a provider of its own
+  (`poolKey`/`scopeKey` carry `main@K`) whose every read names it (`?asOfSeq=K`), except the data
+  source's own chrome (`TODAYS_PATHS`: `/stats`, `/introspection`, `/metadata/ontology|schema`). The
+  server answers each read as the graph was or refuses it — never from now. `useRevisionGuard`
+  closes a revision that isn't one, and hands one too far back to draw (or a fork's) to History's
+  comparison with now (`versioningPanelStore.openCompare`). The context exposes `asOfSeq`.
+- **One canvas per revision** — `CanvasRouter` keys the canvas component by the revision, so nothing
+  a canvas remembers of what it drew (expansions, rollups asked for, layer assignments, the
+  display-rule latch) crosses between the graph as it was and as it is; the trace clears and the
+  reference model's assignment status resets as on a branch switch.
+- **Read-only, with the way back kept** — `canEnterEdit` is false, `useEntityEditing` blocks with
+  `AT_REVISION`, `ensureDraftOpen` opens nothing and says why. Search (the header box keeps its place
+  and says why it is off), traces, Narrow, display rules, subset-view layers (`subsetIssue:
+  'revision'`), the entity drawer's lineage walk and `?trace=`/`?lens=`/`?narrow=` links are off: they
+  read the graph as it is now. Unlike `readOnly`, the versioning bar stays: it is the way back.
+- **Chrome** — `RevisionBanner` (mounted by `CanvasVersioningBar`) says when, which revision, whose
+  and how far the graph has moved on since; "Opening…" until the canvas reads it, "Rewinding N
+  changes…" while it draws; Compare with now, Restore graph to here (publishers), Back to Published
+  (Esc, unless a dialog has it). Exporting at a revision exports it (`ExportTarget.asOfSeq`).
+- **History** — `ViewHistoryTimeline` pages by `before` (`useHistoryPages`), virtualized, grouped by
+  month and day in the reader's time zone with a pinned month header; with the preview each revision
+  of Published opens, compares (`RevisionCompare`, `RevisionPicker`) and copies its link, and
+  `HistoryMonthPicker` goes to the end of any month or day (`useHistoryMonths`).
+- **Deep link** — `useRevisionDeepLink` two-way-syncs `?rev=K` like `?branch=` (§12): applied once
+  the view is resolved, dropped when it names no past revision, and a `?branch=` beside it goes.
+
+---
+
 ## 13. Limitations & gotchas (frontend)
 
 > **Limitation.** The `saveStagedChangesToDraft` header comment says "two phases" but the body
@@ -389,6 +428,8 @@ param with the active branch, making a view+branch shareable and bookmarkable.
   the graph (§3). This trips up new code that only invalidates.
 - **The 4 s aggregated-edge re-fetch is a timing heuristic** (§11), not a signal — a slow projection
   could still serve stale rollups past 4 s until the next interaction.
+- **A publish while a revision is open re-reads it.** `mainEpoch` still folds into `providerVersion`
+  at a revision (it keeps every version unique), so the canvas refetches the same past data.
 
 ---
 

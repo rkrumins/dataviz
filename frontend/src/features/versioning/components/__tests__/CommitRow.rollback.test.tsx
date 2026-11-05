@@ -9,6 +9,8 @@ import { describe, expect, it, vi } from 'vitest'
 vi.mock('../../hooks/useVersioning', () => ({
   useCommitDiffSummary: () => ({ data: undefined, isLoading: false }),
   useSquashedCommits: () => ({ data: undefined, isLoading: false }),
+  useRevision: () => ({ data: undefined, isLoading: false }),
+  useChangeSummary: () => ({ data: undefined, isLoading: false }),
 }))
 vi.mock('@/services/versioningApiService', () => ({ getCommitDiffChildren: vi.fn() }))
 vi.mock('../ChangeTreePanel', () => ({ ChangeTreePanel: () => null }))

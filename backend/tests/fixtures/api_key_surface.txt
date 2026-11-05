@@ -101,6 +101,10 @@ GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/commits/{commit_id}/diff/summar
 GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/commits/{commit_id}/restore-preview resource
 GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/commits/{commit_id}/squashed resource
 GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/commits/{commit_id}/state resource
+GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/diff/entries resource
+GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/diff/entries/{entity_id} resource
+GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/diff/index resource
+GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/diff/summary resource
 GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/entities/{entity_id}/history resource
 GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/entities/{entity_id}/summary resource
 GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/exports resource
@@ -109,6 +113,7 @@ GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/exports/stream resource
 GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/exports/{job_id} resource
 GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/exports/{job_id}/download resource
 GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/graph/neighbors resource
+GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/history/months resource
 GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/imports resource
 GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/imports/schema resource
 GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/imports/template resource
@@ -118,6 +123,7 @@ GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/imports/{job_id}/preview resour
 GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/merge-requests resource
 GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/publish-jobs/{job_id} resource
 GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/pulls resource
+GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/revisions/{seq} resource
 GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/watermark resource
 GET /api/v1/{ws_id}/versioning/merge-requests/{pr_id} resource
 GET /api/v1/{ws_id}/versioning/merge-requests/{pr_id}/diff resource

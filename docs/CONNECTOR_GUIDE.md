@@ -155,5 +155,11 @@ SYNODIC_URL=https://… SYNODIC_TOKEN=nxsat_… \
   import.
 - **Version 1 only gains columns.** Unknown columns are ignored by an import and reported by the
   dry run.
-- **Not checked by an import:** `baseVersion`. There is no optimistic concurrency on imports, so
-  two runs writing the same field: the later wins.
+- **A row without `baseVersion` sets what it carries.** A connector's own rows are the source's
+  truth: two runs writing one field, the later wins. A row an export wrote carries `baseVersion`,
+  and is merged with what changed since: only the cells it changed apply, and one someone else
+  also changed refuses the row, naming the field.
+- **One row per entity.** When two rows of a file name one node or edge and say different things,
+  the second is refused. Send each entity once per file.
+- **Your id, kept.** A `urn` finds its node again but isn't stored. To see the source's own id on
+  the node, send it in a property too, and mark that property "Match imports by this".

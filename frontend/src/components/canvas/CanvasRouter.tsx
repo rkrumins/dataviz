@@ -10,7 +10,7 @@
  * All data loading is handled by useGraphHydration (called here and in canvas components).
  */
 
-import { Suspense, useMemo, useEffect } from 'react'
+import { Suspense, useMemo, useEffect, useRef } from 'react'
 import { ReactFlowProvider } from '@xyflow/react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { AlertTriangle, Loader2, RefreshCw } from 'lucide-react'
@@ -23,9 +23,9 @@ import { useLoadingNotification, useNotificationStore } from '@/components/ui/no
 import { useCanvasStore } from '@/store/canvas'
 import { useTraceStore } from '@/hooks/useUnifiedTrace'
 import { useBranchStore } from '@/store/branchStore'
+import { useReferenceModelStore } from '@/store/referenceModelStore'
 import { useFeature } from '@/store/features'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
-import { useReferenceModelStore } from '@/store/referenceModelStore'
 import { CanvasVersioningBar } from '@/features/versioning/components/CanvasVersioningBar'
 import { useStagedDraftPersistence } from '@/features/canvas-drafts/useStagedDraftPersistence'
 import { RestoredDraftBanner } from '@/features/canvas-drafts/RestoredDraftBanner'
@@ -113,6 +113,8 @@ export function CanvasRouter({ className, layoutType: layoutTypeProp }: CanvasRo
   // branch-scoped provider when currentBranchId changes — see ViewExecutionContext).
   const activeViewId = activeView?.id
   const currentBranchId = useBranchStore((s) => s.currentBranchId)
+  // A past revision is another graph state again: the graph as it was then.
+  const asOfSeq = viewExecCtx?.asOfSeq ?? null
   useEffect(() => {
     const { clearTrace, resetAddedEdgeIds } = useTraceStore.getState()
     clearTrace()
@@ -122,7 +124,15 @@ export function CanvasRouter({ className, layoutType: layoutTypeProp }: CanvasRo
     // open would be listed as view B's. In memory only — no persistence, so a
     // refresh starts clean too.
     useNotificationStore.getState().clearHistory()
-  }, [activeViewId, currentBranchId])
+  }, [activeViewId, currentBranchId, asOfSeq])
+  // Layer assignments are computed per graph state, and the store holding them is an app singleton
+  // whose latch would keep the graph as it is on the graph as it was (and back): asked again.
+  const assignedAtRef = useRef(asOfSeq)
+  useEffect(() => {
+    if (assignedAtRef.current === asOfSeq) return
+    assignedAtRef.current = asOfSeq
+    useReferenceModelStore.getState().resetAssignmentStatus()
+  }, [asOfSeq])
 
   // Scope staged changes to the active (workspace, data source, branch). Staged edits belong to
   // ONE branch — a draft is isolated until merged — so switching branches must PARK the current
@@ -213,7 +223,11 @@ export function CanvasRouter({ className, layoutType: layoutTypeProp }: CanvasRo
             className="absolute inset-0"
           >
             <Suspense fallback={<CanvasLoader />}>
-              <CanvasComponent key={draftEpoch} />
+              {/* Keyed by the revision: the graph as it was is a canvas of its own, so nothing
+                  a canvas remembers of what it drew (expansions, rollups asked, assignments)
+                  carries over between it and the graph as it is. And by `draftEpoch`: a draft
+                  rewritten behind the canvas (an import, others' saves) starts it over too. */}
+              <CanvasComponent key={`${asOfSeq == null ? 'now' : `rev${asOfSeq}`}|${draftEpoch}`} />
             </Suspense>
           </motion.div>
         </AnimatePresence>

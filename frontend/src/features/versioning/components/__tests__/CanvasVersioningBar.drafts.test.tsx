@@ -26,12 +26,19 @@ vi.mock('@/store/auth', () => ({
 }))
 vi.mock('@/hooks/useDataSourceProviderMap', () => ({ useDataSourceProviderMap: () => ({ resolve: () => undefined }) }))
 vi.mock('@/store/schema', () => ({ useActiveView: () => ({ id: 'v1', name: 'View' }) }))
+// One store state across renders, its actions stable, as the real store's are.
+const branchState: Record<string, unknown> = {
+  committedDiffHidden: false, setCommittedDiffHidden: vi.fn(), setActiveChangeSet: vi.fn(), switchToMain: vi.fn(),
+  openRevision: vi.fn(), setHighlight: vi.fn(), viewId: null, activeChangeSet: null,
+}
 vi.mock('@/store/branchStore', () => ({
-  useBranchStore: (sel: (s: unknown) => unknown) => sel({
-    committedDiffHidden: false, setCommittedDiffHidden: vi.fn(), setActiveChangeSet: vi.fn(), switchToMain: vi.fn(),
-  }),
+  useBranchStore: (sel: (s: unknown) => unknown) => sel(branchState),
   useEffectiveBranchId: () => 'br_1',
+  useEffectiveRevision: () => null,
+  useRevisionHighlight: () => null,
 }))
+// The ?rev= link reads the router, which this bar is never rendered without in the app.
+vi.mock('../../hooks/useRevisionDeepLink', () => ({ useRevisionDeepLink: () => {} }))
 vi.mock('@/store/stagedChangesStore', () => ({ useStagedChangeCount: () => 0 }))
 vi.mock('../../hooks/useVersioning', () => ({
   useResolveGraph: () => ({ data: { graphId: 'g1', mainHeadCommitSeq: 5, kind: 'bootstrap' }, isLoading: false }),
@@ -40,6 +47,8 @@ vi.mock('../../hooks/useVersioning', () => ({
   useBranch: () => ({ data: branchData }),
   useRefreshDraftFromOthers: () => vi.fn(),
   useDiffVsMain: () => ({ data: undefined, isLoading: false }),
+  useChangeIndex: () => ({ data: undefined, isLoading: false }),
+  useChangeSummary: () => ({ data: undefined, isLoading: false }),
   useBranchViewChanges: () => ({ data: undefined }),
   useAbandonDraft: () => ({ mutate: vi.fn(), isPending: false }),
 }))
@@ -77,6 +86,19 @@ describe('CanvasVersioningBar on a draft', () => {
     freshness = { behind: false, behindBy: 0, mainHeadCommitSeq: 5, baseCommitSeq: 5, status: 'open' }
     freshnessError = null
     branchData = undefined
+  })
+
+  it('puts the draft’s rings back when something else cleared them (a revision closed, a highlight cleared)', () => {
+    branchesData = [draft({})]
+    const setActive = vi.mocked(branchState.setActiveChangeSet as (cs: unknown) => void)
+    setActive.mockImplementation((cs) => { branchState.activeChangeSet = cs })
+    const { rerender } = render(<CanvasVersioningBar workspaceId="ws1" dataSourceId="ds1" />)
+    const rings = branchState.activeChangeSet
+    expect(rings).not.toBeNull()
+    rerender(<CanvasVersioningBar workspaceId="ws1" dataSourceId="ds1" />)   // as the store's update would
+    branchState.activeChangeSet = null
+    rerender(<CanvasVersioningBar workspaceId="ws1" dataSourceId="ds1" />)
+    expect(branchState.activeChangeSet).toBe(rings)
   })
 
   it('tells the guard a draft its reader may no longer read is gone', () => {

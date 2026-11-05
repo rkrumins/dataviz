@@ -42,7 +42,8 @@ export function branchCreatedUrns(changes: StagedChange[]): Set<string> {
  */
 export function committedCreatedUrns(changeSet: ChangeSet | null): Set<string> {
   const urns = new Set<string>()
-  if (!changeSet) return urns
+  // A branch's own: two revisions compared on the canvas are highlighted, never "created here".
+  if (!changeSet || changeSet.origin !== 'branch') return urns
   for (const c of changeSet.changes) {
     const urn = c.urn ?? c.entityId   // the name the canvas loads a node by; an imported entity's id is not it
     if (c.status === 'added' && c.kind === 'node' && urn) urns.add(urn)
@@ -60,7 +61,7 @@ export function committedCreatedChildUrns(
   changeSet: ChangeSet | null, containmentTypes: readonly string[],
 ): Set<string> {
   const urns = new Set<string>()
-  if (!changeSet || containmentTypes.length === 0) return urns
+  if (!changeSet || changeSet.origin !== 'branch' || containmentTypes.length === 0) return urns
   const cset = new Set(containmentTypes.map((t) => t.toUpperCase()))
   for (const c of changeSet.changes) {
     if (c.status !== 'added' || c.kind !== 'edge') continue

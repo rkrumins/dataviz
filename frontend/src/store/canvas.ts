@@ -159,6 +159,11 @@ export interface SearchFeedState {
   delivered: number
 }
 
+/** New roots a draft created that a curated view loads by URN: a page of them. They have no
+ *  placement to page by yet, and an import of 100,000 is listed in the draft's Changes; the canvas
+ *  says how many more there are (`createdRootsNotLoaded`). */
+export const CREATED_ROOTS_LOADED = 200
+
 interface CanvasState {
   // Nodes and Edges
   nodes: LineageNode[]
@@ -242,6 +247,10 @@ interface CanvasState {
   missingEntityCount: number
   noteNodeFetchFailure: (batches: number, entities: number) => void
   clearNodeFetchFailures: () => void
+  /** New entities a draft created at the top of a curated view that the canvas did not load: it
+   *  loads a page of them (they have no placement to page by yet); the draft's Changes lists all. */
+  createdRootsNotLoaded: number
+  setCreatedRootsNotLoaded: (n: number) => void
 
   // Placements that point at nothing: assigned entities the load ASKED FOR, by URN, and the
   // graph didn't return (failed batches are left out, since those are unknown rather than
@@ -251,8 +260,8 @@ interface CanvasState {
   setPlacementsNotFound: (found: { viewId: string; urns: string[] } | null) => void
   /** Why a subset view's layers list no matches: the preview is off, this data
    *  source can't list them, or the view's base view is gone. */
-  subsetIssue: 'off' | 'unsupported' | 'base_missing' | null
-  setSubsetIssue: (issue: 'off' | 'unsupported' | 'base_missing' | null) => void
+  subsetIssue: 'off' | 'unsupported' | 'base_missing' | 'revision' | null
+  setSubsetIssue: (issue: 'off' | 'unsupported' | 'base_missing' | 'revision' | null) => void
   /** Bumped to ask a subset view's layers for answers on the current data. */
   subsetRefreshNonce: number
   refreshSubsetFeeds: () => void
@@ -560,6 +569,9 @@ export const useCanvasStore = create<CanvasState>()(
         missingEntityCount: entities,
       }),
       clearNodeFetchFailures: () => set({ nodeFetchFailures: 0, missingEntityCount: 0 }),
+      createdRootsNotLoaded: 0,
+      setCreatedRootsNotLoaded: (createdRootsNotLoaded) => set((s) =>
+        (s.createdRootsNotLoaded === createdRootsNotLoaded ? s : { createdRootsNotLoaded })),
       placementsNotFound: null,
       setPlacementsNotFound: (placementsNotFound) => set({ placementsNotFound }),
       subsetIssue: null,

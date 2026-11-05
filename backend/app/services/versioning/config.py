@@ -263,6 +263,19 @@ DRAFT_SWEEP_SECS: int = int(os.getenv("GRAPHVER_DRAFT_SWEEP_SECS", "86400"))
 # containment tree: the tree is built from every changed payload and their ancestors, in the
 # web process, per request.
 DIFF_TREE_MAX_CHANGES: int = int(os.getenv("GRAPHVER_DIFF_TREE_MAX_CHANGES", "20000"))
+# Change lists — a draft's changes, a revision's, two revisions compared (change_index.py) — are
+# classified once from content hashes and version-row columns, no payload, and kept for their
+# pages: about 300 bytes an entity. Past this many changed entities an origin is counted, not listed.
+CHANGE_LIST_MAX: int = int(os.getenv("GRAPHVER_CHANGE_LIST_MAX", "250000"))
+# Entries the change lists a web process keeps may hold together: the least recently read go
+# first, the newest is kept whatever its size. About 90 MB at the default.
+CHANGE_INDEX_CACHE_ENTRIES: int = int(os.getenv("GRAPHVER_CHANGE_INDEX_CACHE_ENTRIES", "300000"))
+# Longest one statement building a change list or the history calendar may run before Postgres
+# cancels it and the reader is told to try again. Each is an index range that finishes well inside
+# a second at 100k changes; one that runs this long has a bad plan, and a web process should not
+# hold its connection while it does.
+CHANGE_INDEX_STATEMENT_TIMEOUT_MS: int = int(
+    os.getenv("GRAPHVER_CHANGE_INDEX_STATEMENT_TIMEOUT_MS", "15000"))
 # A draft changing more entities than this publishes (or has its review merged) as a job on the
 # versioning worker, not inside the request: the squash holds every changed payload and hashes
 # them all, which a web pod's memory and event loop can't spare at that size.
@@ -286,6 +299,11 @@ MAX_FORKS_PER_GRAPH: int = int(os.getenv("GRAPHVER_MAX_FORKS_PER_GRAPH", "10"))
 # (layered reads) and the fork recommends an update from its parent; at the warning, the
 # parent's changes it has not taken in recommend one too.
 FORK_REWIND_MAX: int = int(os.getenv("GRAPHVER_FORK_REWIND_MAX", "200000"))
+# The canvas reads main as it was at a past revision as main's store with a patch set over it: every
+# entity main changed since then, at about 1.2 KB an entry in the overlay cache below. A revision more
+# than this many entities behind main's head is too far back to draw (409 revision_too_far); its
+# change list, a comparison and an export still reach it.
+REVISION_REWIND_MAX: int = int(os.getenv("GRAPHVER_REVISION_REWIND_MAX", "100000"))
 FORK_REWIND_WARN: int = int(os.getenv("GRAPHVER_FORK_REWIND_WARN", "50000"))
 # Drop the FalkorDB copies earlier releases made of forks (Reaper.fork_copies). Off by default:
 # pods still running such a release read and project them. Turn it on once every pod runs this one.

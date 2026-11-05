@@ -9,8 +9,8 @@ import { useMemo } from 'react'
 import { createPortal } from 'react-dom'
 import { Loader2 } from 'lucide-react'
 import { Backdrop } from '@/components/ui/Backdrop'
-import { useDiffVsMain } from '../hooks/useVersioning'
-import { fromDiffVsMain } from '../model/changeAdapters'
+import { useChangeSummary } from '../hooks/useVersioning'
+import { fromChangeCounts } from '../model/changeAdapters'
 import { EMPTY_CHANGE_SET } from '../model/changeModel'
 import { CommitDialog, type CommitDialogProps } from './CommitDialog'
 
@@ -26,15 +26,18 @@ export function PublishDraftDialog({
   onPublished?: CommitDialogProps['onPublished']
   canPublishDraft?: CommitDialogProps['canPublishDraft']
 }) {
-  const diffQ = useDiffVsMain(wsId, graphId, branchId, { slim: true })
+  // The dialog says how much the draft changes, so it reads the draft's counts — never the diff,
+  // which for a 100,000-change draft was tens of megabytes to show three numbers.
+  const origin = useMemo(() => ({ branchId }), [branchId])
+  const summaryQ = useChangeSummary(wsId, graphId, origin)
   const changeSet = useMemo(
-    () => (diffQ.data ? fromDiffVsMain(diffQ.data, branchId) : EMPTY_CHANGE_SET),
-    [diffQ.data, branchId],
+    () => (summaryQ.data ? fromChangeCounts(summaryQ.data.counts) : EMPTY_CHANGE_SET),
+    [summaryQ.data],
   )
-  if (diffQ.isLoading) {
+  if (summaryQ.isLoading) {
     return createPortal(
       <>
-        <Backdrop open={diffQ.isLoading} zClassName="z-[100]" className="bg-black/40 backdrop-blur-sm" />
+        <Backdrop open={summaryQ.isLoading} zClassName="z-[100]" className="bg-black/40 backdrop-blur-sm" />
         <div className="fixed inset-0 z-[100] flex items-center justify-center pointer-events-none">
           <div className="pointer-events-auto flex items-center gap-2 px-4 py-3 rounded-xl bg-canvas-elevated border border-glass-border text-sm text-ink-muted">
             <Loader2 className="w-4 h-4 animate-spin" /> Preparing publish…

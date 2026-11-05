@@ -207,11 +207,57 @@ class LockBusy(_HttpMapped, RuntimeError):
                          {"Retry-After": str(retry_after)})
 
 
+class RevisionUnsupported(_HttpMapped, NotImplementedError):
+    """A read of a past revision this graph or this read can't answer as the graph was then:
+    a data source without version control, a fork, or a read that answers from the published
+    graph as it is now (search, trace). Never answered from now instead. A
+    ``NotImplementedError``, so the routes that answer a provider's missing read with their own
+    501 keep doing so."""
+
+    status_code = 501
+
+    def __init__(self, reason: str, message: str):
+        super().__init__(message, {"type": "revision_unsupported", "reason": reason})
+
+
+class RevisionTooFar(_HttpMapped, RuntimeError):
+    """A past revision more than ``GRAPHVER_REVISION_REWIND_MAX`` entities behind main's head:
+    too far back to draw. Its change list, a comparison and an export still reach it."""
+
+    def __init__(self, as_of_seq: int, head_seq: int, changed: int, limit: int):
+        super().__init__(
+            f"revision {as_of_seq} is more than {limit} changes behind the published graph",
+            {"type": "revision_too_far", "asOfSeq": as_of_seq, "headSeq": head_seq,
+             "changed": changed, "limit": limit})
+
+
+class RevisionReadOnly(_HttpMapped, RuntimeError):
+    """A write that named a past revision. History is read, never written: edits go to a draft
+    of the published graph."""
+
+    def __init__(self):
+        super().__init__("a past revision is read-only: edit a draft of the published graph",
+                         {"type": "revision_read_only"})
+
+
 class ContentionExhausted(LockBusy):
     """Every retry of a write lost to a concurrent writer."""
 
     def __init__(self, message: str = "the graph is busy; try again", retry_after: int = 2):
         super().__init__(message, retry_after)
+
+
+class ChangeListBusy(_HttpMapped, RuntimeError):
+    """A statement building a change list (or the history calendar) ran past
+    ``GRAPHVER_CHANGE_INDEX_STATEMENT_TIMEOUT_MS`` and Postgres cancelled it. Answered as a busy
+    store the reader may retry, not as the database being down (the generic 503)."""
+
+    status_code = 503
+
+    def __init__(self, retry_after: int = 5):
+        super().__init__("this list is taking too long to prepare; try again in a moment",
+                         {"type": "change_list_busy", "retryable": True},
+                         {"Retry-After": str(retry_after)})
 
 
 class JobActive(_HttpMapped, RuntimeError):
@@ -532,7 +578,8 @@ class ReviewRequired(_HttpMapped, RuntimeError):
 
 HTTP_MAPPED = (BranchNotOpen, MainWriteForbidden, NotDraftOwner, DraftRoleRequired, SelfReview,
                PersonRequired, GroupsUnavailable, IneligibleMember, ServiceAccountMember, HeadMoved,
-               LockBusy, JobActive, CurationAtRisk, MassDeleteBlocked, ForkLimit, NotAFork, LiveForks,
+               LockBusy, ChangeListBusy, RevisionUnsupported, RevisionTooFar, RevisionReadOnly,
+               JobActive, CurationAtRisk, MassDeleteBlocked, ForkLimit, NotAFork, LiveForks,
                ForkNotRestorable, GraphMoved, ProjectionNotAdopted, ProjectionAlreadyAdopted,
                ProjectionPassInFlight, ProjectionKeyInUse,
                ProjectionKeyInvalid, PublishRequired, GraphNotWritable, VersionConflict,
