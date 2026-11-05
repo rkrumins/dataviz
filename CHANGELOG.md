@@ -35,7 +35,8 @@ limitations** — a changelog that only lists good news is not worth reading.
   errors and retries, idempotency, one table of every limit, sizing measured at 500 MB, curl and
   Python walkthroughs, and troubleshooting.
 - **The reference connector sends large files:**
-  - it streams from disk, 4 resumable parts at a time, honouring `Retry-After`;
+  - it streams from disk, 4 resumable parts at a time, in 40 MB of memory, honouring
+    `Retry-After`;
   - it resumes a run that stopped, from a state file keyed on the file's sha256;
   - with `--publish`, it follows the import and then its publish;
   - it sends an existing file with `--file`.
@@ -66,9 +67,10 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 - `tests/fixtures/api_key_surface.txt` and `docs/security/endpoints.md` list the two routes keys
   may now call (publish, and merge a draft's merge request), and the dry run as read-only.
-- **Size Postgres for gigabyte imports.** An import writes far more into the graph than its file
-  holds: about 27 times an NDJSON file of short rows, kept as both the draft's and the published
-  copy, plus the staged rows. See [Building a Connector → Large files](docs/CONNECTOR_GUIDE.md).
+- **Size Postgres for gigabyte imports.** An import writes far more into Postgres than its file
+  holds: a 501 MB NDJSON file of short rows took 16.7 GB. That was the graph, kept as both the
+  draft's and the published copy (about 26 times the file), plus the staged rows (about 7 times,
+  kept 7 days). See [Building a Connector → Large files](docs/CONNECTOR_GUIDE.md).
 
 ### Known limitations
 

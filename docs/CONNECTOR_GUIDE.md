@@ -348,26 +348,41 @@ row.
 
 | Run | File | Rows | Upload | Import | Publish | Peak memory |
 |---|---|---|---|---|---|---|
-| NDJSON | 53 MB | 440,000 | under 1 s (4 parts) | 125 s, about 3,500 rows/s | 65 s | worker 410 MB, API 385 MB, connector 140 MB |
-| CSV, the same rows | 30 MB | 440,000 | under 1 s (2 parts) | 155 s, about 2,800 rows/s | 65 s | as above |
+| NDJSON | 501 MB | 4,180,000 | 6 s (30 parts, sha256 included) | 1,176 s (20 min), about 3,550 rows/s | 936 s (16 min) | worker 230 MB importing, 450 MB publishing; API 330 MB; connector 40 MB |
+| NDJSON | 53 MB | 440,000 | under 1 s | 125 s, about 3,500 rows/s | 65 s | as above |
+| CSV, the same rows | 30 MB | 440,000 | under 1 s | 155 s, about 2,800 rows/s | 65 s | as above |
+| A 1% delta into the 4.18M graph: 1,900 updates, 190 deletes | 195 KB | 2,090 | under 1 s | 17 s end to end, publish included | | |
+| Export of the 4.18M graph, NDJSON | 1.65 GB out | 4,180,000 | | 152 s, about 27,500 entities/s | | |
+
+The import's time goes into Postgres: the worker waits on it about three quarters of the time.
+About 12% of the import is reading the file into staged rows; the rest is reconciling rows against
+the graph and writing them, node windows then edge windows.
 
 **What follows for a 2–4 GB file:**
 
-- **Time.** At these rates, a 4 GB NDJSON file of rows like these (about 35 million) imports in
-  about 3 hours and publishes in about 1.5. A 2 GB one takes half that. Rows of 250 bytes halve the
+- **Time.** The import's rate held from 440,000 rows to 4.18 million, so it scales with the file:
+  a 4 GB NDJSON file of rows like these (about 33 million) imports in about 2.6 hours. The publish
+  slows a little as drafts grow (6,800 entities/s at 440,000, 4,500 at 4.18 million), so allow 2 to
+  2.5 hours for it: about 5 hours end to end, and half that for 2 GB. Rows of 250 bytes halve the
   row count, and roughly the time. A CSV takes about a quarter longer to import.
+- **Deltas are cheap.** A delta costs what its file holds, not what the graph holds: the 1% delta
+  above took 17 seconds into a graph of 4 million entities. Send the first load once, then deltas.
 - **Memory** stays flat: windows of 10,000 rows, whatever the file's size.
 - **The upload** is the quick part. 16 MiB parts at 4 at a time fill the link, and at
   100 Mbit/s a 4 GB file is up in about 6 minutes.
 
 **What to set up for gigabyte imports:**
 
-- **Disk, first of all.** An import writes far more into Postgres than its file holds. In this run, the graph took about
-1.4 GB for the 53 MB file: every entity is kept twice, as the draft's version and the published
-copy, with their indexes, about 3.2 KB per entity. The import's staged rows took about 0.8 KB per
-row more, and are kept for 7 days (`IMPORT_STAGING_GC_DAYS`). That is about 27 times an NDJSON file
-of short rows: for 4 GB of them, about 110 GB of graph and 28 GB of staged rows. Size Postgres for
-it before the first gigabyte import. The in-cluster Postgres volumes are 10–20 Gi.
+- **Disk, first of all.** An import writes far more into Postgres than its file holds. The 501 MB
+  file took 16.7 GB:
+  - **the graph, 13.1 GB, about 26 times the file:** every entity is kept twice, as the draft's
+    version and the published copy, with their indexes, about 3.1 KB per entity;
+  - **the staged rows, 3.5 GB, about 7 times the file:** about 840 bytes per row, kept for 7 days
+    (`IMPORT_STAGING_GC_DAYS`);
+  - **the uploaded parts, 30 MB:** they compress well.
+
+  For 4 GB of rows like these, that is about 105 GB of graph and 28 GB of staged rows. Size
+  Postgres for it before the first gigabyte import: the in-cluster Postgres volumes are 10–20 Gi.
 - **The object store.**
   - The default keeps uploaded parts in Postgres, where they compress well.
   - Above about 1 GB, set `OBJECT_STORE_BACKEND=s3` (an image with `requirements-s3.txt`), or
