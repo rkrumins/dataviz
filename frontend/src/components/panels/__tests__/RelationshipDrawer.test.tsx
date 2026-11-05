@@ -2,7 +2,7 @@
  * RelationshipDrawer — the EntityDrawer for a relationship. Pins what a graph
  * owner relies on: it names both ends and walks to them on the shared trail,
  * says who created and last changed the relationship, lets a raw lineage
- * relationship be edited (staged) and deleted in a draft, keeps roll-ups,
+ * relationship be edited (staged), reversed and deleted in a draft, keeps roll-ups,
  * hierarchy links and published relationships read-only with the reason, and
  * guards unsaved edits against a move away.
  */
@@ -207,9 +207,10 @@ describe('RelationshipDrawer — a relationship', () => {
   ])('keeps %s read-only and says why', (_what, type, reason) => {
     h.record = { ...h.record!, edgeType: type }
     setup(rel('e1', type))
-    render(<RelationshipDrawer canEdit onDeleteEdge={vi.fn()} />)
+    render(<RelationshipDrawer canEdit onDeleteEdge={vi.fn()} onReverseEdge={vi.fn()} />)
     expect(screen.queryByRole('tab', { name: /^Edit/ })).not.toBeInTheDocument()
     expect(screen.queryByTitle('Delete relationship')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Reverse direction' })).not.toBeInTheDocument()
     expect(screen.getByText(reason)).toBeInTheDocument()
   })
 
@@ -217,8 +218,9 @@ describe('RelationshipDrawer — a relationship', () => {
     const user = userEvent.setup()
     const onStartEditing = vi.fn()
     setup(rel('e1'))
-    render(<RelationshipDrawer canEdit={false} onStartEditing={onStartEditing} />)
+    render(<RelationshipDrawer canEdit={false} onStartEditing={onStartEditing} onReverseEdge={vi.fn()} />)
     expect(screen.queryByRole('tab', { name: /^Edit/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Reverse direction' })).not.toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Open a draft' }))
     expect(onStartEditing).toHaveBeenCalled()
   })
@@ -247,6 +249,16 @@ describe('RelationshipDrawer — a relationship', () => {
     render(<RelationshipDrawer canEdit onDeleteEdge={onDeleteEdge} />)
     await user.click(screen.getByTitle('Delete relationship'))
     expect(onDeleteEdge).toHaveBeenCalledWith('e1')
+    expect(useCanvasStore.getState().drawerEdge).toBeNull()
+  })
+
+  it('reverses through the canvas and closes', async () => {
+    const user = userEvent.setup()
+    const onReverseEdge = vi.fn()
+    setup(rel('e1'))
+    render(<RelationshipDrawer canEdit onReverseEdge={onReverseEdge} />)
+    await user.click(screen.getByRole('button', { name: 'Reverse direction' }))
+    expect(onReverseEdge).toHaveBeenCalledWith('e1')
     expect(useCanvasStore.getState().drawerEdge).toBeNull()
   })
 })

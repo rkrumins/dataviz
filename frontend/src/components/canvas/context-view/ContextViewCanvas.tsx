@@ -1662,10 +1662,15 @@ export function ContextViewCanvas({
       if (element) {
         const rect = element.getBoundingClientRect()
         const targetNode = nodes.find(n => n.id === nodeId)
+        // The rename edits the name the row shows: in the Business view, the business label
+        // when the entity has one.
+        const businessLabel = targetNode?.data?.businessLabel
+        const field = personaMode === 'business' && businessLabel?.trim() ? 'businessLabel' : 'label'
         interactions.startInlineEdit(
           nodeId,
-          (targetNode?.data?.label as string) || nodeId,
-          { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }
+          (field === 'businessLabel' ? businessLabel : targetNode?.data?.label as string) || nodeId,
+          { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 },
+          field,
         )
         return
       }
@@ -1673,7 +1678,7 @@ export function ContextViewCanvas({
 
     // TRACE: open the Lineage Lens on this node with the full walk on.
     toggleTraceRef.current(nodeId)
-  }, [nodes, interactions, canEditGraph, traceWriteLocked])
+  }, [nodes, interactions, canEditGraph, traceWriteLocked, personaMode])
 
 
   // Lineage flow toggle
@@ -6782,6 +6787,11 @@ export function ContextViewCanvas({
         onSetCanvasZoom={setCanvasZoom}
         onFitToWidth={handleFitToWidth}
         onOpenOrphans={() => setOrphansOpen(true)}
+        // The Reviews button's gate (ViewReviewsButton): a versioned graph with history to show.
+        // `branchWorkspaceId` is null in a read-only session, which gets no route into it.
+        onOpenHistory={branchWorkspaceId && graphId && (isBlankModel || mainHeadSeq > 1)
+          ? () => useVersioningPanelStore.getState().openPanel(isDraft ? 'changes' : 'history')
+          : undefined}
         canvasDensity={canvasDensity}
         onSetCanvasDensity={setCanvasDensity}
         showCanvasTypeBadge={showCanvasTypeBadge}
@@ -8019,6 +8029,7 @@ export function ContextViewCanvas({
             onFocusNode={revealOnCanvas}
             onLocateMany={drawerLocateMany}
             onDeleteEdge={canvasWritable ? interactions.deleteEdge : undefined}
+            onReverseEdge={canvasWritable ? interactions.reverseEdge : undefined}
             onStartEditing={drawerStartEditing}
           />
         )}

@@ -3,9 +3,11 @@
  *
  * The Business view keeps the row to what reading a view needs: Lineage,
  * Display, the Focus Lens and Trace. What it tucks away is not taken away:
- * picking several entities, the Property Manager and exporting the view are
- * all here, and the last item puts every tool back on the row (the Technical
- * view) for anyone who wants them all.
+ * picking several entities, the Property Manager, the entities with no parent
+ * (in a draft), the view's changes and history, its drafts (on Published) and
+ * its files — import, export, updating it from a file, its layers as a
+ * template — are all here, and the last item puts every tool back on the row
+ * (the Technical view) for anyone who wants them all.
  *
  * NON-MODAL and portaled, as every dropdown in the header is: the header has
  * a backdrop blur, which makes a stacking context that would clip an inline
@@ -19,6 +21,7 @@ import { HoverTip } from '@/components/ui/HoverTip'
 import { useFeature } from '@/store/features'
 import { usePersonaStore } from '@/store/persona'
 import { useViewPortability } from '@/features/view-transfer/useViewPortability'
+import { BRANCH_VOCAB } from '@/features/versioning/model/branchVocab'
 import { formatShortcut } from '@/lib/platform'
 import { cn } from '@/lib/utils'
 
@@ -35,9 +38,19 @@ export interface MoreMenuProps {
   /** Open or close the Property Manager. Absent, not offered. */
   onTogglePropertyManager?: () => void
   propertyManagerOpen?: boolean
+  /** Open the panel of entities with no parent. Absent, not offered. */
+  onOpenOrphans?: () => void
+  /** Open the view's changes and history. Absent, not offered. */
+  onOpenHistory?: () => void
+  /** Open the drafts of this view. Absent, not offered. */
+  onOpenDrafts?: () => void
+  /** Bring entities in from a file. Absent, not offered. */
+  onImport?: () => void
+  /** A draft is open. Import writes to it, so it needs one. */
+  isDraft?: boolean
   /** Export the view's graph data. Absent, not offered. */
   onExport?: () => void
-  /** The view's own file actions; only its export is offered here. */
+  /** The view's own file actions; all but its export with data are offered here. */
   thisView?: ViewFileActions
 }
 
@@ -46,18 +59,29 @@ export function MoreMenu({
   multiSelectArmed = false,
   onTogglePropertyManager,
   propertyManagerOpen = false,
+  onOpenOrphans,
+  onOpenHistory,
+  onOpenDrafts,
+  onImport,
+  isDraft = false,
   onExport,
   thisView,
 }: MoreMenuProps) {
   const setMode = usePersonaStore((s) => s.setMode)
+  // Import writes to a draft: with versioning off there is none to write to.
+  const versioningEnabled = useFeature('versioningEnabled')
   const graphExportEnabled = useFeature('graphExportEnabled')
-  const { canExport: viewExportEnabled } = useViewPortability()
+  const { canExport: viewExportEnabled, canImport: viewImportEnabled } = useViewPortability()
+  const importData = versioningEnabled ? onImport : undefined
   const exportView = viewExportEnabled ? thisView?.onExport : undefined
   const exportData = graphExportEnabled ? onExport : undefined
+  const updateView = viewImportEnabled ? thisView?.onUpdateFromFile : undefined
+  const saveTemplate = thisView?.onSaveAsTemplate
+  const hasFiles = !!(importData || exportView || exportData || updateView || saveTemplate)
 
   return (
     <DropdownMenu.Root modal={false}>
-      <HoverTip className="inline-flex" label="More tools" detail="Select several, properties and display rules, export">
+      <HoverTip className="inline-flex" label="More tools" detail="Select several, properties and display rules, history and drafts, import and export">
         <DropdownMenu.Trigger asChild>
           <button
             type="button"
@@ -104,23 +128,95 @@ export function MoreMenu({
               </span>
             </DropdownMenu.Item>
           )}
-          {exportView && (
-            <DropdownMenu.Item className={itemClass} onSelect={exportView}>
-              <LucideIcons.FileDown className="w-4 h-4 mt-px text-accent-lineage shrink-0" strokeWidth={2.2} />
+          {onOpenOrphans && (
+            <DropdownMenu.Item className={itemClass} onSelect={onOpenOrphans}>
+              <LucideIcons.Unlink className="w-4 h-4 mt-px text-accent-lineage shrink-0" strokeWidth={2.2} />
               <span className="min-w-0">
-                <span className="block font-medium">Export view…</span>
-                <span className="block text-[11px] text-ink-muted leading-snug">Its design as a file, to import in another environment</span>
+                <span className="block font-medium">Entities with no parent…</span>
+                <span className="block text-[11px] text-ink-muted leading-snug">Find them and place each one in a layer</span>
               </span>
             </DropdownMenu.Item>
           )}
-          {exportData && (
-            <DropdownMenu.Item className={itemClass} onSelect={exportData}>
-              <LucideIcons.PackageOpen className="w-4 h-4 mt-px text-accent-lineage shrink-0" strokeWidth={2.2} />
+          {onOpenHistory && (
+            <DropdownMenu.Item className={itemClass} onSelect={onOpenHistory}>
+              <LucideIcons.History className="w-4 h-4 mt-px text-accent-lineage shrink-0" strokeWidth={2.2} />
               <span className="min-w-0">
-                <span className="block font-medium">Export data…</span>
-                <span className="block text-[11px] text-ink-muted leading-snug">The graph data this view reads</span>
+                <span className="block font-medium">Changes &amp; history…</span>
+                <span className="block text-[11px] text-ink-muted leading-snug">
+                  {isDraft
+                    ? 'Opens on the changes in your draft'
+                    : `Opens on the history of the ${BRANCH_VOCAB.published.toLowerCase()} version`}
+                </span>
               </span>
             </DropdownMenu.Item>
+          )}
+          {onOpenDrafts && (
+            <DropdownMenu.Item className={itemClass} onSelect={onOpenDrafts}>
+              <LucideIcons.GitBranch className="w-4 h-4 mt-px text-accent-lineage shrink-0" strokeWidth={2.2} />
+              <span className="min-w-0">
+                <span className="block font-medium">{BRANCH_VOCAB.yourDrafts}…</span>
+                <span className="block text-[11px] text-ink-muted leading-snug">The drafts of this view, and where each one stands</span>
+              </span>
+            </DropdownMenu.Item>
+          )}
+          {hasFiles && (
+            <>
+              <DropdownMenu.Separator className="h-px bg-glass-border my-1.5 mx-1" />
+              <DropdownMenu.Group aria-label="File">
+                <DropdownMenu.Label className="px-2.5 pt-1.5 pb-1 text-[10px] font-semibold uppercase tracking-wider text-ink-muted">
+                  File
+                </DropdownMenu.Label>
+                {importData && (
+                  <DropdownMenu.Item className={itemClass} disabled={!isDraft} onSelect={importData}>
+                    <LucideIcons.Upload className="w-4 h-4 mt-px text-accent-lineage shrink-0" strokeWidth={2.2} />
+                    <span className="min-w-0">
+                      <span className="block font-medium">Import…</span>
+                      <span className="block text-[11px] text-ink-muted leading-snug">
+                        {isDraft
+                          ? 'Bring entities in from CSV, Excel or NDJSON'
+                          : 'Available in Edit mode — start a draft to import'}
+                      </span>
+                    </span>
+                  </DropdownMenu.Item>
+                )}
+                {exportView && (
+                  <DropdownMenu.Item className={itemClass} onSelect={exportView}>
+                    <LucideIcons.FileDown className="w-4 h-4 mt-px text-accent-lineage shrink-0" strokeWidth={2.2} />
+                    <span className="min-w-0">
+                      <span className="block font-medium">Export view…</span>
+                      <span className="block text-[11px] text-ink-muted leading-snug">Its design as a file, to import in another environment</span>
+                    </span>
+                  </DropdownMenu.Item>
+                )}
+                {exportData && (
+                  <DropdownMenu.Item className={itemClass} onSelect={exportData}>
+                    <LucideIcons.PackageOpen className="w-4 h-4 mt-px text-accent-lineage shrink-0" strokeWidth={2.2} />
+                    <span className="min-w-0">
+                      <span className="block font-medium">Export data…</span>
+                      <span className="block text-[11px] text-ink-muted leading-snug">The graph data this view reads</span>
+                    </span>
+                  </DropdownMenu.Item>
+                )}
+                {updateView && (
+                  <DropdownMenu.Item className={itemClass} onSelect={updateView}>
+                    <LucideIcons.FileUp className="w-4 h-4 mt-px text-accent-lineage shrink-0" strokeWidth={2.2} />
+                    <span className="min-w-0">
+                      <span className="block font-medium">Update this view from a file…</span>
+                      <span className="block text-[11px] text-ink-muted leading-snug">Bring in a newer design of it from another environment</span>
+                    </span>
+                  </DropdownMenu.Item>
+                )}
+                {saveTemplate && (
+                  <DropdownMenu.Item className={itemClass} onSelect={saveTemplate}>
+                    <LucideIcons.LayoutTemplate className="w-4 h-4 mt-px text-accent-lineage shrink-0" strokeWidth={2.2} />
+                    <span className="min-w-0">
+                      <span className="block font-medium">Save layers as a template…</span>
+                      <span className="block text-[11px] text-ink-muted leading-snug">Reuse its layer layout for new views — never the entities it placed</span>
+                    </span>
+                  </DropdownMenu.Item>
+                )}
+              </DropdownMenu.Group>
+            </>
           )}
           <DropdownMenu.Separator className="h-px bg-glass-border my-1.5 mx-1" />
           <DropdownMenu.Item className={itemClass} onSelect={() => setMode('technical')}>

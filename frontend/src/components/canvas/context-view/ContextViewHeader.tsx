@@ -27,7 +27,7 @@
  * separate layout slot from the right-rail EntityDrawer.
  */
 
-import { useRef } from 'react'
+import { useRef, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Loader2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -159,6 +159,8 @@ export interface ContextViewHeaderProps {
   onFitToWidth?: () => void
   /** Open the orphaned-entities panel (Display menu → Advanced). Optional. */
   onOpenOrphans?: () => void
+  /** Open the view's changes and history (the Business view's More). Optional. */
+  onOpenHistory?: () => void
 }
 
 export function ContextViewHeader({
@@ -218,6 +220,7 @@ export function ContextViewHeader({
   onResetCanvasDisplaySettings,
   onFitToWidth,
   onOpenOrphans,
+  onOpenHistory,
 }: ContextViewHeaderProps) {
   // The actions fold their words away, least-used first, when the row can't
   // hold them beside the search box — and move under it when even that
@@ -227,6 +230,9 @@ export function ContextViewHeader({
   const actionsRef = useRef<HTMLDivElement>(null)
   const fold = useToolbarFold(rowRef, leadRef, actionsRef)
   const technical = usePersonaMode() === 'technical'
+  // The switcher's drafts manager, held here so the Business view's More can
+  // open it on Published, where the switcher itself is hidden.
+  const [draftsOpen, setDraftsOpen] = useState(false)
 
   // Shared comprehension cluster — identical in both modes (see
   // header/ViewerActions.tsx for the rationale).
@@ -244,6 +250,8 @@ export function ContextViewHeader({
     onResetCanvasDisplaySettings,
     onFitToWidth,
     onOpenOrphans,
+    onOpenHistory,
+    onOpenDrafts: branchWorkspaceId && canEnterEdit && !isDraft ? () => setDraftsOpen(true) : undefined,
     lineageRenderMode,
     onSetLineageRenderMode,
     showEdgeDirection,
@@ -267,8 +275,9 @@ export function ContextViewHeader({
     onOpenLens,
     onTogglePropertyManager,
     propertyManagerOpen,
-    // Import / Export live in the shared cluster so the combined dropdown shows in BOTH modes; the
-    // Import item self-disables when not editing (isDraft).
+    // Import / Export live in the shared cluster so they show in BOTH modes (one dropdown in the
+    // Technical view, under More in the Business view); the Import item self-disables when not
+    // editing (isDraft).
     onImport,
     onExport,
     isDraft,
@@ -329,6 +338,8 @@ export function ContextViewHeader({
               <BranchSwitcher
                 workspaceId={branchWorkspaceId}
                 dataSourceId={branchDataSourceId ?? null}
+                managerOpen={draftsOpen}
+                onManagerOpenChange={setDraftsOpen}
               />
             </div>
           )}

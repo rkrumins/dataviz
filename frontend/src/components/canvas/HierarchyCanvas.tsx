@@ -525,7 +525,8 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
                       interactions.startInlineEdit(
                         nodeId,
                         node.name,
-                        { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }
+                        { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 },
+                        (node.data.businessLabel as string | undefined)?.trim() ? 'businessLabel' : 'label',
                       )
                     }
                   }}

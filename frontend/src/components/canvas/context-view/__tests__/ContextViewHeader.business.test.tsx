@@ -1,7 +1,8 @@
 /**
  * ContextViewHeader in the Business view — the row keeps what reading a view
  * needs and tucks the rest into More, which holds it rather than dropping it.
- * The Technical view keeps every tool on the row, exactly as before.
+ * A draft keeps its Connect tool on the row too. The Technical view keeps
+ * every tool on the row, exactly as before.
  */
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -12,7 +13,9 @@ import { usePersonaStore } from '@/store/persona'
 import { stubSession } from '@/test/stubSearchSession'
 
 vi.mock('@/features/versioning/components/BranchSwitcher', () => ({
-  BranchSwitcher: () => <div data-testid="branch-switcher" />,
+  BranchSwitcher: ({ managerOpen }: { managerOpen?: boolean }) => (
+    <div data-testid="branch-switcher" data-manager-open={String(!!managerOpen)} />
+  ),
 }))
 
 import { ContextViewHeader, type ContextViewHeaderProps } from '../ContextViewHeader'
@@ -122,6 +125,54 @@ describe('ContextViewHeader — Business view', () => {
   it('shows the branch switcher in a draft, where it says which draft this is', () => {
     renderHeader(baseProps({ isDraft: true }))
     expect(screen.getByTestId('branch-switcher')).toBeVisible()
+  })
+
+  it('in a draft, keeps Connect on the row and Import under More', async () => {
+    const props = baseProps({ isDraft: true, onToggleConnectTool: vi.fn(), onImport: vi.fn() })
+    renderHeader(props)
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'Connect' }))
+    expect(props.onToggleConnectTool).toHaveBeenCalledTimes(1)
+
+    await user.click(screen.getByRole('button', { name: 'More tools' }))
+    await user.click(await screen.findByRole('menuitem', { name: /^Import…/ }))
+    expect(props.onImport).toHaveBeenCalledTimes(1)
+  })
+
+  it('on Published, Import waits for a draft, and "Your drafts…" opens the drafts manager', async () => {
+    const props = baseProps({ onImport: vi.fn() })
+    renderHeader(props)
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'More tools' }))
+    expect(await screen.findByRole('menuitem', { name: /^Import…/ })).toHaveAttribute('aria-disabled', 'true')
+
+    expect(screen.getByTestId('branch-switcher')).toHaveAttribute('data-manager-open', 'false')
+    await user.click(screen.getByRole('menuitem', { name: /^Your drafts…/ }))
+    expect(screen.getByTestId('branch-switcher')).toHaveAttribute('data-manager-open', 'true')
+  })
+
+  it('"Changes & history…" opens the versioning panel', async () => {
+    const props = baseProps({ onOpenHistory: vi.fn() })
+    renderHeader(props)
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('button', { name: 'More tools' }))
+    await user.click(await screen.findByRole('menuitem', { name: /^Changes & history…/ }))
+    expect(props.onOpenHistory).toHaveBeenCalledTimes(1)
+  })
+
+  it('offers "Entities with no parent…" in a draft only', async () => {
+    const onOpenOrphans = vi.fn()
+    const user = userEvent.setup()
+    const published = renderHeader(baseProps({ onOpenOrphans }))
+    await user.click(screen.getByRole('button', { name: 'More tools' }))
+    await screen.findByRole('menu')
+    expect(screen.queryByRole('menuitem', { name: /^Entities with no parent…/ })).not.toBeInTheDocument()
+    published.unmount()
+
+    renderHeader(baseProps({ isDraft: true, onOpenOrphans }))
+    await user.click(screen.getByRole('button', { name: 'More tools' }))
+    await user.click(await screen.findByRole('menuitem', { name: /^Entities with no parent…/ }))
+    expect(onOpenOrphans).toHaveBeenCalledTimes(1)
   })
 })
 

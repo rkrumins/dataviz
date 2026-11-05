@@ -56,16 +56,21 @@ interface BranchSwitcherProps {
   workspaceId: string
   dataSourceId: string | null
   className?: string
+  /** The drafts manager's open state, when the host holds it (to open it from elsewhere). */
+  managerOpen?: boolean
+  onManagerOpenChange?: (open: boolean) => void
 }
 
-export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchSwitcherProps) {
+export function BranchSwitcher({ workspaceId, dataSourceId, className, ...props }: BranchSwitcherProps) {
   const [open, setOpen] = useState(false)
   const [creating, setCreating] = useState(false)
   const [newName, setNewName] = useState('')
   // The level asked for; null: the data source's policy decides (shown as its default).
   const [newLevel, setNewLevel] = useState<DraftLevel | null>(null)
   const [settingsBranch, setSettingsBranch] = useState<Branch | null>(null)
-  const [managerOpen, setManagerOpen] = useState(false)
+  const [ownManagerOpen, setOwnManagerOpen] = useState(false)
+  const managerOpen = props.managerOpen ?? ownManagerOpen
+  const setManagerOpen = props.onManagerOpenChange ?? setOwnManagerOpen
   // Callback ref: the trigger lands in state on mount so the menu's position can be
   // derived from its rect AT RENDER TIME — no state written from an effect.
   const [triggerEl, setTriggerEl] = useState<HTMLButtonElement | null>(null)
