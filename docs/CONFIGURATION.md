@@ -708,6 +708,7 @@ Drafts and commits, projection into the graph store, and import and export.
 | `GRAPH_EXPORT_PAGE_SIZE` | `2000` | `backend/app/services/versioning/import_export/snapshot.py` |
 | `GRAPH_EXPORT_PLAN_BUDGET_SECS` | `20` | `backend/app/services/versioning/import_export/stream.py` |
 | `GRAPH_EXPORT_SLOT_WAIT_SECS` | `900` | `backend/app/services/versioning/import_export/stream.py` |
+| `IMPORT_BULK_CONCURRENCY` | `4` | `backend/app/services/versioning/config.py` |
 | `IMPORT_COMMIT_WINDOW` | `10000` | `backend/app/services/versioning/config.py` |
 | `IMPORT_MAX_BYTES` | `10737418240` | `backend/app/services/versioning/import_export/uploads.py` |
 | `IMPORT_MAX_ROWS` | `0` | `backend/app/services/versioning/config.py` |

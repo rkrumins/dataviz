@@ -164,7 +164,7 @@ async def _while_loading(svc, ie, store) -> None:
     draft = await svc.open_draft(graph_id=gid, owner="u")
     job = await _job(ie, store, gid, _FILE)
     worker = ImportWorker(svc, store)
-    worker._next_window = _crash_on(worker._next_window, 3)
+    worker._commit_window = _crash_on(worker._commit_window, 3)
     with pytest.raises(_Crash):
         await worker.run(job["job_id"])
     row = await _get(JobORM, job["job_id"])
@@ -210,7 +210,7 @@ async def _discarded(svc, ie, store) -> None:
     head = (await _get(GraphORM, gid)).main_head_commit_seq
     job = await _job(ie, store, gid, _FILE)
     worker = ImportWorker(svc, store)
-    worker._next_window = _crash_on(worker._next_window, 3)
+    worker._commit_window = _crash_on(worker._commit_window, 3)
     with pytest.raises(_Crash):
         await worker.run(job["job_id"])
     cid = (await _get(JobORM, job["job_id"])).target_commit_id

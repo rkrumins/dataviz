@@ -28,8 +28,10 @@ loses at most the unit it was in, and the next one carries on from the cursor �
 A **bulk** import (``bulk`` on the job's ``field_scope``) has no draft: its windows write straight
 into ``main``'s next commit, opened at head+1 once the file is staged and landed whole once every
 window is in (``GraphVersioningService.open_import_commit`` / ``land_import_commit``), and nothing
-else writes ``main`` meanwhile. It adds and updates only. Its cursor goes on from the windows'
-to ``bulk:landed``, or to ``bulk:discard`` while it is being discarded.
+else writes ``main`` meanwhile. It adds and updates only. Its windows are still written one at a
+time, in file order, but the next ``IMPORT_BULK_CONCURRENCY - 1`` are looked up and matched while
+one is written (``ImportWorker._bulk_phase``). Its cursor goes on from the windows' to
+``bulk:landed``, or to ``bulk:discard`` while it is being discarded.
 
 A superseded worker (its job taken over, or no longer running) finds out at its next checkpoint,
 whose transaction — the window's work with it — then rolls back.
@@ -40,8 +42,9 @@ import asyncio
 import contextlib
 import json
 import logging
+from collections import deque
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, NamedTuple, Optional, Tuple
+from typing import Any, Deque, Dict, List, NamedTuple, Optional, Tuple
 
 from sqlalchemy import (BigInteger, Text, and_, any_, bindparam, delete, exists, false, func, null,
                         or_, select, text, tuple_)
@@ -57,8 +60,8 @@ from ..models import (BranchORM, EdgeVersionORM, ImportResultORM, ImportRowORM, 
 from ..errors import PublishRequired, ReviewRequired
 from ..service import OntologyViolation
 from .formats import get_adapter
-from .resolve import (KeyIndex, _canonical_map, key_value, pointer_id, pointer_seed, pointers,
-                      resolve_rows)
+from .resolve import (KeyIndex, _canonical_map, _etype_key, key_value, pointer_id, pointer_seed,
+                      pointers, resolve_rows)
 from .rowmodel import PROP_DELETE, normalize
 from .snapshot import open_bulk_snapshot, open_snapshot, window_reads
 from .stream import view_entities
@@ -134,6 +137,57 @@ class _Position(NamedTuple):
     summary: Dict[str, Any]
     processed: int
     total: int
+
+
+class _Resolved(NamedTuple):
+    """A window's ops and its rows' resolutions, and its tokens (:func:`_tokens`)."""
+    ops: List[dict]
+    resolutions: List[dict]
+    tokens: set
+
+
+class _Ahead(NamedTuple):
+    """A bulk window being resolved ahead of its write: its rows, how many of the phase's windows
+    had been written when it began, and the task resolving it."""
+    rows: List[Dict[str, Any]]
+    seen: int
+    task: "asyncio.Task[_Resolved]"
+
+
+async def _settled(task) -> Optional[_Resolved]:
+    """What a window resolved ahead came to; ``None`` when that failed: it is resolved again in its
+    turn, where a fault is retried or raised as for a window taken one at a time."""
+    try:
+        return await task
+    except Exception as exc:                                     # noqa: BLE001 — resolved again
+        logger.info("import window resolved ahead failed (%s: %s); resolving it in its turn",
+                    type(exc).__name__, str(exc)[:200])
+        return None
+
+
+def _tokens(kind: str, rows, ops, resolutions, identity_prop: Optional[str],
+            keys: Optional[KeyIndex], canon: Dict[str, str]) -> set:
+    """What a window's rows name its entities by, and what it resolved them to: two windows whose
+    tokens meet may each read what the other writes. Node rows: their pointers (urn and identifier
+    value, the names a node's id is derived from), file entity ids, qualifiedNames and team-key
+    values (``keys``: the fields types match by or keep unique). Edge rows: their own ids and the
+    ``(source, target, TYPE)`` of each edge a window creates. Both: every entity a row matched or
+    made. Edge ends are not tokens: every node is written before the first edge window."""
+    out: set = {res["matched_entity_id"] for res in resolutions if res.get("matched_entity_id")}
+    out.update(r["entity_id"] for r in rows if r.get("entity_id"))
+    if kind == "node":
+        for r in rows:
+            props = r.get("properties") or {}
+            out.update(pointers(r.get("urn"), props.get(identity_prop) if identity_prop else None))
+            if r.get("qualifiedName"):
+                out.add(("qualifiedName", r["qualifiedName"]))
+            if keys is not None:
+                etype = canon.get(str(r.get("entityType") or "").lower(), r.get("entityType"))
+                out.update(("key", etype or "", field, value) for field, value in keys.values(etype, props))
+    else:
+        out.update(("edge", op["payload"]["sourceEntityId"], op["payload"]["targetEntityId"],
+                    _etype_key(op["payload"]["edgeType"])) for op in ops if op["op"] == "create")
+    return out
 
 
 def _window_after(cursor: Optional[str]) -> Tuple[Optional[str], int]:
@@ -621,10 +675,13 @@ class ImportWorker:
                 "import the file again.")
         snap = await (open_bulk_snapshot(graph_id=graph_id, commit_seq=bulk_seq) if bulk_seq is not None
                       else open_snapshot(graph_id=graph_id, branch_id=branch_id))
-        more = True
-        while more:
-            more = await self._lease.retry_transient(
-                lambda: self._next_window(job_id, snap, graph_id, branch_id, actor))
+        if bulk_seq is not None and config.IMPORT_BULK_CONCURRENCY > 1:
+            await self._bulk_windows(job_id, snap, graph_id, branch_id, actor)
+        else:
+            more = True
+            while more:
+                more = await self._lease.retry_transient(
+                    lambda: self._next_window(job_id, snap, graph_id, branch_id, actor))
         if reconcile_mode == "replace":        # delete-on-absence (not file rows; counted as it goes)
             invalid = int((await self._position(job_id)).summary.get("invalid") or 0)
             if invalid:
@@ -658,18 +715,119 @@ class ImportWorker:
             if kind == "edge":                      # every window is in: what a publish plans on
                 await _analyze_graph(graph_id)
             return False
-        if not self._identity_read:                # once a run, before its first window
+        await self._read_identity(job_id, snap, graph_id, branch_id)
+        ops, resolutions = await self._resolve_window(job_id, snap, kind, rows)
+        await self._commit_window(job_id, pos, kind, rows, ops, resolutions, graph_id, branch_id, actor)
+        return True
+
+    async def _bulk_windows(self, job_id, snap, graph_id, branch_id, actor) -> None:
+        """A bulk import's windows from its cursor on, ``IMPORT_BULK_CONCURRENCY`` at a time
+        (:meth:`_bulk_phase`): every node window, then every edge window, with the statistics
+        refreshed after each phase, as :meth:`_next_window` takes them one at a time."""
+        pos = await self._lease.retry_transient(lambda: self._position(job_id))
+        kind, after = _window_after(pos.cursor)
+        if kind == "node":
+            await self._bulk_phase(job_id, snap, "node", after, graph_id, branch_id, actor)
+            await _analyze_graph(graph_id)
+            if not await self._bulk_phase(job_id, snap, "edge", -1, graph_id, branch_id, actor):
+                return                              # no edges: the statistics are fresh already
+        elif kind == "edge":
+            await self._bulk_phase(job_id, snap, "edge", after, graph_id, branch_id, actor)
+        else:
+            return
+        await _analyze_graph(graph_id)              # every window is in
+
+    async def _bulk_phase(self, job_id, snap, kind, after, graph_id, branch_id, actor) -> bool:
+        """The windows of ``kind`` after staged row ``after``, ``IMPORT_BULK_CONCURRENCY`` in hand
+        at once: each is written after the one before it, as :meth:`_next_window` writes it, and
+        meanwhile the next ones are looked up and matched. ``main`` holds still under a bulk
+        import (nothing else writes it), so what a window ahead reads can only be stale where a
+        window written since it began wrote: when their tokens meet (:func:`_tokens` — a row
+        naming what the other wrote, or the same entity or edge), it is matched again after them.
+        Every window is then resolved as one at a time would resolve it. True when there was one.
+
+        Each read and each write is retried through a transient fault on its own, as a window is;
+        a window ahead that failed is resolved again in its turn. Windows still ahead when the
+        phase stops are dropped: nothing of them was written."""
+        width = config.IMPORT_BULK_CONCURRENCY
+        ahead: Deque[_Ahead] = deque()
+        landed: Deque[Tuple[int, set]] = deque()    # windows written since the oldest ahead began
+        written = 0
+        try:
+            while True:
+                while len(ahead) < width and after is not None:
+                    rows = await self._lease.retry_transient(
+                        lambda after=after: self._window(job_id, kind, after))
+                    if not rows:
+                        after = None
+                        break
+                    await self._lease.retry_transient(
+                        lambda: self._read_identity(job_id, snap, graph_id, branch_id))
+                    after = rows[-1]["_row_index"]
+                    ahead.append(_Ahead(rows, written, asyncio.create_task(
+                        self._resolve_ahead(job_id, snap, kind, rows))))
+                if not ahead:
+                    return written > 0
+                this = ahead.popleft()
+                resolved = await _settled(this.task)
+                if resolved is None or any(not resolved.tokens.isdisjoint(tokens)
+                                           for n, tokens in landed if n >= this.seen):
+                    resolved = await self._lease.retry_transient(
+                        lambda rows=this.rows: self._resolve_ahead(job_id, snap, kind, rows))
+                await self._lease.retry_transient(lambda rows=this.rows, resolved=resolved: (
+                    self._land_window(job_id, kind, rows, resolved, graph_id, branch_id, actor)))
+                landed.append((written, resolved.tokens))
+                written += 1
+                oldest = ahead[0].seen if ahead else written
+                while landed and landed[0][0] < oldest:
+                    landed.popleft()
+        finally:
+            for a in ahead:
+                a.task.cancel()
+            await asyncio.gather(*(a.task for a in ahead), return_exceptions=True)
+
+    async def _resolve_ahead(self, job_id, snap, kind, rows) -> _Resolved:
+        """A window resolved as :meth:`_next_window` resolves it, with its tokens."""
+        ops, resolutions = await self._resolve_window(job_id, snap, kind, rows)
+        tokens = await asyncio.to_thread(_tokens, kind, rows, ops, resolutions,
+                                         self._identity_prop, self._keys, self._canon)
+        return _Resolved(ops, resolutions, tokens)
+
+    async def _land_window(self, job_id, kind, rows, resolved, graph_id, branch_id, actor) -> None:
+        """Write a window :meth:`_bulk_phase` resolved, once: tried again after a fault whose
+        commit landed after all, it finds the cursor already past the window, and only remembers
+        what it created."""
+        pos = await self._position(job_id)
+        if pos.cursor == f"{kind}:{rows[-1]['_row_index']}":
+            if kind == "node":
+                self._remember_created(rows, resolved.ops, resolved.resolutions)
+            return
+        await self._commit_window(job_id, pos, kind, rows, resolved.ops, resolved.resolutions,
+                                  graph_id, branch_id, actor)
+
+    async def _read_identity(self, job_id, snap, graph_id, branch_id) -> None:
+        """The job's identity state (:meth:`_identity_state`), once a run, before its first window."""
+        if not self._identity_read:
             await self._identity_state(job_id, snap, graph_id, branch_id)
             self._identity_read = True
+
+    async def _resolve_window(self, job_id, snap, kind, rows) -> Tuple[List[dict], List[dict]]:
+        """A window's ops and its rows' resolutions: the entities its rows name, looked up in the
+        snapshot (:meth:`_node_lookups`, :meth:`_edge_lookups`), then matched (``resolve_rows``)."""
         lookups = await (self._node_lookups if kind == "node" else self._edge_lookups)(snap, rows)
         lookups.update(created_from=self._created_from, keys=self._keys,
                        earlier=await self._earlier(job_id, kind, rows[0]["_row_index"], lookups))
         scope = self._id_scope
-        ops, resolutions = await asyncio.to_thread(       # a window of pure-Python matching
+        return await asyncio.to_thread(       # a window of pure-Python matching
             resolve_rows, rows, lookups, mint_id=new_entity_id,     # a urn:uuid (UUIDv7) each
             ontology=self._ontology, identity_prop=self._identity_prop,
             mint_urn=lambda _etype: new_entity_id(),
             derive_urn=lambda seed: pointer_id(scope, seed))
+
+    async def _commit_window(self, job_id, pos, kind, rows, ops, resolutions, graph_id, branch_id,
+                             actor) -> None:
+        """Write a resolved window after ``pos``, the job's position: its ops, its rows' outcomes
+        and the job's checkpoint in one transaction; then what its nodes are known by."""
         processed = pos.processed + len(rows)
 
         async def on_commit(s) -> None:
@@ -686,7 +844,6 @@ class ImportWorker:
         await self._apply_window(graph_id, branch_id, actor, ops, resolutions, on_commit)
         if kind == "node":
             self._remember_created(rows, ops, resolutions)
-        return True
 
     async def _identity_state(self, job_id: str, snap, graph_id: str, branch_id: str) -> None:
         """What every window resolves new nodes and named ends against, read once a run (a resumed
