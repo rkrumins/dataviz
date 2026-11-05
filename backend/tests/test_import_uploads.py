@@ -4,8 +4,10 @@ Pins: a file is split into fixed parts (the last holds the rest); a part must ho
 share, and a wrong one is not kept; sending a part again replaces it; which parts arrived is what a
 client resumes from; the parts read back in order as one file, however they arrived; a file too
 large for its format is refused before any of it is sent; an upload is its owner's only. Through
-the API: completing an upload before every part is in is a 409, then it starts the import from the
-upload, once (asking again answers with the same import).
+the API: an upload says when it expires; completing an upload before every part is in is a 409,
+then it starts the import from the upload, once — asking again answers with the same import, at
+the same time too, and one whose completion broke off before it was queued is queued then — and
+a completed upload takes no more parts.
 
 A view package is uploaded the same way, its own user's and no graph's. Once checked, its import
 reads the data part out of the uploaded parts as it streams — spooled once, never sniffed, the spool
@@ -19,8 +21,11 @@ from datetime import datetime
 
 import pytest
 
+from sqlalchemy.exc import IntegrityError
+
 from backend.app.api.v1.endpoints.versioning import get_import_export_service, get_versioning_service
 from backend.app.services.storage.object_store import LocalFsObjectStore
+from backend.app.services.versioning import config
 from backend.app.services.versioning.errors import JobActive
 from backend.app.services.versioning.import_export import uploads
 from backend.app.services.versioning.import_export.uploads import UploadError
@@ -114,23 +119,33 @@ class _Versioning:
 
 
 class _ImportExport:
-    """Import jobs recorded rather than run."""
+    """Import jobs recorded rather than run. Like the jobs table, an idempotency key starts one
+    job: a second insert with it is an ``IntegrityError``."""
 
     def __init__(self, store):
         self.store = store
         self.created: list = []
         self.started: list = []
+        self.jobs: dict = {}
 
     async def create_import_job(self, **kwargs):
+        if any(job["key"] == kwargs.get("idempotency_key") for job in self.jobs.values()):
+            raise IntegrityError("INSERT INTO jobs", {}, Exception("ix_jobs_idem_active"))
         self.created.append(kwargs)
-        return {"job_id": f"vjob_{len(self.created)}", "branch_id": "br_1", "source_uri": kwargs["source_uri"]}
+        job_id = f"vjob_{len(self.created)}"
+        self.jobs[job_id] = {"jobId": job_id, "jobType": "ingest", "status": "pending", "phase": None,
+                             "branchId": "br_1", "key": kwargs.get("idempotency_key")}
+        return {"job_id": job_id, "branch_id": "br_1", "source_uri": kwargs["source_uri"]}
 
     async def start_import(self, job_id):
         self.started.append(job_id)
         return "pending"
 
     async def get_job(self, job_id):
-        return {"jobId": job_id, "status": "pending"}
+        return self.jobs.get(job_id)
+
+    async def find_job(self, *, graph_id, idempotency_key):
+        return next((job for job in self.jobs.values() if job["key"] == idempotency_key), None)
 
 
 @pytest.fixture
@@ -177,6 +192,51 @@ async def test_an_upload_becomes_one_import_once_every_part_is_in(test_client, a
     again = await test_client.post(f"{url}/complete")
     assert again.status_code == 202 and again.json()["jobId"] == "vjob_1"
     assert len(api.created) == 1, "asking again answers with the import already started"
+    assert job["idempotency_key"] == f"upload:{up['uploadId']}"
+
+    late = await test_client.put(f"{url}/parts/1", content=parts[1])
+    assert late.status_code == 409 and "complete" in late.json()["detail"], "what is imported stays put"
+
+
+async def test_an_upload_says_when_it_expires(test_client, api):
+    up = (await test_client.post(BASE, json={"fileName": "f.ndjson", "size": 10, "format": "ndjson"})).json()
+    expires = datetime.fromisoformat(up["expiresAt"])
+    record = await uploads.read_record(api.store, uploads.record_key(
+        {"workspaceId": "ws1", "dataSourceId": "ds1", "graphId": "g1", "uploadId": up["uploadId"]}))
+    started = datetime.fromisoformat(record["createdAt"])
+    assert (expires - started).total_seconds() == config.OBJECT_STORE_TTL_HOURS * 3600
+    assert (await test_client.get(f"{BASE}/{up['uploadId']}")).json()["expiresAt"] == up["expiresAt"]
+
+
+async def test_two_completions_at_once_start_one_import(test_client, api):
+    """The other completion's import is in, but not yet on the upload: this one answers with it,
+    records it, and queues nothing more."""
+    url = await _uploaded(test_client)
+    upload_id = url.rsplit("/", 1)[1]
+    await api.create_import_job(source_uri="elsewhere", idempotency_key=f"upload:{upload_id}")
+    second = await test_client.post(f"{url}/complete")
+    assert second.status_code == 202, second.text
+    assert second.json()["jobId"] == "vjob_1" and len(api.created) == 1 and api.started == []
+    assert (await test_client.get(url)).json()["jobId"] == "vjob_1"
+
+
+async def test_a_completion_that_broke_off_is_queued_when_the_upload_is_completed_again(test_client, api):
+    reclaimed = []
+
+    async def reclaim(job_id, *, actor, workspace_id):
+        reclaimed.append(job_id)
+        api.jobs[job_id].update(status="pending")
+        return True
+
+    api.reclaim_import = reclaim
+    url = await _uploaded(test_client)
+    assert (await test_client.post(f"{url}/complete")).status_code == 202
+    api.jobs["vjob_1"].update(status="failed", errorMessage=config.JOB_NEVER_QUEUED)   # never queued
+    api.started.clear()
+    again = await test_client.post(f"{url}/complete")
+    assert again.status_code == 202, again.text
+    assert (again.json()["jobId"], reclaimed, api.started) == ("vjob_1", ["vjob_1"], ["vjob_1"])
+    assert len(api.created) == 1
 
 
 async def test_the_api_refuses_what_an_upload_cant_take(test_client, api):

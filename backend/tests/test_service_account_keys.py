@@ -362,8 +362,9 @@ async def test_a_key_writes_main_where_the_account_publishes_not_where_its_manag
 ):
     """A bulk ingest writes a versioned graph's main directly, so it needs publish: for an
     ``nxsat_`` key, held by the service account through its own workspace roles (Publisher, on
-    its page), whoever manages it. Advancing main otherwise — publishing, merging, reverting,
-    restoring, syncing — and sharing a draft are refused to every key."""
+    its page), whoever manages it. Advancing main otherwise — reverting, restoring, syncing,
+    merging a fork's review — and sharing a draft are refused to every key; publishing a draft
+    and merging its review follow bulk ingest's rule (the test below)."""
     from backend.app.main import app
 
     class _Versioning(_FakeVersioning):
@@ -398,13 +399,103 @@ async def test_a_key_writes_main_where_the_account_publishes_not_where_its_manag
         "required": "workspace:datasource:publish"}
 
     for path in (
-        "graphs/g_a/branches/br_a/publish", "graphs/g_a/commits/c1/revert",
-        "graphs/g_a/commits/c1/restore", "graphs/g_a/sync", "pulls/pr1/merge",
-        "merge-requests/mr1/merge", "graphs/g_a/branches/br_a/members",
+        "graphs/g_a/commits/c1/revert", "graphs/g_a/commits/c1/restore", "graphs/g_a/sync",
+        "pulls/pr1/merge", "graphs/g_a/branches/br_a/members",
     ):
         response = await client.post(f"/api/v1/ws_a/versioning/{path}", json={}, headers=key.headers)
         assert response.status_code == 403, path
         assert error(response) == "api_key_not_allowed", path
+
+
+#: A draft's review, and a fork's review into ``g_a2`` (from ``g_fork``), as ``get_pr`` reads them.
+_PRS = {
+    "mr_a": {"pr_id": "mr_a", "target_graph_id": "g_a", "source_graph_id": "g_a",
+             "source_branch_id": "br_a", "actor": OWNER, "reviewers": [], "status": "open"},
+    "pr_fork": {"pr_id": "pr_fork", "target_graph_id": "g_a2", "source_graph_id": "g_fork",
+                "source_branch_id": "br_fork", "actor": OWNER, "reviewers": [], "status": "open"},
+}
+
+
+class _Reviews(_FakeVersioning):
+    async def get_pr(self, pr_id):
+        return _PRS.get(pr_id)
+
+    async def branch_change_count(self, **_kwargs):      # the routes' first step past every gate
+        reached_the_handler()
+
+
+async def _publisher_key(db_session, account) -> tuple[Key, RoleBindingORM]:
+    """A data-writing key of an account that holds Publisher in ws_a, and that binding."""
+    await publisher_role(db_session)
+    binding = (await db_session.execute(select(RoleBindingORM).where(
+        RoleBindingORM.subject_id == account, RoleBindingORM.scope_id == "ws_a",
+    ))).scalar_one()
+    binding.role_name = "workspace_publisher"
+    await db_session.commit()
+    return await _minted(db_session, account, permissions={"views": "none", "data": "write",
+                                                           "publish": False}), binding
+
+
+async def test_a_key_publishes_a_draft_and_merges_its_review_where_the_account_publishes(
+    client, db_session, account,
+):
+    """Publishing a draft and merging its review advance main, so they follow bulk ingest's rule:
+    an ``nxsat_`` key passes where its service account holds publish, and is refused with
+    ``publish_required`` once the account loses it."""
+    from backend.app.main import app
+
+    app.dependency_overrides[versioning_endpoints.get_versioning_service] = _Reviews
+    key, binding = await _publisher_key(db_session, account)
+    paths = ("/api/v1/ws_a/versioning/graphs/g_a/branches/br_a/publish",
+             "/api/v1/ws_a/versioning/merge-requests/mr_a/merge")
+    for path in paths:
+        reached = await client.post(path, json={"message": "nightly"}, headers=key.headers)
+        assert reached.status_code == 418, (path, reached.text)
+
+    binding.role_name = "workspace_member"
+    await db_session.commit()
+    api_key_service.forget(key.id)
+    for path in paths:
+        refused = await client.post(path, json={"message": "nightly"}, headers=key.headers)
+        assert refused.status_code == 403, (path, refused.text)
+        assert refused.json()["detail"]["code"] == "publish_required", path
+
+
+async def test_no_key_merges_a_forks_review_through_the_merge_request_route(
+    client, db_session, account, forks_on,
+):
+    """The merge-request route merges a fork's review too (``…/pulls/{id}/merge`` is closed to
+    keys): a key gets ``api_key_not_allowed`` there, whoever publishes."""
+    from backend.app.main import app
+
+    app.dependency_overrides[versioning_endpoints.get_versioning_service] = _Reviews
+    key, _binding = await _publisher_key(db_session, account)
+    refused = await client.post("/api/v1/ws_a/versioning/merge-requests/pr_fork/merge",
+                                json={"message": "x"}, headers=key.headers)
+    assert refused.status_code == 403, refused.text
+    assert error(refused) == "api_key_not_allowed"
+
+
+async def test_a_key_is_told_it_may_merge_where_its_account_publishes(db_session, account):
+    """``viewerCan`` on a review answers as the merge route decides: a key holds no publish of
+    its own, so a draft's review reads ``merge: true`` where the key's owner publishes."""
+    from backend.app.services.permission_service import KeyScope, PermissionClaims
+
+    manage = ("workspace:datasource:read", "workspace:datasource:manage")
+
+    def claims(**owner):
+        return PermissionClaims(sid="", ws_perms={"ws_a": manage},
+                                key_scope=KeyScope(key_id="k", data="write", **owner))
+
+    async def merge(pr, key_claims):
+        can = await versioning_endpoints._viewer_can(_Reviews(), db_session, pr, account,
+                                                      key_claims, "ws_a")
+        return can["merge"], can["mergeReason"]
+
+    publishes = claims(owner_publish_workspaces=frozenset({"ws_a"}))
+    assert await merge(_PRS["mr_a"], publishes) == (True, None)
+    assert await merge(_PRS["mr_a"], claims()) == (False, "publish_required")
+    assert await merge(_PRS["pr_fork"], publishes) == (False, "publish_required")
 
 
 async def test_the_limit_is_the_accounts_own(client, db_session, account, monkeypatch):

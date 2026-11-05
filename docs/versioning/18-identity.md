@@ -134,11 +134,13 @@ held by the data source.
 | `POST /graph/changes` | the `Idempotency-Key` header, up to 128 characters | Answers with the first commit and the entities as they are now, even if the draft has closed since. `uq_commits_idem` makes two racing attempts land once. |
 | `POST /graph/nodes/create` | `idempotencyKey` in the body | Answers with the node the first request created, and writes nothing. |
 | `POST /graph/edges` | `idempotencyKey` in the body | Answers with the edge the first request created, and writes nothing. |
-| `POST …/imports`, `POST …/exports` | `?idempotencyKey` | Answers with the job the first request started. |
+| `POST …/imports`, `POST …/exports` | `?idempotencyKey` | Answers with the job the first request started, whatever has happened to it since, and whatever `branchId` it is sent with. |
+| `POST …/imports/uploads/{id}/complete` | the upload itself | Answers with the import it started: an upload is imported once. |
 | `POST …/bulk-ingest`, `POST …/sync` | `?idempotencyKey` | Answers with the first commit (`idempotent_replay`). |
 
-A key belongs to one caller on one branch. The same key from someone else, or on another draft, is
-a new request.
+A key belongs to one caller. On `/graph/changes` it also belongs to one branch, so the same key on
+another draft is a new request there. An import's or export's key is the caller's for good on the
+graph, on any draft. The same key from someone else is always a new request.
 
 **Running an import again** starts a new job. What happens to each row depends on how it points at
 its entity:

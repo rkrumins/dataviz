@@ -21,7 +21,8 @@ from backend.app.services.versioning.import_export.service import ImportExportSe
 @pytest.fixture
 def job(monkeypatch):
     row = SimpleNamespace(workspace_id="ws", data_source_id="ds", scope_view_id="v1",
-                          reconcile_mode="replace", branch_id="br_9")
+                          reconcile_mode="replace", branch_id="br_9",
+                          graph_id="g1", auto_publish=False)
 
     @contextlib.asynccontextmanager
     async def session():

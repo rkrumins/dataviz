@@ -268,7 +268,7 @@ See [08](08-import-export.md) for detail; the load-bearing ones:
   `OBJECT_STORE_S3_PRESIGN=1`, view-package uploads and stored downloads go straight to the bucket;
   a data source's own import still uploads through the backend, in resumable pieces.
   JSON and xlsx *exports* now stream; JSON and xlsx *imports* are still read whole, which the client
-  caps at 100 MiB.
+  and the server cap at 100 MiB.
 - **A view's export holds the view's entity ids.** A view-scoped export (and a view package) first
   finds the entities the view places and their containment descendants, and keeps their ids while
   it streams — about 100 bytes each, so about 1 GB for a view of 10 million entities, inside the

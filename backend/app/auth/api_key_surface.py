@@ -181,8 +181,10 @@ SURFACE: dict[tuple[str, str], Rule] = {
     # Not here: creating graphs (blank or forked) and opening a draft by
     # data source, which name their target in the body; rebuilding or
     # reconciling a projection (operations); adding or removing a
-    # draft's members (sharing); and advancing main (publish, merge,
-    # revert, restore, sync), which needs a publish no key holds.
+    # draft's members (sharing); merging a fork's review; and advancing
+    # main otherwise (revert, restore, sync). Publishing a draft and
+    # merging its review are here: no key holds publish, so a key passes
+    # where its owner does (``versioning_gate.require_publish``).
     **_entries(
         "versioning", RESOURCE,
         "resolve_graph_get", "get_graph", "get_watermark", "graph_neighbors",
@@ -197,8 +199,8 @@ SURFACE: dict[tuple[str, str], Rule] = {
         "get_history_months", "get_revision",
         "get_restore_preview",
         "get_entity_history", "get_entity_summary",
-        "bulk_ingest", "get_publish_job",
-        "list_imports", "import_template", "import_schema", "validate_import", "create_import",
+        "bulk_ingest", "publish", "get_publish_job",
+        "list_imports", "import_template", "import_schema", "create_import",
         "get_import",
         "get_import_preview", "create_import_upload", "get_import_upload",
         "put_import_upload_part", "complete_import_upload",
@@ -206,7 +208,7 @@ SURFACE: dict[tuple[str, str], Rule] = {
         "download_export", "cancel_export",
         "open_merge_request", "list_merge_requests", "get_merge_request",
         "update_merge_request", "approve_merge_request", "close_merge_request",
-        "diff_merge_request", "diff_merge_request_summary",
+        "merge_merge_request", "diff_merge_request", "diff_merge_request_summary",
         "diff_merge_request_children", "preview_merge_request_endpoint",
         "open_pull_request", "list_pull_requests", "get_pull_request",
         "update_pull_request", "approve_pull_request", "close_pull_request",
@@ -215,7 +217,8 @@ SURFACE: dict[tuple[str, str], Rule] = {
         "list_data_source_pull_requests", "list_view_pull_requests",
         "count_view_pull_requests",
     ),
-    **_entries("versioning", RESOURCE, "create_export", reads_only=True),
+    # A dry run checks a file against the graph and writes nothing.
+    **_entries("versioning", RESOURCE, "validate_import", "create_export", reads_only=True),
 
     # ── Data sources: their state, their jobs, and change signals ────
     # Not here: anything on the Ingestion cockpit's any-workspace gate

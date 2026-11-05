@@ -114,15 +114,15 @@ class PersonRequired(_HttpMapped, AccessDenied):
 
 class PublishRequired(_HttpMapped, AccessDenied):
     """A person without ``workspace:datasource:publish`` wrote a versioned graph's main directly
-    (a graph route with no draft, or a bulk ingest), in person or with their API key."""
+    (a graph route with no draft, or a bulk ingest), in person or with their API key — or asked an
+    import to publish itself (``message`` says so)."""
 
     status_code = 403
 
-    def __init__(self):
-        super().__init__("editing the published version needs publish permission; "
-                         "start a draft to make these edits and send them for review",
-                         {"type": "access_denied", "code": "publish_required",
-                          "required": "workspace:datasource:publish"})
+    def __init__(self, message: str = ("editing the published version needs publish permission; "
+                                       "start a draft to make these edits and send them for review")):
+        super().__init__(message, {"type": "access_denied", "code": "publish_required",
+                                   "required": "workspace:datasource:publish"})
 
 
 class GroupsUnavailable(_HttpMapped, RuntimeError):
