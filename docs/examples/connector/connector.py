@@ -188,10 +188,9 @@ class Graph:
         missing = sorted(set(range(upload["parts"])) - set(upload["received"]))
 
         def send(n: int) -> None:
-            with open(path, "rb") as f:
-                f.seek(n * step)
-                data = f.read(step)
-            self.api("PUT", f"{url}/{n}", content=data)
+            size = min(step, upload["size"] - n * step)
+            self.api("PUT", f"{url}/{n}", content=_Part(path, n * step, size),
+                     headers={"Content-Length": str(size)})
 
         done, every = upload["parts"] - len(missing), max(1, upload["parts"] // 20)
         with concurrent.futures.ThreadPoolExecutor(PARALLEL) as pool:
@@ -258,6 +257,25 @@ class Graph:
         if answer.get("jobId"):                            # a large draft publishes as a job
             return _outcome(self.follow(f"{self.base}/publish-jobs/{answer['jobId']}", "publish"))
         return {"state": "completed", "commitId": answer.get("commitId")}
+
+
+class _Part:
+    """One part of the file, read from disk as it is sent, 1 MiB at a time, and read afresh for each
+    attempt: memory stays small however many parts are in flight, and a part sent again is whole."""
+
+    def __init__(self, path: str, offset: int, size: int):
+        self.path, self.offset, self.size = path, offset, size
+
+    def __iter__(self) -> Iterator[bytes]:
+        with open(self.path, "rb") as f:
+            f.seek(self.offset)
+            left = self.size
+            while left:
+                block = f.read(min(1024 * 1024, left))
+                if not block:
+                    raise OSError(f"{self.path} is shorter than when its upload began")
+                left -= len(block)
+                yield block
 
 
 def _outcome(job: dict[str, Any]) -> dict[str, Any]:
