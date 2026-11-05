@@ -500,7 +500,9 @@ class ImportRowORM(VersioningBase):
     kind = Column(Text, nullable=False)                   # node | edge
     raw = Column(JSONB, nullable=False)                   # normalized (bulk_ingest) row shape
     match_key = Column(Text, nullable=True)               # urn | endpoint-triple | qualifiedName
-    matched_entity_id = Column(Text, nullable=True)       # resolved at the resolve phase
+    # What a row resolved to, as a release before ``import_results`` recorded it (a job it staged
+    # and a later one resumes); nothing writes them now.
+    matched_entity_id = Column(Text, nullable=True)
     resolved_op = Column(Text, nullable=True)             # create|update|delete|unchanged|invalid
     status = Column(Text, nullable=True)                  # new|updated|unchanged|deleted|invalid|auto_fixed
     reasons = Column(JSONB, nullable=True)                # violations / suggestions
@@ -515,6 +517,30 @@ class ImportRowORM(VersioningBase):
         Index("ix_import_rows_kind_row", "job_id", "kind", "row_index"),
         Index("ix_import_rows_matched", "job_id", "matched_entity_id"),   # a replace's absence check
         CheckConstraint("kind IN ('node','edge')", name="ck_import_rows_kind"),
+    )
+
+
+class ImportResultORM(VersioningBase):
+    """What each staged row of an import resolved to: the entity it matched or created, the op,
+    and the reasons a row was refused. Written once, with the window that resolved the row, so a
+    staged row is written once and never again: recording the outcome on the row itself rewrote
+    the whole row (its raw JSON inline, an indexed column changing) with three new index entries,
+    and left a dead copy for autovacuum, for every row of the file. A row's status is its op's
+    (``resolve._STATUS``). Plain, keyed by job like ``import_rows``, and deleted with them."""
+
+    __tablename__ = "import_results"
+
+    job_id = Column(Text, nullable=False)
+    row_index = Column(BigInteger, nullable=False)        # the staged row's
+    kind = Column(Text, nullable=False)                   # node | edge
+    matched_entity_id = Column(Text, nullable=True)       # None: a refused create, a delete of nothing
+    resolved_op = Column(Text, nullable=False)            # create|update|delete|unchanged|invalid
+    reasons = Column(JSONB, nullable=True)                # why it was refused, or a note
+
+    __table_args__ = _plain(
+        PrimaryKeyConstraint("job_id", "row_index", name="pk_import_results"),
+        # Which earlier row named an entity (one row per entity), and a replace's absence check.
+        Index("ix_import_results_matched", "job_id", "matched_entity_id"),
     )
 
 

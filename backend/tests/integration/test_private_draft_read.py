@@ -110,8 +110,9 @@ async def _run() -> None:
             async with db.graphver_session() as s:
                 s.add(models.JobORM(id=job, job_type="ingest", graph_id=gid, workspace_id="ws1",
                                     data_source_id=ds, branch_id=d, status="completed"))
-                s.add(models.ImportRowORM(job_id=job, row_index=0, kind="node", resolved_op="create",
-                                          status="new", raw={"displayName": "Secret Table"}))
+                s.add(models.ImportRowORM(job_id=job, row_index=0, kind="node",
+                                          raw={"displayName": "Secret Table"}))
+                s.add(models.ImportResultORM(job_id=job, row_index=0, kind="node", resolved_op="create"))
 
             async def imports(user: str, manage: bool = False) -> list:
                 h = {"X-User": user, "X-Manage": "1" if manage else "0"}

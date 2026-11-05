@@ -37,8 +37,8 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
-from sqlalchemy import (BigInteger, Text, and_, bindparam, delete, exists, false, func, insert,
-                        null, or_, select, text, tuple_)
+from sqlalchemy import (BigInteger, Text, and_, any_, bindparam, delete, exists, false, func, null,
+                        or_, select, text, tuple_)
 from sqlalchemy.dialects.postgresql import ARRAY
 
 from backend.app.services.view_placement import NodeFacts, suggest_placement
@@ -46,28 +46,47 @@ from backend.app.services.view_placement import NodeFacts, suggest_placement
 from .. import config, db
 from ..ids import new_entity_id
 from ..job_lease import QUEUED, Lease, Superseded
-from ..models import BranchORM, EdgeVersionORM, ImportRowORM, JobORM, NodeVersionORM
+from ..models import (BranchORM, EdgeVersionORM, ImportResultORM, ImportRowORM, JobORM,
+                      NodeVersionORM)
 from ..service import OntologyViolation
 from .formats import get_adapter
 from .resolve import (KeyIndex, _canonical_map, key_value, pointer_id, pointer_seed, pointers,
                       resolve_rows)
 from .rowmodel import PROP_DELETE, normalize
-from .snapshot import open_snapshot
+from .snapshot import open_snapshot, window_reads
 from .stream import view_entities
 from .uploads import WHOLE_FILE_FORMATS, is_archive_source, open_source, source_size, too_large
 
 logger = logging.getLogger(__name__)
 
-_PARSE_BATCH = 2000
+# Rows a parse stages per transaction (each with the job's checkpoint); a resumed parse redoes at
+# most one batch.
+_PARSE_BATCH = 10000
 _PERSIST_BATCH = 5000
-# Record a batch of resolutions: each column one array parameter, so the statement never changes.
-_RESOLVE_ROWS = text(
-    f"UPDATE {ImportRowORM.__table__.fullname} AS r SET matched_entity_id = v.eid, resolved_op = v.op, "
-    "status = v.status, reasons = v.reasons::jsonb "
-    "FROM unnest(:idx, :eids, :ops, :statuses, :reasons) AS v(row_index, eid, op, status, reasons) "
-    "WHERE r.job_id = :job_id AND r.row_index = v.row_index",
+# Stage a batch of parsed rows: the rows as typed columns, unnested server-side — one statement,
+# where an INSERT of a list of rows is one statement per row on the server (executemany).
+_STAGE_ROWS = text(
+    f"INSERT INTO {ImportRowORM.__table__.fullname} (job_id, row_index, kind, raw) "
+    "SELECT :job_id, v.row_index, v.kind, CAST(v.raw AS jsonb) "
+    "FROM unnest(:idx, :kinds, :raws) AS v(row_index, kind, raw)",
+).bindparams(bindparam("idx", type_=ARRAY(BigInteger)), bindparam("kinds", type_=ARRAY(Text)),
+             bindparam("raws", type_=ARRAY(Text)))
+_RESULT_COLUMNS = "job_id, row_index, kind, matched_entity_id, resolved_op, reasons"
+# Record a batch of outcomes: each column one array parameter, so the statement never changes.
+_RECORD_RESULTS = text(
+    f"INSERT INTO {ImportResultORM.__table__.fullname} ({_RESULT_COLUMNS}) "
+    "SELECT :job_id, v.row_index, v.kind, v.eid, v.op, v.reasons::jsonb "
+    "FROM unnest(:idx, :kinds, :eids, :ops, :reasons) AS v(row_index, kind, eid, op, reasons)",
 ).bindparams(bindparam("idx", type_=ARRAY(BigInteger)),
-             *(bindparam(name, type_=ARRAY(Text)) for name in ("eids", "ops", "statuses", "reasons")))
+             *(bindparam(name, type_=ARRAY(Text)) for name in ("kinds", "eids", "ops", "reasons")))
+# The outcomes a worker of the release before ``import_results`` recorded on a job's staged rows,
+# copied across for the job it staged and this one resumes (``ImportWorker._carry_over_results``).
+_CARRY_OVER_RESULTS = text(
+    f"INSERT INTO {ImportResultORM.__table__.fullname} ({_RESULT_COLUMNS}) "
+    f"SELECT {_RESULT_COLUMNS} FROM {ImportRowORM.__table__.fullname} "
+    "WHERE job_id = :job_id AND resolved_op IS NOT NULL ON CONFLICT DO NOTHING")
+# A list of ids, as one array: the statement is the same whatever the list's length.
+_IDS = any_(bindparam("ids", type_=ARRAY(Text)))
 # A node row's resolutions that leave it naming a node later rows may point at.
 _LANDED = ("create", "update", "unchanged")
 # What an import's summary tallies, per row by its resolution (``deleted`` also counts what a
@@ -131,6 +150,17 @@ def _sniff_format(declared: str, head: bytes) -> str | None:
 def _chunks(seq: List[Any], size: int):
     for i in range(0, len(seq), size):
         yield seq[i:i + size]
+
+
+def _stage_columns(batch: List[Dict[str, Any]]) -> Dict[str, list]:
+    """A batch of parsed rows as ``_STAGE_ROWS``' columns, each row's raw as its JSON text."""
+    return {"idx": [r["row_index"] for r in batch], "kinds": [r["kind"] for r in batch],
+            "raws": [json.dumps(r["raw"]) for r in batch]}
+
+
+def _staged(res):
+    """An outcome's own staged row (``res`` is ``ImportResultORM``), to join for its raw fields."""
+    return and_(ImportRowORM.job_id == res.job_id, ImportRowORM.row_index == res.row_index)
 
 
 def _first_layer_id(layers: List[dict]) -> str:
@@ -312,6 +342,7 @@ class ImportWorker:
         graph_id, branch_id = job["graph_id"], job["branch_id"]
         actor = await self._branch_owner(graph_id, branch_id)
 
+        await self._lease.retry_transient(lambda: self._carry_over_results(job_id))
         await self._lease.retry_transient(
             lambda: self._stage(job_id, job["source_uri"], job["import_format"]))
         summary = await self._resolve_and_build(
@@ -347,6 +378,17 @@ class ImportWorker:
         self._cursor = row.last_cursor
         return _Position(row.last_cursor, dict(row.summary) if isinstance(row.summary, dict) else {},
                          row.processed or 0, row.total or 0)
+
+    async def _carry_over_results(self, job_id: str) -> None:
+        """A job a worker of the release before ``import_results`` staged, which this one resumes,
+        has its rows' outcomes on the rows themselves: copy them across, once, before any window
+        reads them. One indexed probe for any other job (no staged row of its names an entity).
+        Goes with ``ix_import_rows_matched`` in the release after."""
+        async with db.graphver_session() as s:
+            older = await s.scalar(select(ImportRowORM.row_index).where(
+                ImportRowORM.job_id == job_id, ImportRowORM.matched_entity_id.is_not(None)).limit(1))
+            if older is not None:
+                await s.execute(_CARRY_OVER_RESULTS, {"job_id": job_id})
 
     async def _branch_owner(self, graph_id: str, branch_id: str) -> str:
         async with db.graphver_session() as s:
@@ -426,13 +468,15 @@ class ImportWorker:
         return idx, skipped
 
     async def _flush(self, batch: List[Dict[str, Any]]) -> None:
-        """Stage a batch of parsed rows — batched multi-row INSERTs, no ORM object per row — and
-        move the job's cursor past them in the SAME transaction, fenced: each row is staged once,
-        by whichever run of the job got to it, and a superseded worker's batch rolls back."""
+        """Stage a batch of parsed rows — one statement (``_STAGE_ROWS``), the rows' JSON written off
+        the event loop — and move the job's cursor past them in the SAME transaction, fenced: each
+        row is staged once, by whichever run of the job got to it, and a superseded worker's batch
+        rolls back."""
         self._lease.check()
         cursor = f"parse:{batch[-1]['row_index'] + 1}"
+        columns = await asyncio.to_thread(_stage_columns, batch)
         async with db.graphver_session() as s:
-            await s.execute(insert(ImportRowORM.__table__), batch)
+            await s.execute(_STAGE_ROWS, {"job_id": batch[0]["job_id"], **columns})
             await self._lease.checkpoint(s, expect_cursor=self._cursor, last_cursor=cursor,
                                          total=batch[-1]["row_index"] + 1, current_phase="parse")
         self._cursor = cursor
@@ -489,7 +533,11 @@ class ImportWorker:
         if not rows and kind == "node":             # the node windows are done: on to the edges
             await _analyze_graph(graph_id)
             kind, rows = "edge", await self._window(job_id, "edge", -1)
+            if not rows:
+                return False                        # no edges: the statistics are fresh already
         if not rows:
+            if kind == "edge":                      # every window is in: what a publish plans on
+                await _analyze_graph(graph_id)
             return False
         if not self._identity_read:                # once a run, before its first window
             await self._identity_state(job_id, snap, graph_id, branch_id)
@@ -537,14 +585,15 @@ class ImportWorker:
         # value beside a urn — never a whole row, which a large job has millions of.
         fid, urn = ImportRowORM.raw["entity_id"].astext, ImportRowORM.raw["urn"].astext
         value = ImportRowORM.raw["properties"][ident].astext if ident else null()
-        links = or_(and_(fid != "", fid != ImportRowORM.matched_entity_id),
+        res = ImportResultORM
+        links = or_(and_(fid != "", fid != res.matched_entity_id),
                     and_(urn.isnot(None), value.isnot(None)) if ident else false())
         async with db.graphver_session() as s:
             landed = (await s.execute(
-                select(fid, urn, value, ImportRowORM.matched_entity_id)
-                .where(ImportRowORM.job_id == job_id, ImportRowORM.kind == "node",
-                       ImportRowORM.resolved_op.in_(_LANDED), links,
-                       ImportRowORM.matched_entity_id.is_not(None)))).all()   # not a delete of nothing
+                select(fid, urn, value, res.matched_entity_id)
+                .join_from(res, ImportRowORM, _staged(res))
+                .where(res.job_id == job_id, res.kind == "node", res.resolved_op.in_(_LANDED), links,
+                       res.matched_entity_id.is_not(None)))).all()   # not a delete of nothing
         for row_fid, row_urn, row_value, eid in landed:
             self._link(row_fid, row_urn, row_value, eid)
         onto = self._ontology or {}
@@ -668,15 +717,14 @@ class ImportWorker:
         eids = (lookups.get("node_eids") or set()) if kind == "node" else (
             set((lookups.get("edge_to_eid") or {}).values()) | (lookups.get("edge_eids") or set()))
         out: Dict[str, int] = {}
+        res = ImportResultORM
+        stmt = (select(res.matched_entity_id, func.min(res.row_index))
+                .where(res.job_id == job_id, res.kind == kind, res.row_index < before,
+                       res.matched_entity_id == _IDS, res.resolved_op != "invalid")
+                .group_by(res.matched_entity_id))
         async with db.graphver_session() as s:
             for chunk in _chunks(sorted(e for e in eids if e), _PERSIST_BATCH):
-                out.update((await s.execute(
-                    select(ImportRowORM.matched_entity_id, func.min(ImportRowORM.row_index))
-                    .where(ImportRowORM.job_id == job_id, ImportRowORM.kind == kind,
-                           ImportRowORM.row_index < before,
-                           ImportRowORM.matched_entity_id.in_(chunk),
-                           ImportRowORM.resolved_op != "invalid")
-                    .group_by(ImportRowORM.matched_entity_id))).all())
+                out.update((await s.execute(stmt, {"ids": chunk})).all())
         return out
 
     async def _window(self, job_id: str, kind: str, after: int) -> List[Dict[str, Any]]:
@@ -689,14 +737,17 @@ class ImportWorker:
                 .order_by(ImportRowORM.row_index).limit(config.IMPORT_COMMIT_WINDOW))).all()
         return [{**raw, "_row_index": idx} for idx, raw in rows]
 
-    async def _pointer_hits(self, snap, names) -> Dict[str, str]:
+    async def _pointer_hits(self, snap, names, read=None) -> Dict[str, str]:
         """``{name: node id}`` for the names rows point at nodes by: the live node that carries the
         name as its urn; else the live node whose id the name derives (one an import made from it);
-        else the node a row of this job gave it to as a second name."""
+        else the node a row of this job gave it to as a second name. With ``read`` (a dict), the
+        nodes found by a derived id are read with their payloads, into it."""
         names = {n for n in names if n}
         hits = dict(await snap.nodes_by_urn(names))
         derived = {n: pointer_id(self._id_scope, pointer_seed(n)) for n in names - set(hits)}
-        live = await snap.lookup_live("node", set(derived.values()))
+        live = await snap.lookup_live("node", set(derived.values()), payload=read is not None)
+        if read is not None:
+            read.update(live)
         hits.update({n: d for n, d in derived.items() if d in live})
         hits.update({n: self._aliases[n] for n in names - set(hits) if n in self._aliases})
         return hits
@@ -705,12 +756,21 @@ class ImportWorker:
         """What ``resolve_rows`` needs to match these node rows: the live nodes they name by
         entity_id, urn (or the identifier property's value) or — a row without a urn —
         qualifiedName, each one's current payload; and, of the identities the rows that match
-        nothing would take, which are taken and which a deleted node held."""
+        nothing would take, which are taken and which a deleted node held. Read in one
+        transaction (``window_reads``): one state of the graph, ``main`` from its heads."""
+        async with window_reads():
+            return await self._read_node_lookups(snap, rows)
+
+    async def _read_node_lookups(self, snap, rows) -> Dict[str, Any]:
         ident = self._identity_prop
         wanted = {n for r in rows for n in pointers(
             r.get("urn"), (r.get("properties") or {}).get(ident) if ident else None)}
-        by_id = await snap.lookup_live("node", {r["entity_id"] for r in rows if r.get("entity_id")})
-        urn_to_eid = await self._pointer_hits(snap, wanted)
+        # The nodes rows name by id, and by a derived id, read once with their payloads: they are
+        # what the rows are diffed against (``_heads`` reads only the rest).
+        by_id = await snap.lookup_live("node", {r["entity_id"] for r in rows if r.get("entity_id")},
+                                       payload=True)
+        read = dict(by_id)
+        urn_to_eid = await self._pointer_hits(snap, wanted, read)
         qname_to_eid = await snap.nodes_by_qname(r.get("qualifiedName") for r in rows if not r.get("urn"))
         named = set(by_id) | set(urn_to_eid.values()) | {e for e in qname_to_eid.values() if e}
         # A node an earlier window of this job made, by the file's id for it: read with the rest,
@@ -722,7 +782,7 @@ class ImportWorker:
                 r.get("properties"))[0])}
         taken, restore = await self._svc.identities_taken(
             graph_id=self._graph_id, branch_id=self._branch_id, names=wanted - set(urn_to_eid))
-        current, hash_of = await _heads(snap, "node", named)
+        current, hash_of = await _heads(snap, "node", named, read)
         return {"urn_to_eid": urn_to_eid, "qname_to_eid": qname_to_eid, "node_eids": named,
                 "current": current, "hash_of": hash_of,
                 "bases": await _bases(snap, "node", rows, hash_of), "taken": taken, "restore": restore}
@@ -730,7 +790,11 @@ class ImportWorker:
     async def _edge_lookups(self, snap, rows) -> Dict[str, Any]:
         """What ``resolve_rows`` needs for these edge rows: the live nodes their endpoints name (by
         entity_id, urn, or — an end without a urn — qualifiedName), the live edges between those
-        nodes, and each such edge's current payload."""
+        nodes, and each such edge's current payload. Read as :meth:`_node_lookups` reads."""
+        async with window_reads():
+            return await self._read_edge_lookups(snap, rows)
+
+    async def _read_edge_lookups(self, snap, rows) -> Dict[str, Any]:
         ends = {}
         ident = self._identity_prop
         for end in ("source", "target"):
@@ -769,14 +833,16 @@ class ImportWorker:
         order), and the endpoints of the edges it created as the draft holds them. The layout writer
         maps each eid to its projection key (urn or gv:<eid>) and reasons about parentage from the
         created edges."""
-        created = (ImportRowORM.job_id == job_id, ImportRowORM.resolved_op == "create")
+        res = ImportResultORM
+        created = (res.job_id == job_id, res.resolved_op == "create")
         async with db.graphver_session() as s:
             nodes = (await s.execute(
-                select(ImportRowORM.matched_entity_id, ImportRowORM.raw["urn"].astext,
+                select(res.matched_entity_id, ImportRowORM.raw["urn"].astext,
                        ImportRowORM.raw["layerAssignment"], ImportRowORM.raw["entityType"].astext,
                        ImportRowORM.raw["displayName"].astext, ImportRowORM.raw["tags"],
                        ImportRowORM.raw["properties"])
-                .where(*created, ImportRowORM.kind == "node").order_by(ImportRowORM.row_index))).all()
+                .join_from(res, ImportRowORM, _staged(res))
+                .where(*created, res.kind == "node").order_by(res.row_index))).all()
             # Each created node's projection key is the urn it was stored with — the file's urn
             # is only a pointer — read from the draft's versions, as the edges are below.
             stored: Dict[str, Optional[str]] = {}
@@ -786,8 +852,8 @@ class ImportWorker:
                     .where(NodeVersionORM.graph_id == graph_id,
                            NodeVersionORM.branch_id == branch_id,
                            NodeVersionORM.entity_id.in_(chunk), NodeVersionORM.op == "create"))).all())
-            edge_ids = (await s.execute(select(ImportRowORM.matched_entity_id)
-                                        .where(*created, ImportRowORM.kind == "edge"))).scalars().all()
+            edge_ids = (await s.execute(select(res.matched_entity_id)
+                                        .where(*created, res.kind == "edge"))).scalars().all()
             edges = []
             for chunk in _chunks(edge_ids, _PERSIST_BATCH):
                 edges += (await s.execute(
@@ -841,26 +907,28 @@ class ImportWorker:
         """Those of ``eids`` no row of this import matched."""
         async with db.graphver_session() as s:
             matched = set((await s.execute(
-                select(ImportRowORM.matched_entity_id).where(
-                    ImportRowORM.job_id == job_id, ImportRowORM.matched_entity_id.in_(eids))
-            )).scalars())
+                select(ImportResultORM.matched_entity_id).where(
+                    ImportResultORM.job_id == job_id, ImportResultORM.matched_entity_id == _IDS),
+                {"ids": list(eids)})).scalars())
         return [eid for eid in eids if eid not in matched]
 
     @staticmethod
     async def _persist_resolutions(s, job_id: str, resolutions) -> None:
-        """Record each row's resolution, in the window's transaction: one UPDATE per few thousand
-        rows, each column as one array (unnest), rather than a round trip per row (which took over
-        a third of an import)."""
+        """Record each row's outcome in ``import_results``, in the window's transaction: one INSERT
+        per few thousand rows, each column as one array (unnest), rather than a round trip per row
+        (which took over a third of an import). The staged rows themselves are never written again."""
         for chunk in _chunks(resolutions, _PERSIST_BATCH):
-            await s.execute(_RESOLVE_ROWS, {
+            await s.execute(_RECORD_RESULTS, {
                 "job_id": job_id, "idx": [r["_row_index"] for r in chunk],
+                "kinds": [r["kind"] for r in chunk],
                 "eids": [r["matched_entity_id"] for r in chunk],
-                "ops": [r["resolved_op"] for r in chunk], "statuses": [r["status"] for r in chunk],
+                "ops": [r["resolved_op"] for r in chunk],
                 "reasons": [json.dumps(r["reasons"]) if r["reasons"] else None for r in chunk]})
 
 
 async def _analyze_graph(graph_id: str) -> None:
-    """Refresh the planner's statistics of the graph's partitions once the node windows are in.
+    """Refresh the planner's statistics of the graph's partitions once the node windows are in, and
+    again once the edge windows are (a publish of the draft plans its pages on them).
 
     Until autovacuum gets to them, they describe the partitions without what those windows wrote
     (100k draft heads and versions into a new graph): the first edge window's lookups of its ends'
@@ -879,9 +947,9 @@ async def _analyze_graph(graph_id: str) -> None:
 
 
 async def sweep_staged_rows(*, older_than_days: float, batch: int = 50_000) -> int:
-    """Delete the staged rows of import jobs that finished more than ``older_than_days`` ago, a
-    batch per transaction (a large import stages millions). Their preview sample goes with them;
-    the draft's changes, the review surface, stay. Returns how many rows went."""
+    """Delete the staged rows of import jobs that finished more than ``older_than_days`` ago, with
+    their outcomes, a batch per transaction (a large import stages millions). Their preview sample
+    goes with them; the draft's changes, the review surface, stay. Returns how many rows went."""
     cutoff = (datetime.now(timezone.utc) - timedelta(days=older_than_days)).isoformat()
     async with db.graphver_session() as s:
         jobs = (await s.execute(select(JobORM.id).where(
@@ -892,7 +960,12 @@ async def sweep_staged_rows(*, older_than_days: float, batch: int = 50_000) -> i
     for job_id in jobs:
         while True:
             async with db.graphver_session() as s:
-                first = select(ImportRowORM.row_index).where(ImportRowORM.job_id == job_id).limit(batch)
+                # In row order, so both statements name the same rows: the batch's outcomes, then
+                # the rows. An outcome is never left behind without its row.
+                first = (select(ImportRowORM.row_index).where(ImportRowORM.job_id == job_id)
+                         .order_by(ImportRowORM.row_index).limit(batch))
+                await s.execute(delete(ImportResultORM).where(
+                    ImportResultORM.job_id == job_id, ImportResultORM.row_index.in_(first)))
                 gone = (await s.execute(delete(ImportRowORM).where(
                     ImportRowORM.job_id == job_id, ImportRowORM.row_index.in_(first)))).rowcount
             removed += gone
@@ -951,9 +1024,12 @@ def _normalize_page(page: List[Dict[str, Any]], native: bool = False) -> Tuple[L
     return out, skipped
 
 
-async def _heads(snap, kind: str, eids) -> Tuple[Dict[str, dict], Dict[str, str]]:
-    """The current payload of each live entity among ``eids``, and its content hash."""
-    live = await snap.lookup_live(kind, set(eids), payload=True)
+async def _heads(snap, kind: str, eids, read=None) -> Tuple[Dict[str, dict], Dict[str, str]]:
+    """The current payload of each live entity among ``eids``, and its content hash; ``read`` holds
+    the live entities the window already read with their payloads, which are not read again."""
+    eids = set(eids)
+    live = {eid: w for eid, w in (read or {}).items() if eid in eids}
+    live.update(await snap.lookup_live(kind, eids - set(live), payload=True))
     return ({eid: json.loads(w.payload) for eid, w in live.items() if w.payload is not None},
             {eid: w.content_hash for eid, w in live.items() if w.payload is not None})
 
