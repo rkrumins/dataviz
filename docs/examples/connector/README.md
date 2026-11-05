@@ -14,7 +14,8 @@ what [Building a Connector](../../CONNECTOR_GUIDE.md) describes, in about 300 li
     is resumed by the next one, which sends only the parts the server lacks. Progress is kept in a
     state file beside the file, keyed on its sha256.
   - **`start`** imports the upload into a draft. With `--publish` the import publishes itself
-    (`autoPublish`) once every row is applied.
+    (`autoPublish`) once every row is applied. With `--bulk` it loads the published graph itself,
+    with no draft and no publish (`bulk`): the fastest way in for a large file.
   - **`follow`** polls a job until it finishes, waiting longer between polls as it goes. A large
     import runs for hours.
   - **`published`** follows the publish to its end. If the import never wrote how its publish went
@@ -29,11 +30,13 @@ export SYNODIC_URL=https://synodic.example.com SYNODIC_TOKEN=nxsat_…    # a se
 python connector.py source.json --workspace ws_… --graph graph_… --check       # a dry run only
 python connector.py source.json --workspace ws_… --graph graph_… --publish     # import and publish
 python connector.py --file export.csv --workspace ws_… --graph graph_… --publish
+python connector.py --file big.ndjson --workspace ws_… --graph graph_… --bulk           # straight in
 ```
 
-Without `--publish`, the import lands in a draft for someone to review and publish. The run exits
-non-zero when the import fails, or when it couldn't publish itself; the printed `publish.reason`
-says why. Run it again and nothing changes.
+Without `--publish` or `--bulk`, the import lands in a draft for someone to review and publish. The
+run exits non-zero when the import fails, or when it couldn't publish itself (the printed
+`publish.reason` says why), or when a bulk import refused rows (the rest landed; the job's preview
+names them). Run it again and nothing changes.
 
 `backend/tests/test_connector_example.py` keeps it honest. Every record must pass the record
 contract, and the same source must give the same file. The test's server answers as the API does:
