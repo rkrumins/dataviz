@@ -58,23 +58,46 @@ def _decode_no_bom(raw: bytes) -> str:
         return raw.decode("cp1252", errors="replace")
 
 
+#: The longest line — or quoted CSV record — a file may hold. A file whose lines never end (CR-only
+#: line endings, or no line breaks at all), or a CSV quote left open, would otherwise be read whole
+#: into the worker's memory: a multi-gigabyte one runs it out of memory, and the next worker to take
+#: the job over too. Past this, the import fails, saying which line.
+MAX_RECORD_BYTES = 16 * 1024 * 1024
+
+
+def _too_long(line: int, *, quote: bool = False) -> ValueError:
+    limit = f"{MAX_RECORD_BYTES // 1024 ** 2} MB"
+    if quote:
+        return ValueError(f"Line {line} of the file opens a quoted cell that doesn't close within "
+                          f"{limit}, so nothing was imported. Check that every quote the file "
+                          "opens is closed.")
+    return ValueError(f"Line {line} of the file has no line break within {limit}, so nothing was "
+                      "imported. Is the file saved with CR-only line endings, or with no line "
+                      "breaks at all? Save it with one record per line (LF or CRLF line endings).")
+
+
 async def _lines(chunks: AsyncIterator[bytes]) -> AsyncIterator[str]:
     """Yield complete decoded lines from a byte-chunk stream (reassembling across boundaries).
     Linear: each chunk is scanned once with ``find`` and only the unfinished line's pieces carry
-    over (re-splitting the whole remaining buffer per line was quadratic)."""
+    over (re-splitting the whole remaining buffer per line was quadratic). A line longer than
+    ``MAX_RECORD_BYTES`` is a ``ValueError``."""
     tail: List[bytes] = []
-    seen = False
+    held = 0                                  # bytes of the unfinished line so far
+    seen = 0                                  # lines yielded
     async for chunk in chunks:
         start = 0
         end = chunk.find(b"\n")
         while end != -1:
             tail.append(chunk[start:end])
             yield _decode_line(b"".join(tail), first=not seen)
-            tail = []
-            seen = True
+            tail, held = [], 0
+            seen += 1
             start = end + 1
             end = chunk.find(b"\n", start)
         tail.append(chunk[start:])
+        held += len(chunk) - start
+        if held > MAX_RECORD_BYTES:
+            raise _too_long(seen + 1)
     rest = b"".join(tail)
     if rest.strip():
         yield _decode_line(rest, first=not seen)
@@ -86,11 +109,17 @@ async def _csv_records(lines: AsyncIterator[str], delim: str) -> AsyncIterator[s
     only at the start of a cell (anywhere else it is literal, e.g. ``5" screen``), and inside one
     ``""`` is an escaped quote. A line with no quote costs one ``find``."""
     record: List[str] = []
+    size = 0                                  # characters of the record so far
     quoted = False
+    number = 0                                # the physical line read last
     async for line in lines:
+        number += 1
         if line == "" and not record:
             continue
         record.append(line)
+        size += len(line) + 1
+        if size > MAX_RECORD_BYTES:
+            raise _too_long(number - len(record) + 1, quote=True)
         i = line.find('"')
         while i != -1:
             if quoted:
@@ -103,7 +132,7 @@ async def _csv_records(lines: AsyncIterator[str], delim: str) -> AsyncIterator[s
             i = line.find('"', i + 1)
         if not quoted:
             yield "\n".join(record)
-            record = []
+            record, size = [], 0
     if record:
         yield "\n".join(record)   # a quoted cell still open at EOF: the csv reader closes it
 

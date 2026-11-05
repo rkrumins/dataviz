@@ -233,7 +233,8 @@ async def test_run_import_resolves_the_mapping_for_its_worker(monkeypatch):
             return dict(_NO_TALLIES)
 
     row = SimpleNamespace(workspace_id="ws", data_source_id="ds", scope_view_id=None,
-                          reconcile_mode="upsert", branch_id="br_1")
+                          reconcile_mode="upsert", branch_id="br_1",
+                          graph_id="g1", auto_publish=False)
     monkeypatch.setattr(ver_db, "graphver_session", _sessions([], row))
     monkeypatch.setattr(service_mod, "ImportWorker", _Worker)
     await ImportExportService(versioning=object(), store=object(),

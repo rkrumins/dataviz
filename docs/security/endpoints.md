@@ -4,7 +4,7 @@
 
 **48 reachable with no gate of any kind** — worth attacking first. Routes whose gate lives inside the handler (most of the auth surface) are named explicitly rather than reported as ungated.
 
-**225 callable with an API key** (`Authorization: Bearer nxpat_…`, or `nxsat_…` for a service account's), acting as the person or service account it belongs to and held to the views and data sources its key covers as the API key column says — see `backend/app/auth/api_key_surface.py`. Every other route refuses a key with `403 api_key_not_allowed`.
+**227 callable with an API key** (`Authorization: Bearer nxpat_…`, or `nxsat_…` for a service account's), acting as the person or service account it belongs to and held to the views and data sources its key covers as the API key column says — see `backend/app/auth/api_key_surface.py`. Every other route refuses a key with `403 api_key_not_allowed`.
 
 
 ### Authentication + SSO
@@ -626,7 +626,7 @@
 | `DELETE` | `/api/v1/{ws_id}/versioning/graphs/{graph_id}/branches/{branch_id}/members/{subject_type}/{subject_id}` | workspace:datasource:manage (ws:ws_id) | enforced | refused |
 | `GET` | `/api/v1/{ws_id}/versioning/graphs/{graph_id}/branches/{branch_id}/merge-preview` | workspace:datasource:read (ws:ws_id) | n/a | resource |
 | `POST` | `/api/v1/{ws_id}/versioning/graphs/{graph_id}/branches/{branch_id}/merge-requests` | workspace:datasource:manage (ws:ws_id) | enforced | resource |
-| `POST` | `/api/v1/{ws_id}/versioning/graphs/{graph_id}/branches/{branch_id}/publish` | workspace:datasource:manage (ws:ws_id), workspace:datasource:publish (ws:ws_id) | enforced | refused |
+| `POST` | `/api/v1/{ws_id}/versioning/graphs/{graph_id}/branches/{branch_id}/publish` | workspace:datasource:manage (ws:ws_id), workspace:datasource:publish (ws:ws_id; an API key: its owner's) | enforced | resource |
 | `POST` | `/api/v1/{ws_id}/versioning/graphs/{graph_id}/branches/{branch_id}/rebase` | workspace:datasource:manage (ws:ws_id) | enforced | resource |
 | `GET` | `/api/v1/{ws_id}/versioning/graphs/{graph_id}/branches/{branch_id}/state` | workspace:datasource:read (ws:ws_id) | n/a | resource |
 | `POST` | `/api/v1/{ws_id}/versioning/graphs/{graph_id}/branches/{branch_id}/transfer` | workspace:datasource:manage (ws:ws_id) | enforced | refused |
@@ -667,7 +667,7 @@
 | `GET` | `/api/v1/{ws_id}/versioning/graphs/{graph_id}/imports/uploads/{upload_id}` | workspace:datasource:manage (ws:ws_id) | n/a | resource |
 | `POST` | `/api/v1/{ws_id}/versioning/graphs/{graph_id}/imports/uploads/{upload_id}/complete` | workspace:datasource:manage (ws:ws_id) | enforced | resource |
 | `PUT` | `/api/v1/{ws_id}/versioning/graphs/{graph_id}/imports/uploads/{upload_id}/parts/{part}` | workspace:datasource:manage (ws:ws_id) | enforced | resource |
-| `POST` | `/api/v1/{ws_id}/versioning/graphs/{graph_id}/imports/validate` | workspace:datasource:read (ws:ws_id) | enforced | resource |
+| `POST` | `/api/v1/{ws_id}/versioning/graphs/{graph_id}/imports/validate` | workspace:datasource:read (ws:ws_id) | enforced | resource (reads only) |
 | `GET` | `/api/v1/{ws_id}/versioning/graphs/{graph_id}/imports/{job_id}` | workspace:datasource:read (ws:ws_id) | n/a | resource |
 | `GET` | `/api/v1/{ws_id}/versioning/graphs/{graph_id}/imports/{job_id}/preview` | workspace:datasource:read (ws:ws_id) | n/a | resource |
 | `POST` | `/api/v1/{ws_id}/versioning/graphs/{graph_id}/lifecycle/freeze` | workspace:datasource:manage (ws:ws_id), workspace:datasource:publish (ws:ws_id) | enforced | refused |
@@ -691,7 +691,7 @@
 | `GET` | `/api/v1/{ws_id}/versioning/merge-requests/{pr_id}/diff` | workspace:datasource:read (ws:ws_id) | n/a | resource |
 | `GET` | `/api/v1/{ws_id}/versioning/merge-requests/{pr_id}/diff/children` | workspace:datasource:read (ws:ws_id) | n/a | resource |
 | `GET` | `/api/v1/{ws_id}/versioning/merge-requests/{pr_id}/diff/summary` | workspace:datasource:read (ws:ws_id) | n/a | resource |
-| `POST` | `/api/v1/{ws_id}/versioning/merge-requests/{pr_id}/merge` | workspace:datasource:manage (ws:ws_id), workspace:datasource:publish (ws:ws_id) | enforced | refused |
+| `POST` | `/api/v1/{ws_id}/versioning/merge-requests/{pr_id}/merge` | workspace:datasource:manage (ws:ws_id), workspace:datasource:publish (ws:ws_id; an API key: its owner's) | enforced | resource |
 | `GET` | `/api/v1/{ws_id}/versioning/merge-requests/{pr_id}/preview` | workspace:datasource:read (ws:ws_id) | n/a | resource |
 | `GET` | `/api/v1/{ws_id}/versioning/pulls/{pr_id}` | workspace:datasource:read (ws:ws_id) | n/a | resource |
 | `PATCH` | `/api/v1/{ws_id}/versioning/pulls/{pr_id}` | workspace:datasource:manage (ws:ws_id) | enforced | resource |

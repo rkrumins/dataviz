@@ -16,6 +16,7 @@ import tempfile
 import time
 
 from backend.app.services.storage.object_store import LocalFsObjectStore
+from backend.app.services.versioning.import_export import formats
 from backend.app.services.versioning.import_export.formats import _lines, get_adapter
 from backend.app.services.versioning.import_export.import_worker import ImportWorker, _sniff_format
 from backend.app.services.versioning.import_export.resolve import _changed_props
@@ -226,6 +227,27 @@ def test_import_format_sniff(caplog):
 
 def test_import_formats_scale():
     asyncio.run(_run_scale())
+
+
+def test_a_line_that_never_ends_fails_the_import_instead_of_filling_memory(monkeypatch):
+    """A file with CR-only line endings (or none), or a CSV quote left open, would be read whole
+    into memory: past ``MAX_RECORD_BYTES`` the read stops with which line it was. Lines under the
+    limit, however many, read as before."""
+    import pytest
+
+    monkeypatch.setattr(formats, "MAX_RECORD_BYTES", 64)
+    ok = b'{"kind":"node","urn":"urn:a"}\n' * 10
+    cr_only = b'{"kind":"node","urn":"urn:a"}\r' * 10                 # 300 bytes, no line feed
+    open_quote = b'kind,urn,displayName\nnode,urn:a,"never closed\n' + b"more text\n" * 10
+
+    async def run():
+        assert len(await _collect(get_adapter("ndjson").parse(_achunks(ok[:40], ok[40:])))) == 10
+        with pytest.raises(ValueError, match="Line 1 of the file has no line break within"):
+            await _collect(get_adapter("ndjson").parse(_achunks(*(cr_only[i:i + 32]
+                                                                   for i in range(0, 300, 32)))))
+        with pytest.raises(ValueError, match="Line 2 of the file opens a quoted cell that doesn't close"):
+            await _collect(get_adapter("csv").parse(_achunks(open_quote)))
+    asyncio.run(run())
 
 
 if __name__ == "__main__":

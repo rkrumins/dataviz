@@ -138,6 +138,37 @@ def test_writing_main_directly_needs_publish_held_by_the_person_or_the_keys_owne
     assert unknown.value.status_code == 503
 
 
+async def test_publishing_a_draft_holds_a_person_as_before_and_a_key_to_its_owners_publish():
+    """``require_publish`` gates publishing a draft and merging its review. A person meets
+    ``requires()`` itself: the same ``missing_permission`` answer as before. A key, which never
+    holds publish, passes where its owner publishes and gets ``publish_required`` elsewhere."""
+    from backend.app.api.v1.versioning_gate import require_publish
+    from backend.app.services.permission_service import KeyScope, PermissionClaims
+    from backend.app.services.versioning.errors import PublishRequired
+    manage = ("workspace:datasource:read", "workspace:datasource:manage")
+    request = SimpleNamespace(path_params={"ws_id": "ws1"}, query_params={})
+    user = SimpleNamespace(id="u1")
+
+    async def gate(claims):
+        return await require_publish(request, user, claims, None)
+
+    with pytest.raises(HTTPException) as refused:
+        await gate(PermissionClaims(sid="s", ws_perms={"ws1": manage}))
+    assert refused.value.status_code == 403
+    assert refused.value.detail["error"] == "missing_permission"
+    assert refused.value.detail["permission"] == "workspace:datasource:publish"
+    assert await gate(PermissionClaims(
+        sid="s", ws_perms={"ws1": manage + ("workspace:datasource:publish",)})) is user
+
+    def key(**owner):
+        return PermissionClaims(sid="", ws_perms={"ws1": manage},
+                                key_scope=KeyScope(key_id="k", data="write", **owner))
+    with pytest.raises(PublishRequired):
+        await gate(key(owner_publish_workspaces=frozenset({"ws2"})))
+    assert await gate(key(owner_publish_workspaces=frozenset({"ws1"}))) is user
+    assert not hasattr(require_publish, "required_permission")      # a key could never hold it
+
+
 def test_a_service_account_reviewing_or_approving_is_403_person_required():
     from backend.app.services.versioning.errors import PersonRequired
     exc = PersonRequired("a service account cannot review a PR: name a person")

@@ -543,7 +543,8 @@ class ImportWorker:
             landed = (await s.execute(
                 select(fid, urn, value, ImportRowORM.matched_entity_id)
                 .where(ImportRowORM.job_id == job_id, ImportRowORM.kind == "node",
-                       ImportRowORM.resolved_op.in_(_LANDED), links))).all()
+                       ImportRowORM.resolved_op.in_(_LANDED), links,
+                       ImportRowORM.matched_entity_id.is_not(None)))).all()   # not a delete of nothing
         for row_fid, row_urn, row_value, eid in landed:
             self._link(row_fid, row_urn, row_value, eid)
         onto = self._ontology or {}

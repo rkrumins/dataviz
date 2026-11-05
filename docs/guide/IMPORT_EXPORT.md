@@ -354,4 +354,5 @@ those Views can run the publish script in the
 - [Editing in a Draft](/guide/editing-in-a-draft) — when you want to check or adjust what an import put in your draft, then submit it.
 - [The Review Center](/guide/review-center) — when an import is waiting for someone to review and merge it.
 - [Versioning & Change Control](/guide/versioning-change-control) — when you need version control turned on, or want to undo a published import.
+- [Building a Connector](/docs/connector-guide) — when a script or another system sends files on a schedule, from a few rows up to several gigabytes, and can publish them itself.
 - [Display Rules](/guide/display-rules) — when you're moving display rules and saved searches in a library file.

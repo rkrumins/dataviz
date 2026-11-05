@@ -78,6 +78,15 @@ async def _run(svc) -> None:
                                         branch_id=draft, data=data, import_format="ndjson")
     assert on_draft["summary"]["unchanged"] == 1 and on_draft["checkedAgainst"] == draft
 
+    # A delete of what isn't there is done already: unchanged, not listed, and counted in a hint.
+    gone = await ie.validate_import(graph_id=gid, workspace_id="ws1", data_source_id=ds, branch_id=None,
+                                    data=_ndjson({"kind": "node", "urn": "urn:li:gone",
+                                                  "entityType": "Table", "_op": "delete"}),
+                                    import_format="ndjson")
+    assert (gone["summary"]["unchanged"], gone["summary"]["invalid"], gone["rows"]) == (1, 0, [])
+    assert gone["hints"] == [gone["hints"][0]] and gone["hints"][0].startswith(
+        "1 delete row finds nothing to delete"), gone["hints"]
+
     # One window at most, and a file it can't read says so.
     window, config.IMPORT_COMMIT_WINDOW = config.IMPORT_COMMIT_WINDOW, 2
     try:

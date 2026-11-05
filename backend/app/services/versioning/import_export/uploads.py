@@ -166,8 +166,11 @@ async def load_package(store, upload_id: str, owner: str) -> Dict[str, Any]:
 
 
 def expires_at(record: Dict[str, Any]) -> datetime:
-    """When the package upload may be swept (unless a job still reads it)."""
-    ttl = min(PACKAGE_TTL_SECONDS, config.OBJECT_STORE_TTL_HOURS * 3600)
+    """When the upload may be swept (unless a job still reads it): ``OBJECT_STORE_TTL_HOURS`` after
+    it was started — a package's ``PACKAGE_TTL_SECONDS`` at most."""
+    ttl = config.OBJECT_STORE_TTL_HOURS * 3600
+    if _PACKAGE_ID.match(record["uploadId"]):
+        ttl = min(PACKAGE_TTL_SECONDS, ttl)
     return datetime.fromisoformat(record["createdAt"]) + timedelta(seconds=ttl)
 
 

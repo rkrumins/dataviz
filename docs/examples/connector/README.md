@@ -1,27 +1,41 @@
 # Reference connector
 
 `connector.py` sends a source system's catalog into a data source's graph through the HTTP API
-alone. It is what [Building a Connector](../../CONNECTOR_GUIDE.md) describes, in about 150 lines.
+alone. It can also send any NDJSON, CSV or TSV file you already have, gigabytes included. It is
+what [Building a Connector](../../CONNECTOR_GUIDE.md) describes, in about 300 lines.
 
 - **`source.json`**: a warehouse's tables, their columns, the lineage between tables, and a table
   it dropped.
-- **`to_records`**: maps it to import records (format v1). Each node is pointed at by a urn of
-  the source's own (`urn:acme-warehouse:table:…`), so every run finds the same nodes.
-- **`Graph`**: the API calls.
-  - `validate`: the dry run;
-  - `start_import`: one request, or resumable parts past 100 MB, sending only the parts the server
-    lacks, under an idempotency key drawn from the file;
-  - `wait`: polls the job until it finishes.
+- **`to_records`** maps it to import records (format v1). Each node is pointed at by a urn of the
+  source's own (`urn:acme-warehouse:table:…`), so every run finds the same nodes. `write_ndjson`
+  streams them to a file on disk.
+- **`Graph`** makes the API calls:
+  - **`upload`** sends the file in resumable parts, 4 at a time, read from disk. A run that stopped
+    is resumed by the next one, which sends only the parts the server lacks. Progress is kept in a
+    state file beside the file, keyed on its sha256.
+  - **`start`** imports the upload into a draft. With `--publish` the import publishes itself
+    (`autoPublish`) once every row is applied.
+  - **`follow`** polls a job until it finishes, waiting longer between polls as it goes. A large
+    import runs for hours.
+  - **`published`** follows the publish to its end. If the import never wrote how its publish went
+    (its worker stopped in between), it publishes the draft itself.
+  - **`check`** is the dry run, on the file's first rows.
+- **`Api`** asks again whenever an answer says to: a 429 or 503 after its `Retry-After`, another
+  5xx or a dropped connection after a growing pause.
 
 ```bash
 pip install httpx
-export SYNODIC_URL=https://synodic.example.com SYNODIC_TOKEN=nxsat_…   # a service account's key
-python connector.py source.json --workspace ws_… --graph gv_… --check  # check only
-python connector.py source.json --workspace ws_… --graph gv_…          # check, then import
+export SYNODIC_URL=https://synodic.example.com SYNODIC_TOKEN=nxsat_…    # a service account's key
+python connector.py source.json --workspace ws_… --graph graph_… --check       # a dry run only
+python connector.py source.json --workspace ws_… --graph graph_… --publish     # import and publish
+python connector.py --file export.csv --workspace ws_… --graph graph_… --publish
 ```
 
-The import lands in a draft; publish it, or open a merge request for review. Run it again and
-nothing changes.
+Without `--publish`, the import lands in a draft for someone to review and publish. The run exits
+non-zero when the import fails, or when it couldn't publish itself; the printed `publish.reason`
+says why. Run it again and nothing changes.
 
-`backend/tests/test_connector_example.py` keeps it honest: every record passes the record
-contract, the same source gives the same file, and its calls match the API.
+`backend/tests/test_connector_example.py` keeps it honest. Every record must pass the record
+contract, and the same source must give the same file. The test's server answers as the API does:
+parts, resume, `Retry-After`, the publish and its fallback. Every call the connector makes must be
+one an API key may make (`api_key_surface`).

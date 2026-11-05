@@ -27,7 +27,8 @@ sync safety overrides (``force``, ``allowMassDelete``) on ``POST /graphs/{id}/sy
 a graph's outside changes into history (``/graph/resync``) needs neither: it holds main and
 deletes nothing. Nor is
 ``require_publish_for_main``: a versioned graph's main is written directly only by a person with
-publish, or with an API key whose owner has it.
+publish, or with an API key whose owner has it. ``require_publish`` holds publishing a draft, and
+merging its review, to the same rule.
 
 Both go through ``FeatureFlagService.is_enabled_self_session`` (cache-first, 30s
 TTL — the hot read paths never pay a DB-pool checkout for this), defaulting to
@@ -44,8 +45,10 @@ from backend.app.auth.dependencies import (
     assert_session_alive_or_503,
     get_current_user,
     get_permission_claims,
+    requires,
 )
 from backend.app.config.features_seed import REFUSAL_MESSAGES
+from backend.app.db.engine import get_db_session
 from backend.app.db.models import ViewORM
 from backend.app.db.repositories import data_source_repo
 from backend.app.services.feature_flags import FeatureDisabledError, feature_flags
@@ -172,6 +175,35 @@ def require_publish_for_main(claims: PermissionClaims, ws_id: str) -> None:
     if not claims.ws_available:
         raise HTTPException(status_code=503, detail="Authorization temporarily unavailable")
     raise PublishRequired()
+
+
+#: A person's check in :func:`require_publish`: ``requires()`` itself, so its 403 body, its audit
+#: and its 503 stay what they were.
+_PERSON_PUBLISH = requires("workspace:datasource:publish", workspace="ws_id")
+
+
+async def require_publish(
+    request: Request,
+    user=Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """``workspace:datasource:publish`` in the path's workspace, to publish a draft or merge its
+    review. A person is held to it as ``requires()`` holds them. No API key can hold publish, so a
+    key passes where the person or service account it belongs to holds it
+    (:func:`require_publish_for_main`), as it does to write main directly: publishing a draft is
+    the reviewed way to the same place. The data source's review policy and the draft's roles still
+    apply, in the route."""
+    if claims.key_scope is None:
+        return await _PERSON_PUBLISH(request, user, claims, session)
+    require_publish_for_main(claims, request.path_params["ws_id"])
+    return user
+
+
+# No ``required_permission`` tag: the API key surface refuses a route that needs more than a key
+# can carry, and a key never carries publish. This says what the gate checks instead, for
+# ``backend/scripts/export_pentest_surface.py``.
+require_publish.gate_label = "workspace:datasource:publish (ws:ws_id; an API key: its owner's)"
 
 
 class SyncOverrides(NamedTuple):

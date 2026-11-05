@@ -3,7 +3,7 @@ change in it is either made or refused with a reason — Postgres.
 
 * **Excel.** An export opened in Excel and edited — a property changed, one added, one removed with
   ``\\N``, a name changed, a node and an edge added, an edge deleted — lands as exactly those
-  changes. The same workbook sent again changes nothing.
+  changes. The same workbook sent again changes nothing, and refuses nothing: its delete is done.
 * **A stale workbook.** One exported before a colleague's edits applies only its user's own cells
   and keeps the colleague's: a row whose cell both changed is refused naming the field, and a row
   only the colleague changed stays as they left it.
@@ -26,7 +26,10 @@ from sqlalchemy import select
 
 from backend.app.services.storage.object_store import LocalFsObjectStore, storage_key
 from backend.app.services.versioning import config, db, models
-from backend.app.services.versioning.import_export.resolve import pointer_id
+from backend.app.services.versioning.import_export.resolve import (
+    _ALREADY_GONE,
+    pointer_id,
+)
 from backend.app.services.versioning.import_export.rowmodel import column_order
 from backend.app.services.versioning.import_export.service import ImportExportService
 from backend.app.services.versioning.import_export.xlsx_adapter import XlsxAdapter
@@ -156,10 +159,11 @@ async def _excel(h):
 
     # The same workbook again, into the same draft: nothing changes. Its rows are stale now (the
     # draft moved past the versions they were exported at), and each cell its user changed holds
-    # what the draft already has. The edge it deleted is gone, so its delete row finds nothing.
+    # what the draft already has. The edge it deleted is gone, so its delete row finds nothing to
+    # delete: done already, and refused no more.
     _d, again, rows = await h.upload_xlsx(book, branch_id=draft)
-    assert (again["new"], again["updated"], again["deleted"]) == (0, 0, 0), again
-    assert [r for r in rows.values() if r[0] == "invalid"] == [("invalid", ["delete edge not found"])]
+    assert (again["new"], again["updated"], again["deleted"], again["invalid"]) == (0, 0, 0, 0), again
+    assert [r for r in rows.values() if _ALREADY_GONE in r[1]] == [("unchanged", [_ALREADY_GONE])]
     assert await h.state(draft) == (nodes, edges)
 
 
