@@ -22,7 +22,7 @@ from backend.app.services.versioning.import_export.service import ImportExportSe
 def job(monkeypatch):
     row = SimpleNamespace(workspace_id="ws", data_source_id="ds", scope_view_id="v1",
                           reconcile_mode="replace", branch_id="br_9",
-                          graph_id="g1", auto_publish=False)
+                          graph_id="g1", auto_publish=False, field_scope=None)
 
     @contextlib.asynccontextmanager
     async def session():

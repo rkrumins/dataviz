@@ -40,7 +40,8 @@ def _world(monkeypatch, summary, *, auto_publish=True):
     ``summary``. Returns the service, the job's row, and what the step did."""
     row = SimpleNamespace(workspace_id="ws", data_source_id="ds", scope_view_id=None,
                           reconcile_mode="upsert", branch_id="br1", graph_id="g1",
-                          auto_publish=auto_publish, summary=dict(summary), updated_at=None)
+                          auto_publish=auto_publish, summary=dict(summary), updated_at=None,
+                          field_scope=None)
     branch = SimpleNamespace(owner="alice")
 
     @contextlib.asynccontextmanager
@@ -154,6 +155,9 @@ async def test_its_publish_job_is_marked_to_check_publish_again(monkeypatch):
             pass
 
         async def _assert_writable(self, *_args):
+            pass
+
+        async def _assert_no_bulk_load(self, *_args):
             pass
 
         async def _lock_branch(self, *_args):

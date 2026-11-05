@@ -25,6 +25,12 @@ loses at most the unit it was in, and the next one carries on from the cursor �
   ``replace``     every window; a replace's deletes under way (run again whole: a deleted entity is
                   no longer there to delete).
 
+A **bulk** import (``bulk`` on the job's ``field_scope``) has no draft: its windows write straight
+into ``main``'s next commit, opened at head+1 once the file is staged and landed whole once every
+window is in (``GraphVersioningService.open_import_commit`` / ``land_import_commit``), and nothing
+else writes ``main`` meanwhile. It adds and updates only. Its cursor goes on from the windows'
+to ``bulk:landed``, or to ``bulk:discard`` while it is being discarded.
+
 A superseded worker (its job taken over, or no longer running) finds out at its next checkpoint,
 whose transaction — the window's work with it — then rolls back.
 """
@@ -48,12 +54,13 @@ from ..ids import new_entity_id
 from ..job_lease import QUEUED, Lease, Superseded
 from ..models import (BranchORM, EdgeVersionORM, ImportResultORM, ImportRowORM, JobORM,
                       NodeVersionORM)
+from ..errors import PublishRequired, ReviewRequired
 from ..service import OntologyViolation
 from .formats import get_adapter
 from .resolve import (KeyIndex, _canonical_map, key_value, pointer_id, pointer_seed, pointers,
                       resolve_rows)
 from .rowmodel import PROP_DELETE, normalize
-from .snapshot import open_snapshot, window_reads
+from .snapshot import open_bulk_snapshot, open_snapshot, window_reads
 from .stream import view_entities
 from .uploads import WHOLE_FILE_FORMATS, is_archive_source, open_source, source_size, too_large
 
@@ -95,6 +102,8 @@ _TALLIES = ("new", "updated", "unchanged", "deleted", "invalid")
 # Times a window's other rows are applied again after the write gate refused some of them
 # (``ImportWorker._apply_window``).
 _QUARANTINE_ROUNDS = 4
+# A bulk import's cursor once its commit has landed, and while it is being discarded.
+LANDED, DISCARDING = "bulk:landed", "bulk:discard"
 
 
 def _now() -> str:
@@ -299,7 +308,7 @@ def contract_import_root_assignments(
 
 class ImportWorker:
     def __init__(self, versioning, store, scope=None, ontology=None, facts: bool = True,
-                 node_identity=None) -> None:
+                 node_identity=None, bulk_check=None) -> None:
         self._svc = versioning
         self._store = store
         self._scope = scope          # view scope for scoped replace ({assigned_urns, ...}) | None
@@ -332,6 +341,13 @@ class ImportWorker:
         self._keys: Optional[KeyIndex] = None
         self._canon: Dict[str, str] = _canonical_map((ontology or {}).get("node_types"))
         self._identity_read = False
+        # A bulk import's: what asks the API layer for the containment edge types and ontology rules
+        # its windows are judged by (a draft's are judged at its publish) — refusing once its actor
+        # may no longer land it — what that answered, and the commit the windows write into.
+        self._bulk_check = bulk_check
+        self._bulk_rules: Tuple[Any, Any] = (None, None)
+        self._bulk = False
+        self._bulk_commit: Optional[str] = None
 
     async def run(self, job_id: str, *, lease: Optional[Lease] = None) -> Dict[str, int]:
         """Run the import job to the end on ``lease`` — the transfer lane's; called without one,
@@ -339,6 +355,8 @@ class ImportWorker:
         Raises :class:`Superseded` once the job is no longer this worker's."""
         self._lease = lease or await lease_job(job_id)
         job = await self._job(job_id)
+        if job.get("bulk"):
+            return await self._run_bulk(job_id, job)
         graph_id, branch_id = job["graph_id"], job["branch_id"]
         actor = await self._branch_owner(graph_id, branch_id)
 
@@ -360,9 +378,102 @@ class ImportWorker:
             row = await s.get(JobORM, job_id)
             if row is None:
                 raise ValueError(f"unknown import job {job_id}")
+            scope = row.field_scope if isinstance(row.field_scope, dict) else {}
             return {"graph_id": row.graph_id, "branch_id": row.branch_id,
                     "source_uri": row.source_uri, "import_format": row.import_format,
-                    "reconcile_mode": row.reconcile_mode}
+                    "reconcile_mode": row.reconcile_mode, "bulk": bool(scope.get("bulk")),
+                    "actor": scope.get("actor"), "cursor": row.last_cursor,
+                    "target_commit_id": row.target_commit_id}
+
+    async def _run_bulk(self, job_id: str, job: Dict[str, Any]) -> Dict[str, int]:
+        """A bulk import, to the end: the file staged (refused at its first delete, before anything
+        is written), ``main``'s next commit opened, the windows written into it (judged by the
+        ontology as a publish judges them, a refused row quarantined and the rest kept), every new
+        node checked for the parent a strict ontology requires, then the commit landed whole. A
+        parent missing discards it and fails the job. Resumes from its cursor like any import;
+        ``bulk:discard`` runs a discard someone asked for."""
+        graph_id, actor = job["graph_id"], job["actor"] or "system"
+        self._bulk = True
+        if job["cursor"] == DISCARDING:
+            await self._discard(job_id, graph_id, job["target_commit_id"])
+            if not await self._lease.finish("cancelled", current_phase="discarded"):
+                raise Superseded(f"import job {job_id} was taken over before it could finish")
+            return {}
+        cursor = job["cursor"] or ""
+        if job["target_commit_id"] is None and _window_after(cursor)[0] is not None and cursor != "node:-1":
+            # Its windows were written and then discarded (its landing refused it): nothing of the
+            # load is left, and carrying on from the cursor would land an empty commit.
+            raise ValueError("Nothing is left to resume: this bulk import's load was discarded. "
+                             "Import the file again.")
+        self._bulk_rules = await self._checked(job_id, graph_id, job["target_commit_id"])
+        await self._lease.retry_transient(
+            lambda: self._stage(job_id, job["source_uri"], job["import_format"]))
+        if (await self._position(job_id)).cursor != LANDED:
+            commit = await self._svc.open_import_commit(
+                graph_id=graph_id, job_id=job_id, actor=actor, message=f"Bulk import {job_id}",
+                on_open=lambda s, c: self._lease.checkpoint(s, target_commit_id=c.id))
+            self._bulk_commit = commit.id
+            await self._resolve_and_build(job_id, graph_id, commit.branch_id, actor,
+                                          bulk_seq=commit.commit_seq)
+            await self._land(job_id, graph_id, commit.id)
+        summary = (await self._position(job_id)).summary
+        if not await self._lease.finish("completed", summary=summary, progress=100):
+            raise Superseded(f"import job {job_id} (epoch {self._lease.epoch}) was taken over "
+                             "before it could finish")
+        return {k: int(summary.get(k) or 0) for k in _TALLIES}
+
+    async def _land(self, job_id: str, graph_id: str, commit_id: str) -> None:
+        """Land a bulk import's commit, once every window is in: when its strict ontology wants
+        every node inside a parent and one of the new ones is not, the load is discarded and the
+        job fails naming them, as such a publish fails. ``summary.landed`` says what landed: the
+        commit and its stats, or ``unchanged`` when the file changed nothing. Its actor is asked
+        about again first (:meth:`_checked`)."""
+        await self._checked(job_id, graph_id, commit_id)
+        rules = self._bulk_rules[1]
+        if rules is not None and rules.root_entity_types:
+            orphans = await self._lease.retry_transient(lambda: self._svc.import_commit_parentless(
+                graph_id=graph_id, commit_id=commit_id, ontology_rules=rules))
+            if orphans:
+                await self._discard(job_id, graph_id, commit_id)
+                names = ", ".join(str(v.get("entity_id")) for v in orphans[:5])
+                raise ValueError(
+                    f"Nothing was loaded: {len(orphans)} new node(s) of the file sit outside every "
+                    f"parent this data source's ontology requires one of (for example {names}). "
+                    "Add the rows that give them a parent, or import the file into a draft.")
+
+        async def landed(s, stats) -> None:
+            summary = dict((await s.get(JobORM, job_id)).summary or {})
+            summary["landed"] = ({"state": "unchanged"} if stats is None else
+                                 {"state": "landed", "commitId": commit_id, "stats": stats})
+            await self._lease.checkpoint(s, last_cursor=LANDED, target_commit_id=None,
+                                         current_phase="landed", summary=summary)
+        await self._lease.retry_transient(lambda: self._svc.land_import_commit(
+            graph_id=graph_id, commit_id=commit_id, on_landed=landed))
+
+    async def _checked(self, job_id: str, graph_id: str, commit_id: Optional[str]) -> Tuple[Any, Any]:
+        """The containment edge types and ontology rules a bulk import's windows are judged by,
+        from the API layer, which refuses once the import's actor may no longer land it — they
+        lost publish, or the data source's policy no longer lets them merge their own changes.
+        Then what it wrote is discarded, and the refusal fails the job."""
+        if self._bulk_check is None:
+            return None, None
+        try:
+            return await self._lease.retry_transient(self._bulk_check)
+        except (PublishRequired, ReviewRequired):
+            await self._discard(job_id, graph_id, commit_id)
+            raise
+
+    async def _discard(self, job_id: str, graph_id: str, commit_id: Optional[str]) -> None:
+        """Delete what a bulk import wrote into its commit, a batch at a time, then the commit,
+        clearing the job's ``target_commit_id`` with it: ``main`` is as it was, and open again."""
+        if commit_id is None:
+            return
+        while await self._lease.retry_transient(lambda: self._svc.discard_import_rows(
+                graph_id=graph_id, commit_id=commit_id)):
+            self._lease.check()
+        await self._lease.retry_transient(lambda: self._svc.drop_import_commit(
+            graph_id=graph_id, commit_id=commit_id,
+            on_dropped=lambda s: self._lease.checkpoint(s, target_commit_id=None)))
 
     async def _position(self, job_id: str) -> _Position:
         """Where the job has got, read afresh by every unit of work: a unit retried after a fault
@@ -457,6 +568,12 @@ class ImportWorker:
                 rows, page_skipped = await asyncio.to_thread(_normalize_page, page, native)
                 skipped += page_skipped
                 for kind, row in rows:
+                    if self._bulk and row.get("op") == "delete":
+                        raise ValueError(
+                            f"Nothing was loaded: row {idx + 1} of the file deletes "
+                            f"{row.get('urn') or row.get('entity_id') or 'an entity'}, and a bulk "
+                            "import only adds and updates. Send the deletes as an import of their "
+                            "own, without bulk.")
                     if idx >= self._skip:              # below it: staged by an earlier run of the job
                         batch.append({"job_id": job_id, "row_index": idx, "kind": kind, "raw": row})
                     idx += 1
@@ -482,7 +599,8 @@ class ImportWorker:
         self._cursor = cursor
 
     async def _resolve_and_build(self, job_id, graph_id, branch_id, actor,
-                                 reconcile_mode: str = "upsert") -> Dict[str, int]:
+                                 reconcile_mode: str = "upsert",
+                                 bulk_seq: Optional[int] = None) -> Dict[str, int]:
         """Resolve the staged rows against the draft and build them onto it, a window at a time:
         every node window first, then every edge window, so an edge finds a node any row of the file
         creates. A window looks up only the entities its own rows name (by id, urn, qualifiedName,
@@ -501,7 +619,8 @@ class ImportWorker:
                 "edge, and a replace deletes whatever the file leaves out — which could include "
                 "what those records name. Nothing was imported either. Fix those records and "
                 "import the file again.")
-        snap = await open_snapshot(graph_id=graph_id, branch_id=branch_id)
+        snap = await (open_bulk_snapshot(graph_id=graph_id, commit_seq=bulk_seq) if bulk_seq is not None
+                      else open_snapshot(graph_id=graph_id, branch_id=branch_id))
         more = True
         while more:
             more = await self._lease.retry_transient(
@@ -700,7 +819,7 @@ class ImportWorker:
             try:
                 await self._svc.apply_ops(graph_id=graph_id, ops=ops, actor=actor,
                                           branch_id=branch_id, message="import", on_commit=on_commit,
-                                          node_identity=self._node_identity)
+                                          node_identity=self._node_identity, **self._bulk_args())
                 return
             except OntologyViolation as exc:
                 rest = _quarantine(ops, resolutions, exc.violations) if attempt < _QUARANTINE_ROUNDS else None
@@ -709,6 +828,15 @@ class ImportWorker:
                 logger.info("import window: %d op(s) quarantined by the write gate, the other %d "
                             "applied again", len(ops) - len(rest), len(rest))
                 ops = rest
+
+    def _bulk_args(self) -> Dict[str, Any]:
+        """What a bulk import's window adds to ``apply_ops``: the commit it writes into, and the
+        rules a publish would judge it by (a draft's window is judged at its publish)."""
+        if self._bulk_commit is None:
+            return {}
+        cset, rules = self._bulk_rules
+        return {"bulk_commit_id": self._bulk_commit, "containment_edge_types": cset,
+                "ontology_rules": rules}
 
     async def _earlier(self, job_id: str, kind: str, before: int, lookups) -> Dict[str, int]:
         """``{entity id: row}`` for the entities this window's rows may name that a row of this

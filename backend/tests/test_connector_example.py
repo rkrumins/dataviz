@@ -42,9 +42,9 @@ class _Server:
     once and reports how its publish went (``note``: a ``summary.publish``, or ``None`` when the
     worker never wrote one), and a publish job that lands."""
 
-    def __init__(self, *, note=None, busy=frozenset(), branch="open"):
+    def __init__(self, *, note=None, busy=frozenset(), branch="open", summary=None):
         self.calls, self.uploads, self.polls = [], {}, 0
-        self.note, self.busy, self.branch = note, set(busy), branch
+        self.note, self.busy, self.branch, self.summary = note, set(busy), branch, summary or {}
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         method, path = request.method, request.url.path
@@ -78,7 +78,7 @@ class _Server:
             if self.polls == 1:
                 return httpx.Response(200, json={"jobId": "vjob_1", "branchId": "br_1", "status": "running",
                                                  "phase": "nodes", "processed": 1, "total": 2})
-            summary = {"new": 9, "updated": 0, "unchanged": 0, "deleted": 0, "invalid": 0}
+            summary = {"new": 9, "updated": 0, "unchanged": 0, "deleted": 0, "invalid": 0, **self.summary}
             if self.note is not None:
                 summary["publish"] = self.note
             return httpx.Response(200, json={"jobId": "vjob_1", "branchId": "br_1", "status": "completed",
@@ -205,6 +205,22 @@ def test_without_publish_the_draft_waits_for_review(world):
     result = connector.run(graph(server), str(path), "ndjson", publish=False, state_path=state)
     assert "publish" not in result and result["job"]["branchId"] == "br_1" and connector.succeeded(result)
     assert [c for c in server.calls if "/publish" in c[1]] == []
+
+
+def test_a_bulk_import_lands_itself_and_refused_rows_fail_the_run(world):
+    """``--bulk``: the upload is completed with ``bulk``, and the import followed to its end, with
+    no publish to follow. Rows it refused fail the run, though the rest landed."""
+    path, state, graph, _slept = world
+    landed = {"state": "landed", "commitId": "cmt_9", "stats": {"create": 9, "update": 0, "delete": 0}}
+    server = _Server(summary={"landed": landed})
+    result = connector.run(graph(server), str(path), "ndjson", publish=True, bulk=True, state_path=state)
+    (upload_id,) = server.uploads
+    assert ("POST", f"{BASE}/imports/uploads/{upload_id}/complete", {"bulk": "true"}) in server.calls
+    assert [c for c in server.calls if "/publish" in c[1]] == []
+    assert result["job"]["summary"]["landed"] == landed and connector.succeeded(result)
+    server = _Server(summary={"landed": landed, "invalid": 2})
+    assert not connector.succeeded(connector.run(graph(server), str(path), "ndjson", publish=False,
+                                                 bulk=True, state_path=state + ".2"))
 
 
 def test_the_dry_run_sends_no_more_than_a_dry_run_reads(world, monkeypatch):
