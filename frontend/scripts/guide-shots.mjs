@@ -331,6 +331,7 @@ const SHOTS = [
         throw new Error(`version control is already on under "${UNVERSIONED_VIEW}" — this shot needs a source without it`)
       }
       await sleep(1500)
+      await clickText(ctx.evalJs, 'Continue', '[role="dialog"]'); await sleep(600) // What it means
       await clickText(ctx.evalJs, 'Turn on version control', '[role="dialog"]')
       for (let i = 0; i < 60 && !(await ctx.evalJs(`return document.body.innerText.includes('Everything checked out')`)); i++) await sleep(1000)
     },
