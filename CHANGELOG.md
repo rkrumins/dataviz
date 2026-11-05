@@ -9,6 +9,93 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Business view: every draft action, plain words for readers, a new view switch and Minimal rows
+
+Business users can now do everything in a draft without switching to Technical. Readers get plain
+words and a way to see what a view is for. The Business / Technical switch is redesigned, and a new
+**Minimal** density fits about three times as many rows on screen.
+
+### Added
+
+- **Minimal density** (**Display → Density**, both views): each entity on one line. Rows are 26 px
+  (30 px for top-level entities), with the icon without its tile, the Technical view's identifier
+  inline after the name, and display-rule chips as coloured dots. Every mark a row carries stays.
+- **More** (`⋯`) **in the Business view** gains:
+  - **Changes & history…**: a draft's changes, or the published history, its reviews and data
+    health;
+  - **Your drafts…**, on Published;
+  - **Entities with no parent…**, in a draft;
+  - a **File** group: **Import…**, **Export view…**, **Export data…**, **Update this view from a
+    file…** and **Save layers as a template…**.
+- **Reverse direction** in a relationship's panel, beside **Delete**, for lineage links you can
+  edit, in both views.
+- **A view's description** shows under its title. People who can't edit get **About**, which leads
+  with what the view is for.
+
+### Changed
+
+- **The Business / Technical switch** is a two-choice control:
+  - a sliding thumb tinted by the view, emerald for Business and amber for Technical;
+  - arrow keys and Home/End, and a focus ring;
+  - the shortcut on each choice, and a tooltip on what each view keeps;
+  - labels that meet contrast in light and dark.
+- **Business drafts** keep **Connect** on the toolbar.
+- **Graph canvas cards**: **Trace Upstream** and **Trace Downstream** now work. **More** opens the
+  right-click menu (Technical). **Pin**, which did nothing, is gone. **Add inside** shows only to
+  editors in a draft.
+- **The Business Display menu** says **How many lines** for Edge Density, with plain choices and no
+  budget slider. It keeps **Lineage colours** and **Missing-link alerts**, and a switch that is on
+  stays on screen.
+- **Status chips** state facts to people who can't edit, without telling them to change the view.
+- **Business sync chips** say **Up to date**, **Updating…** or **May be out of date**, without
+  database names or revision ids.
+- **Reading first**: the dashboard leads Business readers to browse views. The empty Explorer and an
+  empty model offer building only to people who can build.
+
+### Fixed
+
+- **Renaming in place** in the Business view changed a name the row doesn't show. Double-click now
+  edits the name the row shows, the business label. The same fix applies to Hierarchy views, in both
+  views.
+- **Hierarchy views** showed a placeholder "Physical Fabric" header and a fixed "Flow: Left →
+  Right".
+
+### Known limitations
+
+- **Minimal rows**:
+  - they leave out the type badge, and **Show entity type badge** says so;
+  - a placed row's name and its path share one line.
+- **Paste** is still not offered on the Context View, in either view.
+- **Business view audit**, still open, most important first:
+  1. The same entity can show different names in the Lens, the canvas command palette and the rows.
+  2. The Business details panel can show a URN tile, and raw property keys and JSON.
+  3. Read-only panels open with an amber "change in a draft" warning, even for people who can't
+     edit.
+  4. Keyboard and screen-reader gaps:
+     - the intro tip's tab order, and Esc;
+     - the roles and arrow keys of the layer `⋯` menu;
+     - focus in the Display popover;
+     - an unlabelled layer column.
+  5. Muted text and the Business green fall short of WCAG AA contrast.
+  6. The intro tip shows on the first page loaded, and doesn't mention **More**.
+  7. The Business view doesn't yet reach:
+     - the Graph and Hierarchy toolbars;
+     - the trace dock's Performance tab;
+     - the search panel's options.
+  8. Mixed words:
+     - "Business View" and "Business view";
+     - four names for Focus Lens;
+     - "Data Sources / Data Consumers" for lineage direction.
+  9. The workspace link opens on Data Sources, not Views, and error states offer no way forward.
+  10. The rest are smaller: menu styles, the selection bar's offset, what double-click does, small
+     copy, and docs drift.
+
+### Upgrading
+
+- **Nothing to do.** **Display → Density** gains **Minimal**, and existing choices are kept.
+
+---
+
 ## [Unreleased] — Business and Technical views: a simpler workspace for readers
 
 The **Business** / **Technical** switch in the top bar now sets how much the app shows, not only

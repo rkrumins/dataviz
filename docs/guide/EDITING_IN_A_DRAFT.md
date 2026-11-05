@@ -79,6 +79,10 @@ You can also start from where you are:
 **Cancel** throws the edit away. `Esc` first leaves the field you're typing in,
 then closes the drawer.
 
+To rename an entity without opening its drawer, double-click its row and type.
+In the Business view the row shows the business label, so that is the name you
+change; in the Technical view you change its **Name**.
+
 ![An entity drawer on the Edit tab with a changed Description; the footer shows 'Unsaved changes', Cancel and Stage changes (hover tip showing the keyboard shortcut)](/docs-assets/guide/editing-in-a-draft-stage-bar.png)
 
 ### If you leave before staging
@@ -130,7 +134,8 @@ read-only, with **Edit in a draft**. Choosing one entity's own details closes it
 
 To remove the relationship instead, choose **Delete** in its drawer. The
 deletion is staged straight away — it happens when you save, or you can discard
-it in **Review & Save**.
+it in **Review & Save**. To turn it round, choose **Reverse direction** next to
+**Delete**: it then runs the other way, staged the same way.
 
 Only lineage relationships — the ones your graph's owners author — can be
 changed. Rolled-up lines, hierarchy links and other relationship types are
@@ -155,7 +160,8 @@ All of these are staged too — nothing is saved until **Review & Save**.
   ringed green when a relationship can join them — or red, with the reason,
   when none can. `Esc` backs out one step at a time. You can still drag from
   the **+** to the target, or right-click an entity and choose **Connect To…**
-  or **Link to…**.
+  or **Link to…**. **Connect** in the toolbar turns the tool on too, in either
+  view.
   - When only one relationship type fits, the link is made at once, and the
     message that confirms it offers **Undo**. Otherwise pick the type — only
     the types your [semantic layer](/guide/semantic-layer) allows are offered.
@@ -208,6 +214,9 @@ takes them back.
 - **In the Business view**, a column's header keeps to the layer itself: its
   name, count and sort. Choose **⋯** on the header for the layer's menu, which
   also holds **Add entity**, **New group** and **Build a lot at once**.
+- **Place entities that have no parent:** choose **More** (`⋯`) → **Entities
+  with no parent…** (in the Technical view, **Display → Advanced**). The panel
+  lists them, and you place each one in a layer.
 
 Outside a draft, the menu says layers change in a draft and offers **Start
 editing to change layers**. **Layer details…** shows a layer's settings,
@@ -273,6 +282,10 @@ with resolutions**.
 
 ## Your draft
 
+- **In the Business view**, the version menu shows once you're in a draft. On
+  Published, **More** (`⋯`) → **Your drafts…** opens your drafts, and **More →
+  Changes & history…** opens a draft's changes, or the published history, its
+  reviews and data health.
 - **Switch versions.** The version menu in the toolbar shows **Published** or
   your draft's name. It lists **Published**, then **Your drafts**, **Shared
   with you** and **Public drafts**, each marked with a globe (public) or a lock
