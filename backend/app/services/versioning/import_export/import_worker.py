@@ -399,6 +399,12 @@ class ImportWorker:
             if not await self._lease.finish("cancelled", current_phase="discarded"):
                 raise Superseded(f"import job {job_id} was taken over before it could finish")
             return {}
+        cursor = job["cursor"] or ""
+        if job["target_commit_id"] is None and _window_after(cursor)[0] is not None and cursor != "node:-1":
+            # Its windows were written and then discarded (its landing refused it): nothing of the
+            # load is left, and carrying on from the cursor would land an empty commit.
+            raise ValueError("Nothing is left to resume: this bulk import's load was discarded. "
+                             "Import the file again.")
         self._bulk_rules = await self._checked(job_id, graph_id, job["target_commit_id"])
         await self._lease.retry_transient(
             lambda: self._stage(job_id, job["source_uri"], job["import_format"]))

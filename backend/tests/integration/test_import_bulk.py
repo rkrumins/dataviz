@@ -265,6 +265,12 @@ async def _refusals(svc, ie, store, rooted) -> None:
     assert (row.status, row.target_commit_id) == ("failed", None), (row.status, row.error_message)
     assert "outside every parent" in row.error_message
     assert await _main(svc, gid, main) == ({}, set())
+    # Resumed, it finds nothing left of its load, and says so rather than land an empty commit.
+    assert await strict.resume_bulk_import(job["job_id"], viewer=Viewer(actor="u", can_manage=False,
+                                                                         can_read=True))
+    await strict.run_import_safe(job["job_id"], await lease_job(job["job_id"]))
+    row = await _get(JobORM, job["job_id"])
+    assert row.status == "failed" and "Nothing is left to resume" in row.error_message
     assert await _count(CommitORM, CommitORM.graph_id == gid, CommitORM.kind == "import") == 0
     job = await _job(strict, store, gid, [schema, _n(1), _n(2), _e("s", 1, "CONTAINS"), _e("s", 2, "CONTAINS")])
     await strict.run_import(job["job_id"])
