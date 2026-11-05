@@ -283,7 +283,7 @@ async def test_run_import_skips_layout_write_without_view_id(monkeypatch):
     row = SimpleNamespace(
         workspace_id="ws", data_source_id="ds", scope_view_id=None,
         reconcile_mode="upsert", branch_id=None, summary={}, updated_at=None,
-        graph_id="g1", auto_publish=False)
+        graph_id="g1", auto_publish=False, field_scope=None)
     monkeypatch.setattr(ver_db, "graphver_session", lambda: _session_yielding(row))
     monkeypatch.setattr(service_mod, "ImportWorker", _FakeWorker)
 
@@ -320,7 +320,7 @@ async def test_run_import_calls_layout_write_with_view_id(monkeypatch):
     row = SimpleNamespace(
         workspace_id="ws", data_source_id="ds", scope_view_id="v1",
         reconcile_mode="upsert", branch_id="br1", summary={}, updated_at=None,
-        graph_id="g1", auto_publish=False)
+        graph_id="g1", auto_publish=False, field_scope=None)
     monkeypatch.setattr(ver_db, "graphver_session", lambda: _session_yielding(row))
     monkeypatch.setattr(service_mod, "ImportWorker", _FakeWorker)
 

@@ -18,13 +18,13 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from sqlalchemy import and_, delete, func, select, update
+from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
 from backend.app.services.storage.object_store import get_object_store, storage_key
 
 from .. import config, db
-from ..errors import JobActive, MainWriteForbidden
+from ..errors import BulkImportLoading, JobActive, MainWriteForbidden
 from ..job_lease import Draining, Lease, Superseded, friendly_infra_error, is_transient
 from ..models import BranchORM, GraphORM, ImportResultORM, ImportRowORM, JobORM, MergeRequestORM
 from ..service import AccessDenied, GraphVersioningService, NotUpToDate, Viewer
@@ -32,7 +32,7 @@ from . import contract, stream
 from ..ids import new_entity_id, uuid_urn
 from .export_worker import ExportWorker, example_template_records
 from .formats import get_adapter
-from .import_worker import ImportWorker, _normalize_page, _record_pages, lease_job
+from .import_worker import DISCARDING, LANDED, ImportWorker, _normalize_page, _record_pages, lease_job
 from .resolve import _ALREADY_GONE, _STATUS, pointer_id, resolve_rows
 from .rowmodel import column_order
 from .runner import INSPECT_TYPES, JOB_TYPES, QUEUED, JobReaper
@@ -104,6 +104,8 @@ class ImportExportService:
         replace_scope_resolver=None,
         identity_resolver=None,
         fork_hook=None,
+        bulk_resolver=None,
+        landed_hook=None,
     ) -> None:
         self._svc = versioning or GraphVersioningService()
         self._store = store or get_object_store()
@@ -133,6 +135,12 @@ class ImportExportService:
         # The same for a fork's jobs (``fork_update``, ``fork_merge``): ``(job) -> its answer |
         # {"error": …}``.
         self._fork_hook = fork_hook
+        # A bulk import's: ``(workspace_id, data_source_id, graph_id, actor) -> (containment edge
+        # types, ontology rules)`` its windows are judged by, raising PublishRequired or
+        # ReviewRequired once its actor may no longer land it; and ``(job) -> None``, what a
+        # publish sets off, run once its commit has landed. Injected at the API layer.
+        self._bulk_resolver = bulk_resolver
+        self._landed_hook = landed_hook
 
     @property
     def store(self):
@@ -157,6 +165,7 @@ class ImportExportService:
         name: Optional[str] = None,
         originating_view_id: Optional[str] = None,
         draft_visibility: Optional[str] = None,
+        bulk: bool = False,
     ) -> Dict[str, str]:
         """Open/append the working draft and create the import job.
 
@@ -170,6 +179,10 @@ class ImportExportService:
         A supplied branch must be an open draft of this graph: main is :class:`MainWriteForbidden`,
         a closed draft :class:`BranchNotOpen`, someone else's private draft :class:`NotDraftOwner`,
         any other branch ``ValueError``.
+
+        ``bulk``: a bulk import, which loads ``main``'s next commit itself (``ImportWorker``), opens
+        no draft (``branch_id`` comes back ``None``) and keeps its actor on the job. One at a time
+        per graph: while another is pending, running or holding its commit, :class:`BulkImportLoading`.
 
         An ``idempotency_key`` already taken on the graph (by any job, finished or not:
         ``ix_jobs_idem_active``) raises ``IntegrityError``; the draft this call would have opened
@@ -190,6 +203,20 @@ class ImportExportService:
                 await self._svc._lock_lifecycle(s, graph_id, shared=True)
                 await self._lock_in_workspace(s, graph_id, workspace_id)
                 await self._svc._assert_writable(s, graph_id)
+                if bulk:
+                    await self._refuse_second_bulk(s, graph_id)
+                    job = JobORM(
+                        job_type="ingest", graph_id=graph_id, workspace_id=workspace_id,
+                        data_source_id=data_source_id, provider_id=provider_id, branch_id=None,
+                        reconcile_mode="upsert", import_format=import_format,
+                        field_scope={**(field_scope or {}), "actor": actor, "bulk": True},
+                        source_uri=uri, idempotency_key=idempotency_key, status="pending")
+                    s.add(job)
+                    await s.flush()
+                    if uri is None:
+                        uri = job.source_uri = storage_key(
+                            workspace_id, data_source_id, graph_id, job.id, f"source.{import_format}")
+                    return {"job_id": job.id, "branch_id": None, "source_uri": uri}
                 if draft_id is None:
                     draft_id = await self._svc._add_draft(
                         s, graph_id=graph_id, owner=actor, name=name or "Import",
@@ -237,6 +264,26 @@ class ImportExportService:
             if attempt == 2 or not any((await JobReaper().run_once(job_id=active)).values()):
                 raise JobActive(active, f"Another import is still running on this draft (job "
                                         f"{active}). Wait for it to finish, then import again.") from None
+
+    async def refuse_second_bulk(self, graph_id: str) -> None:
+        """:class:`BulkImportLoading` while a bulk import loads the graph (:meth:`_refuse_second_bulk`):
+        what a request for another one is told before it stores anything."""
+        async with db.graphver_session() as s:
+            await self._refuse_second_bulk(s, graph_id)
+
+    @staticmethod
+    async def _refuse_second_bulk(s, graph_id: str) -> None:
+        """:class:`BulkImportLoading` while another bulk import of the graph is pending or running,
+        or holds its commit (a failed one, until it is resumed or discarded): one loads ``main`` at
+        a time. Its commit's opening checks again, under the graph lock."""
+        row = (await s.execute(select(JobORM.id, JobORM.status).where(
+            JobORM.job_type == "ingest", JobORM.graph_id == graph_id,
+            JobORM.field_scope["bulk"].astext == "true",
+            or_(JobORM.status.in_(("pending", "running")),
+                and_(JobORM.status == "failed", JobORM.target_commit_id.is_not(None))))
+            .limit(1))).first()
+        if row is not None:
+            raise BulkImportLoading(row.id, row.status)
 
     async def _lock_in_workspace(self, s, graph_id: str, workspace_id: str) -> None:
         """Take the graph's move lock shared (:meth:`GraphVersioningService._lock_move`), which a
@@ -439,6 +486,7 @@ class ImportExportService:
             ws, ds, view_id, mode, branch_id, graph_id, auto_publish = (
                 (row.workspace_id, row.data_source_id, row.scope_view_id, row.reconcile_mode,
                  row.branch_id, row.graph_id, row.auto_publish) if row else (None,) * 7)
+            fields = row.field_scope if row is not None and isinstance(row.field_scope, dict) else {}
         scope = None
         if mode == "replace" and view_id:
             if self._replace_scope_resolver is not None:
@@ -452,13 +500,21 @@ class ImportExportService:
         node_identity = None
         if self._identity_resolver is not None:
             node_identity = await self._identity_resolver(ws, ds)
+        bulk_check = None
+        if fields.get("bulk") and self._bulk_resolver is not None:
+            async def bulk_check():         # asked when it starts, and again before it lands
+                return await self._bulk_resolver(ws, ds, graph_id, fields.get("actor"))
         worker = ImportWorker(self._svc, self._store, scope=scope, ontology=ontology,
                               facts=bool(view_id and self._layout_writer is not None),
-                              node_identity=node_identity)
+                              node_identity=node_identity,
+                              **({"bulk_check": bulk_check} if bulk_check is not None else {}))
         # Called directly (tools, tests faking ImportWorker) there is no lease to pass on: the
         # worker takes the job itself.
         summary = await (worker.run(job_id, lease=lease) if lease is not None
                          else worker.run(job_id))
+        if fields.get("bulk"):
+            await asyncio.shield(self._after_landing(job_id))
+            return summary
         # Post-commit: a view-scoped import that created new top-level entities writes canonical layer
         # assignments so the curated view shows them right away. Best-effort — never fails the import.
         if view_id and self._layout_writer is not None and worker.created_node_facts:
@@ -466,6 +522,63 @@ class ImportExportService:
         if auto_publish:          # after the layout, so the placements are published with the data
             await asyncio.shield(self._auto_publish(job_id, ws, ds, graph_id, branch_id, summary))
         return summary
+
+    async def _after_landing(self, job_id: str) -> None:
+        """What a publish sets off (caches, views, the projection's nudge), for a bulk import whose
+        commit landed (``summary.landed``). Best effort: the projection's target moved with the
+        head, so the projector gets to it anyway. Never raised."""
+        try:
+            async with db.graphver_session() as s:
+                row = await s.get(JobORM, job_id)
+                landed = ((row.summary or {}).get("landed") or {}) if row is not None else {}
+                actor = (row.field_scope or {}).get("actor") if row is not None else None
+            if self._landed_hook is not None and landed.get("state") == "landed":
+                await self._landed_hook({"graphId": row.graph_id, "actor": actor})
+        except Exception:  # noqa: BLE001 — the import is complete whatever happens here
+            logger.exception("what bulk import %s's landing sets off did not run", job_id)
+
+    async def discard_import(self, job_id: str, *, viewer: Viewer) -> Dict[str, Any]:
+        """Discard a bulk import that has not landed: what it wrote into ``main``'s next commit is
+        deleted, and ``main`` takes writes again. Its actor's to discard, or a manager's
+        (:class:`AccessDenied` for anyone else). One that never opened its commit is cancelled
+        there and then; one that did is queued to be discarded (``bulk:discard``), and a worker
+        running it finds at its next fenced write that it is no longer its own. A draft's import is
+        not discarded (``ValueError``: abandon its draft); one that has landed, or is cancelled
+        already, is answered as it is."""
+        async with db.graphver_session() as s:
+            row = await s.get(JobORM, job_id, with_for_update=True)
+            if row is None or row.job_type != "ingest":
+                raise ValueError("import not found")
+            fields = row.field_scope if isinstance(row.field_scope, dict) else {}
+            if not fields.get("bulk"):
+                raise ValueError("only a bulk import is discarded; abandon an import's draft instead")
+            if fields.get("actor") != viewer.actor and not viewer.can_manage:
+                raise AccessDenied("Only the person who started this import, or a manager, can discard it.")
+            if row.status in ("completed", "cancelled") or row.last_cursor in (LANDED, DISCARDING):
+                return {"jobId": job_id, "status": row.status, "discarding": row.last_cursor == DISCARDING}
+            summary = row.summary if isinstance(row.summary, dict) else {}
+            row.summary = {**summary, "discardedBy": viewer.actor}
+            row.error_message = None
+            row.updated_at = _now()
+            if row.target_commit_id is None:          # nothing written into main: done
+                row.status, row.completed_at = "cancelled", _now()
+                return {"jobId": job_id, "status": "cancelled", "discarding": False}
+            row.status, row.current_phase, row.last_cursor = "pending", QUEUED, DISCARDING
+        return {"jobId": job_id, "status": "pending", "discarding": True}
+
+    async def resume_bulk_import(self, job_id: str, *, viewer: Viewer) -> bool:
+        """Queue a failed bulk import again (:meth:`requeue_failed`), to carry on from where it
+        stopped: until it is resumed or discarded, it keeps ``main`` from taking other changes. Its
+        actor's to resume, or a manager's (:class:`AccessDenied` for anyone else); ``ValueError``
+        for an import into a draft. True when this call queued it."""
+        async with db.graphver_session() as s:
+            row = await s.get(JobORM, job_id)
+            fields = row.field_scope if row is not None and isinstance(row.field_scope, dict) else {}
+            if row is None or row.job_type != "ingest" or not fields.get("bulk"):
+                raise ValueError("only a bulk import is resumed; import the file into a draft again")
+            if fields.get("actor") != viewer.actor and not viewer.can_manage:
+                raise AccessDenied("Only the person who started this import, or a manager, can resume it.")
+        return await self.requeue_failed(job_id)
 
     async def _auto_publish(self, job_id, ws, ds, graph_id, branch_id, summary) -> None:
         """Publish the draft a completed import opened, as it asked (``autoPublish``), and record
@@ -672,6 +785,7 @@ class ImportExportService:
             await self._svc._lock_lifecycle(s, graph_id, shared=True)
             await self._lock_in_workspace(s, graph_id, workspace_id)
             await self._svc._assert_writable(s, graph_id)
+            await self._svc._assert_no_bulk_load(s, graph_id)
             branch = await self._svc._lock_branch(s, graph_id, branch_id)
             if branch.kind == "main":
                 raise MainWriteForbidden()
@@ -790,6 +904,7 @@ class ImportExportService:
             await self._svc._lock_lifecycle(s, parent_id, shared=True)
             await self._lock_in_workspace(s, parent_id, workspace_id)
             await self._svc._assert_writable(s, parent_id)
+            await self._svc._assert_no_bulk_load(s, parent_id)
             pr = await self._svc._lock_pr(s, pr_id)
             if pr is None or pr.status in ("merged", "closed"):
                 raise ValueError(f"pull request {pr_id} is not open")
@@ -1078,4 +1193,6 @@ class ImportExportService:
                 # A view package's export: what it packages (its views, at the versions sealed for it).
                 "package": {k: v for k, v in row.field_scope["package"].items() if k != "actor"}
                 if isinstance(row.field_scope, dict) and row.field_scope.get("package") else None,
+                # A bulk import: it loads the published graph itself, with no draft.
+                "bulk": bool(isinstance(row.field_scope, dict) and row.field_scope.get("bulk")),
             }

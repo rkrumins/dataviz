@@ -538,6 +538,23 @@ class GraphNotWritable(_HttpMapped, RuntimeError):
                           "retryable": False})
 
 
+class BulkImportLoading(_HttpMapped, RuntimeError):
+    """A write to a graph's ``main`` while a bulk import is loading into it: the import writes
+    ``main``'s next commit itself, so nothing else may write one until that has landed or been
+    discarded. Drafts are not affected; nor is reading ``main``, which shows it as it was."""
+
+    def __init__(self, job_id: str, status: str):
+        self.job_id, self.status = job_id, status
+        if status == "failed":
+            message = ("A bulk import into this graph's published version stopped part-way: resume "
+                       "it or discard it before publishing or changing the published version.")
+        else:
+            message = ("A bulk import is loading into this graph's published version: publishing "
+                       "and other changes to it wait until it lands. Drafts can still be edited.")
+        super().__init__(message, {"type": "bulk_import_loading", "jobId": job_id, "status": status,
+                                   "retryable": status != "failed"})
+
+
 class VersionConflict(_HttpMapped, RuntimeError):
     """A compare-and-set named a version of ``resource`` that is no longer current."""
 
@@ -582,7 +599,7 @@ HTTP_MAPPED = (BranchNotOpen, MainWriteForbidden, NotDraftOwner, DraftRoleRequir
                JobActive, CurationAtRisk, MassDeleteBlocked, ForkLimit, NotAFork, LiveForks,
                ForkNotRestorable, GraphMoved, ProjectionNotAdopted, ProjectionAlreadyAdopted,
                ProjectionPassInFlight, ProjectionKeyInUse,
-               ProjectionKeyInvalid, PublishRequired, GraphNotWritable, VersionConflict,
+               ProjectionKeyInvalid, PublishRequired, GraphNotWritable, BulkImportLoading, VersionConflict,
                AmbiguousSpelling, NotAnEdge, StagedChangesUnsaved, SelfMerge, ReviewRequired,
                IneligibleOwner, ForkUpdateConflicts, ResolutionsWithoutConflict, ForkNotUpToDate,
                CrossesUpdate, AmbiguousUrn, EntityExists, EdgeEndsMissing, UniqueViolation)

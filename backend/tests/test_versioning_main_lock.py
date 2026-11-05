@@ -372,8 +372,10 @@ async def test_bulk_import_through_the_api_refuses_a_graph_that_has_entities(mon
         return "main1"
     monkeypatch.setattr(svc, "_main_branch_id", main_bid)
 
-    async def live(_stmt):
+    async def live(stmt):
         events.append("scalar")
+        if "graphver.jobs" in str(stmt):           # no bulk import is loading (_assert_no_bulk_load)
+            return None
         return "urn:some:entity"
     monkeypatch.setattr(_Session, "scalar", lambda self, stmt: live(stmt))
     with pytest.raises(ConcurrencyError, match="empty graph"):

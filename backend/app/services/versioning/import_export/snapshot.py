@@ -166,19 +166,22 @@ async def _stream(stmt, size: int) -> AsyncIterator[Sequence]:
 
 @dataclass(frozen=True)
 class VersionLayer:
-    """A branch's version rows at ``commit_seq <= seq`` — the winner per entity is its newest."""
+    """A branch's version rows at ``commit_seq <= seq`` — the winner per entity is its newest. With
+    ``after``, only the rows past it: one commit's, a bulk import's (:func:`open_bulk_snapshot`)."""
 
     graph_id: str
     branch_id: str
     seq: int
+    after: Optional[int] = None
 
     def _winners(self, kind: str, payload: bool = False):
         model = _model(kind)
-        return (select(*_columns(model, kind, payload))
+        stmt = (select(*_columns(model, kind, payload))
                 .where(model.graph_id == self.graph_id, model.branch_id == self.branch_id,
                        model.commit_seq <= self.seq)
                 .order_by(model.entity_id, model.commit_seq.desc(), model.created_at.desc())
                 .distinct(model.entity_id))
+        return stmt if self.after is None else stmt.where(model.commit_seq > self.after)
 
     async def scan(self, kind: str, size: int, payload: bool = False,
                    limit: Optional[int] = None) -> AsyncIterator[List[Winner]]:
@@ -444,6 +447,19 @@ async def _main_layers(s, graph_id: str, seq: int) -> List[Layer]:
         layers += await _main_layers(s, graph.fork_parent_graph_id, await fork_base_at(s, graph, seq))
     layers.append(VersionLayer(graph_id, main_id, seq))
     return layers
+
+
+async def open_bulk_snapshot(*, graph_id: str, commit_seq: int, page_size: int = PAGE_SIZE) -> Snapshot:
+    """What a bulk import resolves its rows against while it loads its commit (at ``commit_seq``,
+    head+1): ``main``'s head pointers, which are ``main`` as it was (nothing else writes ``main``
+    while the load holds it), under the rows the import's earlier windows wrote into its commit."""
+    async with _session() as s:
+        main_id = (await s.execute(select(BranchORM.id).where(
+            BranchORM.graph_id == graph_id, BranchORM.kind == "main"))).scalar_one()
+    return Snapshot([HeadsLayer(graph_id, main_id),
+                     VersionLayer(graph_id, main_id, commit_seq, after=commit_seq - 1)],
+                    graph_id=graph_id, branch_id=main_id, main_branch_id=main_id,
+                    as_of_seq=commit_seq, page_size=page_size)
 
 
 async def open_snapshot(*, graph_id: str, branch_id: Optional[str] = None, as_of_seq: Optional[int] = None,
