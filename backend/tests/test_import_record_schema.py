@@ -3,6 +3,11 @@ match it, every record an export writes must pass it, and a data source's schema
 that source's types and properties."""
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
+from pathlib import Path
+
 import pytest
 
 from backend.app.services.versioning.import_export import contract
@@ -22,6 +27,22 @@ def test_the_committed_schema_is_current():
     assert SCHEMA_PATH.read_text(encoding="utf-8") == render(), \
         "run: python -m backend.scripts.export_import_schema"
     assert main(["--check"]) == 0
+
+
+def test_the_schema_is_the_same_whatever_the_process_imported_first():
+    """typing hands a union back in the member order of an equal one created earlier, in any
+    module (a library's too). A process that wrote ``Optional[Union[str, List[str]]]`` first reads
+    the contract's ``tags: Optional[Union[List[str], str]]`` the other way round, and the full
+    suite did: the schema must not change with it."""
+    code = ("from typing import List, Optional, Union\n"
+            "Optional[Union[str, List[str]]]\n"
+            "import sys\n"
+            "from backend.scripts.export_import_schema import render\n"
+            "sys.stdout.write(render())\n")
+    out = subprocess.run([sys.executable, "-c", code], cwd=Path(__file__).resolve().parents[2],
+                         capture_output=True, text=True, check=True,
+                         env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}).stdout
+    assert out == SCHEMA_PATH.read_text(encoding="utf-8")
 
 
 def test_every_record_an_export_writes_passes_the_contract():
@@ -59,6 +80,7 @@ def test_a_data_sources_schema_names_its_types_and_types_its_properties():
     assert {"enum": ["Column", "Table"]} in node["properties"]["entityType"]["anyOf"]
     assert edge["properties"]["edgeType"]["enum"] == ["CONTAINS", "FLOWS_TO"]
     rows = node["properties"]["prop.rows"]
-    assert rows["anyOf"] == [{"type": "number"}, {"const": "\\N"}], "a number, or removed"
+    assert len(rows["anyOf"]) == 2 and {"type": "number"} in rows["anyOf"] \
+        and {"const": "\\N"} in rows["anyOf"], "a number, or removed"
     assert "required for a new Table" in node["properties"]["prop.owner"]["description"]
-    assert node["properties"]["prop.pii"]["anyOf"][0] == {"type": "boolean"}
+    assert {"type": "boolean"} in node["properties"]["prop.pii"]["anyOf"]
