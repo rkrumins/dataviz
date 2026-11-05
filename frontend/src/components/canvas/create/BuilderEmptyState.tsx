@@ -17,6 +17,8 @@ import { useViewEntityTypes, useViewRootEntityTypes } from '@/hooks/useViewSchem
 import { containmentChains } from '@/services/ontologyPreflightService'
 import { useHierarchyBuilderStore } from './hierarchyBuilderStore'
 import { useFeature } from '@/store/features'
+import { usePermission } from '@/store/auth'
+import { useActiveView } from '@/store/schema'
 
 const MAX_TEMPLATES = 3
 
@@ -28,6 +30,11 @@ export function BuilderEmptyState() {
   // entity", the canvas does not move, and they are left to conclude the app is broken. If it
   // cannot be done, do not offer it — say what is true instead.
   const versioningEnabled = useFeature('versioningEnabled')
+  // The same holds for someone without the right to build: the manage permission on the active
+  // view's workspace, which is what BlankCanvasEmptyState is given on the Context View canvas.
+  const activeView = useActiveView()
+  const canManage = usePermission('workspace:datasource:manage', activeView?.workspaceId)
+  const canBuild = versioningEnabled && canManage
   const entityTypes = useViewEntityTypes()
   const rootEntityTypes = useViewRootEntityTypes()
   const typeById = useMemo(() => new Map(entityTypes.map((et) => [et.id, et])), [entityTypes])
@@ -62,15 +69,17 @@ export function BuilderEmptyState() {
           <Plus className="w-7 h-7 text-accent-lineage" />
         </span>
         <h2 className="text-lg font-bold text-ink leading-tight">
-          {versioningEnabled ? 'Start your model' : 'This model is empty'}
+          {canBuild ? 'Start your model' : 'This model is empty'}
         </h2>
         <p className="text-sm text-ink-muted mt-1.5">
-          {versioningEnabled
+          {canBuild
             ? 'Add entities, nest them into a hierarchy, or paste a list to bring in several at once.'
-            : 'Editing is turned off for this workspace, so this model is view-only. An administrator can turn it back on.'}
+            : !versioningEnabled
+              ? 'Editing is turned off for this workspace, so this model is view-only. An administrator can turn it back on.'
+              : 'Nothing has been added yet. Someone with edit access can start building this model.'}
         </p>
 
-        {versioningEnabled && (
+        {canBuild && (
         <div className="mt-5 flex items-center justify-center gap-2">
           <button
             onClick={() => useHierarchyBuilderStore.getState().open()}
@@ -89,7 +98,7 @@ export function BuilderEmptyState() {
         </div>
         )}
 
-        {versioningEnabled && templates.length > 0 && (
+        {canBuild && templates.length > 0 && (
           <div className="mt-4">
             <p className="flex items-center justify-center gap-1 text-[10px] uppercase tracking-wide text-ink-muted/70 mb-2">
               <Sparkles className="w-3 h-3" />Start from a template
@@ -119,7 +128,7 @@ export function BuilderEmptyState() {
           </div>
         )}
 
-        {versioningEnabled && (
+        {canBuild && (
           <p className="mt-5 text-[11px] text-ink-muted/80">
             or press <kbd className="px-1.5 py-0.5 rounded border border-glass-border bg-canvas-overlay text-[10px] font-semibold">N</kbd>
           </p>

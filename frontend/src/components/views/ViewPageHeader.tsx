@@ -75,7 +75,7 @@
 import { useId, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowUpRight, Boxes, Clock, Database, Eye, FileDown, GitPullRequestDraft, Milestone, History, Info, Pencil, Shapes, Share2, X } from 'lucide-react'
+import { ArrowUpRight, Boxes, Clock, Database, Eye, FileDown, GitPullRequestDraft, Milestone, History, Info, Pencil, Shapes, Share2, Tag, X } from 'lucide-react'
 import { ViewUsageBadge } from './ViewUsageBadge'
 import { SyncStatusChip } from '@/features/sync-status/SyncStatusChip'
 import { cn } from '@/lib/utils'
@@ -496,6 +496,15 @@ export function ViewPageHeader({ viewId, workspaceName }: {
                         {technical && <SubsetsChip view={view} />}
                     </div>
 
+                    {/* What the view is FOR, in its author's words: the Details
+                        form asked for it, and the view page never showed it.
+                        Two lines at most; About has the rest. */}
+                    {view.description && (
+                        <p className="mt-0.5 max-w-3xl text-xs leading-snug text-ink-secondary line-clamp-2">
+                            {view.description}
+                        </p>
+                    )}
+
                     {/* 2 — where it lives. A KIND, a PLACE and a SOURCE are
                         three different sorts of fact; each gets its own icon
                         and its own colour, and the two that go somewhere are
@@ -663,7 +672,7 @@ export function ViewPageHeader({ viewId, workspaceName }: {
 
                     <span aria-hidden className="mx-0.5 h-5 w-px bg-glass-border" />
 
-                    {canEditDetails && (
+                    {canEditDetails ? (
                         <HoverTip
                             className="inline-flex"
                             label="Rename, describe, tag, or change who can see this view"
@@ -677,6 +686,24 @@ export function ViewPageHeader({ viewId, workspaceName }: {
                             >
                                 <Pencil className="w-3.5 h-3.5" aria-hidden />
                                 <span className="hidden lg:inline">Details</span>
+                            </button>
+                        </HoverTip>
+                    ) : (
+                        /* Someone who cannot edit had one way into the sheet: the
+                           data source, which says what the view is BUILT ON and
+                           not what it is FOR. Same sheet, on its About tab. */
+                        <HoverTip
+                            className="inline-flex"
+                            label="What this view is for, and what it is built on"
+                        >
+                            <button
+                                type="button"
+                                onClick={() => openDetails('about')}
+                                className={actionButtonClass}
+                                aria-label="About"
+                            >
+                                <Info className="w-3.5 h-3.5" aria-hidden />
+                                <span className="hidden lg:inline">About</span>
                             </button>
                         </HoverTip>
                     )}
@@ -872,7 +899,28 @@ export function ViewPageHeader({ viewId, workspaceName }: {
                             className="p-5"
                         >
                             {details === 'about' || !canEditDetails ? (
-                                <ViewBuiltOn view={view} />
+                                /* What the view is FOR leads — its description in
+                                   full, then its tags — and what it rests on
+                                   follows. Who made it stays in the footer. */
+                                <div className="space-y-5">
+                                    {view.description && (
+                                        <p className="text-sm leading-relaxed text-ink">{view.description}</p>
+                                    )}
+                                    {view.tags && view.tags.length > 0 && (
+                                        <div className="flex flex-wrap gap-1.5">
+                                            {view.tags.map(tag => (
+                                                <span
+                                                    key={tag}
+                                                    className="inline-flex items-center gap-1 rounded-full bg-black/[0.04] dark:bg-white/[0.06] border border-glass-border px-2.5 py-1 text-xs font-medium text-ink-muted"
+                                                >
+                                                    <Tag className="h-3 w-3" />
+                                                    {tag}
+                                                </span>
+                                            ))}
+                                        </div>
+                                    )}
+                                    <ViewBuiltOn view={view} />
+                                </div>
                             ) : (
                                 <EditDetailsPanel
                                     view={view}

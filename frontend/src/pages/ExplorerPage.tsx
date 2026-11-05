@@ -16,7 +16,7 @@ import {
   Compass, LayoutGrid, List, X, TrendingUp, Plus, FileUp, AlertTriangle, RefreshCw, ListFilter,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { useAuthStore } from '@/store/auth'
+import { useAnyWorkspacePermission, useAuthStore } from '@/store/auth'
 import { useExplorerViews, type SortOption, type ExplorerFilters } from '@/hooks/useExplorerViews'
 import { useViewStats } from '@/hooks/useViewStats'
 import { useViewHealth } from '@/hooks/useViewHealth'
@@ -126,6 +126,8 @@ export function ExplorerPage() {
   const visit = useVisitWindow(visitKey)
   const markVisitSeen = useVisitWindowsStore(s => s.markSeen)
   const { openViewEditor } = useViewEditorModal()
+  // The empty Explorer offers to create a view only to someone who may create one somewhere.
+  const canCreateViews = useAnyWorkspacePermission('workspace:view:create')
   // A view from another environment: the wizard's Import journey, from the button or a file
   // dropped anywhere on the page.
   const { canImport: importEnabled, canExport: exportEnabled } = useViewPortability()
@@ -881,7 +883,7 @@ export function ExplorerPage() {
                 hasFilters={hasActiveFilters}
                 activeCategory={filterState.category}
                 onClearFilters={clearAllFilters}
-                onCreateView={() => openViewEditor()}
+                onCreateView={canCreateViews ? () => openViewEditor() : undefined}
                 relaxations={relaxations}
                 onRelax={next => { setFilterState(next); setSearchInput(next.search) }}
                 activeFilterCount={activeDimensions(filterState).length}

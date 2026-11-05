@@ -24,6 +24,9 @@
  *     the very same form and the very same dialog.)
  *   - Versions and Export are a preview behind one admin switch: while it is off
  *     neither is offered, and the version status behind the chip is never asked for.
+ *   - what the view is FOR: its description sits under the name, and someone who
+ *     cannot edit gets About, which leads the sheet with the description and tags
+ *     before what the view is built on.
  */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter } from 'react-router-dom'
@@ -140,6 +143,9 @@ const PENDING: ViewPublishRequest = {
   requestedAt: THREE_DAYS_AGO,
   note: 'The whole company needs this map.',
 }
+
+/** What the view is for, in its author's words. */
+const DESCRIPTION = 'Where the quarterly revenue figures come from, end to end.'
 
 function viewResponse(overrides: Partial<View> = {}): View {
   return {
@@ -407,6 +413,39 @@ describe('what this view is built on', () => {
     // …and it is one click away, not one scroll.
     fireEvent.click(screen.getByRole('tab', { name: 'Edit' }))
     expect(screen.getByTestId('edit-details-form')).toBeTruthy()
+  })
+})
+
+describe('what the view is for', () => {
+  const PURPOSE: Partial<View> = { description: DESCRIPTION, tags: ['finance', 'quarterly'] }
+
+  it('says it under the name, in two lines at most', async () => {
+    renderHeader(viewResponse({ ...PURPOSE, access: VIEWER_ACCESS }))
+    const description = await screen.findByText(DESCRIPTION)
+    expect(description).toHaveClass('line-clamp-2')
+    // About carries the full text, so the clamp needs no tip of its own.
+    expect(description).not.toHaveAttribute('title')
+    const name = screen.getByRole('heading', { name: 'Test View' })
+    expect(name.compareDocumentPosition(description) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('gives a viewer About, which leads with the description and tags — and no edit form', async () => {
+    renderHeader(viewResponse({ ...PURPOSE, access: VIEWER_ACCESS }))
+    fireEvent.click(await screen.findByRole('button', { name: 'About' }))
+    const sheet = screen.getByRole('dialog')
+    const description = within(sheet).getByText(DESCRIPTION)
+    const tag = within(sheet).getByText('finance')
+    const builtOn = within(sheet).getByTestId('built-on-account')
+    expect(within(sheet).getByText('quarterly')).toBeInTheDocument()
+    expect(description.compareDocumentPosition(tag) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(tag.compareDocumentPosition(builtOn) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(screen.queryByTestId('edit-details-form')).toBeNull()
+  })
+
+  it('keeps Details for an editor, who gets no About button', async () => {
+    renderHeader(viewResponse({ ...PURPOSE, access: OWNER_ACCESS }))
+    expect(await screen.findByRole('button', { name: 'Details' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'About' })).toBeNull()
   })
 })
 
@@ -707,5 +746,11 @@ describe('the Business view keeps the bar to what a reader needs', () => {
   it('still shows a request waiting on the view', async () => {
     renderHeader(viewResponse({ access: OWNER_ACCESS, publishRequest: PENDING }))
     expect(await screen.findByText('Publication requested')).toBeInTheDocument()
+  })
+
+  it('says what the view is for, and gives a viewer About', async () => {
+    renderHeader(viewResponse({ access: VIEWER_ACCESS, description: DESCRIPTION }))
+    expect(await screen.findByText(DESCRIPTION)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'About' })).toBeInTheDocument()
   })
 })
