@@ -57,7 +57,7 @@
             }
           ],
           "default": null,
-          "description": "The entity's content hash, as an export writes it. Informational: an import doesn't check it.",
+          "description": "The entity's content hash, as an export writes it. If the entity has changed since, only the cells you changed apply, and a row whose cell someone else also changed is refused, naming it. Leave it out to set what the row carries.",
           "title": "Baseversion"
         },
         "confidence": {
@@ -139,7 +139,7 @@
             }
           ],
           "default": null,
-          "description": "The source node's urn. A pointer, not stored: it finds the node that carries it as its urn, or the node an earlier import made from it — whose id is derived from it, so importing the same file again updates what it made. A `urn:uuid:` no node holds is kept as the new node's id.",
+          "description": "The source node's urn. A pointer, not stored: it finds the node that carries it as its urn, or the node an earlier import made from it — whose id is derived from it, so importing the same file again updates what it made. A `urn:uuid:` no node holds is kept as the new node's id. To see your own id on the node, keep it in a property marked \"Match imports by this\" too.",
           "title": "Sourceurn"
         },
         "source_entity_id": {
@@ -178,7 +178,7 @@
             }
           ],
           "default": null,
-          "description": "The target node's urn. A pointer, not stored: it finds the node that carries it as its urn, or the node an earlier import made from it — whose id is derived from it, so importing the same file again updates what it made. A `urn:uuid:` no node holds is kept as the new node's id.",
+          "description": "The target node's urn. A pointer, not stored: it finds the node that carries it as its urn, or the node an earlier import made from it — whose id is derived from it, so importing the same file again updates what it made. A `urn:uuid:` no node holds is kept as the new node's id. To see your own id on the node, keep it in a property marked \"Match imports by this\" too.",
           "title": "Targeturn"
         },
         "target_entity_id": {
@@ -259,7 +259,7 @@
             }
           ],
           "default": null,
-          "description": "The entity's content hash, as an export writes it. Informational: an import doesn't check it.",
+          "description": "The entity's content hash, as an export writes it. If the entity has changed since, only the cells you changed apply, and a row whose cell someone else also changed is refused, naming it. Leave it out to set what the row carries.",
           "title": "Baseversion"
         },
         "description": {
@@ -404,7 +404,7 @@
             }
           ],
           "default": null,
-          "description": "The node's urn. A pointer, not stored: it finds the node that carries it as its urn, or the node an earlier import made from it — whose id is derived from it, so importing the same file again updates what it made. A `urn:uuid:` no node holds is kept as the new node's id.",
+          "description": "The node's urn. A pointer, not stored: it finds the node that carries it as its urn, or the node an earlier import made from it — whose id is derived from it, so importing the same file again updates what it made. A `urn:uuid:` no node holds is kept as the new node's id. To see your own id on the node, keep it in a property marked \"Match imports by this\" too.",
           "title": "Urn"
         }
       },

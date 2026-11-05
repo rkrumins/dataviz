@@ -29,7 +29,7 @@ from ..job_lease import Draining, Lease, Superseded, friendly_infra_error, is_tr
 from ..models import GraphORM, ImportRowORM, JobORM, MergeRequestORM
 from ..service import AccessDenied, GraphVersioningService, NotUpToDate, Viewer
 from . import contract, stream
-from ..ids import new_entity_id
+from ..ids import new_entity_id, uuid_urn
 from .export_worker import ExportWorker, example_template_records
 from .formats import get_adapter
 from .import_worker import ImportWorker, _normalize_page, _record_pages, lease_job
@@ -61,6 +61,13 @@ def _never_arrived(row) -> bool:
 
 #: How many changed rows a dry run lists (its summary counts them all).
 _VALIDATE_SAMPLE = 200
+
+
+def _named_by_pointer(row: Dict[str, Any], identity_prop: Optional[str]) -> bool:
+    """A node row named by a pointer that isn't kept: a urn, or identifier value, that isn't a
+    ``urn:uuid:`` (a free one is kept as the id)."""
+    held = (row.get("properties") or {}).get(identity_prop) if identity_prop else None
+    return any(v and not uuid_urn(str(v)) for v in (row.get("urn"), held))
 
 
 class DryRunTooLarge(ValueError):
@@ -929,10 +936,11 @@ class ImportExportService:
         lookups: Dict[str, Any] = await worker._node_lookups(snap, nodes) if nodes else {}
         if edges:                                    # one call: an edge finds a node made above it
             more = await worker._edge_lookups(snap, edges)
-            for key in ("urn_to_eid", "qname_to_eid", "current"):
+            for key in ("urn_to_eid", "qname_to_eid", "current", "hash_of", "bases"):
                 lookups[key] = {**more.get(key, {}), **lookups.get(key, {})}
             lookups["node_eids"] = set(lookups.get("node_eids") or ()) | more["node_eids"]
             lookups["edge_to_eid"] = more["edge_to_eid"]
+            lookups["edge_eids"] = more["edge_eids"]
         lookups.update(created_from={}, keys=worker._keys)
         scope = worker._id_scope
         _ops, resolutions = await asyncio.to_thread(
@@ -949,10 +957,16 @@ class ImportExportService:
                    "op": res["resolved_op"], "matchedEntityId": res.get("matched_entity_id"),
                    "label": _label(by_index[res["_row_index"]]), "reasons": res.get("reasons") or []}
                   for res in sorted(changed, key=lambda r: r["_row_index"])[:_VALIDATE_SAMPLE]]
+        named = sum(1 for res in resolutions if res["resolved_op"] == "create"
+                    and _named_by_pointer(by_index[res["_row_index"]], worker._identity_prop))
+        hints = [(f"{named} new {'node is' if named == 1 else 'nodes are'} named by a urn your file "
+                  "gives. A urn finds its node again on the next import but isn't stored, so "
+                  "exports and search show the node's urn:uuid; to see your own id, keep it in a "
+                  "property marked \"Match imports by this\".")] if named else []
         return {"format": import_format, "checkedAgainst": branch_id or "main",
                 "schemaVersion": contract.FORMAT_VERSION, "summary": summary, "rows": sample,
                 "rowsTruncated": len(changed) > len(sample),
-                "unknownColumns": contract.unknown_columns(records)}
+                "unknownColumns": contract.unknown_columns(records), "hints": hints}
 
     async def get_job(self, job_id: str) -> Optional[Dict[str, Any]]:
         """Job as a camelCase dict (frontend wire shape). READ-ONLY: polled by every open dialog, so

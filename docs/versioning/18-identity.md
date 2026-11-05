@@ -152,6 +152,10 @@ its entity:
   file's rows to each other and nothing more. Under `reconcileMode=replace`, each run then deletes
   the node the previous run made.
 - A row whose urn and identifier value point at two different entities is refused.
+- A matched row's urn or identifier value that names nothing is reported on the row, not applied.
+  An import never changes a node's urn.
+- A row an export wrote, imported after its entity changed, applies only the cells it changed; see
+  [08 §4a](08-import-export.md#4a-offline-edits-are-reconciled-never-silently-lost).
 
 ## 5. Adding, changing and removing properties
 

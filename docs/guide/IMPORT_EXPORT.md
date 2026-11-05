@@ -98,6 +98,19 @@ If an import fails, **Try again** takes you back to choose the file.
 New top-level entities that an import creates are placed in the View's layers,
 so you see them on the canvas straight away.
 
+### Editing an export offline
+
+An export you edit in Excel can be imported days later. If someone changed the
+same items in the meantime, only the cells you changed are applied, so their
+changes stay. If you both changed the same cell, that row isn't imported: the
+preview names the field, and you can export again and redo that edit. Two rows
+for one item, or an edge whose ends you changed, are refused the same way. To
+point an edge somewhere else, delete its row (set `_op` to `delete`) and add a
+new one.
+
+A `urn` you give a new item finds it again on the next import, but isn't kept
+on the item. To see your own id on it, put the id in a property too.
+
 ### Choosing a reconcile mode
 
 | Mode | What it does | Use it when |

@@ -65,6 +65,8 @@ async def _run(svc) -> None:
     assert rows[2]["op"] == "invalid" and "not a valid entity type" in rows[2]["reasons"][0]
     assert rows[3]["op"] == "create" and rows[3]["kind"] == "edge", "an edge to a node made above it"
     assert out["unknownColumns"] == ["prop_owner"] and out["checkedAgainst"] == "main"
+    # The new node is named by a urn it won't carry: the dry run says so, and what to do instead.
+    assert len(out["hints"]) == 1 and out["hints"][0].startswith("1 new node is named by a urn")
     assert await _counts(gid) == before, "no job, no draft, no commit"
 
     # Against a draft that already renamed A, the same row changes nothing.

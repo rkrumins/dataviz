@@ -226,7 +226,8 @@ def test_a_created_node_makes_its_qualified_name_ambiguous():
 def test_two_items_of_one_file_sharing_a_qualified_name_are_not_merged():
     """Two urn-less rows of one file, different items (their file entity_ids differ) under one
     qualifiedName: the second is not an update of the first. It is quarantined, and the
-    qualifiedName then names neither — but the file's own id of the first still names it."""
+    qualifiedName then names neither — but the file's own id of the first still names it (a third
+    row by that id names its node, and is refused for saying otherwise than the first)."""
     idx = {"urn_to_eid": {}, "qname_to_eid": {}, "edge_to_eid": {}, "node_eids": set()}
     minted = iter(["ent_0", "ev_1", "ev_2"])
     ops, res = resolve_rows([
@@ -248,12 +249,12 @@ def test_two_items_of_one_file_sharing_a_qualified_name_are_not_merged():
     by_row = {r["_row_index"]: r for r in res}
     assert by_row[0]["resolved_op"] == "create" and by_row[0]["matched_entity_id"] == "ent_0"
     assert by_row[1]["resolved_op"] == "invalid" and "more than one item" in by_row[1]["reasons"][0]
-    assert by_row[2]["resolved_op"] == "update" and by_row[2]["matched_entity_id"] == "ent_0"
+    assert by_row[2]["resolved_op"] == "invalid" and by_row[2]["matched_entity_id"] == "ent_0"
+    assert "row 1 of this file already names this node" in by_row[2]["reasons"][0]
     assert by_row[3]["resolved_op"] == "create", by_row[3]
     for i in (4, 5):                     # B's edge, and one naming the qualifiedName alone
         assert by_row[i]["resolved_op"] == "invalid", by_row[i]
-    assert [(o["op"], o["entity_id"]) for o in ops] == [
-        ("create", "ent_0"), ("update", "ent_0"), ("create", "ev_1")], ops
+    assert [(o["op"], o["entity_id"]) for o in ops] == [("create", "ent_0"), ("create", "ev_1")], ops
 
 
 def test_an_invalid_row_still_names_the_entity_it_matched():
@@ -308,11 +309,11 @@ def test_an_edge_is_the_same_edge_whatever_the_case_of_its_type():
                                   "targetEntityId": "ent_B"}}}
     ops, res = resolve_rows([
         {"_row_index": 0, "kind": "edge", "op": "upsert", "entity_id": "", "edgeType": "LINEAGE",
-         "sourceUrn": "urn:A", "targetUrn": "urn:B"},
+         "sourceUrn": "urn:A", "targetUrn": "urn:B", "properties": {"note": "x"}},
         {"_row_index": 1, "kind": "edge", "op": "upsert", "entity_id": "", "edgeType": "lineage",
          "sourceUrn": "urn:A", "targetUrn": "urn:B", "properties": {"note": "x"}},
     ], idx, mint_id=lambda: "never")
-    assert [r["resolved_op"] for r in res] == ["unchanged", "update"], res
+    assert [r["resolved_op"] for r in res] == ["update", "unchanged"], res
     assert ops == [{"op": "update", "entity_kind": "edge", "entity_id": "edg_AB",
                     "payload": {"properties": {"note": "x"}}}], ops
 
@@ -423,3 +424,140 @@ def test_a_delete_and_an_edge_find_their_node_by_pointer_and_by_file_id():
     assert res[2]["resolved_op"] == "delete" and res[2]["matched_entity_id"] == "N2"
     edge = next(o for o in ops if o["entity_kind"] == "edge")["payload"]
     assert (edge["sourceEntityId"], edge["targetEntityId"]) == (d, "N2")
+
+
+# ── An offline edit is reconciled, never silently lost ──────────────────────────────────────────
+# A row an export wrote carries ``baseVersion``, the content hash of the version it was exported
+# at. If the entity has changed since (``hash_of`` holds its head), only the cells the user changed
+# apply; a cell someone else also changed refuses the row; a version this graph doesn't hold
+# (``bases``) — another graph's export — applies as the row stands.
+
+from backend.common.property_patch import PROP_DELETE
+
+_X = "urn:uuid:0192f5a4-7b3c-7d2e-8f1a-2b3c4d5e6f72"
+_AT_EXPORT = {"urn": _X, "entityType": "Table", "displayName": "x", "description": "d0",
+              "tags": ["a"], "properties": {"owner": "alice", "tier": "gold"}}
+
+
+def _stale_run(row, now, **indexes):
+    """``row`` exported at ``_AT_EXPORT`` (hash ``h1``), resolved against ``now`` (hash ``h2``)."""
+    return _pointer_run([_node_row(0, entity_id=_X, urn=_X, baseVersion="h1", **row)],
+                        node_eids={_X}, urn_to_eid={_X: _X}, current={_X: now},
+                        **{"hash_of": {_X: "h2"}, "bases": {(_X, "h1"): _AT_EXPORT}, **indexes})
+
+
+def _exported(**changes):
+    """The row as the export wrote it, with the user's ``changes``."""
+    cells = {k: v for k, v in _AT_EXPORT.items() if k != "urn"}
+    props = {**cells.pop("properties"), **changes.pop("properties", {})}
+    return {**cells, **changes, "properties": props}
+
+
+def test_a_stale_row_applies_only_the_cells_its_user_changed():
+    now = {**_AT_EXPORT, "properties": {"owner": "bob", "tier": "gold"}}   # a colleague's edit
+    ops, res = _stale_run(_exported(description="mine"), now)
+    assert res[0]["resolved_op"] == "update", res[0]
+    assert ops[0]["payload"] == {"description": "mine"}, "the colleague's owner is not reverted"
+
+
+def test_a_stale_row_whose_cell_someone_else_also_changed_is_refused_naming_it():
+    now = {**_AT_EXPORT, "description": "theirs", "properties": {"owner": "bob", "tier": "gold"}}
+    ops, res = _stale_run(_exported(description="mine", properties={"owner": "carol"}), now)
+    assert ops == [] and res[0]["resolved_op"] == "invalid"
+    assert "changed since you exported it: description, owner" in res[0]["reasons"][0]
+
+
+def test_a_stale_row_changed_alike_or_untouched_is_unchanged():
+    now = {**_AT_EXPORT, "description": "same", "properties": {"owner": "bob", "tier": "gold"}}
+    ops, res = _stale_run(_exported(description="same"), now)
+    assert ops == [] and res[0]["resolved_op"] == "unchanged", res[0]
+
+
+def test_a_stale_rows_tags_merge_and_its_removal_applies():
+    now = {**_AT_EXPORT, "tags": ["a", "b"]}                               # a colleague added b
+    ops, _res = _stale_run(_exported(tags=["a", "c"], properties={"tier": PROP_DELETE}), now)
+    assert ops[0]["payload"]["tags"] == ["a", "b", "c"]
+    assert ops[0]["payload"]["properties"] == {"tier": PROP_DELETE}
+
+
+def test_a_stale_delete_is_refused():
+    now = {**_AT_EXPORT, "description": "theirs"}
+    ops, res = _pointer_run([_node_row(0, op="delete", entity_id=_X, baseVersion="h1")],
+                            node_eids={_X}, current={_X: now}, hash_of={_X: "h2"},
+                            bases={(_X, "h1"): _AT_EXPORT})
+    assert ops == [] and res[0]["resolved_op"] == "invalid"
+    assert "changed since you exported it" in res[0]["reasons"][0]
+
+
+def test_a_row_from_elsewhere_or_without_a_base_sets_what_it_carries():
+    now = {**_AT_EXPORT, "properties": {"owner": "bob", "tier": "gold"}}
+    for indexes in ({"bases": {}}, {"hash_of": {}}):           # a version this graph never held
+        ops, _res = _stale_run(_exported(description="mine"), now, **indexes)
+        assert ops[0]["payload"] == {"description": "mine", "properties": {"owner": "alice"}}
+    ops, _res = _pointer_run([_node_row(0, entity_id=_X, urn=_X, **_exported(description="mine"))],
+                             node_eids={_X}, current={_X: now}, hash_of={_X: "h2"})
+    assert ops[0]["payload"] == {"description": "mine", "properties": {"owner": "alice"}}
+
+
+def test_a_urn_edit_is_reported_and_a_urn_of_another_node_refuses_the_row():
+    held = {"urn": _X, "entityType": "Table", "displayName": "x"}
+    ops, res = _pointer_run([_node_row(0, entity_id=_X, urn="urn:li:renamed", displayName="x2"),
+                             _node_row(1, entity_id=_X, urn="urn:li:y", displayName="x3")],
+                            node_eids={_X, "N2"}, urn_to_eid={"urn:li:y": "N2"},
+                            current={_X: held, "N2": {"urn": "urn:li:y"}})
+    assert res[0]["resolved_op"] == "update" and ops[0]["payload"] == {"displayName": "x2"}
+    assert "urn 'urn:li:renamed' isn't stored" in res[0]["reasons"][0]
+    assert res[1]["resolved_op"] == "invalid"
+    assert "its entity_id and its urn name two different entities" in res[1]["reasons"][0]
+
+
+def _edge_row(i, **kw):
+    return {"_row_index": i, "kind": "edge", "op": "upsert", "edgeType": "FLOWS", **kw}
+
+
+def test_an_exported_edge_with_a_new_end_is_refused_not_doubled():
+    e = {"edgeType": "FLOWS", "sourceEntityId": "N1", "targetEntityId": "N2"}
+    ops, res = _pointer_run([_edge_row(0, entity_id="E1", source_entity_id="N1",
+                                       target_entity_id="N3"),
+                             _edge_row(1, entity_id="E1", source_entity_id="N1",
+                                       target_entity_id="N2", confidence=0.5)],
+                            node_eids={"N1", "N2", "N3"}, edge_eids={"E1"}, current={"E1": e},
+                            edge_to_eid={("N1", "N2", "FLOWS"): "E9"})        # a parallel edge
+    assert res[0]["resolved_op"] == "invalid" and "differ from edge E1" in res[0]["reasons"][0]
+    assert res[1]["resolved_op"] == "update" and res[1]["matched_entity_id"] == "E1"
+    assert [o["entity_id"] for o in ops] == ["E1"]
+
+
+def test_a_second_row_for_one_node_is_refused_unless_it_says_the_same():
+    held = {"urn": _X, "entityType": "Table", "displayName": "x"}
+    ops, res = _pointer_run([_node_row(0, entity_id=_X, displayName="x2"),
+                             _node_row(1, entity_id=_X, displayName="x2"),
+                             _node_row(2, entity_id=_X, displayName="x3"),
+                             _node_row(3, urn="urn:li:new", displayName="n"),
+                             _node_row(4, urn="urn:li:new", displayName="n2")],
+                            node_eids={_X}, current={_X: held})
+    assert [res[i]["resolved_op"] for i in range(5)] == [
+        "update", "unchanged", "invalid", "create", "invalid"]
+    assert "row 1 of this file already names this node" in res[2]["reasons"][0]
+    assert "row 4 of this file already names this node" in res[4]["reasons"][0]
+    assert [o["op"] for o in ops] == ["update", "create"]
+
+
+def test_a_row_for_a_node_an_earlier_window_named_is_refused_when_it_changes_it():
+    held = {"urn": _X, "entityType": "Table", "displayName": "x"}
+    _ops, res = _pointer_run([_node_row(20, entity_id=_X, displayName="x"),
+                              _node_row(21, entity_id=_X, displayName="x2")],
+                             node_eids={_X}, current={_X: held}, earlier={_X: 3})
+    assert res[20]["resolved_op"] == "unchanged"
+    assert res[21]["resolved_op"] == "invalid" and "row 4 of this file" in res[21]["reasons"][0]
+
+
+def test_a_second_row_for_one_edge_is_refused_unless_it_says_the_same():
+    ops, res = _pointer_run([_edge_row(0, source_entity_id="N1", target_entity_id="N2"),
+                             _edge_row(1, source_entity_id="N1", target_entity_id="N2"),
+                             _edge_row(2, source_entity_id="N1", target_entity_id="N2",
+                                       confidence=0.4)],
+                            node_eids={"N1", "N2"})
+    assert [res[i]["resolved_op"] for i in range(3)] == ["create", "unchanged", "invalid"]
+    assert "row 1 of this file already names this edge" in res[2]["reasons"][0]
+    assert len(ops) == 1
