@@ -7,22 +7,27 @@
  * even when nothing had arrived.)
  *
  * This shows the arriving work in the SAME visual language as every other diff on the canvas —
- * emerald added / amber modified / rose removed (`useDiffDecoration`) — reusing `ChangesPanel`, with
+ * emerald added / amber modified / rose removed (`useDiffDecoration`) — as main's change list for the
+ * window that came in, a page at a time (a pull after a 100,000-entity publish is 100,000 rows), with
  * the upstream authors named, because "who changed this under me" is the first thing you want to know.
  *
  * NO AnimatePresence/exit: a portaled exit transition strands an invisible click-blocker over the
  * canvas — a freeze class that has shipped here three times.
  */
+import { useMemo } from 'react'
 import { createPortal } from 'react-dom'
-import { ArrowDownToLine, X, Loader2, Users } from 'lucide-react'
+import { ArrowDownToLine, X, Users } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { HoverTip } from '@/components/ui/HoverTip'
 import { Backdrop } from '@/components/ui/Backdrop'
 import type { IncomingChanges } from '@/services/versioningApiService'
-import { useDiffWindow } from '../hooks/useVersioning'
-import { fromIncomingDiff } from '../model/changeAdapters'
+import { useChangeSummary } from '../hooks/useVersioning'
 import { ownerName } from '../model/branchVocab'
-import { ChangesPanel, ChangeCountChips } from './ChangesPanel'
+import { ChangeList } from './ChangeList'
+import { NodeDiffBadge } from './NodeDiffBadge'
+
+const STATUSES = ['added', 'modified', 'removed'] as const
+const NOTHING_CAME_IN = 'No entity changes came in — only metadata.'
 
 export function IncomingChangesSheet({
   wsId,
@@ -39,8 +44,12 @@ export function IncomingChangesSheet({
   userNames?: Record<string, string>
   onClose: () => void
 }) {
-  const diffQ = useDiffWindow(wsId, graphId, incoming.branchId, incoming.fromSeq, incoming.toSeq)
-  const changeSet = diffQ.data ? fromIncomingDiff(diffQ.data, `pull_${incoming.toSeq}`) : null
+  // What came in is main between the draft's old base and its new one.
+  const origin = useMemo(() => ({ fromSeq: incoming.fromSeq, toSeq: incoming.toSeq }),
+    [incoming.fromSeq, incoming.toSeq])
+  const empty = incoming.toSeq <= incoming.fromSeq
+  const summaryQ = useChangeSummary(wsId, graphId, empty ? null : origin)
+  const arrived = summaryQ.data
 
   const n = incoming.commitCount
   const authors = incoming.contributors.map((c) => ownerName(c, userNames)).filter(Boolean)
@@ -88,22 +97,21 @@ export function IncomingChangesSheet({
             </HoverTip>
           </div>
 
-          {changeSet && changeSet.changes.length > 0 && (
+          {arrived && arrived.total > 0 && (
             <div className="px-6 py-3 border-b border-glass-border bg-canvas-overlay/30 flex items-center gap-2">
               <span className="text-xs text-ink-muted">Arrived</span>
-              <ChangeCountChips changeSet={changeSet} />
+              {STATUSES.map((st) => arrived.counts[st] > 0 && (
+                <NodeDiffBadge key={st} status={st} count={arrived.counts[st]} withLabel />
+              ))}
             </div>
           )}
 
           <div className="flex-1 overflow-y-auto px-6 py-4 min-h-0">
-            {diffQ.isLoading ? (
-              <div className="flex items-center justify-center gap-2 py-10 text-ink-muted text-sm">
-                <Loader2 className="w-4 h-4 animate-spin" /> Loading what changed…
-              </div>
-            ) : changeSet ? (
-              <ChangesPanel changeSet={changeSet} emptyHint="No entity changes came in — only metadata." />
+            {empty ? (
+              <p className="text-sm text-ink-muted py-10 text-center">{NOTHING_CAME_IN}</p>
             ) : (
-              <p className="text-sm text-ink-muted py-10 text-center">Couldn’t load the incoming changes.</p>
+              <ChangeList wsId={wsId} graphId={graphId} origin={origin} summary={arrived}
+                emptyHint={NOTHING_CAME_IN} maxHeight="50vh" />
             )}
           </div>
 

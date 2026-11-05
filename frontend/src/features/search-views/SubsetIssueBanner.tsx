@@ -6,7 +6,7 @@
 import * as LucideIcons from 'lucide-react'
 import { Link } from 'react-router-dom'
 
-export type SubsetIssue = 'off' | 'unsupported' | 'base_missing'
+export type SubsetIssue = 'off' | 'unsupported' | 'base_missing' | 'revision'
 
 const WORDS: Record<SubsetIssue, { title: string; detail: string; action?: { label: string; to: string } }> = {
   off: {
@@ -16,6 +16,10 @@ const WORDS: Record<SubsetIssue, { title: string; detail: string; action?: { lab
   unsupported: {
     title: 'This data source can’t list a subset view’s matches',
     detail: 'Subset views are read by the server’s search, which this data source doesn’t offer.',
+  },
+  revision: {
+    title: 'A subset view shows the graph as it is now',
+    detail: 'Its layers are a search’s matches, and search reads the graph as it is now, not as it was at this revision. Go back to Published to see them.',
   },
   base_missing: {
     title: 'Its base view isn’t available',

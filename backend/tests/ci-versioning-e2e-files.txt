@@ -89,6 +89,7 @@ tests/integration/test_repair_revert_commit.py
 tests/integration/test_resync_identity_invariant.py
 tests/integration/test_review_inbox_open_prs.py
 tests/integration/test_review_policy.py
+tests/integration/test_revision_overlay_reads.py
 tests/integration/test_seed_identity.py
 tests/integration/test_shared_draft_members.py
 tests/integration/test_stage2_collaboration_story.py
@@ -106,6 +107,7 @@ tests/integration/test_versioning_branch_list.py
 tests/integration/test_versioning_branch_per_view.py
 tests/integration/test_versioning_branch_provider_stats.py
 tests/integration/test_versioning_bulk_ingest.py
+tests/integration/test_versioning_change_index.py
 tests/integration/test_versioning_commit_diff.py
 tests/integration/test_versioning_commit_log.py
 tests/integration/test_versioning_data_source_lifecycle.py

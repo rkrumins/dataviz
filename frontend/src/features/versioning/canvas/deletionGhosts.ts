@@ -179,26 +179,54 @@ export interface RestoreChangeInput {
   after: Record<string, unknown>
   summary: string
 }
+/** A change set's committed deletions, indexed in one pass: each removed node by urn, the removed
+ *  containment link that held each child, and the children each parent lost (first match wins, as a
+ *  scan would find it). A restore used to scan every change for every node it touched — quadratic
+ *  in a large deleted subtree. */
+interface RemovalIndex {
+  nodes: Map<string, GraphChange>
+  parentLink: Map<string, GraphChange>
+  childrenOf: Map<string, string[]>
+}
+
+function indexRemovals(
+  changeSet: ChangeSet | null, isContainmentEdgeType: (edgeType: string) => boolean,
+): RemovalIndex {
+  const nodes = new Map<string, GraphChange>()
+  const parentLink = new Map<string, GraphChange>()
+  const childrenOf = new Map<string, string[]>()
+  for (const c of changeSet?.changes ?? []) {
+    if (c.status !== 'removed' || !c.before) continue
+    if (c.kind === 'node') {
+      if (!nodes.has(nodeUrn(c))) nodes.set(nodeUrn(c), c)   // by urn: the canvas's name for it
+      continue
+    }
+    const e = c.before as Record<string, unknown>
+    if (!isContainmentEdgeType(str(e.edgeType) ?? str(e.edge_type) ?? '')) continue
+    const { source: src, target: tgt } = edgeEnds(c)
+    if (tgt && !parentLink.has(tgt)) parentLink.set(tgt, c)
+    if (src && tgt) {
+      const kids = childrenOf.get(src)
+      if (kids) kids.push(tgt)
+      else childrenOf.set(src, [tgt])
+    }
+  }
+  return { nodes, parentLink, childrenOf }
+}
+
 export function buildRestoreChange(
   urn: string,
   changeSet: ChangeSet | null,
   presentUrns: ReadonlySet<string>,
   isContainmentEdgeType: (edgeType: string) => boolean,
+  removals: RemovalIndex = indexRemovals(changeSet, isContainmentEdgeType),
 ): RestoreChangeInput | null {
-  const changes = changeSet?.changes ?? []
-  const nodeChange = changes.find(
-    (c) => c.kind === 'node' && c.status === 'removed' && nodeUrn(c) === urn && c.before,
-  )
+  const nodeChange = removals.nodes.get(urn)
   if (!nodeChange?.before) return null
   const b = nodeChange.before as Record<string, unknown>
 
   const edgeBefore = (c: GraphChange) => (c.before ?? {}) as Record<string, unknown>
-  const parentEdge = changes.find((c) => {
-    if (c.kind !== 'edge' || c.status !== 'removed' || !c.before) return false
-    const e = edgeBefore(c)
-    const et = str(e.edgeType) ?? str(e.edge_type) ?? ''
-    return edgeEnds(c).target === urn && isContainmentEdgeType(et)
-  })
+  const parentEdge = removals.parentLink.get(urn)
   const pe = parentEdge ? edgeBefore(parentEdge) : undefined
   const parentUrn = parentEdge ? edgeEnds(parentEdge).source : undefined
   const edgeType = pe ? (str(pe.edgeType) ?? str(pe.edge_type)) : undefined
@@ -229,37 +257,25 @@ export function buildRestoreSubtree(
   liveUrns: ReadonlySet<string>,
   isContainmentEdgeType: (edgeType: string) => boolean,
 ): RestoreChangeInput[] {
-  const changes = changeSet?.changes ?? []
-  const isRemovedNode = (u: string) =>
-    changes.some((c) => c.kind === 'node' && c.status === 'removed' && nodeUrn(c) === u && c.before)
-
-  // parent urn → deleted child urns, from removed CONTAINMENT edges only.
-  const childrenOf = new Map<string, string[]>()
-  for (const c of changes) {
-    if (c.kind !== 'edge' || c.status !== 'removed' || !c.before) continue
-    const e = c.before as Record<string, unknown>
-    const et = str(e.edgeType) ?? str(e.edge_type) ?? ''
-    if (!isContainmentEdgeType(et)) continue
-    const { source: src, target: tgt } = edgeEnds(c)
-    if (src && tgt) childrenOf.set(src, [...(childrenOf.get(src) ?? []), tgt])
-  }
+  // Removed nodes, and parent urn → deleted child urns from removed CONTAINMENT edges only.
+  const removals = indexRemovals(changeSet, isContainmentEdgeType)
 
   // BFS from the root over removed nodes → parent-before-child order.
   const order: string[] = []
   const seen = new Set<string>()
   const queue = [rootUrn]
-  while (queue.length) {
-    const u = queue.shift()!
-    if (seen.has(u) || !isRemovedNode(u)) continue
+  for (let i = 0; i < queue.length; i++) {
+    const u = queue[i]
+    if (seen.has(u) || !removals.nodes.has(u)) continue
     seen.add(u)
     order.push(u)
-    for (const ch of childrenOf.get(u) ?? []) queue.push(ch)
+    for (const ch of removals.childrenOf.get(u) ?? []) queue.push(ch)
   }
 
   // A subtree child's parent isn't "live" yet — it's being restored too. Treat the whole restore set
   // as present so descendants re-nest under their (restored) parents.
   const willBePresent = new Set<string>([...liveUrns, ...order])
   return order
-    .map((u) => buildRestoreChange(u, changeSet, willBePresent, isContainmentEdgeType))
+    .map((u) => buildRestoreChange(u, changeSet, willBePresent, isContainmentEdgeType, removals))
     .filter((r): r is RestoreChangeInput => !!r)
 }

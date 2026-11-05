@@ -38,8 +38,18 @@ vi.mock('@/providers/providerPool', () => ({
 }))
 
 vi.mock('@/store/branchStore', () => ({
-  useBranchStore: (sel: (s: unknown) => unknown) => sel({ mainEpoch: 0, draftEpoch: 0 }),
+  useBranchStore: (sel: (s: unknown) => unknown) => sel({ mainEpoch: 0, draftEpoch: 0, graphId: null }),
   useEffectiveBranchId: () => null,
+  useEffectiveRevision: () => null,
+}))
+
+// No past revision is open here: nothing to ask the server about one.
+vi.mock('@/features/versioning/hooks/useVersioning', () => ({
+  useRevision: () => ({ data: undefined, error: null }),
+}))
+vi.mock('@/features/versioning/hooks/useRevisionViewer', () => ({
+  useRevisionViewer: () => false,
+  useRevisionGuard: () => {},
 }))
 
 vi.mock('@/store/workspaces', () => ({

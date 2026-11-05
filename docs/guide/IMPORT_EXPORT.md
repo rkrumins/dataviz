@@ -88,6 +88,10 @@ editing dozens of nodes on the canvas.
    deleted, or need fixing — and a preview of the actual rows. Nothing has
    touched Published. Choose **Review changes**: the **Changes & Reviews**
    panel opens on **Changes**, listing everything the import put in your draft.
+   Up to 20,000 changes are laid out by container. A larger import is counted
+   by type, then listed a page at a time: switch between **Entities** and
+   **Relationships**, narrow by status or type, search by name, and expand any
+   row to see its values before and after.
 9. Publish the draft, or submit it for review, exactly as you would for any
    other change — see
    [Submit your draft for review](/guide/editing-in-a-draft#submit-your-draft-for-review).
@@ -96,7 +100,9 @@ editing dozens of nodes on the canvas.
 If an import fails, **Try again** takes you back to choose the file.
 
 New top-level entities that an import creates are placed in the View's layers,
-so you see them on the canvas straight away.
+so you see them on the canvas straight away. A View that lists its own entities
+draws the first 200 of them; the draft bar's **+N new** chip says how many more
+there are and opens **Changes**, which lists every one.
 
 ### Editing an export offline
 

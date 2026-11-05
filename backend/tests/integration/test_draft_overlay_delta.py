@@ -114,9 +114,12 @@ async def _run() -> None:
     assert "M.lin" in [e["id"] for e in iso["edgesRemove"]], iso
     # main-DELETED-after-fork edge → RESTORED to the read (fork-point value).
     assert "lin1" in [e["id"] for e in iso["edgesUpsert"]], iso
-    # main-MODIFIED node → restored to the FORK-POINT value ("A"), not main's live "A-renamed".
-    a_up = [n for n in iso["nodesUpsert"] if n["urn"] == "A"]
-    assert a_up and a_up[0]["displayName"] == "A", iso
+    # main-MODIFIED node → restored to the FORK-POINT value ("A"), not main's live "A-renamed": named,
+    # and its value loaded when a read serves it — the draft's value of what it did not touch is
+    # main's at its branch point.
+    assert {"entityId": "A", "urn": "A"} in iso["nodesModified"], iso
+    a_iso, = await svc.overlay_payloads(graph_id=gid, branch_id=d_iso, entity_ids=["A"])
+    assert a_iso["displayName"] == "A", a_iso
     # main-DELETED-after-fork node → restored via upsert AND marked new so the list/search reads surface it.
     assert "DEL" in [n["urn"] for n in iso["nodesUpsert"]], iso
     assert "DEL" in iso["nodesNew"], iso
@@ -149,8 +152,9 @@ async def _run() -> None:
                         ops=[{"op": "update", "entity_kind": "node", "entity_id": "B",  # B is parent-seeded in F
                               "payload": {"urn": "B", "entityType": "Table", "displayName": "B-fork"}}])
     fk = await svc.branch_overlay_delta(graph_id=fid, branch_id=d_fork)
-    b_up = [n for n in fk["nodesUpsert"] if n["urn"] == "B"]
-    assert b_up and b_up[0]["displayName"] == "B", fk               # restored to fork-point value via parent seeding
+    assert {"entityId": "B", "urn": "B"} in fk["nodesModified"], fk
+    b_fk, = await svc.overlay_payloads(graph_id=fid, branch_id=d_fork, entity_ids=["B"])
+    assert b_fk["displayName"] == "B", b_fk                         # restored to fork-point value via parent seeding
     assert "B" not in [n["urn"] for n in fk["nodesRemove"]], fk     # NOT removed
 
     await db.dispose_engine()
@@ -159,6 +163,46 @@ async def _run() -> None:
 @pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
 def test_draft_overlay_delta_e2e():
     asyncio.run(_run())
+
+
+async def _run_rewind_unloaded() -> None:
+    await models.create_schema_and_partitions()
+    svc = GraphVersioningService()
+    gid = (await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(), workspace_id="ws1",
+                                  actor="u"))["graph_id"]
+    await svc.apply_ops(graph_id=gid, actor="u", message="seed", containment_edge_types=CONT,
+                        ops=[_n(f"T{i}") for i in range(30)] + [_e("k", "T0", "T1", "CONTAINS")])
+    d = await svc.open_draft(graph_id=gid, owner="u")
+    # Someone publishes a large change after the draft branched off.
+    await svc.apply_ops(graph_id=gid, actor="u", message="publish", containment_edge_types=CONT, ops=[
+        *({"op": "update", "entity_kind": "node", "entity_id": f"T{i}",
+           "payload": {"urn": f"T{i}", "entityType": "Table", "displayName": f"T{i}'"}}
+          for i in range(10, 30)),
+        *(_n(f"M{i}") for i in range(20)),
+        {"op": "delete", "entity_kind": "edge", "entity_id": "k", "payload": None}])
+
+    saved = GraphVersioningService._values_at
+
+    async def refused(self, *a, **k):
+        raise AssertionError("the draft's patch set loaded a payload")
+    GraphVersioningService._values_at = refused
+    try:
+        delta = await svc.branch_overlay_delta(graph_id=gid, branch_id=d)
+    finally:
+        GraphVersioningService._values_at = saved
+    # Every entity main advanced is rewound, by name: a read loads the values it serves.
+    assert sorted(m["urn"] for m in delta["nodesModified"]) == sorted(f"T{i}" for i in range(10, 30))
+    assert sorted(m["urn"] for m in delta["nodesRemove"]) == sorted(f"M{i}" for i in range(20))
+    assert [e["id"] for e in delta["edgesUpsert"]] == ["k"] and delta["edgesUpsert"][0]["lazy"]
+    t, = await svc.overlay_payloads(graph_id=gid, branch_id=d, entity_ids=["T10"])
+    assert t["displayName"] == "T10"
+    await db.dispose_engine()
+
+
+@pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
+def test_a_drafts_rewind_of_what_main_published_since_loads_no_payload():
+    """After a large publish, each draft still open read every entity it changed, twice, whole."""
+    asyncio.run(_run_rewind_unloaded())
 
 
 if __name__ == "__main__":

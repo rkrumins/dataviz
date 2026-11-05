@@ -14,6 +14,7 @@ import { useEffectiveBranchId } from '@/store/branchStore'
 import { useViewExecutionContext } from '@/providers/ViewExecutionContext'
 
 import { useResolveGraph } from './useVersioning'
+import { AT_REVISION } from '../model/ensureDraftOpen'
 
 export const NO_VERSION_CONTROL = "Version control isn't set up for this data source yet"
 export const NO_DRAFT = 'Switch to a draft to make changes'
@@ -29,13 +30,17 @@ export interface EntityEditing {
 export function useEntityEditing(): EntityEditing {
   const versioningEnabled = useFeature('versioningEnabled')
   const editModeEnabled = useFeature('editModeEnabled')
-  const readOnly = useViewExecutionContext()?.readOnly ?? false
+  const viewCtx = useViewExecutionContext()
+  const readOnly = viewCtx?.readOnly ?? false
+  const atRevision = (viewCtx?.asOfSeq ?? null) != null
   const view = useActiveView()
   const dataSourceId = view?.dataSourceId ?? null
   const inDraft = !!useEffectiveBranchId(view?.workspaceId ?? '', dataSourceId, view?.id ?? null)
   const resolve = useResolveGraph(view?.workspaceId, dataSourceId, view?.id ?? null)
 
   const offered = versioningEnabled && editModeEnabled && !readOnly
+  // Offered, and said why it can't be taken: the way back to editing is one click away.
+  if (atRevision) return { offered, blocked: AT_REVISION }
   if (inDraft) return { offered, blocked: null }
   // No versioned graph (the lookup 404s — and says so while it is tried again on a new mount), or
   // one still being set up.

@@ -44,6 +44,7 @@ import * as LucideIcons from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { HoverTip } from '@/components/ui/HoverTip'
+import { useViewExecutionContext } from '@/providers/ViewExecutionContext'
 import { useRecentSearches } from '@/hooks/useRecentSearches'
 import type { SearchHit } from '@/types/search'
 import { useDiscovery } from '../../search/builder/useDiscovery'
@@ -110,7 +111,31 @@ function lookInLabel(lookIn: QuickLookIn): string {
   return FIXED_LOOK_IN.find((o) => o.value === lookIn)?.label ?? 'Everything'
 }
 
+/** The header's search box — or, at a past revision, its place kept and why it is empty: search reads
+ *  the graph as it is now, and the canvas is the graph as it was. */
 export function HeaderSearch() {
+  const atRevision = (useViewExecutionContext()?.asOfSeq ?? null) != null
+  if (!atRevision) return <HeaderSearchBox />
+  return (
+    <div data-tour="canvas-search" className="justify-self-center w-full min-w-0 max-w-xl">
+      <HoverTip
+        className="flex w-full"
+        label="Search is off at a past revision"
+        detail="Search reads the graph as it is now, not as it was at this revision. Go back to Published to search."
+      >
+        <div
+          aria-disabled
+          className="flex w-full items-center gap-2 px-3 py-2 rounded-[13px] border border-dashed border-indigo-500/30 bg-indigo-500/[0.04] text-[13px] text-ink-muted"
+        >
+          <LucideIcons.SearchX className="w-4 h-4 shrink-0 text-indigo-500/70" aria-hidden />
+          <span className="truncate">Search reads the graph as it is now</span>
+        </div>
+      </HoverTip>
+    </div>
+  )
+}
+
+function HeaderSearchBox() {
   // Destructured, not held as one object: the session carries the input
   // ref, and reading a ref-bearing object's fields through it during
   // render trips the react-hooks lint.

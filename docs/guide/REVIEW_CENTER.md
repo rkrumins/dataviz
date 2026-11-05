@@ -121,7 +121,13 @@ requests. To list only the ready or troubled ones, use the **Status** filter.
    - **Views** — Views the draft creates or changes (**New view**,
      **Imported**, **Layers edited**). They *go live when this merges*.
    - **Files changed** — every entity and relationship the request adds,
-     modifies or removes. Expand a row to compare before and after.
+     modifies or removes. Expand a row to compare before and after. A request
+     with more than 20,000 changes lists them a page at a time: switch between
+     **Entities** and **Relationships**, narrow by **Added**, **Modified** or
+     **Removed** or by type, or search by name. The list loads more as you
+     scroll. If the draft is behind **main**, the list shows what the draft
+     changes where it started; after **Pull latest** it is exactly what
+     merging changes.
    - **Activity** — when it was opened, approved, merged or closed, and by
      whom.
 3. To see the changes on the canvas, choose **Browse this branch’s changes**

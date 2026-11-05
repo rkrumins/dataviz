@@ -6,7 +6,7 @@
 import { useCallback } from 'react'
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import * as api from '@/services/versioningApiService'
-import type { BranchStatusFilter, DraftLevel, DraftRole, DraftsPolicyChange, PullRequest, ResolutionMap, StageOp, Watermark } from '@/services/versioningApiService'
+import type { BranchStatusFilter, ChangeListFilter, ChangeListOrigin, DraftLevel, DraftRole, DraftsPolicyChange, PullRequest, ResolutionMap, StageOp, Watermark } from '@/services/versioningApiService'
 import { workspaceService } from '@/services/workspaceService'
 import { SYNC_STATUS_KEY } from '@/features/sync-status/useSyncStatus'
 import { invalidateAggregatedEdges } from '@/hooks/useAggregatedLineage'
@@ -64,6 +64,14 @@ export const VERSIONING_KEYS = {
     [...VERSIONING_KEYS.all, 'branchViewChanges', ws, gid, bid] as const,
   commitDiffSummary: (ws?: string, gid?: string | null, cid?: string | null) =>
     [...VERSIONING_KEYS.all, 'commitDiffSummary', ws, gid, cid] as const,
+  // A change list (/graphs/{gid}/diff/*). A draft's sits under its `diffVsMain` key, so every save,
+  // pull and refresh that invalidates the draft's diff invalidates its lists too; main between two
+  // revisions never changes.
+  changeList: (ws?: string, gid?: string | null, origin?: ChangeListOrigin | null) =>
+    origin && 'branchId' in origin
+      ? ([...VERSIONING_KEYS.diffVsMain(ws, gid, origin.branchId), 'changes'] as const)
+      : ([...VERSIONING_KEYS.all, 'changes', ws, gid,
+          origin ? `${origin.fromSeq}-${origin.toSeq}` : 'none'] as const),
   viewPrs: (ws?: string, viewId?: string | null, status?: string | null) =>
     [...VERSIONING_KEYS.all, 'viewPrs', ws, viewId, status ?? 'all'] as const,
   dataSourcePrs: (ws?: string, dsId?: string | null, status?: string | null) =>
@@ -72,6 +80,15 @@ export const VERSIONING_KEYS = {
     [...VERSIONING_KEYS.all, 'viewPrCounts', ws, viewId] as const,
   viewCommitLog: (ws?: string, gid?: string | null, viewId?: string | null, graphWide?: boolean, limit?: number) =>
     [...VERSIONING_KEYS.all, 'viewCommits', ws, gid, viewId, !!graphWide, limit ?? 'default'] as const,
+  // Under 'viewCommits', so every publish, merge, revert and restore that refreshes the history
+  // refreshes these too: a timeline's pages, the history calendar, and what opening a revision takes
+  // (how far behind the head it is moves with the head).
+  historyPages: (ws?: string, gid?: string | null, scope?: string) =>
+    [...VERSIONING_KEYS.all, 'viewCommits', ws, gid, 'pages', scope ?? 'graph'] as const,
+  historyMonths: (ws?: string, gid?: string | null, tz?: string, viewId?: string | null) =>
+    [...VERSIONING_KEYS.all, 'viewCommits', ws, gid, 'months', tz ?? 'UTC', viewId ?? null] as const,
+  revision: (ws?: string, gid?: string | null, seq?: number | null) =>
+    [...VERSIONING_KEYS.all, 'viewCommits', ws, gid, 'revision', seq ?? null] as const,
   squashedCommits: (ws?: string, gid?: string | null, cid?: string | null) =>
     [...VERSIONING_KEYS.all, 'squashed', ws, gid, cid] as const,
   projectionWatermark: (ws?: string, gid?: string | null) =>
@@ -335,6 +352,9 @@ export function useDiffVsMain(
     queryFn: () => api.getDiffVsMain(wsId!, graphId!, branchId!, { slim }),
     enabled: !!wsId && !!graphId && !!branchId,
     staleTime: 10_000,
+    // A draft past the tree's cap says so at once (409 too_large_for_tree): its readers move to
+    // its change list (`/diff/index`, `/diff/summary`), and asking again changes nothing.
+    retry: (n, err) => !(err instanceof api.DiffTooLargeError) && n < 1,
   })
 }
 
@@ -450,21 +470,6 @@ export function useMergeRequest(wsId?: string, prId?: string | null) {
   })
 }
 
-/** The renderable diff of a branch between two seqs. Used for "what came in when I pulled": the
- *  window is main between the draft's old and new base. Immutable history → cache it hard. */
-export function useDiffWindow(
-  wsId?: string, graphId?: string | null, branchId?: string | null,
-  fromSeq?: number | null, toSeq?: number | null,
-) {
-  const on = !!wsId && !!graphId && !!branchId && fromSeq != null && toSeq != null && toSeq > fromSeq
-  return useQuery({
-    queryKey: [...VERSIONING_KEYS.all, 'diffWindow', wsId, graphId, branchId, fromSeq, toSeq],
-    queryFn: () => api.getDiffWindow(wsId!, graphId!, branchId!, fromSeq!, toSeq!),
-    enabled: on,
-    staleTime: Infinity,   // a closed commit window never changes
-  })
-}
-
 /** A PR's itemised Files Changed (for the unified ChangesPanel). */
 export function usePullRequestDiff(wsId?: string, prId?: string | null) {
   return useQuery({
@@ -472,6 +477,8 @@ export function usePullRequestDiff(wsId?: string, prId?: string | null) {
     queryFn: () => api.getMergeRequestDiff(wsId!, prId!),
     enabled: !!wsId && !!prId,
     staleTime: 15_000,
+    // A review too large to diff in a request says so at once; asking again changes nothing.
+    retry: (n, err) => !(err instanceof api.DiffTooLargeError) && n < 1,
   })
 }
 
@@ -527,6 +534,63 @@ export function useCommitDiffSummary(wsId?: string, graphId?: string | null, com
     queryFn: () => api.getCommitDiffSummary(wsId!, graphId!, commitId!),
     enabled: !!wsId && !!graphId && !!commitId,
     staleTime: 60_000,   // a commit is immutable
+  })
+}
+
+// ── Change lists: a draft's changes, or main's between two revisions, at any size ──────────────
+
+/** A draft's lists move with it; main between two revisions is fixed for good. */
+const changeListStale = (origin?: ChangeListOrigin | null) =>
+  origin && !('branchId' in origin) ? Infinity : 10_000
+
+/** Rows a change list page holds. */
+export const CHANGE_LIST_PAGE = 100
+
+/** A change list's counts by kind, status and type (the same index its pages come from). */
+export function useChangeSummary(wsId?: string, graphId?: string | null, origin?: ChangeListOrigin | null) {
+  return useQuery({
+    queryKey: [...VERSIONING_KEYS.changeList(wsId, graphId, origin), 'summary'],
+    queryFn: () => api.getChangeSummary(wsId!, graphId!, origin!),
+    enabled: !!wsId && !!graphId && !!origin,
+    staleTime: changeListStale(origin),
+  })
+}
+
+/** A change list a page at a time, narrowed by `filter`; `fetchNextPage` follows the server's offset. */
+export function useChangeEntries(
+  wsId: string | undefined, graphId: string | null | undefined, origin: ChangeListOrigin | null | undefined,
+  filter: ChangeListFilter = {}, { enabled = true }: { enabled?: boolean } = {},
+) {
+  return useInfiniteQuery({
+    queryKey: [...VERSIONING_KEYS.changeList(wsId, graphId, origin), 'entries', filter.kind ?? 'all',
+      (filter.statuses ?? []).join(','), filter.type ?? '', (filter.q ?? '').trim()],
+    queryFn: ({ pageParam }) => api.getChangeEntries(wsId!, graphId!, origin!, filter, pageParam, CHANGE_LIST_PAGE),
+    initialPageParam: 0,
+    getNextPageParam: (last) => (last.hasMore ? last.offset + last.entries.length : undefined),
+    enabled: enabled && !!wsId && !!graphId && !!origin,
+    staleTime: changeListStale(origin),
+  })
+}
+
+/** One entity before and after, fetched when its row is opened. */
+export function useChangeEntry(
+  wsId?: string, graphId?: string | null, origin?: ChangeListOrigin | null, entityId?: string | null,
+) {
+  return useQuery({
+    queryKey: [...VERSIONING_KEYS.changeList(wsId, graphId, origin), 'entry', entityId],
+    queryFn: () => api.getChangeEntry(wsId!, graphId!, origin!, entityId!),
+    enabled: !!wsId && !!graphId && !!origin && !!entityId,
+    staleTime: changeListStale(origin),
+  })
+}
+
+/** Every change of an origin, compact — what the canvas marks entities by. */
+export function useChangeIndex(wsId?: string, graphId?: string | null, origin?: ChangeListOrigin | null) {
+  return useQuery({
+    queryKey: [...VERSIONING_KEYS.changeList(wsId, graphId, origin), 'index'],
+    queryFn: () => api.getChangeIndex(wsId!, graphId!, origin!),
+    enabled: !!wsId && !!graphId && !!origin,
+    staleTime: changeListStale(origin),
   })
 }
 
@@ -600,6 +664,72 @@ export function useViewCommitLog(
           : { originatingViewId: viewId, publishedOnly: true, limit }),
     enabled: !!wsId && !!graphId && (graphWide || !!viewId),
     staleTime: 15_000,
+  })
+}
+
+/** Revisions fetched per page of a history timeline. */
+export const HISTORY_PAGE = 50
+
+/** Whose history a timeline lists: a draft's own commits, a view's published timeline, or the
+ *  whole graph's. */
+export type HistoryScope =
+  | { kind: 'draft'; branchId: string }
+  | { kind: 'view'; viewId: string }
+  | { kind: 'graph' }
+
+/** A history timeline, newest first, a page at a time. Paged by `before` (the oldest revision
+ *  already listed), so a walk neither skips nor repeats one while new revisions land. */
+export function useHistoryPages(
+  wsId: string | undefined, graphId: string | null | undefined, scope: HistoryScope, enabled = true,
+) {
+  const scopeKey = scope.kind === 'draft' ? `draft:${scope.branchId}`
+    : scope.kind === 'view' ? `view:${scope.viewId}` : 'graph'
+  return useInfiniteQuery({
+    queryKey: VERSIONING_KEYS.historyPages(wsId, graphId, scopeKey),
+    queryFn: ({ pageParam }) => api.getCommitLog(wsId!, graphId!, {
+      ...(scope.kind === 'draft' ? { branchId: scope.branchId }
+        : scope.kind === 'view' ? { originatingViewId: scope.viewId, publishedOnly: true } : {}),
+      limit: HISTORY_PAGE,
+      ...(pageParam != null ? { before: pageParam } : {}),
+    }),
+    initialPageParam: null as number | null,
+    getNextPageParam: (last) => (last.hasMore && last.nextBefore != null ? last.nextBefore : undefined),
+    enabled: enabled && !!wsId && !!graphId,
+    staleTime: 15_000,
+  })
+}
+
+/** The reader's time zone, which the history calendar counts days and months in. */
+export function readerTimeZone(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+  } catch {
+    return 'UTC'
+  }
+}
+
+/** Published's revisions by month and day, in the reader's time zone — the month picker's heat. */
+export function useHistoryMonths(
+  wsId: string | undefined, graphId: string | null | undefined, viewId?: string | null, enabled = true,
+) {
+  const tz = readerTimeZone()
+  return useQuery({
+    queryKey: VERSIONING_KEYS.historyMonths(wsId, graphId, tz, viewId),
+    queryFn: () => api.getHistoryMonths(wsId!, graphId!, { tz, originatingViewId: viewId }),
+    enabled: enabled && !!wsId && !!graphId,
+    staleTime: 60_000,
+  })
+}
+
+/** One revision of Published and what opening it takes: asked before the canvas reads it. */
+export function useRevision(wsId: string | undefined, graphId: string | null | undefined, seq: number | null) {
+  return useQuery({
+    queryKey: VERSIONING_KEYS.revision(wsId, graphId, seq),
+    queryFn: () => api.getRevision(wsId!, graphId!, seq!),
+    enabled: !!wsId && !!graphId && seq != null,
+    staleTime: 30_000,
+    // A revision that isn't one is an answer, not an outage.
+    retry: (n, err) => n < 1 && (err as { status?: number })?.status !== 404,
   })
 }
 

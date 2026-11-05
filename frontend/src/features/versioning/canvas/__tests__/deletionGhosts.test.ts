@@ -173,3 +173,23 @@ describe('deletionGhosts — entity ids that are not urns', () => {
     expect(r.after).toMatchObject({ urn: 'urn:X', parentUrn: 'urn:P', containmentEdgeType: 'CONTAINS' })
   })
 })
+
+describe('deletionGhosts — restoring a large deleted subtree', () => {
+  it('restores 20,000 deleted children parent-first, in time linear in the change set', () => {
+    // Each restored node used to scan every change, twice, and each parent's child list was copied
+    // on every append: 20,000 children were billions of steps.
+    const n = 20_000
+    const changes: GraphChange[] = [removedNode('urn:root', { displayName: 'Root', entityType: 'Schema' })]
+    for (let i = 0; i < n; i++) {
+      changes.push(removedNode(`urn:c${i}`, { displayName: `c${i}`, entityType: 'Table' }))
+      changes.push(removedEdge(`e${i}`, { edgeType: 'CONTAINS', sourceEntityId: 'urn:root', targetEntityId: `urn:c${i}` }))
+    }
+    const started = performance.now()
+    const restore = buildRestoreSubtree('urn:root', buildChangeSet(changes), new Set(['urn:db']), CONTAINS)
+    expect(performance.now() - started).toBeLessThan(2000)
+    expect(restore).toHaveLength(n + 1)
+    expect(restore[0].targetUrn).toBe('urn:root')
+    expect(restore[1].after).toMatchObject({ parentUrn: 'urn:root', containmentEdgeType: 'CONTAINS' })
+  })
+})
+

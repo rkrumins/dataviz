@@ -17,9 +17,10 @@ const src = readFileSync(resolve(__dirname, '../CanvasRouter.tsx'), 'utf8')
 
 describe('CanvasRouter scopes the notification message history to the active view', () => {
   it('clears the history in the same effect that clears the trace', () => {
-    // The effect body between the trace clear and its [activeViewId, currentBranchId] deps.
+    // The effect body between the trace clear and its [activeViewId, currentBranchId, asOfSeq]
+    // deps — a past revision is another graph state, cleared for in the same effect.
     const effect = src.match(
-      /useEffect\(\(\) => \{[\s\S]*?clearTrace\(\)[\s\S]*?\}, \[activeViewId, currentBranchId\]\)/,
+      /useEffect\(\(\) => \{[\s\S]*?clearTrace\(\)[\s\S]*?\}, \[activeViewId, currentBranchId, asOfSeq\]\)/,
     )
     expect(effect, 'the view/branch-change effect must still exist').not.toBeNull()
     expect(effect![0]).toMatch(/clearHistory\(\)/)

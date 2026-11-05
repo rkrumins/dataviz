@@ -118,12 +118,20 @@ class ContextEngine:
         actor: Optional[str] = None,
         branch_id: Optional[str] = None,
         viewer: Any = None,  # versioning Viewer
+        as_of_seq: Optional[int] = None,
     ) -> "ContextEngine":
         """
         Create a ContextEngine scoped to a workspace data source.
         If data_source_id is given, uses that specific source; otherwise the primary.
         A draft ``viewer`` can't read is a ``KeyError`` (404), exactly like an unknown
         branch; internal callers pass no viewer and are not scoped.
+
+        ``as_of_seq``: read the data source's published graph as it was at that revision of its
+        ``main`` — its store at the head with the patch set of everything changed since over it
+        (``DraftOverlayProvider`` with ``as_of_seq``), read-only. A revision more than
+        ``GRAPHVER_REVISION_REWIND_MAX`` entities back is ``RevisionTooFar``; a data source without
+        version control, a fork and a draft are ``RevisionUnsupported``: none of them is ever
+        answered from the graph as it is now instead.
 
         Ontology is resolved and pushed into the provider *eagerly* so
         that endpoints which call ``engine.provider.*`` directly (e.g.
@@ -162,6 +170,9 @@ class ContextEngine:
                 if fork_row is None or fork_row.deleted_at is not None:
                     raise KeyError(f"Data source not found: {data_source_id}")
                 fork = fork_row.fork_of_data_source_id is not None
+            if fork and as_of_seq is not None:
+                from .versioning.errors import RevisionUnsupported
+                raise RevisionUnsupported("fork", "A fork's past revisions can't be opened yet")
             provider = None if fork else await registry.get_provider_for_workspace(
                 workspace_id, session, data_source_id
             )
@@ -193,6 +204,9 @@ class ContextEngine:
             graph = await svc.get_graph_by_data_source(data_source_id)
             if graph is None and fork:
                 raise KeyError(f"Data source not found: {data_source_id}")   # its graph is trashed
+            if graph is None and as_of_seq is not None:
+                from .versioning.errors import RevisionUnsupported
+                raise RevisionUnsupported("unversioned", "This data source has no version history")
             if graph is not None:
                 gid = graph["graph_id"]
                 # Residency (doc 17): with it on, a person's read holds the graph's key before the
@@ -204,6 +218,10 @@ class ContextEngine:
                     await residency.hold(svc, graph)
                 main_id = await svc.main_branch_id(gid)
                 is_draft = norm not in ("", "main", main_id)
+                if is_draft and as_of_seq is not None:
+                    from .versioning.errors import RevisionUnsupported
+                    raise RevisionUnsupported(
+                        "draft", "A past revision is of the published graph: leave the draft out")
                 main_reader = None
                 if fork:
                     # A fork's main is its root's store with the fork's patch set over it, and a
@@ -221,7 +239,36 @@ class ContextEngine:
                         wm.get("falkor_graph_name"), gid)
                 read_provider = None
                 read_branch: Optional[str] = None
-                if is_draft:
+                revision: Optional[int] = None
+                if as_of_seq is not None:
+                    from .versioning import config as vconfig
+                    from .versioning.errors import RevisionTooFar
+                    try:
+                        plan = await svc.revision_read_plan(gid, as_of_seq)
+                    except ValueError as exc:
+                        raise KeyError(str(exc)) from exc
+                    if plan["too_far"]:
+                        raise RevisionTooFar(as_of_seq, plan["head"], plan["changed"],
+                                             vconfig.REVISION_REWIND_MAX)
+                    # At the head, a revision is main itself and is read as main is.
+                    if as_of_seq < plan["head"]:
+                        revision = as_of_seq
+                if revision is not None:
+                    # main as it was at a revision: main's store at the head, with the patch set of
+                    # everything changed since over it, read-only.
+                    from ..providers.versioned_branch_provider import VersionedBranchProvider
+                    from ..providers.draft_overlay_provider import DraftOverlayProvider
+                    base = provider if main_fresh else VersionedBranchProvider(
+                        svc, graph_id=gid, branch_id=main_id, actor=actor)
+                    # Keyed by the store's version it reads against, as a fork's is, so nothing
+                    # read while the store was out or catching up outlives that.
+                    read_provider = DraftOverlayProvider(
+                        base, svc=svc, graph_id=gid, branch_id=main_id, actor=actor,
+                        as_of_seq=revision, version=("rev", revision, plan["head"]),
+                        read_ns=f"rev{revision}@{wm['committed']}:{wm['projected']}:{wm['status']}")
+                    # Its own answer cache, and never the published top level's.
+                    read_branch = f"{main_id}@{revision}"
+                elif is_draft:
                     async with svc._session() as gv_s:
                         try:
                             branch = await svc._get_branch(gv_s, gid, norm)
@@ -259,7 +306,7 @@ class ContextEngine:
                     engine._db_session = session
                     engine._branch_id = read_branch
                     engine._actor = actor
-                    engine._writes_main = not is_draft
+                    engine._writes_main = not is_draft and revision is None
                     try:
                         await engine._resolve_ontology()
                     except Exception as exc:

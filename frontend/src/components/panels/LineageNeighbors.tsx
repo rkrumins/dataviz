@@ -37,6 +37,7 @@ import {
   type NeighborRecord,
 } from '@/lib/lineage-neighbors'
 import { useGraphProviderIfAvailable } from '@/providers/GraphProviderContext'
+import { useViewExecutionContext } from '@/providers/ViewExecutionContext'
 import { useViewLineageEdgeTypes } from '@/hooks/useViewSchema'
 import { useLensLineage, EDGE_FETCH_LIMIT } from '@/hooks/useLensLineage'
 import { useLensWalk } from '@/hooks/useLensWalk'
@@ -134,7 +135,9 @@ export function LineageNeighbors({ nodeId, onFocusNode, onLocateMany, onRevealPa
   // neighbours), so a leaf walks at once — as does anything the rollups
   // cannot answer: no rollup lane, no cells, or a failed read.
   const provider = useGraphProviderIfAvailable()
-  const walkCapable = typeof provider?.traceClosure === 'function'
+  // A walk reads the graph as it is now: at a past revision the drawer lists what the canvas reads.
+  const atRevision = (useViewExecutionContext()?.asOfSeq ?? null) != null
+  const walkCapable = !atRevision && typeof provider?.traceClosure === 'function'
   const focalChildCount = useCanvasStore((s) => nodeIndexOf(s.nodes).get(nodeId)?.data?.childCount as number | undefined)
   const isLeafFocal = focalChildCount === 0
   const coarse = useCoarseLineage(walkCapable && nodeId && !isLeafFocal ? nodeId : null, walkCapable ? provider : null)

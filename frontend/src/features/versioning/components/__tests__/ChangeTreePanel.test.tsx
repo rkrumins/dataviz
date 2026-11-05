@@ -6,6 +6,12 @@
  */
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
+
+const listed = vi.hoisted(() => vi.fn())
+vi.mock('../ChangeList', () => ({
+  ChangeList: (props: unknown) => { listed(props); return <div>the change list</div> },
+}))
+
 import { ChangeTreePanel } from '../ChangeTreePanel'
 import type { DiffSummaryResponse, DiffChildrenResponse } from '@/services/versioningApiService'
 
@@ -75,27 +81,37 @@ describe('ChangeTreePanel', () => {
     expect(screen.getByText('Nothing here.')).toBeInTheDocument()
   })
 
-  it('counts a draft too large to list as a tree, and says where each change is', () => {
+  const tooLarge: DiffSummaryResponse = {
+    groups: [], groupTotal: 0,
+    counts: { added: 0, modified: 100000, removed: 0 },
+    entityCounts: { added: 0, modified: 100000, removed: 0 },
+    edgeCounts: { added: 0, modified: 0, removed: 0 },
+    impact: { SchemaField: 100000 },
+    tooLarge: { changed: 100000, limit: 20000 },
+  }
+
+  it('counts a set too large to lay out as a tree', () => {
     render(
-      <ChangeTreePanel
-        summary={{
-          groups: [], groupTotal: 0,
-          counts: { added: 0, modified: 100000, removed: 0 },
-          entityCounts: { added: 0, modified: 100000, removed: 0 },
-          edgeCounts: { added: 0, modified: 0, removed: 0 },
-          impact: { SchemaField: 100000 },
-          tooLarge: { changed: 100000, limit: 20000 },
-        }}
-        fetchChildren={vi.fn()}
-        origin={origin}
-        emptyHint="Nothing here."
-        summaryFirst
-      />,
+      <ChangeTreePanel summary={tooLarge} fetchChildren={vi.fn()} origin={origin}
+        emptyHint="Nothing here." summaryFirst />,
     )
     expect(screen.getByText('100000 changes')).toBeInTheDocument()
-    expect(screen.getByText(/too many to list here/)).toBeInTheDocument()
-    expect(screen.getByText(/Commits/)).toBeInTheDocument()
+    expect(screen.getByText(/100,000 entities changed — too many to lay out here/)).toBeInTheDocument()
     expect(screen.queryByText('Nothing here.')).not.toBeInTheDocument()
     expect(screen.queryByText(/Show details/)).not.toBeInTheDocument()
+  })
+
+  it('lists a set too large for the tree from its change list, a page at a time', () => {
+    listed.mockClear()
+    render(
+      <ChangeTreePanel summary={tooLarge} fetchChildren={vi.fn()} origin={origin} emptyHint="Nothing here."
+        summaryFirst list={{ wsId: 'ws1', graphId: 'g1', origin: { branchId: 'br_1' } }} />,
+    )
+    expect(screen.getByText('100000 changes')).toBeInTheDocument()
+    expect(screen.getByText('the change list')).toBeInTheDocument()
+    expect(listed).toHaveBeenCalledWith(expect.objectContaining({
+      wsId: 'ws1', graphId: 'g1', origin: { branchId: 'br_1' },
+    }))
+    expect(screen.queryByText(/too many to lay out here/)).not.toBeInTheDocument()
   })
 })

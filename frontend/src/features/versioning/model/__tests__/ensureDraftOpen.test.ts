@@ -31,7 +31,7 @@ import { GraphNotWritableError, resolveAndOpenDraft } from '@/services/versionin
 import { useNotificationStore } from '@/components/ui/notifications'
 import { useBranchStore } from '@/store/branchStore'
 import { DEFAULT_FEATURES, useFeaturesStore } from '@/store/features'
-import { ensureDraftOpen } from '../ensureDraftOpen'
+import { ensureDraftOpen, AT_REVISION } from '../ensureDraftOpen'
 
 const resolveAndOpenDraftMock = vi.mocked(resolveAndOpenDraft)
 
@@ -136,6 +136,18 @@ describe('ensureDraftOpen', () => {
 
     await expect(ensureDraftOpen()).resolves.toBeNull()
     expect(useNotificationStore.getState().notifications).toEqual([expect.objectContaining({ type: 'error', message })])
+  })
+
+  it('opens no draft from a past revision, which is read-only, and says how to edit', async () => {
+    useNotificationStore.setState({ notifications: [] })
+    useBranchStore.getState().openRevision({ seq: 12 })
+
+    await expect(ensureDraftOpen()).resolves.toBeNull()
+    expect(resolveAndOpenDraftMock).not.toHaveBeenCalled()
+    expect(useBranchStore.getState().revision?.seq).toBe(12)
+    expect(useNotificationStore.getState().notifications).toEqual([
+      expect.objectContaining({ type: 'info', message: AT_REVISION }),
+    ])
   })
 
   it('returns null without any network call when versioning is admin-disabled', async () => {
