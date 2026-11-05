@@ -131,7 +131,8 @@ the changed entities differ (the "draft = main ⊕ sparse delta" overlay).
 - **Store.** `graphver` Postgres schema: 6 high-cardinality **append-only** tables
   (`commits`, `node_versions`, `edge_versions`, `entity_heads`, `merkle_nodes`, `working_changes`)
   **HASH-partitioned on `graph_id`** into 64 partitions; control-plane tables (`graphs`, `branches`,
-  `branch_members`, `merge_requests`, `projection_state`, `jobs`, `import_rows`) unpartitioned.
+  `branch_members`, `merge_requests`, `projection_state`, `jobs`, `import_rows`, `import_results`)
+  unpartitioned.
 - **Hashing.** Content + Merkle hashing is **blake2b** (32-byte), length-prefixed; Merkle trie depth
   **4** (16⁴ = 65,536 leaf buckets). Both are **immutable-after-data**.
 - **Code footprint.** `GraphVersioningService` ≈ **6,822** lines; the REST surface ≈ **3,615**
