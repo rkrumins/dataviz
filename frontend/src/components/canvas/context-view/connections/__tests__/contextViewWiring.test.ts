@@ -68,7 +68,8 @@ describe('the Connections panel is wired into the Context View', () => {
     // while one of its ends is hovered. Counted in a budget, it took a slot
     // it never filled; listed in the panel, it was a flow nobody could see.
     expect(source).toMatch(/drawableLineageEdges = useMemo\(\s*\(\) => visibleLineageEdges\.filter\(e => !e\.isDelegated\)/)
-    expect(source).toMatch(/\[\.\.\.drawableLineageEdges\]\.sort\(bySignificance\)/)
+    // Ranked by significance, a trace's own lines first (Adaptive keeps them).
+    expect(source).toMatch(/\[\.\.\.drawableLineageEdges\]\s*\.sort\(\(a, b\) => Number\(own\(b\)\) - Number\(own\(a\)\) \|\| bySignificance\(a, b\)\)/)
     expect(source).toMatch(/aggregateFlowRibbons\(\s*drawableLineageEdges,/)
     expect(source).toMatch(/for \(const e of drawableLineageEdges\) \{/)
     // The panel lists every drawable line, not the budgeted subset the
@@ -76,8 +77,8 @@ describe('the Connections panel is wired into the Context View', () => {
     expect(source).toContain('buildConnectionModel(drawableLineageEdges)')
     expect(source).not.toContain('buildConnectionModel(effectiveLineageEdges)')
     // The hover pool keeps everything: hovering an end brings a delegated
-    // line back.
-    expect(source).toContain('hoverPool={isStubsMode && !overlay.active ? visibleLineageEdges : undefined}')
+    // line back, and in a trace that reveals lines, a hidden one.
+    expect(source).toContain('hoverPool={isStubsMode || traceRevealsLines ? visibleLineageEdges : undefined}')
   })
 
   it('the panel and search highlights reach the overlay only — cards keep their own highlight', () => {
