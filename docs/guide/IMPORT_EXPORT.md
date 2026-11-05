@@ -64,8 +64,10 @@ editing dozens of nodes on the canvas.
    continue a draft.
 2. Open **Import / Export** and choose **Import…**. The **Import data** dialog
    opens, with *How importing works* on the left.
-3. **Download a starter template** — it's prefilled with your current data, so
-   you learn the columns straight away — or use your own file. Excel, CSV, TSV,
+3. **Download a starter template** — every column your data can carry, with an
+   example row of each type (the Excel one explains each column on its Columns
+   sheet; CSV and NDJSON are a click away) — or use your own file. To change
+   what's already there, **export** it instead and edit that. Excel, CSV, TSV,
    NDJSON and JSON are all supported (older formats like `.xls` or Numbers files
    aren't — save as CSV first).
 4. Edit the file anywhere — a spreadsheet, a script, whatever's convenient.

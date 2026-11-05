@@ -21,9 +21,11 @@ give. Each step links to the page with the detail.
    imports and exports over HTTP.
 7. [Import / Export](/docs/versioning-import-export) — how a bulk file is read, matched and
    applied.
-8. [View portability](/docs/feature-view-portability) — the view file format and the checks an
+8. [Building a Connector](/docs/connector-guide) — sending another system's catalog in: the
+   record format and its schema, pointers, deltas and the dry run.
+9. [View portability](/docs/feature-view-portability) — the view file format and the checks an
    import runs.
-9. [Feature Switches API](/docs/api-features) — which administrator switch turns which endpoint
+10. [Feature Switches API](/docs/api-features) — which administrator switch turns which endpoint
    off.
 
 ## 1. Choose the credential
@@ -240,6 +242,7 @@ the API explorer marks each one ([Find the endpoint you need](/docs/api-guide#fi
 ## Where to next
 
 - [API Guide for Integrators](/docs/api-guide) — conventions and recipes.
+- [Building a Connector](/docs/connector-guide) — send another system's catalog in, safely re-run.
 - [Key Management API](/docs/key-management-api) — every key route and refusal.
 - [API Keys](/guide/api-keys) and [Service Accounts](/guide/service-accounts) — the same, from the
   app.

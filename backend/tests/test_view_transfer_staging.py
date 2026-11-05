@@ -48,6 +48,9 @@ class _Versioning:
     async def get_graph(self, graph_id):
         return next((g for g in self.graphs.values() if g["graph_id"] == graph_id), None)
 
+    async def identity_scope(self, graph_id):
+        return (await self.get_graph(graph_id) or {}).get("data_source_id", graph_id)
+
     async def branch_statuses(self, branch_ids):
         return {d["branch_id"]: d["status"] for d in self.drafts if d["branch_id"] in set(branch_ids)}
 

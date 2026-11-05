@@ -757,6 +757,20 @@ publish.
    A `404` means version control isn't on for this data source. A `bootstrap` object in the
    answer means it is still being turned on (its `status` is `pending`, `running`,
    `needs_decision` or `failed`): wait until `bootstrap` is `null`.
+
+   Then learn the format and check the file before importing it. These are also open to API
+   keys:
+   - `GET …/imports/schema` is the JSON Schema of one record for this data source.
+   - `GET …/imports/template?format=xlsx` gives every column, with a worked row of each type.
+   - `POST …/imports/validate?format=ndjson`, with the file as the body, says what an import
+     would do and writes nothing.
+
+   ```bash
+   api POST "/api/v1/$WS/versioning/graphs/$GID/imports/validate?format=ndjson" \
+       --data-binary @lineage.ndjson | jq '{summary, unknownColumns}'
+   ```
+
+   A team that sends files from another system: see [Building a Connector](/docs/connector-guide).
 2. For a file up to 100 MB, send it as the request body. The answer is `202` with the import
    job and the draft it writes to:
 

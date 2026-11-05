@@ -28,10 +28,12 @@ from ..errors import JobActive, MainWriteForbidden
 from ..job_lease import Draining, Lease, Superseded, friendly_infra_error, is_transient
 from ..models import GraphORM, ImportRowORM, JobORM, MergeRequestORM
 from ..service import AccessDenied, GraphVersioningService, NotUpToDate, Viewer
-from . import stream
+from . import contract, stream
+from ..ids import new_entity_id
 from .export_worker import ExportWorker, example_template_records
 from .formats import get_adapter
-from .import_worker import ImportWorker, lease_job
+from .import_worker import ImportWorker, _normalize_page, _record_pages, lease_job
+from .resolve import _STATUS, pointer_id, resolve_rows
 from .rowmodel import column_order
 from .runner import INSPECT_TYPES, JOB_TYPES, QUEUED, JobReaper
 from .snapshot import open_snapshot
@@ -55,6 +57,19 @@ def _never_arrived(row) -> bool:
     broke off before storing it, or the reaper failed it once that request had gone."""
     return (row is not None and row.job_type == "ingest" and row.status == "failed"
             and row.current_phase is None and row.error_message == config.JOB_NEVER_QUEUED)
+
+
+#: How many changed rows a dry run lists (its summary counts them all).
+_VALIDATE_SAMPLE = 200
+
+
+class DryRunTooLarge(ValueError):
+    """A file larger than a dry run checks: import it into a draft instead."""
+
+
+def _label(row: Dict[str, Any]) -> Optional[str]:
+    """How a row is named in a dry run's list, as the import preview names it."""
+    return row.get("displayName") or row.get("qualifiedName") or row.get("urn") or row.get("edgeType")
 
 
 class ImportExportService:
@@ -833,24 +848,111 @@ class ImportExportService:
             row.completed_at = row.updated_at = _now()
         return True
 
-    async def build_template(self, *, graph_id: str, export_format: str = "csv", limit: int = 5) -> bytes:
-        """A small, prepopulated starter template so users learn the format instantly: the column
-        schema + up to ``limit`` real rows from the graph (edit-in-place), or worked example rows
-        when the graph is empty. Reads one page of each kind from published main, never the whole
-        graph — returned inline for a direct download."""
-        snap = await open_snapshot(graph_id=graph_id, page_size=limit)
-        records = await stream.first_records(snap, limit) or example_template_records()
-        columns = column_order(records)
+    async def contract_context(self, workspace_id: str,
+                               data_source_id: Optional[str]) -> Tuple[Optional[dict], Optional[str]]:
+        """What the import contract says of this data source: its ontology as an import reads it
+        (types, fields, the types each relationship joins, team keys), and the property it
+        identifies nodes by — ``(None, None)`` where either can't be read."""
+        from backend.app.services.node_identity import identity_property
+        ontology = (await self._ontology_resolver(workspace_id, data_source_id)
+                    if self._ontology_resolver is not None else None)
+        identity = (await self._identity_resolver(workspace_id, data_source_id)
+                    if self._identity_resolver is not None else None)
+        return ontology, identity_property(identity) if identity is not None else None
+
+    async def build_template(self, *, export_format: str = "csv",
+                             ontology: Optional[Dict[str, Any]] = None,
+                             identity_property: Optional[str] = None) -> bytes:
+        """The import template a person fills in, or a connector copies: the record format's
+        columns (:mod:`.contract`) — every property the data source's types define, its identifier
+        property, the fields an edge's ends are found by — with a worked row of each entity type
+        and an edge of each relationship type joining them, each pointing at its nodes by an
+        example urn. A workbook adds a Columns sheet saying what every column means; CSV and TSV
+        start with a BOM, so a spreadsheet reads them as UTF-8. Without an ontology, worked
+        example rows. Nothing of the graph is read: a template never carries a real entity, which
+        importing it as it is would change. Built in memory, returned inline."""
+        records = contract.template_records(ontology) or example_template_records()
+        extra = contract.template_columns(ontology, identity_property)
+        columns = column_order(records, schema_props={
+            "node": [c[len("prop."):] for c in extra["node"]]})
+        if any(r.get("kind") == "edge" for r in records):
+            columns = columns[:-1] + extra["edge"] + columns[-1:]          # ahead of _op
         adapter = get_adapter(export_format)
 
         async def _iter():
             for rec in records:
                 yield rec
 
-        chunks: List[bytes] = []
-        async for b in adapter.write(_iter(), columns=columns):
+        options = ({"guide": contract.columns_guide(columns, ontology, identity_property)}
+                   if export_format == "xlsx" else {})
+        chunks: List[bytes] = [stream._BOM] if export_format in ("csv", "tsv") else []
+        async for b in adapter.write(_iter(), columns=columns, **options):
             chunks.append(b)
         return b"".join(chunks)
+
+    async def validate_import(self, *, graph_id: str, workspace_id: str,
+                              data_source_id: Optional[str], branch_id: Optional[str],
+                              data: bytes, import_format: str) -> Dict[str, Any]:
+        """A dry run of importing ``data``: parsed, normalized and resolved against ``main`` (or
+        the draft ``branch_id``) as an import resolves a window — the same matching, the same new
+        ids, the same reasons a row is refused — and nothing written: no draft opened, no job
+        made. One window at most (``IMPORT_COMMIT_WINDOW`` rows; ``ValueError`` past it): a larger
+        file is imported into a draft, which is itself a dry run until published. Not run here:
+        the write gate a strict graph applies at commit, and the deletions a ``replace`` would
+        make — the import's preview shows those."""
+        adapter = get_adapter(import_format)
+
+        async def _chunks():
+            yield data
+
+        records: List[Dict[str, Any]] = []
+        rows: List[Dict[str, Any]] = []
+        skipped = 0
+        async for page in _record_pages(adapter, _chunks()):
+            records += [r for r in page if isinstance(r, dict)          # a row, not a skipped record
+                        and str(r.get("kind") or "").strip().lower() in ("node", "edge")]
+            page_rows, page_skipped = await asyncio.to_thread(_normalize_page, page, False)
+            skipped += page_skipped
+            rows += [{**row, "_row_index": len(rows) + i} for i, (_kind, row) in enumerate(page_rows)]
+            if len(rows) > config.IMPORT_COMMIT_WINDOW:
+                raise DryRunTooLarge(f"a dry run checks up to {config.IMPORT_COMMIT_WINDOW:,} rows; "
+                                     "import a larger file into a draft and read its preview")
+        ontology, _identity = await self.contract_context(workspace_id, data_source_id)
+        node_identity = (await self._identity_resolver(workspace_id, data_source_id)
+                         if self._identity_resolver is not None else None)
+        branch = branch_id or await self._svc.main_branch_id(graph_id)
+        snap = await open_snapshot(graph_id=graph_id, branch_id=branch_id)
+        worker = ImportWorker(self._svc, self._store, ontology=ontology, node_identity=node_identity)
+        await worker.validation_state(snap, graph_id, branch, rows)
+        nodes = [r for r in rows if r["kind"] == "node"]
+        edges = [r for r in rows if r["kind"] == "edge"]
+        lookups: Dict[str, Any] = await worker._node_lookups(snap, nodes) if nodes else {}
+        if edges:                                    # one call: an edge finds a node made above it
+            more = await worker._edge_lookups(snap, edges)
+            for key in ("urn_to_eid", "qname_to_eid", "current"):
+                lookups[key] = {**more.get(key, {}), **lookups.get(key, {})}
+            lookups["node_eids"] = set(lookups.get("node_eids") or ()) | more["node_eids"]
+            lookups["edge_to_eid"] = more["edge_to_eid"]
+        lookups.update(created_from={}, keys=worker._keys)
+        scope = worker._id_scope
+        _ops, resolutions = await asyncio.to_thread(
+            resolve_rows, nodes + edges, lookups, mint_id=new_entity_id, ontology=ontology,
+            identity_prop=worker._identity_prop, mint_urn=lambda _etype: new_entity_id(),
+            derive_urn=lambda seed: pointer_id(scope, seed))
+        summary = {"new": 0, "updated": 0, "unchanged": 0, "deleted": 0, "invalid": 0,
+                   "skipped": skipped}
+        for res in resolutions:
+            summary[_STATUS[res["resolved_op"]]] += 1
+        by_index = {r["_row_index"]: r for r in rows}
+        changed = [res for res in resolutions if res["resolved_op"] != "unchanged"]
+        sample = [{"rowIndex": res["_row_index"], "kind": by_index[res["_row_index"]]["kind"],
+                   "op": res["resolved_op"], "matchedEntityId": res.get("matched_entity_id"),
+                   "label": _label(by_index[res["_row_index"]]), "reasons": res.get("reasons") or []}
+                  for res in sorted(changed, key=lambda r: r["_row_index"])[:_VALIDATE_SAMPLE]]
+        return {"format": import_format, "checkedAgainst": branch_id or "main",
+                "schemaVersion": contract.FORMAT_VERSION, "summary": summary, "rows": sample,
+                "rowsTruncated": len(changed) > len(sample),
+                "unknownColumns": contract.unknown_columns(records)}
 
     async def get_job(self, job_id: str) -> Optional[Dict[str, Any]]:
         """Job as a camelCase dict (frontend wire shape). READ-ONLY: polled by every open dialog, so

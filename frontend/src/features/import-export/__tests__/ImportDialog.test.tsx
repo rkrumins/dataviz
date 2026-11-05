@@ -20,9 +20,10 @@ vi.mock('@/services/importExportApiService', async (importOriginal) => ({
   getImport: vi.fn(),
   getImportPreview: vi.fn(),
   pollJob: vi.fn(),
+  triggerBrowserDownload: vi.fn(),
 }))
 
-import { getImportPreview, importInParts, pollJob } from '@/services/importExportApiService'
+import { getImportPreview, importInParts, pollJob, triggerBrowserDownload } from '@/services/importExportApiService'
 import { ImportDialog } from '../ImportDialog'
 
 let unmount = () => {}
@@ -45,6 +46,18 @@ beforeEach(() => {
 })
 
 describe('ImportDialog', () => {
+  it('downloads the starter template as Excel, or as CSV or NDJSON', async () => {
+    open()
+    await userEvent.click(screen.getByRole('button', { name: /Download a starter template/ }))
+    await userEvent.click(screen.getByRole('button', { name: 'CSV' }))
+    await userEvent.click(screen.getByRole('button', { name: 'NDJSON' }))
+    expect(vi.mocked(triggerBrowserDownload).mock.calls).toEqual([
+      [expect.stringMatching(/\/graphs\/g1\/imports\/template\?format=xlsx$/), 'import-template.xlsx'],
+      [expect.stringMatching(/format=csv$/), 'import-template.csv'],
+      [expect.stringMatching(/format=ndjson$/), 'import-template.ndjson'],
+    ])
+  })
+
   it('refuses a file over the upload limit before sending it', async () => {
     await userEvent.upload(open(), file('graph.csv', 10.5 * 1024 ** 3))
 

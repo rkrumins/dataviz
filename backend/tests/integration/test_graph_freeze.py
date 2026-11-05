@@ -36,6 +36,7 @@ from backend.app.services.storage.object_store import LocalFsObjectStore, storag
 from backend.app.services.versioning import config, db, models
 from backend.app.services.versioning.errors import GraphNotWritable, LockBusy, VersionConflict
 from backend.app.services.versioning.import_export.import_worker import lease_job
+from backend.app.services.versioning.import_export.resolve import pointer_id
 from backend.app.services.versioning.import_export.service import ImportExportService
 from backend.app.services.versioning.models import BranchORM, CommitORM, GraphORM, JobORM, WorkingChangeORM
 from backend.app.services.versioning.purge_worker import (PURGE_JOB_TYPE, restore_graphs_for_data_source,
@@ -491,7 +492,9 @@ async def _import(svc):
         await ie.run_import_safe(job["job_id"], await lease_job(job["job_id"]))
         assert (await ie.get_job(job["job_id"]))["status"] == "completed"
         nodes = (await svc.materialize_state(graph_id=gid, branch_id=draft))["nodes"]
-        assert sorted(p["urn"] for p in nodes.values()) == urns, "every row landed once"
+        scope = await svc.identity_scope(gid)          # the file's urns are pointers
+        assert sorted(p["urn"] for p in nodes.values()) == sorted(
+            pointer_id(scope, u) for u in urns), "every row landed once"
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
