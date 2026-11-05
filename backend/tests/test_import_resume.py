@@ -133,7 +133,9 @@ async def test_a_resumed_parse_stages_only_the_rows_past_its_cursor(monkeypatch)
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
-    staged = [[row["row_index"] for row in entry[2]] for entry in log if entry[0] == "sql"]
+    staged = [entry[2]["idx"] for entry in log if entry[0] == "sql"]
+    assert all(entry[1] is import_worker._STAGE_ROWS for entry in log if entry[0] == "sql"), \
+        "a batch is one statement"
     assert staged == [[3, 4, 5], [6]], "rows below the cursor are never staged again"
     assert [entry[0] for entry in log] == ["sql", "checkpoint", "sql", "checkpoint", "checkpoint"], \
         "each batch commits with its checkpoint"

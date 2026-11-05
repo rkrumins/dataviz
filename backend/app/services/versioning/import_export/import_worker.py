@@ -37,8 +37,8 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
-from sqlalchemy import (BigInteger, Text, and_, any_, bindparam, delete, exists, false, func,
-                        insert, null, or_, select, text, tuple_)
+from sqlalchemy import (BigInteger, Text, and_, any_, bindparam, delete, exists, false, func, null,
+                        or_, select, text, tuple_)
 from sqlalchemy.dialects.postgresql import ARRAY
 
 from backend.app.services.view_placement import NodeFacts, suggest_placement
@@ -59,8 +59,18 @@ from .uploads import WHOLE_FILE_FORMATS, is_archive_source, open_source, source_
 
 logger = logging.getLogger(__name__)
 
-_PARSE_BATCH = 2000
+# Rows a parse stages per transaction (each with the job's checkpoint); a resumed parse redoes at
+# most one batch.
+_PARSE_BATCH = 10000
 _PERSIST_BATCH = 5000
+# Stage a batch of parsed rows: the rows as typed columns, unnested server-side — one statement,
+# where an INSERT of a list of rows is one statement per row on the server (executemany).
+_STAGE_ROWS = text(
+    f"INSERT INTO {ImportRowORM.__table__.fullname} (job_id, row_index, kind, raw) "
+    "SELECT :job_id, v.row_index, v.kind, CAST(v.raw AS jsonb) "
+    "FROM unnest(:idx, :kinds, :raws) AS v(row_index, kind, raw)",
+).bindparams(bindparam("idx", type_=ARRAY(BigInteger)), bindparam("kinds", type_=ARRAY(Text)),
+             bindparam("raws", type_=ARRAY(Text)))
 _RESULT_COLUMNS = "job_id, row_index, kind, matched_entity_id, resolved_op, reasons"
 # Record a batch of outcomes: each column one array parameter, so the statement never changes.
 _RECORD_RESULTS = text(
@@ -140,6 +150,12 @@ def _sniff_format(declared: str, head: bytes) -> str | None:
 def _chunks(seq: List[Any], size: int):
     for i in range(0, len(seq), size):
         yield seq[i:i + size]
+
+
+def _stage_columns(batch: List[Dict[str, Any]]) -> Dict[str, list]:
+    """A batch of parsed rows as ``_STAGE_ROWS``' columns, each row's raw as its JSON text."""
+    return {"idx": [r["row_index"] for r in batch], "kinds": [r["kind"] for r in batch],
+            "raws": [json.dumps(r["raw"]) for r in batch]}
 
 
 def _staged(res):
@@ -452,13 +468,15 @@ class ImportWorker:
         return idx, skipped
 
     async def _flush(self, batch: List[Dict[str, Any]]) -> None:
-        """Stage a batch of parsed rows — batched multi-row INSERTs, no ORM object per row — and
-        move the job's cursor past them in the SAME transaction, fenced: each row is staged once,
-        by whichever run of the job got to it, and a superseded worker's batch rolls back."""
+        """Stage a batch of parsed rows — one statement (``_STAGE_ROWS``), the rows' JSON written off
+        the event loop — and move the job's cursor past them in the SAME transaction, fenced: each
+        row is staged once, by whichever run of the job got to it, and a superseded worker's batch
+        rolls back."""
         self._lease.check()
         cursor = f"parse:{batch[-1]['row_index'] + 1}"
+        columns = await asyncio.to_thread(_stage_columns, batch)
         async with db.graphver_session() as s:
-            await s.execute(insert(ImportRowORM.__table__), batch)
+            await s.execute(_STAGE_ROWS, {"job_id": batch[0]["job_id"], **columns})
             await self._lease.checkpoint(s, expect_cursor=self._cursor, last_cursor=cursor,
                                          total=batch[-1]["row_index"] + 1, current_phase="parse")
         self._cursor = cursor

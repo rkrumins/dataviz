@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import random
 import sys
@@ -34,7 +35,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from typing import (Any, Awaitable, Callable, Collection, Dict, Iterable, List, Mapping, NamedTuple,
                     Optional, Sequence, Set, Tuple)
 
-from sqlalchemy import (TIMESTAMP, Boolean, Text, TextClause, any_, bindparam, cast, insert, select, func,
+from sqlalchemy import (TIMESTAMP, Boolean, Text, TextClause, any_, bindparam, cast, select, func,
                         delete, null, literal, text, update, or_, tuple_, and_, case)
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -342,6 +343,67 @@ _ADVANCE_HEADS = text(
     "AND (h.content_hash = v.pre OR (v.pre = :absent AND h.content_hash = :empty)) "
     "RETURNING h.entity_id",
 ).bindparams(*_head_arrays(), bindparam("pres", type_=ARRAY(Text)))
+
+
+# A commit's version rows of one kind as ONE statement: the rows as typed columns, unnested
+# server-side, the columns built off the event loop (``_delta_columns``). An INSERT of a list of
+# rows is one statement PER ROW on the server (executemany: asyncpg pipelines them, Postgres runs
+# each), which an import window of 10,000 rows paid 10,000 times; the bootstrap writes its copy
+# the same way (``bootstrap_worker._versions_insert_sql``).
+_DELTA_COLUMNS = {
+    "node": (("id", "text"), ("entity_id", "text"), ("op", "text"), ("content_hash", "text"),
+             ("prev_content_hash", "text"), ("payload", "text"), ("urn", "text"),
+             ("entity_type", "text"), ("display_name", "text"), ("qualified_name", "text")),
+    "edge": (("id", "text"), ("entity_id", "text"), ("op", "text"), ("content_hash", "text"),
+             ("prev_content_hash", "text"), ("payload", "text"), ("source_entity_id", "text"),
+             ("target_entity_id", "text"), ("edge_type", "text"), ("confidence", "float8"),
+             ("discriminator", "text")),
+}
+# Version rows per statement: a revert of a large commit writes them all in one commit.
+_DELTA_BATCH = 10000
+
+
+def _insert_deltas_sql(kind: str) -> TextClause:
+    cols = _DELTA_COLUMNS[kind]
+    names = [c for c, _type in cols]
+    picked = ", ".join(f"CAST(v.{c} AS jsonb)" if c == "payload" else f"v.{c}" for c in names)
+    arrays = ", ".join(f"CAST(:{c} AS {t}[])" for c, t in cols)
+    model = NodeVersionORM if kind == "node" else EdgeVersionORM
+    return text(
+        f"INSERT INTO {model.__table__.fullname} (graph_id, commit_id, commit_seq, branch_id, "
+        f"actor, change_reason, created_at, {', '.join(names)}) "
+        f"SELECT :graph_id, :commit_id, :commit_seq, :branch_id, :actor, NULL, :created_at, {picked} "
+        f"FROM unnest({arrays}) AS v({', '.join(names)})")
+
+
+_INSERT_DELTAS = {kind: _insert_deltas_sql(kind) for kind in _DELTA_COLUMNS}
+
+
+def _delta_columns(deltas: Sequence[Delta], kind_by_entity: Mapping[str, str]):
+    """The version rows of ``deltas`` as one list per column and kind (a payload as its JSON text,
+    a tombstone's as ``null``, as the JSONB column stored it), and each entity's new head."""
+    columns = {kind: {c: [] for c, _type in cols} for kind, cols in _DELTA_COLUMNS.items()}
+    heads: List[dict] = []
+    for d in deltas:
+        kind = kind_by_entity.get(d.entity_id, "node")
+        p = d.payload or {}
+        vid = prefixed_id("nv" if kind == "node" else "ev")
+        row = {"id": vid, "entity_id": d.entity_id, "op": d.op, "content_hash": d.content_hash,
+               "prev_content_hash": d.prev_content_hash, "payload": json.dumps(d.payload)}
+        if kind == "node":
+            row.update(urn=p.get("urn"), entity_type=p.get("entityType"),
+                       display_name=p.get("displayName"), qualified_name=p.get("qualifiedName"))
+        else:
+            row.update(source_entity_id=p.get("sourceEntityId") or p.get("source_entity_id") or "",
+                       target_entity_id=p.get("targetEntityId") or p.get("target_entity_id") or "",
+                       edge_type=p.get("edgeType"), confidence=p.get("confidence"),
+                       discriminator=p.get("discriminator"))
+        for c, values in columns[kind].items():
+            values.append(row[c])
+        heads.append({"entity_id": d.entity_id, "entity_kind": kind, "head_version_id": vid,
+                      "content_hash": d.content_hash, "is_tombstone": d.op == "delete",
+                      "pre_image": d.prev_content_hash or _HASH_NONE})
+    return columns, heads
 
 
 def _live_heads_sql(model, kind: str, join: str = "") -> str:
@@ -9988,44 +10050,17 @@ class GraphVersioningService:
         self, s, graph_id, branch_id, commit, deltas: List[Delta], kind_by_entity, actor,
         *, occ_guard: bool = False,
     ) -> None:
-        now = _now()
-        node_rows: List[dict] = []
-        edge_rows: List[dict] = []
+        scalars = {"graph_id": graph_id, "commit_id": commit.id, "commit_seq": commit.commit_seq,
+                   "branch_id": branch_id, "actor": actor, "created_at": _now()}
+        # The version rows, one statement per kind and batch (``_INSERT_DELTAS``), built off the
+        # loop: a large commit (an import window) spent most of its time building them.
         heads: List[dict] = []
-        for d in deltas:
-            kind = kind_by_entity.get(d.entity_id, "node")
-            p = d.payload or {}
-            if kind == "node":
-                vid = prefixed_id("nv")
-                node_rows.append(dict(
-                    graph_id=graph_id, id=vid, entity_id=d.entity_id, commit_id=commit.id,
-                    commit_seq=commit.commit_seq, branch_id=branch_id, op=d.op,
-                    content_hash=d.content_hash, prev_content_hash=d.prev_content_hash,
-                    payload=d.payload, actor=actor, change_reason=None, created_at=now,
-                    urn=p.get("urn"), entity_type=p.get("entityType"),
-                    display_name=p.get("displayName"), qualified_name=p.get("qualifiedName"),
-                ))
-            else:
-                vid = prefixed_id("ev")
-                edge_rows.append(dict(
-                    graph_id=graph_id, id=vid, entity_id=d.entity_id, commit_id=commit.id,
-                    commit_seq=commit.commit_seq, branch_id=branch_id, op=d.op,
-                    content_hash=d.content_hash, prev_content_hash=d.prev_content_hash,
-                    payload=d.payload, actor=actor, change_reason=None, created_at=now,
-                    source_entity_id=p.get("sourceEntityId") or p.get("source_entity_id") or "",
-                    target_entity_id=p.get("targetEntityId") or p.get("target_entity_id") or "",
-                    edge_type=p.get("edgeType"), confidence=p.get("confidence"),
-                    discriminator=p.get("discriminator"),
-                ))
-            heads.append({"entity_id": d.entity_id, "entity_kind": kind, "head_version_id": vid,
-                          "content_hash": d.content_hash, "is_tombstone": d.op == "delete",
-                          "pre_image": d.prev_content_hash or _HASH_NONE})
-        # The version rows, as batched multi-row INSERTs (executemany) rather than an ORM object
-        # each: a large commit (an import window) spent most of its time building them.
-        if node_rows:
-            await s.execute(insert(NodeVersionORM.__table__), node_rows)
-        if edge_rows:
-            await s.execute(insert(EdgeVersionORM.__table__), edge_rows)
+        for batch in _chunks(list(deltas), _DELTA_BATCH):
+            columns, batch_heads = await asyncio.to_thread(_delta_columns, batch, kind_by_entity)
+            for kind, values in columns.items():
+                if values["id"]:
+                    await s.execute(_INSERT_DELTAS[kind], {**scalars, **values})
+            heads += batch_heads
         # Upsert the head pointers (keeps version tables append-only), a batch per statement.
         for i in range(0, len(heads), _HEAD_BATCH):
             await self._upsert_heads(s, graph_id, branch_id, heads[i:i + _HEAD_BATCH], occ_guard)
@@ -10042,8 +10077,10 @@ class GraphVersioningService:
         pre-image is the empty-state hash (content_hash(None)) — which is exactly what a tombstone
         head stores, so a legit delete→re-create (resurrect) MATCHES, while a concurrent LIVE
         create (different hash) correctly misses. Two statements a batch, not one per entity: an
-        UPDATE advances the heads still at their pre-image, then an INSERT adds the entities with
-        no head yet. An entity advanced by neither lost the race."""
+        INSERT adds the entities with no head on the branch yet, then an UPDATE advances the ones
+        that had one, still at their pre-image. An entity advanced by neither lost the race. The
+        INSERT first: on a draft every create, and every first change of an entity ``main`` holds,
+        has no head there, and an UPDATE first missed each of them before the INSERT added it."""
         arrays = {"eids": [h["entity_id"] for h in heads], "vids": [h["head_version_id"] for h in heads],
                   "hashes": [h["content_hash"] for h in heads], "tombs": [h["is_tombstone"] for h in heads],
                   "kinds": [h["entity_kind"] for h in heads]}
@@ -10051,13 +10088,13 @@ class GraphVersioningService:
         if not occ_guard:
             await s.execute(_UPSERT_HEADS, {**arrays, **scalars})
             return
-        advanced = set((await s.execute(
-            _ADVANCE_HEADS, {**arrays, **scalars, "pres": [h["pre_image"] for h in heads],
-                             "absent": _HASH_NONE, "empty": _HASH_EMPTY})).scalars())
-        fresh = [i for i, h in enumerate(heads) if h["entity_id"] not in advanced]
-        if fresh:
-            rest = {k: [v[i] for i in fresh] for k, v in arrays.items()}
-            advanced.update((await s.execute(_ADD_HEADS, {**rest, **scalars})).scalars())
+        advanced = set((await s.execute(_ADD_HEADS, {**arrays, **scalars})).scalars())
+        held = [i for i, h in enumerate(heads) if h["entity_id"] not in advanced]
+        if held:
+            rest = {k: [v[i] for i in held] for k, v in arrays.items()}
+            advanced.update((await s.execute(
+                _ADVANCE_HEADS, {**rest, **scalars, "pres": [heads[i]["pre_image"] for i in held],
+                                 "absent": _HASH_NONE, "empty": _HASH_EMPTY})).scalars())
         for h in heads:
             if h["entity_id"] not in advanced:
                 raise _StaleHead(h["entity_id"])
