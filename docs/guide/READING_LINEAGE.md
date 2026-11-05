@@ -134,8 +134,9 @@ is named:
 
 The entities and lines are the same in both; only a trace starts drawing them
 differently. In the Business view a trace's lines appear as you point at or pick
-a card; in the Technical view it draws every line (**Trace settings → Lines**
-changes either). The Business view also shows fewer
+a card; in the Technical view it draws every line. Each view keeps its own
+choice, which **Trace settings → Lines** changes for the view you're in.
+The Business view also shows fewer
 tools — see [Business or Technical view](/guide/key-concepts#business-or-technical-view).
 Switch to **Technical** when you need an exact identifier to look something up in
 another system, and back to **Business** when you're sharing your screen with

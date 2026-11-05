@@ -34,8 +34,15 @@ words and a way to see what a view is for. The Business / Technical switch is re
 - **A trace's Lines choice** (**Trace settings → Lines**, on a Context View): **On hover**,
   **Adaptive** or **Every line**, the density modes **Display** already has. The Business view
   starts on **On hover**: the trace lays out its cards, and a card's lines draw when you point at it
-  or pick it. The Technical view starts on **Every line**, as traces always drew. Once you choose,
-  the choice holds in both views.
+  or pick it. The Technical view starts on **Every line**, as traces always drew. Each view keeps
+  its own choice, and a choice changes only the view you're in.
+- **Lines kept** and **Lines per card** under it: how many of the strongest lines **Adaptive** keeps
+  drawn, and how many a card draws when you point at or pick it, 500 each to start. They are a
+  trace's own, apart from the **Edge Budget** in **Display**, which the Business view doesn't show.
+- **While tracing** under **Display → How many lines** (**Edge Density**), in both views: the same
+  Lines choice, for the view you're in.
+- **Trace lines** in **Preferences**: each view's Lines choice, and **Reset to defaults**, which puts
+  back both views and the two budgets.
 - **N of M lines · Show every line** in the trace bar, whenever a trace leaves lines undrawn.
 
 ### Changed
