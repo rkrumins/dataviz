@@ -10234,10 +10234,13 @@ class GraphVersioningService:
                                        ontology_rules: OntologyRules) -> List[dict]:
         """The nodes a bulk import's commit would leave outside every parent its strict ontology
         requires one of (:meth:`_parentless_violations`), asked once all of it is written, as a
-        publish asks of what it wrote: ``main`` read as of the commit."""
+        publish asks of what it wrote: ``main`` read as of the commit. None on a graph whose
+        ontology isn't enforced strictly, as a publish asks it only there."""
         out: List[dict] = []
         async with self._session() as s:
             graph = await s.get(GraphORM, graph_id)
+            if graph is None or graph.ontology_enforcement != "strict":
+                return out
             commit = await s.get(CommitORM, (graph_id, commit_id))
             base = commit.commit_seq - 1
             set_committed_value(graph, "main_head_commit_seq", commit.commit_seq)   # never flushed

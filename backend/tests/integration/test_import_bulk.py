@@ -270,6 +270,12 @@ async def _refusals(svc, ie, store, rooted) -> None:
     await strict.run_import(job["job_id"])
     assert (await _main(svc, gid, main))[0] == {"s": "Schema", "t1": "Table", "t2": "Table"}
 
+    # Not enforced strictly, the rule is not asked, as a publish doesn't ask it.
+    gid, main = await _graph(svc)
+    job = await _job(strict, store, gid, [schema, _n(1), _n(2), _e("s", 1, "CONTAINS")])
+    await strict.run_import(job["job_id"])
+    assert (await _main(svc, gid, main))[0] == {"s": "Schema", "t1": "Table", "t2": "Table"}
+
 
 async def _run() -> None:
     await models.create_schema_and_partitions()
