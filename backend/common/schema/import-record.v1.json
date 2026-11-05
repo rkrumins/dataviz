@@ -7,15 +7,6 @@
         "^(prop|source|target)\\.[^.].*$": {
           "anyOf": [
             {
-              "type": "string"
-            },
-            {
-              "type": "number"
-            },
-            {
-              "type": "boolean"
-            },
-            {
               "items": {
                 "type": [
                   "string",
@@ -24,6 +15,15 @@
                 ]
               },
               "type": "array"
+            },
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "string"
             }
           ]
         }
@@ -50,10 +50,10 @@
         "baseVersion": {
           "anyOf": [
             {
-              "type": "string"
+              "type": "null"
             },
             {
-              "type": "null"
+              "type": "string"
             }
           ],
           "default": null,
@@ -63,13 +63,13 @@
         "confidence": {
           "anyOf": [
             {
+              "type": "null"
+            },
+            {
               "type": "number"
             },
             {
               "type": "string"
-            },
-            {
-              "type": "null"
             }
           ],
           "default": null,
@@ -84,10 +84,10 @@
         "entity_id": {
           "anyOf": [
             {
-              "type": "string"
+              "type": "null"
             },
             {
-              "type": "null"
+              "type": "string"
             }
           ],
           "default": null,
@@ -106,10 +106,10 @@
               "type": "object"
             },
             {
-              "type": "string"
+              "type": "null"
             },
             {
-              "type": "null"
+              "type": "string"
             }
           ],
           "default": null,
@@ -119,10 +119,10 @@
         "sourceQualifiedName": {
           "anyOf": [
             {
-              "type": "string"
+              "type": "null"
             },
             {
-              "type": "null"
+              "type": "string"
             }
           ],
           "default": null,
@@ -132,10 +132,10 @@
         "sourceUrn": {
           "anyOf": [
             {
-              "type": "string"
+              "type": "null"
             },
             {
-              "type": "null"
+              "type": "string"
             }
           ],
           "default": null,
@@ -145,10 +145,10 @@
         "source_entity_id": {
           "anyOf": [
             {
-              "type": "string"
+              "type": "null"
             },
             {
-              "type": "null"
+              "type": "string"
             }
           ],
           "default": null,
@@ -158,10 +158,10 @@
         "targetQualifiedName": {
           "anyOf": [
             {
-              "type": "string"
+              "type": "null"
             },
             {
-              "type": "null"
+              "type": "string"
             }
           ],
           "default": null,
@@ -171,10 +171,10 @@
         "targetUrn": {
           "anyOf": [
             {
-              "type": "string"
+              "type": "null"
             },
             {
-              "type": "null"
+              "type": "string"
             }
           ],
           "default": null,
@@ -184,10 +184,10 @@
         "target_entity_id": {
           "anyOf": [
             {
-              "type": "string"
+              "type": "null"
             },
             {
-              "type": "null"
+              "type": "string"
             }
           ],
           "default": null,
@@ -209,15 +209,6 @@
         "^prop\\.[^.].*$": {
           "anyOf": [
             {
-              "type": "string"
-            },
-            {
-              "type": "number"
-            },
-            {
-              "type": "boolean"
-            },
-            {
               "items": {
                 "type": [
                   "string",
@@ -226,6 +217,15 @@
                 ]
               },
               "type": "array"
+            },
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "string"
             }
           ]
         }
@@ -252,10 +252,10 @@
         "baseVersion": {
           "anyOf": [
             {
-              "type": "string"
+              "type": "null"
             },
             {
-              "type": "null"
+              "type": "string"
             }
           ],
           "default": null,
@@ -265,10 +265,10 @@
         "description": {
           "anyOf": [
             {
-              "type": "string"
+              "type": "null"
             },
             {
-              "type": "null"
+              "type": "string"
             }
           ],
           "default": null,
@@ -278,10 +278,10 @@
         "displayName": {
           "anyOf": [
             {
-              "type": "string"
+              "type": "null"
             },
             {
-              "type": "null"
+              "type": "string"
             }
           ],
           "default": null,
@@ -291,10 +291,10 @@
         "entityType": {
           "anyOf": [
             {
-              "type": "string"
+              "type": "null"
             },
             {
-              "type": "null"
+              "type": "string"
             }
           ],
           "default": null,
@@ -304,10 +304,10 @@
         "entity_id": {
           "anyOf": [
             {
-              "type": "string"
+              "type": "null"
             },
             {
-              "type": "null"
+              "type": "string"
             }
           ],
           "default": null,
@@ -322,10 +322,10 @@
         "layerAssignment": {
           "anyOf": [
             {
-              "type": "string"
+              "type": "null"
             },
             {
-              "type": "null"
+              "type": "string"
             }
           ],
           "default": null,
@@ -339,10 +339,10 @@
               "type": "object"
             },
             {
-              "type": "string"
+              "type": "null"
             },
             {
-              "type": "null"
+              "type": "string"
             }
           ],
           "default": null,
@@ -352,10 +352,10 @@
         "qualifiedName": {
           "anyOf": [
             {
-              "type": "string"
+              "type": "null"
             },
             {
-              "type": "null"
+              "type": "string"
             }
           ],
           "default": null,
@@ -365,10 +365,10 @@
         "sourceSystem": {
           "anyOf": [
             {
-              "type": "string"
+              "type": "null"
             },
             {
-              "type": "null"
+              "type": "string"
             }
           ],
           "default": null,
@@ -384,10 +384,10 @@
               "type": "array"
             },
             {
-              "type": "string"
+              "type": "null"
             },
             {
-              "type": "null"
+              "type": "string"
             }
           ],
           "default": null,
@@ -397,10 +397,10 @@
         "urn": {
           "anyOf": [
             {
-              "type": "string"
+              "type": "null"
             },
             {
-              "type": "null"
+              "type": "string"
             }
           ],
           "default": null,

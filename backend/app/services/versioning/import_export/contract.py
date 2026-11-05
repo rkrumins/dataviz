@@ -12,6 +12,7 @@ Version 1 only ever gains columns: a connector written against it keeps working.
 """
 from __future__ import annotations
 
+import json
 import re
 from typing import Annotated, Any, Dict, List, Literal, Mapping, Optional, Sequence, Tuple, Union
 
@@ -167,7 +168,7 @@ def json_schema(ontology: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
         **schema,
     }
     if not ontology:
-        return schema
+        return _canonical(schema)
     defs = schema["$defs"]
     node, edge = defs["ImportNodeRecord"], defs["ImportEdgeRecord"]
     if ontology.get("node_types"):
@@ -179,7 +180,21 @@ def json_schema(ontology: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
             **edge["properties"]["edgeType"], "enum": sorted(set(ontology["edge_types"]))}
     for prop, spec in sorted(_typed_properties(ontology).items()):
         node["properties"][prop] = spec
-    return schema
+    return _canonical(schema)
+
+
+def _canonical(node: Any) -> Any:
+    """``node`` with every ``anyOf`` in one order, by content. typing hands a union back in the
+    member order of an equal one created earlier anywhere in the process, so pydantic's order
+    would depend on what was imported first."""
+    if isinstance(node, dict):
+        out = {key: _canonical(value) for key, value in node.items()}
+        if isinstance(out.get("anyOf"), list):
+            out["anyOf"] = sorted(out["anyOf"], key=lambda m: json.dumps(m, sort_keys=True))
+        return out
+    if isinstance(node, list):
+        return [_canonical(value) for value in node]
+    return node
 
 
 def _typed_properties(ontology: Mapping[str, Any]) -> Dict[str, Dict[str, Any]]:
