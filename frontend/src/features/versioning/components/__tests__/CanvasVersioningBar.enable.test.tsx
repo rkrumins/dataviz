@@ -21,12 +21,19 @@ vi.mock('@/hooks/useDataSourceProviderMap', () => ({
   useDataSourceProviderMap: () => ({ resolve: () => (providerType ? { providerType } : undefined) }),
 }))
 vi.mock('@/store/schema', () => ({ useActiveView: () => ({ id: 'v1', name: 'View' }) }))
+// One store state across renders, its actions stable, as the real store's are.
+const branchState: Record<string, unknown> = {
+  committedDiffHidden: false, setCommittedDiffHidden: vi.fn(), setActiveChangeSet: vi.fn(), switchToMain: vi.fn(),
+  openRevision: vi.fn(), setHighlight: vi.fn(), viewId: null, activeChangeSet: null,
+}
 vi.mock('@/store/branchStore', () => ({
-  useBranchStore: (sel: (s: unknown) => unknown) => sel({
-    committedDiffHidden: false, setCommittedDiffHidden: vi.fn(), setActiveChangeSet: vi.fn(), switchToMain: vi.fn(),
-  }),
+  useBranchStore: (sel: (s: unknown) => unknown) => sel(branchState),
   useEffectiveBranchId: () => null,
+  useEffectiveRevision: () => null,
+  useRevisionHighlight: () => null,
 }))
+// The ?rev= link reads the router, which this bar is never rendered without in the app.
+vi.mock('../../hooks/useRevisionDeepLink', () => ({ useRevisionDeepLink: () => {} }))
 vi.mock('@/store/stagedChangesStore', () => ({ useStagedChangeCount: () => 0 }))
 vi.mock('../../hooks/useVersioning', () => ({
   // No versioned graph for this data source yet.
@@ -38,6 +45,8 @@ vi.mock('../../hooks/useVersioning', () => ({
   useDiffVsMain: () => ({ data: undefined, isLoading: false }),
   useBranchViewChanges: () => ({ data: undefined }),
   useAbandonDraft: () => ({ mutate: vi.fn(), isPending: false }),
+  useChangeIndex: () => ({ data: undefined, isLoading: false }),
+  useChangeSummary: () => ({ data: undefined, isLoading: false }),
 }))
 vi.mock('../../hooks/useActiveBranchGuard', () => ({ useActiveBranchGuard: () => {} }))
 vi.mock('../../model/useBootstrapWatch', () => ({
