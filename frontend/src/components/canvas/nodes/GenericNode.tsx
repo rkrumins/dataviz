@@ -6,6 +6,7 @@ import { useSchemaStore } from '@/store/schema'
 import { useViewEntityType, useViewEntityVisual } from '@/hooks/useViewSchema'
 import { useCanvasStore } from '@/store/canvas'
 import { usePersonaMode } from '@/store/persona'
+import { useOpensDetailsOnSelect } from '@/store/detailsOnSelect'
 import { resolveEntityName, technicalIdentity } from '@/lib/entityDisplayName'
 import { useCanvasIdentityProperty } from '@/components/dataSource/NodeIdentity'
 import { cn } from '@/lib/utils'
@@ -17,6 +18,7 @@ import { useSearchHighlight } from '../search/useSearchHighlight'
 import { useEntityChangeDecoration, nodeDecorationClass } from '@/features/versioning/canvas/useDiffDecoration'
 import { useRestoreGhost } from '@/features/versioning/canvas/useRestoreGhost'
 import { DisplayRuleTagChips } from '../property-manager/DisplayRuleTagChips'
+import { useDisplayRuleLook } from '@/store/displayRuleMatchStore'
 import { useHierarchyBuilderStore } from '../create/hierarchyBuilderStore'
 
 // Dynamic icon component
@@ -65,6 +67,9 @@ export const GenericNode = memo(function GenericNode({
   // simultaneous reveals (multi-locate) can all pulse at once. Auto-clears
   // per-id after the animation duration (~900ms).
   const isPulsing = useCanvasStore((s) => s.pulseNodeIds.has(id))
+  // Where a click doesn't open an entity's details, the selected card's
+  // toolbar offers them.
+  const offerDetails = !useOpensDetailsOnSelect() && !!selected
   // Handle both nested (data.data) and flat (data) structures
   const rawData = (data as Record<string, unknown>)
   const entityData: GenericNodeData = rawData.data
@@ -188,6 +193,11 @@ export const GenericNode = memo(function GenericNode({
   const search = useSearchHighlight(searchUrn, { isSelected: !!selected })
   // Change decoration — staged (dashed) + committed-vs-main (solid), default-on on a draft.
   const changeDeco = useEntityChangeDecoration().for(searchUrn)
+  // The view's display rules: a tint and a frame for this card. A trace, a
+  // focus or a change decoration paints the same card, and wins.
+  const ruleLook = useDisplayRuleLook(
+    changeDeco || isTraced || isFocus || isUpstream || isDownstream ? undefined : searchUrn,
+  )
   // GraphCanvas nodes are typically uncollapsed (they render their
   // children as separate React Flow nodes), so the ancestor badge
   // only makes sense on nodes that have collapsed children
@@ -213,12 +223,25 @@ export const GenericNode = memo(function GenericNode({
           traceable OR can contain children. The trace/pin/more cluster keeps
           its traceable gate; the Add-inside button is ontology-gated on
           canContain and opens the Hierarchy Builder scoped to this node. */}
-      {(canTrace || canAddChild) && (
+      {(canTrace || canAddChild || offerDetails) && (
         <NodeToolbar
           isVisible={!!selected}
           position={Position.Top}
           className="flex items-center gap-1 glass-panel-subtle rounded-lg p-1"
         >
+          {offerDetails && (
+            <>
+              <ToolbarButton
+                icon="PanelRightOpen"
+                label="Open details"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  useCanvasStore.getState().openNodeDrawer(id)
+                }}
+              />
+              {(canTrace || canAddChild) && <div className="w-px h-4 bg-glass-border mx-0.5" />}
+            </>
+          )}
           {canTrace && (
             <>
               <ToolbarButton icon="ArrowUpRight" label="Trace Upstream" />
@@ -330,6 +353,13 @@ export const GenericNode = memo(function GenericNode({
                       ? undefined
                       : '0 4px 12px rgba(0,0,0,0.1)',
           ['--ring-color' as string]: isFocus ? '#fbbf24' : isUpstream ? '#60a5fa' : isDownstream ? '#4ade80' : isTraced ? '#c084fc' : visual.color,
+          ...(ruleLook.fillColor && {
+            backgroundColor: `color-mix(in srgb, ${ruleLook.fillColor} 14%, var(--nx-bg-elevated))`,
+          }),
+          ...(ruleLook.frameKind && {
+            outline: `2px ${ruleLook.frameKind} ${ruleLook.frameColor}`,
+            outlineOffset: 3,
+          }),
         }}
         // Add data attributes for testing/debugging
         data-traced={isTraced}

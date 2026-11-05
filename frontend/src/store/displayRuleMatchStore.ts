@@ -14,14 +14,15 @@
  *     /search/counts``), however many entities that is.
  *
  * Consumers (FlatTreeItem and other canvas rows) subscribe via
- * ``useDisplayRuleTags(urn)``; a row re-renders only when THAT entity's
- * tags change — cheap inside a virtualized list of hundreds of rows.
+ * ``useDisplayRuleTags(urn)`` for its chips and ``useDisplayRuleLook(urn)``
+ * for its tint and frame; a row re-renders only when THAT entity's answer
+ * changes — cheap inside a virtualized list of hundreds of rows.
  */
 import { create } from 'zustand'
 import { useShallow } from 'zustand/react/shallow'
 
 import type { RuleCount } from '@/services/ruleCounts'
-import type { DisplayRuleConfig } from '@/types/schema'
+import type { DisplayRuleConfig, DisplayRuleStyle } from '@/types/schema'
 
 
 /** The visual payload a matched node needs to render one chip. */
@@ -31,6 +32,17 @@ export interface DisplayRuleTag {
     color: string
     /** Optional Lucide icon name rendered on the chip. */
     icon?: string
+    /** How the rule paints what it matches; absent, its chip alone. */
+    style?: DisplayRuleStyle
+}
+
+/** How one entity's card is painted by the rules that match it: the first
+ *  rule in the list with a tint gives the tint, the first with a frame the
+ *  frame. Empty when none paints it. */
+export interface DisplayRuleLook {
+    fillColor?: string
+    frameColor?: string
+    frameKind?: 'solid' | 'dashed'
 }
 
 
@@ -80,6 +92,7 @@ const EMPTY_MATCHES: ReadonlyMap<string, ReadonlySet<string>> = new Map()
 const EMPTY_COUNTS: ReadonlyMap<string, RuleCount> = new Map()
 const EMPTY_META: ReadonlyArray<DisplayRuleTag> = Object.freeze([])
 const EMPTY_TAGS: ReadonlyArray<DisplayRuleTag> = Object.freeze([])
+const EMPTY_LOOK: DisplayRuleLook = Object.freeze({})
 
 
 export const useDisplayRuleMatchStore = create<DisplayRuleMatchState>((set) => ({
@@ -118,7 +131,7 @@ export const useDisplayRuleMatchStore = create<DisplayRuleMatchState>((set) => (
         set({
             ruleMeta: rules
                 .filter((r) => r.enabled)
-                .map((r) => ({ id: r.id, name: r.name, color: r.color, icon: r.icon })),
+                .map((r) => ({ id: r.id, name: r.name, color: r.color, icon: r.icon, style: r.style })),
         })
     },
 
@@ -160,9 +173,41 @@ function tagsOf(s: DisplayRuleMatchState, urn: string | undefined): ReadonlyArra
     if (!urn || s.ruleMeta.length === 0) return EMPTY_TAGS
     const tags: DisplayRuleTag[] = []
     for (const meta of s.ruleMeta) {
+        // A rule styled without its chip paints the card and says nothing.
+        if (meta.style?.chip === false) continue
         if (s.matchUrnsByRule.get(meta.id)?.has(urn)) tags.push(meta)
     }
     return tags.length === 0 ? EMPTY_TAGS : tags
+}
+
+
+/**
+ * Subscribe to how a single node URN's card is painted. Compared field by
+ * field, so a row re-renders only when its own tint or frame changes.
+ */
+export function useDisplayRuleLook(urn: string | undefined): DisplayRuleLook {
+    return useDisplayRuleMatchStore(useShallow((s) => lookOf(s, urn)))
+}
+
+
+function lookOf(s: DisplayRuleMatchState, urn: string | undefined): DisplayRuleLook {
+    if (!urn || s.ruleMeta.length === 0) return EMPTY_LOOK
+    let fillColor: string | undefined
+    let frameColor: string | undefined
+    let frameKind: DisplayRuleLook['frameKind']
+    for (const meta of s.ruleMeta) {
+        const style = meta.style
+        if (!style || (!style.fill && !style.frame)) continue
+        if (!s.matchUrnsByRule.get(meta.id)?.has(urn)) continue
+        if (style.fill && fillColor === undefined) fillColor = meta.color
+        if (style.frame && frameKind === undefined) {
+            frameKind = style.frame
+            frameColor = meta.color
+        }
+        if (fillColor !== undefined && frameKind !== undefined) break
+    }
+    if (fillColor === undefined && frameKind === undefined) return EMPTY_LOOK
+    return { fillColor, frameColor, frameKind }
 }
 
 

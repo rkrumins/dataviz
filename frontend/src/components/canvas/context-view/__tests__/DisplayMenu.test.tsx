@@ -8,6 +8,7 @@ import { render, screen, fireEvent, within } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import { DisplayMenu } from '../header/DisplayMenu'
 import { usePreferencesStore } from '@/store/preferences'
+import { usePersonaStore } from '@/store/persona'
 
 function baseProps() {
   return {
@@ -173,5 +174,34 @@ describe('DisplayMenu', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Orphaned entities…' }))
     expect(onOpenOrphans).toHaveBeenCalledTimes(1)
     expect(screen.queryByRole('dialog', { name: 'Display' })).not.toBeInTheDocument()
+  })
+})
+
+describe('DisplayMenu — Business view', () => {
+  it('is the canvas and how many lines it draws, with nothing about how they look', () => {
+    usePersonaStore.setState({ mode: 'business' })
+    render(<DisplayMenu {...baseProps()} onOpenOrphans={vi.fn()} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Display' }))
+
+    expect(screen.getByText('Canvas')).toBeInTheDocument()
+    expect(screen.getByRole('radio', { name: /adaptive/i })).toBeInTheDocument()
+    expect(screen.queryByRole('switch', { name: /arrow markers/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('radiogroup', { name: 'Marker sides' })).not.toBeInTheDocument()
+    expect(screen.queryByText('Advanced')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Orphaned entities/ })).not.toBeInTheDocument()
+  })
+
+  it('offers lines that point back in either view, off until turned on, with an alert colour', () => {
+    usePersonaStore.setState({ mode: 'business' })
+    usePreferencesStore.setState({ highlightBackPointers: false, backPointerColor: '#ef4444' })
+    render(<DisplayMenu {...baseProps()} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Display' }))
+    const toggle = screen.getByRole('switch', { name: /highlight lines that point back/i })
+    expect(toggle).toHaveAttribute('aria-checked', 'false')
+    fireEvent.click(toggle)
+    expect(usePreferencesStore.getState().highlightBackPointers).toBe(true)
+    fireEvent.click(screen.getByRole('radio', { name: 'Amber' }))
+    expect(usePreferencesStore.getState().backPointerColor).toBe('#f59e0b')
+    usePreferencesStore.setState({ highlightBackPointers: false, backPointerColor: '#ef4444' })
   })
 })

@@ -1,13 +1,16 @@
 /**
  * The entity drawer's header: the trail, the entity's type and name, the one-click lineage traces,
  * quick actions, and the View / Edit / JSON tabs — or, on the published graph, the way to a draft.
+ * The Business view leaves out Copy URN and the JSON tab (its At a glance tile copies the ID);
+ * both views can Customize what the drawer shows.
  */
 import type { ComponentType } from 'react'
 import {
   ArrowDownRight, ArrowUpLeft, Check, Code, Copy, ExternalLink, Eye, Focus, GitBranch, GitBranchPlus,
-  Pencil, RotateCcw, Trash2,
+  Pencil, RotateCcw, SlidersHorizontal, Trash2,
 } from 'lucide-react'
 import { useCanvasStore } from '@/store/canvas'
+import { usePersonaMode } from '@/store/persona'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/Button'
 import { HoverTip } from '@/components/ui/HoverTip'
@@ -29,7 +32,7 @@ interface TraceAction {
 export function EntityHeader({
   nodeId, titleId, typeName, colors, confidence, title, technicalLine, isGhost, onRestore,
   onTraceUp, onTraceDown, onFullTrace, onFocusConnections, copiedUrn, onCopyUrn, externalUrl,
-  editable, editBlocked, dirty, onStartEditing, onClose, onFocusNode,
+  editable, editBlocked, dirty, onStartEditing, onClose, onFocusNode, customizing = false, onCustomize,
 }: {
   nodeId: string
   titleId: string
@@ -57,7 +60,12 @@ export function EntityHeader({
   onStartEditing?: () => void
   onClose: () => void
   onFocusNode?: (nodeId: string) => void | Promise<unknown>
+  /** The Customize panel is open. */
+  customizing?: boolean
+  /** Opens or closes it; absent, not offered. */
+  onCustomize?: () => void
 }) {
+  const technical = usePersonaMode() === 'technical'
   // Upstream and downstream wear the product's lineage direction pair (lib/lineageDirectionColors.ts)
   // — the canvas's ports, the lineage cards below, the Focus Lens and a trace.
   const traces: TraceAction[] = [
@@ -141,15 +149,27 @@ export function EntityHeader({
         {onFocusConnections && !isGhost && (
           <Button size="sm" variant="subtle" leftIcon={Focus} onClick={() => onFocusConnections(nodeId)}>Focus</Button>
         )}
-        <Button size="sm" variant="subtle" leftIcon={copiedUrn ? Check : Copy} onClick={onCopyUrn}>
-          {copiedUrn ? 'Copied' : 'Copy URN'}
-        </Button>
+        {technical && (
+          <Button size="sm" variant="subtle" leftIcon={copiedUrn ? Check : Copy} onClick={onCopyUrn}>
+            {copiedUrn ? 'Copied' : 'Copy URN'}
+          </Button>
+        )}
         {externalUrl && (
           <Button size="sm" variant="subtle" leftIcon={ExternalLink} onClick={() => window.open(externalUrl, '_blank', 'noopener')}>Open</Button>
         )}
+        {onCustomize && (
+          <Button size="sm" variant={customizing ? 'secondary' : 'ghost'} leftIcon={SlidersHorizontal}
+                  aria-pressed={customizing} onClick={onCustomize} className="ml-auto">
+            Customize
+          </Button>
+        )}
       </div>
 
+      {/* The Business view, with nothing to edit here, has one tab — and a strip
+          with one tab in it is chrome with nothing to switch. */}
+      {(technical || editable || !!editBlocked || !!onStartEditing) && (
       <div className="flex items-center gap-2 mt-4">
+        {(technical || editable || (!!editBlocked && !onStartEditing)) && (
         <TabsList aria-label="Entity details" className="flex-1">
           <TabsTrigger value="view" icon={Eye}>View</TabsTrigger>
           {editable ? (
@@ -163,13 +183,15 @@ export function EntityHeader({
               <TabsTrigger value="edit" icon={Pencil} disabled>Edit</TabsTrigger>
             </HoverTip>
           ) : null}
-          <TabsTrigger value="json" icon={Code}>JSON</TabsTrigger>
+          {technical && <TabsTrigger value="json" icon={Code}>JSON</TabsTrigger>}
         </TabsList>
+        )}
         {!editable && onStartEditing && (
           // The published graph is never edited in place — say where editing happens.
           <Button variant="secondary" leftIcon={GitBranchPlus} onClick={onStartEditing}>Edit in a draft</Button>
         )}
       </div>
+      )}
     </DrawerHeader>
   )
 }

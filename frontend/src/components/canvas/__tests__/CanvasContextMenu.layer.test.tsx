@@ -4,7 +4,7 @@
  * move past either end isn't offered. Outside a draft it says layers change in
  * a draft and offers to start one.
  */
-import { fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import { CanvasContextMenu, type LayerMenuModel } from '../CanvasContextMenu'
 import { LAYER_COLORS } from '@/components/views/ViewWizard/layerColors'
@@ -91,5 +91,49 @@ describe('CanvasContextMenu — layer target', () => {
     expect(m.onToggleFold).toHaveBeenCalled()
     fireEvent.click(screen.getByRole('button', { name: /Start editing to change layers/ }))
     expect(m.onStartEditing).toHaveBeenCalled()
+  })
+
+  it('opens the layer\'s settings in a draft — and its details outside one', () => {
+    const onOpenSettings = vi.fn()
+    open(model({ onOpenSettings }))
+    fireEvent.click(screen.getByRole('button', { name: /Layer settings…/ }))
+    expect(onOpenSettings).toHaveBeenCalledTimes(1)
+    cleanup()
+    open(model({ onOpenSettings, canEdit: false }))
+    expect(screen.getByRole('button', { name: /Layer details…/ })).toBeInTheDocument()
+  })
+
+  it('carries the header\'s own actions where the header keeps to the essentials', () => {
+    const m = model({ onAddEntity: vi.fn(), onNewGroup: vi.fn(), onBuild: vi.fn() })
+    open(m)
+    fireEvent.click(screen.getByRole('button', { name: /Add entity/ }))
+    expect(m.onAddEntity).toHaveBeenCalled()
+    cleanup()
+    open(m)
+    fireEvent.click(screen.getByRole('button', { name: /New group/ }))
+    expect(m.onNewGroup).toHaveBeenCalled()
+    cleanup()
+    open(m)
+    fireEvent.click(screen.getByRole('button', { name: /Build a lot at once/ }))
+    expect(m.onBuild).toHaveBeenCalled()
+  })
+
+  it('opened from the header\'s ⋯ button, takes the keyboard in, and gives it back', () => {
+    const trigger = document.createElement('button')
+    trigger.setAttribute('data-canvas-menu-trigger', '')
+    document.body.appendChild(trigger)
+    trigger.focus()
+    const props = { position: { x: 10, y: 10 }, target: { type: 'layer', layerId: 'l1' } as const, onClose: vi.fn(), layerMenu: model({ onOpenSettings: vi.fn() }) }
+    const { rerender } = render(<CanvasContextMenu isOpen {...props} />)
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: /Layer settings…/ }))
+    rerender(<CanvasContextMenu isOpen={false} {...props} />)
+    expect(document.activeElement).toBe(trigger)
+    trigger.remove()
+  })
+
+  it('opened by a right-click, leaves the focus where it was', () => {
+    const before = document.activeElement
+    open(model({ onOpenSettings: vi.fn() }))
+    expect(document.activeElement).toBe(before)
   })
 })

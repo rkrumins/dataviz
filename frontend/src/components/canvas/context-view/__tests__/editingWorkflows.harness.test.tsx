@@ -11,6 +11,7 @@ import { act, fireEvent, screen } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 import { renderCanvasWithTrace } from '@/test/canvasHarness'
 import { cfoEstate } from '@/test/fixtures/traceEstates'
+import { usePersonaStore } from '@/store/persona'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 
 /** The columns, left to right, as rendered. */
@@ -52,6 +53,31 @@ describe('editing workflows on the canvas', () => {
     expect(useStagedChangesStore.getState().changes.some(
       (c) => c.type === 'layer_config' && /Inserted layer/.test(c.summary ?? ''),
     )).toBe(true)
+  }, 30000)
+
+  it('keeps a layer\'s settings in a panel of their own — opened from its menu, staged on Stage', async () => {
+    const h = await open()
+    await act(async () => { fireEvent.contextMenu(headerOf('warehouse')) })
+    await h.settle()
+    await act(async () => { fireEvent.click(screen.getByText('Layer settings…')) })
+    await h.settle()
+    fireEvent.change(screen.getByRole('textbox', { name: 'Layer description' }), { target: { value: 'Where the numbers are kept' } })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Stage changes' })) })
+    await h.settle()
+    expect(useStagedChangesStore.getState().changes.some(
+      (c) => c.type === 'layer_config' && /Edited layer/.test(c.summary ?? ''),
+    )).toBe(true)
+  }, 30000)
+
+  it('in the Business view, the header\'s ⋯ opens the layer menu — New group among it', async () => {
+    usePersonaStore.setState({ mode: 'business' })
+    const h = await open()
+    const more = headerOf('warehouse').querySelector<HTMLElement>('[aria-label$=": layer actions"]')!
+    await act(async () => { fireEvent.click(more) })
+    await h.settle()
+    await act(async () => { fireEvent.click(screen.getByText('New group')) })
+    await h.settle()
+    expect(screen.getByRole('textbox', { name: /^Name the new group in/ })).toBeInTheDocument()
   }, 30000)
 
   it('the gutter "+" inserts a layer just before a column', async () => {

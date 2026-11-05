@@ -36,6 +36,19 @@ export function recolorLayer(layers: ViewLayerConfig[], id: string, color: strin
   return layers.map((l) => (l.id === id ? { ...l, color } : l))
 }
 
+/** The fields of one layer the settings panel edits. */
+export type LayerPatch = Partial<Pick<ViewLayerConfig, 'name' | 'description' | 'color' | 'icon' | 'properties' | 'showUnassigned'>>
+
+/** Change one layer's fields by id; the same array when nothing would change. */
+export function updateLayer(layers: ViewLayerConfig[], id: string, patch: LayerPatch): ViewLayerConfig[] {
+  const target = layers.find((l) => l.id === id)
+  if (!target) return layers
+  const changed = (Object.keys(patch) as Array<keyof LayerPatch>)
+    .some((k) => JSON.stringify(target[k]) !== JSON.stringify(patch[k]))
+  if (!changed) return layers
+  return layers.map((l) => (l.id === id ? { ...l, ...patch } : l))
+}
+
 /** Rename one layer by id; no-op if not found. Order untouched. */
 export function renameLayer(layers: ViewLayerConfig[], id: string, name: string): ViewLayerConfig[] {
   return layers.map((l) => (l.id === id ? { ...l, name } : l))

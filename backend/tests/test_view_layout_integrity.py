@@ -76,6 +76,19 @@ async def test_a_config_save_keeps_the_published_layout_and_scope(test_client: A
     assert body["config"]["content"]["entityScope"] == "curated"
 
 
+async def test_a_layout_save_keeps_a_layers_own_properties(test_client: AsyncClient):
+    view_id = await _view(test_client)
+    props = {"owner": "data-eng", "sla": {"hours": 4}, "tags": ["gold"]}
+    layout = _layout("la", "urn:a")
+    layout["layers"][0]["properties"] = props
+    resp = await test_client.put(f"/api/v1/views/{view_id}/layout", json={"referenceLayout": layout})
+    assert resp.status_code == 200, resp.text
+    layer = (await _config(test_client, view_id))["layout"]["referenceLayout"]["layers"][0]
+    assert layer["properties"] == props
+    # In the order they were written.
+    assert list(layer["properties"]) == ["owner", "sla", "tags"]
+
+
 async def test_a_wizard_save_during_a_draft_leaves_published_untouched(test_client: AsyncClient, any_open_draft):
     view_id = await _view(test_client)
     await test_client.put(f"/api/v1/views/{view_id}/layout",

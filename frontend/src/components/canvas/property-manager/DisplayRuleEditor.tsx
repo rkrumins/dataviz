@@ -25,7 +25,9 @@ import { cn, generateId } from '@/lib/utils'
 import { useGraphProvider } from '@/providers/GraphProviderContext'
 import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
 import { countRules } from '@/services/ruleCounts'
-import type { DisplayRuleConfig } from '@/types/schema'
+import type { DisplayRuleConfig, DisplayRuleStyle } from '@/types/schema'
+import { Segmented } from '@/components/ui/Segmented'
+import { ToggleSwitch } from '@/components/admin/AdminFeatures/ToggleSwitch'
 import type { Predicate } from '@/types/search'
 
 import { useDiscovery } from '../search/builder/useDiscovery'
@@ -39,6 +41,7 @@ import { VisualQueryBuilder } from '../search/panel/VisualQueryBuilder'
 /** Curated swatch palette — premium, legible-on-dark tag colors. */
 const SWATCHES = [
     '#6366f1', // indigo
+    '#3b82f6', // blue — "these are the starting points"
     '#06b6d4', // cyan
     '#10b981', // emerald
     '#f59e0b', // amber
@@ -46,7 +49,25 @@ const SWATCHES = [
     '#ec4899', // pink
     '#8b5cf6', // violet
     '#14b8a6', // teal
+    '#64748b', // slate — "these are the ordinary ones", for a quiet tint
 ]
+
+type FrameChoice = 'none' | 'solid' | 'dashed'
+const FRAME_OPTIONS = [
+    { value: 'none', label: 'No frame' },
+    { value: 'solid', label: 'Solid' },
+    { value: 'dashed', label: 'Dashed' },
+] as const
+
+/** The style a rule is saved with: only what differs from a chip alone. */
+function styleOf(chip: boolean, fill: boolean, frame: FrameChoice): DisplayRuleStyle | undefined {
+    if (chip && !fill && frame === 'none') return undefined
+    return {
+        ...(chip ? {} : { chip: false }),
+        ...(fill ? { fill: true } : {}),
+        ...(frame !== 'none' ? { frame } : {}),
+    }
+}
 
 /** Small, business-friendly Lucide icon set for tag chips. */
 const ICON_CHOICES = [
@@ -83,6 +104,12 @@ export function DisplayRuleEditor({
     const [name, setName] = useState(rule?.name ?? '')
     const [color, setColor] = useState(rule?.color ?? SWATCHES[0])
     const [icon, setIcon] = useState<string | undefined>(rule?.icon)
+    // How it paints what it matches, besides (or instead of) its chip.
+    const [chip, setChip] = useState(rule?.style?.chip !== false)
+    const [fill, setFill] = useState(!!rule?.style?.fill)
+    const [frame, setFrame] = useState<FrameChoice>(rule?.style?.frame ?? 'none')
+    // A rule with no chip, tint or frame would match and show nothing.
+    const showsNothing = !chip && !fill && frame === 'none'
     const [previewCount, setPreviewCount] = useState<number | null>(null)
     // False while the count is still reading the view: the number so far.
     const [previewExact, setPreviewExact] = useState(true)
@@ -130,7 +157,7 @@ export function DisplayRuleEditor({
         () => existingNames.some((n) => n.toLowerCase() === trimmedName.toLowerCase()),
         [existingNames, trimmedName],
     )
-    const canSave = trimmedName.length > 0 && !isEmpty && !hasIncomplete && !isDuplicate && !saving
+    const canSave = trimmedName.length > 0 && !isEmpty && !hasIncomplete && !isDuplicate && !showsNothing && !saving
 
     // ── Live preview-as-you-build ────────────────────────────────────
     // Count the predicate's matches in the view (debounced) whenever it
@@ -197,6 +224,7 @@ export function DisplayRuleEditor({
                 predicate: stripUiScope(predicate),
                 enabled: rule?.enabled ?? true,
                 createdAt: rule?.createdAt ?? new Date().toISOString(),
+                style: styleOf(chip, fill, frame),
             })
         } catch (e) {
             setSaveError((e as Error).message)
@@ -292,6 +320,58 @@ export function DisplayRuleEditor({
                         </button>
                     ))}
                 </div>
+            </div>
+
+            {/* Appearance — what the rule does to the cards it matches, beside
+                its chip: a tint, a frame, or both; the chip can go. Shown on
+                a card as it will be drawn. */}
+            <div className="flex flex-col gap-2.5">
+                <label className="block text-[10px] font-semibold uppercase tracking-[0.14em] text-ink-muted">
+                    Appearance
+                </label>
+                <div className="rounded-xl border border-glass-border bg-canvas p-3">
+                    <div
+                        data-testid="rule-look-preview"
+                        className="flex items-center gap-2.5 rounded-xl border border-glass-border px-3 py-2.5 shadow-sm"
+                        style={{
+                            backgroundColor: fill ? `color-mix(in srgb, ${color} 14%, var(--nx-bg-canvas))` : 'var(--nx-bg-canvas)',
+                            ...(frame !== 'none' && { outline: `2px ${frame} ${color}`, outlineOffset: -2 }),
+                        }}
+                    >
+                        <span className="h-6 w-6 shrink-0 rounded-lg bg-accent-lineage/15" aria-hidden />
+                        <span className="min-w-0 flex-1">
+                            <span className="block truncate text-[12.5px] font-medium text-ink">Customer Orders</span>
+                            {chip && (
+                                <span className="mt-1 inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-medium"
+                                      style={{ backgroundColor: `${color}26`, color }}>
+                                    {icon && <DynamicIcon name={icon} className="w-2.5 h-2.5 shrink-0" />}
+                                    {trimmedName || 'Tag'}
+                                </span>
+                            )}
+                        </span>
+                    </div>
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                    <label htmlFor="rule-show-chip" className="text-[12px] text-ink cursor-pointer">Show the tag chip</label>
+                    <ToggleSwitch id="rule-show-chip" size="sm" checked={chip} onChange={setChip} aria-label="Show the tag chip" />
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                    <label htmlFor="rule-fill" className="text-[12px] text-ink cursor-pointer">Colour the card</label>
+                    <ToggleSwitch id="rule-fill" size="sm" checked={fill} onChange={setFill} aria-label="Colour the card" />
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                    <span className="text-[12px] text-ink">Frame</span>
+                    <Segmented label="Frame" options={FRAME_OPTIONS} value={frame} onChange={setFrame} />
+                </div>
+                {showsNothing && (
+                    <span className="text-[11px] text-amber-600 dark:text-amber-400">
+                        Turn on the chip, a tint or a frame — otherwise the rule shows nothing.
+                    </span>
+                )}
+                <span className="text-[11px] leading-snug text-ink-muted">
+                    Every matching rule adds its chip. Where two rules colour or frame the same card, the
+                    one higher in the list wins.
+                </span>
             </div>
 
             {/* Criteria builder — the SAME flat-filter builder as the

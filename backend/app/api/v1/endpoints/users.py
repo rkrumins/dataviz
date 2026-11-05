@@ -2308,7 +2308,7 @@ async def _provision_user(
 
     if role:
         await _grant_invite_role(
-            session, user.id, role, workspace_id, granted_by=actor_id,
+            session, user_id=user.id, role=role, workspace_id=workspace_id, granted_by=actor_id,
         )
 
     attached: list[str] = []

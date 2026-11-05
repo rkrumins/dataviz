@@ -44,7 +44,7 @@ import { OFF_CANVAS_STUB_WIDTH, portalLabel } from './ghostCues'
 import { OffCanvasStub } from './OffCanvasStub'
 import { unitNoun } from './connections/connectionUnits'
 import type { OffCanvasLineage } from '@/hooks/useEdgeProjection'
-import type { LineagePortSides } from '@/store/preferences'
+import { usePreferencesStore, type LineagePortSides } from '@/store/preferences'
 
 // Global visibility tracker — which layer-node-* elements are currently in the viewport
 const globalVisibleNodes = new Set<string>()
@@ -207,6 +207,8 @@ export function LineageFlowOverlay({
   // Store computed abstract edges instead of direct React nodes for virtualization
   const [computedEdges, setComputedEdges] = useState<ComputedEdge[]>([])
   const tints = useLineageDirectionColors()
+  // Lines that point back, in the reader's alert colour — or null, not marked.
+  const backPointerColor = usePreferencesStore((s) => (s.highlightBackPointers ? s.backPointerColor || '#ef4444' : null))
   // Overflow indicators — badges at top/bottom of column gutters for off-screen connections
   const [overflowBadges, setOverflowBadges] = useState<OverflowBadge[]>([])
   // Trailing edge stubs — partial curves from visible nodes toward container boundary
@@ -633,6 +635,12 @@ export function LineageFlowOverlay({
 
       if (edge.isGhost) edgeOpacity = Math.min(0.7, edgeOpacity)
 
+      // A line pointing back — its source in a layer to the right of its
+      // target — wears the alert colour where the reader asked for it. A trace
+      // keeps its own colours, and a two-way bundle flows both ways.
+      const pointsBack = !!backPointerColor && !isTracing && !!edge.isReverseFlow && !(edge as { isBidirectional?: boolean }).isBidirectional
+      if (pointsBack) color = backPointerColor!
+
       const delegation = edge.id === hoveredEdgeId ? 'full' : delegatedLineState(edge, hovered)
       if (delegation === 'hidden') return
       if (delegation === 'faint') {
@@ -659,6 +667,7 @@ export function LineageFlowOverlay({
         isFocusIncident,
         isReverseFlow: !!edge.isReverseFlow,
         isBidirectional: !!(edge as any).isBidirectional,
+        pointsBack,
       })
     }
 
@@ -1157,7 +1166,7 @@ export function LineageFlowOverlay({
     }
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [edgeIndex, isTracing, traceResult, highlightedEdges, isHighlightActive, resolveEdgeColor, resolveEdgeStrokeStyle, hoveredEdgeId, geometryRegistry, flowRibbons, hoverLinesFor, poolById, hoverBudget, tints, portSides])
+  }, [edgeIndex, isTracing, traceResult, highlightedEdges, isHighlightActive, resolveEdgeColor, resolveEdgeStrokeStyle, hoveredEdgeId, geometryRegistry, flowRibbons, hoverLinesFor, poolById, hoverBudget, tints, portSides, backPointerColor])
 
   // NOTE: an earlier "pass-through edges" layer drew ESTIMATED dashed
   // curves for edges whose endpoints were both unmounted. Removed after
@@ -2181,6 +2190,14 @@ export function LineageFlowOverlay({
                   Two-way
                 </span>
               )}
+              {edge.pointsBack && (
+                <span
+                  className="px-1.5 py-0.5 rounded text-[9px] font-semibold uppercase tracking-wider"
+                  style={{ background: `${edge.color}1a`, color: edge.color, border: `1px solid ${edge.color}33` }}
+                >
+                  Points back
+                </span>
+              )}
             </div>
 
             {/* Source → Target with arrow */}
@@ -2312,6 +2329,7 @@ const EdgeLine = React.memo(function EdgeLine({
       data-edge-id={edge.id}
       data-edge-src={edge.source}
       data-edge-tgt={edge.target}
+      data-edge-back={edge.pointsBack || undefined}
       className={edgeClasses}
       // Opacity inline ONLY when this line is dimmed: an inline `opacity: 1`
       // outranks the stylesheet, and the hover spotlight dims lines from

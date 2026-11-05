@@ -17,6 +17,8 @@ import { fetchWithTimeout } from '@/services/fetchWithTimeout'
 import { useSchemaStore, isContainmentEdgeType } from '@/store/schema'
 import { useViewContainmentEdgeTypes, useViewLineageEdgeTypes, useViewRelationshipTypes } from '@/hooks/useViewSchema'
 import { useCanvasStore } from '@/store/canvas'
+import { useOpensDetailsOnSelect } from '@/store/detailsOnSelect'
+import { useDisplayRuleLook } from '@/store/displayRuleMatchStore'
 import { useFeature } from '@/store/features'
 import { useSearchStore } from '@/store/searchStore'
 import { useGraphHydration } from '@/hooks/useGraphHydration'
@@ -720,6 +722,8 @@ function HierarchyContainer({
   const isExpanded = expandedNodes.has(node.id)
   const isSelected = selectedNodeId === node.id
   const isSearchResult = searchResults.includes(node.id)
+  // Where a click doesn't open an entity's details, its row offers them.
+  const offerDetails = !useOpensDetailsOnSelect()
 
   // W2.1 — advanced-search match decoration. Lights up the row when
   // the URN is a direct match, surfaces an N-level subtree count
@@ -739,6 +743,9 @@ function HierarchyContainer({
   // Trace highlighting
   const isHighlighted = isTraceActive && traceContextSet.has(node.id)
   const isFocusNode = traceFocusId === node.id
+  // The view's display rules: a tint and a frame for this card. A focus, a
+  // trace highlight or a change decoration paints the same card, and wins.
+  const ruleLook = useDisplayRuleLook(changeDeco || isFocusNode || isHighlighted ? undefined : (node.urn ?? node.id))
   const isDimmed = (isTraceActive && !isHighlighted) || isSpotlightDim
 
   // Canvas filter Isolate / Hide modes drop this row entirely. Same
@@ -810,6 +817,13 @@ function HierarchyContainer({
           borderColor: isFocusNode ? '#fbbf24' : isHighlighted ? '#c084fc' : visual?.color ?? '#6b7280',
           borderLeftWidth: '4px',
           ['--tw-ring-color' as string]: isFocusNode ? '#fbbf24' : isHighlighted ? '#c084fc' : visual?.color ?? '#6b7280',
+          ...(ruleLook.fillColor && {
+            backgroundColor: `color-mix(in srgb, ${ruleLook.fillColor} 14%, var(--nx-bg-elevated))`,
+          }),
+          ...(ruleLook.frameKind && {
+            outline: `2px ${ruleLook.frameKind} ${ruleLook.frameColor}`,
+            outlineOffset: 2,
+          }),
         }}
       >
         {/* Header (always visible) */}
@@ -908,6 +922,23 @@ function HierarchyContainer({
           {/* Display-rule tags — shared premium chip cluster (same as the
               other canvases). */}
           <DisplayRuleTagChips urn={node.urn ?? node.id} size="xs" />
+
+          {/* Details on demand — hover-visible, and kept on the selected row. */}
+          {offerDetails && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation()
+                useCanvasStore.getState().openNodeDrawer(node.id)
+              }}
+              className={cn(
+                'flex items-center justify-center w-6 h-6 rounded-md hover:bg-black/10 dark:hover:bg-white/10 transition-all hover:scale-110 active:scale-95',
+                isSelected ? 'opacity-100' : 'opacity-0 group-hover/row:opacity-100 focus-visible:opacity-100',
+              )}
+              aria-label={`Open details of ${node.name}`}
+            >
+              <LucideIcons.PanelRightOpen className="w-4 h-4 text-ink-muted" />
+            </button>
+          )}
 
           {/* Add child — hover-visible; direct store import so the recursive
               render never threads an onAddChild prop down every level. */}

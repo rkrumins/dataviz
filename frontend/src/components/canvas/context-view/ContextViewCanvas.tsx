@@ -39,6 +39,8 @@ import { mapSaveProblems } from '@/features/versioning/model/saveProblems'
 import { useReparentNode } from './useReparentNode'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { usePreferencesStore } from '@/store/preferences'
+import { usePersonaMode } from '@/store/persona'
+import { useOpensDetailsOnSelect } from '@/store/detailsOnSelect'
 import { useFeature } from '@/store/features'
 import { NarrowChip } from '@/features/narrow/NarrowChip'
 import { NarrowComposer } from '@/features/narrow/NarrowComposer'
@@ -75,6 +77,8 @@ import { Crosshair, X, History, Workflow, ChevronUp, ChevronDown } from 'lucide-
 import { LayerStrip } from './LayerStrip'
 import { CanvasEdgeFades } from './CanvasEdgeFades'
 import { SelectionBar } from './SelectionBar'
+import { BulkEditPanel } from './BulkEditPanel'
+import { LayerSettingsPanel } from './LayerSettingsPanel'
 import { useRevealNode, type RevealOptions } from '@/hooks/useRevealNode'
 import { useLocateManyOnCanvas } from '@/hooks/useLocateManyOnCanvas'
 import { useRevealPartners, REVEAL_PARTNERS_CAP } from '@/hooks/useRevealPartners'
@@ -463,6 +467,17 @@ function paintedRow(nodeId: string): HTMLElement | null {
   return el && !el.hasAttribute('data-fold-anchor') ? el : null
 }
 
+
+/** Give the right rail to a panel of the canvas's own (several entities, a
+ *  layer's settings) in place of the drawers there — once an unsaved edit in
+ *  one of them is settled, as any move of the drawer waits for. */
+function takeRail(open: () => void) {
+  useCanvasStore.getState().requestDrawerMove(() => {
+    useCanvasStore.getState().closeNodeDrawer()
+    open()
+  })
+}
+
 export function ContextViewCanvas({
   className,
   layers = defaultReferenceModelLayers,
@@ -477,7 +492,10 @@ export function ContextViewCanvas({
   const removeStoreNodes = useCanvasStore((s) => s.removeNodes)
   const selectNode = useCanvasStore((s) => s.selectNode)
   const setSelection = useCanvasStore((s) => s.setSelection)
-  const canvasDockMinimized = usePreferencesStore((s) => s.canvasDockMinimized)
+  // Until the reader chooses, the dock follows the view: the Business view
+  // starts it minimized, so the columns have the room.
+  const personaMode = usePersonaMode()
+  const canvasDockMinimized = usePreferencesStore((s) => s.canvasDockMinimized) ?? personaMode === 'business'
   const setCanvasDockMinimized = usePreferencesStore((s) => s.setCanvasDockMinimized)
   const multiSelectArmed = useCanvasStore((s) => s.multiSelectArmed)
   const setMultiSelectArmed = useCanvasStore((s) => s.setMultiSelectArmed)
@@ -854,7 +872,8 @@ export function ContextViewCanvas({
 
   const interactions = useCanvasInteractions({
     onTraceNode: (nodeId) => startTraceRef.current(nodeId),
-    onNodeCreated: (nodeId) => selectNode(nodeId),
+    // A new entity is one to fill in: its details open, whatever a click does.
+    onNodeCreated: (nodeId) => { selectNode(nodeId); useCanvasStore.getState().openNodeDrawer(nodeId) },
     duplicateSubtree,
     // Reveal the copy and offer Undo. Mirrors GraphCanvas's onNodeDuplicated,
     // using this file's parentMap / setExpandedNodes (via the forward-ref).
@@ -1825,7 +1844,10 @@ export function ContextViewCanvas({
     // user was still choosing from. Building a selection across columns is
     // exactly when the ground must stay put.
     if (selectedNodeIds.length > 1) return
-    if (lastAutoScrolledForSelectionRef.current === selectedNodeId) return
+    // Once per selection — and once more when its details open after the
+    // click (on demand), since the drawer then covers part of the canvas.
+    const scrollKey = `${selectedNodeId}:${drawerNodeId === selectedNodeId ? 'details' : ''}`
+    if (lastAutoScrolledForSelectionRef.current === scrollKey) return
 
     const layerId = effectiveAssignments.get(selectedNodeId)?.layerId
     if (!layerId && !placementContractOn) return
@@ -1875,7 +1897,7 @@ export function ContextViewCanvas({
           // smooth scroll has settled so trace edges follow the column.
           settleTimer = setTimeout(() => triggerEdgeRedrawRef.current?.(), 350)
         }
-        lastAutoScrolledForSelectionRef.current = selectedNodeId
+        lastAutoScrolledForSelectionRef.current = scrollKey
       })
     })
     return () => {
@@ -1885,7 +1907,7 @@ export function ContextViewCanvas({
       // change left redraws queued against a scroll that had been superseded.
       if (settleTimer != null) clearTimeout(settleTimer)
     }
-  }, [selectedNodeId, selectedNodeIds.length, isEdgePanelOpen, effectiveAssignments, placementContractOn])
+  }, [selectedNodeId, selectedNodeIds.length, isEdgePanelOpen, effectiveAssignments, placementContractOn, drawerNodeId])
 
   const handleLayerScroll = useCallback(() => {
     if (triggerEdgeRedrawRef.current) {
@@ -2332,6 +2354,24 @@ export function ContextViewCanvas({
   // The selection a bulk action reads — trace included: a logical group has
   // no urn to walk, so a lone one must not light up Trace.
   const bulkSelection = useMemo(() => selectedNodeIds.filter(isSelectableNode), [selectedNodeIds])
+  // Where a click doesn't open an entity's details, the selection bar offers
+  // them for one held entity while the drawer is closed.
+  const opensDetailsOnSelect = useOpensDetailsOnSelect()
+  const offerDetails = !opensDetailsOnSelect && bulkSelection.length === 1 && !drawerNodeId && !drawerEdge
+  // Several held entities, read — and in a draft edited — as one (BulkEditPanel),
+  // as selected when it opened. An entity's or a relationship's own details take
+  // the rail back.
+  const [bulkEditFor, setBulkEditFor] = useState<string[] | null>(null)
+  // Adjusted while rendering, not in an effect: the two never paint together.
+  if (bulkEditFor && (drawerNodeId || drawerEdge)) setBulkEditFor(null)
+  // One layer's settings (LayerSettingsPanel), in the same rail.
+  const [layerSettingsFor, setLayerSettingsFor] = useState<string | null>(null)
+  if (layerSettingsFor && (drawerNodeId || drawerEdge || bulkEditFor)) setLayerSettingsFor(null)
+
+  const openShared = () => {
+    const ids = [...bulkSelection]
+    takeRail(() => setBulkEditFor(ids))
+  }
   const bulkSelectionCount = bulkSelection.length
   // The server refuses trace requests when this is off; the header hides its
   // Trace and Focus for it, and the SelectionBar follows suit.
@@ -3252,7 +3292,7 @@ export function ContextViewCanvas({
     targetId: string,
     before: NormalizedReferenceLayout,
     after: NormalizedReferenceLayout,
-    action: 'add' | 'rename' | 'recolor' | 'delete' | 'reorder' | 'sort' | 'move',
+    action: 'add' | 'rename' | 'recolor' | 'edit' | 'delete' | 'reorder' | 'sort' | 'move',
     summary: string,
   ) => {
     useStagedChangesStore.getState().stage({
@@ -3297,6 +3337,11 @@ export function ContextViewCanvas({
   const requestLayerRename = useCallback((layerId: string) => {
     setRenameRequest((r) => ({ layerId, nonce: (r?.nonce ?? 0) + 1 }))
   }, [])
+  // New group, asked for from the layer menu: the column opens the group's name.
+  const [newGroupRequest, setNewGroupRequest] = useState<{ layerId: string; nonce: number } | null>(null)
+  const requestNewGroup = useCallback((layerId: string) => {
+    setNewGroupRequest((r) => ({ layerId, nonce: (r?.nonce ?? 0) + 1 }))
+  }, [])
   const insertLayerAt = useCallback((index: number) => {
     if (traceWriteLockedRef.current()) return
     const taken = new Set(currentLayout().layers.map((l) => l.name.toLowerCase()))
@@ -3325,6 +3370,17 @@ export function ContextViewCanvas({
     const after = { ...before, layers }
     persistReferenceLayout(after)
     stageLayerChange(`layer:${id}`, before, after, 'recolor', `Recoloured layer “${target.name}”`)
+  }, [currentLayout, persistReferenceLayout, stageLayerChange])
+
+  // Several of a layer's fields at once — its settings panel's Stage.
+  const editLayer = useCallback((id: string, patch: layerOps.LayerPatch) => {
+    const before = currentLayout()
+    const target = before.layers.find((l) => l.id === id)
+    const layers = layerOps.updateLayer(before.layers, id, patch)
+    if (!target || layers === before.layers) return
+    const after = { ...before, layers }
+    persistReferenceLayout(after)
+    stageLayerChange(`layer:${id}`, before, after, 'edit', `Edited layer “${target.name}”`)
   }, [currentLayout, persistReferenceLayout, stageLayerChange])
 
   // ── Groups: view-only containers inside a layer (the wizard's logicalNodes), managed here ──────
@@ -5613,6 +5669,13 @@ export function ContextViewCanvas({
         : undefined,
       onDelete: () => deleteLayerWithUndo(layer.id),
       onStartEditing: !isDraft && canEnterEdit ? handleEnterEdit : undefined,
+      onOpenSettings: () => takeRail(() => { setBulkEditFor(null); setLayerSettingsFor(layer.id) }),
+      // The Business view's header keeps to the essentials; its own actions are here.
+      ...(personaMode !== 'technical' && {
+        onAddEntity: canEditGraph && !subsetView ? () => openBuilderForLayer(layer.id) : undefined,
+        onNewGroup: isDraft && !traceActive && !subsetView ? () => requestNewGroup(layer.id) : undefined,
+        onBuild: canEditGraph && !subsetView ? () => openBuildForLayer(layer.id) : undefined,
+      }),
       // Everything the view places in this layer, found as search's Layer filter finds it.
       onNarrow: narrowEnabled
         ? () => openNarrow({
@@ -5623,7 +5686,8 @@ export function ContextViewCanvas({
     }
   }, [menuLayerId, sortedLayers, layerFold, layerEditsAllowed, subsetFollows, insertLayerBeside, requestLayerRename,
     recolorLayer, reorderLayer, layerFoldOffered, foldLayersEnabled, deleteLayerWithUndo, isDraft,
-    canEnterEdit, handleEnterEdit, narrowEnabled, openNarrow])
+    canEnterEdit, handleEnterEdit, narrowEnabled, openNarrow, personaMode, canEditGraph, subsetView,
+    openBuilderForLayer, openBuildForLayer, traceActive, requestNewGroup, setBulkEditFor, setLayerSettingsFor])
 
   // What each folded layer holds of the lineage on screen:
   //   * `ports` — its rows with a line to an OPEN layer, which LayerColumn
@@ -7228,6 +7292,9 @@ export function ContextViewCanvas({
             onLink={canvasWritable ? () => useBulkLinkStore.getState().openPanel() : undefined}
             onNarrow={narrowEnabled ? () => openNarrow(narrowDraftFor(bulkSelection)) : undefined}
             lineage={selectionLineage}
+            onOpenDetails={offerDetails ? () => useCanvasStore.getState().openNodeDrawer(bulkSelection[0]) : undefined}
+            onOpenShared={bulkSelection.length > 1 ? openShared : undefined}
+            sharedEditable={canvasWritable && !traceActive}
           />
         )}
         {/* Link the selection to other entities in one go — a draft being
@@ -7798,6 +7865,7 @@ export function ContextViewCanvas({
                 onHeaderContextMenu={openLayerMenu}
                 onInsertLayerBefore={layerEditsAllowed && !subsetFollows ? insertLayerBefore : undefined}
                 renameNonce={renameRequest?.layerId === layer.id ? renameRequest.nonce : 0}
+                newGroupNonce={newGroupRequest?.layerId === layer.id ? newGroupRequest.nonce : 0}
                 isNew={newLayerId === layer.id}
                 // Node sorting — the menu is available to everyone (viewers get a
                 // device-local override); persisted actions are draft-gated
@@ -7954,7 +8022,31 @@ export function ContextViewCanvas({
             onStartEditing={drawerStartEditing}
           />
         )}
-        {!builderOpen && !buildOpen && !drawerNodeId && !drawerEdge && isEdgePanelOpen && (
+        {!builderOpen && !buildOpen && !drawerNodeId && !drawerEdge && !bulkEditFor && layerSettingsFor
+          && sortedLayers.some((l) => l.id === layerSettingsFor) && (
+          <LayerSettingsPanel
+            // Afresh when a draft starts or ends: its fields are that layout's.
+            key={`layer-settings-${layerSettingsFor}-${layerEditsAllowed && !subsetFollows}`}
+            layer={sortedLayers.find((l) => l.id === layerSettingsFor)!}
+            // A layer's settings are the view's layout: a draft's, never during a trace.
+            canEdit={layerEditsAllowed && !subsetFollows}
+            onSave={(patch) => editLayer(layerSettingsFor, patch)}
+            onDelete={isDraft && !subsetFollows ? () => { setLayerSettingsFor(null); deleteLayerWithUndo(layerSettingsFor) } : undefined}
+            onStartEditing={!isDraft && canEnterEdit ? handleEnterEdit : undefined}
+            onClose={() => setLayerSettingsFor(null)}
+          />
+        )}
+        {!builderOpen && !buildOpen && !drawerNodeId && !drawerEdge && bulkEditFor && (
+          <BulkEditPanel
+            key="bulk-edit-panel"
+            nodeIds={bulkEditFor}
+            // Edits are draft-only, and a trace is read-only for its whole life.
+            canEdit={canvasWritable && !traceActive}
+            onStartEditing={drawerStartEditing}
+            onClose={() => setBulkEditFor(null)}
+          />
+        )}
+        {!builderOpen && !buildOpen && !drawerNodeId && !drawerEdge && !bulkEditFor && !layerSettingsFor && isEdgePanelOpen && (
           <EdgeDetailPanel
             key="edge-detail-panel"
             isOpen={isEdgePanelOpen}

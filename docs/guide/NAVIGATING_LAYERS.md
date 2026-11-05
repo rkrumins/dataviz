@@ -30,6 +30,13 @@ count yet, so the total is a minimum. Hover the count for how many rows are in
 the tree right now. Columns handle very long lists smoothly, rendering only what's on
 screen as you scroll, so a layer with thousands of entities stays responsive.
 
+**Read a layer at a glance.** Hover a column's name for the layer's card: its name
+and description in full, and its **properties** — an owner, a purpose, an SLA,
+whatever the View's builders want a reader to know. A tag icon and a number after
+the name say a layer has properties. For all of them, right-click the header and
+choose **Layer details…** (in a draft, **Layer settings…**). In the Business view,
+**⋯** on the header opens the same menu.
+
 ## The Layer Strip: your "you-are-here" navigator
 
 When a canvas is wider than the window, it's scrollable — but scrolling alone

@@ -8,11 +8,13 @@
  * in words rather than presenting a dead button, because "why is this
  * greyed out" is the question a disabled control always leaves behind.
  *
- * It appears only for a selection of SEVERAL. One entity is already fully
- * served: its row is highlighted, the drawer opens on it, and the header's
- * Trace and Focus Lens act on it — a bar repeating that would be chrome
- * with nothing new to say, and a second control named "Trace lineage"
- * beside the header's own.
+ * It appears for a selection of SEVERAL — and for ONE where a click does not
+ * open the entity's details (the Business view, by default: details on
+ * demand). One entity whose drawer opens on the click is already fully
+ * served: its row is highlighted, the drawer shows it, and the header's Trace
+ * and Focus Lens act on it — a bar repeating that would be chrome with nothing
+ * new to say. Where the drawer waits to be asked, the bar is how to ask:
+ * Details, and nothing the header already offers.
  *
  * Docked bottom-centre over the columns, above the trace dock, and it
  * reserves its own band (`--selection-bar-height`) so a column's last row
@@ -55,6 +57,14 @@ export interface SelectionBarProps {
   /** The selection's combined lineage on the canvas: how many entities feed
    *  it and how many it feeds. Absent, or none either way, nothing is said. */
   lineage?: { upstream: number; downstream: number }
+  /** Open the one held entity's details. Given only where a click does not
+   *  open them; with it, a selection of one gets the bar. */
+  onOpenDetails?: () => void
+  /** Read — and, in a draft, edit — what several held entities share
+   *  (BulkEditPanel). Absent, not offered. */
+  onOpenShared?: () => void
+  /** The shared panel edits: the action reads "Edit N…", otherwise "Details". */
+  sharedEditable?: boolean
 }
 
 export function SelectionBar({
@@ -67,18 +77,23 @@ export function SelectionBar({
   onLink,
   onNarrow,
   lineage,
+  onOpenDetails,
+  onOpenShared,
+  sharedEditable = false,
 }: SelectionBarProps) {
   const ref = useRef<HTMLDivElement>(null)
   useBandReservation(ref, '--selection-bar-height')
 
   const count = nodeIds.length
+  const single = count === 1
+  const shown = count > 1 || (single && !!onOpenDetails)
   const named = nodeIds.slice(0, NAMED_LIMIT)
   const rest = count - named.length
   const showLineage = !!lineage && lineage.upstream + lineage.downstream > 0
 
   return (
     <AnimatePresence>
-      {count > 1 && (
+      {shown && (
         <motion.div
           ref={ref}
           role="region"
@@ -115,15 +130,21 @@ export function SelectionBar({
               <span className="text-lg font-semibold text-accent-lineage tabular-nums leading-none">
                 {count}
               </span>
-              <span className="text-xs text-ink-muted">entities</span>
+              <span className="text-xs text-ink-muted">{single ? 'entity' : 'entities'}</span>
             </span>
 
             {/* What they touch, together — in the colours the lines wear. */}
+            {/* On a tight canvas (a panel open beside it) the pair gives way
+                before the actions: it wraps onto a clipped second line and is
+                gone whole, as the hint below does, rather than sliding under
+                the buttons. */}
             {showLineage && (
               <span
-                className="flex items-center gap-1 shrink-0"
+                className="flex flex-wrap items-center h-[23px] min-w-0 overflow-hidden"
                 title="Entities on the canvas that feed the selection, and that it feeds"
               >
+                <span className="w-0 h-[23px]" aria-hidden />
+                <span className="flex items-center gap-1 whitespace-nowrap">
                 <span className={cn(LINEAGE_PILL, 'text-lineage-in bg-lineage-in/10 border border-lineage-in/25')}>
                   <LucideIcons.ArrowUpLeft className="w-3 h-3" strokeWidth={2.4} aria-hidden />
                   {lineage.upstream} in
@@ -133,12 +154,16 @@ export function SelectionBar({
                   <LucideIcons.ArrowDownRight className="w-3 h-3" strokeWidth={2.4} aria-hidden />
                   {lineage.downstream} out
                 </span>
+                </span>
               </span>
             )}
 
             <span className="h-4 w-px bg-glass-border shrink-0" aria-hidden />
 
-            <ul className="flex items-center gap-1.5 min-w-0 overflow-hidden">
+            {/* Only whole names: one that no longer fits wraps onto the clipped
+                second line rather than being squeezed to a sliver. */}
+            <ul className="flex flex-wrap items-center gap-1.5 h-[29px] min-w-0 overflow-hidden">
+              <li className="w-0 h-[29px]" aria-hidden />
               {named.map((id) => (
                 <li key={id} className="min-w-0 max-w-[11rem]">
                   <span
@@ -190,7 +215,42 @@ export function SelectionBar({
 
           {/* What will happen. */}
           <div className="flex items-center gap-2 ml-auto shrink-0">
-            {onLink && (
+            {single && onOpenDetails && (
+              <button
+                type="button"
+                onClick={onOpenDetails}
+                className={cn(
+                  'flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl text-[12.5px] font-medium',
+                  'text-accent-lineage bg-accent-lineage/15 border border-accent-lineage/45',
+                  'hover:bg-accent-lineage/25 hover:border-accent-lineage/65',
+                  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/50',
+                  'transition-colors duration-150',
+                )}
+              >
+                <LucideIcons.PanelRightOpen className="w-3.5 h-3.5" strokeWidth={2.2} />
+                Details
+                <Kbd shortcut="enter" className="ml-0.5" />
+              </button>
+            )}
+            {!single && onOpenShared && (
+              <button
+                type="button"
+                onClick={onOpenShared}
+                className={cn(
+                  'flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-[12.5px] font-medium',
+                  'text-ink bg-black/[0.04] border border-glass-border dark:bg-white/[0.06]',
+                  'hover:border-accent-lineage/45 hover:text-accent-lineage',
+                  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+                  'transition-colors duration-150',
+                )}
+              >
+                {sharedEditable
+                  ? <LucideIcons.PenLine className="w-3.5 h-3.5" strokeWidth={2.2} />
+                  : <LucideIcons.PanelRightOpen className="w-3.5 h-3.5" strokeWidth={2.2} />}
+                {sharedEditable ? `Edit ${count}…` : 'Details'}
+              </button>
+            )}
+            {!single && onLink && (
               <button
                 type="button"
                 onClick={onLink}
@@ -207,7 +267,7 @@ export function SelectionBar({
                 Link…
               </button>
             )}
-            {onNarrow && (
+            {!single && onNarrow && (
               <button
                 type="button"
                 onClick={onNarrow}
@@ -224,7 +284,7 @@ export function SelectionBar({
                 Narrow…
               </button>
             )}
-            {onOpenLens && (
+            {!single && onOpenLens && (
               <button
                 type="button"
                 onClick={onOpenLens}
@@ -241,7 +301,7 @@ export function SelectionBar({
                 Focus all {count}
               </button>
             )}
-            {onTrace && (
+            {!single && onTrace && (
               <button
                 type="button"
                 onClick={onTrace}

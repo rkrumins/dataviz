@@ -298,9 +298,13 @@ export function useCanvasInteractions(
     // ===================
     
     const editNode = useCallback((nodeId: string) => {
-        // Simply select the node - the NodeDetailsPanel will show automatically
-        // The panel has its own internal edit toggle
-        selectNode(nodeId)
+        // View & Edit — and Enter on the selected entity — asks for the
+        // entity's details: select it, unless it is the selection already (a
+        // second select would toggle it off), and open them, whatever this
+        // view does on a plain click. The drawer has its own edit toggle.
+        const { selectedNodeIds, openNodeDrawer } = useCanvasStore.getState()
+        if (!(selectedNodeIds.length === 1 && selectedNodeIds[0] === nodeId)) selectNode(nodeId)
+        openNodeDrawer(nodeId)
         closeContextMenu()
     }, [selectNode, closeContextMenu])
     

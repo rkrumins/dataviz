@@ -21,6 +21,7 @@ describe('MatchBar — an answer that stopped short', () => {
     afterEach(() => usePersonaStore.getState().setMode('business'))
 
     it('says so in plain words for Business, the engine\'s account a click away', () => {
+        usePersonaStore.getState().setMode('business')
         renderBar({ truncated: true, deadlineExceeded: true })
         expect(screen.getByText('Some matches aren’t shown')).toBeInTheDocument()
         expect(screen.getByText('Some matches may be missing')).toBeInTheDocument()

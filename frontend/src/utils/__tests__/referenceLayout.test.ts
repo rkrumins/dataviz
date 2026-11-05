@@ -3,6 +3,13 @@ import { deriveEntityScope, normalizeReferenceLayout, scopeForPersist } from '..
 import type { LayerAssignmentEntry, ViewContentConfig } from '@/types/schema'
 
 describe('normalizeReferenceLayout', () => {
+    it('keeps a layer\'s own properties as they were written', () => {
+        const out = normalizeReferenceLayout({
+            layers: [{ id: 'l1', name: 'Raw', entityTypes: [], order: 0, properties: { owner: 'ana', sla: '1h' } }],
+        })
+        expect(out.layers[0].properties).toEqual({ owner: 'ana', sla: '1h' })
+    })
+
     it('returns empty layers/assignments for null, undefined, and malformed input', () => {
         expect(normalizeReferenceLayout(null)).toEqual({ layers: [], assignments: {} })
         expect(normalizeReferenceLayout(undefined)).toEqual({ layers: [], assignments: {} })

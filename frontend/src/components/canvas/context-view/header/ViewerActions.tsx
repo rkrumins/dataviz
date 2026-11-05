@@ -22,6 +22,7 @@ import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { formatShortcut } from '@/lib/platform'
 import { useFeature } from '@/store/features'
+import { usePersonaMode } from '@/store/persona'
 import { useViewExecutionContext } from '@/providers/ViewExecutionContext'
 import { useAppNotifications } from '@/components/ui/notifications'
 import type { CanvasDensity, LineageRenderMode } from '@/store/preferences'
@@ -29,6 +30,7 @@ import { TraceDepthControl } from '../TraceDepthControl'
 import { PropertyManagerButton } from '../../property-manager/PropertyManagerButton'
 import { DisplayMenu } from './DisplayMenu'
 import { ImportExportMenu, type ViewFileActions } from './ImportExportMenu'
+import { MoreMenu } from './MoreMenu'
 import { TraceHistoryPanel, type TraceHistoryPanelEntry } from './TraceHistoryPanel'
 import { useFolded } from './toolbarFold'
 import { HoverTip } from '@/components/ui/HoverTip'
@@ -158,7 +160,13 @@ export function ComprehensionTools({
   const { notify } = useAppNotifications()
   const [traceHistoryOpen, setTraceHistoryOpen] = useState(false)
   const traceLauncherRef = useRef<HTMLDivElement>(null)
-  const hasTraceHistory = traceHistory.length > 0 && !!onResumeTraceHistory
+  // The Business view keeps the row to reading: Lineage, Display, the Focus
+  // Lens and Trace. Select, the Property Manager and Import / Export wait under
+  // More (MoreMenu), and Trace is one button rather than a split control.
+  // A tucked-away tool that is ON stays on the row, so nobody is left with a
+  // mode they cannot see to turn off.
+  const technical = usePersonaMode() === 'technical'
+  const hasTraceHistory = technical && traceHistory.length > 0 && !!onResumeTraceHistory
   // The Lens focuses ONE entity by construction; Trace can take a whole
   // selection. Defaults to canTrace so a caller that never sets it is unchanged.
   const lensAllowed = canOpenLens ?? canTrace
@@ -260,7 +268,7 @@ export function ComprehensionTools({
           trace: open the Lens on the selection and walk its connections
           hop by hop. Same gating as Trace (single non-logical entity);
           same feature flag (the lens rides the same trace backend). */}
-      {onToggleMultiSelect && !traceActive && (
+      {onToggleMultiSelect && !traceActive && (technical || multiSelectArmed) && (
         <HoverTip
           className="inline-flex"
           label={multiSelectArmed
@@ -453,7 +461,7 @@ export function ComprehensionTools({
           properties and roll out display-rule tags onto matched
           entities. Shared button carries the first-run coachmark so
           the affordance is consistent across all canvases. */}
-      {onTogglePropertyManager && (
+      {onTogglePropertyManager && (technical || propertyManagerOpen) && (
         <PropertyManagerButton
           open={propertyManagerOpen}
           onToggle={onTogglePropertyManager}
@@ -463,7 +471,18 @@ export function ComprehensionTools({
 
       {/* Import / Export — one dropdown, both modes. Import is disabled with an explainer outside
           Edit mode; Export is always available (published state is a valid, re-importable backup). */}
-      <ImportExportMenu onImport={onImport} onExport={onExport} isDraft={isDraft} thisView={thisView} />
+      {technical ? (
+        <ImportExportMenu onImport={onImport} onExport={onExport} isDraft={isDraft} thisView={thisView} />
+      ) : (
+        <MoreMenu
+          onToggleMultiSelect={!traceActive ? onToggleMultiSelect : undefined}
+          multiSelectArmed={multiSelectArmed}
+          onTogglePropertyManager={onTogglePropertyManager}
+          propertyManagerOpen={propertyManagerOpen}
+          onExport={onExport}
+          thisView={thisView}
+        />
+      )}
     </>
   )
 }

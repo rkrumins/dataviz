@@ -58,9 +58,9 @@ sidebar are **Getting started** (your checklist), **User Guide** and
 
 | Control | What it does |
 | --- | --- |
-| The {brandShort} name, with **Business View** or **Technical View** under it | Shows which naming mode is on |
+| The {brandShort} name, with **Business View** or **Technical View** under it | Shows which view is on |
 | **Search pages, views, workspaces, docs…** (`⌘K` / `Ctrl-K`) | Opens the command palette: jump to any page, view, workspace or guide page |
-| **Business** / **Technical** | Switches how entities are named — Technical adds each one's identifier (`⌘/` / `Ctrl-/`) |
+| **Business** / **Technical** | Switches between the essentials (Business) and every tool, with each entity's identifier (Technical) — `⌘/` / `Ctrl-/` |
 | The star (**Favorites**) | Your favourite views, plus the ones you opened recently |
 | The bell (**Inbox**) | Messages for you — for example, a view someone shared with you |
 | The theme button | Cycles between light, dark and your system's theme |
@@ -144,9 +144,10 @@ screen.
 This is the heart of {brand}: pick one thing and see where its data comes from
 and where it goes.
 
-1. Click any entity on the canvas. It's highlighted, and its details panel
-   opens on the right with three buttons at the top: **Root Cause**, **Impact**
-   and **Full Lineage**.
+1. Click any entity on the canvas. It's highlighted. In the Technical view its
+   details panel opens on the right; in the Business view, choose **Details** in
+   the bar at the bottom of the canvas, or press `Enter`. The panel has three
+   buttons at the top: **Root Cause**, **Impact** and **Full Lineage**.
 2. Click **Full Lineage**. {brand} follows the entity's lineage both ways and
    highlights the chain — upstream (where its data comes from) and downstream
    (what it feeds). **Root Cause** traces upstream only; **Impact** downstream

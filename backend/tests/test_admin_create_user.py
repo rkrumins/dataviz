@@ -20,6 +20,18 @@ async def _post(client, body, path="/api/v1/admin/users"):
 BASE = {"email": "grace@company.com", "firstName": "Grace", "lastName": "Hopper"}
 
 
+async def _workspace(client, name="Finance"):
+    r = await client.post("/api/v1/admin/workspaces", json={"name": name, "dataSources": []})
+    assert r.status_code == 201, r.text
+    return r.json()["id"]
+
+
+async def _bindings(session, user_id):
+    from backend.app.db.repositories import binding_repo
+    rows = await binding_repo.list_for_subject(session, subject_type="user", subject_id=user_id)
+    return sorted((b.role_name, b.scope_type, b.scope_id) for b in rows)
+
+
 class TestCreateOne:
     async def test_creates_an_active_account_recorded_as_admin_created(
         self, test_client, db_session,
@@ -131,6 +143,22 @@ class TestCreateOne:
         assert r.status_code == 201
         assert r.json()["status"] == "pending"
 
+    async def test_grants_the_workspace_role_it_was_created_with(
+        self, test_client, db_session,
+    ):
+        """A role given at creation is held at once — the account is not left without one."""
+        ws_id = await _workspace(test_client)
+        r = await _post(test_client, {**BASE, "role": "workspace_viewer", "workspaceId": ws_id})
+        assert r.status_code == 201, r.text
+        assert await _bindings(db_session, r.json()["id"]) == [("workspace_viewer", "workspace", ws_id)]
+
+    async def test_grants_an_organisation_role_it_was_created_with(
+        self, test_client, db_session,
+    ):
+        r = await _post(test_client, {**BASE, "role": "org_admin"})
+        assert r.status_code == 201, r.text
+        assert await _bindings(db_session, r.json()["id"]) == [("org_admin", "global", None)]
+
     async def test_an_unknown_role_is_refused_before_the_account_exists(
         self, test_client, db_session,
     ):
@@ -216,3 +244,20 @@ class TestBulk:
         assert len(tokens) == 2
         assert all(tokens)
         assert tokens[0] != tokens[1], "one token for two accounts is one account"
+
+    async def test_every_row_gets_the_role_the_batch_was_created_with(
+        self, test_client, db_session,
+    ):
+        ws_id = await _workspace(test_client)
+        r = await _post(test_client, {
+            "users": [{"email": "a@company.com"}, {"email": "b@company.com"}],
+            "role": "workspace_viewer", "workspaceId": ws_id,
+        }, path="/api/v1/admin/users/bulk")
+        assert r.status_code == 201, r.text
+        results = r.json()["results"]
+        assert [x["outcome"] for x in results] == ["created", "created"]
+
+        from backend.app.db.repositories import user_repo
+        for email in ("a@company.com", "b@company.com"):
+            user = await user_repo.get_user_by_email(db_session, email)
+            assert await _bindings(db_session, user.id) == [("workspace_viewer", "workspace", ws_id)]

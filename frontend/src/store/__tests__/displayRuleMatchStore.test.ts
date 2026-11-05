@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 
 import { useDisplayRuleMatchStore } from '../displayRuleMatchStore'
+import { renderHook } from '@testing-library/react'
+import { useDisplayRuleLook, useDisplayRuleTags } from '../displayRuleMatchStore'
 import type { DisplayRuleConfig } from '@/types/schema'
 
 
@@ -147,5 +149,45 @@ describe('displayRuleMatchStore', () => {
         expect(after.matchUrnsByRule.size).toBe(0)
         expect(after.countsByRule.size).toBe(0)
         expect(after.ruleMeta).toHaveLength(0)
+    })
+})
+
+
+describe('displayRuleMatchStore — a rule\'s look', () => {
+    beforeEach(reset)
+
+    it('the first rule in the list with a tint gives the tint, the first with a frame the frame', () => {
+        useDisplayRuleMatchStore.getState().setRuleMeta([
+            rule({ id: 'chip-only' }),
+            rule({ id: 'seed', color: '#3b82f6', style: { fill: true } }),
+            rule({ id: 'boxed', color: '#ef4444', style: { frame: 'dashed' } }),
+            rule({ id: 'grey', color: '#64748b', style: { fill: true, frame: 'solid' } }),
+        ])
+        for (const id of ['chip-only', 'seed', 'boxed', 'grey']) tag(id, ['a'])
+        tag('grey', ['b'])
+        expect(renderHook(() => useDisplayRuleLook('a')).result.current)
+            .toEqual({ fillColor: '#3b82f6', frameColor: '#ef4444', frameKind: 'dashed' })
+        expect(renderHook(() => useDisplayRuleLook('b')).result.current)
+            .toEqual({ fillColor: '#64748b', frameColor: '#64748b', frameKind: 'solid' })
+        expect(renderHook(() => useDisplayRuleLook('c')).result.current).toEqual({})
+    })
+
+    it('a rule with its chip off paints without a chip', () => {
+        useDisplayRuleMatchStore.getState().setRuleMeta([
+            rule({ id: 'quiet', style: { chip: false, fill: true } }),
+            rule({ id: 'pii' }),
+        ])
+        tag('quiet', ['a'])
+        tag('pii', ['a'])
+        expect(renderHook(() => useDisplayRuleTags('a')).result.current.map((t) => t.id)).toEqual(['pii'])
+        expect(renderHook(() => useDisplayRuleLook('a')).result.current.fillColor).toBe('#6366f1')
+    })
+
+    it('a style-only edit reaches the look without asking which entities match again', () => {
+        useDisplayRuleMatchStore.getState().setRuleMeta([rule({ id: 'r1' })])
+        tag('r1', ['a'])
+        expect(renderHook(() => useDisplayRuleLook('a')).result.current).toEqual({})
+        useDisplayRuleMatchStore.getState().setRuleMeta([rule({ id: 'r1', style: { frame: 'solid' } })])
+        expect(renderHook(() => useDisplayRuleLook('a')).result.current.frameKind).toBe('solid')
     })
 })

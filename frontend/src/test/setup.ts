@@ -1,7 +1,8 @@
 import '@testing-library/jest-dom/vitest'
 import { cleanup } from '@testing-library/react'
-import { afterEach } from 'vitest'
+import { afterEach, beforeEach } from 'vitest'
 import { cancelHealthProbes } from '@/store/health'
+import { usePersonaStore } from '@/store/persona'
 
 // jsdom implements neither of these, and two separate surfaces need them
 // on mount: React Flow (Lens graph mode) needs a ResizeObserver to mount
@@ -19,6 +20,13 @@ if (typeof globalThis.ResizeObserver === 'undefined') {
 if (!Element.prototype.scrollIntoView) {
   Element.prototype.scrollIntoView = () => {}
 }
+
+// The suite runs in the Technical view: every tool on screen, as before the
+// Business view was simplified. A test about the Business view sets it in its
+// own beforeEach (which runs after this one) or inline.
+beforeEach(() => {
+  usePersonaStore.setState({ mode: 'technical' })
+})
 
 afterEach(() => {
   cleanup()

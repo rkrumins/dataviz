@@ -39,6 +39,36 @@ describe('SelectionBar', () => {
     expect(screen.queryByRole('region', { name: /selected entities/i })).not.toBeInTheDocument()
   })
 
+  it('offers ONE entity\'s details where a click does not open them — and nothing the header has', async () => {
+    const onOpenDetails = vi.fn()
+    renderBar(['a'], { onOpenDetails, onLink: vi.fn(), onNarrow: vi.fn() })
+    const bar = screen.getByRole('region', { name: /selected entities/i })
+    expect(within(bar).getByText('entity')).toBeInTheDocument()
+    expect(within(bar).getByText('orders')).toBeInTheDocument()
+    expect(within(bar).queryByRole('button', { name: /Trace all/ })).not.toBeInTheDocument()
+    expect(within(bar).queryByRole('button', { name: /Focus all/ })).not.toBeInTheDocument()
+    expect(within(bar).queryByRole('button', { name: /Link/ })).not.toBeInTheDocument()
+    await userEvent.setup().click(within(bar).getByRole('button', { name: /Details/ }))
+    expect(onOpenDetails).toHaveBeenCalledTimes(1)
+  })
+
+  it('offers to edit what several share in a draft — and to read it outside one', async () => {
+    const onOpenShared = vi.fn()
+    const { unmount } = render(<SelectionBar nodeIds={['a', 'b']} labelFor={labelFor} onRemove={vi.fn()} onClear={vi.fn()}
+      onOpenShared={onOpenShared} sharedEditable />)
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Edit 2…' }))
+    expect(onOpenShared).toHaveBeenCalledTimes(1)
+    unmount()
+    render(<SelectionBar nodeIds={['a', 'b']} labelFor={labelFor} onRemove={vi.fn()} onClear={vi.fn()} onOpenShared={onOpenShared} />)
+    expect(screen.getByRole('button', { name: 'Details' })).toBeInTheDocument()
+  })
+
+  it('never offers Details for several', () => {
+    renderBar(['a', 'b'], { onOpenDetails: vi.fn() })
+    expect(screen.queryByRole('button', { name: /^Details/ })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Trace all 2/ })).toBeInTheDocument()
+  })
+
   it('names what is held, so it can be checked', () => {
     renderBar(['a', 'b'])
     expect(screen.getByText('2')).toBeInTheDocument()

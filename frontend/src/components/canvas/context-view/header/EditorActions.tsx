@@ -16,6 +16,7 @@
 import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { HoverTip } from '@/components/ui/HoverTip'
+import { usePersonaMode } from '@/store/persona'
 import { BRANCH_VOCAB } from '@/features/versioning/model/branchVocab'
 import { ComprehensionTools, type ComprehensionToolsProps } from './ViewerActions'
 import { useFolded } from './toolbarFold'
@@ -55,6 +56,9 @@ export function EditorActions({
   const undoFolded = useFolded('undo')
   const redoFolded = useFolded('redo')
   const reviewFolded = useFolded('review')
+  // Linking by clicking is a modelling tool: the Business view offers it only
+  // while it is on, so it can always be turned off.
+  const technical = usePersonaMode() === 'technical'
   return (
     <>
       <ComprehensionTools {...tools} />
@@ -64,7 +68,7 @@ export function EditorActions({
       {/* Connect — link entities by clicking, no dragging: click where a link
           starts, then where it goes. Stays on for the next link until turned
           off (Done, Esc, or C again). */}
-      {onToggleConnectTool && (
+      {onToggleConnectTool && (technical || connectToolOn) && (
         <HoverTip
           className="flex"
           label={connectToolOn ? 'Stop connecting' : 'Connect entities by clicking'}

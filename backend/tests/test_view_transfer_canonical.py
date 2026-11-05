@@ -58,6 +58,15 @@ def test_everything_else_is_kept_verbatim_including_unknown_keys():
     assert rl["defaultNodeSortMode"] == "alpha-desc"
 
 
+def test_a_layers_own_properties_travel_verbatim():
+    props = {"owner": "data-eng", "sla": {"hours": 4}, "tags": ["gold"]}
+    config = _config()
+    config["layout"]["referenceLayout"]["layers"][0]["properties"] = props
+    definition = portable_definition(config, "reference")
+    assert definition["layout"]["referenceLayout"]["layers"][0]["properties"] == props
+    assert portable_definition(config_from_definition(definition, icon="Layout"), "reference") == definition
+
+
 def test_legacy_layout_is_up_converted_and_moved_under_layout():
     config = {
         "referenceLayout": {
