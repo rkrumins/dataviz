@@ -53,7 +53,7 @@ from .formats import get_adapter
 from .resolve import (KeyIndex, _canonical_map, key_value, pointer_id, pointer_seed, pointers,
                       resolve_rows)
 from .rowmodel import PROP_DELETE, normalize
-from .snapshot import open_snapshot
+from .snapshot import open_snapshot, window_reads
 from .stream import view_entities
 from .uploads import WHOLE_FILE_FORMATS, is_archive_source, open_source, source_size, too_large
 
@@ -533,7 +533,11 @@ class ImportWorker:
         if not rows and kind == "node":             # the node windows are done: on to the edges
             await _analyze_graph(graph_id)
             kind, rows = "edge", await self._window(job_id, "edge", -1)
+            if not rows:
+                return False                        # no edges: the statistics are fresh already
         if not rows:
+            if kind == "edge":                      # every window is in: what a publish plans on
+                await _analyze_graph(graph_id)
             return False
         if not self._identity_read:                # once a run, before its first window
             await self._identity_state(job_id, snap, graph_id, branch_id)
@@ -733,14 +737,17 @@ class ImportWorker:
                 .order_by(ImportRowORM.row_index).limit(config.IMPORT_COMMIT_WINDOW))).all()
         return [{**raw, "_row_index": idx} for idx, raw in rows]
 
-    async def _pointer_hits(self, snap, names) -> Dict[str, str]:
+    async def _pointer_hits(self, snap, names, read=None) -> Dict[str, str]:
         """``{name: node id}`` for the names rows point at nodes by: the live node that carries the
         name as its urn; else the live node whose id the name derives (one an import made from it);
-        else the node a row of this job gave it to as a second name."""
+        else the node a row of this job gave it to as a second name. With ``read`` (a dict), the
+        nodes found by a derived id are read with their payloads, into it."""
         names = {n for n in names if n}
         hits = dict(await snap.nodes_by_urn(names))
         derived = {n: pointer_id(self._id_scope, pointer_seed(n)) for n in names - set(hits)}
-        live = await snap.lookup_live("node", set(derived.values()))
+        live = await snap.lookup_live("node", set(derived.values()), payload=read is not None)
+        if read is not None:
+            read.update(live)
         hits.update({n: d for n, d in derived.items() if d in live})
         hits.update({n: self._aliases[n] for n in names - set(hits) if n in self._aliases})
         return hits
@@ -749,12 +756,21 @@ class ImportWorker:
         """What ``resolve_rows`` needs to match these node rows: the live nodes they name by
         entity_id, urn (or the identifier property's value) or — a row without a urn —
         qualifiedName, each one's current payload; and, of the identities the rows that match
-        nothing would take, which are taken and which a deleted node held."""
+        nothing would take, which are taken and which a deleted node held. Read in one
+        transaction (``window_reads``): one state of the graph, ``main`` from its heads."""
+        async with window_reads():
+            return await self._read_node_lookups(snap, rows)
+
+    async def _read_node_lookups(self, snap, rows) -> Dict[str, Any]:
         ident = self._identity_prop
         wanted = {n for r in rows for n in pointers(
             r.get("urn"), (r.get("properties") or {}).get(ident) if ident else None)}
-        by_id = await snap.lookup_live("node", {r["entity_id"] for r in rows if r.get("entity_id")})
-        urn_to_eid = await self._pointer_hits(snap, wanted)
+        # The nodes rows name by id, and by a derived id, read once with their payloads: they are
+        # what the rows are diffed against (``_heads`` reads only the rest).
+        by_id = await snap.lookup_live("node", {r["entity_id"] for r in rows if r.get("entity_id")},
+                                       payload=True)
+        read = dict(by_id)
+        urn_to_eid = await self._pointer_hits(snap, wanted, read)
         qname_to_eid = await snap.nodes_by_qname(r.get("qualifiedName") for r in rows if not r.get("urn"))
         named = set(by_id) | set(urn_to_eid.values()) | {e for e in qname_to_eid.values() if e}
         # A node an earlier window of this job made, by the file's id for it: read with the rest,
@@ -766,7 +782,7 @@ class ImportWorker:
                 r.get("properties"))[0])}
         taken, restore = await self._svc.identities_taken(
             graph_id=self._graph_id, branch_id=self._branch_id, names=wanted - set(urn_to_eid))
-        current, hash_of = await _heads(snap, "node", named)
+        current, hash_of = await _heads(snap, "node", named, read)
         return {"urn_to_eid": urn_to_eid, "qname_to_eid": qname_to_eid, "node_eids": named,
                 "current": current, "hash_of": hash_of,
                 "bases": await _bases(snap, "node", rows, hash_of), "taken": taken, "restore": restore}
@@ -774,7 +790,11 @@ class ImportWorker:
     async def _edge_lookups(self, snap, rows) -> Dict[str, Any]:
         """What ``resolve_rows`` needs for these edge rows: the live nodes their endpoints name (by
         entity_id, urn, or — an end without a urn — qualifiedName), the live edges between those
-        nodes, and each such edge's current payload."""
+        nodes, and each such edge's current payload. Read as :meth:`_node_lookups` reads."""
+        async with window_reads():
+            return await self._read_edge_lookups(snap, rows)
+
+    async def _read_edge_lookups(self, snap, rows) -> Dict[str, Any]:
         ends = {}
         ident = self._identity_prop
         for end in ("source", "target"):
@@ -907,7 +927,8 @@ class ImportWorker:
 
 
 async def _analyze_graph(graph_id: str) -> None:
-    """Refresh the planner's statistics of the graph's partitions once the node windows are in.
+    """Refresh the planner's statistics of the graph's partitions once the node windows are in, and
+    again once the edge windows are (a publish of the draft plans its pages on them).
 
     Until autovacuum gets to them, they describe the partitions without what those windows wrote
     (100k draft heads and versions into a new graph): the first edge window's lookups of its ends'
@@ -1003,9 +1024,12 @@ def _normalize_page(page: List[Dict[str, Any]], native: bool = False) -> Tuple[L
     return out, skipped
 
 
-async def _heads(snap, kind: str, eids) -> Tuple[Dict[str, dict], Dict[str, str]]:
-    """The current payload of each live entity among ``eids``, and its content hash."""
-    live = await snap.lookup_live(kind, set(eids), payload=True)
+async def _heads(snap, kind: str, eids, read=None) -> Tuple[Dict[str, dict], Dict[str, str]]:
+    """The current payload of each live entity among ``eids``, and its content hash; ``read`` holds
+    the live entities the window already read with their payloads, which are not read again."""
+    eids = set(eids)
+    live = {eid: w for eid, w in (read or {}).items() if eid in eids}
+    live.update(await snap.lookup_live(kind, eids - set(live), payload=True))
     return ({eid: json.loads(w.payload) for eid, w in live.items() if w.payload is not None},
             {eid: w.content_hash for eid, w in live.items() if w.payload is not None})
 
