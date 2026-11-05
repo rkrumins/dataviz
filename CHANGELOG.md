@@ -9,6 +9,34 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — A bulk import reads ahead: a large delta lands a quarter sooner
+
+### Changed
+
+- **A bulk import has four windows of rows in hand** (`IMPORT_BULK_CONCURRENCY`, default 4): it
+  writes one while it looks up and matches the next three. Windows are still written one at a
+  time, in file order, and each lands what it would land alone. A window ahead that names what a
+  window written meanwhile names (the same urn, file id, qualifiedName, key value, entity or edge)
+  is matched again before it is written. Measured over HTTP on 4 vCPU and default Postgres:
+
+  | | One window at a time | Four in hand |
+  |---|---|---|
+  | 211 MB, a third new or updated, into a graph of 1.32 million rows | 366 s | **278 s** |
+  | 501 MB (4.18 million rows) into an empty graph | 879 s | 851 s |
+
+  A delta gains most: matching its unchanged rows is reading, and the reads now overlap the
+  writes. A first load gains little, because its writes, one window at a time, set the pace (on
+  tuned Postgres, 759 s against 820 s). The worker holds the extra windows: 360 MB at its peak,
+  against 235 MB.
+
+### Upgrading
+
+- **A transfer worker's connection pool grows** by two per slot for each window in hand: 20 for
+  the default two slots, where it was 8. A pool you size yourself (`GRAPHVER_POOL_SIZE`) needs as
+  much, or set `IMPORT_BULK_CONCURRENCY=1`.
+
+---
+
 ## [Unreleased] — A bulk import loads a large file straight into the published graph
 
 ### Added

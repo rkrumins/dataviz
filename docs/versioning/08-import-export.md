@@ -367,6 +367,18 @@ The worker (`ImportWorker._run_bulk`) runs the import's own phases, with these d
    the commit, and never flushes it); judges the window by the ontology's write gates — containment
    and rules, as a publish judges a draft — so a bad row is quarantined like any refused row; and
    writes the version rows into the commit, with no heads, Merkle, stats or head move.
+
+   `IMPORT_BULK_CONCURRENCY` (4) windows are in hand at once (`ImportWorker._bulk_phase`): each is
+   written after the one before it, in file order, as above, and meanwhile the next ones are looked
+   up and matched. Nothing else writes `main` under the gate, so a window ahead can have read stale
+   state only where a window written since it began wrote. When their tokens meet (`_tokens`: a
+   node row's pointers, file id, qualifiedName and team-key values; the `(source, target, TYPE)` of
+   an edge window's creates; every entity either resolved to), it is matched again after them. So
+   every window is resolved as one at a time resolves it, and the write gates still judge each
+   against all that was written before it. Matching unchanged rows is reading, so a delta gains most
+   (366 s → 278 s for the 211 MB delta of the connector guide's §9); a first load's writes set its
+   pace. A window ahead that fails is matched again in its turn; one still ahead when the phase
+   stops is dropped, as nothing of it was written. 1 takes one window at a time (`_next_window`).
 3. **Land.** Once every window is in: the starter is asked about again (`bulk_resolver`: still
    allowed to publish and merge their own changes?), and a strict ontology with root types is asked
    whether every new node sits inside a parent (`import_commit_parentless`). Either refusal discards

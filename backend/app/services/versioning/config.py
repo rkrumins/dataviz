@@ -386,6 +386,10 @@ def object_store_s3() -> dict:
 # window is also what a resumed import redoes at most, and what the job's lease waits out before a
 # stopping worker hands the job back — so a few seconds of work, not minutes.
 IMPORT_COMMIT_WINDOW: int = int(os.getenv("IMPORT_COMMIT_WINDOW", "10000"))
+# Windows a bulk import has in hand at once: the one it writes, and the next ones looked up and
+# matched meanwhile. Windows are still written one at a time, in file order; 1 works on one window
+# at a time.
+IMPORT_BULK_CONCURRENCY: int = max(1, int(os.getenv("IMPORT_BULK_CONCURRENCY", "4")))
 # Rows returned inline in a preview before the full diff must be downloaded.
 PREVIEW_SAMPLE_LIMIT: int = int(os.getenv("IMPORT_PREVIEW_SAMPLE_LIMIT", "200"))
 # Two-tier threshold: imports at/below this stage client-side (existing Review & Save); above
@@ -577,13 +581,15 @@ def lane_pool_size(lanes) -> int:
 
     Sized from what each lane holds at once — projection: one per concurrent graph plus the poll,
     stream and sweep; transfer: two per slot (the job's window and a nested read) plus the inspect
-    slot; bootstrap: three per slot (window, phase driver, a validation read) plus purge and reaper —
-    so a busy lane waits on its own work, never on a pool sized for a web process."""
+    slot, and two more per slot for each window a bulk import reads ahead of the one it writes
+    (``IMPORT_BULK_CONCURRENCY``); bootstrap: three per slot (window, phase driver, a validation
+    read) plus purge and reaper — so a busy lane waits on its own work, never on a pool sized for a
+    web process."""
     size = 2
     if "projection" in lanes:
         size += PROJECTION_CONCURRENCY + 3
     if "transfer" in lanes:
-        size += 2 * (TRANSFER_SLOTS + 1)
+        size += 2 * (TRANSFER_SLOTS + 1) + 2 * TRANSFER_SLOTS * (IMPORT_BULK_CONCURRENCY - 1)
     if "bootstrap" in lanes:
         size += 3 * BOOTSTRAP_SLOTS + 2
     return size

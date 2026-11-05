@@ -409,11 +409,11 @@ row.
 | Run | File | Rows | Upload | Import | Publish | Peak memory |
 |---|---|---|---|---|---|---|
 | NDJSON | 501 MB | 4,180,000 | 7 s (30 parts, sha256 included) | 934 s (16 min), about 4,470 rows/s | 846 s (14 min) | worker 230 MB importing, 450 MB publishing; API 330 MB; connector 40 MB |
-| **The same file, `--bulk`** | 501 MB | 4,180,000 | 7 s | **873 s (15 min) in all**: the load lands itself | none | as above |
+| **The same file, `--bulk`** | 501 MB | 4,180,000 | 7 s | **844 s (14 min) in all**: the load lands itself | none | worker 360 MB |
 | NDJSON | 53 MB | 440,000 | under 1 s | 125 s, about 3,500 rows/s | 65 s | as above |
 | CSV, the same rows | 30 MB | 440,000 | under 1 s | 155 s, about 2,800 rows/s | 65 s | as above |
 | A 1% delta into the 4.18M graph: 1,900 updates, 190 deletes | 195 KB | 2,090 | under 1 s | 17 s end to end, publish included | | |
-| A large delta into a graph of 1.32 million rows: 440,000 rows new, 165,000 updated, 1,154,999 unchanged | 211 MB | 1,760,000 | 3 s | 363 s, and 94 s to publish: **460 s**. With `--bulk`: **366 s** in all | | |
+| A large delta into a graph of 1.32 million rows: 440,000 rows new, 165,000 updated, 1,154,999 unchanged | 211 MB | 1,760,000 | 3 s | 363 s, and 94 s to publish: **460 s**. With `--bulk`: **278 s** in all | | |
 | Export of the 4.18M graph, NDJSON | 1.65 GB out | 4,180,000 | | 152 s, about 27,500 entities/s | | |
 
 The import's time goes into Postgres: the worker waits on it about three quarters of the time.
@@ -429,7 +429,7 @@ the graph and writing them, node windows then edge windows.
   row count, and roughly the time. A CSV takes about a quarter longer to import.
 - **In bulk, about half that** for a first load: no draft, no publish, and the landing a minute or
   two. A 3 GB file of rows like these goes into an empty graph in about an hour and a half, and a
-  3 GB delta, a third of it new or changed, into a graph built from 2 GB in about the same
+  3 GB delta, a third of it new or changed, into a graph built from 2 GB in a little over an hour
   (§6). The published graph takes no other changes meanwhile.
 - **Deltas are cheap.** A delta costs what its file holds, not what the graph holds: the 1% delta
   above took 17 seconds into a graph of 4 million entities. Send the first load once, then deltas.
@@ -463,8 +463,23 @@ the graph and writing them, node windows then edge windows.
     (`ingress.annotations."nginx.ingress.kubernetes.io/proxy-body-size"`). The app takes up to
     100 MB.
   - Every proxy must allow a request at least 120 s.
-- **One import at a time per draft, two per worker.** `GRAPHVER_TRANSFER_SLOTS` (2) jobs run at
-  once on each transfer worker. Run more workers for more at once.
+- **Postgres's own settings.** On its defaults, Postgres checkpointed every 8 seconds through these
+  imports, and said so in its log (`checkpoints are occurring too frequently`). Raise
+  `max_wal_size` first, and give it `shared_buffers` of a quarter of its memory: the production
+  flags are in [INFRASTRUCTURE_LAUNCH_SCALE.md](INFRASTRUCTURE_LAUNCH_SCALE.md) §5.2. Here, with
+  4 GB of buffers and 4 GB of WAL between checkpoints, the bulk load of the 501 MB file took 753 s
+  instead of 844 s.
+- **Several graphs at once.** Imports into different graphs run side by side,
+  `GRAPHVER_TRANSFER_SLOTS` (2) at a time on each transfer worker; run more workers for more at
+  once. A graph takes one import at a time per draft, and one bulk import. Measured one window at a
+  time (`IMPORT_BULK_CONCURRENCY=1`): two 250 MB bulk loads into two graphs took 640 s together,
+  where the 501 MB file alone took 879 s; four 125 MB loads, with four slots and tuned Postgres,
+  took 490 s, where the 501 MB file took 820 s.
+- **A bulk import's windows in hand** (`IMPORT_BULK_CONCURRENCY`, 4): it writes one window of
+  10,000 rows while it looks up and matches the next three. That made the delta above a quarter
+  faster; a first load, whose writes set the pace, gains little. Each window in hand takes up to
+  two of the worker's connections. Its pool is sized for them, unless you set
+  `GRAPHVER_POOL_SIZE` yourself.
 - **Keep main quiet while a large import runs.** An import that publishes itself needs `main` not
   to have moved since it began (§6).
 

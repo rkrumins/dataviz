@@ -46,12 +46,16 @@ def test_the_pool_is_sized_from_the_lanes(monkeypatch):
     monkeypatch.setattr(config, "PROJECTION_CONCURRENCY", 8)
     monkeypatch.setattr(config, "TRANSFER_SLOTS", 2)
     monkeypatch.setattr(config, "BOOTSTRAP_SLOTS", 2)
+    monkeypatch.setattr(config, "IMPORT_BULK_CONCURRENCY", 1)
     assert config.lane_pool_size({"projection"}) == 2 + 11
     assert config.lane_pool_size({"transfer"}) == 2 + 6
     assert config.lane_pool_size({"bootstrap"}) == 2 + 8
     assert config.lane_pool_size(set(config.LANES)) == 2 + 11 + 6 + 8
     monkeypatch.setattr(config, "TRANSFER_SLOTS", 4)
     assert config.lane_pool_size({"transfer"}) == 2 + 10, "more slots, more connections"
+    monkeypatch.setattr(config, "IMPORT_BULK_CONCURRENCY", 4)
+    assert config.lane_pool_size({"transfer"}) == 2 + 10 + 24, (
+        "two more per slot for each window a bulk import reads ahead")
 
 
 def _build(lanes):
