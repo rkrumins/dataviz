@@ -23,6 +23,14 @@ limitations** — a changelog that only lists good news is not worth reading.
   - **a refused row doesn't stop the rest:** it is listed in the job's preview, and the other rows
     land.
 
+  Measured over HTTP on 4 vCPU and default Postgres, against an import that publishes itself (on
+  this release's faster imports):
+
+  | | Into a draft, published | In bulk |
+  |---|---|---|
+  | 501 MB (4.18 million rows) into an empty graph | 30 min, 15.0 GB | **15 min, 10.1 GB** |
+  | 211 MB, a third new or updated, into a graph of 1.32 million rows | 460 s | **366 s** |
+
   It needs what `autoPublish` needs: publish rights (an API key's owner's), and a data source
   whose policy lets people merge their own changes. It is checked before anything is stored, and
   again before the load lands. It adds and updates only: a file with a delete row fails at that

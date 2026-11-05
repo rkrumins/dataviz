@@ -397,8 +397,8 @@ Every call an import connector makes does no harm sent twice:
 
 ## 9. Large files
 
-Measured end to end over HTTP on one machine, through the reference connector with `--publish`. The
-setup:
+Measured end to end over HTTP on one machine, through the reference connector with `--publish`, or
+with `--bulk` where the table says so. The setup:
 - 4 vCPU and 15 GB RAM;
 - Postgres 16 with default settings, holding the parts (the `database` store);
 - the API and one transfer worker.
@@ -409,9 +409,11 @@ row.
 | Run | File | Rows | Upload | Import | Publish | Peak memory |
 |---|---|---|---|---|---|---|
 | NDJSON | 501 MB | 4,180,000 | 7 s (30 parts, sha256 included) | 934 s (16 min), about 4,470 rows/s | 846 s (14 min) | worker 230 MB importing, 450 MB publishing; API 330 MB; connector 40 MB |
+| **The same file, `--bulk`** | 501 MB | 4,180,000 | 7 s | **873 s (15 min) in all**: the load lands itself | none | as above |
 | NDJSON | 53 MB | 440,000 | under 1 s | 125 s, about 3,500 rows/s | 65 s | as above |
 | CSV, the same rows | 30 MB | 440,000 | under 1 s | 155 s, about 2,800 rows/s | 65 s | as above |
 | A 1% delta into the 4.18M graph: 1,900 updates, 190 deletes | 195 KB | 2,090 | under 1 s | 17 s end to end, publish included | | |
+| A large delta into a graph of 1.32 million rows: 440,000 rows new, 165,000 updated, 1,154,999 unchanged | 211 MB | 1,760,000 | 3 s | 363 s, and 94 s to publish: **460 s**. With `--bulk`: **366 s** in all | | |
 | Export of the 4.18M graph, NDJSON | 1.65 GB out | 4,180,000 | | 152 s, about 27,500 entities/s | | |
 
 The import's time goes into Postgres: the worker waits on it about three quarters of the time.
@@ -425,6 +427,10 @@ the graph and writing them, node windows then edge windows.
   slows a little as drafts grow (4,900 entities/s at 4.18 million), so allow about 2 hours for it:
   about 4 hours end to end, and half that for 2 GB. Rows of 250 bytes halve the
   row count, and roughly the time. A CSV takes about a quarter longer to import.
+- **In bulk, about half that** for a first load: no draft, no publish, and the landing a minute or
+  two. A 3 GB file of rows like these goes into an empty graph in about an hour and a half, and a
+  3 GB delta, a third of it new or changed, into a graph built from 2 GB in about the same
+  (§6). The published graph takes no other changes meanwhile.
 - **Deltas are cheap.** A delta costs what its file holds, not what the graph holds: the 1% delta
   above took 17 seconds into a graph of 4 million entities. Send the first load once, then deltas.
 - **Memory** stays flat: windows of 10,000 rows, whatever the file's size.
@@ -443,6 +449,9 @@ the graph and writing them, node windows then edge windows.
 
   For 4 GB of rows like these, that is about 100 GB of graph and 26 GB of staged rows. Size
   Postgres for it before the first gigabyte import: the in-cluster Postgres volumes are 10–20 Gi.
+
+  **In bulk, the graph is kept once.** The same file took 10.1 GB: 6.4 GB of graph, about 13 times
+  the file, and the staged rows as above. For 4 GB, about 50 GB of graph.
 - **The object store.**
   - The default keeps uploaded parts in Postgres, where they compress well.
   - Above about 1 GB, set `OBJECT_STORE_BACKEND=s3` (an image with `requirements-s3.txt`), or
