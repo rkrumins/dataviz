@@ -60,7 +60,7 @@ describe('the Connections panel is wired into the Context View', () => {
       /\(b\.bundleSize \?\? b\.edgeCount \?\? 1\) - \(a\.bundleSize \?\? a\.edgeCount \?\? 1\)/
     )
     expect(source).toContain("import { bySignificance } from './lineDensity'")
-    expect(source).toMatch(/\.sort\(bySignificance\)\.slice\(0, autoStubThreshold\)/)
+    expect(source).toMatch(/\.sort\(bySignificance\)\.slice\(0, cardBudget\)/)
   })
 
   it('the budget, the hubs, the ribbons and the panel read one list of drawable lines', () => {

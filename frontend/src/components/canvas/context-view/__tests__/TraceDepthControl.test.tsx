@@ -11,10 +11,11 @@
  * The control is capped at 25 and says what depth actually does now: narrow
  * the view over a flow already in hand, instantly, with no refetch.
  */
-import { describe, it, expect, vi } from 'vitest'
+import { afterEach, describe, it, expect, vi } from 'vitest'
 import { render, screen, fireEvent, within } from '@testing-library/react'
 import { TraceDepthControl } from '../TraceDepthControl'
 import { usePreferencesStore } from '@/store/preferences'
+import { usePersonaStore } from '@/store/persona'
 
 function open(upstream = 25, downstream = 25) {
   const onChange = vi.fn()
@@ -74,6 +75,8 @@ describe('TraceDepthControl — the one depth rule', () => {
 })
 
 describe('TraceDepthControl — the trace settings live here', () => {
+  afterEach(() => usePreferencesStore.getState().resetTraceLines())
+
   it('carries the Display switch: "Lineage counts on cards", ON by default, persisted', () => {
     usePreferencesStore.setState({ showLineageCounts: true })
     open()
@@ -86,17 +89,51 @@ describe('TraceDepthControl — the trace settings live here', () => {
     usePreferencesStore.setState({ showLineageCounts: true })
   })
 
-  it('carries the Lines choice: the view’s own until one is picked, then the pick, kept', () => {
-    usePreferencesStore.setState({ traceLineMode: null })
+  it('carries the Lines choice: the view’s own, and a pick is that view’s alone', () => {
     open()
     const lines = screen.getByRole('radiogroup', { name: 'Lines' })
     // The suite runs in the Technical view, whose traces draw every line.
     expect(within(lines).getByRole('radio', { name: /^Every line/ }).getAttribute('aria-checked')).toBe('true')
-    fireEvent.click(within(lines).getByRole('radio', { name: /^On hover/ }))
-    expect(usePreferencesStore.getState().traceLineMode).toBe('stubs')
+    fireEvent.click(within(lines).getByRole('radio', { name: /^Adaptive/ }))
+    expect(usePreferencesStore.getState().traceLineMode).toEqual({ business: 'stubs', technical: 'auto' })
+    expect(within(lines).getByRole('radio', { name: /^Adaptive/ }).getAttribute('aria-checked')).toBe('true')
+  })
+
+  it('in the Business view, starts on On hover and picks for the Business view', () => {
+    usePersonaStore.setState({ mode: 'business' })
+    open()
+    const lines = screen.getByRole('radiogroup', { name: 'Lines' })
     expect(within(lines).getByRole('radio', { name: /^On hover/ }).getAttribute('aria-checked')).toBe('true')
     fireEvent.click(within(lines).getByRole('radio', { name: /^Adaptive/ }))
-    expect(usePreferencesStore.getState().traceLineMode).toBe('auto')
-    usePreferencesStore.setState({ traceLineMode: null })
+    expect(usePreferencesStore.getState().traceLineMode).toEqual({ business: 'auto', technical: 'raw' })
+  })
+
+  it('has budgets of its own: Lines kept for Adaptive, Lines per card for On hover and Adaptive', () => {
+    open()
+    const lines = screen.getByRole('radiogroup', { name: 'Lines' })
+    // Every line has neither.
+    expect(screen.queryByRole('slider', { name: 'Lines kept' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('slider', { name: 'Lines per card' })).not.toBeInTheDocument()
+
+    fireEvent.click(within(lines).getByRole('radio', { name: /^On hover/ }))
+    expect(screen.queryByRole('slider', { name: 'Lines kept' })).not.toBeInTheDocument()
+    const perCard = screen.getByRole('slider', { name: 'Lines per card' })
+    expect(perCard).toHaveAttribute('min', '5')
+    expect(perCard).toHaveAttribute('max', '500')
+    expect(screen.getByText('Lines a card draws when you point at or pick it')).toBeInTheDocument()
+    fireEvent.change(perCard, { target: { value: '40' } })
+    expect(usePreferencesStore.getState().traceLinesPerCard).toBe(40)
+
+    fireEvent.click(within(lines).getByRole('radio', { name: /^Adaptive/ }))
+    expect(screen.getByRole('slider', { name: 'Lines per card' })).toHaveValue('40')
+    const kept = screen.getByRole('slider', { name: 'Lines kept' })
+    expect(kept).toHaveAttribute('min', '10')
+    expect(kept).toHaveAttribute('max', '2000')
+    expect(screen.getByText('The strongest 500 lines stay drawn')).toBeInTheDocument()
+    fireEvent.change(kept, { target: { value: '120' } })
+    expect(usePreferencesStore.getState().traceLinesKept).toBe(120)
+    expect(screen.getByText('The strongest 120 lines stay drawn')).toBeInTheDocument()
+    // Display's browse budget is not the trace's.
+    expect(usePreferencesStore.getState().autoStubThreshold).toBe(500)
   })
 })

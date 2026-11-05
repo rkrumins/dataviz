@@ -20,12 +20,13 @@ import { act, fireEvent, screen } from '@testing-library/react'
 import { renderCanvasWithTrace, type TraceCanvasHarness } from '@/test/canvasHarness'
 import { cfoEstate, coarseThenFineEstate, wideFanEstate } from '@/test/fixtures/traceEstates'
 import { decodeTraceShare, encodeTraceShare } from '@/hooks/lib/traceShareCodec'
-import { usePreferencesStore } from '@/store/preferences'
+import { DEFAULT_TRACE_LINE_MODE, usePreferencesStore } from '@/store/preferences'
+import { usePersonaStore } from '@/store/persona'
 import { DEFAULT_LINEAGE_DIRECTION_COLORS } from '@/lib/lineageDirectionColors'
 import { countTest, expectTestsRan } from '@/test/canary'
 
 beforeEach(() => countTest())
-afterAll(() => expectTestsRan(30))
+afterAll(() => expectTestsRan(33))
 
 describe('the trace overlay on the real canvas', () => {
   it('CFO trace: dashboard chain open, partners closed with counts, two rolled wires, zero store writes, exit restores', async () => {
@@ -716,11 +717,15 @@ describe('the trace overlay on the real canvas', () => {
 //
 // A table with thirty partners each side is a trace that buries the canvas
 // in lines when every one of them draws. A trace now takes Display's density
-// modes as a choice of its own: the Business view starts on On hover, the
-// Technical view on every line, which is how a trace has always drawn.
+// modes as a choice of its own, one per view: the Business view starts on On
+// hover, the Technical view on every line, which is how a trace has always
+// drawn. Its budgets are its own too: Lines kept and Lines per card.
 describe("a trace's Lines choice", () => {
-  beforeEach(() => usePreferencesStore.setState({ traceLineMode: null, autoStubThreshold: 500 }))
-  afterAll(() => usePreferencesStore.setState({ traceLineMode: null, autoStubThreshold: 500 }))
+  const defaults = () => usePreferencesStore.setState({
+    traceLineMode: DEFAULT_TRACE_LINE_MODE, traceLinesKept: 500, traceLinesPerCard: 500, autoStubThreshold: 500,
+  })
+  beforeEach(defaults)
+  afterAll(defaults)
 
   const linesChip = () => screen.queryByRole('button', { name: /show every line/i })
   // What the chip says, in reading order: its name.
@@ -746,7 +751,7 @@ describe("a trace's Lines choice", () => {
   }
 
   it('Business: the cards are laid out and no line draws until a card is pointed at or picked', async () => {
-    usePreferencesStore.setState({ autoStubThreshold: 20 })   // Lines per entity
+    usePreferencesStore.setState({ traceLinesPerCard: 20 })   // Lines per card
     const h = await renderCanvasWithTrace(wideFanEstate(), { focus: 'hub', persona: 'business' })
     await h.startTrace('hub')
 
@@ -767,7 +772,7 @@ describe("a trace's Lines choice", () => {
     expect(h.wires()).toEqual([])
 
     // Picking the traced table keeps its lines drawn, the strongest first, up
-    // to Lines per entity.
+    // to Lines per card.
     await h.clickCard('hub')
     const picked = h.wires()
     expect(picked).toHaveLength(20)
@@ -778,6 +783,7 @@ describe("a trace's Lines choice", () => {
   }, 30000)
 
   it('"Show every line" draws every line the trace walks, and the next trace keeps it', async () => {
+    usePreferencesStore.setState({ traceLineMode: { business: 'stubs', technical: 'auto' } })
     const h = await renderCanvasWithTrace(wideFanEstate(), { focus: 'hub', persona: 'business' })
     await h.startTrace('hub')
     expect(h.wires()).toEqual([])
@@ -786,7 +792,8 @@ describe("a trace's Lines choice", () => {
     await pastTheMoment(h)
     expect(h.wires()).toHaveLength(61)
     expect(linesChip()).toBeNull()
-    expect(usePreferencesStore.getState().traceLineMode).toBe('raw')
+    // The view it was chosen in: the Technical view keeps its own.
+    expect(usePreferencesStore.getState().traceLineMode).toEqual({ business: 'raw', technical: 'auto' })
 
     h.pressEscape()
     await h.settle()
@@ -799,9 +806,9 @@ describe("a trace's Lines choice", () => {
   }, 30000)
 
   it("Adaptive draws at most its budget, the traced table's own lines first", async () => {
-    usePreferencesStore.setState({ autoStubThreshold: 20 })   // the budget
+    usePreferencesStore.setState({ traceLinesKept: 20 })   // the budget: Lines kept
     const h = await renderCanvasWithTrace(wideFanEstate(), { focus: 'hub', persona: 'business' })
-    await h.setTraceLines('auto')
+    await h.setTraceLines({ mode: 'auto' })
     await h.startTrace('hub')
 
     const drawn = h.wires()
@@ -842,6 +849,73 @@ describe("a trace's Lines choice", () => {
     expect(fill('in05', 'hub')).toBe(DEFAULT_LINEAGE_DIRECTION_COLORS.in)
     expect(fill('hub', 'out05')).toBe(DEFAULT_LINEAGE_DIRECTION_COLORS.out)
     expect(fill('RAW', 'in00')).toBe(DEFAULT_LINEAGE_DIRECTION_COLORS.in)
+    expect(h.storeWrites()).toBe(0)
+    expect(h.consoleErrors()).toEqual([])
+  }, 30000)
+
+  it('Lines per card is how many lines a card draws when you point at it or pick it', async () => {
+    const h = await renderCanvasWithTrace(wideFanEstate(), { focus: 'hub', persona: 'business' })
+    await h.setTraceLines({ perCard: 5 })
+    await h.startTrace('hub')
+
+    await pointAt(h, 'hub')
+    expect(h.wires()).toHaveLength(5)
+    await pointAway(h, 'hub')
+
+    await h.clickCard('hub')
+    expect(h.wires()).toHaveLength(5)
+    expect(chipSays()).toBe('5 of 61 lines. Show every line')
+    await h.setTraceLines({ perCard: 25 })
+    await pastTheMoment(h)
+    const picked = h.wires()
+    expect(picked).toHaveLength(25)
+    expect(picked.every(w => w.source === 'hub' || w.target === 'hub')).toBe(true)
+    expect(chipSays()).toBe('25 of 61 lines. Show every line')
+    expect(h.storeWrites()).toBe(0)
+    expect(h.consoleErrors()).toEqual([])
+  }, 30000)
+
+  it('Adaptive keeps Lines kept drawn, whatever Display’s browse budget is', async () => {
+    usePreferencesStore.setState({ autoStubThreshold: 100 })   // Display's: every line, were it the trace's
+    const h = await renderCanvasWithTrace(wideFanEstate(), { focus: 'hub', persona: 'business' })
+    await h.setTraceLines({ mode: 'auto', kept: 10 })
+    await h.startTrace('hub')
+    expect(h.wires()).toHaveLength(10)
+    expect(chipSays()).toBe('10 of 61 lines. Show every line')
+
+    await h.setTraceLines({ kept: 40 })
+    await pastTheMoment(h)
+    expect(h.wires()).toHaveLength(40)
+    expect(chipSays()).toBe('40 of 61 lines. Show every line')
+
+    // A budget the trace fits in draws every line, and leaves nothing to say.
+    await h.setTraceLines({ kept: 100 })
+    await pastTheMoment(h)
+    expect(h.wires()).toHaveLength(61)
+    expect(linesChip()).toBeNull()
+    expect(h.storeWrites()).toBe(0)
+    expect(h.consoleErrors()).toEqual([])
+  }, 30000)
+
+  it('each view keeps its own choice: switching the view switches the trace’s lines', async () => {
+    const h = await renderCanvasWithTrace(wideFanEstate(), { focus: 'hub', persona: 'business' })
+    await h.startTrace('hub')
+    expect(h.wires()).toEqual([])                       // Business: On hover
+
+    await act(async () => { usePersonaStore.setState({ mode: 'technical' }) })
+    await pastTheMoment(h)
+    expect(h.wires()).toHaveLength(61)                  // Technical: every line
+    expect(linesChip()).toBeNull()
+
+    // A choice made here is the Technical view's alone.
+    await h.setTraceLines({ mode: 'auto', kept: 10 })
+    await pastTheMoment(h)
+    expect(h.wires()).toHaveLength(10)
+    await act(async () => { usePersonaStore.setState({ mode: 'business' }) })
+    await pastTheMoment(h)
+    expect(h.wires()).toEqual([])
+    expect(usePreferencesStore.getState().traceLineMode).toEqual({ business: 'stubs', technical: 'auto' })
+    expect(h.isTracing()).toBe(true)
     expect(h.storeWrites()).toBe(0)
     expect(h.consoleErrors()).toEqual([])
   }, 30000)

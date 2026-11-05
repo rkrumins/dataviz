@@ -26,12 +26,13 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { motion } from 'framer-motion'
-import { ArrowUp, ArrowDown, ChevronDown, Eye, Minus, Plus, Workflow } from 'lucide-react'
+import { ArrowUp, ArrowDown, ChevronDown, Eye, Minus, Plus, Sliders, Workflow } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { FULL_WALK_INITIAL_DEPTH } from '@/hooks/useLensWalk'
-import { usePreferencesStore, type LineageRenderMode } from '@/store/preferences'
+import { usePreferencesStore } from '@/store/preferences'
 import { useTraceLineMode } from '@/store/traceLineMode'
 import { LineageCountsToggle } from '../trace/LineageCountsToggle'
+import { TraceLinesChoice } from '../trace/TraceLinesChoice'
 
 export interface TraceDepthControlProps {
   upstreamDepth: number
@@ -232,7 +233,8 @@ export function TraceDepthControl({
                   <Eye className="w-3 h-3" strokeWidth={2.2} />
                   Display
                 </div>
-                <LinesChoice />
+                <TraceLinesChoice />
+                <LineBudgets />
                 <LineageCountsToggle />
               </div>
             </motion.div>
@@ -357,58 +359,76 @@ function DepthRow({
   )
 }
 
-const LINE_OPTIONS: Array<{ mode: LineageRenderMode; label: string; description: string }> = [
-  { mode: 'stubs', label: 'On hover', description: 'A card’s lines appear when you point at it or pick it' },
-  { mode: 'auto', label: 'Adaptive', description: 'The strongest lines stay drawn, the traced entity’s own first' },
-  { mode: 'raw', label: 'Every line', description: 'Every line the trace walks, all the time' },
-]
-
 /**
- * How many of the trace's lines draw at once: Display's density modes,
- * applied to the trace (store/traceLineMode.ts). A choice here is kept for
- * every trace after it, in both views. Wherever lines are left undrawn, the
- * cards' markers still show where the lineage goes.
+ * The trace's own budgets, apart from Display's browse one: Lines kept, how
+ * many of the strongest lines Adaptive keeps drawn, and Lines per card, the
+ * most a card draws when it is pointed at or picked. Every line has neither.
  */
-function LinesChoice() {
+function LineBudgets() {
   const mode = useTraceLineMode()
-  const setMode = usePreferencesStore((s) => s.setTraceLineMode)
+  const kept = usePreferencesStore((s) => s.traceLinesKept)
+  const setKept = usePreferencesStore((s) => s.setTraceLinesKept)
+  const perCard = usePreferencesStore((s) => s.traceLinesPerCard)
+  const setPerCard = usePreferencesStore((s) => s.setTraceLinesPerCard)
   return (
-    <div className="pb-2">
-      <div className="px-1 pb-1 text-[11px] font-semibold text-ink">Lines</div>
-      <div role="radiogroup" aria-label="Lines" className="flex flex-col gap-1">
-        {LINE_OPTIONS.map(opt => {
-          const active = mode === opt.mode
-          return (
-            <button
-              key={opt.mode}
-              type="button"
-              role="radio"
-              aria-checked={active}
-              onClick={() => setMode(opt.mode)}
-              className={cn(
-                'flex items-start gap-2.5 px-2.5 py-2 rounded-lg border text-left transition-colors',
-                active
-                  ? 'bg-accent-lineage/15 border-accent-lineage/40 shadow-sm shadow-accent-lineage/10 dark:bg-accent-lineage/20 dark:border-accent-lineage/35'
-                  : 'bg-black/[0.02] border-transparent hover:bg-black/[0.05] hover:border-black/[0.08] dark:bg-white/[0.02] dark:hover:bg-white/[0.05] dark:hover:border-white/[0.06]',
-              )}
-            >
-              <div
-                className={cn(
-                  'mt-0.5 w-3.5 h-3.5 rounded-full border-2 flex-shrink-0 flex items-center justify-center transition-colors',
-                  active ? 'border-accent-lineage' : 'border-ink-muted/40',
-                )}
-              >
-                {active && <div className="w-1.5 h-1.5 rounded-full bg-accent-lineage" />}
-              </div>
-              <div className="min-w-0 flex-1">
-                <div className={cn('text-[12px] font-medium leading-tight', active ? 'text-accent-lineage' : 'text-ink')}>
-                  {opt.label}
-                </div>
-                <div className="text-[11px] text-ink-muted/80 leading-snug mt-0.5">{opt.description}</div>
-              </div>
-            </button>
-          )
-        })}
+    <>
+      {mode === 'auto' && (
+        <BudgetSlider
+          label="Lines kept"
+          detail={`The strongest ${kept.toLocaleString()} lines stay drawn`}
+          min={10}
+          max={2000}
+          step={10}
+          value={kept}
+          onChange={setKept}
+        />
+      )}
+      {mode !== 'raw' && (
+        <BudgetSlider
+          label="Lines per card"
+          detail="Lines a card draws when you point at or pick it"
+          min={5}
+          max={500}
+          step={5}
+          value={perCard}
+          onChange={setPerCard}
+        />
+      )}
+    </>
+  )
+}
+
+/** One budget — Display's Edge Budget slider, in the trace's words. */
+function BudgetSlider({ label, detail, min, max, step, value, onChange }: {
+  label: string
+  detail: string
+  min: number
+  max: number
+  step: number
+  value: number
+  onChange: (n: number) => void
+}) {
+  return (
+    <div className="mb-2 px-2.5 py-2 rounded-lg bg-black/[0.02] dark:bg-white/[0.02] border border-black/[0.06] dark:border-white/[0.05]">
+      <div className="flex items-center gap-1.5 text-[10px] font-semibold tracking-[0.1em] uppercase text-ink-muted/80">
+        <Sliders className="w-3 h-3" />
+        <span>{label}</span>
+        <span className="ml-auto tabular-nums text-accent-lineage/80">{value.toLocaleString()}</span>
+      </div>
+      <p className="pt-1 pb-1.5 text-[11px] text-ink-muted/80 leading-snug">{detail}</p>
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        onChange={(e) => onChange(parseInt(e.target.value, 10))}
+        className="w-full accent-accent-lineage"
+        aria-label={label}
+      />
+      <div className="flex justify-between text-[9.5px] text-ink-muted/60 tabular-nums">
+        <span>{min}</span>
+        <span>{max.toLocaleString()}</span>
       </div>
     </div>
   )

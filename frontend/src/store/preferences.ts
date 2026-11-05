@@ -44,6 +44,10 @@ export const CANVAS_ZOOM_STEP = 0.05
  */
 export type LineageRenderMode = 'stubs' | 'auto' | 'raw'
 
+/** Each view's Lines choice for a trace until the reader makes one: On hover
+ *  in the Business view, every line in the Technical one. */
+export const DEFAULT_TRACE_LINE_MODE: Record<PersonaMode, LineageRenderMode> = { business: 'stubs', technical: 'raw' }
+
 /**
  * Which lineage lines move (the chevrons marching along a line) — see
  * `lineMotion.ts`. 'focus': the lines being looked at; 'all': every line
@@ -238,12 +242,22 @@ interface PreferencesState {
   toggleLineageCounts: () => void
   /**
    * How many of a trace's lines the Context View draws (Trace settings →
-   * Lines): the density modes, applied to the trace. Null until the reader
-   * chooses: then it follows the view (store/traceLineMode.ts). A reader's
-   * own choice, never part of a trace's history or its link.
+   * Lines): the density modes, applied to the trace. Each view keeps its own
+   * (store/traceLineMode.ts). A reader's own choice, never part of a trace's
+   * history or its link.
    */
-  traceLineMode: LineageRenderMode | null
-  setTraceLineMode: (mode: LineageRenderMode) => void
+  traceLineMode: Record<PersonaMode, LineageRenderMode>
+  setTraceLineMode: (view: PersonaMode, mode: LineageRenderMode) => void
+  /** A trace's own budgets, apart from `autoStubThreshold`, the browse one:
+   *  the strongest lines Adaptive keeps drawn (Lines kept), and the most a
+   *  card draws when it is pointed at or picked (Lines per card). */
+  traceLinesKept: number
+  setTraceLinesKept: (n: number) => void
+  traceLinesPerCard: number
+  setTraceLinesPerCard: (n: number) => void
+  /** Both views' Lines choices and the two budgets, back to their defaults
+   *  (Preferences → Trace lines). */
+  resetTraceLines: () => void
   /**
    * A subset view draws each match inside the containers its base draws it in.
    * Off, each match is a row of its own, naming where it sits. On by default;
@@ -506,8 +520,15 @@ export const usePreferencesStore = create<PreferencesState>()(
       showLineageCounts: true,
       toggleLineageCounts: () =>
         set((state) => ({ showLineageCounts: !state.showLineageCounts })),
-      traceLineMode: null,
-      setTraceLineMode: (traceLineMode) => set({ traceLineMode }),
+      traceLineMode: DEFAULT_TRACE_LINE_MODE,
+      setTraceLineMode: (view, mode) => set((state) => ({
+        traceLineMode: { ...state.traceLineMode, [view]: mode },
+      })),
+      traceLinesKept: 500,
+      setTraceLinesKept: (traceLinesKept) => set({ traceLinesKept }),
+      traceLinesPerCard: 500,
+      setTraceLinesPerCard: (traceLinesPerCard) => set({ traceLinesPerCard }),
+      resetTraceLines: () => set({ traceLineMode: DEFAULT_TRACE_LINE_MODE, traceLinesKept: 500, traceLinesPerCard: 500 }),
       showWhereTheySit: true,
       toggleWhereTheySit: () =>
         set((state) => ({ showWhereTheySit: !(state.showWhereTheySit ?? true) })),
@@ -658,7 +679,10 @@ export const usePreferencesStore = create<PreferencesState>()(
       // v11 (2026-11-04): the canvas dock follows the view until the reader
       // chooses (null) — minimized in the Business view. A stored `false` was
       // the old default, not a choice: reset it. A stored `true` was a choice.
-      version: 11,
+      // v12 (2026-11-05): a trace's Lines choice is kept per view. The one
+      // stored before held in both views, so it becomes each view's; unset
+      // (null) or unknown, each view starts on its own default.
+      version: 12,
       migrate: (persisted, version) => {
         let state = persisted as Record<string, unknown>
         if (version < 2) state = { ...state, lensFrameChildren: 'connected' }
@@ -674,6 +698,15 @@ export const usePreferencesStore = create<PreferencesState>()(
         if (version < 9) state = { ...state, showFlowRibbons: false }
         if (version < 10) state = { ...state, lineageDirectionColors: DEFAULT_LINEAGE_DIRECTION_COLORS }
         if (version < 11 && state.canvasDockMinimized === false) state = { ...state, canvasDockMinimized: null }
+        if (version < 12) {
+          const legacy = state.traceLineMode
+          state = {
+            ...state,
+            traceLineMode: legacy === 'stubs' || legacy === 'auto' || legacy === 'raw'
+              ? { business: legacy, technical: legacy }
+              : DEFAULT_TRACE_LINE_MODE,
+          }
+        }
         return state
       },
     }
