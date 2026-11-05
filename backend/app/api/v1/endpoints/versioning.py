@@ -44,8 +44,9 @@ from backend.app.services.versioning.entity_audit import (
 from backend.app.api.v1.feature_gate import require_feature
 from backend.app.api.v1.capability_gate import require_ds_read_or_view
 from backend.app.api.v1.versioning_gate import (SyncOverrides, fork_write_gate, require_forks_enabled,
-                                                require_publish_for_main, sync_override_gate)
-from backend.app.auth import api_key_auth
+                                                require_publish, require_publish_for_main,
+                                                sync_override_gate)
+from backend.app.auth import api_key_auth, api_key_errors
 from backend.app.auth.dependencies import get_current_user, get_permission_claims, requires
 from backend.app.db.engine import get_db_session
 from backend.app.db.repositories import (data_source_repo, group_repo, notification_repo, provider_repo,
@@ -117,7 +118,8 @@ _GATE_BLANK_MODELS = require_feature("blankModelsEnabled")
 # Permission constants (a graph is a data source — reuse its perms).
 _READ = "workspace:datasource:read"
 _MANAGE = "workspace:datasource:manage"
-# Advancing main (publish, merge, revert, restore, sync) also needs publish, which no API key holds.
+# Advancing main (publish, merge, revert, restore, sync) also needs publish. No API key holds it: a
+# key publishes a draft or merges its review where its owner does (``require_publish``).
 _PUBLISH = "workspace:datasource:publish"
 
 
@@ -2282,7 +2284,7 @@ async def publish(
     ws_id: str, graph_id: str, branch_id: str, body: PublishRequest,
     background: BackgroundTasks,
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
-    _publisher: User = Depends(requires(_PUBLISH, workspace="ws_id")),
+    _publisher: User = Depends(require_publish),
     _meta: dict = Depends(graph_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
     session: AsyncSession = Depends(get_db_session),
@@ -2290,7 +2292,8 @@ async def publish(
 ):
     """Publish a draft. One that changes more than ``SYNC_PUBLISH_MAX_CHANGES`` entities is
     published by a job instead: 202 with the job to poll (``GET …/publish-jobs/{jobId}``). Where
-    the data source's policy says nobody merges their own changes, 409 ``review_required``."""
+    the data source's policy says nobody merges their own changes, 409 ``review_required``. An API
+    key publishes where the person or service account it belongs to may (``require_publish``)."""
     policy = await _drafts_policy_of(session, _meta.get("data_source_id"))
     if await svc.branch_change_count(graph_id=graph_id, branch_id=branch_id) > vconfig.SYNC_PUBLISH_MAX_CHANGES:
         with _domain_errors():                   # queuing takes the draft: closed → 409, unknown → 404
@@ -4847,10 +4850,15 @@ async def _viewer_can(svc: GraphVersioningService, session: AsyncSession, pr: di
             await _not_their_own(session, pr, viewer)
         except HTTPException:
             approve = "self_review"
+    # A key holds no publish of its own: it merges a draft's review where its owner may publish.
+    key = claims.key_scope
+    publishes = (key.owner_publishes(ws_id) if key is not None
+                 and pr.get("source_graph_id") == pr.get("target_graph_id")
+                 else has_permission(claims, _PUBLISH, workspace_id=ws_id))
     merge = _first_refusal(
         (settled is not None, settled),
         (not manages, "manage_required"),
-        (not has_permission(claims, _PUBLISH, workspace_id=ws_id), "publish_required"),
+        (not publishes, "publish_required"),
         (opened and not policy.self_merge, "self_merge"))
     return {"approve": approve is None, "merge": merge is None,
             "approveReason": approve, "mergeReason": merge}
@@ -5337,7 +5345,8 @@ async def merge_merge_request(
     ws_id: str, pr_id: str, body: MergePrRequest,
     background: BackgroundTasks,
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
-    _publisher: User = Depends(requires(_PUBLISH, workspace="ws_id")),
+    _publisher: User = Depends(require_publish),
+    claims: PermissionClaims = Depends(get_permission_claims),
     _pr: dict = Depends(pr_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
     session: AsyncSession = Depends(get_db_session),
@@ -5345,8 +5354,12 @@ async def merge_merge_request(
 ):
     """Merge a merge request. A draft that changes more than ``SYNC_PUBLISH_MAX_CHANGES``
     entities is merged by a job instead: 202 with the job to poll, as for publish; so is a fork's
-    review that does (``…/pulls/{id}/merge``), which merges only up to date with its parent."""
+    review that does (``…/pulls/{id}/merge``), which merges only up to date with its parent. An API
+    key merges a draft's review where its owner may publish (``require_publish``), never a fork's."""
     target, source = str(_pr["target_graph_id"]), _pr.get("source_branch_id")
+    if claims.key_scope is not None and _pr.get("source_graph_id") != target:     # a fork's review
+        raise api_key_errors.key_forbidden(
+            "api_key_not_allowed", "A fork's review cannot be merged with an API key.")
     policy = await _pr_policy(svc, session, _pr)
     if source and await svc.branch_change_count(
             graph_id=target, branch_id=str(source)) > vconfig.SYNC_PUBLISH_MAX_CHANGES:
