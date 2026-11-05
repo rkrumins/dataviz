@@ -51,7 +51,7 @@ export function PersonaIntroTip({ anchor }: {
     const caret = Math.min(WIDTH - 20, Math.max(12, rect.left + rect.width / 2 - left - 6))
     return createPortal(
         <>
-            <span aria-hidden className="pointer-events-none fixed z-50 rounded-lg ring-2 ring-accent-business/50 motion-safe:animate-pulse"
+            <span aria-hidden className="pointer-events-none fixed z-50 rounded-[14px] ring-2 ring-accent-business/50 motion-safe:animate-pulse"
                   style={{ top: rect.top - 2, left: rect.left - 2, width: rect.width + 4, height: rect.height + 4 }} />
             <div role="status" style={{ top: rect.top + rect.height + 10, left, width: WIDTH }}
                  className="fixed z-50 rounded-xl border border-accent-business/40 bg-canvas-elevated py-3 pl-3.5 pr-8 text-xs leading-snug text-ink shadow-xl shadow-black/30">
