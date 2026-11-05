@@ -9,6 +9,44 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — A bulk import loads a large file straight into the published graph
+
+### Added
+
+- **A bulk import:** `bulk=true` on `POST …/imports` or on `…/imports/uploads/{id}/complete`, and
+  `--bulk` in the reference connector. It loads the file straight into the published graph, with no
+  draft and no publish:
+  - **each row is written once,** where a draft import writes a changed row into the draft and its
+    publish copies it; unchanged rows write nothing;
+  - **readers see all of it or none of it:** the file's changes go into one commit, which nobody
+    sees until every row is in, and which then lands whole (the job's `summary.landed`);
+  - **a refused row doesn't stop the rest:** it is listed in the job's preview, and the other rows
+    land.
+
+  It needs what `autoPublish` needs: publish rights (an API key's owner's), and a data source
+  whose policy lets people merge their own changes. It is checked before anything is stored, and
+  again before the load lands. It adds and updates only: a file with a delete row fails at that
+  row, before anything is written; replace, view placements and forks take the draft path. A
+  strict ontology's parent rule is checked over the whole load at its end.
+- **`POST …/imports/{jobId}/discard` and `…/resume`,** for a bulk import that hasn't landed. Discard
+  deletes what it wrote; resume carries a failed one on from where it stopped. Either is its
+  starter's to do, or a manager's, and an API key may.
+
+### Changed
+
+- **While a bulk import loads, the published graph takes no other changes.** Publishing, merging,
+  an edit of the published graph, a revert, a restore, an ingest, and a second bulk import all get
+  `409 bulk_import_loading`, naming the job. Drafts stay editable, and reads show the published
+  graph as it was. A failed bulk import holds it until it is resumed or discarded.
+- **Reads of the published graph stop at its head** wherever they didn't: its freshness, a diff of
+  its commits, and a commit read by its id.
+
+### Upgrading
+
+- No migration. A bulk import is recorded on its job (`field_scope.bulk`, `target_commit_id`).
+
+---
+
 ## [Unreleased] — An import writes each row fewer times, and runs about a fifth faster
 
 ### Changed
