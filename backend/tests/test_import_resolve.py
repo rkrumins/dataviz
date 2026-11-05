@@ -7,7 +7,10 @@ by the endpoint-triple. Emits ``{op, entity_kind, entity_id, payload}`` ops (nod
 so an edge can reference a node created in the same batch) plus a per-row resolution record
 (new/updated/deleted/invalid) for the preview/summary. Pure — runs under the per-file runner.
 """
-from backend.app.services.versioning.import_export.resolve import resolve_rows
+from backend.app.services.versioning.import_export.resolve import (
+    _ALREADY_GONE,
+    resolve_rows,
+)
 
 
 def _indexes():
@@ -19,6 +22,27 @@ def _indexes():
         "edge_eids": set(),
     }
 
+
+
+def test_a_delete_of_what_is_already_gone_is_done():
+    """A delta sent again deletes what it deleted before: nothing is left to delete, so its row is
+    unchanged, saying so, rather than refused. An edge whose end node is gone went with it. A row
+    that isn't a delete still can't point at what isn't there."""
+    idx = {**_indexes(), "urn_to_eid": {"urn:A": "ent_A", "urn:B": "ent_B"},
+           "node_eids": {"ent_A", "ent_B"}}
+    ops, res = resolve_rows([
+        {"_row_index": 0, "kind": "edge", "op": "delete", "entity_id": "", "edgeType": "LINEAGE",
+         "sourceUrn": "urn:A", "targetUrn": "urn:B"},           # both ends here, no such edge
+        {"_row_index": 1, "kind": "edge", "op": "delete", "entity_id": "", "edgeType": "LINEAGE",
+         "sourceUrn": "urn:A", "targetUrn": "urn:GONE"},        # an end deleted already
+        {"_row_index": 2, "kind": "edge", "op": "upsert", "entity_id": "", "edgeType": "LINEAGE",
+         "sourceUrn": "urn:A", "targetUrn": "urn:GONE"},        # not a delete: refused
+    ], idx, mint_id=lambda: "unused")
+    by_row = {r["_row_index"]: r for r in res}
+    assert ops == []
+    assert [(by_row[i]["resolved_op"], by_row[i]["reasons"]) for i in (0, 1)] == \
+        [("unchanged", [_ALREADY_GONE])] * 2
+    assert by_row[2]["resolved_op"] == "invalid" and by_row[2]["reasons"] == ["edge endpoint not found"]
 
 def _run() -> None:
     minted = iter(["ent_B", "ev_1"])
@@ -51,7 +75,8 @@ def _run() -> None:
     assert edge["payload"]["targetEntityId"] == "ent_B"
     assert edge["payload"]["edgeType"] == "LINEAGE"
 
-    # ---- delete of a matched node -> delete op ; delete of an unknown -> invalid ----
+    # ---- delete of a matched node -> delete op ; delete of an unknown -> unchanged, with a note:
+    # nothing to delete (a delta sent again, or a name that was never there) ----
     minted2 = iter([])
     ops2, res2 = resolve_rows([
         {"_row_index": 0, "kind": "node", "op": "delete", "entity_id": "", "urn": "urn:A"},
@@ -59,7 +84,8 @@ def _run() -> None:
     ], _indexes(), mint_id=lambda: next(minted2))
     d = {r["_row_index"]: r for r in res2}
     assert d[0]["resolved_op"] == "delete" and d[0]["matched_entity_id"] == "ent_A"
-    assert d[1]["resolved_op"] == "invalid"
+    assert (d[1]["resolved_op"], d[1]["matched_entity_id"]) == ("unchanged", None)
+    assert d[1]["reasons"] == [_ALREADY_GONE]
     assert ops2 == [{"op": "delete", "entity_kind": "node", "entity_id": "ent_A", "payload": None}]
 
     # ---- node create missing entityType -> invalid, no op ----

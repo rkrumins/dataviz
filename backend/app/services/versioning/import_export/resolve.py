@@ -161,6 +161,11 @@ _STALE_DELETE = ("changed since you exported it — export again, or clear baseV
                  "anyway")
 
 
+#: A delete of what the graph doesn't hold — deleted already (a delta sent again), or never there:
+#: there is nothing to do, so nothing to refuse, and the row says so (a mistyped name isn't silent).
+_ALREADY_GONE = "nothing to delete: it isn't in the graph (deleted already, or never there)"
+
+
 def _named_already(first: int, noun: str) -> str:
     return f"row {first + 1} of this file already names this {noun} — give each {noun} one row"
 
@@ -463,7 +468,7 @@ def resolve_rows(
                 resolutions.append(_resolution(row, "delete", matched_eid))
                 seen[matched_eid] = row.get("_row_index")
             else:
-                resolutions.append(_resolution(row, "invalid", None, reasons=["delete target not found"]))
+                resolutions.append(_resolution(row, "unchanged", None, reasons=[_ALREADY_GONE]))
             continue
         if node_types is not None and row.get("entityType") and str(row["entityType"]).strip().lower() not in node_types:
             resolutions.append(_resolution(row, "invalid", matched_eid,
@@ -597,6 +602,10 @@ def resolve_rows(
         teid, t_ambiguous = _resolve_endpoint(row, "target", node_eids, qname_to_eid, urn_to_eid,
                                               created_from, qname_from, keys, identity_prop)
         if not (row.get("edgeType") and seid and teid):
+            if row.get("op") == "delete" and row.get("edgeType") and not (s_ambiguous or t_ambiguous):
+                # An end that's gone took its edges with it: nothing is left to delete.
+                resolutions.append(_resolution(row, "unchanged", None, reasons=[_ALREADY_GONE]))
+                continue
             reason = ("edge missing edgeType" if not row.get("edgeType")
                       else s_ambiguous or t_ambiguous or "edge endpoint not found")
             resolutions.append(_resolution(row, "invalid", None, reasons=[reason]))
@@ -626,7 +635,7 @@ def resolve_rows(
                 resolutions.append(_resolution(row, "delete", matched_eid))
                 seen[matched_eid] = row.get("_row_index")
             else:
-                resolutions.append(_resolution(row, "invalid", None, reasons=["delete edge not found"]))
+                resolutions.append(_resolution(row, "unchanged", None, reasons=[_ALREADY_GONE]))
             continue
         if matched_eid:
             ep = _edge_payload(row, seid, teid)

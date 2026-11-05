@@ -33,7 +33,7 @@ from ..ids import new_entity_id, uuid_urn
 from .export_worker import ExportWorker, example_template_records
 from .formats import get_adapter
 from .import_worker import ImportWorker, _normalize_page, _record_pages, lease_job
-from .resolve import _STATUS, pointer_id, resolve_rows
+from .resolve import _ALREADY_GONE, _STATUS, pointer_id, resolve_rows
 from .rowmodel import column_order
 from .runner import INSPECT_TYPES, JOB_TYPES, QUEUED, JobReaper
 from .snapshot import open_snapshot
@@ -963,6 +963,11 @@ class ImportExportService:
                   "gives. A urn finds its node again on the next import but isn't stored, so "
                   "exports and search show the node's urn:uuid; to see your own id, keep it in a "
                   "property marked \"Match imports by this\".")] if named else []
+        gone = sum(1 for res in resolutions if _ALREADY_GONE in (res.get("reasons") or ()))
+        if gone:                             # unchanged, so not among the rows listed
+            hints.append(f"{gone} delete {'row finds' if gone == 1 else 'rows find'} nothing to "
+                         "delete: what they name isn't in the graph (deleted already, or never "
+                         "there). They change nothing; check their names if you expected them to.")
         return {"format": import_format, "checkedAgainst": branch_id or "main",
                 "schemaVersion": contract.FORMAT_VERSION, "summary": summary, "rows": sample,
                 "rowsTruncated": len(changed) > len(sample),
