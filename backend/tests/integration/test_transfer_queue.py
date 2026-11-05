@@ -31,6 +31,7 @@ from backend.app.services.storage.object_store import LocalFsObjectStore
 from backend.app.services.versioning import config, db, job_lease, models
 from backend.app.services.versioning.import_export import export_worker
 from backend.app.services.versioning.import_export.import_worker import lease_job
+from backend.app.services.versioning.import_export.resolve import pointer_id
 from backend.app.services.versioning.import_export.runner import (
     INSPECT_TYPES,
     JOB_TYPES,
@@ -363,7 +364,8 @@ async def _through_the_worker() -> None:
             assert job["status"] == "completed", job
             assert (job["summary"]["nodes"], job["summary"]["edges"]) == (2, 1), job["summary"]
             text = b"".join([c async for c in store.open_stream(export["result_uri"])]).decode()
-            assert "urn:A" in text and "urn:B" in text
+            scope = await svc.identity_scope(gid)              # the file's urns are pointers
+            assert pointer_id(scope, "urn:A") in text and pointer_id(scope, "urn:B") in text
 
             # Running, an export says how far it has got: a CSV reads every record for its columns,
             # then again to write them. Its own summary replaces that when it finishes.

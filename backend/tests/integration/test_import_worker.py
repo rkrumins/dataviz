@@ -16,6 +16,7 @@ import pytest
 
 from backend.app.services.storage.object_store import LocalFsObjectStore, storage_key
 from backend.app.services.versioning import db, models
+from backend.app.services.versioning.import_export.resolve import pointer_id
 from backend.app.services.versioning.import_export.service import ImportExportService
 from backend.app.services.versioning.service import GraphVersioningService
 
@@ -61,10 +62,12 @@ async def _run() -> None:
         summary = await ie.run_import(job["job_id"])
         assert summary == {"new": 2, "updated": 1, "unchanged": 0, "deleted": 0, "invalid": 0}, summary
 
-        # main is untouched — the import lives on a draft
+        # main is untouched — the import lives on a draft. The file's urn:B is a pointer: B is
+        # named by the id derived from it.
+        b = pointer_id(await svc.identity_scope(gid), "urn:B")
         delta = await svc.branch_overlay_delta(graph_id=gid, branch_id=branch_id)
-        assert {n["urn"] for n in delta["nodesUpsert"]} == {"urn:B"}, delta
-        assert "urn:B" in delta["nodesNew"], delta                 # B created on the draft
+        assert {n["urn"] for n in delta["nodesUpsert"]} == {b}, delta
+        assert b in delta["nodesNew"], delta                       # B created on the draft
         modified = {m["urn"]: m["entityId"] for m in delta["nodesModified"]}
         assert set(modified) == {"urn:A"}, delta                   # A updated, not duplicated
         a, = await svc.overlay_payloads(graph_id=gid, branch_id=branch_id, entity_ids=[modified["urn:A"]])
@@ -73,7 +76,7 @@ async def _run() -> None:
         # edge A->B created, its ends named by urn as a reader matches them (and the projector
         # names them) — never by the entity ids its version row holds
         edges = [(e["sourceUrn"], e["targetUrn"], e["edgeType"]) for e in delta["edgesUpsert"]]
-        assert ("urn:A", "urn:B", "LINEAGE") in edges, delta
+        assert ("urn:A", b, "LINEAGE") in edges, delta
 
         # job records the tally + terminal state, and how far it got: every row, at its one attempt
         got = await ie.get_job(job["job_id"])

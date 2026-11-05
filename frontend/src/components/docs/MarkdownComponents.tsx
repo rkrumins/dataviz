@@ -51,6 +51,7 @@ export const filenameMap: Record<string, string> = {
   'SSO_BACKCHANNEL_CONTRACT.md': 'sso-backchannel-contract',
   'INTEGRATION_QUICKSTART.md': 'integration-quickstart',
   'API_GUIDE.md': 'api-guide',
+  'CONNECTOR_GUIDE.md': 'connector-guide',
   'KEY_MANAGEMENT_API.md': 'key-management-api',
   'GRAPH_METADATA_API.md': 'graph-metadata-api',
   'ONBOARDING_A_SOURCE.md': 'onboarding-a-source',
@@ -114,12 +115,12 @@ export const filenameMap: Record<string, string> = {
   '10-authoritative-sources-datahub-openmetadata.md': 'versioning-authoritative-sources',
   '11-resync-at-any-scale.md': 'versioning-resync-at-any-scale',
   '12-streaming-ingestion.md': 'versioning-streaming-ingestion',
+  '18-identity.md': 'versioning-identity',
   '13-access-and-review.md': 'versioning-access-and-review',
   '14-graph-lifecycle-v2.md': 'versioning-graph-lifecycle-v2',
   '15-shared-contracts.md': 'versioning-shared-contracts',
   '16-go-live-stages-1-2.md': 'versioning-go-live-stages-1-2',
   '17-forks-and-residency.md': 'versioning-forks-and-residency',
-  '18-identity.md': 'versioning-identity',
   'VERSIONING_DRAFTS_LINEAGE_AND_MERGE.md': 'versioning-drafts-and-merge',
 }
 

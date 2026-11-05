@@ -237,7 +237,8 @@ async def get_context_engine(
                 actor=(user.id if user else None), branch_id=branchId, viewer=viewer,
             )
         if connectionId:
-            return await ContextEngine.for_connection(connectionId, provider_manager, session)
+            return await ContextEngine.for_connection(
+                connectionId, provider_manager, session, actor=(user.id if user else None))
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     # ProviderUnavailable propagates to FastAPI exception handler → 503
@@ -4576,7 +4577,8 @@ async def batch_commands(
                 ))
             break
         except Exception as exc:
-            if isinstance(exc, GraphNotWritable) and succeeded == 0:
+            from backend.app.providers.versioned_write_provider import VersioningNotEnabled
+            if isinstance(exc, (GraphNotWritable, VersioningNotEnabled)) and succeeded == 0:
                 raise                              # nothing landed: the 409 says why
             failed += 1
             results.append(BatchCommandResult(

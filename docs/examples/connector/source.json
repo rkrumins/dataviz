@@ -1,0 +1,11 @@
+{
+  "system": "acme-warehouse",
+  "tables": [
+    {"name": "raw.orders", "owner": "ingest", "description": "Orders as the shop writes them",
+     "columns": [{"name": "id", "type": "bigint"}, {"name": "amount", "type": "numeric"}]},
+    {"name": "mart.revenue", "owner": "finance", "tier": "gold",
+     "columns": [{"name": "day", "type": "date"}, {"name": "total", "type": "numeric"}]}
+  ],
+  "lineage": [{"from": "raw.orders", "to": "mart.revenue"}],
+  "removed": ["raw.orders_v0"]
+}

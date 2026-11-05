@@ -72,8 +72,10 @@ The id is `uuid5(ENTITY_NAMESPACE, "<kind>/<seed>")`.
 |---|---|
 | `POST /graph/changes` with an `Idempotency-Key`: a create whose client `ref` is at least 16 characters (as every canvas temp ref is) | `<graph>/<branch>/<actor>/ref:<ref>`, so a later save that still carries the same staged create names the same entity |
 | Any other create in that save | `<graph>/<branch>/<actor>/key:<key>/<n>`, where `n` is its turn among them |
-| `POST /graph/nodes/create` with `idempotencyKey`, or a `create_node` command of `/commands/batch` | `<data source>/<branch>/<actor>/<key>` |
+| `POST /graph/nodes/create` with `idempotencyKey`, or a `create_node` command of `/commands/batch` | `<data source>/<branch>/<actor>/<key>`. `<branch>` is `main` for every write to the published graph: fresh, catching up, external or versioned. So a retry names the same node while the first write is projected, and after the graph gains version control. A connection's engine uses its connection id in place of the data source. |
 | `POST /graph/edges` with `idempotencyKey`, or a `create_edge` command | the same |
+| A view package seed's line with no id | `<upload>:<offset>`, its place in the upload, so a resumed seed derives the same id |
+| An imported node, named from its row's pointer | `<data source>/pointer:<pointer>`: the data source at the root of the graph's fork lineage, and the row's urn, else its identifier value (a `urn:uuid:` in canonical form). The same file imported again names the same nodes, in a fork or after the graph is made again. |
 
 ## 3. Where each id comes from
 
@@ -83,19 +85,47 @@ The id is `uuid5(ENTITY_NAMESPACE, "<kind>/<seed>")`.
 | `POST /graph/nodes/create`, a `create_node` command | v7, or v5 with `idempotencyKey`. Its containment edge is v7. | — |
 | `POST /graph/edges`, a `create_edge` command | — | v7, or v5 with `idempotencyKey` |
 | A draft's `POST …/branches/{bid}/changes` | the create's `entityId`, else its payload's `urn`, else v7, which becomes its urn too | its `entityId`, else v7 |
-| Import, `POST …/imports` ([08 §3b](08-import-export.md#3b-resolve-a-window-at-a-time)) | The entity a row matches. Otherwise: the row's urn (or its identifier value) when nothing holds it; else the deleted node that held it, brought back; else v7. | v7 |
-| `…/bulk-ingest`, `…/sync` | the row's own id, else v7 | the same |
+| Import, `POST …/imports` ([08 §3b](08-import-export.md#3b-resolve-a-window-at-a-time)) | The entity a row points at. Otherwise: the deleted node its urn names, brought back; else a free `urn:uuid:` the row brings, kept; else v5 derived from the row's urn or identifier value; else (it points by neither) v7. The file's urn and identifier value are pointers, not stored. | v7 |
+| `…/bulk-ingest` | The row's own id, else its urn, else v7. A node with no urn is given its id as its urn. A second row naming the same node is refused. | the row's own id, else v7 |
+| `…/sync` | The node already holding the row's urn, else the row's own id, else its urn, else v7, which becomes its urn too | the edge already joining the two ends with that type, else the row's own id, else `sync:e:…` |
+| Enabling version control (`/graph/bootstrap`) | the node's urn, as the graph holds it | the edge's own id, else `<source>|<TYPE>|<target>` |
+| A view package seed | the line's entity id, else v5; a line with neither an id nor a urn is named by that id, its urn too | the line's entity id, else v5 |
 
-**Kept: ids derived from a source.** A re-sync or a resumed seed finds what it made by these ids,
-so they stay:
+**Kept: ids derived from a source.** A re-sync finds what it made by these ids, so they stay:
 
-- a provider's urn (DataHub, OpenMetadata, FalkorDB);
-- a sync's `sync:<urn>`, for a row that brings a urn but no id;
-- a bootstrap edge's `<source>|<TYPE>|<target>`;
-- a view package seed's `stable_prefixed_id("ent", …)`, for a line with no id.
+- a provider's urn (DataHub, OpenMetadata, FalkorDB), which is also a node's id once its graph
+  gains version control;
+- a bootstrap edge's `<source>|<TYPE>|<target>`, for an edge with no id of its own;
+- a sync's `sync:e:…`, for an edge with no id;
+- `sync:<urn>`, which syncs gave nodes before a new node was named by its urn. A later sync finds
+  such a node by its urn and keeps its id.
 
 `tests/test_identity_minting_guard.py` lists each one, with the reason. Any other way of minting
 an id fails the build.
+
+## 3a. Across the lifecycle: external and versioned graphs
+
+An id is the same opaque string at every stage of a data source's life. Nothing reads a type or
+an origin out of it.
+
+| Stage | What happens to ids |
+|---|---|
+| **External graph** | Read live. The provider keys a node by `urn` and an edge by its `id`, as exact strings. A write needs version control (`409 versioning_not_enabled` without it). |
+| **Enabling version control** | Each node's id becomes its urn, as the graph spells it, so a `urn:uuid:` keeps one identity. Edges keep their ids. The backfill sets each node's anchor (`n.entityId`) to that id, including where an earlier graph of the key left another. |
+| **Operating** | The projection writes nodes by urn and edges by id. Forks read their root's store, so they share its ids. Freezing or moving a graph's key leaves ids alone. |
+| **Abandoning a conversion** | The data source keeps its id. Enabling version control again makes a new graph, and its nodes are again named by their urns. |
+| **Trash and restore** | Both ids stay. |
+| **Purge** | The data source and its graph go. The customer's own key is never dropped. A new data source on that key names its nodes by their urns again. |
+
+**Scopes that last.** A keyed create's id is scoped to the data source, not the graph, and
+writes to main are always `main`. So a retry names the same entity while the first write is
+projected, and after the graph gains version control. Across data sources (a new data source on a
+key, or another environment), match an entity by its platform urn, which an export carries, or by a
+team key.
+
+**Not built yet:** detach, release of the original key and drift sync (doc 14). The rules above
+keep them working once they are built: id = urn everywhere, the projection keyed by urn, and scopes
+held by the data source.
 
 ## 4. Sending a request again
 
@@ -110,15 +140,18 @@ an id fails the build.
 A key belongs to one caller on one branch. The same key from someone else, or on another draft, is
 a new request.
 
-**Running an import again** starts a new job. What happens to each row depends on how it names its
-entity:
+**Running an import again** starts a new job. What happens to each row depends on how it points at
+its entity:
 
-- A row that names an entity by `entity_id` or `urn` updates it. Every row of an export names its
-  entity this way.
-- A row from which the earlier import kept a urn (or an identifier value) is found by that value.
+- A row that names an entity by its `entity_id` updates it. Every row of an export does.
+- A row's `urn`, or its value of the identifier property, is a **pointer**. It finds the node that
+  carries it as its urn, or the node an earlier import made from it, whose id was derived from it.
+  So the same file imported again updates what it made, and creates nothing.
 - A row whose field is marked as a team key ("Match imports by this") is matched by that field.
 - A row that brings only the file's own `entity_id` is created again, because that id links the
-  file's rows to each other and nothing more.
+  file's rows to each other and nothing more. Under `reconcileMode=replace`, each run then deletes
+  the node the previous run made.
+- A row whose urn and identifier value point at two different entities is refused.
 
 ## 5. Adding, changing and removing properties
 
@@ -160,7 +193,10 @@ Absent properties and blank cells are left as they are.
   - It imports and exports as `prop.<name>`.
   - Mark the field "Match imports by this" to match rows by it.
   - Mark it "Must be unique" to keep it unique.
-  - Keep it out of the identifier property, which holds the node's urn.
+  - Keep it out of the identifier property, which is reserved: it holds the node's urn, and a
+    file's value there is a pointer, never stored.
+- **An identifier value beside a different urn** is a second name for the row's node, but only
+  within that import. Later imports find the node by its urn.
 
 ## 7. Guarantees and non-goals
 

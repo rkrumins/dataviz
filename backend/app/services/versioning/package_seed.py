@@ -64,7 +64,7 @@ from .bootstrap_worker import (
     _vid,
 )
 from .falkor_indexes import ensure_urn_indexes
-from .ids import stable_prefixed_id
+from .ids import derived_entity_id
 from .job_lease import Lease, is_transient
 from .merkle import content_hash
 from .models import EdgeVersionORM, JobORM, NodeVersionORM, ProjectionStateORM, _now
@@ -201,14 +201,15 @@ def _line(raw: bytes) -> Optional[dict]:
     return rec if isinstance(rec, dict) else None
 
 
-def _row_id(rec: dict, offset: int, upload_id: str, win: Window) -> str:
-    """The package's own entity id; one minted from the line's place in the package when it has
-    none — the same id every time the line is read, so a replayed window collides with itself."""
+def _row_id(rec: dict, offset: int, upload_id: str, win: Window, kind: str) -> str:
+    """The package's own entity id; else a ``urn:uuid:`` derived from the line's place in the
+    package — the same id every time the line is read, so a replayed window collides with
+    itself."""
     eid = str(rec.get("entity_id") or "").strip()
     if eid:
         return eid
     win.minted += 1
-    return stable_prefixed_id("ent", f"{upload_id}:{offset}")
+    return derived_entity_id(kind, f"{upload_id}:{offset}")
 
 
 def node_rows(lines: List[Tuple[int, bytes]], *, ctx, graph_id: str, rules,
@@ -248,11 +249,14 @@ def node_rows(lines: List[Tuple[int, bytes]], *, ctx, graph_id: str, rules,
             payload = _no_deletes(_node_payload(row))
         canonicalize_rows([payload], rules)
         payload = _sanitize_node_properties(payload)
-        eid = _row_id(rec, offset, upload_id, win)
+        named_here = not str(rec.get("entity_id") or "").strip()
+        eid = _row_id(rec, offset, upload_id, win, "node")
         if eid in seen:
             win.dupes += 1
             continue
         seen.add(eid)
+        if named_here and not payload.get("urn"):          # one identity: its id is its urn too
+            payload = {**payload, "urn": eid}
         win.dicts.append(dict(
             graph_id=graph_id, id=_vid("nvb", ctx.commit_id, eid), entity_id=eid,
             commit_id=ctx.commit_id, commit_seq=ctx.commit_seq, branch_id=ctx.main_id,
@@ -312,7 +316,7 @@ def edge_lines(lines: List[Tuple[int, bytes]], *, upload_id: str) -> Tuple[List[
             win.reject({"kind": "edge", "offset": offset,
                         "reason": "no type, or an end it doesn't name"})
             continue
-        out.append(EdgeLine(offset, _row_id(rec, offset, upload_id, win), payload,
+        out.append(EdgeLine(offset, _row_id(rec, offset, upload_id, win, "edge"), payload,
                             src or None, tgt or None, src_urn or None, tgt_urn or None))
     return out, win
 

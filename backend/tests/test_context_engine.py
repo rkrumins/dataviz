@@ -329,6 +329,63 @@ class TestContextEngineCreatesAreNamedByTheMinter:
             urns.add((await engine.create_node(ask)).node.urn)
         assert len(urns) == 3, urns                          # someone else's, or another draft's
 
+    async def test_a_key_names_one_node_on_a_fresh_or_a_stale_main(self, monkeypatch):
+        """The first keyed create leaves main stale until it is projected, and the engine then
+        reads main from Postgres under main's branch id. A retry made meanwhile, or after the graph
+        gained version control, names the same node."""
+        from backend.common.models.graph import CreateNodeRequest
+
+        ask = CreateNodeRequest(entityType="dataset", displayName="Orders", idempotencyKey="k-1")
+        fresh, _ = self._engine(monkeypatch)
+        fresh._writes_main, fresh._actor = True, "alice"                   # main read from FalkorDB
+        stale, _ = self._engine(monkeypatch)
+        stale._writes_main, stale._branch_id, stale._actor = True, "br_main", "alice"
+        external, _ = self._engine(monkeypatch)
+        external._actor = "alice"                                           # no version control
+        urns = {(await e.create_node(ask)).node.urn for e in (fresh, stale, external)}
+        assert len(urns) == 1, urns
+
+    async def test_a_connections_keys_are_its_own_and_each_callers(self, monkeypatch):
+        """A connection's engine has no data source: its keys are scoped by the connection and by
+        who sends them, never shared by every caller of every connection."""
+        from backend.common.models.graph import CreateNodeRequest
+
+        ask = CreateNodeRequest(entityType="dataset", displayName="Orders", idempotencyKey="k-1")
+        urns = []
+        for conn, actor in (("conn-1", "alice"), ("conn-1", "bob"), ("conn-2", "alice"),
+                            ("conn-1", "alice")):
+            provider = self._engine(monkeypatch)[0].provider
+
+            class _Registry:
+                async def get_provider(self, connection_id, session):
+                    return provider
+            engine = await ContextEngine.for_connection(conn, _Registry(), None, actor=actor)
+
+            async def _resolved():
+                return ResolvedOntology()
+            monkeypatch.setattr(engine, "_resolve_ontology", _resolved)
+            urns.append((await engine.create_node(ask)).node.urn)
+        assert len(set(urns[:3])) == 3 and urns[3] == urns[0], urns
+
+    async def test_a_keyed_edge_the_store_already_holds_is_answered(self, monkeypatch):
+        """A customer's FalkorDB graph keeps its own id for a link it already had, so a retry's
+        read misses the edge by its derived id and the write is refused as existing: the answer
+        is the edge the first request made. An unkeyed create is still refused."""
+        from backend.app.services.versioning.errors import EntityExists
+        from backend.common.models.graph import CreateEdgeRequest
+
+        engine, _written = self._engine(monkeypatch, [_node("urn:a"), _node("urn:b")])
+
+        async def _exists(edge):
+            raise EntityExists([edge.id])
+        monkeypatch.setattr(engine.provider, "create_edge", _exists)
+        made = await engine.create_edge(CreateEdgeRequest(
+            sourceUrn="urn:a", targetUrn="urn:b", edgeType="FLOWS_TO", idempotencyKey="e-1"))
+        assert made.success and self._v(made.edge.id) == 5
+        with pytest.raises(EntityExists):
+            await engine.create_edge(CreateEdgeRequest(
+                sourceUrn="urn:a", targetUrn="urn:b", edgeType="FLOWS_TO"))
+
 
 class TestContextEngineChildren:
     async def test_get_children_with_explicit_edge_types(self):

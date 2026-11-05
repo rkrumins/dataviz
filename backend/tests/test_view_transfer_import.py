@@ -574,3 +574,34 @@ async def test_inspect_finds_where_the_file_belongs(test_client, db_session, gra
     assert twin["score"] >= 70 and "Same graph" in twin["reasons"]
     assert "Identical semantic layer" in twin["reasons"], "the ontology digests match"
     assert twin["sampleSize"] == 3 and twin["sampleHitRate"] == pytest.approx(2 / 3)
+
+
+async def test_a_view_checked_against_a_draft_finds_what_its_data_was_imported_as(
+        test_client, graph, db_session):
+    """A view package's data is imported as nodes named by ids derived from its urns (the
+    file's urns are pointers). Checked against that draft, a urn the draft doesn't hold is looked
+    for again as that id: found, and the view is pointed at it. Without a draft, it is missing."""
+    from backend.app.services.versioning.import_export.resolve import pointer_id
+    from backend.app.services.view_transfer.references import Rewrite
+
+    dev = await _workspace(test_client, "Dev")
+    view = (await _file(test_client, await _view(test_client, dev)))["views"][0]
+    gone = pointer_id("ds_root", "urn:gone")
+    graph.known[gone] = {"type": "dataset", "name": "gone", "qualifiedName": None}
+
+    def item(target):
+        return importing.ReconcileItem(
+            key="0", definition=view["definition"], view_type="reference",
+            exported={"urn:gone": {"name": "gone", "type": "dataset"}}, entities_resolved=True,
+            history_hashes=[], action="create", strategy="replace", rewrite=Rewrite(),
+            target=target)
+
+    drafted = importing.Target("ws", "ds", branch_id="br_1", identity_scope="ds_root")
+    [found] = (await importing.reconcile_items(db_session, [item(drafted)]))["views"]
+    assignments = _assignments(found["effectiveDefinition"])
+    assert "urn:gone" not in assignments and assignments[gone]["layerId"] == "l1"
+    assert found["report"]["summary"]["entities"]["missing"] == 0, found["report"]
+
+    [plain] = (await importing.reconcile_items(db_session, [item(importing.Target("ws", "ds"))]))["views"]
+    assert "urn:gone" in _assignments(plain["effectiveDefinition"])
+    assert plain["report"]["summary"]["entities"]["missing"] == 1

@@ -115,6 +115,113 @@ than build it; **Technical** is the full toolset, as before. Business stays the 
 
 ---
 
+## [Unreleased] — A connector-ready import and export contract
+
+### Added
+
+- **The record format is a published contract (v1).** `import_export/contract.py` declares every
+  column of an import or export file, and its JSON Schema is committed at
+  `backend/common/schema/import-record.v1.json`. `GET …/versioning/graphs/{graphId}/imports/schema`
+  serves it narrowed to a data source: its entity and edge types as enums, and its properties
+  typed. It answers with an `ETag` and `X-Schema-Version`. Version 1 only gains columns.
+- **A dry run:** `POST …/imports/validate`, with the file as the body. It reads a file exactly as an
+  import would and writes nothing, with no draft and no job. It says what each row would do, the id
+  a new node would take, why a row would be refused, and which columns the format doesn't know
+  (usually a typo). It takes up to 8 MiB and one window of rows.
+- **[Building a Connector](docs/CONNECTOR_GUIDE.md)** covers the format, pointers, deltas vs
+  snapshots, sending large files, retries, the dry run and publishing. A reference connector ships
+  in `docs/examples/connector/` and is tested against the contract.
+- **API keys can call** the schema and the dry run.
+
+### Changed
+
+- **The import template is built from the data source's ontology.** It has every column a file can
+  carry, a worked row of each entity type and an edge of each relationship type, and an Excel
+  Columns sheet explaining each column. It no longer copies a few real rows from `main`: to edit
+  real data, export it. The dialog offers Excel, CSV or NDJSON.
+- **Template downloads carry the right media type** for Excel, JSON and TSV, and CSV/TSV start with
+  a BOM, as exports do.
+
+---
+
+## [Unreleased] — The ids a file carries are pointers; importing it again changes nothing
+
+### Changed
+
+- **A file's urns and identifier values are pointers, not stored.** A row's `urn`, and its value
+  of the data source's identifier property, find the node that carries one as its urn, or the node
+  an earlier import made from it. A new node's id is a `urn:uuid:` v5 derived from its first pointer
+  and the data source (at the root of the graph's fork lineage).
+  - So the same file imported again creates nothing: in the same draft, a later draft, a fork, or
+    after the graph is made again.
+  - A free `urn:uuid:` a row brings is kept as the id, so an entity keeps its id from one
+    environment to the next.
+  - A deleted node a pointer names is brought back.
+- **The identifier property is reserved:** it holds the node's urn. A matched row never writes its
+  pointer over the node's own urn or identifier. Keep a team's own reference in any other property,
+  and mark it "Match imports by this" to match on it.
+- **A row whose urn and identifier value differ** is no longer refused: both point at its node,
+  and the identifier value is a second name within that import. A row is refused only when the two
+  point at two different entities.
+- **Exports copied into another graph get new ids there.** An export's legacy urns become new ids
+  in that graph, and `urn:uuid:` ids are kept.
+- **A file's urn is not searchable** on the node it made, because it isn't stored.
+
+### Fixed
+
+- **Re-imports no longer quarantine edges named by the file's own id.** An import now remembers
+  which node each row matched or made, so on a re-import, and in a later window, an edge that names
+  its end by the file's own `entity_id`, or by a second name, still lands on it.
+- **Placements of an import's new roots** are keyed by each node's stored urn. Before, a urn-less
+  node was keyed `gv:<id>`.
+- **A deleted node's free `urn:uuid:` brings it back** on import, instead of minting another node.
+- **A view package's view, checked against its data's draft,** finds the nodes the data was imported
+  as: its urns are remapped onto the derived ids automatically.
+
+### Upgrading
+
+- Nodes made by earlier imports keep their ids. A file that names them by urn still finds them,
+  wherever the urn was stored.
+
+### Known limitations
+
+- A row that points by nothing but the file's own `entity_id` is created again on each import.
+  Under `replace`, each run deletes the previous run's node.
+- A "View only" import of a multi-view package against published data doesn't remap the package's
+  urns; remap them on the Match step.
+
+---
+
+## [Unreleased] — One identity on every path that seeds a graph
+
+### Changed
+
+- **Bulk ingest names a node by its urn** when the row brings no id, and a node with no urn gets
+  its id as its urn. A second row naming the same node is refused in `rejected`; before, it was
+  stored as another node with the same urn.
+- **An NDJSON sync names a new node by its urn,** not `sync:<urn>`. A node an earlier sync named
+  that way is found by its urn and keeps its id.
+- **A view package line with no id** gets a `urn:uuid:` derived from its place in the upload
+  (before, `ent_<hash>`). If the line has no urn either, that id becomes its urn. A resumed seed
+  derives the same id.
+
+### Fixed
+
+- **Writes to a data source without version control are refused properly.** `/graph/nodes/create`,
+  `/graph/edges` and `/commands/batch` on such a source now answer `409 versioning_not_enabled`,
+  as a save does. Before, `/graph/nodes/create` answered `500`, and the others a `200` that said
+  they failed.
+- **Enabling version control again on a key a projection wrote** sets each node's anchor to its new
+  id. Before, an anchor an earlier graph left behind could make a later delete miss the node.
+
+### Known limitations
+
+- Nodes stored before this release keep their ids, including `sync:<urn>` and `ent_…`.
+- A legacy node with no urn, enabled again from a projected key, keeps `gv:<id>` as its urn.
+- Detach, release and drift sync are still design only ([14 · Lifecycle](docs/versioning/14-graph-lifecycle-v2.md)).
+
+---
+
 ## [Unreleased] — Every new id is a standard UUID
 
 ### Changed
@@ -161,7 +268,6 @@ than build it; **Technical** is the full toolset, as before. Business stays the 
 ### Known limitations
 
 - Existing entities keep the ids they have.
-- An import still keeps the urn a row brings when nothing holds it, whatever its form.
 
 ---
 

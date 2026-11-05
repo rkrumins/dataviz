@@ -1,11 +1,12 @@
 """An import gives each new node one identity and finds what it names — needs Postgres.
 
-The server decides a new node's identity: the urn its row brings (or the row's value of the data
-source's identifier property) when nothing holds it, the deleted node that held it brought back,
-else a urn it mints — and that one value is the node's id, its urn and its identifier property
-alike, as a canvas create's is. A row and an edge's end name an existing node by its id, its urn,
-its identifier value or a field its type matches imports by (a team's own key); a unique field's
-value is never taken twice. Re-importing the same file updates what it created.
+The server decides a new node's identity: the deleted node its row's urn names brought back, else
+an id derived from the row's urn (or its value of the data source's identifier property), else —
+a row that points by neither — a urn it mints; and that one value is the node's id, its urn and
+its identifier property alike, as a canvas create's is. A row and an edge's end name an existing
+node by its id, its urn, its identifier value or a field its type matches imports by (a team's
+own key); a unique field's value is never taken twice. Re-importing the same file updates what it
+created.
 """
 import asyncio
 import json
@@ -20,6 +21,7 @@ from backend.app.services.node_identity import ResolvedNodeIdentity
 from backend.app.services.storage.object_store import LocalFsObjectStore, storage_key
 from backend.app.services.versioning import db, models
 from backend.app.services.versioning.ids import uuid_urn
+from backend.app.services.versioning.import_export.resolve import pointer_id
 from backend.app.services.versioning.import_export.service import ImportExportService
 from backend.app.services.versioning.service import GraphVersioningService
 
@@ -95,7 +97,9 @@ async def _run() -> None:
                                  identity_resolver=_identity)
         job, summary, got = await _import(ie, store, gid, FILE)
         draft = job["branch_id"]
-        assert summary["invalid"] == 2, (summary, got.get("summary"))
+        assert summary["invalid"] == 1, (summary, got.get("summary"))
+        scope = await svc.identity_scope(gid)
+        c, a9, x = (pointer_id(scope, p) for p in ("urn:C", "A-9", "urn:X"))
 
         async with svc._session() as s:
             heads = await svc._head_index(s, gid, draft)
@@ -105,8 +109,9 @@ async def _run() -> None:
             async with svc._session() as s:
                 return (await svc._current_values(s, gid, draft, [eid])).get(eid)
 
-        # A free urn, an identifier value, nothing at all: one identity each — id, urn, asset_id.
-        for eid in ("urn:C", "A-9"):
+        # A urn, an identifier value, both (urn:X beside asset_id Y), nothing at all: one identity
+        # each — id, urn, asset_id — derived from the pointer, which is not stored.
+        for eid in (c, a9, x):
             v = await value(eid)
             assert v["urn"] == eid and v["properties"]["asset_id"] == eid, v
         f1, = [e for e, h in live.items() if h.name == "F1"]
@@ -118,16 +123,16 @@ async def _run() -> None:
         # A team key named the canvas node: renamed, its identity its own.
         k = await value("urn:K")
         assert k["displayName"] == "K renamed" and k["urn"] == "urn:K"
-        assert not any(h.name in ("X", "U2") for h in live.values()), "refused rows wrote"
+        assert not any(h.name == "U2" for h in live.values()), "a refused row wrote"
         u1, = [e for e, h in live.items() if h.name == "U1"]
 
         edges = {(h.src, h.tgt, h.type) for h in heads.values() if h.kind == "edge" and h.live}
         assert ("ent_P", f1, "CONTAINS") in edges, edges          # by the file's own id
         assert ("urn:K", "ent_L", "LINEAGE") in edges, edges      # by a team key
-        assert ("A-9", "urn:C", "LINEAGE") in edges, edges        # by the identifier value
+        assert (a9, c, "LINEAGE") in edges, edges                 # by the identifier value
 
         reasons = got["summary"]
-        assert reasons["invalid"] == 2, reasons
+        assert reasons["invalid"] == 1, reasons
 
         # The same rows again (those that carry an identity): updated, never doubled.
         again = [line for line in FILE if line.get("urn") or line.get("prop.asset_id")

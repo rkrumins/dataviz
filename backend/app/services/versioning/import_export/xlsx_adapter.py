@@ -16,7 +16,7 @@ import io
 import math
 import re
 import zipfile
-from typing import Any, AsyncIterator, Dict, List, Sequence
+from typing import Any, AsyncIterator, Dict, List, Optional, Sequence
 
 from .rowmodel import cell_text, parse_list_cells
 
@@ -25,6 +25,7 @@ _LOCKED = {"entity_id", "urn", "baseVersion", "source_entity_id", "target_entity
 _NODE_SHEET = "Nodes"
 _EDGE_SHEET = "Edges"
 _INSTRUCTIONS = "Instructions"
+_COLUMNS = "Columns"                 # a template's guide to its columns (never read back)
 
 
 class XlsxAdapter:
@@ -50,27 +51,31 @@ class XlsxAdapter:
             wb.close()
 
     async def write(
-        self, records: AsyncIterator[Dict[str, Any]], *, columns: Sequence[str]
+        self, records: AsyncIterator[Dict[str, Any]], *, columns: Sequence[str],
+        guide: Optional[Sequence[Sequence[str]]] = None,
     ) -> AsyncIterator[bytes]:
         """Records -> workbook, for small in-memory sets (templates); an export streams pages
-        through :meth:`write_pages` with the sheet columns its first pass found."""
+        through :meth:`write_pages` with the sheet columns its first pass found. ``guide`` rows
+        (column, for, required, meaning) add a Columns sheet saying what each column means."""
         node_recs: List[Dict[str, Any]] = []
         edge_recs: List[Dict[str, Any]] = []
         async for rec in records:
             (edge_recs if rec.get("kind") == "edge" else node_recs).append(rec)
         sheets = {"node": sheet_columns(node_recs, columns), "edge": sheet_columns(edge_recs, columns)}
-        async for chunk in self.write_pages(_one_page(node_recs + edge_recs), sheets=sheets):
+        async for chunk in self.write_pages(_one_page(node_recs + edge_recs), sheets=sheets,
+                                            guide=guide):
             yield chunk
 
     async def write_pages(
-        self, pages: AsyncIterator[List[Dict[str, Any]]], *, sheets: Dict[str, List[str]]
+        self, pages: AsyncIterator[List[Dict[str, Any]]], *, sheets: Dict[str, List[str]],
+        guide: Optional[Sequence[Sequence[str]]] = None,
     ) -> AsyncIterator[bytes]:
         """Stream a workbook: node pages then edge pages, each row written into the zip as it
         comes. Memory stays flat whatever the size (openpyxl, even write-only, keeps every distinct
         string in memory for its shared-string table; here strings are written inline)."""
         sink = _Sink()
         book = zipfile.ZipFile(sink, "w", zipfile.ZIP_DEFLATED)
-        await asyncio.to_thread(_write_static_parts, book)
+        await asyncio.to_thread(_write_static_parts, book, guide)
         yield sink.take()
         writers = {"node": _SheetWriter(book, "xl/worksheets/sheet2.xml", sheets["node"]),
                    "edge": _SheetWriter(book, "xl/worksheets/sheet3.xml", sheets["edge"])}
@@ -255,7 +260,8 @@ _INSTRUCTION_LINES = [
     ("• You only need the ROWS and COLUMNS you're changing. Deleting rows or columns from this"
      " file changes nothing — untouched entities and fields are left exactly as they are.", _PLAIN),
     ("• Add a NEW property = add a column named 'prop.<name>' (e.g. prop.owner) and fill only the"
-     " rows it applies to. Add a new entity = a new row with entity_id/urn left blank.", _PLAIN),
+     " rows it applies to. Add a new entity = a new row: give it a urn of your own (a pointer —"
+     " importing the file again updates that entity) or leave entity_id/urn blank.", _PLAIN),
     ("• DELETE a property value with the token \\N in its cell (or delete the whole row's entity"
      " by setting _op to 'delete').", _PLAIN),
     ("• Save as .xlsx and import — you'll review every change before anything is published.", _PLAIN),
@@ -278,9 +284,11 @@ _STYLES = (
     '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>')
 
 
-def _write_static_parts(book: zipfile.ZipFile) -> None:
-    """Everything but the two data sheets: the package plumbing, styles and the Instructions."""
+def _write_static_parts(book: zipfile.ZipFile, guide: Optional[Sequence[Sequence[str]]] = None) -> None:
+    """Everything but the two data sheets: the package plumbing, styles and the Instructions —
+    and with ``guide``, a Columns sheet (sheet 4) saying what each column means."""
     sheet_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"
+    numbers = (1, 2, 3, 4) if guide else (1, 2, 3)
     book.writestr("[Content_Types].xml", (
         f'{_XML}<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
         '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
@@ -290,13 +298,13 @@ def _write_static_parts(book: zipfile.ZipFile) -> None:
         '<Override PartName="/xl/styles.xml" '
         'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>'
         + "".join(f'<Override PartName="/xl/worksheets/sheet{i}.xml" ContentType="{sheet_type}"/>'
-                  for i in (1, 2, 3))
+                  for i in numbers)
         + '</Types>'))
     rel = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
     book.writestr("_rels/.rels", (
         f'{_XML}<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
         f'<Relationship Id="rId1" Type="{rel}/officeDocument" Target="xl/workbook.xml"/></Relationships>'))
-    names = (_INSTRUCTIONS, _NODE_SHEET, _EDGE_SHEET)
+    names = (_INSTRUCTIONS, _NODE_SHEET, _EDGE_SHEET) + ((_COLUMNS,) if guide else ())
     book.writestr("xl/workbook.xml", (
         f'{_XML}<workbook {_NS}><bookViews><workbookView/></bookViews><sheets>'
         + "".join(f'<sheet name="{n}" sheetId="{i}" r:id="rId{i}"/>' for i, n in enumerate(names, start=1))
@@ -304,11 +312,28 @@ def _write_static_parts(book: zipfile.ZipFile) -> None:
     book.writestr("xl/_rels/workbook.xml.rels", (
         f'{_XML}<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
         + "".join(f'<Relationship Id="rId{i}" Type="{rel}/worksheet" Target="worksheets/sheet{i}.xml"/>'
-                  for i in (1, 2, 3))
-        + f'<Relationship Id="rId4" Type="{rel}/styles" Target="styles.xml"/></Relationships>'))
+                  for i in numbers)
+        + f'<Relationship Id="rId{len(numbers) + 1}" Type="{rel}/styles" Target="styles.xml"/>'
+        '</Relationships>'))
     book.writestr("xl/styles.xml", _STYLES)
     rows = "".join(f'<row r="{n}">{_cell_xml(f"A{n}", text, style)}</row>'
                    for n, (text, style) in enumerate(_INSTRUCTION_LINES, start=1))
     book.writestr("xl/worksheets/sheet1.xml", (
         f'{_XML}<worksheet {_NS}><cols><col min="1" max="1" width="110" customWidth="1"/></cols>'
         f'<sheetData>{rows}</sheetData></worksheet>'))
+    if guide:
+        header = ("Column", "For", "Required", "What it means")
+        lines = [header, *guide]
+        cells = "".join(
+            f'<row r="{n}">' + "".join(
+                _cell_xml(f"{letter}{n}", str(text or ""), _HEADER if n == 1 else _PLAIN)
+                for letter, text in zip("ABCD", line)) + "</row>"
+            for n, line in enumerate(lines, start=1))
+        book.writestr("xl/worksheets/sheet4.xml", (
+            f'{_XML}<worksheet {_NS}><sheetViews><sheetView workbookViewId="0"><pane ySplit="1" '
+            'topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>'
+            '<cols><col min="1" max="1" width="28" customWidth="1"/>'
+            '<col min="2" max="2" width="12" customWidth="1"/>'
+            '<col min="3" max="3" width="16" customWidth="1"/>'
+            '<col min="4" max="4" width="110" customWidth="1"/></cols>'
+            f'<sheetData>{cells}</sheetData></worksheet>'))

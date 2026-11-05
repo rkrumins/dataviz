@@ -220,18 +220,29 @@ whole-state importer (~4.4 KB per entity) reached 1.4 GB.
 Each window goes through `resolve_rows` (`resolve.py`) — a **pure, deterministic** function (the id
 minter is injected) that returns `(ops, resolutions)`:
 
-- **Nodes** match an existing entity by **`entity_id` → `urn` (or the data source's identifier
-  property, `prop.<identifier>`, read as the urn) → a field the type matches imports by →
-  `qualifiedName`** (urn-less rows; `_match_node`). A value several live entities carry names none
-  of them: the row is quarantined, saying so. No match ⇒ a **new node with one identity, the
-  server's to decide**: the row's urn (or identifier value) when no entity holds it, the deleted node
-  that held it brought back, else a new `urn:uuid:` (a UUIDv7, [18 · Identity](18-identity.md)) — the
-  node's `entity_id`, its `urn` and (bound at the write) its identifier property alike, as a canvas
-  create's are. A row whose urn and identifier value differ is quarantined. The new node joins the
-  window's indexes, and — once its window commits — the job's, by the file's `entity_id` it came from
-  and by its key values, so a later window's rows and edges find it.
+- **Nodes** match an existing entity by **`entity_id` → its pointers → a field the type matches
+  imports by → `qualifiedName`** (rows that point by nothing; `_named`). A row's **pointers** are its
+  `urn` and its value of the data source's identifier property (`prop.<identifier>`), each also in
+  canonical form when it is a `urn:uuid:` (`pointers`). They are not stored: a pointer finds the node
+  that carries it as its urn, the node an earlier import derived its id from it (`pointer_id`), or,
+  for an identifier value given beside a different urn, the node a row of this job gave it to. Two
+  pointers that name two entities refuse the row, and so does a value several live entities carry.
+  No match ⇒ a **new node with one identity, the server's to decide**:
+  1. the deleted node its pointer names, brought back;
+  2. else a free `urn:uuid:` the row brings, kept;
+  3. else `urn:uuid:` v5 of the graph's identity scope (the data source at the root of its fork
+     lineage, `identity_scope`) and its first pointer, which a re-import derives again;
+  4. else (it points by nothing) a new `urn:uuid:` (a UUIDv7).
+
+  That one value is the node's `entity_id`, its `urn` and (bound at the write) its identifier
+  property alike, as a canvas create's are ([18 · Identity](18-identity.md)). A matched row never
+  writes its pointers over the node's own urn or identifier. The row joins the window's indexes, and
+  — once its window commits — the job's, by the file's `entity_id` it came with and any second name,
+  whether it matched or made its node, so a later window's rows and edges (and those of the same
+  file imported again) find it.
 - **Edges** resolve each endpoint the same way (`entity_id` — an entity's, or the file's own id of a
-  node the job created — → `urn` or `source.<identifier>` → `source.<key>` → `qualifiedName`,
+  node the job matched or created — → the pointers `urn` and `source.<identifier>` → `source.<key>`
+  → `qualifiedName`,
   `_resolve_endpoint`) and key on the `(source_eid, target_eid, edge_type)` triple — the same keying
   `sync_ingest` uses.
 - **Team keys and unique fields** are flags on an entity type's fields in the ontology ("Match
@@ -319,12 +330,13 @@ back).
 The single most important correctness property: **re-importing an unchanged export changes nothing.**
 Two mechanisms deliver it.
 
-- **Stable identity, not fragile keys.** Matching prefers the stable `entity_id`, then the `urn`
-  (or identifier value), then a team's key, then `qualifiedName` — `qualifiedName` is a *field*, not
-  an identity, so a rename doesn't fork the entity. A node matched by a team key keeps its own urn.
-  Since a new node's id **is** its urn, re-importing a file whose rows carry urns (an export does)
-  updates the nodes it created instead of adding them again. (Glossary: `entity_id` in
-  [`README.md`](README.md).)
+- **Stable identity, not fragile keys.** Matching prefers the stable `entity_id`, then the row's
+  pointers (`urn`, identifier value), then a team's key, then `qualifiedName` — `qualifiedName` is a
+  *field*, not an identity, so a rename doesn't fork the entity. A matched node keeps its own urn.
+  Since a new node's id is derived from its pointer, re-importing the same file — or an export,
+  whose rows carry the nodes' own ids — updates the nodes it created instead of adding them again.
+  A row that points by nothing but the file's own `entity_id` is created again. (Glossary:
+  `entity_id` in [`README.md`](README.md).)
 - **Type-tolerant, field-level diff.** `_changed_fields` / `_changed_props` (`resolve.py:41-84`)
   compare each provided field against the current stored value with `_scalar_eq`
   (`resolve.py:31-38`), which treats `5 == "5"` and `True == "True"` — essential because CSV
@@ -680,10 +692,25 @@ tests/integration/test_s3_store_minio.py tests/test_object_store.py`.
   human label per row — a real "T0 · updated / orders · new / row 13 · invalid: <reason>" preview,
   not noise. The **full field-level diff is the draft-vs-main diff** served by the existing
   versioning endpoints ([06 — API Reference](06-api-reference.md)).
-- **Starter template.** `GET /imports/template` (`versioning.py:2030-2050`, declared *before*
-  `/imports/{job_id}` so the literal path wins) returns a prepopulated file — the column schema plus
-  a few real rows from the graph, or worked examples when it's empty (`build_template`,
-  `service.py:251-273`).
+- **Starter template.** `GET /imports/template?format=` (declared *before* `/imports/{job_id}` so
+  the literal path wins) is built from the data source's ontology by the record contract
+  (`import_export/contract.py`, `build_template`):
+  - every column a file can carry: each type's properties, the identifier property, and the
+    fields an edge's ends are found by;
+  - a worked row of each entity type, and an edge of each relationship type between example nodes
+    of types it may join, pointing at them by example urns;
+  - an Excel template's Columns sheet, saying what each column means.
+
+  It never carries a real entity, so importing it as it is changes nothing that exists; to edit
+  real data, export it. With no ontology it holds worked examples. CSV and TSV carry a BOM, and the
+  media type fits the format.
+- **The record contract.** `contract.py` declares the format's columns as Pydantic models.
+  - `GET /imports/schema` serves their JSON Schema, narrowed to the data source. The generic one
+    is committed as `backend/common/schema/import-record.v1.json`, and
+    `tests/test_import_record_schema.py` fails when it drifts.
+  - `POST /imports/validate` is a dry run of a file of up to one window: parse, normalize and
+    resolve exactly as a window is, writing nothing.
+  - [Building a Connector](../CONNECTOR_GUIDE.md) is the guide for a team that sends files.
 - **The dialogs** (`frontend/src/features/import-export/{ImportDialog,ExportDialog}.tsx`, client
   service `importExportApiService.ts`): the ImportDialog drag-drops a file, content-detects its
   format, offers upsert/replace (replace warns, and when view-scoped notes only the view's entities
