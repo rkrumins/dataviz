@@ -74,6 +74,12 @@ words and a way to see what a view is for. The Business / Technical switch is re
   views.
 - **Hierarchy views** showed a placeholder "Physical Fabric" header and a fixed "Flow: Left →
   Right".
+- **A trace could keep asking for the same page** (`/trace/closure`) until a 2,000-request failsafe
+  stopped it. The server now always moves on, and the walk never sends the same request twice. If
+  the server answers the same page twice, the trace says so, and **Try again** asks once more.
+- **Entities could drop out of a trace.** When one request for several entities needed a second
+  page, merging that page cleared what the first page had left owed. Those entities were never
+  fetched, and the trace read as complete.
 
 ### Known limitations
 

@@ -462,6 +462,11 @@ export function useLensWalk(
         const signal = abortRef.current.signal
         const baseModel = startEntry.model
         const request = buildRequest(baseModel)
+        // A seed-page continuation walks only what lies past its cursor —
+        // never the focus itself or the anchors its request named — so it
+        // re-reports none of what an earlier page left owed. Clearing on it
+        // dropped those entries, and the walk ended without them.
+        const ctx = request.seedCursor ? { ...mergeCtx, clearsFrontier: false } : mergeCtx
 
         // Seeded from `prev`, NEVER from the entry read out of the ref
         // above: that mirror is a render behind, so a second op fired in
@@ -491,13 +496,13 @@ export function useLensWalk(
             if (res.seedCursor && request.seedUrns && mergeCtx.rootUrn !== focusUrn && !stuck) {
                 followUp = res.seedCursor
                 const latest = stateRef.current.get(cacheKey)?.model ?? baseModel
-                mergedModel = mergeClosures(latest, res, mergeCtx)
+                mergedModel = mergeClosures(latest, res, ctx)
             }
             if (driverKey !== undefined) patchMeta(cacheKey, m => ({ answered: new Set(m.answered).add(driverKey) }))
             setState(prev => {
                 const entry = prev.get(cacheKey)
                 if (!entry) return prev   // session cleared/re-created before this landed
-                const merged = mergeClosures(entry.model, res, mergeCtx)
+                const merged = mergeClosures(entry.model, res, ctx)
                 return setEntry(prev, cacheKey, withExtendStatus({ ...entry, model: merged }, statusKey, stuck ? 'error' : null))
             })
         } catch {
@@ -563,9 +568,10 @@ export function useLensWalk(
     }, [provider, runFrontierOp])
 
     // A bulk re-seed: one request for up to WALK_BATCH_SIZE cursor-less
-    // anchors in one direction. The response is authoritative for every
-    // anchor it named (clearFrontierRoots), and rootUrn is the first anchor
-    // — NOT the focus — so the focus's seed cursor is never touched.
+    // anchors in one direction. Its first page is authoritative for every
+    // anchor it named (clearFrontierRoots; a follow-up page clears nothing),
+    // and rootUrn is the first anchor — NOT the focus — so the focus's seed
+    // cursor is never touched.
     const bulk = useCallback((anchors: string[], dir: LensWalkDir, walkFocusUrn: string, driverKey: string) => {
         void runFrontierOp(walkFocusUrn, anchors[0]!, dir, (baseModel) => ({
             urn: anchors[0]!,

@@ -578,6 +578,59 @@ describe('useLensWalk — the walk completes hands-free (both modes)', () => {
     expect(result.current.walkFor('a')!.model.nodes.map(n => n.urn).sort()).toEqual(['a', 'c1', 'c20', 'tbl'])
   })
 
+  // A page sent with a seed cursor walks only what lies past it: never the
+  // focus itself or the seeds its request named, so it re-reports none of
+  // them. What an earlier page left owed must survive it.
+  it('one hop: a re-seed\'s next page keeps what its first page left owed — a seed that did not fit is re-seeded, not dropped', async () => {
+    const { provider, traceClosure } = providerByUrn({
+      a: () => closureResult({
+        focus: f('a'), nodes: [gn('a'), gn('b'), gn('c')],
+        truncated: true, truncationReason: 'max_nodes', frontierDown: [cut('b', 2), cut('c', 2)],
+      }),
+      // Page one walks b and its first column; c did not fit (cut again),
+      // and b's other columns are owed by the cursor. Page two walks those.
+      b: (req) => req.seedCursor === 's:b2'
+        ? closureResult({ focus: f('b'), nodes: [gn('b2'), gn('y')] })
+        : closureResult({
+          focus: f('b'), nodes: [gn('b'), gn('c'), gn('b1'), gn('x')],
+          truncated: true, truncationReason: 'max_nodes', seedTruncated: true, seedCursor: 's:b2',
+          frontierDown: [cut('c', 2)],
+        }),
+      c: () => closureResult({ focus: f('c'), nodes: [gn('c'), gn('z')] }),
+    })
+    const { result } = renderHook(() => useLensWalk('a', provider, 1, false))
+    await waitFor(() => expect(result.current.walkProgressFor('a')?.phase).toBe('done'))
+
+    const reseeds = fineCalls(traceClosure).map(c => c[0] as Record<string, unknown>).filter(r => Array.isArray(r.seedUrns))
+    expect(reseeds.map(r => [r.seedUrns, r.seedCursor ?? null])).toEqual([
+      [['b', 'c'], null], [['b', 'c'], 's:b2'], [['c'], null],
+    ])
+    expect(result.current.walkFor('a')!.model.nodes.map(n => n.urn)).toContain('z')
+    expect(result.current.walkProgressFor('a')).toMatchObject({ phase: 'done', pending: 0 })
+  })
+
+  it('one hop: the focus\'s next seed page keeps what its first page left owed — a focus paged by edge id is still paged', async () => {
+    const { provider, traceClosure } = providerByUrn({
+      // The focus carries more lineage of its own than a page holds (paged
+      // by edge id), and its columns carry lineage too (owed by the cursor).
+      a: (req) => req.afterCursor === 'e:50'
+        ? closureResult({ focus: f('a'), nodes: [gn('h2')] })
+        : req.seedCursor === 's:a2'
+          ? closureResult({ focus: f('a'), nodes: [gn('a2'), gn('y')] })
+          : closureResult({
+            focus: f('a'), nodes: [gn('a'), gn('h1')],
+            truncated: true, truncationReason: 'max_nodes', seedTruncated: true, seedCursor: 's:a2',
+            frontierDown: [cut('a', 900, 'e:50')],
+          }),
+    })
+    const { result } = renderHook(() => useLensWalk('a', provider, 1, false))
+    await waitFor(() => expect(result.current.walkProgressFor('a')?.phase).toBe('done'))
+
+    expect(fineCalls(traceClosure).map(c => c[0] as Record<string, unknown>).filter(r => r.afterCursor === 'e:50')).toHaveLength(1)
+    expect(result.current.walkFor('a')!.model.nodes.map(n => n.urn)).toContain('h2')
+    expect(result.current.walkProgressFor('a')).toMatchObject({ phase: 'done', pending: 0 })
+  })
+
   it('full flow: drains depth entries in bulk, hop after hop, with no budget and zero clicks', async () => {
     // a → 450 partners (depth entries) → each partner → one more node.
     const partners = Array.from({ length: 450 }, (_, i) => `p${String(i).padStart(3, '0')}`)

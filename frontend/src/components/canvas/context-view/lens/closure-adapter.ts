@@ -205,8 +205,8 @@ function mergeFrontier(
     const byUrn = new Map<string, LensFrontierEntry>()
     for (const f of existing) byUrn.set(f.urn, f)
     if (clearRoot) byUrn.delete(rootUrn)
-    // A BULK re-seed is authoritative for every anchor it named: the
-    // response re-reports the ones still open, so the rest are drained.
+    // A BULK re-seed's first page is authoritative for every anchor it
+    // named: it re-reports the ones still open, so the rest are drained.
     // Without this the union keeps stale entries and the driver re-chases
     // them forever.
     for (const u of clearRoots) byUrn.delete(u)
@@ -238,6 +238,13 @@ export function mergeClosures(
          *  coarse page landing after the fine page wiped the cursor and
          *  the walk silently stopped short. */
         authoritative?: boolean
+        /** Default true. False for a seed-page CONTINUATION (a request sent
+         *  with a `seedCursor`): the server walks only what lies past the
+         *  cursor — never the focus itself or the seeds the request named —
+         *  so it re-reports none of the entries an earlier page left owed,
+         *  and clears none of them. Its seed cursor still advances the
+         *  focus's. */
+        clearsFrontier?: boolean
     },
 ): LensWalkModel {
     const authoritative = ctx.authoritative ?? true
@@ -264,8 +271,9 @@ export function mergeClosures(
     const coarseUpstreamUrns = new Set([...(model.coarseUpstreamUrns ?? []), ...(incoming.coarseUpstreamUrns ?? [])])
     const coarseDownstreamUrns = new Set([...(model.coarseDownstreamUrns ?? []), ...(incoming.coarseDownstreamUrns ?? [])])
 
-    const clearUp = authoritative && (ctx.direction === 'up' || ctx.direction === 'both')
-    const clearDown = authoritative && (ctx.direction === 'down' || ctx.direction === 'both')
+    const clears = authoritative && (ctx.clearsFrontier ?? true)
+    const clearUp = clears && (ctx.direction === 'up' || ctx.direction === 'both')
+    const clearDown = clears && (ctx.direction === 'down' || ctx.direction === 'both')
     const clearRoots = ctx.clearFrontierRoots ?? []
 
     const frontierUp = mergeFrontier(model.frontierUp, incoming.frontierUp, clearUp, ctx.rootUrn, clearUp ? clearRoots : [])
