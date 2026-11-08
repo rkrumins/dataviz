@@ -41,6 +41,7 @@ import { useWorkspacesStore } from '@/store/workspaces'
 import { usePreferencesStore } from '@/store/preferences'
 import { usePersonaMode } from '@/store/persona'
 import { useOpensDetailsOnSelect } from '@/store/detailsOnSelect'
+import { chooseTraceLineMode, useTraceLineMode } from '@/store/traceLineMode'
 import { useFeature } from '@/store/features'
 import { NarrowChip } from '@/features/narrow/NarrowChip'
 import { NarrowComposer } from '@/features/narrow/NarrowComposer'
@@ -526,6 +527,11 @@ export function ContextViewCanvas({
   const lineageRenderMode = usePreferencesStore((s) => s.lineageRenderMode)
   const setLineageRenderMode = usePreferencesStore((s) => s.setLineageRenderMode)
   const autoStubThreshold = usePreferencesStore((s) => s.autoStubThreshold)
+  // A trace's own Lines choice (Trace settings → Lines), the same modes, and
+  // its own budgets: Lines kept (Adaptive) and Lines per card.
+  const traceLineMode = useTraceLineMode()
+  const traceLinesKept = usePreferencesStore((s) => s.traceLinesKept)
+  const traceLinesPerCard = usePreferencesStore((s) => s.traceLinesPerCard)
 
   // Canvas display settings — driven by the header's DisplaySettingsPopover.
   // `?? default` guards users whose persisted preferences predate these
@@ -2632,6 +2638,10 @@ export function ContextViewCanvas({
   const beginTrace = useCallback((urn: string | readonly string[]) => {
     setShowLineageFlow(true)
     useCanvasStore.getState().closeNodeDrawer()
+    // The selection is spent on the trace (see the SelectionBar). A trace that
+    // draws a card's lines once it is picked starts with nothing picked, so
+    // On hover opens with no lines drawn, as it says.
+    if (traceLineMode !== 'raw') useCanvasStore.getState().setSelection([])
     // Lock writes NOW, not on the next commit: the reader can click a browse
     // chevron between pressing Trace and the walk's first wave.
     traceSessionRef.current = true
@@ -2645,7 +2655,7 @@ export function ContextViewCanvas({
       }
     }
     canvasTrace.start(urn)
-  }, [canvasTrace])
+  }, [canvasTrace, traceLineMode])
   // The overlay's seed is keyed by the PRIMARY seed, so that dropping a seed
   // keeps the reader's picture (`removeTraceSeed`). A different seed SET on
   // the same primary is a different trace, though, and opens as one — not
@@ -2865,14 +2875,32 @@ export function ContextViewCanvas({
       for (const u of urns) s.add(urnToIdMap.get(u) ?? u)
       return s
     }
+    const upstreamNodes = toIds(traceModel.upstreamUrns)
+    const downstreamNodes = toIds(traceModel.downstreamUrns)
+    // The walk names the RAW endpoints — columns, mostly — so a line landing
+    // on a closed table, or one between two containers, has neither end in
+    // those sets and drew in the faint off-the-trace style. Each card's place
+    // on the trace comes from the view model instead: its own role, and a
+    // host's from what it holds.
+    for (const lane of overlay.view?.lanes ?? []) {
+      for (const card of lane.cards.values()) {
+        const up = card.role === 'up' || card.role === 'both'
+        const down = card.role === 'down' || card.role === 'both'
+        if (!up && !down) continue
+        for (let id: string | null = card.id; id; id = lane.cards.get(id)?.parentId ?? null) {
+          if (up) upstreamNodes.add(id)
+          if (down) downstreamNodes.add(id)
+        }
+      }
+    }
     return {
-      upstreamNodes: toIds(traceModel.upstreamUrns),
-      downstreamNodes: toIds(traceModel.downstreamUrns),
+      upstreamNodes,
+      downstreamNodes,
       focusId: canvasTrace.tracedUrn ? (urnToIdMap.get(canvasTrace.tracedUrn) ?? canvasTrace.tracedUrn) : null,
       // Every seed's wires read as focus wires, not just the first's.
       focusIds: traceFocusIdSet,
     }
-  }, [overlay.active, traceModel, canvasTrace.tracedUrn, urnToIdMap, traceFocusIdSet])
+  }, [overlay.active, overlay.view, traceModel, canvasTrace.tracedUrn, urnToIdMap, traceFocusIdSet])
 
   const traceParticipants = useMemo(() => {
     const upstream: Array<{ urn: string; label: string }> = []
@@ -5415,6 +5443,10 @@ export function ContextViewCanvas({
         source: w.source,
         target: w.target,
         edgeCount: w.edgeCount,
+        // How many lines this one stands in for, which a line budget ranks by
+        // (lineDensity.ts): a raw wire's hops; a roll-up is ONE line, however
+        // many flows it speaks for, so it cannot push out the raw ones.
+        bundleSize: w.kind === 'raw' ? w.edgeCount : 1,
         isBundled: w.isBundled,
         kind: w.kind,
         types: w.types.filter(t => !traceHiddenTypes.has(t.toUpperCase())),
@@ -5491,17 +5523,25 @@ export function ContextViewCanvas({
   // Render-mode resolution: `raw` shows every projected edge; `stubs`
   // suppresses ambient edges in favour of per-node indicators (hover /
   // selection materializes); `auto` renders everything below
-  // `autoStubThreshold` and switches to a BUDGETED presentation above it.
-  // A trace bypasses it: the walk already bounds its lines and every trace
-  // wire draws. Display › Edge Density says so.
+  // `ambientBudget` and switches to a BUDGETED presentation above it.
+  // A trace takes its own mode (Trace settings → Lines), so a Technical trace
+  // keeps every line whatever Display › Edge Density says. Display offers it
+  // too, as While tracing.
+  const renderMode = overlay.active ? traceLineMode : lineageRenderMode
+  // And its own budgets: what Adaptive keeps drawn (Lines kept), and what a
+  // pointed-at or picked card draws (Lines per card). Browsing has one for
+  // both, Display's.
+  const ambientBudget = overlay.active ? traceLinesKept : autoStubThreshold
+  const cardBudget = overlay.active ? traceLinesPerCard : autoStubThreshold
   const isStubsMode = useMemo(() => {
-    // Trace mode: the flow IS the point, and the walk budget already
-    // bounds the edge count — every trace wire draws, no stub culling.
-    if (overlay.active) return false
-    if (lineageRenderMode === 'raw') return false
-    if (lineageRenderMode === 'stubs') return true
-    return drawableLineageEdges.length > autoStubThreshold
-  }, [overlay.active, lineageRenderMode, drawableLineageEdges.length, autoStubThreshold])
+    if (renderMode === 'raw') return false
+    if (renderMode === 'stubs') return true
+    return drawableLineageEdges.length > ambientBudget
+  }, [renderMode, drawableLineageEdges.length, ambientBudget])
+  // Pointing at and picking a card reveal its lines during a trace too, as
+  // they do while browsing — unless it draws every line, when the trace's own
+  // picture is what is read.
+  const traceRevealsLines = overlay.active && traceLineMode !== 'raw'
 
   // The ambient budget ranks by `bySignificance` (lineDensity.ts): how many
   // lines a line replaces, never the weight it stands for.
@@ -5514,15 +5554,21 @@ export function ContextViewCanvas({
   // counts, and a status chip reports "showing N strongest of M" with
   // escalation to All Edges. Nothing is lost silently; the canvas stays
   // readable; SVG path count stays bounded regardless of graph size.
+  // A trace's budget goes first to the traced entities' own lines — what it is
+  // about — and the strongest of the rest fill what is left of it.
   const rankedAmbientEdges = useMemo(() => {
-    if (!isStubsMode || lineageRenderMode !== 'auto') return null
-    return [...drawableLineageEdges].sort(bySignificance).slice(0, autoStubThreshold)
-  }, [isStubsMode, lineageRenderMode, drawableLineageEdges, autoStubThreshold])
+    if (!isStubsMode || renderMode !== 'auto') return null
+    const seeds = overlay.active ? traceFocusIdSet : null
+    const own = (e: { source: string; target: string }) => !!seeds && (seeds.has(e.source) || seeds.has(e.target))
+    return [...drawableLineageEdges]
+      .sort((a, b) => Number(own(b)) - Number(own(a)) || bySignificance(a, b))
+      .slice(0, ambientBudget)
+  }, [isStubsMode, renderMode, overlay.active, traceFocusIdSet, drawableLineageEdges, ambientBudget])
 
   // Effective edge set passed to the renderer, plus the shown/total
-  // bookkeeping the status chips surface. Focus (every selected entity /
-  // trace anchor) materializes incident edges in every stub-y mode, but a hub's fan is
-  // ALSO capped at the strongest `autoStubThreshold` — 650 curves at once is
+  // bookkeeping the status chips surface. Focus (every selected entity)
+  // materializes incident edges in every stub-y mode, but a hub's fan is
+  // ALSO capped at the strongest `cardBudget` — 650 curves at once is
   // noise; the Lineage Lens enumerates the full fan properly and the chip
   // points there. A HOVERED entity's lines follow the same rule, drawn by
   // the overlay from `hoverPool` so a hover never re-renders the canvas.
@@ -5531,18 +5577,16 @@ export function ContextViewCanvas({
       return { edges: visibleLineageEdges, ambientShown: 0, ambientTotal: 0, focusShown: 0, focusTotal: 0 }
     }
     const ambient = rankedAmbientEdges ?? []
-    const ambientTotal = lineageRenderMode === 'auto' ? drawableLineageEdges.length : 0
+    const ambientTotal = renderMode === 'auto' ? drawableLineageEdges.length : 0
     const focusIds = new Set<string>(selectedNodeIds)
-    // Every seed of a combined trace anchors its lines, not just the first.
-    if (overlay.active) for (const id of traceFocusIdSet) focusIds.add(id)
     if (focusIds.size === 0) {
       return { edges: ambient, ambientShown: ambient.length, ambientTotal, focusShown: 0, focusTotal: 0 }
     }
     const focusAll = drawableLineageEdges.filter(e =>
       focusIds.has(e.source) || focusIds.has(e.target)
     )
-    const focus = focusAll.length > autoStubThreshold
-      ? [...focusAll].sort(bySignificance).slice(0, autoStubThreshold)
+    const focus = focusAll.length > cardBudget
+      ? [...focusAll].sort(bySignificance).slice(0, cardBudget)
       : focusAll
     if (ambient.length === 0) {
       return { edges: focus, ambientShown: 0, ambientTotal, focusShown: focus.length, focusTotal: focusAll.length }
@@ -5555,7 +5599,7 @@ export function ContextViewCanvas({
       focusShown: focus.length,
       focusTotal: focusAll.length,
     }
-  }, [isStubsMode, lineageRenderMode, rankedAmbientEdges, visibleLineageEdges, drawableLineageEdges, autoStubThreshold, selectedNodeIds, overlay.active, traceFocusIdSet])
+  }, [isStubsMode, renderMode, rankedAmbientEdges, visibleLineageEdges, drawableLineageEdges, cardBudget, selectedNodeIds])
   // A search's lit lines, on top: in All Edges every one is drawn already; in
   // a budget, the lines with the most matches up to SEARCH_LINE_CAP, and how
   // many it lit in all.
@@ -5923,16 +5967,17 @@ export function ContextViewCanvas({
   // Flow ribbons — macro volume per (layer → layer) pair, aggregated over
   // EVERY drawable line (not just the budgeted subset) so the bands show
   // the true totals the budget summarizes. Only in Adaptive's summarized
-  // state; user-toggleable.
+  // state; user-toggleable. Never in a trace: its cards sit in its lanes, not
+  // in the browse layers the bands are counted over.
   const flowRibbons = useMemo(() => {
-    if (!showFlowRibbons || !isStubsMode || lineageRenderMode !== 'auto') return undefined
+    if (!showFlowRibbons || overlay.active || !isStubsMode || lineageRenderMode !== 'auto') return undefined
     const ribbons = aggregateFlowRibbons(
       drawableLineageEdges,
       nodeLayerMap,
       sortedLayers.map(l => l.id),
     )
     return ribbons.length > 0 ? ribbons : undefined
-  }, [showFlowRibbons, isStubsMode, lineageRenderMode, drawableLineageEdges, nodeLayerMap, sortedLayers])
+  }, [showFlowRibbons, overlay.active, isStubsMode, lineageRenderMode, drawableLineageEdges, nodeLayerMap, sortedLayers])
 
   // Edges whose drill-down is in flight — match by `${sourceUrn}->${targetUrn}`
   // against `trace.expandingPairs`. The renderer pulses these so the
@@ -6500,10 +6545,11 @@ export function ContextViewCanvas({
 
   // Highlight state: connected nodes/edges for selected node. With several
   // selected, `selectionLineage` is the SelectionBar's "↑ N in · ↓ M out",
-  // counted off the same lines.
+  // counted off the same lines. A trace lights a picked card's lines only
+  // while it reveals them (traceRevealsLines).
   const { highlightState, isHighlightActive: isClickHighlightActive, selectionLineage } = useHighlightState({
     selectedNodeId, selectedNodeIds, visibleLineageEdges: effectiveLineageEdges,
-    isTracing: traceActive, displayMap, childMap,
+    isTracing: traceActive && !traceRevealsLines, displayMap, childMap,
   })
 
   // The HOVER highlight (lighter, deferring to this one) is the overlay's,
@@ -6831,6 +6877,11 @@ export function ContextViewCanvas({
               seeds={traceSeeds}
               onRemoveSeed={removeTraceSeed}
               outsideView={overlay.view?.outsideView ?? 0}
+              // What the trace's Lines choice leaves undrawn: the lines drawn
+              // now, a picked card's among them, of every line it walks.
+              lines={overlay.active && effectiveLineageEdges.length < drawableLineageEdges.length
+                ? { shown: effectiveLineageEdges.length, total: drawableLineageEdges.length, onShowAll: () => chooseTraceLineMode('raw') }
+                : undefined}
             />
         )}
 
@@ -7424,8 +7475,9 @@ export function ContextViewCanvas({
           onLoadMoreDetail={handleLoadMoreAggDetail}
           viewScope={activeEntityScope}
           canEdit={canEditGraph}
-          focusShown={edgePresentation.focusShown}
-          focusTotal={edgePresentation.focusTotal}
+          // A drawing trace counts its lines in the trace bar instead.
+          focusShown={overlay.active ? 0 : edgePresentation.focusShown}
+          focusTotal={overlay.active ? 0 : edgePresentation.focusTotal}
           searchShown={edgePresentation.searchShown}
           searchTotal={edgePresentation.searchTotal}
           onOpenFocusLens={() => {
@@ -7691,9 +7743,10 @@ export function ContextViewCanvas({
               focusNodeId={selectedNodeId ?? lineEnds?.from ?? null}
               railLineId={selectedNodeId ? null : openLine?.id ?? null}
               childMap={childMap}
-              // On Hover / Adaptive draw a hovered entity's lines from here.
-              hoverPool={isStubsMode && !overlay.active ? visibleLineageEdges : undefined}
-              hoverBudget={autoStubThreshold}
+              // On Hover / Adaptive draw a hovered entity's lines from here —
+              // in a trace too, unless it draws every line.
+              hoverPool={isStubsMode || traceRevealsLines ? visibleLineageEdges : undefined}
+              hoverBudget={cardBudget}
               // A stub is a missing-link alert: lineage that leaves the view.
               // It follows the alerts switch, as the chip and the cue do.
               offCanvasLineage={overlay.active || !showMissingConnectionIndicators ? undefined : offCanvasByNode}
@@ -7907,7 +7960,7 @@ export function ContextViewCanvas({
                 lineageOutside={offCanvasByNode}
                 lineagePorts={nodePorts}
                 showLineageIndicators={showLineageFlow}
-                showDensityGutter={isStubsMode && showLineageFlow && lineageRenderMode === 'auto'}
+                showDensityGutter={isStubsMode && showLineageFlow && renderMode === 'auto'}
                 onProxyReveal={revealOnCanvas}
                 onProxyRevealMany={railRevealMany}
                 railPathOf={railPathOf}

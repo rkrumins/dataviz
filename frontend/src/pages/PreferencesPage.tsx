@@ -9,16 +9,28 @@
  * Technical view, which inspects as it clicks, and off in the Business view,
  * where details open when asked for (Details, Enter, the context menu).
  *
+ * How many of a trace's lines a Context View draws, for each view
+ * (store/traceLineMode.ts): On hover in the Business view, every line in the
+ * Technical one. Trace settings changes the view you're in; Reset puts both
+ * back, with the trace's budgets.
+ *
  * Preferences live in this browser (the preferences store persists locally),
  * and the page says so rather than implying they follow you to another device.
  */
-import { AlertTriangle, Briefcase, Code2, LayoutDashboard, PanelRightOpen } from 'lucide-react'
+import { AlertTriangle, Briefcase, Code2, LayoutDashboard, PanelRightOpen, RotateCcw, Workflow } from 'lucide-react'
 
 import { AccountCard, AccountShell } from '@/components/account/AccountShell'
 import { ToggleSwitch } from '@/components/admin/AdminFeatures/ToggleSwitch'
+import { Segmented } from '@/components/ui/Segmented'
 import { useCanReadProfiling } from '@/hooks/useProfilingAccess'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
-import { usePreferencesStore } from '@/store/preferences'
+import { DEFAULT_TRACE_LINE_MODE, usePreferencesStore, type LineageRenderMode } from '@/store/preferences'
+
+const TRACE_LINE_CHOICES: { value: LineageRenderMode; label: string }[] = [
+    { value: 'stubs', label: 'On hover' },
+    { value: 'auto', label: 'Adaptive' },
+    { value: 'raw', label: 'Every line' },
+]
 
 export function PreferencesPage() {
     useDocumentTitle('Preferences')
@@ -27,6 +39,9 @@ export function PreferencesPage() {
     const canReadProfiling = useCanReadProfiling()
     const openDetailsOnSelect = usePreferencesStore((s) => s.openDetailsOnSelect)
     const setOpenDetailsOnSelect = usePreferencesStore((s) => s.setOpenDetailsOnSelect)
+    const traceLineMode = usePreferencesStore((s) => s.traceLineMode)
+    const setTraceLineMode = usePreferencesStore((s) => s.setTraceLineMode)
+    const resetTraceLines = usePreferencesStore((s) => s.resetTraceLines)
 
     return (
         <AccountShell title="Preferences" blurb="How the app works for you. Saved in this browser.">
@@ -83,6 +98,44 @@ export function PreferencesPage() {
                             />
                         </div>
                     ))}
+                </div>
+            </AccountCard>
+
+            <AccountCard icon={Workflow} title="Trace lines"
+                         blurb="How many of a trace’s lines a Context View draws at once. A choice made while tracing changes only the view you’re in.">
+                <div className="space-y-4">
+                    {([
+                        ['business', Briefcase, 'In the Business view', 'On hover by default: a card’s lines draw when you point at or pick it.'],
+                        ['technical', Code2, 'In the Technical view', 'Every line by default, as a trace has always drawn.'],
+                    ] as const).map(([mode, Icon, label, hint]) => (
+                        <div key={mode} className="flex items-start justify-between gap-4">
+                            <div className="min-w-0">
+                                <span className="flex items-center gap-2 text-sm font-semibold text-ink">
+                                    <Icon className="w-4 h-4 text-ink-muted" aria-hidden />
+                                    {label}
+                                </span>
+                                <span className="block text-xs text-ink-muted mt-1 max-w-xl">{hint}</span>
+                            </div>
+                            <Segmented
+                                label={`Trace lines, ${label.toLowerCase()}`}
+                                size="md"
+                                options={TRACE_LINE_CHOICES}
+                                value={traceLineMode?.[mode] ?? DEFAULT_TRACE_LINE_MODE[mode]}
+                                onChange={(lines) => setTraceLineMode(mode, lines)}
+                            />
+                        </div>
+                    ))}
+                    <div className="flex items-center gap-3">
+                        <button
+                            type="button"
+                            onClick={resetTraceLines}
+                            className="shrink-0 inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-black/[0.10] dark:border-white/[0.12] text-xs font-medium text-ink-muted hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition-colors"
+                        >
+                            <RotateCcw className="w-3.5 h-3.5" aria-hidden />
+                            Reset to defaults
+                        </button>
+                        <span className="text-xs text-ink-muted">Puts back both views, and a trace’s Lines kept and Lines per card.</span>
+                    </div>
                 </div>
             </AccountCard>
         </AccountShell>

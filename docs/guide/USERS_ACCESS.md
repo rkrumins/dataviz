@@ -517,6 +517,7 @@ It's saved in the browser you're using, so set it again on another device.
 |---|---|
 | **Needs attention** | Off by default. On, your Dashboard lists the worst open profiling findings — a source far outside its usual movement, an entity type that vanished, a source gone quiet — each with **Open** and **Mark seen**. It's for people who look after data sources: it needs the permission to see profiling results, and the switch says so when you don't have it. |
 | **Entity details** | Whether selecting an entity opens its details panel, set for each view: off **in the Business view**, where a click picks an entity out and **Details** (or `Enter`) opens it, and on **in the Technical view**, where the details follow every click. Details already open follow what you select either way. |
+| **Trace lines** | How many of a trace's lines a Context View draws, set for each view: **On hover**, **Adaptive** or **Every line**. **On hover** is the Business view's default and **Every line** the Technical view's. A choice made while tracing (**Trace settings → Lines**, **Display → While tracing** or **Show every line**) changes only the view you're in. **Reset to defaults** puts back both views, and a trace's **Lines kept** and **Lines per card** (500 each). See [Narrow a trace by direction and depth](/guide/exploring-graph#narrow-a-trace-by-direction-and-depth). |
 
 ---
 

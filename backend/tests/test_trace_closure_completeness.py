@@ -22,6 +22,8 @@ both directions, and the seed reserve shipped half the table's columns with
 no edges at all. Tracing one of its columns was complete. These tests make
 "trace the table" and "trace the column" agree.
 """
+import time
+
 import pytest
 
 from backend.tests.test_falkordb_trace_structural import _TraceFake, _make_provider, _run
@@ -383,6 +385,80 @@ def test_a_degree_probe_failure_makes_no_progress_and_ships_no_cursor():
     assert r.edges == []
     assert r.truncated is True and r.truncation_reason == "timeout"
     assert r.seed_cursor is None
+
+
+class _Clock:
+    """The provider module's ``time``, with a skew a test pushes forward: a
+    read that outlives the walk budget, without sleeping through it."""
+
+    def __init__(self):
+        self.skew = 0.0
+
+    def monotonic(self):
+        return time.monotonic() + self.skew
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+
+def test_a_seed_page_the_deadline_ended_before_any_anchor_never_hands_its_cursor_back(monkeypatch):
+    """The walk budget runs out while the page's FIRST degree read is in
+    flight, so nothing is walked. The page used to hand back the very cursor
+    it was given — labelled ``max_nodes``, a deterministic cut the cache keeps
+    for its full TTL — so every repeat of the request got this same page, and
+    the client asked again until its request failsafe. A page that walked
+    nothing ships no cursor, and says it timed out."""
+    from backend.app.providers import falkordb_provider as fp
+
+    fake = _TraceFake()
+    _wide_table(fake, leaves=6)
+    p = _make_provider(fake, hydrate=True)
+    clock = _Clock()
+    monkeypatch.setattr(fp, "time", clock)
+    read = fake.ro_query
+
+    async def slow_degree_read(cypher, params=None, timeout=None, **kwargs):
+        if "count(r) AS degree" in cypher:
+            clock.skew += 3600.0
+        return await read(cypher, params=params, timeout=timeout, **kwargs)
+
+    p._ro_query = slow_degree_read
+
+    r = _closure(p, "dom", up=0, down=1, max_nodes=50, seed_cursor="s:leaf_02")
+
+    assert r.seed_cursor != "s:leaf_02", "the page handed back the cursor it was given"
+    assert r.seed_cursor is None
+    assert r.edges == []
+    assert r.truncated is True and r.truncation_reason == "timeout"
+
+
+def test_a_hub_page_that_could_not_be_read_never_hands_its_cursor_back():
+    """``afterCursor`` pages one hub, and this page's read fails. Handing the
+    SAME cursor back told the client to ask for the same failing page again —
+    and a timed-out page is cached for a few seconds, so the repeat got this
+    same page back, as fast as the client could ask. The hub stays owed as a
+    cursor-less CUT entry (re-rooted via ``seedUrns``, like a hub whose first
+    page failed inside a walk), and the page says it timed out."""
+    fake = _TraceFake()
+    fake.adjacency[("hub", "outgoing")] = [(f"t{i}", "FLOWS") for i in range(8)]
+    fake.degrees = {"hub": {"in": 0, "out": 8}}
+    p = _make_provider(fake, hydrate=True)
+    read = fake.ro_query
+
+    async def failing_page(cypher, params=None, timeout=None, **kwargs):
+        if "WHERE id(r) >= $after" in cypher:
+            raise RuntimeError("page timed out")
+        return await read(cypher, params=params, timeout=timeout, **kwargs)
+
+    p._ro_query = failing_page
+
+    r = _closure(p, "hub", up=0, down=1, max_nodes=3, after_cursor="e:3")
+
+    assert [(f.urn, f.reason, f.next_cursor, f.total_count) for f in r.frontier_down] == [
+        ("hub", "cut", None, 8),
+    ]
+    assert r.edges == []
+    assert r.truncated is True and r.truncation_reason == "timeout"
 
 
 def test_failures_outrank_max_nodes_in_the_reason():

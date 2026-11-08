@@ -79,9 +79,9 @@ export const TRACE_CHECKPOINT_NODES = 20_000
  *  this many are released — stepping back to one walks it again, answered
  *  from the server's cache. */
 export const KEEP_WALKED_FOCALS = 4
-/** Failsafe against a frontier that never converges (every request either
- *  drains what it named or advances a cursor, so this should be
- *  unreachable). Reached, it is reported as an ERROR, never as silence. */
+/** Failsafe against a frontier that never converges. The driver never sends
+ *  the same request twice, so only a frontier that keeps naming NEW work can
+ *  reach it. Reached, it is reported as an ERROR, never as silence. */
 export const WALK_REQUEST_FAILSAFE = 2_000
 /** Known urns shipped as `excludeUrns` (wire cap). Budget steering, not
  *  correctness — an edge into an un-excluded known node simply re-arrives
@@ -157,8 +157,14 @@ const EMPTY_EXTEND_STATUS: ReadonlyMap<string, 'loading' | 'error'> = new Map()
 interface WalkMeta {
     requests: number
     unbounded: boolean
+    /** The driver's requests this walk has had an answer to: it never sends
+     *  one of them again — the same request gets the same page. */
+    answered: ReadonlySet<string>
+    /** Owed steps (`stepKey`) the driver stopped following because their next
+     *  request was one already answered: the server did not move them on. */
+    stalled: ReadonlySet<string>
 }
-const EMPTY_META: WalkMeta = { requests: 0, unbounded: false }
+const EMPTY_META: WalkMeta = { requests: 0, unbounded: false, answered: new Set(), stalled: new Set() }
 
 /** Client-side caches keyed by urn must fold in provider identity, or the
  *  same urn across two graphs/data sources collides (GraphDataProvider's
@@ -206,6 +212,17 @@ function depthFields(dir: LensWalkDir, value: number): Pick<TraceClosureRequest,
 function owedEntries(model: LensWalkModel, dir: LensWalkDir, fullWalk: boolean) {
     const list = dir === 'up' ? model.frontierUp : model.frontierDown
     return list.filter(f => f.kind === 'cut' || f.nextCursor !== null || fullWalk)
+}
+
+/** An owed step as the driver's bookkeeping names it. A cursor is part of
+ *  the name: a page that comes back with the cursor it was sent is the same
+ *  step, a page that moves on is a new one. For the focus's seed page and a
+ *  hub's page this is also the request's key (`WalkMeta.answered`). */
+function stepKey(dir: LensWalkDir, fr: { urn: string; nextCursor: string | null }): string {
+    return `${dir}:${fr.urn}\u0000${fr.nextCursor ?? ''}`
+}
+function seedStepKey(focusUrn: string, cursor: string): string {
+    return `seed:${focusUrn}\u0000${cursor}`
 }
 
 export function useLensWalk(
@@ -296,6 +313,19 @@ export function useLensWalk(
             const meta = prev.get(cacheKey) ?? EMPTY_META
             const next = new Map(prev)
             next.set(cacheKey, { ...meta, requests: meta.requests + n })
+            return next
+        })
+    }, [])
+
+    /** Change a walked focal's bookkeeping. Never re-creates a released one:
+     *  an answer can land after its focal was let go, and a later walk of it
+     *  must start clean. */
+    const patchMeta = useCallback((cacheKey: string, patch: (meta: WalkMeta) => Partial<WalkMeta>) => {
+        setWalkMeta(prev => {
+            const meta = prev.get(cacheKey)
+            if (!meta) return prev
+            const next = new Map(prev)
+            next.set(cacheKey, { ...meta, ...patch(meta) })
             return next
         })
     }, [])
@@ -416,6 +446,9 @@ export function useLensWalk(
         buildRequest: (baseModel: LensWalkModel) => TraceClosureRequest,
         statusKey: string,
         mergeCtx: { rootUrn: string; direction: 'up' | 'down' | 'both'; clearFrontierRoots?: string[] },
+        /** The driver's key for this request (`WalkMeta.answered`) — once
+         *  answered, never sent again. Absent for a click. */
+        driverKey?: string,
     ) => {
         if (!focusUrn) return
         if (typeof provider?.traceClosure !== 'function') return   // unsupported: nothing to extend/page
@@ -429,6 +462,11 @@ export function useLensWalk(
         const signal = abortRef.current.signal
         const baseModel = startEntry.model
         const request = buildRequest(baseModel)
+        // A seed-page continuation walks only what lies past its cursor —
+        // never the focus itself or the anchors its request named — so it
+        // re-reports none of what an earlier page left owed. Clearing on it
+        // dropped those entries, and the walk ended without them.
+        const ctx = request.seedCursor ? { ...mergeCtx, clearsFrontier: false } : mergeCtx
 
         // Seeded from `prev`, NEVER from the entry read out of the ref
         // above: that mirror is a render behind, so a second op fired in
@@ -451,17 +489,21 @@ export function useLensWalk(
             if (session !== sessionRef.current) return   // lens closed mid-flight
             // A seeded request that still owes contents is followed, with
             // the same shape plus the cursor. The focus's own cursor rides
-            // in the model instead (the driver pages it).
-            if (res.seedCursor && request.seedUrns && mergeCtx.rootUrn !== focusUrn) {
+            // in the model instead (the driver pages it). A page that came
+            // back with the very cursor it was sent did not move on: asking
+            // again would get the same page, so the step FAILS instead.
+            const stuck = !!request.seedCursor && res.seedCursor === request.seedCursor && mergeCtx.rootUrn !== focusUrn
+            if (res.seedCursor && request.seedUrns && mergeCtx.rootUrn !== focusUrn && !stuck) {
                 followUp = res.seedCursor
                 const latest = stateRef.current.get(cacheKey)?.model ?? baseModel
-                mergedModel = mergeClosures(latest, res, mergeCtx)
+                mergedModel = mergeClosures(latest, res, ctx)
             }
+            if (driverKey !== undefined) patchMeta(cacheKey, m => ({ answered: new Set(m.answered).add(driverKey) }))
             setState(prev => {
                 const entry = prev.get(cacheKey)
                 if (!entry) return prev   // session cleared/re-created before this landed
-                const merged = mergeClosures(entry.model, res, mergeCtx)
-                return setEntry(prev, cacheKey, withExtendStatus({ ...entry, model: merged }, statusKey, null))
+                const merged = mergeClosures(entry.model, res, ctx)
+                return setEntry(prev, cacheKey, withExtendStatus({ ...entry, model: merged }, statusKey, stuck ? 'error' : null))
             })
         } catch {
             if (session !== sessionRef.current) return
@@ -478,7 +520,7 @@ export function useLensWalk(
             const base = mergedModel
             void runFrontierOp(focusUrn, cardUrn, dir, (m) => ({ ...buildRequest(base ?? m), seedCursor: cursor, maxNodes: WALK_PAGE_NODES }), statusKey, mergeCtx)
         }
-    }, [provider, bumpRequests])
+    }, [provider, bumpRequests, patchMeta])
 
     const extend = useCallback((cardUrn: string, dir: LensWalkDir, seedLeaves: string[]) => {
         void runFrontierOp(primaryFocusUrn, cardUrn, dir, (baseModel) => ({
@@ -490,14 +532,14 @@ export function useLensWalk(
         }), `${dir}:${cardUrn}`, { rootUrn: cardUrn, direction: dir })
     }, [runFrontierOp, primaryFocusUrn])
 
-    const pageFor = useCallback((focusUrn: string | null, cardUrn: string, dir: LensWalkDir, cursor: string) => {
+    const pageFor = useCallback((focusUrn: string | null, cardUrn: string, dir: LensWalkDir, cursor: string, driverKey?: string) => {
         void runFrontierOp(focusUrn, cardUrn, dir, () => ({
             urn: cardUrn,
             direction: dir === 'up' ? 'upstream' : 'downstream',
             ...depthFields(dir, 1),
             afterCursor: cursor,
             maxNodes: WALK_PAGE_NODES,
-        }), `${dir}:${cardUrn}`, { rootUrn: cardUrn, direction: dir })
+        }), `${dir}:${cardUrn}`, { rootUrn: cardUrn, direction: dir }, driverKey)
     }, [runFrontierOp])
 
     const page = useCallback(
@@ -509,7 +551,7 @@ export function useLensWalk(
     // entry's fetched depth, resuming the model's seedCursor. Own status key
     // ('seed:<focus>') so it never collides with a real `up:` op on the
     // focus (either would block the other).
-    const pageSeeds = useCallback((walkFocusUrn: string) => {
+    const pageSeeds = useCallback((walkFocusUrn: string, driverKey?: string) => {
         const cacheKey = cacheKeyFor(provider, walkFocusUrn)
         const entry = stateRef.current.get(cacheKey)
         const cursor = entry?.model.seedCursor
@@ -522,14 +564,15 @@ export function useLensWalk(
             seedCursor: cursor,
             excludeUrns: knownUrns(baseModel),
             maxNodes: WALK_PAGE_NODES,
-        }), `seed:${walkFocusUrn}`, { rootUrn: walkFocusUrn, direction: 'both' })
+        }), `seed:${walkFocusUrn}`, { rootUrn: walkFocusUrn, direction: 'both' }, driverKey)
     }, [provider, runFrontierOp])
 
     // A bulk re-seed: one request for up to WALK_BATCH_SIZE cursor-less
-    // anchors in one direction. The response is authoritative for every
-    // anchor it named (clearFrontierRoots), and rootUrn is the first anchor
-    // — NOT the focus — so the focus's seed cursor is never touched.
-    const bulk = useCallback((anchors: string[], dir: LensWalkDir, walkFocusUrn: string) => {
+    // anchors in one direction. Its first page is authoritative for every
+    // anchor it named (clearFrontierRoots; a follow-up page clears nothing),
+    // and rootUrn is the first anchor — NOT the focus — so the focus's seed
+    // cursor is never touched.
+    const bulk = useCallback((anchors: string[], dir: LensWalkDir, walkFocusUrn: string, driverKey: string) => {
         void runFrontierOp(walkFocusUrn, anchors[0]!, dir, (baseModel) => ({
             urn: anchors[0]!,
             direction: dir === 'up' ? 'upstream' : 'downstream',
@@ -537,13 +580,17 @@ export function useLensWalk(
             seedUrns: anchors,
             excludeUrns: knownUrns(baseModel),
             maxNodes: WALK_PAGE_NODES,
-        }), `bulk:${dir}:${walkFocusUrn}`, { rootUrn: anchors[0]!, direction: dir, clearFrontierRoots: anchors })
+        }), `bulk:${dir}:${walkFocusUrn}`, { rootUrn: anchors[0]!, direction: dir, clearFrontierRoots: anchors }, driverKey)
     }, [runFrontierOp])
 
     // ── The driver ───────────────────────────────────────────────────────
     // Reactive loop: each merged response updates `state`, which re-runs
-    // this effect, which fires the next wave. Terminates because every
-    // request either drains what it named or advances a cursor; the
+    // this effect, which fires the next wave. Nothing on the wire promises
+    // that a page moves on, so the driver never sends the same request twice
+    // in a walk (`WalkMeta.answered`): a step whose next request was already
+    // answered — a page back with the cursor it was sent, a re-seed that left
+    // its anchors owed — is STALLED, never asked again, and the walk says so
+    // (`computeWalkProgress`). What is left moves on, so the walk ends; the
     // checkpoint and the failsafe bound it besides. A step that FAILED keeps
     // its 'error' marker and is never auto-retried — the walk stops
     // honestly instead of looping on a broken hop.
@@ -573,20 +620,33 @@ export function useLensWalk(
             // its ceiling must not stop the others being walked.
             if (meta.requests >= WALK_REQUEST_FAILSAFE) continue
             if (!meta.unbounded && entry.model.nodes.length >= checkpointNodes) continue
+            // True when `key` was already answered: instead of asking again,
+            // its steps stall.
+            const stalls = (key: string, steps: string[]): boolean => {
+                if (!meta.answered.has(key)) return false
+                patchMeta(cacheKey, m => ({ stalled: new Set([...m.stalled, ...steps]) }))
+                return true
+            }
 
             // 1. The focus's own owed contents FIRST — nothing else can
             //    complete the picture of the thing the user asked about.
-            if (entry.model.seedCursor && !entry.extendStatus.has(`seed:${focusUrn}`)) {
-                pageSeeds(focusUrn)
-                slots--
-                continue
+            const seedCursor = entry.model.seedCursor
+            if (seedCursor && !entry.extendStatus.has(`seed:${focusUrn}`)) {
+                const key = seedStepKey(focusUrn, seedCursor)
+                if (!meta.stalled.has(key) && !stalls(key, [key])) {
+                    pageSeeds(focusUrn, key)
+                    slots--
+                    continue
+                }
             }
             // 2. Paged hubs, per anchor (a cursor is per adjacency by contract).
             for (const dir of ['up', 'down'] as const) {
                 for (const fr of owedEntries(entry.model, dir, fullWalk)) {
                     if (slots <= 0) return
                     if (fr.nextCursor === null || entry.extendStatus.has(`${dir}:${fr.urn}`)) continue
-                    pageFor(focusUrn, fr.urn, dir, fr.nextCursor)
+                    const key = stepKey(dir, fr)
+                    if (meta.stalled.has(key) || stalls(key, [key])) continue
+                    pageFor(focusUrn, fr.urn, dir, fr.nextCursor, key)
                     slots--
                 }
             }
@@ -595,16 +655,18 @@ export function useLensWalk(
             for (const dir of ['up', 'down'] as const) {
                 if (slots <= 0) return
                 if (entry.extendStatus.has(`bulk:${dir}:${focusUrn}`)) continue
-                const anchors = owedEntries(entry.model, dir, fullWalk)
-                    .filter(fr => fr.nextCursor === null && !entry.extendStatus.has(`${dir}:${fr.urn}`))
-                    .map(fr => fr.urn)
+                const steps = owedEntries(entry.model, dir, fullWalk)
+                    .filter(fr => fr.nextCursor === null && !entry.extendStatus.has(`${dir}:${fr.urn}`) && !meta.stalled.has(stepKey(dir, fr)))
                     .slice(0, WALK_BATCH_SIZE)
-                if (anchors.length === 0) continue
-                bulk(anchors, dir, focusUrn)
+                if (steps.length === 0) continue
+                const anchors = steps.map(fr => fr.urn)
+                const key = `bulk:${dir}:${focusUrn}\u0000${anchors.join('\u0000')}`
+                if (stalls(key, steps.map(fr => stepKey(dir, fr)))) continue
+                bulk(anchors, dir, focusUrn, key)
                 slots--
             }
         }
-    }, [fullWalk, checkpointNodes, focusUrns, provider, state, walkMeta, pageFor, pageSeeds, bulk])
+    }, [fullWalk, checkpointNodes, focusUrns, provider, state, walkMeta, pageFor, pageSeeds, bulk, patchMeta])
 
     const computeWalkProgress = useCallback((urn: string): WalkProgress | null => {
         const cacheKey = cacheKeyFor(provider, urn)
@@ -621,8 +683,23 @@ export function useLensWalk(
         if (entry.status === 'loading') return { ...base, phase: 'loading', pending: 0 }
         if (entry.status === 'error') return { ...base, phase: 'error', pending: 0, error: entry.error }
         if (entry.status === 'unsupported') return { ...base, phase: 'done', pending: 0 }
-        const owed = owedEntries(entry.model, 'up', fullWalk).length + owedEntries(entry.model, 'down', fullWalk).length
-            + (entry.model.seedCursor ? 1 : 0)
+        // A STALLED step is not waited on. One the picture still lacks (the
+        // focus's seed page, a hub's page, a cut) is a step that failed; a
+        // stalled DEPTH entry is a partner found again after its own hop was
+        // walked (the server cannot see past the exclude cap) — nothing lost.
+        let owed = 0
+        let stalled = 0
+        for (const dir of ['up', 'down'] as const) {
+            for (const fr of owedEntries(entry.model, dir, fullWalk)) {
+                if (!meta.stalled.has(stepKey(dir, fr))) owed += 1
+                else if (fr.kind === 'cut' || fr.nextCursor !== null) stalled += 1
+            }
+        }
+        const seedCursor = entry.model.seedCursor
+        if (seedCursor) {
+            if (meta.stalled.has(seedStepKey(urn, seedCursor))) stalled += 1
+            else owed += 1
+        }
         let anyLoading = false
         let anyError = false
         for (const v of entry.extendStatus.values()) {
@@ -630,14 +707,18 @@ export function useLensWalk(
             if (v === 'error') anyError = true
         }
         if (anyLoading) return { ...base, phase: fullWalk ? 'walking' : 'seeding', pending: owed }
-        if (owed === 0) return { ...base, phase: 'done', pending: 0 }
+        if (owed === 0) {
+            return stalled === 0
+                ? { ...base, phase: 'done', pending: 0 }
+                : { ...base, phase: 'error', pending: stalled, error: 'the server returned the same page twice' }
+        }
         if (meta.requests >= WALK_REQUEST_FAILSAFE) {
-            return { ...base, phase: 'error', pending: owed, error: 'the walk did not converge' }
+            return { ...base, phase: 'error', pending: owed + stalled, error: 'the walk did not converge' }
         }
         if (!meta.unbounded && entry.model.nodes.length >= checkpointNodes) {
             return { ...base, phase: 'checkpoint', pending: owed }
         }
-        if (anyError) return { ...base, phase: 'error', pending: owed, error: entry.model.truncationReason ?? 'a step failed' }
+        if (anyError) return { ...base, phase: 'error', pending: owed + stalled, error: entry.model.truncationReason ?? 'a step failed' }
         // Candidates remain and nothing is in flight: the driver is about to
         // fire (it runs after this render).
         return { ...base, phase: fullWalk ? 'walking' : 'seeding', pending: owed }
@@ -687,6 +768,15 @@ export function useLensWalk(
             }
             if (!cleared) return prev
             return setEntry(prev, cacheKey, { ...entry, extendStatus: nextStatus })
+        })
+        // A stalled step too: forgetting what was already answered lets each
+        // one ask again — once.
+        setWalkMeta(prev => {
+            const meta = prev.get(cacheKey)
+            if (!meta || meta.stalled.size === 0) return prev
+            const next = new Map(prev)
+            next.set(cacheKey, { ...meta, answered: new Set(), stalled: new Set() })
+            return next
         })
     }, [provider])
 

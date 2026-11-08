@@ -67,10 +67,12 @@ describe('DisplayMenu', () => {
     fireEvent.click(directionSwitch)
     expect(props.onToggleEdgeDirection).not.toHaveBeenCalled()
 
-    const edgeDensityRadio = screen.getByRole('radio', { name: /adaptive/i })
+    const edgeDensityRadio = within(screen.getByRole('radiogroup', { name: 'Edge density' })).getByRole('radio', { name: /adaptive/i })
     expect(edgeDensityRadio).toBeDisabled()
     fireEvent.click(edgeDensityRadio)
     expect(props.onSetLineageRenderMode).not.toHaveBeenCalled()
+
+    expect(within(screen.getByRole('radiogroup', { name: 'While tracing' })).getByRole('radio', { name: /^Adaptive/ })).toBeDisabled()
   })
 
   it('fires onReset when display settings are non-default', () => {
@@ -115,11 +117,23 @@ describe('DisplayMenu', () => {
     expect(screen.getByText(/the most a hovered or selected entity draws/)).toBeInTheDocument()
   })
 
-  it('the Edge Density section says a trace draws every line', () => {
-    render(<DisplayMenu {...baseProps()} />)
+  it('Edge Density offers a trace its own choice, While tracing, for the view you are in', () => {
+    const props = baseProps()
+    render(<DisplayMenu {...props} />)
     fireEvent.click(screen.getByRole('button', { name: 'Display' }))
 
-    expect(screen.getByText('A trace draws every line it walks, whatever this is set to.')).toBeInTheDocument()
+    const tracing = screen.getByRole('radiogroup', { name: 'While tracing' })
+    // The suite runs in the Technical view, whose traces draw every line.
+    expect(within(tracing).getByRole('radio', { name: /^Every line/ })).toHaveAttribute('aria-checked', 'true')
+    fireEvent.click(within(tracing).getByRole('radio', { name: /^Adaptive/ }))
+    expect(usePreferencesStore.getState().traceLineMode).toEqual({ business: 'stubs', technical: 'auto' })
+    expect(within(tracing).getByRole('radio', { name: /^Adaptive/ })).toHaveAttribute('aria-checked', 'true')
+    // The canvas's own density is untouched, and a trace's budgets stay in
+    // Trace settings.
+    expect(props.onSetLineageRenderMode).not.toHaveBeenCalled()
+    expect(screen.queryByRole('slider', { name: 'Lines kept' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('slider', { name: 'Lines per card' })).not.toBeInTheDocument()
+    usePreferencesStore.getState().resetTraceLines()
   })
 
   it('Marker sides: incoming left, outgoing right by default; a choice is stored', () => {
@@ -184,7 +198,7 @@ describe('DisplayMenu — Business view', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Display' }))
 
     expect(screen.getByText('Canvas')).toBeInTheDocument()
-    expect(screen.getByRole('radio', { name: /adaptive/i })).toBeInTheDocument()
+    expect(within(screen.getByRole('radiogroup', { name: 'How many lines' })).getByRole('radio', { name: /adaptive/i })).toBeInTheDocument()
     expect(screen.queryByRole('switch', { name: /arrow markers/i })).not.toBeInTheDocument()
     expect(screen.queryByRole('radiogroup', { name: 'Marker sides' })).not.toBeInTheDocument()
     expect(screen.queryByText('Advanced')).not.toBeInTheDocument()
@@ -214,13 +228,27 @@ describe('DisplayMenu — Business view, in plain words', () => {
 
     expect(screen.getByText('How many lines')).toBeInTheDocument()
     expect(screen.getByText(/How many lines the canvas draws at once\./)).toBeInTheDocument()
-    expect(screen.getByText('A trace draws every line it walks, whatever this is set to.')).toBeInTheDocument()
+    expect(screen.getByRole('radiogroup', { name: 'While tracing' })).toBeInTheDocument()
     expect(screen.queryByText(/\((Stubs|Auto|Raw)\)/)).not.toBeInTheDocument()
     expect(screen.queryByText('Edge Budget')).not.toBeInTheDocument()
     expect(screen.getByRole('radio', { name: /All lines/ })).toBeInTheDocument()
     // Screen readers hear the same plain name.
     expect(screen.getByRole('radiogroup', { name: 'How many lines' })).toBeInTheDocument()
     expect(screen.queryByRole('radiogroup', { name: 'Edge density' })).not.toBeInTheDocument()
+  })
+
+  it('While tracing starts on On hover, and a pick is the Business view’s', () => {
+    usePersonaStore.setState({ mode: 'business' })
+    render(<DisplayMenu {...baseProps()} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Display' }))
+
+    const tracing = screen.getByRole('radiogroup', { name: 'While tracing' })
+    expect(within(tracing).getByRole('radio', { name: /^On hover/ })).toHaveAttribute('aria-checked', 'true')
+    fireEvent.click(within(tracing).getByRole('radio', { name: /^Every line/ }))
+    expect(usePreferencesStore.getState().traceLineMode).toEqual({ business: 'raw', technical: 'raw' })
+    fireEvent.click(within(tracing).getByRole('radio', { name: /^Adaptive/ }))
+    expect(usePreferencesStore.getState().traceLineMode).toEqual({ business: 'auto', technical: 'raw' })
+    usePreferencesStore.getState().resetTraceLines()
   })
 
   it('on Adaptive, offers no budget, and no ribbons or memory switch while they are off', () => {
