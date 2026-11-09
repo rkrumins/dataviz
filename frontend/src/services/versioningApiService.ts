@@ -1860,14 +1860,25 @@ export interface DeletionCascade {
   total: { nodes: number; links: number } | null
   removed: Array<ChangeListEntry & { urn?: string | null; sourceUrn?: string | null; targetUrn?: string | null }>
   restorable: boolean
+  /** `not_deleted`, `too_large`; with `into`: `draft_predates`, `recreated` or `parent_gone`. */
   reason?: string | null
+  /** With `into`: the urns it hangs from that the draft has — its old parent first, then its links'
+   *  other ends. */
+  live?: string[] | null
+  /** With `into`: the links whose other end the draft hasn't, left out of a restore. */
+  skippedLinks?: string[] | null
+  /** `parent_gone`: the old parent the draft no longer has. */
+  detail?: { parentId?: string; parentName?: string | null } | null
 }
 
+/** With `into` (a draft), also what restoring it there would meet, and whether it can be. */
 export function getDeletionCascade(
-  wsId: string, graphId: string, entityId: string, origin: ChangeListOrigin,
+  wsId: string, graphId: string, entityId: string, origin: ChangeListOrigin, into?: string | null,
 ): Promise<DeletionCascade> {
+  const sp = changeOriginParams(origin)
+  if (into) sp.set('into', into)
   return vfetch<DeletionCascade>(
-    `${base(wsId)}/graphs/${graphId}/entities/${encodeURIComponent(entityId)}/deletion/cascade?${changeOriginParams(origin)}`,
+    `${base(wsId)}/graphs/${graphId}/entities/${encodeURIComponent(entityId)}/deletion/cascade?${sp}`,
   )
 }
 

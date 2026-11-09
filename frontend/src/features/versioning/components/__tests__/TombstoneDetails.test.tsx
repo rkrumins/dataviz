@@ -21,11 +21,14 @@ vi.mock('@/services/versioningApiService', async (importOriginal) => ({
   ...api,
 }))
 vi.mock('@/components/ui/notifications', () => ({ useAppNotifications: () => ({ notify: vi.fn() }) }))
+const restoreDeletion = vi.hoisted(() => vi.fn())
+vi.mock('../../canvas/useRestoreGhost', () => ({ useRestoreDeletion: () => restoreDeletion }))
 
 import { queryClient } from '@/lib/queryClient'
 import { StaticViewSchemaProvider, type ResolvedViewSchema } from '@/providers/ViewExecutionContext'
 import { useAuthStore } from '@/store/auth'
 import { useBranchStore } from '@/store/branchStore'
+import { DEFAULT_FEATURES, useFeaturesStore } from '@/store/features'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { useVersioningPanelStore } from '@/store/versioningPanelStore'
 import { buildChangeSet, type GraphChange } from '../../model/changeModel'
@@ -70,6 +73,8 @@ beforeEach(() => {
   useBranchStore.setState({ graphId: 'g', revision: null } as never)
   useStagedChangesStore.setState({ changes: [] })
   useVersioningPanelStore.setState({ requestedTab: null, requestedCompare: null })
+  useFeaturesStore.setState({ values: { ...DEFAULT_FEATURES, versioningEnabled: true, editModeEnabled: true, revisionViewerEnabled: true } } as never)
+  restoreDeletion.mockReset().mockResolvedValue(undefined)
 })
 
 describe('TombstoneDetails', () => {
@@ -167,8 +172,25 @@ describe('TombstoneDetails', () => {
     expect(await screen.findByText('Deleted in this draft')).toBeInTheDocument()
     expect(api.getEntityDeletion).toHaveBeenCalledWith('ws', 'g', 'e-orders', { branchId: 'd1', atSeq: null, kind: 'node' })
     expect(screen.queryByRole('button', { name: 'Open just before it was deleted' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Restore into my draft' })).toBeNull()
     fireEvent.click(screen.getByRole('button', { name: 'See the change' }))
     expect(useVersioningPanelStore.getState().requestedTab).toBe('changes')
+  })
+
+  it('offers a published deletion back, into the draft, to someone who may edit it', async () => {
+    const onNavigate = vi.fn()
+    show(<TombstoneDetails target={published} onNavigate={onNavigate} />, { onCanvas: true })
+    fireEvent.click(await screen.findByRole('button', { name: 'Restore into my draft' }))
+    expect(restoreDeletion).toHaveBeenCalledWith(published, 'orders')
+    await waitFor(() => expect(onNavigate).toHaveBeenCalled())
+  })
+
+  it('offers it to no one who can’t manage the data source', async () => {
+    useAuthStore.setState({ permissions: { sid: 't', global: [], ws: { ws: ['workspace:datasource:read'] } } } as never)
+    show(<TombstoneDetails target={published} />, { onCanvas: true })
+    expect(await screen.findByText('Deleted in #42')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'See the change' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Restore into my draft' })).toBeNull()
   })
 
   it('offers nothing that moves a canvas where there is none', async () => {
@@ -176,6 +198,7 @@ describe('TombstoneDetails', () => {
     expect(await screen.findByText('Deleted in #42')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Open just before it was deleted' })).toBeNull()
     expect(screen.queryByRole('button', { name: 'See the change' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Restore into my draft' })).toBeNull()
     expect(screen.getByRole('button', { name: 'Copy URN' })).toBeInTheDocument()
   })
 })
