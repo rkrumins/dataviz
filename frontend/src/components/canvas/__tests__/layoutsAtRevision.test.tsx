@@ -246,7 +246,8 @@ describe.each([
 
     it('searches names instead, a page at a time, and reveals a hit', async () => {
         mountAtRevision(Canvas)
-        fireEvent.click(screen.getByRole('button', { name: /Open advanced search/ }))
+        expect(screen.queryByRole('button', { name: /Open advanced search/ })).toBeNull()
+        fireEvent.click(screen.getByRole('button', { name: 'Search names (⌘⇧F)' }))
         const panel = screen.getByRole('complementary', { name: 'Search names' })
         expect(panel).toHaveTextContent(AT_REVISION_READS)
 

@@ -601,6 +601,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
       <CanvasSearchTrigger
         open={advancedSearchOpen}
         onToggle={() => setAdvancedSearchOpen((v) => !v)}
+        namesOnly={!advancedSearch}
       />
       <AnimatePresence>
         {activeView?.id && advancedSearchOpen && (advancedSearch ? (

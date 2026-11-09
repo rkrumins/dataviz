@@ -1699,6 +1699,7 @@ export function GraphCanvas({ className }: { className?: string }) {
         open={advancedSearchOpen}
         onToggle={() => setAdvancedSearchOpen((v) => !v)}
         hideButton={isEdgePanelOpen}
+        namesOnly={!advancedSearch}
       />
       <AnimatePresence>
         {activeView?.id && advancedSearchOpen && (advancedSearch ? (
