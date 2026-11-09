@@ -163,6 +163,7 @@ import { defaultReferenceModelLayers } from './constants'
 import { useLayerAssignment } from '@/hooks/useLayerAssignment'
 import { useDeletionGhosts } from '@/features/versioning/canvas/useDeletionGhosts'
 import { useRestoreGhost } from '@/features/versioning/canvas/useRestoreGhost'
+import { useRevisionReveal } from '@/features/versioning/hooks/useRevisionReveal'
 import { useWithStagedDeletions } from '@/features/versioning/canvas/useDiffDecoration'
 import { useContainmentHierarchy } from '@/hooks/useContainmentHierarchy'
 import { useEdgeProjection } from '@/hooks/useEdgeProjection'
@@ -4351,6 +4352,8 @@ export function ContextViewCanvas({
     if (!isDrawnRow(nodeId)) await revealPartnersRef.current?.([nodeId], { anchoredOnly: true })
     return revealAndFocus(nodeId, revealOpts)
   }, [expandTraceChain, scrollHitIntoView, revealAndFocus, traceWriteLocked, isDrawnRow])
+  // "Open just before it was deleted" lands on the entity, revealed and selected.
+  useRevisionReveal(revealOnCanvas)
 
   // Multi-locate (T24 F5): reveal each target (expanding collapsed
   // ancestors), then walk each one through the SAME virtualizer-aware

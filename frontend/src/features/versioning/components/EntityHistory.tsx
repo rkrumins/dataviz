@@ -14,10 +14,15 @@ import { cn } from '@/lib/utils'
 import { HoverTip } from '@/components/ui/HoverTip'
 import { timeAgo, formatUtc } from '@/lib/timeAgo'
 import type { EntityRevision, RevisionChange } from '@/services/versioningApiService'
+import { useViewExecutionContext } from '@/providers/ViewExecutionContext'
+import { useBranchStore } from '@/store/branchStore'
+import { useVersioningPanelStore } from '@/store/versioningPanelStore'
 import { useEntityHistoryPages } from '../hooks/useVersioning'
+import { useRevisionViewer } from '../hooks/useRevisionViewer'
 import type { FieldDelta, GraphChange } from '../model/changeModel'
 import { actorName } from '../model/branchVocab'
 import { EntityDiff } from './EntityDiff'
+import { DeletionDetailsButton, type TombstoneTarget } from './TombstoneDetails'
 
 const OP_META: Record<string, { label: string; cls: string; Icon: ComponentType<{ className?: string }> }> = {
   create: { label: 'created', cls: 'text-emerald-500', Icon: Plus },
@@ -45,11 +50,15 @@ function asChange(entityId: string, v: EntityRevision): GraphChange {
   }
 }
 
-function Timeline({ entityId, rows, dotCls, userNames }: {
+function Timeline({ entityId, rows, dotCls, userNames, onRevision, deletionOf }: {
   entityId: string
   rows: EntityRevision[]
   dotCls: string
   userNames?: Record<string, string>
+  /** Shows what a published revision changed, on the canvas; absent where there is none. */
+  onRevision?: (seq: number) => void
+  /** A delete row's deletion, for its details; absent where they are already shown. */
+  deletionOf?: (v: EntityRevision) => TombstoneTarget
 }) {
   return (
     <ol className="relative ml-1.5 border-l border-glass-border space-y-3 pl-4">
@@ -66,6 +75,14 @@ function Timeline({ entityId, rows, dotCls, userNames }: {
               <HoverTip label={formatUtc(v.created_at)} className="inline-flex">
                 <span>{timeAgo(v.created_at)}</span>
               </HoverTip>
+              {!v.on_draft && v.commit_seq > 0 && (onRevision ? (
+                <HoverTip label={`What changed in revision #${v.commit_seq}`} className="inline-flex">
+                  <button type="button" onClick={() => onRevision(v.commit_seq)}
+                    className="font-mono tabular-nums text-accent-lineage hover:underline">#{v.commit_seq}</button>
+                </HoverTip>
+              ) : (
+                <span className="font-mono tabular-nums">#{v.commit_seq}</span>
+              ))}
               {v.after_branch_point && (
                 <span className="px-1.5 py-px rounded text-[10px] font-semibold bg-sky-500/10 text-sky-700 dark:text-sky-300">
                   after your draft began
@@ -80,6 +97,7 @@ function Timeline({ entityId, rows, dotCls, userNames }: {
                 ? <p className="text-[11px] text-ink-muted italic">What this revision changed is no longer on record.</p>
                 : <EntityDiff change={asChange(entityId, v)} />}
             </div>
+            {v.op === 'delete' && deletionOf && <DeletionDetailsButton target={deletionOf(v)} className="mt-1" />}
           </li>
         )
       })}
@@ -94,6 +112,7 @@ export function EntityHistory({
   mainBranchId,
   branchId,
   kind,
+  deletionDetails = true,
 }: {
   wsId: string
   graphId: string
@@ -102,8 +121,23 @@ export function EntityHistory({
   /** Active draft branch — its unmerged revisions for this entity are shown above the published ones. */
   branchId?: string | null
   kind?: 'node' | 'edge'
+  /** A delete row offers its deletion's details; off where they are what's around it. */
+  deletionDetails?: boolean
 }) {
   const draftId = branchId && branchId !== mainBranchId ? branchId : null
+  // A published revision's number shows what it changed, on a canvas of this graph.
+  const inView = !!useViewExecutionContext()
+  const canvasGraphId = useBranchStore((s) => s.graphId)
+  const revisionViewer = useRevisionViewer(wsId)
+  const onRevision = inView && canvasGraphId === graphId && revisionViewer
+    ? (seq: number) => useVersioningPanelStore.getState().openCompare({ fromSeq: seq - 1, toSeq: seq })
+    : undefined
+  const deletionOf = deletionDetails
+    ? (v: EntityRevision): TombstoneTarget => ({
+        wsId, graphId, entityId, kind: kind ?? 'node',
+        origin: v.on_draft ? { branchId: v.branch_id } : { fromSeq: v.commit_seq - 1, toSeq: v.commit_seq },
+      })
+    : undefined
   const q = useEntityHistoryPages(wsId, graphId, entityId, { branchId: draftId, kind })
   const all = useMemo(() => q.data?.pages.flatMap((p) => p.versions) ?? [], [q.data])
   const userNames = useMemo(
@@ -143,7 +177,8 @@ export function EntityHistory({
             <GitBranch className="w-3 h-3" />
             In this draft · not merged yet
           </div>
-          <Timeline entityId={entityId} rows={draftRows} dotCls="bg-amber-500" userNames={userNames} />
+          <Timeline entityId={entityId} rows={draftRows} dotCls="bg-amber-500" userNames={userNames}
+            onRevision={onRevision} deletionOf={deletionOf} />
         </div>
       )}
       {publishedRows.length > 0 && (
@@ -151,7 +186,8 @@ export function EntityHistory({
           {draftRows.length > 0 && (
             <div className="text-[10px] font-semibold uppercase tracking-wider text-ink-muted">Published</div>
           )}
-          <Timeline entityId={entityId} rows={publishedRows} dotCls="bg-accent-lineage" userNames={userNames} />
+          <Timeline entityId={entityId} rows={publishedRows} dotCls="bg-accent-lineage" userNames={userNames}
+            onRevision={onRevision} deletionOf={deletionOf} />
         </div>
       )}
       {q.hasNextPage && (

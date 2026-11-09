@@ -37,6 +37,7 @@ import { useSearchHighlight } from './search/useSearchHighlight'
 import { useEntityChangeDecoration, nodeDecorationClass, deletedTitle } from '@/features/versioning/canvas/useDiffDecoration'
 import { useDeletionGhosts } from '@/features/versioning/canvas/useDeletionGhosts'
 import { useRestoreGhost } from '@/features/versioning/canvas/useRestoreGhost'
+import { useRevisionReveal } from '@/features/versioning/hooks/useRevisionReveal'
 import { isGhostEdge, isGhostNode } from '@/features/versioning/canvas/deletionGhosts'
 import { DeletedChip, STATUS_META } from '@/features/versioning/components/NodeDiffBadge'
 import { useCanvasInteractions } from '@/hooks/useCanvasInteractions'
@@ -335,6 +336,8 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
       useCanvasStore.getState().pulseNode(nodeId)
     }, 100)
   }, [flatNodes, selectNode])
+  // "Open just before it was deleted" lands on the entity, revealed and selected.
+  useRevisionReveal(expandToNode)
 
   // Toggle node expansion with lazy loading
   const toggleNode = useCallback(async (nodeId: string) => {

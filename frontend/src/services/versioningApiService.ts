@@ -1807,6 +1807,70 @@ export function getEntitySummary(
   )
 }
 
+/** How an entity came to be deleted on the line being read: the revision, who deleted it (in the
+ *  draft it was published from) and who published it. `deleted` is null while the line has it. */
+export interface EntityDeletion {
+  entityId: string
+  kind: 'node' | 'edge'
+  urn?: string | null
+  deleted: {
+    seq: number
+    commitId: string
+    commitKind?: string | null
+    message?: string | null
+    at: string
+    deletedBy?: string | null
+    /** Who published it, where that is someone else. */
+    mergedBy?: string | null
+    /** When it was published, where that is another time. */
+    mergedAt?: string | null
+    /** Deleted in the draft being read, not published yet. */
+    inDraft: boolean
+  } | null
+  /** What it held when it was deleted. */
+  lastValue?: Record<string, unknown> | null
+  /** A node's ancestors as they were just before, root first. */
+  ancestors: Array<{ urn: string; displayName?: string | null; entityType?: string | null }>
+  /** An edge's ends as they were just before. */
+  ends?: { source?: { urn: string; displayName?: string | null } | null; target?: { urn: string; displayName?: string | null } | null } | null
+  userNames?: Record<string, string>
+}
+
+export function getEntityDeletion(
+  wsId: string, graphId: string, entityId: string,
+  params: { branchId?: string | null; atSeq?: number | null; kind?: 'node' | 'edge' } = {},
+): Promise<EntityDeletion> {
+  const sp = new URLSearchParams()
+  if (params.branchId) sp.set('branchId', params.branchId)
+  if (params.atSeq != null) sp.set('atSeq', String(params.atSeq))
+  if (params.kind) sp.set('kind', params.kind)
+  const qs = sp.toString()
+  return vfetch<EntityDeletion>(
+    `${base(wsId)}/graphs/${graphId}/entities/${encodeURIComponent(entityId)}/deletion${qs ? `?${qs}` : ''}`,
+  )
+}
+
+/** What a change list's removal of an entity took with it, to restore it whole: the node, the
+ *  removed subtree under it (parent first) and the removed links touching it, each with its value
+ *  before. Past its caps it is counted (`restorable: false`, `reason: 'too_large'`). */
+export interface DeletionCascade {
+  origin: ChangeListOrigin
+  root: string
+  /** Null for a change list too large to list. */
+  total: { nodes: number; links: number } | null
+  removed: Array<ChangeListEntry & { urn?: string | null; sourceUrn?: string | null; targetUrn?: string | null }>
+  restorable: boolean
+  reason?: string | null
+}
+
+export function getDeletionCascade(
+  wsId: string, graphId: string, entityId: string, origin: ChangeListOrigin,
+): Promise<DeletionCascade> {
+  return vfetch<DeletionCascade>(
+    `${base(wsId)}/graphs/${graphId}/entities/${encodeURIComponent(entityId)}/deletion/cascade?${changeOriginParams(origin)}`,
+  )
+}
+
 export function getDiff(
   wsId: string,
   graphId: string,

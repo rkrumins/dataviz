@@ -31,7 +31,12 @@ const short = (id?: string) => {
   return s.length > 30 ? `…${s.slice(-28)}` : s || '—'
 }
 
-export function CascadeImpactList({ impact, rootUrn }: { impact: CascadeImpact; rootUrn?: string }) {
+export function CascadeImpactList({ impact, rootUrn, past = false }: {
+  impact: CascadeImpact
+  rootUrn?: string
+  /** A deletion that was made, not one about to be: what it removed. */
+  past?: boolean
+}) {
   if (impact.nodeTotal <= 1 && impact.edgeTotal === 0) return null
   const childNodes = impact.nodes.filter((n) => (n.urn ?? n.entityId) !== rootUrn)
   const moreNodes = impact.nodeTotal - impact.nodes.length
@@ -45,11 +50,14 @@ export function CascadeImpactList({ impact, rootUrn }: { impact: CascadeImpact; 
     if (n.urn) names.set(String(n.urn), name)
   }
   const nameOf = (id?: string) => (id && names.get(id)) || short(id)
+  // An end goes with the relationship only when it is one of the entities removed too.
+  const gone = new Set(impact.nodes.flatMap((n) => [n.entityId, n.urn]).filter((id): id is string => !!id).map(String))
+  const endClass = (id?: string) => cn('truncate', id && gone.has(id) && STATUS_META.removed.strike)
 
   return (
     <div className="mt-2 rounded-lg border border-rose-500/20 bg-rose-500/[0.04] p-2.5 space-y-2.5">
       <p className="text-[11px] text-ink-muted">
-        Also removes{' '}
+        {past ? 'Also removed' : 'Also removes'}{' '}
         <span className="font-semibold text-rose-500 tabular-nums">{Math.max(0, impact.nodeTotal - 1)}</span>{' '}
         contained {impact.nodeTotal === 2 ? 'entity' : 'entities'} and{' '}
         <span className="font-semibold text-rose-500 tabular-nums">{impact.edgeTotal}</span>{' '}
@@ -82,9 +90,9 @@ export function CascadeImpactList({ impact, rootUrn }: { impact: CascadeImpact; 
               <li key={String(e.entityId)} className="flex items-center gap-1.5 text-[11px] text-ink-muted min-w-0">
                 <NodeDiffBadge status="removed" />
                 <span className="font-medium text-ink/80 shrink-0">{String(e.edgeType ?? 'edge')}</span>
-                <span className={cn('truncate', STATUS_META.removed.strike)} title={String(e.sourceEntityId ?? '')}>{nameOf(e.sourceEntityId)}</span>
+                <span className={endClass(e.sourceEntityId)} title={String(e.sourceEntityId ?? '')}>{nameOf(e.sourceEntityId)}</span>
                 <ArrowRight className="w-3 h-3 shrink-0" />
-                <span className={cn('truncate', STATUS_META.removed.strike)} title={String(e.targetEntityId ?? '')}>{nameOf(e.targetEntityId)}</span>
+                <span className={endClass(e.targetEntityId)} title={String(e.targetEntityId ?? '')}>{nameOf(e.targetEntityId)}</span>
               </li>
             ))}
             {moreEdges > 0 && <li className="text-[11px] text-ink-muted/80 pl-1">+ {moreEdges} more…</li>}

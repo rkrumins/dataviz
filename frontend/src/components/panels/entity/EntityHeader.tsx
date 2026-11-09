@@ -7,7 +7,7 @@
 import type { ComponentType } from 'react'
 import {
   ArrowDownRight, ArrowUpLeft, Check, Code, Copy, ExternalLink, Eye, Focus, GitBranch, GitBranchPlus,
-  Pencil, RotateCcw, SlidersHorizontal, Trash2,
+  Pencil, SlidersHorizontal,
 } from 'lucide-react'
 import { useCanvasStore } from '@/store/canvas'
 import { usePersonaMode } from '@/store/persona'
@@ -32,7 +32,7 @@ interface TraceAction {
 }
 
 export function EntityHeader({
-  nodeId, titleId, typeName, colors, confidence, title, technicalLine, isGhost, onRestore,
+  nodeId, titleId, typeName, colors, confidence, title, technicalLine, isGhost,
   onTraceUp, onTraceDown, onFullTrace, traceBlocked, onFocusConnections, copiedUrn, onCopyUrn, externalUrl,
   editable, editBlocked, dirty, onStartEditing, onClose, onFocusNode, customizing = false, onCustomize,
 }: {
@@ -44,8 +44,6 @@ export function EntityHeader({
   title: string
   technicalLine?: string
   isGhost: boolean
-  /** Absent where the canvas can't be edited: the banner says so without the button. */
-  onRestore?: () => void
   onTraceUp?: (nodeId: string) => void
   onTraceDown?: (nodeId: string) => void
   onFullTrace?: (nodeId: string) => void
@@ -114,25 +112,8 @@ export function EntityHeader({
       </h2>
       {technicalLine && <p className="text-xs font-mono text-ink-muted break-all mb-4">{technicalLine}</p>}
 
-      {isGhost ? (
-        // Committed-deletion ghost → a Restore banner takes the place of the trace and edit actions.
-        <div className="mb-4 p-3 rounded-xl bg-rose-500/10 border border-rose-500/30">
-          <div className="flex items-center gap-2 mb-1.5">
-            <Trash2 className="w-4 h-4 text-rose-500" aria-hidden />
-            <span className="text-sm font-semibold text-rose-600 dark:text-rose-400">{deletedTitle(deco) ?? 'Deleted in this draft'}</span>
-          </div>
-          <p className={cn('text-xs text-ink-muted', onRestore && 'mb-3')}>
-            {deco?.between
-              ? `In the graph at #${deco.between.fromSeq}, and gone by #${deco.between.toSeq}.`
-              : 'Removed on this branch — it disappears once the draft merges.'}
-            {onRestore && ' Restore to bring it back (nested under its parent when that parent still exists).'}
-          </p>
-          {onRestore && <Button size="sm" variant="ghost" leftIcon={RotateCcw} onClick={onRestore}
-            className="border border-rose-500/30 text-rose-600 dark:text-rose-400 hover:text-rose-700 dark:hover:text-rose-300 hover:bg-rose-500/10">
-            Restore
-          </Button>}
-        </div>
-      ) : (
+      {/* A tombstone has no lineage to trace: its details, below, take the place of these. */}
+      {!isGhost && (
         <div className="grid grid-cols-3 gap-2 mb-4">
           {traces.map(({ label, hint, icon: Icon, run, tone }) => (
             <button

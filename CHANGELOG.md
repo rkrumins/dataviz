@@ -9,6 +9,42 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Who deleted it, when, and what went with it
+
+A deleted entity said only that it was deleted. Now its details say who deleted it, when and in which
+revision, where it lived, what it held and what went with it, wherever it is seen.
+
+### Added
+
+- **A deleted entity's details.** Select a deleted entity or relationship drawn where it was, or
+  choose **Deletion details** on a deleted row of any list of changes. They show:
+  - who deleted it, when and in which revision;
+  - for a deletion published from a draft, who published it, and the message it was published with;
+  - where it lived, and what it held.
+
+  **What went with it** and its **History** unfold on request.
+- **Open just before it was deleted**, on a canvas: the graph as it was the revision before, with the
+  entity selected. Too far back, it opens the comparison with now instead.
+- **See the change**: the revision that deleted it, or your draft's **Changes**.
+- **A published revision's number links to what it changed**, in an entity's history.
+- **`GET …/entities/{eid}/deletion`** and **`GET …/entities/{eid}/deletion/cascade`** say how an
+  entity came to be deleted and what went with it. Both only read, so an API key that only reads may
+  call them.
+
+### Changed
+
+- **The drawer of a deleted entity** shows its details, and **Restore** beside them. It used to show
+  only a banner.
+- **The drawer's footer says "Deleted"**, in rose, with who and when, for an entity its line no
+  longer has.
+
+### Fixed
+
+- **A relationship deleted with an entity struck through both its ends**, in a delete's preview too,
+  even the one that is still there. Only an end that went as well is struck through now.
+
+---
+
 ## [Unreleased] — Deletions drawn where they were, in comparisons and in large drafts
 
 Two revisions compared on the canvas showed only rings: what the newer one no longer had wasn't

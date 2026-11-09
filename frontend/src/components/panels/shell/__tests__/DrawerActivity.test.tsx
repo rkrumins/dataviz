@@ -36,6 +36,12 @@ describe('DrawerActivity', () => {
     expect(screen.queryByRole('status')).not.toBeInTheDocument()
   })
 
+  it('says who deleted it, in rose, where the line no longer has it', () => {
+    render(<DrawerActivity summary={summary({ exists: false })} loading={false} wsId="ws" graphId="g" inDraft />)
+    expect(screen.getByText('Deleted · draft').closest('div')).toHaveTextContent('Bo')
+    expect(screen.queryByText(/Updated/)).toBeNull()
+  })
+
   it('calls out a change on the published graph since the draft began', () => {
     render(<DrawerActivity summary={summary({ changedOnMainSinceBranch: true })} loading={false} wsId="ws" graphId="g" inDraft />)
     expect(screen.getByRole('status')).toHaveTextContent(/Changed on the published graph since this draft began/)

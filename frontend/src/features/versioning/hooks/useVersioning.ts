@@ -43,6 +43,8 @@ export const VERSIONING_KEYS = {
     [...VERSIONING_KEYS.all, 'entity', ws, gid, eid, 'history', bid ?? 'main', scope ?? 'all'] as const,
   entitySummary: (ws?: string, gid?: string | null, eid?: string | null, bid?: string | null, withValue?: boolean) =>
     [...VERSIONING_KEYS.all, 'entity', ws, gid, eid, 'summary', bid ?? 'main', withValue ? 'value' : 'meta'] as const,
+  entityDeletion: (ws?: string, gid?: string | null, eid?: string | null, bid?: string | null, atSeq?: number | null) =>
+    [...VERSIONING_KEYS.all, 'entity', ws, gid, eid, 'deletion', bid ?? 'main', atSeq ?? 'head'] as const,
   mergeRequests: (ws?: string, gid?: string | null) =>
     [...VERSIONING_KEYS.all, 'mrs', ws, gid] as const,
   forks: (ws?: string, gid?: string | null) =>
@@ -406,6 +408,39 @@ export function useEntitySummary(
     queryFn: () => api.getEntitySummary(wsId!, graphId!, entityId!, { branchId, kind, includeValue }),
     enabled: !!wsId && !!graphId && !!entityId,
     staleTime: 15_000,
+  })
+}
+
+/** How an entity came to be deleted on the line being read (a draft, or main at `atSeq`): the
+ *  revision, who deleted it and who published it, what it held and where it lived. A few index
+ *  lookups, asked when its details are shown. */
+export function useEntityDeletion(
+  wsId: string | undefined,
+  graphId: string | null | undefined,
+  entityId: string | null | undefined,
+  opts: { branchId?: string | null; atSeq?: number | null; kind?: 'node' | 'edge'; enabled?: boolean } = {},
+) {
+  const { branchId, atSeq, kind, enabled = true } = opts
+  return useQuery({
+    queryKey: VERSIONING_KEYS.entityDeletion(wsId, graphId, entityId, branchId, atSeq),
+    queryFn: () => api.getEntityDeletion(wsId!, graphId!, entityId!, { branchId, atSeq, kind }),
+    enabled: enabled && !!wsId && !!graphId && !!entityId,
+    staleTime: 30_000,
+    ...BUSY_RETRY,
+  })
+}
+
+/** What a change list's removal of an entity took with it: asked only once it is opened. */
+export function useDeletionCascade(
+  wsId: string | undefined, graphId: string | null | undefined, entityId: string | null | undefined,
+  origin: ChangeListOrigin | null | undefined, { enabled = true }: { enabled?: boolean } = {},
+) {
+  return useQuery({
+    queryKey: [...VERSIONING_KEYS.changeList(wsId, graphId, origin), 'cascade', entityId],
+    queryFn: () => api.getDeletionCascade(wsId!, graphId!, entityId!, origin!),
+    enabled: enabled && !!wsId && !!graphId && !!entityId && !!origin,
+    staleTime: changeListStale(origin),
+    ...BUSY_RETRY,
   })
 }
 
