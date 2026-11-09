@@ -230,3 +230,43 @@ async def test_the_route_bounds_what_it_is_asked(test_client: AsyncClient):
 async def test_a_reader_that_cannot_search_names_answers_501(test_client: AsyncClient):
     resp = await _post(test_client, ContextEngine(provider=_StubProvider()), {"q": "x"})
     assert resp.status_code == 501
+
+
+class _Rows:
+    def __init__(self, rows):
+        self.result_set = rows
+
+
+@pytest.mark.parametrize("match,op", [("substring", "CONTAINS"), ("prefix", "STARTS WITH"),
+                                      ("suffix", "ENDS WITH"), ("exact", "=")])
+def test_falkordb_searches_names_by_label_in_one_order(monkeypatch, match, op):
+    """What the store is asked (the live suite runs it: test_search_names_live.py): each label
+    scanned under its own MATCH, names and qualified names compared lower-cased under the mode,
+    one fixed order, and one row past the page."""
+    from backend.app.providers.falkordb_provider import FalkorDBProvider
+
+    p = FalkorDBProvider(host="x", graph_name="g")
+
+    async def connected():
+        return None
+    asked = []
+
+    async def ro_query(cypher, params=None, **kw):
+        asked.append((cypher, params))
+        return _Rows([[u] for u in ("a", "b", "c")])
+    monkeypatch.setattr(p, "_ensure_connected", connected)
+    monkeypatch.setattr(p, "_ro_query", ro_query)
+    monkeypatch.setattr(p, "_decoded_without", lambda rows, anchors: False)
+    monkeypatch.setattr(p, "_extract_node_from_result", lambda urn: _n(urn, urn))
+
+    page = asyncio.run(p.search_names("Ord", match=match, entity_types=["Table", "View"],
+                                      limit=2, offset=4))
+    assert [n.urn for n in page.nodes] == ["a", "b"] and page.has_more and page.next_offset == 6
+    cypher, params = asked[0]
+    assert params == {"q": "ord", "skip": 4, "limit": 3}
+    assert "MATCH (n:Table) WHERE" in cypher and "MATCH (n:View) WHERE" in cypher
+    assert f"{op} $q OR toLower(toString(n.qualifiedName)) {op} $q" in cypher
+    assert cypher.endswith("ORDER BY n.displayName, n.urn, id(n) SKIP $skip LIMIT $limit RETURN n")
+
+    asyncio.run(p.search_names("Ord", match=match))
+    assert asked[1][0].startswith("MATCH (n) WHERE ")       # no type: every node

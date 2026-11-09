@@ -6725,7 +6725,7 @@ class FalkorDBProvider(GraphDataProvider):
         if not q:
             return NodePage(nodes=[], hasMore=False, nextOffset=offset)
         op = NAME_MATCH_OPS[match]
-        cond = (f"(toLower({display_name_expr(self._name_property)}) {op} $q "
+        cond = (f"(toLower({display_name_expr(getattr(self, '_name_property', None))}) {op} $q "
                 f"OR toLower(toString(n.qualifiedName)) {op} $q)")
         params = {"q": q, "skip": int(offset), "limit": int(limit) + 1}
         page = "WITH n ORDER BY n.displayName, n.urn, id(n) SKIP $skip LIMIT $limit RETURN n"
