@@ -1,7 +1,8 @@
 """One entity's audit trail, bounded: who created it and who last changed it on the line of work the
-reader is looking at (its *summary*), and its revisions, a page at a time (its *history*).
+reader is looking at (its *summary*), its revisions, a page at a time (its *history*), and who
+deleted it, what it held and where it lived (its *deletion*).
 
-Both answer for ONE entity on ONE line — ``main``, or a draft seen the way the draft sees it:
+Each answers for ONE entity on ONE line — ``main``, or a draft seen the way the draft sees it:
 ``main`` at the draft's branch point, overlaid with the draft's own edits. Every query is served by
 the per-entity index (``ix_nv_entity_hist`` / ``ix_ev_entity_hist``), so the cost follows the
 entity's own revision count, never the graph's.
@@ -33,6 +34,7 @@ __all__ = [
     "history_branches",
     "entity_views",
     "entity_summary",
+    "entity_deletion",
     "entity_history_page",
 ]
 
@@ -264,6 +266,115 @@ async def entity_summary(
             urns = await _edge_endpoint_urns(s, svc, graph_id, line, value) if kind == "edge" else {}
             views, _ = entity_views({entity_id: (kind, value)}, urns)
             out["value"] = views[entity_id]
+        return out
+
+
+async def _values_on(s, svc, graph_id: str, layers: Sequence[Tuple[str, int]],
+                     ids: Sequence[str]) -> Dict[str, Optional[dict]]:
+    """``ids``' values on a line made of ``layers`` — ``(branch, seq)``, nearest first: the first
+    layer that has a row of an id decides it."""
+    out: Dict[str, Optional[dict]] = {}
+    for branch, seq in layers:
+        rest = [i for i in ids if i not in out]
+        if rest:
+            out.update(await svc._values_at(s, graph_id, branch, rest, seq))
+    return out
+
+
+async def entity_deletion(
+    svc, *, graph_id: str, entity_id: str, containment_edge_types: Sequence[str],
+    branch_id: Optional[str] = None, at_seq: Optional[int] = None, kind: Optional[str] = None,
+) -> dict:
+    """How the entity came to be deleted on the line being read: the revision that deleted it
+    and who did, what it held then (``lastValue``) and where it lived — ``deleted: None`` while
+    the line has it.
+
+    The line's newest revision of it decides: on a draft, the draft's own when it has one (a
+    deletion not published yet is ``inDraft``), else ``main``'s at ``at_seq`` — by default where
+    the draft branched off, or ``main``'s head. ``main``'s row of a published draft names the
+    publisher, so a deletion published from a draft names the person who made it there
+    (``deletedBy``, ``at``), and the publisher as ``mergedBy`` and ``mergedAt`` where they are
+    not that person and that time. A node's ``ancestors`` (root first) are ``main``'s just before
+    it (a draft's deletion: where the draft branched off); an edge's ``ends`` as the line had
+    them just before it. A few index lookups, each bounded as a past revision's read is."""
+    from .service import _edge_src_tgt
+
+    async with svc._revision_session() as s:
+        graph, main_id, draft_id, base_seq = await _line_of(s, svc, graph_id, branch_id)
+        head = graph.main_head_commit_seq or 0
+        if at_seq is not None and at_seq > head:
+            raise ValueError(f"no revision {at_seq}: main's newest is {head}")
+        kind = await _kind_of(s, graph_id, entity_id, kind)
+        model = _MODELS[kind]
+
+        async def newest(branch: str, *, upto: Optional[int] = None, deletes: bool = False):
+            q = select(model).where(model.graph_id == graph_id, model.entity_id == entity_id,
+                                    model.branch_id == branch)
+            if upto is not None:
+                q = q.where(model.commit_seq <= upto)
+            if deletes:
+                q = q.where(model.op == "delete")
+            return (await s.execute(
+                q.order_by(model.commit_seq.desc(), model.created_at.desc()).limit(1))).scalars().first()
+
+        row = await newest(draft_id) if draft_id else None
+        if row is None:
+            row = await newest(main_id, upto=base_seq if at_seq is None else at_seq)
+        out: Dict[str, Any] = {"entityId": entity_id, "kind": kind, "urn": None, "deleted": None,
+                               "lastValue": None, "ancestors": []}
+        if row is None or row.op != "delete":
+            return out
+
+        commit = await s.get(CommitORM, (graph_id, row.commit_id))
+        deleted: Dict[str, Any] = {"seq": row.commit_seq, "commitId": row.commit_id,
+                                   "commitKind": commit.kind if commit else None,
+                                   "message": commit.message if commit else None,
+                                   "at": row.created_at, "deletedBy": row.actor}
+        if commit is not None and commit.kind == "squash_publish" and commit.source_branch_id:
+            authored = await newest(commit.source_branch_id, deletes=True)
+            if authored is not None:
+                deleted.update(at=authored.created_at, deletedBy=authored.actor)
+                if commit.actor != authored.actor:
+                    deleted["mergedBy"] = commit.actor
+                if commit.created_at != authored.created_at:
+                    deleted["mergedAt"] = commit.created_at
+        deleted["inDraft"] = row.branch_id != main_id
+        out["deleted"] = deleted
+
+        # The line just before the deletion: main's revision before it; or the draft's own rows
+        # before it, over main where the draft branched off.
+        before = ([(main_id, row.commit_seq - 1)] if row.branch_id == main_id
+                  else [(row.branch_id, row.commit_seq - 1), (main_id, base_seq)])
+        last = None
+        if row.prev_content_hash:
+            last = await s.scalar(select(model.payload).where(
+                model.graph_id == graph_id, model.entity_id == entity_id,
+                model.content_hash == row.prev_content_hash).limit(1))
+        if last is None:                   # e.g. a fork's, whose row is its parent's
+            last = (await _values_on(s, svc, graph_id, before, [entity_id])).get(entity_id)
+        out["lastValue"] = last
+
+        if kind == "edge":
+            src, tgt = _edge_src_tgt(last or {})
+            ends = await _values_on(s, svc, graph_id, before, [x for x in (src, tgt) if x])
+
+            def end(x: str) -> dict:
+                v = ends.get(x)
+                return {"urn": (v.get("urn") or f"gv:{x}") if v else x,
+                        "displayName": v.get("displayName") if v else None}
+            out["ends"] = {"source": end(src), "target": end(tgt)}
+            return out
+
+        urn = out["urn"] = (last or {}).get("urn") or f"gv:{entity_id}"
+        seq = row.commit_seq - 1 if row.branch_id == main_id else base_seq
+        chain = (await svc.ancestor_chains(
+            graph_id=graph_id, branch_id=main_id, urns=[urn],
+            containment_edge_types=containment_edge_types, as_of_seq=seq)).get(urn, [])[::-1]
+        eids = await svc._urns_to_eids(s, graph_id, main_id, chain, seq)
+        vals = await svc._values_at(s, graph_id, main_id, list(eids.values()), seq)
+        named = {u: vals.get(eid) or {} for u, eid in eids.items()}
+        out["ancestors"] = [{"urn": u, "displayName": named.get(u, {}).get("displayName"),
+                             "entityType": named.get(u, {}).get("entityType")} for u in chain]
         return out
 
 
