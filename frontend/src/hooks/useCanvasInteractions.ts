@@ -92,6 +92,9 @@ export interface UseCanvasInteractionsOptions {
     onConnectTool?: () => void
     /** ⇧⌘D on one selected entity: open Duplicate… for it. */
     onDuplicateWithOptions?: (nodeId: string) => void
+    /** Nothing here can be edited (a past revision is read-only): what would stage a change does
+     *  nothing, and the keys for it are inert. */
+    readOnly?: boolean
 }
 
 export interface UseCanvasInteractionsResult {
@@ -195,6 +198,35 @@ function edgeCreateChange(sourceUrn: string, targetUrn: string, edgeType: string
     return { optimistic, change }
 }
 
+const noop = () => {}
+
+/** The interactions of a canvas nothing can be edited on. Its write keys are made inert rather
+ *  than left out: left out, Delete would fall through to the keyboard hook's own delete. */
+function readOnlyOf(interactions: UseCanvasInteractionsResult): UseCanvasInteractionsResult {
+    return {
+        ...interactions,
+        startInlineEdit: noop,
+        saveInlineEdit: noop,
+        duplicateNode: noop,
+        deleteNode: noop,
+        createChild: noop,
+        deleteEdge: noop,
+        reverseEdge: noop,
+        stageEdgeCreate: () => null,
+        stageEdgeCreateMany: () => ({ staged: 0, rejected: [] }),
+        deleteSelected: noop,
+        duplicateSelected: noop,
+        keyboardHandlers: {
+            ...interactions.keyboardHandlers,
+            onDelete: noop,
+            onDuplicate: noop,
+            onDuplicateWithOptions: noop,
+            onCreate: noop,
+            onConnectMode: noop,
+        },
+    }
+}
+
 export function useCanvasInteractions(
     options: UseCanvasInteractionsOptions = {}
 ): UseCanvasInteractionsResult {
@@ -212,6 +244,7 @@ export function useCanvasInteractions(
         onConnectMode,
         onConnectTool,
         onDuplicateWithOptions,
+        readOnly = false,
     } = options
     
     const provider = useGraphProvider()
@@ -673,7 +706,7 @@ export function useCanvasInteractions(
         onCommandPalette: openCommandPalette,
     }
 
-    return {
+    const interactions: UseCanvasInteractionsResult = {
         state: {
             contextMenu,
             inlineEdit,
@@ -717,6 +750,7 @@ export function useCanvasInteractions(
         // Keyboard
         keyboardHandlers,
     }
+    return readOnly ? readOnlyOf(interactions) : interactions
 }
 
 export default useCanvasInteractions

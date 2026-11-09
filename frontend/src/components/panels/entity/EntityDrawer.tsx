@@ -55,6 +55,8 @@ export interface EntityDrawerProps {
   onTraceUp?: (nodeId: string) => void
   onTraceDown?: (nodeId: string) => void
   onFullTrace?: (nodeId: string) => void
+  /** Why the canvas can't trace from here; the trace actions say so, disabled. */
+  traceBlocked?: string
   /** Reveal on canvas — expands collapsed ancestors (lazy-loading if needed), then pans to it. May
    *  report a `RevealOutcome`: 'unavailable' means the walk finished and it is still not there. */
   onFocusNode?: (nodeId: string) => void | Promise<unknown>
@@ -84,7 +86,7 @@ export const EntityDrawer = memo(function EntityDrawer({ resolveNode, ...props }
 
 function OpenEntityDrawer({
   node, canEdit = false, onStartEditing, writesLocked = false, onFocusConnections, onTraceUp, onTraceDown,
-  onFullTrace, onFocusNode, onLocateMany, onRevealPath, getExternalUrl,
+  onFullTrace, traceBlocked, onFocusNode, onLocateMany, onRevealPath, getExternalUrl,
 }: Omit<EntityDrawerProps, 'resolveNode'> & { node: LineageNode }) {
   const data = node.data as Record<string, unknown>
   const typeId = (data.type as string | undefined) ?? ''
@@ -199,6 +201,7 @@ function OpenEntityDrawer({
             onTraceUp={onTraceUp}
             onTraceDown={onTraceDown}
             onFullTrace={onFullTrace}
+            traceBlocked={traceBlocked}
             onFocusConnections={onFocusConnections}
             copiedUrn={copiedUrn}
             onCopyUrn={copyUrn}
