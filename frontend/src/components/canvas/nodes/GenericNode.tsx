@@ -552,7 +552,7 @@ export const GenericNode = memo(function GenericNode({
         )}
 
         {/* Child Count for collapsed nodes */}
-        {entityData.childCount && !entityData.isExpanded && (
+        {(entityData.childCount ?? 0) > 0 && !entityData.isExpanded && (
           <div className="mt-2 text-2xs text-ink-muted">
             {entityData.childCount} {entityData.childCount === 1 ? 'child' : 'children'}
           </div>

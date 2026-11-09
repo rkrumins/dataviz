@@ -64,6 +64,7 @@ dropped it, and **Restore** left its relationships behind.
 - **A child moved to another parent could show under both parents** while the draft held its old
   link as a deletion.
 - **The graph and hierarchy layouts' legacy Save would have sent deletions as live entities.**
+- **A graph card showed a stray 0** where its entity held nothing, as every deletion drawn there does.
 
 ---
 
