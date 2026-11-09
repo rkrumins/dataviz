@@ -163,6 +163,7 @@ jobs:
             tests/integration/test_search_crash_guard_live.py \
             tests/integration/test_search_layers_live.py \
             tests/integration/test_search_generic_ontology_live.py \
+            tests/integration/test_search_names_live.py \
             tests/integration/test_search_edges_live.py -q
 
   versioning-e2e:

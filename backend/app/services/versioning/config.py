@@ -314,6 +314,22 @@ DROP_FORK_COPIES: bool = os.getenv("GRAPHVER_DROP_FORK_COPIES", "false").lower()
 # rollup read keeps), so a web process holds under 512 MB of them. An evicted delta is built again
 # on its next read: 2 to 6 s for 50,000 to 145,000 entries.
 OVERLAY_CACHE_ENTRIES: int = int(os.getenv("GRAPHVER_OVERLAY_CACHE_ENTRIES", "400000"))
+# Of those, the entries past revisions' deltas may hold: past it, opening another revision evicts
+# the least recently read revision, never a draft's or a fork's delta (a draft's evicts revisions
+# first). About 180 MB a process at the default.
+REVISION_CACHE_ENTRIES: int = int(os.getenv("GRAPHVER_REVISION_CACHE_ENTRIES", "150000"))
+# Past revisions a web process puts together at once (each up to REVISION_REWIND_MAX entities
+# classified, 2 to 6 s), and how long another waits for a turn before it is told to try again
+# (503 revision_busy). Readers of a revision already being put together wait for it without a turn.
+REVISION_BUILDS_MAX: int = int(os.getenv("GRAPHVER_REVISION_BUILDS_MAX", "2"))
+REVISION_BUILD_WAIT_MS: int = int(os.getenv("GRAPHVER_REVISION_BUILD_WAIT_MS", "3000"))
+# Longest one statement reading a past revision may run (its plan, putting it together, the values
+# a page shows, its searches and traces) before Postgres cancels it: 503 revision_busy, retryable.
+# A plan's count that runs this long is taken as too far back to draw.
+REVISION_STATEMENT_TIMEOUT_MS: int = int(os.getenv("GRAPHVER_REVISION_STATEMENT_TIMEOUT_MS", "15000"))
+# Entities a whole-state read (a branch's state as of a revision, a commit's state) may assemble in
+# a web process before it is refused (409 state_too_large); an export streams any size.
+STATE_READ_MAX: int = int(os.getenv("GRAPHVER_STATE_READ_MAX", "50000"))
 
 # Default per-data-source audit tier (plan decision #8): commit_only | full_wip.
 DEFAULT_AUDIT_TIER: str = os.getenv("GRAPHVER_DEFAULT_AUDIT_TIER", "commit_only")

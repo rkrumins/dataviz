@@ -9,6 +9,79 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — The graph as it was: name search and lineage traces, within bounds
+
+Reading the published graph as it was at a past revision (`?asOfSeq`, still the
+`revisionViewerEnabled` preview) now answers name searches and lineage closures exactly. It also
+stays within bounds: no read of the past can hold FalkorDB's slots, pile up builds or run
+unbounded.
+
+### Added
+
+- **Name search at a revision**: `POST /graph/search/names`.
+  - It matches each node's name or qualified name, ignoring case, by substring, prefix, suffix or
+    exact match, optionally narrowed by entity type.
+  - A page holds at most 50 hits and reaches 1,000 deep. Each hit carries its ancestors, root
+    first.
+  - At a revision, whatever changed since is judged by its name then.
+  - It works on main and drafts too while their FalkorDB copy is current. While it catches up it
+    answers as Advanced Search does: 503 while the graph loads, else 501. API keys can call it.
+- **Lineage closures at a revision**: `/trace/closure` with `?asOfSeq` walks the flows as they ran
+  then. Advanced Search and rolled-up traces still answer 501 at a revision.
+- **Settings**:
+  - `GRAPHVER_REVISION_STATEMENT_TIMEOUT_MS` (15,000);
+  - `GRAPHVER_REVISION_BUILDS_MAX` (2);
+  - `GRAPHVER_REVISION_BUILD_WAIT_MS` (3,000);
+  - `GRAPHVER_REVISION_CACHE_ENTRIES` (150,000);
+  - `GRAPHVER_STATE_READ_MAX` (50,000).
+
+### Changed
+
+- **A past revision is put together before its read takes a FalkorDB slot.**
+  - At most two are put together at once per process. A third waits up to 3 s, then answers
+    **503 `revision_busy`** with `Retry-After`. A reader of a revision already being put together
+    waits for that one.
+  - Revisions keep to their own share of the delta cache, so opening them never evicts a draft's.
+- **Every statement reading the past is bounded** by the revision statement timeout: past it,
+  503 `revision_busy` (retryable). A revision that takes longer than that to count is "too far
+  back", for that head.
+- **"Since then"** is summed in Postgres, not by reading every commit row in the window.
+- **The Postgres reader's closures** (a projection catching up) now report what they didn't
+  finish, as FalkorDB's do:
+  - the next hop past the requested depth;
+  - what the node budget or the deadline cut, which the Lens re-roots from.
+
+  Each re-root finds more, and the deadline is honoured.
+- **Reads over Postgres** (drafts, and main while its projection catches up) resolve urns in one
+  batched read, not one lookup per urn.
+
+### Fixed
+
+- **A re-pointed edge served for its old end.** An edge re-pointed since a revision, or in a
+  draft, was returned for a query on its current end with its other value. A canvas or a trace
+  could follow it to the wrong place.
+- **The state cap counted only today's entities.** A whole state as of a revision held to it
+  could hold more than the cap: what had been deleted since never counted.
+
+### Upgrading
+
+- `…/branches/{bid}/state` and `…/commits/{cid}/state` answer **409 `state_too_large`** past
+  50,000 entities. Export instead (`POST …/exports`, with `asOfSeq` for the past), which streams
+  any size.
+- `…/branches/{bid}/diff` answers **409 `too_large_for_tree`** past `GRAPHVER_DIFF_TREE_MAX_CHANGES`.
+  Page it as a change list.
+
+### Known limitations
+
+- A name search at a revision doesn't search inside one container; it searches the whole graph.
+- Node degrees at a revision answer 501 while the projection catches up, as main's do; the canvas
+  asks again later.
+- Right after a burst of writes, before Postgres has refreshed its statistics, reading the past
+  can be several times slower. In one measurement, a 10,000-change revision took 24 s to put
+  together, against 0.5 s afterwards. The bounds hold while it lasts.
+
+---
+
 ## [Unreleased] — Business view: every draft action, plain words for readers, a new view switch and Minimal rows
 
 Business users can now do everything in a draft without switching to Technical. Readers get plain

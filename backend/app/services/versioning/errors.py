@@ -260,6 +260,31 @@ class ChangeListBusy(_HttpMapped, RuntimeError):
                          {"Retry-After": str(retry_after)})
 
 
+class StateTooLarge(_HttpMapped, RuntimeError):
+    """A read of a whole state — a branch's, as of a revision or a commit — holding more than
+    ``GRAPHVER_STATE_READ_MAX`` entities: too large to assemble in one response. An export
+    streams any size (``POST …/exports``, with ``asOfSeq`` for the past)."""
+
+    def __init__(self, entities: int, limit: int):
+        super().__init__(
+            f"this state has more than {limit} entities; export it instead, which streams any size",
+            {"type": "state_too_large", "entities": entities, "limit": limit})
+
+
+class RevisionBusy(_HttpMapped, RuntimeError):
+    """A read of a past revision that couldn't be answered in time: one of its statements ran past
+    ``GRAPHVER_REVISION_STATEMENT_TIMEOUT_MS`` and Postgres cancelled it, or every slot for
+    putting a revision together was in use for longer than the wait allows. Busy, not down:
+    the reader may retry. ``reason`` says which."""
+
+    status_code = 503
+
+    def __init__(self, reason: str, retry_after: int = 5):
+        super().__init__("the graph as it was is taking too long to prepare; try again in a moment",
+                         {"type": "revision_busy", "reason": reason, "retryable": True},
+                         {"Retry-After": str(retry_after)})
+
+
 class JobActive(_HttpMapped, RuntimeError):
     """Another job of the same kind is already running on this branch.
     Same shape as ``BootstrapConflict``'s ``job_active``."""
@@ -578,7 +603,8 @@ class ReviewRequired(_HttpMapped, RuntimeError):
 
 HTTP_MAPPED = (BranchNotOpen, MainWriteForbidden, NotDraftOwner, DraftRoleRequired, SelfReview,
                PersonRequired, GroupsUnavailable, IneligibleMember, ServiceAccountMember, HeadMoved,
-               LockBusy, ChangeListBusy, RevisionUnsupported, RevisionTooFar, RevisionReadOnly,
+               LockBusy, ChangeListBusy, RevisionBusy, RevisionUnsupported, RevisionTooFar,
+               RevisionReadOnly, StateTooLarge,
                JobActive, CurationAtRisk, MassDeleteBlocked, ForkLimit, NotAFork, LiveForks,
                ForkNotRestorable, GraphMoved, ProjectionNotAdopted, ProjectionAlreadyAdopted,
                ProjectionPassInFlight, ProjectionKeyInUse,

@@ -613,7 +613,10 @@ def test_a_forks_delta_keeps_its_patch_set_compact_for_the_next_extension():
     import copy as _copy
     raw = {"nodesUpsert": [{"urn": "N", "entityId": "eN", "entityType": "Table", "displayName": "N",
                             "qualifiedName": None, "lazy": True}],
-           "nodesModified": [{"entityId": "e1", "urn": "A.c"}],
+           "nodesModified": [{"entityId": "e1", "urn": "A.c", "entityType": "Column",
+                              "displayName": "c", "qualifiedName": "A.c"},
+                             {"entityId": "e4", "urn": "B.d", "entityType": "Column",
+                              "displayName": "d", "qualifiedName": None, "baseUrn": "B.e"}],
            "nodesRemove": [{"entityId": "e2", "urn": "B.c"}],
            "edgesUpsert": [{"id": "f1", "sourceUrn": "A.c", "targetUrn": "N", "edgeType": "FLOWS",
                             "lazy": True},
@@ -625,7 +628,7 @@ def test_a_forks_delta_keeps_its_patch_set_compact_for_the_next_extension():
     d = _OverlayDelta(_copy.deepcopy(raw), ["CONTAINS"])
     kept = [x for key in ("nodesUpsert", "nodesModified", "nodesRemove", "edgesUpsert", "edgesRemove")
             for x in d.raw[key]]
-    assert len(kept) == 6 and not any(isinstance(x, dict) for x in kept)
+    assert len(kept) == 7 and not any(isinstance(x, dict) for x in kept)
     from backend.app.providers.draft_overlay_provider import _unkept
     assert _unkept(d.raw) == raw
     assert _OverlayDelta(_copy.deepcopy({**raw, "since": None}), ["CONTAINS"]).raw is None  # a draft's

@@ -688,11 +688,16 @@ Drafts and commits, projection into the graph store, and import and export.
 | `GRAPHVER_REBUILD_LOCK_TTL` | `120` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_REBUILD_TIMEOUT_SECS` | `900` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_RESYNC_MAX_ENTITIES` | `250000` | `backend/app/services/versioning/config.py` |
+| `GRAPHVER_REVISION_BUILDS_MAX` | `2` | `backend/app/services/versioning/config.py` |
+| `GRAPHVER_REVISION_BUILD_WAIT_MS` | `3000` | `backend/app/services/versioning/config.py` |
+| `GRAPHVER_REVISION_CACHE_ENTRIES` | `150000` | `backend/app/services/versioning/config.py` |
+| `GRAPHVER_REVISION_STATEMENT_TIMEOUT_MS` | `15000` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_SCHEMA` | `graphver` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_SET_FIELDS` | `tags` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_SQUASH_PAGE` | `20000` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_SQUASH_PAGED_ABOVE` | `200000` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_STANDARD_IDLE_SECS` | `604800` | `backend/app/services/versioning/config.py` |
+| `GRAPHVER_STATE_READ_MAX` | `50000` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_SYNC_DELETE_MAX_ABS` | `500` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_SYNC_DELETE_MAX_FRACTION` | `0.05` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_SYNC_PUBLISH_MAX_CHANGES` | `20000` | `backend/app/services/versioning/config.py` |

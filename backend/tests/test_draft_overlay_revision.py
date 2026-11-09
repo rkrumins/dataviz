@@ -4,8 +4,8 @@ A revision is ``main``'s store at its head with the patch set of everything main
 back over it (``GraphVersioningService.revision_overlay_delta``): what changed is loaded as it was
 then, what was made since is gone, and what was deleted since is back. Its delta is a line of its
 own per revision, extended when the head moves; its ancestors are walked at the revision; its reads
-take the store's admission slots. It never answers from the graph as it is now — search and traces
-refuse — and it is read-only. A rollup under containment that moved since says it may be stale.
+take the store's admission slots. It never answers from the graph as it is now — Advanced Search
+and rolled-up traces refuse (name search and closures walk its own reads) — and it is read-only. A rollup under containment that moved since says it may be stale.
 """
 import asyncio
 import itertools
@@ -162,7 +162,6 @@ def test_a_revision_refuses_what_it_would_answer_from_the_graph_as_it_is_now():
         await refused(p.deep_search_session(None, context=None))
         await refused(p.trace_at_level("A", 1, 1, 1, [], [], 10, 100))
         await refused(p.expand_aggregated("A", "B", None, [], [], 10, 100))
-        await refused(p.trace_closure("A", 1, 1, [], [], 10, 100))
 
     asyncio.run(run())
 
