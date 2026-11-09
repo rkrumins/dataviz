@@ -4506,9 +4506,14 @@ async def batch_commands(
     stops on the first failure and returns partial results. If fail_fast=false,
     all commands are attempted and results are collected.
 
-    A busy graph (LockBusy) is a 503 only while no command has committed;
-    after that it is the failing command's result and the batch stops.
-    So is a graph that is not writable (GraphNotWritable), as a 409.
+    On a versioned graph the commands that succeed land as ONE commit, so
+    history shows the batch as the one change it is. A busy graph (LockBusy,
+    503) or one that is not writable (GraphNotWritable, 409) then lands none
+    of them, and the batch can be sent again as it was. If the store refuses
+    the batch as a whole, its commands run again one at a time, each its own
+    commit, so each result says whether that command landed: a busy graph is
+    then a 503 only while no command has committed, and after that it is the
+    failing command's result and the batch stops.
 
     All node/edge mutations are validated against the active ontology before
     any write is attempted.  Validation failures count as command failures.
@@ -4516,92 +4521,114 @@ async def batch_commands(
     from backend.common.models.graph import CreateNodeRequest as _CNR, CreateEdgeRequest as _CER
     from backend.common.models.graph import UpdateEdgeRequest as _UER
 
-    results: List[BatchCommandResult] = []
-    succeeded = 0
-    failed = 0
+    from backend.app.providers import write_batch
+    from backend.app.providers.versioned_write_provider import VersioningNotEnabled
 
-    for cmd in request.commands:
-        try:
-            if cmd.op == "create_node":
-                node_req = _CNR(**cmd.payload)
-                res = await engine.create_node(node_req)
-                if res.success:
-                    succeeded += 1
-                    results.append(BatchCommandResult(
-                        ref=cmd.ref, op=cmd.op, success=True,
-                        createdUrn=res.node.urn if res.node else None,
-                    ))
-                else:
-                    failed += 1
-                    results.append(BatchCommandResult(
-                        ref=cmd.ref, op=cmd.op, success=False, error=res.error,
-                    ))
-            elif cmd.op == "create_edge":
-                edge_req = _CER(**cmd.payload)
-                res = await engine.create_edge(edge_req)
-                if res.success:
-                    succeeded += 1
-                    results.append(BatchCommandResult(
-                        ref=cmd.ref, op=cmd.op, success=True,
-                        createdEdgeId=res.edge.id if res.edge else None,
-                    ))
-                else:
-                    failed += 1
-                    results.append(BatchCommandResult(
-                        ref=cmd.ref, op=cmd.op, success=False, error=res.error,
-                        warnings=res.warnings,
-                    ))
-            elif cmd.op == "delete_edge":
-                edge_id = cmd.payload.get("edgeId") or cmd.payload.get("edge_id", "")
-                ok = await engine.delete_edge(edge_id)
-                if ok:
-                    succeeded += 1
-                    results.append(BatchCommandResult(ref=cmd.ref, op=cmd.op, success=True))
+    async def run_commands():
+        results: List[BatchCommandResult] = []
+        succeeded = 0
+        failed = 0
+
+        for cmd in request.commands:
+            try:
+                if cmd.op == "create_node":
+                    node_req = _CNR(**cmd.payload)
+                    res = await engine.create_node(node_req)
+                    if res.success:
+                        succeeded += 1
+                        results.append(BatchCommandResult(
+                            ref=cmd.ref, op=cmd.op, success=True,
+                            createdUrn=res.node.urn if res.node else None,
+                        ))
+                    else:
+                        failed += 1
+                        results.append(BatchCommandResult(
+                            ref=cmd.ref, op=cmd.op, success=False, error=res.error,
+                        ))
+                elif cmd.op == "create_edge":
+                    edge_req = _CER(**cmd.payload)
+                    res = await engine.create_edge(edge_req)
+                    if res.success:
+                        succeeded += 1
+                        results.append(BatchCommandResult(
+                            ref=cmd.ref, op=cmd.op, success=True,
+                            createdEdgeId=res.edge.id if res.edge else None,
+                        ))
+                    else:
+                        failed += 1
+                        results.append(BatchCommandResult(
+                            ref=cmd.ref, op=cmd.op, success=False, error=res.error,
+                            warnings=res.warnings,
+                        ))
+                elif cmd.op == "delete_edge":
+                    edge_id = cmd.payload.get("edgeId") or cmd.payload.get("edge_id", "")
+                    ok = await engine.delete_edge(edge_id)
+                    if ok:
+                        succeeded += 1
+                        results.append(BatchCommandResult(ref=cmd.ref, op=cmd.op, success=True))
+                    else:
+                        failed += 1
+                        results.append(BatchCommandResult(
+                            ref=cmd.ref, op=cmd.op, success=False,
+                            error=f"Edge '{edge_id}' not found",
+                        ))
                 else:
                     failed += 1
                     results.append(BatchCommandResult(
                         ref=cmd.ref, op=cmd.op, success=False,
-                        error=f"Edge '{edge_id}' not found",
+                        error=f"Unsupported op: {cmd.op}",
                     ))
-            else:
+            except LockBusy as exc:
+                if succeeded == 0:
+                    raise                              # nothing landed: 503 + Retry-After is safe to retry
+                # Earlier commands committed, so a 503 would get them resent. Report which
+                # landed and stop, even when fail_fast=false: the graph is busy.
                 failed += 1
                 results.append(BatchCommandResult(
-                    ref=cmd.ref, op=cmd.op, success=False,
-                    error=f"Unsupported op: {cmd.op}",
+                    ref=cmd.ref, op=cmd.op, success=False, error=f"lock_busy (retryable): {exc}",
                 ))
-        except LockBusy as exc:
-            if succeeded == 0:
-                raise                              # nothing landed: 503 + Retry-After is safe to retry
-            # Earlier commands committed, so a 503 would get them resent. Report which
-            # landed and stop, even when fail_fast=false: the graph is busy.
-            failed += 1
-            results.append(BatchCommandResult(
-                ref=cmd.ref, op=cmd.op, success=False, error=f"lock_busy (retryable): {exc}",
-            ))
-            for skipped in request.commands[len(results):]:
+                for skipped in request.commands[len(results):]:
+                    results.append(BatchCommandResult(
+                        ref=skipped.ref, op=skipped.op, success=False,
+                        error="Skipped: graph busy; retry only the commands that did not succeed",
+                    ))
+                break
+            except Exception as exc:
+                from backend.app.providers.versioned_write_provider import VersioningNotEnabled
+                if isinstance(exc, (GraphNotWritable, VersioningNotEnabled)) and succeeded == 0:
+                    raise                              # nothing landed: the 409 says why
+                failed += 1
                 results.append(BatchCommandResult(
-                    ref=skipped.ref, op=skipped.op, success=False,
-                    error="Skipped: graph busy; retry only the commands that did not succeed",
+                    ref=cmd.ref, op=cmd.op, success=False, error=str(exc),
                 ))
-            break
-        except Exception as exc:
-            from backend.app.providers.versioned_write_provider import VersioningNotEnabled
-            if isinstance(exc, (GraphNotWritable, VersioningNotEnabled)) and succeeded == 0:
-                raise                              # nothing landed: the 409 says why
-            failed += 1
-            results.append(BatchCommandResult(
-                ref=cmd.ref, op=cmd.op, success=False, error=str(exc),
-            ))
 
-        if request.fail_fast and failed > 0:
-            # Fill remaining commands as skipped
-            remaining = request.commands[len(results):]
-            for skipped in remaining:
-                results.append(BatchCommandResult(
-                    ref=skipped.ref, op=skipped.op, success=False,
-                    error="Skipped: batch aborted due to earlier failure (fail_fast=true)",
-                ))
-            break
+            if request.fail_fast and failed > 0:
+                # Fill remaining commands as skipped
+                remaining = request.commands[len(results):]
+                for skipped in remaining:
+                    results.append(BatchCommandResult(
+                        ref=skipped.ref, op=skipped.op, success=False,
+                        error="Skipped: batch aborted due to earlier failure (fail_fast=true)",
+                    ))
+                break
+        return results, succeeded, failed
+
+    # One commit for the whole batch: the versioned provider holds each command's write, and they
+    # land together below (write_batch). A batch the store refuses as a whole — the ontology, an
+    # edge whose end another command removed — runs again one command at a time, as before, so
+    # each says whether it landed.
+    with write_batch.deferring() as batch:
+        results, succeeded, failed = await run_commands()
+    if batch.ops:
+        try:
+            await batch.owner.commit_deferred(
+                batch.drain(), f"batch: {succeeded} command" + ("" if succeeded == 1 else "s"))
+        except (LockBusy, GraphNotWritable, VersioningNotEnabled):
+            raise                                  # nothing landed: the 503 / 409 says why
+        except Exception:
+            logger.info("batch of %d commands refused as one commit; running them one by one",
+                        len(request.commands), exc_info=True)
+            results, succeeded, failed = await run_commands()
 
     # Batch mutations change graph content just like the single-command
     # endpoints — invalidate the response cache + nudge the counts poll.

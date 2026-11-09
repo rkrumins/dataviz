@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
+from backend.app.providers import write_batch
 from backend.common.interfaces.provider import resolve_identities_by_query
 from backend.common.property_patch import apply_patch
 from backend.common.models.graph import (
@@ -104,6 +105,9 @@ class VersionedBranchProvider:
 
     # ---- reads: bounded Postgres over base + overlay -------------------- #
     async def get_node(self, urn: str) -> Optional[GraphNode]:
+        held = write_batch.node(urn)                     # made earlier in this request's batch
+        if held is not None:
+            return held
         d = await self._svc.get_node_from_state(
             graph_id=self._gid, branch_id=self._branch, as_of_seq=self._as_of, urn=urn,
             containment_edge_types=self._containment_types)
@@ -681,9 +685,18 @@ class VersionedBranchProvider:
             containment_edge_types=self._containment_types, as_of_seq=self._as_of)
 
     # ---- writes: one audited commit on this branch via apply_ops -------- #
-    async def _commit(self, ops: List[dict], message: str, from_client: bool = True) -> Optional[str]:
+    async def _commit(self, ops: List[dict], message: str, from_client: bool = True,
+                      defer: bool = True) -> Optional[str]:
         if self._as_of is not None:
             raise PermissionError("cannot write to a historical (as-of) view")
+        # Inside a write batch (write_batch), held for its one commit; ``defer`` False commits what
+        # the batch holds with these ops, in order.
+        batch = write_batch.current()
+        if batch is not None and from_client:
+            if defer and batch.take(self, ops):
+                return None
+            if batch.owner is self:
+                ops = batch.drain() + ops
         # allow_main: ContextEngine serves a stale main through this provider, and its writes are
         # the ordinary main write-through (a draft id is unaffected by the flag). from_client: the
         # graph API names a node by its urn, which an imported node's id is not; a create never
@@ -700,12 +713,18 @@ class VersionedBranchProvider:
             ops.append({"op": "create", "entity_kind": "edge", "entity_id": containment_edge.id,
                         "payload": _edge_payload(containment_edge)})
         await self._commit(ops, f"create node {node.urn}")
+        write_batch.held(node, containment_edge)
         return True
 
     async def create_edge(self, edge: GraphEdge) -> bool:
         await self._commit([{"op": "create", "entity_kind": "edge", "entity_id": edge.id,
                              "payload": _edge_payload(edge)}], f"create edge {edge.id}")
+        write_batch.held(None, edge)
         return True
+
+    async def commit_deferred(self, ops: List[dict], message: str) -> Optional[str]:
+        """Commit a write batch's ops (:mod:`.write_batch`) as one commit."""
+        return await self._commit(ops, message, defer=False)
 
     async def update_edge(self, edge_id: str, properties: Dict[str, Any]) -> Optional[GraphEdge]:
         # The id names the edge it resolves to — never a node that shares it (resolve_edges).
@@ -727,6 +746,10 @@ class VersionedBranchProvider:
             properties=payload.get("properties") or {})
 
     async def delete_edge(self, edge_id: str) -> bool:
+        if write_batch.has_edge(edge_id):              # made earlier in this batch: not stored yet
+            await self._commit([{"op": "delete", "entity_kind": "edge", "entity_id": edge_id,
+                                 "payload": None}], f"delete edge {edge_id}")
+            return True
         found = (await self._svc.resolve_edges(
             graph_id=self._gid, edge_ids=[edge_id], branch_id=self._branch)).get(edge_id)
         if found is None:
