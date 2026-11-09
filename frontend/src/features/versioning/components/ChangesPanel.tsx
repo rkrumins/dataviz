@@ -15,9 +15,13 @@ import type { ChangeKind, ChangeSet, ChangeStatus, GraphChange } from '../model/
 import { STATUS_META, NodeDiffBadge } from './NodeDiffBadge'
 import { EntityDiff } from './EntityDiff'
 import { edgeEnds } from '../canvas/deletionGhosts'
+import type { ChangeListOrigin } from '@/services/versioningApiService'
+import { DeletionDetailsButton } from './TombstoneDetails'
 
 /** An entity by name where the change set has it, else the end of its id. */
 type NameOf = (id: string) => string
+/** The graph a set's changes are in, for a deletion's details. */
+type Details = { wsId: string; graphId: string }
 const idTail = (id: string) => (id.length > 24 ? `…${id.slice(-22)}` : id)
 
 const STATUS_ORDER: ChangeStatus[] = ['added', 'modified', 'removed']
@@ -38,14 +42,22 @@ function group(changes: GraphChange[]): Grouped {
   return out
 }
 
+/** The change list a change is in: a draft, or main between two revisions. */
+const listOrigin = (c: GraphChange): ChangeListOrigin | null =>
+  c.origin.source === 'branch' ? { branchId: c.origin.branchId }
+    : c.origin.source === 'compare' ? { fromSeq: c.origin.fromSeq, toSeq: c.origin.toSeq }
+      : null
+
 function ChangeRow({
   change,
   onDiscard,
   nameOf,
+  details,
 }: {
   change: GraphChange
   onDiscard?: (stagedChangeId: string) => void
   nameOf: NameOf
+  details?: Details
 }) {
   const [open, setOpen] = useState(false)
   const meta = STATUS_META[change.status]
@@ -55,6 +67,8 @@ function ChangeRow({
     ? `${change.label} · ${nameOf(ends.source)} → ${nameOf(ends.target)}`
     : change.label
   const canDiscard = onDiscard && change.origin.source === 'staged'
+  // A saved deletion offers who deleted it and what went with it.
+  const deletedIn = details && change.status === 'removed' ? listOrigin(change) : null
   return (
     <div className={cn('rounded-lg border-l-2 bg-canvas-overlay/40', meta.accent)}>
       <div className="flex items-center gap-2 px-2.5 py-1.5">
@@ -89,6 +103,10 @@ function ChangeRow({
       {open && (
         <div className="px-2.5 pb-2 pl-7">
           <EntityDiff change={change} />
+          {details && deletedIn && (
+            <DeletionDetailsButton className="mt-1.5"
+              target={{ ...details, entityId: change.entityId, kind: change.kind, origin: deletedIn, label }} />
+          )}
         </div>
       )}
     </div>
@@ -99,17 +117,19 @@ function StatusRows({
   items,
   onDiscard,
   nameOf,
+  details,
 }: {
   items: GraphChange[]
   onDiscard?: (stagedChangeId: string) => void
   nameOf: NameOf
+  details?: Details
 }) {
   const [shown, setShown] = useState(ROWS_SHOWN)
   const rest = items.length - shown
   return (
     <div className="space-y-1">
       {items.slice(0, shown).map((c) => (
-        <ChangeRow key={c.entityId} change={c} onDiscard={onDiscard} nameOf={nameOf} />
+        <ChangeRow key={c.entityId} change={c} onDiscard={onDiscard} nameOf={nameOf} details={details} />
       ))}
       {rest > 0 && (
         <button
@@ -129,11 +149,13 @@ function KindGroup({
   byStatus,
   onDiscard,
   nameOf,
+  details,
 }: {
   kind: ChangeKind
   byStatus: Record<ChangeStatus, GraphChange[]>
   onDiscard?: (stagedChangeId: string) => void
   nameOf: NameOf
+  details?: Details
 }) {
   if (STATUS_ORDER.every((s) => byStatus[s].length === 0)) return null
   return (
@@ -154,7 +176,7 @@ function KindGroup({
                 </span>
                 <span className="text-[11px] text-ink-muted tabular-nums">{items.length.toLocaleString()}</span>
               </div>
-              <StatusRows items={items} onDiscard={onDiscard} nameOf={nameOf} />
+              <StatusRows items={items} onDiscard={onDiscard} nameOf={nameOf} details={details} />
             </div>
           )
         })}
@@ -168,12 +190,15 @@ export function ChangesPanel({
   onDiscard,
   className,
   emptyHint = 'No changes yet.',
+  details,
 }: {
   changeSet: ChangeSet
   /** Provided only for staged (discardable) change sets. */
   onDiscard?: (stagedChangeId: string) => void
   className?: string
   emptyHint?: string
+  /** The graph of a saved set: its deletions offer their details. */
+  details?: Details
 }) {
   const grouped = useMemo(() => group(changeSet.changes), [changeSet])
   const nameOf = useCallback<NameOf>((id) => changeSet.byEntityId.get(id)?.label ?? idTail(id), [changeSet])
@@ -188,8 +213,8 @@ export function ChangesPanel({
 
   return (
     <div className={cn('space-y-4', className)}>
-      <KindGroup kind="node" byStatus={grouped.node} onDiscard={onDiscard} nameOf={nameOf} />
-      <KindGroup kind="edge" byStatus={grouped.edge} onDiscard={onDiscard} nameOf={nameOf} />
+      <KindGroup kind="node" byStatus={grouped.node} onDiscard={onDiscard} nameOf={nameOf} details={details} />
+      <KindGroup kind="edge" byStatus={grouped.edge} onDiscard={onDiscard} nameOf={nameOf} details={details} />
     </div>
   )
 }

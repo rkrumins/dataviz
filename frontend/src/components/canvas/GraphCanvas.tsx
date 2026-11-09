@@ -58,6 +58,7 @@ import { useViewLibrary } from '@/hooks/useViewLibrary'
 import { useEffectiveBranchId } from '@/store/branchStore'
 import { useWithStagedDeletions, isDeletedEdge, DELETED_LINE } from '@/features/versioning/canvas/useDiffDecoration'
 import { useDeletionGhosts } from '@/features/versioning/canvas/useDeletionGhosts'
+import { useRevisionReveal } from '@/features/versioning/hooks/useRevisionReveal'
 import { isGhostEdge, isGhostNode } from '@/features/versioning/canvas/deletionGhosts'
 import { CanvasSearchTrigger } from './search/CanvasSearchTrigger'
 import { RevisionNameSearchPanel } from './search/RevisionNameSearchPanel'
@@ -723,6 +724,8 @@ export function GraphCanvas({ className }: { className?: string }) {
       })
     },
   })
+  // "Open just before it was deleted" lands on the entity, revealed and selected.
+  useRevisionReveal(revealAndFocus)
 
   // Multi-locate: reveal a batch of targets in parallel, then fit the
   // viewport so all of them are on screen. Each reveal runs the same

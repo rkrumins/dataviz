@@ -25,6 +25,7 @@ import type {
 import { useChangeEntries, useChangeEntry, useChangeSummary } from '../hooks/useVersioning'
 import type { GraphChange } from '../model/changeModel'
 import { EntityDiff } from './EntityDiff'
+import { DeletionDetailsButton } from './TombstoneDetails'
 import { NodeDiffBadge, STATUS_META } from './NodeDiffBadge'
 
 const STATUSES: ChangeListStatus[] = ['added', 'modified', 'removed']
@@ -341,7 +342,14 @@ function RowDetail({ wsId, graphId, origin, row }: {
       ? { source: 'branch', branchId: origin.branchId }
       : { source: 'compare', fromSeq: origin.fromSeq, toSeq: origin.toSeq },
   }
-  return <EntityDiff change={change} />
+  if (change.status !== 'removed') return <EntityDiff change={change} />
+  return (
+    <>
+      <EntityDiff change={change} />
+      <DeletionDetailsButton className="mt-1.5"
+        target={{ wsId, graphId, entityId: d.entityId, kind: d.kind, origin, label: change.label }} />
+    </>
+  )
 }
 
 /** An origin past what a list holds: what changed, counted, and why it isn't listed. */

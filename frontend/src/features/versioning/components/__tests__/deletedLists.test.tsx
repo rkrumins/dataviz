@@ -21,7 +21,7 @@ describe('DeletedChip', () => {
 })
 
 describe('CascadeImpactList', () => {
-  it('names a relationship by the entities it joined, struck through', () => {
+  it('names a relationship by the entities it joined, striking those that went too', () => {
     render(<CascadeImpactList rootUrn="urn:orders" impact={{
       nodeTotal: 2, edgeTotal: 1,
       nodes: [
@@ -32,6 +32,7 @@ describe('CascadeImpactList', () => {
     }} />)
     expect(screen.getAllByText('Order ID').at(-1)).toHaveClass('line-through')
     expect(screen.getByText('e-elsewhere-123')).toBeInTheDocument()   // an end the impact doesn't list: its id
+    expect(screen.getByText('e-elsewhere-123')).not.toHaveClass('line-through')   // and it stays
   })
 })
 

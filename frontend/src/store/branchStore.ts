@@ -27,6 +27,9 @@ export interface OpenRevision {
   createdAt?: string | null
   message?: string | null
   actor?: string | null
+  /** A canvas name (urn) to reveal, selected with its details open, once the revision has drawn —
+   *  "Open just before it was deleted". One shot: cleared when it is revealed. */
+  reveal?: string | null
 }
 
 /** Two revisions of Published compared on the canvas: what changed after `fromSeq`, up to and

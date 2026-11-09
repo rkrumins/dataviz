@@ -48,7 +48,7 @@ from backend.common.property_patch import apply_patch, compose_patches, strip_de
 from backend.common.service_accounts import is_service_account
 from .entity_serde import edge_payload_from_parts
 from .change_index import (ChangeIndex, ChangeIndexBuilder, ChangeOrigin, IndexCache, compact_entries,
-                           entry_dict, stat_changes)
+                           entry_dict, removed_subtree, stat_changes)
 from .errors import (AccessDenied, AmbiguousSpelling, AmbiguousUrn, BranchNotOpen, ChangeListBusy,
                      ContentionExhausted, CrossesUpdate, CurationAtRisk, DraftNotReadable,
                      EdgeEndsMissing, EntityExists, StagedChangesUnsaved, UniqueViolation,
@@ -7170,6 +7170,46 @@ class GraphVersioningService:
         return {"origin": origin.as_dict(), "entries": await asyncio.to_thread(compact_entries, index),
                 "total": total, "truncated": index.too_large is not None}
 
+    async def deletion_cascade(
+        self, *, graph_id: str, origin: ChangeOrigin, entity_id: str, containment_edge_types,
+        viewer: Optional[Viewer] = None,
+    ) -> Dict[str, object]:
+        """What an origin's removal of ``entity_id`` took with it, to restore it whole: the node
+        and the removed subtree under it, parent first, and the removed links with an end among
+        them (:func:`removed_subtree`, walked over the origin's cached change index), each with
+        the value it had — at a window's start, or where a draft branched off — named as the
+        canvas names it (a node's ``urn``, a link's ``sourceUrn`` and ``targetUrn``).
+
+        ``restorable`` is false with a ``reason``: ``not_deleted`` when the origin did not remove
+        it; ``too_large`` past ``_CASCADE_NODES_MAX`` nodes or ``_CASCADE_LINKS_MAX`` links (their
+        ``total``, no values), or for a change list too large to list (no ``total``)."""
+        index = await self._change_index(graph_id, origin, containment_edge_types, viewer)
+        out: Dict[str, object] = {"origin": origin.as_dict(), "root": entity_id, "total": None,
+                                  "removed": [], "restorable": False}
+        if index.too_large is not None:
+            return {**out, "reason": "too_large"}
+        nodes, links = await asyncio.to_thread(removed_subtree, index, entity_id)
+        out["total"] = {"nodes": len(nodes), "links": len(links)}
+        if not (nodes or links):
+            return {**out, "reason": "not_deleted"}
+        if len(nodes) > _CASCADE_NODES_MAX or len(links) > _CASCADE_LINKS_MAX:
+            return {**out, "reason": "too_large"}
+        async with self._bounded_session() as s:
+            main_id = await self._main_branch_id(s, graph_id)
+            seq = (origin.from_seq if origin.branch_id is None else
+                   (await self._get_branch(s, graph_id, origin.branch_id)).base_commit_seq or 0)
+            before = await self._values_at(s, graph_id, main_id,
+                                           [e.entity_id for e in nodes + links], seq)
+        urns = index.end_urns
+        out["removed"] = [
+            {"entityId": e.entity_id, "kind": e.kind, "status": "removed",
+             "before": before.get(e.entity_id),
+             **({"urn": e.urn or f"gv:{e.entity_id}"} if e.kind == "node" else
+                {"sourceUrn": urns.get(e.src or "", e.src), "targetUrn": urns.get(e.tgt or "", e.tgt)})}
+            for e in nodes + links]
+        out["restorable"] = True
+        return out
+
     async def _change_index(self, graph_id: str, origin: ChangeOrigin, containment_edge_types,
                             viewer: Optional[Viewer]) -> ChangeIndex:
         """The origin's index from this process's cache, built once per version of it: a draft's
@@ -11681,6 +11721,10 @@ _STATEMENT_TIMEOUT = text("SELECT set_config('statement_timeout', :ms, true)")
 _QUERY_CANCELED = "57014"
 #: Contributors a window's summary names; past this it counts them.
 _WINDOW_CONTRIBUTORS_LISTED = 50
+#: The most a deletion may have taken with it for ``deletion_cascade`` to list it, values and all:
+#: nodes, and links with an end among them. Past either it is counted, not listed.
+_CASCADE_NODES_MAX = 1000
+_CASCADE_LINKS_MAX = 5000
 _DIFF_TOO_FAR = ("these revisions are more than {limit} changes apart, too many to diff in one "
                  "response; read their change list instead (…/diff/entries?fromSeq=&toSeq=)")
 

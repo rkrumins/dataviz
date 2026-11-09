@@ -40,7 +40,8 @@ from backend.app.api.raw_path_route import RawPathSegmentRoute
 from backend.common.property_patch import InvalidPatch, normalize_update
 from backend.common.service_accounts import is_service_account
 from backend.app.services.versioning.entity_audit import (
-    HISTORY_DEFAULT_LIMIT, HISTORY_MAX_LIMIT, InvalidCursor, entity_history_page, entity_summary)
+    HISTORY_DEFAULT_LIMIT, HISTORY_MAX_LIMIT, InvalidCursor, entity_deletion, entity_history_page,
+    entity_summary)
 from backend.app.api.v1.feature_gate import require_feature
 from backend.app.api.v1.capability_gate import require_ds_read_or_view
 from backend.app.api.v1.versioning_gate import (SyncOverrides, fork_write_gate, require_forks_enabled,
@@ -1181,6 +1182,20 @@ class EntitySummaryResponse(_ApiModel):
     user_names: Dict[str, str] = Field(default_factory=dict, alias="userNames")
 
 
+class EntityDeletionResponse(_ApiModel):
+    """How an entity came to be deleted on the line being read, what it held and where it lived
+    (see entity_audit). ``deleted`` is null while the line has it."""
+    entity_id: str = Field(alias="entityId")
+    kind: str
+    urn: Optional[str] = None
+    # {seq, commitId, commitKind, message, at, deletedBy, mergedBy?, mergedAt?, inDraft}
+    deleted: Optional[dict] = None
+    last_value: Optional[dict] = Field(default=None, alias="lastValue")
+    ancestors: List[dict] = Field(default_factory=list)       # [{urn, displayName, entityType}], root first
+    ends: Optional[dict] = None                               # an edge's {source, target}: {urn, displayName}
+    user_names: Dict[str, str] = Field(default_factory=dict, alias="userNames")
+
+
 class CommitLogEntry(_ApiModel):
     """One commit as the log returns it, under the stored row's own (snake_case) names —
     ``GraphVersioningService._commit_meta``."""
@@ -1229,6 +1244,20 @@ class DiffEntry(_ApiModel):
     urn: Optional[str] = None
     source_urn: Optional[str] = Field(default=None, alias="sourceUrn")
     target_urn: Optional[str] = Field(default=None, alias="targetUrn")
+
+
+class DeletionCascadeEntry(DiffEntry):
+    status: str = "removed"
+
+
+class DeletionCascadeResponse(_ApiModel):
+    """What a deletion took with it, to restore it whole (``deletion_cascade``)."""
+    origin: Dict[str, Any]
+    root: str
+    total: Optional[Dict[str, int]] = None          # {nodes, links}; null for a list too large to list
+    removed: List[DeletionCascadeEntry] = Field(default_factory=list)
+    restorable: bool
+    reason: Optional[str] = None                    # not_deleted | too_large
 
 
 class DiffVsMainResponse(_ApiModel):
@@ -1555,6 +1584,7 @@ class PrResponse(_ApiModel):
 # request's management session — never as a cross-store join inside the service.
 _ACTOR_ID_FIELDS = (
     "owner", "created_by", "actor", "merged_by", "closed_by", "source_branch_owner", "deleted_by",
+    "deletedBy", "mergedBy",
 )
 _ACTOR_ID_LIST_FIELDS = ("contributors", "reviewers", "approved_by", "stale_approved_by")
 
@@ -2912,6 +2942,35 @@ async def get_entity_summary(
     return summary
 
 
+@router.get("/graphs/{graph_id}/entities/{entity_id}/deletion", response_model=EntityDeletionResponse)
+async def get_entity_deletion(
+    ws_id: str, graph_id: str, entity_id: str,
+    branch_id: Optional[str] = Query(None, alias="branchId"),
+    at_seq: Optional[int] = Query(None, alias="atSeq", ge=0,
+                                  description="Read main as of this revision (default: where the "
+                                  "draft branched off, or main's head)"),
+    kind: Optional[str] = Query(None, pattern="^(node|edge)$"),
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    viewer: Viewer = Depends(viewer_ctx),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """How the entity came to be deleted, as the line being read has it: the revision, who
+    deleted it (in the draft it was published from) and who published it, what it held then, and
+    where it lived — a node's ancestors, an edge's ends. ``deleted`` is null while the line has
+    it. Bounded: a few index lookups, never the whole history."""
+    await _assert_line_readable(svc, graph_id, branch_id, viewer)
+    cset = await _live_containment_types(session, ws_id, _meta.get("data_source_id"))
+    with _domain_errors():
+        deletion = await entity_deletion(svc, graph_id=graph_id, entity_id=entity_id,
+                                         branch_id=branch_id, at_seq=at_seq, kind=kind,
+                                         containment_edge_types=cset)
+    await _attach_user_names(session, [deletion["deleted"]] if deletion["deleted"] else [],
+                             wrapper=deletion)
+    return deletion
+
+
 @router.get("/graphs/{graph_id}/commits", response_model=CommitLogResponse)
 async def get_commit_log(
     ws_id: str, graph_id: str,
@@ -3245,6 +3304,30 @@ async def get_change_entries_batch(
     with _domain_errors():
         return await svc.change_entries_batch(graph_id=graph_id, origin=origin,
                                               entity_ids=body.ids, viewer=viewer)
+
+
+@router.get("/graphs/{graph_id}/entities/{entity_id}/deletion/cascade",
+            response_model=DeletionCascadeResponse)
+async def get_deletion_cascade(
+    ws_id: str, graph_id: str, entity_id: str,
+    branch_id: Optional[str] = Query(None, alias="branchId", description=_ORIGIN_DOC["branch_id"]),
+    from_seq: Optional[int] = Query(None, alias="fromSeq", ge=0, description=_ORIGIN_DOC["from_seq"]),
+    to_seq: Optional[int] = Query(None, alias="toSeq", ge=1, description=_ORIGIN_DOC["to_seq"]),
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    viewer: Viewer = Depends(viewer_ctx),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """What a change list's removal of the entity took with it, to restore it whole: the node,
+    the removed subtree under it (parent first) and the removed links with an end among them,
+    each with the value it had before. Read from the origin's change list; capped at 1,000
+    nodes and 5,000 links (``restorable: false``, ``reason: too_large``)."""
+    origin = _change_origin(branch_id, from_seq, to_seq)
+    cset = await _live_containment_types(session, ws_id, _meta.get("data_source_id"))
+    with _domain_errors():
+        return await svc.deletion_cascade(graph_id=graph_id, origin=origin, entity_id=entity_id,
+                                          containment_edge_types=cset, viewer=viewer)
 
 
 @router.get("/graphs/{graph_id}/diff/index", response_model=ChangeIndexResponse)

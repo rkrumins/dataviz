@@ -24,6 +24,9 @@ import { useFeature } from '@/store/features'
 import { useEntityColorSet } from '@/hooks/useEntityVisual'
 import { useEntitySummary } from '@/features/versioning/hooks/useVersioning'
 import { useRestoreGhost } from '@/features/versioning/canvas/useRestoreGhost'
+import { listOriginOf } from '@/features/versioning/canvas/useDeletionGhosts'
+import { TombstoneDetails, type TombstoneTarget } from '@/features/versioning/components/TombstoneDetails'
+import { useBranchStore } from '@/store/branchStore'
 import { NO_VERSION_CONTROL, useEntityEditing } from '@/features/versioning/hooks/useEntityEditing'
 import { resolveEntityName, technicalIdentity } from '@/lib/entityDisplayName'
 import { useCanvasIdentityProperty } from '@/components/dataSource/NodeIdentity'
@@ -152,6 +155,15 @@ function OpenEntityDrawer({
     [node.data, personaMode, identityProperty, node.id, title],
   )
   const externalUrl = useMemo(() => getExternalUrl?.(urn) ?? null, [getExternalUrl, urn])
+  // A tombstone shows how it came to be deleted, in place of what a live entity shows: its change
+  // names the entity and the change list it was deleted in.
+  const changeSet = useBranchStore((s) => s.activeChangeSet)
+  const tombstone = useMemo((): TombstoneTarget | null => {
+    const removed = isGhost ? changeSet?.byEntityId.get(node.id) : undefined
+    const origin = listOriginOf(changeSet)
+    if (!removed || removed.status !== 'removed' || !origin || !scope.wsId || !scope.graphId) return null
+    return { wsId: scope.wsId, graphId: scope.graphId, entityId: removed.entityId, kind: 'node', origin, label: title }
+  }, [isGhost, changeSet, node.id, scope.wsId, scope.graphId, title])
   // The entity's ID for At a glance, in either view: its data source's identity property, or its URN.
   const identity = useMemo(
     () => technicalIdentity(node.data, 'technical', { identityProperty, urn: node.id, name: '' }),
@@ -200,7 +212,6 @@ function OpenEntityDrawer({
             title={title}
             technicalLine={technicalLine}
             isGhost={isGhost}
-            onRestore={canRestore ? () => restoreGhost((data.urn as string | undefined) || node.id) : undefined}
             onTraceUp={onTraceUp}
             onTraceDown={onTraceDown}
             onFullTrace={onFullTrace}
@@ -221,29 +232,34 @@ function OpenEntityDrawer({
 
           <DrawerBody>
             <TabsContent value="view">
-              <EntityViewTab
-                nodeId={node.id}
-                form={form}
-                original={unsavedCreate || stagedBefore !== undefined || dirty ? original : undefined}
-                urn={urn}
-                childCount={Number(form.childCount || form._collapsedChildCount || 0)}
-                tagColors={colors}
-                userProps={userProps}
-                copiedUrn={copiedUrn}
-                onCopyUrn={copyUrn}
-                canEdit={editable}
-                onStartEdit={startEdit}
-                onFocusNode={onFocusNode}
-                onLocateMany={onLocateMany}
-                onRevealPath={onRevealPath}
-                history={scope}
-                typeId={typeId}
-                typeName={entityType?.name || typeId}
-                fields={entityType?.fields}
-                identity={identity}
-                customizing={customizing}
-                onDoneCustomizing={() => setCustomizing(false)}
-              />
+              {tombstone ? (
+                <TombstoneDetails target={tombstone}
+                  onRestore={canRestore ? () => restoreGhost((data.urn as string | undefined) || node.id) : undefined} />
+              ) : (
+                <EntityViewTab
+                  nodeId={node.id}
+                  form={form}
+                  original={unsavedCreate || stagedBefore !== undefined || dirty ? original : undefined}
+                  urn={urn}
+                  childCount={Number(form.childCount || form._collapsedChildCount || 0)}
+                  tagColors={colors}
+                  userProps={userProps}
+                  copiedUrn={copiedUrn}
+                  onCopyUrn={copyUrn}
+                  canEdit={editable}
+                  onStartEdit={startEdit}
+                  onFocusNode={onFocusNode}
+                  onLocateMany={onLocateMany}
+                  onRevealPath={onRevealPath}
+                  history={scope}
+                  typeId={typeId}
+                  typeName={entityType?.name || typeId}
+                  fields={entityType?.fields}
+                  identity={identity}
+                  customizing={customizing}
+                  onDoneCustomizing={() => setCustomizing(false)}
+                />
+              )}
             </TabsContent>
             {editable && (
               <TabsContent value="edit">

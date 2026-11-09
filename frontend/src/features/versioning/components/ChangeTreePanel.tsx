@@ -6,7 +6,7 @@
  * thousands of entities stays a handful of rows until you drill in. Leaves expand to the
  * same `EntityDiff` the flat ChangesPanel uses.
  */
-import { useMemo, useState } from 'react'
+import { createContext, useContext, useMemo, useState } from 'react'
 import { ChevronRight, Loader2, AlertCircle, Folder, Boxes, Spline } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { ChangeOrigin } from '../model/changeModel'
@@ -14,6 +14,7 @@ import type { ChangeListOrigin, DiffSummaryResponse, DiffTreeNode } from '@/serv
 import { ChangeList } from './ChangeList'
 import { STATUS_META, NodeDiffBadge } from './NodeDiffBadge'
 import { EntityDiff } from './EntityDiff'
+import { DeletionDetailsButton } from './TombstoneDetails'
 import { entityTypeStyle } from '@/components/canvas/property-manager/entityTypeStyles'
 import { treeLeafToChange } from '../model/changeTreeModel'
 import { useChangeTreeExpansion, type FetchChildren } from '../hooks/useChangeTreeExpansion'
@@ -102,7 +103,11 @@ function Indent({ depth }: { depth: number }) {
   return depth > 0 ? <span style={{ width: depth * 14 }} className="shrink-0" aria-hidden /> : null
 }
 
+/** The change list the tree's changes are, where the panel was given it. */
+const TreeList = createContext<{ wsId: string; graphId: string; origin: ChangeListOrigin } | undefined>(undefined)
+
 function LeafRow({ node, depth, origin }: { node: DiffTreeNode; depth: number; origin: ChangeOrigin }) {
+  const list = useContext(TreeList)
   const [open, setOpen] = useState(false)
   const status = node.status && node.status !== 'unchanged' ? node.status : 'modified'
   const meta = STATUS_META[status]
@@ -123,6 +128,9 @@ function LeafRow({ node, depth, origin }: { node: DiffTreeNode; depth: number; o
       {open && (
         <div className="px-2.5 pb-2" style={{ paddingLeft: depth * 14 + 28 }}>
           <EntityDiff change={change} />
+          {status === 'removed' && list && (
+            <DeletionDetailsButton className="mt-1.5" target={{ ...list, entityId: change.entityId, kind: change.kind, label: change.label }} />
+          )}
         </div>
       )}
     </div>
@@ -283,6 +291,7 @@ export function ChangeTreePanel({
   const isOpen = !summaryFirst || (treeOpen ?? totalChanges <= 6)
 
   return (
+    <TreeList.Provider value={list}>
     <div className={cn('space-y-2.5', className)}>
       <ImpactHeader summary={summary} />
       {summaryFirst && (
@@ -308,5 +317,6 @@ export function ChangeTreePanel({
         </div>
       )}
     </div>
+    </TreeList.Provider>
   )
 }

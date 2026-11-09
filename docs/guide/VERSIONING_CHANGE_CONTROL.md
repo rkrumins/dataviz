@@ -232,6 +232,31 @@ A revision more than 100,000 changes back is too far to draw. It opens as a
 comparison with now instead, and you can still export the graph as it was then.
 One open while Published moves that far on is handed over the same way.
 
+### A deleted entity's details
+
+Select a deleted entity or relationship drawn where it was, or choose **Deletion
+details** on a deleted row of any list of changes. You see:
+
+- **Who deleted it, when, and in which revision.** For a deletion published from a
+  draft, who published it too, and the message it was published with.
+- **Where it lived**: the entities it sat in, or the two a relationship joined.
+- **What it held** when it was deleted.
+- **What went with it**, when you unfold it: what it contained, and the
+  relationships that went with them.
+- **Its history**, when you unfold it. Each published revision's number shows what
+  that revision changed.
+
+On a canvas of that data source you can also:
+
+- **Open just before it was deleted**: the graph as it was the revision before, with
+  the entity selected. A revision too far back opens as a comparison with now
+  instead. Save or discard your unsaved edits first.
+- **See the change**: the revision that deleted it, compared with the one before. For
+  a deletion in your draft, its **Changes**.
+
+**Copy URN** is always there. **Restore** is there for a deletion saved to a draft
+you can edit.
+
 ## Undo vs. Restore — the distinction that matters
 
 Two different tools fix a published mistake, and they're not interchangeable.

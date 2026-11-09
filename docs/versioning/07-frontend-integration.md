@@ -270,6 +270,37 @@ holds no payload.
   500 a request). It refuses past `RESTORE_NODES_MAX` (1,000 entities) or `RESTORE_LINKS_MAX`
   (2,000 links) rather than bring back part of it.
 
+**A deletion's details** (`TombstoneDetails`) take a `TombstoneTarget`: the entity id, its kind, and
+the change list it was deleted in (a draft, or main between two revisions).
+- **What it reads.** `useEntityDeletion` (`…/entities/{eid}/deletion`, `atSeq` the window's newer
+  end) when shown, and `useDeletionCascade` (`…/deletion/cascade`) and `EntityHistory` only when
+  their parts are unfolded. All three retry a busy server (`BUSY_RETRY`).
+- **Two hosts.**
+  - On the canvas, the entity drawer and the relationship drawer show it for a tombstone, in place
+    of the live view. Its change in the canvas's change set gives the entity id (an imported node's
+    urn is not its id) and the origin (`listOriginOf`).
+  - Elsewhere, `TombstoneDrawer`, a portal at `z-[120]`/`[121]`, opens it above any panel.
+    `DeletionDetailsButton` opens that drawer from a deleted row of `ChangeList`, `ChangeTreePanel`
+    (given its `list`), `ChangesPanel` (given `details`; Files changed passes it) and
+    `EntityHistory`'s delete rows. Nothing is asked until it is clicked.
+- **What moves the canvas** is offered only inside a view (`useViewExecutionContext`) on the same
+  graph, and only with the revision viewer on.
+  - **See the change** asks the versioning panel for the comparison `N−1 → N`
+    (`useVersioningPanelStore.openCompare`), or for Changes after a draft's deletion.
+  - **Open just before it was deleted** fetches revision `N−1`'s plan.
+    - Openable: it opens the revision with `OpenRevision.reveal` set to the entity's urn (a link's
+      source end).
+    - Not openable: it opens the comparison with now.
+    - Disabled while edits are unsaved.
+  - **`useRevisionReveal`**, mounted by the three canvases with their own reveal, runs once the
+    canvas reads that revision (`asOfSeq`) and has drawn it.
+    - It has drawn when hydration was seen in progress and is complete, or when the entity is
+      already there, live. Published never has it, so it never fires early.
+    - It reveals the entity, selects it, opens its drawer, and clears `reveal`.
+- **`EntityHistory`** links a published revision's `#N` to the same comparison.
+- **`DrawerActivity`** says **Deleted**, in rose, when the summary says the entity doesn't `exist`
+  on the line.
+
 ---
 
 ## 7. The versioning chrome — the bar, the bridge, the panel
