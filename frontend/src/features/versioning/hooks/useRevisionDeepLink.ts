@@ -64,7 +64,7 @@ export function useRevisionDeepLink({
     const seq = /^\d+$/.test(urlRev) ? Number(urlRev) : NaN
     const from = urlHl != null && /^\d+$/.test(urlHl) ? Number(urlHl) : NaN
     if (Number.isSafeInteger(seq) && seq < headSeq) {
-      if (seq !== revisionSeq) openRevision({ seq })
+      if (seq !== revisionSeq) openRevision({ seq, headAtOpen: headSeq })
       if (from < seq) setHighlight({ fromSeq: from, toSeq: seq })
       if (searchParams.has('branch') || urlHl != null) {
         setSearchParams((prev) => { const n = new URLSearchParams(prev); n.delete('branch'); n.delete('hl'); return n }, { replace: true })

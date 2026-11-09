@@ -158,6 +158,9 @@ export function ViewHistoryTimeline({
   const openBlocked = unavailable ?? (unsaved > 0 ? 'Save or discard your unsaved edits first.' : null)
   const setHighlight = useBranchStore((s) => s.setHighlight)
   const closeRevision = useBranchStore((s) => s.closeRevision)
+  // While a revision is open on the canvas, every "since then" counts up to the head it opened at.
+  const pinnedHead = useBranchStore((s) => s.revision?.headAtOpen ?? null)
+  const repinRevision = useBranchStore((s) => s.repinRevision)
 
   const historyScope: HistoryScope = scope === 'draft' && branchId ? { kind: 'draft', branchId }
     : scope === 'view' && viewId ? { kind: 'view', viewId } : { kind: 'graph' }
@@ -234,6 +237,7 @@ export function ViewHistoryTimeline({
       const commit = c ?? plan.commit
       openRevision({
         seq,
+        headAtOpen: plan.headSeq,
         commitId: (commit.commit_id as string) ?? null,
         createdAt: (commit.created_at as string) ?? null,
         message: (commit.message as string) ?? null,
@@ -262,6 +266,8 @@ export function ViewHistoryTimeline({
     if (!revisionViewer || scope === 'draft' || typeof seq !== 'number') return undefined
     return {
       headSeq,
+      pinnedHeadSeq: pinnedHead,
+      onRepin: () => repinRevision(headSeq),
       openBlocked,
       linkBlocked: unavailable,
       onOpen: () => void openOnCanvas(seq, c),

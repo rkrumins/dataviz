@@ -2,9 +2,10 @@
  * ViewHistoryTimeline — a history of revisions, newest first, a page at a time, grouped by month and
  * day. A commit row expands to its hierarchical diff, fetched only then. With the revision viewer on,
  * a revision of Published opens on the canvas — asked first whether it can, so one too far back to
- * draw opens its comparison with now instead — and the timeline pages on as it nears its end.
+ * draw opens its comparison with now instead — and the timeline pages on as it nears its end. While a
+ * revision is open, a row's "since then" counts up to the head it was opened at.
  */
-import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { act, render, screen, fireEvent, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
@@ -45,6 +46,7 @@ const state = vi.hoisted(() => ({
   hasNextPage: false,
   fetchNextPage: vi.fn(),
   plan: { openable: true, reason: null as string | null },
+  since: [] as unknown[],
 }))
 
 const useCommitDiffSummary = vi.fn((_ws?: string, _gid?: string | null, cid?: string | null) => ({
@@ -71,7 +73,10 @@ vi.mock('../../hooks/useVersioning', () => ({
   useCommitDiffSummary: (ws?: string, gid?: string | null, cid?: string | null) => useCommitDiffSummary(ws, gid, cid),
   useSquashedCommits: () => ({ data: undefined, isLoading: false }),
   useRevision: () => ({ data: { openable: state.plan.openable, reason: state.plan.reason, changedSince: 40, limit: 100_000 }, isLoading: false }),
-  useChangeSummary: () => ({ data: undefined, isLoading: false }),
+  useChangeSummary: (_ws?: string, _gid?: string | null, origin?: unknown) => {
+    state.since.push(origin)
+    return { data: undefined, isLoading: false }
+  },
   // The timeline hosts the rollback dialogs (revert / restore-to-here).
   useRevertCommit: () => ({ mutate: vi.fn(), isPending: false }),
   useRestoreCommit: () => ({ mutate: vi.fn(), isPending: false }),
@@ -102,6 +107,7 @@ beforeEach(() => {
   state.revisionOn = false
   state.hasNextPage = false
   state.plan = { openable: true, reason: null }
+  state.since = []
   state.fetchNextPage.mockReset()
   getRevision.mockReset()
   useBranchStore.getState().reset()
@@ -188,6 +194,23 @@ describe('ViewHistoryTimeline', () => {
     expect(await screen.findByText('Save or discard your unsaved edits first.')).toBeInTheDocument()
     expect(screen.getByText('Open on canvas').closest('[role="menuitem"]')).toHaveAttribute('data-disabled')
     expect(getRevision).not.toHaveBeenCalled()
+  })
+
+  it("counts a row's since then up to the head an open revision was opened at, until it is updated", () => {
+    state.revisionOn = true
+    wrap(<ViewHistoryTimeline wsId="ws1" graphId="g1" viewId={null} />)
+    fireEvent.click(screen.getByText('Add Sales dataset'))
+    expect(state.since.at(-1)).toEqual({ fromSeq: 2, toSeq: 9 })            // Published's head
+    expect(screen.queryByText(/Published has moved on/)).not.toBeInTheDocument()
+
+    act(() => useBranchStore.getState().openRevision({ seq: 2, headAtOpen: 7 }))
+    expect(state.since.at(-1)).toEqual({ fromSeq: 2, toSeq: 7 })
+    expect(screen.getByText('Published has moved on: 2 newer revisions')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Update' }))
+    expect(useBranchStore.getState().revision?.headAtOpen).toBe(9)
+    expect(state.since.at(-1)).toEqual({ fromSeq: 2, toSeq: 9 })
+    expect(screen.queryByText(/Published has moved on/)).not.toBeInTheDocument()
   })
 
   it('opens on a comparison it is asked for', () => {

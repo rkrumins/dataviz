@@ -24,6 +24,7 @@ import { getCommitDiffChildren } from '@/services/versioningApiService'
 import { useChangeSummary, useCommitDiffSummary, useRevision, useSquashedCommits } from '../hooks/useVersioning'
 import { kindMeta, isPullCommit } from '../model/commitKind'
 import { ownerName } from '../model/branchVocab'
+import { movedOn } from '../model/revisionCopy'
 import { NodeDiffBadge } from './NodeDiffBadge'
 import { ChangeTreePanel } from './ChangeTreePanel'
 
@@ -31,6 +32,11 @@ import { ChangeTreePanel } from './ChangeTreePanel'
 export interface RevisionRowActions {
   /** Published's head: the graph as it is now, which there is nothing to open or compare with. */
   headSeq: number
+  /** While a revision is open on the canvas, the head its "since then" counts up to
+   *  (`OpenRevision.headAtOpen`): a row's counts up to it too, and says when Published moved on. */
+  pinnedHeadSeq?: number | null
+  /** Count "since then" up to `headSeq` instead. */
+  onRepin?: () => void
   /** Why opening is held back for now (unsaved edits, nowhere to open it), or null. */
   openBlocked?: string | null
   /** Why there is no link to copy (nowhere to open it), or null. */
@@ -153,11 +159,15 @@ export function CommitRow({
   // Whether the canvas can draw it: asked when the menu opens, so the choice says before it is made.
   const [menuOpen, setMenuOpen] = useState(false)
   const plan = useRevision(wsId, graphId, revision && menuOpen && !atHead ? seq : null)
-  // How far the graph has moved on since — when an opened row is a past revision.
+  // How far the graph has moved on since — when an opened row is a past revision: up to the head
+  // "since then" is pinned to while a revision is open on the canvas, else up to Published's.
+  const sinceHead = revision ? revision.pinnedHeadSeq ?? revision.headSeq : null
   const sinceOrigin = useMemo(
-    () => (revision && expanded && seq != null && !atHead ? { fromSeq: seq, toSeq: revision.headSeq } : null),
-    [revision, expanded, seq, atHead],
+    () => (revision && expanded && seq != null && sinceHead != null && seq < sinceHead
+      ? { fromSeq: seq, toSeq: sinceHead } : null),
+    [revision, expanded, seq, sinceHead],
   )
+  const newer = revision?.pinnedHeadSeq != null ? Math.max(0, revision.headSeq - revision.pinnedHeadSeq) : 0
   const sinceQ = useChangeSummary(wsId, graphId, sinceOrigin)
   // On a squash (publish/merge) actor is the publisher; contributors are everyone who actually edited.
   const contributors = Array.isArray(commit.contributors) ? (commit.contributors as string[]) : []
@@ -322,6 +332,8 @@ export function CommitRow({
               loading={sinceQ.isLoading}
               revisions={sinceQ.data?.window?.commitCount ?? null}
               counts={sinceQ.data?.counts}
+              newer={newer}
+              onUpdate={revision.onRepin}
               onCompare={revision.onCompareWithNow}
             />
           )}
@@ -409,15 +421,19 @@ function RevisionMenuItems({ seq, atHead, plan, actions }: {
   )
 }
 
-/** "Since then: 32 revisions · +1.2k ~340 −12 · Compare with now" — under an opened past revision. */
-function SinceThenLine({ loading, revisions, counts, onCompare }: {
+/** "Since then: 32 revisions · +1.2k ~340 −12 · Compare with now" — under an opened past revision —
+ *  and, while one is open on the canvas, how far Published has moved on past what that counts up to. */
+function SinceThenLine({ loading, revisions, counts, newer, onUpdate, onCompare }: {
   loading: boolean
   revisions: number | null
   counts?: { added: number; modified: number; removed: number }
+  /** Published's revisions past the head "since then" counts up to. */
+  newer: number
+  onUpdate?: () => void
   onCompare: () => void
 }) {
   return (
-    <div className="mb-2 flex items-center gap-2 rounded-lg border border-indigo-500/15 bg-indigo-500/[0.04] px-2.5 py-1.5 text-[11px] text-ink-muted">
+    <div className="mb-2 flex flex-wrap items-center gap-2 rounded-lg border border-indigo-500/15 bg-indigo-500/[0.04] px-2.5 py-1.5 text-[11px] text-ink-muted">
       <History className="w-3.5 h-3.5 shrink-0 text-indigo-500" />
       <span className="font-medium text-ink/80">Since then</span>
       {loading ? <Loader2 className="w-3 h-3 animate-spin" /> : (
@@ -431,6 +447,19 @@ function SinceThenLine({ loading, revisions, counts, onCompare }: {
               <span className="text-rose-600 dark:text-rose-400 font-semibold">−{compactCount.format(counts.removed)}</span>
             </>
           )}
+        </span>
+      )}
+      {newer > 0 && onUpdate && (
+        <span className="inline-flex items-center gap-1.5">
+          <span className="text-ink-muted/50">·</span>
+          <span>{movedOn(newer)}</span>
+          <span className="text-ink-muted/50">·</span>
+          <button
+            onClick={(e) => { e.stopPropagation(); onUpdate() }}
+            className="font-semibold text-indigo-700 dark:text-indigo-300 hover:underline"
+          >
+            Update
+          </button>
         </span>
       )}
       <button

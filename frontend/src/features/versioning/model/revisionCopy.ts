@@ -7,3 +7,8 @@ export const AT_REVISION_READS =
 
 /** The one-line form, for a control that is off at a revision. */
 export const OFF_AT_REVISION = 'Reads the graph as it is now — off at a past revision'
+
+/** Published has revisions past the head an open revision's "since then" counts up to. */
+export function movedOn(newer: number): string {
+  return `Published has moved on: ${newer.toLocaleString()} newer ${newer === 1 ? 'revision' : 'revisions'}`
+}

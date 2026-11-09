@@ -31,10 +31,10 @@ const at = (initial: string) =>
 const base = { enabled: true, headSeq: 40, revisionSeq: null, scopeViewId: 'v1', activeViewId: 'v1', setHighlight: () => {} }
 
 describe('useRevisionDeepLink', () => {
-  it('opens the revision a link names, and drops a draft beside it', () => {
+  it('opens the revision a link names, at the head it was opened at, and drops a draft beside it', () => {
     const openRevision = vi.fn()
     renderHook(() => useRevisionDeepLink({ ...base, openRevision }), { wrapper: at('/views/v1?rev=12&branch=br_1') })
-    expect(openRevision).toHaveBeenCalledWith({ seq: 12 })
+    expect(openRevision).toHaveBeenCalledWith({ seq: 12, headAtOpen: 40 })
     expect(probe.search).toBe('?rev=12')
   })
 
