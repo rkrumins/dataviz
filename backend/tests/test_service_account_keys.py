@@ -362,9 +362,9 @@ async def test_a_key_writes_main_where_the_account_publishes_not_where_its_manag
 ):
     """A bulk ingest writes a versioned graph's main directly, so it needs publish: for an
     ``nxsat_`` key, held by the service account through its own workspace roles (Publisher, on
-    its page), whoever manages it. Advancing main otherwise — reverting, restoring, syncing,
-    merging a fork's review — and sharing a draft are refused to every key; publishing a draft
-    and merging its review follow bulk ingest's rule (the test below)."""
+    its page), whoever manages it. Advancing main otherwise — reverting, restoring, merging a
+    fork's review — and sharing a draft are refused to every key; publishing a draft, merging its
+    review and syncing a snapshot follow bulk ingest's rule (the tests below)."""
     from backend.app.main import app
 
     class _Versioning(_FakeVersioning):
@@ -398,8 +398,10 @@ async def test_a_key_writes_main_where_the_account_publishes_not_where_its_manag
         "type": "access_denied", "code": "publish_required",
         "required": "workspace:datasource:publish"}
 
+    assert "the account this API key belongs to" in refused.json()["detail"]["message"]
+
     for path in (
-        "graphs/g_a/commits/c1/revert", "graphs/g_a/commits/c1/restore", "graphs/g_a/sync",
+        "graphs/g_a/commits/c1/revert", "graphs/g_a/commits/c1/restore",
         "pulls/pr1/merge", "graphs/g_a/branches/br_a/members",
     ):
         response = await client.post(f"/api/v1/ws_a/versioning/{path}", json={}, headers=key.headers)
@@ -496,6 +498,124 @@ async def test_a_key_is_told_it_may_merge_where_its_account_publishes(db_session
     assert await merge(_PRS["mr_a"], publishes) == (True, None)
     assert await merge(_PRS["mr_a"], claims()) == (False, "publish_required")
     assert await merge(_PRS["pr_fork"], publishes) == (False, "publish_required")
+
+
+async def test_a_key_syncs_a_snapshot_where_the_account_publishes(client, db_session, account):
+    """Syncing an external snapshot into main is how a connector refreshes a versioned graph that
+    already holds data (bulk ingest only seeds an empty one), so it follows bulk ingest's rule: an
+    ``nxsat_`` key passes where its service account holds publish. The safety overrides stay a
+    workspace admin's, which no key is."""
+    from backend.app.main import app
+
+    class _Versioning(_FakeVersioning):
+        async def sync_ingest(self, **_kwargs):
+            reached_the_handler()
+
+    app.dependency_overrides[versioning_endpoints.get_versioning_service] = _Versioning
+    key, binding = await _publisher_key(db_session, account)
+    sync = "/api/v1/ws_a/versioning/graphs/g_a/sync"
+    reached = await client.post(sync, content=b"", headers=key.headers)
+    assert reached.status_code == 418, reached.text
+    for override in ("force=true", "allowMassDelete=true"):
+        refused = await client.post(f"{sync}?{override}", content=b"", headers=key.headers)
+        assert refused.status_code == 403, (override, refused.text)
+        assert refused.json()["detail"]["code"] == "needs_admin", override
+
+    binding.role_name = "workspace_member"
+    await db_session.commit()
+    api_key_service.forget(key.id)
+    refused = await client.post(sync, content=b"", headers=key.headers)
+    assert refused.status_code == 403, refused.text
+    assert refused.json()["detail"]["code"] == "publish_required"
+
+
+async def _member_key(db_session, account, **minted) -> Key:
+    """A data-writing key of an account that is a Member in ws_a: it changes data, and publishes
+    nothing."""
+    binding = (await db_session.execute(select(RoleBindingORM).where(
+        RoleBindingORM.subject_id == account, RoleBindingORM.scope_id == "ws_a",
+    ))).scalar_one()
+    binding.role_name = "workspace_member"
+    await db_session.commit()
+    return await _minted(db_session, account, permissions={"views": "none", "data": "write",
+                                                           "publish": False}, **minted)
+
+
+@pytest.fixture()
+def _setup_reaches_the_handler(monkeypatch):
+    """Each graph-setup route's first step past every gate answers 418."""
+    from backend.app.api.v1.endpoints import graph as graph_endpoints
+    from backend.app.main import app
+    from backend.app.services.versioning import bootstrap_worker
+
+    class _Versioning(_FakeVersioning):
+        async def create_graph(self, **_kwargs):
+            reached_the_handler()
+
+        async def resolve_graph(self, **_kwargs):
+            reached_the_handler()
+
+    async def _copyable(*_args):
+        return None
+
+    async def _no_aliases(*_args):
+        return []
+
+    async def _reached(*_args, **_kwargs):
+        reached_the_handler()
+
+    app.dependency_overrides[versioning_endpoints.get_versioning_service] = _Versioning
+    monkeypatch.setattr(graph_endpoints, "_assert_copyable", _copyable)
+    monkeypatch.setattr(versioning_endpoints, "same_server_providers", _no_aliases)
+    monkeypatch.setattr(graph_endpoints, "_pin_projection_target", _reached)
+    monkeypatch.setattr(bootstrap_worker, "retry_bootstrap", _reached)
+
+
+_SETUP = (
+    ("/api/v1/ws_a/versioning/graphs", {"dataSourceId": "ds_a", "workspaceId": "ws_a"}),
+    ("/api/v1/ws_a/versioning/resolve", {"dataSourceId": "ds_a"}),
+    ("/api/v1/ws_a/graph/bootstrap?dataSourceId=ds_a", None),
+    ("/api/v1/ws_a/graph/bootstrap/retry?dataSourceId=ds_a", None),
+)
+
+
+async def test_a_key_sets_up_the_graph_it_imports_into(
+    client, db_session, account, _setup_reaches_the_handler,
+):
+    """Turning version control on for a data source, making its graph and opening a draft on it by
+    data source need what they need of a person: manage there. So a connector's key can set up a
+    brand-new versioned graph end to end, then import into it. Deciding a paused bootstrap's
+    duplicates and abandoning it stay a person's."""
+    key = await _member_key(db_session, account)
+    for path, body in _SETUP:
+        reached = await client.post(path, json=body, headers=key.headers)
+        assert reached.status_code == 418, (path, reached.text)
+    for path in ("/api/v1/ws_a/graph/bootstrap/decision?dataSourceId=ds_a",
+                 "/api/v1/ws_a/graph/bootstrap/abandon?dataSourceId=ds_a"):
+        refused = await client.post(path, json={"action": "collapse", "fingerprint": "f"},
+                                    headers=key.headers)
+        assert refused.status_code == 403, path
+        assert error(refused) == "api_key_not_allowed", path
+
+
+async def test_a_key_sets_up_only_the_data_sources_it_covers(
+    client, db_session, account, _setup_reaches_the_handler,
+):
+    """A key limited to one data source sets up that one, and no other in its workspace, whether
+    the request names it in the body, the query or the view it opens a draft for."""
+    key = await _member_key(db_session, account, resources={"dataSources": ["ds_a2"]})
+    for path, body in _SETUP:
+        refused = await client.post(path, json=body, headers=key.headers)
+        assert refused.status_code == 403, (path, refused.text)
+        assert error(refused) == "api_key_out_of_scope", path
+    covered = await client.post("/api/v1/ws_a/versioning/resolve", json={"dataSourceId": "ds_a2"},
+                                headers=key.headers)
+    assert covered.status_code == 418, covered.text
+    # A draft opened for a view is a write to that view's layout: not one the key doesn't cover.
+    view = await client.post("/api/v1/ws_a/versioning/resolve",
+                             json={"dataSourceId": "ds_a2", "originatingViewId": "v_a_ws"},
+                             headers=key.headers)
+    assert view.status_code == 403, view.text
 
 
 async def test_the_limit_is_the_accounts_own(client, db_session, account, monkeypatch):

@@ -1667,6 +1667,14 @@ class GraphVersioningService:
             raise ReviewRequired(branch_id)
 
         async def _once():
+            # Who may publish is settled before anything is written: the fold below commits the
+            # draft's staged edits under the caller's name, which someone refused the publish must
+            # never do. Asked again under the draft's lock below, where it decides.
+            async with self._session() as s:
+                draft = await self._get_branch(s, graph_id, branch_id)
+                if draft.kind != "main":
+                    self._require_open(draft, publishing_ok=queued)
+                    await self._require_publish(s, draft, actor, actor_groups)
             # Fold any staged-but-uncommitted edits first, so a publish never silently
             # drops working changes that were staged but not checkpointed.
             await self._flush_pending_changes(
@@ -8180,8 +8188,19 @@ class GraphVersioningService:
 
     async def _require_publish(self, s, branch: BranchORM, actor: str, groups: Sequence[str]) -> None:
         """Publishing a draft needs its owner or a maintainer, at either level: a public draft's
-        other writers ask for a review."""
-        await self._require_manage(s, branch, actor, groups)
+        other writers ask for a review. The refusal says so (``hint: merge_request``): a merge
+        request on the draft is merged by anyone who may publish there, whoever owns the draft —
+        how a service account lands a person's draft, or a person a service account's."""
+        try:
+            await self._require_manage(s, branch, actor, groups)
+        except (NotDraftOwner, DraftRoleRequired) as exc:
+            exc.detail = {
+                **exc.detail, "hint": "merge_request",
+                "message": (f"{exc.detail['message']}: only its owner or a maintainer publishes it "
+                            "directly. Open a merge request on it instead; anyone who may publish "
+                            "here can merge that."),
+            }
+            raise
 
     # ── Read visibility (draft privacy + PR scoping) ──────────────────────────
     async def _is_pr_participant_for_branch(self, s, branch_id: str, actor: str) -> bool:
