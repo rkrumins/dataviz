@@ -192,7 +192,9 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
   // Proactive gate: the server flags a draft MR that lags main head. Mirror it into needsPull so the
   // banner + Pull-latest show up front (the 409 catch in runMerge is the backstop). A clean pull
   // clears it and invalidates this PR, so pr.behind flips false and keeps it cleared.
-  useEffect(() => { setNeedsPull(!terminal && !!pr?.behind) }, [pr?.behind, terminal])
+  // Only people's commits make a pull a must (pullRequired); automation alone is merged past.
+  const mustPull = pr?.pullRequired ?? pr?.behind
+  useEffect(() => { setNeedsPull(!terminal && !!mustPull) }, [mustPull, terminal])
 
   const runMerge = async (resolutions?: ResolutionMap) => {
     if (!pr || unsaved > 0) return

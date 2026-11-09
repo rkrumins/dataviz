@@ -508,8 +508,12 @@ export interface PullRequest {
   targetGraphId: string
   targetBranch: string
   baseCommitSeq?: number | null
-  behind?: boolean | null         // draft MR: base lags main head — must pull latest before merge
+  behind?: boolean | null         // draft MR: base lags main head
   behindBy?: number | null
+  /** Of those commits, how many people made. Only they make a pull a must before merging:
+   *  automation that touched none of the draft's entities is merged past. */
+  behindByPeople?: number | null
+  pullRequired?: boolean | null
   status: string
   title?: string | null
   description?: string | null
@@ -1466,6 +1470,10 @@ export function getWatermark(wsId: string, graphId: string): Promise<Watermark> 
 export interface BranchFreshness {
   behind: boolean
   behindBy: number
+  /** Of those commits, how many people made. Only they make pulling a must before publishing:
+   *  automation that touched none of the draft's entities is published past. */
+  behindByPeople?: number
+  pullRequired?: boolean
   mainHeadCommitSeq: number
   baseCommitSeq: number
   /** The draft's own status — how a client learns it was published or discarded. */

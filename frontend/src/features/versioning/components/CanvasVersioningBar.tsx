@@ -216,7 +216,9 @@ export function CanvasVersioningBar({
   // is the signal the (now deleted) BranchBehindBanner existed to provide; folding it in here is
   // what let the two contradictory banners become one.
   const freshness = useBranchFreshness(workspaceId, graphId, isDraft ? branchId : null)
-  const behindMain = freshness.data?.behind === true
+  // Only people's commits make a pull a must: a draft behind nothing but automation that touched
+  // none of its entities publishes as it is (the server's gate; an overlap it finds is a 409).
+  const behindMain = freshness.data?.pullRequired ?? freshness.data?.behind === true
   // Who else is on it: who saved into it, and what they saved since the reader last caught up.
   const branchQ = useBranch(workspaceId, graphId, isDraft ? branchId : null)
   const refreshDraft = useRefreshDraftFromOthers(workspaceId, graphId)

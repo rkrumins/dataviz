@@ -49,8 +49,8 @@ from backend.app.api.v1.versioning_gate import (SyncOverrides, fork_write_gate, 
 from backend.app.auth import api_key_auth, api_key_errors
 from backend.app.auth.dependencies import get_current_user, get_permission_claims, requires
 from backend.app.db.engine import get_db_session
-from backend.app.db.repositories import (data_source_repo, group_repo, notification_repo, provider_repo,
-                                         service_account_repo, user_repo)
+from backend.app.db.repositories import (api_key_repo, data_source_repo, group_repo, notification_repo,
+                                         provider_repo, service_account_repo, user_repo)
 from backend.app.db.repositories.view_repo import resolve_user_ids
 from backend.auth_service.interface import User
 from backend.app.services.graph_cache import CacheScope, get_graph_cache
@@ -545,7 +545,7 @@ def _domain_errors():
     except NotUpToDate as exc:
         raise HTTPException(status_code=409, detail={
             "type": "not_up_to_date", "branchId": exc.branch_id, "behindBy": exc.behind_by,
-            "message": str(exc)})
+            "reason": exc.reason, "message": str(exc)})
     except PullRequestExists as exc:
         # Carries the EXISTING prId so the client can route the user to the review that already
         # covers this branch, rather than dead-ending them on "no".
@@ -1041,6 +1041,13 @@ class BranchFreshnessModel(_ApiModel):
     And who else is saving into it."""
     behind: bool
     behind_by: int = Field(alias="behindBy")
+    # Of those commits, how many people made. Only they make pulling a must before publishing:
+    # automation that touched none of the draft's entities is published past (doc 19 §3.5).
+    behind_by_people: int = Field(default=0, alias="behindByPeople")
+    pull_required: bool = Field(default=False, alias="pullRequired")
+    # Why it must pull: ``people`` (someone changed main), ``overlap`` (automation changed what the
+    # draft changes), ``size`` (too big to publish behind). None: it publishes as it is.
+    pull_reason: Optional[Literal["people", "overlap", "size"]] = Field(default=None, alias="pullReason")
     main_head_commit_seq: int = Field(alias="mainHeadCommitSeq")
     base_commit_seq: int = Field(alias="baseCommitSeq")
     status: str
@@ -1197,6 +1204,13 @@ class CommitLogEntry(_ApiModel):
     merkle_root: Optional[str] = None      # may be filled in after the commit lands
     stats: Optional[Dict[str, Any]] = None  # shape varies by kind
     created_at: str
+    # Who made it, and how (``provenance``): human | service | system; the API key it came through,
+    # and the request; ``automation`` — a service account, the platform, or any API key.
+    actor_kind: Optional[str] = None
+    api_key_id: Optional[str] = None
+    correlation_id: Optional[str] = None
+    automation: bool = False
+    change_reason: Optional[str] = None    # a sync's source, an import's reason
 
 
 class CommitLogResponse(_ApiModel):
@@ -1204,6 +1218,8 @@ class CommitLogResponse(_ApiModel):
     # ONE wrapper-level map covering every commit's actor + contributors (this
     # response wraps a list, so the map hangs here rather than per commit dict).
     user_names: Dict[str, str] = Field(default_factory=dict, alias="userNames")
+    # The name of each API key the page's commits came through, by id.
+    api_key_names: Dict[str, str] = Field(default_factory=dict, alias="apiKeyNames")
     has_more: bool = Field(default=False, alias="hasMore")
     # The oldest ``commit_seq`` on the page while one branch's log has more; pass it back as
     # ``before``. Null for a view's raw history, which spans branches.
@@ -1502,9 +1518,12 @@ class PrResponse(_ApiModel):
     target_graph_id: str = Field(alias="targetGraphId")
     target_branch: str = Field(alias="targetBranch")
     base_commit_seq: Optional[int] = Field(default=None, alias="baseCommitSeq")
-    # Draft MR only: lags the target's main head and must pull latest before it can merge.
+    # Draft MR only: lags the target's main head; ``pullRequired`` when people's commits are among
+    # those, and it must pull latest before it can merge (automation alone is merged past).
     behind: Optional[bool] = None
     behind_by: Optional[int] = Field(default=None, alias="behindBy")
+    behind_by_people: Optional[int] = Field(default=None, alias="behindByPeople")
+    pull_required: Optional[bool] = Field(default=None, alias="pullRequired")
     status: str
     title: Optional[str] = None
     description: Optional[str] = None
@@ -2579,6 +2598,8 @@ async def get_branch_freshness(
         resolved = await resolve_user_ids(session, set(f["saved_since"]["by"]))
         names = {uid: disp for uid, (disp, _email) in resolved.items() if disp}
     return BranchFreshnessModel(behind=f["behind"], behind_by=f["behind_by"],
+                                behind_by_people=f["behind_by_people"],
+                                pull_required=f["pull_required"], pull_reason=f["pull_reason"],
                                 main_head_commit_seq=f["main_head_commit_seq"],
                                 base_commit_seq=f["base_commit_seq"], status=f["status"],
                                 head_commit_seq=f["head_commit_seq"], visibility=f["visibility"],
@@ -2918,6 +2939,9 @@ async def get_commit_log(
                                   "lower — the previous page's `nextBefore`"),
     after: Optional[int] = Query(None, ge=0, description="Only commits whose `commit_seq` is "
                                  "higher — the newest one you already have"),
+    origin: Optional[Literal["people", "automation"]] = Query(None, description=(
+        "`people`: commits a person made by hand. `automation`: commits a service account or "
+        "the platform made, or that came through an API key. Every commit when unset.")),
     _user: User = Depends(requires(_READ, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
     viewer: Viewer = Depends(viewer_ctx),
@@ -2945,9 +2969,11 @@ async def get_commit_log(
         commits, has_more = await svc.commit_log_page(
             graph_id=graph_id, branch_id=branch_id, originating_view_id=originating_view_id,
             published_only=published_only, limit=limit, offset=offset, before=before,
-            after=after, viewer=viewer)
+            after=after, viewer=viewer, origin=origin)
     next_before = commits[-1]["commit_seq"] if has_more and one_branch and commits else None
-    payload = {"commits": commits, "has_more": has_more, "next_before": next_before}
+    payload = {"commits": commits, "has_more": has_more, "next_before": next_before,
+               "api_key_names": await api_key_repo.names_by_ids(
+                   session, (c.get("api_key_id") for c in commits))}
     await _attach_user_names(session, commits, wrapper=payload)
     return payload
 
