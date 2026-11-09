@@ -32,8 +32,9 @@ flowchart LR
 2. Type part of the entity's name. When it appears under **Top matches**, click
    it (or highlight it with the arrow keys and press **Enter**). The canvas
    opens whatever the entity sits inside and scrolls to it.
-3. Click the entity's row. It's highlighted, and its details panel opens on the
-   right.
+3. Click the entity's row. It's highlighted — and, in the Technical view, its
+   details panel opens on the right (in the Business view, choose **Details**
+   in the bar at the bottom of the canvas, or press `Enter`).
 4. Click **Trace Lineage** in the header, or press `T`. The details panel
    closes to give the trace room, a progress capsule appears at the top of the
    canvas, and the trace dock opens at the bottom.
@@ -115,7 +116,8 @@ it away.
 1. Click the first entity's row.
 2. Hold `⌘` (Mac) or `Ctrl` (Windows) and click each extra entity, or hold
    Shift and click to add a range. Prefer plain clicks? Click **Select** in the
-   header (it changes to **Selecting**), then click rows.
+   header (in the Business view, **More → Select several**); it changes to
+   **Selecting**. Then click rows.
 3. A bar appears at the bottom of the canvas, naming what you've selected
    (*N entities*) and how much feeds it and flows from it.
 4. Click **Trace all N** in the bar, **Trace N Entities** in the header, or
@@ -321,14 +323,25 @@ the view itself.
 | See lines without hovering | **Edge Density** to **Adaptive** (strongest flows stay visible) or **All Edges**. **On Hover** is the default |
 | Draw more or fewer lines on a busy view | The **Edge Budget** slider (**Lines per entity** in On Hover), from 100 to 2,000 |
 | Hide the arrowheads | **Direction → Arrow markers** off |
+| Spot dependencies that run against the layers | **Highlight lines that point back** on: a line whose source sits in a layer to the right of its target is drawn in an alert colour — **Red** (the default), **Amber** or **Magenta**. Its hover card says **Points back**, and **Flows** counts them (**←**) in the same colour |
 | Change the upstream and downstream colours | **Appearance → Lineage colours**: pick a preset, or set **Incoming** and **Outgoing** yourself |
 | Stop the off-screen partner lists opening | **Appearance → Off-screen partners** off (a small hint shows instead) |
 | Hide alerts about links to entities outside the view | **Missing Connections → Missing-link alerts** off |
-| Make rows, icons and badges smaller | **Canvas → Density** (**Compact**, **Comfortable** or **Spacious**) and **Display options** |
+| Make rows, icons and badges smaller | **Canvas → Density** (**Minimal**, **Compact**, **Comfortable** or **Spacious**) and **Display options**. **Minimal** puts each entity on one line — its identifier after the name in the Technical view, display-rule chips as coloured dots — so about three times as many rows fit |
 
 The lineage settings work only while **Lineage** in the header is on; when it's
 off, the menu says *Turn on Lineage to adjust edge appearance*. A trace draws
-every line it walks, whatever **Edge Density** is set to.
+every line it walks, whatever **Edge Density** is set to. In the Business view,
+**Display** keeps the canvas settings, **How many lines** (Edge Density, in plain
+words: **On hover**, **Adaptive** or **All lines**), **Lineage colours**,
+**Missing-link alerts** and **Highlight lines that point back**; the rest are
+the Technical view's.
+
+Lines that point back follow each relationship's stored direction, the same one
+the arrowheads show. A trace keeps its own colours, and a line standing for
+flows both ways is never marked. Some relationship types are stored from
+reader to read — `CONSUMES` in the demo data — so they point back whenever the
+reader sits to the right of what it reads.
 
 ![The Display popover open from the view header, showing the Canvas section and the Lineage appearance section with Edge Density set to On Hover](/docs-assets/guide/exploring-graph-display.png)
 
@@ -380,7 +393,7 @@ Context View features.
 | `C` | In a draft: start a link from the selected entity, as **Connect To…** does. With no entity or several selected, turn **Connect** on or off |
 | `⌘D` / `Ctrl-D` | In a draft: make a quick copy of each selected entity and everything inside it, without asking |
 | `⌘⇧D` / `Ctrl-Shift-D` | In a draft: open **Duplicate…** for the selected entity |
-| `⌘/` / `Ctrl-/` | Switch between **Business** and **Technical** names (anywhere in the app) |
+| `⌘/` / `Ctrl-/` | Switch between the **Business** and **Technical** views (anywhere in the app) |
 
 ## Where to next
 

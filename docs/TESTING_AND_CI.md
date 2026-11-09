@@ -126,7 +126,7 @@ npx vitest run src/components/docs      # one folder
 npx vitest run src/components/docs/docsIntegrity.test.ts   # one file
 ```
 
-The suite runs in jsdom with `src/test/setup.ts` and a 20-second per-test timeout (`frontend/vite.config.ts`). The full run takes several minutes, so run the files you touched first. CI uses Node 20; the repository and the frontend image use Node 24 (`frontend/.nvmrc`).
+The suite runs in jsdom with `src/test/setup.ts` and a 20-second per-test timeout (`frontend/vite.config.ts`). Every test starts in the Technical view, which `setup.ts` sets, so the full toolset is on screen; a test of the Business view sets `usePersonaStore.setState({ mode: 'business' })` in its own `beforeEach`, or inline. The full run takes several minutes, so run the files you touched first. CI uses Node 20; the repository and the frontend image use Node 24 (`frontend/.nvmrc`).
 
 ### Documentation checks
 

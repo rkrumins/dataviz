@@ -49,6 +49,7 @@ import { useSchemaStore } from '@/store/schema'
 import { usePreferencesStore } from '@/store/preferences'
 import { useBranchStore } from '@/store/branchStore'
 import { useFeaturesStore } from '@/store/features'
+import { usePersonaStore, type PersonaMode } from '@/store/persona'
 import type { GraphDataProvider, GraphNode, NodeDegree, TraceV2Result, LensClosureExtras } from '@/providers/GraphDataProvider'
 import type { LensWalkModel } from '@/components/canvas/context-view/lens/closure-adapter'
 import type { ViewLayerConfig } from '@/types/schema'
@@ -657,6 +658,9 @@ export async function renderCanvasWithTrace(
     placementContract?: boolean
     /** Make the seeded view a subset view: a search's matches inside another view. */
     subset?: SearchViewDefinition
+    /** The view the canvas mounts in. Absent, the suite's own (Technical, see
+     *  test/setup.ts) or whatever the test set. */
+    persona?: PersonaMode
   },
 ): Promise<TraceCanvasHarness> {
   installJsdomLayout()
@@ -689,6 +693,7 @@ export async function renderCanvasWithTrace(
       placementContractEnabled: !!opts.placementContract,
     },
   } as never)
+  if (opts.persona) usePersonaStore.setState({ mode: opts.persona })
   // A recipient opens a link: the canvas must find it in the URL at mount.
   window.history.replaceState(null, '', `/views/harness-view${opts.search ?? ''}`)
   seedBrowse(estate, opts.browseHolds)

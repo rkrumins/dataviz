@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import type { ViewLayerConfig } from '@/types/schema'
-import { appendLayer, insertLayer, recolorLayer, renameLayer, removeLayer, reorderLayer, setLayerNodeSortMode, setViewDefaultSortMode, clearLayerOrderKeys } from './layerMutations'
+import { appendLayer, insertLayer, recolorLayer, renameLayer, removeLayer, reorderLayer, setLayerNodeSortMode, setViewDefaultSortMode, clearLayerOrderKeys, updateLayer } from './layerMutations'
 
 const L = (id: string, name: string, order: number): ViewLayerConfig => ({
   id,
@@ -220,5 +220,19 @@ describe('setViewDefaultSortMode — widened modes', () => {
   it('accepts the property-derived modes as view defaults', () => {
     const out = setViewDefaultSortMode({ layers: base(), assignments: {} }, 'count-desc')
     expect(out.defaultNodeSortMode).toBe('count-desc')
+  })
+})
+
+describe('updateLayer', () => {
+  it('changes one layer\'s fields, its properties among them, and leaves the rest', () => {
+    const out = updateLayer(base(), 'b', { description: 'Cleaned', properties: { owner: 'ana', sla: '1h' } })
+    expect(out.find((l) => l.id === 'b')).toMatchObject({ name: 'Beta', description: 'Cleaned', properties: { owner: 'ana', sla: '1h' } })
+    expect(out.find((l) => l.id === 'a')).toEqual(base()[0])
+  })
+
+  it('returns the same array when nothing would change, or the layer is missing', () => {
+    const layers = updateLayer(base(), 'b', { properties: { owner: 'ana' } })
+    expect(updateLayer(layers, 'b', { properties: { owner: 'ana' } })).toBe(layers)
+    expect(updateLayer(layers, 'zz', { name: 'X' })).toBe(layers)
   })
 })

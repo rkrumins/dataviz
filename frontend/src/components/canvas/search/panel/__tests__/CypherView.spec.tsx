@@ -82,6 +82,7 @@ describe('CypherView', () => {
     it('shows the compiled Cypher, read-only, and copies it with its values written in', async () => {
         const writeText = vi.fn().mockResolvedValue(undefined)
         Object.assign(navigator, { clipboard: { writeText } })
+        usePersonaStore.getState().setMode('business')
         compiled = COMPILED
         render(<CypherView viewId="view-1" />)
 

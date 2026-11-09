@@ -27,13 +27,14 @@
  * separate layout slot from the right-rail EntityDrawer.
  */
 
-import { useRef } from 'react'
+import { useRef, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Loader2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { HoverTip } from '@/components/ui/HoverTip'
 import type { CanvasDensity, LineageRenderMode } from '@/store/preferences'
 import { BranchSwitcher } from '@/features/versioning/components/BranchSwitcher'
+import { usePersonaMode } from '@/store/persona'
 import { HeaderSearch } from './header/HeaderSearch'
 import { ViewerActions } from './header/ViewerActions'
 import type { ViewFileActions } from './header/ImportExportMenu'
@@ -158,6 +159,8 @@ export interface ContextViewHeaderProps {
   onFitToWidth?: () => void
   /** Open the orphaned-entities panel (Display menu → Advanced). Optional. */
   onOpenOrphans?: () => void
+  /** Open the view's changes and history (the Business view's More). Optional. */
+  onOpenHistory?: () => void
 }
 
 export function ContextViewHeader({
@@ -217,6 +220,7 @@ export function ContextViewHeader({
   onResetCanvasDisplaySettings,
   onFitToWidth,
   onOpenOrphans,
+  onOpenHistory,
 }: ContextViewHeaderProps) {
   // The actions fold their words away, least-used first, when the row can't
   // hold them beside the search box — and move under it when even that
@@ -225,6 +229,10 @@ export function ContextViewHeader({
   const leadRef = useRef<HTMLDivElement>(null)
   const actionsRef = useRef<HTMLDivElement>(null)
   const fold = useToolbarFold(rowRef, leadRef, actionsRef)
+  const technical = usePersonaMode() === 'technical'
+  // The switcher's drafts manager, held here so the Business view's More can
+  // open it on Published, where the switcher itself is hidden.
+  const [draftsOpen, setDraftsOpen] = useState(false)
 
   // Shared comprehension cluster — identical in both modes (see
   // header/ViewerActions.tsx for the rationale).
@@ -242,6 +250,8 @@ export function ContextViewHeader({
     onResetCanvasDisplaySettings,
     onFitToWidth,
     onOpenOrphans,
+    onOpenHistory,
+    onOpenDrafts: branchWorkspaceId && canEnterEdit && !isDraft ? () => setDraftsOpen(true) : undefined,
     lineageRenderMode,
     onSetLineageRenderMode,
     showEdgeDirection,
@@ -265,8 +275,9 @@ export function ContextViewHeader({
     onOpenLens,
     onTogglePropertyManager,
     propertyManagerOpen,
-    // Import / Export live in the shared cluster so the combined dropdown shows in BOTH modes; the
-    // Import item self-disables when not editing (isDraft).
+    // Import / Export live in the shared cluster so they show in BOTH modes (one dropdown in the
+    // Technical view, under More in the Business view); the Import item self-disables when not
+    // editing (isDraft).
     onImport,
     onExport,
     isDraft,
@@ -316,11 +327,21 @@ export function ContextViewHeader({
             CanvasVersioningBar) and the blueprint-sync signal that used to
             ride the title's subline. */}
         <div ref={leadRef} className="flex items-center gap-2 min-w-0">
+          {/* The Business view reads the published view and shows no switcher
+              there; in a draft it says which draft this is. Hidden, never
+              unmounted: the switcher is what hands the canvas this view's
+              versioned graph, which Edit waits for, and what opens a shared
+              link to a draft. */}
           {branchWorkspaceId && (
-            <BranchSwitcher
-              workspaceId={branchWorkspaceId}
-              dataSourceId={branchDataSourceId ?? null}
-            />
+            // `contents` only while shown: a display utility would override `hidden`.
+            <div hidden={!(technical || isDraft)} className={technical || isDraft ? 'contents min-w-0' : undefined}>
+              <BranchSwitcher
+                workspaceId={branchWorkspaceId}
+                dataSourceId={branchDataSourceId ?? null}
+                managerOpen={draftsOpen}
+                onManagerOpenChange={setDraftsOpen}
+              />
+            </div>
           )}
 
           {/* A spinner and an error link, both unexplained: `aria-label` told a

@@ -36,7 +36,8 @@ All of these switches are in **Administration → Features**.
 
 Importing and exporting data happens on a **Context View**: open the **Import
 / Export** menu in its header (two arrows — the words show only on very wide
-screens).
+screens). In the Business view, the same items are under **More** (`⋯`) →
+**File**.
 
 - **Export…** is there whenever **Export graph data** is on — on Published and
   in a draft, with or without version control.

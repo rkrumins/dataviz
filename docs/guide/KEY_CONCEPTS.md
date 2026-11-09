@@ -103,9 +103,10 @@ lineage runs two ways:
   radius*: everything a change to it would touch.
 
 To **trace** an entity is to have {brand} follow its lineage for you and
-highlight the whole chain. Click the entity, then use **Root Cause** (upstream),
-**Impact** (downstream) or **Full Lineage** (both) in its details panel — or
-right-click it and choose **Trace Lineage**. In a Context View there's also a
+highlight the whole chain. Click the entity (in the Business view, then
+**Details**), then use **Root Cause** (upstream), **Impact** (downstream) or
+**Full Lineage** (both) in its details panel — or right-click it and choose
+**Trace Lineage**. In a Context View there's also a
 **Trace Lineage** button in the header.
 
 Each trace has an **upstream depth** and a **downstream depth**: how many hops
@@ -200,21 +201,45 @@ See [Versioning & Change Control](/guide/versioning-change-control),
 [Editing in a Draft](/guide/editing-in-a-draft) and
 [The Review Center](/guide/review-center).
 
-## Business or Technical names
+## Business or Technical view
 
-The **Business** / **Technical** switch in the top bar changes how entities are
-named, everywhere at once:
+The **Business** / **Technical** switch in the top bar sets how much the app
+shows you, everywhere at once:
 
-- **Business** — the name people use, and nothing else.
-- **Technical** — the same name, with each entity's identifier underneath (its
-  data source's identifier property, such as `id`, or its URN), on the canvas
-  and in the entity's details panel.
+- **Business** — the essentials, for reading lineage. Menus and toolbars keep to
+  what reading a view needs, and entities go by the name people use, and
+  nothing else.
+- **Technical** — every tool on every row, and each entity's identifier under
+  its name (its data source's identifier property, such as `id`, or its URN),
+  on the canvas and in the entity's details panel.
 
-It changes labels only: the graph, its lineage and your access stay the same.
-The words **Business View** or **Technical View** under the {brandShort} name at
-the top left show which one is on, and the `⌘K` / `Ctrl-K` palette can switch
-it too (**Switch to Technical View** / **Switch to Business View**). Or press
-`⌘/` / `Ctrl-/` anywhere outside a text field.
+What the Business view tucks away is a click away, not gone:
+
+| Where | What the Business view keeps | Where the rest is |
+| --- | --- | --- |
+| A Context View's header | **Lineage**, **Display**, **Focus Lens**, **Trace Lineage**, **Edit** | **More** (`⋯`): **Select several**, **Properties & display rules**, **Changes & history…**, **Your drafts…**, and under **File**: **Import…**, **Export view…**, **Export data…**, **Update this view from a file…**, **Save layers as a template…** |
+| Search in the header | The search box | **Look in** and **Match** appear once a search uses them |
+| **Display** | The canvas settings, **How many lines**, **Lineage colours** and **Missing-link alerts** | How lines move, arrows, marker sides and **Advanced** are the Technical view's |
+| The view's header | Its name and description, where it lives, **Share**, **Details** (or **About**, for people who can't edit), **Activity**, and any request waiting on it | Versions, export, reviews, the type count and usage are the Technical view's |
+| An entity's right-click menu | **View & Edit**, **Trace Lineage**, **Focus Connections** | **Copy URN** and **Narrow to this…** are the Technical view's |
+| A trace bar (Graph canvas) | Its directions and **Exit** | Statistics, settings, **Copy URNs** and export are the Technical view's |
+| An entity's details panel | Opens when you ask (**Details**, `Enter`), on **At a glance**: its description, ID, owner and featured properties | The identifier block, raw details, placement, history, **Copy URN** and the **JSON** tab are the Technical view's; **Customize** brings any section back |
+
+A tool that is on stays on screen in either view, so you can always turn it off —
+**Selecting**, an open Property Manager. In a draft, **Connect** is on the toolbar
+in both. The branch switcher shows
+while you're in a draft. The **Data loads** and **Flows** panels start minimized
+in the Business view until you open or minimize them yourself.
+
+The graph, its lineage and your access are the same in both. Choose a view in
+the switch, or use the arrow keys once it has focus. The words
+**Business View** or **Technical View** under the {brandShort} name at the top
+left show which one is on, and the `⌘K` / `Ctrl-K` palette can switch it too
+(**Switch to Technical View** / **Switch to Business View**). Or press
+`⌘/` / `Ctrl-/` anywhere outside a text field, or choose **Show every tool** at
+the bottom of **More**. The first time you open the app in the Business view, a
+short note by the switch says what it keeps; it goes when you dismiss it or
+switch.
 
 ---
 

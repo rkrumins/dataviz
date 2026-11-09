@@ -15,6 +15,7 @@
 import { Plus, Compass, ArrowRight } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { ViewActivityEntry } from '@/services/viewApiService'
+import { usePersonaMode } from '@/store/persona'
 
 /**
  * Time-of-day salutation. Local clock — this is a pleasantry, not a timestamp.
@@ -91,12 +92,26 @@ export function HeroActions({ onCreateView, onResume, resumeLabel, onBrowse }: {
     resumeLabel?: string
     onBrowse: () => void
 }) {
+    // A Business reader comes here to read: browsing leads, and building waits
+    // behind picking up where they were. The Technical view keeps building first.
+    const browseFirst = usePersonaMode() !== 'technical'
+
+    const build = (
+        <button type="button" onClick={onCreateView} className={browseFirst ? SECONDARY : PRIMARY}>
+            <Plus className={cn('w-[18px] h-[18px] transition-transform group-hover:rotate-90 duration-200', browseFirst && 'text-ink-muted')} />
+            Build a new view
+        </button>
+    )
+    const browse = (
+        <button type="button" onClick={onBrowse} className={browseFirst ? PRIMARY : SECONDARY}>
+            <Compass className={cn('w-[18px] h-[18px]', !browseFirst && 'text-ink-muted')} />
+            Browse all views
+        </button>
+    )
+
     return (
         <>
-            <button type="button" onClick={onCreateView} className={PRIMARY}>
-                <Plus className="w-[18px] h-[18px] transition-transform group-hover:rotate-90 duration-200" />
-                Build a new view
-            </button>
+            {browseFirst ? browse : build}
 
             {onResume && resumeLabel && (
                 <button type="button" onClick={onResume} className={SECONDARY}>
@@ -106,10 +121,7 @@ export function HeroActions({ onCreateView, onResume, resumeLabel, onBrowse }: {
                 </button>
             )}
 
-            <button type="button" onClick={onBrowse} className={SECONDARY}>
-                <Compass className="w-[18px] h-[18px] text-ink-muted" />
-                Browse all views
-            </button>
+            {browseFirst ? build : browse}
         </>
     )
 }

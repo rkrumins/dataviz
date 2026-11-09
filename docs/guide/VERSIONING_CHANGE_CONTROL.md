@@ -58,7 +58,10 @@ even in a draft.
    choose the workspace, select the data source on the **Data Sources** tab, and
    open its **Versioning** tab — it says **Version control is off**.)
 2. Choose **Enable version control**. The **Turn on version control** dialog
-   opens and says how much it will copy into the version history.
+   opens on **What it means**: what version control gives you, and what
+   happens to changes another tool writes straight to the graph (see **If
+   another tool keeps writing to the graph**, below). Choose **Continue**;
+   the dialog then says how much it will copy into the version history.
 3. Choose **Turn on version control**. The strip shows the copy's progress —
    *N of M items copied*. You can keep using the graph while it runs, and
    nothing changes until every item has been checked against the source.

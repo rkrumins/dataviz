@@ -11,6 +11,7 @@
  */
 import { Database } from 'lucide-react'
 import { HoverTip } from '@/components/ui/HoverTip'
+import { usePersonaMode } from '@/store/persona'
 import { useProjectionWatermark } from '../hooks/useVersioning'
 
 export function ReadRouteChip({ workspaceId, graphId, isDraft }: {
@@ -19,9 +20,23 @@ export function ReadRouteChip({ workspaceId, graphId, isDraft }: {
   isDraft: boolean
 }) {
   const wm = useProjectionWatermark(workspaceId, graphId).data
+  const technical = usePersonaMode() === 'technical'
   const route = wm?.readRoute
   if (!graphId || !wm || !route) return null
   if (!isDraft && route.main === 'falkordb') return null
+  // The Business view names no store. FalkorDB serving published is the steady state there, under
+  // a draft overlay too; Postgres standing in for it means only that reads are slower for now.
+  if (!technical) {
+    if (route.main === 'falkordb') return null
+    return (
+      <HoverTip className="inline-flex" label="Reads stay correct while it catches up">
+        <span className="flex items-center gap-1.5 px-2 py-0.5 rounded-md text-[11px] font-medium bg-black/[0.04] dark:bg-white/[0.06] text-ink-muted border border-glass-border">
+          <Database className="w-3 h-3" />
+          Catching up — may be slower
+        </span>
+      </HoverTip>
+    )
+  }
 
   const onFalkor = route.main === 'falkordb'
   const farFork = !onFalkor && wm.readsFrom === 'postgres'

@@ -516,6 +516,7 @@ It's saved in the browser you're using, so set it again on another device.
 | Preference | Notes |
 |---|---|
 | **Needs attention** | Off by default. On, your Dashboard lists the worst open profiling findings — a source far outside its usual movement, an entity type that vanished, a source gone quiet — each with **Open** and **Mark seen**. It's for people who look after data sources: it needs the permission to see profiling results, and the switch says so when you don't have it. |
+| **Entity details** | Whether selecting an entity opens its details panel, set for each view: off **in the Business view**, where a click picks an entity out and **Details** (or `Enter`) opens it, and on **in the Technical view**, where the details follow every click. Details already open follow what you select either way. |
 
 ---
 

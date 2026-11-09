@@ -41,6 +41,8 @@ def build_schema() -> dict:
     # The pack keeps its items as open objects so one bad item is refused on its own; these are
     # what each item is checked against. A rule's id is optional: every item imported gets a new one.
     rule = DisplayRule.model_json_schema()
+    # A rule's nested models (its style) are defined beside it, where its refs point.
+    defs.update(rule.pop("$defs", {}))
     rule["properties"]["predicate"] = {"$ref": "#/$defs/Predicate"}
     rule["required"] = [key for key in rule["required"] if key != "id"]
     query = SavedQueryInput.model_json_schema()

@@ -9,8 +9,8 @@
  * connection and lists them.
  *
  * Raw lineage relationships — the ones a graph's owners author and keep — can
- * be edited (properties) and deleted, in a draft, staged like every other
- * canvas edit. Roll-ups, hierarchy links and non-lineage types are shown
+ * be edited (properties), reversed and deleted, in a draft, staged like every
+ * other canvas edit. Roll-ups, hierarchy links and non-lineage types are shown
  * read-only, and say why.
  *
  * Details come from the drawer's own read (`useRelationshipRecord`), never the
@@ -21,7 +21,7 @@
  * the drawer asks first.
  */
 import { memo, useEffect, useId, useMemo, useRef, useState } from 'react'
-import { AlertCircle, Code, Crosshair, Eye, FileText, History, Info, Pencil, Trash2, Waypoints } from 'lucide-react'
+import { AlertCircle, ArrowLeftRight, Code, Crosshair, Eye, FileText, History, Info, Pencil, Trash2, Waypoints } from 'lucide-react'
 import { useCanvasStore, type DrawerEdgeTarget, type LineageNode } from '@/store/canvas'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { useFeature } from '@/store/features'
@@ -64,6 +64,8 @@ interface RelationshipDrawerProps {
   onLocateMany?: (nodeIds: string[]) => void | Promise<void>
   /** Stage the deletion of a canvas edge — the canvas's own delete. */
   onDeleteEdge?: (canvasEdgeId: string) => void
+  /** Stage the reversal of a canvas edge — the canvas's own reverse. */
+  onReverseEdge?: (canvasEdgeId: string) => void
   /** Open a draft, so a relationship on the published graph can be changed. */
   onStartEditing?: () => void
 }
@@ -116,6 +118,7 @@ function RelationshipPanel({
   onFocusNode,
   onLocateMany,
   onDeleteEdge,
+  onReverseEdge,
   onStartEditing,
 }: RelationshipDrawerProps & {
   target: RelationshipTarget
@@ -259,6 +262,11 @@ function RelationshipPanel({
     onDeleteEdge!(canvasEdge!.id)
     useCanvasStore.getState().closeNodeDrawer()
   })
+  const canReverse = !!onReverseEdge && editable && canvasEdge?.id === entityId
+  const reverseRelationship = () => useCanvasStore.getState().requestDrawerMove(() => {
+    onReverseEdge!(canvasEdge!.id)
+    useCanvasStore.getState().closeNodeDrawer()
+  })
 
   const jsonData = useMemo(() => ({
     id: entityId ?? target.id,
@@ -322,6 +330,11 @@ function RelationshipPanel({
             >
               Edge Explorer
             </Button>
+            {canReverse && (
+              <Button size="sm" variant="subtle" leftIcon={ArrowLeftRight} onClick={reverseRelationship}>
+                Reverse direction
+              </Button>
+            )}
             {canDelete && (
               <Button
                 size="sm"

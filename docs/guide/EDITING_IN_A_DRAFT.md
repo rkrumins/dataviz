@@ -66,7 +66,8 @@ You can also start from where you are:
 
 ## Change an entity
 
-1. Click the entity on the canvas. Its drawer opens on the **View** tab.
+1. Click the entity on the canvas. Its drawer opens on the **View** tab (in the
+   Business view, choose **Details** in the bar at the bottom, or press `Enter`).
 2. Choose the **Edit** tab.
 3. Change what you need: **Name**, **Business label** (the name the business
    knows it by), **Description**, **Qualified name**, **Source system**,
@@ -77,6 +78,10 @@ You can also start from where you are:
 
 **Cancel** throws the edit away. `Esc` first leaves the field you're typing in,
 then closes the drawer.
+
+To rename an entity without opening its drawer, double-click its row and type.
+In the Business view the row shows the business label, so that is the name you
+change; in the Technical view you change its **Name**.
 
 ![An entity drawer on the Edit tab with a changed Description; the footer shows 'Unsaved changes', Cancel and Stage changes (hover tip showing the keyboard shortcut)](/docs-assets/guide/editing-in-a-draft-stage-bar.png)
 
@@ -94,6 +99,32 @@ with an edit you haven't staged opens **Unsaved changes**:
 If you try to close the browser tab with an unstaged edit, the browser asks you
 to confirm.
 
+## Change many entities at once
+
+1. Select the entities: hold `⌘` (Mac) or `Ctrl` (Windows) and click each one,
+   or Shift-click to add a range.
+2. In the bar at the bottom of the canvas, choose **Edit N…**. A panel opens on
+   the right with how many you hold, of which types, and what they share:
+
+   | It says | Meaning |
+   | --- | --- |
+   | **Same** | Every one has this value — it's in the box |
+   | **Mixed · 7 of 12** | They differ, or only 7 of the 12 have it — the box is empty |
+   | **None set** | None of them has it |
+
+3. Change what should be the same for all of them:
+   - type a **Description**, or a property's value, to give all of them that
+     value (**Leave each as it is** takes a description back);
+   - the bin beside a property removes it from all of them;
+   - **Add a property to all** adds a new one.
+4. Choose **Stage for N**. Each entity's change is staged on its own, as if you
+   had edited them one by one — an entity you had already changed keeps that
+   change too, and one the edit wouldn't change isn't touched. **Undo** on the
+   message takes the whole edit back.
+
+Outside a draft the same bar says **Details**: the panel shows what they share,
+read-only, with **Edit in a draft**. Choosing one entity's own details closes it.
+
 ## Change a relationship
 
 1. Click a line on the canvas. The relationship's drawer opens: what it means,
@@ -103,7 +134,8 @@ to confirm.
 
 To remove the relationship instead, choose **Delete** in its drawer. The
 deletion is staged straight away — it happens when you save, or you can discard
-it in **Review & Save**.
+it in **Review & Save**. To turn it round, choose **Reverse direction** next to
+**Delete**: it then runs the other way, staged the same way.
 
 Only lineage relationships — the ones your graph's owners author — can be
 changed. Rolled-up lines, hierarchy links and other relationship types are
@@ -128,7 +160,8 @@ All of these are staged too — nothing is saved until **Review & Save**.
   ringed green when a relationship can join them — or red, with the reason,
   when none can. `Esc` backs out one step at a time. You can still drag from
   the **+** to the target, or right-click an entity and choose **Connect To…**
-  or **Link to…**.
+  or **Link to…**. **Connect** in the toolbar turns the tool on too, in either
+  view.
   - When only one relationship type fits, the link is made at once, and the
     message that confirms it offers **Undo**. Otherwise pick the type — only
     the types your [semantic layer](/guide/semantic-layer) allows are offered.
@@ -173,9 +206,21 @@ takes them back.
   entities move to the first remaining layer, and the message that confirms it
   offers **Undo**.
 - **Add a layer at the end:** choose **Add layer** after the last column.
+- **Edit a layer's settings:** choose **Layer settings…** in its menu. A panel
+  opens beside the canvas with the layer's essentials — name, description,
+  colour and icon — then its **Custom properties**, which its card shows every
+  reader, and under **More**, **Show unassigned entities** and **Delete layer**.
+  **Stage changes** keeps what you changed for **Review & Save**.
+- **In the Business view**, a column's header keeps to the layer itself: its
+  name, count and sort. Choose **⋯** on the header for the layer's menu, which
+  also holds **Add entity**, **New group** and **Build a lot at once**.
+- **Place entities that have no parent:** choose **More** (`⋯`) → **Entities
+  with no parent…** (in the Technical view, **Display → Advanced**). The panel
+  lists them, and you place each one in a layer.
 
 Outside a draft, the menu says layers change in a draft and offers **Start
-editing to change layers**.
+editing to change layers**. **Layer details…** shows a layer's settings,
+read-only.
 
 ## Review & Save
 
@@ -237,6 +282,10 @@ with resolutions**.
 
 ## Your draft
 
+- **In the Business view**, the version menu shows once you're in a draft. On
+  Published, **More** (`⋯`) → **Your drafts…** opens your drafts, and **More →
+  Changes & history…** opens a draft's changes, or the published history, its
+  reviews and data health.
 - **Switch versions.** The version menu in the toolbar shows **Published** or
   your draft's name. It lists **Published**, then **Your drafts**, **Shared
   with you** and **Public drafts**, each marked with a globe (public) or a lock

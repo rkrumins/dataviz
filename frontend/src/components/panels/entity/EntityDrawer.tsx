@@ -128,7 +128,15 @@ function OpenEntityDrawer({
     setTabFor(node.id)
     setTab('view')
   }
-  const shownTab: EntityTab = tab === 'edit' && !editable ? 'view' : tab
+  // The Business view has no JSON tab: a drawer left on it reads the View tab there.
+  const technical = personaMode === 'technical'
+  const shownTab: EntityTab = (tab === 'edit' && !editable) || (tab === 'json' && !technical) ? 'view' : tab
+  // Customize opens above the View tab's sections, and stays open as the drawer moves.
+  const [customizing, setCustomizing] = useState(false)
+  const toggleCustomize = useCallback(() => {
+    setCustomizing((v) => !v)
+    setTab('view')
+  }, [])
 
   const urn = (form.urn as string | undefined) || node.id
   const userProps = useMemo(() => userProperties(form.properties), [form.properties])
@@ -139,6 +147,11 @@ function OpenEntityDrawer({
     [node.data, personaMode, identityProperty, node.id, title],
   )
   const externalUrl = useMemo(() => getExternalUrl?.(urn) ?? null, [getExternalUrl, urn])
+  // The entity's ID for At a glance, in either view: its data source's identity property, or its URN.
+  const identity = useMemo(
+    () => technicalIdentity(node.data, 'technical', { identityProperty, urn: node.id, name: '' }),
+    [node.data, identityProperty, node.id],
+  )
 
   const [copiedUrn, setCopiedUrn] = useState(false)
   const copyUrn = useCallback(() => {
@@ -196,6 +209,8 @@ function OpenEntityDrawer({
             onStartEditing={editOffered && editing.blocked !== NO_VERSION_CONTROL ? onStartEditing : undefined}
             onClose={close}
             onFocusNode={onFocusNode}
+            customizing={customizing}
+            onCustomize={toggleCustomize}
           />
 
           <DrawerBody>
@@ -216,6 +231,12 @@ function OpenEntityDrawer({
                 onLocateMany={onLocateMany}
                 onRevealPath={onRevealPath}
                 history={scope}
+                typeId={typeId}
+                typeName={entityType?.name || typeId}
+                fields={entityType?.fields}
+                identity={identity}
+                customizing={customizing}
+                onDoneCustomizing={() => setCustomizing(false)}
               />
             </TabsContent>
             {editable && (
@@ -232,9 +253,11 @@ function OpenEntityDrawer({
                 />
               </TabsContent>
             )}
-            <TabsContent value="json">
-              <JsonView data={form} label="Entity data" />
-            </TabsContent>
+            {technical && (
+              <TabsContent value="json">
+                <JsonView data={form} label="Entity data" />
+              </TabsContent>
+            )}
           </DrawerBody>
 
           <EntityFooter

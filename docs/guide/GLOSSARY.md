@@ -32,7 +32,7 @@ screen.
 | **Data health** | A tab of a view's versioning panel, shown only to people who manage the data source. It checks the graph against its published versions and can rebuild it. | [Data Freshness & Ingestion](/guide/data-freshness) |
 | **Data source** | A graph added to a workspace together with the semantic layer that describes it. Every view is built on one. | [Admin Setup](/guide/admin-setup) |
 | **Density** | The Lineage Lens control for how much is folded away: **Overview**, **Grouped** or **Every card**. | [The Lineage Lens & Context View](/guide/lineage-lens) |
-| **Display rule** | A rule that tags every entity matching a search with a coloured chip; found under **Properties → Display rules**. | [Display Rules](/guide/display-rules) |
+| **Display rule** | A rule that tags every entity matching a search with a coloured chip — and, if you choose, colours its card or frames it; found under **Properties → Display rules**. | [Display Rules](/guide/display-rules) |
 | **Downstream** | What a piece of data feeds — follow the arrows forwards. | [Reading Lineage](/guide/reading-lineage) |
 | **Draft** | Your private working copy of a data source's graph. Edits go there; the published version stays untouched until the draft is published. | [Editing in a Draft](/guide/editing-in-a-draft) |
 | **Drift** | Something changed after it was last built. **Graph Drift Detected** means the graph changed since its last aggregation. | [Data Freshness & Ingestion](/guide/data-freshness) |
@@ -65,7 +65,7 @@ screen.
 | **Impact** | Everything downstream of an entity — what a change to it could affect. **Impact** in the entity drawer traces it. | [Tracing Lineage on the Canvas](/guide/exploring-graph) |
 | **Inbox** | The bell in the top bar. It lists views shared with you, requests to publish a view or join a workspace, and the answers to your own requests. | [Managing & Sharing Views](/guide/managing-views) |
 | **Invite link** | A sign-up link an administrator creates, carrying a role and groups. The **Invite links** switch can stop every link at once. | [Users & Access](/guide/users-access) |
-| **Layer** | A column of a Context View, holding the entity types or entities placed in it. | [Navigating Layers](/guide/navigating-layers) |
+| **Layer** | A column of a Context View, holding the entity types or entities placed in it. A layer can carry properties of its own, such as an owner, which its card shows. | [Navigating Layers](/guide/navigating-layers) |
 | **Lineage** | How data flows from where it starts to where it's used. | [Reading Lineage](/guide/reading-lineage) |
 | **Lineage Lens** | A focused picture of one entity's connections over the canvas, walked one hop at a time. Open it with **Focus Lens**, or **Focus Connections** on the right-click menu. | [The Lineage Lens & Context View](/guide/lineage-lens) |
 | **List view** (**Auto-updating** / **Snapshot**) | A view that keeps a list of its members, up to 5,000, made with **Save as view** from a narrowing or a search's matches, kept **As a list · up to 5,000**. **Auto-updating** brings itself up to date when it's opened after its data changed; a **Snapshot** keeps the members it has. Its header chip says which. | [Managing & Sharing Views](/guide/managing-views#views-made-from-a-query) |
@@ -87,7 +87,7 @@ screen.
 | **Org Auditor** | An organisation-wide role that can see every workspace and the activity log, but can't change anything. | [Users & Access](/guide/users-access) |
 | **Orphan** | An entity whose type normally sits inside another (a table in a schema) but which has no parent in the data. List them with **Display → Advanced → Orphaned entities…** in a Context View. | [Navigating Layers](/guide/navigating-layers) |
 | **Other matches** | A subset view's layer for the matches none of its other layers holds. While the subset follows its base, these are the matches the base places in none of its layers. | [Managing & Sharing Views](/guide/managing-views#subset-views-a-searchs-matches-as-a-view) |
-| **Persona toggle** | The **Business** / **Technical** switch in the top bar. **Business** shows names only; **Technical** adds each entity's identifier under its name: its data source's identifier property, such as `id`, or its URN. | [Reading Lineage](/guide/reading-lineage) |
+| **Persona toggle** | The **Business** / **Technical** switch in the top bar. **Business** keeps to the essentials: fewer tools on screen, the rest under **More**, and names only. **Technical** shows every tool and adds each entity's identifier under its name: its data source's identifier property, such as `id`, or its URN. | [Key Concepts](/guide/key-concepts#business-or-technical-view) |
 | **Profiling** | A data source's counts and make-up over time, under **Ingestion → Profiling**. | [Data Freshness & Ingestion](/guide/data-freshness) |
 | **Projection Mode** | Where a data source's rollups are written when its aggregation runs: **In-Source** (into the source graph) or **Dedicated Graph** (a separate graph, leaving the source untouched). | [Rollup Capacity & Large Graphs](/guide/rollup-capacity) |
 | **Provider** | A registered connection to a graph database, added with **Register Provider** under **Ingestion → Providers**. | [Admin Setup](/guide/admin-setup) |

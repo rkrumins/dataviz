@@ -208,6 +208,17 @@
         },
         "predicate": {
           "$ref": "#/$defs/Predicate"
+        },
+        "style": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DisplayRuleStyle"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -216,6 +227,42 @@
         "predicate"
       ],
       "title": "DisplayRule",
+      "type": "object"
+    },
+    "DisplayRuleStyle": {
+      "description": "How a rule paints the entities it matches, beside (or instead of) its chip. A rule with\nno style shows its chip and nothing else. Where two rules paint one card, the one first in\nthe view's list wins; chips are never contested — every matching rule adds its own.",
+      "properties": {
+        "chip": {
+          "default": true,
+          "description": "Show the rule's tag chip on each entity it matches.",
+          "title": "Chip",
+          "type": "boolean"
+        },
+        "fill": {
+          "default": false,
+          "description": "Tint each matching card in the rule's colour.",
+          "title": "Fill",
+          "type": "boolean"
+        },
+        "frame": {
+          "anyOf": [
+            {
+              "enum": [
+                "solid",
+                "dashed"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Draw a box round each matching card, in the rule's colour.",
+          "title": "Frame"
+        }
+      },
+      "title": "DisplayRuleStyle",
       "type": "object"
     },
     "EdgeGroupPredicate": {

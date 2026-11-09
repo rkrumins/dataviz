@@ -2,14 +2,26 @@ import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import type { LayerNodeSortAlgo } from '@/types/schema'
 import { DEFAULT_LINEAGE_DIRECTION_COLORS, type LineageDirectionColors } from '@/lib/lineageDirectionColors'
+import type { PersonaMode } from './persona'
 
 export type ThemeMode = 'light' | 'dark' | 'system'
+
+/** The entity drawer's sections, as its Customize panel names them. */
+export type DrawerSectionId =
+  | 'overview' | 'identifier' | 'details' | 'relationship' | 'properties' | 'classifications' | 'lineage' | 'history'
+
+/** A view's own order and choice of the entity drawer's sections. */
+export interface DrawerLayout {
+  order: DrawerSectionId[]
+  hidden: DrawerSectionId[]
+}
 
 /** Visual density of list/grid items in the Explorer page. */
 export type ExplorerDensity = 'compact' | 'comfortable' | 'spacious'
 
-/** Visual density of layer column tree items in the Context View canvas. */
-export type CanvasDensity = 'compact' | 'comfortable' | 'spacious'
+/** Visual density of layer column tree items in the Context View canvas.
+ *  `minimal` is one line per entity. */
+export type CanvasDensity = 'minimal' | 'compact' | 'comfortable' | 'spacious'
 
 // Canvas zoom range — wide enough to support both tiny-overview ("zoom out
 // to see the whole hierarchy") and large-text accessibility ("zoom in for
@@ -90,8 +102,10 @@ interface PreferencesState {
 
   // Canvas bottom-right dock (Data loads + Flows). Collapsed individually
   // each is still a header; minimizing folds the pair into one slim strip
-  // so the columns get their width and height back.
-  canvasDockMinimized: boolean
+  // so the columns get their width and height back. Null until the reader
+  // chooses: then it follows the view — minimized in the Business view,
+  // open in the Technical one.
+  canvasDockMinimized: boolean | null
   setCanvasDockMinimized: (minimized: boolean) => void
 
   // Context View: when the layers do not all fit, the ones outside the open
@@ -111,6 +125,29 @@ interface PreferencesState {
   // the identifier most readers need, and one line says the rest.
   drawerIdentityDetailsOpen: boolean
   toggleDrawerIdentityDetails: () => void
+  // Whether selecting an entity opens its details, per view
+  // (store/detailsOnSelect.ts): the Technical view's follow every click, the
+  // Business view's open when asked for. Either can be changed.
+  openDetailsOnSelect: Record<PersonaMode, boolean>
+  setOpenDetailsOnSelect: (mode: PersonaMode, open: boolean) => void
+  // The right-hand details panel's width in px, shared by every drawer that
+  // sits there. Null until the reader drags it: the panel's own default.
+  drawerWidth: number | null
+  setDrawerWidth: (width: number | null) => void
+  // The entity drawer's sections — which show, in what order — per view.
+  // Null is that view's default (panels/entity/drawerLayout.ts).
+  drawerLayout: Record<PersonaMode, DrawerLayout | null>
+  setDrawerLayout: (mode: PersonaMode, layout: DrawerLayout | null) => void
+  // The properties featured at the top of an entity's details, per entity
+  // type, in order. A type absent from the map features its defaults.
+  drawerPinnedProperties: Record<string, string[]>
+  setDrawerPinnedProperties: (typeId: string, keys: string[] | null) => void
+  // Context View: a line that points back — its source in a layer to the
+  // right of its target — drawn in an alert colour. Off until turned on.
+  highlightBackPointers: boolean
+  setHighlightBackPointers: (on: boolean) => void
+  backPointerColor: string
+  setBackPointerColor: (color: string) => void
 
   // Canvas preferences
   showMinimap: boolean
@@ -379,7 +416,7 @@ export const usePreferencesStore = create<PreferencesState>()(
       sidebarCollapsed: false,
       toggleSidebar: () => set((state) => ({ sidebarCollapsed: !state.sidebarCollapsed })),
 
-      canvasDockMinimized: false,
+      canvasDockMinimized: null,
       setCanvasDockMinimized: (canvasDockMinimized) => set({ canvasDockMinimized }),
 
       canvasFoldLayers: false,
@@ -395,6 +432,27 @@ export const usePreferencesStore = create<PreferencesState>()(
       })),
       drawerIdentityDetailsOpen: false,
       toggleDrawerIdentityDetails: () => set((state) => ({ drawerIdentityDetailsOpen: !state.drawerIdentityDetailsOpen })),
+      openDetailsOnSelect: { business: false, technical: true },
+      setOpenDetailsOnSelect: (mode, open) => set((state) => ({
+        openDetailsOnSelect: { ...state.openDetailsOnSelect, [mode]: open },
+      })),
+      drawerWidth: null,
+      setDrawerWidth: (drawerWidth) => set({ drawerWidth }),
+      drawerLayout: { business: null, technical: null },
+      setDrawerLayout: (mode, layout) => set((state) => ({
+        drawerLayout: { ...state.drawerLayout, [mode]: layout },
+      })),
+      highlightBackPointers: false,
+      setHighlightBackPointers: (highlightBackPointers) => set({ highlightBackPointers }),
+      backPointerColor: '#ef4444',
+      setBackPointerColor: (backPointerColor) => set({ backPointerColor }),
+      drawerPinnedProperties: {},
+      setDrawerPinnedProperties: (typeId, keys) => set((state) => {
+        const next = { ...state.drawerPinnedProperties }
+        if (keys === null) delete next[typeId]
+        else next[typeId] = keys
+        return { drawerPinnedProperties: next }
+      }),
 
       // Canvas
       showMinimap: true,
@@ -587,7 +645,10 @@ export const usePreferencesStore = create<PreferencesState>()(
       // v10 (2026-09-21): the lineage direction pair's default is blue / green.
       // The sky / amber stored for the hour before was that default, not a
       // choice — reset it.
-      version: 10,
+      // v11 (2026-11-04): the canvas dock follows the view until the reader
+      // chooses (null) — minimized in the Business view. A stored `false` was
+      // the old default, not a choice: reset it. A stored `true` was a choice.
+      version: 11,
       migrate: (persisted, version) => {
         let state = persisted as Record<string, unknown>
         if (version < 2) state = { ...state, lensFrameChildren: 'connected' }
@@ -602,6 +663,7 @@ export const usePreferencesStore = create<PreferencesState>()(
         if (version < 8) state = { ...state, canvasFoldLayers: false }
         if (version < 9) state = { ...state, showFlowRibbons: false }
         if (version < 10) state = { ...state, lineageDirectionColors: DEFAULT_LINEAGE_DIRECTION_COLORS }
+        if (version < 11 && state.canvasDockMinimized === false) state = { ...state, canvasDockMinimized: null }
         return state
       },
     }

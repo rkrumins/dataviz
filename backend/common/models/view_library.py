@@ -29,6 +29,16 @@ class _Base(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class DisplayRuleStyle(_Base):
+    """How a rule paints the entities it matches, beside (or instead of) its chip. A rule with
+    no style shows its chip and nothing else. Where two rules paint one card, the one first in
+    the view's list wins; chips are never contested — every matching rule adds its own."""
+    chip: bool = Field(True, description="Show the rule's tag chip on each entity it matches.")
+    fill: bool = Field(False, description="Tint each matching card in the rule's colour.")
+    frame: Optional[Literal["solid", "dashed"]] = Field(
+        None, description="Draw a box round each matching card, in the rule's colour.")
+
+
 class DisplayRule(_Base):
     """One display rule, as the Property Manager edits it."""
     id: str = Field(min_length=1, max_length=128)
@@ -38,6 +48,7 @@ class DisplayRule(_Base):
     predicate: Dict[str, Any]
     enabled: bool = True
     created_at: Optional[str] = Field(None, alias="createdAt", max_length=64)
+    style: Optional[DisplayRuleStyle] = None
 
 
 class SavedQuery(_Base):

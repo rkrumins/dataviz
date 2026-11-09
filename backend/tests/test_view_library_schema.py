@@ -23,7 +23,8 @@ async def test_the_schema_describes_everything_an_export_writes(test_client: Asy
     defs = schema["$defs"]
     view_id = await _view(test_client)
     base = f"/api/v1/views/{view_id}/library"
-    assert (await test_client.put(f"{base}/rules/r1", json=_rule("r1", "PII", icon="Tag"))).status_code == 200
+    styled = _rule("r1", "PII", icon="Tag", style={"chip": True, "fill": True, "frame": "solid"})
+    assert (await test_client.put(f"{base}/rules/r1", json=styled)).status_code == 200
     assert (await test_client.put(f"{base}/queries/q1",
                                   json=_query("Tables", description="Every table"))).status_code == 200
     pack = (await test_client.get(f"{base}/export")).json()
@@ -36,6 +37,7 @@ async def test_the_schema_describes_everything_an_export_writes(test_client: Asy
     check(pack["source"], defs["LibraryPackSource"], "source")
     [rule] = pack["displayRules"]
     check(rule, defs["DisplayRule"], "rule")
+    check(rule["style"], defs["DisplayRuleStyle"], "rule style")
     [query] = pack["savedQueries"]
     check(query, defs["SavedQuery"], "query")
     assert (pack["format"], pack["version"]) == \

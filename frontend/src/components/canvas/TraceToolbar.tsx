@@ -14,6 +14,7 @@ import React, { useState, useCallback, useEffect, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { usePersonaMode } from '@/store/persona'
 import { edgeTypeCopy } from '@/lib/relationshipLabel'
 import {
     useTraceStore,
@@ -98,6 +99,9 @@ export function TraceToolbar({
 }: TraceToolbarProps) {
     const [isExpanded, setIsExpanded] = useState(false)
     const [showStats, setShowStats] = useState(false)
+    // The Business view's trace bar picks a direction and exits; statistics,
+    // settings, copying identifiers and exporting are the Technical view's.
+    const technical = usePersonaMode() === 'technical'
     const [copiedMessage, setCopiedMessage] = useState<string | null>(null)
     const [configChanged, setConfigChanged] = useState(false)
     const prevConfigRef = useRef(config)
@@ -267,6 +271,7 @@ export function TraceToolbar({
                     </button>
                 </div>
 
+                {technical && <>
                 {/* Divider */}
                 <div className="h-4 w-[1px] bg-glass-border" />
 
@@ -334,6 +339,7 @@ export function TraceToolbar({
                         <LucideIcons.Download className="w-4 h-4" />
                     </button>
                 </div>
+                </>}
 
                 {/* Divider */}
                 <div className="h-4 w-[1px] bg-glass-border" />
@@ -350,7 +356,7 @@ export function TraceToolbar({
 
             {/* Statistics Panel */}
             <AnimatePresence>
-                {showStats && statistics && (
+                {technical && showStats && statistics && (
                     <motion.div
                         initial={{ height: 0, opacity: 0 }}
                         animate={{ height: 'auto', opacity: 1 }}
@@ -413,7 +419,7 @@ export function TraceToolbar({
 
             {/* Expanded Settings Panel */}
             <AnimatePresence>
-                {isExpanded && (
+                {technical && isExpanded && (
                     <motion.div
                         initial={{ height: 0, opacity: 0 }}
                         animate={{ height: 'auto', opacity: 1 }}

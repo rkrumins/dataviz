@@ -46,6 +46,7 @@ import { ChevronDown, ChevronUp, Eye, EyeOff, GitBranch } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { EdgeTypeDefinition } from '@/utils/edgeTypeUtils'
 import { useDrawnEdgesStore } from '@/store/drawnEdges'
+import { usePreferencesStore } from '@/store/preferences'
 import { edgeDashArray } from '../edgeDash'
 import type { ConnectionModel } from './connectionModel'
 import { formatUnitCount, unitMeaning, unitNoun } from './connectionUnits'
@@ -116,6 +117,9 @@ export function ConnectionsPanel({
   const [pinnedType, setPinnedType] = useState<string | null>(null)
   const [hoveredType, setHoveredType] = useState<string | null>(null)
   const drawn = useDrawnEdgesStore((s) => s.drawn)
+  // Lines that point back wear the reader's alert colour on the canvas; their
+  // count here wears it too, outside a trace.
+  const backPointerColor = usePreferencesStore((s) => (s.highlightBackPointers ? s.backPointerColor || '#ef4444' : null))
 
   // A pin must not outlive the thing it pinned. Hiding the type, switching
   // view or entering a trace all replace the model without remounting the
@@ -322,7 +326,13 @@ export function ConnectionsPanel({
                             title={DIRECTION_TITLE}
                             className="ml-auto flex-shrink-0 text-[11px] text-ink-muted tabular-nums whitespace-nowrap group-hover/row:hidden group-focus-within/row:hidden"
                           >
-                            {`→ ${row.forward.toLocaleString()} · ← ${row.backward.toLocaleString()}`}
+                            {`→ ${row.forward.toLocaleString()} · `}
+                            <span
+                              data-points-back={backPointerColor && !traceMode && row.backward > 0 ? '' : undefined}
+                              style={backPointerColor && !traceMode && row.backward > 0 ? { color: backPointerColor, fontWeight: 600 } : undefined}
+                            >
+                              {`← ${row.backward.toLocaleString()}`}
+                            </span>
                             {row.bidirectional > 0 ? ` · ⇄ ${row.bidirectional.toLocaleString()}` : ''}
                           </span>
                           <button

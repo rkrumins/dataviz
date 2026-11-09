@@ -52,6 +52,199 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Business view: every draft action, plain words for readers, a new view switch and Minimal rows
+
+Business users can now do everything in a draft without switching to Technical. Readers get plain
+words and a way to see what a view is for. The Business / Technical switch is redesigned, and a new
+**Minimal** density fits about three times as many rows on screen.
+
+### Added
+
+- **Minimal density** (**Display → Density**, both views): each entity on one line. Rows are 26 px
+  (30 px for top-level entities), with the icon without its tile, the Technical view's identifier
+  inline after the name, and display-rule chips as coloured dots. Every mark a row carries stays.
+- **More** (`⋯`) **in the Business view** gains:
+  - **Changes & history…**: a draft's changes, or the published history, its reviews and data
+    health;
+  - **Your drafts…**, on Published;
+  - **Entities with no parent…**, in a draft;
+  - a **File** group: **Import…**, **Export view…**, **Export data…**, **Update this view from a
+    file…** and **Save layers as a template…**.
+- **Reverse direction** in a relationship's panel, beside **Delete**, for lineage links you can
+  edit, in both views.
+- **A view's description** shows under its title. People who can't edit get **About**, which leads
+  with what the view is for.
+
+### Changed
+
+- **The Business / Technical switch** is a two-choice control:
+  - a sliding thumb tinted by the view, emerald for Business and amber for Technical;
+  - arrow keys and Home/End, and a focus ring;
+  - the shortcut on each choice, and a tooltip on what each view keeps;
+  - labels that meet contrast in light and dark.
+- **Business drafts** keep **Connect** on the toolbar.
+- **Graph canvas cards**: **Trace Upstream** and **Trace Downstream** now work. **More** opens the
+  right-click menu (Technical). **Pin**, which did nothing, is gone. **Add inside** shows only to
+  editors in a draft.
+- **The Business Display menu** says **How many lines** for Edge Density, with plain choices and no
+  budget slider. It keeps **Lineage colours** and **Missing-link alerts**, and a switch that is on
+  stays on screen.
+- **Status chips** state facts to people who can't edit, without telling them to change the view.
+- **Business sync chips** say **Up to date**, **Updating…** or **May be out of date**, without
+  database names or revision ids.
+- **Reading first**: the dashboard leads Business readers to browse views. The empty Explorer and an
+  empty model offer building only to people who can build.
+
+### Fixed
+
+- **Renaming in place** in the Business view changed a name the row doesn't show. Double-click now
+  edits the name the row shows, the business label. The same fix applies to Hierarchy views, in both
+  views.
+- **Hierarchy views** showed a placeholder "Physical Fabric" header and a fixed "Flow: Left →
+  Right".
+
+### Known limitations
+
+- **Minimal rows**:
+  - they leave out the type badge, and **Show entity type badge** says so;
+  - a placed row's name and its path share one line.
+- **Paste** is still not offered on the Context View, in either view.
+- **Business view audit**, still open, most important first:
+  1. The same entity can show different names in the Lens, the canvas command palette and the rows.
+  2. The Business details panel can show a URN tile, and raw property keys and JSON.
+  3. Read-only panels open with an amber "change in a draft" warning, even for people who can't
+     edit.
+  4. Keyboard and screen-reader gaps:
+     - the intro tip's tab order, and Esc;
+     - the roles and arrow keys of the layer `⋯` menu;
+     - focus in the Display popover;
+     - an unlabelled layer column.
+  5. Muted text and the Business green fall short of WCAG AA contrast.
+  6. The intro tip shows on the first page loaded, and doesn't mention **More**.
+  7. The Business view doesn't yet reach:
+     - the Graph and Hierarchy toolbars;
+     - the trace dock's Performance tab;
+     - the search panel's options.
+  8. Mixed words:
+     - "Business View" and "Business view";
+     - four names for Focus Lens;
+     - "Data Sources / Data Consumers" for lineage direction.
+  9. The workspace link opens on Data Sources, not Views, and error states offer no way forward.
+  10. The rest are smaller: menu styles, the selection bar's offset, what double-click does, small
+     copy, and docs drift.
+
+### Upgrading
+
+- **Nothing to do.** **Display → Density** gains **Minimal**, and existing choices are kept.
+
+---
+
+## [Unreleased] — Business and Technical views: a simpler workspace for readers
+
+The **Business** / **Technical** switch in the top bar now sets how much the app shows, not only
+how entities are named. **Business** keeps to the essentials for people who read lineage rather
+than build it; **Technical** is the full toolset, as before. Business stays the default. See
+*Business or Technical view* in Key Concepts.
+
+### Added
+
+- **More** (`⋯`) in a Context View's header, in the Business view: **Select several**,
+  **Properties & display rules**, **Export view…**, **Export data…**, and **Show every tool**,
+  which switches to the Technical view.
+- **A first-run note** by the switch, once per browser, in the Business view: what it keeps and
+  how to reach every tool. It goes when dismissed or when the view is switched.
+- **Details on demand.** In the Business view a click picks an entity out, and its details open
+  when asked for: **Details** in the selection bar, `Enter`, or **View & Edit**. On a Graph canvas
+  **Open details** sits above the selected card; in a Hierarchy view, at the end of its row. Once
+  open, the details follow the selection, in either view.
+- **Entity details** under Preferences: whether a click opens an entity's details, for each view —
+  off for Business, on for Technical.
+- **A resizable details panel.** Drag its left edge, or step it from the keyboard; the entity,
+  relationship and orphans panels all keep the width, and the canvas keeps at least 480 px.
+- **At a glance**, the first section of an entity's details in the Business view: the view's tags
+  on it, its description, and tiles for its ID (with a copy button), what sits inside it, its
+  layer and source, and the properties its type features, such as an owner.
+- **Customize** in the details panel: show, hide and reorder sections for the view you're in, and
+  choose the featured properties for each entity type. **Reset** puts them back.
+- **Display rules that colour and frame.** Besides its chip, a rule can colour the cards it matches
+  (**Colour the card**) and draw a frame round them (**Solid** or **Dashed**), and can leave its
+  chip off. The rule editor's **Appearance** shows a card as it will look, and the rule list says
+  what each rule paints. Chips still stack; where two rules colour or frame one card, the one
+  higher in the list wins. In Context View rows and on Graph and Hierarchy cards.
+- **Blue** and **slate** rule colours, for a status read at a glance — "starting points blue, the
+  rest grey" is a recipe in Display Rules.
+- **Edit many entities at once.** Select several on a Context View and choose **Edit N…** in the
+  selection bar: a panel says how many you hold, of which types, and what they share — each
+  property **Same**, or **Mixed** with how many have it. Set a description or a property for all of
+  them, remove a property from all, or add one to all, then **Stage for N**. Each entity's change is
+  staged as its own edit, so an earlier edit of it is kept and Review & Save sends them as one
+  batch. **Undo** takes the whole edit back. Outside a draft the bar says **Details**, and the
+  panel compares them read-only.
+- **Lines that point back**, in a Context View: **Display → Highlight lines that point back** draws a
+  line whose source sits in a layer to the right of its target in an alert colour (**Red**,
+  **Amber** or **Magenta**). Its hover card says **Points back**, and **Flows** counts them in the
+  same colour. Off by default, in both views.
+- **A layer's own properties.** A Context View's layer can carry properties — an owner, a purpose,
+  an SLA. A tag icon and a number after its name say it has some, and hovering the name opens the
+  layer's card: its name and description in full, and its properties, formatted. They are part of
+  the View, so drafts, versions and view files keep them.
+- **Layer settings**, in a panel of its own: **Layer settings…** in a layer's menu opens its
+  essentials (name, description, colour, icon), then its **Custom properties**, then, under
+  **More**, **Show unassigned entities** and **Delete layer**. **Stage changes** keeps only the
+  fields changed in the panel, for Review & Save. Outside a draft it is **Layer details…**,
+  read-only, with **Start editing**.
+- API: a display rule carries an optional `style` — `{"chip": bool, "fill": bool, "frame":
+  "solid" | "dashed"}`. `PUT /api/v1/views/{view_id}/library/rules/{rule_id}`, library files and
+  `view-library.v1.json` accept it; any other `frame` is a `422`.
+- API: a layer in `referenceLayout.layers` may carry `properties`, an object kept as written —
+  through a draft's merge on publish, view files and versions.
+
+### Changed
+
+- **The Business view shows fewer tools.** What it tucks away stays reachable:
+  - the canvas header keeps **Lineage**, **Display**, **Focus Lens**, **Trace Lineage** and
+    **Edit**; **Select**, **Properties** and **Import / Export** move under **More**, and trace
+    history is the Technical view's;
+  - the branch switcher shows only in a draft; search's **Look in** and **Match** menus show once
+    a search uses them;
+  - **Display** keeps the canvas settings and **Edge Density**; how lines move, their arrows and
+    markers, and **Advanced** are the Technical view's;
+  - the view's header leaves out **Versions**, **Export**, **Reviews**, the type count, usage, and
+    the template-update and subsets chips; a request waiting on the view still shows;
+  - an entity's menu leaves out **Copy URN** and **Narrow to this…**; the trace bar keeps its
+    directions and **Exit**; the Graph canvas leaves out its extra control panel, its layout
+    direction and **Edge Details**;
+  - **Selecting**, **Connect**, an open Property Manager and open **Edge Details** stay on screen
+    while they are on;
+  - **Data loads** and **Flows** start minimized, until you open or minimize them yourself.
+- **The details panel in the Business view** opens on **At a glance**, then **Properties**,
+  **Classifications** and **Lineage**. The identifier block, raw details, placement, history,
+  **Copy URN** and the **JSON** tab are the Technical view's, and **Customize** brings any back.
+- **View & Edit** and `Enter` open an entity's details without deselecting it when it was already
+  the selection.
+- **A Context View's layer headers in the Business view** keep to the layer itself: its name,
+  count and sort. **⋯** opens the layer's menu, which now also holds **Add entity**, **New group**
+  and **Build a lot at once**; opened from the keyboard, the menu takes the focus and gives it back.
+  The Technical view keeps them on the header.
+- The switch, its tip and the command palette say what each view now does.
+
+### Known limitations
+
+- Lines that point back follow each relationship's stored direction, as the arrowheads do. A type
+  stored from reader to read — `CONSUMES` in the demo data — points back whenever the reader sits to
+  the right of what it reads. A line standing for flows both ways, and a line inside one layer, are
+  never marked; a trace keeps its own colours. The Graph canvas doesn't mark them.
+- A layer's properties are listed in the order they were added, until a version of the view is
+  restored: a version keeps them in alphabetical order, and so lists them after a restore.
+
+### Upgrading
+
+- Nothing to do. People who never chose a view are in the Business view, as before, and now see
+  fewer tools. **Show every tool**, the switch or `⌘/` / `Ctrl-/` brings them back, and the choice
+  is kept.
+
+---
+
 ## [Unreleased] — A connector sends a multi-gigabyte file, and its import publishes itself
 
 ### Added

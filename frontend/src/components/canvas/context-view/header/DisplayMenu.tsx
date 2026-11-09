@@ -21,6 +21,7 @@ import { ChevronDown, RotateCcw, Settings2, Sliders, SlidersHorizontal, Unlink, 
 import { cn } from '@/lib/utils'
 import { HoverTip } from '@/components/ui/HoverTip'
 import { usePreferencesStore, type CanvasDensity, type LineageRenderMode } from '@/store/preferences'
+import { usePersonaMode } from '@/store/persona'
 import { DisplaySettingsSections, isDefaultState } from '../DisplaySettingsPopover'
 import { LineageDisplaySections } from '../LineageDisplayPopover'
 import { useFolded } from './toolbarFold'
@@ -126,6 +127,10 @@ export function DisplayMenu({
   const showEntityIcons = usePreferencesStore((s) => s.showCanvasEntityIcons) ?? true
   const showMemoryUsage = usePreferencesStore((s) => s.showMemoryUsage) ?? false
   const lineagePortSides = usePreferencesStore((s) => s.lineagePortSides) ?? 'direction'
+  // The Business view's Display is the canvas and how many lines it draws; how
+  // they move, their arrows and their markers, and the Advanced tools, are the
+  // Technical view's.
+  const technical = usePersonaMode() === 'technical'
   const setLineagePortSides = usePreferencesStore((s) => s.setLineagePortSides)
   const isCustom = !isDefaultState({ canvasZoom, canvasDensity, showTypeBadge, subtleTreeLines, showEntityIcons, showMemoryUsage })
 
@@ -222,6 +227,7 @@ export function DisplayMenu({
                 subtleTreeLines={subtleTreeLines}
                 onToggleSubtleTreeLines={onToggleSubtleTreeLines}
                 onFitToWidth={onFitToWidth}
+                simple={!technical}
               />
 
               <div className="h-px bg-black/[0.08] dark:bg-white/[0.06] mx-3" />
@@ -236,7 +242,7 @@ export function DisplayMenu({
 
               {!lineageEnabled && (
                 <p className="px-3 pt-2 pb-1 text-[11px] text-ink-muted/70 leading-snug">
-                  Turn on Lineage to adjust edge appearance
+                  {technical ? 'Turn on Lineage to adjust edge appearance' : 'Turn on Lineage to change how lines are drawn'}
                 </p>
               )}
 
@@ -248,9 +254,10 @@ export function DisplayMenu({
                 lineagePortSides={lineagePortSides}
                 onSetLineagePortSides={setLineagePortSides}
                 disabled={!lineageEnabled}
+                simple={!technical}
               />
 
-              {onOpenOrphans && (
+              {technical && onOpenOrphans && (
                 <>
                   <div className="h-px bg-black/[0.08] dark:bg-white/[0.06] mx-3" />
 

@@ -35,6 +35,7 @@ import { FlatTreeItem, type GroupActions, type RowSelectModifiers } from './Flat
 import type { PlacedOut, PlacementInfo } from './placement'
 import { groupNameClash, groupSubtreeIds, listGroups, parentGroupOf } from './layerMutations'
 import { LayerSortMenu, SORT_MODE_LABELS } from './LayerSortMenu'
+import { ValueView, humanizeKey } from '@/components/ui/ValueView'
 import { LoadMoreItem } from './LoadMoreItem'
 import { SearchBoxItem } from './SearchBoxItem'
 import { SearchHitInlineRow } from './SearchHitInlineRow'
@@ -178,6 +179,8 @@ interface LayerColumnProps {
   onInsertLayerBefore?: (layerId: string) => void
   /** Bumped to open this layer's name for editing: Rename in its menu, or a layer just inserted. */
   renameNonce?: number
+  /** Bumped to start naming a new group in this layer: New group in its menu. */
+  newGroupNonce?: number
   /** Just inserted: the column fades in where it lands (its neighbours glide aside on their own). */
   isNew?: boolean
   /** Effective node sort mode for this column (override → layer → view default). */
@@ -391,6 +394,7 @@ export const LayerColumn = React.memo(function LayerColumn({
   onHeaderContextMenu,
   onInsertLayerBefore,
   renameNonce = 0,
+  newGroupNonce = 0,
   isNew = false,
   sortMode = 'alpha-asc',
   sortIsOverride = false,
@@ -522,6 +526,14 @@ export const LayerColumn = React.memo(function LayerColumn({
     setRenameSeen(renameNonce)
     setDraftName(layer.name)
     setIsRenaming(true)
+  }
+  // A new group asked for from the layer menu (the Business view's header keeps
+  // its own button there): open its name, the same way.
+  const [newGroupSeen, setNewGroupSeen] = useState(0)
+  if (newGroupNonce > newGroupSeen && onCreateGroup) {
+    setNewGroupSeen(newGroupNonce)
+    setDraftGroupName('')
+    setIsNamingGroup(true)
   }
   const [confirmingDelete, setConfirmingDelete] = useState(false)
   const [dragKind, setDragKind] = useState<'entity' | 'layer' | 'group' | null>(null)
@@ -1125,8 +1137,9 @@ export const LayerColumn = React.memo(function LayerColumn({
   // has never mounted contributes to `getTotalSize()` and to every
   // `scrollToIndex` offset. The chrome rows below (search box, search hit,
   // skeleton, load-more, error) render no technical line and keep their size.
+  // Minimal sets the identifier on the name's line, so its rows do not grow.
   const personaMode = usePersonaMode()
-  const technicalExtra = personaMode === 'technical' ? TECHNICAL_LINE_HEIGHT : 0
+  const technicalExtra = personaMode === 'technical' && density !== 'minimal' ? TECHNICAL_LINE_HEIGHT : 0
   const virtualizer = useVirtualizer({
     count: flatTree.length,
     getScrollElement: () => scrollContainerRef.current,
@@ -2097,6 +2110,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                     name={layer.name}
                     description={layer.description}
                     color={layer.color}
+                    properties={layer.properties}
                   />
                   {onRenameLayer && (
                     <button
@@ -2194,7 +2208,27 @@ export const LayerColumn = React.memo(function LayerColumn({
                     onResetCustomOrder={onResetCustomOrder ? () => onResetCustomOrder(layer.id) : undefined}
                   />
                 )}
-                {onAddToLayer && (
+                {/* The Business view keeps the header to the layer and its sort:
+                    adding, grouping, building and deleting wait in its menu (⋯),
+                    with the layer's settings. */}
+                {personaMode !== 'technical' && onHeaderContextMenu && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      // The menu drops from the button, clicked or pressed.
+                      const r = e.currentTarget.getBoundingClientRect()
+                      onHeaderContextMenu(Object.assign(e, { clientX: r.left, clientY: r.bottom + 4 }), layer.id)
+                    }}
+                    aria-label={`${layer.name}: layer actions`}
+                    aria-haspopup="menu"
+                    data-canvas-menu-trigger
+                    className="p-1.5 rounded-lg text-ink-muted hover:text-ink hover:bg-black/[0.06] dark:hover:bg-white/[0.1] transition-colors"
+                  >
+                    <LucideIcons.Ellipsis className="w-3.5 h-3.5" />
+                  </button>
+                )}
+                {personaMode === 'technical' && onAddToLayer && (
                   <button
                     onClick={(e) => {
                       e.stopPropagation()
@@ -2206,7 +2240,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                     <LucideIcons.Plus className="w-3.5 h-3.5" />
                   </button>
                 )}
-                {onCreateGroup && (
+                {personaMode === 'technical' && onCreateGroup && (
                   <button
                     onClick={(e) => {
                       e.stopPropagation()
@@ -2220,7 +2254,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                     <LucideIcons.FolderPlus className="w-3.5 h-3.5" />
                   </button>
                 )}
-                {onBuildToLayer && (
+                {personaMode === 'technical' && onBuildToLayer && (
                   <button
                     onClick={(e) => {
                       e.stopPropagation()
@@ -2235,7 +2269,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                 {/* Delete — hover-revealed trash → inline check/✗ confirm (the check's tooltip warns
                     when the layer has entities: hand-placed ones fall back to the default layer,
                     rule-placed ones become unassigned unless another layer claims their type). */}
-                {onDeleteLayer && (
+                {personaMode === 'technical' && onDeleteLayer && (
                   confirmingDelete ? (
                     <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
                       <button
@@ -3225,17 +3259,25 @@ export const LayerColumn = React.memo(function LayerColumn({
 const TITLE_HOVER_OPEN_DELAY_MS = 180
 const TITLE_HOVER_CLOSE_DELAY_MS = 80
 const TITLE_POPOVER_WIDTH = 320
+/** A layer card lists this many properties; Layer settings has them all. */
+const LAYER_CARD_PROPERTIES = 8
 
 function LayerHeaderTitle({
   name,
   description,
   color,
+  properties,
 }: {
   name: string
   description?: string
   color?: string
+  /** The layer's own properties: an owner, a purpose, an SLA. Shown on its
+   *  card, read at a glance — the header itself only says there are some. */
+  properties?: Record<string, unknown>
 }) {
   const resolvedColor = color ?? '#6b7280'
+  const propertyEntries = Object.entries(properties ?? {}).filter(([, v]) => v !== undefined && v !== null && v !== '')
+  const hasProperties = propertyEntries.length > 0
   const containerRef = useRef<HTMLDivElement>(null)
   const nameRef = useRef<HTMLHeadingElement>(null)
   const descRef = useRef<HTMLParagraphElement>(null)
@@ -3295,7 +3337,9 @@ function LayerHeaderTitle({
   }, [])
 
   const scheduleOpen = () => {
-    if (!isTruncated) return
+    // The card opens when the header cuts something short — or the layer has
+    // properties to read.
+    if (!isTruncated && !hasProperties) return
     clearTimeout(closeTimerRef.current)
     clearTimeout(openTimerRef.current)
     openTimerRef.current = setTimeout(() => setOpen(true), TITLE_HOVER_OPEN_DELAY_MS)
@@ -3319,9 +3363,19 @@ function LayerHeaderTitle({
         ref={nameRef}
         className="text-sm font-semibold tracking-tight line-clamp-2 leading-snug"
         style={{ color: resolvedColor }}
-        title={isTruncated ? undefined : name}
+        title={isTruncated || hasProperties ? undefined : name}
       >
         {name}
+        {hasProperties && (
+          <span
+            className="ml-1.5 inline-flex items-center gap-0.5 align-middle text-[10px] font-medium text-ink-muted"
+            role="img"
+            aria-label={`${propertyEntries.length} ${propertyEntries.length === 1 ? 'property' : 'properties'}`}
+          >
+            <LucideIcons.Tags className="w-3 h-3" aria-hidden />
+            {propertyEntries.length}
+          </span>
+        )}
       </h3>
       {description && (
         <p
@@ -3370,6 +3424,21 @@ function LayerHeaderTitle({
                 <div className="px-3 py-2.5 text-[12px] text-ink/85 leading-relaxed whitespace-pre-wrap">
                   {description}
                 </div>
+              )}
+              {hasProperties && (
+                <dl className="px-3 py-2.5 grid grid-cols-[minmax(0,auto)_minmax(0,1fr)] gap-x-3 gap-y-1.5 border-t border-black/[0.06] dark:border-white/[0.04]">
+                  {propertyEntries.slice(0, LAYER_CARD_PROPERTIES).map(([key, value]) => (
+                    <React.Fragment key={key}>
+                      <dt className="text-[11px] text-ink-muted truncate">{humanizeKey(key)}</dt>
+                      <dd className="text-[12px] text-ink min-w-0 break-words"><ValueView value={value} keyHint={key} /></dd>
+                    </React.Fragment>
+                  ))}
+                  {propertyEntries.length > LAYER_CARD_PROPERTIES && (
+                    <dd className="col-span-2 text-[11px] text-ink-muted">
+                      and {propertyEntries.length - LAYER_CARD_PROPERTIES} more — open Layer settings
+                    </dd>
+                  )}
+                </dl>
               )}
             </motion.div>
           )}

@@ -44,4 +44,18 @@ describe('PreferencesPage', () => {
         expect(toggle()).toBeDisabled()
         expect(screen.getByText(/can’t see profiling results/)).toBeInTheDocument()
     })
+
+    it('opens details on select per view: off for Business, on for Technical, each changeable', () => {
+        usePreferencesStore.setState({ openDetailsOnSelect: { business: false, technical: true } })
+        renderPage()
+        const business = screen.getByRole('switch', { name: /in the business view/i })
+        const technical = screen.getByRole('switch', { name: /in the technical view/i })
+        expect(business).toHaveAttribute('aria-checked', 'false')
+        expect(technical).toHaveAttribute('aria-checked', 'true')
+
+        fireEvent.click(business)
+        expect(usePreferencesStore.getState().openDetailsOnSelect).toEqual({ business: true, technical: true })
+        fireEvent.click(technical)
+        expect(usePreferencesStore.getState().openDetailsOnSelect).toEqual({ business: true, technical: false })
+    })
 })

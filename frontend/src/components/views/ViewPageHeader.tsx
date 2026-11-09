@@ -75,7 +75,7 @@
 import { useId, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowUpRight, Boxes, Clock, Database, Eye, FileDown, GitPullRequestDraft, Milestone, History, Info, Pencil, Shapes, Share2, X } from 'lucide-react'
+import { ArrowUpRight, Boxes, Clock, Database, Eye, FileDown, GitPullRequestDraft, Milestone, History, Info, Pencil, Shapes, Share2, Tag, X } from 'lucide-react'
 import { ViewUsageBadge } from './ViewUsageBadge'
 import { SyncStatusChip } from '@/features/sync-status/SyncStatusChip'
 import { cn } from '@/lib/utils'
@@ -109,6 +109,7 @@ import { workspaceColor } from '@/lib/workspaceColor'
 import { getView, updateView, type View } from '@/services/viewApiService'
 import { useBrand } from '@/store/branding'
 import { useCanvasStore } from '@/store/canvas'
+import { usePersonaMode } from '@/store/persona'
 import { useSchemaStore } from '@/store/schema'
 import { useWorkspacesStore } from '@/store/workspaces'
 
@@ -216,11 +217,15 @@ export function ViewPageHeader({ viewId, workspaceName }: {
     const [exportOpen, setExportOpen] = useState(false)
     // Versions and Export are a preview behind one switch (Admin → Features).
     const portability = useViewPortability()
+    // The Business view keeps this bar to what a reader needs: what the view is, where it
+    // lives, who can see it, and any request waiting on it. The builder's chrome — versions,
+    // export, reviews, counts and usage — is the Technical view's.
+    const technical = usePersonaMode() === 'technical'
     const exportEnabled = portability.canExport
     const [versionsOpen, setVersionsOpen] = useState(false)
     // The latest version of the view's design, and whether it has changed since: the chip's
     // "v8 •". Above the `!view` guard, like every hook here.
-    const { data: versionStatus } = useViewVersionStatus(viewId, portability.versions)
+    const { data: versionStatus } = useViewVersionStatus(viewId, portability.versions && technical)
     // Double-click the name to rename it — the affordance came up with the name
     // when the canvas toolbar's duplicate title was removed. The long way round
     // (Details → Name) is unchanged; this is the shortcut people already had.
@@ -475,7 +480,7 @@ export function ViewPageHeader({ viewId, workspaceName }: {
                                 </span>
                             </HoverTip>
                         ))}
-                        <TemplateUpdateChip view={view} canEdit={canEditDetails} />
+                        {technical && <TemplateUpdateChip view={view} canEdit={canEditDetails} />}
                         <LiveViewChip view={view} canEdit={canEditDetails} />
                         <SearchViewChip
                             view={view}
@@ -488,8 +493,17 @@ export function ViewPageHeader({ viewId, workspaceName }: {
                             }}
                             onRefresh={() => useCanvasStore.getState().refreshSubsetFeeds()}
                         />
-                        <SubsetsChip view={view} />
+                        {technical && <SubsetsChip view={view} />}
                     </div>
+
+                    {/* What the view is FOR, in its author's words: the Details
+                        form asked for it, and the view page never showed it.
+                        Two lines at most; About has the rest. */}
+                    {view.description && (
+                        <p className="mt-0.5 max-w-3xl text-xs leading-snug text-ink-secondary line-clamp-2">
+                            {view.description}
+                        </p>
+                    )}
 
                     {/* 2 — where it lives. A KIND, a PLACE and a SOURCE are
                         three different sorts of fact; each gets its own icon
@@ -511,7 +525,7 @@ export function ViewPageHeader({ viewId, workspaceName }: {
 
                         {/* How much of the model this view shows — next to the
                             KIND of view, which is the fact it qualifies. */}
-                        {entityTypeCount > 0 && (
+                        {technical && entityTypeCount > 0 && (
                             <>
                                 <Dot />
                                 <HoverTip
@@ -607,7 +621,7 @@ export function ViewPageHeader({ viewId, workspaceName }: {
                         The platform always knew; it only ever said so on a
                         dashboard the person who built this has no reason to
                         open. Renders nothing while loading or on failure. */}
-                    <ViewUsageBadge viewId={viewId} className="mt-1 hidden md:inline-flex" />
+                    {technical && <ViewUsageBadge viewId={viewId} className="mt-1 hidden md:inline-flex" />}
                 </div>
 
                 {/* The action cluster, and UNDER IT the review chip.
@@ -658,7 +672,7 @@ export function ViewPageHeader({ viewId, workspaceName }: {
 
                     <span aria-hidden className="mx-0.5 h-5 w-px bg-glass-border" />
 
-                    {canEditDetails && (
+                    {canEditDetails ? (
                         <HoverTip
                             className="inline-flex"
                             label="Rename, describe, tag, or change who can see this view"
@@ -672,6 +686,24 @@ export function ViewPageHeader({ viewId, workspaceName }: {
                             >
                                 <Pencil className="w-3.5 h-3.5" aria-hidden />
                                 <span className="hidden lg:inline">Details</span>
+                            </button>
+                        </HoverTip>
+                    ) : (
+                        /* Someone who cannot edit had one way into the sheet: the
+                           data source, which says what the view is BUILT ON and
+                           not what it is FOR. Same sheet, on its About tab. */
+                        <HoverTip
+                            className="inline-flex"
+                            label="What this view is for, and what it is built on"
+                        >
+                            <button
+                                type="button"
+                                onClick={() => openDetails('about')}
+                                className={actionButtonClass}
+                                aria-label="About"
+                            >
+                                <Info className="w-3.5 h-3.5" aria-hidden />
+                                <span className="hidden lg:inline">About</span>
                             </button>
                         </HoverTip>
                     )}
@@ -694,7 +726,7 @@ export function ViewPageHeader({ viewId, workspaceName }: {
                     {/* The history of the view's DESIGN, which every view has; not the
                         graph's drafts and commits, which Reviews opens. The dot says the
                         design has changed since its latest version. */}
-                    {portability.versions && (
+                    {technical && portability.versions && (
                         <HoverTip
                             className="inline-flex"
                             label="Versions of this view’s design: its layers, placements and settings"
@@ -724,7 +756,7 @@ export function ViewPageHeader({ viewId, workspaceName }: {
                     {/* Anyone who can read the view can take a copy of its design
                         elsewhere; the admin switch withdraws the button and the
                         server refuses the file together. */}
-                    {exportEnabled && (
+                    {technical && exportEnabled && (
                         <HoverTip
                             className="inline-flex"
                             label="Download this view as a file to import into another environment"
@@ -746,7 +778,7 @@ export function ViewPageHeader({ viewId, workspaceName }: {
                         branch switcher and nothing else. A read-only session
                         gets no versioning chrome at all (CanvasRouter mounts
                         none), so it must not get a route into it either. */}
-                    {!readOnly && (
+                    {technical && !readOnly && (
                         <ViewReviewsButton
                             workspaceId={view.workspaceId}
                             dataSourceId={view.dataSourceId ?? null}
@@ -867,7 +899,28 @@ export function ViewPageHeader({ viewId, workspaceName }: {
                             className="p-5"
                         >
                             {details === 'about' || !canEditDetails ? (
-                                <ViewBuiltOn view={view} />
+                                /* What the view is FOR leads — its description in
+                                   full, then its tags — and what it rests on
+                                   follows. Who made it stays in the footer. */
+                                <div className="space-y-5">
+                                    {view.description && (
+                                        <p className="text-sm leading-relaxed text-ink">{view.description}</p>
+                                    )}
+                                    {view.tags && view.tags.length > 0 && (
+                                        <div className="flex flex-wrap gap-1.5">
+                                            {view.tags.map(tag => (
+                                                <span
+                                                    key={tag}
+                                                    className="inline-flex items-center gap-1 rounded-full bg-black/[0.04] dark:bg-white/[0.06] border border-glass-border px-2.5 py-1 text-xs font-medium text-ink-muted"
+                                                >
+                                                    <Tag className="h-3 w-3" />
+                                                    {tag}
+                                                </span>
+                                            ))}
+                                        </div>
+                                    )}
+                                    <ViewBuiltOn view={view} />
+                                </div>
                             ) : (
                                 <EditDetailsPanel
                                     view={view}

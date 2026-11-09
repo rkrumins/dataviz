@@ -13,10 +13,13 @@ import { useState, useMemo, useCallback, useRef, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { formatShortcut } from '@/lib/platform'
 import { fetchWithTimeout } from '@/services/fetchWithTimeout'
 import { useSchemaStore, isContainmentEdgeType } from '@/store/schema'
 import { useViewContainmentEdgeTypes, useViewLineageEdgeTypes, useViewRelationshipTypes } from '@/hooks/useViewSchema'
 import { useCanvasStore } from '@/store/canvas'
+import { useOpensDetailsOnSelect } from '@/store/detailsOnSelect'
+import { useDisplayRuleLook } from '@/store/displayRuleMatchStore'
 import { useFeature } from '@/store/features'
 import { useSearchStore } from '@/store/searchStore'
 import { useGraphHydration } from '@/hooks/useGraphHydration'
@@ -407,20 +410,14 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
 
       {/* Header */}
       <div className="flex-shrink-0 bg-canvas-elevated/95 backdrop-blur border-b border-glass-border px-6 py-3">
-        <div className="flex items-center gap-4">
-          <h2 className="text-lg font-display font-semibold text-ink">Physical Fabric</h2>
-          <span className="px-2 py-1 rounded-md bg-accent-lineage/10 text-accent-lineage text-xs font-medium">
-            Context View
-          </span>
-          <div className="flex-1" />
-
+        <div className="flex items-center justify-end gap-4">
           {/* Search */}
           <div className="relative">
             <LucideIcons.Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-ink-muted" />
             <input
               ref={searchInputRef}
               type="text"
-              placeholder="Search entities... (⌘F)"
+              placeholder={`Search entities… (${formatShortcut('mod+f')})`}
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               className="input pl-9 pr-8 py-1.5 w-64 text-sm"
@@ -451,11 +448,6 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
             >
               <LucideIcons.ChevronsDownUp className="w-4 h-4" />
             </button>
-          </div>
-
-          <div className="flex items-center gap-2 text-sm text-ink-muted">
-            <span>Flow: Left → Right</span>
-            <LucideIcons.ArrowRight className="w-4 h-4" />
           </div>
         </div>
 
@@ -523,7 +515,8 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
                       interactions.startInlineEdit(
                         nodeId,
                         node.name,
-                        { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }
+                        { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 },
+                        (node.data.businessLabel as string | undefined)?.trim() ? 'businessLabel' : 'label',
                       )
                     }
                   }}
@@ -720,6 +713,8 @@ function HierarchyContainer({
   const isExpanded = expandedNodes.has(node.id)
   const isSelected = selectedNodeId === node.id
   const isSearchResult = searchResults.includes(node.id)
+  // Where a click doesn't open an entity's details, its row offers them.
+  const offerDetails = !useOpensDetailsOnSelect()
 
   // W2.1 — advanced-search match decoration. Lights up the row when
   // the URN is a direct match, surfaces an N-level subtree count
@@ -739,6 +734,9 @@ function HierarchyContainer({
   // Trace highlighting
   const isHighlighted = isTraceActive && traceContextSet.has(node.id)
   const isFocusNode = traceFocusId === node.id
+  // The view's display rules: a tint and a frame for this card. A focus, a
+  // trace highlight or a change decoration paints the same card, and wins.
+  const ruleLook = useDisplayRuleLook(changeDeco || isFocusNode || isHighlighted ? undefined : (node.urn ?? node.id))
   const isDimmed = (isTraceActive && !isHighlighted) || isSpotlightDim
 
   // Canvas filter Isolate / Hide modes drop this row entirely. Same
@@ -810,6 +808,13 @@ function HierarchyContainer({
           borderColor: isFocusNode ? '#fbbf24' : isHighlighted ? '#c084fc' : visual?.color ?? '#6b7280',
           borderLeftWidth: '4px',
           ['--tw-ring-color' as string]: isFocusNode ? '#fbbf24' : isHighlighted ? '#c084fc' : visual?.color ?? '#6b7280',
+          ...(ruleLook.fillColor && {
+            backgroundColor: `color-mix(in srgb, ${ruleLook.fillColor} 14%, var(--nx-bg-elevated))`,
+          }),
+          ...(ruleLook.frameKind && {
+            outline: `2px ${ruleLook.frameKind} ${ruleLook.frameColor}`,
+            outlineOffset: 2,
+          }),
         }}
       >
         {/* Header (always visible) */}
@@ -908,6 +913,23 @@ function HierarchyContainer({
           {/* Display-rule tags — shared premium chip cluster (same as the
               other canvases). */}
           <DisplayRuleTagChips urn={node.urn ?? node.id} size="xs" />
+
+          {/* Details on demand — hover-visible, and kept on the selected row. */}
+          {offerDetails && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation()
+                useCanvasStore.getState().openNodeDrawer(node.id)
+              }}
+              className={cn(
+                'flex items-center justify-center w-6 h-6 rounded-md hover:bg-black/10 dark:hover:bg-white/10 transition-all hover:scale-110 active:scale-95',
+                isSelected ? 'opacity-100' : 'opacity-0 group-hover/row:opacity-100 focus-visible:opacity-100',
+              )}
+              aria-label={`Open details of ${node.name}`}
+            >
+              <LucideIcons.PanelRightOpen className="w-4 h-4 text-ink-muted" />
+            </button>
+          )}
 
           {/* Add child — hover-visible; direct store import so the recursive
               render never threads an onAddChild prop down every level. */}

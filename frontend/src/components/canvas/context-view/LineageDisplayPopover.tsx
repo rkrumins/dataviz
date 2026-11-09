@@ -48,6 +48,9 @@ interface DensityOption {
   label: string
   technical: string
   description: string
+  /** The Business view's words for the same choice. */
+  plainLabel: string
+  plainDescription: string
 }
 
 const DENSITY_OPTIONS: DensityOption[] = [
@@ -56,18 +59,24 @@ const DENSITY_OPTIONS: DensityOption[] = [
     label: 'On Hover',
     technical: 'Stubs',
     description: 'Edges appear when you hover or select a node',
+    plainLabel: 'On hover',
+    plainDescription: 'Lines appear when you point at or pick an entity',
   },
   {
     mode: 'auto',
     label: 'Adaptive',
     technical: 'Auto',
     description: 'Strongest flows stay visible on dense graphs; markers summarize the rest — hover or select to focus',
+    plainLabel: 'Adaptive',
+    plainDescription: 'The strongest lines stay drawn; small markers stand in for the rest',
   },
   {
     mode: 'raw',
     label: 'All Edges',
     technical: 'Raw',
     description: 'Render every projected edge (heavy on dense workspaces)',
+    plainLabel: 'All lines',
+    plainDescription: 'Every line, all the time — slower on big views',
   },
 ]
 
@@ -244,6 +253,9 @@ interface LineageDisplaySectionsProps {
   /** When true, every control renders inert (native `disabled`) and muted —
    *  used by the header's DisplayMenu when Lineage is off. */
   disabled?: boolean
+  /** The Business view's short form, in plain words: how many lines are
+   *  drawn, their colours and the alerts — not how they move or attach. */
+  simple?: boolean
 }
 
 /**
@@ -259,23 +271,27 @@ export function LineageDisplaySections({
   lineagePortSides,
   onSetLineagePortSides,
   disabled = false,
+  simple = false,
 }: LineageDisplaySectionsProps) {
+  const density = DENSITY_OPTIONS.find(o => o.mode === lineageRenderMode)
+  // The short form keeps a switch that is on, so it can still be turned off.
+  const showFlowRibbons = usePreferencesStore((s) => s.showFlowRibbons) ?? false
   return (
     <div className={cn(disabled && 'opacity-50')}>
-      {/* Edge Density */}
+      {/* Edge Density — one section id under either title, so its open state carries */}
       <CollapsibleSection
         id="edge-density"
         icon={Layers}
-        title="Edge Density"
-        summary={DENSITY_OPTIONS.find(o => o.mode === lineageRenderMode)?.label ?? 'Adaptive'}
+        title={simple ? 'How many lines' : 'Edge Density'}
+        summary={(simple ? density?.plainLabel : density?.label) ?? 'Adaptive'}
       >
         <p className="px-1 pt-1 pb-2 text-[11px] text-ink-muted/80 leading-snug">
-          How many edges materialise on the canvas at once.
+          {simple ? 'How many lines the canvas draws at once.' : 'How many edges materialise on the canvas at once.'}
           <span className="block mt-0.5">A trace draws every line it walks, whatever this is set to.</span>
         </p>
         <div
           role="radiogroup"
-          aria-label="Edge density"
+          aria-label={simple ? 'How many lines' : 'Edge density'}
           className="flex flex-col gap-1"
         >
           {DENSITY_OPTIONS.map(opt => {
@@ -313,23 +329,30 @@ export function LineageDisplaySections({
                       active ? 'text-accent-lineage' : 'text-ink',
                     )}
                   >
-                    <span>{opt.label}</span>
-                    <span className="text-[10px] text-ink-muted/60 font-normal">
-                      ({opt.technical})
-                    </span>
+                    <span>{simple ? opt.plainLabel : opt.label}</span>
+                    {!simple && (
+                      <span className="text-[10px] text-ink-muted/60 font-normal">
+                        ({opt.technical})
+                      </span>
+                    )}
                   </div>
                   <div className="text-[11px] text-ink-muted/80 leading-snug mt-0.5">
-                    {opt.description}
+                    {simple ? opt.plainDescription : opt.description}
                   </div>
                 </div>
               </button>
             )
           })}
         </div>
-        {lineageRenderMode !== 'raw' && <AdaptiveBudgetSlider disabled={disabled} mode={lineageRenderMode} />}
-        {lineageRenderMode === 'auto' && <FlowRibbonsToggle disabled={disabled} />}
+        {!simple && lineageRenderMode !== 'raw' && <AdaptiveBudgetSlider disabled={disabled} mode={lineageRenderMode} />}
+        {lineageRenderMode === 'auto' && (!simple || showFlowRibbons) && <FlowRibbonsToggle disabled={disabled} />}
       </CollapsibleSection>
 
+      <div className="h-px bg-black/[0.08] dark:bg-white/[0.06] mx-3" />
+
+      <BackPointers disabled={disabled} />
+
+      {!simple && <>
       <div className="h-px bg-black/[0.08] dark:bg-white/[0.06] mx-3" />
 
       <AppearanceSection disabled={disabled} />
@@ -457,17 +480,30 @@ export function LineageDisplaySections({
           })}
         </div>
       </CollapsibleSection>
+      </>}
+
+      {/* The short form's lineage colours; the long form has them under Appearance. */}
+      {simple && <>
+      <div className="h-px bg-black/[0.08] dark:bg-white/[0.06] mx-3" />
+
+      <div className="px-3 pb-3">
+        <DirectionColors disabled={disabled} />
+      </div>
+      </>}
 
       <div className="h-px bg-black/[0.08] dark:bg-white/[0.06] mx-3" />
 
       {/* Missing connections — Views are subsets of a Data Source, so a
           curated view legitimately excludes upstream/downstream partners.
-          This switch shows/hides the "connections not on canvas" alerts. */}
+          This switch shows/hides the "connections not on canvas" alerts, in
+          either form: they are on by default. */}
       <MissingConnectionsToggle disabled={disabled} />
 
+      {!simple && <>
       <div className="h-px bg-black/[0.08] dark:bg-white/[0.06] mx-3" />
 
       <ExternalPreviewToggle disabled={disabled} />
+      </>}
     </div>
   )
 }
@@ -608,6 +644,58 @@ function AppearanceSection({ disabled }: { disabled: boolean }) {
 }
 
 /** A labelled on/off switch in the Appearance section's own style. */
+/** Alert colours for lines that point back. */
+const BACK_POINTER_COLORS = [
+  { label: 'Red', color: '#ef4444' },
+  { label: 'Amber', color: '#f59e0b' },
+  { label: 'Magenta', color: '#d946ef' },
+] as const
+
+/** Lines that point back: a source in a layer to the right of its target — a
+ *  dependency running against the order of the view's layers — in an alert
+ *  colour. Off until the reader turns it on. A trace keeps its own colours. */
+function BackPointers({ disabled }: { disabled: boolean }) {
+  const on = usePreferencesStore((s) => s.highlightBackPointers) ?? false
+  const setOn = usePreferencesStore((s) => s.setHighlightBackPointers)
+  const color = usePreferencesStore((s) => s.backPointerColor) ?? '#ef4444'
+  const setColor = usePreferencesStore((s) => s.setBackPointerColor)
+  return (
+    <div className="px-3 pb-2.5">
+      <SwitchRow
+        on={on}
+        disabled={disabled}
+        onToggle={() => setOn(!on)}
+        label="Highlight lines that point back"
+        detail="A line whose source sits in a layer to the right of its target, in an alert colour"
+      />
+      {on && (
+        <div role="radiogroup" aria-label="Colour of lines that point back" className="mt-2 flex items-center gap-2 px-2.5">
+          {BACK_POINTER_COLORS.map(({ label, color: c }) => {
+            const active = c.toLowerCase() === color.toLowerCase()
+            return (
+              <button
+                key={c}
+                type="button"
+                role="radio"
+                aria-checked={active}
+                aria-label={label}
+                disabled={disabled}
+                onClick={() => setColor(c)}
+                className={cn(
+                  'w-5 h-5 rounded-full transition-transform',
+                  active ? 'ring-2 ring-offset-2 ring-offset-canvas-elevated scale-110' : 'opacity-80 hover:opacity-100 hover:scale-105',
+                )}
+                style={{ backgroundColor: c, ...(active ? { boxShadow: `0 0 0 2px ${c}` } : {}) }}
+              />
+            )
+          })}
+          <span className="text-[11px] text-ink-muted">Its colour</span>
+        </div>
+      )}
+    </div>
+  )
+}
+
 function SwitchRow({ on, disabled, onToggle, label, detail }: {
   on: boolean
   disabled: boolean

@@ -26,6 +26,7 @@ import { SearchMatchBadge } from '../search/SearchMatchBadge'
 import { NarrowRowMark } from '@/features/narrow/NarrowRowMark'
 import { useSearchHighlight } from '../search/useSearchHighlight'
 import { DisplayRuleTagChips } from '../property-manager/DisplayRuleTagChips'
+import { useDisplayRuleLook } from '@/store/displayRuleMatchStore'
 import { NodeConnectionHandle } from './NodeConnectionHandle'
 import { useReparentNode } from './useReparentNode'
 import { LineEndTag } from './LineEndTag'
@@ -219,6 +220,10 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   // as the graph canvas, so "saved vs not" reads identically everywhere. Cascade (a descendant has a
   // staged change) keeps its muted left stripe.
   const directDeco = useEntityChangeDecoration().for(node.urn ?? node.id)
+  // How the view's display rules paint this card: a tint and a frame, each
+  // from the first rule in the list that matches. A change decoration
+  // (staged or committed) paints the same channels, and wins.
+  const ruleLook = useDisplayRuleLook(directDeco ? undefined : (node.urn ?? node.id))
   const isPendingDelete = directDeco?.status === 'removed'
   const stagedSummary = directChange?.summary
     ?? (directDeco?.state === 'committed' ? `${directDeco.status} vs main` : undefined)
@@ -311,7 +316,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   // left out when it is the name on the row, so no row prints the same string
   // twice. The row grows by one line when it does; LayerColumn measures every
   // row via `virtualizer.measureElement`, so the taller rows reflow without
-  // scroll-jump.
+  // scroll-jump. Minimal sets it beside the name, and the row keeps its height.
   const personaMode = usePersonaMode()
   const displayName = resolveEntityName(node.data, personaMode, node.name)
   const identityProperty = useCanvasIdentityProperty()
@@ -327,6 +332,9 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   const textClass = sizing.textClass
   const iconSize = sizing.iconSize
   const iconContainerSize = sizing.iconContainerSize
+  // Minimal is one line per entity: the glyph without its tile, the
+  // identifier beside the name, rule chips as dots, and nothing below.
+  const minimal = density === 'minimal'
 
   // Dimming applies to (a) the click-highlight feature, and (b) the
   // advanced-search "spotlight" mode (sourced from useSearchHighlight
@@ -428,6 +436,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
       data-selected={isSelected || undefined}
       data-canvas-interactive
       data-trace-focus={isFocusNode ? 'true' : 'false'}
+      data-rule-fill={ruleLook.fillColor ? '' : undefined}
       onDragOver={(e) => {
         // Accept a node drag (reparent / reorder). The id can't be read during
         // dragover, so we can't exclude self here — drop handlers guard that.
@@ -558,6 +567,14 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         // Subtle left border accent for root items
         ...(depth === 0 && {
           borderLeft: `3px solid ${nodeColor}40`,
+        }),
+        // A rule's tint (globals.css `.nx-row-card[data-rule-fill]`) and frame —
+        // drawn inside the card, so it never reaches a neighbouring row and
+        // changes no row's height.
+        ...(ruleLook.fillColor && { '--nx-rule-fill': ruleLook.fillColor } as React.CSSProperties),
+        ...(ruleLook.frameKind && {
+          outline: `2px ${ruleLook.frameKind} ${ruleLook.frameColor}`,
+          outlineOffset: -2,
         }),
       }}
       // Shift-click takes a range; without this the browser also paints a
@@ -691,7 +708,8 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
           hasChildren
             ? "hover:bg-white/[0.1] hover:scale-110 active:scale-95"
             : "opacity-0 pointer-events-none",
-          isRoot ? "w-7 h-7" : "w-6 h-6"
+          // Minimal's line is 22px: a taller toggle would set the row's height.
+          minimal ? "w-5 h-5" : isRoot ? "w-7 h-7" : "w-6 h-6"
         )}
       >
         {hasChildren && (
@@ -754,9 +772,11 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
           "rounded-xl flex items-center justify-center flex-shrink-0 transition-all duration-200 shadow-sm relative",
           iconContainerSize,
           isSelected && "scale-110 shadow-md",
-          isHovered && "scale-105"
+          isHovered && "scale-105",
+          // Minimal: the glyph alone — no tile behind it.
+          minimal && "shadow-none"
         )}
-        style={{
+        style={minimal ? undefined : {
           background: `linear-gradient(135deg, ${nodeColor}25 0%, ${nodeColor}10 100%)`,
           boxShadow: isSelected ? `0 4px 12px ${nodeColor}30` : `0 2px 4px ${nodeColor}15`,
           ...(isLogical && !isContext && { border: `1px dashed ${nodeColor}50` }),
@@ -794,7 +814,12 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
           previous ``pr-[120px]`` reflow shrank the text to
           unreadable widths). */}
       <div
-        className="flex-1 min-w-0 flex flex-col justify-center"
+        className={cn(
+          "flex-1 min-w-0 flex",
+          // Minimal sets everything below beside the name, on its one line;
+          // `*:mt-0` drops the gaps the stacked layout puts between them.
+          minimal ? "items-center gap-1.5 *:mt-0" : "flex-col justify-center",
+        )}
         title={stagedSummary ?? displayName}
       >
         <span className={cn(
@@ -811,12 +836,16 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
           // ``INTERMEDIATE_T1a sfdasdfasdfasdfafaf`` test case)
           // without losing the tail to ellipsis. The virtualizer
           // re-measures rows dynamically so taller rows reflow
-          // their successors without scroll-jump.
-          "line-clamp-3 break-words"
+          // their successors without scroll-jump. Minimal keeps
+          // its one line and truncates instead.
+          minimal ? "truncate" : "line-clamp-3 break-words"
         )}>
           {displayName}
-          {lineEnd && <LineEndTag end={lineEnd} className="ml-1.5 align-[1px]" />}
+          {lineEnd && !minimal && <LineEndTag end={lineEnd} className="ml-1.5 align-[1px]" />}
         </span>
+        {/* A truncated name's ellipsis would take a tag set inside it, so
+            Minimal stands the tag beside the name. */}
+        {lineEnd && minimal && <LineEndTag end={lineEnd} className="flex-shrink-0" />}
         {/* Technical identity (Business/Technical toggle) — one truncated line,
             the property and its full value on hover.
 
@@ -827,10 +856,14 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
             a screenful of siblings then reads the identical
             `urn:synodic:solidatus:n…`. An RTL inline direction puts the
             ellipsis at the start and keeps the discriminating tail; the runs
-            inside are still read left-to-right. */}
+            inside are still read left-to-right.
+
+            Minimal sets it after the name, in the space the name leaves: a
+            zero basis gives the name its width first, and `max-w-max` keeps
+            what follows right behind the identifier. */}
         {technical && (
           <span
-            className="text-[10px] font-mono text-ink-muted/70 truncate mt-0.5"
+            className={cn("text-[10px] font-mono text-ink-muted/70 truncate mt-0.5", minimal && "flex-1 max-w-max")}
             style={{ direction: 'rtl', textAlign: 'left' }}
             title={`${technical.property}: ${technical.value}`}
           >
@@ -838,8 +871,9 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
           </span>
         )}
         {/* Type badge — gated by usePreferencesStore.showCanvasTypeBadge so
-            users can reclaim vertical space in dense canvases. */}
-        {showTypeBadge && (
+            users can reclaim vertical space in dense canvases. Minimal has
+            no line under the name for it; the glyph says the type. */}
+        {showTypeBadge && !minimal && (
           <span className={cn(
             "text-[10px] text-ink-muted/60 truncate mt-0.5 flex items-center gap-1",
             isRoot && "text-[11px]"
@@ -868,11 +902,12 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         )}
         {placedOut && <PlacedOutNote placedOut={placedOut} parentName={node.name} />}
         {isLogical && groupActions && (
-          <GroupRowControls groupId={node.id.replace(/^logical:/, '')} name={node.name} actions={groupActions} />
+          <GroupRowControls groupId={node.id.replace(/^logical:/, '')} name={node.name} actions={groupActions} hint={!minimal} />
         )}
         {/* Display-rule tags — shared chip cluster (premium chips +
-            overflow popover) so all canvases render identically. */}
-        <DisplayRuleTagChips urn={node.urn ?? node.id} size="xs" className="mt-1" />
+            overflow popover) so all canvases render identically. Minimal
+            shows each as a colour dot on the name's line. */}
+        <DisplayRuleTagChips urn={node.urn ?? node.id} size={minimal ? 'dot' : 'xs'} className="mt-1" />
       </div>
 
       {/* Right-side metadata cluster — descendant count + search
@@ -887,8 +922,12 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
           fades, because it overlaps the action overlay's slot.
           The action overlay positions itself with
           ``right-[3.125rem]`` when a badge is present so it lands
-          to the LEFT of the badge, never on top of it. */}
-      <div className="flex items-center gap-1.5 flex-shrink-0 relative z-[5]">
+          to the LEFT of the badge, never on top of it.
+
+          Minimal holds the cluster to its line: the narrowing's 24px pill
+          then reaches into the row's padding instead of making the row
+          taller than the virtualizer's estimate. */}
+      <div className={cn("flex items-center gap-1.5 flex-shrink-0 relative z-[5]", minimal && "h-5")}>
         {/* On a narrowed canvas: why this row is there (nothing otherwise). */}
         {!isTracing && <NarrowRowMark urn={urnOrId} collapsed={!isExpanded && hasChildren} />}
         {(descendantCount > 0 || traceApprox > 0) && (
@@ -898,6 +937,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
             "text-ink-muted font-semibold tabular-nums",
             "transition-opacity duration-150",
             isHovered && "opacity-0 pointer-events-none",
+            minimal && "py-0",
           )}>
             {descendantCount > 0
               ? (isTracing ? `${descendantCount} on this lineage` : `+${descendantCount}`)
@@ -1176,7 +1216,14 @@ export interface GroupActions {
  * hovered or focused; naming happens in place; delete asks once and says what happens to the
  * entities (they stay in the column, ungrouped — nothing leaves the view, the data is untouched).
  */
-function GroupRowControls({ groupId, name, actions }: { groupId: string; name: string; actions: GroupActions }) {
+function GroupRowControls({ groupId, name, actions, hint = true }: {
+  groupId: string
+  name: string
+  actions: GroupActions
+  /** The drop hint beside the controls. Minimal's one line leaves it out: hidden
+   *  or not, its width would come out of the group's name. */
+  hint?: boolean
+}) {
   const [mode, setMode] = useState<'idle' | 'rename' | 'inside' | 'confirm' | 'move' | 'contents'>('idle')
   const [draft, setDraft] = useState('')
   const stop = (e: React.SyntheticEvent) => e.stopPropagation()
@@ -1294,7 +1341,7 @@ function GroupRowControls({ groupId, name, actions }: { groupId: string; name: s
         onClick={(e) => { stop(e); setMode('confirm') }}>
         <LucideIcons.Trash2 className="w-3 h-3" aria-hidden />
       </button>
-      <span className="text-[10px] text-ink-muted ml-1 truncate">Drop entities or groups here</span>
+      {hint && <span className="text-[10px] text-ink-muted ml-1 truncate">Drop entities or groups here</span>}
     </span>
   )
 }

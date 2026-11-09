@@ -34,7 +34,7 @@ export interface EditorActionsProps extends ComprehensionToolsProps {
   /** Turns the Connect tool on or off; absent → not offered. */
   onToggleConnectTool?: () => void
   // Import / Export are inherited from ComprehensionToolsProps and rendered by the shared
-  // ImportExportMenu (both modes) — no standalone buttons here.
+  // ImportExportMenu, or under More in the Business view (both modes) — no standalone buttons here.
   onExitEdit: () => void
 }
 
