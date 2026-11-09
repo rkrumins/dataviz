@@ -221,6 +221,13 @@ modified and removed, over how many revisions and by whom, which types changed
 most, and every change. **Highlight on canvas** rings them on the graph, up to
 20,000 of them; past that it says how many there are and offers **Open the list**.
 
+Deleted entities are drawn where they were, struck through and marked
+**Deleted**: under their parent when it's on the canvas, up to 500 of them. Deleted
+relationships are rose dashes. Hover **Deleted** to see between which revisions it
+went. The chip above the canvas counts what was added, modified and deleted; hover
+it for what each mark means. When not every deletion could be drawn, it says how
+many were, such as **3 of 40 deleted drawn**, and **Open the list** lists them all.
+
 A revision more than 100,000 changes back is too far to draw. It opens as a
 comparison with now instead, and you can still export the graph as it was then.
 One open while Published moves that far on is handed over the same way.

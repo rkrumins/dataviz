@@ -1358,6 +1358,18 @@ class ChangeEntryResponse(_ApiModel):
     after: Optional[dict] = None
 
 
+class ChangeEntriesBatchRequest(_ApiModel):
+    """The origin as the list routes name it in their query, and the entities to open."""
+    branch_id: Optional[str] = Field(default=None, alias="branchId")
+    from_seq: Optional[int] = Field(default=None, alias="fromSeq", ge=0)
+    to_seq: Optional[int] = Field(default=None, alias="toSeq", ge=1)
+    ids: List[str] = Field(min_length=1, max_length=500)
+
+
+class ChangeEntriesBatchResponse(_ApiModel):
+    entries: List[ChangeEntryResponse]
+
+
 class ChangeIndexResponse(_ApiModel):
     origin: Dict[str, Any]
     # [entityId, "n", status, type] for a node; [entityId, "e", status, type, source, target]
@@ -3216,6 +3228,23 @@ async def get_change_entry(
     with _domain_errors():
         return await svc.change_entry(graph_id=graph_id, origin=origin, entity_id=entity_id,
                                       viewer=viewer)
+
+
+@router.post("/graphs/{graph_id}/diff/entries/batch", response_model=ChangeEntriesBatchResponse)
+async def get_change_entries_batch(
+    ws_id: str, graph_id: str, body: ChangeEntriesBatchRequest,
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    viewer: Viewer = Depends(viewer_ctx),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+):
+    """Up to 500 entities' values before and after, for one origin — ``/diff/entries/{entityId}``
+    for each, read together: the rows a person opens at once (what a deletion removed). Ids the
+    origin did not change are left out. Changes nothing; a POST for the length of its id list."""
+    origin = _change_origin(body.branch_id, body.from_seq, body.to_seq)
+    with _domain_errors():
+        return await svc.change_entries_batch(graph_id=graph_id, origin=origin,
+                                              entity_ids=body.ids, viewer=viewer)
 
 
 @router.get("/graphs/{graph_id}/diff/index", response_model=ChangeIndexResponse)

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { synthesizeGhostNode, synthesizeGhostEdge, reconcileGhosts, buildRestoreChange, buildRestoreSubtree, buildRestoreLinks, indexRemovals, pickGhosts, isGhostNode, isGhostEdge } from '../deletionGhosts'
+import { synthesizeGhostNode, synthesizeGhostEdge, reconcileGhosts, buildRestoreChange, buildRestoreSubtree, buildRestoreLinks, indexRemovals, pickGhosts, restoreNeeds, isGhostNode, isGhostEdge } from '../deletionGhosts'
 import { buildChangeSet, type GraphChange } from '../../model/changeModel'
 
 const removedNode = (urn: string, before: Record<string, unknown>): GraphChange => ({
@@ -271,5 +271,36 @@ describe('deletionGhosts — a restore brings links back under their ids', () =>
       ...buildRestoreSubtree('urn:t2', cs, new Set(), CONTAINS)]
     const ids = buildRestoreLinks(both, changes, () => false, CONTAINS).map((l) => l.targetId)
     expect(ids).toEqual(['f-gone'])
+  })
+})
+
+describe('deletionGhosts — a compact change list, without payloads', () => {
+  // As /diff/index answers: a removed node with no `before`, its parent link with type and ends only.
+  const bare = (urn: string): GraphChange => ({ entityId: urn, urn, kind: 'node', status: 'removed', label: urn, origin: { source: 'compare', fromSeq: 1, toSeq: 9 } })
+  const link = (id: string, s: string, t: string, edgeType: string): GraphChange => ({
+    entityId: id, kind: 'edge', status: 'removed', label: edgeType, origin: { source: 'compare', fromSeq: 1, toSeq: 9 },
+    before: { edgeType, sourceEntityId: s, targetEntityId: t },
+  })
+  const changes = [bare('urn:t1'), link('k1', 'urn:db', 'urn:t1', 'CONTAINS'), bare('urn:c1'), link('k2', 'urn:t1', 'urn:c1', 'CONTAINS'),
+    link('f1', 'urn:c1', 'urn:report', 'FLOWS_TO')]
+
+  it('says which deletions to fetch before drawing them, and draws them once fetched', () => {
+    const cs = buildChangeSet(changes)
+    const first = reconcileGhosts(cs, [liveNode('urn:db')], [], false, CONTAINS)
+    expect(first.missing).toEqual(['urn:t1', 'urn:c1'])
+    expect(first.nodesToAdd).toEqual([])
+    expect([first.drawn, first.total]).toEqual([0, 2])
+    const befores = new Map([['urn:t1', { displayName: 'T1', entityType: 'T' }], ['urn:c1', { displayName: 'C1', entityType: 'T' }]])
+    const then = reconcileGhosts(cs, [liveNode('urn:db')], [], false, CONTAINS, undefined, befores)
+    expect(then.missing).toEqual([])
+    expect(then.nodesToAdd.map((n) => n.id)).toEqual(['urn:t1', 'urn:c1'])
+    expect([then.drawn, then.total]).toEqual([2, 2])
+  })
+
+  it('knows what a restore must fetch, and refuses past its caps', () => {
+    const removals = indexRemovals(changes, CONTAINS)
+    expect(restoreNeeds(removals, changes, 'urn:t1', CONTAINS, 10, 10)).toEqual({ nodeIds: ['urn:t1', 'urn:c1'], linkIds: ['f1'] })
+    expect(restoreNeeds(removals, changes, 'urn:t1', CONTAINS, 1, 10)).toBeNull()
+    expect(restoreNeeds(removals, changes, 'urn:t1', CONTAINS, 10, 0)).toBeNull()
   })
 })

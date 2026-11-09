@@ -55,6 +55,7 @@ import { BranchSwitcher } from './BranchSwitcher'
 import { PullBeforeMergeBanner } from './PullBeforeMergeBanner'
 import { DeletedChip, STATUS_META } from './NodeDiffBadge'
 import { DELETED_LINE } from '../canvas/useDiffDecoration'
+import { GHOST_CAP } from '../canvas/deletionGhosts'
 import { ReadRouteChip } from './ReadRouteChip'
 import { RefreshingBadge } from './RefreshingBadge'
 import { ChangeCountChips } from './ChangesPanel'
@@ -158,8 +159,8 @@ export function CanvasVersioningBar({
   // a modified entity's payloads, which a large draft would ship by the hundred megabytes.
   const diffQ = useDiffVsMain(workspaceId, graphId, isDraft ? branchId : null, { slim: true })
   // Past the tree's cap the slim diff is refused (409): the draft's compact change index — about
-  // 70 bytes a change, no payloads — rings its nodes and finds what it created instead. Its
-  // removed nodes, which only a payload can draw, go undrawn (no ghosts).
+  // 70 bytes a change, no payloads — rings its nodes and finds what it created instead. What its
+  // removed nodes were is asked for just the ones the canvas draws (useDeletionGhosts).
   const large = diffQ.error instanceof DiffTooLargeError
   const draftOrigin = useMemo(() => (isDraft && branchId ? { branchId } : null), [isDraft, branchId])
   const indexQ = useChangeIndex(workspaceId, graphId, large ? draftOrigin : null)
@@ -176,6 +177,8 @@ export function CanvasVersioningBar({
   const changeCount = changeSet.counts.added + changeSet.counts.modified + changeSet.counts.removed
   // New entities a curated view could not draw: it draws a page of what the draft created.
   const createdNotLoaded = useCanvasStore((s) => s.createdRootsNotLoaded)
+  // Deleted entities drawn where they were, of how many the canvas's change set holds.
+  const deletedDrawn = useCanvasStore((s) => s.deletedDrawn)
   const loadingChanges = diffQ.isLoading || (large && (indexQ.isLoading || countsQ.isLoading))
   // A draft's rings are its own diff's: whatever replaced them (a revision closed, a highlight
   // cleared) gives way to them again.
@@ -404,7 +407,26 @@ export function CanvasVersioningBar({
                 <button onClick={() => openCompare(highlightOrigin.fromSeq, highlightOrigin.toSeq)}
                   className="font-semibold hover:underline">Open the list</button>
               </>
-            ) : `What changed after #${highlightOrigin.fromSeq} up to #${highlightOrigin.toSeq}`}
+            ) : (
+              <HoverTip className="inline-flex items-center gap-1.5" label={(
+                <span className="block">
+                  <span className="block text-[12px] font-semibold leading-snug text-ink">
+                    What changed after #{highlightOrigin.fromSeq} up to #{highlightOrigin.toSeq}, on the canvas
+                  </span>
+                  <ChangeLegend comparison />
+                </span>
+              )}>
+                <span>{`What changed after #${highlightOrigin.fromSeq} up to #${highlightOrigin.toSeq}`}</span>
+                {activeChangeSet?.origin === 'compare' && <ChangeCountChips changeSet={activeChangeSet} />}
+                {deletedDrawn && deletedDrawn.total > deletedDrawn.drawn && (
+                  <span className="text-indigo-700/80 dark:text-indigo-300/80">
+                    {deletedDrawn.drawn.toLocaleString()} of {deletedDrawn.total.toLocaleString()} deleted drawn
+                  </span>
+                )}
+                <button onClick={() => openCompare(highlightOrigin.fromSeq, highlightOrigin.toSeq)}
+                  className="font-semibold hover:underline">Open the list</button>
+              </HoverTip>
+            )}
             <HoverTip className="inline-flex" label="Stop highlighting">
               <button onClick={() => setHighlight(null)} aria-label="Stop highlighting"
                 className="p-0.5 rounded-full hover:bg-indigo-500/15"><X className="w-3 h-3" /></button>
@@ -453,6 +475,21 @@ export function CanvasVersioningBar({
                       className="inline-flex items-center rounded-md border border-emerald-500/25 bg-emerald-500/[0.06] px-1.5 py-0.5 text-[11px] font-medium text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/[0.12] transition-colors"
                     >
                       +{createdNotLoaded.toLocaleString()} new
+                    </button>
+                  </HoverTip>
+                )}
+                {deletedDrawn && deletedDrawn.total > deletedDrawn.drawn && (
+                  <HoverTip
+                    className="inline-flex"
+                    label={`${(deletedDrawn.total - deletedDrawn.drawn).toLocaleString()} deleted ${deletedDrawn.total - deletedDrawn.drawn === 1 ? 'entity isn’t' : 'entities aren’t'} drawn here`}
+                    detail={`A deleted entity is drawn where it was, under a parent shown here, ${GHOST_CAP} at most. Changes lists every one.`}
+                  >
+                    <button
+                      type="button"
+                      onClick={() => setPanelTab('changes')}
+                      className="inline-flex items-center rounded-md border border-rose-500/25 bg-rose-500/[0.06] px-1.5 py-0.5 text-[11px] font-medium text-rose-600 dark:text-rose-400 hover:bg-rose-500/[0.12] transition-colors"
+                    >
+                      {deletedDrawn.drawn.toLocaleString()} of {deletedDrawn.total.toLocaleString()} deleted drawn
                     </button>
                   </HoverTip>
                 )}
@@ -620,17 +657,21 @@ export function CanvasVersioningBar({
  *  action leads, the legend is the body. `label` takes a node precisely so a
  *  legend like this does not need a second component. */
 /** What the canvas's change marks mean: the rings, the colours, and how a deletion reads. */
-function ChangeLegend() {
+/** What the marks on the canvas mean: a draft's own changes, or two revisions compared, where
+ *  nothing is a draft's and nothing waits to be published. */
+function ChangeLegend({ comparison = false }: { comparison?: boolean }) {
   return (
     <span className="mt-2 block space-y-1.5 text-[11px] leading-snug text-ink-muted">
       <span className="flex items-center gap-2">
         <span className="w-4 h-4 rounded ring-2 ring-emerald-500/70 inline-block shrink-0" />
-        solid ring = saved to this draft
+        {comparison ? 'solid ring = changed in these revisions' : 'solid ring = saved to this draft'}
       </span>
-      <span className="flex items-center gap-2">
-        <span className="w-4 h-4 rounded outline-dashed outline-2 outline-offset-1 outline-emerald-400/80 inline-block shrink-0" />
-        dashed halo = edited but not saved
-      </span>
+      {!comparison && (
+        <span className="flex items-center gap-2">
+          <span className="w-4 h-4 rounded outline-dashed outline-2 outline-offset-1 outline-emerald-400/80 inline-block shrink-0" />
+          dashed halo = edited but not saved
+        </span>
+      )}
       <span className="flex items-center gap-3 border-t border-glass-border/60 pt-1.5">
         <span className="inline-flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-emerald-500" />new</span>
         <span className="inline-flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-orange-500" />edited</span>
@@ -638,7 +679,9 @@ function ChangeLegend() {
       </span>
       <span className="flex items-center gap-2 border-t border-glass-border/60 pt-1.5">
         <DeletedChip />
-        <span><span className={STATUS_META.removed.strike}>struck name</span> = deleted, kept in its place until published</span>
+        <span>
+          <span className={STATUS_META.removed.strike}>struck name</span> = {comparison ? 'deleted, drawn where it was' : 'deleted, kept in its place until published'}
+        </span>
       </span>
       <span className="flex items-center gap-2">
         <svg width="28" height="6" aria-hidden className="shrink-0">

@@ -98,6 +98,21 @@ async def _check_origin(svc, gid, origin, expected: dict) -> None:
         assert capped["total"] == len(expected)
 
 
+async def _check_batch(svc, gid, origin, ids) -> None:
+    """Opening many entries at once is opening each in turn: the same entries, in the order asked,
+    without the ids the origin did not change (on neither side, or changed and changed back)."""
+    one_by_one = []
+    for eid in ids:
+        try:
+            entry = await svc.change_entry(graph_id=gid, origin=origin, entity_id=eid)
+        except ValueError:
+            continue
+        if entry["status"] != "unchanged":
+            one_by_one.append(entry)
+    batch = await svc.change_entries_batch(graph_id=gid, origin=origin, entity_ids=ids)
+    assert batch == {"entries": one_by_one}, origin
+
+
 async def _run() -> None:
     await models.create_schema_and_partitions()
     service_mod._CHANGE_INDEXES.clear()
@@ -122,10 +137,12 @@ async def _run() -> None:
     head = max(c["commit_seq"] for c in log)
 
     # ── every window of main against the whole-payload oracle ───────────────
+    every = ["DOM", "T1", "C1", "C2", "T2", "e_d1", "e_t1c1", "e_t1c2", "e_d2", "f_12", "nothing"]
     with _whole_graph_reads_refused():
         for lo, hi in combinations(range(0, head + 1), 2):
             flat = await svc.diff_window(graph_id=gid, branch_id=main, from_seq=lo, to_seq=hi)
             await _check_origin(svc, gid, ChangeOrigin(from_seq=lo, to_seq=hi), _oracle(flat))
+            await _check_batch(svc, gid, ChangeOrigin(from_seq=lo, to_seq=hi), every)
 
     # A rename undone later is no net change across both revisions, but a change in each.
     seqs = {c["message"]: c["commit_seq"] for c in log}
@@ -150,6 +167,11 @@ async def _run() -> None:
                                  entity_id="C1")
     assert one["status"] == "modified" and one["kind"] == "node"
     assert (one["before"]["displayName"], one["after"]["displayName"]) == ("amount", "amount_usd")
+    # Many at once leave out what the window did not change: C1, renamed and renamed back.
+    back = ChangeOrigin(from_seq=seqs["add"], to_seq=head)
+    assert (await svc.change_entry(graph_id=gid, origin=back, entity_id="C1"))["status"] == "unchanged"
+    many = await svc.change_entries_batch(graph_id=gid, origin=back, entity_ids=["C1", "C2", "T1"])
+    assert [(e["entityId"], e["status"]) for e in many["entries"]] == [("C2", "removed")]
 
     # A window past main's head is no window.
     with pytest.raises(ValueError):
@@ -164,6 +186,7 @@ async def _run() -> None:
     draft = ChangeOrigin(branch_id=d)
     with _whole_graph_reads_refused():
         await _check_origin(svc, gid, draft, _oracle(await svc.diff_branch_vs_base(graph_id=gid, branch_id=d)))
+        await _check_batch(svc, gid, draft, every + ["T3", "e_d3"])
     entry = await svc.change_entry(graph_id=gid, origin=draft, entity_id="C1")
     assert (entry["before"]["displayName"], entry["after"]["displayName"]) == ("amount", "amount_eur")
 
@@ -304,3 +327,48 @@ async def _run_ids_not_urns() -> None:
 @pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
 def test_the_compact_form_names_nodes_and_ends_by_urn():
     asyncio.run(_run_ids_not_urns())
+
+
+async def _run_batch_route() -> None:
+    """``POST …/diff/entries/batch`` over the store: what the service answers, for a window and a
+    draft; one origin and 1 to 500 ids, else 422; a draft the reader can't read, or a window past
+    main's head, is not found."""
+    from httpx import ASGITransport, AsyncClient
+
+    from .test_api_graph_draft_journey import _build_app
+
+    await models.create_schema_and_partitions()
+    app, _graph_routes = _build_app()
+    svc = GraphVersioningService()
+    G = await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(), workspace_id="ws1", actor="u")
+    gid = G["graph_id"]
+    await svc.apply_ops(graph_id=gid, actor="u", message="seed", ops=[_n("A"), _n("B")])
+    await svc.apply_ops(graph_id=gid, actor="u", message="drop", ops=[_del("A")])
+    head = (await svc.get_graph(gid))["main_head_commit_seq"]
+    mine = await svc.open_draft(graph_id=gid, owner="u_test")            # the harness's reader
+    await svc.apply_ops(graph_id=gid, branch_id=mine, actor="u_test", message="add", ops=[_n("C")])
+    theirs = await svc.open_draft(graph_id=gid, owner="someone_else")
+    url = f"/api/v1/ws1/versioning/graphs/{gid}/diff/entries/batch"
+    ids = ["A", "B", "C", "nothing"]
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+            for origin in (ChangeOrigin(from_seq=head - 1, to_seq=head), ChangeOrigin(branch_id=mine)):
+                r = await c.post(url, json={**origin.as_dict(), "ids": ids})
+                assert r.status_code == 200, r.text
+                assert r.json() == await svc.change_entries_batch(graph_id=gid, origin=origin, entity_ids=ids)
+                assert r.json()["entries"], origin
+            for body in ({"branchId": mine, "ids": [f"n{i}" for i in range(501)]},
+                         {"branchId": mine, "ids": []},
+                         {"fromSeq": head - 1, "ids": ids}):
+                assert (await c.post(url, json=body)).status_code == 422, body
+            r = await c.post(url, json={"branchId": mine, "ids": [f"n{i}" for i in range(500)]})
+            assert r.status_code == 200 and r.json() == {"entries": []}, r.text
+            for body in ({"branchId": theirs, "ids": ids}, {"fromSeq": 0, "toSeq": head + 1, "ids": ids}):
+                assert (await c.post(url, json=body)).status_code == 404, body
+    finally:
+        await db.dispose_engine()
+
+
+@pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
+def test_many_entries_open_at_once_over_the_route():
+    asyncio.run(_run_batch_route())

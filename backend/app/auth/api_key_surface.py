@@ -219,6 +219,8 @@ SURFACE: dict[tuple[str, str], Rule] = {
     ),
     # A dry run checks a file against the graph and writes nothing.
     **_entries("versioning", RESOURCE, "validate_import", "create_export", reads_only=True),
+    # Opening many rows of a change list at once only reads them.
+    **_entries("versioning", RESOURCE, "get_change_entries_batch", reads_only=True),
 
     # ── Data sources: their state, their jobs, and change signals ────
     # Not here: anything on the Ingestion cockpit's any-workspace gate
