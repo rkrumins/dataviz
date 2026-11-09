@@ -9,6 +9,38 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Deleted entities never stand in for children that haven't loaded
+
+The first of three parts toward **Review changes**, a way through every change on the canvas. This
+part fixes how deleted entities drawn where they were (tombstones) count, and lets the canvas draw
+one past the 500 it draws on its own.
+
+### Fixed
+
+- **A container could stop loading its children** because tombstones counted as loaded children.
+  - One whose tombstones filled its child count never loaded the children it still has.
+  - One expanded with only tombstones inside didn't load its first page.
+- **Counts came up short for the same reason:**
+  - a row's "N more";
+  - its column's total, whose header also counted tombstones as entities the layer holds;
+  - a layer anchor's remainder.
+- **Paging went wrong for the same reason:**
+  - a sort flip re-sorted a partial page as if it were whole;
+  - lineage roll-ups skipped a container that still had children to load.
+- **A deleted container could offer "Load more"**, or ask for children the graph no longer has.
+- **A search reveal beside tombstones paged the levels it opened.** Tombstones aren't a page anyone
+  scrolled to, so the level waits, as one holding only the revealed entity does.
+
+### Added
+
+- **The canvas can draw a deletion past its 500 on request**, with the deleted entities above it,
+  and knows how many deletions under each row it hasn't drawn. Locate and "N deleted inside" use
+  this in the next parts.
+  - At most 500 are drawn on request, the oldest ask dropped first.
+  - Another draft or comparison starts without them.
+
+---
+
 ## [Unreleased] — Bring back one deleted entity through your draft
 
 Bringing back a published deletion meant undoing the whole revision that made it, or restoring the

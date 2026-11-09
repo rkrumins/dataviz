@@ -163,6 +163,9 @@ export interface SearchFeedState {
  *  placement to page by yet, and an import of 100,000 is listed in the draft's Changes; the canvas
  *  says how many more there are (`createdRootsNotLoaded`). */
 export const CREATED_ROOTS_LOADED = 200
+/** The most deleted entities drawn because someone asked to see them (Locate, "N deleted inside"),
+ *  beyond the ones a canvas draws on its own. The oldest ask goes first. */
+export const PINNED_GHOSTS_MAX = 500
 
 interface CanvasState {
   // Nodes and Edges
@@ -255,6 +258,16 @@ interface CanvasState {
    *  where none are drawn from it. */
   deletedDrawn: { drawn: number; total: number } | null
   setDeletedDrawn: (d: { drawn: number; total: number } | null) => void
+  /** Deleted entities, by urn, drawn because someone asked to see them: with the deleted entities
+   *  above them, beyond the cap. */
+  ghostPins: string[]
+  pinGhosts: (urns: readonly string[]) => void
+  /** The change set the pins were asked in, by its origin: another one starts without them. */
+  ghostPinsOrigin: string | null
+  setGhostPinsOrigin: (origin: string) => void
+  /** Per parent on the canvas, by urn, how many deletions directly under it aren't drawn. */
+  deletedHidden: ReadonlyMap<string, number>
+  setDeletedHidden: (hidden: ReadonlyMap<string, number>) => void
 
   // Placements that point at nothing: assigned entities the load ASKED FOR, by URN, and the
   // graph didn't return (failed batches are left out, since those are unknown rather than
@@ -579,6 +592,22 @@ export const useCanvasStore = create<CanvasState>()(
       deletedDrawn: null,
       setDeletedDrawn: (deletedDrawn) => set((s) =>
         (s.deletedDrawn?.drawn === deletedDrawn?.drawn && s.deletedDrawn?.total === deletedDrawn?.total ? s : { deletedDrawn })),
+      ghostPins: [],
+      // Asked again, a pin becomes the newest: the latest ask is never the one dropped.
+      pinGhosts: (urns) => set((s) => {
+        const asked = new Set(urns)
+        const next = [...s.ghostPins.filter((u) => !asked.has(u)), ...asked].slice(-PINNED_GHOSTS_MAX)
+        return next.length === s.ghostPins.length && next.every((u, i) => u === s.ghostPins[i]) ? s : { ghostPins: next }
+      }),
+      ghostPinsOrigin: null,
+      setGhostPinsOrigin: (origin) => set((s) =>
+        (s.ghostPinsOrigin === origin ? s : { ghostPinsOrigin: origin, ghostPins: [] })),
+      deletedHidden: new Map(),
+      setDeletedHidden: (hidden) => set((s) => {
+        const was = s.deletedHidden
+        if (was.size === hidden.size && [...hidden].every(([k, v]) => was.get(k) === v)) return s
+        return { deletedHidden: hidden }
+      }),
       placementsNotFound: null,
       setPlacementsNotFound: (placementsNotFound) => set({ placementsNotFound }),
       subsetIssue: null,

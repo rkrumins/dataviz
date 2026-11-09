@@ -45,13 +45,18 @@ export function shouldAutoLoadFirstPage({
 
     const node = displayMap.get(nodeId)
     if (!node) return false
+    // A tombstone has no page: the graph no longer has it.
+    if (node.data?.isGhost === true) return false
 
     const childCount = (node.data?.childCount as number) ?? 0
     if (childCount === 0) return false
 
     // Already has children on the canvas — a page-2+ situation, which is
-    // the Load-more row's business, not ours.
-    if ((childMap.get(nodeId)?.length ?? 0) > 0) return false
+    // the Load-more row's business, not ours. Deleted entities drawn where
+    // they were (tombstones) aren't children the graph still has: a row
+    // holding only those still needs its first page.
+    const children = childMap.get(nodeId) ?? []
+    if (children.some((id) => displayMap.get(id)?.data?.isGhost !== true)) return false
 
     return true
 }

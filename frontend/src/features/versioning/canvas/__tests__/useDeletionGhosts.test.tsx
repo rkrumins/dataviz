@@ -105,3 +105,46 @@ describe('useDeletionGhosts', () => {
     expect(ids()).toEqual(['urn:table'])
   })
 })
+
+describe('useDeletionGhosts — past the 500 drawn', () => {
+  // 501 columns deleted from one table: the canvas draws 500 of them on its own.
+  const many: GraphChange[] = Array.from({ length: 501 }, (_, i): GraphChange[] => [
+    { entityId: `urn:c${i}`, kind: 'node', status: 'removed', label: `c${i}`, origin: branch,
+      before: { displayName: `c${i}`, entityType: 'Column' } },
+    { entityId: `k${i}`, kind: 'edge', status: 'removed', label: `k${i}`, origin: branch,
+      before: { sourceEntityId: 'urn:table', targetEntityId: `urn:c${i}`, edgeType: 'CONTAINS' } },
+  ]).flat()
+  const s = () => useCanvasStore.getState()
+
+  beforeEach(() => {
+    useCanvasStore.setState({ ghostPins: [], ghostPinsOrigin: null, deletedHidden: new Map() })
+    useBranchStore.setState({ activeChangeSet: buildChangeSet(many) } as never)
+    useCanvasStore.getState().addNodes([table as never])
+  })
+
+  it('says how many under each parent are not drawn, and draws one someone asks to see', () => {
+    mount()
+    expect(ids()).not.toContain('urn:c500')
+    expect(s().deletedDrawn).toEqual({ drawn: 500, total: 501 })
+    expect(s().deletedHidden.get('urn:table')).toBe(1)
+
+    act(() => s().pinGhosts(['urn:c500']))
+    expect(ids()).toContain('urn:c500')
+    expect(s().deletedDrawn).toEqual({ drawn: 501, total: 501 })
+    expect(s().deletedHidden.size).toBe(0)
+  })
+
+  it('keeps the pins while the change set is refetched, and drops them for another', () => {
+    mount()
+    act(() => s().pinGhosts(['urn:c500']))
+    act(() => useBranchStore.setState({ activeChangeSet: null }))      // between two fetches
+    act(() => useBranchStore.setState({ activeChangeSet: buildChangeSet(many) }))
+    expect(s().ghostPins).toEqual(['urn:c500'])
+    expect(ids()).toContain('urn:c500')
+
+    const otherDraft = many.map((c) => ({ ...c, origin: { source: 'branch', branchId: 'other' } as const }))
+    act(() => useBranchStore.setState({ activeChangeSet: buildChangeSet(otherDraft) }))
+    expect(s().ghostPins).toEqual([])
+    expect(ids()).not.toContain('urn:c500')
+  })
+})

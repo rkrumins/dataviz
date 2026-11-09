@@ -1780,6 +1780,8 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
             const { nodes, edges, _nodeIndex, childPaging } = useCanvasStore.getState()
             const parentNode = nodes.find(n => n.id === parentId)
             if (!parentNode) return null
+            // A tombstone has no page: the graph no longer has it, and what it held is drawn with it.
+            if (parentNode.data?.isGhost === true) return null
             const nodeData = parentNode.data as { childCount?: number | null; metadata?: { childCount?: number | null } }
             // UNKNOWN IS NOT ZERO.
             //
@@ -1810,12 +1812,18 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
             const revealedNodeIds = new Set(
                 nodes.filter(n => n.data?.viaReveal).map(n => n.id),
             )
+            // A deleted entity drawn where it was (a tombstone) isn't a child the graph still has:
+            // counting it would stop the live children ever loading.
+            const ghostNodeIds = new Set(
+                nodes.filter(n => n.data?.isGhost === true).map(n => n.id),
+            )
             // Count loaded SAVED children via containment edges (ontology-driven)
             const currentChildrenCount = edges.filter(e => {
                 if (e.source !== parentId) return false
                 if (!existingNodeIds.has(e.target)) return false
                 if (e.data?.isPending === 'create' || pendingNodeIds.has(e.target)) return false
                 if (revealedNodeIds.has(e.target)) return false
+                if (ghostNodeIds.has(e.target)) return false
                 return isContainmentEdgeType(normalizeEdgeType(e), containmentEdgeTypes)
             }).length
             // If we have all children, don't refetch

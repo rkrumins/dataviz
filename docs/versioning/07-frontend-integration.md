@@ -242,9 +242,29 @@ graph and the hierarchy).
 - **Which are drawn.** `pickGhosts` draws the deletions whose old parent is on the canvas, and those
   that had none, then what each held, parent-first, at most `GHOST_CAP` (500). One whose parent is
   not loaded waits for it: the hook re-runs whenever the canvas's node count changes.
+- **Drawn on request, past the cap.** The canvas store's `ghostPins` (`pinGhosts`) are drawn first,
+  each with the deleted entities above it (`deletedChain`), outside the cap, wherever what it hangs
+  from is on the canvas.
+  - At most `PINNED_GHOSTS_MAX` (500). The oldest ask is dropped first, and one asked for again
+    becomes the newest.
+  - They belong to the change set they were asked in (`ghostPinsOrigin`). Another draft or comparison
+    starts without them; a refetch of the same one keeps them.
+- **What isn't drawn, per row.** `reconcileGhosts` returns `hiddenByParent`, which the hook publishes
+  as `deletedHidden`: for each parent on the canvas, live or a ghost, how many deletions directly
+  under it aren't drawn.
 - **Parent links.** A deleted parent link is re-added only into a ghost, so a child moved elsewhere
   never gets a second parent.
-- **Ghosts are not the graph.** They never load children and are left out of the legacy save.
+- **Ghosts are not the graph.** They are left out of the legacy save, and they never page:
+  `loadChildren`, the first-page auto-load and the "N more" row skip a ghost. Nor are they a
+  parent's loaded children, wherever those are weighed against its `childCount`:
+  - `loadChildren`'s "all loaded" check, and `shouldAutoLoadFirstPage` (a parent holding only ghosts
+    still loads its first page);
+  - the column's "N more" row and header totals;
+  - and, through `withoutTombstones`, the anchor's remainder, the lineage aggregation's holders and
+    a sort flip's "fully loaded".
+
+  A reveal's level holding its child and ghosts is still unbrowsed, so its "N more" row doesn't
+  page itself.
 - **Restore** (`useRestoreGhost`) stages the subtree with every id kept. A node comes back by urn,
   its parent link under its own id (`containmentEdgeId`). The lineage links deleted with it come back
   under theirs (`buildRestoreLinks`, `restoreOf`) where the other end is restored or still live.

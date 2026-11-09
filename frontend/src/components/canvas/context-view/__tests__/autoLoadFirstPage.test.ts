@@ -67,4 +67,24 @@ describe('shouldAutoLoadFirstPage', () => {
   it('leaves a childless container alone — there is no page to fetch', () => {
     expect(ask({ displayMap: new Map([[P, container(0)]]) })).toBe(false)
   })
+
+  // Deleted entities drawn where they were (tombstones) aren't children the
+  // graph still has. A container holding only those has had no page yet.
+  it('pages a container whose only children are tombstones', () => {
+    const tombstone: HierarchyNode = {
+      id: CHILD, urn: CHILD, typeId: 'column', name: 'C', children: [],
+      data: { label: 'C', urn: CHILD, type: 'column', isGhost: true },
+      depth: 1, entityTypeOption: 'column', tags: [],
+    }
+    expect(ask({
+      displayMap: new Map([[P, container(150)], [CHILD, tombstone]]),
+      childMap: new Map([[P, [CHILD]]]),
+    })).toBe(true)
+  })
+
+  it('never pages a tombstone: the graph no longer has it', () => {
+    const gone = container(3)
+    gone.data = { ...gone.data, isGhost: true }
+    expect(ask({ displayMap: new Map([[P, gone]]) })).toBe(false)
+  })
 })
