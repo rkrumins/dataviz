@@ -177,3 +177,21 @@ def test_every_kind_that_moves_main_is_catalogued():
     _severity, summary = catalogue._EVENT_META["workspace.versioning.main_edited"]
     assert summary({"target_label": "Sales", "details": {"changes": {"update": 1}}}) == \
         "Changed the published data of Sales (1 change)"
+
+
+@_live
+def test_turning_version_control_on_records_no_import_event():
+    """Seeding a graph in the transaction that makes it is turning version control on, which records
+    its own event (`workspace.versioning.enabled`): no `ingested` beside it."""
+    async def go():
+        await models.create_schema_and_partitions()
+        svc = GraphVersioningService()
+        ds = "ds_" + os.urandom(4).hex()
+        async with db.graphver_session() as s:
+            gid = (await svc.create_graph(data_source_id=ds, workspace_id="ws1", actor="alice",
+                                          session=s))["graph_id"]
+            await svc.bulk_ingest(graph_id=gid, actor="alice", session=s, rows=[
+                {"kind": "node", "id": "A", "urn": "A", "entityType": "domain", "displayName": "A"}])
+        assert await _events(ds) == []
+        await db.dispose_engine()
+    asyncio.run(go())

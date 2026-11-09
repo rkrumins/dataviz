@@ -8932,7 +8932,8 @@ class GraphVersioningService:
             await self._bulk_insert_versions(s, graph_id, main_id, commit, node_deltas, edge_deltas, actor)
             main.head_commit_id = commit.id
             graph.main_head_commit_seq = new_seq
-            main_activity.note(s, graph, commit)
+            if session is None:     # with one, it seeds a graph being enabled: `enabled` says so
+                main_activity.note(s, graph, commit)
             commit.merkle_root = await self._commit_merkle(s, graph_id, main_id, commit, deltas)
             graph.updated_at = _now()
             ps = await s.get(ProjectionStateORM, graph_id)

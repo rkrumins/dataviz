@@ -15,7 +15,8 @@ The event is noted where ``main``'s head moves (:func:`note`) and recorded only 
 transaction has committed (:func:`.db.after_commit`). An attempt that is rolled back and retried
 leaves nothing behind, and a failure to record never fails the commit. Steps that already record
 their own event keep it, and note nothing here:
-- turning version control on (``workspace.versioning.enabled``);
+- turning version control on (``workspace.versioning.enabled``), whether the bootstrap job imports
+  the graph or ``bulk_ingest`` seeds it in the enabling transaction;
 - updating a fork from its parent (``workspace.versioning.fork_updated``).
 """
 from __future__ import annotations
