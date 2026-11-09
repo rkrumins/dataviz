@@ -304,7 +304,7 @@ export function ViewHistoryTimeline({
           headSeq={headSeq}
           notice={compare.notice ?? null}
           canOpen={revisionViewer}
-          openBlocked={unavailable}
+          openBlocked={openBlocked}
           onChange={(fromSeq, toSeq) => setCompare({ fromSeq, toSeq })}
           onBack={() => setCompare(null)}
           onOpen={(seq) => {

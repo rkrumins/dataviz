@@ -84,8 +84,8 @@ vi.mock('../../hooks/useVersioning', () => ({
 }))
 vi.mock('../../hooks/useRevisionViewer', () => ({ useRevisionViewer: () => state.revisionOn }))
 vi.mock('../RevisionCompare', () => ({
-  RevisionCompare: (p: { from: number; to: number | null; notice?: string | null }) => (
-    <p>Comparing #{p.from} with {p.to ?? 'now'}{p.notice ? ` (${p.notice})` : ''}</p>
+  RevisionCompare: (p: { from: number; to: number | null; notice?: string | null; openBlocked?: string | null }) => (
+    <p>Comparing #{p.from} with {p.to ?? 'now'}{p.notice ? ` (${p.notice})` : ''}{p.openBlocked ? ` [${p.openBlocked}]` : ''}</p>
   ),
 }))
 
@@ -217,5 +217,12 @@ describe('ViewHistoryTimeline', () => {
     state.revisionOn = true
     wrap(<ViewHistoryTimeline wsId="ws1" graphId="g1" viewId={null} compare={{ fromSeq: 3, toSeq: null }} />)
     expect(screen.getByText('Comparing #3 with now')).toBeInTheDocument()
+  })
+
+  it("holds a comparison's Open and Highlight back while edits are unsaved, as a row's", () => {
+    state.revisionOn = true
+    useStagedChangesStore.setState({ changes: [{ id: 'chg_1' }] } as never)
+    wrap(<ViewHistoryTimeline wsId="ws1" graphId="g1" viewId={null} compare={{ fromSeq: 3, toSeq: null }} />)
+    expect(screen.getByText('Comparing #3 with now [Save or discard your unsaved edits first.]')).toBeInTheDocument()
   })
 })
