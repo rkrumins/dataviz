@@ -57,6 +57,7 @@ import { useDisplayRuleEngine } from '@/hooks/useDisplayRuleEngine'
 import { useViewLibrary } from '@/hooks/useViewLibrary'
 import { useEffectiveBranchId } from '@/store/branchStore'
 import { CanvasSearchTrigger } from './search/CanvasSearchTrigger'
+import { RevisionNameSearchPanel } from './search/RevisionNameSearchPanel'
 import { useRevealSearchHit } from '@/hooks/useRevealSearchHit'
 import { EdgeDetailPanel, generateEdgeTypeFilters } from '../panels/EdgeDetailPanel'
 
@@ -109,6 +110,8 @@ import { usePreferencesStore } from '@/store/preferences'
 import { usePersonaMode } from '@/store/persona'
 import { drawerWidthCss } from '@/components/panels/shell/drawerWidth'
 import { useFeature } from '@/store/features'
+import { useRevisionCapabilities } from '@/features/versioning/hooks/useAtRevision'
+import { OFF_AT_REVISION } from '@/features/versioning/model/revisionCopy'
 
 // Types
 import type { HierarchyNode } from '@/types/hierarchy'
@@ -167,6 +170,10 @@ export function GraphCanvas({ className }: { className?: string }) {
   // extra control panel, the layout-direction switch and the edge-details
   // panel are the Technical view's.
   const technical = usePersonaMode() === 'technical'
+  // A past revision is read as it was: what reads the graph as it is now (display rules, the
+  // rolled-up trace, Advanced Search) is off there, and nothing is edited.
+  const { editing, displayRules, rolledUpTraces, advancedSearch } = useRevisionCapabilities()
+  const traceBlocked = rolledUpTraces ? undefined : OFF_AT_REVISION
 
   // 4. Local state
   const [showLineageFlow, setShowLineageFlow] = useState(true)
@@ -174,9 +181,9 @@ export function GraphCanvas({ className }: { className?: string }) {
   // Hierarchy Builder open state — drives right-rail mutual exclusion with the
   // inspectors ("creation takes the rail"). Selector, not getState-in-render.
   // `surface` distinguishes the 400px rail from the wider Build Mode panel —
-  // only one of the two (never both) mounts at a time.
-  const builderOpen = useHierarchyBuilderStore((s) => s.isOpen && s.surface === 'rail')
-  const buildOpen = useHierarchyBuilderStore((s) => s.isOpen && s.surface === 'build')
+  // only one of the two (never both) mounts at a time, and neither where nothing is edited.
+  const builderOpen = useHierarchyBuilderStore((s) => s.isOpen && s.surface === 'rail') && editing
+  const buildOpen = useHierarchyBuilderStore((s) => s.isOpen && s.surface === 'build') && editing
   const [activeEdgeType, setActiveEdgeType] = useState<string>('manual')
   // Advanced search (Map + Builder + Power tools + Ask) — mounted as a
   // flex-sibling drawer alongside EntityDrawer / EdgeDetailPanel.
@@ -186,7 +193,8 @@ export function GraphCanvas({ className }: { className?: string }) {
   // sets so GenericNode renders the tag chips.
   const [propertyManagerOpen, setPropertyManagerOpen] = useState(false)
   const activeView = useSchemaStore((s) => s.getActiveView())
-  useDisplayRuleEngine(activeView?.id ?? null)
+  // Display rules match through search, which reads the graph as it is now: off at a past revision.
+  useDisplayRuleEngine(displayRules ? activeView?.id ?? null : null)
   // The view's display rules (the draft's own, on a draft) and saved queries, from its library.
   const libraryBranchId = useEffectiveBranchId(
     activeView?.workspaceId ?? '', activeView?.dataSourceId ?? null, activeView?.id ?? null)
@@ -953,8 +961,8 @@ export function GraphCanvas({ className }: { className?: string }) {
 
   // Graph mutations (create/update/delete node + edge) 403 server-side when the admin turns
   // editModeEnabled off (graph.py's require_edit_mode), so the affordances that reach those
-  // routes are hidden rather than left to fail.
-  const editModeEnabled = useFeature('editModeEnabled')
+  // routes are hidden rather than left to fail. A past revision is read-only: hidden there too.
+  const editModeEnabled = useFeature('editModeEnabled') && editing
 
   // A card's More button opens the menu its right-click does. interactions is
   // defined later, so this and the edge menu below reach it through a ref.
@@ -990,6 +998,7 @@ export function GraphCanvas({ className }: { className?: string }) {
         onToggleExpanded: stableOnToggle,
         onTraceUpstream: trace.traceUpstream,
         onTraceDownstream: trace.traceDownstream,
+        traceBlocked,
         onOpenMenu: openNodeMenu,
         // Add inside stages an entity: offered in a draft, with editing on.
         canAddInside: editModeEnabled && !!libraryBranchId,
@@ -1044,6 +1053,7 @@ export function GraphCanvas({ className }: { className?: string }) {
     mergedHighlightNodes,
     stableOnLoadMore,
     stableOnToggle,
+    traceBlocked,
     openNodeMenu,
     editModeEnabled,
     libraryBranchId,
@@ -1087,14 +1097,14 @@ export function GraphCanvas({ className }: { className?: string }) {
   const onNodeDoubleClick: NodeMouseHandler = useCallback(
     (event, node) => {
       if (event.shiftKey) {
-        // Shift+Double-click: trace
-        trace.toggleTrace(node.id)
+        // Shift+Double-click: trace, where the canvas can
+        if (rolledUpTraces) trace.toggleTrace(node.id)
       } else {
         // Regular double-click: expand/collapse
         toggleNode(node.id)
       }
     },
-    [trace, toggleNode],
+    [trace, toggleNode, rolledUpTraces],
   )
 
   const onPaneClick = useCallback(() => clearSelection(), [clearSelection])
@@ -1321,7 +1331,8 @@ export function GraphCanvas({ className }: { className?: string }) {
   // 19. Canvas interactions (context menu, inline edit, quick create, command palette)
   const { duplicateSubtree } = useDuplicateSubtree()
   const interactions = useCanvasInteractions({
-    onTraceNode: (nodeId) => trace.startTrace(nodeId),
+    readOnly: !editing,
+    onTraceNode: traceBlocked ? undefined : (nodeId) => trace.startTrace(nodeId),
     onNodeCreated: (nodeId) => selectNode(nodeId),
     duplicateSubtree,
     onNodeDuplicated: (originalId, newUrn) => {
@@ -1413,6 +1424,7 @@ export function GraphCanvas({ className }: { className?: string }) {
           <PropertyManagerButton
             open={propertyManagerOpen}
             onToggle={() => setPropertyManagerOpen((v) => !v)}
+            blocked={displayRules ? undefined : OFF_AT_REVISION}
           />
         )}
       </div>
@@ -1506,6 +1518,11 @@ export function GraphCanvas({ className }: { className?: string }) {
           onNodeMouseEnter={onNodeMouseEnter}
           onNodeMouseLeave={onNodeMouseLeave}
           onPaneClick={onPaneClick}
+          // Drawing a line, re-drawing one and Backspace on a selection (React Flow's own delete,
+          // into onNodesChange) edit the graph: none of them where nothing is edited.
+          nodesConnectable={editing}
+          edgesReconnectable={editing}
+          deleteKeyCode={editing ? 'Backspace' : null}
           onConnect={onConnect}
           onReconnect={onReconnect}
           onEdgeClick={onEdgeClick}
@@ -1663,6 +1680,7 @@ export function GraphCanvas({ className }: { className?: string }) {
           onTraceUp={trace.traceUpstream}
           onTraceDown={trace.traceDownstream}
           onFullTrace={trace.traceFullLineage}
+          traceBlocked={traceBlocked}
           onFocusNode={revealAndFocus}
           onLocateMany={locateManyOnCanvas}
         />
@@ -1675,14 +1693,15 @@ export function GraphCanvas({ className }: { className?: string }) {
 
       {/* Advanced search trigger + panel. The trigger handles ⌘⇧F
           globally; the panel mounts as a flex-sibling drawer (parity
-          with ContextViewCanvas). Disabled when no view is active. */}
+          with ContextViewCanvas). Disabled when no view is active.
+          At a past revision the search is by name, as the names were. */}
       <CanvasSearchTrigger
         open={advancedSearchOpen}
         onToggle={() => setAdvancedSearchOpen((v) => !v)}
         hideButton={isEdgePanelOpen}
       />
       <AnimatePresence>
-        {activeView?.id && advancedSearchOpen && (
+        {activeView?.id && advancedSearchOpen && (advancedSearch ? (
           <SearchMapPanel
             key="advanced-search-panel"
             open={advancedSearchOpen}
@@ -1692,7 +1711,14 @@ export function GraphCanvas({ className }: { className?: string }) {
               revealSearchHit(urn, ancestorPath)
             }
           />
-        )}
+        ) : (
+          <RevisionNameSearchPanel
+            key="name-search-panel"
+            viewId={activeView.id}
+            onClose={() => setAdvancedSearchOpen(false)}
+            onRevealNode={revealSearchHit}
+          />
+        ))}
       </AnimatePresence>
 
       {/* Property Manager — display-rule tag overlay drawer. */}
@@ -1730,6 +1756,7 @@ export function GraphCanvas({ className }: { className?: string }) {
           })
         } : undefined}
         onTraceNode={(id) => trace.startTrace(id)}
+        traceBlocked={traceBlocked}
         onCopyUrn={interactions.copyUrn}
         onEditEdge={interactions.editEdge}
         onDeleteEdge={editModeEnabled ? interactions.deleteEdge : undefined}
