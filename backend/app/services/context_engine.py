@@ -889,6 +889,34 @@ class ContextEngine:
 
     async def search_nodes(self, query: str, limit: int = 10, offset: int = 0) -> List[GraphNode]:
         return await self.provider.search_nodes(query, limit=limit, offset=offset)
+
+    async def search_names(self, query: str, *, match: str = "substring",
+                           entity_types: Optional[List[str]] = None, limit: int = 20,
+                           offset: int = 0) -> Dict[str, Any]:
+        """One page of a name search (the provider's ``search_names``: exact on a past revision
+        too), each hit with where it sits — its ancestors, root first, read as the provider holds
+        them — which is how the canvas opens the way to it. A hit whose place could not be read
+        has none. ``NotImplementedError`` from a reader that cannot search names: a 501."""
+        from backend.common.models.search import AncestorRef, SearchHit
+
+        fn = getattr(self.provider, "search_names", None)
+        if fn is None:
+            raise NotImplementedError(
+                f"name search is not available on {type(self.provider).__name__}")
+        page = await fn(query, match=match, entity_types=entity_types, limit=limit, offset=offset)
+        urns = [n.urn for n in page.nodes]
+        chains = await self.get_ancestor_chains(urns) if urns else {}
+        above = list(dict.fromkeys(u for chain in chains.values() for u in chain))
+        named = {n.urn: n for n in await self.provider.get_nodes(NodeQuery(
+            urns=above, limit=len(above), include_child_count=False))} if above else {}
+
+        def ref(urn: str) -> "AncestorRef":
+            n = named.get(urn)
+            return AncestorRef(urn=urn, displayName=(n.display_name if n else None) or urn,
+                               entityType=(n.entity_type if n else None) or "unknown")
+        return {"hits": [SearchHit(node=n, ancestorPath=[ref(u) for u in reversed(chains.get(n.urn, []))])
+                         for n in page.nodes],
+                "hasMore": page.has_more, "nextOffset": page.next_offset}
     
     async def get_stats(self) -> Dict[str, Any]:
         return await self.provider.get_stats()

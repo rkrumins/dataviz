@@ -256,3 +256,57 @@ def test_opening_a_revision_reads_what_changed_since_never_the_graph(engine_part
 
     small, large = asyncio.run(run())
     assert small == large, (small, large)
+
+
+async def _named(search, q, **kw):
+    """Every urn a name search finds, three a page, following its positions."""
+    async def page(offset):
+        r = await search(q, limit=3, offset=offset or 0, **kw)
+        return [n.urn for n in r.nodes], r.next_offset, r.has_more
+    return await _pages(page)
+
+
+async def _run_name_search(seed: int) -> None:
+    from backend.app.providers.draft_overlay_provider import DraftOverlayProvider
+    from backend.common.interfaces.provider import name_matches
+    from backend.common.models.graph import GraphNode
+    from backend.tests.test_revision_name_search import Store
+
+    await models.create_schema_and_partitions()
+    svc = GraphVersioningService()
+    ds = "ds_" + os.urandom(4).hex()
+    G = await svc.create_graph(data_source_id=ds, workspace_id="ws1", actor="alice")
+    gid, main = G["graph_id"], G["main_branch_id"]
+    writer = _Writer(svc, gid, main, "n", random.Random(seed))
+    for _ in range(30):
+        await writer.step()
+    seqs = await _seqs(gid, main)
+    head = seqs[-1]
+    # The store as FalkorDB holds main now, which a revision's search corrects.
+    now = (await svc.materialize_state(graph_id=gid, branch_id=main))["nodes"].values()
+    store = Store([GraphNode(urn=p["urn"], entityType=p["entityType"], displayName=p["displayName"],
+                             qualifiedName=p.get("qualifiedName")) for p in now])
+    # Renamed names end in a quote; tables are "T n…", columns "C n…".
+    asks = [("'", "substring", None), ("t n", "prefix", None), ("c n", "prefix", ["Column"]),
+            ("'", "suffix", ["Table"])]
+    for seq in seqs[:-1]:
+        then = (await svc.materialize_state(graph_id=gid, branch_id=main, as_of_seq=seq))["nodes"]
+        over_postgres = (await _engine(ds, seq)).provider          # main's Postgres reader
+        over_store = DraftOverlayProvider(store, svc=svc, graph_id=gid, branch_id=main,
+                                          as_of_seq=seq, version=("rev", seq, head),
+                                          read_ns=f"rev{seq}@{head}")
+        over_store.set_containment_edge_types(CONT)
+        for q, match, types in asks:
+            want = sorted(p["urn"] for p in then.values()
+                          if (not types or p["entityType"] in types)
+                          and (name_matches(p.get("displayName"), q, match)
+                               or name_matches(p.get("qualifiedName"), q, match)))
+            for reader in (over_postgres, over_store):
+                got = await _named(reader.search_names, q, match=match, entity_types=types)
+                assert sorted(got) == want and len(got) == len(set(got)), (
+                    seed, seq, head, q, match, types, type(reader._base).__name__)
+
+
+@pytest.mark.parametrize("seed", [3, 2026])
+def test_a_name_search_at_every_past_revision_finds_what_it_held(seed, engine_parts):
+    asyncio.run(_run_name_search(seed))

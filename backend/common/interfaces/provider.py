@@ -86,6 +86,27 @@ def capability_for(provider_type: Optional[str]) -> ProviderCapability:
     return PROVIDER_CAPABILITIES.get((provider_type or "").lower(), _DEFAULT_CAPABILITY)
 
 
+#: The match modes of a name search (``search_names``), as Cypher spells each: ignoring case, as
+#: the header search compares a name (:func:`name_matches` reads them the same way).
+NAME_MATCH_OPS = {"substring": "CONTAINS", "prefix": "STARTS WITH", "suffix": "ENDS WITH",
+                  "exact": "="}
+
+
+def name_matches(text: Optional[str], q: str, match: str) -> bool:
+    """Whether ``text`` matches ``q`` (lower-cased) under ``match``, one of
+    :data:`NAME_MATCH_OPS`, ignoring case. No text matches nothing."""
+    if not text:
+        return False
+    t = text.lower()
+    if match == "prefix":
+        return t.startswith(q)
+    if match == "suffix":
+        return t.endswith(q)
+    if match == "exact":
+        return t == q
+    return q in t
+
+
 async def resolve_identities_by_query(provider: Any, urns: List[str], *, chunk: int = 1000,
                                       ) -> Dict[str, Optional[Dict[str, Any]]]:
     """:meth:`GraphDataProvider.resolve_identities` for any object with an async ``get_nodes``:

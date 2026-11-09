@@ -43,6 +43,7 @@ from sqlalchemy.orm import aliased
 
 from . import config, db, keymigrate
 from .changeset import Delta, fold_batch_ops, materialize, net_delta, diff_states
+from backend.common.interfaces.provider import name_matches
 from backend.common.property_patch import apply_patch, compose_patches, strip_deletes
 from backend.common.service_accounts import is_service_account
 from .entity_serde import edge_payload_from_parts
@@ -200,7 +201,9 @@ def _overlay_patch(heads: Dict[str, _Head], node_ids, edge_ids, base_nodes, held
     it, main at its head, which a removal takes out and an edit counts against (``was``). Edge ends
     are named by urn: ``urns`` as the draft holds its ends, ``held_urns`` as main's head does."""
     nodes_upsert: List[dict] = []
-    nodes_modified: List[dict] = []    # {urn, entityId}: the reader loads the payload it serves
+    # {urn, entityId, entityType, displayName, qualifiedName[, baseUrn]}: the reader loads the
+    # payload it serves, and searches by these
+    nodes_modified: List[dict] = []
     nodes_remove: List[dict] = []
     edges_upsert: List[dict] = []
     edges_remove: List[dict] = []
@@ -219,7 +222,8 @@ def _overlay_patch(heads: Dict[str, _Head], node_ids, edge_ids, base_nodes, held
                                  "displayName": h.name or "", "qualifiedName": h.qname, "lazy": True})
             nodes_new.append(urn)
         else:                                          # modified → loaded when a read serves it
-            nodes_modified.append({"entityId": eid, "urn": h.urn or b.urn or f"gv:{eid}"})
+            urn = h.urn or b.urn or f"gv:{eid}"
+            nodes_modified.append({"entityId": eid, "urn": urn, **_named(h, b, urn)})
     for eid in edge_ids:
         h, b = heads[eid], held.get(eid)
         if not h.live and b is None:
@@ -234,6 +238,27 @@ def _overlay_patch(heads: Dict[str, _Head], node_ids, edge_ids, base_nodes, held
                                  "targetUrn": _end(urns, h.tgt), "edgeType": h.type or "unknown",
                                  "lazy": True, **_was(b, held_urns)})
     return nodes_upsert, nodes_modified, nodes_remove, edges_upsert, edges_remove, nodes_new
+
+
+def _named(value, base: _Stored, urn: str) -> dict:
+    """A modified node's type and names as the patch set's side holds it, from its version row —
+    what a name search judges it by without loading it — and ``baseUrn`` when the store it is read
+    over holds it under another urn."""
+    out = {"entityType": value.type or "unknown", "displayName": value.name or "",
+           "qualifiedName": value.qname}
+    if base.urn and base.urn != urn:
+        out["baseUrn"] = base.urn
+    return out
+
+
+#: A name search's match modes (``NAME_MATCH_OPS``) as LIKE patterns over the lower-cased,
+#: escaped query (:func:`_like_escaped`).
+_NAME_LIKE = {"substring": "%{}%", "prefix": "{}%", "suffix": "%{}", "exact": "{}"}
+
+
+def _like_escaped(text: str) -> str:
+    """``text`` as a LIKE pattern matches it literally, with ``\\`` as the escape."""
+    return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def _was(held: Optional[_Stored], urns: Mapping[str, str]) -> dict:
@@ -278,7 +303,8 @@ def _fork_patch(ids, ours: Dict[str, _Stored], theirs: Dict[str, _Stored],
             elif f is None:
                 out["nodesRemove"].append({"entityId": eid, "urn": r.urn or f"gv:{eid}"})
             else:
-                out["nodesModified"].append({"entityId": eid, "urn": f.urn or r.urn or f"gv:{eid}"})
+                urn = f.urn or r.urn or f"gv:{eid}"
+                out["nodesModified"].append({"entityId": eid, "urn": urn, **_named(f, r, urn)})
         elif f is None:
             out["edgesRemove"].append({"id": eid, "sourceUrn": _end(their_urns, r.src),
                                        "targetUrn": _end(their_urns, r.tgt),
@@ -5375,6 +5401,7 @@ class GraphVersioningService:
         search_query: Optional[str] = None, limit: int = 100, offset: int = 0,
         containment_edge_types: Optional[Sequence[str]] = None,
         include_child_count: bool = True,
+        name_query: Optional[str] = None, name_match: str = "substring",
     ) -> List[dict]:
         """Branch- and as-of-aware node filter read, served from Postgres — the draft/as-of
         counterpart of the provider's ``get_nodes``, so a user working in a draft sees their
@@ -5386,10 +5413,15 @@ class GraphVersioningService:
 
         Pagination is exact for a page that fits the fetch window (the common draft case); a
         very large filtered set at a deep ``offset`` is best-effort — the hot, deeply-paged
-        path is ``main`` via FalkorDB, not this fallback."""
+        path is ``main`` via FalkorDB, not this fallback.
+
+        ``name_query``: a name search's — the name or qualified name matching it under
+        ``name_match`` (``NAME_MATCH_OPS``), ignoring case. A read as of a revision runs under
+        its statement timeout (:meth:`_revision_session`)."""
         urn_set = set(urns) if urns else None
         type_set = set(entity_types) if entity_types else None
         q = (search_query or "").strip().lower()
+        nq = (name_query or "").strip().lower()
 
         def matches(p: dict) -> bool:
             if urn_set is not None and p.get("urn") not in urn_set:
@@ -5401,6 +5433,9 @@ class GraphVersioningService:
                                for k in ("displayName", "qualifiedName", "urn")).lower()
                 if q not in hay:
                     return False
+            if nq and not any(isinstance(p.get(k), str) and name_matches(p[k], nq, name_match)
+                              for k in ("displayName", "qualifiedName")):
+                return False
             return True
 
         def where(c):
@@ -5414,9 +5449,13 @@ class GraphVersioningService:
                 preds.append(or_(func.lower(c.display_name).like(like),
                                  func.lower(c.qualified_name).like(like),
                                  func.lower(c.urn).like(like)))
+            if nq:
+                pattern = _NAME_LIKE[name_match].format(_like_escaped(nq))
+                preds.append(or_(func.lower(c.display_name).like(pattern, escape="\\"),
+                                 func.lower(c.qualified_name).like(pattern, escape="\\")))
             return preds
 
-        async with self._session() as s:
+        async with (self._revision_session() if as_of_seq is not None else self._session()) as s:
             if branch_id is None:
                 branch_id = await self._main_branch_id(s, graph_id)
             main_id = await self._main_branch_id(s, graph_id)
@@ -6573,8 +6612,9 @@ class GraphVersioningService:
         (:meth:`_current_urns`), as the projector names them in FalkorDB: an imported node's
         ``entity_id`` is not its urn.
 
-        A node the draft MODIFIED comes as ``nodesModified`` — its urn and entity id, never its
-        payload: a reader loads the payloads of just the nodes it is about to serve
+        A node the draft MODIFIED comes as ``nodesModified`` — its urn and entity id, and the
+        type and names its version row says (with ``baseUrn`` when main holds it under another
+        urn), never its payload: a reader loads the payloads of just the nodes it is about to serve
         (:meth:`overlay_payloads`), so a draft that changed 100k nodes costs each read a page of
         payloads, not 100k of them. A node the draft created comes as a skeleton in
         ``nodesUpsert`` — what its version row says (urn, entityId, entityType, displayName,

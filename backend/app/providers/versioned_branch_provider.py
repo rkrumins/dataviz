@@ -143,6 +143,25 @@ class VersionedBranchProvider:
             query=query, limit=limit)
         return [GraphNode(**d) for d in rows]
 
+    async def search_names(self, query: str, *, match: str = "substring",
+                           entity_types: Optional[List[str]] = None, limit: int = 20,
+                           offset: int = 0) -> NodePage:
+        """``FalkorDBProvider.search_names`` on this branch's own state as of a past revision: one
+        page in name order, and one row past it says whether another follows. A scan — names have
+        no text index here — so only a past revision's, under its statement timeout: the published
+        graph and its drafts search their FalkorDB store, and wait for it while it catches up, as
+        deep search does (the refusal is its copy)."""
+        if self._as_of is None:
+            raise NotImplementedError(self._deep_search_gap)
+        if not (query or "").strip():
+            return NodePage(nodes=[], hasMore=False, nextOffset=offset)
+        rows = await self._svc.get_nodes_from_state(
+            graph_id=self._gid, branch_id=self._branch, as_of_seq=self._as_of,
+            entity_types=entity_types, name_query=query, name_match=match,
+            limit=limit + 1, offset=offset, include_child_count=False)
+        page = [GraphNode(**d) for d in rows[:limit]]
+        return NodePage(nodes=page, hasMore=len(rows) > limit, nextOffset=offset + len(page))
+
     async def get_edges(self, query: EdgeQuery) -> List[GraphEdge]:
         rows = await self._svc.get_edges_from_state(
             graph_id=self._gid, branch_id=self._branch, as_of_seq=self._as_of,
