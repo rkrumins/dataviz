@@ -86,6 +86,7 @@ import { useRevealPartners, REVEAL_PARTNERS_CAP } from '@/hooks/useRevealPartner
 import { primeLineageFor } from '@/lib/primeLineageFor'
 import { lookupRetryDelayMs } from '@/config/polling'
 import { shouldAutoLoadFirstPage } from './autoLoadFirstPage'
+import { withoutTombstones } from './loadedChildren'
 import { feedRemainder } from './feedRemainder'
 import {
   childLoadMessage, connectionsLoadedMessage, layersPlacedMessage, loadingChildrenMessage,
@@ -1973,6 +1974,11 @@ export function ContextViewCanvas({
   const { nodeMap, childMap, parentMap } = useContainmentHierarchy({
     nodes, edges, isContainmentEdge, fingerprint: nodeEdgeFingerprint,
   })
+  // The children each parent holds that the graph still has, to weigh against its childCount.
+  const loadedChildMap = useMemo(
+    () => withoutTombstones(childMap, (id) => nodeMap.get(id)?.data?.isGhost === true),
+    [childMap, nodeMap],
+  )
 
   // Flag-on, and only while some valid entry cascades: a loaded node with no loaded parent and no
   // valid entry of its own asks for its containment chain, so a hand placement on an ancestor the
@@ -2014,13 +2020,13 @@ export function ContextViewCanvas({
       const total = Number((anchor.data as Record<string, unknown> | undefined)?.childCount ?? 0) || 0
       const pager = childPaging[layer.anchorUrn]
       if (pager && !pager.hasMore && pager.childCount === total) continue
-      const loaded = (childMap.get(layer.anchorUrn) ?? []).length
+      const loaded = (loadedChildMap.get(layer.anchorUrn) ?? []).length
       if (total > loaded) {
         out.set(layer.id, { anchorUrn: layer.anchorUrn, remaining: total - loaded })
       }
     }
     return out
-  }, [sortedLayers, nodeMap, childMap, childPaging])
+  }, [sortedLayers, nodeMap, loadedChildMap, childPaging])
 
 
   // Track previous aggregation target fingerprint to avoid redundant fetches
@@ -4099,7 +4105,7 @@ export function ContextViewCanvas({
         const total = Number(node.data?.childCount ?? 0) || 0
         const pager = childPaging[id]
         if (pager && !pager.hasMore && pager.childCount === total) return
-        if (total > (childMap.get(id) ?? []).length) holders.add(node.urn || id)
+        if (total > (loadedChildMap.get(id) ?? []).length) holders.add(node.urn || id)
       })
       const aggregationHolders = [...holders].sort()
 
@@ -4116,7 +4122,7 @@ export function ContextViewCanvas({
     }, delay)
 
     return () => clearTimeout(fetchDebounced)
-  }, [showLineageFlow, nodesByLayer, fetchAggregated, nodes.length, expandedNodes, traceActive, aggregatedCacheVersion, loadingNodes, lineageGranularity, fetchHolders, anchorMoreByLayer, displayMap, childMap, childPaging])
+  }, [showLineageFlow, nodesByLayer, fetchAggregated, nodes.length, expandedNodes, traceActive, aggregatedCacheVersion, loadingNodes, lineageGranularity, fetchHolders, anchorMoreByLayer, displayMap, loadedChildMap, childPaging])
 
   // Source-changed self-refresh: while the aggregated overlay is flagged
   // `source_changed`, poll readiness and invalidate the aggregated cache once
@@ -4226,7 +4232,7 @@ export function ContextViewCanvas({
       const kids = childMap.get(nodeId) ?? []
       if (kids.length === 0) continue
       const childCount = (displayMap.get(nodeId)?.data?.childCount as number) ?? 0
-      if (childCount > 0 && kids.length >= childCount) continue // fully loaded — exact client re-sort
+      if (childCount > 0 && (loadedChildMap.get(nodeId) ?? []).length >= childCount) continue // fully loaded — exact client re-sort
       refetchParents.push(nodeId)
       const stack = [...kids]
       while (stack.length > 0) {
@@ -7859,7 +7865,7 @@ export function ContextViewCanvas({
                 loadingNodes={loadingNodes}
                 failedNodes={failedNodes}
                 exhaustedParents={exhaustedParents}
-                loadedChildren={childMap}
+                loadedChildren={loadedChildMap}
                 placedApart={placedApart}
                 placedOut={placedOut}
                 onRevealPlacement={revealPlacementParent}

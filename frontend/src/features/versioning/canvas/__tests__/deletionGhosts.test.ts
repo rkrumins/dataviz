@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { synthesizeGhostNode, synthesizeGhostEdge, reconcileGhosts, buildRestoreChange, buildRestoreSubtree, buildRestoreLinks, indexRemovals, pickGhosts, restoreNeeds, isGhostNode, isGhostEdge } from '../deletionGhosts'
+import { synthesizeGhostNode, synthesizeGhostEdge, reconcileGhosts, buildRestoreChange, buildRestoreSubtree, buildRestoreLinks, indexRemovals, pickGhosts, deletedChain, restoreNeeds, isGhostNode, isGhostEdge } from '../deletionGhosts'
 import { buildChangeSet, type GraphChange } from '../../model/changeModel'
 
 const removedNode = (urn: string, before: Record<string, unknown>): GraphChange => ({
@@ -233,6 +233,63 @@ describe('deletionGhosts — which deletions a canvas draws', () => {
     expect(reconcileGhosts(cs, [], [], false, CONTAINS).nodesToAdd.map((n) => n.id)).toEqual(['urn:root-gone'])
     expect(reconcileGhosts(cs, [liveNode('urn:db')], [], false, CONTAINS).nodesToAdd.map((n) => n.id))
       .toEqual(['urn:root-gone', 'urn:t1', 'urn:c1'])
+  })
+})
+
+describe('deletionGhosts — deletions someone asked to see, past the cap', () => {
+  const contains = (id: string, parent: string, child: string) =>
+    removedEdge(id, { sourceEntityId: parent, targetEntityId: child, edgeType: 'CONTAINS' })
+  const t = (urn: string) => removedNode(urn, { displayName: urn.slice(4), entityType: 'T' })
+  // urn:db is live. Deleted under it: t1 (holding c1 and c2), t2 and t3. urn:far sat under a parent
+  // the canvas hasn't loaded, and urn:root-gone had no parent.
+  const changes = [
+    t('urn:t1'), contains('k1', 'urn:db', 'urn:t1'),
+    t('urn:c1'), contains('k2', 'urn:t1', 'urn:c1'),
+    t('urn:c2'), contains('k3', 'urn:t1', 'urn:c2'),
+    t('urn:t2'), contains('k4', 'urn:db', 'urn:t2'),
+    t('urn:t3'), contains('k5', 'urn:db', 'urn:t3'),
+    t('urn:far'), contains('k6', 'urn:not-loaded', 'urn:far'),
+    t('urn:root-gone'),
+  ]
+  const removals = indexRemovals(changes, CONTAINS)
+  const db = new Set(['urn:db'])
+
+  it('walks a deletion up through the deletions above it, to what it hung from', () => {
+    expect(deletedChain(removals, 'urn:c2')).toEqual({ chain: ['urn:t1', 'urn:c2'], anchor: 'urn:db' })
+    expect(deletedChain(removals, 'urn:root-gone')).toEqual({ chain: ['urn:root-gone'], anchor: undefined })
+    expect(deletedChain(removals, 'urn:db').chain).toEqual([])                  // not a deletion
+  })
+
+  it('draws a pinned deletion with the deletions above it, outside the cap', () => {
+    expect(pickGhosts(removals, db, 1)).toEqual(['urn:t1'])
+    // c2 and the t1 it sat in, then the walk's one: the cap is for the walk alone.
+    expect(pickGhosts(removals, db, 1, ['urn:c2'])).toEqual(['urn:t1', 'urn:c2', 'urn:t2'])
+  })
+
+  it('leaves out a pin whose chain hangs from something the canvas has not loaded', () => {
+    expect(pickGhosts(removals, db, 0, ['urn:far'])).toEqual([])
+    expect(pickGhosts(removals, new Set(['urn:db', 'urn:not-loaded']), 0, ['urn:far'])).toEqual(['urn:far'])
+  })
+
+  it('draws a pin that had no parent at the top, and ignores one that is no deletion here', () => {
+    expect(pickGhosts(removals, new Set(), 0, ['urn:root-gone', 'urn:elsewhere'])).toEqual(['urn:root-gone'])
+  })
+
+  it('still walks what a pinned entity held, within the cap', () => {
+    expect(pickGhosts(removals, db, 4, ['urn:t1'])).toEqual(['urn:t1', 'urn:t2', 'urn:t3', 'urn:root-gone', 'urn:c1'])
+  })
+
+  it('says, for each parent on the canvas, how many deletions under it are not drawn', () => {
+    const cs = buildChangeSet(changes)
+    const drawnByCap = reconcileGhosts(cs, [liveNode('urn:db')], [], false, CONTAINS, 2)
+    expect(drawnByCap.nodesToAdd.map((n) => n.id)).toEqual(['urn:t1', 'urn:t2'])
+    // t3 under db, and both of the drawn t1's columns. Not urn:far: its parent isn't on the canvas.
+    expect(Object.fromEntries(drawnByCap.hiddenByParent)).toEqual({ 'urn:db': 1, 'urn:t1': 2 })
+
+    const asked = reconcileGhosts(cs, [liveNode('urn:db')], [], false, CONTAINS, 2, undefined, ['urn:c2'])
+    expect(asked.nodesToAdd.map((n) => n.id)).toEqual(['urn:t1', 'urn:c2', 'urn:t2', 'urn:t3'])
+    expect(Object.fromEntries(asked.hiddenByParent)).toEqual({ 'urn:t1': 1 })
+    expect([asked.drawn, asked.total]).toEqual([4, 7])
   })
 })
 

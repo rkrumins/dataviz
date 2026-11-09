@@ -28,6 +28,8 @@ export function listOriginOf(changeSet: ChangeSet | null): ChangeListOrigin | nu
   return null
 }
 
+const NONE_HIDDEN: ReadonlyMap<string, number> = new Map()
+
 export function useDeletionGhosts(enabled: boolean) {
   const changeSet = useBranchStore((s) => s.activeChangeSet)
   const committedHidden = useBranchStore((s) => s.committedDiffHidden)
@@ -35,6 +37,8 @@ export function useDeletionGhosts(enabled: boolean) {
   const graphId = useBranchStore((s) => s.graphId)
   const hydrationPhase = useCanvasStore((s) => s.hydrationPhase)
   const nodeCount = useCanvasStore((s) => s.nodes.length)
+  // Deletions someone asked to see (Locate, "N deleted inside"): drawn beyond the cap.
+  const pins = useCanvasStore((s) => s.ghostPins)
   const containmentTypes = useContainmentEdgeTypes()
   // Bumped when what deleted entities were arrives, to draw them.
   const [fetched, setFetched] = useState(0)
@@ -49,6 +53,12 @@ export function useDeletionGhosts(enabled: boolean) {
   const on = enabled || changeSet?.origin === 'compare'
   // A draft's "hide saved changes" is about the draft; it never hides a comparison.
   const hidden = committedHidden && changeSet?.origin !== 'compare'
+
+  // An ask belongs to the change set it was made in: another draft or comparison starts without it.
+  // None in between (a refetch) is no other one.
+  const origin = listOriginOf(changeSet)
+  const originKey = origin ? JSON.stringify(origin) : null
+  useEffect(() => { if (originKey) useCanvasStore.getState().setGhostPinsOrigin(originKey) }, [originKey])
 
   useEffect(() => {
     // Overlay only after hydration settles, so ghosts aren't clobbered by the live-state load.
@@ -66,7 +76,7 @@ export function useDeletionGhosts(enabled: boolean) {
       }
     }
     const result = on
-      ? reconcileGhosts(changeSet, state.nodes, state.edges, hidden, isContainmentEdgeType, undefined, befores)
+      ? reconcileGhosts(changeSet, state.nodes, state.edges, hidden, isContainmentEdgeType, undefined, befores, pins)
       : null
     const { nodesToAdd, nodesToRemove, edgesToAdd, edgesToRemove } = result ?? {
       nodesToAdd: [],
@@ -90,6 +100,7 @@ export function useDeletionGhosts(enabled: boolean) {
     state.setDeletedDrawn(result && result.total > 0
       ? { drawn: result.drawn + (ask ? missing.length : 0), total: result.total }
       : null)
+    state.setDeletedHidden(result?.hiddenByParent ?? NONE_HIDDEN)
     if (!result || !ask || !origin || !wsId || !graphId) return
     let live = true
     const ids = [...missing].sort()
@@ -103,5 +114,5 @@ export function useDeletionGhosts(enabled: boolean) {
       if (live) setFetched((n) => n + 1)
     }, () => { if (live) state.setDeletedDrawn({ drawn: result.drawn, total: result.total }) })
     return () => { live = false }
-  }, [on, changeSet, hidden, hydrationPhase, isContainmentEdgeType, nodeCount, fetched, wsId, graphId])
+  }, [on, changeSet, hidden, hydrationPhase, isContainmentEdgeType, nodeCount, fetched, wsId, graphId, pins])
 }

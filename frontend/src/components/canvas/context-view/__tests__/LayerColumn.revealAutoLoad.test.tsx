@@ -19,7 +19,7 @@
  * so nothing may page it on their behalf. Its button still works, and the
  * moment one real page lands the row goes back to being a normal sentinel.
  */
-import { render, act } from '@testing-library/react'
+import { render, act, screen } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
 import {
@@ -94,10 +94,10 @@ function dwellInView() {
     act(() => { vi.advanceTimersByTime(400) })
 }
 
-function renderColumn(children: HierarchyNode[], session: ViewSearchSession) {
+function renderColumn(children: HierarchyNode[], session: ViewSearchSession, parentData: Record<string, unknown> = {}) {
     const onLoadMore = vi.fn()
     // A container of ten, of which the column currently holds `children`.
-    const parent = node('P', { type: 'container', childCount: 10 }, children)
+    const parent = node('P', { type: 'container', childCount: 10, ...parentData }, children)
     render(
         <ViewSearchSessionContext.Provider value={session}>
             <ViewRowSearchContext.Provider value={session.rowSearch}>
@@ -165,5 +165,36 @@ describe('LayerColumn — the "N more" row after a reveal', () => {
         dwellInView()
 
         expect(onLoadMore).toHaveBeenCalledWith('P', true)
+    })
+})
+
+
+// Tombstones — deleted entities a draft or comparison draws where they were —
+// aren't children the graph still has, and aren't a page anyone browsed.
+describe('LayerColumn — the "N more" row beside tombstones', () => {
+    const tombstone = (id: string) => node(id, { isGhost: true })
+
+    it('counts only the children the graph still has toward what is left', () => {
+        renderColumn([node('page-1-child'), tombstone('gone-1'), tombstone('gone-2')], stubSession())
+
+        expect(screen.getByRole('button', { name: 'Load 9 more of 9 remaining' })).toBeInTheDocument()
+    })
+
+    it('offers no more under a tombstone: the graph no longer has it', () => {
+        renderColumn([tombstone('gone-child')], stubSession(), { isGhost: true, childCount: 3 })
+
+        expect(screen.queryByRole('button', { name: /^Load/ })).toBeNull()
+    })
+
+    it('does not page a level the reveal opened because tombstones sit beside its child', () => {
+        vi.useFakeTimers()
+        const { onLoadMore } = renderColumn(
+            [node('spine-child', { viaReveal: true }), tombstone('gone-1')],
+            stubSession(),
+        )
+
+        dwellInView()
+
+        expect(onLoadMore).not.toHaveBeenCalled()
     })
 })

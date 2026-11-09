@@ -128,6 +128,8 @@ export function reconcileGhosts(
   /** What deleted entities were, by entity id, where the change set carries no payloads (a
    *  compact change list): fetched for the ones drawn. */
   befores?: ReadonlyMap<string, Record<string, unknown>>,
+  /** Deleted entities a person asked to see, by urn: drawn with what's above them, outside `cap`. */
+  pinned: readonly string[] = [],
 ): {
   nodesToAdd: GhostNode[]; nodesToRemove: string[]; edgesToAdd: GhostEdge[]; edgesToRemove: string[]
   /** Picked to draw but with nothing known of what they were yet: their entity ids, to fetch. */
@@ -135,6 +137,8 @@ export function reconcileGhosts(
   /** Deleted entities drawn after this pass, of how many the change set holds. */
   drawn: number
   total: number
+  /** Per parent on the canvas, how many deletions directly under it aren't drawn. */
+  hiddenByParent: Map<string, number>
 } {
   const changes = committedHidden ? [] : (changeSet?.changes ?? [])
   const removals = indexRemovals(changes, isContainmentEdgeType)
@@ -152,7 +156,10 @@ export function reconcileGhosts(
 
   // Which deletions to draw: under a parent on the canvas, or at the top where they had none —
   // parent-first, at most `cap`. Only those with their `before` can be drawn.
-  const picked = pickGhosts(removals, new Set([...liveUrns, ...pendingDeletes]), cap)
+  const anchors = new Set([...liveUrns, ...pendingDeletes])
+  const picked = pickGhosts(removals, anchors, cap, pinned)
+  const pickedSet = new Set(picked)
+  const hiddenByParent = hiddenDeletions(removals, anchors, pickedSet)
   const withBefore = (c: GraphChange): GraphChange => (c.before || !befores?.has(c.entityId) ? c : { ...c, before: befores.get(c.entityId) })
   const pickedChanges = picked.map((u) => withBefore(removals.nodes.get(u)!))
   const removedNodes = pickedChanges.filter((c) => !!c.before)
@@ -188,7 +195,10 @@ export function reconcileGhosts(
   const edgesToAdd = wanted.filter((e) => !onCanvas.has(e.id))
   const edgesToRemove = [...existingGhostEdges].filter((id) => !desiredEdges.has(id))
 
-  return { nodesToAdd, nodesToRemove, edgesToAdd, edgesToRemove, missing, drawn: desiredNodes.size, total: removals.nodes.size }
+  return {
+    nodesToAdd, nodesToRemove, edgesToAdd, edgesToRemove, missing,
+    drawn: desiredNodes.size, total: removals.nodes.size, hiddenByParent,
+  }
 }
 
 /** The staged `create_entity` input that RESTORES (resurrects) a committed deletion: it carries the
@@ -253,29 +263,72 @@ export function indexRemovals(
   return { nodes, parentLink, childrenOf }
 }
 
+/** A deleted entity with the deleted entities above it, top-down, and what the topmost one hung
+ *  from: a parent still there (`anchor`), or nothing for one that had no parent. */
+export function deletedChain(removals: RemovalIndex, urn: string): { chain: string[]; anchor?: string } {
+  const chain: string[] = []
+  const seen = new Set<string>()
+  let u: string | undefined = urn
+  while (u && removals.nodes.has(u) && !seen.has(u)) {
+    seen.add(u)
+    chain.unshift(u)
+    const link = removals.parentLink.get(u)
+    u = link ? edgeEnds(link).source : undefined
+  }
+  return { chain, anchor: u }
+}
+
 /**
- * Which deleted entities a canvas draws: those whose old parent is on it (`present`), and those that
- * had no parent — then, under each, the deleted entities it held, parent before child, at most
- * `cap` in all. One whose parent isn't loaded is left out: drawn at its layer's top it would read as
- * somewhere it never was.
+ * Which deleted entities a canvas draws.
+ *
+ * First the ones a person asked to see (`pinned`), each with the deleted entities above it, outside
+ * the cap: wherever what it hangs from is on the canvas, or it had no parent. Then those whose old
+ * parent is on it (`present`), and those that had no parent — then, under each, the deleted entities
+ * it held, parent before child, at most `cap` more. One whose parent isn't loaded is left out: drawn
+ * at its layer's top it would read as somewhere it never was.
  */
-export function pickGhosts(removals: RemovalIndex, present: ReadonlySet<string>, cap = GHOST_CAP): string[] {
+export function pickGhosts(
+  removals: RemovalIndex, present: ReadonlySet<string>, cap = GHOST_CAP, pinned: readonly string[] = [],
+): string[] {
+  const picked: string[] = []
+  const seen = new Set<string>()
+  for (const urn of pinned) {
+    const { chain, anchor } = deletedChain(removals, urn)
+    if (chain.length === 0 || (anchor !== undefined && !present.has(anchor))) continue
+    for (const u of chain) if (!seen.has(u)) { seen.add(u); picked.push(u) }
+  }
+  const asked = picked.length
   const queue: string[] = []
   for (const urn of removals.nodes.keys()) {
     const link = removals.parentLink.get(urn)
     const parent = link ? edgeEnds(link).source : undefined
     if (!link || (parent && present.has(parent) && !removals.nodes.has(parent))) queue.push(urn)
   }
-  const picked: string[] = []
-  const seen = new Set<string>()
-  for (let i = 0; i < queue.length && picked.length < cap; i++) {
+  // A pinned entity met on the walk is already drawn, and what it held still is a candidate.
+  const walked = new Set<string>()
+  for (let i = 0; i < queue.length && picked.length - asked < cap; i++) {
     const u = queue[i]
-    if (seen.has(u)) continue
-    seen.add(u)
-    picked.push(u)
+    if (walked.has(u)) continue
+    walked.add(u)
+    if (!seen.has(u)) { seen.add(u); picked.push(u) }
     for (const ch of removals.childrenOf.get(u) ?? []) if (removals.nodes.has(ch)) queue.push(ch)
   }
   return picked
+}
+
+/** For each parent on the canvas — still there (`present`), or a deletion drawn (`picked`) — how
+ *  many of the entities deleted from directly under it aren't drawn: what its row says is hidden. */
+export function hiddenDeletions(
+  removals: RemovalIndex, present: ReadonlySet<string>, picked: ReadonlySet<string>,
+): Map<string, number> {
+  const hidden = new Map<string, number>()
+  for (const [parent, kids] of removals.childrenOf) {
+    if (!present.has(parent) && !picked.has(parent)) continue
+    let n = 0
+    for (const k of new Set(kids)) if (removals.nodes.has(k) && !picked.has(k)) n++
+    if (n > 0) hidden.set(parent, n)
+  }
+  return hidden
 }
 
 export function buildRestoreChange(
