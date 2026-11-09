@@ -391,26 +391,53 @@ published graph **as it was at revision K**, read-only — like checking out a c
   source's own chrome (`TODAYS_PATHS`: `/stats`, `/introspection`, `/metadata/ontology|schema`). The
   server answers each read as the graph was or refuses it — never from now. `useRevisionGuard`
   closes a revision that isn't one, and hands one too far back to draw (or a fork's) to History's
-  comparison with now (`versioningPanelStore.openCompare`). The context exposes `asOfSeq`.
+  comparison with now (`versioningPanelStore.openCompare`) — by its plan, or once a read at it is
+  refused `revision_too_far` because Published moved too far on while it was open (the provider
+  dispatches `REVISION_TOO_FAR_EVENT`). The context exposes `asOfSeq`.
 - **One canvas per revision** — `CanvasRouter` keys the canvas component by the revision, so nothing
   a canvas remembers of what it drew (expansions, rollups asked for, layer assignments, the
   display-rule latch) crosses between the graph as it was and as it is; the trace clears and the
   reference model's assignment status resets as on a branch switch.
 - **Read-only, with the way back kept** — `canEnterEdit` is false, `useEntityEditing` blocks with
-  `AT_REVISION`, `ensureDraftOpen` opens nothing and says why. Search (the header box keeps its place
-  and says why it is off), traces, Narrow, display rules, subset-view layers (`subsetIssue:
-  'revision'`), the entity drawer's lineage walk and `?trace=`/`?lens=`/`?narrow=` links are off: they
-  read the graph as it is now. Unlike `readOnly`, the versioning bar stays: it is the way back.
+  `AT_REVISION`, `ensureDraftOpen` opens nothing and says why. The graph and hierarchy layouts'
+  interactions are `readOnly` (`useCanvasInteractions`), and they draw no line, re-draw none, delete
+  nothing on Backspace and mount no builder. Unlike `readOnly`, the versioning bar stays: it is the
+  way back.
+- **What a revision reads** — `useRevisionCapabilities()` says, in one place. The provider holds
+  every graph read to the server's list (`providers/revisionReads.ts`; the fixture
+  `backend/tests/fixtures/revision_reads.txt` is both sides' list, and a test on each holds its own to
+  it) and refuses the rest before sending them, with the server's 501 `revision_unsupported`: a
+  canvas at a revision sends no request that fails.
+  - **On, as the graph was:** name search — `searchAdvanced` sends a one-leaf query on names to
+    `/search/names` and answers a finished page (the Context View's header box in names mode,
+    `useViewSearchSessionController({ namesOnly })`; the other layouts' `RevisionNameSearchPanel`) —
+    and lineage traces on `/trace/closure`: the Context View's trace, the Lens and `?trace=`/`?lens=`
+    links, and the drawer's lineage walk, each without its coarse leg.
+  - **Off, saying why** (`OFF_AT_REVISION`), because they read the graph as it is now: Advanced
+    Search, display rules (Properties), subset-view layers (`subsetIssue: 'revision'`), Narrow and
+    `?narrow=`, the rolled-up trace (the graph and hierarchy layouts' only one), and editing.
 - **Chrome** — `RevisionBanner` (mounted by `CanvasVersioningBar`) says when, which revision, whose
   and how far the graph has moved on since; "Opening…" until the canvas reads it, "Rewinding N
   changes…" while it draws; Compare with now, Restore graph to here (publishers), Back to Published
   (Esc, unless a dialog has it). Exporting at a revision exports it (`ExportTarget.asOfSeq`).
+  "Since then" counts up to the head it was opened at (`OpenRevision.headAtOpen`), not each new
+  one: once Published moves on, the banner and the history rows say so, and Update re-pins it
+  (`repinRevision`).
+- **Highlight on canvas** asks `…/diff/index?max=20000`: past that, the chip says how many changes
+  there are and opens the list instead of drawing. A draft's rings ask for every change.
+- **Busy** — a change list, the history and a revision's plan answered 503 `change_list_busy` or
+  `revision_busy` (a `BusyError`) are asked again up to three times after its Retry-After, held to
+  1–10 s with jitter (`BUSY_RETRY`); a 4xx is not asked again, any other failure once.
 - **History** — `ViewHistoryTimeline` pages by `before` (`useHistoryPages`), virtualized, grouped by
   month and day in the reader's time zone with a pinned month header; with the preview each revision
   of Published opens, compares (`RevisionCompare`, `RevisionPicker`) and copies its link, and
-  `HistoryMonthPicker` goes to the end of any month or day (`useHistoryMonths`).
+  `HistoryMonthPicker` goes to the end of any month or day (`useHistoryMonths`). The data source's
+  Versioning tab shows the same timeline in whole-graph scope; there a revision opens, highlights and
+  copies its link in the view picked under "Open in" (remembered per data source), and with no
+  views only those three are off.
 - **Deep link** — `useRevisionDeepLink` two-way-syncs `?rev=K` like `?branch=` (§12): applied once
   the view is resolved, dropped when it names no past revision, and a `?branch=` beside it goes.
+  `?rev=T&hl=K` also highlights what changed after K up to T, read once and then dropped.
 
 ---
 

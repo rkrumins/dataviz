@@ -63,6 +63,9 @@ import { ForkStrip } from './ForkStrip'
 import { PublishReceiptBanner } from './PublishReceiptBanner'
 import { ViewVersioningPanel, type ViewPanelTab } from './ViewVersioningPanel'
 
+/** The most changes a comparison of two revisions is highlighted with; past it, History lists them. */
+const HIGHLIGHT_MAX = 20_000
+
 interface CanvasVersioningBarProps {
   workspaceId: string
   dataSourceId: string | null
@@ -120,6 +123,7 @@ export function CanvasVersioningBar({
   const revisionViewer = useRevisionViewer(workspaceId)
   const revisionSeq = useEffectiveRevision(workspaceId, dataSourceId, viewId)
   const openRevision = useBranchStore((s) => s.openRevision)
+  const setHighlight = useBranchStore((s) => s.setHighlight)
   const scopeViewId = useBranchStore((s) => s.viewId)
   useRevisionDeepLink({
     enabled: revisionViewer && !!graphId,
@@ -128,16 +132,18 @@ export function CanvasVersioningBar({
     scopeViewId,
     activeViewId: viewId,
     openRevision,
+    setHighlight,
   })
   const highlight = useRevisionHighlight()
-  const setHighlight = useBranchStore((s) => s.setHighlight)
   const highlightOrigin = useMemo(
     () => (revisionViewer && !isDraft && highlight ? { fromSeq: highlight.fromSeq, toSeq: highlight.toSeq } : null),
     [revisionViewer, isDraft, highlight],
   )
-  const highlightIndexQ = useChangeIndex(workspaceId, graphId, highlightOrigin)
-  const highlightCountsQ = useChangeSummary(workspaceId, graphId,
-    highlightOrigin && highlightIndexQ.data?.truncated ? highlightOrigin : null)
+  // A comparison's whole index can hold hundreds of thousands of changes, in one response: ask for
+  // no more than the canvas rings. Past that the server answers with how many, which the chip says
+  // instead of drawing.
+  const highlightIndexQ = useChangeIndex(workspaceId, graphId, highlightOrigin, HIGHLIGHT_MAX)
+  const tooManyToHighlight = highlightIndexQ.data?.truncated ? highlightIndexQ.data.total : null
   const canPublish = usePermission('workspace:datasource:publish', workspaceId)
   const versioningEnabled = useFeature('versioningEnabled')
   const openCompare = useCallback((fromSeq: number, toSeq: number | null) => {
@@ -175,12 +181,11 @@ export function CanvasVersioningBar({
   useEffect(() => {
     if (isDraft && activeChangeSet !== changeSet) setActiveChangeSet(changeSet)
   }, [isDraft, changeSet, activeChangeSet, setActiveChangeSet])
-  // Two revisions compared, ringed on the canvas showing the newer one.
+  // Two revisions compared, ringed on the canvas showing the newer one — unless too many changed.
   useEffect(() => {
-    if (isDraft || !highlightOrigin || !highlightIndexQ.data) return
-    setActiveChangeSet(fromChangeIndex(highlightIndexQ.data, { source: 'compare', ...highlightOrigin },
-      highlightCountsQ.data?.counts))
-  }, [isDraft, highlightOrigin, highlightIndexQ.data, highlightCountsQ.data, setActiveChangeSet])
+    if (isDraft || !highlightOrigin || !highlightIndexQ.data || highlightIndexQ.data.truncated) return
+    setActiveChangeSet(fromChangeIndex(highlightIndexQ.data, { source: 'compare', ...highlightOrigin }))
+  }, [isDraft, highlightOrigin, highlightIndexQ.data, setActiveChangeSet])
 
   // One-shot bridge: the Context View header's "Changes" button (far from this bar)
   // asks to open the versioning panel via useVersioningPanelStore. Honour the request
@@ -391,7 +396,13 @@ export function CanvasVersioningBar({
         {highlightOrigin && (
           <span className="inline-flex items-center gap-1.5 pl-2 pr-1 py-0.5 rounded-full text-[11px] font-medium bg-indigo-500/10 text-indigo-700 dark:text-indigo-300 border border-indigo-500/20">
             <Sparkles className="w-3 h-3" />
-            {highlightIndexQ.isLoading ? 'Highlighting…' : `What changed after #${highlightOrigin.fromSeq} up to #${highlightOrigin.toSeq}`}
+            {highlightIndexQ.isLoading ? 'Highlighting…' : tooManyToHighlight != null ? (
+              <>
+                {`Too many changes to highlight (${tooManyToHighlight.toLocaleString()}) —`}
+                <button onClick={() => openCompare(highlightOrigin.fromSeq, highlightOrigin.toSeq)}
+                  className="font-semibold hover:underline">Open the list</button>
+              </>
+            ) : `What changed after #${highlightOrigin.fromSeq} up to #${highlightOrigin.toSeq}`}
             <HoverTip className="inline-flex" label="Stop highlighting">
               <button onClick={() => setHighlight(null)} aria-label="Stop highlighting"
                 className="p-0.5 rounded-full hover:bg-indigo-500/15"><X className="w-3 h-3" /></button>

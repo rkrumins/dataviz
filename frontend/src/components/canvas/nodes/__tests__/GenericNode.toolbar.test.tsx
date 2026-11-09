@@ -9,6 +9,7 @@ import { ReactFlow, ReactFlowProvider, type Node } from '@xyflow/react'
 import { beforeAll, describe, expect, it, vi } from 'vitest'
 
 import { GenericNode } from '../GenericNode'
+import { OFF_AT_REVISION } from '@/features/versioning/model/revisionCopy'
 import { StaticViewSchemaProvider, type ResolvedViewSchema } from '@/providers/ViewExecutionContext'
 import { usePersonaStore } from '@/store/persona'
 import type { EntityTypeSchema } from '@/types/schema'
@@ -84,6 +85,20 @@ describe('GenericNode — the selected card’s toolbar', () => {
     expect(onTraceDownstream).not.toHaveBeenCalled()
     fireEvent.click(screen.getByRole('button', { name: 'Trace Downstream' }))
     expect(onTraceDownstream).toHaveBeenCalledWith('n1')
+  })
+
+  it('keeps the trace pair, disabled, where the canvas can’t trace, and says why', () => {
+    const onTraceUpstream = vi.fn()
+    const onTraceDownstream = vi.fn()
+    renderCard({ onTraceUpstream, onTraceDownstream, traceBlocked: OFF_AT_REVISION })
+    for (const name of ['Trace Upstream', 'Trace Downstream']) {
+      const button = screen.getByRole('button', { name })
+      expect(button).toBeDisabled()
+      expect(button).toHaveAttribute('title', OFF_AT_REVISION)
+      fireEvent.click(button)
+    }
+    expect(onTraceUpstream).not.toHaveBeenCalled()
+    expect(onTraceDownstream).not.toHaveBeenCalled()
   })
 
   it('opens the card’s menu from More in the Technical view', () => {

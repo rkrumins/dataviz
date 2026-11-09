@@ -173,6 +173,15 @@ async def test_the_compact_index(test_client, versioning):
     assert body["entries"][1] == ["e1", "e", "r", "FLOWS_TO", "n1", "n2"]
 
 
+async def test_the_compact_index_is_capped_only_when_asked(test_client, versioning):
+    for params in ({"fromSeq": 3, "toSeq": 9, "max": 20000}, {"fromSeq": 3, "toSeq": 9}):
+        r = await test_client.get(f"{BASE}/diff/index", params=params)
+        assert r.status_code == 200, r.text
+    assert [kw["max_entries"] for _n, kw in versioning.calls] == [20000, None]
+    r = await test_client.get(f"{BASE}/diff/index", params={"fromSeq": 3, "toSeq": 9, "max": -1})
+    assert r.status_code == 422, r.text
+
+
 async def test_a_list_that_takes_too_long_is_a_retryable_busy(test_client, versioning):
     versioning.busy = True
     r = await test_client.get(f"{BASE}/diff/summary", params={"branchId": "br_1"})

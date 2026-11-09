@@ -19,6 +19,7 @@ import { useHierarchyBuilderStore } from './hierarchyBuilderStore'
 import { useFeature } from '@/store/features'
 import { usePermission } from '@/store/auth'
 import { useActiveView } from '@/store/schema'
+import { useRevisionCapabilities } from '@/features/versioning/hooks/useAtRevision'
 
 const MAX_TEMPLATES = 3
 
@@ -34,7 +35,9 @@ export function BuilderEmptyState() {
   // view's workspace, which is what BlankCanvasEmptyState is given on the Context View canvas.
   const activeView = useActiveView()
   const canManage = usePermission('workspace:datasource:manage', activeView?.workspaceId)
-  const canBuild = versioningEnabled && canManage
+  // …and nothing is built on a past revision, which is read-only.
+  const { editing } = useRevisionCapabilities()
+  const canBuild = versioningEnabled && canManage && editing
   const entityTypes = useViewEntityTypes()
   const rootEntityTypes = useViewRootEntityTypes()
   const typeById = useMemo(() => new Map(entityTypes.map((et) => [et.id, et])), [entityTypes])
@@ -74,9 +77,11 @@ export function BuilderEmptyState() {
         <p className="text-sm text-ink-muted mt-1.5">
           {canBuild
             ? 'Add entities, nest them into a hierarchy, or paste a list to bring in several at once.'
-            : !versioningEnabled
-              ? 'Editing is turned off for this workspace, so this model is view-only. An administrator can turn it back on.'
-              : 'Nothing has been added yet. Someone with edit access can start building this model.'}
+            : !editing
+              ? 'Nothing had been added by this revision.'
+              : !versioningEnabled
+                ? 'Editing is turned off for this workspace, so this model is view-only. An administrator can turn it back on.'
+                : 'Nothing has been added yet. Someone with edit access can start building this model.'}
         </p>
 
         {canBuild && (

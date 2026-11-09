@@ -174,6 +174,11 @@ export function readsAsItIsNow(path: string): boolean {
     return TODAYS_PATHS.some((p) => p.test(pathOnly))
 }
 
+/** Dispatched on `window` when the server refuses a read at a past revision as too far back to
+ *  draw (409 `revision_too_far`) — Published moved on that far while it was open — with the
+ *  revision as `detail.asOfSeq`. `useRevisionGuard` hands the revision over to its comparison. */
+export const REVISION_TOO_FAR_EVENT = 'graph:revision-too-far'
+
 export class RemoteGraphProvider implements GraphDataProvider {
     readonly name = 'RemoteGraphProvider'
 
@@ -447,6 +452,12 @@ export class RemoteGraphProvider implements GraphDataProvider {
                         // Honor Retry-After from the backend's own breaker so
                         // the client waits at least as long as it suggests.
                         circuitBreaker.recordFailure(error.retryAfterMs)
+                    }
+                    // Published moved too far on from this revision to draw it:
+                    // whichever read learns it first — a canvas load, an expand,
+                    // a trace — says so, and the revision's guard hands it over.
+                    if (this.asOfSeq != null && error.status === 409 && error.code === 'revision_too_far') {
+                        window.dispatchEvent(new CustomEvent(REVISION_TOO_FAR_EVENT, { detail: { asOfSeq: this.asOfSeq } }))
                     }
                     // A 504 is the same as a client timeout: one more go.
                     if (retryable && attempt < readRetryBudget(error) && isRetryableGraphFailure(error)) {

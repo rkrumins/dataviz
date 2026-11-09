@@ -69,8 +69,8 @@ function Harness() {
   }, [setTheme])
   useEffect(() => {
     if (BANNER) {
-      const c = revisionInfo(SEQ).commit
-      useBranchStore.getState().openRevision({ seq: SEQ, commitId: c.commit_id, createdAt: c.created_at, message: c.message, actor: c.actor })
+      const { commit: c, headSeq } = revisionInfo(SEQ)
+      useBranchStore.getState().openRevision({ seq: SEQ, headAtOpen: headSeq, commitId: c.commit_id, createdAt: c.created_at, message: c.message, actor: c.actor })
       useCanvasStore.setState({ hydrationPhase: fixture === 'rewinding' ? 'roots' : 'complete' } as never)
     }
     if (fixture === 'months') {

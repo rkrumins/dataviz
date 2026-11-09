@@ -61,14 +61,17 @@ export interface PropertyManagerButtonProps {
     className?: string
     /** Its icon alone — a toolbar short of room (the Context View header's). */
     folded?: boolean
+    /** Why the manager can't be opened here; the button says so, disabled. */
+    blocked?: string
 }
 
 
-export function PropertyManagerButton({ open, onToggle, className, folded = false }: PropertyManagerButtonProps) {
+export function PropertyManagerButton({ open, onToggle, className, folded = false, blocked }: PropertyManagerButtonProps) {
     // The hint is armed once per browser; it shows whenever the manager is
-    // closed until the user opens the manager or dismisses it.
+    // closed until the user opens the manager or dismisses it — never while
+    // the button is off, inviting a click it can't take.
     const [hintArmed, setHintArmed] = useState(() => !readSeen())
-    const hintVisible = hintArmed && !open
+    const hintVisible = hintArmed && !open && !blocked
 
     // Callback ref: the trigger element lands in state on mount, and the
     // coachmark's position is derived from its rect at render time —
@@ -94,14 +97,16 @@ export function PropertyManagerButton({ open, onToggle, className, folded = fals
             <HoverTip
                 className="inline-flex"
                 label="Browse the properties in use and tag the entities that match"
-                detail="Colours the canvas by a rule you write — the data is untouched"
+                detail={blocked ?? 'Colours the canvas by a rule you write — the data is untouched'}
             >
             <button
                 ref={setTriggerEl}
                 onClick={handleClick}
+                disabled={!!blocked}
                 data-toolbar-item="properties"
                 className={cn(
                     'relative flex items-center gap-2 px-3.5 py-2 rounded-xl text-sm font-medium transition duration-300',
+                    'disabled:opacity-50 disabled:cursor-not-allowed',
                     open
                         ? 'bg-gradient-to-r from-accent-lineage/30 to-purple-500/20 text-accent-lineage border border-accent-lineage/60 shadow-md shadow-accent-lineage/20'
                         /* A PLAIN token, not `bg-canvas-elevated/95`: the
