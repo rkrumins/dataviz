@@ -584,11 +584,14 @@ export function useChangeEntry(
   })
 }
 
-/** Every change of an origin, compact — what the canvas marks entities by. */
-export function useChangeIndex(wsId?: string, graphId?: string | null, origin?: ChangeListOrigin | null) {
+/** Every change of an origin, compact — what the canvas marks entities by; with `max`, no more than
+ *  that many (past it, the total alone). */
+export function useChangeIndex(
+  wsId?: string, graphId?: string | null, origin?: ChangeListOrigin | null, max?: number,
+) {
   return useQuery({
-    queryKey: [...VERSIONING_KEYS.changeList(wsId, graphId, origin), 'index'],
-    queryFn: () => api.getChangeIndex(wsId!, graphId!, origin!),
+    queryKey: [...VERSIONING_KEYS.changeList(wsId, graphId, origin), 'index', max ?? 'all'],
+    queryFn: () => api.getChangeIndex(wsId!, graphId!, origin!, max),
     enabled: !!wsId && !!graphId && !!origin,
     staleTime: changeListStale(origin),
   })

@@ -7134,14 +7134,19 @@ class GraphVersioningService:
 
     async def change_index_compact(
         self, *, graph_id: str, origin: ChangeOrigin, containment_edge_types,
-        viewer: Optional[Viewer] = None,
+        viewer: Optional[Viewer] = None, max_entries: Optional[int] = None,
     ) -> Dict[str, object]:
         """Every change of an origin as a short array (:func:`compact_entries`) — what the canvas
         decorates entities by, and finds a draft's created entities and their parents from — at
-        about 70 bytes an entity. Past ``CHANGE_LIST_MAX``, ``truncated`` and no entries."""
+        about 70 bytes an entity. Past ``CHANGE_LIST_MAX``, ``truncated`` and no entries; so too
+        past ``max_entries``, for a reader that draws no more than that (a comparison highlighted
+        on the canvas), which would otherwise download up to ``CHANGE_LIST_MAX`` of them."""
         index = await self._change_index(graph_id, origin, containment_edge_types, viewer)
+        total = sum(index.counts.values())
+        if max_entries is not None and total > max_entries:
+            return {"origin": origin.as_dict(), "entries": [], "total": total, "truncated": True}
         return {"origin": origin.as_dict(), "entries": await asyncio.to_thread(compact_entries, index),
-                "total": sum(index.counts.values()), "truncated": index.too_large is not None}
+                "total": total, "truncated": index.too_large is not None}
 
     async def _change_index(self, graph_id: str, origin: ChangeOrigin, containment_edge_types,
                             viewer: Optional[Viewer]) -> ChangeIndex:

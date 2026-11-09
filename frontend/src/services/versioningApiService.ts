@@ -1996,7 +1996,7 @@ export interface ChangeListIndex {
   origin: Record<string, unknown>
   entries: ChangeIndexEntry[]
   total: number
-  /** Too large to list: no entries. */
+  /** Too large to list, or more than the `max` asked for: no entries. */
   truncated: boolean
 }
 
@@ -2044,11 +2044,14 @@ export function getChangeEntry(
   )
 }
 
-/** Every change of an origin as a short array — what the canvas marks entities by. */
+/** Every change of an origin as a short array — what the canvas marks entities by. With `max`, an
+ *  origin with more changes than that comes back with its total alone (`truncated`, no entries). */
 export function getChangeIndex(
-  wsId: string, graphId: string, origin: ChangeListOrigin,
+  wsId: string, graphId: string, origin: ChangeListOrigin, max?: number,
 ): Promise<ChangeListIndex> {
-  return vfetch<ChangeListIndex>(`${base(wsId)}/graphs/${graphId}/diff/index?${changeOriginParams(origin)}`)
+  const sp = changeOriginParams(origin)
+  if (max != null) sp.set('max', String(max))
+  return vfetch<ChangeListIndex>(`${base(wsId)}/graphs/${graphId}/diff/index?${sp}`)
 }
 
 // ============================================

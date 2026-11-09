@@ -3224,6 +3224,9 @@ async def get_change_index(
     branch_id: Optional[str] = Query(None, alias="branchId", description=_ORIGIN_DOC["branch_id"]),
     from_seq: Optional[int] = Query(None, alias="fromSeq", ge=0, description=_ORIGIN_DOC["from_seq"]),
     to_seq: Optional[int] = Query(None, alias="toSeq", ge=1, description=_ORIGIN_DOC["to_seq"]),
+    max_entries: Optional[int] = Query(None, alias="max", ge=0, description=(
+        "The most entries to answer with: an origin with more is answered with its total and "
+        "no entries (truncated)")),
     _user: User = Depends(requires(_READ, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
     viewer: Viewer = Depends(viewer_ctx),
@@ -3233,12 +3236,13 @@ async def get_change_index(
     """Every change of an origin as a short array, without names or payloads — what the canvas
     marks entities by and finds a draft's new entities and their parents from: about 70 bytes a
     change, where the full diff was a kilobyte or more. ``truncated`` past
-    ``GRAPHVER_CHANGE_LIST_MAX``, with no entries."""
+    ``GRAPHVER_CHANGE_LIST_MAX``, or past ``max`` when it is given, with no entries."""
     origin = _change_origin(branch_id, from_seq, to_seq)
     cset = await _live_containment_types(session, ws_id, _meta.get("data_source_id"))
     with _domain_errors():
         return await svc.change_index_compact(graph_id=graph_id, origin=origin,
-                                              containment_edge_types=cset, viewer=viewer)
+                                              containment_edge_types=cset, viewer=viewer,
+                                              max_entries=max_entries)
 
 
 @router.get("/graphs/{graph_id}/history/months", response_model=HistoryMonthsResponse)
