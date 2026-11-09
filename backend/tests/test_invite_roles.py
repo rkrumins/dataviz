@@ -140,13 +140,16 @@ async def test_invite_custom_workspace_role_shareable(test_client: AsyncClient, 
 
 @pytest.mark.asyncio
 async def test_invite_custom_global_role_shareable(test_client: AsyncClient, db_session):
+    """A custom role stored global but made only of workspace permissions is a workspace
+    template, like Workspace member: a shareable invite carries it into the workspace it names."""
+    ws = await _seed_workspace(db_session)
     await _seed_custom_role(
         db_session, "auditor", scope_type="global", scope_id=None,
         perms=("workspace:view:read",),
     )
-    r = await _mint_invite(test_client, role="auditor")
+    r = await _mint_invite(test_client, role="auditor", workspaceId=ws)
     assert r.status_code == 201, r.text
-    assert r.json()["workspaceId"] is None
+    assert r.json()["workspaceId"] == ws
 
     su = await _signup(test_client, email="auditor@example.com", token=r.json()["inviteToken"])
     assert su.status_code == 201
@@ -154,7 +157,10 @@ async def test_invite_custom_global_role_shareable(test_client: AsyncClient, db_
     bindings = await binding_repo.list_for_subject(
         db_session, subject_type="user", subject_id=user.id,
     )
-    assert any(b.role_name == "auditor" and b.scope_type == "global" for b in bindings)
+    assert any(
+        b.role_name == "auditor" and b.scope_type == "workspace" and b.scope_id == ws
+        for b in bindings
+    )
 
 
 # ── Privileged invites require email-bind ────────────────────────────
@@ -340,28 +346,31 @@ async def test_plain_invite_user_has_no_workspace_access(
 async def test_custom_global_role_grants_no_workspace_access(
     test_client: AsyncClient, db_session,
 ):
-    """A non-privileged GLOBAL custom role is shareable, but even if
-    its bundle lists workspace perms, the resolver's category × scope
-    filter drops them at global scope — so the invited user still has
-    NO workspace access until explicitly bound to a workspace."""
+    """The resolver's category × scope filter drops a workspace permission
+    from a global binding, so a custom role made only of workspace
+    permissions would grant nothing as one. Such an invite used to be minted
+    anyway, and the invitee signed up to no access at all. It now needs a
+    workspace, and grants the role there."""
     from backend.app.services.permission_service import resolve, has_permission
 
     await _seed_workspace(db_session, ws_id="ws_x", name="X")
-    # A custom global role that (mistakenly) bundles a workspace perm.
     await _seed_custom_role(
         db_session, "global_viewer", scope_type="global", scope_id=None,
         perms=("workspace:view:read",),
     )
-    r = await _mint_invite(test_client, role="global_viewer")
+    refused = await _mint_invite(test_client, role="global_viewer")
+    assert refused.status_code == 400, refused.text
+    assert "workspace" in refused.json()["detail"]
+
+    r = await _mint_invite(test_client, role="global_viewer", workspaceId="ws_x")
     assert r.status_code == 201, r.text
     su = await _signup(test_client, email="gv@example.com", token=r.json()["inviteToken"])
     assert su.status_code == 201
 
     user = await user_repo.get_user_by_email(db_session, "gv@example.com")
     claims = await resolve(db_session, user.id)
-    # The workspace perm bundled in the global role is filtered out.
-    assert claims.ws_perms == {}
-    assert not has_permission(claims, "workspace:view:read", workspace_id="ws_x")
+    assert has_permission(claims, "workspace:view:read", workspace_id="ws_x")
+    assert set(claims.ws_perms) == {"ws_x"}
 
 
 # ── Phase 13 — group attachments on invite ───────────────────────────
