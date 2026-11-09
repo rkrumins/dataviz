@@ -7172,7 +7172,7 @@ class GraphVersioningService:
 
     async def deletion_cascade(
         self, *, graph_id: str, origin: ChangeOrigin, entity_id: str, containment_edge_types,
-        viewer: Optional[Viewer] = None,
+        viewer: Optional[Viewer] = None, into: Optional[str] = None,
     ) -> Dict[str, object]:
         """What an origin's removal of ``entity_id`` took with it, to restore it whole: the node
         and the removed subtree under it, parent first, and the removed links with an end among
@@ -7182,7 +7182,15 @@ class GraphVersioningService:
 
         ``restorable`` is false with a ``reason``: ``not_deleted`` when the origin did not remove
         it; ``too_large`` past ``_CASCADE_NODES_MAX`` nodes or ``_CASCADE_LINKS_MAX`` links (their
-        ``total``, no values), or for a change list too large to list (no ``total``)."""
+        ``total``, no values), or for a change list too large to list (no ``total``).
+
+        ``into``, a draft to restore it into, adds what the restore would meet there: ``live``,
+        the urns of what it hangs from that the draft has (its old parent, a link's other end),
+        and ``skippedLinks``, the links whose other end the draft has not. It is refused with
+        ``draft_predates`` when the draft branched off before a window's end (the draft still has
+        what the window removed), ``recreated`` when the draft has one of its entities again (by
+        id, or another node holds its urn), and ``parent_gone`` when the draft no longer has its
+        old parent (``detail: {parentId, parentName}``)."""
         index = await self._change_index(graph_id, origin, containment_edge_types, viewer)
         out: Dict[str, object] = {"origin": origin.as_dict(), "root": entity_id, "total": None,
                                   "removed": [], "restorable": False}
@@ -7194,12 +7202,24 @@ class GraphVersioningService:
             return {**out, "reason": "not_deleted"}
         if len(nodes) > _CASCADE_NODES_MAX or len(links) > _CASCADE_LINKS_MAX:
             return {**out, "reason": "too_large"}
+        ids = [e.entity_id for e in nodes + links]
+        inside = {e.entity_id for e in nodes}
+        parent = next((e.src for e in links if e.structural and e.tgt == entity_id), None)
+        # What it hangs from outside itself: its old parent first, then its links' other ends.
+        ends = list(dict.fromkeys(([parent] if parent else [])
+                                  + [x for e in links for x in (e.src, e.tgt) if x and x not in inside]))
         async with self._bounded_session() as s:
             main_id = await self._main_branch_id(s, graph_id)
             seq = (origin.from_seq if origin.branch_id is None else
                    (await self._get_branch(s, graph_id, origin.branch_id)).base_commit_seq or 0)
-            before = await self._values_at(s, graph_id, main_id,
-                                           [e.entity_id for e in nodes + links], seq)
+            before = await self._values_at(s, graph_id, main_id, ids + ([parent] if parent else []), seq)
+            if into is not None:
+                target = await self._get_branch(s, graph_id, into)
+                if target.kind == "main":
+                    raise ValueError("a deletion is restored into a draft, not into main")
+                there = await self._current_skeletons(s, graph_id, into, ids + ends)
+                held = await self._urns_to_eids(s, graph_id, into,
+                                                [e.urn or f"gv:{e.entity_id}" for e in nodes])
         urns = index.end_urns
         out["removed"] = [
             {"entityId": e.entity_id, "kind": e.kind, "status": "removed",
@@ -7208,7 +7228,23 @@ class GraphVersioningService:
                 {"sourceUrn": urns.get(e.src or "", e.src), "targetUrn": urns.get(e.tgt or "", e.tgt)})}
             for e in nodes + links]
         out["restorable"] = True
-        return out
+        if into is None:
+            return out
+        out["live"] = [urns.get(x, x) for x in ends if there.get(x)]
+        out["skippedLinks"] = [e.entity_id for e in links
+                               if any(x not in inside and not there.get(x) for x in (e.src, e.tgt) if x)]
+        if origin.branch_id is None and (target.base_commit_seq or 0) < origin.to_seq:
+            reason = "draft_predates"
+        elif any(there.get(i) for i in ids) or any(
+                held.get(e.urn or f"gv:{e.entity_id}", e.entity_id) != e.entity_id for e in nodes):
+            reason = "recreated"
+        elif parent is not None and not there.get(parent):
+            reason = "parent_gone"
+            out["detail"] = {"parentId": parent,
+                             "parentName": (before.get(parent) or {}).get("displayName")}
+        else:
+            return out
+        return {**out, "restorable": False, "reason": reason}
 
     async def _change_index(self, graph_id: str, origin: ChangeOrigin, containment_edge_types,
                             viewer: Optional[Viewer]) -> ChangeIndex:

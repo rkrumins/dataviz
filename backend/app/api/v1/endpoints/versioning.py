@@ -1257,7 +1257,12 @@ class DeletionCascadeResponse(_ApiModel):
     total: Optional[Dict[str, int]] = None          # {nodes, links}; null for a list too large to list
     removed: List[DeletionCascadeEntry] = Field(default_factory=list)
     restorable: bool
-    reason: Optional[str] = None                    # not_deleted | too_large
+    # not_deleted | too_large; with `into`: draft_predates | recreated | parent_gone
+    reason: Optional[str] = None
+    # With `into`: the urns it hangs from that the draft has, and the links whose other end it hasn't.
+    live: Optional[List[str]] = None
+    skipped_links: Optional[List[str]] = Field(default=None, alias="skippedLinks")
+    detail: Optional[Dict[str, Any]] = None         # parent_gone: {parentId, parentName}
 
 
 class DiffVsMainResponse(_ApiModel):
@@ -3313,6 +3318,8 @@ async def get_deletion_cascade(
     branch_id: Optional[str] = Query(None, alias="branchId", description=_ORIGIN_DOC["branch_id"]),
     from_seq: Optional[int] = Query(None, alias="fromSeq", ge=0, description=_ORIGIN_DOC["from_seq"]),
     to_seq: Optional[int] = Query(None, alias="toSeq", ge=1, description=_ORIGIN_DOC["to_seq"]),
+    into: Optional[str] = Query(None, description="A draft to restore it into: what it would "
+                                "meet there, and whether it can be"),
     _user: User = Depends(requires(_READ, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
     viewer: Viewer = Depends(viewer_ctx),
@@ -3322,12 +3329,15 @@ async def get_deletion_cascade(
     """What a change list's removal of the entity took with it, to restore it whole: the node,
     the removed subtree under it (parent first) and the removed links with an end among them,
     each with the value it had before. Read from the origin's change list; capped at 1,000
-    nodes and 5,000 links (``restorable: false``, ``reason: too_large``)."""
+    nodes and 5,000 links (``restorable: false``, ``reason: too_large``). ``into`` names the
+    draft it would be restored into: what it hangs from there, the links it can't take, and
+    whether the draft can take it at all."""
     origin = _change_origin(branch_id, from_seq, to_seq)
+    await _assert_line_readable(svc, graph_id, into, viewer)
     cset = await _live_containment_types(session, ws_id, _meta.get("data_source_id"))
     with _domain_errors():
         return await svc.deletion_cascade(graph_id=graph_id, origin=origin, entity_id=entity_id,
-                                          containment_edge_types=cset, viewer=viewer)
+                                          containment_edge_types=cset, viewer=viewer, into=into)
 
 
 @router.get("/graphs/{graph_id}/diff/index", response_model=ChangeIndexResponse)
