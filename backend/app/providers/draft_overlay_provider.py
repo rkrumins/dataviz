@@ -30,7 +30,7 @@ from backend.common.models.graph import (
     AggregatedEdgeInfo, AggregatedEdgeResult, ChildrenWithEdgesResult, EdgeQuery, GraphEdge,
     GraphNode, NodePage, NodeQuery, TopLevelNodesResult, TraceClosureResult, TraceResult,
 )
-from .versioned_branch_provider import VersionedBranchProvider
+from .versioned_branch_provider import VersionedBranchProvider, bounded_closure
 
 #: The overlay patches whatever trace shape it is handed and hands the SAME
 #: shape back — a closure in, a closure out. Declaring the base type lost
@@ -884,12 +884,21 @@ class DraftOverlayProvider:
         d = await self._delta_()
         if d.empty:
             return base
-        out = [d.edge_upsert.get(e.id, e) for e in base if e.id not in d.edge_remove]
-        seen = {e.id for e in out}
         src = set(query.source_urns or [])
         tgt = set(query.target_urns or [])
         anyu = set(query.any_urns or [])
         ets = set(query.edge_types or [])
+        types = {t.upper() for t in ets}
+
+        def asked(e: GraphEdge) -> bool:
+            """Whether the overlay's value of a store edge still is one the query asks for: an
+            edge the overlay re-pointed or re-typed was found by its ends and type in the store."""
+            return ((not src or e.source_urn in src) and (not tgt or e.target_urn in tgt)
+                    and (not anyu or e.source_urn in anyu or e.target_urn in anyu)
+                    and (not types or (e.edge_type or "").upper() in types))
+        out = [v for e in base if e.id not in d.edge_remove
+               for v in (d.edge_upsert.get(e.id, e),) if v is e or asked(v)]
+        seen = {e.id for e in out}
         added = 0
         named = src or tgt or anyu                     # the ends asked about: walk just theirs
         pool = ((e for u in sorted(named) for e in d.edges_at.get(u, ())) if named
@@ -1306,7 +1315,13 @@ class DraftOverlayProvider:
         exclude_urns: Optional[List[str]] = None, after_cursor: Optional[str] = None,
         seed_cursor: Optional[str] = None,
     ) -> TraceClosureResult:
-        self._now_only("Lineage trace")
+        if self._as_of is not None:
+            # The past: walked over this overlay's own reads, each as it was then — never the
+            # store's closure, which walks the graph as it is now.
+            return await bounded_closure(
+                self, urn, upstream_depth, downstream_depth, lineage_edge_types,
+                containment_edge_types, max_nodes, timeout_ms, seed_urns=seed_urns,
+                exclude_urns=exclude_urns, after_cursor=after_cursor, seed_cursor=seed_cursor)
         # Overlay lineage deltas can make frontier totalCount advisory-stale —
         # acceptable (it is a cue, not a ledger).
         #

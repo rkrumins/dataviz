@@ -107,9 +107,15 @@ def test_direction_depths_bound_the_walk():
 
 
 def test_max_nodes_cap_is_said_out_loud():
-    r = _closure(_provider(), max_nodes=3)
+    # Two found besides where the walk starts (F and c1): u1 and d1, then u2 does not fit.
+    r = _closure(_provider(), max_nodes=2)
     assert r.truncated is True
     assert r.truncation_reason == "max_nodes"
+    # What it did not finish is a cut frontier entry, with how much is left there: a client
+    # re-roots from it. d1's lineage that way is all shipped — a dead end, no entry.
+    assert [(f.urn, f.total_count, f.reason) for f in r.frontier_up] == [("u1", 1, "cut")]
+    assert r.frontier_down == []
+    assert _closure(_provider(), max_nodes=3).truncated is False      # the whole flow fits
 
 
 def test_continuation_cursors_are_a_safe_empty_page():

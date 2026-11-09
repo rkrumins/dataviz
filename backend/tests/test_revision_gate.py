@@ -102,8 +102,10 @@ async def test_a_listed_read_builds_its_engine_at_the_revision(engine_sees, on):
     assert resp.status_code == 418 and resp.json()["detail"] == {"asOfSeq": 3}
     resp = await engine_sees.post(f"{WS}/canvas/bootstrap", params={"asOfSeq": 0}, json={})
     assert resp.status_code == 418 and resp.json()["detail"] == {"asOfSeq": 0}
-    # A name search is the one search that reads the graph as it was.
+    # A name search is the one search that reads the graph as it was, and a closure the one trace.
     resp = await engine_sees.post(f"{WS}/search/names", params={"asOfSeq": 3}, json={"q": "x"})
+    assert resp.status_code == 418 and resp.json()["detail"] == {"asOfSeq": 3}
+    resp = await engine_sees.post(f"{WS}/trace/closure", params={"asOfSeq": 3}, json={"urn": "u"})
     assert resp.status_code == 418 and resp.json()["detail"] == {"asOfSeq": 3}
 
 
@@ -126,6 +128,7 @@ async def test_a_read_that_answers_from_now_is_refused_never_answered(engine_see
     for method, path, body in (("post", "/search", {"query": "x"}),
                                ("post", "/search/advanced", {}),
                                ("post", "/trace/v2", {}),
+                               ("post", "/trace/expand", {}),
                                ("get", "/metadata/entity-types", None),
                                ("get", "/stats", None),
                                ("get", "/metadata/schema", None)):

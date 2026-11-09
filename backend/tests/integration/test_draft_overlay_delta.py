@@ -114,10 +114,11 @@ async def _run() -> None:
     assert "M.lin" in [e["id"] for e in iso["edgesRemove"]], iso
     # main-DELETED-after-fork edge → RESTORED to the read (fork-point value).
     assert "lin1" in [e["id"] for e in iso["edgesUpsert"]], iso
-    # main-MODIFIED node → restored to the FORK-POINT value ("A"), not main's live "A-renamed": named,
-    # and its value loaded when a read serves it — the draft's value of what it did not touch is
-    # main's at its branch point.
-    assert {"entityId": "A", "urn": "A"} in iso["nodesModified"], iso
+    # main-MODIFIED node → restored to the FORK-POINT value ("A"), not main's live "A-renamed": named
+    # as it was then (what a name search judges it by), and its value loaded when a read serves it —
+    # the draft's value of what it did not touch is main's at its branch point.
+    assert {"entityId": "A", "urn": "A", "entityType": "Table", "displayName": "A",
+            "qualifiedName": None} in iso["nodesModified"], iso
     a_iso, = await svc.overlay_payloads(graph_id=gid, branch_id=d_iso, entity_ids=["A"])
     assert a_iso["displayName"] == "A", a_iso
     # main-DELETED-after-fork node → restored via upsert AND marked new so the list/search reads surface it.
@@ -135,8 +136,10 @@ async def _run() -> None:
                         ops=[{"op": "update", "entity_kind": "node", "entity_id": "A",
                               "payload": {"urn": "A", "entityType": "Table", "displayName": "A-main2"}}])
     own = await svc.branch_overlay_delta(graph_id=gid, branch_id=d_own)
-    # A node the draft modified comes by name alone; a read loads its value when it serves it.
-    assert own["nodesModified"] == [{"entityId": "A", "urn": "A"}], own
+    # A node the draft modified comes by its version row alone — named as the draft names it; a read
+    # loads its value when it serves it.
+    assert own["nodesModified"] == [{"entityId": "A", "urn": "A", "entityType": "Table",
+                                     "displayName": "A-draft", "qualifiedName": None}], own
     assert "A" not in [n["urn"] for n in own["nodesUpsert"]], own   # not rewound either
     a_own, = await svc.overlay_payloads(graph_id=gid, branch_id=d_own, entity_ids=["A"])
     assert a_own["displayName"] == "A-draft", a_own                 # draft's own value — not rewound
@@ -152,7 +155,8 @@ async def _run() -> None:
                         ops=[{"op": "update", "entity_kind": "node", "entity_id": "B",  # B is parent-seeded in F
                               "payload": {"urn": "B", "entityType": "Table", "displayName": "B-fork"}}])
     fk = await svc.branch_overlay_delta(graph_id=fid, branch_id=d_fork)
-    assert {"entityId": "B", "urn": "B"} in fk["nodesModified"], fk
+    assert {"entityId": "B", "urn": "B", "entityType": "Table", "displayName": "B",
+            "qualifiedName": None} in fk["nodesModified"], fk
     b_fk, = await svc.overlay_payloads(graph_id=fid, branch_id=d_fork, entity_ids=["B"])
     assert b_fk["displayName"] == "B", b_fk                         # restored to fork-point value via parent seeding
     assert "B" not in [n["urn"] for n in fk["nodesRemove"]], fk     # NOT removed
