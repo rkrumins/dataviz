@@ -156,6 +156,8 @@ that backs `dataSourceId`.
 | `RevisionTooFar` | **409** | `{type: "revision_too_far", asOfSeq, headSeq, changed, limit, message}` — a graph read named a revision more than `GRAPHVER_REVISION_REWIND_MAX` entities behind `main`'s head ([§4](#asofseq--the-graph-as-it-was-at-a-past-revision)) |
 | `RevisionReadOnly` | **409** | `{type: "revision_read_only", message}` — a write, or a read that plans one, named a past revision |
 | `RevisionUnsupported` | **501** | `{type: "revision_unsupported", reason, message}` — a past revision this read can't answer as the graph was then: `reason` is `route` (it reads the graph as it is now), `fork`, `draft` or `unversioned` |
+| `RevisionBusy` | **503** | `{type: "revision_busy", reason, retryable: true, message}`, `Retry-After` — a past revision couldn't be read in time. `reason` is `statement_timeout` (a statement ran past `GRAPHVER_REVISION_STATEMENT_TIMEOUT_MS`) or `builds_saturated` (every turn at putting a revision together stayed taken for `GRAPHVER_REVISION_BUILD_WAIT_MS`; `Retry-After: 2`). Retry |
+| `StateTooLarge` | **409** | `{type: "state_too_large", entities, limit, message}` — a whole-state read (`…/branches/{bid}/state`, `…/commits/{cid}/state`) may hold more than `GRAPHVER_STATE_READ_MAX` (50,000) entities. An export (`POST …/exports`, with `asOfSeq` for the past) streams any size |
 | `NotUpToDate` | **409** | `{type: "not_up_to_date", branchId, behindBy, message}` — pull `main` in with `…/rebase`, then retry |
 | `ForkNotUpToDate` | **409** | `{type: "not_up_to_date", reason: "parent_moved", behind, graphId, message}` — a fork's review merges only up to date with its parent: `POST …/graphs/{fork}/update-from-parent`, then retry. `behind` counts the entities the parent changed since (to `GRAPHVER_FORK_REWIND_MAX`) |
 | `ForkUpdateConflicts` | **409** | `{type: "fork_update_conflicts", conflicts: […], seeds: {…}, message}` — Update from parent found fields both the fork and its parent changed: a pull's conflicts, and the fork's own value of each entity to resolve from. Nothing was written; send it again with `resolutions` |
@@ -304,11 +306,11 @@ See [04 · Projection & Cache](/docs/versioning-projection-and-cache) for what t
 
 | Method · Path | Gate | Purpose |
 |---|---|---|
-| `GET …/branches/{bid}/state` | `_READ` | `?asOfSeq` → `{nodes, edges, watermark}` (materialized, limited to what you may read) |
-| `GET …/commits/{cid}/state` | `_READ` | Time travel: the full state at a commit |
+| `GET …/branches/{bid}/state` | `_READ` | `?asOfSeq` → `{nodes, edges, watermark}` (materialized, limited to what you may read). **409 `state_too_large`** past `GRAPHVER_STATE_READ_MAX` entities (as of a revision, everything it may have held counts, deleted since or not): export it instead |
+| `GET …/commits/{cid}/state` | `_READ` | Time travel: the full state at a commit. **409 `state_too_large`** as above |
 | `GET …/entities/{eid}/history` | `_READ` | One entity's revisions, newest first, a page at a time: `?branchId&scope(all \| draft \| published)&limit(50, max 200)&before&include=payload&kind(node \| edge)` → `EntityHistoryResponse{entityId, kind, versions, userNames, hasMore, nextBefore}`; each entry of `versions` keeps the store's snake_case names. Send `nextBefore` back as `before` for the next page; a cursor the server didn't issue is **422 `invalid_cursor`**. A draft you can't read is a **404** |
 | `GET …/entities/{eid}/summary` | `_READ` | Who created the entity and who last changed it, on the line being read: `?branchId&kind&include=value` → `{entityId, kind, exists, version?, inherited, created?, updated?, revisions, changedOnMainSinceBranch, baseCommitSeq?, value?, userNames}`. `include=value` adds the entity and its concurrency token |
-| `GET …/branches/{bid}/diff` | `_READ` | `?fromSeq&toSeq` → `{added, removed, modified}` — **id-keyed**: enough to *count* what changed, not to *show* it |
+| `GET …/branches/{bid}/diff` | `_READ` | `?fromSeq&toSeq` → `{added, removed, modified}` — **id-keyed**: enough to *count* what changed, not to *show* it. Past `GRAPHVER_DIFF_TREE_MAX_CHANGES` entities, **409 `too_large_for_tree`**: page it as a change list (`…/diff/entries?fromSeq&toSeq`) |
 | `GET …/branches/{bid}/diff-window` | `_READ` | The same window with **whole-payload before and after** (`DiffVsMainResponse`). Past `GRAPHVER_DIFF_TREE_MAX_CHANGES` entities, **409 `too_large_for_tree`**: page it as a change list (`…/diff/entries?fromSeq&toSeq`) |
 | `GET …/branches/{bid}/diff-vs-main` | `_READ` | The draft against its base as whole node and edge payloads with `before` and `after` — what the canvas overlay uses for a draft within the tree's cap. `?payloads=changes` leaves out the payloads of modified entities (enough to count and highlight), and names each entry as the canvas does: a node's `urn`, an edge's `sourceUrn` and `targetUrn` (an imported node's `entityId` is not its urn). Past `GRAPHVER_DIFF_TREE_MAX_CHANGES` changed entities, **409 `too_large_for_tree`** in either mode: the canvas reads the draft's `…/diff/index` and `…/diff/summary` instead |
 | `GET …/branches/{bid}/diff-vs-main/summary · /children` | `_READ` | The changes as a containment tree: `{groups, groupTotal, counts, entityCounts, edgeCounts, impact, tooLarge?}`, then each container's children by `?containerKey` (`limit` up to 1,000). Past 20,000 changed entities (`GRAPHVER_DIFF_TREE_MAX_CHANGES`) the summary is counts only with `tooLarge: {changed, limit}`, and `/children` answers **409 `too_large_for_tree`** |
@@ -563,8 +565,9 @@ Which routes answer one is decided in one place, `api/v1/revision_gate.py`, a de
 | Routes | With `?asOfSeq=K` |
 |---|---|
 | `GET /nodes`, `/nodes/{urn}`, `/nodes/top-level`, `/nodes/{urn}/children`, `/nodes/{urn}/children-with-edges`, `/nodes/{urn}/ancestors`, `/map/{urn}`, `GET /edges`; `POST /nodes/query`, `/nodes/page`, `/nodes/ancestor-chains`, `/nodes/degree`, `/edges/query`, `/edges/between`, `/edges/beneath`, `/edges/aggregated`, `/canvas/bootstrap`, `/canvas/expand`, `/assignments/compute` | Answered as the graph was at K: main's store with what changed since K put back (see [04 · Projection & Cache](/docs/versioning-projection-and-cache)). Layout, layers and the ontology are today's. A rollup under containment that moved since K says `stale: true`, `staleReason: "revision_structure_moved"` |
+| `POST /search/names`, `/trace/closure` | Answered exactly as the graph was at K: a name search judges what changed since by its name then, and a closure walks the flows as they ran then (a `grain: "coarse"` request gets the same fine walk) |
 | Every write (`/save`, `/nodes/create`, `/edges` writes, `/changes`, `/commands/batch`, `/edges/aggregated/materialize`, `/resync`, `/bootstrap…`, `/introspection/refresh`, `/vocab-alignment/confirm`) and what plans one (`/nodes/{urn}/delete-impact`, `/allowed-children`, `/allowed-edges`) | **409 `revision_read_only`** |
-| Everything else — search, traces, membership, subset-view feeds, metadata, statistics, introspection, exports — and any route added later until it is listed | **501 `revision_unsupported`** (`reason: "route"`): never answered from the graph as it is now |
+| Everything else — `/search` and Advanced Search, rolled-up traces (`/trace/v2`, `/trace/expand`, `/trace`), membership, subset-view feeds, metadata, statistics, introspection, exports — and any route added later until it is listed | **501 `revision_unsupported`** (`reason: "route"`): never answered from the graph as it is now |
 
 A revision more than `GRAPHVER_REVISION_REWIND_MAX` (100,000) entities behind main's head is
 **409 `revision_too_far`** `{asOfSeq, headSeq, changed, limit}`: its change list
@@ -573,7 +576,8 @@ A revision more than `GRAPHVER_REVISION_REWIND_MAX` (100,000) entities behind ma
 revision of `main` is **404**. A fork, a draft (`?branchId` together with `?asOfSeq`) and a data
 source without version control are **501 `revision_unsupported`** with `reason` `fork`, `draft`
 or `unversioned`. Answers are cached per revision (the branch `main@K`), apart from the published
-graph's.
+graph's. A revision that can't be put together in time is **503 `revision_busy`** with
+`Retry-After` (`RevisionBusy` in the [error map](#domain--http-error-map)): retry.
 
 ### Per-branch cache scoping
 

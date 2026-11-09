@@ -464,13 +464,28 @@ provider per request:
   read serves. So opening one costs what changed since, never the graph, and no FalkorDB copy is
   made. Its delta is a line of its own (`main@K`) in the shared delta cache, extended when the head
   moves; its answers are cached under the branch `main@K`, so the published top level's
-  materialized payload never serves one. Ancestor chains are walked at K; search and traces
-  refuse (`RevisionUnsupported`, 501), writes too (`RevisionReadOnly`, 409); a rollup under
+  materialized payload never serves one. Ancestor chains are walked at K. A name search
+  (`search_names`) is the store's search as it is now, corrected by the patch set: what changed
+  since is judged by its version row at K, which the patch set carries for every modified node.
+  A lineage closure (`trace_closure`) is `bounded_closure` walked over the overlay's own reads.
+  Over a Postgres reader both read the state at K there instead. Advanced Search and rolled-up
+  traces refuse (`RevisionUnsupported`, 501), writes too (`RevisionReadOnly`, 409); a rollup under
   containment that moved since K is flagged `stale` (`revision_structure_moved`). Which graph
   routes read a revision is decided in one place, `api/v1/revision_gate.py` (see doc 06); past
   `GRAPHVER_REVISION_REWIND_MAX` changes since K, the engine refuses (`RevisionTooFar`, 409).
   Forks, drafts and data sources without version control have no revisions to open
   (`RevisionUnsupported`).
+- **A past revision's load is bounded.**
+  - Its delta is put together in `get_context_engine`, before the route takes a FalkorDB slot.
+  - A new one takes one of `GRAPHVER_REVISION_BUILDS_MAX` turns per process. It waits up to
+    `GRAPHVER_REVISION_BUILD_WAIT_MS` for one, holding nothing of its request, and is then told
+    to retry (503 `revision_busy`). A reader of a revision already being built joins that build.
+  - Revisions' deltas keep within `GRAPHVER_REVISION_CACHE_ENTRIES` of the cache: a new revision
+    evicts only older revisions, and a draft's delta evicts revisions first.
+  - Every statement reading a revision (its plan, its delta, the values a page loads, a name
+    search over Postgres) runs under `GRAPHVER_REVISION_STATEMENT_TIMEOUT_MS`. A cancelled one
+    answers 503 `revision_busy`. A plan count that runs that long is taken as too far back, and
+    kept for that head.
 - **`VersionedBranchProvider`** (`versioned_branch_provider.py:45`) is an ordinary provider over one
   `(graph_id, branch_id[, as_of_seq])`, composing base+overlay from Postgres. Its
   `get_aggregated_edges_between` returns **empty** (a draft/Postgres read has no materialized rollups;

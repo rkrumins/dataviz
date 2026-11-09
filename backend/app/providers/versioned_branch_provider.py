@@ -20,6 +20,7 @@ therefore read-only.
 """
 from __future__ import annotations
 
+import asyncio
 import time
 from collections import Counter
 from typing import Any, Dict, List, Optional
@@ -175,10 +176,11 @@ async def bounded_closure(
     depth_up: Dict[str, None] = {}
     depth_down: Dict[str, None] = {}
 
-    async def _hop(frontier: List[str], *, into: bool):
-        """One hop from ``frontier``: the nodes it found, and whether the budget stopped it."""
+    def _hop(edges: List[GraphEdge], *, into: bool):
+        """One hop over a frontier's ``edges``: the nodes it found, and whether the budget
+        stopped it."""
         found: List[str] = []
-        for e in await _edges(frontier, ltypes, into=into):
+        for e in edges:
             edges_by_id[e.id] = e
             other = e.source_urn if into else e.target_urn
             if other in visited:
@@ -202,8 +204,11 @@ async def bounded_closure(
             break
         next_up: List[str] = []
         next_down: List[str] = []
+        # Both directions read at once, then walked in one order: a capped walk is the same walk.
+        up_edges, down_edges = await asyncio.gather(
+            _edges(up, ltypes, into=True), _edges(down, ltypes, into=False))
         if up:
-            next_up, stopped = await _hop(up, into=True)
+            next_up, stopped = _hop(up_edges, into=True)
             upstream_urns.update(next_up)
             if stopped:
                 truncation = "max_nodes"
@@ -211,7 +216,7 @@ async def bounded_closure(
                 cut_down.update(dict.fromkeys(down))
                 break
         if down:
-            next_down, stopped = await _hop(down, into=False)
+            next_down, stopped = _hop(down_edges, into=False)
             downstream_urns.update(next_down)
             if stopped:
                 truncation = "max_nodes"
@@ -248,8 +253,8 @@ async def bounded_closure(
                 out.append(TraceFrontierNode(urn=u, totalCount=totals[u], reason=reason))
         return out
 
-    frontier_up = await _frontier(cut_up, depth_up, into=True)
-    frontier_down = await _frontier(cut_down, depth_down, into=False)
+    frontier_up, frontier_down = await asyncio.gather(
+        _frontier(cut_up, depth_up, into=True), _frontier(cut_down, depth_down, into=False))
 
     # ── Containment ancestor chains for every participant (nesting).
     containment_by_id: Dict[str, GraphEdge] = {}
