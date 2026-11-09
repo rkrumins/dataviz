@@ -57,8 +57,8 @@ from .errors import (AccessDenied, AmbiguousSpelling, AmbiguousUrn, BranchNotOpe
                      MainWriteForbidden, MassDeleteBlocked, NotAFork, NotAnEdge, NotDraftOwner,
                      PersonRequired, ProjectionAlreadyAdopted, ProjectionPassInFlight,
                      ProjectionKeyInUse, ProjectionKeyInvalid, ProjectionNotAdopted,
-                     ResolutionsWithoutConflict, ReviewRequired, SelfMerge, SelfReview,
-                     VersionConflict)
+                     ResolutionsWithoutConflict, ReviewRequired, RevisionBusy, SelfMerge,
+                     SelfReview, StateTooLarge, VersionConflict)
 from .ids import new_entity_id, prefixed_id
 from .merge import three_way_merge
 from .merkle import MerkleTree, content_hash
@@ -514,8 +514,8 @@ class DiffTooLarge(RuntimeError):
     """A draft changes more entities than its Changes tree lays out (``DIFF_TREE_MAX_CHANGES``):
     its summary is counts only, and the tree has no children to page through."""
 
-    def __init__(self, changed: int, limit: int):
-        super().__init__(f"this draft changes {changed} entities; the tree lists up to {limit}")
+    def __init__(self, changed: int, limit: int, message: Optional[str] = None):
+        super().__init__(message or f"this draft changes {changed} entities; the tree lists up to {limit}")
         self.changed = changed
         self.limit = limit
 
@@ -4539,7 +4539,7 @@ class GraphVersioningService:
 
     async def materialize_state(
         self, *, graph_id: str, branch_id: str, as_of_seq: Optional[int] = None,
-        viewer: Optional[Viewer] = None,
+        viewer: Optional[Viewer] = None, max_entities: Optional[int] = None,
     ) -> Dict[str, Dict[str, dict]]:
         """Node/edge payloads for a branch (fork-aware composition). ``as_of_seq``
         reconstructs the state at ``commit_seq <= as_of_seq`` (time-travel); ``None``
@@ -4547,9 +4547,16 @@ class GraphVersioningService:
 
         Read straight from the version store (the source of truth); the FalkorDB
         projection is the hot read path and sits behind the same API.
+
+        ``max_entities`` (a route's ``STATE_READ_MAX``) refuses a state that may hold more, with
+        :class:`StateTooLarge`, before any of it is read (:meth:`_capped_state_size`).
         """
         async with self._session() as s:
             await self._assert_branch_readable(s, await self._get_branch(s, graph_id, branch_id), viewer)
+            if max_entities is not None:
+                size = await self._capped_state_size(s, graph_id, branch_id, max_entities)
+                if size > max_entities:
+                    raise StateTooLarge(size, max_entities)
             state = (
                 await self._composed_state(s, graph_id, branch_id)
                 if as_of_seq is None
@@ -4561,6 +4568,28 @@ class GraphVersioningService:
                     continue
                 (edges if _is_edge_payload(p) else nodes)[eid] = p
             return {"nodes": nodes, "edges": edges}
+
+    async def _capped_state_size(self, s, graph_id: str, branch_id: str, cap: int) -> int:
+        """At least as many live entities as a branch's whole state holds, counted no further than
+        ``cap + 1`` a layer: its own live heads, ``main``'s under a draft, and each layer's up a
+        fork's parents. An upper bound (a draft's edit of main's entity is counted twice), cheap
+        whatever the graph's size: an indexed count that stops past the cap."""
+        branch = await self._get_branch(s, graph_id, branch_id)
+        main_id = await self._main_branch_id(s, graph_id)
+        pairs = [(graph_id, branch_id)] + ([(graph_id, main_id)] if branch_id != main_id else [])
+        graph = await s.get(GraphORM, graph_id)
+        if graph is not None and graph.fork_parent_graph_id:
+            layers = await self._layers(s, graph_id, main_id, graph.main_head_commit_seq)
+            pairs += [(gid, bid) for gid, bid, _at in layers[1:]]
+        total = 0
+        for gid, bid in pairs:
+            live = select(EntityHeadORM.entity_id).where(
+                EntityHeadORM.graph_id == gid, EntityHeadORM.branch_id == bid,
+                EntityHeadORM.is_tombstone.is_(False)).limit(cap + 1)
+            total += int(await s.scalar(select(func.count()).select_from(live.subquery())) or 0)
+            if total > cap:
+                break
+        return total
 
     async def schema_counts(self, *, graph_id: str, branch_id: str) -> Optional[Dict[str, object]]:
         """``main``'s live nodes and edges by type, its nodes' names by type and the tags they
@@ -4603,15 +4632,18 @@ class GraphVersioningService:
 
     async def state_at_commit(
         self, *, graph_id: str, commit_id: str, viewer: Optional[Viewer] = None,
+        max_entities: Optional[int] = None,
     ) -> Dict[str, Dict[str, dict]]:
-        """Full branch state as of a specific commit (time-travel by commit id)."""
+        """Full branch state as of a specific commit (time-travel by commit id); ``max_entities``
+        as :meth:`materialize_state`."""
         async with self._session() as s:
             c = await s.get(CommitORM, (graph_id, commit_id))
             if c is None:
                 raise ValueError(f"unknown commit {commit_id}")
             branch_id, seq = c.branch_id, c.commit_seq
             await self._assert_branch_readable(s, await self._get_branch(s, graph_id, branch_id), viewer)
-        return await self.materialize_state(graph_id=graph_id, branch_id=branch_id, as_of_seq=seq)
+        return await self.materialize_state(graph_id=graph_id, branch_id=branch_id, as_of_seq=seq,
+                                            max_entities=max_entities)
 
     async def projection_watermark(self, graph_id: str) -> Dict[str, object]:
         """Read freshness for a graph's FalkorDB projection — attached to reads so
@@ -5204,12 +5236,39 @@ class GraphVersioningService:
     async def _eids_for_urns(
         self, s, graph_id: str, branch_id: str, urns, as_of_seq: Optional[int] = None,
     ) -> set:
-        """Resolve a small set of seed urns to live entity_ids on a branch (bounded)."""
-        out: set = set()
-        for u in urns or []:
-            eid = await self._eid_for_urn(s, graph_id, branch_id, u, as_of_seq)
-            if eid is not None:
-                out.add(eid)
+        """Resolve seed urns to live entity_ids on a branch (:meth:`_urns_to_eids`)."""
+        return set((await self._urns_to_eids(s, graph_id, branch_id, urns, as_of_seq)).values())
+
+    async def _urns_to_eids(
+        self, s, graph_id: str, branch_id: str, urns, as_of_seq: Optional[int] = None,
+    ) -> Dict[str, str]:
+        """``{urn: entity id}`` of the live nodes on a branch carrying each urn (or named by it,
+        ``gv:<eid>``, or whose id it is): one indexed read of the candidates for all of them
+        (``ix_nv_urn``, up a fork's layers), and their states at once from version-row columns,
+        never a payload — :meth:`_eid_for_urn` for many urns, without a lookup per urn."""
+        wanted = [u for u in dict.fromkeys(urns or []) if u]
+        if not wanted:
+            return {}
+        cand: Dict[str, set] = {}
+        for u in wanted:
+            cand.setdefault(u[3:] if u.startswith("gv:") else u, set()).add(u)
+        graphs = await self._layer_graph_ids(s, graph_id)
+        for chunk in _chunks(wanted, _IN_LIST_MAX):
+            for eid, urn in (await s.execute(
+                select(NodeVersionORM.entity_id, NodeVersionORM.urn).where(
+                    NodeVersionORM.graph_id.in_(graphs),
+                    NodeVersionORM.urn == any_(bindparam("urns", type_=ARRAY(Text))),
+                ).distinct(), {"urns": list(chunk)})).all():
+                cand.setdefault(eid, set()).add(urn)
+        states = await self._current_skeletons(s, graph_id, branch_id, list(cand), as_of_seq)
+        out: Dict[str, str] = {}
+        for eid, asked in cand.items():
+            v = states.get(eid)
+            if v is None or "edgeType" in v:
+                continue
+            for u in asked:
+                if v.get("urn") == u or f"gv:{eid}" == u:
+                    out.setdefault(u, eid)
         return out
 
     async def ancestor_chains(
@@ -6360,7 +6419,15 @@ class GraphVersioningService:
         async with self._session() as s:
             branch = await self._get_branch(s, graph_id, branch_id)
             await self._assert_branch_readable(s, branch, viewer)
+            # Both ends' payloads are loaded: bounded as a change tree is. Past it, the change
+            # list pages through any size (…/diff/entries?fromSeq=&toSeq=).
+            cap = config.DIFF_TREE_MAX_CHANGES
+            far = await self._own_change_count(s, graph_id, branch_id, from_seq, to_seq, cap)
+            if far > cap:
+                raise DiffTooLarge(far, cap, _DIFF_TOO_FAR.format(limit=cap))
             changed = await self._changed_in_window(s, graph_id, branch_id, from_seq, to_seq)
+            if len(changed) > cap:                      # a fork's parent's changes count too
+                raise DiffTooLarge(len(changed), cap, _DIFF_TOO_FAR.format(limit=cap))
             if not changed:
                 return {"added": [], "removed": [], "modified": {}}
             a = await self._values_at(s, graph_id, branch_id, changed, from_seq)
@@ -6748,8 +6815,10 @@ class GraphVersioningService:
         the entities main changed since, capped at ``REVISION_REWIND_MAX`` and kept per
         (revision, head): history never changes, so neither does the count. ``too_far`` past the
         cap; ``fork`` when the graph is a fork's, whose past is not opened yet. ``ValueError`` for
-        a seq that is not a revision of main's."""
-        async with self._session() as s:
+        a seq that is not a revision of main's. Each statement is bounded
+        (``REVISION_STATEMENT_TIMEOUT_MS``): a count that runs past it is taken as too far back,
+        kept like any other, so a revision that far back costs one cancelled count per head."""
+        async with self._revision_session() as s:
             graph = await s.get(GraphORM, graph_id)
             if graph is None:
                 raise ValueError(f"unknown graph {graph_id}")
@@ -6766,7 +6835,14 @@ class GraphVersioningService:
             key = ("rev", graph_id, as_of_seq, head, cap)
             changed = _FORK_COUNTS.get(key)
             if changed is None:
-                changed = await self._own_change_count(s, graph_id, main_id, as_of_seq, head, cap)
+                try:
+                    async with s.begin_nested():
+                        changed = await self._own_change_count(s, graph_id, main_id, as_of_seq,
+                                                               head, cap)
+                except DBAPIError as exc:
+                    if getattr(exc.orig, "sqlstate", None) != _QUERY_CANCELED:
+                        raise
+                    changed = cap + 1                 # too long to count: too far back to draw
                 _FORK_COUNTS[key] = changed
                 while len(_FORK_COUNTS) > _FORK_COUNTS_KEPT:
                     _FORK_COUNTS.popitem(last=False)
@@ -6791,7 +6867,7 @@ class GraphVersioningService:
         revision at an older head — is extended by what main changed since that head instead of
         built again. Never :meth:`branch_overlay_delta` for ``main``: its head index is all of it."""
         since = {"asOf": as_of_seq, "head": head_seq}
-        async with self._session() as s:
+        async with self._revision_session() as s:
             main_id = await self._main_branch_id(s, graph_id)
             prev = (extend or {}).get("since") or {}
             if prev.get("asOf") == as_of_seq and isinstance(prev.get("head"), int) \
@@ -6839,8 +6915,9 @@ class GraphVersioningService:
         """The draft's current value of each of ``entity_ids``, reader-shaped — the nodes
         (:meth:`branch_overlay_delta`'s ``nodesModified`` and created skeletons) or, with
         ``kind='edge'``, the edges a read loads for the page it serves. ``as_of_seq``: ``main``'s
-        value at that revision (:meth:`revision_overlay_delta`'s patch set)."""
-        async with self._session() as s:
+        value at that revision (:meth:`revision_overlay_delta`'s patch set), read in a bounded
+        session (:meth:`_revision_session`)."""
+        async with (self._revision_session() if as_of_seq is not None else self._session()) as s:
             values = await self._current_values(s, graph_id, branch_id, list(entity_ids),
                                                 as_of_seq=as_of_seq)
             urns = (await self._current_urns(s, graph_id, branch_id, _payload_ends(values),
@@ -7069,18 +7146,27 @@ class GraphVersioningService:
         return await self._main_branch_id(s, graph_id)
 
     @contextlib.asynccontextmanager
-    async def _bounded_session(self):
-        """A session whose every statement Postgres cancels past
-        ``CHANGE_INDEX_STATEMENT_TIMEOUT_MS``, answered as :class:`ChangeListBusy`: for the reads a
-        person waits on that a bad plan could otherwise stretch to minutes on a pooled connection."""
+    async def _bounded_session(self, timeout_ms: Optional[int] = None,
+                               busy: Optional[Callable[[], Exception]] = None):
+        """A session whose every statement Postgres cancels past ``timeout_ms``
+        (``CHANGE_INDEX_STATEMENT_TIMEOUT_MS`` by default), answered as ``busy()``
+        (:class:`ChangeListBusy` by default): for the reads a person waits on that a bad plan could
+        otherwise stretch to minutes on a pooled connection."""
         try:
             async with self._session() as s:
-                await s.execute(_STATEMENT_TIMEOUT, {"ms": str(config.CHANGE_INDEX_STATEMENT_TIMEOUT_MS)})
+                await s.execute(_STATEMENT_TIMEOUT, {
+                    "ms": str(timeout_ms or config.CHANGE_INDEX_STATEMENT_TIMEOUT_MS)})
                 yield s
         except DBAPIError as exc:
             if getattr(exc.orig, "sqlstate", None) == _QUERY_CANCELED:
-                raise ChangeListBusy() from exc
+                raise (busy() if busy is not None else ChangeListBusy()) from exc
             raise
+
+    def _revision_session(self):
+        """A session for reading a past revision: each statement bounded by
+        ``REVISION_STATEMENT_TIMEOUT_MS``, a cancelled one answered as :class:`RevisionBusy`."""
+        return self._bounded_session(config.REVISION_STATEMENT_TIMEOUT_MS,
+                                     lambda: RevisionBusy("statement_timeout"))
 
     async def _build_draft_change_index(self, graph_id: str, branch_id: str, cset) -> ChangeIndex:
         """A draft's changes against ``main`` at its branch point — its heads a page at a time,
@@ -7146,39 +7232,33 @@ class GraphVersioningService:
     async def _window_commits(self, s, graph_id: str, main_id: str, lo: int,
                               hi: int) -> Tuple[Dict[str, object], Tuple[int, int, int]]:
         """The revisions a window of ``main`` spans — how many, by whom, when, and the revisions
-        at its two ends — and the ``(create, update, delete)`` they recorded of themselves."""
-        rows = (await s.execute(
+        at its two ends — and the ``(create, update, delete)`` they recorded of themselves.
+        Counted and summed in Postgres (``_WINDOW_TOTALS``, ``_WINDOW_PEOPLE``): a window years
+        long is a few aggregate statements, never every commit row read into the web process."""
+        p = {"g": graph_id, "b": main_id, "lo": lo, "hi": hi}
+        ends = {r.commit_seq: r for r in (await s.execute(
             select(CommitORM.commit_seq, CommitORM.id, CommitORM.kind, CommitORM.message,
-                   CommitORM.actor, CommitORM.contributors, CommitORM.created_at, CommitORM.stats)
+                   CommitORM.actor, CommitORM.created_at)
             .where(CommitORM.graph_id == graph_id, CommitORM.branch_id == main_id,
-                   CommitORM.commit_seq >= lo, CommitORM.commit_seq <= hi)
-            .order_by(CommitORM.commit_seq)
-        )).all()
+                   CommitORM.commit_seq.in_([lo, hi])))).all()}
+        totals = (await s.execute(_WINDOW_TOTALS, p)).one()
+        people = (await s.execute(_WINDOW_PEOPLE, {**p, "listed": _WINDOW_CONTRIBUTORS_LISTED})).all()
 
         def end(r) -> Dict[str, object]:
             return {"seq": r.commit_seq, "commitId": r.id, "kind": r.kind, "message": r.message,
                     "actor": r.actor, "createdAt": r.created_at}
 
-        start = next((r for r in rows if r.commit_seq == lo), None)
-        inside = [r for r in rows if r.commit_seq > lo]
-        people: Dict[str, None] = {}
-        create = update = delete = 0
-        for r in inside:
-            for person in [r.actor, *(r.contributors or [])]:
-                if person:
-                    people.setdefault(person, None)
-            c, u, d = stat_changes(r.stats)
-            create, update, delete = create + c, update + u, delete + d
+        count = int(totals.n or 0)
         window = {
-            "commitCount": len(inside),
-            "contributors": list(people)[:_WINDOW_CONTRIBUTORS_LISTED],
-            "contributorCount": len(people),
-            "firstAt": inside[0].created_at if inside else None,
-            "lastAt": inside[-1].created_at if inside else None,
-            "from": end(start) if start is not None else None,
-            "to": end(inside[-1]) if inside and inside[-1].commit_seq == hi else None,
+            "commitCount": count,
+            "contributors": [r.person for r in people],
+            "contributorCount": int(people[0].total) if people else 0,
+            "firstAt": totals.first_at if count else None,
+            "lastAt": totals.last_at if count else None,
+            "from": end(ends[lo]) if lo in ends else None,
+            "to": end(ends[hi]) if count and hi > lo and hi in ends else None,
         }
-        return window, (create, update, delete)
+        return window, (int(totals.c or 0), int(totals.u or 0), int(totals.d or 0))
 
     async def _end_names(self, graph_id: str, origin: ChangeOrigin, index: ChangeIndex,
                          page: Sequence) -> Dict[str, Optional[str]]:
@@ -11530,6 +11610,41 @@ _STATEMENT_TIMEOUT = text("SELECT set_config('statement_timeout', :ms, true)")
 _QUERY_CANCELED = "57014"
 #: Contributors a window's summary names; past this it counts them.
 _WINDOW_CONTRIBUTORS_LISTED = 50
+_DIFF_TOO_FAR = ("these revisions are more than {limit} changes apart, too many to diff in one "
+                 "response; read their change list instead (…/diff/entries?fromSeq=&toSeq=)")
+
+# A window's revisions, in Postgres: how many, when its first and last were made, and the
+# (create, update, delete) they recorded of themselves, as change_index.stat_changes reads stats —
+# {create, update, delete}, or an import's {nodes, edges}, counted as creates.
+_STAT_NUM = "(CASE WHEN jsonb_typeof(stats->'{k}') = 'number' THEN (stats->'{k}')::numeric ELSE 0 END)"
+_CUD = "stats ?| array['create','update','delete']"
+_WINDOW_IN = "graph_id = :g AND branch_id = :b AND commit_seq > :lo AND commit_seq <= :hi"
+_WINDOW_TOTALS = text(
+    "SELECT count(*) AS n, "
+    f"(SELECT created_at FROM {CommitORM.__table__.fullname} WHERE {_WINDOW_IN} "
+    "ORDER BY commit_seq LIMIT 1) AS first_at, "
+    f"(SELECT created_at FROM {CommitORM.__table__.fullname} WHERE {_WINDOW_IN} "
+    "ORDER BY commit_seq DESC LIMIT 1) AS last_at, "
+    f"coalesce(sum(CASE WHEN {_CUD} THEN {_STAT_NUM.format(k='create')} "
+    f"ELSE {_STAT_NUM.format(k='nodes')} + {_STAT_NUM.format(k='edges')} END), 0) AS c, "
+    f"coalesce(sum(CASE WHEN {_CUD} THEN {_STAT_NUM.format(k='update')} ELSE 0 END), 0) AS u, "
+    f"coalesce(sum(CASE WHEN {_CUD} THEN {_STAT_NUM.format(k='delete')} ELSE 0 END), 0) AS d "
+    f"FROM {CommitORM.__table__.fullname} WHERE {_WINDOW_IN}")
+# Who made a window's revisions, in the order they first appear (each revision's actor, then its
+# contributors): the first ``listed``, and how many there are in all.
+_WINDOW_PEOPLE = text(
+    "WITH p AS ("
+    f" SELECT commit_seq AS seq, 0 AS ord, actor AS person FROM {CommitORM.__table__.fullname}"
+    " WHERE graph_id = :g AND branch_id = :b AND commit_seq > :lo AND commit_seq <= :hi"
+    " UNION ALL"
+    f" SELECT c.commit_seq, t.ord, t.person FROM {CommitORM.__table__.fullname} c"
+    " CROSS JOIN LATERAL jsonb_array_elements_text("
+    "  CASE WHEN jsonb_typeof(c.contributors) = 'array' THEN c.contributors ELSE '[]'::jsonb END)"
+    "  WITH ORDINALITY AS t(person, ord)"
+    " WHERE c.graph_id = :g AND c.branch_id = :b AND c.commit_seq > :lo AND c.commit_seq <= :hi)"
+    " SELECT person, count(*) OVER () AS total FROM p"
+    " WHERE person IS NOT NULL AND person <> ''"
+    " GROUP BY person ORDER BY min(ARRAY[seq, ord]) LIMIT :listed")
 
 
 def _add_draft_page(builder: ChangeIndexBuilder, heads: Mapping[str, "_Head"],

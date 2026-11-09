@@ -2807,7 +2807,8 @@ async def get_state(
     svc: GraphVersioningService = Depends(get_versioning_service),
 ):
     with _domain_errors():
-        state = await svc.materialize_state(graph_id=graph_id, branch_id=branch_id, as_of_seq=as_of_seq, viewer=viewer)
+        state = await svc.materialize_state(graph_id=graph_id, branch_id=branch_id, as_of_seq=as_of_seq,
+                                            viewer=viewer, max_entities=vconfig.STATE_READ_MAX)
     wm = await svc.projection_watermark(graph_id)
     return {"nodes": state["nodes"], "edges": state["edges"],
             "watermark": {"committed": wm["committed"], "projected": wm["projected"], "fresh": wm["fresh"]}}
@@ -2823,7 +2824,8 @@ async def get_commit_state(
 ):
     """Full graph state as of a specific commit (time-travel by commit id)."""
     with _domain_errors():
-        state = await svc.state_at_commit(graph_id=graph_id, commit_id=commit_id, viewer=viewer)
+        state = await svc.state_at_commit(graph_id=graph_id, commit_id=commit_id, viewer=viewer,
+                                          max_entities=vconfig.STATE_READ_MAX)
     wm = await svc.projection_watermark(graph_id)
     return {"nodes": state["nodes"], "edges": state["edges"],
             "watermark": {"committed": wm["committed"], "projected": wm["projected"], "fresh": wm["fresh"]}}

@@ -22,7 +22,9 @@ from collections import ChainMap, OrderedDict
 from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Tuple, TypeVar
 
 from backend.app.services.versioning import config as vconfig
-from backend.app.services.versioning.errors import RevisionReadOnly, RevisionUnsupported
+from backend.app.services import graph_waits
+from backend.app.services.versioning.errors import (RevisionBusy, RevisionReadOnly,
+                                                    RevisionUnsupported)
 from backend.common.interfaces.provider import resolve_identities_by_query
 from backend.common.models.graph import (
     AggregatedEdgeInfo, AggregatedEdgeResult, ChildrenWithEdgesResult, EdgeQuery, GraphEdge,
@@ -305,6 +307,37 @@ def _line(key: tuple) -> tuple:
     return key[0], key[1], key[3]
 
 
+def _is_revision(key: tuple) -> bool:
+    """Whether a cache key is a past revision's (its version ``("rev", K, head)``)."""
+    version = key[2]
+    return isinstance(version, tuple) and bool(version) and version[0] == "rev"
+
+
+# Turns at putting a past revision together, per event loop (asyncio primitives are bound to one).
+_BUILD_TURNS: Dict[asyncio.AbstractEventLoop, asyncio.Semaphore] = {}
+
+
+async def _build_turn() -> asyncio.Semaphore:
+    """A turn at putting a revision together: ``REVISION_BUILDS_MAX`` at a time in this process,
+    waited for up to ``REVISION_BUILD_WAIT_MS`` — holding nothing of the request meanwhile
+    (``graph_waits.waiting``) — else :class:`RevisionBusy`. Returns the semaphore, to release."""
+    loop = asyncio.get_running_loop()
+    turns = _BUILD_TURNS.get(loop)
+    if turns is None:
+        for gone in [lp for lp in _BUILD_TURNS if lp.is_closed()]:
+            del _BUILD_TURNS[gone]
+        turns = _BUILD_TURNS[loop] = asyncio.Semaphore(max(1, vconfig.REVISION_BUILDS_MAX))
+    if turns.locked():
+        try:
+            async with graph_waits.waiting():
+                await asyncio.wait_for(turns.acquire(), vconfig.REVISION_BUILD_WAIT_MS / 1000)
+        except asyncio.TimeoutError:
+            raise RevisionBusy("builds_saturated", retry_after=2) from None
+    else:
+        await turns.acquire()
+    return turns
+
+
 # A fork's patch set as its delta keeps it for the next extension: each list's entries as tuples
 # of these fields, over the strings the index holds already — no dict per entry (1,043 bytes an
 # entry with the index became 865; the index alone holds 737).
@@ -379,11 +412,18 @@ class _DeltaCache:
 
     Bounded by the entries its deltas hold together (``GRAPHVER_OVERLAY_CACHE_ENTRIES``), not by
     their number: many drafts and forks read at once each keep theirs, and the newest is kept
-    whatever its size. A delta supersedes the older ones of its draft or fork."""
+    whatever its size. A delta supersedes the older ones of its draft or fork.
 
-    def __init__(self, max_entries: Optional[int] = None):
+    Past revisions are kept within a budget of their own (``GRAPHVER_REVISION_CACHE_ENTRIES``),
+    and go first when the whole is over its bound: opening revisions never evicts a draft's
+    delta. Putting a new revision together takes a turn (:func:`_build_turn`)."""
+
+    def __init__(self, max_entries: Optional[int] = None,
+                 max_revision_entries: Optional[int] = None):
         self._max = max_entries
+        self._max_revision = max_revision_entries
         self._held = 0
+        self._revision_held = 0
         self._items: "OrderedDict[tuple, _OverlayDelta]" = OrderedDict()
         self._building: Dict[tuple, asyncio.Task] = {}
 
@@ -402,10 +442,32 @@ class _DeltaCache:
             return hit
         task = self._building.get(key)
         if task is None or task.get_loop() is not asyncio.get_running_loop():
-            task = asyncio.ensure_future(build())
-            self._building[key] = task
-            task.add_done_callback(lambda t, k=key: self._settle(k, t))
-        return await asyncio.shield(task)          # one reader giving up doesn't cancel the build
+            turn = await _build_turn() if _is_revision(key) else None
+            hit = self._items.get(key)                 # landed, or begun, while waiting for a turn
+            task = self._building.get(key)
+            if hit is not None or (task is not None and task.get_loop() is asyncio.get_running_loop()):
+                if turn is not None:
+                    turn.release()
+                if hit is not None:
+                    self._items.move_to_end(key)
+                    return hit
+            else:
+                task = asyncio.ensure_future(build())
+                self._building[key] = task
+                task.add_done_callback(lambda t, k=key: self._settle(k, t))
+                if turn is not None:
+                    task.add_done_callback(lambda _t, turn=turn: turn.release())
+                return await asyncio.shield(task)  # one reader giving up doesn't cancel the build
+        if _is_revision(key) and not task.done():
+            async with graph_waits.waiting():          # another reader's build: wait holding nothing
+                return await asyncio.shield(task)
+        return await asyncio.shield(task)
+
+    def _drop(self, key: tuple) -> None:
+        size = self._items.pop(key).size
+        self._held -= size
+        if _is_revision(key):
+            self._revision_held -= size
 
     def _settle(self, key: tuple, task: asyncio.Task) -> None:
         if self._building.get(key) is task:
@@ -413,12 +475,24 @@ class _DeltaCache:
         if task.cancelled() or task.exception() is not None:
             return
         for old in [k for k in self._items if _line(k) == _line(key)]:
-            self._held -= self._items.pop(old).size
+            self._drop(old)
         delta = self._items[key] = task.result()
         self._held += delta.size
+        if _is_revision(key):
+            self._revision_held += delta.size
+            limit = (vconfig.REVISION_CACHE_ENTRIES if self._max_revision is None
+                     else self._max_revision)
+            while self._revision_held > limit:         # older revisions go, never the newest
+                older = next((k for k in self._items if _is_revision(k) and k != key), None)
+                if older is None:
+                    break
+                self._drop(older)
         limit = vconfig.OVERLAY_CACHE_ENTRIES if self._max is None else self._max
         while self._held > limit and len(self._items) > 1:
-            self._held -= self._items.popitem(last=False)[1].size
+            # Revisions first, the least recently read first; the newest is kept whatever its size.
+            victim = (next((k for k in self._items if _is_revision(k) and k != key), None)
+                      or next(k for k in self._items if k != key))
+            self._drop(victim)
 
 
 _DELTAS = _DeltaCache()
@@ -554,6 +628,11 @@ class DraftOverlayProvider:
             shared = await _DELTAS.get(key, build)
             self._delta = shared.for_request(self._load_modified, self._load_edges)
         return self._delta
+
+    async def warm(self) -> None:
+        """Put this read's delta together now, before the read takes any of the store's slots: a
+        past revision's first read is seconds of Postgres, which must not hold a FalkorDB slot."""
+        await self._delta_()
 
     def _at(self) -> Dict[str, Any]:
         """Where values load from: the branch's head, or main at the revision being read."""

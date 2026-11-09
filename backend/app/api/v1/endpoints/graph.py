@@ -239,11 +239,17 @@ async def get_context_engine(
             viewer = Viewer(actor=user.id if user else "",
                             can_manage=has_permission(claims, "workspace:datasource:manage", workspace_id=ws_id),
                             can_read=has_permission(claims, "workspace:datasource:read", workspace_id=ws_id))
-            return await ContextEngine.for_workspace(
+            engine = await ContextEngine.for_workspace(
                 ws_id, provider_manager, session, data_source_id=dataSourceId,
                 actor=(user.id if user else None), branch_id=branchId, viewer=viewer,
                 as_of_seq=asOfSeq,
             )
+            # A past revision is put together here, before the route takes any of the store's
+            # slots (``_bounded_compute``): its first read is seconds of Postgres work.
+            warm = getattr(engine.provider, "warm", None) if asOfSeq is not None else None
+            if warm is not None:
+                await warm()
+            return engine
         if connectionId:
             return await ContextEngine.for_connection(
                 connectionId, provider_manager, session, actor=(user.id if user else None))
