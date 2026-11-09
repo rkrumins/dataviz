@@ -26,6 +26,7 @@ import { kindMeta, isPullCommit } from '../model/commitKind'
 import { ownerName } from '../model/branchVocab'
 import { NodeDiffBadge } from './NodeDiffBadge'
 import { ChangeTreePanel } from './ChangeTreePanel'
+import { CommitProvenance } from './CommitProvenance'
 
 /** What a revision of Published offers from its row (the revision viewer on). */
 export interface RevisionRowActions {
@@ -47,7 +48,7 @@ const actorLabel = (a: unknown, userNames?: Record<string, string>) =>
   typeof a === 'string' && a ? ownerName(a, userNames) : 'system'
 const num = (v: unknown) => (typeof v === 'number' ? v : 0)
 
-function StatChips({ stats }: { stats: Record<string, unknown> }) {
+export function StatChips({ stats }: { stats: Record<string, unknown> }) {
   const added = num(stats.create)
   const modified = num(stats.update)
   const removed = num(stats.delete)
@@ -65,9 +66,10 @@ function StatChips({ stats }: { stats: Record<string, unknown> }) {
  *  is a full CommitRow (its own diff drills down further); squash-in-squash isn't possible, so
  *  children never drill down again. */
 function SquashedCommitList({
-  wsId, graphId, commitId, userNames,
+  wsId, graphId, commitId, userNames, apiKeyNames,
 }: {
   wsId: string; graphId: string; commitId: string; userNames?: Record<string, string>
+  apiKeyNames?: Record<string, string>
 }) {
   const q = useSquashedCommits(wsId, graphId, commitId)
   const [expandedId, setExpandedId] = useState<string | null>(null)
@@ -95,6 +97,7 @@ function SquashedCommitList({
             wsId={wsId}
             graphId={graphId}
             userNames={userNames ?? q.data?.userNames}
+            apiKeyNames={{ ...q.data?.apiKeyNames, ...apiKeyNames }}
             expanded={expandedId === cid}
             onToggle={toggle}
           />
@@ -111,6 +114,7 @@ export function CommitRow({
   originatingViewLabel = null,
   allowSquashDrilldown = false,
   userNames,
+  apiKeyNames,
   expanded,
   onToggle,
   onRevert,
@@ -127,6 +131,8 @@ export function CommitRow({
   allowSquashDrilldown?: boolean
   /** actor/contributor id → resolved display name (the commit log wrapper's map). */
   userNames?: Record<string, string>
+  /** API key id → name (the commit log wrapper's map): names the key a change came through. */
+  apiKeyNames?: Record<string, string>
   expanded: boolean
   onToggle: (commitId: string) => void
   /** When provided (main timeline, manager, flag on): "Undo just this change". Hidden on genesis. */
@@ -258,6 +264,7 @@ export function CommitRow({
         </div>
         <p className="text-[11px] text-ink-muted mt-0.5 flex items-center gap-1.5 flex-wrap pl-5">
           <User className="w-3 h-3" /> {actorLabel(commit.actor, userNames)}
+          <CommitProvenance commit={commit} apiKeyNames={apiKeyNames} />
           {others.length > 0 && (
             <HoverTip className="inline-flex" label="Everyone who edited this revision">
               <span>
@@ -338,7 +345,8 @@ export function CommitRow({
       )}
       {drilldownable && showSquashed && (
         <div className="pl-5">
-          <SquashedCommitList wsId={wsId} graphId={graphId} commitId={commitId} userNames={userNames} />
+          <SquashedCommitList wsId={wsId} graphId={graphId} commitId={commitId} userNames={userNames}
+            apiKeyNames={apiKeyNames} />
         </div>
       )}
     </Item>

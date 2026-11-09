@@ -2994,6 +2994,8 @@ async def get_squashed_commits(
         commits = await svc.squashed_commits(
             graph_id=graph_id, commit_id=commit_id, limit=limit + 1, offset=offset)
     payload = {"commits": commits[:limit], "has_more": len(commits) > limit}
+    payload["api_key_names"] = await api_key_repo.names_by_ids(
+        session, (c.get("api_key_id") for c in payload["commits"]))
     await _attach_user_names(session, payload["commits"], wrapper=payload)
     return payload
 
