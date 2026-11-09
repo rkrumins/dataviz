@@ -125,7 +125,7 @@ function refusal(c: DeletionCascade, name: string): string {
  * draft says first whether it can take it (`…/deletion/cascade?into=`): a draft that still has it,
  * has it again, or no longer has what held it is told why, and nothing is staged.
  */
-export function useRestoreDeletion(): (target: TombstoneTarget, name: string) => Promise<void> {
+export function useRestoreDeletion(): (target: TombstoneTarget, name: string) => Promise<boolean> {
   const containmentTypes = useContainmentEdgeTypes()
   const { notify } = useAppNotifications()
 
@@ -133,7 +133,7 @@ export function useRestoreDeletion(): (target: TombstoneTarget, name: string) =>
     // A past revision is read-only: restoring goes back to the graph as it is now, in the draft.
     if (useBranchStore.getState().revision) useBranchStore.getState().closeRevision()
     const draftId = await ensureDraftOpen()
-    if (!draftId) return
+    if (!draftId) return false
     let cascade: DeletionCascade
     try {
       cascade = await queryClient.fetchQuery({
@@ -144,11 +144,11 @@ export function useRestoreDeletion(): (target: TombstoneTarget, name: string) =>
       })
     } catch {
       notify('error', 'Couldn’t restore it just now. Try again in a moment.')
-      return
+      return false
     }
     if (!cascade.restorable) {
       notify('warning', refusal(cascade, name))
-      return
+      return false
     }
 
     const up = new Set(containmentTypes.map((t) => t.toUpperCase()))
@@ -167,7 +167,7 @@ export function useRestoreDeletion(): (target: TombstoneTarget, name: string) =>
     const restores = buildRestoreSubtree(rootUrn, buildChangeSet(changes), live, isContainment)
     if (!restores.length) {
       notify('error', 'Couldn’t restore it just now. Try again in a moment.')
-      return
+      return false
     }
     const links = buildRestoreLinks(restores, changes, (u) => live.has(u), isContainment)
 
@@ -184,5 +184,6 @@ export function useRestoreDeletion(): (target: TombstoneTarget, name: string) =>
       links.length > 0 && `${links.length.toLocaleString()} ${links.length === 1 ? 'relationship' : 'relationships'}`,
     ].filter(Boolean).join(' and ')
     notify('success', `Restored ‘${name}’${withIt ? ` with the ${withIt} deleted with it` : ''} into your draft. Review and save to keep it.`)
+    return true
   }, [containmentTypes, notify])
 }

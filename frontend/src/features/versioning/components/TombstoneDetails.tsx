@@ -265,7 +265,7 @@ export function TombstoneDetails({ target, onRestore, onNavigate }: {
         )}
         {!onRestore && canRestoreIntoDraft && del && !del.inDraft && (
           <Button size="sm" variant="ghost" leftIcon={RotateCcw}
-            onClick={() => { void restoreDeletion(target, name).then(() => onNavigate?.()) }}
+            onClick={() => { void restoreDeletion(target, name).then((staged) => { if (staged) onNavigate?.() }) }}
             className="border border-rose-500/30 text-rose-600 dark:text-rose-400 hover:text-rose-700 dark:hover:text-rose-300 hover:bg-rose-500/10">
             Restore into my draft
           </Button>

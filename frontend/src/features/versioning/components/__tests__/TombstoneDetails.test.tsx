@@ -74,7 +74,7 @@ beforeEach(() => {
   useStagedChangesStore.setState({ changes: [] })
   useVersioningPanelStore.setState({ requestedTab: null, requestedCompare: null })
   useFeaturesStore.setState({ values: { ...DEFAULT_FEATURES, versioningEnabled: true, editModeEnabled: true, revisionViewerEnabled: true } } as never)
-  restoreDeletion.mockReset().mockResolvedValue(undefined)
+  restoreDeletion.mockReset().mockResolvedValue(true)
 })
 
 describe('TombstoneDetails', () => {
@@ -183,6 +183,15 @@ describe('TombstoneDetails', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Restore into my draft' }))
     expect(restoreDeletion).toHaveBeenCalledWith(published, 'orders')
     await waitFor(() => expect(onNavigate).toHaveBeenCalled())
+  })
+
+  it('stays open when the draft can’t take it, so its details are still there', async () => {
+    restoreDeletion.mockResolvedValue(false)
+    const onNavigate = vi.fn()
+    show(<TombstoneDetails target={published} onNavigate={onNavigate} />, { onCanvas: true })
+    fireEvent.click(await screen.findByRole('button', { name: 'Restore into my draft' }))
+    await waitFor(() => expect(restoreDeletion).toHaveBeenCalled())
+    expect(onNavigate).not.toHaveBeenCalled()
   })
 
   it('offers it to no one who can’t manage the data source', async () => {

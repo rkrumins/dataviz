@@ -39,9 +39,10 @@ const cascade = (over: Record<string, unknown> = {}) => ({
   ],
   ...over,
 })
+let staged: boolean | undefined
 const restore = async () => {
   const { result } = renderHook(() => useRestoreDeletion())
-  await act(async () => { await result.current(target, 'orders') })
+  await act(async () => { staged = await result.current(target, 'orders') })
 }
 
 beforeEach(() => {
@@ -70,6 +71,7 @@ describe('useRestoreDeletion', () => {
     expect(s.isReviewPanelOpen).toBe(true)
     expect(h.notify).toHaveBeenCalledWith('success',
       'Restored ‘orders’ with the 1 entity and 1 relationship deleted with it into your draft. Review and save to keep it.')
+    expect(staged).toBe(true)
   })
 
   it.each([
@@ -81,6 +83,7 @@ describe('useRestoreDeletion', () => {
     h.getDeletionCascade.mockResolvedValue(cascade({ restorable: false, reason, removed: [], ...extra }))
     await restore()
     expect(h.notify).toHaveBeenCalledWith('warning', message)
+    expect(staged).toBe(false)
     expect(useStagedChangesStore.getState().changes).toEqual([])
     expect(useStagedChangesStore.getState().isReviewPanelOpen).toBe(false)
   })
