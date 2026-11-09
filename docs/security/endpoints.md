@@ -4,7 +4,7 @@
 
 **48 reachable with no gate of any kind** — worth attacking first. Routes whose gate lives inside the handler (most of the auth surface) are named explicitly rather than reported as ungated.
 
-**227 callable with an API key** (`Authorization: Bearer nxpat_…`, or `nxsat_…` for a service account's), acting as the person or service account it belongs to and held to the views and data sources its key covers as the API key column says — see `backend/app/auth/api_key_surface.py`. Every other route refuses a key with `403 api_key_not_allowed`.
+**232 callable with an API key** (`Authorization: Bearer nxpat_…`, or `nxsat_…` for a service account's), acting as the person or service account it belongs to and held to the views and data sources its key covers as the API key column says — see `backend/app/auth/api_key_surface.py`. Every other route refuses a key with `403 api_key_not_allowed`.
 
 
 ### Authentication + SSO
@@ -521,11 +521,11 @@
 | `GET` | `/api/v1/{ws_id}/assets/rule-sets/{rule_set_id}` | workspace:datasource:read (ws:ws_id) (or view capability) | n/a | resource |
 | `GET` | `/api/v1/{ws_id}/graph/alignment-analysis` | workspace:datasource:read (ws:ws_id) (or view capability) | n/a | resource |
 | `POST` | `/api/v1/{ws_id}/graph/assignments/compute` | workspace:datasource:read (ws:ws_id) (or view capability) | enforced | resource (reads only) |
-| `POST` | `/api/v1/{ws_id}/graph/bootstrap` | workspace:datasource:manage (ws:ws_id), workspace:datasource:read (ws:ws_id) (or view capability) | enforced | refused |
+| `POST` | `/api/v1/{ws_id}/graph/bootstrap` | workspace:datasource:manage (ws:ws_id), workspace:datasource:read (ws:ws_id) (or view capability) | enforced | resource |
 | `POST` | `/api/v1/{ws_id}/graph/bootstrap/abandon` | workspace:datasource:manage (ws:ws_id), workspace:datasource:read (ws:ws_id) (or view capability) | enforced | refused |
 | `POST` | `/api/v1/{ws_id}/graph/bootstrap/decision` | workspace:datasource:manage (ws:ws_id), workspace:datasource:read (ws:ws_id) (or view capability) | enforced | refused |
 | `GET` | `/api/v1/{ws_id}/graph/bootstrap/duplicates` | workspace:datasource:read (ws:ws_id), workspace:datasource:read (ws:ws_id) (or view capability) | n/a | resource |
-| `POST` | `/api/v1/{ws_id}/graph/bootstrap/retry` | workspace:datasource:manage (ws:ws_id), workspace:datasource:read (ws:ws_id) (or view capability) | enforced | refused |
+| `POST` | `/api/v1/{ws_id}/graph/bootstrap/retry` | workspace:datasource:manage (ws:ws_id), workspace:datasource:read (ws:ws_id) (or view capability) | enforced | resource |
 | `GET` | `/api/v1/{ws_id}/graph/bootstrap/status` | workspace:datasource:read (ws:ws_id) (or view capability) | n/a | resource |
 | `POST` | `/api/v1/{ws_id}/graph/canvas/bootstrap` | workspace:datasource:read (ws:ws_id) (or view capability) | enforced | resource (reads only) |
 | `POST` | `/api/v1/{ws_id}/graph/canvas/expand` | workspace:datasource:read (ws:ws_id) (or view capability) | enforced | resource (reads only) |
@@ -605,7 +605,7 @@
 | `GET` | `/api/v1/{ws_id}/versioning/drafts-policy` | workspace:datasource:read (ws:ws_id) | n/a | refused |
 | `PUT` | `/api/v1/{ws_id}/versioning/drafts-policy` | workspace:admin (ws:ws_id) | enforced | refused |
 | `GET` | `/api/v1/{ws_id}/versioning/drafts/owner-left` | workspace:admin (ws:ws_id) | n/a | refused |
-| `POST` | `/api/v1/{ws_id}/versioning/graphs` | workspace:datasource:manage (ws:ws_id) | enforced | refused |
+| `POST` | `/api/v1/{ws_id}/versioning/graphs` | workspace:datasource:manage (ws:ws_id) | enforced | resource |
 | `DELETE` | `/api/v1/{ws_id}/versioning/graphs/{graph_id}` | workspace:datasource:manage (ws:ws_id) | enforced | refused |
 | `GET` | `/api/v1/{ws_id}/versioning/graphs/{graph_id}` | workspace:datasource:read (ws:ws_id) | n/a | resource |
 | `GET` | `/api/v1/{ws_id}/versioning/graphs/{graph_id}/branches` | workspace:datasource:read (ws:ws_id) | n/a | resource |
@@ -680,7 +680,7 @@
 | `POST` | `/api/v1/{ws_id}/versioning/graphs/{graph_id}/pulls` | workspace:datasource:read (ws:ws_id) | enforced | resource |
 | `POST` | `/api/v1/{ws_id}/versioning/graphs/{graph_id}/restore` | workspace:datasource:manage (ws:ws_id) | enforced | refused |
 | `GET` | `/api/v1/{ws_id}/versioning/graphs/{graph_id}/revisions/{seq}` | workspace:datasource:read (ws:ws_id) | n/a | resource |
-| `POST` | `/api/v1/{ws_id}/versioning/graphs/{graph_id}/sync` | workspace:datasource:manage (ws:ws_id), workspace:datasource:publish (ws:ws_id) | enforced | refused |
+| `POST` | `/api/v1/{ws_id}/versioning/graphs/{graph_id}/sync` | workspace:datasource:manage (ws:ws_id), workspace:datasource:publish (ws:ws_id; an API key: its owner's) | enforced | resource |
 | `POST` | `/api/v1/{ws_id}/versioning/graphs/{graph_id}/update-from-parent` | workspace:datasource:publish (ws:ws_id) | enforced | refused |
 | `GET` | `/api/v1/{ws_id}/versioning/graphs/{graph_id}/update-jobs/{job_id}` | workspace:datasource:manage (ws:ws_id) | n/a | refused |
 | `GET` | `/api/v1/{ws_id}/versioning/graphs/{graph_id}/watermark` | workspace:datasource:read (ws:ws_id) | n/a | resource |
@@ -703,7 +703,7 @@
 | `POST` | `/api/v1/{ws_id}/versioning/pulls/{pr_id}/merge` | workspace:datasource:manage (ws:ws_id), workspace:datasource:publish (ws:ws_id) | enforced | refused |
 | `GET` | `/api/v1/{ws_id}/versioning/pulls/{pr_id}/preview` | workspace:datasource:read (ws:ws_id) | n/a | resource |
 | `GET` | `/api/v1/{ws_id}/versioning/resolve` | workspace:datasource:read (ws:ws_id) (or view capability) | n/a | resource |
-| `POST` | `/api/v1/{ws_id}/versioning/resolve` | workspace:datasource:manage (ws:ws_id) | enforced | refused |
+| `POST` | `/api/v1/{ws_id}/versioning/resolve` | workspace:datasource:manage (ws:ws_id) | enforced | resource |
 | `GET` | `/api/v1/{ws_id}/versioning/reviewers` | workspace:datasource:manage (ws:ws_id) | n/a | refused |
 | `GET` | `/api/v1/{ws_id}/versioning/views/{view_id}/pull-requests` | workspace:datasource:read (ws:ws_id) | n/a | resource |
 | `GET` | `/api/v1/{ws_id}/versioning/views/{view_id}/pull-requests/count` | workspace:datasource:read (ws:ws_id) | n/a | resource |

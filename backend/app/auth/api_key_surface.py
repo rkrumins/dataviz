@@ -135,9 +135,12 @@ SURFACE: dict[tuple[str, str], Rule] = {
     ),
 
     # ── Graph data ──────────────────────────────────────────────────
-    # Every route is behind the data-plane capability gate. Not here: the
-    # one-time versioning bootstrap and resync, and materialising aggregated
-    # edges — operations on a graph's lifecycle, not on its data.
+    # Every route is behind the data-plane capability gate. Turning version
+    # control on for the data source ``dataSourceId`` names (bootstrap, and
+    # retrying a stopped one) is here, as a person with manage may: a
+    # connector sets up the graph it then imports into. Not here: deciding a
+    # paused bootstrap's duplicates or abandoning it (a person's call about
+    # their data), resync, and materialising aggregated edges.
     **_entries(
         "graph", RESOURCE,
         "get_nodes", "get_node", "get_top_level_nodes", "get_node_children",
@@ -149,6 +152,7 @@ SURFACE: dict[tuple[str, str], Rule] = {
         "get_graph_introspection", "get_refresh_status", "get_graph_stats",
         "get_sync_status", "get_alignment_analysis", "get_vocab_alignment",
         "bootstrap_status_endpoint", "bootstrap_duplicates_endpoint",
+        "bootstrap_versioned_graph_endpoint", "bootstrap_retry_endpoint",
         "search_discover", "search_schema", "search_values",
         "search_export_download",
         "create_node", "create_edge", "update_edge", "delete_edge",
@@ -178,13 +182,15 @@ SURFACE: dict[tuple[str, str], Rule] = {
     **_entries("assets", WORKSPACE, "create_rule_set", "delete_rule_set"),
 
     # ── Versioning: drafts, proposals, history ──────────────────────
-    # Not here: creating graphs (blank or forked) and opening a draft by
-    # data source, which name their target in the body; rebuilding or
-    # reconciling a projection (operations); adding or removing a
-    # draft's members (sharing); merging a fork's review; and advancing
-    # main otherwise (revert, restore, sync). Publishing a draft and
-    # merging its review are here: no key holds publish, so a key passes
-    # where its owner does (``versioning_gate.require_publish``).
+    # Not here: blank models and forks; rebuilding or reconciling a
+    # projection (operations); adding or removing a draft's members, handing
+    # it on or changing its level (sharing); merging a fork's review; and
+    # advancing main otherwise (revert, restore, freezing). Publishing a draft,
+    # merging its review and syncing a snapshot into main are here: no key
+    # holds publish, so a key passes where its owner does
+    # (``versioning_gate.require_publish``). Making a data source's graph and
+    # opening a draft by data source name their data source in the body, and
+    # hold the key to it in the handler (``hold_to_data_source``).
     **_entries(
         "versioning", RESOURCE,
         "resolve_graph_get", "get_graph", "get_watermark", "graph_neighbors",
@@ -199,7 +205,8 @@ SURFACE: dict[tuple[str, str], Rule] = {
         "get_history_months", "get_revision",
         "get_restore_preview",
         "get_entity_history", "get_entity_summary",
-        "bulk_ingest", "publish", "get_publish_job",
+        "create_graph", "resolve_graph_open",
+        "bulk_ingest", "sync_ingest", "publish", "get_publish_job",
         "list_imports", "import_template", "import_schema", "create_import",
         "get_import",
         "get_import_preview", "create_import_upload", "get_import_upload",

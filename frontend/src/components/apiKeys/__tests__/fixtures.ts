@@ -36,7 +36,7 @@ export function adminKey(over: Partial<AdminApiKey> = {}): AdminApiKey {
 }
 
 export const access = (over: Partial<EffectiveAccess> = {}): EffectiveAccess => ({
-    workspaces: [{ id: 'ws1', name: 'Finance', views: 'read', data: 'write', publish: false }],
+    workspaces: [{ id: 'ws1', name: 'Finance', views: 'read', data: 'write', publish: false, publishData: false }],
     views: [], dataSources: [], everyWorkspace: null, ...over,
 })
 
@@ -57,7 +57,7 @@ export function options(over: Partial<ApiKeyOptions> = {}): ApiKeyOptions {
         stepUp: { method: 'password', fresh: false },
         stepUpAvailable: true,
         activeKeys: 1,
-        workspaces: [{ id: 'ws1', name: 'Finance', views: 'write', data: 'read', publish: false }],
+        workspaces: [{ id: 'ws1', name: 'Finance', views: 'write', data: 'read', publish: false, publishData: false }],
         clientIp: '203.0.113.24',
         ssoSignInUrl: '/api/v1/auth/corp/login?next=/me/api-keys',
         ...over,

@@ -759,3 +759,36 @@ def test_corrupt_group_json_does_not_take_down_a_signup():
     assert invite_repo.group_ids_of(row) == []
     row.group_ids = '["ok", 42, null]'
     assert invite_repo.group_ids_of(row) == ["ok"]
+
+
+# ── a role granted in a workspace ────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_role_made_only_of_workspace_permissions_is_invited_into_a_workspace(
+    test_client: AsyncClient, db_session,
+):
+    """Data engineer, and any custom role whose permissions are all about a workspace, means
+    nothing as a global binding: the resolver drops a workspace permission there, so the invitee
+    would get nothing. Such a role is invited into a workspace, and refused without one. Data
+    engineer used to be refused a workspace ("is global") and could only become that empty binding."""
+    from backend.app.db.models import RoleORM, RolePermissionORM
+
+    db_session.add(WorkspaceORM(id="ws_data", name="Data"))
+    for name in ("workspace_data_engineer", "pipeline_ops"):
+        db_session.add(RoleORM(name=name, description="", scope_type="global", scope_id=None,
+                               is_system=name == "workspace_data_engineer",
+                               created_at="2026-01-01", updated_at="2026-01-01"))
+    await db_session.flush()
+    for name in ("workspace_data_engineer", "pipeline_ops"):
+        for perm in ("workspace:datasource:read", "workspace:datasource:manage"):
+            db_session.add(RolePermissionORM(role_name=name, permission_id=perm))
+    await db_session.commit()
+
+    for role in ("workspace_data_engineer", "pipeline_ops"):
+        minted = await _mint(test_client, role=role, workspaceId="ws_data")
+        assert minted.status_code in (200, 201), (role, minted.text)
+        assert minted.json()["workspaceId"] == "ws_data", role
+        refused = await _mint(test_client, role=role)
+        assert refused.status_code == 400, (role, refused.text)
+        assert "workspace" in refused.json()["detail"], role

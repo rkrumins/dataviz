@@ -47,23 +47,27 @@ authenticated `User` and `PermissionClaims`; they never re-derive identity.
 `Authorization: Bearer nxpat_…` — or a [service account](/guide/service-accounts)'s `nxsat_…` —
 replaces the cookies and the CSRF header — see [API Keys](/guide/api-keys). The key acts as its
 owner, a person or a service account, narrowed to what it was limited to: data read for the routes
-`_READ` gates, data read & write for those `_MANAGE` gates ([below](#permissions-rbac)). Every route below accepts a key except creating a graph
-(`POST /graphs`, `/blank-graphs` and its name check `GET /blank-graphs/name-check`), every fork
-route (create, list, delete, restore), opening a draft by data source (`POST /resolve`), adding or
-removing a draft's members, projection rebuild and reconcile, everything else that advances `main`
-(a fork review's merge, revert, restore, sync), `GET /reviewers`, freeze and unfreeze, the platform
-routes of [§2.14](#214-platform-administration), and on the graph router `POST /bootstrap`,
-`/bootstrap/decision`, `/bootstrap/retry` and `/bootstrap/abandon`, `/resync` and
-`edges/aggregated/materialize` — `GET /bootstrap/status` and `/bootstrap/duplicates` accept one.
+`_READ` gates, data read & write for those `_MANAGE` gates ([below](#permissions-rbac)). Every route below accepts a key except a blank model
+(`/blank-graphs` and its name check `GET /blank-graphs/name-check`), every fork
+route (create, list, delete, restore), adding or removing a draft's members, projection rebuild
+and reconcile, everything else that advances `main` (a fork review's merge, revert, restore),
+`GET /reviewers`, freeze and unfreeze, the platform routes of
+[§2.14](#214-platform-administration), and on the graph router `/bootstrap/decision`,
+`/bootstrap/abandon`, `/resync` and `edges/aggregated/materialize`. Setting up the graph an import
+goes into takes a key, held to what a person needs (`_MANAGE`): `POST /graphs` and `POST /resolve`
+(each holding the key to the data source its body names, and `POST /resolve` to a view it may edit
+for `originatingViewId`), and on the graph router `POST /bootstrap` and `/bootstrap/retry`, beside
+`GET /bootstrap/status` and `/bootstrap/duplicates`.
 Those answer a key with **403** `{"detail": {"error": "api_key_not_allowed", "message": …}}`. A
 key limited to particular data sources reaches a graph, branch or request only when the data
 source behind it is one of them — otherwise `403 api_key_out_of_scope`, or `404` across
 workspaces; opening a fork's pull request (`POST …/pulls`) also needs the parent graph's data
 source.
 
-Publishing a draft (`POST …/branches/{id}/publish`) and merging a draft's merge request
-(`POST /merge-requests/{id}/merge`) accept a key where its owner holds publish
-(`versioning_gate.require_publish`), as bulk ingest does; elsewhere **403** `publish_required`. An
+Publishing a draft (`POST …/branches/{id}/publish`), merging a draft's merge request
+(`POST /merge-requests/{id}/merge`) and syncing a snapshot (`POST …/graphs/{id}/sync`) accept a key
+where its owner holds publish (`versioning_gate.require_publish`), as bulk ingest does; elsewhere
+**403** `publish_required`, whose message says it is the key's account that needs Publisher. An
 import asked to publish itself (`autoPublish`) is held to the same. A fork's review stays closed to
 keys on either merge route (**403 `api_key_not_allowed`**).
 
@@ -82,7 +86,7 @@ Three permission strings gate the whole surface (`_READ`, `_MANAGE` and `_PUBLIS
 |---|---|---|
 | `_READ` | `workspace:datasource:read` | All reads; **open a fork PR**; PR and commit inspection; exports |
 | `_MANAGE` | `workspace:datasource:manage` | All writes; **fork**, and delete or restore a fork; projection rebuild and reconcile; branch admin; reviews; upload and publish-job status |
-| `_PUBLISH` | `workspace:datasource:publish` | On top of `_MANAGE`, everything that advances `main`: **publish**, **merge** (draft and fork PRs), **revert**, **restore** and **sync**, the graph router's `/resync`, and pausing or resuming editing (`…/lifecycle/freeze`, `…/lifecycle/unfreeze`). A `workspace_member` does not hold it: a person without it gets **403** `{error: "missing_permission", permission, scope, message}` (an `error` key, no `type`). These routes are closed to API keys (**403 `api_key_not_allowed`**, [above](#api-keys)), except publishing a draft and merging a draft's merge request, where a key's owner must hold it (**403 `publish_required`**). A person also needs it to write `main` directly — **bulk-ingest**, and the graph router's writes with no draft (§4) — or gets **403** `publish_required`; an API key makes those writes only where its owner holds publish (for a service account's `nxsat_` key, the service account, through its own workspace roles) |
+| `_PUBLISH` | `workspace:datasource:publish` | On top of `_MANAGE`, everything that advances `main`: **publish**, **merge** (draft and fork PRs), **revert**, **restore** and **sync**, the graph router's `/resync`, and pausing or resuming editing (`…/lifecycle/freeze`, `…/lifecycle/unfreeze`). A `workspace_member` does not hold it: a person without it gets **403** `{error: "missing_permission", permission, scope, message}` (an `error` key, no `type`). These routes are closed to API keys (**403 `api_key_not_allowed`**, [above](#api-keys)), except publishing a draft, merging a draft's merge request and sync, where a key's owner must hold it (**403 `publish_required`**). A direct publish also needs the draft's owner or a maintainer; refused for that, the 403 (`not_draft_owner` / `not_owner_or_member`) carries `hint: "merge_request"`, since anyone with publish merges the draft's review. A person also needs it to write `main` directly — **bulk-ingest**, and the graph router's writes with no draft (§4) — or gets **403** `publish_required`; an API key makes those writes only where its owner holds publish (for a service account's `nxsat_` key, the service account, through its own workspace roles) |
 
 > **Decision — governance by permission asymmetry.** Anyone who can *see* a fork may propose its
 > changes: **opening a PR** (`POST /graphs/{gid}/pulls`) needs only `_READ`. **Forking**
@@ -338,7 +342,7 @@ See [04 · Projection & Cache](/docs/versioning-projection-and-cache) for what t
 | Method · Path | Gate | Purpose |
 |---|---|---|
 | `POST …/bulk-ingest` | `_MANAGE`; a person also `_PUBLISH` | An NDJSON body, one entity per line — a node `{"kind": "node", "entityType", "urn"?, "id"?, …properties}` or an edge `{"kind": "edge", "edgeType", "source", "target", …properties}`, whose ends name a node in the same body by `urn` or `id` — → **one `import` commit straight on `main`** — no draft, no review. It seeds only an empty graph: on one that has entities it answers **409 `integrity`**; update it with `…/sync`. Invalid lines are reported in `rejected` (`{row, reason}`), not fatal; idempotent on `?idempotencyKey`. Answers in snake_case: `{commit_id, commit_seq, ingested, nodes, edges, rejected, idempotent_replay}`; `commit_id` is `null` when no line was valid. The body is read whole, so the 100 MB request limit applies; for a reviewed load, use `POST …/imports` ([§2.10](#210-imports--exports)) |
-| `POST …/sync` | `_PUBLISH` | An NDJSON snapshot into `main` as one `sync` commit, by **3-way merge**: `?strategy=merge` (a field both sides changed → **409**) or `?strategy=external_wins`; also `?source` and `?idempotencyKey`. An entity the snapshot drops is deleted, with its containment subtree, if nobody edited it. Answers in snake_case: `{commit_id, commit_seq, applied, rejected, idempotent_replay, overrides}` — `commit_id` is `null` when nothing changed. Refused when `main` holds more than 250,000 entities (`GRAPHVER_RESYNC_MAX_ENTITIES`) with **422 `graph_too_large_to_sync`** `{entities, limit, estimatedBytes, message}`. Also refused with **409 `curation_at_risk`** `{lastHumanCommit: {id, seq, kind, actor, createdAt}, message}` when `main` holds a person's commit from before its last import or sync (the merge base would read their work as the source's old values and undo it), and with **409 `mass_delete_blocked`** `{deletes, live, limit, message}` when it would delete more than max(500, 5% of live entities) (`GRAPHVER_SYNC_DELETE_MAX_ABS`, `GRAPHVER_SYNC_DELETE_MAX_FRACTION`). A workspace admin may override with `?force=true` or `?allowMassDelete=true` (each overrides only its own check; anyone else gets **403 `needs_admin`**, and an API key can't call this route at all). An override is named in the commit message and in the answer's `overrides`. See [10 · Authoritative Sources](/docs/versioning-authoritative-sources) |
+| `POST …/sync` | `_PUBLISH` | An NDJSON snapshot into `main` as one `sync` commit, by **3-way merge**: `?strategy=merge` (a field both sides changed → **409**) or `?strategy=external_wins`; also `?source` and `?idempotencyKey`. An entity the snapshot drops is deleted, with its containment subtree, if nobody edited it. Answers in snake_case: `{commit_id, commit_seq, applied, rejected, idempotent_replay, overrides}` — `commit_id` is `null` when nothing changed. Refused when `main` holds more than 250,000 entities (`GRAPHVER_RESYNC_MAX_ENTITIES`) with **422 `graph_too_large_to_sync`** `{entities, limit, estimatedBytes, message}`. Also refused with **409 `curation_at_risk`** `{lastHumanCommit: {id, seq, kind, actor, createdAt}, message}` when `main` holds a person's commit from before its last import or sync (the merge base would read their work as the source's old values and undo it), and with **409 `mass_delete_blocked`** `{deletes, live, limit, message}` when it would delete more than max(500, 5% of live entities) (`GRAPHVER_SYNC_DELETE_MAX_ABS`, `GRAPHVER_SYNC_DELETE_MAX_FRACTION`). A workspace admin may override with `?force=true` or `?allowMassDelete=true` (each overrides only its own check; anyone else gets **403 `needs_admin`**, an API key included: a key syncs where its owner holds publish, and never overrides). An override is named in the commit message and in the answer's `overrides`. See [10 · Authoritative Sources](/docs/versioning-authoritative-sources) |
 
 ### 2.10 Imports & exports
 

@@ -74,3 +74,48 @@ async def test_publishing_a_draft_needs_its_owner_or_a_maintainer_at_either_leve
 async def test_each_branch_says_what_its_reader_may_do(branch, role, manages, expected):
     access = GraphVersioningService._access(branch, role, Viewer("bob", manages, can_read=True))
     assert (access["canRead"], access["canWrite"], access["canManage"]) == expected
+
+
+async def test_a_refused_publish_says_to_open_a_merge_request():
+    """Who may not publish a draft directly is told how they can still land it: a merge request on
+    it, which anyone who may publish there merges, whoever owns the draft."""
+    for members, branch in ((_Members(), _draft()), (_Members(("bob", "editor")), _draft(shared=True))):
+        with pytest.raises((NotDraftOwner, DraftRoleRequired)) as refused:
+            await _SVC._require_publish(members, branch, "bob", ())
+        assert refused.value.detail["hint"] == "merge_request"
+        assert "merge request" in refused.value.detail["message"]
+        assert refused.value.detail["type"] == "access_denied"
+
+
+async def test_abandoning_someone_elses_draft_is_refused_without_a_merge_request_hint():
+    """Only publishing has another way in. Abandoning a draft or managing its members needs its
+    owner or a maintainer, and nothing else does them."""
+    with pytest.raises(NotDraftOwner) as refused:
+        await _SVC._require_manage(_Members(), _draft(), "bob", ())
+    assert "hint" not in refused.value.detail
+
+
+async def test_a_refused_publish_folds_nothing_under_the_callers_name():
+    """A public draft's other writers may stage on it, but not publish it. Their publish is refused
+    before the draft's staged edits are folded into a checkpoint: that fold is written under the
+    caller's name, and would commit the owner's work as someone else's."""
+    from contextlib import asynccontextmanager
+
+    svc = GraphVersioningService.__new__(GraphVersioningService)
+    folded = []
+
+    @asynccontextmanager
+    async def _session():
+        yield _Members()
+
+    async def _get_branch(_s, _graph_id, _branch_id):
+        return _draft()
+
+    async def _flush(**kwargs):
+        folded.append(kwargs["actor"])
+
+    svc._session, svc._get_branch, svc._flush_pending_changes = _session, _get_branch, _flush
+    with pytest.raises(NotDraftOwner) as refused:
+        await svc.publish(graph_id="g_1", branch_id="br_1", actor="bob", message="m")
+    assert folded == []
+    assert refused.value.detail["hint"] == "merge_request"

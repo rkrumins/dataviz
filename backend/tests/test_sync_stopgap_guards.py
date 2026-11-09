@@ -149,15 +149,22 @@ async def test_sync_route_override_requires_workspace_admin(test_client, app, fl
 
 @pytest.mark.parametrize("flag", ["force", "allowMassDelete"])
 async def test_an_api_key_cannot_override(test_client, app, flag):
-    """Keys can never hold workspace:admin, so scripted callers cannot override either. Nor can
-    they hold publish, so they are refused a sync before the override is looked at."""
+    """A key syncs where the person or service account it belongs to publishes, and is refused
+    ``publish_required`` before the override is looked at where they don't. Keys can never hold
+    workspace:admin, so even one whose owner publishes cannot override."""
     svc = _Versioning()
+    manage = {WS: ("workspace:datasource:read", "workspace:datasource:manage")}
     _install(app, svc, PermissionClaims(
-        sid="", ws_perms={WS: ("workspace:datasource:read", "workspace:datasource:manage")},
-        key_scope=KeyScope(key_id="k", data="write", all_resources=True)))
+        sid="", ws_perms=manage, key_scope=KeyScope(key_id="k", data="write", all_resources=True)))
     resp = await test_client.post(f"/api/v1/{WS}/versioning/graphs/g1/sync?{flag}=true", content=b"")
     assert resp.status_code == 403, resp.text
-    assert resp.json()["detail"]["permission"] == "workspace:datasource:publish"
+    assert resp.json()["detail"]["code"] == "publish_required"
+
+    _install(app, svc, PermissionClaims(
+        sid="", ws_perms=manage, key_scope=KeyScope(
+            key_id="k", data="write", all_resources=True, owner_publish_workspaces=frozenset({WS}))))
+    _needs_admin(await test_client.post(
+        f"/api/v1/{WS}/versioning/graphs/g1/sync?{flag}=true", content=b""))
     assert svc.calls == []
 
 

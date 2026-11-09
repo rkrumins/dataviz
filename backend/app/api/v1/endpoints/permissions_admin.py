@@ -44,6 +44,7 @@ from backend.app.db.repositories.role_repo import (
     UnknownPermissionError,
 )
 from backend.common.display_name import resolve_display_name
+from backend.common.service_accounts import ID_PREFIX as SERVICE_ACCOUNT_ID_PREFIX
 from backend.common.role_defaults import (
     SYSTEM_ROLE_DEFAULTS,
     default_permissions,
@@ -185,6 +186,36 @@ async def _binding_counts(
     return {name: count for name, count in rows.all()}
 
 
+async def _refuse_what_service_accounts_cannot_hold(
+    session: AsyncSession, role_name: str, permissions: Optional[list[str]],
+) -> None:
+    """409 when a role service accounts hold would come to administer a workspace or let people
+    in (``workspace:admin``, ``workspace:members:add``). A service account never holds those: its
+    claims drop them (``permission_service._fold``), and with ``workspace:admin`` everything it
+    implies — so the edit would quietly take from those accounts what the role gave them. Take the
+    role away from them first, or make another role."""
+    if permissions is None or workspace_access.is_requestable(permissions):
+        return
+    accounts = sorted(set((await session.execute(
+        select(RoleBindingORM.subject_id).where(
+            RoleBindingORM.role_name == role_name,
+            RoleBindingORM.subject_type == "user",
+            RoleBindingORM.subject_id.startswith(SERVICE_ACCOUNT_ID_PREFIX, autoescape=True),
+        )
+    )).scalars()))
+    if not accounts:
+        return
+    raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail={
+        "type": "role_held_by_service_accounts",
+        "serviceAccounts": accounts,
+        "message": (
+            f"Service accounts hold '{role_name}' ({', '.join(accounts)}), and a service account "
+            "can't hold a role that administers a workspace or lets people in: they would lose "
+            "what the role gives them. Take the role away from them first, or make another role."
+        ),
+    })
+
+
 def _role_to_response(role, *, permissions: list[str], binding_count: int) -> RoleDefinitionResponse:
     # "Modified?" is a sync diff of the already-fetched bundle + description
     # against the seeded default — no extra query. Only system roles with a
@@ -306,7 +337,9 @@ async def update_role(
     Works for custom *and* system roles. Stripping a protected floor
     permission from a system role (e.g. ``system:admin`` from
     ``super_admin``) returns 422 — that floor gates platform
-    administration and cannot be removed."""
+    administration and cannot be removed. Nor may a role service accounts hold come to
+    administer a workspace or let people in (409, ``role_held_by_service_accounts``)."""
+    await _refuse_what_service_accounts_cannot_hold(session, name, body.permissions)
     try:
         role = await role_repo.update_role(
             session,

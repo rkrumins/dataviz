@@ -4,7 +4,7 @@
  * words that name the account rather than you. Its managers run it here, and
  * the page offers each person only what the server's `can` says they may do.
  */
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -79,7 +79,7 @@ function account(over: Partial<ServiceAccountDetail> = {}): ServiceAccountDetail
         ],
         managed: true, singleManager: true, unmanagedSince: null, pausesAt: null, adminHold: false, deletedAt: null,
         purgesAt: null, handOver: null,
-        roles: [{ bindingId: 'rb_1', workspaceId: 'ws1', workspaceName: 'Finance', role: 'workspace_viewer', grantedAt: null, expiresAt: null }],
+        roles: [{ bindingId: 'rb_1', workspaceId: 'ws1', workspaceName: 'Finance', role: 'workspace_viewer', grantedAt: null, expiresAt: null, publishesData: false }],
         orgRead: null,
         requests: [],
         liveKeys: 1,
@@ -351,7 +351,7 @@ describe('its access', () => {
 
     it('asks to keep a role that ends', async () => {
         sa.get.mockResolvedValue(account({
-            roles: [{ bindingId: 'rb_1', workspaceId: 'ws1', workspaceName: 'Finance', role: 'workspace_viewer', grantedAt: null, expiresAt: '2099-01-01T00:00:00+00:00' }],
+            roles: [{ bindingId: 'rb_1', workspaceId: 'ws1', workspaceName: 'Finance', role: 'workspace_viewer', grantedAt: null, expiresAt: '2099-01-01T00:00:00+00:00', publishesData: false }],
         }))
         ar.extend.mockResolvedValue({ id: 'req_2' })
         renderPage()
@@ -359,6 +359,25 @@ describe('its access', () => {
         expect(roles).toHaveTextContent(/until/)
         await userEvent.click(within(roles).getByRole('button', { name: /^keep$/i }))
         await waitFor(() => expect(ar.extend).toHaveBeenCalledWith({ bindingId: 'rb_1' }))
+    })
+
+    it('says where it publishes data, and that its keys publish nothing while no role does', async () => {
+        sa.get.mockResolvedValue(account({
+            roles: [
+                { bindingId: 'rb_1', workspaceId: 'ws1', workspaceName: 'Finance', role: 'workspace_publisher', grantedAt: null, expiresAt: null, publishesData: true },
+                { bindingId: 'rb_2', workspaceId: 'ws2', workspaceName: 'Sales', role: 'workspace_member', grantedAt: null, expiresAt: null, publishesData: false },
+            ],
+        }))
+        renderPage()
+        const roles = await screen.findByRole('list', { name: 'Roles' })
+        expect(within(roles).getAllByRole('listitem')[0]).toHaveTextContent(/publishes data/)
+        expect(within(roles).getAllByRole('listitem')[1]).not.toHaveTextContent(/publishes data/)
+        expect(screen.queryByText(/can’t publish data anywhere/)).not.toBeInTheDocument()
+
+        sa.get.mockResolvedValue(account())
+        cleanup()
+        renderPage()
+        expect(await screen.findByText(/can’t publish data anywhere/)).toBeInTheDocument()
     })
 
     it('lets an administrator who reads every workspace let it read them all, saying first what that is', async () => {

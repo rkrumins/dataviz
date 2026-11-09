@@ -113,9 +113,10 @@ exception**.
 | If they should… | Give them | Because |
 | --- | --- | --- |
 | Look, not change | **Workspace viewer** | Read-only: they open the workspace's views and see its data sources. |
-| Build and edit views, and look after data sources day to day | **Workspace member** | The everyday contributor role. |
+| Build and edit views, and look after data sources day to day | **Workspace member** | The everyday contributor role. Changes versioned data in drafts, and can't publish them. |
+| Do what a member does, and publish versioned data sources' drafts | **Publisher** | Publishes drafts, merges reviews, syncs. Give it to the service accounts whose automation should publish too. |
 | Do what a member does, and let people in | **Workspace steward** | Adds people as viewers or members and answers their requests. |
-| Own the data — sources, semantic layers, catalog items and views — without managing people | **Data engineer** | Full data control, but no members or workspace settings. |
+| Own the data — sources, semantic layers, catalog items and views — without managing people | **Data engineer** | Full data control, publishing included, but no members or workspace settings. |
 | Run the workspace — members, settings, deletion and everything inside | **Workspace admin** | Every permission inside this one workspace, none outside it. |
 
 Custom roles your team has created also appear in the list, when they can be

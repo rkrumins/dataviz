@@ -390,12 +390,6 @@ async def _fold(
     session: AsyncSession, bindings: list[RoleBindingORM], *, sid: str, service: bool = False,
 ) -> PermissionClaims:
     """Bindings folded into claims, by the invariants ``resolve`` describes."""
-    if service:
-        # And never more than it could be given: a role it holds that is later
-        # widened to administer a workspace or let people in brings it none of
-        # that, and a platform role brings only reading every workspace.
-        from backend.app.services.workspace_access import is_requestable
-
     # Collect distinct role names so we can fetch role_permissions in
     # one query. This keeps resolve() O(1) DB calls regardless of how
     # many bindings the user has.
@@ -406,6 +400,29 @@ async def _fold(
     # Phase 5: pull the {permission_id: category} map once so the
     # category × scope filter has no per-permission DB cost.
     perm_categories = await permission_repo.get_permission_categories(session)
+    global_set, ws_sets = _fold_sets(bindings, role_perms, perm_categories, service=service)
+
+    return PermissionClaims(
+        sid=sid,
+        global_perms=tuple(sorted(global_set)),
+        ws_perms={
+            ws: _collapse_wildcards(perms) for ws, perms in ws_sets.items()
+        },
+    )
+
+
+def _fold_sets(
+    bindings, role_perms: Mapping[str, list[str]], perm_categories: Mapping[str, str], *,
+    service: bool = False,
+) -> tuple[set[str], dict[str, set[str]]]:
+    """The fold itself, on what the database already said: ``(global, ws_id → permissions)``
+    as raw sets. Shared by :func:`_fold` and :func:`simulate_for_user`, so a preview of a change
+    answers exactly as a request after it would."""
+    if service:
+        # And never more than it could be given: a role it holds that is later
+        # widened to administer a workspace or let people in brings it none of
+        # that, and a platform role brings only reading every workspace.
+        from backend.app.services.workspace_access import is_requestable
 
     # Aggregate into per-scope permission sets.
     global_set: set[str] = set()
@@ -430,7 +447,7 @@ async def _fold(
                 if ws_id:
                     ws_sets.setdefault(ws_id, set()).add(perm)
             # Other category × scope combinations are silently dropped.
-            # See Phase 5 invariants in the docstring above.
+            # See the Phase 5 invariants in ``resolve``'s docstring.
 
     # Phase 5: ``workspace:admin`` auto-implies every other workspace
     # permission in the same bucket. Computed against the seed leaves
@@ -439,14 +456,7 @@ async def _fold(
     for ws_id, perms in ws_sets.items():
         if "workspace:admin" in perms:
             perms.update(_WORKSPACE_CATEGORY_LEAVES)
-
-    return PermissionClaims(
-        sid=sid,
-        global_perms=tuple(sorted(global_set)),
-        ws_perms={
-            ws: _collapse_wildcards(perms) for ws, perms in ws_sets.items()
-        },
-    )
+    return global_set, ws_sets
 
 
 # ── Wildcard collapsing ───────────────────────────────────────────────
@@ -1034,9 +1044,13 @@ async def simulate_for_user(
 
     Returns the same ``(global_perms, ws_perms)`` shape as
     ``resolve`` but as raw sets (no wildcard collapse) so callers can
-    diff cleanly.
+    diff cleanly — folded by the same rules (``_fold_sets``): a service
+    account's own bindings only and what it may hold of them, the
+    category × scope filter, and ``workspace:admin``'s implication. What a
+    preview says someone gains or loses is what their next request holds.
     """
-    group_ids = await user_repo.get_groups_for_user(session, user_id)
+    service = is_service_account(user_id)
+    group_ids = [] if service else await user_repo.get_groups_for_user(session, user_id)
     bindings = await binding_repo.list_for_user_with_groups(
         session, user_id=user_id, group_ids=group_ids
     )
@@ -1045,6 +1059,11 @@ async def simulate_for_user(
         bindings = [b for b in bindings if b.id != excluded_binding_id]
     if excluded_role_name is not None:
         bindings = [b for b in bindings if b.role_name != excluded_role_name]
+    if service:
+        bindings = [
+            b for b in bindings
+            if b.scope_type in ("workspace", "global") and b.subject_type == "user"
+        ]
 
     role_names = sorted({b.role_name for b in bindings})
     role_perms = await permission_repo.get_role_permissions_for_roles(
@@ -1053,19 +1072,8 @@ async def simulate_for_user(
     if role_perm_override:
         for name, perms in role_perm_override.items():
             role_perms[name] = list(perms)
-
-    global_set: set[str] = set()
-    ws_sets: dict[str, set[str]] = {}
-    for b in bindings:
-        perms_for_role = role_perms.get(b.role_name, [])
-        if b.scope_type == "global":
-            global_set.update(perms_for_role)
-        else:
-            ws_id = b.scope_id or ""
-            if not ws_id:
-                continue
-            ws_sets.setdefault(ws_id, set()).update(perms_for_role)
-    return global_set, ws_sets
+    perm_categories = await permission_repo.get_permission_categories(session)
+    return _fold_sets(bindings, role_perms, perm_categories, service=service)
 
 
 # ── SSO group -> target reconciliation (Phase 3 — both targets) ──────

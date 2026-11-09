@@ -1829,12 +1829,20 @@ async def _with_bootstrap(res: dict, data_source_id: str, ws_id: str,
 @router.post("/resolve", response_model=ResolveResponse)
 async def resolve_graph_open(
     ws_id: str, body: ResolveRequest,
+    request: Request,
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    claims: PermissionClaims = Depends(get_permission_claims),
     svc: GraphVersioningService = Depends(get_versioning_service),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Resolve and ensure the caller has an open draft to edit on (opens one if none, at the level
-    its data source's policy starts a draft at). None opens on a fork while forks are off."""
+    its data source's policy starts a draft at). None opens on a fork while forks are off.
+
+    An API key must cover the data source (an id in the body is invisible to ``requires()``'s key
+    scope), and a draft it opens for a view is for a view of this workspace it may edit."""
+    await api_key_auth.hold_to_data_source(request, body.data_source_id, ws_id)
+    if claims.key_scope is not None:
+        await _check_import_view(session, ws_id, body.originating_view_id, user, claims)
     if body.data_source_id.startswith("dsfork_"):
         await require_forks_enabled()
     res = await svc.resolve_graph(
@@ -3464,7 +3472,7 @@ async def sync_ingest(
     strategy: str = Query("merge", pattern="^(merge|external_wins)$"),
     source: str = Query("external"),
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
-    _publisher: User = Depends(requires(_PUBLISH, workspace="ws_id")),
+    _publisher: User = Depends(require_publish),
     overrides: SyncOverrides = Depends(sync_override_gate),
     _meta: dict = Depends(graph_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
@@ -3476,7 +3484,8 @@ async def sync_ingest(
     the external value under ``strategy=external_wins``. A node the snapshot drops cascades
     to its containment subtree (ontology-driven). Idempotent on ``idempotencyKey``. 409
     ``curation_at_risk`` / ``mass_delete_blocked`` unless a workspace admin passes ``force`` /
-    ``allowMassDelete``."""
+    ``allowMassDelete``. It advances main, so it needs publish: an API key, its owner's
+    (``require_publish``); no key passes the overrides, which need a workspace admin."""
     rows: List[dict] = []
     content = await request.body()
     for line in content.splitlines():

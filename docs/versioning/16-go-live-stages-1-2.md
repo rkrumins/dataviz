@@ -68,8 +68,10 @@ the graph routes; everyone else edits a draft.
 | Merge its review | Any workspace manager with publish | Any workspace manager with publish | — |
 
 - `workspace:datasource:publish` is separate from manage. `workspace_member` loses it;
-  `workspace_publisher` carries it. API keys never publish or merge, and write `main` directly only
-  if their owner holds publish (for a service account's `nxsat_` key, the service account itself).
+  `workspace_publisher` carries it. An API key never holds it: it publishes a draft, merges a
+  draft's review, syncs a snapshot and writes `main` directly only if its owner holds publish (for a
+  service account's `nxsat_` key, the service account itself), and never reverts, restores, freezes
+  or merges a fork's review.
 - Each approval records the draft head it saw. A later content commit makes it stale (409
   `approval_required` with `pending` and `stale`); `POST …/approve` with `expectedHeadCommitId`
   answers 409 `head_moved`; authors and draft owners get 403 `self_review`.

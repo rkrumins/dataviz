@@ -391,7 +391,8 @@ async def list_requestable_roles(
     stranger what the workspace is."""
     ws = await _live_workspace(session, workspace_id)
     roles = [
-        RequestableRole(name=r.name, description=r.description, is_system=r.is_system)
+        RequestableRole(name=r.name, description=r.description, is_system=r.is_system,
+                        publishes_data=workspace_access.publishes_data(perms))
         for r, perms in await workspace_access.workspace_roles(session, workspace_id)
         if workspace_access.is_requestable(perms)
     ]
@@ -892,14 +893,9 @@ async def approve_access_request(
     else:
         granted_role = body.role or row.requested_role
         perms = await _grantable_role(session, claims, ws.id, granted_role)
-        if account and not workspace_access.is_requestable(perms):
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    "A service account can hold a workspace role that neither administers the "
-                    "workspace nor lets people in"
-                ),
-            )
+        refusal = account and workspace_access.service_account_refusal(perms, workspace_role=True)
+        if refusal:
+            raise HTTPException(status_code=422, detail=refusal)
         if not body.role and not workspace_access.is_requestable(perms):
             # Approving as asked grants what may be asked for — a request
             # from before that rule, for authority over the workspace,
@@ -1024,7 +1020,13 @@ async def _approve_extension(
             status_code=status.HTTP_409_CONFLICT,
             detail="That access has been removed; they can ask to join again",
         )
-    await _grantable_role(session, claims, ws.id, binding.role_name)
+    perms = await _grantable_role(session, claims, ws.id, binding.role_name)
+    # Keeping a role is granting it again: not one a service account can't hold, as a role edited
+    # since it was granted may have become (its claims would drop what it gives).
+    refusal = is_service_account(row.requester_id) and workspace_access.service_account_refusal(
+        perms, workspace_role=True)
+    if refusal:
+        raise HTTPException(status_code=422, detail=refusal)
     if binding.idp_exception:
         if not body.exception:
             raise _idp_managed(

@@ -164,7 +164,7 @@ class Principal:
 | workspace_data_engineer (granted P) | Y | Y | Y | – |
 | workspace_admin, org_admin, super_admin | Y | Y | Y (via category leaves) | Y |
 
-> **Shipped (Stage 1 seed, Stage 2 enforcement): as designed.** `20261017_1000_datasource_publish` seeds the permission and `workspace_publisher` (c1852aa1); the admin UI treats Publisher as a workspace role (08168c26). P is enforced since ca0472df. An API key never holds P (it is not in `KEY_GRANTABLE_PERMISSIONS`).
+> **Shipped (Stage 1 seed, Stage 2 enforcement): as designed.** `20261017_1000_datasource_publish` seeds the permission and `workspace_publisher` (c1852aa1); the admin UI treats Publisher as a workspace role (08168c26). P is enforced since ca0472df. An API key never holds P (it is not in `KEY_GRANTABLE_PERMISSIONS`); where it needs P it passes where its owner — the person, or the service account — holds it (`require_publish`, `require_publish_for_main`).
 
 ### 3. Branch relations and visibility
 
@@ -258,11 +258,11 @@ State `blocked` returns HOLD, not a denial.
 > - DRAFT_MANAGE and DRAFT_ABANDON M + O/bM.
 > - PR_REVIEW (approve) M; not the author or the source draft's owner (403 `self_review`); not a service account (403 `person_required`), nor a manager of the service account that opened the PR or owns its draft, nor anyone who made a key for it (403 `self_review`); `expectedHeadCommitId` optional. PR_EDIT and PR_CLOSE M.
 > - PR_OPEN and PR_EDIT: a service account named as a reviewer → 403 `person_required`. `GET …/reviewers` leaves service accounts out.
-> - PR_MERGE and DIRECT_PUBLISH M + P; DIRECT_PUBLISH also O (private) or O/bM (shared).
-> - MAIN_REVERT and MAIN_RESTORE M + P, target `main` only (there is no `target`). MAIN_SYNC (sync and `/graph/resync`) M + P.
+> - PR_MERGE and DIRECT_PUBLISH M + P; DIRECT_PUBLISH also O (private) or O/bM (shared). An API key passes P where its owner holds it (a fork's review stays closed to keys). A DIRECT_PUBLISH refused for O/bM says so with `hint: merge_request`: anyone with M + P merges the draft's review, whoever owns it. Who may publish is checked before the draft's staged edits are folded, so a refused publisher commits nothing.
+> - MAIN_REVERT and MAIN_RESTORE M + P, target `main` only (there is no `target`); closed to keys. MAIN_SYNC (sync and `/graph/resync`) M + P; `POST …/sync` is open to a key where its owner holds P (its `force` / `allowMassDelete` overrides need `workspace:admin`, which no key holds), `/graph/resync` is not.
 > - MAIN_WRITE_THROUGH and MAIN_BULK: a person needs P (403 `publish_required`); an API key passes only where its owner holds P.
 > - FORK M. REBUILD and RECONCILE M, not P. LIFECYCLE_FREEZE (freeze and unfreeze) M + P.
-> - There is no BYPASS, PR_COMMENT, PR_DISMISS_REVIEW, DRAFT_REOPEN, service principal or `system:*` principal. #567's service accounts are not that principal: they act through `nxsat_` keys with their own workspace roles, write drafts and raise reviews as any key does, never review, approve or join a draft, and pass MAIN_WRITE_THROUGH and MAIN_BULK only where the account itself holds P.
+> - There is no BYPASS, PR_COMMENT, PR_DISMISS_REVIEW, DRAFT_REOPEN, service principal or `system:*` principal. #567's service accounts are not that principal: they act through `nxsat_` keys with their own workspace roles, write drafts and raise reviews as any key does, never review, approve or join a draft, and pass P — MAIN_WRITE_THROUGH, MAIN_BULK, MAIN_SYNC, DIRECT_PUBLISH and PR_MERGE of a draft's review — only where the account itself holds it.
 
 ### 5. Lifecycle × drafts/PRs (shared §9; ACCESS enforcement)
 
@@ -875,7 +875,7 @@ The rollout follows the shared §17 order.
 > - step 2, the forced claims refresh, moved to the R3 preconditions. It has not run: a session minted before R0 holds `workspace:datasource:*` until its next refresh;
 > - step 5, the R0 report, moves to R2, where admins use it. Its activity inputs (M2, M10, possibly a separate `GRAPHVER_DB_URL`) are not readable from a management-DB migration. `docs/RBAC.md` lists who holds publish.
 >
-> API keys cannot carry `workspace:datasource:publish`: it is not in `KEY_GRANTABLE_PERMISSIONS`. Stage 2 did not extend the key profile. Instead, when publish became enforced (ca0472df), publish, both merges, revert, restore and sync left the API-key surface (a key gets 403 `api_key_not_allowed`), so `test_api_key_surface.py::test_nothing_on_the_surface_needs_more_than_a_key_can_hold` holds; and a key writes `main` directly only where its owner (a person, or the service account for an `nxsat_` key) holds publish (e6815a25). Since then, publishing a draft and merging a draft's review have come back to the surface under the same rule (`versioning_gate.require_publish`, which carries no `required_permission`, so the test still holds); a fork's review, revert, restore and sync stay closed to keys.
+> API keys cannot carry `workspace:datasource:publish`: it is not in `KEY_GRANTABLE_PERMISSIONS`. Stage 2 did not extend the key profile. Instead, when publish became enforced (ca0472df), publish, both merges, revert, restore and sync left the API-key surface (a key gets 403 `api_key_not_allowed`), so `test_api_key_surface.py::test_nothing_on_the_surface_needs_more_than_a_key_can_hold` holds; and a key writes `main` directly only where its owner (a person, or the service account for an `nxsat_` key) holds publish (e6815a25). Since then, publishing a draft, merging a draft's review and syncing a snapshot (`POST …/sync`) have come back to the surface under the same rule (`versioning_gate.require_publish`, which carries no `required_permission`, so the test still holds); a fork's review, revert, restore, freeze and `/graph/resync` stay closed to keys. Data Engineer has carried publish since R0, so an account on it — a person's or a service account's — publishes, and so do its keys; Member never has (see [RBAC → Who publishes data](/docs/rbac#who-publishes-data)).
 
 **R1: fences (enforce immediately, independent of the flag).**
 - branch_closed, the foreign-graph 404, main_write_forbidden on `/graph/changes` and imports, the `publishing` status during jobs, service and system principal restrictions, and graph_not_writable.

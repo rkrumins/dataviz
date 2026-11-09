@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
 
 from backend.app.auth import api_key_auth
 from backend.app.db import engine as db_engine
@@ -113,6 +114,24 @@ async def publisher_role(session) -> None:
     for permission in ("workspace:datasource:read", "workspace:datasource:manage",
                        "workspace:datasource:publish"):
         session.add(RolePermissionORM(role_name="workspace_publisher", permission_id=permission))
+
+
+async def data_engineer_role(session) -> None:
+    """Data engineer as the seed defines it, publish included (it has carried publish since the
+    datasource-publish migration). Call after :func:`publisher_role`, which adds the permission."""
+    from backend.common.role_defaults import SYSTEM_ROLE_DEFAULTS
+
+    spec = SYSTEM_ROLE_DEFAULTS["workspace_data_engineer"]
+    session.add(RoleORM(name="workspace_data_engineer", description=spec.description,
+                        scope_type="global", scope_id=None, is_system=True,
+                        created_at="2026-01-01", updated_at="2026-01-01"))
+    await session.flush()
+    known = set((await session.execute(select(PermissionORM.id))).scalars())
+    for permission in sorted(spec.permissions):
+        if permission not in known:
+            session.add(PermissionORM(id=permission, description="", category="workspace"))
+        session.add(RolePermissionORM(role_name="workspace_data_engineer", permission_id=permission))
+    await session.flush()
 
 
 @dataclass(frozen=True)

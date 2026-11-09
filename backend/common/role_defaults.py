@@ -151,7 +151,8 @@ SYSTEM_ROLE_DEFAULTS: dict[str, SystemRoleDefault] = {
     RoleName.WORKSPACE_DATA_ENGINEER.value: SystemRoleDefault(
         description=(
             "Owns data products inside a workspace (datasources, ontology, "
-            "catalog, views) without managing members or workspace settings."
+            "catalog, views) and publishes its versioned data sources, without "
+            "managing members or workspace settings."
         ),
         scope_type="global",
         permissions=frozenset({
@@ -171,7 +172,10 @@ SYSTEM_ROLE_DEFAULTS: dict[str, SystemRoleDefault] = {
         }),
     ),
     RoleName.WORKSPACE_MEMBER.value: SystemRoleDefault(
-        description="Standard workspace member — manage views and data sources.",
+        description=(
+            "Standard workspace member — manage views, and change data sources "
+            "through drafts. Publishing them needs Publisher or Data engineer."
+        ),
         scope_type="global",
         permissions=frozenset({
             "workspace:catalog:read",

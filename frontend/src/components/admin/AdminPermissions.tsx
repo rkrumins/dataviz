@@ -50,6 +50,7 @@ import { cn } from '@/lib/utils'
 import { PermissionTooltip } from './PermissionTooltip'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { ImpactPreviewModal } from './ImpactPreviewModal'
+import { PublishGapAdvisory } from './PublishGapAdvisory'
 import { RBACSearchBar, type RBACSearchTarget } from './RBACSearchBar'
 import { AccessSummary } from '@/components/access/AccessSummary'
 import { Link, useNavigate } from 'react-router-dom'
@@ -116,6 +117,17 @@ const CATEGORY_VISUAL: Record<string, {
 
 
 // ── Helpers ──────────────────────────────────────────────────────────
+
+/** Platform and workspace permissions together: no one binding grants both. */
+export function mixesScopes(perms: Iterable<string>): boolean {
+    let platform = false
+    let workspace = false
+    for (const p of perms) {
+        if (p.startsWith('system:')) platform = true
+        else if (p.startsWith('workspace:')) workspace = true
+    }
+    return platform && workspace
+}
 
 function groupByCategory(perms: PermissionResponse[]): Record<string, PermissionResponse[]> {
     const out: Record<string, PermissionResponse[]> = { system: [], workspace: [], resource: [] }
@@ -295,12 +307,15 @@ export function AdminPermissions() {
             ) : (
                 <>
                     {permissions && roles && tab === 'roles' && (
-                        <RoleMatrixTab
-                            permissions={permissions}
-                            roles={roles}
-                            onEditRole={setEditingRole}
-                            onPermissionUpdated={() => void fetchCatalogue()}
-                        />
+                        <div className="space-y-5">
+                            <PublishGapAdvisory roles={roles} onChanged={fetchCatalogue} />
+                            <RoleMatrixTab
+                                permissions={permissions}
+                                roles={roles}
+                                onEditRole={setEditingRole}
+                                onPermissionUpdated={() => void fetchCatalogue()}
+                            />
+                        </div>
                     )}
                     {permissions && roles && tab === 'catalog' && (
                         <PermissionCatalogTab
@@ -1947,6 +1962,24 @@ export function RoleEditorDrawer({
                             className="input w-full text-sm resize-none"
                         />
                     </div>
+
+                    {/* One grant is global or in a workspace, and keeps only that
+                        scope's permissions: a custom role carrying both never
+                        gives both. The built-in platform roles carry their
+                        workspace leaves only to render the matrix honestly. */}
+                    {!isSystem && mixesScopes(selectedPerms) && (
+                        <p
+                            role="note"
+                            className="flex items-start gap-2 p-3 rounded-lg border border-amber-500/25 bg-amber-500/[0.06] text-xs text-amber-800 dark:text-amber-200 leading-relaxed"
+                        >
+                            <AlertTriangle className="w-3.5 h-3.5 text-amber-500 shrink-0 mt-0.5" aria-hidden />
+                            <span>
+                                This role mixes platform and workspace permissions, and no one grant gives both: granted
+                                globally only its platform permissions apply, and granted in a workspace only its workspace
+                                ones. Service accounts can't hold it at all. Make two roles instead.
+                            </span>
+                        </p>
+                    )}
 
                     {/* Permission picker */}
                     <div>

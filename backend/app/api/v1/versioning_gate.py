@@ -174,7 +174,14 @@ def require_publish_for_main(claims: PermissionClaims, ws_id: str) -> None:
         return
     if not claims.ws_available:
         raise HTTPException(status_code=503, detail="Authorization temporarily unavailable")
-    raise PublishRequired()
+    raise PublishRequired(_KEY_PUBLISH_NEEDS if key is not None else PublishRequired.DEFAULT)
+
+
+#: Why a key is refused publish: never the key's own setting, always its account's role.
+_KEY_PUBLISH_NEEDS = (
+    "the account this API key belongs to can't publish in this workspace: give that person or "
+    "service account the Workspace publisher role here (workspace:datasource:publish), or import "
+    "into a draft and have someone who can publish it")
 
 
 #: A person's check in :func:`require_publish`: ``requires()`` itself, so its 403 body, its audit

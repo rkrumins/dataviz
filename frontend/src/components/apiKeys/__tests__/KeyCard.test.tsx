@@ -112,10 +112,22 @@ describe('the drawer', () => {
     })
 
     it('shows what it reaches now, per workspace or across every one', async () => {
-        drawer(detail({ effectiveAccess: access({ workspaces: [], everyWorkspace: { views: 'read', data: 'read', publish: false } }) }))
+        drawer(detail({ effectiveAccess: access({ workspaces: [], everyWorkspace: { views: 'read', data: 'read', publish: false, publishData: false } }) }))
         await userEvent.click(screen.getByRole('tab', { name: /access/i }))
         expect(await screen.findByText('Every workspace')).toBeInTheDocument()
         expect(screen.getByText(/organisation-wide role/i)).toBeInTheDocument()
+    })
+
+    it('says apart publishing views and publishing data, and where it changes data but can’t publish it', async () => {
+        drawer(detail({ effectiveAccess: access({ workspaces: [
+            { id: 'ws1', name: 'Finance', views: 'write', data: 'write', publish: true, publishData: true },
+            { id: 'ws2', name: 'Sales', views: 'none', data: 'write', publish: false, publishData: false },
+        ] }) }))
+        await userEvent.click(screen.getByRole('tab', { name: /access/i }))
+        expect(await screen.findByText('Publishes views')).toBeInTheDocument()
+        expect(screen.getByText('Publishes data')).toBeInTheDocument()
+        expect(screen.getAllByText(/can’t publish data here/)).toHaveLength(1)
+        expect(screen.queryByText('Can publish')).not.toBeInTheDocument()
     })
 
     it('shows 30 days of use: totals, the share that wrote, refusals and errors', async () => {

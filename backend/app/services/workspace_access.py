@@ -143,9 +143,36 @@ def ceiling_refusal(claims: PermissionClaims, ws_id: str, role_name: str) -> str
     return f"You can only grant roles whose permissions you hold yourself — not '{role_name}'"
 
 
+PUBLISH_DATA = "workspace:datasource:publish"
+
+
+def publishes_data(perms: Iterable[str]) -> bool:
+    """A role whose holders publish the workspace's versioned data sources — and whose API keys
+    do: it carries publish, or ``workspace:admin``, which implies it."""
+    perms = set(perms)
+    return PUBLISH_DATA in perms or "workspace:admin" in perms
+
+
 def is_requestable(perms: Iterable[str]) -> bool:
     perms = set(perms)
     return "workspace:admin" not in perms and MEMBERS_ADD not in perms
+
+
+def service_account_refusal(bundle: Iterable[str], *, workspace_role: bool) -> Optional[str]:
+    """Why a service account may not hold a role in a workspace, or ``None`` when it may — the
+    rule its claims are folded by (``permission_service._fold``), said before the grant rather
+    than discovered at its first request. ``workspace_role``: the role is one of the workspace's
+    (:func:`workspace_roles`); ``bundle``: its permissions."""
+    bundle = set(bundle)
+    if not workspace_role:
+        if any(p.startswith("system:") for p in bundle):
+            return ("A service account holds only workspace roles in a workspace, and this role "
+                    "carries platform permissions too")
+        return "A service account can hold a workspace role, and this isn't one here"
+    if not is_requestable(bundle):
+        return ("A service account can hold a workspace role that neither administers the "
+                "workspace nor lets people in")
+    return None
 
 
 def answerable_workspace_ids(claims: PermissionClaims) -> Optional[list[str]]:

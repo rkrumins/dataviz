@@ -484,7 +484,8 @@ Searches and traces only read, though they are `POST`s: a read-only key may make
 ### Tell the platform a data source changed
 
 **Needs:** `workspace:datasource:manage` in the data source's workspace — for a service
-account, the Workspace member or Data engineer role there.
+account, the Workspace member, Publisher or Data engineer role there. (Publishing a versioned data
+source needs Publisher or Data engineer: see [RBAC → Who publishes data](/docs/rbac#who-publishes-data).)
 
 When something outside {brand} loads data into a graph, the platform notices on its own: a
 drift probe reads the graph's counts every minute (`AGGREGATION_PROBE_INTERVAL_SECS`, 60 s by

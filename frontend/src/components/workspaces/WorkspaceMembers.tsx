@@ -1141,6 +1141,14 @@ function AddMemberModal({
 
     // Reset selection when toggling subject type
     useEffect(() => { setSelected(null) }, [kind])
+    // A role picked for a person that a service account can't hold (it
+    // administers the workspace or lets people in) is not kept for one: the
+    // server would refuse it. Back to Member, or the first role it may hold.
+    useEffect(() => {
+        if (!availableRoles || availableRoles.some(r => r.name === role)) return
+        const fallback = availableRoles.find(r => r.name === 'workspace_member') ?? availableRoles[0]
+        if (fallback) setRole(fallback.name as RoleName)
+    }, [availableRoles, role])
 
     const candidates = useMemo(() => {
         // Already active-only, searched and name-sorted by the server.
@@ -1337,6 +1345,11 @@ function AddMemberModal({
                                                 {isCustom && (
                                                     <span className="inline-flex items-center px-1.5 py-px rounded-full text-[9px] font-bold bg-violet-500/10 text-violet-600 dark:text-violet-400 border border-violet-500/20">
                                                         custom
+                                                    </span>
+                                                )}
+                                                {r.publishesData && (
+                                                    <span className="inline-flex items-center px-1.5 py-px rounded-full text-[9px] font-bold bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border border-emerald-500/20">
+                                                        publishes data
                                                     </span>
                                                 )}
                                             </div>

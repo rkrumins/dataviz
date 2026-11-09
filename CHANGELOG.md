@@ -9,6 +9,95 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — API keys and service accounts publish and import where their roles say
+
+Integrations using API keys and service accounts were refused when they published graph changes or
+imported versioned graphs, even with the roles they had been given. Keys now follow the account's
+Publisher role on every route a connector needs. The app also shows where a key or account can
+publish data, and why a refusal happened.
+
+### Added
+
+- **Keys sync a snapshot** into the published version (`POST …/versioning/graphs/{id}/sync`) where
+  their account is a Publisher. Bulk ingest into a graph that already holds data has always
+  answered "use sync", and sync refused every key, which left no way to refresh a versioned graph
+  by API. The sync safety overrides (`force`, `allowMassDelete`) stay a workspace admin's.
+- **Keys set up the graph they import into**, with what a person needs for each (manage):
+  - turn version control on (`POST …/graph/bootstrap`) and resume it (`…/bootstrap/retry`);
+  - make a data source's graph (`POST …/versioning/graphs`);
+  - open a draft by data source (`POST …/versioning/resolve`).
+  A key limited to some data sources sets up only those. Deciding a paused bootstrap's duplicates,
+  and abandoning it, stay a person's.
+- **`publishData`** on a key's effective access (detail, preview, and `/options` for its owner):
+  data write, where the key's owner holds Publisher.
+- **`GET /api-keys/self` returns `effectiveAccess`**, so an integration can see what its key can do
+  before meeting a 403.
+- **A service account's roles say whether it publishes data** (`publishesData`). Its page marks
+  them, and says when its keys can publish data nowhere.
+- **Every role picker marks the roles that publish data**: giving a service account a role,
+  adding a member, and asking for access. The role options carry `publishesData`.
+- **Permissions → Roles lists roles that change data but can't publish it.** These are roles with
+  `manage` and without publish, such as Workspace member or a custom role made before publish
+  existed. An admin can add publish to one, after the usual impact preview. Nothing changes on
+  its own.
+
+### Changed
+
+- **Data engineer's and Workspace member's descriptions say who publishes.**
+  - Data engineer publishes versioned data sources by default. It has carried
+    `workspace:datasource:publish` since that permission was added, and the description now
+    says so.
+  - Workspace member changes data sources through drafts, and publishing them needs Publisher or
+    Data engineer.
+  - Migration `20261109_1200_publish_words` updates a description only where it is still the
+    seeded one. No permission changes.
+- **RBAC → Who publishes data** is one table of who publishes: per role, for people, service
+  accounts and API keys. The user, admin, integration and connector guides point to it.
+- **"Publish" on a key now says "Publish views".** The switch, the key's chip, its summary and the
+  access matrix only ever covered views. The matrix shows **Publishes views** and **Publishes data**
+  separately, and notes where a key changes data but can't publish it.
+- **The key wizard** says, beside the data levels, in which workspaces a data-writing key will
+  import into drafts but can't publish. The data-writing preset is now **Import and publish data
+  (connectors)**.
+- **`403 publish_required` to a key** says that the key's account, not the key, needs the Workspace
+  publisher role.
+- **Publishing a draft you don't own** is refused with `hint: merge_request`: open a merge request
+  on it, and anyone who may publish there can merge it.
+- **Impact previews** now compute what someone gains or loses with the same rules as their claims:
+  - a service account's own roles only, and only what it may hold;
+  - no workspace permission from a global binding;
+  - everything `workspace:admin` implies.
+
+### Fixed
+
+- **A refused publish no longer commits the draft's staged edits under the refused caller's name.**
+  The right to publish is now checked before the edits are folded.
+- **Inviting someone as Data engineer into a workspace** was refused as "global". Without a
+  workspace, it made a global binding that granted nothing. Any role made only of workspace
+  permissions is now invited into a workspace.
+- **An SSO mapping of a workspace-only role to the whole platform** is refused. It would have
+  granted nothing.
+- **A service account can no longer be left holding a role it can't use.**
+  - Editing a role it holds so that the role administers a workspace or lets people in is refused
+    (`409 role_held_by_service_accounts`).
+  - Keeping such a role when it ends is refused.
+  - A role that also carries platform permissions is refused with a reason that says so.
+- **Adding a service account as a member** no longer carries over a role picked for a person that
+  the account can't hold.
+- **The role editor warns** when a custom role mixes platform and workspace permissions. A single
+  grant never gives both.
+
+### Upgrading
+
+- People and service accounts on **Workspace member**, or on custom roles created before
+  `workspace:datasource:publish` existed, can import into drafts but can't publish. Give the
+  accounts that should publish the **Workspace publisher** role, or add publish to a role under
+  **Permissions → Roles**.
+- Regenerated the reviewed API key surface (`backend/tests/fixtures/api_key_surface.txt`) and
+  `docs/security/endpoints.md`: five routes open to keys.
+
+---
+
 ## [Unreleased] — Business view: every draft action, plain words for readers, a new view switch and Minimal rows
 
 Business users can now do everything in a draft without switching to Technical. Readers get plain
