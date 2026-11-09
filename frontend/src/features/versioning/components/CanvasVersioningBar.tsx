@@ -413,7 +413,7 @@ export function CanvasVersioningBar({
                   <span className="block text-[12px] font-semibold leading-snug text-ink">
                     What changed after #{highlightOrigin.fromSeq} up to #{highlightOrigin.toSeq}, on the canvas
                   </span>
-                  <ChangeLegend />
+                  <ChangeLegend comparison />
                 </span>
               )}>
                 <span>{`What changed after #${highlightOrigin.fromSeq} up to #${highlightOrigin.toSeq}`}</span>
@@ -657,17 +657,21 @@ export function CanvasVersioningBar({
  *  action leads, the legend is the body. `label` takes a node precisely so a
  *  legend like this does not need a second component. */
 /** What the canvas's change marks mean: the rings, the colours, and how a deletion reads. */
-function ChangeLegend() {
+/** What the marks on the canvas mean: a draft's own changes, or two revisions compared, where
+ *  nothing is a draft's and nothing waits to be published. */
+function ChangeLegend({ comparison = false }: { comparison?: boolean }) {
   return (
     <span className="mt-2 block space-y-1.5 text-[11px] leading-snug text-ink-muted">
       <span className="flex items-center gap-2">
         <span className="w-4 h-4 rounded ring-2 ring-emerald-500/70 inline-block shrink-0" />
-        solid ring = saved to this draft
+        {comparison ? 'solid ring = changed in these revisions' : 'solid ring = saved to this draft'}
       </span>
-      <span className="flex items-center gap-2">
-        <span className="w-4 h-4 rounded outline-dashed outline-2 outline-offset-1 outline-emerald-400/80 inline-block shrink-0" />
-        dashed halo = edited but not saved
-      </span>
+      {!comparison && (
+        <span className="flex items-center gap-2">
+          <span className="w-4 h-4 rounded outline-dashed outline-2 outline-offset-1 outline-emerald-400/80 inline-block shrink-0" />
+          dashed halo = edited but not saved
+        </span>
+      )}
       <span className="flex items-center gap-3 border-t border-glass-border/60 pt-1.5">
         <span className="inline-flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-emerald-500" />new</span>
         <span className="inline-flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-orange-500" />edited</span>
@@ -675,7 +679,9 @@ function ChangeLegend() {
       </span>
       <span className="flex items-center gap-2 border-t border-glass-border/60 pt-1.5">
         <DeletedChip />
-        <span><span className={STATUS_META.removed.strike}>struck name</span> = deleted, kept in its place until published</span>
+        <span>
+          <span className={STATUS_META.removed.strike}>struck name</span> = {comparison ? 'deleted, drawn where it was' : 'deleted, kept in its place until published'}
+        </span>
       </span>
       <span className="flex items-center gap-2">
         <svg width="28" height="6" aria-hidden className="shrink-0">

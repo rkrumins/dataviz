@@ -265,7 +265,7 @@ holds no payload.
 - **How many are drawn.** The canvas store's `deletedDrawn` holds drawn of total; ones being
   fetched count as drawn, so it doesn't flicker, and a failed fetch takes them off. When not all are
   drawn, the comparison chip and the draft bar say "M of N deleted drawn" and open the list. The
-  comparison chip also counts its changes, with `ChangeLegend` on hover.
+  comparison chip also counts its changes, with `ChangeLegend` on hover, worded for a comparison.
 - **Restore on a large draft** first fetches what the subtree and its links were (`restoreNeeds`,
   500 a request). It refuses past `RESTORE_NODES_MAX` (1,000 entities) or `RESTORE_LINKS_MAX`
   (2,000 links) rather than bring back part of it.

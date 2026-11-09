@@ -5,6 +5,7 @@
  * as they always have.
  */
 import { fireEvent, render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { DiffTooLargeError } from '@/services/versioningApiService'
 
@@ -131,6 +132,15 @@ describe('CanvasVersioningBar — what a comparison drew of its deletions', () =
     expect(screen.getByText('3 of 4 deleted drawn')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Open the list' }))
     expect(screen.getByText('history on 3→12')).toBeInTheDocument()
+  })
+
+  it('explains its marks as a comparison’s, not a draft’s', async () => {
+    render(<CanvasVersioningBar workspaceId="ws1" dataSourceId="ds1" />)
+    await userEvent.setup().hover(screen.getByText('What changed after #3 up to #12'))
+    const legend = await screen.findByRole('tooltip')
+    expect(legend).toHaveTextContent('solid ring = changed in these revisions')
+    expect(legend).toHaveTextContent('deleted, drawn where it was')
+    expect(legend).not.toHaveTextContent(/draft|not saved|until published/)
   })
 
   it('says nothing of drawing when every deletion is drawn', () => {
