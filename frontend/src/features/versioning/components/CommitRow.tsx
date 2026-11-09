@@ -31,8 +31,10 @@ import { ChangeTreePanel } from './ChangeTreePanel'
 export interface RevisionRowActions {
   /** Published's head: the graph as it is now, which there is nothing to open or compare with. */
   headSeq: number
-  /** Why opening is held back for now (unsaved edits), or null. */
+  /** Why opening is held back for now (unsaved edits, nowhere to open it), or null. */
   openBlocked?: string | null
+  /** Why there is no link to copy (nowhere to open it), or null. */
+  linkBlocked?: string | null
   onOpen: () => void
   onCompareWithNow: () => void
   onCompareWith: () => void
@@ -394,11 +396,13 @@ function RevisionMenuItems({ seq, atHead, plan, actions }: {
           <span className="block text-[11px] text-ink-muted leading-snug">Pick another revision in the list.</span>
         </span>
       </DropdownMenu.Item>
-      <DropdownMenu.Item onSelect={actions.onCopyLink} className={MENU_ITEM}>
+      <DropdownMenu.Item disabled={!!actions.linkBlocked} onSelect={actions.onCopyLink} className={MENU_ITEM}>
         <Link2 className="w-4 h-4 mt-0.5 shrink-0 text-ink-muted" />
         <span className="min-w-0">
           <span className="block font-medium">Copy link</span>
-          <span className="block text-[11px] text-ink-muted leading-snug">Opens the graph as it was at this revision.</span>
+          <span className="block text-[11px] text-ink-muted leading-snug">
+            {actions.linkBlocked ?? 'Opens the graph as it was at this revision.'}
+          </span>
         </span>
       </DropdownMenu.Item>
     </>

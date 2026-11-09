@@ -1,24 +1,28 @@
 /**
  * DataSourceVersioningTab — the data-source-level versioning hub (a tab in
  * DataSourceDetailPanel). Shows whether version control is on, lets a manager enable
- * it, and surfaces the branch list, the graph's forks + recent commit history, and the data source's
+ * it, and surfaces the branch list, the graph's forks + its history, and the data source's
  * drafts and reviews settings over its workspace's. Read-only overview apart from forking the graph,
  * a fork's own actions (Update from parent, Propose to parent, the trash and back), pausing editing
- * and (workspace admins) those settings; the editing loop lives on the canvas.
+ * and (workspace admins) those settings; the editing loop lives on the canvas. With the revision
+ * viewer, the history is a way into the graph as it was: a revision opens in one of the data
+ * source's views.
  */
 import { useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { GitBranch, GitCommitHorizontal, History, Loader2, Sparkles, GitMerge, User, GitPullRequestArrow, ChevronRight, RefreshCw, GitFork, Trash2, RotateCcw, Pause, Play, ShieldCheck, ArrowUpRight } from 'lucide-react'
+import { GitBranch, GitCommitHorizontal, History, Loader2, Sparkles, GitMerge, GitPullRequestArrow, ChevronRight, RefreshCw, GitFork, Trash2, RotateCcw, Pause, Play, ShieldCheck, ArrowUpRight } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/Button'
 import { DateTime } from '@/components/ui/DateTime'
 import { usePermission } from '@/store/auth'
 import { useFeature } from '@/store/features'
 import { useDataSourceProviderMap } from '@/hooks/useDataSourceProviderMap'
+import type { View } from '@/services/viewApiService'
 import {
-  useBranches, useCommitLog, useDataSourceDraftsPolicy, useDataSourcePullRequests, useForks, useResolveGraph,
+  useBranches, useDataSourceDraftsPolicy, useDataSourcePullRequests, useForks, useResolveGraph,
   useSetDataSourceDraftsPolicy, useSetGraphFrozen,
 } from '../hooks/useVersioning'
+import { useRevisionViewer } from '../hooks/useRevisionViewer'
 import { useBootstrapWatch } from '../model/useBootstrapWatch'
 import { deleteFork, restoreFork, PullRequestExistsError, type Branch, type BranchStatusFilter, type ForkSummary } from '@/services/versioningApiService'
 import { PrListRow } from '@/features/reviews/components/PrListRow'
@@ -32,7 +36,7 @@ import { ForkStrip } from './ForkStrip'
 import { ProjectionHealthCard } from './ProjectionHealthCard'
 import { ProposeToParentButton } from './ProposeToParentButton'
 import { UpdateFromParentButton } from './UpdateFromParentButton'
-import { kindMeta } from '../model/commitKind'
+import { ViewHistoryTimeline } from './ViewHistoryTimeline'
 import { ownerName } from '../model/branchVocab'
 
 // A missing actor (e.g. a genesis/import commit) is "system" — distinct from an actor id
@@ -40,27 +44,19 @@ import { ownerName } from '../model/branchVocab'
 const actorLabel = (a: unknown, userNames?: Record<string, string>) =>
   typeof a === 'string' && a ? ownerName(a, userNames) : 'system'
 
-function timeAgo(iso?: string): string {
-  if (!iso) return ''
-  const s = Math.floor((Date.now() - new Date(iso).getTime()) / 1000)
-  if (Number.isNaN(s)) return ''
-  if (s < 60) return `${s}s ago`
-  if (s < 3600) return `${Math.floor(s / 60)}m ago`
-  if (s < 86400) return `${Math.floor(s / 3600)}h ago`
-  return `${Math.floor(s / 86400)}d ago`
-}
-
 // The resolve 404 ("no versioned graph for data source") is the only failure that means version
 // control is off; anything else (a 5xx, a timeout, a refused request) says nothing either way.
 const NOT_VERSIONED = /404|not found|no versioned graph/i
 
 const ARCHIVED: BranchStatusFilter[] = ['merged', 'abandoned']
 
-export function DataSourceVersioningTab({ wsId, dataSourceId, itemCount }: {
+export function DataSourceVersioningTab({ wsId, dataSourceId, itemCount, views }: {
   wsId: string
   dataSourceId: string
   /** Best-known size of the source graph (nodes + edges): how long enabling may take. */
   itemCount?: number | null
+  /** The data source's views: where its revisions open. */
+  views: Array<Pick<View, 'id' | 'name'>>
 }) {
   const canManage = usePermission('workspace:datasource:manage', wsId)
   const canPublish = usePermission('workspace:datasource:publish', wsId)
@@ -76,7 +72,6 @@ export function DataSourceVersioningTab({ wsId, dataSourceId, itemCount }: {
   const [showArchived, setShowArchived] = useState(false)
   const branchesQ = useBranches(wsId, graphId)
   const archivedQ = useBranches(wsId, showArchived ? graphId : null, undefined, ARCHIVED)
-  const commitsQ = useCommitLog(wsId, graphId, resolve.data?.mainBranchId ?? null)
   // The data source's open PRs (the inbox's read), so newer merged or closed PRs can't push an
   // older one awaiting review off the page.
   const mrsQ = useDataSourcePullRequests(wsId, dataSourceId, 'open', !!graphId)
@@ -188,7 +183,6 @@ export function DataSourceVersioningTab({ wsId, dataSourceId, itemCount }: {
 
   const branches = branchesQ.data ?? []
   const drafts = branches.filter((b) => b.kind !== 'main' && (b.status === 'open' || b.status === 'publishing'))
-  const commits = (commitsQ.data?.commits ?? []) as Array<Record<string, unknown>>
   const forks = forksQ.data ?? []
 
   return (
@@ -324,53 +318,82 @@ export function DataSourceVersioningTab({ wsId, dataSourceId, itemCount }: {
         </section>
       )}
 
-      {/* History */}
-      <section>
-        <h4 className="flex items-center gap-1.5 text-[11px] font-semibold text-ink-muted uppercase tracking-wider mb-2">
-          <History className="w-3.5 h-3.5" /> Recent history (main)
-        </h4>
-        {commits.length === 0 ? (
-          <p className="text-xs text-ink-muted px-1 py-3">No commits yet.</p>
-        ) : (
-          <ol className="relative ml-1.5 border-l border-glass-border space-y-3 pl-4">
-            {commits.slice(0, 12).map((c, i) => {
-              const stats = (c.stats ?? {}) as Record<string, number>
-              const total = (stats.created ?? 0) + (stats.updated ?? 0) + (stats.deleted ?? 0)
-              const kind = kindMeta(c.kind)
-              return (
-                <li key={(c.commit_id as string) ?? i} className="relative">
-                  <span className="absolute -left-[1.36rem] top-0.5 w-2.5 h-2.5 rounded-full bg-accent-lineage ring-2 ring-canvas-elevated" />
-                  <p className="text-sm text-ink leading-tight flex items-center gap-1.5 min-w-0">
-                    <span className="truncate">
-                      {(c.message as string) || `${c.kind ?? 'commit'} #${c.commit_seq ?? ''}`}
-                    </span>
-                    <span className={cn('shrink-0 text-[9px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded', kind.cls)}>
-                      {kind.label}
-                    </span>
-                  </p>
-                  <p className="text-[11px] text-ink-muted flex items-center gap-2 mt-0.5">
-                    <span className="inline-flex items-center gap-1">
-                      <User className="w-3 h-3" />
-                      {actorLabel(c.actor, commitsQ.data?.userNames)}
-                    </span>
-                    <span>·</span>
-                    <span>{timeAgo(c.created_at as string)}</span>
-                    {total > 0 && (
-                      <>
-                        <span>·</span>
-                        <span className="tabular-nums">{total} change{total === 1 ? '' : 's'}</span>
-                      </>
-                    )}
-                  </p>
-                </li>
-              )
-            })}
-          </ol>
-        )}
-      </section>
+      {/* History, keyed by data source: the panel keeps this tab mounted from one data source to the
+          next, and the view picked and where the timeline was (a comparison, a row open) are each its own */}
+      {graphId && (
+        <RevisionHistory key={dataSourceId} wsId={wsId} dataSourceId={dataSourceId} graphId={graphId}
+          headSeq={resolve.data?.mainHeadCommitSeq ?? null} views={views} />
+      )}
 
       {openPrId && <PrDetailDrawer wsId={wsId} prId={openPrId} onClose={() => setOpenPrId(null)} />}
     </div>
+  )
+}
+
+// The view a data source's revisions open in, remembered per data source. A per-viewer nicety:
+// storage that throws (a private window, blocked site data) only means it isn't remembered.
+const OPEN_IN_KEY = 'synodic.versioning.revisionsOpenIn.'
+
+function rememberedView(dataSourceId: string): string | null {
+  try { return localStorage.getItem(OPEN_IN_KEY + dataSourceId) } catch { return null }
+}
+
+function rememberView(dataSourceId: string, viewId: string) {
+  try { localStorage.setItem(OPEN_IN_KEY + dataSourceId, viewId) } catch { /* not remembered */ }
+}
+
+const NO_VIEWS = 'This data source has no views to open it in.'
+
+/** Published's history a page at a time, with its months and comparisons. With the revision viewer,
+ *  a revision opens in one of the data source's views — the one picked under "Open in" — as the graph
+ *  was then (`?rev=`), with a comparison highlighted on it (`&hl=`), or as a link to copy. */
+function RevisionHistory({ wsId, dataSourceId, graphId, headSeq, views }: {
+  wsId: string
+  dataSourceId: string
+  graphId: string
+  /** Published's head, as resolved here: the branch store holds the canvas's graph, if any. */
+  headSeq: number | null
+  views: Array<Pick<View, 'id' | 'name'>>
+}) {
+  const navigate = useNavigate()
+  const revisionViewer = useRevisionViewer(wsId)
+  const [picked, setPicked] = useState(() => rememberedView(dataSourceId))
+  const view = views.find((v) => v.id === picked) ?? views.at(0)
+  // Where a revision opens: that view, read at the revision.
+  const openUrl = view && ((seq: number) => `/views/${view.id}?rev=${seq}`)
+
+  return (
+    <section>
+      <div className="flex items-center justify-between gap-2 mb-2">
+        <h4 className="flex items-center gap-1.5 text-[11px] font-semibold text-ink-muted uppercase tracking-wider">
+          <History className="w-3.5 h-3.5" /> History (main)
+        </h4>
+        {revisionViewer && view && (
+          <label className="flex items-center gap-1.5 text-[11px] text-ink-muted">
+            Open in
+            <select
+              value={view.id}
+              onChange={(e) => { setPicked(e.target.value); rememberView(dataSourceId, e.target.value) }}
+              className="max-w-[14rem] px-2 py-1 rounded-lg bg-canvas-elevated border border-glass-border text-[12px] text-ink focus:outline-none focus:border-accent-lineage/50"
+            >
+              {views.map((v) => <option key={v.id} value={v.id}>{v.name}</option>)}
+            </select>
+          </label>
+        )}
+      </div>
+      {/* The timeline scrolls its own list, a window of it at a time, so it needs a height of its own. */}
+      <div className="h-[60vh]">
+        <ViewHistoryTimeline
+          wsId={wsId}
+          graphId={graphId}
+          headSeq={headSeq}
+          openBlocked={openUrl ? null : NO_VIEWS}
+          onOpenRevision={openUrl && ((seq) => navigate(openUrl(seq)))}
+          onHighlight={openUrl && ((fromSeq, toSeq) => navigate(`${openUrl(toSeq)}&hl=${fromSeq}`))}
+          revisionLink={openUrl && ((seq) => `${window.location.origin}${openUrl(seq)}`)}
+        />
+      </div>
+    </section>
   )
 }
 
