@@ -9,6 +9,80 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Automation that leaves an audit trail, and never blocks people
+
+Integrations that change a versioned graph often left history hard to read: every commit looked
+like a person's, and none said which key or request made it. They also blocked people: every
+commit put every open draft "behind", so a connector syncing every few minutes meant nobody could
+publish without pulling first. Now every commit says who made it and how, every change to a
+published graph is in the activity log, and people publish past automation that didn't touch their
+work. This is phase 1 of [change streams](docs/versioning/19-change-streams.md); phase 2 lands an
+integration's many small changes as a few commits.
+
+### Added
+
+- **Every commit records how it was made:**
+  - `actorKind`: a person, a service account or the platform;
+  - `apiKeyId`: the API key it came through;
+  - `correlationId`: the request it came from.
+
+  A job keeps its request's provenance, so an import or publish a key queued is attributed to that
+  key, though a worker writes it.
+- **Every change to a published graph writes an activity event**, under its data source, with the
+  commit, its kind and counts, and who made it, through which key:
+  - `workspace.versioning.published`, `main_edited`, `ingested`, `synced`, `reverted` and
+    `restored`;
+  - written only once the commit has landed, and a failure to record never fails it.
+- **History tells people from automation.**
+  - An Everyone / People / Automation filter (commit log `origin=people|automation`).
+  - Chips name the service account, the platform or the API key behind each commit.
+  - A run of one automation's commits on a day collapses into one row that opens to its commits:
+    "Snowflake sync · 42 commits · 1,240 changes · 09:00–11:30".
+  - The commit log names each key (`apiKeyNames`).
+- **A publish credits each entity to whoever edited it.** Each version on the published graph names
+  its editor. The commit still names the publisher, and its contributors everyone who edited.
+
+### Changed
+
+- **People publish past automation.** A draft behind Published publishes and merges without a pull
+  when only automation moved Published (a service account, the platform, or any API key) and none
+  of it touched what the draft changes, or met it at an edge.
+
+  Otherwise `409 not_up_to_date` now says why: `reason` is `people`, `overlap` or `size`.
+  Freshness says `behindByPeople`, `pullRequired` and `pullReason`. The canvas says calmly when
+  automation alone moved Published, and what to do when a pull is needed.
+- **`POST /graph/commands/batch` is one commit per request** on a versioned graph, not one per
+  command.
+  - A busy or paused graph lands none of the commands, so the batch can be resent as it was.
+  - A batch the store refuses as a whole runs command by command, as before.
+- **The projector's whole-graph verify runs at most every 5 minutes per graph** on incremental
+  passes (`GRAPHVER_PROJECTION_VERIFY_INTERVAL_SECS`; `0` = every pass). It always runs on a full
+  seed, a dropped write, or after a verify that healed or failed.
+
+### Fixed
+
+- **The data source's Versioning tab shows "N changes" again.** It read stats keys that commits
+  never had.
+- **"What changed" on the behind-Published strip counts changes.** It read node and edge counts that
+  commits never had.
+
+### Upgrading
+
+- Migration `20261110_1000_gv_commit_prov` adds `commits.actor_kind`, `api_key_id` and
+  `correlation_id` (nullable text), and `jobs.provenance` (JSONB). It adds no rows and rewrites
+  none; an older commit is classed from its actor. A separate `GRAPHVER_DB_URL` gets the same
+  columns at start-up.
+- Clients that read `409 not_up_to_date` can use its new `reason`. A draft that is behind only
+  automation, on nothing it changes, is no longer refused.
+
+### Known limitations
+
+- A review's `pullRequired` counts only people's commits. Whether automation touched the draft is
+  found when it merges, and the refusal says so (`reason: overlap`). A draft's freshness checks this
+  on every poll, for drafts of up to 10,000 changes.
+
+---
+
 ## [Unreleased] — API keys and service accounts publish and import where their roles say
 
 Integrations using API keys and service accounts were refused when they published graph changes or

@@ -114,9 +114,10 @@ stateDiagram-v2
     note right of publishing
         Closed to every writer but its job:
         a save answers 409 branch_closed.
-        A draft behind main is refused with
-        NotUpToDate (409) until it pulls
-        the latest main (§3.6).
+        A draft behind people's changes,
+        or automation's on what it changes,
+        is refused with NotUpToDate (409)
+        until it pulls the latest main (§3.6).
     end note
 ```
 
@@ -303,10 +304,21 @@ sequenceDiagram
 
 Notable behaviors inside `_apply_draft_squash`:
 
-- **Require-up-to-date (NOT auto-rebase).** If `main` advanced under the draft, publish and `merge_mr`
-  **hard-block** with `NotUpToDate` — the user must pull latest (§3.7) first, so the diff that was
-  reviewed is the diff that lands. Both gates read the draft's *live* `base_commit_seq` under
-  `_lock_graph`, so `main` cannot advance between the check and the squash.
+- **Require-up-to-date (NOT auto-rebase), people first.** If people advanced `main` under the draft,
+  publish and `merge_mr` **hard-block** with `NotUpToDate` (`reason: "people"`) — the user must pull
+  latest (§3.7) first, so the diff that was reviewed is the diff that lands. Both gates read the draft's
+  *live* `base_commit_seq` under `_lock_graph`, so `main` cannot advance between the check and the
+  squash (`_require_landable`).
+
+  The exception is a draft behind **automation alone**: service accounts, the platform, or any API
+  key (`provenance.is_automation`). If none of it touched what the draft changes, or met it at an edge,
+  the draft lands without a pull. Otherwise:
+  - `reason: "overlap"` when automation changed what the draft changes;
+  - `reason: "size"` when the draft is too large to land behind (`SQUASH_PAGED_ABOVE`).
+
+  A connector committing every few minutes would otherwise block every person's publish until they
+  pulled ([19 · Change streams](19-change-streams.md) §3.5). The queued publish job
+  (`create_publish_job`) applies the same gate. A fork's main pulls whenever it moved.
 
   > **This chapter previously documented the opposite** ("auto-rebase-when-clean; `NotUpToDate` never
   > blocks here"). That was true once and is not any more. It matters because it puts **pulling on the
@@ -326,9 +338,13 @@ Notable behaviors inside `_apply_draft_squash`:
   (`service.py:769-790`). Edge integrity is re-checked against current `main` too, so two individually-clean
   drafts can't compose a two-parent or cyclic hierarchy (`service.py:791-803`; §3.11).
 - **Head before merkle.** The head pointer + `main_head_commit_seq` advance *before* `_commit_merkle`, and
-  the projection target is set to the new seq with `projected_commit_seq=0` — a deliberate **full reseed**
-  on publish because the incremental projector has been observed to miss a merge's field-level updates
-  that a count-based verify can't detect (`service.py:806-825`; see [04 · Projection](04-projection-and-cache.md)).
+  the projection target is set to the new seq (`_finish_squash`). The projector then applies the
+  publish's window incrementally. A publish no longer forces a full reseed (`projected_commit_seq=0`
+  is set only by a rebuild, a repin or an eviction); see [04 · Projection](04-projection-and-cache.md).
+- **Attribution per entity.** Each entity's version row on `main` names whoever edited it in the
+  draft (`_editors`); the commit's actor is the publisher. Every commit also records `actor_kind`,
+  `api_key_id` and `correlation_id`, and each one that advances `main` writes an activity event
+  ([19 · Change streams](19-change-streams.md) §3.6).
 
 ---
 
@@ -671,8 +687,10 @@ route gate. A person's direct write to a versioned graph's `main` — the graph 
 "workspace:datasource:publish"}` (`require_publish_for_main`, `backend/app/api/v1/versioning_gate.py`).
 An API key never holds publish: it writes `main` directly, publishes a draft (`POST …/publish`) or merges
 a draft's merge request only if its owner (the person, or the service account for an `nxsat_` key) holds
-publish (`require_publish`, otherwise 403 `publish_required`), and cannot call the fork-review merge,
-revert, restore or sync routes at all (403 `api_key_not_allowed`).
+publish (`require_publish`, otherwise 403 `publish_required`). It may sync a graph
+(`POST …/graphs/{id}/sync`) on the same terms; the `force` and `allowMassDelete` overrides stay a
+workspace admin's. It cannot call the fork-review merge, revert or restore routes at all (403
+`api_key_not_allowed`).
 `workspace_publisher`, `workspace_data_engineer` and the admins hold publish; `workspace_member` does
 not.
 
