@@ -90,6 +90,7 @@ tests/integration/test_repair_revert_commit.py
 tests/integration/test_resync_identity_invariant.py
 tests/integration/test_review_inbox_open_prs.py
 tests/integration/test_review_policy.py
+tests/integration/test_revision_bounds_postgres.py
 tests/integration/test_revision_overlay_reads.py
 tests/integration/test_seed_identity.py
 tests/integration/test_shared_draft_members.py

@@ -4580,7 +4580,8 @@ class GraphVersioningService:
         async with self._session() as s:
             await self._assert_branch_readable(s, await self._get_branch(s, graph_id, branch_id), viewer)
             if max_entities is not None:
-                size = await self._capped_state_size(s, graph_id, branch_id, max_entities)
+                size = await self._capped_state_size(s, graph_id, branch_id, max_entities,
+                                                     past=as_of_seq is not None)
                 if size > max_entities:
                     raise StateTooLarge(size, max_entities)
             state = (
@@ -4595,11 +4596,14 @@ class GraphVersioningService:
                 (edges if _is_edge_payload(p) else nodes)[eid] = p
             return {"nodes": nodes, "edges": edges}
 
-    async def _capped_state_size(self, s, graph_id: str, branch_id: str, cap: int) -> int:
+    async def _capped_state_size(self, s, graph_id: str, branch_id: str, cap: int,
+                                 past: bool = False) -> int:
         """At least as many live entities as a branch's whole state holds, counted no further than
         ``cap + 1`` a layer: its own live heads, ``main``'s under a draft, and each layer's up a
         fork's parents. An upper bound (a draft's edit of main's entity is counted twice), cheap
-        whatever the graph's size: an indexed count that stops past the cap."""
+        whatever the graph's size: an indexed count that stops past the cap. ``past``: of its
+        state at some revision, which may hold what was deleted since — every head, deleted ones
+        too, since each entity it ever held has one."""
         branch = await self._get_branch(s, graph_id, branch_id)
         main_id = await self._main_branch_id(s, graph_id)
         pairs = [(graph_id, branch_id)] + ([(graph_id, main_id)] if branch_id != main_id else [])
@@ -4611,7 +4615,7 @@ class GraphVersioningService:
         for gid, bid in pairs:
             live = select(EntityHeadORM.entity_id).where(
                 EntityHeadORM.graph_id == gid, EntityHeadORM.branch_id == bid,
-                EntityHeadORM.is_tombstone.is_(False)).limit(cap + 1)
+                *([] if past else [EntityHeadORM.is_tombstone.is_(False)])).limit(cap + 1)
             total += int(await s.scalar(select(func.count()).select_from(live.subquery())) or 0)
             if total > cap:
                 break

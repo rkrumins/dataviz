@@ -242,6 +242,7 @@ tests/test_residency_policy.py
 tests/test_residency_reads.py
 tests/test_restore_preview_api.py
 tests/test_revision_api.py
+tests/test_revision_bounds.py
 tests/test_revision_closure.py
 tests/test_revision_engine_routing.py
 tests/test_revision_gate.py
