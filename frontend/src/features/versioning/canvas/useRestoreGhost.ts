@@ -9,13 +9,15 @@
 import { useCallback } from 'react'
 import { useBranchStore } from '@/store/branchStore'
 import { useCanvasStore } from '@/store/canvas'
-import { useStagedChangesStore } from '@/store/stagedChangesStore'
+import { stagedScopeKey, useStagedChangesStore } from '@/store/stagedChangesStore'
 import { useContainmentEdgeTypes } from '@/store/schema'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { queryClient } from '@/lib/queryClient'
-import { getChangeEntriesBatch } from '@/services/versioningApiService'
+import { getChangeEntriesBatch, getDeletionCascade, type DeletionCascade } from '@/services/versioningApiService'
 import { BUSY_RETRY, VERSIONING_KEYS } from '../hooks/useVersioning'
-import { buildChangeSet, type ChangeSet } from '../model/changeModel'
+import { buildChangeSet, type ChangeOrigin, type ChangeSet, type GraphChange } from '../model/changeModel'
+import { ensureDraftOpen } from '../model/ensureDraftOpen'
+import type { TombstoneTarget } from '../components/TombstoneDetails'
 import { buildRestoreLinks, buildRestoreSubtree, indexRemovals, isGhostNode, restoreNeeds } from './deletionGhosts'
 import { listOriginOf } from './useDeletionGhosts'
 
@@ -104,4 +106,84 @@ export function useRestoreGhost(): (urn: string) => void {
     },
     [stage, activeChangeSet, containmentTypes, wsId, graphId, notify],
   )
+}
+
+/** Why a published deletion can't come back into the draft, as the draft's own check says. */
+function refusal(c: DeletionCascade, name: string): string {
+  switch (c.reason) {
+    case 'draft_predates': return `Pull the latest from Published into your draft first: it still has ‘${name}’.`
+    case 'recreated': return `Your draft has ‘${name}’, or something deleted with it, again: there is nothing to restore.`
+    case 'parent_gone': return `Restore ‘${c.detail?.parentName || 'what held it'}’ first: your draft no longer has it.`
+    case 'too_large': return `Too much went with ‘${name}’ to restore it here. Undo the change that deleted it in History instead.`
+    default: return `‘${name}’ isn’t deleted there, so there is nothing to restore.`
+  }
+}
+
+/**
+ * useRestoreDeletion — brings a published deletion back into the person's draft: the entity, what
+ * went with it and its links, each under its own id, staged parent-first and then reviewed. The
+ * draft says first whether it can take it (`…/deletion/cascade?into=`): a draft that still has it,
+ * has it again, or no longer has what held it is told why, and nothing is staged.
+ */
+export function useRestoreDeletion(): (target: TombstoneTarget, name: string) => Promise<boolean> {
+  const containmentTypes = useContainmentEdgeTypes()
+  const { notify } = useAppNotifications()
+
+  return useCallback(async (target: TombstoneTarget, name: string) => {
+    // A past revision is read-only: restoring goes back to the graph as it is now, in the draft.
+    if (useBranchStore.getState().revision) useBranchStore.getState().closeRevision()
+    const draftId = await ensureDraftOpen()
+    if (!draftId) return false
+    let cascade: DeletionCascade
+    try {
+      cascade = await queryClient.fetchQuery({
+        queryKey: [...VERSIONING_KEYS.changeList(target.wsId, target.graphId, target.origin), 'cascade', target.entityId, 'into', draftId],
+        queryFn: () => getDeletionCascade(target.wsId, target.graphId, target.entityId, target.origin, draftId),
+        staleTime: 0,
+        ...BUSY_RETRY,
+      })
+    } catch {
+      notify('error', 'Couldn’t restore it just now. Try again in a moment.')
+      return false
+    }
+    if (!cascade.restorable) {
+      notify('warning', refusal(cascade, name))
+      return false
+    }
+
+    const up = new Set(containmentTypes.map((t) => t.toUpperCase()))
+    const isContainment = (et: string) => up.has(et.toUpperCase())
+    const origin: ChangeOrigin = 'branchId' in target.origin
+      ? { source: 'branch', branchId: target.origin.branchId }
+      : { source: 'compare', fromSeq: target.origin.fromSeq, toSeq: target.origin.toSeq }
+    const skipped = new Set(cascade.skippedLinks ?? [])
+    const changes: GraphChange[] = cascade.removed.filter((e) => !skipped.has(e.entityId)).map((e) => ({
+      entityId: e.entityId, urn: e.urn ?? undefined, kind: e.kind, status: 'removed', origin,
+      label: (e.before?.displayName as string | undefined) ?? e.entityId,
+      before: e.before ?? undefined, sourceUrn: e.sourceUrn ?? undefined, targetUrn: e.targetUrn ?? undefined,
+    }))
+    const live = new Set(cascade.live ?? [])
+    const rootUrn = cascade.removed.find((e) => e.entityId === cascade.root)?.urn ?? cascade.root
+    const restores = buildRestoreSubtree(rootUrn, buildChangeSet(changes), live, isContainment)
+    if (!restores.length) {
+      notify('error', 'Couldn’t restore it just now. Try again in a moment.')
+      return false
+    }
+    const links = buildRestoreLinks(restores, changes, (u) => live.has(u), isContainment)
+
+    // Into the draft's own staged slice: the canvas switches to it on its next render, after this.
+    const { workspaceId, dataSourceId } = useBranchStore.getState()
+    const staged = useStagedChangesStore.getState()
+    staged.setScope(stagedScopeKey(workspaceId, dataSourceId, draftId))
+    restores.forEach((r) => staged.stage(r))
+    links.forEach((l) => staged.stage(l))
+    staged.openReviewPanel()
+    const more = restores.length - 1
+    const withIt = [
+      more > 0 && `${more.toLocaleString()} ${more === 1 ? 'entity' : 'entities'}`,
+      links.length > 0 && `${links.length.toLocaleString()} ${links.length === 1 ? 'relationship' : 'relationships'}`,
+    ].filter(Boolean).join(' and ')
+    notify('success', `Restored ‘${name}’${withIt ? ` with the ${withIt} deleted with it` : ''} into your draft. Review and save to keep it.`)
+    return true
+  }, [containmentTypes, notify])
 }

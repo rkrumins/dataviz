@@ -35,7 +35,7 @@ vi.mock('@/features/versioning/hooks/useVersioning', async (importOriginal) => (
 }))
 vi.mock('@/components/panels/LineageNeighbors', () => ({ LineageNeighbors: () => null }))
 vi.mock('@/components/canvas/context-view/useReparentNode', () => ({ useReparentNode: () => ({ reparent: vi.fn() }) }))
-vi.mock('@/features/versioning/canvas/useRestoreGhost', () => ({ useRestoreGhost: () => h.restore }))
+vi.mock('@/features/versioning/canvas/useRestoreGhost', () => ({ useRestoreGhost: () => h.restore, useRestoreDeletion: () => vi.fn() }))
 
 import { EntityDrawer } from '../EntityDrawer'
 

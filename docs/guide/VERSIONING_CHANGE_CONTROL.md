@@ -298,6 +298,32 @@ a draft that's wrong is simply discarded.
 > Restore only when you need to reset everything back to a specific point, or
 > when Undo tells you it can't apply cleanly.
 
+### Bring back one deleted entity
+
+When the published graph lost one entity you want back, and the rest of its
+revision should stay, bring back just that entity through your draft.
+
+1. Open the deleted entity's details (see [A deleted entity's details](#a-deleted-entitys-details)).
+2. Choose **Restore into my draft**. Your draft opens if it isn't open yet.
+3. The entity comes back where it was. So do what it contained and its
+   relationships to entities your draft still has, each under its own id.
+   **Review & Save** opens with them.
+4. Save, then publish your draft. The entity is back as it was, with the same id.
+   Its history keeps both revisions: the one that deleted it and the one that
+   brought it back.
+
+It doesn't restore, and says why, when:
+
+- your draft began before the deletion, so it still has the entity: pull the
+  latest from Published into your draft first;
+- your draft has the entity, or something deleted with it, again;
+- your draft no longer has what held it: restore that first;
+- too much went with it (over 1,000 entities or 5,000 relationships): undo the
+  change that deleted it instead.
+
+**Restore into my draft** is for people who can manage the data source, with
+editing and version control on, on a view they can edit.
+
 ## Work in a fork
 
 *When your administrator has turned on **Administration → Features → Forks**

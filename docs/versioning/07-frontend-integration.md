@@ -301,6 +301,20 @@ the change list it was deleted in (a draft, or main between two revisions).
 - **`DrawerActivity`** says **Deleted**, in rose, when the summary says the entity doesn't `exist`
   on the line.
 
+**Restoring a published deletion** (`useRestoreDeletion`, in `useRestoreGhost.ts`) is the details'
+**Restore into my draft**. It is offered for a published deletion inside a writable view on its
+graph, to someone with `workspace:datasource:manage`, with edit mode and version control on.
+1. It closes an open revision and opens the person's draft (`ensureDraftOpen`).
+2. It asks the cascade with `into=<draft>`. A refusal (`draft_predates`, `recreated`, `parent_gone`,
+   `too_large`) is said as a notice, and nothing is staged.
+3. It builds the restore from what came back: `buildRestoreSubtree` (nodes under their urns, each
+   nested by its parent link's id) with `live` as what the draft has, and `buildRestoreLinks` (links
+   under their ids), leaving out `skippedLinks`.
+4. It stages them parent-first into the draft's own slice, setting the staged scope first
+   (`stagedScopeKey`, which `CanvasRouter` also uses). The canvas switches to the draft only on its
+   next render, and the restore must not land in Published's slice.
+5. It opens Review & Save, with a notice of what came back.
+
 ---
 
 ## 7. The versioning chrome — the bar, the bridge, the panel

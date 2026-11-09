@@ -9,6 +9,28 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Bring back one deleted entity through your draft
+
+Bringing back a published deletion meant undoing the whole revision that made it, or restoring the
+whole graph to before it. Now one entity can come back on its own.
+
+### Added
+
+- **Restore into my draft**, in a published deletion's details, brings back the entity. What it
+  contained and its relationships come too, each under its own id.
+  - They are staged in your draft, which opens if it isn't open, and **Review & Save** opens with
+    them.
+  - Once saved and published, the entity is back as it was, with the same id.
+- **It says why it can't, rather than staging what won't save:**
+  - your draft began before the deletion (pull the latest first);
+  - your draft has it again;
+  - your draft no longer has what held it;
+  - too much went with it.
+- **`…/deletion/cascade?into=<draft>`** says what a restore would meet in a draft: what it hangs
+  from there, the links it can't take, and whether the draft can take it at all.
+
+---
+
 ## [Unreleased] — Who deleted it, when, and what went with it
 
 A deleted entity said only that it was deleted. Now its details say who deleted it, when and in which

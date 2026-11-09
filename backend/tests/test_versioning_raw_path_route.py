@@ -33,8 +33,8 @@ class _RecordingVersioning:
     async def assert_branch_readable(self, *, graph_id, branch_id, viewer):
         self.calls.append(("readable", branch_id))
 
-    async def deletion_cascade(self, *, graph_id, origin, entity_id, containment_edge_types, viewer):
-        self.calls.append(("cascade", entity_id, origin.as_dict()))
+    async def deletion_cascade(self, *, graph_id, origin, entity_id, containment_edge_types, viewer, into):
+        self.calls.append(("cascade", entity_id, origin.as_dict(), into))
         return {"origin": origin.as_dict(), "root": entity_id, "total": {"nodes": 0, "links": 1},
                 "removed": [{"entityId": entity_id, "kind": "edge", "status": "removed",
                              "before": {"edgeType": "FLOWS_TO"}, "sourceUrn": S3, "targetUrn": "b"}],
@@ -149,9 +149,14 @@ async def test_a_cascade_reaches_a_slash_bearing_id_for_one_origin(client):
     c, svc = client
     resp = await c.get(_entity(EDGE_ID, "deletion/cascade") + "?fromSeq=3&toSeq=4")
     assert resp.status_code == 200, resp.text
-    assert svc.calls == [("cascade", EDGE_ID, {"fromSeq": 3, "toSeq": 4})]
+    assert svc.calls == [("cascade", EDGE_ID, {"fromSeq": 3, "toSeq": 4}, None)]
     body = resp.json()
     assert body["restorable"] is True and body["removed"][0]["sourceUrn"] == S3
     assert body["removed"][0]["status"] == "removed" and body["total"] == {"nodes": 0, "links": 1}
     for params in ("", "?branchId=d1&fromSeq=3&toSeq=4", "?fromSeq=4&toSeq=3"):
         assert (await c.get(_entity("ent_1", "deletion/cascade") + params)).status_code == 422, params
+    # Restored into a draft: the draft is checked readable first.
+    svc.calls.clear()
+    resp = await c.get(_entity("ent_1", "deletion/cascade") + "?fromSeq=3&toSeq=4&into=d2")
+    assert resp.status_code == 200, resp.text
+    assert svc.calls == [("readable", "d2"), ("cascade", "ent_1", {"fromSeq": 3, "toSeq": 4}, "d2")]

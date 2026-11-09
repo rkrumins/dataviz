@@ -20,11 +20,14 @@ import { SkeletonText } from '@/components/ui/Skeleton'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { useViewExecutionContext } from '@/providers/ViewExecutionContext'
 import { getRevision, type ChangeListOrigin, type EntityDeletion } from '@/services/versioningApiService'
+import { usePermission } from '@/store/auth'
 import { useBranchStore } from '@/store/branchStore'
+import { useFeature } from '@/store/features'
 import { useStagedChangeCount } from '@/store/stagedChangesStore'
 import { useVersioningPanelStore } from '@/store/versioningPanelStore'
 import { useDeletionCascade, useEntityDeletion, VERSIONING_KEYS } from '../hooks/useVersioning'
 import { useRevisionViewer } from '../hooks/useRevisionViewer'
+import { useRestoreDeletion } from '../canvas/useRestoreGhost'
 import { actorName } from '../model/branchVocab'
 import type { GraphChange } from '../model/changeModel'
 import { CascadeImpactList } from './CascadeImpactList'
@@ -156,9 +159,16 @@ export function TombstoneDetails({ target, onRestore, onNavigate }: {
 
   // What moves the canvas is offered on a canvas of this graph: elsewhere (a review, the data
   // source's page) there is no canvas to move.
-  const inView = !!useViewExecutionContext()
+  const view = useViewExecutionContext()
   const canvasGraphId = useBranchStore((s) => s.graphId)
-  const onCanvas = inView && canvasGraphId === graphId
+  const onCanvas = !!view && canvasGraphId === graphId
+  // A published deletion comes back through the person's draft: theirs to open, on a view they can
+  // write, with editing and version control on.
+  const canManage = usePermission('workspace:datasource:manage', wsId)
+  const editMode = useFeature('editModeEnabled')
+  const versioning = useFeature('versioningEnabled')
+  const canRestoreIntoDraft = onCanvas && !view?.readOnly && canManage && editMode && versioning
+  const restoreDeletion = useRestoreDeletion()
   const revisionViewer = useRevisionViewer(wsId)
   const unsaved = useStagedChangeCount()
   const openRevision = useBranchStore((s) => s.openRevision)
@@ -251,6 +261,13 @@ export function TombstoneDetails({ target, onRestore, onNavigate }: {
           <Button size="sm" variant="ghost" leftIcon={RotateCcw} onClick={onRestore}
             className="border border-rose-500/30 text-rose-600 dark:text-rose-400 hover:text-rose-700 dark:hover:text-rose-300 hover:bg-rose-500/10">
             Restore
+          </Button>
+        )}
+        {!onRestore && canRestoreIntoDraft && del && !del.inDraft && (
+          <Button size="sm" variant="ghost" leftIcon={RotateCcw}
+            onClick={() => { void restoreDeletion(target, name).then((staged) => { if (staged) onNavigate?.() }) }}
+            className="border border-rose-500/30 text-rose-600 dark:text-rose-400 hover:text-rose-700 dark:hover:text-rose-300 hover:bg-rose-500/10">
+            Restore into my draft
           </Button>
         )}
         {onCanvas && revisionViewer && del && !del.inDraft && (
