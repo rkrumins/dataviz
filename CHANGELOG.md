@@ -9,6 +9,66 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — The graph as it was, on every layout and from the data source
+
+Every layout can now read the graph as it was at a past revision without sending a request the
+server refuses. Its names can be searched and, in the Context View, its lineage traced as they
+were. A data source's Versioning tab opens its revisions in a view. What the canvas asks of a
+comparison is bounded too. All of it is still behind the `revisionViewerEnabled` preview.
+
+### Added
+
+- **Search names at a past revision, on every layout.** The Context View's search box searches
+  names as they were then, and its **Look in** is a fixed **Names**. On the graph and hierarchy
+  layouts, **Search** opens a name search in place of Advanced Search: 50 matches a page, and
+  **Load more**.
+- **Trace lineage at a past revision** in the Context View: the trace, the Lens and their links
+  follow the flows as they ran then. On every layout, so does the lineage in an entity's details.
+- **The data source's Versioning tab opens its revisions.** It lists Published's whole history,
+  with its months, comparisons and what each revision changed; it used to list the last 12.
+  - Pick a view under **Open in**; the choice is remembered for the data source.
+  - A revision then **Opens** in that view, **Highlights** a comparison on it, or copies its link.
+  - With no views, comparing still works.
+- **A link can highlight a comparison**: `/views/{view}?rev=T&hl=K` opens revision T with what
+  changed after K highlighted.
+- `GET …/diff/index?max=N` answers past N changes with the total and no entries (`truncated`).
+
+### Changed
+
+- **At a past revision, what reads the graph as it is now is off on every layout, and says why.**
+  - That is Advanced Search, display rules (**Properties**), subset views, Narrow, the graph and
+    hierarchy layouts' trace (it is rolled up) and editing.
+  - The graph and hierarchy layouts used to offer them and have the server refuse them.
+  - The client now holds every read at a revision to the server's list, so none is refused.
+- **Highlight on canvas draws at most 20,000 of a comparison's changes.**
+  - It used to download all of them, up to 250,000.
+  - Past that, it says **Too many changes to highlight (N)** and offers **Open the list**.
+  - A draft's rings are unchanged.
+- **"Since then" counts up to the head a revision was opened at.**
+  - Each publish used to make the banner and the history ask for a new comparison.
+  - Once Published moves on, they say **Published has moved on: N newer revisions · Update**.
+- **A busy server is asked again when it says to.**
+  - A change list, the history or a revision's plan answered 503 `change_list_busy` or
+    `revision_busy` is asked again up to three times, after its Retry-After held to 1–10 s.
+  - A 4xx is not asked again; any other failure is asked once more, as before.
+- **A revision that Published moves too far on from while it is open** is handed over to its
+  comparison with now, as one too far back to open is. The canvas used to keep loading.
+
+### Fixed
+
+- **Backspace on a selected card at a past revision** removed it from the graph layout's canvas
+  (React Flow's own delete). It does nothing there now.
+- **A comparison's Open and Highlight** didn't wait for unsaved edits to be saved or discarded, as
+  a revision's own **Open on canvas** does. Opening one would have parked them out of sight.
+
+### Known limitations
+
+- `?max=` shortens the answer, not the server's work: the comparison is still put together, within
+  `GRAPHVER_CHANGE_LIST_MAX`, to count it.
+- The view picked under **Open in** is remembered in this browser only.
+
+---
+
 ## [Unreleased] — The graph as it was: name search and lineage traces, within bounds
 
 Reading the published graph as it was at a past revision (`?asOfSeq`, still the
