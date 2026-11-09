@@ -41,6 +41,7 @@ from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import aliased
+from sqlalchemy.orm.attributes import set_committed_value
 
 from . import config, db, keymigrate
 from .changeset import Delta, fold_batch_ops, materialize, net_delta, diff_states
@@ -53,7 +54,7 @@ from .errors import (AccessDenied, AmbiguousSpelling, AmbiguousUrn, BranchNotOpe
                      ContentionExhausted, CrossesUpdate, CurationAtRisk, DraftNotReadable,
                      EdgeEndsMissing, EntityExists, StagedChangesUnsaved, UniqueViolation,
                      DraftRoleRequired, ForkLimit, ForkNotRestorable, ForkNotUpToDate,
-                     ForkUpdateConflicts, GraphMoved, GraphNotWritable,
+                     ForkUpdateConflicts, GraphMoved, GraphNotWritable, BulkImportLoading,
                      GroupsUnavailable, HeadMoved, IneligibleMember, JobActive, LiveForks, LockBusy,
                      MainWriteForbidden, MassDeleteBlocked, NotAFork, NotAnEdge, NotDraftOwner,
                      PersonRequired, ProjectionAlreadyAdopted, ProjectionPassInFlight,
@@ -406,6 +407,19 @@ def _delta_columns(deltas: Sequence[Delta], kind_by_entity: Mapping[str, str]):
     return columns, heads
 
 
+# A bulk import's landing: main's head pointers at the rows of its commit (one per entity), the ones
+# main held for those entities replaced (land_import_commit).
+_LAND_HEADS = {kind: text(
+    f"INSERT INTO {EntityHeadORM.__table__.fullname} (graph_id, branch_id, entity_id, entity_kind, "
+    "head_version_id, content_hash, is_tombstone, updated_at) "
+    f"SELECT graph_id, branch_id, entity_id, '{kind}', id, content_hash, op = 'delete', :now "
+    f"FROM {model.__table__.fullname} WHERE graph_id = :graph_id AND commit_id = :commit_id "
+    "ON CONFLICT (graph_id, branch_id, entity_id) DO UPDATE SET "
+    "head_version_id = EXCLUDED.head_version_id, content_hash = EXCLUDED.content_hash, "
+    "is_tombstone = EXCLUDED.is_tombstone, entity_kind = EXCLUDED.entity_kind, "
+    "updated_at = EXCLUDED.updated_at") for kind, model in (("node", NodeVersionORM), ("edge", EdgeVersionORM))}
+
+
 def _live_heads_sql(model, kind: str, join: str = "") -> str:
     """``FROM … WHERE`` of a branch's live head versions of one kind: its head pointers joined to
     the version rows they name (and to ``join``), the tombstones left out."""
@@ -685,6 +699,17 @@ def bootstrap_unfinished(graph_id) -> tuple:
             JobORM.status.in_(_UNFINISHED_ENABLEMENT))
 
 
+def bulk_loading(graph_id) -> tuple:
+    """The ``jobs`` rows that say a bulk import is loading into a graph's ``main``
+    (:meth:`GraphVersioningService._assert_no_bulk_load`): an import that opened its commit at
+    head+1 (``target_commit_id``, which its landing clears) and has not been discarded — a failed
+    one too, whose commit is still there until it is resumed or discarded. ``graph_id`` is an id or
+    a column."""
+    return (JobORM.job_type == "ingest", JobORM.graph_id == graph_id,
+            JobORM.target_commit_id.is_not(None),
+            JobORM.status.in_(("pending", "running", "failed")))
+
+
 async def fork_base_at(s, fork: GraphORM, seq: int) -> int:
     """The seq of its parent's ``main`` a fork's ``main`` reads at ``seq``: the ``parent_seq`` of
     the latest base it took at or before ``seq`` (``fork_bases``), or ``seq`` itself before the
@@ -936,6 +961,38 @@ class GraphVersioningService:
             raise ConcurrencyError(
                 "version control is still being enabled for this data source — "
                 "try again once it finishes")
+
+    async def _assert_no_bulk_load(self, s, graph_id: str) -> None:
+        """Refuse a write to ``main`` while a bulk import is loading into it
+        (:class:`BulkImportLoading`): the import's commit sits at head+1, and a commit written
+        meanwhile would take its place or show half of it. Called by every ``main`` writer after
+        its graph lock, which the import takes to open its commit, so no write gets in between.
+        Drafts don't call it. One indexed lookup (``ix_jobs_graph_status``)."""
+        job_id = await s.scalar(select(JobORM.id).where(*bulk_loading(graph_id)).limit(1))
+        if job_id is not None:
+            raise BulkImportLoading(job_id, await s.scalar(
+                select(JobORM.status).where(JobORM.id == job_id)))
+
+    async def _within_head(self, s, graph_id: str, branch, seq: int) -> int:
+        """``seq``, but no later than ``main``'s head on ``main``: past it is only a bulk import's
+        commit, still loading. A draft's seqs are its own."""
+        if branch.kind != "main":
+            return seq
+        return min(seq, (await s.get(GraphORM, graph_id)).main_head_commit_seq)
+
+    async def _visible_commit(self, s, graph_id: str, commit_id: str) -> CommitORM:
+        """``commit_id``'s commit, for a read of it — ``ValueError`` for none, and for a commit of
+        ``main`` past its head: a bulk import's, still loading, which nothing reads until it lands."""
+        commit = await s.get(CommitORM, (graph_id, commit_id))
+        if commit is not None and commit.commit_seq > 1:
+            graph = await s.get(GraphORM, graph_id)
+            if graph is not None and commit.commit_seq > graph.main_head_commit_seq:
+                branch = await s.get(BranchORM, commit.branch_id)
+                if branch is not None and branch.kind == "main":
+                    commit = None
+        if commit is None:
+            raise ValueError(f"unknown commit {commit_id}")
+        return commit
 
     async def _assert_writable(self, s, graph_id: str) -> None:
         """Refuse a content write to a graph that is not live (:class:`GraphNotWritable`):
@@ -1741,6 +1798,7 @@ class GraphVersioningService:
                 if graph is None:
                     raise ValueError("unknown graph/branch")
                 await self._assert_writable(s, graph_id)
+                await self._assert_no_bulk_load(s, graph_id)
                 # The draft's lock: a save in flight is published with the draft, a later one finds
                 # it merged. An edit staged after the fold above is folded by the retry.
                 draft = await self._lock_branch(s, graph_id, branch_id)
@@ -2700,6 +2758,7 @@ class GraphVersioningService:
         async with self._session() as s:
             branch = await self._get_branch(s, graph_id, branch_id)
             await self._assert_branch_readable(s, branch, viewer)
+            to_seq = await self._within_head(s, graph_id, branch, to_seq)
             too_large = await self._window_too_large(s, graph_id, branch_id, from_seq, to_seq)
             if too_large is not None:
                 raise DiffTooLarge(too_large, config.DIFF_TREE_MAX_CHANGES)
@@ -2958,6 +3017,7 @@ class GraphVersioningService:
             if graph is None:
                 raise ValueError(f"unknown graph {graph_id}")
             await self._assert_writable(s, graph_id)
+            await self._assert_no_bulk_load(s, graph_id)
             main_id = await self._main_branch_id(s, graph_id)
             target = await s.get(CommitORM, (graph_id, commit_id))
             if target is None or target.branch_id != main_id:
@@ -3072,6 +3132,7 @@ class GraphVersioningService:
             if graph is None:
                 raise ValueError(f"unknown graph {graph_id}")
             await self._assert_writable(s, graph_id)
+            await self._assert_no_bulk_load(s, graph_id)
             main_id = await self._main_branch_id(s, graph_id)
             target = await s.get(CommitORM, (graph_id, commit_id))
             if target is None or target.branch_id != main_id:
@@ -3125,8 +3186,8 @@ class GraphVersioningService:
             if graph is None:
                 raise ValueError(f"unknown graph {graph_id}")
             main_id = await self._main_branch_id(s, graph_id)
-            target = await s.get(CommitORM, (graph_id, commit_id))
-            if target is None or target.branch_id != main_id:
+            target = await self._visible_commit(s, graph_id, commit_id)
+            if target.branch_id != main_id:
                 raise ValueError("commit is not on this graph's main")
             await self._assert_within_base(s, graph, target)
 
@@ -4046,6 +4107,7 @@ class GraphVersioningService:
                                     "This review is being merged by a job; it can be merged again "
                                     "if that job ends without merging it.")
                 await self._assert_writable(s, parent.id)   # the target; a frozen fork may propose
+                await self._assert_no_bulk_load(s, parent.id)
                 took = fork.main_head_commit_seq if pinned_seq is None else pinned_seq
                 await self._assert_up_to_date(s, fork, took, parent)
                 # Its approvals as they stand now (_approvals): a content commit on the fork after
@@ -4434,6 +4496,7 @@ class GraphVersioningService:
                 if graph is None:
                     raise ValueError("merge request endpoints missing")
                 await self._assert_writable(s, graph.id)
+                await self._assert_no_bulk_load(s, graph.id)
                 draft = await self._lock_branch(s, graph.id, pr.source_branch_id)   # as in publish
                 self._require_open(draft, publishing_ok=queued)
                 await self._require_no_import(s, pr.source_branch_id)
@@ -4668,9 +4731,7 @@ class GraphVersioningService:
     ) -> Dict[str, Dict[str, dict]]:
         """Full branch state as of a specific commit (time-travel by commit id)."""
         async with self._session() as s:
-            c = await s.get(CommitORM, (graph_id, commit_id))
-            if c is None:
-                raise ValueError(f"unknown commit {commit_id}")
+            c = await self._visible_commit(s, graph_id, commit_id)
             branch_id, seq = c.branch_id, c.commit_seq
             await self._assert_branch_readable(s, await self._get_branch(s, graph_id, branch_id), viewer)
         return await self.materialize_state(graph_id=graph_id, branch_id=branch_id, as_of_seq=seq)
@@ -6422,6 +6483,7 @@ class GraphVersioningService:
         async with self._session() as s:
             branch = await self._get_branch(s, graph_id, branch_id)
             await self._assert_branch_readable(s, branch, viewer)
+            to_seq = await self._within_head(s, graph_id, branch, to_seq)
             changed = await self._changed_in_window(s, graph_id, branch_id, from_seq, to_seq)
             if not changed:
                 return {"added": [], "removed": [], "modified": {}}
@@ -7364,9 +7426,7 @@ class GraphVersioningService:
         ``DIFF_TREE_MAX_CHANGES`` entities written (a fork's Update from parent counts its
         parent's window too) — else None. The tree reads every payload the commit wrote at both
         ends; a publish of a large import is the whole import."""
-        commit = await s.get(CommitORM, (graph_id, commit_id))
-        if commit is None:
-            raise ValueError(f"unknown commit {commit_id}")
+        commit = await self._visible_commit(s, graph_id, commit_id)
         branch = await self._get_branch(s, graph_id, commit.branch_id)
         await self._assert_branch_readable(s, branch, viewer)
         changed = await self._window_too_large(s, graph_id, commit.branch_id,
@@ -7456,9 +7516,7 @@ class GraphVersioningService:
         commit's hierarchical summary counts equal the flat ``diff_commits`` tally for every kind
         of commit; the containment skeleton (resolved at branch head) gives the changes their
         containers to nest under."""
-        commit = await s.get(CommitORM, (graph_id, commit_id))
-        if commit is None:
-            raise ValueError(f"unknown commit {commit_id}")
+        commit = await self._visible_commit(s, graph_id, commit_id)
         branch_id, seq = commit.branch_id, commit.commit_seq
         branch = await self._get_branch(s, graph_id, branch_id)
         await self._assert_branch_readable(s, branch, viewer)
@@ -8023,7 +8081,7 @@ class GraphVersioningService:
                 "main_head_commit_seq": main_head,
                 "base_commit_seq": base,
                 "status": branch.status,      # a closed draft says so without listing every draft
-                "head_commit_seq": int(await s.scalar(
+                "head_commit_seq": main_head if branch.kind == "main" else int(await s.scalar(
                     select(func.coalesce(func.max(CommitORM.commit_seq), 0)).where(
                         CommitORM.graph_id == graph_id, CommitORM.branch_id == branch_id))),
                 "visibility": branch.visibility,
@@ -8033,6 +8091,8 @@ class GraphVersioningService:
             if since_seq is not None:
                 others = [CommitORM.graph_id == graph_id, CommitORM.branch_id == branch_id,
                           CommitORM.commit_seq > since_seq]
+                if branch.kind == "main":       # a bulk import's commit, loading, is not one yet
+                    others.append(CommitORM.commit_seq <= main_head)
                 if viewer is not None:
                     others.append(CommitORM.actor != viewer.actor)
                 rows = (await s.execute(
@@ -8740,6 +8800,7 @@ class GraphVersioningService:
                             "rejected": [], "idempotent_replay": True}
             if session is None:              # after the replay: an import that landed still answers
                 await self._assert_writable(s, graph_id)
+                await self._assert_no_bulk_load(s, graph_id)
             if session is None and await s.scalar(select(EntityHeadORM.entity_id).where(
                     EntityHeadORM.graph_id == graph_id, EntityHeadORM.branch_id == main_id,
                     EntityHeadORM.is_tombstone.is_(False)).limit(1)) is not None:
@@ -9123,6 +9184,7 @@ class GraphVersioningService:
                             "applied": st.get("nodes", 0) + st.get("edges", 0),
                             "rejected": [], "idempotent_replay": True}
             await self._assert_writable(s, graph_id)     # after the replay, as for bulk
+            await self._assert_no_bulk_load(s, graph_id)
 
             last_seq = await self._last_sync_seq(s, graph_id, main_id)
             # After the replay, so a retried key still answers; before any O(graph) work.
@@ -9593,6 +9655,7 @@ class GraphVersioningService:
         allow_main: bool = False,
         node_identity: Optional[ResolvedNodeIdentity] = None,
         from_client: bool = False,
+        bulk_commit_id: Optional[str] = None,
     ) -> Optional[str]:
         """Apply create/update/delete ops as ONE audited commit (default on ``main``) —
         the 'versioned write' primitive behind provider write-through, so an ordinary
@@ -9637,7 +9700,7 @@ class GraphVersioningService:
             graph_id=graph_id, ops=ops, actor=actor, message=message, branch_id=branch_id,
             containment_edge_types=containment_edge_types, ontology_rules=ontology_rules,
             on_commit=on_commit, allow_main=allow_main, node_identity=node_identity,
-            from_client=from_client)
+            from_client=from_client, bulk_commit_id=bulk_commit_id)
         return result.commit_id
 
     async def apply_ops_detailed(
@@ -9651,6 +9714,7 @@ class GraphVersioningService:
         aim_edges: bool = False,
         node_identity: Optional[ResolvedNodeIdentity] = None,
         from_client: bool = False,
+        bulk_commit_id: Optional[str] = None,
     ) -> ApplyResult:
         """:meth:`apply_ops`, answering with every addressed entity's value after the batch.
 
@@ -9660,7 +9724,11 @@ class GraphVersioningService:
 
         ``aim_edges``: each edge update or delete goes to the edge its id names on the branch
         (:meth:`resolve_edges`), once the branch has been found writable by ``actor`` and a
-        retry answered; an id that names only an item is refused (:class:`NotAnEdge`)."""
+        retry answered; an id that names only an item is refused (:class:`NotAnEdge`).
+
+        ``bulk_commit_id``: a bulk import's window, written into the commit it opened on ``main``
+        (:meth:`open_import_commit`) rather than a commit of its own; the commit lands later, whole
+        (:meth:`land_import_commit`)."""
         assert not (idempotency_key and on_commit), "a replay would skip on_commit"
         return await self._retry_seq(
             f"apply_ops on {graph_id}/{branch_id or 'main'}",
@@ -9669,7 +9737,8 @@ class GraphVersioningService:
                 branch_id=branch_id, containment_edge_types=containment_edge_types,
                 ontology_rules=ontology_rules, on_commit=on_commit, allow_main=allow_main,
                 idempotency_key=idempotency_key, aim_edges=aim_edges,
-                node_identity=node_identity, from_client=from_client),
+                node_identity=node_identity, from_client=from_client,
+                bulk_commit_id=bulk_commit_id),
         )
 
     async def _apply_ops_once(
@@ -9683,6 +9752,7 @@ class GraphVersioningService:
         aim_edges: bool = False,
         node_identity: Optional[ResolvedNodeIdentity] = None,
         from_client: bool = False,
+        bulk_commit_id: Optional[str] = None,
     ) -> ApplyResult:
         async with self._session() as s:
             await self._assert_not_bootstrapping(s, graph_id)
@@ -9703,7 +9773,17 @@ class GraphVersioningService:
             # serialize, and none lands on a merged or abandoned draft. Both are xact-scoped, so
             # _retry_seq re-takes them on each fresh-session attempt. The graph's row is checked in
             # between (after the graph lock, before the draft's); a refusal waits for the replay.
-            if bid == main_id:
+            bulk = None
+            if bulk_commit_id is not None:
+                # A bulk import's window, into the commit it opened at head+1. The gate that commit
+                # holds keeps every other writer off main (_assert_no_bulk_load), so main's lock is
+                # not taken; and every read below sees main as of that commit, the windows before
+                # this one included, while the head stays where it is: the seq is this session's
+                # only, never flushed.
+                await self._lock_lifecycle(s, graph_id, shared=True)
+                bulk = await s.get(CommitORM, (graph_id, bulk_commit_id))
+                set_committed_value(graph, "main_head_commit_seq", bulk.commit_seq)
+            elif bid == main_id:
                 if branch_id is not None and not allow_main:
                     raise MainWriteForbidden()
                 await self._lock_graph(s, graph_id)
@@ -9713,7 +9793,9 @@ class GraphVersioningService:
             refusal = None
             try:
                 await self._assert_writable(s, graph_id)
-            except GraphNotWritable as exc:
+                if bid == main_id and bulk_commit_id is None:
+                    await self._assert_no_bulk_load(s, graph_id)
+            except (GraphNotWritable, BulkImportLoading) as exc:
                 refusal = exc
             branch = (await s.get(BranchORM, bid) if bid == main_id
                       else await self._lock_branch(s, graph_id, bid))
@@ -9887,7 +9969,8 @@ class GraphVersioningService:
                     containment_edge_types=containment_edge_types or [],
                     ontology_rules=ontology_rules,
                     strict=graph.ontology_enforcement == "strict",
-                    edited=update_ids)
+                    edited=update_ids,
+                    parentless=bulk is None)            # a bulk import's: once all of it is in
             except OntologyViolation as exc:            # in the names the batch was sent in
                 _with_refs(exc.violations, names)
                 raise
@@ -9920,6 +10003,15 @@ class GraphVersioningService:
             for d in deltas:
                 kind_by_entity.setdefault(
                     d.entity_id, "edge" if _is_edge_payload(cur_vals.get(d.entity_id) or {}) else "node")
+            if bulk is not None:
+                # Into the import's commit as it stands: no heads, Merkle, stats or head move, which
+                # its landing writes for every window at once.
+                await self._write_deltas(s, graph_id, bid, bulk, deltas, kind_by_entity, actor,
+                                         heads=False)
+                if on_commit is not None:
+                    await s.flush()
+                    await on_commit(s)
+                return ApplyResult(bulk.id, written, urns, names)
 
             last = await s.scalar(select(CommitORM.commit_seq).where(
                 CommitORM.graph_id == graph_id, CommitORM.branch_id == bid,
@@ -10048,22 +10140,24 @@ class GraphVersioningService:
 
     async def _write_deltas(
         self, s, graph_id, branch_id, commit, deltas: List[Delta], kind_by_entity, actor,
-        *, occ_guard: bool = False,
+        *, occ_guard: bool = False, heads: bool = True,
     ) -> None:
         scalars = {"graph_id": graph_id, "commit_id": commit.id, "commit_seq": commit.commit_seq,
                    "branch_id": branch_id, "actor": actor, "created_at": _now()}
         # The version rows, one statement per kind and batch (``_INSERT_DELTAS``), built off the
         # loop: a large commit (an import window) spent most of its time building them.
-        heads: List[dict] = []
+        new_heads: List[dict] = []
         for batch in _chunks(list(deltas), _DELTA_BATCH):
             columns, batch_heads = await asyncio.to_thread(_delta_columns, batch, kind_by_entity)
             for kind, values in columns.items():
                 if values["id"]:
                     await s.execute(_INSERT_DELTAS[kind], {**scalars, **values})
-            heads += batch_heads
+            new_heads += batch_heads
+        if not heads:                   # a bulk import's window: its landing points the heads
+            return
         # Upsert the head pointers (keeps version tables append-only), a batch per statement.
-        for i in range(0, len(heads), _HEAD_BATCH):
-            await self._upsert_heads(s, graph_id, branch_id, heads[i:i + _HEAD_BATCH], occ_guard)
+        for i in range(0, len(new_heads), _HEAD_BATCH):
+            await self._upsert_heads(s, graph_id, branch_id, new_heads[i:i + _HEAD_BATCH], occ_guard)
 
     async def _upsert_heads(self, s, graph_id, branch_id, heads: List[dict], occ_guard: bool) -> None:
         """Point each entity's head at its new version. ``deltas`` hold one change per entity
@@ -10098,6 +10192,156 @@ class GraphVersioningService:
         for h in heads:
             if h["entity_id"] not in advanced:
                 raise _StaleHead(h["entity_id"])
+
+    # -- A bulk import: one commit at head+1, loaded a window at a time, landed whole ---------- #
+
+    async def open_import_commit(self, *, graph_id: str, job_id: str, actor: str, message: str,
+                                 on_open: Callable[[Any, CommitORM], Awaitable[None]]) -> CommitORM:
+        """The commit a bulk import writes ``main``'s next state into: an ``import`` commit at
+        head+1, which the head moves to only when it lands (:meth:`land_import_commit`). Opened
+        under the graph lock, with ``on_open`` in its transaction (the job's fenced checkpoint,
+        which sets its ``target_commit_id``): from that commit on, every ``main`` writer finds the
+        load (:meth:`_assert_no_bulk_load`), and none wrote one in between. A job that opened its
+        commit gets it back. A fork takes none."""
+        key = f"bulk:{job_id}"
+
+        async def _once():
+            async with self._session() as s:
+                await self._lock_graph(s, graph_id)
+                await self._assert_not_bootstrapping(s, graph_id)
+                graph = await s.get(GraphORM, graph_id)
+                if graph is None:
+                    raise ValueError(f"unknown graph {graph_id}")
+                await self._assert_writable(s, graph_id)
+                commit = (await s.execute(select(CommitORM).where(
+                    CommitORM.graph_id == graph_id, CommitORM.idempotency_key == key))).scalars().first()
+                if commit is None:
+                    if graph.fork_parent_graph_id:
+                        raise ValueError("a bulk import loads a graph's own main, not a fork's")
+                    await self._assert_no_bulk_load(s, graph_id)
+                    main = await s.get(BranchORM, await self._main_branch_id(s, graph_id))
+                    commit = CommitORM(
+                        graph_id=graph_id, branch_id=main.id, commit_seq=graph.main_head_commit_seq + 1,
+                        parent_commit_id=main.head_commit_id, kind="import", message=message,
+                        actor=actor, idempotency_key=key)
+                    s.add(commit)
+                    await s.flush()
+                await on_open(s, commit)
+                return commit
+        return await self._retry_seq(f"open the import commit of {job_id}", _once)
+
+    async def import_commit_parentless(self, *, graph_id: str, commit_id: str,
+                                       ontology_rules: OntologyRules) -> List[dict]:
+        """The nodes a bulk import's commit would leave outside every parent its strict ontology
+        requires one of (:meth:`_parentless_violations`), asked once all of it is written, as a
+        publish asks of what it wrote: ``main`` read as of the commit. None on a graph whose
+        ontology isn't enforced strictly, as a publish asks it only there."""
+        out: List[dict] = []
+        async with self._session() as s:
+            graph = await s.get(GraphORM, graph_id)
+            if graph is None or graph.ontology_enforcement != "strict":
+                return out
+            commit = await s.get(CommitORM, (graph_id, commit_id))
+            base = commit.commit_seq - 1
+            set_committed_value(graph, "main_head_commit_seq", commit.commit_seq)   # never flushed
+            async for ids in self._commit_entity_pages(s, graph_id, commit.branch_id, commit.commit_seq):
+                written = await self._skeletons_at(s, graph_id, commit.branch_id, ids, commit.commit_seq)
+                written.update({eid: None for eid in ids if eid not in written})
+                prior = await self._skeletons_at(s, graph_id, commit.branch_id, ids, base)
+                kinds = {eid: ("edge" if _is_edge_payload(v or prior.get(eid) or {}) else "node")
+                         for eid, v in written.items()}
+                out += await self._parentless_violations(
+                    s, graph_id, commit.branch_id, written, prior, kinds, ontology_rules)
+        return out
+
+    async def land_import_commit(self, *, graph_id: str, commit_id: str,
+                                 on_landed: Callable[[Any, Optional[dict]], Awaitable[None]]
+                                 ) -> Optional[dict]:
+        """Land a bulk import's commit, in one transaction under the graph lock: ``main``'s head
+        pointers at its rows, its stats and (up to ``BOOTSTRAP_MERKLE_INLINE_MAX`` changes) its
+        Merkle root, then the head and the projection's target moved to it, and last ``on_landed``
+        (the job's fenced checkpoint, which clears its ``target_commit_id``). Readers see all of it
+        at once, and the gate opens as the head moves. A commit no window wrote a row into changed
+        nothing: it is deleted instead, and the head stays. Returns its stats, or ``None``."""
+        async def _once():
+            async with self._session() as s:
+                await self._lock_graph(s, graph_id)
+                graph = await s.get(GraphORM, graph_id)
+                commit = await s.get(CommitORM, (graph_id, commit_id))
+                if graph is None or commit is None:
+                    raise ValueError(f"unknown graph or commit: {graph_id} / {commit_id}")
+                await self._assert_writable(s, graph_id)
+                if graph.main_head_commit_seq != commit.commit_seq - 1:
+                    raise ConcurrencyError(f"main is not where import commit {commit_id} was opened")
+                stats = _delta_stats([])
+                for model in (NodeVersionORM, EdgeVersionORM):
+                    for op, n in (await s.execute(
+                            select(model.op, func.count()).where(
+                                model.graph_id == graph_id, model.commit_id == commit_id)
+                            .group_by(model.op))).all():
+                        stats[op] += n
+                if not any(stats.values()):
+                    await s.delete(commit)
+                    await on_landed(s, None)
+                    return None
+                now = _now()
+                for sql in _LAND_HEADS.values():
+                    await s.execute(sql, {"graph_id": graph_id, "commit_id": commit_id, "now": now})
+                if sum(stats.values()) <= config.BOOTSTRAP_MERKLE_INLINE_MAX:
+                    changes: Dict[str, Optional[str]] = {}
+                    for model in (NodeVersionORM, EdgeVersionORM):
+                        for eid, op, chash in (await s.execute(
+                                select(model.entity_id, model.op, model.content_hash).where(
+                                    model.graph_id == graph_id, model.commit_id == commit_id))).all():
+                            changes[eid] = None if op == "delete" else chash
+                    commit.merkle_root = await self._merkle.commit_tree(
+                        s, graph_id, commit.branch_id, commit.id, commit.commit_seq, changes)
+                commit.stats = stats
+                (await s.get(BranchORM, commit.branch_id)).head_commit_id = commit.id
+                graph.main_head_commit_seq = commit.commit_seq
+                graph.updated_at = now
+                ps = await s.get(ProjectionStateORM, graph_id)
+                if ps is not None:
+                    ps.target_commit_seq = commit.commit_seq
+                await s.flush()
+                await on_landed(s, stats)
+                return stats
+        return await self._retry_seq(f"land import commit {commit_id}", _once)
+
+    async def discard_import_rows(self, *, graph_id: str, commit_id: str, limit: int = 20000) -> int:
+        """Delete up to ``limit`` of the version rows a bulk import wrote into its commit, which has
+        not landed: a discard, a batch a transaction. Returns how many went (0: none are left)."""
+        gone = 0
+        async with self._session() as s:
+            graph = await s.get(GraphORM, graph_id)
+            commit = await s.get(CommitORM, (graph_id, commit_id))
+            if commit is None:
+                return 0
+            if graph is not None and graph.main_head_commit_seq >= commit.commit_seq:
+                raise ConcurrencyError(f"import commit {commit_id} has landed; it is not discarded")
+            for model in (NodeVersionORM, EdgeVersionORM):
+                ids = (select(model.id).where(model.graph_id == graph_id, model.commit_id == commit_id)
+                       .limit(limit - gone).scalar_subquery())
+                gone += (await s.execute(delete(model).where(
+                    model.graph_id == graph_id, model.id.in_(ids)))).rowcount or 0
+                if gone >= limit:
+                    break
+        return gone
+
+    async def drop_import_commit(self, *, graph_id: str, commit_id: str,
+                                 on_dropped: Callable[[Any], Awaitable[None]]) -> None:
+        """Delete a discarded bulk import's commit, its rows gone (:meth:`discard_import_rows`),
+        with ``on_dropped`` (the job's checkpoint, which clears its ``target_commit_id``) in the
+        same transaction, under the graph lock: the gate opens with it."""
+        async with self._session() as s:
+            await self._lock_graph(s, graph_id)
+            graph = await s.get(GraphORM, graph_id)
+            commit = await s.get(CommitORM, (graph_id, commit_id))
+            if commit is not None:
+                if graph is not None and graph.main_head_commit_seq >= commit.commit_seq:
+                    raise ConcurrencyError(f"import commit {commit_id} has landed; it is not discarded")
+                await s.delete(commit)
+            await on_dropped(s)
 
     async def _branch_contributors(self, s, graph_id, branch_id) -> List[str]:
         rows = (await s.execute(

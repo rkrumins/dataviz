@@ -19,7 +19,9 @@ A connector does five things. Each has a section below.
 1. **Map** the source's records to import records, and write them as a file (§2–§4).
 2. **Send** the file: in one request, or in resumable parts up to 10 GiB (§5).
 3. **Import** it into a draft, which reconciles every row against the graph (§5).
-4. **Publish** it: the import publishes itself, you publish it, or a person reviews it (§6).
+4. **Publish** it: the import publishes itself, you publish it, or a person reviews it (§6). Or skip
+   the draft: a **bulk import** loads the published graph itself, the fastest way in for a large
+   file (§6).
 5. **Follow** the jobs, and read what they did (§7).
 
 Run it again on the same source and nothing changes. Change the source, and only what changed is
@@ -284,6 +286,61 @@ Why a publish is skipped (`reason.type`):
 The publish job checks again, when it runs, that the import's owner may still publish. The review
 policy as it is then holds too.
 
+### Bulk: straight into the published graph
+
+For a large file that goes onto the published graph anyway, `bulk=true` on `POST …/imports` or
+`…/uploads/{id}/complete` loads it there itself, with no draft and no publish:
+- **Each row is written once.** A draft import writes a changed row into the draft, then its
+  publish copies it: twice. Unchanged rows write nothing at all. §9 has the numbers.
+- **Readers see all of it or none of it.** The file's changes go into one commit, the published
+  graph's next, which nobody sees until every row is in. Then it lands whole, in one step.
+- **A refused row doesn't stop the rest.** It is listed in the job's preview with its reason, and
+  the other rows land.
+
+Checked before anything is stored:
+- **`403 publish_required`, `409 review_required`:** as for `autoPublish`.
+- **`422`:**
+  - `bulk_needs_no_draft`: you sent `branchId`;
+  - `bulk_places_nothing`: you sent `viewId`;
+  - `bulk_adds_and_updates`: you asked for `reconcileMode=replace`;
+  - `bulk_not_on_a_fork`: the graph is a fork. Import into a draft of it instead.
+- **`409 bulk_import_loading`:** another bulk import is loading the graph. One runs at a time.
+
+**It adds and updates.** A file with a delete row is refused at that row, before anything is
+written. Send deletes as an import of their own, before or after.
+
+**While it loads:**
+- reading the published graph shows it as it was;
+- drafts stay editable;
+- publishing, merging, an edit of the published graph, a revert, a restore, and another bulk import
+  into it all get `409 bulk_import_loading`, naming the job.
+
+So run a bulk load when nobody needs to publish to that data source for a while: §9 says how long
+one takes.
+
+**When it completes,** `summary.landed` on its job says what landed:
+
+| `summary.landed.state` | What happened |
+|---|---|
+| `landed`, with `commitId` and `stats` | The file's changes are on the published graph, as one `import` commit |
+| `unchanged` | The file changed nothing, and nothing landed |
+
+**Two checks happen at the end:**
+- **The starter is asked about again,** perhaps hours later. If they can no longer publish, or the
+  policy no longer lets them merge their own changes, the load is discarded and the job fails.
+- **A strict ontology's parent rule is checked over the whole load,** once every row is in. It
+  wants every node of some types inside a parent. A new node outside every parent discards the
+  load, and the job fails naming the nodes, as such a publish would fail.
+
+**If it fails part-way,** say an outage outlasts its retries, the published graph stays closed to
+other changes (`409 bulk_import_loading`, `status: failed`) until you do one of two things:
+- **Resume it:** `POST …/imports/{jobId}/resume`. It carries on from its last window of 10,000 rows.
+- **Discard it:** `POST …/imports/{jobId}/discard`. What it wrote is deleted, a batch at a time, and
+  the published graph is as it was.
+
+Either is the starter's to do, or a manager's. A worker that stops (a deploy, a crash) needs
+neither: another worker takes the job over and resumes it.
+
 ## 7. Following a job
 
 `GET …/imports/{jobId}` (and `GET …/publish-jobs/{jobId}`) is read-only, so poll it as often as you
@@ -292,13 +349,14 @@ like. Every few seconds at first, and every 30 s or so for a long job, is plenty
 | Field | Means |
 |---|---|
 | `status` | `pending`, `running`, `completed`, `failed`, `cancelled` |
-| `phase` | Where it is: `queued`, `parse` (reading the file into staged rows), `nodes`, `edges`, `replace` (the deletes of a replace) |
+| `phase` | Where it is: `queued`, `parse` (reading the file into staged rows), `nodes`, `edges`, `replace` (the deletes of a replace); a bulk import's, then `landed` (or `discarded`) |
 | `processed`, `total`, `progress` | Rows applied so far, rows in the file, and a percentage |
 | `queuedAhead` | While queued: the jobs before it |
 | `stale` | Running, but its worker has gone quiet. Another worker takes it over and resumes it: wait |
 | `attempt` | Which attempt this is. A job taken over more than 3 times fails |
 | `errorMessage`, `summary.failure` | Why it failed, and whether starting it again would help |
-| `summary` | The tallies: `new`, `updated`, `unchanged`, `deleted`, `invalid` (refused), `skipped` (records that are neither a node nor an edge), `viewAssignments`, `publish` |
+| `summary` | The tallies: `new`, `updated`, `unchanged`, `deleted`, `invalid` (refused), `skipped` (records that are neither a node nor an edge), `viewAssignments`, `publish`, and a bulk import's `landed` |
+| `bulk` | A bulk import: it loads the published graph itself, and has no `branchId` |
 
 - **The preview.** `GET …/imports/{jobId}/preview` lists changed rows, up to 200, with the reason
   for each refused one. For the whole change, read the draft's diff against `main`:
@@ -320,11 +378,13 @@ Errors come back as `{"detail": …}`: a sentence, or an object with a `type`, `
 | `403` | `missing_permission`, `publish_required`, `api_key_read_only`, `api_key_out_of_scope` | The key, or its account, may not | No |
 | `404` | | An unknown graph, job or draft, or an upload that expired | No |
 | `409` | `job_active` | Another import is running on that draft | Yes: wait for it |
+| `409` | `bulk_import_loading` (with `jobId`, `status`) | A bulk import is loading the published graph | Yes, once it lands (`retryable`). One that failed (`status: failed`) waits for a resume or a discard |
 | `409` | `branch_closed`, `main_write_forbidden`, `review_required`, `not_up_to_date` | The draft can't take this | No: see §6 |
 | `409` | `idempotency_key_reused` | The key started another kind of job | No: use a new key |
 | `409` | parts missing (a sentence) | The upload isn't complete | Send the missing parts |
 | `413` | | Too large: for the request (use the upload), the format (split the file), or the dry run (8 MiB) | No |
 | `422` | | A file that can't be read, or a part of the wrong size | No: fix it |
+| `422` | `bulk_needs_no_draft`, `bulk_places_nothing`, `bulk_adds_and_updates`, `bulk_not_on_a_fork` | A bulk import can't take that (§6) | No |
 | `429` | `rate_limited`, `PROVIDER_BUSY` | Too many requests: a key has 1,200 a minute | Yes, after `Retry-After` |
 | `503` | `lock_busy`, `DB_UNAVAILABLE`, `api_keys_unavailable` | Busy or out of reach for a moment | Yes, after `Retry-After`, else a few seconds |
 | `504` | `REQUEST_TIMEOUT` | The request ran out of time, which may have been after it did its work | Read the state before you write again |
@@ -337,8 +397,8 @@ Every call an import connector makes does no harm sent twice:
 
 ## 9. Large files
 
-Measured end to end over HTTP on one machine, through the reference connector with `--publish`. The
-setup:
+Measured end to end over HTTP on one machine, through the reference connector with `--publish`, or
+with `--bulk` where the table says so. The setup:
 - 4 vCPU and 15 GB RAM;
 - Postgres 16 with default settings, holding the parts (the `database` store);
 - the API and one transfer worker.
@@ -349,9 +409,11 @@ row.
 | Run | File | Rows | Upload | Import | Publish | Peak memory |
 |---|---|---|---|---|---|---|
 | NDJSON | 501 MB | 4,180,000 | 7 s (30 parts, sha256 included) | 934 s (16 min), about 4,470 rows/s | 846 s (14 min) | worker 230 MB importing, 450 MB publishing; API 330 MB; connector 40 MB |
+| **The same file, `--bulk`** | 501 MB | 4,180,000 | 7 s | **873 s (15 min) in all**: the load lands itself | none | as above |
 | NDJSON | 53 MB | 440,000 | under 1 s | 125 s, about 3,500 rows/s | 65 s | as above |
 | CSV, the same rows | 30 MB | 440,000 | under 1 s | 155 s, about 2,800 rows/s | 65 s | as above |
 | A 1% delta into the 4.18M graph: 1,900 updates, 190 deletes | 195 KB | 2,090 | under 1 s | 17 s end to end, publish included | | |
+| A large delta into a graph of 1.32 million rows: 440,000 rows new, 165,000 updated, 1,154,999 unchanged | 211 MB | 1,760,000 | 3 s | 363 s, and 94 s to publish: **460 s**. With `--bulk`: **366 s** in all | | |
 | Export of the 4.18M graph, NDJSON | 1.65 GB out | 4,180,000 | | 152 s, about 27,500 entities/s | | |
 
 The import's time goes into Postgres: the worker waits on it about three quarters of the time.
@@ -365,6 +427,10 @@ the graph and writing them, node windows then edge windows.
   slows a little as drafts grow (4,900 entities/s at 4.18 million), so allow about 2 hours for it:
   about 4 hours end to end, and half that for 2 GB. Rows of 250 bytes halve the
   row count, and roughly the time. A CSV takes about a quarter longer to import.
+- **In bulk, about half that** for a first load: no draft, no publish, and the landing a minute or
+  two. A 3 GB file of rows like these goes into an empty graph in about an hour and a half, and a
+  3 GB delta, a third of it new or changed, into a graph built from 2 GB in about the same
+  (§6). The published graph takes no other changes meanwhile.
 - **Deltas are cheap.** A delta costs what its file holds, not what the graph holds: the 1% delta
   above took 17 seconds into a graph of 4 million entities. Send the first load once, then deltas.
 - **Memory** stays flat: windows of 10,000 rows, whatever the file's size.
@@ -383,6 +449,9 @@ the graph and writing them, node windows then edge windows.
 
   For 4 GB of rows like these, that is about 100 GB of graph and 26 GB of staged rows. Size
   Postgres for it before the first gigabyte import: the in-cluster Postgres volumes are 10–20 Gi.
+
+  **In bulk, the graph is kept once.** The same file took 10.1 GB: 6.4 GB of graph, about 13 times
+  the file, and the staged rows as above. For 4 GB, about 50 GB of graph.
 - **The object store.**
   - The default keeps uploaded parts in Postgres, where they compress well.
   - Above about 1 GB, set `OBJECT_STORE_BACKEND=s3` (an image with `requirements-s3.txt`), or
@@ -430,6 +499,7 @@ pip install httpx
 export SYNODIC_URL=https://synodic.example.com SYNODIC_TOKEN=nxsat_…
 python docs/examples/connector/connector.py --file catalog.ndjson --workspace "$WS" --graph "$GID" --check
 python docs/examples/connector/connector.py --file catalog.ndjson --workspace "$WS" --graph "$GID" --publish
+python docs/examples/connector/connector.py --file big.ndjson --workspace "$WS" --graph "$GID" --bulk
 ```
 
 What the connector does:
@@ -439,7 +509,8 @@ What the connector does:
 - **Following:** the import, then its publish. If the import never wrote how its publish went, it
   publishes the draft itself.
 - **Exit code:** non-zero when the import fails or couldn't publish itself, with the reason in its
-  output.
+  output. With `--bulk`, also when rows were refused (the rest landed); the job's preview names
+  them.
 
 Given a catalog instead of `--file`, it maps one first: `source.json`, a warehouse's tables, columns
 and lineage, and a table it dropped. `backend/tests/test_connector_example.py` holds it to the
@@ -461,6 +532,8 @@ record contract, and its calls to the routes a key may call.
 | Every run creates new nodes | Rows point by `entity_id` alone, which is file-local | Give each node a stable `urn` |
 | `stale: true` for a while | The worker running the job stopped | Wait: another takes it over and resumes it |
 | A delete row is `unchanged` with "nothing to delete" | What it names isn't in the graph | Fine for a delta sent again; otherwise check the name |
+| `409 bulk_import_loading` on a publish or an edit of the published graph | A bulk import is loading it | Wait for it to land. If its `status` is `failed`, resume it or discard it (§6) |
+| A bulk import failed: "… row N of the file deletes …" | Bulk imports only add and update | Send the deletes as an import without `bulk` |
 
 ## 12. The format's versioning
 

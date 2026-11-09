@@ -28,7 +28,7 @@ import json
 import logging
 from contextlib import contextmanager
 from datetime import datetime
-from typing import Annotated, Any, Dict, List, Literal, Optional, Union
+from typing import Annotated, Any, Dict, List, Literal, Optional, Tuple, Union
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Path, Query, Request, Response, status
 from fastapi.responses import JSONResponse
@@ -161,7 +161,8 @@ def get_import_export_service():
             ontology_resolver=_resolve_ontology_types,
             layout_writer=_write_view_import_assignments,
             publish_hook=_publish_from_job, replace_scope_resolver=_view_export_scope,
-            identity_resolver=_resolve_node_identity_for_import, fork_hook=_fork_from_job)
+            identity_resolver=_resolve_node_identity_for_import, fork_hook=_fork_from_job,
+            bulk_resolver=_bulk_import_rules, landed_hook=_bulk_import_landed)
     return _ie_service
 
 
@@ -2415,6 +2416,34 @@ async def _publish_from_job(job: dict) -> dict:
     return {"commitId": commit_id}
 
 
+async def _bulk_import_rules(ws_id: str, data_source_id: Optional[str], graph_id: str,
+                             actor: Optional[str]) -> Tuple[List[str], Any]:
+    """What a bulk import's windows are judged by — the data source's live containment types and
+    ontology rules, as a publish is — once its actor is found still allowed to land it: they hold
+    publish (an API key's owner too), and the policy lets them merge their own changes. Asked when
+    the import starts and again before it lands, perhaps hours later: a refusal discards it."""
+    from backend.app.db.engine import get_async_session
+    meta = await get_versioning_service().get_graph(graph_id)
+    async with get_async_session() as session:
+        if not actor or not has_permission(await permission_service.resolve(session, actor), _PUBLISH,
+                                           workspace_id=ws_id):
+            raise PublishRequired(_BULK_NEEDS)
+        if not (await _drafts_policy_of(session, data_source_id)).self_merge:
+            raise ReviewRequired(None)
+        cset = await _live_containment_types(session, ws_id, data_source_id)
+        rules = await _rules_for_meta(session, ws_id, meta)
+    return list(cset or []), rules
+
+
+async def _bulk_import_landed(job: dict) -> None:
+    """What a publish sets off, once a bulk import's commit has landed on ``main``: the cached
+    reads of it, the views of its data, and the projection, nudged (its target moved already)."""
+    graph_id, actor = job["graphId"], job.get("actor") or "system"
+    await _bump_main_cache(graph_id)
+    await _touch_views_data_updated(graph_id, actor)
+    await nudge_projection(graph_id)
+
+
 @router.get("/graphs/{graph_id}/publish-jobs/{job_id}", response_model=PublishJobResponse)
 async def get_publish_job(
     ws_id: str, graph_id: str, job_id: str,
@@ -3736,6 +3765,48 @@ _AUTO_PUBLISH_NEEDS = ("an import that publishes itself needs publish permission
                        "its owner's); leave out autoPublish to import into a draft for review")
 
 
+async def _may_bulk_import(session, claims: PermissionClaims, ws_id: str, meta: dict, ie,
+                           graph_id: str, branch_id: Optional[str], view_id: Optional[str],
+                           reconcile_mode: str) -> None:
+    """A bulk import writes ``main`` itself, so it is held to what a publish is, before anything
+    is created or stored: no draft, view or replace (422 — it opens no draft, places nothing, and
+    adds and updates only); not a fork's (422); publish (an API key: its owner's, 403
+    ``publish_required``); a policy that lets the caller merge their own changes (409
+    ``review_required``); and no other bulk import loading the graph (409 ``bulk_import_loading``).
+    The import asks about its caller again when it starts and before it lands."""
+    refusal = ("bulk_needs_no_draft", "A bulk import loads the published graph itself: leave out "
+                                      "branchId.") if branch_id else (
+        "bulk_places_nothing", "A bulk import doesn't place what it adds in a view: leave out viewId, "
+                               "or import into a draft.") if view_id else (
+        "bulk_adds_and_updates", "A bulk import adds and updates; a replace deletes what the file "
+                                 "leaves out. Use reconcileMode=upsert, or import into a draft.") if (
+        reconcile_mode == "replace") else (
+        "bulk_not_on_a_fork", "A bulk import loads a graph's own published version, not a fork's. "
+                              "Import into a draft of the fork.") if meta.get("fork_parent_graph_id") else None
+    if refusal:
+        raise HTTPException(status_code=422, detail={"type": refusal[0], "message": refusal[1]})
+    try:
+        require_publish_for_main(claims, ws_id)
+    except PublishRequired:
+        raise PublishRequired(_BULK_NEEDS) from None
+    if not (await _drafts_policy_of(session, meta.get("data_source_id"))).self_merge:
+        raise ReviewRequired(None)
+    with _domain_errors():
+        await ie.refuse_second_bulk(graph_id)
+
+
+_BULK_NEEDS = ("a bulk import loads the published graph, so it needs publish permission (for an API "
+               "key, its owner's); leave out bulk to import into a draft for review")
+
+
+_BULK = Query(False, alias="bulk", description=(
+    "Load the file straight into the published graph, with no draft and no publish: as one commit, "
+    "which nobody sees until every row is in and which then lands whole (see the job's "
+    "``summary.landed``). Adds and updates only; a refused row is listed, and the rest land. "
+    "While it loads, the published graph takes no other changes (409 ``bulk_import_loading``); "
+    "drafts stay editable. Needs what a publish needs, and no ``branchId``, ``viewId`` or replace."))
+
+
 _AUTO_PUBLISH = Query(False, alias="autoPublish", description=(
     "Publish the import's draft once it has finished with every row applied (see the job's "
     "``summary.publish``). Needs publish (for an API key, its owner's) and a data source whose "
@@ -3745,7 +3816,7 @@ _AUTO_PUBLISH = Query(False, alias="autoPublish", description=(
 
 class CreateImportResponse(_ApiModel):
     jobId: str
-    branchId: str
+    branchId: Optional[str] = None      # a bulk import's: none
     sourceUri: str
     status: str
 
@@ -3762,6 +3833,7 @@ async def create_import(
         "Makes the request safe to send again: the same key, from the same caller, answers "
         "with the job it started")),
     auto_publish: bool = _AUTO_PUBLISH,
+    bulk: bool = _BULK,
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
     claims: PermissionClaims = Depends(get_permission_claims),
     meta: dict = Depends(graph_in_workspace),
@@ -3780,7 +3852,10 @@ async def create_import(
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     await _check_import_view(session, ws_id, view_id, user, claims)
-    if auto_publish:
+    if bulk:
+        await _may_bulk_import(session, claims, ws_id, meta, ie, graph_id, branch_id, view_id,
+                               reconcile_mode)
+    elif auto_publish:
         await _may_auto_publish(session, claims, ws_id, meta, branch_id)
     key = _callers_key(user, idempotency_key)
     job = await _job_for_key(ie, graph_id, key, "ingest")
@@ -3791,8 +3866,9 @@ async def create_import(
                     workspace_id=ws_id, data_source_id=meta.get("data_source_id"), graph_id=graph_id,
                     actor=user.id, import_format=format, provider_id=meta.get("provider_id"),
                     branch_id=branch_id, reconcile_mode=reconcile_mode, scope_view_id=view_id,
-                    idempotency_key=key, auto_publish=auto_publish, draft_visibility=(
-                        await draft_level(session, meta.get("data_source_id")) if branch_id is None else None))
+                    idempotency_key=key, auto_publish=auto_publish and not bulk, bulk=bulk,
+                    draft_visibility=(await draft_level(session, meta.get("data_source_id"))
+                                      if branch_id is None and not bulk else None))
         except IntegrityError:
             # A request with the same key got there first: answer with its job.
             job = await _job_for_key(ie, graph_id, key, "ingest")
@@ -3812,6 +3888,68 @@ async def create_import(
     # Still storing its file, queued, running or finished: answered as it is.
     return {"jobId": job["jobId"], "branchId": job["branchId"], "sourceUri": job["sourceUri"],
             "status": job["status"]}
+
+
+@router.post("/graphs/{graph_id}/imports/{job_id}/discard")
+async def discard_import(
+    ws_id: str, graph_id: str, job_id: str,
+    _user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    viewer: Viewer = Depends(viewer_ctx),
+    _meta: dict = Depends(graph_in_workspace),
+    ie=Depends(get_import_export_service),
+):
+    """Discard a bulk import that hasn't landed: what it wrote into the published graph's next
+    commit is deleted, and the published graph takes changes again. Its starter's to discard, or a
+    manager's (403 for anyone else). One that never opened its commit is cancelled at once; one
+    that did is discarded by the worker a batch at a time, which the job shows (``status``
+    ``pending``, then ``cancelled``). One that landed is left as it is (409); an import into a
+    draft is not discarded (422: abandon its draft). Answers with the job."""
+    job = await ie.get_job(job_id)
+    if job is None or job.get("graphId") != graph_id or job.get("jobType") != "ingest":
+        raise HTTPException(status_code=404, detail="import not found")
+    try:
+        with _domain_errors():
+            answer = await ie.discard_import(job_id, viewer=viewer)
+    except HTTPException as exc:
+        if exc.status_code == 404:           # a ValueError: not a bulk import
+            raise HTTPException(status_code=422, detail={
+                "type": "not_a_bulk_import",
+                "message": "Only a bulk import is discarded. Abandon an import's draft instead."})
+        raise
+    if answer["status"] == "completed":
+        raise HTTPException(status_code=409, detail={
+            "type": "bulk_import_landed", "message": "This import has landed on the published graph; "
+                                                     "revert its commit to undo it."})
+    return await ie.get_job(job_id)
+
+
+@router.post("/graphs/{graph_id}/imports/{job_id}/resume")
+async def resume_import(
+    ws_id: str, graph_id: str, job_id: str,
+    _user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    viewer: Viewer = Depends(viewer_ctx),
+    _meta: dict = Depends(graph_in_workspace),
+    ie=Depends(get_import_export_service),
+):
+    """Queue a failed bulk import again, to carry on from where it stopped (its job's
+    ``summary.failure`` says whether that can help). Until it is resumed or discarded, it keeps the
+    published graph from taking other changes. Its starter's, or a manager's (403 for anyone
+    else); only a failed one (409 otherwise); only a bulk import (422: import the file into a draft
+    again). Answers with the job."""
+    job = await ie.get_job(job_id)
+    if job is None or job.get("graphId") != graph_id or job.get("jobType") != "ingest":
+        raise HTTPException(status_code=404, detail="import not found")
+    if not job.get("bulk"):
+        raise HTTPException(status_code=422, detail={
+            "type": "not_a_bulk_import", "message": "Only a bulk import is resumed. Import the file "
+                                                    "into a draft again instead."})
+    with _domain_errors():
+        queued = await ie.resume_bulk_import(job_id, viewer=viewer)
+    if not queued:
+        raise HTTPException(status_code=409, detail={
+            "type": "not_failed", "message": "Only a failed import is resumed; this one is "
+                                             f"{job.get('status')}."})
+    return await ie.get_job(job_id)
 
 
 async def _store_and_start(ie, request: Request, job_id: str, branch_id: str, source_uri: str) -> dict:
@@ -3931,6 +4069,7 @@ async def complete_import_upload(
     branch_id: Optional[str] = Query(None, alias="branchId"),
     view_id: Optional[str] = Query(None, alias="viewId"),
     auto_publish: bool = _AUTO_PUBLISH,
+    bulk: bool = _BULK,
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
     claims: PermissionClaims = Depends(get_permission_claims),
     meta: dict = Depends(graph_in_workspace),
@@ -3944,10 +4083,13 @@ async def complete_import_upload(
     from backend.app.services.versioning.import_export import uploads
     record = await _load_upload(ie, ws_id, graph_id, meta, upload_id, user)
     await _check_import_view(session, ws_id, view_id, user, claims)
-    if auto_publish:
-        await _may_auto_publish(session, claims, ws_id, meta, branch_id)
     key = f"upload:{upload_id}"
     job = await ie.get_job(record["jobId"]) if record.get("jobId") else None
+    if bulk and job is None:              # asked once: an import started already is answered below
+        await _may_bulk_import(session, claims, ws_id, meta, ie, graph_id, branch_id, view_id,
+                               reconcile_mode)
+    elif auto_publish:
+        await _may_auto_publish(session, claims, ws_id, meta, branch_id)
     if job is None:
         missing = record["parts"] - len(await uploads.received(ie.store, record))
         if missing:
@@ -3959,9 +4101,9 @@ async def complete_import_upload(
                     workspace_id=ws_id, data_source_id=meta.get("data_source_id"), graph_id=graph_id,
                     actor=user.id, import_format=record["format"], provider_id=meta.get("provider_id"),
                     source_uri=uploads.record_key(record), branch_id=branch_id, reconcile_mode=reconcile_mode,
-                    scope_view_id=view_id, idempotency_key=key, auto_publish=auto_publish,
-                    draft_visibility=(
-                        await draft_level(session, meta.get("data_source_id")) if branch_id is None else None))
+                    scope_view_id=view_id, idempotency_key=key, auto_publish=auto_publish and not bulk,
+                    bulk=bulk, draft_visibility=(await draft_level(session, meta.get("data_source_id"))
+                                                 if branch_id is None and not bulk else None))
         except IntegrityError:
             # A completion sent at the same time got there first: answer with its import.
             job = await _job_for_key(ie, graph_id, key, "ingest")

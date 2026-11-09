@@ -31,6 +31,11 @@ privileged side-door that mutates the shared graph directly.
 > one draft** like successive manual edits; a bad import is discarded by abandoning the draft; every
 > imported change shows up in the same Changes panel and diff as hand edits; and the import worker
 > reuses the engine's ontology gate, edge integrity, cascade-delete, and 3-way merge for free.
+>
+> **The exception, asked for:** a **bulk** import (`bulk=true`, §3e) writes `main` itself, as one
+> commit that lands whole. It is held to what a publish is held to — publish rights, the review
+> policy, the ontology's gates — and so skips the draft and the publish copy, which are most of a
+> large import's time and space.
 
 The vertical is **independent of the aggregation/ingestion worker** — it copies that stateless
 worker *pattern* (a `graphver.jobs` row with traceability metadata, resumable phases) but imports
@@ -338,6 +343,54 @@ it, the view it places into still editable — then stores this request's file a
 export never queued is started. Two requests racing with one key both get the winner's job; the
 loser's draft never exists (it is opened in the job's transaction, which the refused insert rolls
 back).
+
+### 3e. Bulk: straight into main
+
+A bulk import (`bulk=true` on `POST …/imports` or `…/uploads/{id}/complete`; the job's
+`field_scope.bulk`, with its `actor`, and no `branch_id`) loads `main`'s next state itself. It needs
+publish (an API key: its owner's) and a policy that lets its caller merge their own changes; it adds
+and updates only (no `reconcileMode=replace`, and a file with a delete row fails at that row, before
+anything is written), places nothing (no `viewId`), and loads a graph's own `main`, not a fork's.
+
+The worker (`ImportWorker._run_bulk`) runs the import's own phases, with these differences:
+
+1. **Open.** Once the file is staged, `open_import_commit` writes an `import` commit at head+1 under
+   the graph lock, and the job's fenced checkpoint sets its `target_commit_id` in the same
+   transaction. From then on the job is the **gate** (`service.bulk_loading`): every `main` writer —
+   publish, both merges, a `main` edit through `apply_ops`, revert, restore, bulk and sync ingest,
+   a new publish or fork-merge job — calls `_assert_no_bulk_load` after its graph lock and gets
+   `409 bulk_import_loading`. Drafts don't call it.
+2. **Windows.** Each window is resolved against `open_bulk_snapshot`: `main`'s head pointers (which
+   nothing else moves while the gate holds) under the rows earlier windows wrote into the commit
+   (`VersionLayer(after=seq-1)`). `apply_ops(bulk_commit_id=…)` takes the lifecycle lock shared,
+   not the graph lock; reads `main` as of the commit (the session's graph row is told the head is
+   the commit, and never flushes it); judges the window by the ontology's write gates — containment
+   and rules, as a publish judges a draft — so a bad row is quarantined like any refused row; and
+   writes the version rows into the commit, with no heads, Merkle, stats or head move.
+3. **Land.** Once every window is in: the starter is asked about again (`bulk_resolver`: still
+   allowed to publish and merge their own changes?), and a strict ontology with root types is asked
+   whether every new node sits inside a parent (`import_commit_parentless`). Either refusal discards
+   the load and fails the job. Then `land_import_commit`, one transaction under the graph lock:
+   `main`'s heads from the commit's rows (`INSERT … SELECT … ON CONFLICT DO UPDATE`), the stats, the
+   Merkle root up to `BOOTSTRAP_MERKLE_INLINE_MAX` changes, the head and the projection's target
+   moved, and last the job's checkpoint, which clears `target_commit_id`: the gate opens as the head
+   moves. A commit nothing was written into is dropped instead (`summary.landed.state: unchanged`).
+   What a publish sets off afterwards — the cache bump, the views' "data updated", the projection
+   nudge — runs once it has landed (`landed_hook`).
+4. **Discard** (`POST …/imports/{job}/discard`, cursor `bulk:discard`): the commit's rows are
+   deleted a batch at a time (`discard_import_rows`), then the commit (`drop_import_commit`), which
+   clears the gate. A load that never opened its commit is just cancelled.
+
+**What readers see.** `main` reads are bounded by its head (`main_head_commit_seq`) or read its
+head pointers, and neither moves until the landing. The commit log stops at the head already; the
+reads that didn't are bounded too: `branch_freshness` on `main`, `diff_window` and `diff_commits`
+on `main` (`_within_head`), and a commit read by id (`_visible_commit`: `state_at_commit`, the
+commit diff, `restore_preview`).
+
+**When it fails part-way** (an outage outlasting its retries), the job keeps its commit, and the
+gate holds (`status: failed`) until someone resumes it (`POST …/imports/{job}/resume`) or discards
+it. A worker that stops needs neither: the job is taken over and resumed from its cursor, like any
+import.
 
 ---
 
@@ -787,6 +840,11 @@ tests/integration/test_s3_store_minio.py tests/test_object_store.py`.
 
 ## 11. Limitations & open items (candid)
 
+- **A bulk import holds `main` while it loads.** Publishing, merging and every other `main` write
+  wait, for as long as the load runs (an hour or so for 3 GB on a small machine); drafts don't. A
+  bulk load that failed holds it until it is resumed or discarded, so watch for one.
+- **A bulk import adds and updates.** Deletes, a replace, view placements and forks take the draft
+  path (§3e).
 - **A delete of what isn't there is done already.** A file whose `_op=delete` rows already
   applied — or name something that was never there — finds nothing to delete: the row is
   `unchanged`, with the note "nothing to delete", and the dry run counts such rows in a hint. So a

@@ -209,6 +209,8 @@ POST /api/v1/{ws_id}/versioning/graphs/{graph_id}/imports resource
 POST /api/v1/{ws_id}/versioning/graphs/{graph_id}/imports/uploads resource
 POST /api/v1/{ws_id}/versioning/graphs/{graph_id}/imports/uploads/{upload_id}/complete resource
 POST /api/v1/{ws_id}/versioning/graphs/{graph_id}/imports/validate resource reads-only
+POST /api/v1/{ws_id}/versioning/graphs/{graph_id}/imports/{job_id}/discard resource
+POST /api/v1/{ws_id}/versioning/graphs/{graph_id}/imports/{job_id}/resume resource
 POST /api/v1/{ws_id}/versioning/graphs/{graph_id}/pulls resource
 POST /api/v1/{ws_id}/versioning/merge-requests/{pr_id}/approve resource
 POST /api/v1/{ws_id}/versioning/merge-requests/{pr_id}/close resource

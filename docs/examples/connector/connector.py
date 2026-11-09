@@ -8,7 +8,9 @@ source's graph, through the documented HTTP API alone (docs/CONNECTOR_GUIDE.md).
    An answer the server says to ask again for is asked again. A run that stops is resumed by the
    next one, from a state file kept beside the file.
 3. Import it into a draft (``…/complete``). With ``--publish``, the import publishes itself onto the
-   published graph once every row is applied (``autoPublish``).
+   published graph once every row is applied (``autoPublish``). With ``--bulk``, it loads the
+   published graph itself, with no draft and no publish (``bulk``): the fastest way in for a large
+   file, which lands whole once every row is in.
 4. Follow the import, then its publish, and report what they did.
 
 Run it again on the same source and nothing changes: every row points at its node by the same urn,
@@ -20,6 +22,7 @@ Usage::
     python connector.py source.json --workspace ws_… --graph graph_… --check     # a dry run only
     python connector.py source.json --workspace ws_… --graph graph_… --publish
     python connector.py --file export.csv --workspace ws_… --graph graph_… --publish
+    python connector.py --file big.ndjson --workspace ws_… --graph graph_… --bulk
 
 Needs only ``httpx``.
 """
@@ -199,10 +202,12 @@ class Graph:
                 if done % every == 0 or done == upload["parts"]:
                     self.log(f"sent {done} of {upload['parts']} parts")
 
-    def start(self, upload: dict[str, Any], *, publish: bool) -> dict[str, Any]:
-        """Import the uploaded file into a draft. Completing an upload again answers with its import."""
+    def start(self, upload: dict[str, Any], *, publish: bool, bulk: bool = False) -> dict[str, Any]:
+        """Import the uploaded file: into a draft, or with ``bulk`` into the published graph itself.
+        Completing an upload again answers with its import."""
+        params = {"bulk": "true"} if bulk else {"autoPublish": "true"} if publish else {}
         return self.api("POST", f"{self.base}/imports/uploads/{upload['uploadId']}/complete",
-                        params={"autoPublish": "true"} if publish else {})
+                        params=params)
 
     def follow(self, path: str, label: str, *, every: float = 2.0, most: float = 30.0) -> dict[str, Any]:
         """A job, polled until it finishes, saying where it has got whenever that changes. The
@@ -307,22 +312,30 @@ def _write_state(path: str, state: dict[str, Any]) -> None:
         json.dump(state, f)
 
 
-def run(graph: Graph, path: str, fmt: str, *, publish: bool, state_path: str) -> dict[str, Any]:
-    """Send the file, import it, and — with ``publish`` — see it published."""
+def run(graph: Graph, path: str, fmt: str, *, publish: bool, state_path: str,
+        bulk: bool = False) -> dict[str, Any]:
+    """Send the file, import it, and — with ``publish`` — see it published. With ``bulk`` the
+    import lands on the published graph itself (``summary.landed``)."""
     upload = graph.upload(path, fmt, state_path)
-    started = graph.start(upload, publish=publish)
+    started = graph.start(upload, publish=publish, bulk=bulk)
     job = graph.follow(f"{graph.base}/imports/{started['jobId']}", "import")
     result: dict[str, Any] = {"uploadId": upload["uploadId"], "job": {
         k: job.get(k) for k in ("jobId", "branchId", "status", "summary", "errorMessage")}}
-    if publish and job["status"] == "completed":
+    if bulk:
+        result["bulk"] = True
+    elif publish and job["status"] == "completed":
         result["publish"] = graph.published(job)
     return result
 
 
 def succeeded(result: dict[str, Any]) -> bool:
-    """Imported — and, when asked, published, or there was nothing to publish."""
+    """Imported — and, when asked, published, or there was nothing to publish. A bulk import that
+    refused rows landed the rest: the run says so (``summary.invalid``, and the job's preview names
+    them) and does not count as a success."""
     if result["job"]["status"] != "completed":
         return False
+    if result.get("bulk"):
+        return not int((result["job"].get("summary") or {}).get("invalid") or 0)
     return "publish" not in result or result["publish"]["state"] in ("completed", "unchanged")
 
 
@@ -336,6 +349,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--graph", required=True, help="the data source's versioned graph id (graph_…)")
     parser.add_argument("--publish", action="store_true",
                         help="publish the import once every row is applied")
+    parser.add_argument("--bulk", action="store_true",
+                        help="load the published graph itself, with no draft (adds and updates only)")
     parser.add_argument("--check", action="store_true", help="dry-run the file's first rows, import nothing")
     parser.add_argument("--state", help="where to keep the upload's state (default: beside the file)")
     args = parser.parse_args(argv)
@@ -357,7 +372,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.check:
             print(json.dumps(graph.check(path, fmt), indent=2))
             return 0
-        result = run(graph, path, fmt, publish=args.publish, state_path=args.state or path + ".upload.json")
+        result = run(graph, path, fmt, publish=args.publish, bulk=args.bulk,
+                     state_path=args.state or path + ".upload.json")
     print(json.dumps(result, indent=2))
     return 0 if succeeded(result) else 1
 
