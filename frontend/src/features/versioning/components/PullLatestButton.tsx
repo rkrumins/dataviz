@@ -23,10 +23,12 @@ const VARIANTS = {
   row: 'shrink-0 flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-accent-lineage hover:bg-canvas-base disabled:opacity-50',
   bar: 'flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium text-amber-600 bg-amber-500/10 hover:bg-amber-500/20 transition-colors disabled:opacity-50',
   manager: 'shrink-0 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[12px] font-medium text-amber-600 dark:text-amber-400 bg-amber-500/10 hover:bg-amber-500/20 transition-colors disabled:opacity-50',
+  // Offered, not asked for: a draft behind automation alone publishes as it is.
+  calm: 'flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium text-ink-muted ring-1 ring-inset ring-glass-border hover:text-ink hover:bg-canvas-overlay transition-colors disabled:opacity-50',
 } as const
 
 // Plain-language labels (see branchVocab): "pull/rebase" reads as "get the latest updates".
-const IDLE_LABEL = { row: 'Update', bar: 'Get latest updates', manager: 'Get latest' } as const
+const IDLE_LABEL = { row: 'Update', bar: 'Get latest updates', manager: 'Get latest', calm: 'Get latest updates' } as const
 
 export function PullLatestButton({
   wsId, graphId, branchId, behind, variant = 'row', className,

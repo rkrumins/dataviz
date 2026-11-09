@@ -18,7 +18,7 @@ import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
 import type { PullReason } from '@/services/versioningApiService'
 import { useCommitLog } from '../hooks/useVersioning'
-import { ownerName } from '../model/branchVocab'
+import { actorName } from '../model/branchVocab'
 import { gateCopy } from '../model/provenance'
 import { CommitProvenance } from './CommitProvenance'
 import { PullLatestButton } from './PullLatestButton'
@@ -26,7 +26,7 @@ import { PullLatestButton } from './PullLatestButton'
 // A missing actor (e.g. a genesis/import commit) is "system" — distinct from an actor id
 // that failed to resolve to a name (which falls back to 'Unknown' via ownerName).
 const actorLabel = (a: unknown, userNames?: Record<string, string>) =>
-  typeof a === 'string' && a ? ownerName(a, userNames) : 'system'
+  actorName(typeof a === 'string' ? a : null, userNames)
 
 const changesOf = (stats: Record<string, unknown>) =>
   ['create', 'update', 'delete'].reduce((n, op) => n + (typeof stats[op] === 'number' ? (stats[op] as number) : 0), 0)
@@ -98,7 +98,7 @@ export function PullBeforeMergeBanner({
           <ChevronDown className={cn('w-3.5 h-3.5 transition-transform', open && 'rotate-180')} />
           What changed
         </button>
-        <PullLatestButton variant="bar" wsId={wsId} graphId={graphId} branchId={branchId} behind />
+        <PullLatestButton variant={info ? 'calm' : 'bar'} wsId={wsId} graphId={graphId} branchId={branchId} behind />
       </div>
 
       {open && (

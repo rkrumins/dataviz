@@ -23,7 +23,7 @@ import { timeAgo } from '@/lib/timeAgo'
 import { getCommitDiffChildren } from '@/services/versioningApiService'
 import { useChangeSummary, useCommitDiffSummary, useRevision, useSquashedCommits } from '../hooks/useVersioning'
 import { kindMeta, isPullCommit } from '../model/commitKind'
-import { ownerName } from '../model/branchVocab'
+import { actorName, ownerName } from '../model/branchVocab'
 import { NodeDiffBadge } from './NodeDiffBadge'
 import { ChangeTreePanel } from './ChangeTreePanel'
 import { CommitProvenance } from './CommitProvenance'
@@ -42,10 +42,10 @@ export interface RevisionRowActions {
 
 const compactCount = new Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 })
 
-// A missing actor (e.g. a genesis/import commit) is "system" — distinct from an actor id
-// that failed to resolve to a name (which falls back to 'Unknown' via ownerName).
+// A missing actor (e.g. a genesis/import commit), or the platform's own ("system"), is "system" —
+// distinct from an actor id that failed to resolve to a name ('Unknown', via ownerName).
 const actorLabel = (a: unknown, userNames?: Record<string, string>) =>
-  typeof a === 'string' && a ? ownerName(a, userNames) : 'system'
+  actorName(typeof a === 'string' ? a : null, userNames)
 const num = (v: unknown) => (typeof v === 'number' ? v : 0)
 
 export function StatChips({ stats }: { stats: Record<string, unknown> }) {
@@ -122,6 +122,7 @@ export function CommitRow({
   published = false,
   revision,
   asItem = 'li',
+  inRun = false,
 }: {
   commit: Record<string, unknown>
   wsId: string
@@ -145,6 +146,8 @@ export function CommitRow({
   revision?: RevisionRowActions
   /** `div` inside a virtualized list, which draws its own rows. */
   asItem?: 'li' | 'div'
+  /** One of an automation run's commits, under the run's row, which already says who and how. */
+  inRun?: boolean
 }) {
   const commitId = commit.commit_id as string
   const stats = (commit.stats ?? {}) as Record<string, unknown>
@@ -264,7 +267,7 @@ export function CommitRow({
         </div>
         <p className="text-[11px] text-ink-muted mt-0.5 flex items-center gap-1.5 flex-wrap pl-5">
           <User className="w-3 h-3" /> {actorLabel(commit.actor, userNames)}
-          <CommitProvenance commit={commit} apiKeyNames={apiKeyNames} />
+          {!inRun && <CommitProvenance commit={commit} apiKeyNames={apiKeyNames} />}
           {others.length > 0 && (
             <HoverTip className="inline-flex" label="Everyone who edited this revision">
               <span>

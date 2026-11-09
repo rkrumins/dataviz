@@ -40,7 +40,7 @@ import type { CompareRequest } from '@/store/versioningPanelStore'
 import { VERSIONING_KEYS, useHistoryMonths, useHistoryPages, type HistoryScope } from '../hooks/useVersioning'
 import { useRevisionViewer } from '../hooks/useRevisionViewer'
 import { HoverTip } from '@/components/ui/HoverTip'
-import { ownerName } from '../model/branchVocab'
+import { actorName } from '../model/branchVocab'
 import { runKey } from '../model/provenance'
 import { CommitProvenance } from './CommitProvenance'
 import { CommitRow, StatChips, type RevisionRowActions } from './CommitRow'
@@ -581,7 +581,7 @@ function AutomationRun({ run, userNames, apiKeyNames, onToggle }: {
     return acc
   }, { create: 0, update: 0, delete: 0 })
   const changes = totals.create + totals.update + totals.delete
-  const who = typeof newest.actor === 'string' && newest.actor ? ownerName(newest.actor, userNames) : 'The platform'
+  const who = actorName(typeof newest.actor === 'string' ? newest.actor : null, userNames)
   const from = clock(oldest)
   const to = clock(newest)
   return (
@@ -663,6 +663,7 @@ function TimelineCommit({
           published={scope !== 'draft'}
           userNames={userNames}
           apiKeyNames={apiKeyNames}
+          inRun={nested}
           expanded={expanded}
           onToggle={onToggle}
           onRevert={onRevert}
