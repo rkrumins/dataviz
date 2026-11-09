@@ -40,6 +40,14 @@ export interface RoleVisual {
     iconBg: string
 }
 
+/** A role as a picker offers it: its label, and whether it publishes data —
+ *  what tells Workspace member (edits drafts) from Publisher or Data engineer
+ *  (publishes them), for a person or a service account's keys. */
+export function roleOptionLabel(role: { name: string; publishesData?: boolean }): string {
+    const label = roleVisualFor(role.name).label
+    return role.publishesData ? `${label} — publishes data` : label
+}
+
 export const ROLE_VISUAL: Record<string, RoleVisual> = {
     // ── Phase 5 post-uplift built-ins ──────────────────────────────
     super_admin: {

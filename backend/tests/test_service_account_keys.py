@@ -43,6 +43,7 @@ from tests.common.api_key_world import (
     Key,
     _FakeVersioning,
     api_key_app,
+    data_engineer_role,
     days_ago,
     error,
     mint,
@@ -527,6 +528,51 @@ async def test_a_key_syncs_a_snapshot_where_the_account_publishes(client, db_ses
     refused = await client.post(sync, content=b"", headers=key.headers)
     assert refused.status_code == 403, refused.text
     assert refused.json()["detail"]["code"] == "publish_required"
+
+
+async def test_a_publisher_or_data_engineer_account_publishes_through_its_key_a_member_does_not(
+    client, db_session, account,
+):
+    """Both built-in roles that publish — Publisher, and Data engineer, which has published since
+    publish was split from manage — let an account's ``nxsat_`` key publish a draft, merge its
+    review, sync a snapshot and write main directly. Workspace member, which edits drafts, lets it
+    do none of them: ``publish_required``, naming the account rather than the key."""
+    from backend.app.main import app
+
+    class _Versioning(_Reviews):
+        async def sync_ingest(self, **_kwargs):
+            reached_the_handler()
+
+        async def bulk_ingest(self, **_kwargs):
+            reached_the_handler()
+
+    app.dependency_overrides[versioning_endpoints.get_versioning_service] = _Versioning
+    await publisher_role(db_session)
+    await data_engineer_role(db_session)
+    binding = (await db_session.execute(select(RoleBindingORM).where(
+        RoleBindingORM.subject_id == account, RoleBindingORM.scope_id == "ws_a",
+    ))).scalar_one()
+    key = await _minted(db_session, account, permissions={"views": "none", "data": "write",
+                                                          "publish": False})
+    calls = (
+        ("/api/v1/ws_a/versioning/graphs/g_a/branches/br_a/publish", {"json": {"message": "m"}}),
+        ("/api/v1/ws_a/versioning/merge-requests/mr_a/merge", {"json": {"message": "m"}}),
+        ("/api/v1/ws_a/versioning/graphs/g_a/sync", {"content": b""}),
+        ("/api/v1/ws_a/versioning/graphs/g_a/bulk-ingest", {"content": b""}),
+    )
+    for role, publishes in (("workspace_publisher", True), ("workspace_data_engineer", True),
+                            ("workspace_member", False)):
+        binding.role_name = role
+        await db_session.commit()
+        api_key_service.forget(key.id)
+        for path, body in calls:
+            answer = await client.post(path, headers=key.headers, **body)
+            if publishes:
+                assert answer.status_code == 418, (role, path, answer.text)
+            else:
+                assert answer.status_code == 403, (role, path, answer.text)
+                assert answer.json()["detail"]["code"] == "publish_required", (role, path)
+                assert "account this API key belongs to" in answer.json()["detail"]["message"]
 
 
 async def _member_key(db_session, account, **minted) -> Key:

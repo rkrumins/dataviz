@@ -386,7 +386,8 @@ async def db_session(db_engine: AsyncEngine) -> AsyncGenerator[AsyncSession, Non
             ("workspace_admin",
              "Workspace administrator. Auto-implies every workspace:* permission."),
             ("workspace_member",
-             "Standard workspace member — manage views and data sources."),
+             "Standard workspace member — manage views, and change data sources "
+             "through drafts. Publishing them needs Publisher or Data engineer."),
             ("workspace_viewer",
              "Read-only access to the bound workspace's views + data sources."),
         ):

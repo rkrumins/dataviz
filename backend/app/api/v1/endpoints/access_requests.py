@@ -391,7 +391,8 @@ async def list_requestable_roles(
     stranger what the workspace is."""
     ws = await _live_workspace(session, workspace_id)
     roles = [
-        RequestableRole(name=r.name, description=r.description, is_system=r.is_system)
+        RequestableRole(name=r.name, description=r.description, is_system=r.is_system,
+                        publishes_data=workspace_access.publishes_data(perms))
         for r, perms in await workspace_access.workspace_roles(session, workspace_id)
         if workspace_access.is_requestable(perms)
     ]

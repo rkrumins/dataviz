@@ -13,7 +13,7 @@ import { Button } from '@/components/ui/Button'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { useDebouncedValue } from '@/hooks/useDebouncedValue'
 import { WORKSPACE_DIRECTORY_FEATURE } from '@/hooks/useWorkspaceAccess'
-import { roleVisualFor } from '@/lib/roleVisual'
+import { roleOptionLabel, roleVisualFor } from '@/lib/roleVisual'
 import { cn } from '@/lib/utils'
 import { accessRequestsService, type RequestOptions } from '@/services/accessRequestsService'
 import type { ServiceAccountDetail } from '@/services/serviceAccountService'
@@ -158,7 +158,7 @@ export function RequestForAccount({ account, onClose, onSent }: {
                         className={cn(field, 'w-full')}
                     >
                         <option value="">{workspaceId && current && roles.length === 0 ? 'Nothing more to ask for' : 'Choose a role'}</option>
-                        {roles.map((r) => <option key={r.name} value={r.name}>{roleVisualFor(r.name).label}</option>)}
+                        {roles.map((r) => <option key={r.name} value={r.name}>{roleOptionLabel(r)}</option>)}
                     </select>
                 )}
                 <textarea

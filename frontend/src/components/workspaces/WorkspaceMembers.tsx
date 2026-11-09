@@ -1347,6 +1347,11 @@ function AddMemberModal({
                                                         custom
                                                     </span>
                                                 )}
+                                                {r.publishesData && (
+                                                    <span className="inline-flex items-center px-1.5 py-px rounded-full text-[9px] font-bold bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border border-emerald-500/20">
+                                                        publishes data
+                                                    </span>
+                                                )}
                                             </div>
                                             <p className="text-[11px] text-ink-muted leading-snug mt-0.5 truncate">
                                                 {description}

@@ -711,6 +711,11 @@ class RequestableRole(BaseModel):
     description: Optional[str] = None
     is_system: bool = Field(default=False, alias="isSystem")
     requestable: bool = True
+    #: Whoever holds it publishes the workspace's versioned data sources —
+    #: publishing drafts, merging reviews, syncing, imports that publish
+    #: themselves — and so do their API keys: it carries
+    #: ``workspace:datasource:publish``, or ``workspace:admin``, which implies it.
+    publishes_data: bool = Field(default=False, alias="publishesData")
 
 
 class RequestOptions(BaseModel):

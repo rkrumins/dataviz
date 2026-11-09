@@ -251,12 +251,12 @@ SYSTEM_ROLES: tuple[dict[str, str | None], ...] = (
     {
         "name": "workspace_data_engineer",
         "scope_type": "global",
-        "description": "Owns data products inside a workspace (datasources, ontology, catalog, views) without managing members or workspace settings.",
+        "description": "Owns data products inside a workspace (datasources, ontology, catalog, views) and publishes its versioned data sources, without managing members or workspace settings.",
     },
     {
         "name": "workspace_member",
         "scope_type": "global",
-        "description": "Standard workspace member — manage views and data sources.",
+        "description": "Standard workspace member — manage views, and change data sources through drafts. Publishing them needs Publisher or Data engineer.",
     },
     {
         "name": "workspace_publisher",

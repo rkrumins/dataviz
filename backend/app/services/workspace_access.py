@@ -143,6 +143,16 @@ def ceiling_refusal(claims: PermissionClaims, ws_id: str, role_name: str) -> str
     return f"You can only grant roles whose permissions you hold yourself — not '{role_name}'"
 
 
+PUBLISH_DATA = "workspace:datasource:publish"
+
+
+def publishes_data(perms: Iterable[str]) -> bool:
+    """A role whose holders publish the workspace's versioned data sources — and whose API keys
+    do: it carries publish, or ``workspace:admin``, which implies it."""
+    perms = set(perms)
+    return PUBLISH_DATA in perms or "workspace:admin" in perms
+
+
 def is_requestable(perms: Iterable[str]) -> bool:
     perms = set(perms)
     return "workspace:admin" not in perms and MEMBERS_ADD not in perms

@@ -351,6 +351,7 @@ async def get_grant_options(
         RequestableRole(
             name=r.name, description=r.description, is_system=r.is_system,
             requestable=workspace_access.is_requestable(perms),
+            publishes_data=workspace_access.publishes_data(perms),
         )
         for r, perms in await workspace_access.workspace_roles(session, ws_id)
         if workspace_access.can_grant(claims, ws_id, r.name, perms)

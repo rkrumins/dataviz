@@ -1209,6 +1209,35 @@ async def test_its_roles_say_where_it_publishes_data(test_client, db_session, pe
     assert [(r["role"], r["publishesData"]) for r in detail["roles"]] == [("workspace_member", False)]
 
 
+async def test_a_data_engineer_account_publishes_data_and_every_picker_says_which_roles_do(
+    test_client, db_session, people,
+):
+    """Data engineer publishes by default, for a service account as for a person. Every role
+    picker — giving an account a role, adding a member, asking for access — marks the roles that
+    publish data (``publishesData``), so nobody gives automation Member expecting it to publish."""
+    from tests.common.api_key_world import data_engineer_role, publisher_role
+
+    await publisher_role(db_session)
+    await data_engineer_role(db_session)
+    await db_session.commit()
+    account = await _create(test_client)
+    granted = await test_client.post(f"{BASE}/{account['id']}/roles",
+                                     json={"workspaceId": "ws_x", "role": "workspace_data_engineer"})
+    assert granted.status_code == 201, granted.text
+    assert granted.json()["publishesData"] is True
+
+    expected = {"workspace_viewer": False, "workspace_member": False,
+                "workspace_publisher": True, "workspace_data_engineer": True}
+    requestable = (await test_client.get(
+        "/api/v1/access-requests/requestable-roles", params={"workspaceId": "ws_x"})).json()
+    offered = {r["name"]: r["publishesData"] for r in requestable["roles"]}
+    assert {name: offered[name] for name in expected} == expected
+    options = (await test_client.get(f"{MEMBERS}/grant-options")).json()
+    offered = {r["name"]: r["publishesData"] for r in options["roles"]}
+    assert {name: offered[name] for name in expected} == expected
+    assert offered["workspace_admin"] is True           # it implies publish, for a person
+
+
 async def _custom_role(db_session, name: str, *perms: str) -> None:
     from backend.app.db.models import PermissionORM, RoleORM, RolePermissionORM
 

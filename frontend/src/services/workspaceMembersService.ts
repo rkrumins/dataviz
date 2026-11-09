@@ -125,8 +125,12 @@ export interface WorkspaceGrantOptions {
     tier: 'admin' | 'steward'
     accessMode: 'app' | 'idp'
     /** ``requestable``: neither administers the workspace nor lets people in —
-     *  the roles a service account may hold. */
-    roles: { name: string; description: string | null; isSystem: boolean; requestable?: boolean }[]
+     *  the roles a service account may hold. ``publishesData``: its holders,
+     *  and their API keys, publish the workspace's versioned data sources. */
+    roles: {
+        name: string; description: string | null; isSystem: boolean
+        requestable?: boolean; publishesData?: boolean
+    }[]
     /** App-managed teams bound here whose every role the caller could grant. */
     groups: { id: string; name: string; memberCount: number; roles: string[] }[]
     /** Identity-provider groups whose members reach the workspace. */
