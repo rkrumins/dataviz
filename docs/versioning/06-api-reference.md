@@ -554,8 +554,8 @@ failure, with its `graph_not_writable` message as `error`. The batch then goes o
 
 A `/graph` read can name a revision of `main` instead of a draft: `?asOfSeq=K` (a commit seq of
 `main`) reads the published graph **as it was at revision K**, read-only — the revision history
-viewer's canvas. It is a preview: with **`revisionViewerEnabled`** off (as it ships) a request that
-names a revision answers **403 `feature_disabled`**; version control must be on too. It needs read
+viewer's canvas. It is on unless an administrator turns off **`revisionViewerEnabled`**: then a
+request that names a revision answers **403 `feature_disabled`**; version control must be on too. It needs read
 access to the data source itself (`workspace:datasource:read`): a view's share link reaches the
 graph as it is now, never its history (**403 `missing_permission`**).
 

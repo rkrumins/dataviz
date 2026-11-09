@@ -73,9 +73,13 @@ __all__ = [
 #: The copy ships with the code, and the database serves it. If the definition-CRUD API ever grows
 #: a UI, this needs provenance (a `content_edited_at`, set on PATCH and respected here) — until
 #: then, tracking provenance for an editor that does not exist is machinery for its own sake.
+#:
+#: ``default_value`` too: what a deployment that has never stored a value reads (a flag added after
+#: its first seed). A default that changes — a preview turned on for everyone — reaches it; a value
+#: an administrator has stored is in ``feature_flags.config`` and is never touched.
 _CODE_OWNED = (
     "name", "description", "admin_hint", "impact_when_off", "impact_when_on", "help_url",
-    "category_id", "type", "options", "sort_order",
+    "category_id", "type", "options", "sort_order", "default_value",
 )
 
 

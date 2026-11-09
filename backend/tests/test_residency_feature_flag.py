@@ -31,7 +31,8 @@ def test_graph_residency_ships_off_in_lineage_after_forks():
     lineage = sorted((d for d in SEED_DEFINITIONS if d["category_id"] == "lineage"),
                      key=lambda d: d["sort_order"])
     assert [d["key"] for d in lineage] == [
-        "versioningEnabled", "forksEnabled", "residencyEnabled", "traceEnabled"]
+        "versioningEnabled", "forksEnabled", "residencyEnabled", "traceEnabled",
+        "revisionViewerEnabled"]
     # It refuses nothing, so there is nothing to tell a user it stopped.
     assert "residencyEnabled" not in REFUSAL_MESSAGES
 

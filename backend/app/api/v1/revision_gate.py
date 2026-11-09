@@ -10,9 +10,10 @@ that plans one, with 409 ``revision_read_only`` (:data:`REVISION_WRITES`); any o
 only once someone has checked that it can.
 
 Every ``/{ws_id}/graph`` router is mounted with :func:`revision_gate` (``api.py``). It asks, only
-when a request names a revision, for the preview switch (``revisionViewerEnabled``: off, and a flag
-that can't be read means off), version control, and read access to the data source itself: a
-view's share link reaches the graph as it is now, never its history.
+when a request names a revision, for the switch (``revisionViewerEnabled``: on unless an
+administrator turns it off, and a flag that can't be read means on, as for every capability),
+version control, and read access to the data source itself: a view's share link reaches the graph
+as it is now, never its history.
 """
 from __future__ import annotations
 
@@ -21,6 +22,7 @@ from typing import Optional
 from fastapi import Depends, HTTPException, Query, Request
 
 from backend.app.api.v1.feature_gate import feature_disabled
+from backend.app.config.feature_wiring import fail_safe_default
 from backend.app.api.v1.versioning_gate import require_versioning_enabled
 from backend.app.auth.dependencies import get_permission_claims
 from backend.app.services.feature_flags import feature_flags
@@ -95,14 +97,14 @@ async def revision_gate(
     asOfSeq: Optional[int] = Query(
         None, ge=0,
         description="Read the published graph as it was at this revision of main (its commit "
-                    "seq), read-only. Preview: revisionViewerEnabled."),
+                    "seq), read-only. Switch: revisionViewerEnabled."),
     claims: PermissionClaims = Depends(get_permission_claims),
 ) -> Optional[int]:
     """The revision a graph request reads at, or None for the graph as it is now; refuses a
     revision the route can't answer as it was (see the module docstring)."""
     if asOfSeq is None:
         return None
-    if not await feature_flags.is_enabled_self_session(FLAG, default=False):
+    if not await feature_flags.is_enabled_self_session(FLAG, default=fail_safe_default(FLAG)):
         raise feature_disabled(FLAG)
     await require_versioning_enabled()
     ws_id = request.path_params.get("ws_id")

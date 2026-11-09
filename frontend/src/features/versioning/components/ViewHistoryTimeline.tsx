@@ -12,7 +12,7 @@
  * skips or repeats one while new ones land, and never stops at a cap — grouped by month and day in
  * the reader's time zone, and drawn a window at a time: years of revisions scroll as lightly as ten.
  *
- * With the revision viewer (the `revisionViewerEnabled` preview) this is where to travel in time:
+ * With the revision viewer (the `revisionViewerEnabled` switch) this is where to travel in time:
  * each revision of Published opens on the canvas as the graph was then, compares with now or with
  * another, and copies a link to itself; the month picker goes to the end of any month or day; and
  * a comparison of two revisions opens here ({@link RevisionCompare}). Undo and Restore stay with
@@ -142,7 +142,7 @@ export function ViewHistoryTimeline({
   const [revertTarget, setRevertTarget] = useState<Record<string, unknown> | null>(null)
   const [restoreTarget, setRestoreTarget] = useState<Record<string, unknown> | null>(null)
 
-  // Travelling in time (the preview): open, compare, link.
+  // Travelling in time (the revision viewer): open, compare, link.
   const revisionViewer = useRevisionViewer(wsId)
   const [compare, setCompare] = useState<CompareRequest | null>(compareRequest)
   const [askedCompare, setAskedCompare] = useState(compareRequest)

@@ -1302,6 +1302,106 @@
         "Search's Layer filter places by the shared rule either way"
       ],
       "dependsOn": []
+    },
+    {
+      "key": "viewMembershipEnabled",
+      "name": "Narrow: chosen entities and what they reach",
+      "description": "Narrow a Context View to the entities you choose and what they reach \u2014 what is inside them, their sources and consumers one step out or the whole way \u2014 worked out on the server, so it is the same answer for everyone and for any script. Save as view keeps a narrowing as a view of its own: a list of its members, auto-updating or a snapshot.",
+      "category": "experimental",
+      "type": "boolean",
+      "default": false,
+      "options": null,
+      "helpUrl": "/guide/exploring-graph#show-only-some-entities-and-what-they-reach",
+      "adminHint": "Sources and consumers also need Lineage trace on. Each narrowing is one resolution, cached and shared by everyone who asks the same question, and paced by the trace's fair-share bucket when fair share is on.",
+      "impactWhenOff": "Narrow and Save as view (as a list) are not offered, and POST /graph/members, /graph/members/plan, /views/from-members and a list view's membership routes are refused. Views already made as lists keep the members they last had and stop updating; an auto-updating one says its updates are paused, and catches up when it is opened with this on again. Other views, searches, Isolate and traces work exactly as before. This is a preview; it ships off until you switch it on.",
+      "impactWhenOn": null,
+      "sortOrder": 4,
+      "deprecated": false,
+      "stage": "experimental",
+      "implemented": true,
+      "enforcedServerSide": true,
+      "posture": "capability",
+      "serverGates": [
+        "POST /graph/members \u2014 resolves a scope: seeds, what is inside them, their sources and consumers",
+        "POST /graph/members/plan \u2014 previews what a list view would hold",
+        "POST /views/from-members \u2014 makes a list view of a narrowing",
+        "GET/PUT /views/{id}/membership, POST /views/{id}/membership/members and /views/{id}/membership/refresh \u2014 a list view's members and its updates"
+      ],
+      "uiSurfaces": [
+        "Context View: Narrow\u2026 on a selection, Narrow to this in an entity's right-click menu, Narrow\u2026 on Advanced Search's matches, and the Narrowed chip",
+        "Save as view\u2026 as a list, from the Narrowed chip, Narrow and search results",
+        "A list view's Auto-updating / Snapshot chip, which reads Updates paused while this is off"
+      ],
+      "stillAllowed": [
+        "Other views, searches, Isolate and traces work as before. Views already made as lists keep the members they last had, and stop updating until this is on again"
+      ],
+      "dependsOn": []
+    },
+    {
+      "key": "searchViewsEnabled",
+      "name": "Subset views: a search's matches as a view",
+      "description": "Save an Advanced Search's matches inside a view as a view of their own \u2014 always current, any size, created at once \u2014 laid out like the view it came from and shared like any other view.",
+      "category": "experimental",
+      "type": "boolean",
+      "default": false,
+      "options": null,
+      "helpUrl": "/guide/managing-views#subset-views-a-searchs-matches-as-a-view",
+      "adminHint": "Turn it on once the web app that ships with it is deployed. Each layer of a subset view is one search, shared by every view and viewer asking the same question, served from its last complete answer for a few minutes after the data changes (DEEP_SEARCH_VIEW_FEED_REUSE), and scanned in a lane of its own (DEEP_SEARCH_VIEW_FEED_LANE) paced by the view-feed fair-share bucket.",
+      "impactWhenOff": "Save as view is not offered on search results, subset views can't be made or edited, and their layers say the preview is off instead of listing matches. Nothing saved changes, and every other view works as before. This is a preview; it ships off until you switch it on.",
+      "impactWhenOn": null,
+      "sortOrder": 5,
+      "deprecated": false,
+      "stage": "experimental",
+      "implemented": true,
+      "enforcedServerSide": true,
+      "posture": "capability",
+      "serverGates": [
+        "POST /graph/search/view-feed \u2014 a page of one layer of a subset view",
+        "POST /views/from-search and PUT /views/{id}/search \u2014 making and editing subset views"
+      ],
+      "uiSurfaces": [
+        "Advanced Search: Save as view\u2026 on a search's matches",
+        "Context View: a subset view's layers and its Subset of chip"
+      ],
+      "stillAllowed": [
+        "Every other view, search and export works as before; subset views already saved keep their definition, and say the preview is off instead of listing matches"
+      ],
+      "dependsOn": []
+    },
+    {
+      "key": "revisionViewerEnabled",
+      "name": "Revision history viewer: the graph as it was",
+      "description": "Open a data source's published graph as it was at any past revision, or at the end of a past month, read-only, with what changed since \u2014 search its names and trace its lineage as they were \u2014 and compare any two revisions. Needs Version control.",
+      "category": "lineage",
+      "type": "boolean",
+      "default": true,
+      "options": null,
+      "helpUrl": null,
+      "adminHint": "A past revision is the published graph with everything changed since put back: it costs what changed since, never the whole graph \u2014 about 1 KB of memory per changed entity in each API process while it is open, at most two put together at once per process (GRAPHVER_REVISION_BUILDS_MAX) \u2014 and one more than GRAPHVER_REVISION_REWIND_MAX changes back (100,000 by default) can be compared and exported but not opened.",
+      "impactWhenOff": "The graph opens only as it is now: a view's History shows each revision's changes, but no past revision can be opened on the canvas or compared with another. Nothing is changed or deleted.",
+      "impactWhenOn": null,
+      "sortOrder": 6,
+      "deprecated": false,
+      "stage": "active",
+      "implemented": true,
+      "enforcedServerSide": true,
+      "posture": "capability",
+      "serverGates": [
+        "Every /graph read that names a past revision (?asOfSeq=) \u2014 the canvas, its nodes, edges, children and rollups, name search and lineage traces as they were then"
+      ],
+      "uiSurfaces": [
+        "Reviews \u2192 History: Open on canvas, Compare with now, Compare with\u2026 and Copy link on a revision, the month picker, and two revisions compared",
+        "A data source's Versioning tab: its history, opened in one of its views",
+        "The canvas: the past-revision banner, its ?rev= link, a comparison highlighted, and name search and traces of the graph as it was"
+      ],
+      "stillAllowed": [
+        "Every read of the graph as it is now, and every draft",
+        "History: each revision's changes, and Undo and Restore for the people who can publish",
+        "The change lists of drafts, revisions and reviews"
+      ],
+      "dependsOn": [
+        "versioningEnabled"
+      ]
     }
   ],
   "categories": [
@@ -1489,7 +1589,10 @@
     "toursEnabled": false,
     "canvasLayerFoldEnabled": false,
     "canvasLineageRollupEnabled": false,
-    "placementContractEnabled": false
+    "placementContractEnabled": false,
+    "viewMembershipEnabled": false,
+    "searchViewsEnabled": false,
+    "revisionViewerEnabled": true
   },
   "experimentalNotice": {
     "title": "Early access",

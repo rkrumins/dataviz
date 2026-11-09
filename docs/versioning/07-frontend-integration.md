@@ -377,7 +377,7 @@ param with the active branch, making a view+branch shareable and bookmarkable.
 
 ## 12a. A past revision on the canvas (`?rev=`, the revision viewer)
 
-Behind the **`revisionViewerEnabled`** preview (`useRevisionViewer`: the switch, and
+Behind the **`revisionViewerEnabled`** switch, on unless an administrator turns it off (`useRevisionViewer`: the switch, and
 `workspace:datasource:read` — a view's share link never reaches history), a view can read the
 published graph **as it was at revision K**, read-only — like checking out a commit.
 
@@ -429,7 +429,7 @@ published graph **as it was at revision K**, read-only — like checking out a c
   `revision_busy` (a `BusyError`) are asked again up to three times after its Retry-After, held to
   1–10 s with jitter (`BUSY_RETRY`); a 4xx is not asked again, any other failure once.
 - **History** — `ViewHistoryTimeline` pages by `before` (`useHistoryPages`), virtualized, grouped by
-  month and day in the reader's time zone with a pinned month header; with the preview each revision
+  month and day in the reader's time zone with a pinned month header; with the switch on each revision
   of Published opens, compares (`RevisionCompare`, `RevisionPicker`) and copies its link, and
   `HistoryMonthPicker` goes to the end of any month or day (`useHistoryMonths`). The data source's
   Versioning tab shows the same timeline in whole-graph scope; there a revision opens, highlights and
