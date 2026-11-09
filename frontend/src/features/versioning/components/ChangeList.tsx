@@ -297,12 +297,12 @@ function Row({ wsId, graphId, origin, row, open, onToggle }: {
         <meta.Icon className={cn('w-3.5 h-3.5 shrink-0', meta.text)} aria-label={meta.label} />
         {row.kind === 'edge' ? (
           <span className="flex items-center gap-1 min-w-0 text-[13px] text-ink">
-            <span className="truncate">{row.sourceName || row.sourceEntityId}</span>
+            <span className={cn('truncate', meta.strike)}>{row.sourceName || row.sourceEntityId}</span>
             <ArrowRight className="w-3 h-3 text-ink-muted/70 shrink-0" />
-            <span className="truncate">{row.targetName || row.targetEntityId}</span>
+            <span className={cn('truncate', meta.strike)}>{row.targetName || row.targetEntityId}</span>
           </span>
         ) : (
-          <span className="text-[13px] text-ink truncate">{label}</span>
+          <span className={cn('text-[13px] text-ink truncate', meta.strike)}>{label}</span>
         )}
         {row.kind === 'node' && row.qualifiedName && row.qualifiedName !== label && (
           <span className="text-[11px] text-ink-muted/70 truncate min-w-0 hidden sm:inline">{row.qualifiedName}</span>

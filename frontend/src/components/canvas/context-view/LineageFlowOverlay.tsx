@@ -37,6 +37,7 @@ import { useAnchorRailStore } from '@/store/anchorRail'
 import type { ColumnPeripherySummary } from '@/store/columnPeriphery'
 import { formatRibbonCount, type FlowRibbon } from './flowRibbons'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
+import { DELETED_LINE } from '@/features/versioning/canvas/useDiffDecoration'
 import { useHoveredNodeId } from '@/hooks/useHighlightState'
 import { useLineageDirectionColors } from '@/hooks/useLineageDirectionColors'
 import { InfoTooltip } from '../search/panel/builder-atoms/InfoTooltip'
@@ -98,6 +99,8 @@ type StyledLine = PoolLine & {
   types?: string[]
   originalType?: string
   isGhost?: boolean
+  isDeleted?: boolean
+  data?: { members?: ReadonlyArray<{ id: string }> }
   isBundled?: boolean
   isAggregated?: boolean
   edgeCount: number
@@ -564,7 +567,7 @@ export function LineageFlowOverlay({
 
       const primaryType = edge.types && edge.types.length > 0 ? edge.types[0] : (edge.originalType || '')
       const typeColor = resolveEdgeColor ? resolveEdgeColor(primaryType) : '#3b82f6'
-      const dashArray = edgeDashArray(edge.isGhost || false, resolveEdgeStrokeStyle?.(primaryType))
+      const dashArray = edge.isDeleted ? DELETED_LINE.dash : edgeDashArray(edge.isGhost || false, resolveEdgeStrokeStyle?.(primaryType))
 
       let color = typeColor
       let edgeOpacity = 0.6 + (edge.confidence || 0.4) * 0.4
@@ -633,13 +636,15 @@ export function LineageFlowOverlay({
         }
       }
 
-      if (edge.isGhost) edgeOpacity = Math.min(0.7, edgeOpacity)
+      if (edge.isGhost || edge.isDeleted) edgeOpacity = Math.min(0.7, edgeOpacity)
 
       // A line pointing back — its source in a layer to the right of its
       // target — wears the alert colour where the reader asked for it. A trace
       // keeps its own colours, and a two-way bundle flows both ways.
       const pointsBack = !!backPointerColor && !isTracing && !!edge.isReverseFlow && !(edge as { isBidirectional?: boolean }).isBidirectional
       if (pointsBack) color = backPointerColor!
+      // A deleted line is rose whatever else it is.
+      if (edge.isDeleted) color = DELETED_LINE.color
 
       const delegation = edge.id === hoveredEdgeId ? 'full' : delegatedLineState(edge, hovered)
       if (delegation === 'hidden') return
@@ -654,6 +659,8 @@ export function LineageFlowOverlay({
         target: edge.target,
         minY, maxY, pathD, color, dynamicStrokeWidth, edgeOpacity,
         isGhost: edge.isGhost || false,
+        isDeleted: !!edge.isDeleted,
+        memberIds: edge.data?.members?.map((m) => m.id),
         isBundled: edge.isBundled || false,
         isAggregated: edge.isAggregated || false,
         edgeCount: edge.edgeCount || 0,
@@ -1890,7 +1897,9 @@ export function LineageFlowOverlay({
               premiumLook={detailed || !!edge.isFocusIncident}
               dash={lineDash(edge, detailed)}
               showDirection={showDirection}
-              stagedColor={stagedEdgeColorByEdgeId.get(edge.id)}
+              // A drawn line is a bundle (`bundle-…`): its staged change is one of its links'.
+              stagedColor={stagedEdgeColorByEdgeId.get(edge.id)
+                ?? edge.memberIds?.map((id) => stagedEdgeColorByEdgeId.get(id)).find(Boolean)}
               isExpanding={expandingEdgeIds?.has(edge.id) ?? false}
               // The bundle count, on the lines being looked at only: on every
               // line, the counts of a fan stacked into columns of numbers.

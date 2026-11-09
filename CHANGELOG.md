@@ -9,6 +9,38 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Deleted entities read the same everywhere
+
+A deleted entity looked different on every surface, or not deleted at all. Now every card, row and
+list, and the details drawer, shows a deletion the same way: the name struck through and a quiet
+**Deleted** chip. A deleted relationship is drawn in rose dashes.
+
+### Changed
+
+- **One look for a deletion, on every layout.** On a graph card, a Context View row, a hierarchy row
+  and the drawer, a deleted entity's name is struck through and a **Deleted** chip sits beside it.
+  Hovering the chip says whether the deletion is saved to this draft or not saved yet. Lists call
+  it **Deleted**, where they said **Removed**.
+- **Deleting an entity marks everything it takes with it** (its contents and every relationship
+  touching them) until you save or discard. Before, only the entity itself was marked.
+- **A deleted relationship stays drawn, in rose dashes**, until the deletion is saved or discarded;
+  before, it disappeared at once.
+  - A saved deletion draws the same way, where it used to look like a live relationship.
+  - A line that also draws a live relationship stays live.
+- **The change lists name deleted relationships by their ends.** **Files changed** in a review says
+  `FLOWS_TO · Orders → Revenue`, not only `FLOWS_TO`. A delete's preview names the entities, not
+  their ids. Removed entries are struck through in every list and tree.
+- **The canvas legend** (hover **Committed**) explains the struck name, the **Deleted** chip and the
+  rose dashes.
+
+### Fixed
+
+- **The hierarchy's change ring showed the entity type's colour**, not rose, amber or green.
+- **The Context View's halo for a relationship edited but not saved never appeared.** It was looked
+  up by the drawn line's id instead of its relationships'.
+
+---
+
 ## [Unreleased] — The graph as it was, on by default
 
 **Revision history viewer: the graph as it was** (`revisionViewerEnabled`) is no longer a preview.

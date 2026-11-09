@@ -34,8 +34,8 @@ export function nextRenderTier(count: number, current: RenderTier): RenderTier {
  * and the roll-up draws solid. Every other dash is the ontology's own stroke
  * style for the type, and always stays.
  */
-export function lineDash(line: { isGhost: boolean; dashArray: string }, detailed: boolean): string {
-  return line.isGhost && !detailed ? 'none' : line.dashArray
+export function lineDash(line: { isGhost: boolean; isDeleted?: boolean; dashArray: string }, detailed: boolean): string {
+  return line.isGhost && !line.isDeleted && !detailed ? 'none' : line.dashArray
 }
 
 /**

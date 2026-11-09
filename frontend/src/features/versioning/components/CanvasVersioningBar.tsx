@@ -53,6 +53,8 @@ import { BootstrapProgress } from './BootstrapProgress'
 import { EnableVersioningFlow } from './EnableVersioningFlow'
 import { BranchSwitcher } from './BranchSwitcher'
 import { PullBeforeMergeBanner } from './PullBeforeMergeBanner'
+import { DeletedChip, STATUS_META } from './NodeDiffBadge'
+import { DELETED_LINE } from '../canvas/useDiffDecoration'
 import { ReadRouteChip } from './ReadRouteChip'
 import { RefreshingBadge } from './RefreshingBadge'
 import { ChangeCountChips } from './ChangesPanel'
@@ -617,6 +619,37 @@ export function CanvasVersioningBar({
  *  layered under the real tooltip layer. Both are one `HoverTip` now: the
  *  action leads, the legend is the body. `label` takes a node precisely so a
  *  legend like this does not need a second component. */
+/** What the canvas's change marks mean: the rings, the colours, and how a deletion reads. */
+function ChangeLegend() {
+  return (
+    <span className="mt-2 block space-y-1.5 text-[11px] leading-snug text-ink-muted">
+      <span className="flex items-center gap-2">
+        <span className="w-4 h-4 rounded ring-2 ring-emerald-500/70 inline-block shrink-0" />
+        solid ring = saved to this draft
+      </span>
+      <span className="flex items-center gap-2">
+        <span className="w-4 h-4 rounded outline-dashed outline-2 outline-offset-1 outline-emerald-400/80 inline-block shrink-0" />
+        dashed halo = edited but not saved
+      </span>
+      <span className="flex items-center gap-3 border-t border-glass-border/60 pt-1.5">
+        <span className="inline-flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-emerald-500" />new</span>
+        <span className="inline-flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-orange-500" />edited</span>
+        <span className="inline-flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-rose-500" />deleted</span>
+      </span>
+      <span className="flex items-center gap-2 border-t border-glass-border/60 pt-1.5">
+        <DeletedChip />
+        <span><span className={STATUS_META.removed.strike}>struck name</span> = deleted, kept in its place until published</span>
+      </span>
+      <span className="flex items-center gap-2">
+        <svg width="28" height="6" aria-hidden className="shrink-0">
+          <line x1="1" y1="3" x2="27" y2="3" stroke={DELETED_LINE.color} strokeWidth="2" strokeDasharray={DELETED_LINE.dash} strokeLinecap="round" />
+        </svg>
+        rose dashes = a deleted link
+      </span>
+    </span>
+  )
+}
+
 function ChangeHighlightControl({
   committedHidden,
   onToggle,
@@ -634,21 +667,7 @@ function ChangeHighlightControl({
           <span className="block text-[12px] font-semibold leading-snug text-ink">
             {committedHidden ? 'Show saved changes on the canvas' : 'Hide saved changes on the canvas'}
           </span>
-          <span className="mt-2 block space-y-1.5 text-[11px] leading-snug text-ink-muted">
-            <span className="flex items-center gap-2">
-              <span className="w-4 h-4 rounded ring-2 ring-emerald-500/70 inline-block shrink-0" />
-              solid ring = saved to this draft
-            </span>
-            <span className="flex items-center gap-2">
-              <span className="w-4 h-4 rounded outline-dashed outline-2 outline-offset-1 outline-emerald-400/80 inline-block shrink-0" />
-              dashed halo = edited but not saved
-            </span>
-            <span className="flex items-center gap-3 border-t border-glass-border/60 pt-1.5">
-              <span className="inline-flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-emerald-500" />new</span>
-              <span className="inline-flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-orange-500" />edited</span>
-              <span className="inline-flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-rose-500" />deleted</span>
-            </span>
-          </span>
+          <ChangeLegend />
         </span>
       )}
     >

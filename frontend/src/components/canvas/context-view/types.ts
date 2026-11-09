@@ -129,6 +129,10 @@ export type ComputedEdge = {
   dynamicStrokeWidth: number
   edgeOpacity: number
   isGhost: boolean
+  /** Every link it draws is a deletion — saved to the draft or not yet: rose, in short dashes. */
+  isDeleted?: boolean
+  /** The links it draws, by id — what a staged change of one of them is found by. */
+  memberIds?: string[]
   isBundled: boolean
   /** It carries a roll-up — a summary the aggregation job computed. */
   isAggregated?: boolean

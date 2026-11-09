@@ -53,7 +53,7 @@ const str = (v: unknown): string | undefined => (typeof v === 'string' && v ? v 
 /** The names the canvas knows a change by: a node by its urn, an edge's ends by urn. An entity id
  *  need not be a urn (an import's is not), and an edge's `before` names its ends by entity id. */
 const nodeUrn = (c: GraphChange): string => c.urn ?? c.entityId
-function edgeEnds(c: GraphChange): { source?: string; target?: string } {
+export function edgeEnds(c: GraphChange): { source?: string; target?: string } {
   const b = (c.before ?? {}) as Record<string, unknown>
   return {
     source: c.sourceUrn ?? str(b.sourceEntityId) ?? str(b.source_entity_id) ?? str(b.source),

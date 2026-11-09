@@ -17,6 +17,8 @@ import { HoverTip } from '@/components/ui/HoverTip'
 import { TabsList, TabsTrigger } from '@/components/ui/Tabs'
 import { DrawerHeader } from '../shell/DrawerShell'
 import { DrawerTopBar, KindBadge } from '../shell/DrawerTopBar'
+import { useEntityChangeDecoration, deletedTitle } from '@/features/versioning/canvas/useDiffDecoration'
+import { DeletedChip, STATUS_META } from '@/features/versioning/components/NodeDiffBadge'
 
 export type EntityTab = 'view' | 'edit' | 'json'
 
@@ -68,6 +70,9 @@ export function EntityHeader({
   onCustomize?: () => void
 }) {
   const technical = usePersonaMode() === 'technical'
+  // A deletion — saved to the draft (a ghost) or not saved yet — reads as it does on the canvas.
+  const deco = useEntityChangeDecoration().for(nodeId)
+  const tombstone = isGhost || deco?.status === 'removed'
   // Upstream and downstream wear the product's lineage direction pair (lib/lineageDirectionColors.ts)
   // — the canvas's ports, the lineage cards below, the Focus Lens and a trace.
   const traces: TraceAction[] = [
@@ -90,6 +95,7 @@ export function EntityHeader({
         badge={(
           <>
             <KindBadge label={typeName} bg={colors.bg} fg={colors.text} />
+            {tombstone && <DeletedChip title={isGhost ? 'Deleted in this draft' : deletedTitle(deco)} />}
             {confidence !== undefined && (
               <span className={cn('text-xs font-medium tabular-nums',
                 confidence >= 0.8 ? 'text-emerald-600 dark:text-emerald-400' : confidence >= 0.5 ? 'text-amber-600 dark:text-amber-400' : 'text-rose-600 dark:text-rose-400')}>
@@ -102,7 +108,7 @@ export function EntityHeader({
 
       {/* The name — Technical mode adds the fully-qualified identity underneath, and only when it
           says something the name does not. Focus lands here when the entity shown changes. */}
-      <h2 id={titleId} tabIndex={-1} className={cn('text-xl font-display font-semibold text-ink leading-tight outline-none break-words', technicalLine ? 'mb-1' : 'mb-4')}>
+      <h2 id={titleId} tabIndex={-1} className={cn('text-xl font-display font-semibold text-ink leading-tight outline-none break-words', technicalLine ? 'mb-1' : 'mb-4', tombstone && STATUS_META.removed.strike)}>
         {title}
       </h2>
       {technicalLine && <p className="text-xs font-mono text-ink-muted break-all mb-4">{technicalLine}</p>}

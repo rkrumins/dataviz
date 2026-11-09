@@ -13,7 +13,8 @@ import { useViewEntityType } from '@/hooks/useViewSchema'
 import { useCanvasStore } from '@/store/canvas'
 import { generateIconFallback } from '@/lib/type-visuals'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
-import { useEntityChangeDecoration } from '@/features/versioning/canvas/useDiffDecoration'
+import { useEntityChangeDecoration, deletedTitle } from '@/features/versioning/canvas/useDiffDecoration'
+import { DeletedChip, STATUS_META } from '@/features/versioning/components/NodeDiffBadge'
 import { usePreferencesStore } from '@/store/preferences'
 import { usePersonaMode } from '@/store/persona'
 import { resolveEntityName, technicalIdentity } from '@/lib/entityDisplayName'
@@ -827,8 +828,8 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
           textClass,
           (isHighlighted || isOnLineage) ? "text-accent-lineage" : isSelected ? "text-ink" : isContext ? "text-ink-secondary" : "text-ink/90",
           isHovered && !isSelected && "text-ink",
-          // Strikethrough for a delete (staged or committed) makes the destruction intent unmissable
-          isPendingDelete && "line-through decoration-rose-300/80 decoration-2",
+          // Struck through for a delete (staged or committed): the destruction intent is unmissable
+          isPendingDelete && STATUS_META.removed.strike,
           // 3-line cap + word-wrap. ``break-words`` triggers only
           // when a word genuinely cannot fit, so normal labels
           // stay on a single line. The 3-line ceiling handles
@@ -928,6 +929,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
           then reaches into the row's padding instead of making the row
           taller than the virtualizer's estimate. */}
       <div className={cn("flex items-center gap-1.5 flex-shrink-0 relative z-[5]", minimal && "h-5")}>
+        {isPendingDelete && <DeletedChip compact={minimal} title={deletedTitle(directDeco)} />}
         {/* On a narrowed canvas: why this row is there (nothing otherwise). */}
         {!isTracing && <NarrowRowMark urn={urnOrId} collapsed={!isExpanded && hasChildren} />}
         {(descendantCount > 0 || traceApprox > 0) && (
@@ -1052,7 +1054,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         )}
 
         {/* Add child button */}
-        {entityType?.hierarchy?.canContain && entityType.hierarchy.canContain.length > 0 && onAddChild && (
+        {entityType?.hierarchy?.canContain && entityType.hierarchy.canContain.length > 0 && onAddChild && !isPendingDelete && (
           <button
             onClick={(e) => {
               e.stopPropagation()

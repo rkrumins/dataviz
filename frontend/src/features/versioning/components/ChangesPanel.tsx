@@ -7,13 +7,18 @@
  * old GraphChangesReviewDialog but is fully source-agnostic. When the changes are
  * staged (discardable), each row gets a Discard affordance.
  */
-import { useMemo, useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import { ChevronRight, Trash2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { HoverTip } from '@/components/ui/HoverTip'
 import type { ChangeKind, ChangeSet, ChangeStatus, GraphChange } from '../model/changeModel'
 import { STATUS_META, NodeDiffBadge } from './NodeDiffBadge'
 import { EntityDiff } from './EntityDiff'
+import { edgeEnds } from '../canvas/deletionGhosts'
+
+/** An entity by name where the change set has it, else the end of its id. */
+type NameOf = (id: string) => string
+const idTail = (id: string) => (id.length > 24 ? `…${id.slice(-22)}` : id)
 
 const STATUS_ORDER: ChangeStatus[] = ['added', 'modified', 'removed']
 const KIND_TITLE: Record<ChangeKind, string> = { node: 'Entities', edge: 'Relationships' }
@@ -36,12 +41,19 @@ function group(changes: GraphChange[]): Grouped {
 function ChangeRow({
   change,
   onDiscard,
+  nameOf,
 }: {
   change: GraphChange
   onDiscard?: (stagedChangeId: string) => void
+  nameOf: NameOf
 }) {
   const [open, setOpen] = useState(false)
   const meta = STATUS_META[change.status]
+  // A deleted link says which two entities it joined, not only its type.
+  const ends = change.kind === 'edge' && change.status === 'removed' ? edgeEnds(change) : {}
+  const label = ends.source && ends.target
+    ? `${change.label} · ${nameOf(ends.source)} → ${nameOf(ends.target)}`
+    : change.label
   const canDiscard = onDiscard && change.origin.source === 'staged'
   return (
     <div className={cn('rounded-lg border-l-2 bg-canvas-overlay/40', meta.accent)}>
@@ -54,8 +66,8 @@ function ChangeRow({
             className={cn('w-3.5 h-3.5 text-ink-muted/60 transition-transform shrink-0', open && 'rotate-90')}
           />
           <meta.Icon className={cn('w-3.5 h-3.5 shrink-0', meta.text)} />
-          <span className="text-sm text-ink truncate group-hover:text-ink" title={change.label}>
-            {change.label}
+          <span className={cn('text-sm text-ink truncate group-hover:text-ink', meta.strike)} title={label}>
+            {label}
           </span>
         </button>
         {canDiscard && (
@@ -86,16 +98,18 @@ function ChangeRow({
 function StatusRows({
   items,
   onDiscard,
+  nameOf,
 }: {
   items: GraphChange[]
   onDiscard?: (stagedChangeId: string) => void
+  nameOf: NameOf
 }) {
   const [shown, setShown] = useState(ROWS_SHOWN)
   const rest = items.length - shown
   return (
     <div className="space-y-1">
       {items.slice(0, shown).map((c) => (
-        <ChangeRow key={c.entityId} change={c} onDiscard={onDiscard} />
+        <ChangeRow key={c.entityId} change={c} onDiscard={onDiscard} nameOf={nameOf} />
       ))}
       {rest > 0 && (
         <button
@@ -114,10 +128,12 @@ function KindGroup({
   kind,
   byStatus,
   onDiscard,
+  nameOf,
 }: {
   kind: ChangeKind
   byStatus: Record<ChangeStatus, GraphChange[]>
   onDiscard?: (stagedChangeId: string) => void
+  nameOf: NameOf
 }) {
   if (STATUS_ORDER.every((s) => byStatus[s].length === 0)) return null
   return (
@@ -138,7 +154,7 @@ function KindGroup({
                 </span>
                 <span className="text-[11px] text-ink-muted tabular-nums">{items.length.toLocaleString()}</span>
               </div>
-              <StatusRows items={items} onDiscard={onDiscard} />
+              <StatusRows items={items} onDiscard={onDiscard} nameOf={nameOf} />
             </div>
           )
         })}
@@ -160,6 +176,7 @@ export function ChangesPanel({
   emptyHint?: string
 }) {
   const grouped = useMemo(() => group(changeSet.changes), [changeSet])
+  const nameOf = useCallback<NameOf>((id) => changeSet.byEntityId.get(id)?.label ?? idTail(id), [changeSet])
 
   if (changeSet.changes.length === 0) {
     return (
@@ -171,8 +188,8 @@ export function ChangesPanel({
 
   return (
     <div className={cn('space-y-4', className)}>
-      <KindGroup kind="node" byStatus={grouped.node} onDiscard={onDiscard} />
-      <KindGroup kind="edge" byStatus={grouped.edge} onDiscard={onDiscard} />
+      <KindGroup kind="node" byStatus={grouped.node} onDiscard={onDiscard} nameOf={nameOf} />
+      <KindGroup kind="edge" byStatus={grouped.edge} onDiscard={onDiscard} nameOf={nameOf} />
     </div>
   )
 }

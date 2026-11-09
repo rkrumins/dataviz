@@ -34,7 +34,8 @@ import { InlineNodeEditor } from './InlineNodeEditor'
 import { CommandPalette } from './CommandPalette'
 import { SearchMatchBadge } from './search/SearchMatchBadge'
 import { useSearchHighlight } from './search/useSearchHighlight'
-import { useEntityChangeDecoration, nodeDecorationClass } from '@/features/versioning/canvas/useDiffDecoration'
+import { useEntityChangeDecoration, nodeDecorationClass, deletedTitle } from '@/features/versioning/canvas/useDiffDecoration'
+import { DeletedChip, STATUS_META } from '@/features/versioning/components/NodeDiffBadge'
 import { useCanvasInteractions } from '@/hooks/useCanvasInteractions'
 import { useCanvasKeyboard } from '@/hooks/useCanvasKeyboard'
 import { useDuplicateSubtree } from '@/hooks/useDuplicateSubtree'
@@ -713,7 +714,8 @@ interface HierarchyContainerProps {
   traceFocusId?: string | null
 }
 
-function HierarchyContainer({
+// Exported for its tests.
+export function HierarchyContainer({
   node,
   schema,
   selectedNodeId,
@@ -754,6 +756,8 @@ function HierarchyContainer({
   } = useSearchHighlight(node.urn ?? node.id, { isSelected })
   // Change decoration — staged (dashed) + committed-vs-main (solid), default-on on a draft.
   const changeDeco = useEntityChangeDecoration().for(node.urn ?? node.id)
+  // Deleted — saved to the draft or not yet: struck through, with the Deleted chip.
+  const tombstone = changeDeco?.status === 'removed'
 
   // Trace highlighting
   const isHighlighted = isTraceActive && traceContextSet.has(node.id)
@@ -831,7 +835,10 @@ function HierarchyContainer({
         style={{
           borderColor: isFocusNode ? '#fbbf24' : isHighlighted ? '#c084fc' : visual?.color ?? '#6b7280',
           borderLeftWidth: '4px',
-          ['--tw-ring-color' as string]: isFocusNode ? '#fbbf24' : isHighlighted ? '#c084fc' : visual?.color ?? '#6b7280',
+          // Not under a change decoration's own ring: this inline colour would paint it the type's.
+          ...((!changeDeco || isSelected || isFocusNode || isHighlighted) && {
+            ['--tw-ring-color' as string]: isFocusNode ? '#fbbf24' : isHighlighted ? '#c084fc' : visual?.color ?? '#6b7280',
+          }),
           ...(ruleLook.fillColor && {
             backgroundColor: `color-mix(in srgb, ${ruleLook.fillColor} 14%, var(--nx-bg-elevated))`,
           }),
@@ -889,6 +896,7 @@ function HierarchyContainer({
               >
                 {entityType?.name ?? node.typeId}
               </span>
+              {tombstone && <DeletedChip title={deletedTitle(changeDeco)} />}
               {hasChildren && (
                 <span className="px-1.5 py-0.5 rounded text-2xs font-medium bg-black/5 dark:bg-white/10 text-ink-muted">
                   {node.children.length}
@@ -896,7 +904,7 @@ function HierarchyContainer({
               )}
             </div>
             <div className="flex items-center gap-2 min-w-0">
-              <h4 className="text-sm font-medium text-ink truncate flex-1 min-w-0">
+              <h4 className={cn("text-sm font-medium text-ink truncate flex-1 min-w-0", tombstone && STATUS_META.removed.strike)}>
                 {node.name}
               </h4>
               {/* W2.1 — N-level subtree match count. Shown only on
@@ -957,7 +965,7 @@ function HierarchyContainer({
 
           {/* Add child — hover-visible; direct store import so the recursive
               render never threads an onAddChild prop down every level. */}
-          {editing && (entityType?.hierarchy?.canContain?.length ?? 0) > 0 && (
+          {editing && !tombstone && (entityType?.hierarchy?.canContain?.length ?? 0) > 0 && (
             <button
               onClick={(e) => {
                 e.stopPropagation()
