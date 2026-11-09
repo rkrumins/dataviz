@@ -27,16 +27,22 @@ They can do this from a view's **History** or from the data source's **Versionin
   every capability. Turned off, it works as it did: every graph read that names a past revision
   answers 403 `feature_disabled`, and the **History** tab is called **Commits**.
 - **A switch's default follows the code.** On start, the registry sync now sets each definition's
-  `default_value` from the code, as it already did for its name and copy. A default changed through
-  the definitions API is put back. A value an administrator stored is never touched.
+  `default_value` from the code, as it already did for its name and copy.
+  - A default changed through the definitions API is put back.
+  - A value an administrator stored is never touched.
+  - Besides this switch, it changes no value a deployment reads. The only other default changed
+    since the registry began, `semanticLayerNonAdminEditing`'s in July, is stored in every database.
 
 ### Upgrading
 
-- **A stored "off" stays off.** Saving **Admin → Features** stores a value for every switch. So
-  wherever an administrator has saved that page since this switch shipped, its value is stored as
-  off. To turn it on, go to **Admin → Features** and switch on **Revision history viewer: the graph
-  as it was**. A deployment that never stored a value gets it on. No migration changes a stored
-  value.
+- **From 0.2.0, nothing to do.** The switch is new in this release, and it arrives on.
+- **A deployment running unreleased code that already had the switch** may have it stored off. A
+  stored "off" stays off.
+  - A database stores every switch's value when it is first started.
+  - Saving **Admin → Features** stores every switch's value again.
+  - So it is stored off where the database was first started since the switch arrived, or where that
+    page was saved since. Turn it on there: **Revision history viewer: the graph as it was**.
+  - Otherwise it comes on by itself. No migration changes a stored value.
 
 ---
 
