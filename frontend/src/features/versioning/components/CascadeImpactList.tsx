@@ -52,7 +52,7 @@ export function CascadeImpactList({ impact, rootUrn, past = false }: {
   const nameOf = (id?: string) => (id && names.get(id)) || short(id)
   // An end goes with the relationship only when it is one of the entities removed too.
   const gone = new Set(impact.nodes.flatMap((n) => [n.entityId, n.urn]).filter((id): id is string => !!id).map(String))
-  const endClass = (id?: string) => cn('truncate', id && gone.has(id) && STATUS_META.removed.strike)
+  const isGone = (id?: string) => !!id && gone.has(id)
 
   return (
     <div className="mt-2 rounded-lg border border-rose-500/20 bg-rose-500/[0.04] p-2.5 space-y-2.5">
@@ -90,9 +90,9 @@ export function CascadeImpactList({ impact, rootUrn, past = false }: {
               <li key={String(e.entityId)} className="flex items-center gap-1.5 text-[11px] text-ink-muted min-w-0">
                 <NodeDiffBadge status="removed" />
                 <span className="font-medium text-ink/80 shrink-0">{String(e.edgeType ?? 'edge')}</span>
-                <span className={endClass(e.sourceEntityId)} title={String(e.sourceEntityId ?? '')}>{nameOf(e.sourceEntityId)}</span>
+                <span className={cn('truncate', isGone(e.sourceEntityId) && STATUS_META.removed.strike)} title={String(e.sourceEntityId ?? '')}>{nameOf(e.sourceEntityId)}</span>
                 <ArrowRight className="w-3 h-3 shrink-0" />
-                <span className={endClass(e.targetEntityId)} title={String(e.targetEntityId ?? '')}>{nameOf(e.targetEntityId)}</span>
+                <span className={cn('truncate', isGone(e.targetEntityId) && STATUS_META.removed.strike)} title={String(e.targetEntityId ?? '')}>{nameOf(e.targetEntityId)}</span>
               </li>
             ))}
             {moreEdges > 0 && <li className="text-[11px] text-ink-muted/80 pl-1">+ {moreEdges} more…</li>}
