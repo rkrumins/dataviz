@@ -73,7 +73,7 @@ describe('useRevisionDeepLink', () => {
         useRevisionDeepLink({ ...base, revisionSeq, openRevision, setHighlight }),
       { wrapper: at('/views/v1?rev=12&hl=3&branch=br_1'), initialProps: { revisionSeq: null as number | null } },
     )
-    expect(openRevision).toHaveBeenCalledWith({ seq: 12 })
+    expect(openRevision).toHaveBeenCalledWith({ seq: 12, headAtOpen: 40 })
     expect(setHighlight).toHaveBeenCalledWith({ fromSeq: 3, toSeq: 12 })
     expect(openRevision.mock.invocationCallOrder[0]).toBeLessThan(setHighlight.mock.invocationCallOrder[0])
     expect(probe.search).toBe('?rev=12')
@@ -117,7 +117,7 @@ describe('useRevisionDeepLink', () => {
     const openRevision = vi.fn()
     const setHighlight = vi.fn()
     renderHook(() => useRevisionDeepLink({ ...base, openRevision, setHighlight }), { wrapper: at(`/views/v1?rev=12&hl=${hl}`) })
-    expect(openRevision).toHaveBeenCalledWith({ seq: 12 })
+    expect(openRevision).toHaveBeenCalledWith({ seq: 12, headAtOpen: 40 })
     expect(setHighlight).not.toHaveBeenCalled()
     expect(probe.search).toBe('?rev=12')
   })
