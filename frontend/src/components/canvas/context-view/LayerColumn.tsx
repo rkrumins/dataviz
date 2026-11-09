@@ -77,6 +77,7 @@ interface LayerColumnProps {
   onContextMenu: (e: React.MouseEvent, id: string) => void
   onDoubleClick: (id: string, event?: React.MouseEvent) => void
   onAddChild?: (parentId: string) => void
+  onRestore?: (urn: string) => void
   onAddToLayer?: (layerId: string) => void
   /**
    * True only for a `kind === 'blank'` model — one authored from nothing.
@@ -353,6 +354,7 @@ export const LayerColumn = React.memo(function LayerColumn({
   onContextMenu,
   onDoubleClick,
   onAddChild,
+  onRestore,
   onAddToLayer,
   isBlankModel = false,
   onBuildToLayer,
@@ -3157,6 +3159,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                         onContextMenu={onContextMenu}
                         onDoubleClick={onDoubleClick}
                         onAddChild={onAddChild}
+                        onRestore={onRestore}
                         onFocus={handleFocus}
                         onToggleSearch={toggleSearchNode}
                         isSearchVisible={activeSearchNodes.has(node.id)}

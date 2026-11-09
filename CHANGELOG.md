@@ -9,6 +9,34 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Saved deletions stay in place on every layout, and come back whole
+
+A deletion saved to a draft stayed visible only in the Context View; the graph and hierarchy layouts
+dropped it, and **Restore** left its relationships behind.
+
+### Changed
+
+- **Every layout keeps a saved deletion where it was** until the draft is published: struck
+  through, under its parent, with **Restore**. The graph and hierarchy layouts used to drop it.
+- **A deletion waits for its parent.** It is drawn under its parent once the parent is on the
+  canvas, and comes back when you expand a collapsed parent again. Before, it was drawn at the top of
+  its layer when its parent wasn't loaded, and disappeared for good after a collapse.
+- **At most 500 deletions are drawn on a canvas**; **Changes** lists them all. Before, every one was.
+- **Restore brings back what was deleted with an entity**: what it held, and its relationships to
+  entities still there. Each comes back under its own id, so saving it leaves no trace in the draft's
+  changes. Before, its relationships stayed deleted, and its parent link came back under a new id.
+- **Restore is offered only where you can edit** this canvas: on the card, the Context View row, the
+  hierarchy row and the drawer.
+
+### Fixed
+
+- **A child moved to another parent could show under both parents** while the draft held its old
+  link as a deletion.
+- **The graph and hierarchy layouts' legacy Save would have sent deletions as live entities.**
+- **A graph card showed a stray 0** where its entity held nothing, as every deletion drawn there does.
+
+---
+
 ## [Unreleased] — Deleted entities read the same everywhere
 
 A deleted entity looked different on every surface, or not deleted at all. Now every card, row and

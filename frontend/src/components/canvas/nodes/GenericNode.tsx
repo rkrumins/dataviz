@@ -311,7 +311,7 @@ export const GenericNode = memo(function GenericNode({
 
       {/* Ghost (committed deletion) toolbar — read-only entity, so the only action is to bring it
           back. Restore stages a resurrect (create over the tombstone by its original urn). */}
-      {isGhost && !!selected && (
+      {isGhost && !!selected && !!entityData.canAddInside && (
         <NodeToolbar
           isVisible
           position={Position.Top}
@@ -552,7 +552,7 @@ export const GenericNode = memo(function GenericNode({
         )}
 
         {/* Child Count for collapsed nodes */}
-        {entityData.childCount && !entityData.isExpanded && (
+        {(entityData.childCount ?? 0) > 0 && !entityData.isExpanded && (
           <div className="mt-2 text-2xs text-ink-muted">
             {entityData.childCount} {entityData.childCount === 1 ? 'child' : 'children'}
           </div>

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { synthesizeGhostNode, synthesizeGhostEdge, reconcileGhosts, buildRestoreChange, buildRestoreSubtree, isGhostNode, isGhostEdge } from '../deletionGhosts'
+import { synthesizeGhostNode, synthesizeGhostEdge, reconcileGhosts, buildRestoreChange, buildRestoreSubtree, buildRestoreLinks, indexRemovals, pickGhosts, isGhostNode, isGhostEdge } from '../deletionGhosts'
 import { buildChangeSet, type GraphChange } from '../../model/changeModel'
 
 const removedNode = (urn: string, before: Record<string, unknown>): GraphChange => ({
@@ -193,3 +193,83 @@ describe('deletionGhosts — restoring a large deleted subtree', () => {
   })
 })
 
+
+describe('deletionGhosts — which deletions a canvas draws', () => {
+  const contains = (id: string, parent: string, child: string) =>
+    removedEdge(id, { sourceEntityId: parent, targetEntityId: child, edgeType: 'CONTAINS' })
+  const changes = [
+    removedNode('urn:root-gone', { displayName: 'Root gone', entityType: 'T' }),                  // had no parent
+    removedNode('urn:t1', { displayName: 'T1', entityType: 'T' }), contains('k1', 'urn:db', 'urn:t1'),
+    removedNode('urn:c1', { displayName: 'C1', entityType: 'T' }), contains('k2', 'urn:t1', 'urn:c1'),
+    removedNode('urn:far', { displayName: 'Far', entityType: 'T' }), contains('k3', 'urn:not-loaded', 'urn:far'),
+  ]
+  const removals = indexRemovals(changes, CONTAINS)
+
+  it('draws those under a parent on the canvas, and those that had none — parent first', () => {
+    expect(pickGhosts(removals, new Set(['urn:db']))).toEqual(['urn:root-gone', 'urn:t1', 'urn:c1'])
+  })
+
+  it('leaves out one whose parent is not loaded: at its layer top it would read as elsewhere', () => {
+    expect(pickGhosts(removals, new Set(['urn:db']))).not.toContain('urn:far')
+    expect(pickGhosts(removals, new Set(['urn:db', 'urn:not-loaded']))).toContain('urn:far')
+  })
+
+  it('draws at most the cap, breadth first', () => {
+    expect(pickGhosts(removals, new Set(['urn:db']), 2)).toEqual(['urn:root-gone', 'urn:t1'])
+    const many = Array.from({ length: 900 }, (_, i) => removedNode(`urn:n${i}`, { displayName: `n${i}`, entityType: 'T' }))
+    const cs = buildChangeSet(many)
+    expect(reconcileGhosts(cs, [], [], false, CONTAINS).nodesToAdd).toHaveLength(500)
+  })
+
+  it("never re-adds a moved child's old parent link: it would have two parents", () => {
+    // urn:moved is live (moved to another parent); its link to its old parent was removed.
+    const cs = buildChangeSet([contains('k-old', 'urn:old-parent', 'urn:moved')])
+    const { edgesToAdd } = reconcileGhosts(cs, [liveNode('urn:old-parent'), liveNode('urn:moved')], [], false, CONTAINS)
+    expect(edgesToAdd).toEqual([])
+  })
+
+  it('brings a deleted child in once its parent is loaded', () => {
+    const cs = buildChangeSet(changes)
+    expect(reconcileGhosts(cs, [], [], false, CONTAINS).nodesToAdd.map((n) => n.id)).toEqual(['urn:root-gone'])
+    expect(reconcileGhosts(cs, [liveNode('urn:db')], [], false, CONTAINS).nodesToAdd.map((n) => n.id))
+      .toEqual(['urn:root-gone', 'urn:t1', 'urn:c1'])
+  })
+})
+
+describe('deletionGhosts — a restore brings links back under their ids', () => {
+  const flow = (id: string, s: string, t: string) =>
+    removedEdge(id, { sourceEntityId: s, targetEntityId: t, edgeType: 'FLOWS_TO', properties: { job: 'nightly' } })
+  const changes = [
+    removedNode('urn:t1', { displayName: 'T1', entityType: 'T' }),
+    removedEdge('k1', { sourceEntityId: 'urn:db', targetEntityId: 'urn:t1', edgeType: 'CONTAINS' }),
+    removedNode('urn:t2', { displayName: 'T2', entityType: 'T' }),
+    flow('f-live', 'urn:t1', 'urn:report'),       // the other end is live
+    flow('f-gone', 'urn:t1', 'urn:t2'),           // the other end is deleted, and not restored
+    removedEdge('k-other', { sourceEntityId: 'urn:t1', targetEntityId: 'urn:x', edgeType: 'CONTAINS' }),
+  ]
+  const cs = buildChangeSet(changes)
+
+  it("nests the entity under its parent by the parent link's own id", () => {
+    expect(buildRestoreChange('urn:t1', cs, new Set(['urn:db']), CONTAINS)?.after).toMatchObject({
+      parentUrn: 'urn:db', containmentEdgeType: 'CONTAINS', containmentEdgeId: 'k1',
+    })
+  })
+
+  it('restores the links whose other end will be there, and no parent link', () => {
+    const restored = buildRestoreSubtree('urn:t1', cs, new Set(['urn:db']), CONTAINS)
+    const links = buildRestoreLinks(restored, changes, (u) => u !== 'urn:t2', CONTAINS)
+    expect(links).toEqual([expect.objectContaining({
+      type: 'create_edge', targetId: 'f-live',
+      after: expect.objectContaining({ restoreOf: 'f-live', edgeType: 'FLOWS_TO', properties: { job: 'nightly' },
+        source: 'urn:t1', target: 'urn:report' }),
+      summary: "Restore link FLOWS_TO: 'T1' → 'urn:report'",
+    })])
+  })
+
+  it('restores a link between two entities restored together', () => {
+    const both = [...buildRestoreSubtree('urn:t1', cs, new Set(['urn:db']), CONTAINS),
+      ...buildRestoreSubtree('urn:t2', cs, new Set(), CONTAINS)]
+    const ids = buildRestoreLinks(both, changes, () => false, CONTAINS).map((l) => l.targetId)
+    expect(ids).toEqual(['f-gone'])
+  })
+})

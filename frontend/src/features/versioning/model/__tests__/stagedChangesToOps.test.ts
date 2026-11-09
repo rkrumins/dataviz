@@ -363,3 +363,32 @@ describe('stagedChangesToOps — a property the edit removed or renamed', () => 
     expect(op.unsetProperties).toBeUndefined()
   })
 })
+
+describe('stagedChangesToOps — a restore keeps every id', () => {
+  it("brings a restored entity's parent link back under the link's original id", () => {
+    const ops = stagedChangesToOps([sc({ type: 'create_entity', targetUrn: 'urn:col', after: {
+      entityType: 'Column', displayName: 'id', urn: 'urn:col',
+      parentUrn: 'urn:table', containmentEdgeType: 'CONTAINS', containmentEdgeId: 'contains-edge-7',
+    } })])
+    expect(ops[0].payload).not.toHaveProperty('containmentEdgeId')   // a hint, not a field
+    expect(ops[1]).toMatchObject({ op: 'create', kind: 'edge', id: 'contains-edge-7', ref: 'contains-urn:col',
+      payload: { edgeType: 'CONTAINS', sourceEntityId: 'urn:table', targetEntityId: 'urn:col' } })
+  })
+
+  it('brings a restored link back under its original id, with the values it was deleted with', () => {
+    const ops = stagedChangesToOps([sc({ type: 'create_edge', targetId: 'flow-9', after: {
+      edgeType: 'FLOWS_TO', sourceEntityId: 'e-a', targetEntityId: 'e-b', properties: { job: 'nightly' },
+      restoreOf: 'flow-9', source: 'urn:a', target: 'urn:b',
+    } })])
+    expect(ops).toEqual([{ op: 'create', kind: 'edge', id: 'flow-9', ref: 'flow-9', payload: {
+      edgeType: 'FLOWS_TO', sourceEntityId: 'e-a', targetEntityId: 'e-b', properties: { job: 'nightly' },
+    } }])
+  })
+
+  it('still lets the server mint a link the user drew', () => {
+    const [op] = stagedChangesToOps([sc({ type: 'create_edge', targetId: 'staged-1', after: {
+      edgeType: 'FLOWS_TO', source: 'urn:a', target: 'urn:b',
+    } })])
+    expect(op).not.toHaveProperty('id')
+  })
+})

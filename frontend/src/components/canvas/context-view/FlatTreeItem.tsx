@@ -92,6 +92,8 @@ interface FlatTreeItemProps {
   onContextMenu: (e: React.MouseEvent, id: string) => void
   onDoubleClick: (id: string, event?: React.MouseEvent) => void
   onAddChild?: (parentId: string) => void
+  /** Bring back a deletion saved to the draft — offered where the canvas can be edited. */
+  onRestore?: (urn: string) => void
   onFocus: (node: HierarchyNode) => void
   onToggleSearch?: (id: string) => void
   isSearchVisible?: boolean
@@ -167,6 +169,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   onContextMenu,
   onDoubleClick,
   onAddChild,
+  onRestore,
   onFocus,
   onToggleSearch,
   isSearchVisible = false,
@@ -1050,6 +1053,21 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
             title="Search children"
           >
             <LucideIcons.Search className="w-3 h-3 block" />
+          </button>
+        )}
+
+        {/* Restore — a deletion saved to the draft, back where it was */}
+        {node.data?.isGhost === true && onRestore && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation()
+              onRestore(node.urn ?? node.id)
+            }}
+            className="flex items-center justify-center p-1.5 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-500 dark:text-rose-400 transition-all duration-200 hover:scale-110 active:scale-95 leading-none"
+            title={`Restore ${displayName}`}
+            aria-label={`Restore ${displayName}`}
+          >
+            <LucideIcons.RotateCcw className="w-3 h-3 block" />
           </button>
         )}
 

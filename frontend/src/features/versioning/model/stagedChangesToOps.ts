@@ -117,6 +117,9 @@ export function unsavedNodeFields(c: StagedChange): string[] {
     .sort()
 }
 
+/** A restored link's client-side hints: which link it restores, and its ends as the canvas names them. */
+const RESTORE_HINT_FIELDS = new Set(['restoreOf', 'source', 'target'])
+
 export function stagedChangesToOps(
   changes: StagedChange[],
   // Rewrites a staged endpoint id to its real id. After Phase 1 creates the new
@@ -177,6 +180,14 @@ export function stagedChangesToOps(
         const data = asObj(after.data)
         const src = after.source ?? after.sourceEntityId
         const tgt = after.target ?? after.targetEntityId
+        // A restored link comes back under its original id with the values it was deleted with
+        // (create over its tombstone), its ends by entity id as it stored them.
+        const restoreOf = typeof after.restoreOf === 'string' ? after.restoreOf : undefined
+        if (restoreOf) {
+          const stored = Object.fromEntries(Object.entries(after).filter(([k]) => !RESTORE_HINT_FIELDS.has(k)))
+          ops.push({ op: 'create', kind: 'edge', id: restoreOf, ref: c.targetId, payload: stored })
+          break
+        }
         ops.push({
           op: 'create',
           kind: 'edge',
@@ -221,7 +232,7 @@ export function stagedChangesToOps(
         // allow-list to drift: a fresh create carries just the basics it set; a Restore replays the
         // deleted entity's ENTIRE snapshot, so nothing is dropped. An explicit `urn` ⇒ resurrect that
         // entity (create-over-tombstone) instead of minting a new one.
-        const CONTAINMENT_HINT_FIELDS = new Set(['parentUrn', 'containmentEdgeType', 'parentLabel'])
+        const CONTAINMENT_HINT_FIELDS = new Set(['parentUrn', 'containmentEdgeType', 'containmentEdgeId', 'parentLabel'])
         const payload: Record<string, unknown> = {}
         for (const [k, v] of Object.entries(after)) {
           if (v !== undefined && !CONTAINMENT_HINT_FIELDS.has(k)) payload[k] = v
@@ -236,6 +247,8 @@ export function stagedChangesToOps(
           ops.push({
             op: 'create',
             kind: 'edge',
+            // A restore brings its parent link back under the link's original id.
+            ...(typeof after.containmentEdgeId === 'string' ? { id: after.containmentEdgeId } : {}),
             ref: `contains-${ref}`,
             payload: {
               edgeType: after.containmentEdgeType,

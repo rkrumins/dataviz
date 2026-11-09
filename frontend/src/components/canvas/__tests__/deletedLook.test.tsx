@@ -19,6 +19,8 @@ import type { HierarchyNode as RowNode } from '../context-view/types'
 import { StaticViewSchemaProvider, type ResolvedViewSchema } from '@/providers/ViewExecutionContext'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { useBranchStore } from '@/store/branchStore'
+import { buildChangeSet } from '@/features/versioning/model/changeModel'
+import { synthesizeGhostNode } from '@/features/versioning/canvas/deletionGhosts'
 import { installJsdomLayout } from '@/test/canvasHarness'
 import { stubSession } from '@/test/stubSearchSession'
 import type { EntityTypeSchema, ViewLayerConfig } from '@/types/schema'
@@ -57,11 +59,8 @@ beforeEach(() => {
 })
 
 describe('the graph layout’s card', () => {
-  function renderCard() {
-    const nodes: Node[] = [{
-      id: URN, type: 'generic', position: { x: 0, y: 0 },
-      data: { id: URN, typeId: 'dataset', name: 'Orders', urn: URN },
-    }]
+  function renderCard(data: Record<string, unknown> = { id: URN, typeId: 'dataset', name: 'Orders', urn: URN }) {
+    const nodes: Node[] = [{ id: URN, type: 'generic', position: { x: 0, y: 0 }, data }]
     render(
       <StaticViewSchemaProvider schema={schema}>
         <ReactFlowProvider>
@@ -86,6 +85,16 @@ describe('the graph layout’s card', () => {
     renderCard()
     expect(heading()).not.toHaveClass('line-through')
     expect(screen.queryByText('Deleted')).toBeNull()
+  })
+
+  it('draws a deletion saved to the draft as it was, with no count of what it held', () => {
+    const removed = { entityId: URN, urn: URN, kind: 'node', status: 'removed', label: 'Orders',
+      origin: { source: 'branch', branchId: 'b' }, before: { displayName: 'Orders', entityType: 'dataset' } } as const
+    useBranchStore.setState({ activeChangeSet: buildChangeSet([removed]) })
+    const ghost = synthesizeGhostNode(removed)
+    renderCard({ ...ghost.data, id: URN, typeId: 'dataset' })
+    expect(heading()).toHaveClass('line-through')
+    expect(screen.queryByText('0')).toBeNull()
   })
 })
 
@@ -142,5 +151,26 @@ describe('the hierarchy’s row', () => {
   it('keeps the type colour for a row with no change', () => {
     renderRow()
     expect(card().style.getPropertyValue('--tw-ring-color')).toBe('#6366f1')
+  })
+})
+
+describe('Restore on a deletion saved to the draft', () => {
+  const ghost: HierarchyNode = {
+    id: 'urn:gone', typeId: 'dataset', name: 'Gone', data: { urn: 'urn:gone', label: 'Gone', isGhost: true },
+    children: [], depth: 0, urn: 'urn:gone', entityTypeOption: 'dataset', tags: [],
+  }
+
+  it('is offered on the hierarchy row where the canvas can be edited, and brings it back', () => {
+    const onRestore = vi.fn()
+    render(<HierarchyContainer node={ghost} schema={{ entityTypes: [dataset] } as never} selectedNodeId={null}
+      expandedNodes={new Set()} searchResults={[]} onSelect={vi.fn()} onToggle={vi.fn()} onRestore={onRestore} />)
+    screen.getByRole('button', { name: 'Restore Gone' }).click()
+    expect(onRestore).toHaveBeenCalledWith('urn:gone')
+  })
+
+  it('is not offered where the canvas cannot be edited', () => {
+    render(<HierarchyContainer node={ghost} schema={{ entityTypes: [dataset] } as never} selectedNodeId={null}
+      expandedNodes={new Set()} searchResults={[]} onSelect={vi.fn()} onToggle={vi.fn()} />)
+    expect(screen.queryByRole('button', { name: 'Restore Gone' })).toBeNull()
   })
 })
