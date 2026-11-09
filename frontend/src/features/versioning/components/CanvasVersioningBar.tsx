@@ -118,7 +118,7 @@ export function CanvasVersioningBar({
   const [compare, setCompare] = useState<CompareRequest | null>(null)
   const [exportAt, setExportAt] = useState<number | null>(null)
 
-  // Travelling in time (the revision viewer, a preview): the past revision this view reads, its
+  // Travelling in time (the revision viewer): the past revision this view reads, its
   // `?rev=` link, and two revisions highlighted on the canvas.
   const revisionViewer = useRevisionViewer(workspaceId)
   const revisionSeq = useEffectiveRevision(workspaceId, dataSourceId, viewId)

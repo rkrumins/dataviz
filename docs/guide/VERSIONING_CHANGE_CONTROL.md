@@ -168,9 +168,10 @@ More terms are in the [Glossary](/guide/glossary).
 
 1. Open a View on a data source with version control.
 2. In the View's header, choose **Reviews**. The **Changes & Reviews** panel
-   opens — on **Changes** if you're in a draft, on **Commits** if you're on
-   **Published**.
-3. On **Commits**, choose the scope: **This draft**, **This view** (changes made
+   opens — on **Changes** if you're in a draft, on **History** if you're on
+   **Published**. (It's called **Commits** if an administrator has turned off
+   the revision viewer; see below.)
+3. On **History**, choose the scope: **This draft**, **This view** (changes made
    from this View) or **Whole graph**. Select a revision to see its changes.
 
 After a merge or publish, the banner *Merged — your changes are now live* (or
@@ -182,8 +183,9 @@ revisions as you scroll — all the way back to the first.
 
 ### See the graph as it was
 
-> **Preview.** This needs **Revision history viewer: the graph as it was** turned
-> on under Admin → Features. While it is, the **Commits** tab is called **History**.
+> **On by default.** An administrator can turn it off under Admin → Features →
+> **Revision history viewer: the graph as it was**. Then no past revision opens
+> or compares, and the **History** tab is called **Commits** again.
 
 Like checking out an earlier commit, you can open the published graph as it was at
 any revision, read-only, and compare any two revisions.

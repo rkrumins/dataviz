@@ -28,7 +28,7 @@ export function useRevisionDeepLink({
   openRevision,
   setHighlight,
 }: {
-  /** The preview is on and the view's graph is version-controlled. */
+  /** The revision viewer is on and the view's graph is version-controlled. */
   enabled: boolean
   /** Published's head, once resolved. */
   headSeq: number | null

@@ -5,7 +5,7 @@
  *     tree). So after you save, your work doesn't "disappear" — it moves from Pending to Committed
  *     in the same view.
  *   • Commits — the branch's history commit-by-commit (this draft / this view / whole graph), each
- *     expandable to its own diff (GitHub-style). With the revision viewer (a preview) it is
+ *     expandable to its own diff (GitHub-style). With the revision viewer (on by default) it is
  *     History: each revision of Published opens on the canvas as the graph was then, any month is a
  *     click away, and two revisions compare — the drawer widening for the comparison.
  *   • Pull Requests — raised from this view, or the whole data source.
@@ -150,7 +150,7 @@ export function ViewVersioningPanel({
 
         <div className="flex items-center gap-1 px-3 pt-2 border-b border-glass-border/60">
           {TABS.map(({ id, label: tabLabel, Icon }) => {
-            // While the preview is on, the history is a place to travel in time, not a commit log.
+            // While the revision viewer is on, the history is a place to travel in time, not a commit log.
             const label = id === 'history' && revisionViewer ? 'History' : tabLabel
             return (
             <button

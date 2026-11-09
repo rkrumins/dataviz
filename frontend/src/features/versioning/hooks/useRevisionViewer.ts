@@ -11,7 +11,7 @@ import { useNotificationStore } from '@/components/ui/notifications'
 import { REVISION_TOO_FAR_EVENT } from '@/providers/RemoteGraphProvider'
 import type { RevisionInfo } from '@/services/versioningApiService'
 
-/** The preview is on, and the person reads the data source itself: a view's share link reaches the
+/** The switch is on, and the person reads the data source itself: a view's share link reaches the
  *  graph as it is now, never its history (the server refuses it). */
 export function useRevisionViewer(wsId?: string | null): boolean {
   const on = useFeature('revisionViewerEnabled')

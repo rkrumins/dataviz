@@ -9,6 +9,37 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — The graph as it was, on by default
+
+**Revision history viewer: the graph as it was** (`revisionViewerEnabled`) is no longer a preview.
+It is on by default, as an active capability under **Lineage**, beside Version control.
+
+Anyone who can read a data source can now:
+- open its published graph as it was at any revision;
+- search its names and trace its lineage as they were then;
+- compare any two revisions.
+
+They can do this from a view's **History** or from the data source's **Versioning** tab.
+
+### Changed
+
+- **`revisionViewerEnabled` defaults on.** A value that can't be read counts as on, as it does for
+  every capability. Turned off, it works as it did: every graph read that names a past revision
+  answers 403 `feature_disabled`, and the **History** tab is called **Commits**.
+- **A switch's default follows the code.** On start, the registry sync now sets each definition's
+  `default_value` from the code, as it already did for its name and copy. A default changed through
+  the definitions API is put back. A value an administrator stored is never touched.
+
+### Upgrading
+
+- **A stored "off" stays off.** Saving **Admin → Features** stores a value for every switch. So
+  wherever an administrator has saved that page since this switch shipped, its value is stored as
+  off. To turn it on, go to **Admin → Features** and switch on **Revision history viewer: the graph
+  as it was**. A deployment that never stored a value gets it on. No migration changes a stored
+  value.
+
+---
+
 ## [Unreleased] — The graph as it was, on every layout and from the data source
 
 Every layout can now read the graph as it was at a past revision without sending a request the
