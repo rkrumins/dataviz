@@ -581,7 +581,12 @@ implication and the organisation-wide shortcuts — is expanded into concrete pe
 grants, each narrowed to the key's profile (`KEY_GRANTABLE_PERMISSIONS`: view read, edit,
 create, delete and publish; data-source, ontology and catalog read; `datasource:manage`) and
 to the workspaces its selection touches. `workspace:datasource:publish` is not in that
-profile, so no key carries it. Per workspace, view permissions survive only where the
+profile, so no key carries it: a key that writes data publishes where its **owner** holds it
+(`KeyScope.owner_publishes`, checked by `versioning_gate.require_publish` and
+`require_publish_for_main`) — publishing a draft, merging its review, syncing a snapshot, an
+import that publishes itself, and writing a versioned graph's `main` directly. Revert, restore,
+freeze and a fork's review stay closed to keys. The key's own `publish` setting is
+`workspace:view:publish` only. Per workspace, view permissions survive only where the
 workspace or one of its views is selected, data permissions only where the workspace or one
 of its data sources is.
 
@@ -633,9 +638,12 @@ of its data sources is.
   permission's to decide, with a per-person limit; creating one gives it no access. Deleting an
   account stops its keys at once; for 30 days it can be restored as it was, then it is purged — its keys revoked, its
   bindings and manager seats removed. When the account holds Publisher (or Data Engineer), its keys
-  write a versioned graph's `main` directly, since that check reads the account's own roles; like
-  every key, they never publish, merge, revert, restore or sync. See
-  [Service Accounts](/guide/service-accounts).
+  publish a draft, merge its review, sync a snapshot, let an import publish itself and write a
+  versioned graph's `main` directly, since those checks read the account's own roles; like every
+  key, they never revert, restore, freeze or merge a fork's review. A role that administers a
+  workspace or lets people in is never the account's (its claims drop it), so a role an account
+  holds can't be edited to include either (409 `role_held_by_service_accounts`), and keeping one is
+  refused. See [Service Accounts](/guide/service-accounts).
 
 ## 403 body
 

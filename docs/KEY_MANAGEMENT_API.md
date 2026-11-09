@@ -47,6 +47,14 @@ have one, start with the [Integration Quickstart](/docs/integration-quickstart).
   "userId": "svc_7be5998c6784",
   "permissions": {"views": "none", "data": "read", "publish": false},
   "resources": {"workspaces": [], "views": [], "dataSources": ["ds_124482eedff6"]},
+  "effectiveAccess": {
+    "workspaces": [{"id": "ws_2f0c", "name": "Finance", "views": "none", "data": "read",
+                    "publish": false, "publishData": false}],
+    "views": [],
+    "dataSources": [{"id": "ds_124482eedff6", "name": "Ledger", "workspaceId": "ws_2f0c",
+                     "level": "read"}],
+    "everyWorkspace": null
+  },
   "expiresAt": "2027-01-31T00:00:00+00:00",
   "createdAt": "2026-10-24T09:30:00+00:00"
 }
@@ -61,6 +69,7 @@ have one, start with the [Integration Quickstart](/docs/integration-quickstart).
 | `userId` | Who it acts as: a person (`usr_…`) or a service account (`svc_…`). Only while it works. |
 | `permissions` | `views` and `data`: `none`, `read` or `write`; `publish`: whether it may publish views. Only while it works. |
 | `resources` | `"all"`, or the `workspaces`, `views` and `dataSources` it is limited to. Only while it works. |
+| `effectiveAccess` | What it may do right now — as each request it makes is held to: its owner's live access, narrowed by the key. Per workspace `views`, `data`, `publish` (publishing views, the key's switch) and `publishData` (publishing data: data write where its owner holds Publisher — no key setting gives it); per view and data source it names, a `level`; `everyWorkspace` for a key that reaches every workspace through an organisation-wide role. Only while it works. |
 | `expiresAt` | When it stops working — its own expiry or the deployment's maximum lifetime, whichever is sooner. `null`: never. |
 | `createdAt` | When it was made. |
 
@@ -160,9 +169,11 @@ A key, as every route here describes it:
 | `usage` | Requests, writes, refusals and errors over 30 days (`requests30d`, `writes30d`, `refused30d`, `errors30d`), and requests per day for the last 14 (`daily14`, oldest first). |
 
 `GET /{key_id}` adds `effectiveAccess` (what it may do in each workspace, view and data source it
-reaches, as of now), `usageDays` (30 days, per day), and `replaces` / `replacedBy`. `POST /preview`
-answers what the key would be — `permissions`, `resources`, `allowedCidrs`, `expiresAt`,
-`effectiveAccess` — with `activeKeys` and `maxActiveKeys`.
+reaches, as of now, `publishData` included), `usageDays` (30 days, per day), and `replaces` /
+`replacedBy`. `POST /preview` answers what the key would be — `permissions`, `resources`,
+`allowedCidrs`, `expiresAt`, `effectiveAccess` — with `activeKeys` and `maxActiveKeys`. `GET
+/options` lists each workspace the owner reaches with `publishData`: whether they publish data
+there, which a key that writes data would do as them.
 
 ### Confirming it's you
 

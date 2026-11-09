@@ -164,7 +164,7 @@ class Principal:
 | workspace_data_engineer (granted P) | Y | Y | Y | – |
 | workspace_admin, org_admin, super_admin | Y | Y | Y (via category leaves) | Y |
 
-> **Shipped (Stage 1 seed, Stage 2 enforcement): as designed.** `20261017_1000_datasource_publish` seeds the permission and `workspace_publisher` (c1852aa1); the admin UI treats Publisher as a workspace role (08168c26). P is enforced since ca0472df. An API key never holds P (it is not in `KEY_GRANTABLE_PERMISSIONS`).
+> **Shipped (Stage 1 seed, Stage 2 enforcement): as designed.** `20261017_1000_datasource_publish` seeds the permission and `workspace_publisher` (c1852aa1); the admin UI treats Publisher as a workspace role (08168c26). P is enforced since ca0472df. An API key never holds P (it is not in `KEY_GRANTABLE_PERMISSIONS`); where it needs P it passes where its owner — the person, or the service account — holds it (`require_publish`, `require_publish_for_main`).
 
 ### 3. Branch relations and visibility
 
@@ -258,11 +258,11 @@ State `blocked` returns HOLD, not a denial.
 > - DRAFT_MANAGE and DRAFT_ABANDON M + O/bM.
 > - PR_REVIEW (approve) M; not the author or the source draft's owner (403 `self_review`); not a service account (403 `person_required`), nor a manager of the service account that opened the PR or owns its draft, nor anyone who made a key for it (403 `self_review`); `expectedHeadCommitId` optional. PR_EDIT and PR_CLOSE M.
 > - PR_OPEN and PR_EDIT: a service account named as a reviewer → 403 `person_required`. `GET …/reviewers` leaves service accounts out.
-> - PR_MERGE and DIRECT_PUBLISH M + P; DIRECT_PUBLISH also O (private) or O/bM (shared).
-> - MAIN_REVERT and MAIN_RESTORE M + P, target `main` only (there is no `target`). MAIN_SYNC (sync and `/graph/resync`) M + P.
+> - PR_MERGE and DIRECT_PUBLISH M + P; DIRECT_PUBLISH also O (private) or O/bM (shared). An API key passes P where its owner holds it (a fork's review stays closed to keys). A DIRECT_PUBLISH refused for O/bM says so with `hint: merge_request`: anyone with M + P merges the draft's review, whoever owns it. Who may publish is checked before the draft's staged edits are folded, so a refused publisher commits nothing.
+> - MAIN_REVERT and MAIN_RESTORE M + P, target `main` only (there is no `target`); closed to keys. MAIN_SYNC (sync and `/graph/resync`) M + P; `POST …/sync` is open to a key where its owner holds P (its `force` / `allowMassDelete` overrides need `workspace:admin`, which no key holds), `/graph/resync` is not.
 > - MAIN_WRITE_THROUGH and MAIN_BULK: a person needs P (403 `publish_required`); an API key passes only where its owner holds P.
 > - FORK M. REBUILD and RECONCILE M, not P. LIFECYCLE_FREEZE (freeze and unfreeze) M + P.
-> - There is no BYPASS, PR_COMMENT, PR_DISMISS_REVIEW, DRAFT_REOPEN, service principal or `system:*` principal. #567's service accounts are not that principal: they act through `nxsat_` keys with their own workspace roles, write drafts and raise reviews as any key does, never review, approve or join a draft, and pass MAIN_WRITE_THROUGH and MAIN_BULK only where the account itself holds P.
+> - There is no BYPASS, PR_COMMENT, PR_DISMISS_REVIEW, DRAFT_REOPEN, service principal or `system:*` principal. #567's service accounts are not that principal: they act through `nxsat_` keys with their own workspace roles, write drafts and raise reviews as any key does, never review, approve or join a draft, and pass P — MAIN_WRITE_THROUGH, MAIN_BULK, MAIN_SYNC, DIRECT_PUBLISH and PR_MERGE of a draft's review — only where the account itself holds it.
 
 ### 5. Lifecycle × drafts/PRs (shared §9; ACCESS enforcement)
 

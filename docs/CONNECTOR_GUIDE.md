@@ -64,13 +64,19 @@ it as `Authorization: Bearer nxsat_…` on every request.
 | Dry-run a file (`…/imports/validate`) | Data: read | read |
 | Import into a draft | Data: read & write | manage (Member or above) |
 | Place what it creates in a view (`viewId`) | Views: read & write as well | edit on that view |
-| Publish the import (`autoPublish`), publish a draft, merge a merge request | Data: read & write | **Publisher** (`workspace:datasource:publish`) |
+| Publish the import (`autoPublish`), publish a draft, merge a merge request, sync a snapshot | Data: read & write | **Publisher** (`workspace:datasource:publish`) |
+| Turn version control on, make the graph, open a draft by data source | Data: read & write | manage (Member or above) |
 
 A key never holds publish itself. It publishes where the person or service account it belongs to
 publishes. Write main directly (bulk ingest), publish a draft, merge a review: all follow the same
 rule. So a **Data: read & write** key whose account is a Publisher can advance the published graph.
 Give such an account Publisher only where it should. The key's own **publish** switch is about
 views, not data.
+
+`GET /api/v1/api-keys/self` with the key says what it can do right now: `effectiveAccess`, per
+workspace, with `publishData` where it can publish. Check it when a connector is first set up, and
+when it meets `403 publish_required`. A role given to the account reaches its keys within 30
+seconds.
 
 ### Finding the ids
 
@@ -83,11 +89,30 @@ GID=$(api GET "/api/v1/$WS/versioning/resolve?dataSourceId=$DS" | jq -r .graphId
 
 - **`ws_…` and `ds_…`:** the workspace and the data source, from the first call.
 - **`graph_…`:** the data source's versioned graph. A `404` means version control isn't on for the
-  data source. A `bootstrap` object means it is still being turned on: wait until it is `null`.
+  data source (turn it on, below). A `bootstrap` object means it is still being turned on: wait
+  until it is `null`.
 - **`br_…`:** a draft. Every import answers with its own, as `branchId`.
 
 The API explorer is at `/docs` on the API's host (`/viz-docs` through the app). It marks every
 operation a key may call. A production deployment may turn it off (`API_DOCS_ENABLED`).
+
+### A data source that isn't versioned yet
+
+A key with **Data: read & write** can set up the graph it will import into, as a person with
+manage can:
+
+- **Turn version control on** for a data source that already holds a graph:
+  `POST /api/v1/$WS/graph/bootstrap?dataSourceId=$DS` copies it into history as one commit. `202`
+  with the job; follow `GET /api/v1/$WS/graph/bootstrap/status?dataSourceId=$DS`. A copy that
+  stopped is resumed with `POST …/graph/bootstrap/retry?dataSourceId=$DS&mode=resume`. A copy
+  paused on duplicate identifiers waits for a person to decide (`needs_decision`): keys can't
+  collapse them, or abandon the copy.
+- **Make an empty versioned graph** for a data source: `POST /api/v1/$WS/versioning/graphs`
+  `{"dataSourceId": "$DS", "workspaceId": "$WS"}`.
+- **Open a draft by data source:** `POST /api/v1/$WS/versioning/resolve` `{"dataSourceId": "$DS"}`
+  answers with the graph and your draft on it, opening one if you have none.
+
+A key limited to some data sources sets up only those (`403 api_key_out_of_scope` otherwise).
 
 ## 2. The record format
 
@@ -192,6 +217,15 @@ are **pointers**:
 - **One row per entity.** When two rows of a file name one node or edge and say different things,
   the second is refused. Send each entity once per file.
 
+**Syncing a snapshot straight into the published version.** `POST …/graphs/{graphId}/sync`
+(NDJSON body) merges an authoritative snapshot into main as one commit, keeping people's edits to
+fields the snapshot didn't change; `strategy=external_wins` takes the snapshot's value where both
+changed. It needs what publishing needs: a key whose account is a Publisher. It refuses to drop
+people's curation or delete past a limit (`409 curation_at_risk`, `mass_delete_blocked`) unless a
+workspace admin overrides it, and no key can. Bulk ingest only seeds an empty graph; on one that
+holds data it answers "use sync". Prefer an import into a draft when someone should see the change
+first.
+
 ## 5. Sending the file
 
 | File | Send it with |
@@ -251,6 +285,12 @@ An import lands in a draft. Three ways on from there:
 | **The import publishes itself** | `autoPublish=true` when you start the import | Publisher, and a data source that lets people merge their own changes |
 | **You publish the draft** | `POST …/branches/{branchId}/publish` `{"message": "…"}` | the same |
 | **A person reviews it** | `POST …/branches/{branchId}/merge-requests` `{"title": "…", "reviewers": […]}`; once approved, `POST …/merge-requests/{prId}/merge` | merging: Publisher. A service account's own managers can't approve its reviews (four eyes) |
+
+**A draft someone else opened** — a person's, or another account's — is published directly only by
+its owner or a maintainer: anyone else gets `403` `not_draft_owner` (or `not_owner_or_member`) with
+`hint: merge_request`. Land it through its merge request instead: its owner opens one, and any
+Publisher who can see it merges it. A private draft is seen only by its owner and the reviewers they
+name, so make it visible to the workspace first if an account is to merge it.
 
 ### `autoPublish`: an import that publishes itself
 
@@ -318,6 +358,7 @@ Errors come back as `{"detail": …}`: a sentence, or an object with a `type`, `
 |---|---|---|---|
 | `401` | `api_key_expired`, … | The key isn't accepted | No: fix the key |
 | `403` | `missing_permission`, `publish_required`, `api_key_read_only`, `api_key_out_of_scope` | The key, or its account, may not | No |
+| `403` | `not_draft_owner`, `not_owner_or_member` (with `hint: merge_request`) | A direct publish of someone else's draft | No: merge its merge request (§6) |
 | `404` | | An unknown graph, job or draft, or an upload that expired | No |
 | `409` | `job_active` | Another import is running on that draft | Yes: wait for it |
 | `409` | `branch_closed`, `main_write_forbidden`, `review_required`, `not_up_to_date` | The draft can't take this | No: see §6 |
@@ -458,6 +499,9 @@ record contract, and its calls to the routes a key may call.
 | `summary.invalid` > 0, and `publish.state: skipped` | Rows refused: unknown types, missing ends, … | Read the preview's reasons, fix the file, send it again |
 | `publish.reason.type: not_up_to_date` | Something was published to the data source mid-import | Update a small draft from main and publish it; import a large file again |
 | `403 publish_required` with `autoPublish` | The key's account isn't a Publisher | Give the account Publisher, or import without `autoPublish` and have a person publish |
+| `403 publish_required` though the account "can manage data" | Its role holds `manage` but not publish: Workspace member, or a custom role made before publish existed | Give it Workspace publisher. An admin sees such roles under Permissions → Roles, and can add publish to one |
+| `403 not_draft_owner` publishing a draft | The draft is someone else's | Merge its merge request (§6) |
+| `403 api_key_not_allowed` on sync, bootstrap or making a graph | An older deployment | Upgrade: these take keys now |
 | Every run creates new nodes | Rows point by `entity_id` alone, which is file-local | Give each node a stable `urn` |
 | `stale: true` for a while | The worker running the job stopped | Wait: another takes it over and resumes it |
 | A delete row is `unchanged` with "nothing to delete" | What it names isn't in the graph | Fine for a delta sent again; otherwise check the name |
