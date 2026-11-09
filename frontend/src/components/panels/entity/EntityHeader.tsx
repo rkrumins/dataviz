@@ -31,7 +31,7 @@ interface TraceAction {
 
 export function EntityHeader({
   nodeId, titleId, typeName, colors, confidence, title, technicalLine, isGhost, onRestore,
-  onTraceUp, onTraceDown, onFullTrace, onFocusConnections, copiedUrn, onCopyUrn, externalUrl,
+  onTraceUp, onTraceDown, onFullTrace, traceBlocked, onFocusConnections, copiedUrn, onCopyUrn, externalUrl,
   editable, editBlocked, dirty, onStartEditing, onClose, onFocusNode, customizing = false, onCustomize,
 }: {
   nodeId: string
@@ -46,6 +46,8 @@ export function EntityHeader({
   onTraceUp?: (nodeId: string) => void
   onTraceDown?: (nodeId: string) => void
   onFullTrace?: (nodeId: string) => void
+  /** Why the canvas can't trace from here — shown on the trace actions, disabled. */
+  traceBlocked?: string
   onFocusConnections?: (nodeId: string) => void
   copiedUrn: boolean
   onCopyUrn: () => void
@@ -127,7 +129,8 @@ export function EntityHeader({
             <button
               key={label}
               type="button"
-              disabled={!run}
+              disabled={!run || !!traceBlocked}
+              title={traceBlocked}
               onClick={() => run && trace(run)}
               className={cn(
                 'group flex flex-col items-center gap-1.5 p-3 rounded-xl border transition-[background-color,transform] duration-150',

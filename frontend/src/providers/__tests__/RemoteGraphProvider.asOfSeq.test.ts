@@ -12,7 +12,7 @@ vi.mock('@/services/fetchWithTimeout', () => ({
 }))
 
 import { fetchWithTimeout } from '@/services/fetchWithTimeout'
-import { RemoteGraphProvider, readsAsItIsNow } from '../RemoteGraphProvider'
+import { REVISION_TOO_FAR_EVENT, RemoteGraphProvider, readsAsItIsNow } from '../RemoteGraphProvider'
 import { getOrCreateProvider, poolKey } from '../providerPool'
 
 const mockFetch = vi.mocked(fetchWithTimeout)
@@ -67,6 +67,29 @@ describe('RemoteGraphProvider at a past revision', () => {
     expect(new Set([now.scopeKey, r12.scopeKey, r13.scopeKey]).size).toBe(3)
     expect(new Set([poolKey('w', 'd'), poolKey('w', 'd', null, null, 12), poolKey('w', 'd', null, null, 13)]).size).toBe(3)
     expect(getOrCreateProvider('w', 'd', null, 'v', 12)).not.toBe(getOrCreateProvider('w', 'd', null, 'v'))
+  })
+
+  it('says when the server finds Published has moved too far on from the revision to draw it', async () => {
+    const heard: unknown[] = []
+    const listen = (e: Event) => heard.push((e as CustomEvent).detail)
+    const refuse = (detail: unknown) => mockFetch.mockImplementation(async () =>
+      new Response(JSON.stringify({ detail }), { status: 409 }))
+    window.addEventListener(REVISION_TOO_FAR_EVENT, listen)
+    try {
+      refuse({ type: 'revision_too_far', asOfSeq: 12, headSeq: 90, changed: 100_001, limit: 100_000 })
+      const err = await atRevision().getNode('urn:a').catch((e) => e)
+      expect(err).toMatchObject({ status: 409, code: 'revision_too_far' })
+      expect(heard).toEqual([{ asOfSeq: 12 }])
+
+      // No other refusal is that, and Published is never at a revision.
+      refuse({ type: 'state_too_large', entities: 9, limit: 5 })
+      await atRevision().getNode('urn:b').catch(() => {})
+      refuse({ type: 'revision_too_far', asOfSeq: 12, headSeq: 90, changed: 100_001, limit: 100_000 })
+      await new RemoteGraphProvider({ workspaceId: 'ws_1', dataSourceId: 'ds_1' }).getNode('urn:c').catch(() => {})
+      expect(heard).toHaveLength(1)
+    } finally {
+      window.removeEventListener(REVISION_TOO_FAR_EVENT, listen)
+    }
   })
 
   it('never reads a draft at a revision', async () => {

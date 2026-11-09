@@ -140,7 +140,7 @@ describe('ensureDraftOpen', () => {
 
   it('opens no draft from a past revision, which is read-only, and says how to edit', async () => {
     useNotificationStore.setState({ notifications: [] })
-    useBranchStore.getState().openRevision({ seq: 12 })
+    useBranchStore.getState().openRevision({ seq: 12, headAtOpen: 40 })
 
     await expect(ensureDraftOpen()).resolves.toBeNull()
     expect(resolveAndOpenDraftMock).not.toHaveBeenCalled()

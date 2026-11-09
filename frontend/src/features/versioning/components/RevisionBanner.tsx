@@ -25,6 +25,7 @@ import { useCanvasStore } from '@/store/canvas'
 import { useChangeSummary, useRevision } from '../hooks/useVersioning'
 import { ownerName } from '../model/branchVocab'
 import { RestoreDialog } from './RollbackDialogs'
+import { AT_REVISION_READS, movedOn } from '../model/revisionCopy'
 
 const compact = new Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 })
 const whole = new Intl.NumberFormat()
@@ -52,6 +53,7 @@ export function RevisionBanner({
 }) {
   const revision = useOpenRevision()
   const closeRevision = useBranchStore((s) => s.closeRevision)
+  const repinRevision = useBranchStore((s) => s.repinRevision)
   const seq = revision?.seq ?? null
   // The canvas reads the revision once it is known to open; until then it is being opened.
   const readAt = useViewExecutionContext()?.asOfSeq ?? null
@@ -59,10 +61,15 @@ export function RevisionBanner({
   const plan = useRevision(workspaceId, graphId, seq)
   const head = plan.data?.headSeq ?? null
   const openable = plan.data?.openable ?? false
+  // "Since then" counts up to the head the revision was opened at, not the head now: a publish while
+  // it is open would otherwise rebuild it each time. The band says how far Published has moved on
+  // instead, and Update counts up to the head now.
+  const pinned = revision?.headAtOpen ?? null
   const since = useMemo(
-    () => (seq != null && openable && head != null && seq < head ? { fromSeq: seq, toSeq: head } : null),
-    [seq, openable, head],
+    () => (seq != null && openable && pinned != null && seq < pinned ? { fromSeq: seq, toSeq: pinned } : null),
+    [seq, openable, pinned],
   )
+  const newer = head != null && pinned != null ? Math.max(0, head - pinned) : 0
   const sinceQ = useChangeSummary(workspaceId, graphId, since)
   const phase = useCanvasStore((s) => s.hydrationPhase)
   const [restoring, setRestoring] = useState(false)
@@ -87,7 +94,7 @@ export function RevisionBanner({
   const changed = plan.data?.changedSince ?? 0
   const rewinding = !opening && openable && changed > 0 && phase !== 'complete' && phase !== 'idle'
   const counts = sinceQ.data?.counts
-  const revisionsSince = sinceQ.data?.window?.commitCount ?? (head != null ? Math.max(0, head - seq) : null)
+  const revisionsSince = sinceQ.data?.window?.commitCount ?? (pinned != null ? Math.max(0, pinned - seq) : null)
 
   return (
     <div
@@ -149,6 +156,15 @@ export function RevisionBanner({
           ) : (
             <span>Nothing has changed since.</span>
           )}
+          {!plan.isLoading && !opening && !rewinding && newer > 0 && head != null && (
+            <>
+              <span className="text-ink-muted/50">·</span>
+              <span>{movedOn(newer)}</span>
+              <span className="text-ink-muted/50">·</span>
+              <button onClick={() => repinRevision(head)}
+                className="font-semibold text-indigo-700 dark:text-indigo-300 hover:underline">Update</button>
+            </>
+          )}
         </div>
       </div>
 
@@ -156,7 +172,7 @@ export function RevisionBanner({
         <HoverTip
           className="inline-flex"
           label="Drawn with today's layout"
-          detail="Layers and the ontology are today's. Search, traces, Narrow, display rules and subset views read the graph as it is now, so they're off here."
+          detail={`Layers and the ontology are today's. ${AT_REVISION_READS}`}
         >
           <span className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] text-ink-muted hover:bg-canvas-overlay cursor-default">
             <Info className="w-3.5 h-3.5" /> Today's layout

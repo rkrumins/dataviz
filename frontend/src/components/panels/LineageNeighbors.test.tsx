@@ -55,6 +55,12 @@ vi.mock('@/providers/GraphProviderContext', () => ({
 vi.mock('@/hooks/useViewSchema', () => ({
   useViewLineageEdgeTypes: () => [],
 }))
+// The graph as it is now unless a test opens a past revision.
+const revisionHolder = vi.hoisted(() => ({ asOfSeq: null as number | null }))
+vi.mock('@/features/versioning/hooks/useAtRevision', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/features/versioning/hooks/useAtRevision')>()
+  return { ...actual, useRevisionCapabilities: () => actual.revisionCapabilities(revisionHolder.asOfSeq) }
+})
 
 vi.mock('@/store/workspaces', () => ({
   useWorkspacesStore: (selector?: (s: { activeWorkspaceId: null; activeDataSourceId: null }) => unknown) => {
@@ -1139,6 +1145,31 @@ describe('LineageNeighbors — a partner opens down its own path', () => {
       expect(screen.queryByText(/doesn.t hold/)).toBeNull()
     } finally {
       mockProviderHolder.current = null
+    }
+  })
+})
+
+
+describe('LineageNeighbors — at a past revision', () => {
+  it('walks the flows as they ran then, and asks for no rollup cells', async () => {
+    // A container focal: on Published its rollup cells come first, its walk on request. At a
+    // revision the cells are the graph as it is now, so the walk runs at once, alone.
+    seedCanvas([])
+    const asked: Array<Record<string, unknown>> = []
+    mockProviderHolder.current = {
+      getEdges: async () => [],
+      getNodes: async () => [],
+      traceClosure: async (req: Record<string, unknown>) => { asked.push(req); return closure(['u1', 'u2'], []) },
+    }
+    revisionHolder.asOfSeq = 12
+    try {
+      render(<LineageNeighbors nodeId={FOCAL} />)
+      await waitFor(() => expect(countIn('Data Sources').getByText('2')).toBeInTheDocument())
+      expect(asked.length).toBeGreaterThan(0)
+      expect(asked.some((req) => req.grain === 'coarse')).toBe(false)
+    } finally {
+      mockProviderHolder.current = null
+      revisionHolder.asOfSeq = null
     }
   })
 })

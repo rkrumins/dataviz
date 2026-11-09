@@ -15,9 +15,14 @@ import type { ResolveResponse } from '@/services/versioningApiService'
 import type { ChangeSet } from '@/features/versioning/model/changeModel'
 
 /** A past revision of Published the canvas reads, read-only — like checking out a commit. What the
- *  history list knew of it rides along, so the banner reads at once; a deep link knows only `seq`. */
+ *  history list knew of it rides along, so the banner reads at once; a deep link knows only `seq`
+ *  and the head. */
 export interface OpenRevision {
   seq: number
+  /** Published's head when it was opened. "Since then" counts up to it, so a publish while the
+   *  revision is open doesn't rebuild it: the banner says Published has moved on, and offers to
+   *  count up to the new head (`repinRevision`). */
+  headAtOpen: number
   commitId?: string | null
   createdAt?: string | null
   message?: string | null
@@ -93,6 +98,8 @@ interface BranchState {
   openRevision: (revision: OpenRevision) => void
   /** Back to Published as it is now. */
   closeRevision: () => void
+  /** Count the open revision's "since then" up to `headSeq`, Published's head now. */
+  repinRevision: (headSeq: number) => void
   /** Highlight what changed between two revisions; null clears it. */
   setHighlight: (highlight: RevisionHighlight | null) => void
   /** Clear all branch context — call when leaving a data source / view. */
@@ -208,6 +215,9 @@ export const useBranchStore = create<BranchState>((set, get) => ({
   // Leaving a revision, or changing a highlight, clears the rings it drew — never a draft's own,
   // which the bar sets from the draft's diff only when that changes.
   closeRevision: () => set((s) => ({ revision: null, highlight: null, ...(draftOpen(s) ? {} : { activeChangeSet: null }) })),
+
+  // The same revision, still open: nothing it draws or highlights changes.
+  repinRevision: (headSeq) => set((s) => (s.revision ? { revision: { ...s.revision, headAtOpen: headSeq } } : {})),
 
   setHighlight: (highlight) => set((s) => ({ highlight, ...(draftOpen(s) ? {} : { activeChangeSet: null }) })),
 

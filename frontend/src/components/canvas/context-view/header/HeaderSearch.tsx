@@ -45,7 +45,8 @@ import type { LucideIcon } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { HoverTip } from '@/components/ui/HoverTip'
 import { usePersonaMode } from '@/store/persona'
-import { useViewExecutionContext } from '@/providers/ViewExecutionContext'
+import { useRevisionCapabilities } from '@/features/versioning/hooks/useAtRevision'
+import { AT_REVISION_READS } from '@/features/versioning/model/revisionCopy'
 import { useRecentSearches } from '@/hooks/useRecentSearches'
 import type { SearchHit } from '@/types/search'
 import { useDiscovery } from '../../search/builder/useDiscovery'
@@ -112,31 +113,13 @@ function lookInLabel(lookIn: QuickLookIn): string {
   return FIXED_LOOK_IN.find((o) => o.value === lookIn)?.label ?? 'Everything'
 }
 
-/** The header's search box — or, at a past revision, its place kept and why it is empty: search reads
- *  the graph as it is now, and the canvas is the graph as it was. */
+/** The header's search box. At a past revision it searches names, as they were then: the one search
+ *  that reads the graph as it was (the session compiles every query so, `namesOnly`). */
 export function HeaderSearch() {
-  const atRevision = (useViewExecutionContext()?.asOfSeq ?? null) != null
-  if (!atRevision) return <HeaderSearchBox />
-  return (
-    <div data-tour="canvas-search" className="justify-self-center w-full min-w-0 max-w-xl">
-      <HoverTip
-        className="flex w-full"
-        label="Search is off at a past revision"
-        detail="Search reads the graph as it is now, not as it was at this revision. Go back to Published to search."
-      >
-        <div
-          aria-disabled
-          className="flex w-full items-center gap-2 px-3 py-2 rounded-[13px] border border-dashed border-indigo-500/30 bg-indigo-500/[0.04] text-[13px] text-ink-muted"
-        >
-          <LucideIcons.SearchX className="w-4 h-4 shrink-0 text-indigo-500/70" aria-hidden />
-          <span className="truncate">Search reads the graph as it is now</span>
-        </div>
-      </HoverTip>
-    </div>
-  )
+  return <HeaderSearchBox namesOnly={!useRevisionCapabilities().advancedSearch} />
 }
 
-function HeaderSearchBox() {
+function HeaderSearchBox({ namesOnly = false }: { namesOnly?: boolean }) {
   // Destructured, not held as one object: the session carries the input
   // ref, and reading a ref-bearing object's fields through it during
   // render trips the react-hooks lint.
@@ -472,7 +455,7 @@ function HeaderSearchBox() {
           <input
             ref={inputRef}
             type="text"
-            placeholder="Search this view…"
+            placeholder={namesOnly ? 'Search names as they were…' : 'Search this view…'}
             value={quick.text}
             onChange={(e) => {
               // A new word is a new question — whatever the user put the
@@ -533,7 +516,19 @@ function HeaderSearchBox() {
             </span>
           )}
 
-          {(technical || quick.lookIn !== 'everything') && <AnchoredMenu
+          {namesOnly && (
+            <HoverTip className="inline-flex shrink-0" label="Names only" detail={AT_REVISION_READS}>
+              <span className={cn(
+                'shrink-0 inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-medium',
+                'text-indigo-700 dark:text-indigo-300 bg-indigo-500/10',
+              )}>
+                <LucideIcons.ScanSearch className="w-3 h-3" strokeWidth={2.4} aria-hidden />
+                Names
+              </span>
+            </HoverTip>
+          )}
+
+          {!namesOnly && (technical || quick.lookIn !== 'everything') && <AnchoredMenu
             icon={LucideIcons.ScanSearch}
             current={lookInLabel(quick.lookIn)}
             label="Look in"
@@ -568,7 +563,7 @@ function HeaderSearchBox() {
             )}
           </AnchoredMenu>}
 
-          <HoverTip label="Refine — build this query out in the results panel">
+          {!namesOnly && <HoverTip label="Refine — build this query out in the results panel">
             <button
               type="button"
               onClick={() => refine()}
@@ -586,7 +581,7 @@ function HeaderSearchBox() {
             >
               <LucideIcons.Sparkles className="w-3.5 h-3.5" strokeWidth={2.4} />
             </button>
-          </HoverTip>
+          </HoverTip>}
 
           {/* Third control in a 40px stretch that had three treatments: a
               native pill, a HoverTip, and — here — nothing at all. */}
@@ -636,6 +631,7 @@ function HeaderSearchBox() {
             onSeeAll={() => { openPanel(); setDismissed(true) }}
             onRefine={() => { refine(); setDismissed(true) }}
             onRetry={() => runNow()}
+            namesOnly={namesOnly}
           />
         )}
       </div>

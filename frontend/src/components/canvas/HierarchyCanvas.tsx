@@ -55,7 +55,10 @@ import { useDisplayRuleEngine } from '@/hooks/useDisplayRuleEngine'
 import { useViewLibrary } from '@/hooks/useViewLibrary'
 import { useEffectiveBranchId } from '@/store/branchStore'
 import { CanvasSearchTrigger } from './search/CanvasSearchTrigger'
+import { RevisionNameSearchPanel } from './search/RevisionNameSearchPanel'
 import { useRevealSearchHit } from '@/hooks/useRevealSearchHit'
+import { useRevisionCapabilities } from '@/features/versioning/hooks/useAtRevision'
+import { OFF_AT_REVISION } from '@/features/versioning/model/revisionCopy'
 import { TraceToolbar } from './TraceToolbar'
 import { useCanvasTrace } from '@/hooks/useCanvasTrace'
 import type { HierarchyNode } from '@/types/hierarchy'
@@ -114,9 +117,14 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
   const [propertyManagerOpen, setPropertyManagerOpen] = useState(false)
   const activeView = useSchemaStore((s) => s.getActiveView())
   const provider = useGraphProvider()
+  // A past revision is read as it was: what reads the graph as it is now (display rules, the
+  // rolled-up trace, Advanced Search) is off there, and nothing is edited.
+  const { editing, displayRules, rolledUpTraces, advancedSearch } = useRevisionCapabilities()
+  const traceBlocked = rolledUpTraces ? undefined : OFF_AT_REVISION
   // Property Manager display-rule engine — publishes match sets so the
-  // HierarchyContainer rows render tag chips.
-  useDisplayRuleEngine(activeView?.id ?? null)
+  // HierarchyContainer rows render tag chips. Rules match through search, which reads the graph
+  // as it is now: off at a past revision.
+  useDisplayRuleEngine(displayRules ? activeView?.id ?? null : null)
   // The view's display rules (the draft's own, on a draft) and saved queries, from its library.
   const libraryBranchId = useEffectiveBranchId(
     activeView?.workspaceId ?? '', activeView?.dataSourceId ?? null, activeView?.id ?? null)
@@ -124,9 +132,10 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
   const revealSearchHit = useRevealSearchHit({ setExpandedNodes, provider })
 
   // Edit Mode State (shared across canvases). `surface` distinguishes the
-  // 400px rail from the wider Build Mode panel — only one mounts at a time.
-  const builderOpen = useHierarchyBuilderStore(s => s.isOpen && s.surface === 'rail')
-  const buildOpen = useHierarchyBuilderStore(s => s.isOpen && s.surface === 'build')
+  // 400px rail from the wider Build Mode panel — only one mounts at a time,
+  // and neither where nothing is edited.
+  const builderOpen = useHierarchyBuilderStore(s => s.isOpen && s.surface === 'rail') && editing
+  const buildOpen = useHierarchyBuilderStore(s => s.isOpen && s.surface === 'build') && editing
   const [activeEdgeType, setActiveEdgeType] = useState<string>('manual')
 
   // Build containment hierarchy using shared hook (must precede trace + traceContextSet)
@@ -184,11 +193,12 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
   // UX-first Canvas Interactions (context menu, inline edit, quick create, command palette)
   // Graph mutations (create/update/delete node + edge) 403 server-side when the admin turns
   // editModeEnabled off (graph.py's require_edit_mode), so the affordances that reach those
-  // routes are hidden rather than left to fail.
-  const editModeEnabled = useFeature('editModeEnabled')
+  // routes are hidden rather than left to fail. A past revision is read-only: hidden there too.
+  const editModeEnabled = useFeature('editModeEnabled') && editing
   const { duplicateSubtree } = useDuplicateSubtree()
   const interactions = useCanvasInteractions({
-    onTraceNode: (nodeId) => trace.startTrace(nodeId),
+    readOnly: !editing,
+    onTraceNode: traceBlocked ? undefined : (nodeId) => trace.startTrace(nodeId),
     onNodeCreated: (nodeId) => selectNode(nodeId),
     duplicateSubtree,
     onNodeDuplicated: (originalId, newUrn) => {
@@ -404,6 +414,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
           <PropertyManagerButton
             open={propertyManagerOpen}
             onToggle={() => setPropertyManagerOpen((v) => !v)}
+            blocked={displayRules ? undefined : OFF_AT_REVISION}
           />
         )}
       </div>
@@ -548,6 +559,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
             onTraceUp={trace.traceUpstream}
             onTraceDown={trace.traceDownstream}
             onFullTrace={trace.traceFullLineage}
+            traceBlocked={traceBlocked}
             onFocusNode={expandToNode}
           />
         )}
@@ -584,13 +596,15 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
 
       {/* Advanced search — same SearchMapPanel surface mounted on every
           canvas. Trigger handles ⌘⇧F globally; panel is a flex-sibling
-          drawer alongside EntityDrawer. */}
+          drawer alongside EntityDrawer. At a past revision the search is
+          by name, as the names were. */}
       <CanvasSearchTrigger
         open={advancedSearchOpen}
         onToggle={() => setAdvancedSearchOpen((v) => !v)}
+        namesOnly={!advancedSearch}
       />
       <AnimatePresence>
-        {activeView?.id && advancedSearchOpen && (
+        {activeView?.id && advancedSearchOpen && (advancedSearch ? (
           <SearchMapPanel
             key="advanced-search-panel"
             open={advancedSearchOpen}
@@ -600,7 +614,14 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
               revealSearchHit(urn, ancestorPath)
             }
           />
-        )}
+        ) : (
+          <RevisionNameSearchPanel
+            key="name-search-panel"
+            viewId={activeView.id}
+            onClose={() => setAdvancedSearchOpen(false)}
+            onRevealNode={revealSearchHit}
+          />
+        ))}
       </AnimatePresence>
 
       {/* Property Manager — display-rule tag overlay drawer. */}
@@ -639,6 +660,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
           })
         } : undefined}
         onTraceNode={(id) => trace.startTrace(id)}
+        traceBlocked={traceBlocked}
         onCopyUrn={interactions.copyUrn}
         onEditEdge={interactions.editEdge}
         onDeleteEdge={editModeEnabled ? interactions.deleteEdge : undefined}
@@ -715,6 +737,8 @@ function HierarchyContainer({
   const isSearchResult = searchResults.includes(node.id)
   // Where a click doesn't open an entity's details, its row offers them.
   const offerDetails = !useOpensDetailsOnSelect()
+  // Nothing is added inside anything on a past revision, which is read-only.
+  const { editing } = useRevisionCapabilities()
 
   // W2.1 — advanced-search match decoration. Lights up the row when
   // the URN is a direct match, surfaces an N-level subtree count
@@ -933,7 +957,7 @@ function HierarchyContainer({
 
           {/* Add child — hover-visible; direct store import so the recursive
               render never threads an onAddChild prop down every level. */}
-          {(entityType?.hierarchy?.canContain?.length ?? 0) > 0 && (
+          {editing && (entityType?.hierarchy?.canContain?.length ?? 0) > 0 && (
             <button
               onClick={(e) => {
                 e.stopPropagation()

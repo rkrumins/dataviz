@@ -47,6 +47,8 @@ interface GenericNodeData extends EntityInstance {
   onToggleExpanded?: (nodeId: string) => void
   onTraceUpstream?: (id: string) => void
   onTraceDownstream?: (id: string) => void
+  // Why the host can't trace from here: the trace pair says so, disabled
+  traceBlocked?: string
   onOpenMenu?: (e: React.MouseEvent, id: string) => void
   // The host lets this person add entities here (a draft, for an editor)
   canAddInside?: boolean
@@ -88,6 +90,7 @@ export const GenericNode = memo(function GenericNode({
   const onToggleExpanded = entityData.onToggleExpanded
   const onTraceUpstream = entityData.onTraceUpstream
   const onTraceDownstream = entityData.onTraceDownstream
+  const traceBlocked = entityData.traceBlocked
   const onOpenMenu = entityData.onOpenMenu
 
   const hiddenCount = (entityData as any)._hiddenCount || 0
@@ -260,6 +263,7 @@ export const GenericNode = memo(function GenericNode({
               <ToolbarButton
                 icon="ArrowUpRight"
                 label="Trace Upstream"
+                blocked={traceBlocked}
                 onClick={(e) => {
                   e.stopPropagation()
                   onTraceUpstream?.(id)
@@ -268,6 +272,7 @@ export const GenericNode = memo(function GenericNode({
               <ToolbarButton
                 icon="ArrowDownLeft"
                 label="Trace Downstream"
+                blocked={traceBlocked}
                 onClick={(e) => {
                   e.stopPropagation()
                   onTraceDownstream?.(id)
@@ -632,6 +637,7 @@ export const GenericNode = memo(function GenericNode({
     (!next.selected || (
       prevD.onTraceUpstream === nextD.onTraceUpstream &&
       prevD.onTraceDownstream === nextD.onTraceDownstream &&
+      prevD.traceBlocked === nextD.traceBlocked &&
       prevD.onOpenMenu === nextD.onOpenMenu &&
       prevD.canAddInside === nextD.canAddInside
     ))
@@ -749,16 +755,18 @@ function FieldRenderer({ field, value, color, size }: FieldRendererProps) {
   }
 }
 
-// Toolbar Button Component
-function ToolbarButton({ icon, label, onClick }: { icon: string; label: string; onClick?: (e: React.MouseEvent) => void }) {
+// Toolbar Button Component — `blocked` disables it and says why
+function ToolbarButton({ icon, label, onClick, blocked }: { icon: string; label: string; onClick?: (e: React.MouseEvent) => void; blocked?: string }) {
   return (
     <button
-      title={label}
+      title={blocked ?? label}
       aria-label={label}
       onClick={onClick}
+      disabled={!!blocked}
       className={cn(
         "w-7 h-7 rounded-md flex items-center justify-center",
         "text-ink-secondary hover:text-ink hover:bg-black/5 dark:hover:bg-white/10",
+        "disabled:opacity-40 disabled:cursor-not-allowed",
         "transition-colors"
       )}
     >

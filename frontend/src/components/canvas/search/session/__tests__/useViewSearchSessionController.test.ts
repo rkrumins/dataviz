@@ -810,3 +810,34 @@ describe('ViewRowSearchContext', () => {
         expect(() => result.current.openPanel()).not.toThrow()
     })
 })
+
+
+describe('useViewSearchSessionController — names only, at a past revision', () => {
+    function renderNames() {
+        return renderHook(() => useViewSearchSessionController({
+            viewId: VIEW_ID, layers: [], assignments: {}, ...canvas, namesOnly: true,
+        }))
+    }
+
+    it('asks every query as a name search over the whole view', () => {
+        const { result } = renderNames()
+        act(() => { result.current.setQuick({ text: 'cust', lookIn: 'description', match: 'prefix' }) })
+        act(() => { vi.advanceTimersByTime(300) })
+        expect(mocks.runPredicate).toHaveBeenCalledTimes(1)
+        expect(mocks.runPredicate.mock.calls[0][0]).toEqual(
+            { kind: 'text', target: 'name', value: 'cust', match: 'prefix' })
+
+        act(() => { result.current.runNow({ text: 'orders' }) })
+        expect(mocks.runPredicate.mock.calls[1][0]).toMatchObject({ target: 'name', value: 'orders' })
+    })
+
+    it('clamps to no container, and opens no panel or builder', () => {
+        const { result } = renderNames()
+        act(() => { result.current.setScope({ insideUrn: 'urn:t', label: 'T' }) })
+        expect(result.current.quick.scope).toBe('view')
+        act(() => { result.current.openPanel() })
+        act(() => { result.current.refine() })
+        expect(result.current.panelOpen).toBe(false)
+        expect(result.current.refineOpen).toBe(false)
+    })
+})

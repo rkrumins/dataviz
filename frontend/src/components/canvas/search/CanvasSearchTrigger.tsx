@@ -21,10 +21,12 @@ export interface CanvasSearchTriggerProps {
      *  surface (e.g. EntityDrawer) is open and the trigger would clutter
      *  the corner. The keyboard shortcut still works. */
     hideButton?: boolean
+    /** It opens a search of names alone (a past revision's): it says so. */
+    namesOnly?: boolean
 }
 
 export function CanvasSearchTrigger({
-    open, onToggle, hideButton = false,
+    open, onToggle, hideButton = false, namesOnly = false,
 }: CanvasSearchTriggerProps) {
     useEffect(() => {
         const handler = (e: KeyboardEvent) => {
@@ -45,8 +47,8 @@ export function CanvasSearchTrigger({
         <button
             type="button"
             onClick={onToggle}
-            aria-label="Open advanced search (⌘⇧F)"
-            title="Advanced search · ⌘⇧F"
+            aria-label={namesOnly ? 'Search names (⌘⇧F)' : 'Open advanced search (⌘⇧F)'}
+            title={namesOnly ? 'Search names, as they were · ⌘⇧F' : 'Advanced search · ⌘⇧F'}
             className={cn(
                 'absolute top-4 right-4 z-30',
                 'flex items-center gap-2 px-3 h-9 rounded-full',

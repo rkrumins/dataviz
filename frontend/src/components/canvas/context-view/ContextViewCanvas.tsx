@@ -67,6 +67,7 @@ import { saveStagedChangesToDraft } from '@/features/versioning/model/saveStaged
 import { VERSIONING_KEYS, useResolveGraph, useProjectionWatermark } from '@/features/versioning/hooks/useVersioning'
 import { useActiveDraftAccess } from '@/features/versioning/hooks/useActiveDraftAccess'
 import { useViewExecutionContext } from '@/providers/ViewExecutionContext'
+import { revisionCapabilities } from '@/features/versioning/hooks/useAtRevision'
 import { deriveViewCapabilities } from '@/lib/viewAccess'
 import { edgeTypeCopy, relationshipLabel } from '@/lib/relationshipLabel'
 import { connectedEdgeTypes, deriveConnectableEdges } from '@/services/ontologyPreflightService'
@@ -1067,9 +1068,10 @@ export function ContextViewCanvas({
   // for this caller (shared/enterprise view opened without membership).
   const viewExecCtx = useViewExecutionContext()
   const readOnly = viewExecCtx?.readOnly ?? false
-  // A past revision is read-only too, but keeps the versioning bar: it is the way back.
-  const atRevision = (viewExecCtx?.asOfSeq ?? null) != null
-  const canEnterEdit = !!graphId && !readOnly && !atRevision
+  // A past revision is read-only too, but keeps the versioning bar: it is the way back. What else it
+  // allows is one answer for the whole canvas (useAtRevision.ts).
+  const revisionCaps = revisionCapabilities(viewExecCtx?.asOfSeq)
+  const canEnterEdit = !!graphId && !readOnly && revisionCaps.editing
   // The branch switcher moved down here out of CanvasVersioningBar, into the slot
   // the duplicated title block used to occupy. It must appear on exactly the terms
   // the bar did — CanvasRouter mounts that bar only when versioning is on, the view
@@ -1535,7 +1537,7 @@ export function ContextViewCanvas({
   // Orphaned entities (Display menu → Advanced): a power-user panel, closed by default.
   const [orphansOpen, setOrphansOpen] = useState(false)
   // Display rules match through search, which reads the graph as it is now: off at a past revision.
-  useDisplayRuleEngine(atRevision ? null : activeView?.id ?? null)
+  useDisplayRuleEngine(revisionCaps.displayRules ? activeView?.id ?? null : null)
   // The view's display rules (the draft's own, on a draft) and saved queries, from its library.
   useViewLibrary(activeView?.id ?? null, effectiveBranchId)
 
@@ -2079,6 +2081,7 @@ export function ContextViewCanvas({
     curated: activeEntityScope === 'curated',
     revealHit: revealHitForSearch,
     prefetchHit: prefetchSearchHitSpine,
+    namesOnly: !revisionCaps.advancedSearch,
   })
   // Search, from the command palette: a question in plain words, or the
   // panel opened out into Search Studio.
@@ -2379,9 +2382,9 @@ export function ContextViewCanvas({
   }
   const bulkSelectionCount = bulkSelection.length
   // The server refuses trace requests when this is off; the header hides its
-  // Trace and Focus for it, and the SelectionBar follows suit.
-  // …and a trace reads the graph as it is now: off over a past revision too.
-  const traceEnabled = useFeature('traceEnabled') && !atRevision
+  // Trace and Focus for it, and the SelectionBar follows suit. At a past revision a
+  // trace walks the flows as they ran then.
+  const traceEnabled = useFeature('traceEnabled') && revisionCaps.lineageTrace
   // Closes itself when the canvas or the selection stops allowing it.
   useEffect(() => {
     if (bulkLinkSurface && (!canvasWritable || bulkSelectionCount < 2)) useBulkLinkStore.getState().close()
@@ -2466,8 +2469,7 @@ export function ContextViewCanvas({
   // opens normally: a link arrives from outside and must never be able to
   // break the canvas.
   const [initialTraceShare] = useState(() => {
-    // A trace reads the graph as it is now: a link's is not opened over a past revision.
-    const raw = atRevision ? null : new URLSearchParams(window.location.search).get('trace')
+    const raw = new URLSearchParams(window.location.search).get('trace')
     return raw ? decodeTraceShare(raw) : null
   })
   // Direction visibility — the dock's upstream/downstream toggles. Reset
@@ -4587,7 +4589,7 @@ export function ContextViewCanvas({
   // inside those, resolved on the server and shared by everyone asking the same
   // thing. A preview switch (`viewMembershipEnabled`); nothing is saved.
   // Narrowing reads the graph as it is now: off over a past revision.
-  const narrowEnabled = useFeature('viewMembershipEnabled') && !atRevision
+  const narrowEnabled = useFeature('viewMembershipEnabled') && revisionCaps.narrow
   const narrowViewId = activeView?.id ?? null
   const narrowComposer = useNarrowStore((s) => s.composer)
   const narrowApplied = useNarrowStore((s) => (s.viewId === narrowViewId ? s.applied : null))
@@ -4621,7 +4623,7 @@ export function ContextViewCanvas({
   // clean. A malformed token decodes to null and the view opens normally.
   const [initialNarrowShare] = useState(() => {
     // Narrowing reads the graph as it is now: not over a past revision.
-    const raw = atRevision ? null : new URLSearchParams(window.location.search).get('narrow')
+    const raw = revisionCaps.narrow ? new URLSearchParams(window.location.search).get('narrow') : null
     return raw ? decodeNarrowShare(raw) : null
   })
   const narrowShareUsed = useRef(false)
@@ -6105,7 +6107,7 @@ export function ContextViewCanvas({
     // A link that carries both opens the TRACE: it is the more specific
     // state, and two overlays racing each other on arrival is nobody's
     // intent. The lens token is dropped with the param strip below.
-    if (initialTraceShare || atRevision) return null
+    if (initialTraceShare) return null
     const raw = new URLSearchParams(window.location.search).get('lens')
     return raw ? decodeLensShare(raw) : null
   })

@@ -88,6 +88,14 @@ async def _check_origin(svc, gid, origin, expected: dict) -> None:
     compact = await svc.change_index_compact(graph_id=gid, origin=origin, containment_edge_types=CONT)
     code = {"a": "added", "m": "modified", "r": "removed"}
     assert {e[0]: code[e[2]] for e in compact["entries"]} == expected and not compact["truncated"]
+    # Capped at what it holds, it is the same answer; one short, its total and no entries.
+    assert await svc.change_index_compact(graph_id=gid, origin=origin, containment_edge_types=CONT,
+                                          max_entries=len(expected)) == compact
+    if expected:
+        capped = await svc.change_index_compact(graph_id=gid, origin=origin, containment_edge_types=CONT,
+                                                max_entries=len(expected) - 1)
+        assert capped == {**compact, "entries": [], "truncated": True}
+        assert capped["total"] == len(expected)
 
 
 async def _run() -> None:

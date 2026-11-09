@@ -175,7 +175,7 @@ More terms are in the [Glossary](/guide/glossary).
 
 After a merge or publish, the banner *Merged — your changes are now live* (or
 *Published — …*) offers **View in history** too. A data source's **Versioning**
-tab lists its recent commits, drafts and open merge requests.
+tab lists its drafts, open merge requests and its whole history.
 
 The history is listed newest first, by month and day, and keeps loading older
 revisions as you scroll — all the way back to the first.
@@ -190,27 +190,38 @@ any revision, read-only, and compare any two revisions.
 
 1. In **Reviews → History**, open a revision's **⋯** menu and choose **Open on
    canvas**. Or choose **Months** to go to the end of any month or day: darker
-   months saw more revisions.
+   months saw more revisions. A data source's **Versioning** tab has the same
+   history: choose a view under **Open in**, and its revisions open there.
 2. The canvas shows the graph as it was. The banner above it says when that was,
    which revision it is and who made it, and how much has changed since.
 3. Choose **Back to Published** (or press **Esc**) to return to the graph as it is now.
 
 While a past revision is open:
 
-- **Nothing can be edited**, and search, traces, Narrow, display rules and subset
-  views are off: they read the graph as it is now.
+- **Search finds entities by name as they were then**, ignoring case. In the
+  Context View, type in the search box; on the other layouts, choose **Search**.
+- **Lineage traces follow the flows as they ran then**: the Context View's trace
+  and Lens, and the lineage in an entity's details on any layout.
+- **Nothing can be edited**, and Advanced Search, display rules, subset views,
+  Narrow and the graph and hierarchy layouts' trace are off: they read the graph
+  as it is now. Each says so.
 - **The layout is today's**: the view's layers and the ontology as they are now.
 - **Exporting** downloads the graph as it was.
 - **The address in your browser** (`?rev=…`) opens the same revision for anyone
   who can read the data source. **Copy link** on a revision gives you one.
+- **When Published moves on**, the banner keeps counting the changes since up to
+  when you opened the revision, and says *Published has moved on*. **Update**
+  counts them up to now.
 
 To compare, choose **Compare with now** (on a revision or in the banner) or
 **Compare with…** and then the other revision. You see how much was added,
 modified and removed, over how many revisions and by whom, which types changed
-most, and every change. **Highlight on canvas** rings them on the graph.
+most, and every change. **Highlight on canvas** rings them on the graph, up to
+20,000 of them; past that it says how many there are and offers **Open the list**.
 
 A revision more than 100,000 changes back is too far to draw. It opens as a
 comparison with now instead, and you can still export the graph as it was then.
+One open while Published moves that far on is handed over the same way.
 
 ## Undo vs. Restore — the distinction that matters
 

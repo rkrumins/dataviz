@@ -19,7 +19,8 @@
  * Its Drafts and reviews section shows each setting as the workspace's, naming its value, or this
  * data source's own; a workspace admin overrides one or goes back to the workspace's, and only
  * those are sent. Anyone else reads it.
- * The data hooks are stubbed; the card itself has its own spec.
+ * The data hooks are stubbed; the card and the history (DataSourceVersioningTab.history.test.tsx)
+ * have their own specs.
  */
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter, useLocation } from 'react-router-dom'
@@ -79,7 +80,6 @@ vi.mock('../../hooks/useVersioning', () => ({
     data: resolved, isLoading: false, isError: !!resolveError, error: resolveError, refetch,
   }),
   useBranches: (...args: [string, string | null, string | null, string[]]) => useBranches(...args),
-  useCommitLog: () => ({ data: { commits: [] } }),
   useDataSourcePullRequests: (...args: unknown[]) => useDataSourcePullRequests(...args),
   useForks: () => ({ data: forks, refetch: refetchForks }),
   useSetGraphFrozen: () => ({ mutate: freezeMutate, isPending: false, error: freezeError }),
@@ -100,6 +100,7 @@ vi.mock('@/features/reviews/components/PrListRow', () => ({
   PrListRow: ({ pr }: { pr: { title: string } }) => <div>{pr.title}</div>,
 }))
 vi.mock('@/features/reviews/components/PrDetailDrawer', () => ({ PrDetailDrawer: () => null }))
+vi.mock('../ViewHistoryTimeline', () => ({ ViewHistoryTimeline: () => null }))
 vi.mock('../ProjectionHealthCard', () => ({
   ProjectionHealthCard: ({ graphId, showActions, dataSourceId }: {
     graphId: string; showActions?: boolean; dataSourceId?: string
@@ -119,7 +120,7 @@ function Where() {
 const renderTab = (dataSourceId = 'ds1') =>
   render(
     <MemoryRouter initialEntries={['/workspaces/ws1?ds=ds1&dstab=versioning']}>
-      <DataSourceVersioningTab wsId="ws1" dataSourceId={dataSourceId} />
+      <DataSourceVersioningTab wsId="ws1" dataSourceId={dataSourceId} views={[]} />
       <Where />
     </MemoryRouter>,
   )

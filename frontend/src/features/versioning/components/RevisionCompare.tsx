@@ -37,7 +37,7 @@ const KINDS = [
 ] as const
 
 export function RevisionCompare({
-  wsId, graphId, from, to, headSeq, notice = null, canOpen,
+  wsId, graphId, from, to, headSeq, notice = null, canOpen, openBlocked = null,
   onChange, onBack, onOpen, onHighlight, onExport,
 }: {
   wsId: string
@@ -50,6 +50,8 @@ export function RevisionCompare({
   notice?: 'too_far' | 'fork' | null
   /** The canvas can open revisions (the revision viewer). */
   canOpen: boolean
+  /** Why neither end can be opened or highlighted from here (nowhere to open them), or null. */
+  openBlocked?: string | null
   onChange: (from: number, to: number | null) => void
   onBack: () => void
   /** Open a revision on the canvas; null is Published as it is now. */
@@ -130,27 +132,29 @@ export function RevisionCompare({
           <div className="flex flex-wrap items-center gap-1.5">
             {canOpen && range && (
               <HoverTip className="inline-flex" label="Highlight on canvas"
-                detail={`Opens ${to == null ? 'Published as it is now' : `revision #${range.toSeq}`} with these changes ringed.`}>
+                detail={openBlocked ?? `Opens ${to == null ? 'Published as it is now' : `revision #${range.toSeq}`} with these changes ringed.`}>
                 <button
+                  disabled={!!openBlocked}
                   onClick={() => onHighlight(range.fromSeq, range.toSeq)}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-white bg-gradient-to-r from-indigo-500 to-violet-600 hover:from-indigo-600 hover:to-violet-700 shadow-sm shadow-indigo-500/20 active:scale-[0.98]"
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-white bg-gradient-to-r from-indigo-500 to-violet-600 hover:from-indigo-600 hover:to-violet-700 shadow-sm shadow-indigo-500/20 active:scale-[0.98] disabled:opacity-40"
                 >
                   <Sparkles className="w-3.5 h-3.5" /> Highlight on canvas
                 </button>
               </HoverTip>
             )}
             {canOpen && !notice && (
-              <button onClick={() => onOpen(from)}
-                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold text-indigo-700 dark:text-indigo-300 bg-indigo-500/10 hover:bg-indigo-500/20">
+              <button disabled={!!openBlocked} onClick={() => onOpen(from)}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold text-indigo-700 dark:text-indigo-300 bg-indigo-500/10 hover:bg-indigo-500/20 disabled:opacity-40 disabled:cursor-default">
                 <Eye className="w-3.5 h-3.5" /> Open #{from}
               </button>
             )}
             {canOpen && to != null && (
-              <button onClick={() => onOpen(to)}
-                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold text-indigo-700 dark:text-indigo-300 bg-indigo-500/10 hover:bg-indigo-500/20">
+              <button disabled={!!openBlocked} onClick={() => onOpen(to)}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold text-indigo-700 dark:text-indigo-300 bg-indigo-500/10 hover:bg-indigo-500/20 disabled:opacity-40 disabled:cursor-default">
                 <Eye className="w-3.5 h-3.5" /> Open #{to}
               </button>
             )}
+            {canOpen && openBlocked && <span className="text-[11px] text-ink-muted">{openBlocked}</span>}
           </div>
 
           {range && (
