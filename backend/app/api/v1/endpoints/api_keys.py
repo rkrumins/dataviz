@@ -295,7 +295,14 @@ class CreatedApiKey(_Model):
 class Access(_Model):
     views: Literal["none", "read", "write"] = "none"
     data: Literal["none", "read", "write"] = "none"
+    #: Publishing views to everyone (``workspace:view:publish``) — the key's
+    #: own setting, and nothing to do with data.
     publish: bool = False
+    #: Publishing data: a draft, a review's merge, a snapshot sync, an import
+    #: that publishes itself, a write to main. Never the key's own setting —
+    #: data write, where the person or service account it belongs to holds
+    #: ``workspace:datasource:publish`` (``versioning_gate.require_publish``).
+    publish_data: bool = Field(False, alias="publishData")
 
 
 class WorkspaceAccess(Access):
@@ -401,6 +408,9 @@ class SelfDescription(_Model):
     user_id: Optional[str] = Field(None, alias="userId")
     permissions: Optional[dict] = None
     resources: Optional[Union[Literal["all"], dict]] = None
+    #: What it may do right now, as every request it makes is held to: its
+    #: owner's live access, narrowed by the key — ``publishData`` included.
+    effective_access: Optional[EffectiveAccess] = Field(None, alias="effectiveAccess")
     expires_at: Optional[str] = Field(None, alias="expiresAt")
     created_at: str = Field(alias="createdAt")
 
@@ -1011,11 +1021,19 @@ def _level(perms: set[str], read: str, write: str) -> str:
     return "read" if read in perms else "none"
 
 
-def _access(perms: set[str]) -> dict:
+#: What publishing data takes of the owner. Never a key's own: see ``Access.publish_data``.
+_PUBLISH_DATA = "workspace:datasource:publish"
+
+
+def _access(perms: set[str], *, publishes_data: bool = False) -> dict:
+    """``perms``: what the key (or its owner) may exercise. ``publishes_data``: the owner holds
+    publish there — which a key uses only with data write."""
+    data = _level(perms, "workspace:datasource:read", "workspace:datasource:manage")
     return dict(
         views=_level(perms, "workspace:view:read", "workspace:view:edit"),
-        data=_level(perms, "workspace:datasource:read", "workspace:datasource:manage"),
+        data=data,
         publish="workspace:view:publish" in perms,
+        publish_data=publishes_data and data == "write",
     )
 
 
@@ -1043,13 +1061,24 @@ async def _effective_access(
     narrowed by the key — per workspace, and per view and data source it
     names. ``owner_user`` needs only an ``id``."""
     claims = await permission_service.resolve_for_api_key(session, owner_user.id, scope)
+    return await _describe_access(session, owner_user, claims)
+
+
+async def _describe_access(
+    session: AsyncSession, owner_user, claims: PermissionClaims,
+) -> EffectiveAccess:
+    """:func:`_effective_access` of claims already resolved for a key — the ones a request it
+    makes is held to."""
     scope = claims.key_scope
     names = await _workspace_names(session, claims.ws_perms)
     workspaces = [
-        WorkspaceAccess(id=ws, name=names.get(ws, ws), **_access(_perms_in(claims, ws)))
+        WorkspaceAccess(id=ws, name=names.get(ws, ws), **_access(
+            _perms_in(claims, ws), publishes_data=scope.owner_publishes(ws)))
         for ws in sorted(claims.ws_perms, key=lambda w: names.get(w, w).lower())
     ]
-    every = Access(**_access(set(scope.org_perms))) if scope.org_perms else None
+    every = Access(**_access(
+        set(scope.org_perms), publishes_data=scope.owner_publishes_everywhere,
+    )) if scope.org_perms else None
     views: list[ResourceAccess] = []
     if scope.view_ids:
         rows = {v.id: v for v in (await session.execute(
@@ -1333,7 +1362,9 @@ async def get_api_key_options(
             session, principal.id, max_lifetime_days=policy.max_lifetime_days,
         ),
         workspaces=[
-            WorkspaceAccess(id=ws, name=names[ws], **_access(_perms_in(owner_claims, ws)))
+            WorkspaceAccess(id=ws, name=names[ws], **_access(
+                _perms_in(owner_claims, ws),
+                publishes_data=has_permission(owner_claims, _PUBLISH_DATA, workspace_id=ws)))
             for ws in sorted(names, key=lambda w: names[w].lower())
         ],
         client_ip=_client_ip(request),
@@ -1758,7 +1789,8 @@ async def describe_this_key(
         user_id=key.user_id,
         permissions=api_key_repo.loads(key.permissions, {}),
         resources=api_key_repo.loads(key.resources, {}),
-    ) if context.active else {}
+        effective_access=await _describe_access(session, context.user, context.claims),
+    ) if context.active and context.claims is not None else {}
     return SelfDescription(
         id=key.id, name=key.name, prefix=key.token_prefix, kind=key.kind,
         status=(

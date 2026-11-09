@@ -36,7 +36,7 @@ export function KeyChips({ apiKey: key }: { apiKey: Pick<ApiKey, 'permissions' |
         <div className="flex flex-wrap gap-1.5">
             {p.views !== 'none' && <Chip icon={Eye} label={`Views: ${LEVEL[p.views]}`} />}
             {p.data !== 'none' && <Chip icon={Database} label={`Data: ${LEVEL[p.data]}`} />}
-            {p.publish && <Chip icon={Megaphone} label="Publishes" tone="warn" />}
+            {p.publish && <Chip icon={Megaphone} label="Publishes views" tone="warn" />}
             <Chip
                 icon={key.resources === 'all' ? Globe : Layers}
                 label={describeResources(key.resources)}

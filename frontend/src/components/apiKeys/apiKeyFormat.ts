@@ -4,15 +4,16 @@
  */
 import type {
     ApiKey, ApiKeyPermissions, ApiKeyResources, ApiKeyStatus, Level, PickerItem, StepUpReason,
+    WorkspaceAccess,
 } from '@/services/apiKeyService'
 
 const LEVEL_WORD: Record<Level, string> = { none: 'no', read: 'read', write: 'read & write' }
 
-/** "Views: read & write · Publish · Data: read" */
+/** "Views: read & write · Publish views · Data: read" */
 export function describePermissions(p: ApiKeyPermissions): string {
     const parts: string[] = []
     if (p.views !== 'none') parts.push(`Views: ${LEVEL_WORD[p.views]}`)
-    if (p.publish) parts.push('Publish')
+    if (p.publish) parts.push('Publish views')
     if (p.data !== 'none') parts.push(`Data: ${LEVEL_WORD[p.data]}`)
     return parts.join(' · ') || 'Nothing'
 }
@@ -322,6 +323,30 @@ export function overreach(
         ...views.filter((v) => RANK[permissions.views] > RANK[v.level]),
         ...dataSources.filter((d) => RANK[permissions.data] > RANK[d.level]),
     ]
+}
+
+/**
+ * For a key that changes data: the workspaces it would reach where its owner
+ * holds data write but isn't a Publisher. There the key imports into drafts,
+ * and can't publish them, merge their reviews, sync or let an import publish
+ * itself — publishing data is never the key's own setting, always its owner's
+ * role. Reach as the draft has it: everything, the picked workspaces, or the
+ * workspaces of the picked data sources.
+ */
+export function cannotPublishDataIn(
+    d: {
+        permissions: ApiKeyPermissions
+        resourceMode: 'all' | 'workspaces' | 'items'
+        workspaces: string[]
+        dataSources: PickerItem[]
+    },
+    owned: WorkspaceAccess[],
+): WorkspaceAccess[] {
+    if (d.permissions.data !== 'write') return []
+    const reached = d.resourceMode === 'all' ? owned
+        : d.resourceMode === 'workspaces' ? owned.filter((w) => d.workspaces.includes(w.id))
+            : owned.filter((w) => d.dataSources.some((s) => s.workspaceId === w.id))
+    return reached.filter((w) => w.data === 'write' && !w.publishData)
 }
 
 // ── Where the server sends you ──────────────────────────────────────

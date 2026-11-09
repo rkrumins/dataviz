@@ -47,7 +47,9 @@ from backend.app.db.repositories import (
     service_account_repo,
     user_repo,
 )
-from backend.app.services import service_account_access, service_account_standing, workspace_access
+from backend.app.services import (
+    permission_service, service_account_access, service_account_standing, workspace_access,
+)
 from backend.app.services.activity import recorder
 from backend.app.services.permission_service import PermissionClaims, has_permission
 from backend.app.services.service_account_access import MANAGE, MINT_ANY
@@ -149,6 +151,15 @@ class RoleOut(_Model):
     granted_at: Optional[str] = Field(None, alias="grantedAt")
     #: When it ends; ``None`` while it lasts until taken away.
     expires_at: Optional[str] = Field(None, alias="expiresAt")
+    #: Whether the account publishes data in this workspace — through this role or another it
+    #: holds there: what its keys need to publish a draft, merge a review, sync a snapshot or
+    #: let an import publish itself. A key's own settings never add it.
+    publishes_data: bool = Field(False, alias="publishesData")
+
+
+#: What publishing data takes of a service account: a workspace role carrying it (Publisher, Data
+#: engineer, or a custom role with it).
+_PUBLISH_DATA = "workspace:datasource:publish"
 
 
 class OrgReadOut(_Model):
@@ -404,6 +415,8 @@ async def _detail(
     askers = await user_repo.get_identities_by_ids(session, sorted({r.requested_by for r in asked if r.requested_by}))
     # Reading every workspace reaches theirs too, so whoever sees it sees that.
     reads_all = await service_account_access.org_read_bindings(session, [account_id])
+    # As its keys are held to it: the account's own claims, resolved once.
+    own = await permission_service.resolve(session, account_id, sid="") if bindings else None
     return ServiceAccountDetail(
         **base.model_dump(),
         org_read=OrgReadOut(granted_at=reads_all[0].granted_at) if reads_all else None,
@@ -411,6 +424,7 @@ async def _detail(
             RoleOut(
                 binding_id=b.id, workspace_id=b.scope_id, workspace_name=names.get(b.scope_id),
                 role=b.role_name, granted_at=b.granted_at, expires_at=b.expires_at,
+                publishes_data=has_permission(own, _PUBLISH_DATA, workspace_id=b.scope_id),
             )
             for b in sorted(bindings, key=lambda b: ((names.get(b.scope_id) or "").lower(), b.role_name))
         ],
@@ -1006,9 +1020,11 @@ async def grant_role(
             "reactivated": outcome == "reactivated",
         },
     )
+    own = await permission_service.resolve(session, account_id, sid="")
     return RoleOut(
         binding_id=binding.id, workspace_id=workspace.id, workspace_name=workspace.name,
         role=binding.role_name, granted_at=binding.granted_at, expires_at=binding.expires_at,
+        publishes_data=has_permission(own, _PUBLISH_DATA, workspace_id=workspace.id),
     )
 
 

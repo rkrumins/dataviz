@@ -3,16 +3,18 @@
  *
  * Each level is a card that says what a script holding it can actually do,
  * because "write" means nothing until it reads "change graph data and tell
- * the platform a source changed". Publishing is a switch beside views, and
- * only there: it is a way of changing a view, so it needs views read & write.
+ * the platform a source changed". Publishing views is a switch beside views,
+ * and only there: it is a way of changing a view, so it needs views read &
+ * write. Publishing data has no switch: a key that changes data publishes it
+ * where its owner is a Publisher, and the step says where that isn't so.
  */
-import { CheckCircle2, Database, Eye, Megaphone, ShieldCheck, TriangleAlert } from 'lucide-react'
+import { CheckCircle2, Database, Eye, Info, Megaphone, ShieldCheck, TriangleAlert } from 'lucide-react'
 
 import { ToggleSwitch } from '@/components/admin/AdminFeatures/ToggleSwitch'
 import { FieldLabel, StepBlock, StepColumn, StepHero } from '@/components/admin/InviteWizard/ui'
 import { cn } from '@/lib/utils'
 import type { Level } from '@/services/apiKeyService'
-import { overreach } from '../../apiKeyFormat'
+import { cannotPublishDataIn, overreach } from '../../apiKeyFormat'
 import { useOwnerWords } from '../../keyClient'
 import type { ApiKeyWizardState } from '../useApiKeyWizard'
 
@@ -25,7 +27,7 @@ const LEVELS: Record<'views' | 'data', { value: Level; label: string; says: stri
     data: [
         { value: 'none', label: 'No access', says: 'It cannot read graphs or data sources.' },
         { value: 'read', label: 'Read', says: 'Query graphs, traces and data source details.' },
-        { value: 'write', label: 'Read & write', says: 'Also change graph data and signal that a data source changed.' },
+        { value: 'write', label: 'Read & write', says: 'Also import into drafts, change graph data and signal that a data source changed.' },
     ],
 }
 
@@ -33,6 +35,7 @@ export function PermissionsStep({ w }: { w: ApiKeyWizardState }) {
     const p = w.draft.permissions
     const owner = useOwnerWords()
     const short = w.draft.resourceMode === 'items' ? overreach(p, w.draft.views, w.draft.dataSources) : []
+    const noPublish = cannotPublishDataIn(w.draft, w.ownerWorkspaces)
     return (
         <StepColumn wide>
             <StepHero
@@ -57,7 +60,7 @@ export function PermissionsStep({ w }: { w: ApiKeyWizardState }) {
                         <span className="block text-sm font-semibold text-ink">Publish views to everyone</span>
                         <span className="block text-xs text-ink-muted leading-relaxed">
                             {p.views === 'write'
-                                ? 'Make its changes visible to everyone who can see the view, without a review.'
+                                ? 'Move views it may change to Enterprise, visible to every signed-in user. About views only: publishing data follows the account’s Publisher role.'
                                 : 'Needs Views: read & write.'}
                         </span>
                     </span>
@@ -73,6 +76,17 @@ export function PermissionsStep({ w }: { w: ApiKeyWizardState }) {
 
             <StepBlock delay={0.08}>
                 <LevelCards kind="data" icon={Database} title="Data" value={p.data} onChange={(data) => w.setPermissions({ data })} />
+                {noPublish.length > 0 && (
+                    <p className="mt-3 flex items-start gap-2.5 p-3.5 rounded-xl border border-sky-500/25 bg-sky-500/[0.06] text-xs text-sky-800 dark:text-sky-200 leading-relaxed">
+                        <Info className="w-4 h-4 shrink-0 text-sky-500" aria-hidden />
+                        <span>
+                            In {noPublish.map((x) => `“${x.name}”`).join(', ')} {owner.subject.toLowerCase() === 'you' ? 'you' : owner.subject}{' '}
+                            {owner.is === 'are' ? 'aren’t' : 'isn’t'} a Publisher, so the key can import into drafts there but
+                            can’t publish them, merge their reviews, sync or let an import publish itself. Publishing data follows{' '}
+                            {owner.possessive} role, never the key: ask a workspace admin for the Workspace publisher role there.
+                        </span>
+                    </p>
+                )}
             </StepBlock>
 
             {!w.valid.permissions && (

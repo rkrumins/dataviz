@@ -1183,6 +1183,32 @@ async def test_an_account_holds_workspace_roles_that_neither_administer_nor_let_
     assert kinds == ["rbac.workspace.member_bound", "rbac.workspace.member_revoked"]
 
 
+async def test_its_roles_say_where_it_publishes_data(test_client, db_session, people):
+    """Its keys publish data — a draft, a review's merge, a sync, an import that publishes itself —
+    only where the account holds publish itself, so each role says whether it does there: the
+    page can show a Member's keys import into drafts and publish nothing, before a 403 does."""
+    from tests.common.api_key_world import publisher_role
+
+    await publisher_role(db_session)
+    await db_session.commit()
+    account = await _create(test_client)
+    roles = f"{BASE}/{account['id']}/roles"
+    member = await test_client.post(roles, json={"workspaceId": "ws_x", "role": "workspace_member"})
+    assert member.status_code == 201, member.text
+    assert member.json()["publishesData"] is False
+    publisher = await test_client.post(roles, json={"workspaceId": "ws_x", "role": "workspace_publisher"})
+    assert publisher.status_code == 201, publisher.text
+    assert publisher.json()["publishesData"] is True
+    detail = (await test_client.get(f"{BASE}/{account['id']}")).json()
+    # Per workspace: the Member role there publishes nothing, but the account does, through the other.
+    assert {r["role"]: r["publishesData"] for r in detail["roles"]} == {
+        "workspace_member": True, "workspace_publisher": True,
+    }
+    await test_client.delete(f"{roles}/{publisher.json()['bindingId']}")
+    detail = (await test_client.get(f"{BASE}/{account['id']}")).json()
+    assert [(r["role"], r["publishesData"]) for r in detail["roles"]] == [("workspace_member", False)]
+
+
 # ── Reading every workspace ─────────────────────────────────────────
 
 

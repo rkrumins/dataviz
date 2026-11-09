@@ -686,6 +686,40 @@ async def test_the_detail_shows_what_the_key_can_do_right_now(client, db_session
     assert by_ws["ws_b"]["views"] == "read" and by_ws["ws_a"]["data"] == "write"
 
 
+async def test_publishing_data_is_said_as_the_owners_never_the_keys(client, db_session):
+    """Publishing data — a draft, a review's merge, a sync, an import that publishes itself — is
+    no setting of the key's: a key that changes data publishes where its owner holds Publisher.
+    The form says where the owner publishes data, and a key's detail and ``/self`` where the key
+    does — the key's own publish switch, which is about views, changing nothing of it."""
+    from sqlalchemy import update
+
+    from backend.app.db.models import RoleBindingORM
+    from tests.common.api_key_world import publisher_role
+
+    await publisher_role(db_session)
+    await db_session.execute(update(RoleBindingORM).where(
+        RoleBindingORM.subject_id == OWNER, RoleBindingORM.scope_id == "ws_a",
+    ).values(role_name="workspace_publisher"))
+    await db_session.commit()
+    _sign_in(client)
+    options = {w["id"]: w for w in (await client.get("/api/v1/me/api-keys/options")).json()["workspaces"]}
+    assert (options["ws_a"]["publishData"], options["ws_b"]["publishData"]) == (True, False)
+
+    writes = await mint(db_session, data="write")
+    reads = await mint(db_session, views="write", data="read", publish=True)
+    for key, publishes in ((writes, True), (reads, False)):
+        described = (await client.get("/api/v1/api-keys/self", headers=key.headers)).json()
+        on_self = {w["id"]: w for w in described["effectiveAccess"]["workspaces"]}
+        detail = (await client.get(f"/api/v1/me/api-keys/{key.id}")).json()
+        on_detail = {w["id"]: w for w in detail["effectiveAccess"]["workspaces"]}
+        for access in (on_self, on_detail):
+            assert access["ws_a"]["publishData"] is publishes, key
+            # Publishing views is the owner's too, and a Publisher doesn't hold it: the switch
+            # gives the key nothing here, of views or of data.
+            assert access["ws_a"]["publish"] is False, key
+            assert all(not w["publishData"] for ws, w in access.items() if ws != "ws_a"), key
+
+
 async def test_the_pickers_offer_everything_the_owner_reaches_with_their_level(client):
     _sign_in(client)
     views = (await client.get("/api/v1/me/api-keys/resources?type=view")).json()

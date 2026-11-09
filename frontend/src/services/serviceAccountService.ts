@@ -97,6 +97,10 @@ export interface ServiceAccountRole {
     grantedAt: string | null
     /** When it ends; null while it lasts until taken away. */
     expiresAt: string | null
+    /** It publishes data in this workspace, through this role or another it
+     *  holds there: what its keys need to publish a draft, merge a review,
+     *  sync a snapshot or let an import publish itself. */
+    publishesData: boolean
 }
 
 /** A request for its access still waiting on a workspace. */
