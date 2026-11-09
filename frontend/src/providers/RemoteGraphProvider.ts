@@ -13,6 +13,10 @@ import {
     toApiStatusError,
 } from '@/services/graphRequestFailure'
 import { TIMEOUTS } from '@/config/timeouts'
+import {
+    nameSearchOf, readsAtRevision, revisionRefusal, toSearchResultPage,
+    type NameSearchPage,
+} from './revisionReads'
 import { useProviderHealthStore } from '@/store/providerHealth'
 import { useCacheStalenessStore } from '@/store/cacheStaleness'
 
@@ -330,6 +334,12 @@ export class RemoteGraphProvider implements GraphDataProvider {
     private async fetch<T>(path: string, options?: RequestInit & { extraParams?: Record<string, string>, timeoutMs?: number, apiVersion?: 'v1' | 'v2', silent403?: boolean }): Promise<T> {
         const { extraParams, timeoutMs, apiVersion, ...fetchOptions } = options ?? {}
         const method = (fetchOptions.method ?? 'GET').toUpperCase()
+        // A past revision answers only what its gate lists: the rest is refused here, as the
+        // server would refuse it, without sending it (revisionReads.ts).
+        if (this.workspaceId && this.asOfSeq != null && !readsAsItIsNow(path)
+            && !readsAtRevision(method, path)) {
+            throw revisionRefusal(path)
+        }
         const url = this.buildUrl(path, extraParams, apiVersion)
         const cacheKey = `${method}:${url}:${fetchOptions.body ?? ''}`
 
@@ -641,6 +651,20 @@ export class RemoteGraphProvider implements GraphDataProvider {
      * grow its own Redis cache in workstream 3.
      */
     async searchAdvanced(query: SearchQuery, opts?: { signal?: AbortSignal }): Promise<SearchResultPage> {
+        if (this.workspaceId && this.asOfSeq != null) {
+            // At a past revision, search is a name search: exact as the graph was. Anything
+            // else reads the graph as it is now, and is refused before it is sent.
+            const names = nameSearchOf(query)
+            if (!names) throw revisionRefusal('/search/advanced')
+            const started = performance.now()
+            const page = await this.fetch<NameSearchPage>('/search/names', {
+                method: 'POST',
+                body: JSON.stringify(names),
+                signal: opts?.signal,
+                timeoutMs: TIMEOUTS.SEARCH_ADVANCED_MS,
+            })
+            return toSearchResultPage(page, names.offset, Math.round(performance.now() - started))
+        }
         return await this.fetch<SearchResultPage>('/search/advanced', {
             method: 'POST',
             body: JSON.stringify(query),

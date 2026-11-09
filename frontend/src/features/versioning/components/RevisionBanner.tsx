@@ -25,6 +25,7 @@ import { useCanvasStore } from '@/store/canvas'
 import { useChangeSummary, useRevision } from '../hooks/useVersioning'
 import { ownerName } from '../model/branchVocab'
 import { RestoreDialog } from './RollbackDialogs'
+import { AT_REVISION_READS } from '../model/revisionCopy'
 
 const compact = new Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 })
 const whole = new Intl.NumberFormat()
@@ -156,7 +157,7 @@ export function RevisionBanner({
         <HoverTip
           className="inline-flex"
           label="Drawn with today's layout"
-          detail="Layers and the ontology are today's. Search, traces, Narrow, display rules and subset views read the graph as it is now, so they're off here."
+          detail={`Layers and the ontology are today's. ${AT_REVISION_READS}`}
         >
           <span className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] text-ink-muted hover:bg-canvas-overlay cursor-default">
             <Info className="w-3.5 h-3.5" /> Today's layout

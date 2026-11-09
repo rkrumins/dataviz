@@ -1,0 +1,25 @@
+# The graph routes that answer at a past revision (?asOfSeq=), relative to /api/v1/{ws_id}/graph,
+# a path parameter as {urn}: the server's revision_gate.REVISION_READS, and the client's own list
+# (frontend/src/providers/revisionReads.ts), which refuses the rest before sending it. A test on
+# each side holds its list to this one (test_revision_gate.py, revisionReads.test.ts).
+GET /edges
+GET /map/{urn}
+GET /nodes
+GET /nodes/top-level
+GET /nodes/{urn}
+GET /nodes/{urn}/ancestors
+GET /nodes/{urn}/children
+GET /nodes/{urn}/children-with-edges
+POST /assignments/compute
+POST /canvas/bootstrap
+POST /canvas/expand
+POST /edges/aggregated
+POST /edges/beneath
+POST /edges/between
+POST /edges/query
+POST /nodes/ancestor-chains
+POST /nodes/degree
+POST /nodes/page
+POST /nodes/query
+POST /search/names
+POST /trace/closure

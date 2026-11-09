@@ -95,6 +95,19 @@ def test_what_reads_a_revision_reads_it_through_the_engine_and_every_write_is_re
             assert _key(route) in rg.REVISION_WRITES, f"{method} {path} writes: list it"
 
 
+def test_the_client_lists_the_reads_a_revision_answers():
+    """The client refuses at a revision, before sending it, every read the server would refuse: its
+    list (frontend/src/providers/revisionReads.ts) and this gate's are one, the fixture both read."""
+    import re
+    from pathlib import Path
+    fixture = Path(__file__).parent / "fixtures" / "revision_reads.txt"
+    listed = {line.strip() for line in fixture.read_text().splitlines()
+              if line.strip() and not line.startswith("#")}
+    served = {f"{method} " + re.sub(r"\{[^}]+\}", "{urn}", path.split("/{ws_id}/graph", 1)[1])
+              for method, path, route, _d in _graph_routes() if _key(route) in rg.REVISION_READS}
+    assert listed == served
+
+
 # ── What a request naming a revision is answered ─────────────────────────────────────────────────
 
 async def test_a_listed_read_builds_its_engine_at_the_revision(engine_sees, on):

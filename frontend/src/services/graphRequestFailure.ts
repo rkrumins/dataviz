@@ -37,7 +37,7 @@
 
 export interface ApiStatusError extends Error {
   status: number
-  /** Structured code from the backend's `{detail: {code | error}}` envelope. */
+  /** Structured code from the backend's `{detail: {code | error | type}}` envelope. */
   code?: string
   /** The server's `Retry-After`, in milliseconds, when it sent one. */
   retryAfterMs?: number
@@ -106,9 +106,11 @@ function extractCode(bodyText: string): string | undefined {
     const parsed = JSON.parse(bodyText) as { detail?: unknown; code?: unknown }
     const detail = parsed.detail
     if (detail && typeof detail === 'object') {
-      const d = detail as { code?: unknown; error?: unknown }
+      const d = detail as { code?: unknown; error?: unknown; type?: unknown }
       if (typeof d.code === 'string') return d.code
       if (typeof d.error === 'string') return d.error
+      // The versioning errors' envelope: {detail: {type: "revision_busy", …}}.
+      if (typeof d.type === 'string') return d.type
     }
     if (typeof parsed.code === 'string') return parsed.code
   } catch {
@@ -229,7 +231,7 @@ const READ_ONLY_POST_PATHS = [
   // picks its sessions up where they have got to. So does an export's:
   // the same request always continues the same export. A subset view's
   // layer feed reads its stored search, and a replay continues its scan.
-  /^\/search(\/advanced|\/explain|\/membership|\/counts|\/ancestor-counts|\/catalog|\/exports|\/view-feed)?$/,
+  /^\/search(\/advanced|\/names|\/explain|\/membership|\/counts|\/ancestor-counts|\/catalog|\/exports|\/view-feed)?$/,
   // Narrow's resolution and Save as view's preview resolve, and save nothing.
   /^\/members(\/plan)?$/,
   /^\/trace(\/v2|\/closure|\/expand|\/expand-batch)?$/,
