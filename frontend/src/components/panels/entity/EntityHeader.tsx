@@ -44,7 +44,8 @@ export function EntityHeader({
   title: string
   technicalLine?: string
   isGhost: boolean
-  onRestore: () => void
+  /** Absent where the canvas can't be edited: the banner says so without the button. */
+  onRestore?: () => void
   onTraceUp?: (nodeId: string) => void
   onTraceDown?: (nodeId: string) => void
   onFullTrace?: (nodeId: string) => void
@@ -120,14 +121,14 @@ export function EntityHeader({
             <Trash2 className="w-4 h-4 text-rose-500" aria-hidden />
             <span className="text-sm font-semibold text-rose-600 dark:text-rose-400">Deleted in this draft</span>
           </div>
-          <p className="text-xs text-ink-muted mb-3">
-            Removed on this branch — it disappears once the draft merges. Restore to bring it back
-            (nested under its parent when that parent still exists).
+          <p className={cn('text-xs text-ink-muted', onRestore && 'mb-3')}>
+            Removed on this branch — it disappears once the draft merges.
+            {onRestore && ' Restore to bring it back (nested under its parent when that parent still exists).'}
           </p>
-          <Button size="sm" variant="ghost" leftIcon={RotateCcw} onClick={onRestore}
+          {onRestore && <Button size="sm" variant="ghost" leftIcon={RotateCcw} onClick={onRestore}
             className="border border-rose-500/30 text-rose-600 dark:text-rose-400 hover:text-rose-700 dark:hover:text-rose-300 hover:bg-rose-500/10">
             Restore
-          </Button>
+          </Button>}
         </div>
       ) : (
         <div className="grid grid-cols-3 gap-2 mb-4">

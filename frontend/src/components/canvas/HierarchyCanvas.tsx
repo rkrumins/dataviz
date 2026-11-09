@@ -35,6 +35,9 @@ import { CommandPalette } from './CommandPalette'
 import { SearchMatchBadge } from './search/SearchMatchBadge'
 import { useSearchHighlight } from './search/useSearchHighlight'
 import { useEntityChangeDecoration, nodeDecorationClass, deletedTitle } from '@/features/versioning/canvas/useDiffDecoration'
+import { useDeletionGhosts } from '@/features/versioning/canvas/useDeletionGhosts'
+import { useRestoreGhost } from '@/features/versioning/canvas/useRestoreGhost'
+import { isGhostEdge, isGhostNode } from '@/features/versioning/canvas/deletionGhosts'
 import { DeletedChip, STATUS_META } from '@/features/versioning/components/NodeDiffBadge'
 import { useCanvasInteractions } from '@/hooks/useCanvasInteractions'
 import { useCanvasKeyboard } from '@/hooks/useCanvasKeyboard'
@@ -130,6 +133,9 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
   const libraryBranchId = useEffectiveBranchId(
     activeView?.workspaceId ?? '', activeView?.dataSourceId ?? null, activeView?.id ?? null)
   useViewLibrary(activeView?.id ?? null, libraryBranchId)
+  // A deletion saved to the draft stays where it was, struck through, until published.
+  useDeletionGhosts(!!libraryBranchId)
+  const restoreGhost = useRestoreGhost()
   const revealSearchHit = useRevealSearchHit({ setExpandedNodes, provider })
 
   // Edit Mode State (shared across canvases). `surface` distinguishes the
@@ -229,7 +235,8 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
       const response = await fetchWithTimeout('/api/v1/graph/save', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ nodes, edges })
+        // Never the deletions drawn where they were: they are not the graph.
+        body: JSON.stringify({ nodes: nodes.filter((n) => !isGhostNode(n)), edges: edges.filter((e) => !isGhostEdge(e)) })
       })
       if (!response.ok) throw new Error('Failed to save graph')
       alert('Graph saved successfully!')
@@ -358,6 +365,9 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
       cancelChildLoad(nodeId)
       return
     }
+
+    // A deleted entity's children are on the canvas already, as deletions: none to fetch.
+    if (useCanvasStore.getState().nodes.some((n) => n.id === nodeId && isGhostNode(n))) return
 
     // 2. Load Children using Generic Hook
     pendingLoadRef.current.add(nodeId)
@@ -506,6 +516,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
                 <HierarchyContainer
                   key={rootNode.id}
                   node={rootNode}
+                  onRestore={editModeEnabled && libraryBranchId ? restoreGhost : undefined}
                   schema={schema}
                   selectedNodeId={selectedNodeId}
                   expandedNodes={expandedNodes}
@@ -562,6 +573,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
             onFullTrace={trace.traceFullLineage}
             traceBlocked={traceBlocked}
             onFocusNode={expandToNode}
+            canRestore={editModeEnabled && !!libraryBranchId}
           />
         )}
       </div>{/* end tree + right-rail row */}
@@ -712,6 +724,8 @@ interface HierarchyContainerProps {
   isTraceActive?: boolean
   traceContextSet?: Set<string>
   traceFocusId?: string | null
+  /** Bring back a deletion saved to the draft — offered where the canvas can be edited. */
+  onRestore?: (urn: string) => void
 }
 
 // Exported for its tests.
@@ -729,6 +743,7 @@ export function HierarchyContainer({
   isTraceActive = false,
   traceContextSet = new Set(),
   traceFocusId = null,
+  onRestore,
 }: HierarchyContainerProps) {
   const entityType = schema?.entityTypes.find((et) => et.id === node.typeId)
   const visual = entityType?.visual
@@ -963,6 +978,21 @@ export function HierarchyContainer({
             </button>
           )}
 
+          {/* Restore — a deletion saved to the draft, back where it was */}
+          {node.data?.isGhost === true && onRestore && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation()
+                onRestore(node.urn ?? node.id)
+              }}
+              className="flex items-center justify-center w-6 h-6 rounded-md text-rose-500 dark:text-rose-400 hover:bg-rose-500/10 transition-all hover:scale-110 active:scale-95"
+              title={`Restore ${node.name}`}
+              aria-label={`Restore ${node.name}`}
+            >
+              <LucideIcons.RotateCcw className="w-4 h-4" />
+            </button>
+          )}
+
           {/* Add child — hover-visible; direct store import so the recursive
               render never threads an onAddChild prop down every level. */}
           {editing && !tombstone && (entityType?.hierarchy?.canContain?.length ?? 0) > 0 && (
@@ -1014,6 +1044,7 @@ export function HierarchyContainer({
                     isTraceActive={isTraceActive}
                     traceContextSet={traceContextSet}
                     traceFocusId={traceFocusId}
+                    onRestore={onRestore}
                   />
                 ))}
               </div>

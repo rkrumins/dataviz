@@ -144,3 +144,24 @@ describe('the hierarchy’s row', () => {
     expect(card().style.getPropertyValue('--tw-ring-color')).toBe('#6366f1')
   })
 })
+
+describe('Restore on a deletion saved to the draft', () => {
+  const ghost: HierarchyNode = {
+    id: 'urn:gone', typeId: 'dataset', name: 'Gone', data: { urn: 'urn:gone', label: 'Gone', isGhost: true },
+    children: [], depth: 0, urn: 'urn:gone', entityTypeOption: 'dataset', tags: [],
+  }
+
+  it('is offered on the hierarchy row where the canvas can be edited, and brings it back', () => {
+    const onRestore = vi.fn()
+    render(<HierarchyContainer node={ghost} schema={{ entityTypes: [dataset] } as never} selectedNodeId={null}
+      expandedNodes={new Set()} searchResults={[]} onSelect={vi.fn()} onToggle={vi.fn()} onRestore={onRestore} />)
+    screen.getByRole('button', { name: 'Restore Gone' }).click()
+    expect(onRestore).toHaveBeenCalledWith('urn:gone')
+  })
+
+  it('is not offered where the canvas cannot be edited', () => {
+    render(<HierarchyContainer node={ghost} schema={{ entityTypes: [dataset] } as never} selectedNodeId={null}
+      expandedNodes={new Set()} searchResults={[]} onSelect={vi.fn()} onToggle={vi.fn()} />)
+    expect(screen.queryByRole('button', { name: 'Restore Gone' })).toBeNull()
+  })
+})

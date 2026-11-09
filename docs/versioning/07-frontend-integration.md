@@ -237,6 +237,21 @@ A deleted link is drawn in `DELETED_LINE`: rose, dashed `2 4`, apart from a roll
 - **Unsaved-change halos.** The overlay finds a line's staged-change halo by its member links' ids,
   not the drawn line's `bundle-…` id.
 
+**Saved deletions are drawn on every layout** (`useDeletionGhosts`, mounted by the Context View, the
+graph and the hierarchy).
+- **Which are drawn.** `pickGhosts` draws the deletions whose old parent is on the canvas, and those
+  that had none, then what each held, parent-first, at most `GHOST_CAP` (500). One whose parent is
+  not loaded waits for it: the hook re-runs whenever the canvas's node count changes.
+- **Parent links.** A deleted parent link is re-added only into a ghost, so a child moved elsewhere
+  never gets a second parent.
+- **Ghosts are not the graph.** They never load children and are left out of the legacy save.
+- **Restore** (`useRestoreGhost`) stages the subtree with every id kept. A node comes back by urn,
+  its parent link under its own id (`containmentEdgeId`). The lineage links deleted with it come back
+  under theirs (`buildRestoreLinks`, `restoreOf`) where the other end is restored or still live.
+  Saving it nets the draft's diff for them to nothing.
+- **Where Restore is offered.** The card, the Context View row, the hierarchy row and the drawer
+  offer it only where the canvas can be edited.
+
 ---
 
 ## 7. The versioning chrome — the bar, the bridge, the panel

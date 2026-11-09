@@ -311,7 +311,7 @@ export const GenericNode = memo(function GenericNode({
 
       {/* Ghost (committed deletion) toolbar — read-only entity, so the only action is to bring it
           back. Restore stages a resurrect (create over the tombstone by its original urn). */}
-      {isGhost && !!selected && (
+      {isGhost && !!selected && !!entityData.canAddInside && (
         <NodeToolbar
           isVisible
           position={Position.Top}

@@ -162,6 +162,7 @@ import type { ViewLayerConfig, LayerNodeSortAlgo, LayerNodeSortMode } from '@/ty
 import { defaultReferenceModelLayers } from './constants'
 import { useLayerAssignment } from '@/hooks/useLayerAssignment'
 import { useDeletionGhosts } from '@/features/versioning/canvas/useDeletionGhosts'
+import { useRestoreGhost } from '@/features/versioning/canvas/useRestoreGhost'
 import { useWithStagedDeletions } from '@/features/versioning/canvas/useDiffDecoration'
 import { useContainmentHierarchy } from '@/hooks/useContainmentHierarchy'
 import { useEdgeProjection } from '@/hooks/useEdgeProjection'
@@ -1058,6 +1059,7 @@ export function ContextViewCanvas({
   // Reconstruct committed-draft deletions as read-only rose "ghost" nodes (from the draft-vs-main
   // diff) so a deletion stays visible in red until merged — surviving refresh. Draft-only.
   useDeletionGhosts(isDraft)
+  const restoreGhost = useRestoreGhost()
   const canManage = usePermission('workspace:datasource:manage', scopeWsId ?? undefined)
   const graphId = useGraphId()
   // And the draft must be the caller's to write: someone else's, or one made private under them,
@@ -4557,7 +4559,7 @@ export function ContextViewCanvas({
     'ctx-assignments',
     assignmentStatus === 'loading',
     'Arranging layers…',
-    () => layersPlacedMessage(effectiveAssignments.size, storeLayers.length, unassignedNodes.length),
+    () => layersPlacedMessage(effectiveAssignments.size, storeLayers.length, unassignedNodes.filter((n) => n.data?.isGhost !== true).length),
     // An errored pass leaves `effectiveAssignments` at its previous value —
     // an empty Map on a first load — so without this a provider blip reports
     // the green "Placed 0 items across 6 layers", once per bounded retry.
@@ -6072,8 +6074,9 @@ export function ContextViewCanvas({
       .filter((urn) => assignments[urn]?.layerId && !nodeMap.get(urn))
       .map((urn) => ({ urn, label: fallbackNameFromUrn(urn), layerName: layerNames.get(assignments[urn].layerId) }))
   }, [placementsCheck, activeViewId, hydrationStatus, traceActive, activeReferenceLayout, sortedLayers, nodeMap])
+  // A deletion drawn where it was is not an entity the view failed to place.
   const unassignedEntities = useMemo(() =>
-    unassignedNodes.map((n) => ({
+    unassignedNodes.filter((n) => n.data?.isGhost !== true).map((n) => ({
       id: n.id,
       label: (n.data?.label ?? n.data?.businessLabel ?? n.id) as string,
       type: n.data?.type as string | undefined,
@@ -7830,6 +7833,7 @@ export function ContextViewCanvas({
                 // Create affordances render only in draft (edit) mode —
                 // Published shows zero mutation entry points for anyone.
                 onAddChild={canvasWritable && !subsetView ? handleAddChildEntity : undefined}
+                onRestore={canvasWritable ? restoreGhost : undefined}
                 onAddToLayer={canEditGraph && !subsetView ? openBuilderForLayer : undefined}
                 onBuildToLayer={canEditGraph && !subsetView ? openBuildForLayer : undefined}
                 onBeginConnect={canvasWritable ? edgeConnect.beginDrag : undefined}

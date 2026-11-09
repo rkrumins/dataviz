@@ -44,6 +44,9 @@ export interface EntityDrawerProps {
   /** The canvas owning this drawer accepts graph edits — a draft, in edit mode.
    *  Without it the drawer is read-only; the published graph is never edited in place. */
   canEdit?: boolean
+  /** Restore is offered for a deletion saved to the draft (defaults to `canEdit`): a layout that
+   *  edits only by staging changes offers it without offering the drawer's own editing. */
+  canRestore?: boolean
   /** Offered on a read-only drawer over the published graph: start editing in a draft. */
   onStartEditing?: () => void
   /** Writes are refused by the surface that owns this drawer — currently a canvas trace, which is
@@ -85,7 +88,7 @@ export const EntityDrawer = memo(function EntityDrawer({ resolveNode, ...props }
 })
 
 function OpenEntityDrawer({
-  node, canEdit = false, onStartEditing, writesLocked = false, onFocusConnections, onTraceUp, onTraceDown,
+  node, canEdit = false, canRestore = canEdit, onStartEditing, writesLocked = false, onFocusConnections, onTraceUp, onTraceDown,
   onFullTrace, traceBlocked, onFocusNode, onLocateMany, onRevealPath, getExternalUrl,
 }: Omit<EntityDrawerProps, 'resolveNode'> & { node: LineageNode }) {
   const data = node.data as Record<string, unknown>
@@ -197,7 +200,7 @@ function OpenEntityDrawer({
             title={title}
             technicalLine={technicalLine}
             isGhost={isGhost}
-            onRestore={() => restoreGhost((data.urn as string | undefined) || node.id)}
+            onRestore={canRestore ? () => restoreGhost((data.urn as string | undefined) || node.id) : undefined}
             onTraceUp={onTraceUp}
             onTraceDown={onTraceDown}
             onFullTrace={onFullTrace}

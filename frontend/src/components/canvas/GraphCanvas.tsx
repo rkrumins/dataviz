@@ -57,6 +57,8 @@ import { useDisplayRuleEngine } from '@/hooks/useDisplayRuleEngine'
 import { useViewLibrary } from '@/hooks/useViewLibrary'
 import { useEffectiveBranchId } from '@/store/branchStore'
 import { useWithStagedDeletions, isDeletedEdge, DELETED_LINE } from '@/features/versioning/canvas/useDiffDecoration'
+import { useDeletionGhosts } from '@/features/versioning/canvas/useDeletionGhosts'
+import { isGhostEdge, isGhostNode } from '@/features/versioning/canvas/deletionGhosts'
 import { CanvasSearchTrigger } from './search/CanvasSearchTrigger'
 import { RevisionNameSearchPanel } from './search/RevisionNameSearchPanel'
 import { useRevealSearchHit } from '@/hooks/useRevealSearchHit'
@@ -200,6 +202,8 @@ export function GraphCanvas({ className }: { className?: string }) {
   const libraryBranchId = useEffectiveBranchId(
     activeView?.workspaceId ?? '', activeView?.dataSourceId ?? null, activeView?.id ?? null)
   useViewLibrary(activeView?.id ?? null, libraryBranchId)
+  // A deletion saved to the draft stays where it was, struck through, until published.
+  useDeletionGhosts(!!libraryBranchId)
   // A relationship the drawer shows was resolved from THIS view's lines —
   // leaving the view (or this canvas) closes it, trail and all.
   useEffect(() => () => {
@@ -853,7 +857,9 @@ export function GraphCanvas({ className }: { className?: string }) {
         else next.add(nodeId)
         return next
       })
-      if (!wasExpanded && !pendingLoadRef.current.has(nodeId)) {
+      // A deleted entity's children are on the canvas already, as deletions: none to fetch.
+      const ghost = useCanvasStore.getState().nodes.some((n) => n.id === nodeId && isGhostNode(n))
+      if (!wasExpanded && !pendingLoadRef.current.has(nodeId) && !ghost) {
         pendingLoadRef.current.add(nodeId)
         try {
           await loadChildren(nodeId)
@@ -1311,7 +1317,8 @@ export function GraphCanvas({ className }: { className?: string }) {
       const response = await fetchWithTimeout('/api/v1/graph/save', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ nodes: rawNodes, edges: rawEdges }),
+        // Never the deletions drawn where they were: they are not the graph.
+        body: JSON.stringify({ nodes: rawNodes.filter((n) => !isGhostNode(n)), edges: rawEdges.filter((e) => !isGhostEdge(e)) }),
       })
       if (!response.ok) throw new Error('Failed to save graph')
       alert('Graph saved successfully!')
@@ -1692,6 +1699,7 @@ export function GraphCanvas({ className }: { className?: string }) {
           traceBlocked={traceBlocked}
           onFocusNode={revealAndFocus}
           onLocateMany={locateManyOnCanvas}
+          canRestore={editModeEnabled && !!libraryBranchId}
         />
       )}
       {/* Read-only here: this canvas has no save path for graph edits. */}

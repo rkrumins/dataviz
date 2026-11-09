@@ -124,12 +124,11 @@ export function reconcileGhosts(
   currentEdges: ReadonlyArray<EdgeLike>,
   committedHidden: boolean,
   isContainmentEdgeType: (edgeType: string) => boolean,
+  cap = GHOST_CAP,
 ): { nodesToAdd: GhostNode[]; nodesToRemove: string[]; edgesToAdd: GhostEdge[]; edgesToRemove: string[] } {
   const changes = committedHidden ? [] : (changeSet?.changes ?? [])
-  const removedNodes = changes.filter((c) => c.kind === 'node' && c.status === 'removed' && c.before)
+  const removals = indexRemovals(changes, isContainmentEdgeType)
   const removedEdges = changes.filter((c) => c.kind === 'edge' && c.status === 'removed' && c.before)
-  const desiredNodes = new Set(removedNodes.map(nodeUrn))
-  const desiredEdges = new Set(removedEdges.map((c) => c.entityId))
 
   const liveUrns = new Set<string>()
   const existingGhostNodes = new Set<string>()
@@ -140,6 +139,12 @@ export function reconcileGhosts(
     else liveUrns.add(n.id)
   }
   const existingGhostEdges = new Set(currentEdges.filter(isGhostEdge).map((e) => e.id))
+
+  // Which deletions to draw: under a parent on the canvas, or at the top where they had none —
+  // parent-first, at most `cap`. Only those with their `before` can be drawn.
+  const picked = pickGhosts(removals, new Set([...liveUrns, ...pendingDeletes]), cap)
+  const removedNodes = picked.map((u) => removals.nodes.get(u)!).filter((c) => !!c.before)
+  const desiredNodes = new Set(removedNodes.map(nodeUrn))
 
   // Synthesize a ghost for every committed deletion not already live or ghosted. An optimistic
   // `isPending:'delete'` node is NOT counted as "live": once its deletion is committed it CONVERTS to
@@ -158,10 +163,16 @@ export function reconcileGhosts(
   const present = new Set<string>([...liveUrns, ...existingGhostNodes, ...pendingDeletes, ...addedIds])
   for (const u of nodesToRemove) if (!addedIds.has(u)) present.delete(u)
 
-  const edgesToAdd = removedEdges
-    .filter((c) => !existingGhostEdges.has(c.entityId))
+  // A deleted link is drawn where both its ends are — and a deleted parent link only into a ghost:
+  // re-added to a child that is live (moved elsewhere), it would give that child a second parent.
+  const wanted = removedEdges
     .map((c) => synthesizeGhostEdge(c, isContainmentEdgeType))
-    .filter((e): e is GhostEdge => !!e && present.has(e.source) && present.has(e.target))
+    .filter((e): e is GhostEdge => !!e && present.has(e.source) && present.has(e.target)
+      && (e.type !== 'containment' || desiredNodes.has(e.target)))
+  const desiredEdges = new Set(wanted.map((e) => e.id))
+  // Not over a link already there: a ghost, or one a Restore has brought back live.
+  const onCanvas = new Set(currentEdges.map((e) => e.id))
+  const edgesToAdd = wanted.filter((e) => !onCanvas.has(e.id))
   const edgesToRemove = [...existingGhostEdges].filter((id) => !desiredEdges.has(id))
 
   return { nodesToAdd, nodesToRemove, edgesToAdd, edgesToRemove }
@@ -179,28 +190,43 @@ export interface RestoreChangeInput {
   after: Record<string, unknown>
   summary: string
 }
+
+/** The staged `create_edge` that restores a deleted link under its original id (`restoreOf`). */
+export interface RestoreLinkInput {
+  type: 'create_edge'
+  targetId: string
+  after: Record<string, unknown>
+  summary: string
+}
+
+/** The most deleted entities a canvas draws. Past it, the rest are listed in Changes: tens of
+ *  thousands of tombstones would be neither readable nor quick. */
+export const GHOST_CAP = 500
 /** A change set's committed deletions, indexed in one pass: each removed node by urn, the removed
  *  containment link that held each child, and the children each parent lost (first match wins, as a
  *  scan would find it). A restore used to scan every change for every node it touched — quadratic
  *  in a large deleted subtree. */
-interface RemovalIndex {
+export interface RemovalIndex {
   nodes: Map<string, GraphChange>
   parentLink: Map<string, GraphChange>
   childrenOf: Map<string, string[]>
 }
 
-function indexRemovals(
-  changeSet: ChangeSet | null, isContainmentEdgeType: (edgeType: string) => boolean,
+/** A deleted node is indexed with or without its `before` — where it sits is known from the
+ *  removed parent link either way, and what it was can be fetched for the ones drawn. */
+export function indexRemovals(
+  changes: readonly GraphChange[], isContainmentEdgeType: (edgeType: string) => boolean,
 ): RemovalIndex {
   const nodes = new Map<string, GraphChange>()
   const parentLink = new Map<string, GraphChange>()
   const childrenOf = new Map<string, string[]>()
-  for (const c of changeSet?.changes ?? []) {
-    if (c.status !== 'removed' || !c.before) continue
+  for (const c of changes) {
+    if (c.status !== 'removed') continue
     if (c.kind === 'node') {
       if (!nodes.has(nodeUrn(c))) nodes.set(nodeUrn(c), c)   // by urn: the canvas's name for it
       continue
     }
+    if (!c.before) continue                                   // no type to tell a parent link by
     const e = c.before as Record<string, unknown>
     if (!isContainmentEdgeType(str(e.edgeType) ?? str(e.edge_type) ?? '')) continue
     const { source: src, target: tgt } = edgeEnds(c)
@@ -214,12 +240,37 @@ function indexRemovals(
   return { nodes, parentLink, childrenOf }
 }
 
+/**
+ * Which deleted entities a canvas draws: those whose old parent is on it (`present`), and those that
+ * had no parent — then, under each, the deleted entities it held, parent before child, at most
+ * `cap` in all. One whose parent isn't loaded is left out: drawn at its layer's top it would read as
+ * somewhere it never was.
+ */
+export function pickGhosts(removals: RemovalIndex, present: ReadonlySet<string>, cap = GHOST_CAP): string[] {
+  const queue: string[] = []
+  for (const urn of removals.nodes.keys()) {
+    const link = removals.parentLink.get(urn)
+    const parent = link ? edgeEnds(link).source : undefined
+    if (!link || (parent && present.has(parent) && !removals.nodes.has(parent))) queue.push(urn)
+  }
+  const picked: string[] = []
+  const seen = new Set<string>()
+  for (let i = 0; i < queue.length && picked.length < cap; i++) {
+    const u = queue[i]
+    if (seen.has(u)) continue
+    seen.add(u)
+    picked.push(u)
+    for (const ch of removals.childrenOf.get(u) ?? []) if (removals.nodes.has(ch)) queue.push(ch)
+  }
+  return picked
+}
+
 export function buildRestoreChange(
   urn: string,
   changeSet: ChangeSet | null,
   presentUrns: ReadonlySet<string>,
   isContainmentEdgeType: (edgeType: string) => boolean,
-  removals: RemovalIndex = indexRemovals(changeSet, isContainmentEdgeType),
+  removals: RemovalIndex = indexRemovals(changeSet?.changes ?? [], isContainmentEdgeType),
 ): RestoreChangeInput | null {
   const nodeChange = removals.nodes.get(urn)
   if (!nodeChange?.before) return null
@@ -242,7 +293,8 @@ export function buildRestoreChange(
       // server-managed ones (childCount/lastSyncedAt) are recomputed on write.
       ...b,
       urn,
-      ...(nest ? { parentUrn, containmentEdgeType: edgeType } : {}),
+      // Its parent link comes back under its original id, so the draft's diff nets to nothing.
+      ...(nest ? { parentUrn, containmentEdgeType: edgeType, containmentEdgeId: parentEdge!.entityId } : {}),
     },
     summary: `Restore ${str(b.entityType) ?? 'entity'}: '${str(b.displayName) ?? urn}'`,
   }
@@ -258,7 +310,7 @@ export function buildRestoreSubtree(
   isContainmentEdgeType: (edgeType: string) => boolean,
 ): RestoreChangeInput[] {
   // Removed nodes, and parent urn → deleted child urns from removed CONTAINMENT edges only.
-  const removals = indexRemovals(changeSet, isContainmentEdgeType)
+  const removals = indexRemovals(changeSet?.changes ?? [], isContainmentEdgeType)
 
   // BFS from the root over removed nodes → parent-before-child order.
   const order: string[] = []
@@ -278,4 +330,42 @@ export function buildRestoreSubtree(
   return order
     .map((u) => buildRestoreChange(u, changeSet, willBePresent, isContainmentEdgeType, removals))
     .filter((r): r is RestoreChangeInput => !!r)
+}
+
+/** Client-side names a change entry carries beside the stored link, never sent back. */
+const LINK_CLIENT_KEYS = new Set(['id', 'entityId', 'urn', 'sourceUrn', 'targetUrn'])
+
+/**
+ * The links deleted with a set of entities being restored that come back with them: every removed
+ * relationship touching one of them whose other end will be there — restored too, or live (`isLive`).
+ * Each keeps its original id (`restoreOf`) and its stored values. Parent links are not here: an
+ * entity's own comes back with it (`containmentEdgeId`), and any other one would give a live child a
+ * second parent.
+ */
+export function buildRestoreLinks(
+  restored: readonly RestoreChangeInput[],
+  changes: readonly GraphChange[],
+  isLive: (urn: string) => boolean,
+  isContainmentEdgeType: (edgeType: string) => boolean,
+): RestoreLinkInput[] {
+  const back = new Set(restored.map((r) => r.targetUrn))
+  const names = new Map(restored.map((r) => [r.targetUrn, str(r.after.displayName) ?? r.targetUrn]))
+  const there = (urn: string | undefined): urn is string => !!urn && (back.has(urn) || isLive(urn))
+  const out: RestoreLinkInput[] = []
+  for (const c of changes) {
+    if (c.kind !== 'edge' || c.status !== 'removed' || !c.before) continue
+    const b = c.before as Record<string, unknown>
+    const edgeType = str(b.edgeType) ?? str(b.edge_type)
+    if (!edgeType || isContainmentEdgeType(edgeType)) continue
+    const { source, target } = edgeEnds(c)
+    if (!(back.has(source ?? '') || back.has(target ?? '')) || !there(source) || !there(target)) continue
+    const stored = Object.fromEntries(Object.entries(b).filter(([k]) => !LINK_CLIENT_KEYS.has(k) && !k.startsWith('_')))
+    out.push({
+      type: 'create_edge',
+      targetId: c.entityId,
+      after: { ...stored, edgeType, restoreOf: c.entityId, source, target },
+      summary: `Restore link ${edgeType}: '${names.get(source) ?? source}' → '${names.get(target) ?? target}'`,
+    })
+  }
+  return out
 }

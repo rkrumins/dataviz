@@ -1,6 +1,10 @@
 /**
  * useDeletionGhosts — keeps the canvas's committed-deletion ghost nodes AND edges in sync with the
- * draft-vs-main diff. Mount once in the Context View canvas. See `deletionGhosts.ts` for the why.
+ * draft-vs-main diff. Mount once per canvas, on every layout. See `deletionGhosts.ts` for the why.
+ *
+ * It runs again whenever the canvas gains or loses nodes: a deletion is drawn under a parent on the
+ * canvas, so a parent loaded later brings its deleted children, and a collapse that dropped them
+ * from the store gets them back.
  *
  * Runs only once hydration is `complete`, so the overlay lands ON TOP of the freshly re-hydrated live
  * state (a re-hydrate replaces the node/edge set; adding ghosts before it would just be wiped). Reads
@@ -16,6 +20,7 @@ export function useDeletionGhosts(enabled: boolean) {
   const changeSet = useBranchStore((s) => s.activeChangeSet)
   const committedHidden = useBranchStore((s) => s.committedDiffHidden)
   const hydrationPhase = useCanvasStore((s) => s.hydrationPhase)
+  const nodeCount = useCanvasStore((s) => s.nodes.length)
   const containmentTypes = useContainmentEdgeTypes()
 
   // Ontology-driven: which edge types nest (drives whether a ghost edge is 'containment'). No literals.
@@ -42,5 +47,5 @@ export function useDeletionGhosts(enabled: boolean) {
     if (edgesToRemove.length) state.removeEdges(edgesToRemove)
     if (nodesToAdd.length) state.addNodes(nodesToAdd as never)
     if (edgesToAdd.length) state.addEdges(edgesToAdd as never)
-  }, [enabled, changeSet, committedHidden, hydrationPhase, isContainmentEdgeType])
+  }, [enabled, changeSet, committedHidden, hydrationPhase, isContainmentEdgeType, nodeCount])
 }
