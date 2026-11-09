@@ -22,6 +22,9 @@ export type ChangeState = 'staged' | 'committed'
 export interface EntityDecoration {
   state: ChangeState
   status: ChangeStatus
+  /** Two revisions compared on the canvas: the change is one of what changed after `fromSeq` up
+   *  to `toSeq`. Absent for a draft's own changes. */
+  between?: { fromSeq: number; toSeq: number }
 }
 
 const stagedStatus = (t: StagedChangeType): ChangeStatus =>
@@ -91,9 +94,13 @@ export function useEntityChangeDecoration() {
       if (!entityId) return undefined
       const s = staged.get(entityId)
       if (s) return s
-      if (committedHidden || !changeSet) return undefined
+      // "Hide saved changes" is about a draft's own: it never hides two revisions compared.
+      if (!changeSet || (committedHidden && changeSet.origin !== 'compare')) return undefined
       const c = changeSet.byEntityId.get(entityId)
-      return c ? COMMITTED[c.status] : undefined
+      if (!c) return undefined
+      return c.origin.source === 'compare'
+        ? { ...COMMITTED[c.status], between: { fromSeq: c.origin.fromSeq, toSeq: c.origin.toSeq } }
+        : COMMITTED[c.status]
     },
   }
 }
@@ -122,7 +129,10 @@ export const nodeDecorationClass = (d?: EntityDecoration): string => {
 
 /** What a deleted entity's chip says when hovered: which deletion it is. */
 export const deletedTitle = (d?: EntityDecoration): string | undefined =>
-  d?.status !== 'removed' ? undefined : d.state === 'staged' ? 'Deleted · not saved yet' : 'Deleted in this draft'
+  d?.status !== 'removed' ? undefined
+    : d.state === 'staged' ? 'Deleted · not saved yet'
+      : d.between ? `Deleted after #${d.between.fromSeq}, by #${d.between.toSeq}`
+        : 'Deleted in this draft'
 
 /** A deleted link, on every layout: rose, in short dashes — apart from a roll-up's longer dash. */
 export const DELETED_LINE = { color: '#f43f5e', dash: '2 4' } as const

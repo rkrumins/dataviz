@@ -9,6 +9,37 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Deletions drawn where they were, in comparisons and in large drafts
+
+Two revisions compared on the canvas showed only rings: what the newer one no longer had wasn't
+drawn at all. Nor was anything a draft of more than 20,000 changes deleted.
+
+### Added
+
+- **A comparison draws its deletions where they were**, as a draft does: struck through and marked
+  **Deleted** under their parent, up to 500, with deleted relationships in rose dashes. Hover
+  **Deleted** to see between which revisions it went.
+- **The comparison chip counts what changed**, added, modified and deleted, and hovering it shows
+  what each mark means.
+- **When not every deletion is drawn, the canvas says how many are**, such as **3 of 40 deleted
+  drawn**, and opens the list: the comparison's, or the draft's **Changes**.
+- **`POST …/diff/entries/batch`** reads up to 500 rows of a change list, before and after, in one
+  request. It changes nothing, so an API key that only reads may call it.
+
+### Changed
+
+- **A draft of more than 20,000 changes draws its deletions too.** **Restore** works there for up
+  to 1,000 entities and 2,000 relationships deleted together. Past that it says so, rather than
+  bring back part of them.
+- **A deletion drawn on the canvas opens at once in a change list**: what it was is already loaded.
+
+### Fixed
+
+- **Hiding a draft's saved changes also hid the rings of a comparison** highlighted on Published
+  afterwards.
+
+---
+
 ## [Unreleased] — Saved deletions stay in place on every layout, and come back whole
 
 A deletion saved to a draft stayed visible only in the Context View; the graph and hierarchy layouts

@@ -96,7 +96,7 @@ export function EntityHeader({
         badge={(
           <>
             <KindBadge label={typeName} bg={colors.bg} fg={colors.text} />
-            {tombstone && <DeletedChip title={isGhost ? 'Deleted in this draft' : deletedTitle(deco)} />}
+            {tombstone && <DeletedChip title={deletedTitle(deco) ?? 'Deleted in this draft'} />}
             {confidence !== undefined && (
               <span className={cn('text-xs font-medium tabular-nums',
                 confidence >= 0.8 ? 'text-emerald-600 dark:text-emerald-400' : confidence >= 0.5 ? 'text-amber-600 dark:text-amber-400' : 'text-rose-600 dark:text-rose-400')}>
@@ -119,10 +119,12 @@ export function EntityHeader({
         <div className="mb-4 p-3 rounded-xl bg-rose-500/10 border border-rose-500/30">
           <div className="flex items-center gap-2 mb-1.5">
             <Trash2 className="w-4 h-4 text-rose-500" aria-hidden />
-            <span className="text-sm font-semibold text-rose-600 dark:text-rose-400">Deleted in this draft</span>
+            <span className="text-sm font-semibold text-rose-600 dark:text-rose-400">{deletedTitle(deco) ?? 'Deleted in this draft'}</span>
           </div>
           <p className={cn('text-xs text-ink-muted', onRestore && 'mb-3')}>
-            Removed on this branch — it disappears once the draft merges.
+            {deco?.between
+              ? `In the graph at #${deco.between.fromSeq}, and gone by #${deco.between.toSeq}.`
+              : 'Removed on this branch — it disappears once the draft merges.'}
             {onRestore && ' Restore to bring it back (nested under its parent when that parent still exists).'}
           </p>
           {onRestore && <Button size="sm" variant="ghost" leftIcon={RotateCcw} onClick={onRestore}

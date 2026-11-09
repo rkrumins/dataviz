@@ -251,6 +251,10 @@ interface CanvasState {
    *  loads a page of them (they have no placement to page by yet); the draft's Changes lists all. */
   createdRootsNotLoaded: number
   setCreatedRootsNotLoaded: (n: number) => void
+  /** Deleted entities drawn where they were, of how many the canvas's change set holds; null
+   *  where none are drawn from it. */
+  deletedDrawn: { drawn: number; total: number } | null
+  setDeletedDrawn: (d: { drawn: number; total: number } | null) => void
 
   // Placements that point at nothing: assigned entities the load ASKED FOR, by URN, and the
   // graph didn't return (failed batches are left out, since those are unknown rather than
@@ -572,6 +576,9 @@ export const useCanvasStore = create<CanvasState>()(
       createdRootsNotLoaded: 0,
       setCreatedRootsNotLoaded: (createdRootsNotLoaded) => set((s) =>
         (s.createdRootsNotLoaded === createdRootsNotLoaded ? s : { createdRootsNotLoaded })),
+      deletedDrawn: null,
+      setDeletedDrawn: (deletedDrawn) => set((s) =>
+        (s.deletedDrawn?.drawn === deletedDrawn?.drawn && s.deletedDrawn?.total === deletedDrawn?.total ? s : { deletedDrawn })),
       placementsNotFound: null,
       setPlacementsNotFound: (placementsNotFound) => set({ placementsNotFound }),
       subsetIssue: null,

@@ -176,3 +176,23 @@ describe('withStagedDeletions — deleted links stay drawn until saved', () => {
     expect(isDeletedEdge(e('x', { isAggregated: true }))).toBe(false)
   })
 })
+
+describe('two revisions compared on the canvas', () => {
+  beforeEach(() => {
+    useStagedChangesStore.setState({ changes: [] })
+  })
+
+  const compareSet = () => {
+    const origin = { source: 'compare', fromSeq: 40, toSeq: 57 } as const
+    const c = { entityId: 'urn:gone', kind: 'node', status: 'removed', label: 'gone', origin }
+    return { changes: [c], byEntityId: new Map([[c.entityId, c]]), counts: {}, origin: 'compare' } as never
+  }
+
+  it("says which revisions a deletion fell between, and a draft's hide toggle never hides it", () => {
+    act(() => useBranchStore.setState({ activeChangeSet: compareSet(), committedDiffHidden: true }))
+    const { result } = renderHook(() => useEntityChangeDecoration())
+    const d = result.current.for('urn:gone')
+    expect(d).toEqual({ state: 'committed', status: 'removed', between: { fromSeq: 40, toSeq: 57 } })
+    expect(deletedTitle(d)).toBe('Deleted after #40, by #57')
+  })
+})

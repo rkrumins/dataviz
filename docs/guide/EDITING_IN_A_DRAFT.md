@@ -248,7 +248,7 @@ every staged edit away.
 | Dashed halo | Edited, but not saved yet |
 | Green / orange / rose | New / edited / deleted |
 | A struck-through name and **Deleted** | Deleted. Hover **Deleted** to see whether the deletion is saved to this draft or not saved yet. Deleting an entity marks everything inside it and every relationship touching it the same way, until you save or discard |
-| A deleted entity still in its place | A deletion saved to this draft stays visible, struck through, on every layout until the draft is published. It sits under its parent when that parent is on the canvas; up to 500 are drawn, and **Changes** lists them all. Its drawer says **Deleted in this draft**. **Restore** (on the card, the row or the drawer) brings it back with what was deleted inside it and its relationships to entities still there |
+| A deleted entity still in its place | A deletion saved to this draft stays visible, struck through, on every layout until the draft is published. It sits under its parent when that parent is on the canvas; up to 500 are drawn, and **Changes** lists them all. When not all of them are drawn, the bar above the canvas says how many are, such as **500 of 1,200 deleted drawn**; choose it to open **Changes**. Its drawer says **Deleted in this draft**. **Restore** (on the card, the row or the drawer) brings it back with what was deleted inside it and its relationships to entities still there |
 | Rose dashes | A deleted relationship. It stays drawn until the deletion is saved or discarded |
 
 **Committed**, in the amber strip, hides or shows the rings for changes already

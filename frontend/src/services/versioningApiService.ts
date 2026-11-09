@@ -2063,6 +2063,15 @@ export function getChangeEntry(
   )
 }
 
+/** Up to 500 entities' entries of one origin, in one request: what the canvas draws deleted entities
+ *  from where the origin's change list carries no payloads (two revisions compared, a draft past the
+ *  tree's cap). An id the origin did not change is left out. */
+export function getChangeEntriesBatch(
+  wsId: string, graphId: string, origin: ChangeListOrigin, ids: string[],
+): Promise<{ entries: ChangeListEntry[] }> {
+  return vfetch(`${base(wsId)}/graphs/${graphId}/diff/entries/batch`, jsonBody({ ...origin, ids }))
+}
+
 /** Every change of an origin as a short array — what the canvas marks entities by. With `max`, an
  *  origin with more changes than that comes back with its total alone (`truncated`, no entries). */
 export function getChangeIndex(

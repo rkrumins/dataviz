@@ -68,6 +68,8 @@ vi.mock('../ViewVersioningPanel', () => ({
 }))
 
 import { CanvasVersioningBar } from '../CanvasVersioningBar'
+import { useCanvasStore } from '@/store/canvas'
+import { buildChangeSet } from '../../model/changeModel'
 
 const setActiveChangeSet = vi.mocked(branchState.setActiveChangeSet as (cs: unknown) => void)
 
@@ -107,5 +109,42 @@ describe('CanvasVersioningBar — a comparison highlighted on the canvas', () =>
     render(<CanvasVersioningBar workspaceId="ws1" dataSourceId="ds1" />)
 
     expect(useChangeIndex).toHaveBeenCalledWith('ws1', 'g1', { branchId: 'br_1' })
+  })
+})
+
+describe('CanvasVersioningBar — what a comparison drew of its deletions', () => {
+  beforeEach(() => {
+    state.index = { origin: { fromSeq: 3, toSeq: 12 }, entries: [], total: 0, truncated: false }
+    branchState.activeChangeSet = null
+    useCanvasStore.setState({ deletedDrawn: null })
+  })
+
+  it('counts the comparison, says how many deletions it drew of how many, and opens the list', () => {
+    const origin = { source: 'compare', fromSeq: 3, toSeq: 12 } as const
+    branchState.activeChangeSet = buildChangeSet([
+      { entityId: 'a', kind: 'node', status: 'added', label: 'a', origin },
+      ...Array.from({ length: 4 }, (_, i) => ({ entityId: `d${i}`, kind: 'node' as const, status: 'removed' as const, label: `d${i}`, origin })),
+    ])
+    useCanvasStore.setState({ deletedDrawn: { drawn: 3, total: 4 } })
+    render(<CanvasVersioningBar workspaceId="ws1" dataSourceId="ds1" />)
+
+    expect(screen.getByText('3 of 4 deleted drawn')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Open the list' }))
+    expect(screen.getByText('history on 3→12')).toBeInTheDocument()
+  })
+
+  it('says nothing of drawing when every deletion is drawn', () => {
+    useCanvasStore.setState({ deletedDrawn: { drawn: 4, total: 4 } })
+    render(<CanvasVersioningBar workspaceId="ws1" dataSourceId="ds1" />)
+    expect(screen.queryByText(/deleted drawn/)).toBeNull()
+  })
+
+  it("says the same on a draft, whose Changes lists every one", () => {
+    state.branchId = 'br_1'
+    useCanvasStore.setState({ deletedDrawn: { drawn: 500, total: 1_200 } })
+    render(<CanvasVersioningBar workspaceId="ws1" dataSourceId="ds1" />)
+
+    fireEvent.click(screen.getByRole('button', { name: '500 of 1,200 deleted drawn' }))
+    expect(screen.getByText(/^changes on/)).toBeInTheDocument()
   })
 })

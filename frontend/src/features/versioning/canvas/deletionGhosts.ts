@@ -125,7 +125,17 @@ export function reconcileGhosts(
   committedHidden: boolean,
   isContainmentEdgeType: (edgeType: string) => boolean,
   cap = GHOST_CAP,
-): { nodesToAdd: GhostNode[]; nodesToRemove: string[]; edgesToAdd: GhostEdge[]; edgesToRemove: string[] } {
+  /** What deleted entities were, by entity id, where the change set carries no payloads (a
+   *  compact change list): fetched for the ones drawn. */
+  befores?: ReadonlyMap<string, Record<string, unknown>>,
+): {
+  nodesToAdd: GhostNode[]; nodesToRemove: string[]; edgesToAdd: GhostEdge[]; edgesToRemove: string[]
+  /** Picked to draw but with nothing known of what they were yet: their entity ids, to fetch. */
+  missing: string[]
+  /** Deleted entities drawn after this pass, of how many the change set holds. */
+  drawn: number
+  total: number
+} {
   const changes = committedHidden ? [] : (changeSet?.changes ?? [])
   const removals = indexRemovals(changes, isContainmentEdgeType)
   const removedEdges = changes.filter((c) => c.kind === 'edge' && c.status === 'removed' && c.before)
@@ -143,7 +153,10 @@ export function reconcileGhosts(
   // Which deletions to draw: under a parent on the canvas, or at the top where they had none —
   // parent-first, at most `cap`. Only those with their `before` can be drawn.
   const picked = pickGhosts(removals, new Set([...liveUrns, ...pendingDeletes]), cap)
-  const removedNodes = picked.map((u) => removals.nodes.get(u)!).filter((c) => !!c.before)
+  const withBefore = (c: GraphChange): GraphChange => (c.before || !befores?.has(c.entityId) ? c : { ...c, before: befores.get(c.entityId) })
+  const pickedChanges = picked.map((u) => withBefore(removals.nodes.get(u)!))
+  const removedNodes = pickedChanges.filter((c) => !!c.before)
+  const missing = pickedChanges.filter((c) => !c.before).map((c) => c.entityId)
   const desiredNodes = new Set(removedNodes.map(nodeUrn))
 
   // Synthesize a ghost for every committed deletion not already live or ghosted. An optimistic
@@ -175,7 +188,7 @@ export function reconcileGhosts(
   const edgesToAdd = wanted.filter((e) => !onCanvas.has(e.id))
   const edgesToRemove = [...existingGhostEdges].filter((id) => !desiredEdges.has(id))
 
-  return { nodesToAdd, nodesToRemove, edgesToAdd, edgesToRemove }
+  return { nodesToAdd, nodesToRemove, edgesToAdd, edgesToRemove, missing, drawn: desiredNodes.size, total: removals.nodes.size }
 }
 
 /** The staged `create_entity` input that RESTORES (resurrects) a committed deletion: it carries the
@@ -330,6 +343,39 @@ export function buildRestoreSubtree(
   return order
     .map((u) => buildRestoreChange(u, changeSet, willBePresent, isContainmentEdgeType, removals))
     .filter((r): r is RestoreChangeInput => !!r)
+}
+
+/**
+ * What a Restore of `rootUrn` needs to know that a compact change list doesn't say: the entity ids
+ * of the deleted subtree (parent-first, at most `maxNodes`) and of the relationships touching it,
+ * whose stored values come back with them (at most `maxLinks`). Null when the subtree or its links
+ * are past those: too much to restore from the canvas.
+ */
+export function restoreNeeds(
+  removals: RemovalIndex, changes: readonly GraphChange[], rootUrn: string,
+  isContainmentEdgeType: (edgeType: string) => boolean, maxNodes: number, maxLinks: number,
+): { nodeIds: string[]; linkIds: string[] } | null {
+  const order: string[] = []
+  const seen = new Set<string>()
+  const queue = [rootUrn]
+  for (let i = 0; i < queue.length; i++) {
+    const u = queue[i]
+    if (seen.has(u) || !removals.nodes.has(u)) continue
+    seen.add(u)
+    order.push(u)
+    if (order.length > maxNodes) return null
+    for (const ch of removals.childrenOf.get(u) ?? []) queue.push(ch)
+  }
+  const linkIds: string[] = []
+  for (const c of changes) {
+    if (c.kind !== 'edge' || c.status !== 'removed') continue
+    const edgeType = str((c.before as Record<string, unknown> | undefined)?.edgeType)
+    if (edgeType && isContainmentEdgeType(edgeType)) continue
+    const { source, target } = edgeEnds(c)
+    if ((source && seen.has(source)) || (target && seen.has(target))) linkIds.push(c.entityId)
+  }
+  if (linkIds.length > maxLinks) return null
+  return { nodeIds: order.map((u) => removals.nodes.get(u)!.entityId), linkIds }
 }
 
 /** Client-side names a change entry carries beside the stored link, never sent back. */
