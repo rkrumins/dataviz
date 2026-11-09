@@ -9,6 +9,49 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — An import writes each row fewer times, and runs about a fifth faster
+
+### Changed
+
+- **Imports are faster, and smaller on disk.** Measured on 501 MB of NDJSON (4.18 million rows) into
+  an empty graph, over HTTP, on 4 vCPU and default Postgres, the import publishing itself:
+
+  | | Before | Now |
+  |---|---|---|
+  | Import | 1,174 s | 934 s |
+  | Publish | 936 s | 846 s |
+  | End to end | 35 min | 30 min |
+  | Postgres | 16.7 GB | 15.0 GB |
+
+  What changed, with nothing an import does differently:
+  - **A row's outcome is written once,** to a table of its own (`import_results`), with the window
+    that resolved it. Recording it on the staged row rewrote that whole row, with three new index
+    entries and a dead copy, for every row of the file.
+  - **Rows go in a statement per batch:** a commit's versions, its heads, and the staged rows.
+    Before, the server ran one INSERT per row.
+  - **A head is inserted first.** Every create, and every first change a draft makes, has no head
+    yet; the compare-and-swap that ran first missed each of them.
+  - **A window reads in one transaction,** and reads the published graph from its head pointers
+    while the draft is up to date with it, instead of every version of each entity. A node is
+    read once, with its payload.
+  - **Statistics are refreshed after the edges too,** so the publish plans on them.
+
+### Upgrading
+
+- A migration adds `graphver.import_results` (`20261105_1000_import_results`). With a separate
+  `GRAPHVER_DB_URL`, the versioning worker creates it when it starts.
+- An import a worker of the previous release staged, and a worker of this one resumes, has its rows'
+  outcomes copied across once, before it carries on. `ix_import_rows_matched` stays for that, and
+  goes in the release after.
+
+### Known limitations
+
+- **Rolling back past this release while an import runs:** an older worker that resumes an import
+  this release started finds none of its rows' outcomes. Abandon that import's draft and import
+  the file again after the rollback.
+
+---
+
 ## [Unreleased] — A connector sends a multi-gigabyte file, and its import publishes itself
 
 ### Added

@@ -7,8 +7,10 @@ and deletes), a draft as of one of its commits, and a copy-on-write fork — wit
 enough that every read spans many pages. Then that the view scope, a selection, and every format
 written from it agree with the materializing path, and that an empty export is still a valid file.
 A view package's format-2 lines (``stream.native_pages``) carry the same entities' payloads whole.
-A draft read as it stands now, inside ``pinned_reads``, reads one state while it is edited. And a
-layer pinned to a commit is read by one query, however many pages it spans.
+A draft read as it stands now, inside ``pinned_reads``, reads one state while it is edited; inside
+``window_reads`` it reads ``main`` from its head pointers while ``main`` is still where the draft
+branched, and from its versions at that commit once ``main`` has moved on. And a layer pinned to a
+commit is read by one query, however many pages it spans.
 """
 import asyncio
 import json
@@ -18,12 +20,12 @@ import pytest
 from sqlalchemy import event, func, select
 
 from backend.app.services.versioning import db, models
-from backend.app.services.versioning.import_export import stream
+from backend.app.services.versioning.import_export import snapshot, stream
 from backend.app.services.versioning.import_export.rowmodel import column_order
 from backend.app.services.versioning.import_export.formats import get_adapter
 from backend.app.services.versioning.import_export.rowmodel import denormalize_edge, denormalize_node, normalize
 from backend.app.services.versioning.merkle import content_hash
-from backend.app.services.versioning.import_export.snapshot import open_snapshot, pinned_reads
+from backend.app.services.versioning.import_export.snapshot import open_snapshot, pinned_reads, window_reads
 from backend.app.services.versioning.service import GraphVersioningService
 
 PAGE = 4          # every read spans several pages
@@ -245,6 +247,39 @@ async def _run() -> None:
                             ops=[_n("n18", "urn:t:18")])
         assert await _pages(pinned) == before and "n18" not in before
     assert "n18" in await _pages(await open_snapshot(graph_id=gid, branch_id=d, page_size=PAGE))
+
+    # An import window's reads of a draft (``window_reads``): main from its head pointers while it
+    # is still where the draft branched; from its versions at that commit once it has moved on.
+    fresh = await svc.open_draft(graph_id=gid, owner="u")
+    heads_of = []
+    lookup = snapshot.HeadsLayer.lookup
+
+    async def counted(self, kind, ids, payload=False):
+        heads_of.append(self.branch_id)
+        return await lookup(self, kind, ids, payload)
+
+    async def window(names):
+        heads_of.clear()
+        async with window_reads():
+            snap = await open_snapshot(graph_id=gid, branch_id=fresh, page_size=PAGE)
+            found = await snap.lookup_live("node", names, payload=True)
+        outside = await (await open_snapshot(graph_id=gid, branch_id=fresh)).lookup_live("node", names, payload=True)
+        assert {e: (w.content_hash, w.payload) for e, w in found.items()} == \
+            {e: (w.content_hash, w.payload) for e, w in outside.items()}, "what the versions say"
+        return found, set(heads_of)
+
+    snapshot.HeadsLayer.lookup = counted
+    try:
+        found, read = await window(["n01", "n12", "n15"])
+        assert set(found) == {"n01", "n15"} and read == {main, fresh}, (set(found), read)
+        before = found["n01"].content_hash
+        await svc.apply_ops(graph_id=gid, actor="u", message="main moves on",
+                            ops=[_upd(nodes[1], owner="moved")])
+        found, read = await window(["n01", "n12", "n15"])
+        assert found["n01"].content_hash == before, "main where the draft branched, not its head"
+        assert read == {fresh}, read
+    finally:
+        snapshot.HeadsLayer.lookup = lookup
 
     # A whole published graph is counted from its head pointers.
     head = await open_snapshot(graph_id=gid)

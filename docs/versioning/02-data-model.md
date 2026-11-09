@@ -79,6 +79,7 @@ erDiagram
     branches ||--o{ working_changes : "staging buffer"
     branches ||--o{ entity_heads : "latest pointer / branch"
     jobs ||--o{ import_rows : "staged rows"
+    jobs ||--o{ import_results : "what each row resolved to"
 
     graphs {
         text id PK "graph_*"
@@ -164,7 +165,7 @@ erDiagram
 
 | Tier | Tables | Cardinality | Partitioned? |
 |------|--------|-------------|--------------|
-| **Control-plane** | `graphs`, `branches`, `branch_members`, `merge_requests`, `projection_state`, `jobs`, `import_rows` | low / medium | no |
+| **Control-plane** | `graphs`, `branches`, `branch_members`, `merge_requests`, `projection_state`, `jobs`, `import_rows`, `import_results` | low / medium | no |
 | **Versioned data** | `commits`, `node_versions`, `edge_versions`, `entity_heads`, `merkle_nodes`, `working_changes` | high, append-only | **HASH(`graph_id`) × 64** |
 
 `PARTITIONED_TABLES` is the authoritative list (`models.py:45-52`).
@@ -231,7 +232,15 @@ one job per `(graph_id, idempotency_key)` among the jobs that have a key, finish
 (`PrimaryKeyConstraint(job_id, row_index)`), then the worker resolves/diffs/applies them by keyset
 scan — resumable across a crash, reused by both preview and apply (idempotent re-runs). **Plain
 (non-partitioned)** and GC'd by job after a terminal state, because rows are transient and keyed by
-`job_id`, not `graph_id` (`models.py:328-334`).
+`job_id`, not `graph_id` (`models.py:328-334`). A staged row is written once: what it resolved to
+goes to `import_results`. (Its own `matched_entity_id`, `resolved_op`, `status` and `reasons` are
+what the release before that recorded, read once when a job it staged is resumed.)
+
+### `import_results` — what each staged row resolved to
+One row per staged row (`PrimaryKeyConstraint(job_id, row_index)`): its `kind`, the entity it matched
+or created (`matched_entity_id`, `ix_import_results_matched`), its `resolved_op` (a row's status is the
+op's) and `reasons`. Written once, with the window that resolved the row, and swept with the staged
+rows (migration `20261105_1000_import_results`).
 
 ---
 

@@ -33,7 +33,7 @@ from backend.app.services.versioning.import_export.resolve import (
 from backend.app.services.versioning.import_export.rowmodel import column_order
 from backend.app.services.versioning.import_export.service import ImportExportService
 from backend.app.services.versioning.import_export.xlsx_adapter import XlsxAdapter
-from backend.app.services.versioning.models import ImportRowORM
+from backend.app.services.versioning.models import ImportResultORM
 from backend.app.services.versioning.service import GraphVersioningService
 
 pytestmark = [pytest.mark.integration, pytest.mark.skipif(
@@ -104,9 +104,9 @@ class _Harness:
             **({"branch_id": branch_id} if branch_id else {}))
         summary = await self.ie.run_import(job["job_id"])
         async with db.graphver_session() as s:
-            rows = (await s.execute(select(ImportRowORM.row_index, ImportRowORM.resolved_op,
-                                           ImportRowORM.reasons)
-                                    .where(ImportRowORM.job_id == job["job_id"]))).all()
+            rows = (await s.execute(select(ImportResultORM.row_index, ImportResultORM.resolved_op,
+                                           ImportResultORM.reasons)
+                                    .where(ImportResultORM.job_id == job["job_id"]))).all()
         return job["branch_id"], summary, {i: (op, reasons or []) for i, op, reasons in rows}
 
     async def upload_xlsx(self, records, **kw):
