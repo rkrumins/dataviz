@@ -50,6 +50,7 @@ import { cn } from '@/lib/utils'
 import { PermissionTooltip } from './PermissionTooltip'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { ImpactPreviewModal } from './ImpactPreviewModal'
+import { PublishGapAdvisory } from './PublishGapAdvisory'
 import { RBACSearchBar, type RBACSearchTarget } from './RBACSearchBar'
 import { AccessSummary } from '@/components/access/AccessSummary'
 import { Link, useNavigate } from 'react-router-dom'
@@ -295,12 +296,15 @@ export function AdminPermissions() {
             ) : (
                 <>
                     {permissions && roles && tab === 'roles' && (
-                        <RoleMatrixTab
-                            permissions={permissions}
-                            roles={roles}
-                            onEditRole={setEditingRole}
-                            onPermissionUpdated={() => void fetchCatalogue()}
-                        />
+                        <div className="space-y-5">
+                            <PublishGapAdvisory roles={roles} onChanged={fetchCatalogue} />
+                            <RoleMatrixTab
+                                permissions={permissions}
+                                roles={roles}
+                                onEditRole={setEditingRole}
+                                onPermissionUpdated={() => void fetchCatalogue()}
+                            />
+                        </div>
                     )}
                     {permissions && roles && tab === 'catalog' && (
                         <PermissionCatalogTab
