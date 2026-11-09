@@ -64,7 +64,7 @@ it as `Authorization: Bearer nxsat_…` on every request.
 | Dry-run a file (`…/imports/validate`) | Data: read | read |
 | Import into a draft | Data: read & write | manage (Member or above) |
 | Place what it creates in a view (`viewId`) | Views: read & write as well | edit on that view |
-| Publish the import (`autoPublish`), publish a draft, merge a merge request, sync a snapshot | Data: read & write | **Publisher** (`workspace:datasource:publish`) |
+| Publish the import (`autoPublish`), publish a draft, merge a merge request, sync a snapshot | Data: read & write | **Publisher** or **Data engineer** (`workspace:datasource:publish`; Data engineer carries it by default) — not Workspace member |
 | Turn version control on, make the graph, open a draft by data source | Data: read & write | manage (Member or above) |
 
 A key never holds publish itself. It publishes where the person or service account it belongs to

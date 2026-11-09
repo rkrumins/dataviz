@@ -221,11 +221,18 @@ do their job; you can always raise it later.
 | Role | ID | What it's for |
 | --- | --- | --- |
 | **Workspace admin** | `workspace_admin` | Everything inside that workspace — settings, members, deletion, data and views. Nothing outside it. |
-| **Data engineer** | `workspace_data_engineer` | Owns the workspace's data — data sources, semantic layers, catalog items and views — without managing members or workspace settings. |
+| **Data engineer** | `workspace_data_engineer` | Owns the workspace's data — data sources, semantic layers, catalog items and views — and **publishes** its versioned data sources, without managing members or workspace settings. |
 | **Workspace steward** | `workspace_steward` | A **Workspace member** who also lets people in: adds them as viewers or members and answers their access requests (`workspace:members:add`). Can't remove people or change how people get in. |
-| **Workspace member** | `workspace_member` | The everyday contributor: creates, edits and deletes views, and manages data sources. |
+| **Workspace member** | `workspace_member` | The everyday contributor: creates, edits and deletes views, and changes data sources through drafts. **Can't publish** a versioned data source's drafts — that needs Publisher or Data engineer. |
 | **Publisher** | `workspace_publisher` | A workspace member trusted to publish a versioned data source's drafts to its Published version. Publishing, merging, reverting, restoring and syncing need this role (or Data engineer); a Workspace member can't. |
 | **Workspace viewer** | `workspace_viewer` | Read-only: opens the workspace's views and sees its data sources, semantic layers and providers. |
+
+**Who publishes data.** Publishing a versioned data source — a draft, a review's merge, a sync, an
+import that publishes itself — needs **Publisher**, **Data engineer** or **Workspace admin** in its
+workspace. **Workspace member** edits drafts and publishes nothing. The same holds for service
+accounts and for API keys: a key publishes where the person or service account it belongs to does,
+whatever the key's own settings. The role lists mark the roles that **publish data**; see
+[RBAC → Who publishes data](/docs/rbac#who-publishes-data) for the full table.
 
 To change someone's organization-wide role:
 

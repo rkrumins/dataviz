@@ -40,8 +40,8 @@ security picture, see the [Security Overview](/docs/security-overview).
 | Org Auditor | `org_auditor` | Platform | Compliance or audit reviewer: sees every workspace, every binding and the activity log, and changes nothing. |
 | Org Reader | `org_reader` | Platform | A service account that reads across the whole tenancy: every workspace, read only, and nothing else. Only an administrator of service accounts who reads every workspace gives it. |
 | Workspace Admin | `workspace_admin` | A workspace | Workspace owner who manages its members and settings. |
-| Data Engineer | `workspace_data_engineer` | A workspace | Owns the data products in a workspace — data sources, views, semantic layers, catalog — without managing members or settings, or publishing views to everyone. |
-| Member | `workspace_member` | A workspace | Standard contributor: edits views and manages data sources. |
+| Data Engineer | `workspace_data_engineer` | A workspace | Owns the data products in a workspace — data sources, views, semantic layers, catalog — and **publishes** its versioned data sources (`workspace:datasource:publish`, by default), without managing members or settings, or publishing views to everyone. |
+| Member | `workspace_member` | A workspace | Standard contributor: edits views, and changes data sources through drafts. **Can't publish** a versioned data source: that needs Publisher or Data Engineer. |
 | Publisher | `workspace_publisher` | A workspace | A member who can also advance a versioned data source's Published version: publish a draft, merge a review, revert, restore or sync. |
 | Steward | `workspace_steward` | A workspace | A member who also answers requests to join and adds people as viewers or members — for the person who knows a team, without administering the workspace. |
 | Viewer | `workspace_viewer` | A workspace | Read-only, for someone who shouldn't be able to edit. |
@@ -49,6 +49,37 @@ security picture, see the [Security Overview](/docs/security-overview).
 **User** (`user`) is not a stored role. It's the default tier of any account without a
 platform role: no platform permissions, and no workspace access until a workspace binding
 grants it.
+
+### Who publishes data
+
+Changing a versioned data source in a draft (`workspace:datasource:manage`) and **publishing**
+it — advancing its Published version (`workspace:datasource:publish`) — are granted apart. Since
+publish enforcement, manage alone publishes nothing.
+
+| Role, in the workspace | Edits drafts, imports into one | Publishes: a draft, a review's merge, a sync, an import that publishes itself, a write to `main` | Its API keys (Data: read & write) publish |
+|---|---|---|---|
+| Viewer | – | – | – |
+| Member | Y | – | – |
+| Steward | Y | – | – (and a service account can't hold it) |
+| **Publisher** | Y | **Y** | **Y** |
+| **Data Engineer** | Y | **Y**, by default | **Y** |
+| Workspace Admin, Org Admin, Super Admin | Y | Y (`workspace:admin` and the platform shortcuts imply it) | Y — a person's keys; a service account holds none of these |
+| A custom role | with manage | only if it lists `workspace:datasource:publish` | as its holder does |
+
+- **API keys never hold publish themselves.** A key publishes where the person or service account
+  it belongs to does (`KeyScope.owner_publishes`). The key's own `publish` setting is about views
+  (`workspace:view:publish`), not data. Revert, restore, freeze and a fork's review stay closed to
+  keys whoever owns them.
+- **Service accounts publish through their own workspace roles:** Publisher, Data Engineer, or a
+  custom role with publish — never a team's, and never through whoever manages them.
+- **Publishing a draft directly also needs its owner or a maintainer.** Anyone else who may
+  publish lands it through its merge request.
+- **Roles from before publish existed** — Member, and custom roles made with manage before
+  `20261017_1000_datasource_publish` — were not given it. **Permissions → Roles** lists every role
+  that changes data and can't publish, and can add publish to one. Every role picker marks the roles
+  that publish data (`publishesData` on `/grant-options` and `/requestable-roles`).
+- **What a key can do now** is `GET /api/v1/api-keys/self`'s `effectiveAccess` (`publishData` per
+  workspace); what a service account publishes is each of its roles' `publishesData`.
 
 All ten roles are stored once, at `scope_type='global'` with `scope_id=NULL`. The four
 platform roles are bound at global scope. The six workspace roles are templates you bind to a

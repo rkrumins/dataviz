@@ -334,7 +334,8 @@ after its maker stops managing the account. Both answer `403` with
 `"type": "access_denied"`: `person_required` for the account's key,
 `self_review` for its manager or a key's maker.
 
-Given **Publisher** (or **Data engineer**) in a workspace, its keys with
+Given **Publisher** or **Data engineer** (which publishes by default) in a workspace — or a custom
+role that lists publish — its keys with
 **Data: read & write** may change a version-controlled data source's Published
 version there — a bulk ingest, an edit with no draft, publishing a draft,
 merging a draft's merge request, syncing a snapshot, or an import that

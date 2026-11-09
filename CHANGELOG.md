@@ -34,6 +34,8 @@ publish data, and why a refusal happened.
   before meeting a 403.
 - **A service account's roles say whether it publishes data** (`publishesData`). Its page marks
   them, and says when its keys can publish data nowhere.
+- **Every role picker marks the roles that publish data**: giving a service account a role,
+  adding a member, and asking for access. The role options carry `publishesData`.
 - **Permissions → Roles lists roles that change data but can't publish it.** These are roles with
   `manage` and without publish, such as Workspace member or a custom role made before publish
   existed. An admin can add publish to one, after the usual impact preview. Nothing changes on
@@ -41,6 +43,16 @@ publish data, and why a refusal happened.
 
 ### Changed
 
+- **Data engineer's and Workspace member's descriptions say who publishes.**
+  - Data engineer publishes versioned data sources by default. It has carried
+    `workspace:datasource:publish` since that permission was added, and the description now
+    says so.
+  - Workspace member changes data sources through drafts, and publishing them needs Publisher or
+    Data engineer.
+  - Migration `20261109_1200_publish_words` updates a description only where it is still the
+    seeded one. No permission changes.
+- **RBAC → Who publishes data** is one table of who publishes: per role, for people, service
+  accounts and API keys. The user, admin, integration and connector guides point to it.
 - **"Publish" on a key now says "Publish views".** The switch, the key's chip, its summary and the
   access matrix only ever covered views. The matrix shows **Publishes views** and **Publishes data**
   separately, and notes where a key changes data but can't publish it.

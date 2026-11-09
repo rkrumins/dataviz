@@ -470,8 +470,8 @@ Permissions come in two kinds: `system:*` permissions apply across the platform,
 | Org Admin | `org_admin` | Platform | Every workspace, creating workspaces, and groups — not user accounts or SSO |
 | Org Auditor | `org_auditor` | Platform | Read-only across every workspace, plus the audit log and role bindings |
 | Workspace Admin | `workspace_admin` | One workspace | Everything in the workspace, including its members |
-| Data Engineer | `workspace_data_engineer` | One workspace | Data sources, views, semantic layers and catalog — not members or publishing views to everyone |
-| Member | `workspace_member` | One workspace | Views and data sources |
+| Data Engineer | `workspace_data_engineer` | One workspace | Data sources, views, semantic layers and catalog, and publishing versioned data sources — not members or publishing views to everyone |
+| Member | `workspace_member` | One workspace | Views, and data sources through drafts — not publishing them |
 | Publisher | `workspace_publisher` | One workspace | A member who may also advance a versioned data source's Published version: publish a draft, merge a review, revert, restore or sync |
 | Viewer | `workspace_viewer` | One workspace | Read-only |
 

@@ -52,8 +52,9 @@ changed on the way, and **Back** never loses what you filled in.
    & write. Each level says what a script holding the key could do. **Publish
    views to everyone** needs read & write on views. It is about views only: a
    **Data: read & write** key publishes data — a draft, a merge, a snapshot
-   sync, an import that publishes itself — wherever *you* hold publish (a
-   Publisher, or Data engineer). The step names any workspace where the key
+   sync, an import that publishes itself — wherever *you* hold publish: the
+   **Publisher**, **Data engineer** or **Workspace admin** role there. A
+   **Workspace member**'s key imports into drafts and publishes nothing. The step names any workspace where the key
    would import into drafts but can't publish, because you don't. When the key asks for more
    than you have on something — write access to a view you can only read —
    the step says so: the key will only read it.

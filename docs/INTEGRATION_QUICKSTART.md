@@ -57,9 +57,12 @@ allow it — otherwise ask a super admin or an org admin (**Administration → S
 1. **Name it** for what it does — "Metadata sync", say — with a line on what it is for.
 2. **Make you, or better your team, its manager.** Managers make, rotate and revoke its keys.
 3. **Ask each workspace it works in for a role**, from its page: Workspace viewer to read,
-   Workspace member or Data engineer to change data. A data source with version control takes
-   changes through drafts; to write its published version directly, the account needs Publisher
-   or Data engineer. Each workspace's admins and stewards answer, or add it themselves. A service
+   Workspace member to change data in drafts, **Publisher** or **Data engineer** to publish it too.
+   A data source with version control takes changes through drafts, and only an account that
+   publishes can publish them, merge their reviews, sync a snapshot, let an import publish itself
+   or write the published version directly. The role list marks the roles that **publish data**,
+   and the account's page says where it does. Each workspace's admins and stewards answer, or add
+   it themselves. A service
    account never holds a role that administers a workspace or lets people in. One that reads
    across the whole organization can instead be let read every workspace, by an org admin or a
    super admin.
