@@ -43,6 +43,7 @@ from backend.app.db.models import (
     IdpProviderORM,
     RoleBindingORM,
     RoleORM,
+    RolePermissionORM,
 )
 from backend.app.db.repositories.idp_provider_repo import decrypt_settings
 from backend.auth_service.providers.assurance import (
@@ -190,6 +191,19 @@ async def _validate_role_binding_target(
             raise MappingValidationError(
                 f"role '{role_name}' is workspace-scoped to {role_ws!r} and "
                 f"cannot bind in {scope_type}={scope_id!r}"
+            )
+    if scope_type == "global":
+        # A global binding keeps only platform permissions (the resolver's category x scope
+        # filter), so a role made only of workspace permissions would grant nothing through it.
+        perms = set((await session.execute(
+            select(RolePermissionORM.permission_id).where(RolePermissionORM.role_name == role_name)
+        )).scalars())
+        if any(p.startswith("workspace:") for p in perms) and not any(
+            p.startswith("system:") for p in perms
+        ):
+            raise MappingValidationError(
+                f"role '{role_name}' holds only workspace permissions, which a global grant "
+                "drops: map the group to it in a workspace"
             )
 
 

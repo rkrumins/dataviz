@@ -1209,6 +1209,116 @@ async def test_its_roles_say_where_it_publishes_data(test_client, db_session, pe
     assert [(r["role"], r["publishesData"]) for r in detail["roles"]] == [("workspace_member", False)]
 
 
+async def _custom_role(db_session, name: str, *perms: str) -> None:
+    from backend.app.db.models import PermissionORM, RoleORM, RolePermissionORM
+
+    for perm in perms:
+        if await db_session.get(PermissionORM, perm) is None:
+            db_session.add(PermissionORM(id=perm, description="", category=perm.split(":")[0]))
+    db_session.add(RoleORM(name=name, description="", scope_type="global", scope_id=None,
+                           is_system=False, created_at="2026-01-01", updated_at="2026-01-01"))
+    await db_session.flush()
+    for perm in perms:
+        db_session.add(RolePermissionORM(role_name=name, permission_id=perm))
+    await db_session.commit()
+
+
+async def test_a_role_it_holds_cannot_come_to_administer_a_workspace(test_client, db_session, people):
+    """An account never holds workspace:admin: its claims drop it, and everything it implies. So
+    an edit that adds it to a role an account holds would quietly take from the account what the
+    role gave it. The edit is refused, naming the accounts; a role no account holds can still
+    gain it."""
+    await _custom_role(db_session, "pipeline_ops", "workspace:datasource:read", "workspace:datasource:manage")
+    await _custom_role(db_session, "unused_ops", "workspace:datasource:read")
+    account = await _create(test_client)
+    granted = await test_client.post(f"{BASE}/{account['id']}/roles",
+                                     json={"workspaceId": "ws_x", "role": "pipeline_ops"})
+    assert granted.status_code == 201, granted.text
+
+    refused = await test_client.put("/api/v1/admin/roles/pipeline_ops", json={
+        "permissions": ["workspace:datasource:read", "workspace:datasource:manage", "workspace:admin"],
+    })
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["detail"]["type"] == "role_held_by_service_accounts"
+    assert refused.json()["detail"]["serviceAccounts"] == [account["id"]]
+    widened = await test_client.put("/api/v1/admin/roles/unused_ops", json={
+        "permissions": ["workspace:datasource:read", "workspace:admin"],
+    })
+    assert widened.status_code == 200, widened.text
+    # Narrowing it, or changing it otherwise, is the admin's call as before.
+    narrowed = await test_client.put("/api/v1/admin/roles/pipeline_ops", json={
+        "permissions": ["workspace:datasource:read"],
+    })
+    assert narrowed.status_code == 200, narrowed.text
+
+
+async def test_it_is_told_why_a_role_with_platform_permissions_is_not_one_it_holds(
+    test_client, db_session, people,
+):
+    """A role that also carries a platform permission is no workspace role, and says so, rather
+    than being refused as one that administers the workspace."""
+    await _custom_role(db_session, "ops_plus", "system:workspaces:create", "workspace:datasource:manage")
+    account = await _create(test_client)
+    refused = await test_client.post(f"{BASE}/{account['id']}/roles",
+                                     json={"workspaceId": "ws_x", "role": "ops_plus"})
+    assert refused.status_code == 422, refused.text
+    assert "platform permissions" in refused.json()["detail"]
+    for role in ("workspace_admin", "nope"):
+        refused = await test_client.post(f"{BASE}/{account['id']}/roles",
+                                         json={"workspaceId": "ws_x", "role": role})
+        assert refused.status_code == 422, (role, refused.text)
+        assert "platform permissions" not in refused.json()["detail"], role
+
+
+async def test_keeping_a_role_it_can_no_longer_hold_is_refused(test_client, db_session, people):
+    """A role an account was given before it came to administer the workspace gives the account
+    nothing of that, and is not kept as if it did: keeping a role is granting it again."""
+    await _custom_role(db_session, "legacy_ops", "workspace:datasource:read", "workspace:admin")
+    svc = (await _create(test_client))["id"]                  # managed by Ada, not the approver
+    binding = RoleBindingORM(
+        subject_type="user", subject_id=svc, role_name="legacy_ops",
+        scope_type="workspace", scope_id="ws_x", expires_at="2099-01-01T00:00:00+00:00",
+    )
+    db_session.add(binding)
+    await db_session.flush()
+    asked = AccessRequestORM(
+        requester_id=svc, requested_by="usr_ada", target_type="workspace", target_id="ws_x",
+        requested_role="legacy_ops", status="pending", binding_id=binding.id,
+    )
+    db_session.add(asked)
+    await db_session.commit()
+    refused = await test_client.post(f"/api/v1/admin/access-requests/{asked.id}/approve",
+                                     json={"expiresIn": "30d"})
+    assert refused.status_code == 422, refused.text
+    assert "neither administers" in refused.json()["detail"]
+
+
+async def test_a_preview_says_what_an_account_would_hold_as_its_claims_would(db_session, people):
+    """What a role change would give an account, or a person, is what their next request holds:
+    an account gains nothing from workspace:admin, a person gains everything it implies, and a
+    global binding of a workspace role gives nobody anything."""
+    from backend.app.services.permission_service import simulate_for_user
+
+    db_session.add_all([
+        RoleBindingORM(subject_type="user", subject_id="svc_preview", role_name="workspace_member",
+                       scope_type="workspace", scope_id="ws_x"),
+        RoleBindingORM(subject_type="user", subject_id="usr_ada", role_name="workspace_member",
+                       scope_type="workspace", scope_id="ws_x"),
+        RoleBindingORM(subject_type="user", subject_id="usr_bea", role_name="workspace_member",
+                       scope_type="global", scope_id=None),
+    ])
+    await db_session.commit()
+    _g, before = await simulate_for_user(db_session, "svc_preview")
+    wider = {"workspace_member": [*before["ws_x"], "workspace:admin"]}
+    _g, after = await simulate_for_user(db_session, "svc_preview", role_perm_override=wider)
+    assert after == before
+    _g, after = await simulate_for_user(db_session, "usr_ada", role_perm_override=wider)
+    assert {"workspace:admin", "workspace:view:publish", "workspace:view:create"} <= after["ws_x"]
+    global_perms, ws = await simulate_for_user(db_session, "usr_bea")
+    assert "workspace:datasource:manage" not in global_perms
+    assert "ws_x" not in ws
+
+
 # ── Reading every workspace ─────────────────────────────────────────
 
 

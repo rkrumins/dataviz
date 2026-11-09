@@ -90,6 +90,19 @@ describe('Add member — a service account', () => {
         }, { reason: undefined }))
     })
 
+    it('never carries over a role picked for a person that it can’t hold', async () => {
+        const u = userEvent.setup()
+        render(<WorkspaceMembers workspaceId="ws_1" />)
+        await u.click(await screen.findByRole('button', { name: 'Add member' }))
+        await u.click(await screen.findByRole('button', { name: /Workspace admin/ }))
+        await u.click(await screen.findByRole('button', { name: 'Service account' }))
+        await u.click(await screen.findByRole('button', { name: /Metadata sync/ }))
+        await u.click(screen.getByRole('button', { name: 'Add to workspace' }))
+        await waitFor(() => expect(workspaceMembersService.create).toHaveBeenCalledWith('ws_1', {
+            subjectType: 'user', subjectId: 'svc_sync', role: 'workspace_member', expiresIn: null, exception: undefined,
+        }, { reason: undefined }))
+    })
+
     it('is not offered to a steward where the identity provider decides who is in', async () => {
         const u = userEvent.setup()
         vi.mocked(workspaceMembersService.grantOptions).mockResolvedValue({ ...OPTIONS, tier: 'steward', accessMode: 'idp' })

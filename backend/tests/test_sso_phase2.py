@@ -501,3 +501,37 @@ async def test_mapping_repo_validates_role_existence(db_session):
             db_session, idp_group="X",
             scope_type="global", scope_id=None, role_name="nope-typo",
         )
+
+
+@pytest.mark.asyncio
+async def test_a_workspace_role_is_mapped_into_a_workspace_never_globally(db_session):
+    """A global grant keeps only platform permissions, so a role made only of workspace permissions
+    mapped globally would give every member of the IdP group nothing. It is refused, and mapped
+    into a workspace instead; a role with a platform permission still maps globally."""
+    from backend.app.db.models import WorkspaceORM
+    from backend.app.db.repositories import idp_group_mapping_repo
+    from backend.app.db.repositories.idp_group_mapping_repo import MappingValidationError
+
+    db_session.add(WorkspaceORM(id="ws_map", name="Mapped"))
+    await db_session.flush()
+    with pytest.raises(MappingValidationError, match="only workspace permissions"):
+        await idp_group_mapping_repo.create_role_binding_mapping(
+            db_session, idp_group="readers", scope_type="global", scope_id=None,
+            role_name="workspace_viewer",
+        )
+    await idp_group_mapping_repo.create_role_binding_mapping(
+        db_session, idp_group="readers", scope_type="workspace", scope_id="ws_map",
+        role_name="workspace_viewer",
+    )
+    from backend.app.db.models import RoleORM, RolePermissionORM
+
+    db_session.add(RoleORM(name="group_keeper", description="", scope_type="global", scope_id=None,
+                           is_system=False, created_at="2026-01-01", updated_at="2026-01-01"))
+    await db_session.flush()
+    for perm in ("system:groups:manage", "workspace:view:read"):
+        db_session.add(RolePermissionORM(role_name="group_keeper", permission_id=perm))
+    await db_session.flush()
+    await idp_group_mapping_repo.create_role_binding_mapping(
+        db_session, idp_group="operators", scope_type="global", scope_id=None,
+        role_name="group_keeper",
+    )

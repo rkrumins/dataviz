@@ -477,14 +477,9 @@ async def create_member_binding(
         # Only a workspace role that neither administers it nor lets people
         # in — as anywhere a service account is given one.
         defined = {r.name for r, _p in await workspace_access.workspace_roles(session, ws_id)}
-        if body.role not in defined or not workspace_access.is_requestable(perms):
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    "A service account can hold a workspace role that neither administers the "
-                    "workspace nor lets people in"
-                ),
-            )
+        refusal = workspace_access.service_account_refusal(perms, workspace_role=body.role in defined)
+        if refusal:
+            raise HTTPException(status_code=422, detail=refusal)
         if (ws.access_mode or "app") == "idp" and workspace_access.tier(claims, ws_id) != "admin":
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,

@@ -44,6 +44,7 @@ from backend.app.db.repositories import (
     group_repo,
     notification_repo,
     outbox_event_repo,
+    role_repo,
     service_account_repo,
     user_repo,
 )
@@ -982,14 +983,11 @@ async def grant_role(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workspace not found")
     roles = {role.name: perms for role, perms in await workspace_access.workspace_roles(session, workspace.id)}
     perms = roles.get(body.role)
-    if perms is None or not workspace_access.is_requestable(perms):
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "A service account can hold a workspace role that neither administers the "
-                "workspace nor lets people in"
-            ),
-        )
+    bundle = perms if perms is not None else (
+        await role_repo.role_names_with_permissions(session, [body.role])).get(body.role, [])
+    refusal = workspace_access.service_account_refusal(bundle, workspace_role=perms is not None)
+    if refusal:
+        raise HTTPException(status_code=422, detail=refusal)
     if not workspace_access.can_grant(claims, workspace.id, body.role, perms):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
