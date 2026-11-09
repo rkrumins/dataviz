@@ -120,6 +120,7 @@ export function CanvasVersioningBar({
   const revisionViewer = useRevisionViewer(workspaceId)
   const revisionSeq = useEffectiveRevision(workspaceId, dataSourceId, viewId)
   const openRevision = useBranchStore((s) => s.openRevision)
+  const setHighlight = useBranchStore((s) => s.setHighlight)
   const scopeViewId = useBranchStore((s) => s.viewId)
   useRevisionDeepLink({
     enabled: revisionViewer && !!graphId,
@@ -128,9 +129,9 @@ export function CanvasVersioningBar({
     scopeViewId,
     activeViewId: viewId,
     openRevision,
+    setHighlight,
   })
   const highlight = useRevisionHighlight()
-  const setHighlight = useBranchStore((s) => s.setHighlight)
   const highlightOrigin = useMemo(
     () => (revisionViewer && !isDraft && highlight ? { fromSeq: highlight.fromSeq, toSeq: highlight.toSeq } : null),
     [revisionViewer, isDraft, highlight],
