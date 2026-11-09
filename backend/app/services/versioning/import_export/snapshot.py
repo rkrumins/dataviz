@@ -81,6 +81,21 @@ async def pinned_reads():
             _PINNED.reset(token)
 
 
+@contextlib.asynccontextmanager
+async def window_reads():
+    """Every read of a snapshot inside this block from ONE ``REPEATABLE READ READ ONLY`` transaction
+    on a pooled connection: an import window's lookups, which then see one state of the database,
+    and read ``main`` from its head pointers while the draft is up to date (:class:`MainLayer`).
+    One window's reads, so a short transaction; one task, one read at a time."""
+    async with db.graphver_session() as s:
+        await s.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"))
+        token = _PINNED.set(s)
+        try:
+            yield
+        finally:
+            _PINNED.reset(token)
+
+
 @dataclass(frozen=True)
 class Winner:
     """An entity's deciding row in one layer: its version (or that it was deleted there)."""
@@ -238,6 +253,31 @@ class HeadsLayer:
             for r in rows:
                 out[r[0]] = self._winner(kind, r)
         return out
+
+
+@dataclass(frozen=True)
+class MainLayer(VersionLayer):
+    """A graph's own ``main`` at ``seq``, under a draft as it stands now (its base). Inside one
+    pinned transaction (:func:`pinned_reads`, :func:`window_reads`) that sees ``main``'s head still
+    at ``seq``, a lookup reads ``main``'s head pointers: every ``main`` writer moves them in the
+    transaction that moves the head (so do ``head_counts``' readers), and an entity is then one
+    indexed read, where its version rows ask a ``DISTINCT ON`` over every version of it — those of
+    each draft merged since, too (``ix_nv_entity_hist`` has no branch). Otherwise, and outside such
+    a transaction, exactly as :class:`VersionLayer`; a scan always is."""
+
+    async def lookup(self, kind: str, entity_ids: Sequence[str], payload: bool = False) -> Dict[str, Winner]:
+        pinned = _PINNED.get()
+        if pinned is not None and await _head_is(pinned, self.graph_id, self.seq):
+            return await HeadsLayer(self.graph_id, self.branch_id).lookup(kind, entity_ids, payload)
+        return await super().lookup(kind, entity_ids, payload)
+
+
+async def _head_is(s: AsyncSession, graph_id: str, seq: int) -> bool:
+    """Whether ``main``'s head is at ``seq`` in ``s``'s transaction (read once a transaction)."""
+    key = ("main_head", graph_id)
+    if key not in s.info:
+        s.info[key] = await s.scalar(select(GraphORM.main_head_commit_seq).where(GraphORM.id == graph_id))
+    return s.info[key] == seq
 
 
 Layer = Union[VersionLayer, HeadsLayer]
@@ -427,7 +467,10 @@ async def open_snapshot(*, graph_id: str, branch_id: Optional[str] = None, as_of
         base_seq = branch.base_commit_seq or 0
         if as_of_seq is None:
             # A draft as it stands now: main where it branched, then its own (staged) changes.
-            layers = await _main_layers(s, graph_id, base_seq) + [HeadsLayer(graph_id, branch_id)]
+            main = await _main_layers(s, graph_id, base_seq)
+            if len(main) == 1:                       # a graph's own main, not a fork's parents
+                main = [MainLayer(graph_id, main_id, base_seq)]
+            layers = main + [HeadsLayer(graph_id, branch_id)]
         else:
             layers = (await _main_layers(s, graph_id, min(as_of_seq, base_seq))
                       + [VersionLayer(graph_id, branch_id, as_of_seq)])

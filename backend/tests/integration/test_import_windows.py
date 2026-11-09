@@ -29,7 +29,7 @@ import tempfile
 
 import pytest
 
-from sqlalchemy import func, select, update
+from sqlalchemy import and_, delete, func, select, text, update
 
 from backend.app.services.storage.object_store import LocalFsObjectStore, storage_key
 from backend.app.services.versioning import config, db, job_lease, models
@@ -37,7 +37,8 @@ from backend.app.services.versioning.import_export import import_worker
 from backend.app.services.versioning.import_export.import_worker import ImportWorker, lease_job
 from backend.app.services.versioning.import_export.runner import INSPECT_TYPES, JOB_TYPES
 from backend.app.services.versioning.job_lease import Superseded
-from backend.app.services.versioning.models import CommitORM, ImportRowORM, JobORM, MerkleNodeORM
+from backend.app.services.versioning.models import (CommitORM, ImportResultORM, ImportRowORM, JobORM,
+                                                    MerkleNodeORM)
 from backend.app.services.versioning.import_export.service import ImportExportService
 from backend.app.services.versioning.service import GraphVersioningService
 
@@ -84,10 +85,11 @@ async def _state(svc, gid, branch_id):
     state = await svc.materialize_state(graph_id=gid, branch_id=branch_id)
     async with db.graphver_session() as s:
         made = dict((await s.execute(
-            select(ImportRowORM.matched_entity_id, ImportRowORM.raw["urn"].astext)
-            .join(JobORM, JobORM.id == ImportRowORM.job_id)
-            .where(JobORM.graph_id == gid, ImportRowORM.kind == "node",
-                   ImportRowORM.resolved_op == "create"))).all())
+            select(ImportResultORM.matched_entity_id, ImportRowORM.raw["urn"].astext)
+            .join_from(ImportResultORM, ImportRowORM, _STAGED)
+            .join(JobORM, JobORM.id == ImportResultORM.job_id)
+            .where(JobORM.graph_id == gid, ImportResultORM.kind == "node",
+                   ImportResultORM.resolved_op == "create"))).all())
     named = {eid: made.get(p.get("urn")) or p.get("urn") for eid, p in state["nodes"].items()}
     urn = named
     nodes = {named[eid]: p.get("displayName") for eid, p in state["nodes"].items()}
@@ -167,7 +169,7 @@ async def _sweep(svc, ie, store) -> None:
 
     from backend.app.services.versioning import db
     from backend.app.services.versioning.import_export.import_worker import sweep_staged_rows
-    from backend.app.services.versioning.models import ImportRowORM, JobORM
+    from backend.app.services.versioning.models import ImportResultORM, ImportRowORM, JobORM
 
     gid = await _graph(svc, [_node("ent_A", "urn:A", "a")])
     lines = [{"kind": "node", "urn": f"urn:s{i}", "entityType": "Table", "displayName": "s"} for i in range(5)]
@@ -183,12 +185,14 @@ async def _sweep(svc, ie, store) -> None:
         await s.execute(update(JobORM).where(JobORM.id == running).values(status="running"))
 
     async def staged(job_id):
+        """The job's staged rows, and their outcomes."""
         async with db.graphver_session() as s:
-            return (await s.execute(select(func.count()).where(ImportRowORM.job_id == job_id))).scalar_one()
+            return tuple([(await s.execute(select(func.count()).where(model.job_id == job_id))).scalar_one()
+                          for model in (ImportRowORM, ImportResultORM)])
 
-    assert [await staged(j) for j in jobs] == [5, 5, 5]
+    assert [await staged(j) for j in jobs] == [(5, 5)] * 3
     assert await sweep_staged_rows(older_than_days=7, batch=2) >= 5
-    assert [await staged(j) for j in jobs] == [0, 5, 5]
+    assert [await staged(j) for j in jobs] == [(0, 0), (5, 5), (5, 5)]
 
 
 async def _parts(svc, ie, store) -> None:
@@ -234,6 +238,11 @@ async def _row(job_id):
         return await s.get(JobORM, job_id)
 
 
+# An outcome's own staged row.
+_STAGED = and_(ImportRowORM.job_id == ImportResultORM.job_id,
+               ImportRowORM.row_index == ImportResultORM.row_index)
+
+
 async def _count(model, *where):
     async with db.graphver_session() as s:
         return (await s.execute(select(func.count()).select_from(model).where(*where))).scalar_one()
@@ -241,9 +250,11 @@ async def _count(model, *where):
 
 async def _quarantine(job_id):
     async with db.graphver_session() as s:
-        return [(r.raw.get("urn") or r.raw.get("sourceUrn"), r.reasons) for r in (await s.execute(
-            select(ImportRowORM).where(ImportRowORM.job_id == job_id, ImportRowORM.status == "invalid")
-            .order_by(ImportRowORM.row_index))).scalars()]
+        return [(raw.get("urn") or raw.get("sourceUrn"), reasons) for raw, reasons in (await s.execute(
+            select(ImportRowORM.raw, ImportResultORM.reasons)
+            .join_from(ImportResultORM, ImportRowORM, _STAGED)
+            .where(ImportResultORM.job_id == job_id, ImportResultORM.resolved_op == "invalid")
+            .order_by(ImportResultORM.row_index))).all()]
 
 
 # 8 node rows and 6 edge rows, interleaved: node windows of two rows, then edge windows of two. One
@@ -314,6 +325,29 @@ async def _resume(svc, ie, store) -> None:
                                 CommitORM.branch_id == row.branch_id) == windows
         await resumed(job, after_windows)
 
+    # Two node windows resolved by a worker of the release before ``import_results``, which kept
+    # each row's outcome on the row itself: the next worker copies them across, then carries on.
+    job = await _import_job(ie, store, gid, _RESUME_LINES)
+    worker = ImportWorker(svc, store)
+    worker._next_window = _crash_on(worker._next_window, 3)
+    with pytest.raises(_Crash):
+        await worker.run(job["job_id"])
+    async with db.graphver_session() as s:
+        await s.execute(text(
+            f"UPDATE {ImportRowORM.__table__.fullname} AS r SET matched_entity_id = x.matched_entity_id, "
+            "resolved_op = x.resolved_op, reasons = x.reasons "
+            f"FROM {ImportResultORM.__table__.fullname} AS x "
+            "WHERE r.job_id = :j AND x.job_id = r.job_id AND x.row_index = r.row_index"),
+            {"j": job["job_id"]})
+        await s.execute(delete(ImportResultORM).where(ImportResultORM.job_id == job["job_id"]))
+
+    async def older_release(row):
+        assert (row.status, row.last_cursor) == ("running", "node:4"), row.__dict__
+        assert await _count(ImportResultORM, ImportResultORM.job_id == row.id) == 0
+        assert await _count(ImportRowORM, ImportRowORM.job_id == row.id,
+                            ImportRowORM.resolved_op.is_not(None)) == 4
+    await resumed(job, older_release)
+
     # Inside a window's transaction, at its checkpoint: the window's ops roll back with it.
     job = await _import_job(ie, store, gid, _RESUME_LINES)
     lease = await lease_job(job["job_id"])
@@ -333,8 +367,8 @@ async def _resume(svc, ie, store) -> None:
     async def mid_window(row):
         assert (row.status, row.last_cursor) == ("running", windows[0]), row.__dict__
         assert await _count(CommitORM, CommitORM.graph_id == gid, CommitORM.branch_id == row.branch_id) == 1
-        assert await _count(ImportRowORM, ImportRowORM.job_id == row.id,
-                            ImportRowORM.resolved_op.is_not(None)) == 2, "window 2's resolutions rolled back"
+        assert await _count(ImportResultORM, ImportResultORM.job_id == row.id) == 2, \
+            "window 2's resolutions rolled back"
     await resumed(job, mid_window)
 
     # Failed after two windows, then retried by a person: queued again with its cursor, claimed by
@@ -387,9 +421,9 @@ async def _gate_quarantine(svc, ie, store) -> None:
         assert "not allowed by ontology" in quarantined[key][0], (key, quarantined[key])
     assert quarantined[("urn:Q2", "edge")] == ["edge endpoint not found"], "its end was quarantined"
     async with db.graphver_session() as s:
-        assert not (await s.execute(select(ImportRowORM.matched_entity_id).where(
-            ImportRowORM.job_id == job["job_id"], ImportRowORM.status == "invalid",
-            ImportRowORM.matched_entity_id.is_not(None)))).scalars().all(), "a refused create names nothing"
+        assert not (await s.execute(select(ImportResultORM.matched_entity_id).where(
+            ImportResultORM.job_id == job["job_id"], ImportResultORM.resolved_op == "invalid",
+            ImportResultORM.matched_entity_id.is_not(None)))).scalars().all(), "a refused create names nothing"
 
     # A violation about an entity no op of the window writes is not the window's to quarantine.
     ops = [_node("ent_X", "urn:X", "x")]
@@ -399,11 +433,13 @@ async def _gate_quarantine(svc, ie, store) -> None:
     assert resolutions[0]["status"] == "new"
 
 
-async def _rows(job_id, status):
+async def _rows(job_id, op):
     async with db.graphver_session() as s:
-        return [(r.raw.get("urn"), r.raw, r.kind, r.reasons) for r in (await s.execute(
-            select(ImportRowORM).where(ImportRowORM.job_id == job_id, ImportRowORM.status == status)
-            .order_by(ImportRowORM.row_index))).scalars()]
+        return [(raw.get("urn"), raw, kind, reasons) for raw, kind, reasons in (await s.execute(
+            select(ImportRowORM.raw, ImportResultORM.kind, ImportResultORM.reasons)
+            .join_from(ImportResultORM, ImportRowORM, _STAGED)
+            .where(ImportResultORM.job_id == job_id, ImportResultORM.resolved_op == op)
+            .order_by(ImportResultORM.row_index))).all()]
 
 
 async def _on_commit(svc, ie) -> None:

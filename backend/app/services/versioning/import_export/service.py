@@ -18,7 +18,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import and_, delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 
 from backend.app.services.storage.object_store import get_object_store, storage_key
@@ -26,7 +26,7 @@ from backend.app.services.storage.object_store import get_object_store, storage_
 from .. import config, db
 from ..errors import JobActive, MainWriteForbidden
 from ..job_lease import Draining, Lease, Superseded, friendly_infra_error, is_transient
-from ..models import BranchORM, GraphORM, ImportRowORM, JobORM, MergeRequestORM
+from ..models import BranchORM, GraphORM, ImportResultORM, ImportRowORM, JobORM, MergeRequestORM
 from ..service import AccessDenied, GraphVersioningService, NotUpToDate, Viewer
 from . import contract, stream
 from ..ids import new_entity_id, uuid_urn
@@ -392,15 +392,18 @@ class ImportExportService:
         async with db.graphver_session() as s:
             # Surface the actual CHANGES (skip unchanged noise) with a human label, so the dialog can
             # show "T0 · updated", "orders · new", "row 13 · invalid: <reason>" — a real preview.
+            res = ImportResultORM
             rows = (await s.execute(
-                select(ImportRowORM)
-                .where(ImportRowORM.job_id == job_id, ImportRowORM.status != "unchanged")
-                .order_by(ImportRowORM.row_index).limit(limit))).scalars().all()
+                select(res, ImportRowORM.raw)
+                .join_from(res, ImportRowORM, and_(ImportRowORM.job_id == res.job_id,
+                                                   ImportRowORM.row_index == res.row_index))
+                .where(res.job_id == job_id, res.resolved_op != "unchanged")
+                .order_by(res.row_index).limit(limit))).all()
             sample = [{"rowIndex": r.row_index, "kind": r.kind, "op": r.resolved_op,
-                       "status": r.status, "matchedEntityId": r.matched_entity_id,
-                       "label": (r.raw or {}).get("displayName") or (r.raw or {}).get("qualifiedName")
-                                or (r.raw or {}).get("urn") or "",
-                       "reasons": r.reasons or []} for r in rows]
+                       "status": _STATUS[r.resolved_op], "matchedEntityId": r.matched_entity_id,
+                       "label": (raw or {}).get("displayName") or (raw or {}).get("qualifiedName")
+                                or (raw or {}).get("urn") or "",
+                       "reasons": r.reasons or []} for r, raw in rows]
         return {"job": job, "summary": job.get("summary"), "sample": sample,
                 "previewDownloadUrl": job.get("previewUri"),
                 "rejectedDownloadUrl": job.get("reportUri")}

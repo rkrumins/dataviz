@@ -195,7 +195,8 @@ store and database as the web tier, because the web tier stores an upload and a 
 ### 3a. Parse
 
 `_parse` streams the file through the format adapter's `parse`, calls `normalize(raw, kind)` per
-record, and stages the rows in `import_rows`, 2,000 at a time (`_PARSE_BATCH`, multi-row INSERTs):
+record, and stages the rows in `import_rows`, 10,000 at a time (`_PARSE_BATCH`), each batch one
+`INSERT … SELECT FROM unnest()` built off the event loop:
 **the whole file is never buffered** (except the formats read whole; see §7). The file is one object,
 or a resumable upload's parts read in order as one stream (`uploads.open_source`, §3d). Records whose
 `kind` is neither `node` nor `edge` are skipped, never fatal. A JSON array or an Excel workbook larger
@@ -257,7 +258,7 @@ indexes (migration `20260927_1000_import_indexes`).
 
 > **Invariant — partial acceptance.** An unresolvable or ontology-invalid row is **quarantined**
 > (`resolved_op = "invalid"` + a human reason), never aborting the batch (`resolve.py:14, 154-164`).
-> The tally lands on `job.summary` and the reasons on the `import_rows` row.
+> The tally lands on `job.summary` and the reasons on the row's outcome in `import_results`.
 
 ### 3c. Apply
 
@@ -265,11 +266,20 @@ Each window's ops are applied to the draft before the next window is resolved, v
 `apply_ops(graph_id, ops, actor, branch_id=draft, message="import")`. Each window is one `edit` commit
 on the draft, with the message `import` — so a huge import becomes a sequence of ordinary commits, and the engine's
 referential-integrity, edge-integrity, cascade-delete, and ontology gates all apply. The resolutions
-are recorded on `import_rows` (`_persist_resolutions`, one `UPDATE … FROM unnest()` per 5,000 rows),
-and `job.summary` tallies `{new, updated, unchanged, deleted, invalid}`. A commit's entity heads are
-written in bulk too (`_write_deltas`: multi-row INSERTs for the versions, an `unnest()` UPDATE then
-INSERT for the heads, keeping the per-entity compare-and-swap), so an import writes about 1,500–2,500
-rows a second: six times the row-at-a-time rate.
+go to `import_results` (`_persist_resolutions`, one `INSERT … SELECT FROM unnest()` per 5,000 rows,
+in the window's transaction): one row per staged row, written once, so a staged row is never written
+again. (Recording them on the staged row itself rewrote the whole row, its raw JSON inline, with
+three new index entries and a dead copy, for every row of the file.) `job.summary` tallies
+`{new, updated, unchanged, deleted, invalid}`. A commit's versions are written a statement per kind
+(`_write_deltas`: `INSERT … SELECT FROM unnest()`, not executemany, which runs one INSERT per row on
+the server), and its heads by an `unnest()` INSERT for the entities with no head on the branch, then
+the per-entity compare-and-swap UPDATE for the rest.
+
+A window reads what its rows name in one `REPEATABLE READ READ ONLY` transaction
+(`snapshot.window_reads`). While that transaction sees `main`'s head still where the draft
+branched, the draft's `main` layer (`MainLayer`) reads `main`'s head pointers, one indexed read an
+entity, instead of a `DISTINCT ON` over every version of it, the versions of every draft merged since
+included. A node rows name by id is read once, with its payload.
 
 The versioning worker's sweep deletes the staged rows of imports finished more than
 `IMPORT_STAGING_GC_DAYS` (7) ago, a batch at a time. Until then a large import's rows take their
@@ -382,7 +392,7 @@ with its reason; none is applied or dropped in silence.
   edge, delete its row and add a new one. A row whose ends match updates that edge, even beside a
   parallel one.
 - **One row per entity.** A second row that names an entity an earlier row of the file named, in
-  this window or an earlier one (`import_rows.matched_entity_id`), is refused when it says
+  this window or an earlier one (`import_results.matched_entity_id`), is refused when it says
   otherwise (*"row 3 of this file already names this node"*). It is `unchanged` when it says the
   same.
 
@@ -431,7 +441,7 @@ which Postgres JSONB rejects) and is stripped from `create` payloads, where it i
 | **`replace`** | The file is the **authoritative snapshot for its scope**: every existing in-scope entity that no file row matched is **deleted**. | Opt-in |
 
 Replace deletes are computed after the file's rows are applied (`_delete_absent`): the draft is
-walked a page at a time, and every entity in scope that no row matched (`import_rows.matched_entity_id`)
+walked a page at a time, and every entity in scope that no row matched (`import_results.matched_entity_id`)
 is deleted, edges first, then nodes (`apply_ops` cascades containment/incident edges). Derived deletes
 aren't file rows, so they're counted separately into `summary["deleted"]`.
 
