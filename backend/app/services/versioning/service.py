@@ -7111,26 +7111,48 @@ class GraphVersioningService:
         """One entity's value before and after, for an origin — what a row of a change list
         shows when it is opened: two point reads, whatever the origin's size."""
         async with self._session() as s:
-            if origin.branch_id is not None:
-                branch = await self._draft_of(s, graph_id, origin.branch_id, viewer)
-                main_id = await self._main_branch_id(s, graph_id)
-                before = (await self._values_at(s, graph_id, main_id, [entity_id],
-                                                branch.base_commit_seq or 0)).get(entity_id)
-                after = (await self._current_values(s, graph_id, branch.id, [entity_id])).get(entity_id)
-            else:
-                main_id = await self._window_main(s, graph_id, origin)
-                before = (await self._values_at(s, graph_id, main_id, [entity_id],
-                                                origin.from_seq)).get(entity_id)
-                after = (await self._values_at(s, graph_id, main_id, [entity_id],
-                                               origin.to_seq)).get(entity_id)
-        before, after = before or None, after or None        # an empty payload is no entity
-        if before is None and after is None:
+            entry = (await self._entry_values(s, graph_id, origin, [entity_id], viewer)).get(entity_id)
+        if entry is None:
             raise ValueError(f"{entity_id} is not in this change list")
-        status = ("added" if before is None else "removed" if after is None else
-                  "modified" if before != after else "unchanged")
-        kind = "edge" if _is_edge_payload(after or before) else "node"
-        return {"entityId": entity_id, "kind": kind, "status": status,
-                "before": before, "after": after}
+        return entry
+
+    async def change_entries_batch(
+        self, *, graph_id: str, origin: ChangeOrigin, entity_ids: Sequence[str],
+        viewer: Optional[Viewer] = None,
+    ) -> Dict[str, object]:
+        """Many entities' values before and after, for one origin — :meth:`change_entry` for each,
+        in the order asked, the reads made for all of them at once (``= ANY``), a couple a kind.
+        An id the origin did not change is left out. Every statement is bounded
+        (:meth:`_bounded_session`)."""
+        async with self._bounded_session() as s:
+            entries = await self._entry_values(s, graph_id, origin, list(entity_ids), viewer)
+        return {"entries": [e for e in entries.values() if e["status"] != "unchanged"]}
+
+    async def _entry_values(self, s, graph_id: str, origin: ChangeOrigin, ids: List[str],
+                            viewer: Optional[Viewer]) -> Dict[str, Dict[str, object]]:
+        """``ids``' values before and after, for an origin, as an opened row of its list shows
+        them — ``{entityId, kind, status, before, after}`` by id, in the order asked; an id on
+        neither side is left out. A draft is ``main`` at its branch point, then the draft; a
+        window, ``main`` at its two ends."""
+        if origin.branch_id is not None:
+            branch = await self._draft_of(s, graph_id, origin.branch_id, viewer)
+            main_id = await self._main_branch_id(s, graph_id)
+            before = await self._values_at(s, graph_id, main_id, ids, branch.base_commit_seq or 0)
+            after = await self._current_values(s, graph_id, branch.id, ids)
+        else:
+            main_id = await self._window_main(s, graph_id, origin)
+            before = await self._values_at(s, graph_id, main_id, ids, origin.from_seq)
+            after = await self._values_at(s, graph_id, main_id, ids, origin.to_seq)
+        out: Dict[str, Dict[str, object]] = {}
+        for eid in ids:
+            b, a = before.get(eid) or None, after.get(eid) or None    # an empty payload is no entity
+            if b is None and a is None:
+                continue
+            out[eid] = {"entityId": eid, "kind": "edge" if _is_edge_payload(a or b) else "node",
+                        "status": ("added" if b is None else "removed" if a is None else
+                                   "modified" if b != a else "unchanged"),
+                        "before": b, "after": a}
+        return out
 
     async def change_index_compact(
         self, *, graph_id: str, origin: ChangeOrigin, containment_edge_types,

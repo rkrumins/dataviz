@@ -65,6 +65,14 @@ class _Versioning:
         return {"entityId": kw["entity_id"], "kind": "node", "status": "modified",
                 "before": {"name": "a"}, "after": {"name": "b"}}
 
+    async def change_entries_batch(self, **kw):
+        _Versioning.calls.append(("batch", kw))
+        if _Versioning.busy:
+            raise ChangeListBusy()
+        return {"entries": [{"entityId": eid, "kind": "node", "status": "removed",
+                             "before": {"name": eid}, "after": None}
+                            for eid in kw["entity_ids"] if eid != "untouched"]}
+
     async def change_index_compact(self, **kw):
         _Versioning.calls.append(("index", kw))
         return {"origin": kw["origin"].as_dict(), "total": 2, "truncated": False,
@@ -163,6 +171,47 @@ async def test_one_entry_before_and_after(test_client, versioning):
     assert r.json() == {"entityId": "n7", "kind": "node", "status": "modified",
                         "before": {"name": "a"}, "after": {"name": "b"}}
     assert versioning.calls[0][1]["entity_id"] == "n7"
+
+
+async def test_many_entries_before_and_after(test_client, versioning):
+    r = await test_client.post(f"{BASE}/diff/entries/batch",
+                               json={"fromSeq": 3, "toSeq": 9, "ids": ["n1", "untouched", "n2"]})
+    assert r.status_code == 200, r.text
+    assert r.json() == {"entries": [
+        {"entityId": "n1", "kind": "node", "status": "removed", "before": {"name": "n1"}, "after": None},
+        {"entityId": "n2", "kind": "node", "status": "removed", "before": {"name": "n2"}, "after": None}]}
+    (name, kw), = versioning.calls
+    assert name == "batch" and kw["origin"] == ChangeOrigin(from_seq=3, to_seq=9)
+    assert kw["entity_ids"] == ["n1", "untouched", "n2"] and kw["viewer"] is not None
+    r = await test_client.post(f"{BASE}/diff/entries/batch", json={"branchId": "br_1", "ids": ["n1"]})
+    assert r.status_code == 200, r.text
+    assert versioning.calls[1][1]["origin"] == ChangeOrigin(branch_id="br_1")
+
+
+@pytest.mark.parametrize("body", [
+    {"branchId": "br_1", "ids": []},                                    # nothing to open
+    {"branchId": "br_1", "ids": [f"n{i}" for i in range(501)]},         # past 500
+    {"branchId": "br_1"},
+    {"ids": ["n1"]},                                                    # no origin
+    {"branchId": "br_1", "fromSeq": 1, "toSeq": 2, "ids": ["n1"]},     # both
+    {"fromSeq": 4, "toSeq": 3, "ids": ["n1"]},                          # backwards
+    {"fromSeq": -1, "toSeq": 3, "ids": ["n1"]},
+])
+async def test_a_batch_names_one_origin_and_up_to_500_ids(test_client, versioning, body):
+    r = await test_client.post(f"{BASE}/diff/entries/batch", json=body)
+    assert r.status_code == 422, (body, r.text)
+    assert versioning.calls == []
+    ok = await test_client.post(f"{BASE}/diff/entries/batch",
+                                json={"branchId": "br_1", "ids": [f"n{i}" for i in range(500)]})
+    assert ok.status_code == 200, ok.text
+
+
+async def test_a_batch_that_takes_too_long_is_a_retryable_busy(test_client, versioning):
+    versioning.busy = True
+    r = await test_client.post(f"{BASE}/diff/entries/batch", json={"branchId": "br_1", "ids": ["n1"]})
+    assert r.status_code == 503, r.text
+    assert r.json()["detail"]["type"] == "change_list_busy"
+    assert r.headers["Retry-After"] == "5"
 
 
 async def test_the_compact_index(test_client, versioning):
