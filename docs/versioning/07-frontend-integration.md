@@ -377,7 +377,7 @@ param with the active branch, making a view+branch shareable and bookmarkable.
 
 ## 12a. A past revision on the canvas (`?rev=`, the revision viewer)
 
-Behind the **`revisionViewerEnabled`** preview (`useRevisionViewer`: the switch, and
+Behind the **`revisionViewerEnabled`** switch, on unless an administrator turns it off (`useRevisionViewer`: the switch, and
 `workspace:datasource:read` — a view's share link never reaches history), a view can read the
 published graph **as it was at revision K**, read-only — like checking out a commit.
 

@@ -1,9 +1,9 @@
 """A graph read that names a past revision (``?asOfSeq=``) is held to the routes that can answer it.
 
-Every ``/{ws_id}/graph`` route carries ``revision_gate``. With the preview switch on, a route on
+Every ``/{ws_id}/graph`` route carries ``revision_gate``. With the switch on (as it ships), a route on
 ``REVISION_READS`` builds its engine at the revision; a write, or a read that only plans one, is 409
 ``revision_read_only``; every other route 501 ``revision_unsupported`` — never the graph as it is
-now. With the switch off (as it ships) a request naming a revision is 403 ``feature_disabled``, and
+now. With the switch turned off a request naming a revision is 403 ``feature_disabled``, and
 one naming none is as before. A view's share link reaches the graph as it is now, not its history.
 """
 import asyncio
@@ -154,7 +154,7 @@ async def test_a_read_that_answers_from_now_is_refused_never_answered(engine_see
         assert resp.json()["detail"]["reason"] == "route", path
 
 
-async def test_the_preview_switch_off_refuses_a_revision(engine_sees):
+async def test_the_switch_off_refuses_a_revision(engine_sees):
     _flags(revisionViewerEnabled=False)
     resp = await engine_sees.get(f"{WS}/nodes/urn:a", params={"asOfSeq": 3})
     assert resp.status_code == 403
