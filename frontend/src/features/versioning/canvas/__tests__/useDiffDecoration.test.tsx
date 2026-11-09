@@ -5,7 +5,7 @@
  */
 import { renderHook, act } from '@testing-library/react'
 import { describe, it, expect, beforeEach } from 'vitest'
-import { useEntityChangeDecoration, nodeDecorationClass } from '../useDiffDecoration'
+import { useEntityChangeDecoration, nodeDecorationClass, deletedTitle, withStagedDeletions, isDeletedEdge } from '../useDiffDecoration'
 import { useBranchStore } from '@/store/branchStore'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { buildChangeSet, type GraphChange } from '../../model/changeModel'
@@ -95,5 +95,84 @@ describe('useEntityChangeDecoration, entity ids that are not urns', () => {
     const { result } = renderHook(() => useEntityChangeDecoration())
     expect(result.current.for('urn:A')).toEqual({ state: 'committed', status: 'added' })
     expect(result.current.for('ent_A')).toBeUndefined()
+  })
+})
+
+describe('a staged entity delete takes its cascade with it', () => {
+  beforeEach(() => {
+    useStagedChangesStore.setState({ changes: [] })
+    useBranchStore.setState({ activeChangeSet: null, committedDiffHidden: false })
+  })
+
+  const deleteWithCascade = {
+    id: 'del', type: 'delete_entity', targetId: 'urn:root', targetUrn: 'urn:root', summary: 's', timestamp: 0,
+    before: {
+      node: { id: 'urn:root' },
+      cascade: {
+        nodes: [{ urn: 'urn:root', entityId: 'e-root' }, { urn: 'urn:child', entityId: 'e-child' }],
+        edges: [{ entityId: 'edge-1', edgeType: 'FLOWS_TO' }],
+        nodeTotal: 2, edgeTotal: 1,
+      },
+    },
+  } as never
+
+  it('marks every contained entity and touching link as deleted, not saved yet', () => {
+    act(() => useStagedChangesStore.setState({ changes: [deleteWithCascade] }))
+    const { result } = renderHook(() => useEntityChangeDecoration())
+    const removed = { state: 'staged', status: 'removed' }
+    expect(result.current.for('urn:child')).toEqual(removed)   // by urn, as the canvas keys rows
+    expect(result.current.for('e-child')).toEqual(removed)     // and by entity id
+    expect(result.current.for('edge-1')).toEqual(removed)
+    expect(result.current.for('urn:other')).toBeUndefined()
+  })
+
+  it("lets a contained entity's own edit speak, and clears with the delete", () => {
+    act(() => useStagedChangesStore.setState({ changes: [deleteWithCascade, {
+      id: 'ren', type: 'rename_entity', targetId: 'urn:child', targetUrn: 'urn:child', summary: 's', timestamp: 0,
+    } as never] }))
+    const { result, rerender } = renderHook(() => useEntityChangeDecoration())
+    expect(result.current.for('urn:child')).toEqual({ state: 'staged', status: 'modified' })
+    act(() => useStagedChangesStore.setState({ changes: [] }))
+    rerender()
+    expect(result.current.for('edge-1')).toBeUndefined()
+  })
+})
+
+describe('deletedTitle', () => {
+  it('says which deletion a Deleted chip marks', () => {
+    expect(deletedTitle({ state: 'staged', status: 'removed' })).toBe('Deleted · not saved yet')
+    expect(deletedTitle({ state: 'committed', status: 'removed' })).toBe('Deleted in this draft')
+    expect(deletedTitle({ state: 'committed', status: 'added' })).toBeUndefined()
+    expect(deletedTitle(undefined)).toBeUndefined()
+  })
+})
+
+describe('withStagedDeletions — deleted links stay drawn until saved', () => {
+  const e = (id: string, data: Record<string, unknown> = {}) => ({ id, source: 'a', target: 'b', data })
+  const live = [e('l1'), e('l2')]
+
+  it('is the same array when nothing is staged', () => {
+    expect(withStagedDeletions(live, [])).toBe(live)
+  })
+
+  it("marks the links an entity delete takes, and keeps a link deleted on its own from its staged copy", () => {
+    const out = withStagedDeletions(live, [
+      { type: 'delete_entity', before: { cascade: { nodes: [], edges: [{ entityId: 'l2' }] } } },
+      { type: 'delete_edge', targetId: 'gone-a', before: { edge: e('gone-a') } },   // from the canvas
+      { type: 'delete_edge', targetId: 'gone-b', before: e('gone-b') },             // from the edge panel
+    ] as never)
+    expect(out.map((x) => [x.id, isDeletedEdge(x)])).toEqual([
+      ['l1', false], ['l2', true], ['gone-a', true], ['gone-b', true],
+    ])
+  })
+
+  it('never draws a staged copy twice', () => {
+    const out = withStagedDeletions(live, [{ type: 'delete_edge', targetId: 'l1', before: { edge: e('l1') } }] as never)
+    expect(out.map((x) => x.id)).toEqual(['l1', 'l2'])
+  })
+
+  it('reads a ghost link as deleted too', () => {
+    expect(isDeletedEdge(e('x', { isGhost: true }))).toBe(true)
+    expect(isDeletedEdge(e('x', { isAggregated: true }))).toBe(false)
   })
 })

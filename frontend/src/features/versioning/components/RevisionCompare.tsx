@@ -33,7 +33,7 @@ const TYPES_SHOWN = 7
 const KINDS = [
   { key: 'added', label: 'Added', mark: 'bg-emerald-500 dark:bg-emerald-600' },
   { key: 'modified', label: 'Modified', mark: 'bg-amber-500 dark:bg-amber-600' },
-  { key: 'removed', label: 'Removed', mark: 'bg-rose-500 dark:bg-rose-600' },
+  { key: 'removed', label: 'Deleted', mark: 'bg-rose-500 dark:bg-rose-600' },
 ] as const
 
 export function RevisionCompare({
@@ -176,7 +176,7 @@ export function RevisionCompare({
   )
 }
 
-/** Added · Modified · Removed · Revisions · Contributors — the comparison at a glance. */
+/** Added · Modified · Deleted · Revisions · Contributors — the comparison at a glance. */
 function KpiRow({ summary, loading }: { summary?: ChangeListSummary; loading: boolean }) {
   const counts = summary?.counts
   const approx = !!summary?.approximate

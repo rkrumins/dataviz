@@ -9,6 +9,7 @@ import {
 import { cn } from '@/lib/utils'
 import { useEdgeFiltersStore } from '@/hooks/useEdgeFilters'
 import { useEdgeVisual } from '@/hooks/useEntityVisual'
+import { DELETED_LINE } from '@/features/versioning/canvas/useDiffDecoration'
 
 interface LineageEdgeData {
   confidence?: number
@@ -20,6 +21,8 @@ interface LineageEdgeData {
   isDimmed?: boolean
   /** A Connections search matched an edge this line draws. */
   isSearchMatch?: boolean
+  /** Every link this line draws is a deletion: rose, in short dashes, without the flow. */
+  isDeleted?: boolean
   [key: string]: unknown
 }
 
@@ -50,6 +53,7 @@ export const LineageEdge = memo(function LineageEdge({
   const edgeType = data?.edgeType || 'produces'
   const isTraced = data?.isTraced ?? false
   const isDimmed = data?.isDimmed ?? false
+  const isDeleted = data?.isDeleted === true
 
   // Get highlighting state from store
   const highlightedEdgeIds = useEdgeFiltersStore((s) => s.highlightedEdgeIds)
@@ -223,11 +227,14 @@ export const LineageEdge = memo(function LineageEdge({
             ? '#9ca3af'
             : isTraced
               ? '#c084fc'
-              : isHighlighted
-                ? `url(#${highlightGradientId})`
-                : `url(#${gradientId})`,
+              : isDeleted
+                ? DELETED_LINE.color
+                : isHighlighted
+                  ? `url(#${highlightGradientId})`
+                  : `url(#${gradientId})`,
           strokeWidth: isDimmed ? 0.75 : selected ? 2 : isTraced ? 2 : (isHighlighted && highlightMode === 'bold' ? 2.5 : 1.5),
-          strokeOpacity: isDimmed ? 0.15 : 0.85,
+          strokeOpacity: isDimmed ? 0.15 : isDeleted ? 0.7 : 0.85,
+          ...(isDeleted && { strokeDasharray: DELETED_LINE.dash }),
           filter: isDimmed
             ? 'grayscale(1)'
             : isTraced
@@ -241,7 +248,7 @@ export const LineageEdge = memo(function LineageEdge({
       />
 
       {/* Animated Flow Layer — only on interaction */}
-      {animated && !isDimmed && (selected || isHighlighted || isTraced) && (
+      {animated && !isDimmed && !isDeleted && (selected || isHighlighted || isTraced) && (
         <path
           d={edgePath}
           fill="none"
@@ -291,7 +298,8 @@ export const LineageEdge = memo(function LineageEdge({
             "flex items-center gap-1.5",
             isHighlighted && "ring-1 ring-amber-500/50"
           )}>
-            <span className="text-ink-muted">{edgeTypeLabel}</span>
+            <span className={cn("text-ink-muted", isDeleted && "line-through decoration-rose-400/80")}>{edgeTypeLabel}</span>
+            {isDeleted && <span className="text-rose-600 dark:text-rose-400 font-semibold uppercase tracking-wide text-[9px]">Deleted</span>}
             <span className={cn(
               confidence >= 0.8 ? "text-indigo-500" :
                 confidence >= 0.5 ? "text-amber-500" : "text-red-500"

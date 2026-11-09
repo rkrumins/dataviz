@@ -162,6 +162,7 @@ import type { ViewLayerConfig, LayerNodeSortAlgo, LayerNodeSortMode } from '@/ty
 import { defaultReferenceModelLayers } from './constants'
 import { useLayerAssignment } from '@/hooks/useLayerAssignment'
 import { useDeletionGhosts } from '@/features/versioning/canvas/useDeletionGhosts'
+import { useWithStagedDeletions } from '@/features/versioning/canvas/useDiffDecoration'
 import { useContainmentHierarchy } from '@/hooks/useContainmentHierarchy'
 import { useEdgeProjection } from '@/hooks/useEdgeProjection'
 import { useHighlightState } from '@/hooks/useHighlightState'
@@ -5320,8 +5321,10 @@ export function ContextViewCanvas({
     }
     return chains
   }, [ancestorChains, searchEdges])
+  // Links deleted but not saved yet stay drawn, as deleted links, until saved or discarded.
+  const edgesWithStagedDeletions = useWithStagedDeletions(edges) as typeof edges
   const { visibleLineageEdges: browseVisibleLineageEdges, unresolvedEdgeCount, offCanvasByNode } = useEdgeProjection({
-    edges: overlay.active ? (EMPTY_EDGES as typeof edges) : edges,
+    edges: overlay.active ? (EMPTY_EDGES as typeof edges) : edgesWithStagedDeletions,
     aggregatedEdges: overlay.active ? (EMPTY_AGG_EDGES as typeof aggregatedEdges) : aggregatedEdges,
     nodesByLayer: renderByLayer, expandedNodes,
     displayFlat: renderFlat, displayMap: renderMap, urnToIdMap,

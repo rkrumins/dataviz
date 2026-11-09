@@ -76,4 +76,8 @@ describe('lineDash — a roll-up dashes only where the dash can be read', () => 
   it("never touches the ontology's own dash for a type", () => {
     expect(lineDash({ isGhost: false, dashArray: '6,3' }, false)).toBe('6,3')
   })
+
+  it('keeps a deleted line dashed on any board: the dash is what says it is gone', () => {
+    expect(lineDash({ isGhost: true, isDeleted: true, dashArray: '2 4' }, false)).toBe('2 4')
+  })
 })

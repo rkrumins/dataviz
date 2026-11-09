@@ -247,7 +247,9 @@ every staged edit away.
 | Solid ring | Saved to this draft |
 | Dashed halo | Edited, but not saved yet |
 | Green / orange / rose | New / edited / deleted |
-| A deleted entity still in its place | A deletion saved to this draft stays visible, marked in rose, until the draft is published. Its drawer says **Deleted in this draft**, and **Restore** brings it back |
+| A struck-through name and **Deleted** | Deleted. Hover **Deleted** to see whether the deletion is saved to this draft or not saved yet. Deleting an entity marks everything inside it and every relationship touching it the same way, until you save or discard |
+| A deleted entity still in its place | A deletion saved to this draft stays visible, struck through, until the draft is published. Its drawer says **Deleted in this draft**, and **Restore** brings it back |
+| Rose dashes | A deleted relationship. It stays drawn until the deletion is saved or discarded |
 
 **Committed**, in the amber strip, hides or shows the rings for changes already
 saved to the draft.

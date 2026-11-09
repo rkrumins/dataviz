@@ -15,7 +15,8 @@ import type { EntityInstance, EntityVisualConfig } from '@/types/schema'
 
 import { SearchMatchBadge } from '../search/SearchMatchBadge'
 import { useSearchHighlight } from '../search/useSearchHighlight'
-import { useEntityChangeDecoration, nodeDecorationClass } from '@/features/versioning/canvas/useDiffDecoration'
+import { useEntityChangeDecoration, nodeDecorationClass, deletedTitle } from '@/features/versioning/canvas/useDiffDecoration'
+import { DeletedChip, STATUS_META } from '@/features/versioning/components/NodeDiffBadge'
 import { useRestoreGhost } from '@/features/versioning/canvas/useRestoreGhost'
 import { DisplayRuleTagChips } from '../property-manager/DisplayRuleTagChips'
 import { useDisplayRuleLook } from '@/store/displayRuleMatchStore'
@@ -207,6 +208,8 @@ export const GenericNode = memo(function GenericNode({
   const search = useSearchHighlight(searchUrn, { isSelected: !!selected })
   // Change decoration — staged (dashed) + committed-vs-main (solid), default-on on a draft.
   const changeDeco = useEntityChangeDecoration().for(searchUrn)
+  // Deleted — saved to the draft or not yet: struck through, with the Deleted chip.
+  const tombstone = changeDeco?.status === 'removed'
   // The view's display rules: a tint and a frame for this card. A trace, a
   // focus or a change decoration paints the same card, and wins.
   const ruleLook = useDisplayRuleLook(
@@ -348,7 +351,6 @@ export const GenericNode = memo(function GenericNode({
           "bg-canvas-elevated",
           !!selected && !isTraced && "ring-2 ring-offset-2",
           !!dragging && "opacity-80 cursor-grabbing",
-          isGhost && "opacity-60",
           // W2.1 — advanced-search direct-match glow (reuses the
           // shared ``search-match-pulse`` keyframes used by
           // FlatTreeItem + HierarchyCanvas so all canvases pulse
@@ -437,20 +439,24 @@ export const GenericNode = memo(function GenericNode({
 
           {/* Content */}
           <div className="flex-1 min-w-0">
-            {/* Type Badge */}
-            <span
-              className="text-2xs font-medium uppercase tracking-wider"
-              style={{ color: visual.color }}
-            >
-              {entityType.name}
-            </span>
+            {/* Type Badge, and the Deleted chip of a deletion */}
+            <div className="flex items-center gap-1.5 min-w-0">
+              <span
+                className="text-2xs font-medium uppercase tracking-wider truncate"
+                style={{ color: visual.color }}
+              >
+                {entityType.name}
+              </span>
+              {tombstone && <DeletedChip compact={visual.size === 'xs'} title={deletedTitle(changeDeco)} />}
+            </div>
 
             {/* Primary Label + W2.1 search match badge */}
             <div className="flex items-center gap-1.5 min-w-0">
               <h3 className={cn(
                 "font-medium text-ink leading-tight truncate flex-1 min-w-0",
                 visual.size === 'xs' ? 'text-xs' :
-                  visual.size === 'sm' ? 'text-sm' : 'text-sm'
+                  visual.size === 'sm' ? 'text-sm' : 'text-sm',
+                tombstone && STATUS_META.removed.strike
               )}>
                 {primaryLabel}
               </h3>

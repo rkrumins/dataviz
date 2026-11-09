@@ -221,6 +221,22 @@ one language. It merges two layers (`useDiffDecoration.ts:30-61`):
 > unmistakable at a glance. `activeChangeSet` is populated by the bar's effect from
 > `useDiffVsMain` → `fromDiffVsMain` (`CanvasVersioningBar.tsx:59-66`).
 
+**A deletion reads the same on every surface.** Every card, row, list and the drawer header strikes
+the name through (`STATUS_META.removed.strike`) and shows a `DeletedChip` (`NodeDiffBadge.tsx`).
+The chip's hover says which deletion it is (`deletedTitle`). It is never colour alone, and lists call
+the status **Deleted**. A staged `delete_entity` also marks what it takes with it: the entities and
+links in its `before.cascade`, the delete-impact preview it was staged with.
+
+A deleted link is drawn in `DELETED_LINE`: rose, dashed `2 4`, apart from a roll-up's dash.
+- **When a line is deleted.** The projection marks a line `isDeleted` only when every link it draws
+  is a deletion (`isDeletedEdge`: a ghost, or `isPending: 'delete'`). One live link keeps it live.
+- **Where it is drawn.** The Context View overlay (`LineageFlowOverlay`) and the graph layout's
+  `LineageEdge` and containment lines.
+- **Unsaved deletions.** `withStagedDeletions` keeps them drawn: a link deleted on its own, from the
+  copy staged with it; one an entity delete takes, marked in place.
+- **Unsaved-change halos.** The overlay finds a line's staged-change halo by its member links' ids,
+  not the drawn line's `bundle-…` id.
+
 ---
 
 ## 7. The versioning chrome — the bar, the bridge, the panel

@@ -40,10 +40,30 @@ const COMMITTED: Record<ChangeStatus, EntityDecoration> = {
 // once per version of the staged list and shared by everything that asks.
 const stagedLookups = new WeakMap<readonly StagedChange[], Map<string, EntityDecoration>>()
 
+const STAGED_REMOVED: EntityDecoration = { state: 'staged', status: 'removed' }
+
+type Rec = Record<string, unknown>
+/** What a staged entity delete takes with it: its contained entities (by urn and id) and every link
+ *  touching them, from the delete-impact preview it was staged with (`before.cascade`). */
+function cascadeOf(sc: StagedChange): { nodes: string[]; edges: string[] } {
+  const cascade = sc.type === 'delete_entity' ? (sc.before as { cascade?: { nodes?: Rec[]; edges?: Rec[] } } | undefined)?.cascade : undefined
+  if (!cascade) return { nodes: [], edges: [] }
+  const ids = (xs: Rec[] | undefined, keys: string[]) =>
+    (xs ?? []).flatMap((x) => keys.map((k) => x[k]).filter((v): v is string => typeof v === 'string' && v !== ''))
+  return { nodes: ids(cascade.nodes, ['urn', 'entityId']), edges: ids(cascade.edges, ['entityId', 'id']) }
+}
+
 function stagedLookup(staged: readonly StagedChange[]): Map<string, EntityDecoration> {
   let m = stagedLookups.get(staged)
   if (!m) {
     m = new Map()
+    // What an entity delete takes with it reads as deleted too, until it is saved or discarded; an
+    // edit of its own (below) says more, and wins.
+    for (const sc of staged) {
+      const { nodes, edges } = cascadeOf(sc)
+      for (const id of nodes) m.set(id, STAGED_REMOVED)
+      for (const id of edges) m.set(id, STAGED_REMOVED)
+    }
     // Keyed by both id and urn so canvas urns and temp ids both resolve; the last edit wins.
     for (const sc of staged) {
       const d: EntityDecoration = { state: 'staged', status: stagedStatus(sc.type) }
@@ -98,4 +118,42 @@ export const nodeDecorationClass = (d?: EntityDecoration): string => {
   if (!d) return ''
   // committed colour ring for both; staged adds the dashed halo on top.
   return d.state === 'staged' ? `${COMMITTED_RING[d.status]} ${STAGED_HALO[d.status]}` : COMMITTED_RING[d.status]
+}
+
+/** What a deleted entity's chip says when hovered: which deletion it is. */
+export const deletedTitle = (d?: EntityDecoration): string | undefined =>
+  d?.status !== 'removed' ? undefined : d.state === 'staged' ? 'Deleted · not saved yet' : 'Deleted in this draft'
+
+/** A deleted link, on every layout: rose, in short dashes — apart from a roll-up's longer dash. */
+export const DELETED_LINE = { color: '#f43f5e', dash: '2 4' } as const
+
+/** Whether a link on the canvas is a deletion: one saved to the draft (a ghost) or one not saved yet. */
+export const isDeletedEdge = (e: { data?: Rec }): boolean =>
+  e.data?.isGhost === true || e.data?.isPending === 'delete'
+
+type CanvasEdge = { id: string; data?: Rec }
+/**
+ * The canvas's links with the deletions not saved yet still drawn, as deleted links: one deleted on
+ * its own leaves the store at once, so it is drawn from the copy staged with it; one an entity
+ * delete takes with it is still there, and is marked. The same array when nothing is staged.
+ */
+export function withStagedDeletions<E extends CanvasEdge>(edges: readonly E[], staged: readonly StagedChange[]): readonly E[] {
+  const taken = new Set(staged.flatMap((sc) => cascadeOf(sc).edges))
+  // Staged two ways: `{ edge }` from the canvas, the bare edge from the edge panel.
+  const copies = staged.filter((sc) => sc.type === 'delete_edge')
+    .map((sc) => ((sc.before as { edge?: E } | undefined)?.edge ?? sc.before) as E | undefined)
+    .filter((e): e is E => !!e && typeof e.id === 'string')
+  if (taken.size === 0 && copies.length === 0) return edges
+  const mark = (e: E): E => ({ ...e, data: { ...e.data, isPending: 'delete' } })
+  const present = new Set(edges.map((e) => e.id))
+  return [
+    ...edges.map((e) => (taken.has(e.id) ? mark(e) : e)),
+    ...copies.filter((e) => !present.has(e.id)).map(mark),
+  ]
+}
+
+/** {@link withStagedDeletions} for a component's links, kept while neither changes. */
+export function useWithStagedDeletions<E extends CanvasEdge>(edges: readonly E[]): readonly E[] {
+  const staged = useStagedChangesStore((s) => s.changes)
+  return useMemo(() => withStagedDeletions(edges, staged), [edges, staged])
 }

@@ -56,6 +56,7 @@ import { PropertyManagerButton } from './property-manager/PropertyManagerButton'
 import { useDisplayRuleEngine } from '@/hooks/useDisplayRuleEngine'
 import { useViewLibrary } from '@/hooks/useViewLibrary'
 import { useEffectiveBranchId } from '@/store/branchStore'
+import { useWithStagedDeletions, isDeletedEdge, DELETED_LINE } from '@/features/versioning/canvas/useDiffDecoration'
 import { CanvasSearchTrigger } from './search/CanvasSearchTrigger'
 import { RevisionNameSearchPanel } from './search/RevisionNameSearchPanel'
 import { useRevealSearchHit } from '@/hooks/useRevealSearchHit'
@@ -444,12 +445,14 @@ export function GraphCanvas({ className }: { className?: string }) {
     return findVisibleAncestor(parent)
   }, [visibleNodeIds, parentMap])
 
+  // Links deleted but not saved yet stay drawn, as deleted links, until saved or discarded.
+  const edgesWithStagedDeletions = useWithStagedDeletions(rawEdges)
   const allVisibleEdges = useMemo(() => {
     const result: Array<typeof rawEdges[0] & { _isContainment: boolean; _isProjected: boolean }> = []
     const seen = new Set<string>() // Deduplicate projected edges
     const linesByKey = new Map<string, (typeof result)[number]>()
 
-    for (const edge of rawEdges) {
+    for (const edge of edgesWithStagedDeletions) {
       const edgeType = normalizeEdgeType(edge)
       const isContainment = isContainmentEdge(edgeType)
 
@@ -527,8 +530,12 @@ export function GraphCanvas({ className }: { className?: string }) {
       } as any)
     })
 
+    // A line is a deletion when every link it draws is one; one live link keeps it live.
+    for (const line of linesByKey.values()) {
+      (line.data as { isDeleted?: boolean }).isDeleted = (line.data as { members: LineageEdgeType[] }).members.every(isDeletedEdge)
+    }
     return result
-  }, [rawEdges, visibleNodeIds, isContainmentEdge, findVisibleAncestor, aggregatedEdges])
+  }, [edgesWithStagedDeletions, visibleNodeIds, isContainmentEdge, findVisibleAncestor, aggregatedEdges])
 
   // A Connections search's matched edges light their lines as a channel of
   // their own: the reader's own highlights (useEdgeFiltersStore) stay theirs.
@@ -905,7 +912,8 @@ export function GraphCanvas({ className }: { className?: string }) {
       })
       .map(edge => {
         if (edge._isContainment) {
-          // Containment: thin dashed gray — shows hierarchy structure
+          // Containment: thin dashed gray — shows hierarchy structure; a deleted one, rose.
+          const deleted = isDeletedEdge(edge)
           return {
             id: edge.id,
             source: edge.source,
@@ -913,8 +921,8 @@ export function GraphCanvas({ className }: { className?: string }) {
             type: 'smoothstep' as const,
             animated: false,
             style: {
-              stroke: '#94a3b8',
-              strokeDasharray: '6,4',
+              stroke: deleted ? DELETED_LINE.color : '#94a3b8',
+              strokeDasharray: deleted ? DELETED_LINE.dash : '6,4',
               strokeWidth: 1.5,
               opacity: isHighlightActive ? 0.3 : 0.6,
             },
@@ -953,6 +961,7 @@ export function GraphCanvas({ className }: { className?: string }) {
             edgeCount: (edge.data as any)?.edgeCount,
             sourceEdgeCount: (edge.data as any)?.edgeCount,
             isSearchMatch: isSearchMatch && !isHighlightActive,
+            isDeleted: (edge.data as { isDeleted?: boolean })?.isDeleted === true,
           },
         }
       })

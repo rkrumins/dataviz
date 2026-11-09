@@ -5,7 +5,8 @@
  * deleting, say, a Domain — before committing. Lists are capped for sanity ("+N more").
  */
 import { ArrowRight } from 'lucide-react'
-import { NodeDiffBadge } from './NodeDiffBadge'
+import { cn } from '@/lib/utils'
+import { NodeDiffBadge, STATUS_META } from './NodeDiffBadge'
 
 interface ImpactEntity {
   entityId?: string
@@ -35,6 +36,15 @@ export function CascadeImpactList({ impact, rootUrn }: { impact: CascadeImpact; 
   const childNodes = impact.nodes.filter((n) => (n.urn ?? n.entityId) !== rootUrn)
   const moreNodes = impact.nodeTotal - impact.nodes.length
   const moreEdges = impact.edgeTotal - impact.edges.length
+  // A relationship's ends by name where the impact lists them (the entities going with it).
+  const names = new Map<string, string>()
+  for (const n of impact.nodes) {
+    const name = n.displayName ? String(n.displayName) : undefined
+    if (!name) continue
+    if (n.entityId) names.set(String(n.entityId), name)
+    if (n.urn) names.set(String(n.urn), name)
+  }
+  const nameOf = (id?: string) => (id && names.get(id)) || short(id)
 
   return (
     <div className="mt-2 rounded-lg border border-rose-500/20 bg-rose-500/[0.04] p-2.5 space-y-2.5">
@@ -53,7 +63,7 @@ export function CascadeImpactList({ impact, rootUrn }: { impact: CascadeImpact; 
             {childNodes.map((n) => (
               <li key={String(n.entityId ?? n.urn)} className="flex items-center gap-2 text-[12px]">
                 <NodeDiffBadge status="removed" />
-                <span className="text-ink truncate" title={String(n.urn ?? n.entityId)}>
+                <span className={cn('text-ink truncate', STATUS_META.removed.strike)} title={String(n.urn ?? n.entityId)}>
                   {String(n.displayName ?? n.urn ?? n.entityId)}
                 </span>
                 {n.entityType && <span className="text-[10px] text-ink-muted shrink-0">· {String(n.entityType)}</span>}
@@ -72,9 +82,9 @@ export function CascadeImpactList({ impact, rootUrn }: { impact: CascadeImpact; 
               <li key={String(e.entityId)} className="flex items-center gap-1.5 text-[11px] text-ink-muted min-w-0">
                 <NodeDiffBadge status="removed" />
                 <span className="font-medium text-ink/80 shrink-0">{String(e.edgeType ?? 'edge')}</span>
-                <span className="font-mono truncate" title={String(e.sourceEntityId ?? '')}>{short(e.sourceEntityId)}</span>
+                <span className={cn('truncate', STATUS_META.removed.strike)} title={String(e.sourceEntityId ?? '')}>{nameOf(e.sourceEntityId)}</span>
                 <ArrowRight className="w-3 h-3 shrink-0" />
-                <span className="font-mono truncate" title={String(e.targetEntityId ?? '')}>{short(e.targetEntityId)}</span>
+                <span className={cn('truncate', STATUS_META.removed.strike)} title={String(e.targetEntityId ?? '')}>{nameOf(e.targetEntityId)}</span>
               </li>
             ))}
             {moreEdges > 0 && <li className="text-[11px] text-ink-muted/80 pl-1">+ {moreEdges} more…</li>}

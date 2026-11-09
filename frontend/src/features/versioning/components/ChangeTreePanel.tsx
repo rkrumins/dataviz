@@ -118,7 +118,7 @@ function LeafRow({ node, depth, origin }: { node: DiffTreeNode; depth: number; o
         ) : node.entityType ? (
           <span className="w-2 h-2 rounded-full shrink-0" style={{ background: entityTypeStyle(node.entityType).ring }} />
         ) : null}
-        <span className="text-sm text-ink truncate flex-1" title={node.label}>{node.label}</span>
+        <span className={cn('text-sm text-ink truncate flex-1', meta.strike)} title={node.label}>{node.label}</span>
       </button>
       {open && (
         <div className="px-2.5 pb-2" style={{ paddingLeft: depth * 14 + 28 }}>
@@ -164,7 +164,7 @@ function GroupRow({
         {node.entityType && node.kind === 'container' && (
           <span className="w-2 h-2 rounded-full shrink-0" style={{ background: entityTypeStyle(node.entityType).ring }} />
         )}
-        <span className={cn('text-sm truncate flex-1', node.deleted ? 'text-rose-500 line-through' : 'text-ink')} title={node.label}>
+        <span className={cn('text-sm truncate flex-1', node.deleted ? cn('text-rose-500', STATUS_META.removed.strike) : 'text-ink')} title={node.label}>
           {node.label}
         </span>
         <CountBadges counts={node.counts} />
