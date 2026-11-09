@@ -63,7 +63,7 @@ from .ids import new_entity_id, prefixed_id
 from .merge import three_way_merge
 from .merkle import MerkleTree, content_hash
 from .merkle_store import MerkleStore
-from . import provenance
+from . import main_activity, provenance
 from .provenance import commit_provenance
 from .ontology import (
     Ontology, OntologyRules, canonicalize_payload_types,
@@ -1856,6 +1856,7 @@ class GraphVersioningService:
         main = await s.get(BranchORM, main_id)
         main.head_commit_id = squash.id
         graph.main_head_commit_seq = new_seq       # advance head before merkle
+        main_activity.note(s, graph, squash)
         squash.merkle_root = await self._commit_merkle(s, graph.id, main_id, squash, deltas)
         squash.stats = _delta_stats(deltas)
         return await self._squash_landed(s, graph, draft, squash, actor, merged_via)
@@ -2057,6 +2058,7 @@ class GraphVersioningService:
                 squash = await self._squash_commit(s, graph, draft, main_id, actor, message)
                 (await s.get(BranchORM, main_id)).head_commit_id = squash.id
                 graph.main_head_commit_seq = squash.commit_seq   # what later pages read
+                main_activity.note(s, graph, squash)
             await self._copy_versions(s, gid, main_id, squash, copies, actor)
             await self._write_deltas(s, gid, main_id, squash, deltas, kinds, actor,
                                      editors=await self._editors(s, gid, draft.id, deltas))
@@ -2355,6 +2357,7 @@ class GraphVersioningService:
                 await s.flush()
                 main.head_commit_id = squash.id
                 parent.main_head_commit_seq = squash.commit_seq   # what later steps read
+                main_activity.note(s, parent, squash)
             await self._copy_versions(s, gid, parent_main, squash, copies, actor, src_graph_id=fork.id)
             await self._write_deltas(s, gid, parent_main, squash, deltas, kinds, actor)
             for op, eid, chash in ([(r.op, r.entity_id, r.content_hash) for r in copies]
@@ -2994,6 +2997,7 @@ class GraphVersioningService:
             await self._write_deltas(s, graph_id, main_id, revert, deltas, kind_by_entity, actor)
             main.head_commit_id = revert.id
             graph.main_head_commit_seq = new_seq
+            main_activity.note(s, graph, revert)
             revert.merkle_root = await self._commit_merkle(s, graph_id, main_id, revert, deltas)
             graph.updated_at = _now()
             revert.stats = _delta_stats(deltas)
@@ -3083,6 +3087,7 @@ class GraphVersioningService:
             await self._write_deltas(s, graph_id, main_id, restore, deltas, kind_by_entity, actor)
             main.head_commit_id = restore.id
             graph.main_head_commit_seq = new_seq
+            main_activity.note(s, graph, restore)
             restore.merkle_root = await self._commit_merkle(s, graph_id, main_id, restore, deltas)
             graph.updated_at = _now()
             restore.stats = _delta_stats(deltas)
@@ -8927,6 +8932,7 @@ class GraphVersioningService:
             await self._bulk_insert_versions(s, graph_id, main_id, commit, node_deltas, edge_deltas, actor)
             main.head_commit_id = commit.id
             graph.main_head_commit_seq = new_seq
+            main_activity.note(s, graph, commit)
             commit.merkle_root = await self._commit_merkle(s, graph_id, main_id, commit, deltas)
             graph.updated_at = _now()
             ps = await s.get(ProjectionStateORM, graph_id)
@@ -9365,6 +9371,7 @@ class GraphVersioningService:
             await self._write_deltas(s, graph_id, main_id, commit, deltas, kind_by_entity, actor)
             main.head_commit_id = commit.id
             graph.main_head_commit_seq = new_seq
+            main_activity.note(s, graph, commit)
             commit.merkle_root = await self._commit_merkle(s, graph_id, main_id, commit, deltas)
             graph.updated_at = _now()
             commit.stats = _delta_stats(deltas)
@@ -10060,6 +10067,7 @@ class GraphVersioningService:
             graph.updated_at = _now()
             if branch.kind == "main":
                 graph.main_head_commit_seq = new_seq
+                main_activity.note(s, graph, commit)
                 ps = await s.get(ProjectionStateORM, graph_id)
                 if ps is not None:
                     ps.target_commit_seq = new_seq

@@ -670,6 +670,17 @@ def _envelope_summary(template: str) -> Callable[[dict], str]:
     return _build
 
 
+def _commit_summary(template: str) -> Callable[[dict], str]:
+    """A summary of a commit that moved a published graph (``versioning.main_activity``):
+    ``template`` holds ``{changes}`` and one ``{}`` for the data source."""
+    def _build(p: dict) -> str:
+        counts = _detail(p, "changes")
+        n = sum(int(v or 0) for v in counts.values()) if isinstance(counts, dict) else 0
+        changes = f"{n:,} change" + ("" if n == 1 else "s")
+        return template.replace("{changes}", changes).format(_subject(p))
+    return _build
+
+
 def _summary_job_triggered(p: dict) -> str:
     source = _detail(p, "triggerSource")
     mode = {"onboarding": " (onboarding)", "api": " (via the API)"}.get(source or "", "")
@@ -833,6 +844,12 @@ _EVENT_META.update({
     "workspace.versioning.retried": ("info", _envelope_summary("Retried turning on version control for {}")),
     "workspace.versioning.abandoned": ("warning", _envelope_summary("Abandoned turning on version control for {}")),
     "workspace.versioning.resynced": ("info", _envelope_summary("Re-synced the versioned graph of {}")),
+    "workspace.versioning.published": ("info", _commit_summary("Published {changes} to {}")),
+    "workspace.versioning.main_edited": ("info", _commit_summary("Changed the published data of {} ({changes})")),
+    "workspace.versioning.ingested": ("info", _commit_summary("Imported {changes} into {}")),
+    "workspace.versioning.synced": ("info", _commit_summary("Synced {changes} into {}")),
+    "workspace.versioning.reverted": ("warning", _commit_summary("Reverted a published change to {} ({changes})")),
+    "workspace.versioning.restored": ("warning", _commit_summary("Restored {} to an earlier version ({changes})")),
     "workspace.versioning.blank_created": ("info", _envelope_summary("Created a new versioned model, {}")),
     "workspace.versioning.duplicates_collapsed": ("warning", _envelope_summary("Collapsed duplicate copies in {}")),
     "workspace.versioning.fork_created": ("info", _envelope_summary("Created fork {}")),
@@ -935,6 +952,12 @@ LABELS: dict[str, str] = {
     "workspace.versioning.retried": "Retried version control",
     "workspace.versioning.abandoned": "Abandoned version control",
     "workspace.versioning.resynced": "Re-synced a versioned graph",
+    "workspace.versioning.published": "Published changes",
+    "workspace.versioning.main_edited": "Changed published data",
+    "workspace.versioning.ingested": "Imported data",
+    "workspace.versioning.synced": "Synced data",
+    "workspace.versioning.reverted": "Reverted a published change",
+    "workspace.versioning.restored": "Restored an earlier version",
     "workspace.versioning.blank_created": "Created a versioned model",
     "workspace.versioning.duplicates_collapsed": "Collapsed duplicates",
     "workspace.versioning.fork_created": "Created a fork",
