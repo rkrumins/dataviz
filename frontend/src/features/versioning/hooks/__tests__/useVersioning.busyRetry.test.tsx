@@ -1,8 +1,9 @@
 /**
  * The change lists, the history and a revision's plan ask a server too busy to prepare them again:
  * up to three more times, each after its Retry-After held to 1–10 s, plus up to half a second so
- * readers don't ask in step. Nothing else is asked again — a missing revision, a failed read, a
- * change too large for its tree are answers.
+ * readers don't ask in step. A 4xx is an answer — a missing revision, a change too large for its
+ * tree — and is not asked again; a failure with no answer (the network, another 5xx) once more, as
+ * every query is.
  */
 import React from 'react'
 import { act, renderHook } from '@testing-library/react'
@@ -59,15 +60,17 @@ afterEach(() => {
 })
 
 describe('BUSY_RETRY', () => {
-  it('asks a busy server again three more times, and nothing else again', () => {
+  it('asks a busy server again three more times, an answer never, and no answer once', () => {
     const busy = new BusyError('change_list_busy', 5_000)
     expect([0, 1, 2, 3].map((n) => BUSY_RETRY.retry(n, busy))).toEqual([true, true, true, false])
     for (const err of [
       Object.assign(new Error('no revision 12'), { status: 404 }),
-      Object.assign(new Error('the database is unavailable'), { status: 503 }),
       new DiffTooLargeError(300_000, 100_000),
-      new TypeError('Failed to fetch'),
     ]) expect(BUSY_RETRY.retry(0, err)).toBe(false)
+    for (const err of [
+      Object.assign(new Error('the database is unavailable'), { status: 503 }),
+      new TypeError('Failed to fetch'),
+    ]) expect([BUSY_RETRY.retry(0, err), BUSY_RETRY.retry(1, err)]).toEqual([true, false])
   })
 
   it('waits its Retry-After, held to 1–10 s, plus up to half a second', () => {
@@ -90,12 +93,19 @@ describe.each(HOOKS)('%s', (_name, fn, hook) => {
     expect(result.current.data).toBeDefined()
   })
 
-  it('is not asked again after any other failure', async () => {
-    api[fn].mockRejectedValue(Object.assign(new Error('internal error'), { status: 500 }))
-    const { result } = render(hook)
+  it('is not asked again after an answer, and once more after none', async () => {
+    api[fn].mockRejectedValue(Object.assign(new Error('not found'), { status: 404 }))
+    const answered = render(hook)
     await elapse(30_000)
     expect(api[fn]).toHaveBeenCalledTimes(1)
-    expect(result.current.isError).toBe(true)
+    expect(answered.result.current.isError).toBe(true)
+
+    api[fn].mockReset()
+    api[fn].mockRejectedValue(Object.assign(new Error('internal error'), { status: 500 }))
+    const unanswered = render(hook)
+    await elapse(30_000)
+    expect(api[fn]).toHaveBeenCalledTimes(2)
+    expect(unanswered.result.current.isError).toBe(true)
   })
 })
 
