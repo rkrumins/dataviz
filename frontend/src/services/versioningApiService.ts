@@ -15,6 +15,7 @@
 import type { ViewDefinitionDiff } from '@/services/viewVersionsApiService'
 import type { GraphEdge, GraphNode } from '@/providers/GraphDataProvider'
 import { fetchWithTimeout } from './fetchWithTimeout'
+import { parseRetryAfterMs } from './graphRequestFailure'
 import { pollJob } from './importExportApiService'
 import { useHealthStore } from '@/store/health'
 import { readJsonLossless } from '@/lib/losslessJson'
@@ -829,7 +830,7 @@ async function vfetchResponse(url: string, init?: RequestInit & { timeoutMs?: nu
     } catch {
       /* non-JSON error body */
     }
-    throw versioningError(res.status, body?.detail, text || res.statusText)
+    throw versioningError(res.status, body?.detail, text || res.statusText, res.headers.get('Retry-After'))
   }
   return res
 }
@@ -885,10 +886,28 @@ export class DiffTooLargeError extends Error {
   }
 }
 
+/** The server was too busy to prepare a read in time — a change list or the history calendar (503
+ *  `change_list_busy`), the graph as it was or what opening it takes (503 `revision_busy`) — and
+ *  says when to ask again (`retryAfterMs`, its Retry-After). Nothing is wrong with what was asked. */
+export class BusyError extends Error {
+  readonly status = 503
+  constructor(
+    readonly code: 'change_list_busy' | 'revision_busy',
+    readonly retryAfterMs: number | null,
+    message?: string,
+  ) {
+    super(message ?? 'This is taking too long to prepare; try again in a moment.')
+    this.name = 'BusyError'
+  }
+}
+
 /** The error a versioning API refusal (`status`, `detail`) raises — the same whether it came back
  *  from the request or from a job the request queued (a large draft's publish). */
-function versioningError(status: number, detail: RefusalDetail, fallback: string): Error {
+function versioningError(status: number, detail: RefusalDetail, fallback: string, retryAfter?: string | null): Error {
   const d = typeof detail === 'object' && detail ? detail : undefined
+  if (status === 503 && (d?.type === 'change_list_busy' || d?.type === 'revision_busy')) {
+    return new BusyError(d.type, parseRetryAfterMs(retryAfter ?? null), d.message)
+  }
   if (status === 409 && d?.type === 'merge_conflict') {
     return new MergeConflictError(d.conflicts ?? [], (d.current ?? {}) as Record<string, EntityView>)
   }

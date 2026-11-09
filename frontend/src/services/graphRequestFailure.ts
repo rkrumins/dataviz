@@ -119,7 +119,7 @@ function extractCode(bodyText: string): string | undefined {
   return undefined
 }
 
-function parseRetryAfterMs(header: string | null): number | null {
+export function parseRetryAfterMs(header: string | null): number | null {
   if (!header) return null
   const seconds = Number(header.trim())
   if (Number.isFinite(seconds) && seconds >= 0) return Math.floor(seconds * 1000)

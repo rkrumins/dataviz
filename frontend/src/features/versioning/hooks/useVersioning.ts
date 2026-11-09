@@ -539,6 +539,17 @@ export function useCommitDiffSummary(wsId?: string, graphId?: string | null, com
 
 // ── Change lists: a draft's changes, or main's between two revisions, at any size ──────────────
 
+/** How a change list, the history and a revision's plan are asked again. A server too busy to
+ *  prepare one in time says when to ask again (an {@link api.BusyError}, from its Retry-After): up to
+ *  three more times, each after that wait held to 1–10 s, plus up to half a second so a room of
+ *  readers doesn't ask in step. Any other failure is an answer, and is not asked again. */
+export const BUSY_RETRY = {
+  retry: (failures: number, err: unknown) => err instanceof api.BusyError && failures < 3,
+  retryDelay: (_failures: number, err: unknown) =>
+    Math.min(10_000, Math.max(1_000, err instanceof api.BusyError ? err.retryAfterMs ?? 0 : 0))
+      + Math.floor(Math.random() * 500),
+}
+
 /** A draft's lists move with it; main between two revisions is fixed for good. */
 const changeListStale = (origin?: ChangeListOrigin | null) =>
   origin && !('branchId' in origin) ? Infinity : 10_000
@@ -553,6 +564,7 @@ export function useChangeSummary(wsId?: string, graphId?: string | null, origin?
     queryFn: () => api.getChangeSummary(wsId!, graphId!, origin!),
     enabled: !!wsId && !!graphId && !!origin,
     staleTime: changeListStale(origin),
+    ...BUSY_RETRY,
   })
 }
 
@@ -569,6 +581,7 @@ export function useChangeEntries(
     getNextPageParam: (last) => (last.hasMore ? last.offset + last.entries.length : undefined),
     enabled: enabled && !!wsId && !!graphId && !!origin,
     staleTime: changeListStale(origin),
+    ...BUSY_RETRY,
   })
 }
 
@@ -581,6 +594,7 @@ export function useChangeEntry(
     queryFn: () => api.getChangeEntry(wsId!, graphId!, origin!, entityId!),
     enabled: !!wsId && !!graphId && !!origin && !!entityId,
     staleTime: changeListStale(origin),
+    ...BUSY_RETRY,
   })
 }
 
@@ -594,6 +608,7 @@ export function useChangeIndex(
     queryFn: () => api.getChangeIndex(wsId!, graphId!, origin!, max),
     enabled: !!wsId && !!graphId && !!origin,
     staleTime: changeListStale(origin),
+    ...BUSY_RETRY,
   })
 }
 
@@ -699,6 +714,7 @@ export function useHistoryPages(
     getNextPageParam: (last) => (last.hasMore && last.nextBefore != null ? last.nextBefore : undefined),
     enabled: enabled && !!wsId && !!graphId,
     staleTime: 15_000,
+    ...BUSY_RETRY,
   })
 }
 
@@ -721,6 +737,7 @@ export function useHistoryMonths(
     queryFn: () => api.getHistoryMonths(wsId!, graphId!, { tz, originatingViewId: viewId }),
     enabled: enabled && !!wsId && !!graphId,
     staleTime: 60_000,
+    ...BUSY_RETRY,
   })
 }
 
@@ -731,8 +748,8 @@ export function useRevision(wsId: string | undefined, graphId: string | null | u
     queryFn: () => api.getRevision(wsId!, graphId!, seq!),
     enabled: !!wsId && !!graphId && seq != null,
     staleTime: 30_000,
-    // A revision that isn't one is an answer, not an outage.
-    retry: (n, err) => n < 1 && (err as { status?: number })?.status !== 404,
+    // A revision that isn't one is an answer, not an outage: only a busy server is asked again.
+    ...BUSY_RETRY,
   })
 }
 
