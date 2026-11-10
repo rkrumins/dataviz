@@ -157,8 +157,10 @@ def test_explicit_false_flags_count_as_classified():
     assert "unclassified_relationships" not in report.blocking_reasons
 
 
-def test_no_lineage_blocks():
-    # Every relationship is classified, but none has is_lineage=True.
+def test_no_lineage_is_advisory():
+    # Every relationship is classified, but none has is_lineage=True — a
+    # containment-only graph (pure hierarchy). Legitimate: aggregation still
+    # runs (stamps node identity, materializes zero AGGREGATED edges).
     report = check_resolution(**_kwargs(
         entity_type_definitions_raw={"Table": _make_entity(level=1)},
         relationship_type_definitions_raw={
@@ -167,8 +169,9 @@ def test_no_lineage_blocks():
         introspected_entity_ids=["Table"],
         introspected_edge_ids=["HAS_COL"],
     ))
-    assert report.resolved is False
-    assert "no_lineage" in report.blocking_reasons
+    assert report.resolved is True
+    assert report.blocking_reasons == []
+    assert "no_lineage" in report.advisory_warnings
     assert report.has_lineage is False
 
 

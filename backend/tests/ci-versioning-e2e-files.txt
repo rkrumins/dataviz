@@ -13,11 +13,13 @@
 tests/integration/test_api_graph_draft_journey.py
 tests/integration/test_apply_ops_batch_composition.py
 tests/integration/test_authoring_reference_model.py
+tests/integration/test_batch_one_commit.py
 tests/integration/test_blank_graph_provisioning.py
 tests/integration/test_bootstrap_falkor_live.py
 tests/integration/test_bootstrap_job.py
 tests/integration/test_children_paging_exact_live.py
 tests/integration/test_children_sibling_lineage_live.py
+tests/integration/test_commit_provenance.py
 tests/integration/test_deletion_restore.py
 tests/integration/test_draft_awareness.py
 tests/integration/test_draft_levels.py
@@ -66,6 +68,7 @@ tests/integration/test_import_validate.py
 tests/integration/test_import_windows.py
 tests/integration/test_import_worker.py
 tests/integration/test_layered_lineage_schema_ingest.py
+tests/integration/test_main_activity.py
 tests/integration/test_merged_draft_overlay.py
 tests/integration/test_move_op.py
 tests/integration/test_node_sort_desc_live.py

@@ -8,7 +8,7 @@ import { PRESETS, presetAvailability, presetById, presetPatch } from '../presets
 import type { WorkspaceAccess } from '@/services/apiKeyService'
 
 const ws = (over: Partial<WorkspaceAccess> = {}): WorkspaceAccess => ({
-    id: 'ws', name: 'Finance', views: 'read', data: 'read', publish: false, ...over,
+    id: 'ws', name: 'Finance', views: 'read', data: 'read', publish: false, publishData: false, ...over,
 })
 const preset = (id: Parameters<typeof presetById>[0]) => presetById(id)!
 
@@ -30,7 +30,7 @@ describe('what a preset sets', () => {
 
     it('offers the four jobs, custom last', () => {
         expect(PRESETS.map((p) => p.title)).toEqual([
-            'Read data for reporting', 'Load data and signal refreshes', 'Publish views from CI', 'Custom',
+            'Read data for reporting', 'Import and publish data (connectors)', 'Publish views from CI', 'Custom',
         ])
     })
 })

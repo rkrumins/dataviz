@@ -149,6 +149,17 @@ READ_MAX_LAG: int = int(os.getenv("GRAPHVER_READ_MAX_LAG", "0"))
 # graph from Postgres once. Guards against a silently dropped delete leaving the
 # cache diverged from committed main. Disable with GRAPHVER_PROJECTION_VERIFY=0.
 PROJECTION_VERIFY_ENABLED: bool = os.getenv("GRAPHVER_PROJECTION_VERIFY", "1").lower() not in ("0", "false", "no")
+# How often, per graph, a pass that applied only main's newest commits counts the whole graph in
+# both stores (the verify above). Every pass did, so a graph taking a commit every few seconds
+# counted itself every few seconds (doc 19 §3.8). Always verified, whatever the interval:
+# - a full seed;
+# - a pass that dropped a write;
+# - a graph whose last verify healed or failed;
+# - a key with recorded drift;
+# - the first pass in a process.
+# A delta dropped silently between verifies is caught by the next one. 0: verify every pass, as
+# before.
+PROJECTION_VERIFY_INTERVAL_SECS: float = float(os.getenv("GRAPHVER_PROJECTION_VERIFY_INTERVAL_SECS", "300"))
 # On a FULL SEED (an explicit rebuild / first seed / repin), also run a CONTENT verify that catches
 # what the count verify can't: an edge reseeded with a dropped confidence / blanked properties / wrong
 # type, or a node with a drifted displayName or label. It rides the SAME single ordered scan the

@@ -56,6 +56,18 @@ describe('publishing a large draft', () => {
         await expect(publishBranch('ws1', 'g1', 'br_1', { message: 'm' })).rejects.toBeInstanceOf(NotUpToDateError)
     })
 
+    it('says why a draft behind Published must pull: automation changed what it changes', async () => {
+        serve([
+            [202, { jobId: 'vjob_1', graphId: 'g1', status: 'pending' }],
+            [200, { jobId: 'vjob_1', graphId: 'g1', status: 'failed', commitId: null, error: {
+                status: 409, detail: { type: 'not_up_to_date', branchId: 'br_1', behindBy: 2, reason: 'overlap' },
+            } }],
+        ])
+        const err = await publishBranch('ws1', 'g1', 'br_1', { message: 'm' }).catch((e) => e)
+        expect(err).toBeInstanceOf(NotUpToDateError)
+        expect((err as NotUpToDateError).reason).toBe('overlap')
+    })
+
     it('keeps following a job through a failed poll — the job runs on regardless', async () => {
         serve([
             [202, { jobId: 'vjob_1', graphId: 'g1', status: 'pending' }],

@@ -450,6 +450,169 @@ unbounded.
 
 ---
 
+## [Unreleased] — Automation that leaves an audit trail, and never blocks people
+
+Integrations that change a versioned graph often left history hard to read: every commit looked
+like a person's, and none said which key or request made it. They also blocked people: every
+commit put every open draft "behind", so a connector syncing every few minutes meant nobody could
+publish without pulling first. Now every commit says who made it and how, every change to a
+published graph is in the activity log, and people publish past automation that didn't touch their
+work. This is phase 1 of [change streams](docs/versioning/19-change-streams.md); phase 2 lands an
+integration's many small changes as a few commits.
+
+### Added
+
+- **Every commit records how it was made:**
+  - `actorKind`: a person, a service account or the platform;
+  - `apiKeyId`: the API key it came through;
+  - `correlationId`: the request it came from.
+
+  A job keeps its request's provenance, so an import or publish a key queued is attributed to that
+  key, though a worker writes it.
+- **Every change to a published graph writes an activity event**, under its data source, with the
+  commit, its kind and counts, and who made it, through which key:
+  - `workspace.versioning.published`, `main_edited`, `ingested`, `synced`, `reverted` and
+    `restored`;
+  - written only once the commit has landed, and a failure to record never fails it.
+- **History tells people from automation.**
+  - An Everyone / People / Automation filter (commit log `origin=people|automation`).
+  - Chips name the service account, the platform or the API key behind each commit.
+  - A run of one automation's commits on a day collapses into one row that opens to its commits:
+    "Snowflake sync · 42 commits · 1,240 changes · 09:00–11:30".
+  - The commit log names each key (`apiKeyNames`).
+- **A publish credits each entity to whoever edited it.** Each version on the published graph names
+  its editor. The commit still names the publisher, and its contributors everyone who edited.
+
+### Changed
+
+- **People publish past automation.** A draft behind Published publishes and merges without a pull
+  when only automation moved Published (a service account, the platform, or any API key) and none
+  of it touched what the draft changes, or met it at an edge.
+
+  Otherwise `409 not_up_to_date` now says why: `reason` is `people`, `overlap` or `size`.
+  Freshness says `behindByPeople`, `pullRequired` and `pullReason`. The canvas says calmly when
+  automation alone moved Published, and what to do when a pull is needed.
+- **`POST /graph/commands/batch` is one commit per request** on a versioned graph, not one per
+  command.
+  - A busy or paused graph lands none of the commands, so the batch can be resent as it was.
+  - A batch the store refuses as a whole runs command by command, as before.
+- **The projector's whole-graph verify runs at most every 5 minutes per graph** on incremental
+  passes (`GRAPHVER_PROJECTION_VERIFY_INTERVAL_SECS`; `0` = every pass). It always runs on a full
+  seed, a dropped write, or after a verify that healed or failed.
+
+### Fixed
+
+- **The data source's Versioning tab shows "N changes" again.** It read stats keys that commits
+  never had.
+- **"What changed" on the behind-Published strip counts changes.** It read node and edge counts that
+  commits never had.
+
+### Upgrading
+
+- Migration `20261110_1000_gv_commit_prov` adds `commits.actor_kind`, `api_key_id` and
+  `correlation_id` (nullable text), and `jobs.provenance` (JSONB). It adds no rows and rewrites
+  none; an older commit is classed from its actor. A separate `GRAPHVER_DB_URL` gets the same
+  columns at start-up.
+- Clients that read `409 not_up_to_date` can use its new `reason`. A draft that is behind only
+  automation, on nothing it changes, is no longer refused.
+
+### Known limitations
+
+- A review's `pullRequired` counts only people's commits. Whether automation touched the draft is
+  found when it merges, and the refusal says so (`reason: overlap`). A draft's freshness checks this
+  on every poll, for drafts of up to 10,000 changes.
+
+---
+
+## [Unreleased] — API keys and service accounts publish and import where their roles say
+
+Integrations using API keys and service accounts were refused when they published graph changes or
+imported versioned graphs, even with the roles they had been given. Keys now follow the account's
+Publisher role on every route a connector needs. The app also shows where a key or account can
+publish data, and why a refusal happened.
+
+### Added
+
+- **Keys sync a snapshot** into the published version (`POST …/versioning/graphs/{id}/sync`) where
+  their account is a Publisher. Bulk ingest into a graph that already holds data has always
+  answered "use sync", and sync refused every key, which left no way to refresh a versioned graph
+  by API. The sync safety overrides (`force`, `allowMassDelete`) stay a workspace admin's.
+- **Keys set up the graph they import into**, with what a person needs for each (manage):
+  - turn version control on (`POST …/graph/bootstrap`) and resume it (`…/bootstrap/retry`);
+  - make a data source's graph (`POST …/versioning/graphs`);
+  - open a draft by data source (`POST …/versioning/resolve`).
+  A key limited to some data sources sets up only those. Deciding a paused bootstrap's duplicates,
+  and abandoning it, stay a person's.
+- **`publishData`** on a key's effective access (detail, preview, and `/options` for its owner):
+  data write, where the key's owner holds Publisher.
+- **`GET /api-keys/self` returns `effectiveAccess`**, so an integration can see what its key can do
+  before meeting a 403.
+- **A service account's roles say whether it publishes data** (`publishesData`). Its page marks
+  them, and says when its keys can publish data nowhere.
+- **Every role picker marks the roles that publish data**: giving a service account a role,
+  adding a member, and asking for access. The role options carry `publishesData`.
+- **Permissions → Roles lists roles that change data but can't publish it.** These are roles with
+  `manage` and without publish, such as Workspace member or a custom role made before publish
+  existed. An admin can add publish to one, after the usual impact preview. Nothing changes on
+  its own.
+
+### Changed
+
+- **Data engineer's and Workspace member's descriptions say who publishes.**
+  - Data engineer publishes versioned data sources by default. It has carried
+    `workspace:datasource:publish` since that permission was added, and the description now
+    says so.
+  - Workspace member changes data sources through drafts, and publishing them needs Publisher or
+    Data engineer.
+  - Migration `20261109_1200_publish_words` updates a description only where it is still the
+    seeded one. No permission changes.
+- **RBAC → Who publishes data** is one table of who publishes: per role, for people, service
+  accounts and API keys. The user, admin, integration and connector guides point to it.
+- **"Publish" on a key now says "Publish views".** The switch, the key's chip, its summary and the
+  access matrix only ever covered views. The matrix shows **Publishes views** and **Publishes data**
+  separately, and notes where a key changes data but can't publish it.
+- **The key wizard** says, beside the data levels, in which workspaces a data-writing key will
+  import into drafts but can't publish. The data-writing preset is now **Import and publish data
+  (connectors)**.
+- **`403 publish_required` to a key** says that the key's account, not the key, needs the Workspace
+  publisher role.
+- **Publishing a draft you don't own** is refused with `hint: merge_request`: open a merge request
+  on it, and anyone who may publish there can merge it.
+- **Impact previews** now compute what someone gains or loses with the same rules as their claims:
+  - a service account's own roles only, and only what it may hold;
+  - no workspace permission from a global binding;
+  - everything `workspace:admin` implies.
+
+### Fixed
+
+- **A refused publish no longer commits the draft's staged edits under the refused caller's name.**
+  The right to publish is now checked before the edits are folded.
+- **Inviting someone as Data engineer into a workspace** was refused as "global". Without a
+  workspace, it made a global binding that granted nothing. Any role made only of workspace
+  permissions is now invited into a workspace.
+- **An SSO mapping of a workspace-only role to the whole platform** is refused. It would have
+  granted nothing.
+- **A service account can no longer be left holding a role it can't use.**
+  - Editing a role it holds so that the role administers a workspace or lets people in is refused
+    (`409 role_held_by_service_accounts`).
+  - Keeping such a role when it ends is refused.
+  - A role that also carries platform permissions is refused with a reason that says so.
+- **Adding a service account as a member** no longer carries over a role picked for a person that
+  the account can't hold.
+- **The role editor warns** when a custom role mixes platform and workspace permissions. A single
+  grant never gives both.
+
+### Upgrading
+
+- People and service accounts on **Workspace member**, or on custom roles created before
+  `workspace:datasource:publish` existed, can import into drafts but can't publish. Give the
+  accounts that should publish the **Workspace publisher** role, or add publish to a role under
+  **Permissions → Roles**.
+- Regenerated the reviewed API key surface (`backend/tests/fixtures/api_key_surface.txt`) and
+  `docs/security/endpoints.md`: five routes open to keys.
+
+---
+
 ## [Unreleased] — Business view: every draft action, plain words for readers, a new view switch and Minimal rows
 
 Business users can now do everything in a draft without switching to Technical. Readers get plain

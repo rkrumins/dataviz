@@ -92,7 +92,11 @@ export interface WorkspaceAccess {
     name: string
     views: Level
     data: Level
+    /** Publishing views to everyone: the key's own switch. Nothing to do with data. */
     publish: boolean
+    /** Publishing data — a draft, a review's merge, a sync, an import that
+     *  publishes itself: data write, where the key's owner holds Publisher. */
+    publishData: boolean
 }
 
 export interface ResourceAccess {
@@ -109,7 +113,7 @@ export interface EffectiveAccess {
     dataSources: ResourceAccess[]
     /** Set when the key reaches every workspace through an organisation-wide
      *  role; `workspaces` is then not a list of them. */
-    everyWorkspace: { views: Level; data: Level; publish: boolean } | null
+    everyWorkspace: { views: Level; data: Level; publish: boolean; publishData: boolean } | null
 }
 
 export interface ApiKeyDetail extends ApiKey {

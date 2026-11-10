@@ -5,6 +5,7 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+    cannotPublishDataIn,
     clientName,
     cidrProblem,
     customDateProblem,
@@ -25,7 +26,7 @@ import {
     statusLabel,
     stillCalled,
 } from '../apiKeyFormat'
-import type { ApiKeyUsage, PickerItem } from '@/services/apiKeyService'
+import type { ApiKeyUsage, PickerItem, WorkspaceAccess } from '@/services/apiKeyService'
 
 const item = (id: string, level: 'read' | 'write'): PickerItem => ({
     id, name: id, workspaceId: 'ws', workspaceName: 'WS', level,
@@ -37,7 +38,7 @@ const at = (hours: number) => new Date(NOW.getTime() + hours * 3_600_000).toISOS
 describe('describing a key', () => {
     it('names what it may do', () => {
         expect(describePermissions({ views: 'write', data: 'read', publish: true }))
-            .toBe('Views: read & write · Publish · Data: read')
+            .toBe('Views: read & write · Publish views · Data: read')
         expect(describePermissions({ views: 'none', data: 'none', publish: false })).toBe('Nothing')
     })
 
@@ -194,5 +195,30 @@ describe('siteUrl', () => {
         ]) {
             expect(siteUrl(away)).toBeNull()
         }
+    })
+})
+
+describe('cannotPublishDataIn', () => {
+    const owned = [
+        { id: 'ws1', name: 'Finance', views: 'write', data: 'write', publish: false, publishData: true },
+        { id: 'ws2', name: 'Sales', views: 'read', data: 'write', publish: false, publishData: false },
+        { id: 'ws3', name: 'Ops', views: 'read', data: 'read', publish: false, publishData: false },
+    ] as const satisfies WorkspaceAccess[]
+    const draft = (over: Partial<Parameters<typeof cannotPublishDataIn>[0]> = {}) => ({
+        permissions: { views: 'none', data: 'write', publish: false } as const,
+        resourceMode: 'all' as const, workspaces: [], dataSources: [], ...over,
+    })
+
+    it('names where a key that changes data reaches a workspace its owner changes data in but doesn’t publish', () => {
+        expect(cannotPublishDataIn(draft(), [...owned]).map((w) => w.id)).toEqual(['ws2'])
+        expect(cannotPublishDataIn(draft({ resourceMode: 'workspaces', workspaces: ['ws1'] }), [...owned])).toEqual([])
+        const item = { id: 'ds_s', name: 'CRM', workspaceId: 'ws2', workspaceName: 'Sales', level: 'write' } as const
+        expect(cannotPublishDataIn(draft({ resourceMode: 'items', dataSources: [item] }), [...owned]).map((w) => w.id))
+            .toEqual(['ws2'])
+    })
+
+    it('says nothing for a key that only reads data', () => {
+        expect(cannotPublishDataIn(draft({ permissions: { views: 'read', data: 'read', publish: false } }), [...owned]))
+            .toEqual([])
     })
 })

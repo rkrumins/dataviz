@@ -112,10 +112,43 @@ async function toReview(name = 'ci') {
     await screen.findByText('Check it, then create it')
 }
 
+describe('publishing data', () => {
+    async function toPermissions() {
+        await userEvent.click(screen.getByRole('radio', { name: /^custom/i }))
+        await userEvent.type(screen.getByLabelText('Name'), 'connector')
+        await userEvent.click(next())
+        await userEvent.click(await screen.findByRole('radio', { name: /everything i can access/i }))
+        await userEvent.click(next())
+        await screen.findByText('What may it do there?')
+        const data = screen.getByRole('radiogroup', { name: 'Data' })
+        await userEvent.click(within(data).getByRole('radio', { name: /^read & write/i }))
+    }
+
+    it('says where a key that changes data can import but not publish: its owner is not a Publisher there', async () => {
+        await wizard({ workspaces: [
+            { id: 'ws1', name: 'Finance', views: 'write', data: 'write', publish: false, publishData: true },
+            { id: 'ws2', name: 'Sales', views: 'read', data: 'write', publish: false, publishData: false },
+        ] })
+        await toPermissions()
+        const note = await screen.findByText(/can import into drafts there but/)
+        expect(note).toHaveTextContent('“Sales”')
+        expect(note).not.toHaveTextContent('Finance')
+        expect(note).toHaveTextContent(/Workspace publisher/)
+    })
+
+    it('says nothing where its owner publishes everywhere it reaches', async () => {
+        await wizard({ workspaces: [
+            { id: 'ws1', name: 'Finance', views: 'write', data: 'write', publish: false, publishData: true },
+        ] })
+        await toPermissions()
+        expect(screen.queryByText(/can import into drafts there but/)).not.toBeInTheDocument()
+    })
+})
+
 describe('presets', () => {
     it('sets access, reach and lifetime, and closes one you cannot satisfy', async () => {
-        await wizard({ workspaces: [{ id: 'ws1', name: 'Finance', views: 'write', data: 'read', publish: false }] })
-        const loading = screen.getByRole('radio', { name: /load data and signal refreshes/i })
+        await wizard({ workspaces: [{ id: 'ws1', name: 'Finance', views: 'write', data: 'read', publish: false, publishData: false }] })
+        const loading = screen.getByRole('radio', { name: /import and publish data/i })
         expect(loading).toBeDisabled()
         expect(loading).toHaveTextContent('You cannot change data in any workspace.')
         expect(screen.getByRole('radio', { name: /publish views from ci/i })).toBeDisabled()

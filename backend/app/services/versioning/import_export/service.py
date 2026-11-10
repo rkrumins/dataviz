@@ -23,7 +23,7 @@ from sqlalchemy.exc import IntegrityError
 
 from backend.app.services.storage.object_store import get_object_store, storage_key
 
-from .. import config, db
+from .. import config, db, provenance
 from ..errors import JobActive, MainWriteForbidden
 from ..job_lease import Draining, Lease, Superseded, friendly_infra_error, is_transient
 from ..models import BranchORM, GraphORM, ImportRowORM, JobORM, MergeRequestORM
@@ -210,6 +210,7 @@ class ImportExportService:
                     reconcile_mode=reconcile_mode, import_format=import_format,
                     field_scope=field_scope, auto_publish=auto_publish,
                     source_uri=uri, idempotency_key=idempotency_key, status="pending",
+                    provenance=provenance.snapshot(),
                 )
                 s.add(job)
                 await s.flush()
@@ -577,6 +578,7 @@ class ImportExportService:
                 scope_view_id=scope_view_id, branch_id=branch_id,
                 import_format=export_format, as_of_seq=as_of_seq,
                 field_scope=options, idempotency_key=idempotency_key, status="pending",
+                provenance=provenance.snapshot(),
             )
             s.add(job)
             await s.flush()
@@ -677,8 +679,9 @@ class ImportExportService:
                 await self._svc._require_publish(s, branch, actor, ())
             await self._svc._require_no_import(s, branch_id)
             head = await s.scalar(select(GraphORM.main_head_commit_seq).where(GraphORM.id == graph_id))
-            if (branch.base_commit_seq or 0) < head:
-                raise NotUpToDate(branch_id, branch.base_commit_seq, head)
+            if (branch.base_commit_seq or 0) < head:     # behind main: may it land past what came in?
+                await self._svc._require_landable(
+                    s, graph_id, await self._svc._main_branch_id(s, graph_id), branch, head)
             if merge_request_id:
                 pr = await s.get(MergeRequestORM, merge_request_id)
                 if pr is None or pr.status in ("merged", "closed"):
@@ -687,7 +690,8 @@ class ImportExportService:
             branch.status = "publishing"
             job = JobORM(job_type="publish", graph_id=graph_id, workspace_id=workspace_id,
                          data_source_id=data_source_id, branch_id=branch_id,
-                         field_scope=fields, status="pending", current_phase=QUEUED, updated_at=_now())
+                         field_scope=fields, status="pending", current_phase=QUEUED, updated_at=_now(),
+                         provenance=provenance.snapshot())
             s.add(job)
             await s.flush()
             return {"job_id": job.id}
@@ -764,7 +768,7 @@ class ImportExportService:
                                         f"(job {active}).")
             job = JobORM(job_type="fork_update", graph_id=graph_id, workspace_id=workspace_id,
                          data_source_id=data_source_id, field_scope=fields, status="pending",
-                         current_phase=QUEUED, updated_at=_now())
+                         current_phase=QUEUED, updated_at=_now(), provenance=provenance.snapshot())
             s.add(job)
             await s.flush()
             return {"job_id": job.id}
@@ -805,7 +809,8 @@ class ImportExportService:
                          data_source_id=parent.data_source_id,
                          field_scope={"actor": actor, "message": message, "prId": pr_id,
                                       "forkId": fork.id, "pinnedSeq": pinned},
-                         status="pending", current_phase=QUEUED, updated_at=_now())
+                         status="pending", current_phase=QUEUED, updated_at=_now(),
+                         provenance=provenance.snapshot())
             s.add(job)
             await s.flush()
             return {"job_id": job.id, "graph_id": parent_id}

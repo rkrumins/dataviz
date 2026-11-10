@@ -5,8 +5,14 @@
  * reach comes through an organisation-wide role, which is a statement about
  * every workspace there will ever be, not a list to scroll — then each picked
  * view and data source with what the key gets on it.
+ *
+ * Two kinds of publishing, said apart because they are granted apart:
+ * publishing views is the key's own switch; publishing data — a draft, a
+ * review's merge, a sync, an import that publishes itself — follows its
+ * owner's Publisher role, so a key that writes data where its owner is not
+ * one says so rather than looking able to.
  */
-import { AlertTriangle, Building2, Database, Eye, Globe2, Megaphone } from 'lucide-react'
+import { AlertTriangle, Building2, Database, Eye, Globe2, Megaphone, UploadCloud } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
 import type { EffectiveAccess, Level, ResourceAccess } from '@/services/apiKeyService'
@@ -42,9 +48,13 @@ export function AccessMatrix({ access, className }: { access: EffectiveAccess; c
                             views={everyWorkspace.views}
                             data={everyWorkspace.data}
                             publish={everyWorkspace.publish}
+                            publishData={everyWorkspace.publishData}
                         />
                     ) : workspaces.map((w) => (
-                        <Row key={w.id} icon={Building2} name={w.name} views={w.views} data={w.data} publish={w.publish} />
+                        <Row
+                            key={w.id} icon={Building2} name={w.name} views={w.views} data={w.data}
+                            publish={w.publish} publishData={w.publishData}
+                        />
                     ))}
                 </div>
             )}
@@ -54,13 +64,14 @@ export function AccessMatrix({ access, className }: { access: EffectiveAccess; c
     )
 }
 
-function Row({ icon: Icon, name, caption, views, data, publish }: {
+function Row({ icon: Icon, name, caption, views, data, publish, publishData }: {
     icon: typeof Globe2
     name: string
     caption?: string
     views: Level
     data: Level
     publish: boolean
+    publishData: boolean
 }) {
     return (
         <div className={cn('grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-x-4 px-3.5 py-2.5 border-b last:border-0', EDGE)}>
@@ -69,9 +80,23 @@ function Row({ icon: Icon, name, caption, views, data, publish }: {
                 <span className="min-w-0">
                     <span className="block text-xs font-semibold text-ink truncate">{name}</span>
                     {caption && <span className="block text-[11px] text-ink-muted leading-snug">{caption}</span>}
-                    {publish && (
-                        <span className="mt-1 inline-flex items-center gap-1 text-[10px] font-semibold text-violet-600 dark:text-violet-400">
-                            <Megaphone className="w-3 h-3" aria-hidden /> Can publish
+                    {(publish || publishData) && (
+                        <span className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5">
+                            {publish && (
+                                <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-violet-600 dark:text-violet-400">
+                                    <Megaphone className="w-3 h-3" aria-hidden /> Publishes views
+                                </span>
+                            )}
+                            {publishData && (
+                                <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-emerald-700 dark:text-emerald-400">
+                                    <UploadCloud className="w-3 h-3" aria-hidden /> Publishes data
+                                </span>
+                            )}
+                        </span>
+                    )}
+                    {data === 'write' && !publishData && (
+                        <span className="mt-1 block text-[10px] text-amber-700 dark:text-amber-400 leading-snug">
+                            Imports into drafts, but can’t publish data here: its account isn’t a Publisher
                         </span>
                     )}
                 </span>

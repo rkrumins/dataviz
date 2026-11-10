@@ -36,8 +36,8 @@ export const PRESETS: Preset[] = [
     },
     {
         id: 'loading',
-        title: 'Load data and signal refreshes',
-        blurb: 'A pipeline that writes to graphs and tells the platform a data source changed.',
+        title: 'Import and publish data (connectors)',
+        blurb: 'A pipeline or connector that imports graphs, tells the platform a data source changed, and publishes where its account is a Publisher.',
         example: 'Nightly warehouse load',
         permissions: { views: 'none', data: 'write', publish: false },
         resourceMode: 'items',
@@ -46,7 +46,7 @@ export const PRESETS: Preset[] = [
     {
         id: 'publishing',
         title: 'Publish views from CI',
-        blurb: 'A build that keeps views in step with code and publishes them to everyone.',
+        blurb: 'A build that keeps views in step with code and publishes them to everyone. It reads data, and never publishes it.',
         example: 'CI view publisher',
         permissions: { views: 'write', data: 'read', publish: true },
         resourceMode: 'workspaces',

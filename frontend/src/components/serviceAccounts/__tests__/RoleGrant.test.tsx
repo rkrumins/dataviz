@@ -37,4 +37,19 @@ describe('RoleGrant', () => {
         await userEvent.click(screen.getByRole('button', { name: /give role/i }))
         await waitFor(() => expect(onGrant).toHaveBeenCalledWith('ws_sales', 'workspace_viewer'))
     })
+
+    it('says which roles publish data, which its keys need to publish', async () => {
+        listPage.mockResolvedValue({ items: [{ id: 'ws_sales', name: 'Sales' }], totalCount: 1 })
+        requestableRoles.mockResolvedValue({ roles: [
+            { name: 'workspace_member', description: null, isSystem: true, publishesData: false },
+            { name: 'workspace_publisher', description: null, isSystem: true, publishesData: true },
+            { name: 'workspace_data_engineer', description: null, isSystem: true, publishesData: true },
+        ] })
+        render(<RoleGrant busy={false} onGrant={vi.fn()} />)
+        await screen.findByRole('option', { name: 'Sales' })
+        await userEvent.selectOptions(screen.getByLabelText('Workspace'), 'ws_sales')
+        expect(await screen.findByRole('option', { name: 'Workspace member' })).toBeInTheDocument()
+        expect(screen.getByRole('option', { name: 'Publisher — publishes data' })).toBeInTheDocument()
+        expect(screen.getByRole('option', { name: 'Data engineer — publishes data' })).toBeInTheDocument()
+    })
 })

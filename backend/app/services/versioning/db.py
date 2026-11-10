@@ -17,18 +17,22 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from typing import AsyncGenerator, Optional
+import logging
+from typing import AsyncGenerator, Awaitable, Callable, Optional
 
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
 )
-from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy.orm import DeclarativeBase, Session
 from sqlalchemy.pool import NullPool
 
 from . import config
+
+logger = logging.getLogger(__name__)
 
 
 class VersioningBase(DeclarativeBase):
@@ -77,11 +81,13 @@ async def graphver_session() -> AsyncGenerator[AsyncSession, None]:
     would otherwise skip the rollback and leak its connection out of the pool. The commit, the
     rollback and the close are shielded, so the connection goes back even as the task dies."""
     session = get_session_factory()()
+    cancelled = False
     try:
         try:
             yield session
             await asyncio.shield(session.commit())
         except asyncio.CancelledError:
+            cancelled = True
             with contextlib.suppress(Exception):
                 await asyncio.shield(session.rollback())
             raise
@@ -89,8 +95,48 @@ async def graphver_session() -> AsyncGenerator[AsyncSession, None]:
             await session.rollback()
             raise
     finally:
+        committed = session.sync_session.info.pop(_COMMITTED, ())
         with contextlib.suppress(Exception):
             await asyncio.shield(session.close())
+        if committed and not cancelled:
+            await _run_committed(committed)
+        elif committed:
+            logger.warning("%d after-commit step(s) skipped: the task was cancelled", len(committed))
+
+
+#: Steps a transaction defers until it commits (:func:`after_commit`), on its session's ``info``:
+#: waiting for the commit, then committed and waiting for the session scope to close.
+_PENDING, _COMMITTED = "graphver.after_commit", "graphver.committed"
+
+
+def after_commit(session, step: Callable[[], Awaitable[None]]) -> None:
+    """Run ``step`` (an async thunk) once the transaction ``session`` is in has committed, never if
+    it rolls back — so an attempt that :meth:`~.service.GraphVersioningService._retry_seq` runs
+    again leaves nothing behind. For what records a commit in another store (its activity event):
+    it exists only if the commit does, and it never fails the commit. Run, best-effort, as
+    :func:`graphver_session` closes; another session factory drops it."""
+    sync = getattr(session, "sync_session", session)
+    sync.info.setdefault(_PENDING, []).append(step)
+
+
+@event.listens_for(Session, "after_commit")
+def _committed(sync: Session) -> None:
+    pending = sync.info.pop(_PENDING, None)
+    if pending:
+        sync.info.setdefault(_COMMITTED, []).extend(pending)
+
+
+@event.listens_for(Session, "after_rollback")
+def _rolled_back(sync: Session) -> None:
+    sync.info.pop(_PENDING, None)
+
+
+async def _run_committed(steps) -> None:
+    for step in steps:
+        try:
+            await step()
+        except Exception:  # noqa: BLE001 — what it records already happened; nothing to undo
+            logger.warning("an after-commit step failed", exc_info=True)
 
 
 @contextlib.asynccontextmanager

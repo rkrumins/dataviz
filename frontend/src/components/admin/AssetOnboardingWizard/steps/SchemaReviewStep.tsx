@@ -6,9 +6,9 @@
  * Partial coverage (missing types, unclassified relationships) is
  * ADVISORY: the wizard can proceed — unmapped types are ignored by
  * aggregation and render with fallback styling — and the one-click
- * "Add missing types" extend stays the promoted fix. Only a fatal gap
- * (no lineage relationship at all) blocks, because aggregation would
- * produce nothing.
+ * "Add missing types" extend stays the promoted fix. No lineage
+ * relationship at all is advisory too: a containment-only graph (pure
+ * hierarchies) is legitimate — aggregation runs and builds zero rollups.
  *
  * Published ontologies are immutable — saving classifications creates a
  * new draft version (POST .../new-version) and re-points the wizard
@@ -79,7 +79,7 @@ const REASON_LABELS: Record<string, string> = {
 
 /** Advisory chips worth surfacing in the summary row (the detailed
  *  sections below render their own richer treatment). */
-const SUMMARY_ADVISORIES = ['missing_entity_types', 'missing_edge_types', 'unclassified_relationships']
+const SUMMARY_ADVISORIES = ['missing_entity_types', 'missing_edge_types', 'unclassified_relationships', 'no_lineage']
 
 function transformStatsForCheck(raw: any): Record<string, unknown> {
     // ``providerService.getAssetStats`` returns the cache envelope shape
@@ -511,9 +511,9 @@ export function SchemaReviewStep({
                     Review how well each ontology covers its graph. Gaps are
                     advisory — you can proceed, and unmapped types will simply be
                     ignored by aggregation and rendered with default styling —
-                    but one-click fixes below get you to full coverage. Only an
-                    ontology with no lineage relationship at all blocks, since
-                    aggregation would produce nothing.
+                    but one-click fixes below get you to full coverage. An
+                    ontology with no lineage relationship is fine for a
+                    containment-only graph: aggregation builds no rollups for it.
                 </p>
             </div>
 
@@ -736,6 +736,18 @@ export function SchemaReviewStep({
                                         </Section>
                                     )}
 
+                                    {resolution && (resolution.advisoryWarnings ?? []).includes('no_lineage') && (
+                                        <div className="px-3 py-2 rounded-md bg-amber-500/[0.08] border border-amber-500/20 text-xs text-amber-500 space-y-0.5">
+                                            <div className="font-medium">No relationship is flagged as Lineage</div>
+                                            <div className="opacity-90">
+                                                You can proceed — this suits a graph with only containment edges.
+                                                Aggregation still runs and the hierarchy shows on the canvas, but no
+                                                aggregated edges are built. If the graph does carry data flow, mark at
+                                                least one relationship as Lineage above.
+                                            </div>
+                                        </div>
+                                    )}
+
                                     {resolution && (resolution.advisoryWarnings ?? []).includes('no_containment_edges') && (
                                         <div className="px-3 py-2 rounded-md bg-amber-500/[0.08] border border-amber-500/20 text-xs text-amber-500 space-y-0.5">
                                             <div className="font-medium">No relationship is flagged as Containment</div>
@@ -798,9 +810,9 @@ export function SchemaReviewStep({
                             : "bg-emerald-500/[0.06] border-emerald-500/20 text-emerald-600 dark:text-emerald-400",
                 )}>
                     {!allResolved
-                        ? 'A source is blocked: its ontology has no lineage relationship, so aggregation would produce nothing. Classify at least one relationship as Lineage above.'
+                        ? 'A source is still being checked or failed its check — see the details above.'
                         : anyAdvisories
-                            ? 'Ready to submit. Advisories remain — unmapped or unclassified types will be ignored by aggregation and rendered with default styling. Use the one-click fixes above for full coverage.'
+                            ? 'Ready to submit. Advisories remain — see each source above for what they mean and the one-click fixes.'
                             : 'All sources fully resolved — ready to submit.'}
                 </div>
             )}
@@ -834,7 +846,7 @@ function ClassificationGuidance() {
         {
             label: 'Lineage',
             tone: 'text-emerald-600 dark:text-emerald-400',
-            blurb: 'data flows source → target. These are the edges aggregation materializes — at least one is required or the source is blocked.',
+            blurb: 'data flows source → target. These are the edges aggregation materializes — without one, aggregation builds no rollups for the source.',
         },
         {
             label: 'Neither',

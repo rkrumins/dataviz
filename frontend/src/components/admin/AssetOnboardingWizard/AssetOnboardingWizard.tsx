@@ -220,8 +220,8 @@ export function AssetOnboardingWizard({
                 // Every catalog item that has an ontology assigned must
                 // pass the resolution gate. Partial coverage and
                 // unclassified relationships are advisory server-side
-                // (resolved stays true) — only a fatal gap (no lineage
-                // relationship at all) keeps resolved=false. Items
+                // (resolved stays true), and so is no lineage relationship
+                // at all (containment-only graphs). Items
                 // without an ontology (skipped) bypass aggregation
                 // entirely so they don't need to be resolved.
                 const required = catalogItems.filter(c => formData.ontologySelections[c.id]?.ontologyId)

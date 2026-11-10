@@ -34,6 +34,7 @@ import { ChangeCountChips } from './ChangesPanel'
 import { DraftViewChanges } from './DraftViewChanges'
 import { ReviewerPicker } from './ReviewerPicker'
 import type { ChangeSet } from '../model/changeModel'
+import { refusalCopy } from '../model/provenance'
 
 /** Shared values a refused publish lists before it says how many more there are. */
 const UNIQUE_SHOWN = 10
@@ -63,7 +64,8 @@ export function CommitDialog({
   /** Who must approve before the review can merge. */
   const [reviewers, setReviewers] = useState<string[]>([])
   const [conflicts, setConflicts] = useState<number | null>(null)
-  const [notUpToDate, setNotUpToDate] = useState(false)
+  // Why the publish was refused for being behind Published (null: it wasn't).
+  const [notUpToDate, setNotUpToDate] = useState<NotUpToDateError | null>(null)
   /** A publish refused because values that must be unique are shared: which, said here. */
   const [unique, setUnique] = useState<UniqueViolationError | null>(null)
   /** A review we discovered only when the server rejected our open (the race backstop). */
@@ -111,7 +113,7 @@ export function CommitDialog({
     if (e instanceof MergeConflictError) {
       setConflicts(e.conflicts.length)
     } else if (e instanceof NotUpToDateError) {
-      setNotUpToDate(true)
+      setNotUpToDate(e)
     } else if (e instanceof UniqueViolationError) {
       setUnique(e)
     } else if (e instanceof PullRequestExistsError) {
@@ -124,7 +126,7 @@ export function CommitDialog({
 
   const handleOpenMr = () => {
     setConflicts(null)
-    setNotUpToDate(false)
+    setNotUpToDate(null)
     setUnique(null)
     openMr.mutate(
       {
@@ -150,7 +152,7 @@ export function CommitDialog({
       return
     }
     setConflicts(null)
-    setNotUpToDate(false)
+    setNotUpToDate(null)
     setUnique(null)
     publish.mutate(
       { branchId, message: message || 'Publish draft' },
@@ -339,8 +341,10 @@ export function CommitDialog({
             <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2.5 flex items-start gap-2">
               <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
               <div className="text-[11px] text-ink-muted">
-                <span className="font-medium text-amber-500">Updates are available for this draft.</span>{' '}
-                Use “Get latest updates” on the toolbar to bring in the newest changes, then publish.
+                <span className="font-medium text-amber-500">
+                  {notUpToDate.reason === 'overlap' ? 'Automation changed something you changed.' : 'Updates are available for this draft.'}
+                </span>{' '}
+                {refusalCopy(notUpToDate.reason)} Use “Get latest updates” on the toolbar.
               </div>
             </div>
           )}

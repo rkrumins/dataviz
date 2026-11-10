@@ -7,7 +7,7 @@ import { Plus } from 'lucide-react'
 
 import { Button } from '@/components/ui/Button'
 import { useDebouncedValue } from '@/hooks/useDebouncedValue'
-import { roleVisualFor } from '@/lib/roleVisual'
+import { roleOptionLabel } from '@/lib/roleVisual'
 import { cn } from '@/lib/utils'
 import { accessRequestsService, type RequestableRole } from '@/services/accessRequestsService'
 import { workspaceService } from '@/services/workspaceService'
@@ -71,7 +71,7 @@ export function RoleGrant({ busy, onGrant }: { busy: boolean; onGrant: (workspac
             </select>
             <select aria-label="Role" value={role} onChange={(e) => setRole(e.target.value)} disabled={!workspaceId} className={cn(select, 'min-w-[9rem]')}>
                 <option value="">Choose a role</option>
-                {offered.map((r) => <option key={r.name} value={r.name}>{roleVisualFor(r.name).label}</option>)}
+                {offered.map((r) => <option key={r.name} value={r.name}>{roleOptionLabel(r)}</option>)}
             </select>
             <Button
                 variant="secondary"

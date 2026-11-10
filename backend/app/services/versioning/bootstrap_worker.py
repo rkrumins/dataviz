@@ -96,6 +96,8 @@ from .job_lease import friendly_infra_error as _friendly_infra_error
 from .job_lease import is_transient as _is_transient
 from .merkle import content_hash
 from .merkle_store import MerkleStore
+from . import provenance
+from .provenance import commit_provenance
 from .models import (
     BootstrapNodeORM,
     BranchORM,
@@ -552,6 +554,12 @@ class BootstrapRunner:
 
     # ---------------------------------------------------------------- driver --
     async def run_job(self, lease: Lease) -> Dict[str, object]:
+        """:meth:`_run_job`, as the request that started the enablement: its commit and activity
+        name that key and request (``provenance.bound``)."""
+        with provenance.bound(await provenance.job_provenance(lease.job_id, self._session)):
+            return await self._run_job(lease)
+
+    async def _run_job(self, lease: Lease) -> Dict[str, object]:
         """Drive a claimed job to a terminal state — or to a pause, when the pre-flight found
         duplicate identifiers nobody has decided about. Each phase is individually
         resumable; a raised error marks the job failed with a plain-language reason
@@ -1970,7 +1978,7 @@ async def _enqueue_bootstrap(*, data_source_id: str, workspace_id: str, actor: s
             provider_id=falkor_provider,
             current_phase="counting", idempotency_key=f"bootstrap:{gid}",
             batch_size=config.BOOTSTRAP_SCAN_WIDTH, target_commit_id=commit.id,
-            payload_uri=payload_uri, summary=summary,
+            payload_uri=payload_uri, summary=summary, provenance=provenance.snapshot(),
         )
         s.add(job)
         await s.flush()
@@ -2265,7 +2273,7 @@ async def _ensure_import_commit(s, graph_id: str, main_id: str, actor: str,
     commit = CommitORM(
         graph_id=graph_id, branch_id=main_id, commit_seq=2,
         parent_commit_id=branch.head_commit_id, kind="import",
-        message=message, actor=actor,
+        message=message, actor=actor, **commit_provenance(actor),
         idempotency_key=f"bootstrap:{graph_id}",
     )
     s.add(commit)

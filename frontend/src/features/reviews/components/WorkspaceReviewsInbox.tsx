@@ -191,7 +191,7 @@ export function WorkspaceReviewsInbox({ wsId, initialPrId }: { wsId: string; ini
   const stats = useMemo(() => ({
     open: all.filter(({ pr }) => OPEN_STATUSES.has(pr.status)).length,
     ready: all.filter(({ pr }) => READY_STATUSES.has(pr.status)).length,
-    attention: all.filter(({ pr }) => pr.status === 'conflicts' || (pr.behind && (pr.behindBy ?? 0) > 0)).length,
+    attention: all.filter(({ pr }) => pr.status === 'conflicts' || ((pr.pullRequired ?? pr.behind) && (pr.behindBy ?? 0) > 0)).length,
     mine: all.filter(({ pr }) => raisedByMe(pr)).length,
   }), [all, raisedByMe])
 

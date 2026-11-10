@@ -135,6 +135,9 @@ export interface RequestableRole {
     /** It neither administers the workspace nor lets people in: it may be
      *  asked for, and a service account may hold it. */
     requestable?: boolean
+    /** Its holders — and their API keys — publish the workspace's versioned
+     *  data sources: drafts, reviews, syncs, imports that publish themselves. */
+    publishesData?: boolean
 }
 
 /** How a workspace takes requests: its approvers decide, anyone may join

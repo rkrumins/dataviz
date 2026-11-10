@@ -44,6 +44,12 @@ _WORKSPACE_CHECKED_IN_HANDLER = {
     ("backend.app.api.v1.endpoints.view_membership", "create_view_from_members"),
     ("backend.app.api.v1.endpoints.search_views", "create_view_from_search"),
 }
+#: Resource routes that name their data source in the body, and hold the key
+#: to it in the handler (``api_key_auth.hold_to_data_source``).
+_HELD_IN_HANDLER = {
+    ("backend.app.api.v1.endpoints.versioning", "create_graph"),
+    ("backend.app.api.v1.endpoints.versioning", "resolve_graph_open"),
+}
 
 
 def _routes():
@@ -151,7 +157,7 @@ def test_every_resource_route_is_fenced(level):
         gated = any(getattr(c, "accepts_view_capability", False) for c in _calls(dependant))
         if (_path_names(dependant) & _FENCED_PATH_PARAMS) or gated or (
             names & _FENCING_DEPENDENCIES
-        ):
+        ) or _key(route) in _HELD_IN_HANDLER:
             continue
         unfenced.append(f"{method} {path}")
     assert not unfenced, (
@@ -159,6 +165,18 @@ def test_every_resource_route_is_fenced(level):
         f"resource in the path, put the route behind the capability gate or a resolver "
         f"that holds it (graph_in_workspace, …), or give it another level."
     )
+
+
+def test_a_route_held_in_its_handler_holds_the_key_there():
+    """A route excused from the fence by ``_HELD_IN_HANDLER`` is on the surface, and its handler
+    holds the key to the data source its body names."""
+    import inspect
+
+    routed = {_key(route): route for _m, _p, route, _d in _routes()}
+    for key in _HELD_IN_HANDLER:
+        assert key in SURFACE and key in routed, key
+        source = inspect.getsource(routed[key].endpoint)
+        assert "api_key_auth.hold_to_data_source(request, body.data_source_id, ws_id)" in source, key
 
 
 def test_a_resource_route_taking_a_data_source_pins_it_to_the_view():

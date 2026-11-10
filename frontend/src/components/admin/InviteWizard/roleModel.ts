@@ -65,8 +65,14 @@ export function roleIsPrivileged(perms: string[]): boolean {
     return perms.some(p => p === 'workspace:admin' || p.startsWith('system:'))
 }
 
+/** A role granted in a workspace, never globally: a workspace template, a
+ *  role scoped to one workspace, or any role whose permissions are all about a
+ *  workspace — granted globally its workspace permissions would grant nothing.
+ *  The server decides the same way (``users._is_workspace_role``). */
 export function roleNeedsWorkspace(role: RoleDefinitionResponse): boolean {
-    return _WORKSPACE_TEMPLATE_ROLES.has(role.name as RoleName) || role.scopeType === 'workspace'
+    if (_WORKSPACE_TEMPLATE_ROLES.has(role.name as RoleName) || role.scopeType === 'workspace') return true
+    const perms = role.permissions ?? []
+    return perms.some((p) => p.startsWith('workspace:')) && !perms.some((p) => p.startsWith('system:'))
 }
 
 // ── Types & constants ────────────────────────────────────────────────

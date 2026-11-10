@@ -467,6 +467,9 @@ function AboutAccount({ account, central, busy, change, reload }: {
                             <span>
                                 <span className="font-semibold text-ink">{r.workspaceName ?? r.workspaceId}</span> · {roleVisualFor(r.role).label}
                                 {r.expiresAt && <> · until {new Date(r.expiresAt).toLocaleDateString()}</>}
+                                {r.publishesData && (
+                                    <> · <span className="font-semibold text-emerald-700 dark:text-emerald-400">publishes data</span></>
+                                )}
                             </span>
                             {r.expiresAt && can.request && (keeping.has(r.bindingId) ? (
                                 <span className="px-1.5 text-ink-muted">Asked to keep</span>
@@ -494,6 +497,13 @@ function AboutAccount({ account, central, busy, change, reload }: {
                         </li>
                     ))}
                 </ul>
+            )}
+            {account.roles.length > 0 && !account.roles.some((r) => r.publishesData) && (
+                <p className="text-xs text-ink-muted mb-3">
+                    Its keys can import into drafts where it changes data, but can’t publish data anywhere: publishing a
+                    draft, merging a review, syncing a snapshot or an import that publishes itself needs a role that
+                    publishes, such as Workspace publisher.
+                </p>
             )}
             {account.requests.length > 0 && (
                 <ul className="space-y-1.5 mb-3" aria-label="Waiting on a workspace">

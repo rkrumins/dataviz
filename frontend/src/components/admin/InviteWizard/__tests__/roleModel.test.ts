@@ -36,3 +36,23 @@ describe('workspace_publisher', () => {
         expect(roleIsPrivileged(PUBLISHER_GRANTS)).toBe(false)
     })
 })
+
+const role = (name: string, permissions: string[]) => ({
+    name, description: '', permissions, isSystem: false, scopeType: 'global', scopeId: null,
+}) as unknown as RoleDefinitionResponse
+
+describe('a role granted in a workspace', () => {
+    it('is Data engineer, whose global binding would grant nothing', () => {
+        expect(roleNeedsWorkspace(role('workspace_data_engineer', ['workspace:datasource:publish']))).toBe(true)
+    })
+
+    it('is any custom role made only of workspace permissions', () => {
+        expect(roleNeedsWorkspace(role('pipeline_ops', ['workspace:datasource:manage', 'workspace:datasource:read'])))
+            .toBe(true)
+    })
+
+    it('is not a custom role with a platform permission, which means something globally', () => {
+        expect(roleNeedsWorkspace(role('auditor_plus', ['system:audit:read', 'workspace:view:read']))).toBe(false)
+        expect(roleNeedsWorkspace(role('empty', []))).toBe(false)
+    })
+})

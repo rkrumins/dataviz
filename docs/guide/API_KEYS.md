@@ -6,7 +6,8 @@ An API key lets a script or a service call the API **as you**: it reads and
 changes views and data the way you could yourself, and is recorded as you in
 every audit trail. You choose how much of that it gets — some workspaces,
 views or data sources, and read or write — and it can never do more than you
-can. If your own access shrinks, so does the key's, within 30 seconds.
+can. If your own access shrinks, so does the key's, within 30 seconds — and a
+role you are given reaches your keys as fast.
 
 > **Note:** *The one-sentence model* — a key is your access, narrowed to what
 > you chose, checked afresh on every request.
@@ -34,8 +35,8 @@ changed on the way, and **Back** never loses what you filled in.
    | Starting point | Views | Data | Reach | Expires |
    | --- | --- | --- | --- | --- |
    | **Read data for reporting** | read | read | what you pick | 90 days |
-   | **Load data and signal refreshes** | — | read & write | what you pick | 30 days |
-   | **Publish views from CI** | read & write, publish | read | whole workspaces | 90 days |
+   | **Import and publish data (connectors)** | — | read & write | what you pick | 30 days |
+   | **Publish views from CI** | read & write, publish views | read | whole workspaces | 90 days |
    | **Custom** | read | — | what you pick | 30 days |
 
    A starting point you can't give a key — you don't hold that access in any
@@ -50,8 +51,11 @@ changed on the way, and **Back** never loses what you filled in.
 3. **Permissions** — for **Views** and for **Data**: no access, read, or read
    & write. Each level says what a script holding the key could do. **Publish
    views to everyone** needs read & write on views. It is about views only: a
-   **Data: read & write** key publishes data — a draft, a merge, an import
-   that publishes itself — wherever *you* hold publish. When the key asks for more
+   **Data: read & write** key publishes data — a draft, a merge, a snapshot
+   sync, an import that publishes itself — wherever *you* hold publish: the
+   **Publisher**, **Data engineer** or **Workspace admin** role there. A
+   **Workspace member**'s key imports into drafts and publishes nothing. The step names any workspace where the key
+   would import into drafts but can't publish, because you don't. When the key asks for more
    than you have on something — write access to a view you can only read —
    the step says so: the key will only read it.
 4. **Safety** — when it expires (the date is shown; **Never** only where your
@@ -156,9 +160,11 @@ the day comes.
 Keys are for the data plane: reading and changing views and the data behind
 them, proposing and publishing changes, and following what changed. People and
 access, sharing, settings and switches, layout templates and saved filters are
-not available to keys, nor importing a view file, turning version control on,
-creating or forking a graph, merging a fork's review, or reverting, restoring
-or syncing a graph. The API reference marks every operation a key
+not available to keys, nor importing a view file, making a blank model,
+forking a graph, merging a fork's review, or reverting, restoring or freezing a
+graph. Setting up the graph an import goes into is: turning version control on
+for a data source, making its graph, and opening a draft on it, with what a
+person needs for each (**Data: read & write**). The API reference marks every operation a key
 may call — see [Find the endpoint you need](/docs/api-guide#find-the-endpoint-you-need).
 
 | To… | Use |
@@ -169,7 +175,9 @@ may call — see [Find the endpoint you need](/docs/api-guide#find-the-endpoint-
 | Read or change a data source's graph | `/api/v1/{workspace}/graph/…?dataSourceId={id}` |
 | List a workspace's graphs, and which are versioned | `GET /api/v1/admin/workspaces/{workspace}/data-sources?include=versioning` — a key covering the whole workspace |
 | Propose a change | open a draft, stage the change, open a merge request (`/versioning/…`) |
-| Publish a change | publish the draft, merge its merge request, or have an import publish itself (`autoPublish`) — only where you hold **publish** in that workspace (a Publisher); a key with **Data: read & write** can then do it as you. Otherwise a person with publish merges the request |
+| Publish a change | publish the draft, merge its merge request, sync a snapshot into the published version (`POST /versioning/graphs/{id}/sync`), or have an import publish itself (`autoPublish`) — only where you hold **publish** in that workspace (a Publisher); a key with **Data: read & write** can then do it as you. Otherwise a person with publish merges the request |
+| Publish a draft someone else opened | open a merge request on it, and merge that: a direct publish is for the draft's owner or a maintainer (`hint: merge_request` on the 403 says so), while anyone who may publish there merges its review |
+| See what the key can do now | `GET /api/v1/api-keys/self`, with the key: its `effectiveAccess`, per workspace — `publishData` included |
 | Follow what changed | the view's activity (`GET /views/{id}/activity`), the commit log and watermark of its graph (`/versioning/graphs/{id}/commits`, `/watermark` — see [Graph Metadata & History API](/docs/graph-metadata-api)), a data source's jobs and their event stream |
 
 Searches, traces and exports are reads made with `POST`: a read-only key may
@@ -206,6 +214,8 @@ checked again each time.
 | 403 | `api_key_out_of_scope` | The request reaches past what the key was limited to. |
 | 403 | `api_key_cannot_publish` | A key without **Publish views to everyone** tried to create a view published to everyone. |
 | 403 | `missing_permission` | The request needs the permission named in `permission`, and the key doesn't hold it: whoever it acts as lacks it, or the key wasn't given it. A key never adds to its owner's access. |
+| 403 | `publish_required` (in `detail.code`) | Publishing data, and whoever the key acts as isn't a Publisher in that workspace. No key setting changes this: give that person or service account the Workspace publisher role there, or import into a draft and have someone who can publish it. |
+| 403 | `not_draft_owner`, `not_owner_or_member` (in `detail.code`) | A direct publish of a draft someone else owns. Open a merge request on it instead (`detail.hint` is `merge_request`): anyone who may publish there can merge it. |
 | 403 | `csrf_failed` | A change was sent with an `Origin` or `Referer` from a site the deployment doesn't trust. Scripts send neither. |
 | 429 | `rate_limited` | More than 1,200 requests a minute with this key, or more than 120 bad keys a minute from this address. Wait for `Retry-After`. |
 | 503 | `api_keys_unavailable` | The key could not be checked just now. Retry — it says nothing about the key. It lasts while your administrator has authorization enforcement switched off. |

@@ -496,6 +496,7 @@ class _Unresolved(tuple):
 UNRESOLVED = _Unresolved()
 
 
+
 class FalkorProjector:
     """Projects committed `main` state of a graph into its FalkorDB graph."""
 
@@ -517,6 +518,9 @@ class FalkorProjector:
         self._session = session_factory
         self._svc = GraphVersioningService(session_factory)
         self._batch = batch_size or config.PROJECTION_BATCH_SIZE
+        # When each graph's whole-graph verify last found the stores agree (monotonic): what spaces
+        # the verify out on a busy graph (PROJECTION_VERIFY_INTERVAL_SECS).
+        self._verified_at: Dict[str, float] = {}
         # Ontology (containment, lineage) edge-type sets for incremental :AGGREGATED rollup
         # maintenance — injected from the app layer (like target_resolver) so this package
         # stays decoupled from the management DB. None ⇒ rollups are not maintained here.
@@ -871,13 +875,19 @@ class FalkorProjector:
             except Exception:                            # pragma: no cover - infra
                 logger.debug("rollup health unreadable for %s", graph_id, exc_info=True)
             heal_outcome: Dict[str, object] = {}
+            verify = config.PROJECTION_VERIFY_ENABLED and self._verify_due(graph_id, from_seq, dropped, drift)
             verify_error, healed = (
                 await self._verify_and_heal(client, graph_id, main_id, from_seq, to_seq,
                                             level_map=level_map, heal_outcome=heal_outcome,
                                             rollups_moved=window_rollups_applied, owned=owned,
                                             provider_id=provider_id, dropped=dropped, drift=drift)
-                if config.PROJECTION_VERIFY_ENABLED else (None, False)
+                if verify else (None, False)
             )
+            if verify:                  # a clean verify spaces out the next; any other asks for one
+                if verify_error is None and not healed:
+                    self._verified_at[graph_id] = time.monotonic()
+                else:
+                    self._verified_at.pop(graph_id, None)
 
             # Verified faithful → publish: advance the watermark so reads flip to FalkorDB. A reseed
             # that did NOT match committed main (a dropped/mistyped edge, a drifted field — the
@@ -2737,6 +2747,15 @@ class FalkorProjector:
                          params={"batch": chunk})
                 if progress:
                     await progress(len(chunk))
+
+    def _verify_due(self, graph_id: str, from_seq: int, dropped: int, drift) -> bool:
+        """Whether this pass counts the whole graph in both stores (``PROJECTION_VERIFY_INTERVAL_SECS``):
+        always for a full seed, a pass that dropped a write, a key with drift on record, and a graph
+        not verified clean within the interval."""
+        if from_seq <= 0 or dropped or drift or config.PROJECTION_VERIFY_INTERVAL_SECS <= 0:
+            return True
+        last = self._verified_at.get(graph_id)
+        return last is None or time.monotonic() - last >= config.PROJECTION_VERIFY_INTERVAL_SECS
 
     async def _verify_and_heal(
         self, client, graph_id, main_id, from_seq, to_seq, level_map=None,

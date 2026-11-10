@@ -8,6 +8,12 @@
  *  • Whole graph — the graph's full `main` log (every merge / import / genesis).
  * Each commit is expandable (lazy per-commit diff) via the shared {@link CommitRow}.
  *
+ * Everyone, People or Automation (doc 19 §3.7): history shows people's changes and automation's
+ * apart, or together. Automation is a service account, the platform, or anyone's API key. A run
+ * of one automation's commits on one day — a connector syncing every few minutes — is ONE row
+ * ("Snowflake sync · 42 commits · 1,240 changes · 09:00–11:30"), opened to its commits on demand,
+ * so a person's change is never lost among a script's.
+ *
  * Newest first, a page at a time — paged by the oldest revision listed (`before`), so a walk never
  * skips or repeats one while new ones land, and never stops at a cap — grouped by month and day in
  * the reader's time zone, and drawn a window at a time: years of revisions scroll as lightly as ten.
@@ -22,7 +28,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ComponentType } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { useQueryClient } from '@tanstack/react-query'
-import { Eye, Layers, GitBranch, GitCompareArrows, X } from 'lucide-react'
+import { Bot, ChevronRight, Eye, Layers, GitBranch, GitCompareArrows, UserRound, Users, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useFeature } from '@/store/features'
 import { usePermission } from '@/store/auth'
@@ -34,7 +40,11 @@ import * as api from '@/services/versioningApiService'
 import type { CompareRequest } from '@/store/versioningPanelStore'
 import { VERSIONING_KEYS, useHistoryMonths, useHistoryPages, type HistoryScope } from '../hooks/useVersioning'
 import { useRevisionViewer } from '../hooks/useRevisionViewer'
-import { CommitRow, type RevisionRowActions } from './CommitRow'
+import { HoverTip } from '@/components/ui/HoverTip'
+import { actorName } from '../model/branchVocab'
+import { runKey } from '../model/provenance'
+import { CommitProvenance } from './CommitProvenance'
+import { CommitRow, StatChips, type RevisionRowActions } from './CommitRow'
 import { HistoryMonthPicker } from './HistoryMonthPicker'
 import { RevisionCompare } from './RevisionCompare'
 import { RevertDialog, RestoreDialog } from './RollbackDialogs'
@@ -42,27 +52,38 @@ import { RevertDialog, RestoreDialog } from './RollbackDialogs'
 type Scope = 'draft' | 'view' | 'graph'
 type Commit = Record<string, unknown>
 
+type Origin = api.CommitOrigin | null
+
 type Item =
   | { kind: 'month'; key: string; month: string; label: string }
   | { kind: 'day'; key: string; label: string }
-  | { kind: 'commit'; key: string; commit: Commit }
+  | { kind: 'commit'; key: string; commit: Commit; nested?: boolean }
+  | { kind: 'run'; key: string; commits: Commit[]; expanded: boolean }
   | { kind: 'end'; key: 'end' }
 
 const pad = (n: number) => String(n).padStart(2, '0')
 
-/** The rows as drawn: each month under a header, each day under a label, in the reader's time zone. */
-function itemsOf(commits: Commit[], now: Date): Item[] {
+/** A run is at least this many commits of one automation in a row, on one day. */
+const RUN_MIN = 2
+
+/** The rows as drawn: each month under a header, each day under a label, in the reader's time zone;
+ *  a run of one automation's commits on a day is one row, its commits listed under it when opened. */
+function itemsOf(commits: Commit[], now: Date, openRuns: ReadonlySet<string> = new Set()): Item[] {
   const out: Item[] = []
   let month = ''
   let day = ''
   const today = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`
   const y = new Date(now.getTime() - 86_400_000)
   const yesterday = `${y.getFullYear()}-${pad(y.getMonth() + 1)}-${pad(y.getDate())}`
-  for (const c of commits) {
+  const dayOf = (c: Commit) => {
     const at = new Date(String(c.created_at))
     const valid = !Number.isNaN(at.getTime())
     const m = valid ? `${at.getFullYear()}-${pad(at.getMonth() + 1)}` : 'unknown'
-    const d = valid ? `${m}-${pad(at.getDate())}` : 'unknown'
+    return { at, valid, m, d: valid ? `${m}-${pad(at.getDate())}` : 'unknown' }
+  }
+  for (let i = 0; i < commits.length;) {
+    const c = commits[i]
+    const { at, valid, m, d } = dayOf(c)
     if (m !== month) {
       month = m
       day = ''
@@ -75,12 +96,36 @@ function itemsOf(commits: Commit[], now: Date): Item[] {
         label: d === today ? 'Today' : d === yesterday ? 'Yesterday'
           : valid ? at.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' }) : '' })
     }
+    const run = runKey(c)
+    let j = i + 1
+    while (run && j < commits.length && runKey(commits[j]) === run && dayOf(commits[j]).d === d) j++
+    if (run && j - i >= RUN_MIN) {
+      const key = `r:${String(c.commit_id)}`
+      const expanded = openRuns.has(key)
+      out.push({ kind: 'run', key, commits: commits.slice(i, j), expanded })
+      if (expanded) {
+        for (const rc of commits.slice(i, j)) {
+          out.push({ kind: 'commit', key: `c:${String(rc.commit_id)}`, commit: rc, nested: true })
+        }
+      }
+      i = j
+      continue
+    }
     out.push({ kind: 'commit', key: `c:${String(c.commit_id)}`, commit: c })
+    i++
   }
   return out
 }
 
-const ESTIMATE: Record<Item['kind'], number> = { month: 36, day: 26, commit: 58, end: 64 }
+const ESTIMATE: Record<Item['kind'], number> = { month: 36, day: 26, commit: 58, run: 70, end: 64 }
+
+const ORIGINS: Array<{ id: Origin; label: string; Icon: ComponentType<{ className?: string }>; tip: string; detail: string }> = [
+  { id: null, label: 'Everyone', Icon: Users, tip: 'Every change', detail: 'People’s and automation’s, together.' },
+  { id: 'people', label: 'People', Icon: UserRound, tip: 'Changes people made by hand',
+    detail: 'In the app, without an API key.' },
+  { id: 'automation', label: 'Automation', Icon: Bot, tip: 'Changes automation made',
+    detail: 'Service accounts, the platform, and anything made with an API key.' },
+]
 
 export function ViewHistoryTimeline({
   wsId,
@@ -129,6 +174,8 @@ export function ViewHistoryTimeline({
 }) {
   const onDraft = !!branchId
   const [scope, setScope] = useState<Scope>(onDraft ? 'draft' : viewId ? 'view' : 'graph')
+  const [origin, setOrigin] = useState<Origin>(null)
+  const [openRuns, setOpenRuns] = useState<ReadonlySet<string>>(() => new Set())
   const [expandedId, setExpandedId] = useState<string | null>(null)
   const { notify } = useAppNotifications()
   const qc = useQueryClient()
@@ -164,7 +211,7 @@ export function ViewHistoryTimeline({
 
   const historyScope: HistoryScope = scope === 'draft' && branchId ? { kind: 'draft', branchId }
     : scope === 'view' && viewId ? { kind: 'view', viewId } : { kind: 'graph' }
-  const pages = useHistoryPages(wsId, graphId, historyScope)
+  const pages = useHistoryPages(wsId, graphId, historyScope, true, origin)
   const monthsQ = useHistoryMonths(wsId, graphId, scope === 'view' ? viewId : null, scope !== 'draft')
   const resolvedHead = useBranchStore((s) => s.mainHeadCommitSeq)
   const headSeq = monthsQ.data?.headSeq ?? givenHead ?? resolvedHead
@@ -172,12 +219,20 @@ export function ViewHistoryTimeline({
   const userNames = useMemo(
     () => Object.assign({}, ...(pages.data?.pages ?? []).map((p) => p.userNames ?? {})) as Record<string, string>,
     [pages.data])
+  const apiKeyNames = useMemo(
+    () => Object.assign({}, ...(pages.data?.pages ?? []).map((p) => p.apiKeyNames ?? {})) as Record<string, string>,
+    [pages.data])
   const items = useMemo(() => {
-    const out = itemsOf(commits, new Date())
+    const out = itemsOf(commits, new Date(), openRuns)
     if (commits.length > 0 && !pages.hasNextPage) out.push({ kind: 'end', key: 'end' })
     return out
-  }, [commits, pages.hasNextPage])
+  }, [commits, pages.hasNextPage, openRuns])
   const toggle = useCallback((id: string) => setExpandedId((prev) => (prev === id ? null : id)), [])
+  const toggleRun = useCallback((key: string) => setOpenRuns((prev) => {
+    const next = new Set(prev)
+    if (!next.delete(key)) next.add(key)
+    return next
+  }), [])
 
   const scrollRef = useRef<HTMLDivElement>(null)
   const virtualizer = useVirtualizer({
@@ -284,14 +339,21 @@ export function ViewHistoryTimeline({
   ]
   const visible = scopeBtns.filter((b) => b.show)
 
+  const where = scope === 'draft' ? 'this draft' : scope === 'view' ? 'this view' : 'this graph'
   const emptyMsg =
-    scope === 'draft' ? 'No commits on this draft yet — make a change and save it.'
-      : scope === 'graph' ? 'No commits yet.'
-        : 'No changes from this view yet.'
+    origin === 'automation' ? `No automation has changed ${where} yet.`
+      : origin === 'people' ? `No one has changed ${where} by hand yet.`
+        : scope === 'draft' ? 'No commits on this draft yet — make a change and save it.'
+          : scope === 'graph' ? 'No commits yet.'
+            : 'No changes from this view yet.'
   const emptyHint =
-    scope === 'view'
-      ? 'Publishes made from other views on this data source appear under Whole graph.'
-      : null
+    origin === 'automation'
+      ? 'Changes made by service accounts, by the platform, or with an API key show here.'
+      : origin === 'people'
+        ? 'Changes people make in the app show here. Automation’s are under Automation.'
+        : scope === 'view'
+          ? 'Publishes made from other views on this data source appear under Whole graph.'
+          : null
 
   if (compare) {
     return (
@@ -351,6 +413,28 @@ export function ViewHistoryTimeline({
             ))}
           </div>
         )}
+        <div role="radiogroup" aria-label="Whose changes"
+          className="inline-flex rounded-lg border border-glass-border overflow-hidden text-xs">
+          {ORIGINS.map((o, i) => (
+            <HoverTip key={o.label} className="inline-flex" label={o.tip} detail={o.detail}>
+              <button
+                role="radio"
+                aria-checked={origin === o.id}
+                onClick={() => { setOrigin(o.id); setExpandedId(null); setOpenRuns(new Set()) }}
+                className={cn(
+                  'px-2.5 py-1 font-medium inline-flex items-center gap-1',
+                  i > 0 && 'border-l border-glass-border',
+                  origin === o.id
+                    ? o.id === 'automation' ? 'bg-violet-500/15 text-violet-700 dark:text-violet-300'
+                      : 'bg-accent-lineage/15 text-accent-lineage'
+                    : 'text-ink-muted hover:bg-canvas-overlay',
+                )}
+              >
+                <o.Icon className="w-3.5 h-3.5" /> {o.label}
+              </button>
+            </HoverTip>
+          ))}
+        </div>
         {revisionViewer && scope !== 'draft' && (
           <div className="ml-auto flex items-center gap-1.5">
             <HistoryMonthPicker
@@ -365,6 +449,26 @@ export function ViewHistoryTimeline({
           </div>
         )}
       </div>
+
+      {origin && (
+        <div className={cn(
+          'shrink-0 flex items-center gap-2 rounded-xl border px-3 py-2 text-[12px] animate-fade-in',
+          origin === 'automation' ? 'border-violet-500/25 bg-violet-500/[0.06]' : 'border-accent-lineage/25 bg-accent-lineage/[0.05]',
+        )}>
+          {origin === 'automation'
+            ? <Bot className="w-4 h-4 shrink-0 text-violet-600 dark:text-violet-300" />
+            : <UserRound className="w-4 h-4 shrink-0 text-accent-lineage" />}
+          <span className="min-w-0 flex-1 text-ink">
+            {origin === 'automation'
+              ? <>Only <span className="font-semibold">automation</span> — service accounts, the platform, and changes made with an API key.</>
+              : <>Only <span className="font-semibold">people</span> — changes made by hand in the app.</>}
+          </span>
+          <button onClick={() => { setOrigin(null); setOpenRuns(new Set()) }}
+            className="shrink-0 text-[11px] font-semibold text-ink-muted hover:text-ink hover:underline">
+            Show everyone
+          </button>
+        </div>
+      )}
 
       {pickingFrom != null && (
         <div className="shrink-0 flex items-center gap-2 rounded-xl border border-indigo-500/25 bg-indigo-500/[0.06] px-3 py-2 text-[12px] animate-fade-in">
@@ -398,7 +502,7 @@ export function ViewHistoryTimeline({
           {currentMonth && (
             <div className="sticky top-0 z-10 h-0">
               <div className="bg-canvas">
-                <MonthHeader label={currentMonth.label} count={monthCounts.get(currentMonth.month)} />
+                <MonthHeader label={currentMonth.label} count={origin ? undefined : monthCounts.get(currentMonth.month)} />
               </div>
             </div>
           )}
@@ -415,21 +519,25 @@ export function ViewHistoryTimeline({
                   style={{ transform: `translateY(${v.start}px)` }}
                 >
                   {it.kind === 'month' ? (
-                    <MonthHeader label={it.label} count={monthCounts.get(it.month)} />
+                    <MonthHeader label={it.label} count={origin ? undefined : monthCounts.get(it.month)} />
                   ) : it.kind === 'day' ? (
                     <p className="ml-1.5 pl-4 border-l border-glass-border pt-2 pb-1 text-[10px] font-semibold uppercase tracking-wider text-ink-muted/70">
                       {it.label}
                     </p>
                   ) : it.kind === 'end' ? (
                     <p className="ml-1.5 pl-4 pt-3 pb-6 text-[11px] text-ink-muted/70">The beginning of this history.</p>
+                  ) : it.kind === 'run' ? (
+                    <AutomationRun run={it} userNames={userNames} apiKeyNames={apiKeyNames} onToggle={toggleRun} />
                   ) : (
                     <TimelineCommit
                       commit={it.commit}
+                      nested={it.nested}
                       wsId={wsId}
                       graphId={graphId}
                       viewId={viewId}
                       scope={scope}
                       userNames={userNames}
+                      apiKeyNames={apiKeyNames}
                       expanded={expandedId === String(it.commit.commit_id)}
                       onToggle={toggle}
                       onRevert={canRollback && scope !== 'draft' ? setRevertTarget : undefined}
@@ -491,17 +599,79 @@ function MonthHeader({ label, count }: { label: string; count?: number }) {
   )
 }
 
+const clock = (c: Commit) => {
+  const at = new Date(String(c.created_at))
+  return Number.isNaN(at.getTime()) ? '' : at.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
+}
+
+/** A run of one automation's commits on one day, as one row: who, how many, how much, when. */
+function AutomationRun({ run, userNames, apiKeyNames, onToggle }: {
+  run: { key: string; commits: Commit[]; expanded: boolean }
+  userNames: Record<string, string>
+  apiKeyNames: Record<string, string>
+  onToggle: (key: string) => void
+}) {
+  const newest = run.commits[0]
+  const oldest = run.commits[run.commits.length - 1]
+  const totals = run.commits.reduce<Record<string, number>>((acc, c) => {
+    const st = (c.stats ?? {}) as Record<string, unknown>
+    for (const op of ['create', 'update', 'delete']) acc[op] += typeof st[op] === 'number' ? (st[op] as number) : 0
+    return acc
+  }, { create: 0, update: 0, delete: 0 })
+  const changes = totals.create + totals.update + totals.delete
+  const who = actorName(typeof newest.actor === 'string' ? newest.actor : null, userNames)
+  const from = clock(oldest)
+  const to = clock(newest)
+  return (
+    <div className="ml-1.5 pl-4 border-l border-glass-border py-1.5">
+      <div className="relative">
+        <span className="absolute -left-[1.36rem] top-3.5 w-2.5 h-2.5 rounded-full bg-violet-500 ring-2 ring-canvas-elevated" />
+        <button
+          onClick={() => onToggle(run.key)}
+          aria-expanded={run.expanded}
+          className="w-full text-left group rounded-xl border border-violet-500/20 bg-gradient-to-r from-violet-500/[0.07] via-violet-500/[0.03] to-transparent px-3 py-2 hover:border-violet-500/40 transition-colors"
+        >
+          <div className="flex items-start gap-2.5">
+            <span className="mt-0.5 w-7 h-7 shrink-0 rounded-lg bg-violet-500/15 ring-1 ring-inset ring-violet-500/20 grid place-items-center">
+              <Bot className="w-4 h-4 text-violet-600 dark:text-violet-300" />
+            </span>
+            <div className="min-w-0 flex-1">
+              <p className="text-sm text-ink leading-tight flex items-center gap-1.5 min-w-0">
+                <ChevronRight className={cn('w-3.5 h-3.5 text-ink-muted/60 shrink-0 transition-transform', run.expanded && 'rotate-90')} />
+                <span className="truncate font-medium">{who}</span>
+                <span className="shrink-0 text-ink-muted">· {run.commits.length} commits</span>
+              </p>
+              <p className="text-[11px] text-ink-muted mt-1 flex items-center gap-1.5 flex-wrap">
+                <span className="tabular-nums">{changes.toLocaleString()} {changes === 1 ? 'change' : 'changes'}</span>
+                {from && to && <><span>·</span><span className="tabular-nums">{from === to ? from : `${from}–${to}`}</span></>}
+                <CommitProvenance commit={newest} apiKeyNames={apiKeyNames} />
+              </p>
+            </div>
+            <StatChips stats={totals} />
+          </div>
+          <p className="mt-1.5 pl-[2.6rem] text-[10px] text-ink-muted/80">
+            {run.expanded ? 'Hide the commits in this run' : 'Grouped so people’s changes stay easy to find — open to see each commit'}
+          </p>
+        </button>
+      </div>
+    </div>
+  )
+}
+
 /** One revision on the timeline's line — or, while another is being compared with, a target. */
 function TimelineCommit({
-  commit, wsId, graphId, viewId, scope, userNames, expanded, onToggle, onRevert, onRestore, revision,
-  pickingFrom, onPicked,
+  commit, nested = false, wsId, graphId, viewId, scope, userNames, apiKeyNames, expanded, onToggle,
+  onRevert, onRestore, revision, pickingFrom, onPicked,
 }: {
   commit: Commit
+  /** One of an opened automation run's commits, drawn under it. */
+  nested?: boolean
   wsId: string
   graphId: string
   viewId?: string | null
   scope: Scope
   userNames: Record<string, string>
+  apiKeyNames?: Record<string, string>
   expanded: boolean
   onToggle: (id: string) => void
   onRevert?: (c: Commit) => void
@@ -518,7 +688,7 @@ function TimelineCommit({
   const pickable = pickingFrom != null && seq != null && seq !== pickingFrom
   return (
     <div className={cn('ml-1.5 pl-4 border-l border-glass-border py-1.5', pickable && 'group/pick')}>
-      <div className="relative">
+      <div className={cn('relative', nested && 'ml-5 pl-4 border-l border-dashed border-violet-500/30')}>
         <CommitRow
           asItem="div"
           commit={commit}
@@ -530,6 +700,8 @@ function TimelineCommit({
           allowSquashDrilldown={scope !== 'draft'}
           published={scope !== 'draft'}
           userNames={userNames}
+          apiKeyNames={apiKeyNames}
+          inRun={nested}
           expanded={expanded}
           onToggle={onToggle}
           onRevert={onRevert}

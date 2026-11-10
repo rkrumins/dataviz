@@ -69,8 +69,13 @@ and choose at least one manager. Its access then comes from the workspaces it
 works in, [as a person's does](#for-workspaces); you can also give it a role
 yourself: open it, and pick a workspace and a role. A service account can hold
 any workspace role that neither administers the workspace nor lets people in —
-Workspace viewer to read, Workspace member or Data engineer to change data,
-but never Workspace admin or Workspace steward — and never a place in a team.
+Workspace viewer to read, Workspace member to change data in drafts, Workspace
+publisher or Data engineer to publish it too, but never Workspace admin or
+Workspace steward, nor a role that also carries platform permissions — and
+never a place in a team. Its page says, role by role, where it publishes data,
+and when its keys can publish data nowhere. A role it holds can't later be
+edited to administer a workspace or let people in: it would lose what the role
+gives it.
 Of the platform roles it holds only one, which lets it
 [read every workspace](#reading-every-workspace). Its keys pick a new role up
 within half a minute.
@@ -329,13 +334,19 @@ after its maker stops managing the account. Both answer `403` with
 `"type": "access_denied"`: `person_required` for the account's key,
 `self_review` for its manager or a key's maker.
 
-Given **Publisher** (or **Data engineer**) in a workspace, its keys may change
-a version-controlled data source's Published version there — a bulk ingest, an
-edit with no draft, publishing a draft, merging a draft's merge request, or an
-import that publishes itself (`autoPublish`) — since that check reads the
-account's own roles. Give an account Publisher only where its automation should
-publish with no person in the loop. Like every key, they never merge a fork's
-review, revert, restore or sync; and where a data source's review policy says
+Given **Publisher** or **Data engineer** (which publishes by default) in a workspace — or a custom
+role that lists publish — its keys with
+**Data: read & write** may change a version-controlled data source's Published
+version there — a bulk ingest, an edit with no draft, publishing a draft,
+merging a draft's merge request, syncing a snapshot, or an import that
+publishes itself (`autoPublish`) — since that check reads the account's own
+roles. A Member's keys import into drafts and publish nothing (`403
+publish_required`). Its keys may also set up the graph they import into:
+turn version control on for a data source, make its graph and open a draft on
+it. Give an account Publisher only where its automation should publish with no
+person in the loop. Like every key, they never merge a fork's review, revert,
+restore or freeze; a draft someone else opened is landed through its merge
+request, never published directly; and where a data source's review policy says
 nobody merges their own changes, a person merges what the account proposes.
 See [Building a Connector](/docs/connector-guide).
 

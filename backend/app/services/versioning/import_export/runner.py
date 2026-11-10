@@ -19,7 +19,7 @@ from typing import Callable, Dict, Optional, Sequence
 from sqlalchemy import and_, exists, or_, select, update
 from sqlalchemy.orm import aliased
 
-from .. import config, db, job_lease
+from .. import config, db, job_lease, provenance
 from ..job_lease import INSPECT_TYPES, QUEUED, Lease  # QUEUED: callers import it from here
 from ..models import JobORM
 
@@ -66,7 +66,9 @@ class TransferRunner:
         if entry is None:
             await lease.fail(f"this worker doesn't run {lease.job_type!r} jobs")
             return
-        await getattr(ie, entry)(lease.job_id, lease)
+        # As the request that queued it: its commits and activity events name that key and request.
+        with provenance.bound(await provenance.job_provenance(lease.job_id, self._session)):
+            await getattr(ie, entry)(lease.job_id, lease)
 
 
 def _waited():

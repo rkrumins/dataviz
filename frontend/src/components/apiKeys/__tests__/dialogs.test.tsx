@@ -34,7 +34,7 @@ vi.mock('@/services/authService', async (importOriginal) => {
 beforeEach(() => {
     vi.clearAllMocks()
     svc.rotate.mockResolvedValue({ key: apiKey({ id: 'apk_2' }), token: 'nxpat_NEW_TOKEN' })
-    svc.get.mockResolvedValue(detail({ effectiveAccess: access({ workspaces: [{ id: 'ws1', name: 'Finance', views: 'read', data: 'write', publish: false }] }) }))
+    svc.get.mockResolvedValue(detail({ effectiveAccess: access({ workspaces: [{ id: 'ws1', name: 'Finance', views: 'read', data: 'write', publish: false, publishData: false }] }) }))
 })
 
 function rotateDialog(key: ApiKey, over = {}) {

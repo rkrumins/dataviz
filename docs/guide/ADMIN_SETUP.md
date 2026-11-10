@@ -130,7 +130,8 @@ have one yet.
    **Next**.
 7. **Schema Review:** check how well each layer covers its graph. Gaps are
    advisory — unmapped types are ignored by aggregation and drawn with default
-   styling. Only a layer with no lineage relationship at all stops you here.
+   styling. A layer with no lineage relationship at all is a warning too: the
+   source is onboarded with no rollups, which suits a containment-only graph.
    Select **Next**.
 8. **Review:** check the summary and select **Complete Setup**.
 

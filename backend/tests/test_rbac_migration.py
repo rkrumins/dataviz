@@ -560,6 +560,39 @@ def test_the_org_reader_role_reaches_an_existing_database():
     assert SYSTEM_ROLE_DEFAULTS[role].permissions == SERVICE_ACCOUNT_GLOBAL_PERMISSIONS
 
 
+def test_who_publishes_data_is_said_in_the_role_descriptions_everywhere():
+    """Data engineer publishes versioned data sources by default and Workspace member doesn't — on
+    a fresh install (the seed), a migrated database (20261017's grant) and after "Reset to default"
+    (the defaults) — and each role's description, what a role picker shows, says so. The
+    description migration moves only a description still at its seeded words, and the seed and
+    the defaults hold its new words."""
+    from backend.app.config import rbac_seed
+    from backend.common.role_defaults import SYSTEM_ROLE_DEFAULTS
+
+    publish = "workspace:datasource:publish"
+    grants = set(rbac_seed.ROLE_GRANTS)
+    granted = _load_migration(_DATASOURCE_PUBLISH_MIGRATION_PATH, "_ds_publish_for_words")
+    for role, publishes in (("workspace_data_engineer", True), ("workspace_publisher", True),
+                            ("workspace_member", False)):
+        assert ((role, publish) in grants) is publishes, role
+        assert (publish in SYSTEM_ROLE_DEFAULTS[role].permissions) is publishes, role
+        assert ((role, publish) in set(granted._NEW_ROLE_PERMISSIONS)) is publishes, role
+
+    path = _VERSIONS_DIR / "20261109_1200_publish_words.py"
+    assert path.exists(), f"missing migration: {path}"
+    mod = _load_migration(path, "_publish_words_migration")
+    assert (mod.revision, mod.down_revision) == (
+        "20261109_1200_publish_words", "20261103_1200_subset_views",
+    )
+    assert set(mod.DESCRIPTIONS) == {"workspace_data_engineer", "workspace_member"}
+    seed = {r["name"]: r["description"] for r in rbac_seed.SYSTEM_ROLES}
+    for role, (before, now) in mod.DESCRIPTIONS.items():
+        assert before != now, role
+        assert seed[role] == now == SYSTEM_ROLE_DEFAULTS[role].description, role
+    assert "publishes" in mod.DESCRIPTIONS["workspace_data_engineer"][1]
+    assert "Publishing them needs Publisher" in mod.DESCRIPTIONS["workspace_member"][1]
+
+
 def test_the_analytics_permission_is_offered_to_the_client():
     """The server's privileged list and the nav catalogue's must agree.
 

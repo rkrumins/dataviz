@@ -203,6 +203,8 @@ export function useApiKeyWizard({ options, resumed }: {
         dateProblem,
         exposure,
         dirty: draft.preset !== null || draft.name.trim() !== '',
+        /** What the keys' owner can do in each workspace they reach. */
+        ownerWorkspaces: options.workspaces,
         submitLabel: viaProvider ? 'Continue with your identity provider' : 'Create key',
         submit,
     }

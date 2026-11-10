@@ -263,9 +263,21 @@ repair it. So the projector (`projection.py:270-299`):
 
 ## 7. Verify & self-heal — `_verify_and_heal`
 
-After every apply (when `PROJECTION_VERIFY_ENABLED`, default on, `config.py:124`), the projector
-reconciles **live node/edge counts** between Postgres and FalkorDB and bounded-heals a mismatch
-(`projection.py:742-816`). It is best-effort — any count failure skips the check.
+After an apply (when `PROJECTION_VERIFY_ENABLED`, default on), the projector reconciles **live
+node/edge counts** between Postgres and FalkorDB and bounded-heals a mismatch (`_verify_and_heal`).
+It is best-effort — any count failure skips the check.
+
+**How often.** A pass that applied only main's newest commits verifies at most every
+`PROJECTION_VERIFY_INTERVAL_SECS` per graph (default 300; `0` verifies every pass). Before, a graph
+taking a commit every few seconds counted itself in both stores every few seconds. The verify still
+runs on every:
+- full seed;
+- pass that dropped a write;
+- pass on a key with drift on record;
+- pass on a graph whose last verify healed or failed, or that this process has not verified yet.
+
+A delta dropped silently between verifies is caught by the next one
+([19](19-change-streams.md) §3.8).
 
 - **PG counts** come from `entity_heads` via `reconcile.pg_live_counts` (the single source, shared
   with the reconciler), but **only for a main that is fully caught up** (`_pg_live_counts`); a
@@ -601,6 +613,7 @@ boot via `XAUTOCLAIM`. `_project_one` (`worker.py:65`) serializes per-graph via 
 | `GRAPHVER_PROJECTION_CONCURRENCY` | 8 | Max graphs projected per pass (`config.py:118`). |
 | `GRAPHVER_READ_MAX_LAG` | 0 | Neighbors-endpoint staleness tolerance (`config.py:119`; see §5 callout). |
 | `GRAPHVER_PROJECTION_VERIFY` | on | Post-apply count reconcile + heal (`config.py:124`). |
+| `GRAPHVER_PROJECTION_VERIFY_INTERVAL_SECS` | 300 | Per graph, how often an incremental pass runs that verify (§7); `0` = every pass. |
 | `GRAPHVER_PROJECTION_INPROCESS` | off | Run the worker lanes in the web process, only with `SYNODIC_ROLE=dev` (`config.py:158`). |
 | `GRAPHVER_REBUILD_TIMEOUT_SECS` | 900 | Operator-rebuild budget (`config.py:130`). |
 | `GRAPHVER_REBUILD_LOCK_TTL` / `GRAPHVER_LEASE_TTL` | 120 / 60 | Single-flight rebuild lock / read-lease TTLs (`config.py:139-140`). |

@@ -390,6 +390,16 @@ async def get(session: AsyncSession, key_id: str) -> Optional[ApiKeyORM]:
     return await session.get(ApiKeyORM, key_id)
 
 
+async def names_by_ids(session: AsyncSession, key_ids: Iterable[str]) -> dict[str, str]:
+    """Each key's name, by id — for history to say which key made a change. A revoked key keeps
+    its name: what it did stays attributed to it."""
+    ids = sorted({k for k in key_ids if k})
+    if not ids:
+        return {}
+    rows = await session.execute(select(ApiKeyORM.id, ApiKeyORM.name).where(ApiKeyORM.id.in_(ids)))
+    return {key_id: name for key_id, name in rows.all()}
+
+
 async def get_for_user(
     session: AsyncSession, user_id: str, key_id: str,
 ) -> Optional[ApiKeyORM]:

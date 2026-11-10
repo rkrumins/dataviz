@@ -118,9 +118,10 @@ class PublishRequired(_HttpMapped, AccessDenied):
     import to publish itself (``message`` says so)."""
 
     status_code = 403
+    DEFAULT = ("editing the published version needs publish permission; "
+               "start a draft to make these edits and send them for review")
 
-    def __init__(self, message: str = ("editing the published version needs publish permission; "
-                                       "start a draft to make these edits and send them for review")):
+    def __init__(self, message: str = DEFAULT):
         super().__init__(message, {"type": "access_denied", "code": "publish_required",
                                    "required": "workspace:datasource:publish"})
 

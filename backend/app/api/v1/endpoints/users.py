@@ -51,6 +51,7 @@ from backend.app.db.engine import get_db_session
 from backend.app.db.repositories import service_account_repo, user_identity_repo, user_repo
 from backend.app.services import service_account_standing
 from backend.common.display_name import resolve_display_name
+from backend.common.roles import WORKSPACE_TEMPLATE_ROLES
 from backend.common.models.auth import (
     AccountActivityItem,
     AdminCreateUserRequest,
@@ -1209,15 +1210,24 @@ async def generate_reset_token(
 
 # ── Invite link ──────────────────────────────────────────────────────
 
-# Phase 11: workspace-template system roles. Stored ``scope_type=
-# 'global'`` in the roles table (they bind to any workspace) but
-# they are NOT globally meaningful — an invite for one of these
-# MUST carry a workspace_id.
-_WORKSPACE_TEMPLATE_ROLES = frozenset({
-    "workspace_admin", "workspace_member", "workspace_publisher", "workspace_steward",
-    "workspace_viewer",
-})
 _GLOBAL_TIER_ROLES = frozenset({"super_admin", "org_admin"})
+
+
+def _is_workspace_role(name: str, role, perms) -> bool:
+    """Whether a role is granted in a workspace, never as a global binding.
+
+    The workspace templates (``backend.common.roles.WORKSPACE_TEMPLATE_ROLES``) are stored
+    ``scope_type='global'`` — they bind to any workspace — but mean nothing globally, and so does
+    any other role whose permissions are all about a workspace: the resolver drops a workspace
+    permission from a global binding, so granting one globally grants nothing at all. A role scoped
+    to one workspace is granted there. A role with any platform permission stays global."""
+    perms = list(perms or ())
+    return (
+        name in WORKSPACE_TEMPLATE_ROLES
+        or getattr(role, "scope_type", None) == "workspace"
+        or (any(p.startswith("workspace:") for p in perms)
+            and not any(p.startswith("system:") for p in perms))
+    )
 
 
 def _role_is_privileged(perms: list[str]) -> bool:
@@ -1439,10 +1449,7 @@ async def create_invite(
     if role is not None:
 
         # Scope classification.
-        is_workspace_role = (
-            body.role in _WORKSPACE_TEMPLATE_ROLES
-            or role.scope_type == "workspace"
-        )
+        is_workspace_role = _is_workspace_role(body.role, role, role_perms)
         if is_workspace_role:
             if role.scope_type == "workspace":
                 # Custom workspace role — workspace is fixed to its scope.
@@ -1860,9 +1867,7 @@ async def create_bulk_invites(
         role_perms = bundles.get(body.role, [])
         role_is_privileged = _role_is_privileged(role_perms)
 
-        is_workspace_role = (
-            body.role in _WORKSPACE_TEMPLATE_ROLES or role.scope_type == "workspace"
-        )
+        is_workspace_role = _is_workspace_role(body.role, role, role_perms)
         if is_workspace_role:
             if role.scope_type == "workspace":
                 resolved_workspace_id = role.scope_id
@@ -2226,10 +2231,7 @@ async def _resolve_grant(
     perms = bundles.get(body.role, [])
     privileged = _role_is_privileged(perms)
 
-    needs_ws = (
-        body.role in _WORKSPACE_TEMPLATE_ROLES
-        or getattr(role, "scope_type", None) == "workspace"
-    )
+    needs_ws = _is_workspace_role(body.role, role, perms)
     fixed_ws = getattr(role, "scope_id", None) if getattr(role, "scope_type", None) == "workspace" else None
     resolved_ws = fixed_ws or body.workspace_id
 
