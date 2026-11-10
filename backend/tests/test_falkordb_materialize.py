@@ -186,8 +186,19 @@ class _FakeFalkor:
             # write; the noop contract counts data writes only).
             self.meta = dict(params)
             return _Result()
+        if cypher == "MATCH ()-[r:AGGREGATED]->() RETURN r LIMIT 1":
+            # The bulk wipe's existence probe (a read on the write path).
+            return _Result([[1]] if self.agg else [])
         self.write_queries += 1
         now_ms = int(time.time() * 1000)
+        if "WITH r LIMIT" in cypher and "DELETE r RETURN count(r) AS n" in cypher:
+            # The bulk wipe: every AGGREGATED edge, in LIMIT-bounded chunks.
+            limit = int(re.search(r"LIMIT (\d+)", cypher).group(1))
+            victims = list(self.agg)[:limit]
+            for k in victims:
+                self.deleted_pairs.append(k)
+                del self.agg[k]
+            return _Result([[len(victims)]])
         if "MERGE (s)-[r:AGGREGATED {aggKey: item.k}]->(t)" in cypher:
             # Label+urn node match (index seek) — the only supported write
             # form; ID-seek-under-UNWIND is banned (scans per row).
@@ -1458,6 +1469,34 @@ def test_no_lineage_types_returns_zero_result():
     # current cube instead of one that "needs rebuild" forever.
     assert fake.meta is not None
     assert fake.meta["edgeCount"] == 0
+
+
+def test_no_lineage_types_wipes_the_rollups_an_earlier_classification_built():
+    """An ontology that HAD lineage, aggregated, then lost its last lineage
+    relationship: the rollups it built are stale. The no-lineage path returns
+    before the reconcile phase that deletes stale cells, so it must clear them
+    itself — otherwise a "successful" 0-edge run leaves them on the canvas."""
+    fake = _FakeFalkor()
+    fake.add_node(1, "urn:a", "a")
+    fake.add_node(2, "urn:b", "b")
+    fake.seed_aggregated(1, 2, weight=3)
+    p = _make_provider(fake)
+
+    result = _run(mat.materialize_aggregated_edges(
+        p,
+        containment_edge_types=["CONTAINS"],
+        lineage_edge_types=[],
+        last_cursor=None,
+        progress_callback=None,
+        intra_batch_callback=None,
+        should_cancel=None,
+    ))
+
+    assert fake.agg == {}
+    assert fake.deleted_pairs == [(1, 2)]
+    assert result["aggregated_edges_affected"] == 0
+    assert result["deletes"] == 1
+    assert fake.meta is not None and fake.meta["edgeCount"] == 0
 
 
 def test_containment_cycle_is_broken(monkeypatch):

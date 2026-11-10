@@ -2641,6 +2641,14 @@ class AggregationPipeline:
                 "aggregation pipeline on %s: no effective lineage types; "
                 "nothing to materialize.", self.p._graph_name,
             )
+            # Nothing to materialize means nothing may remain: rollups an
+            # earlier lineage classification built are stale now, and this
+            # path never reaches the reconcile phase that deletes them. One
+            # existence probe when there are none (the containment-only case).
+            wiped = await self.p._wipe_aggregated_edges(should_cancel=self._should_cancel)
+            if wiped:
+                self._deletes += wiped
+                await self.p._purge_aggregated_idempotency_namespace()
             # Still record the (empty) run, so a containment-only graph reads
             # as a current cube rather than a pre-depth-stamp one that
             # "needs rebuild" forever.
