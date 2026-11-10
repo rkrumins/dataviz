@@ -344,6 +344,8 @@ import { useFailoverRetry } from '@/hooks/useFailoverRetry'
 import { StaleDataBanner } from '@/components/insights/StaleDataBanner'
 import { useProjectionCatchUp, catchUpMessage } from '@/hooks/useProjectionCatchUp'
 import { SearchMapPanel } from '../search/SearchMapPanel'
+import { ChangesExplorer } from '@/features/versioning/components/ChangesExplorer'
+import { useReviewRail } from '@/features/versioning/hooks/useReviewRail'
 import {
     ViewRowSearchContext,
     ViewSearchSessionContext,
@@ -2093,6 +2095,8 @@ export function ContextViewCanvas({
     prefetchHit: prefetchSearchHitSpine,
     namesOnly: !revisionCaps.advancedSearch,
   })
+  // The left rail holds search results or a review's list of changes, one at a time.
+  const reviewListOpen = useReviewRail(search.panelOpen, search.closePanel)
   // Search, from the command palette: a question in plain words, or the
   // panel opened out into Search Studio.
   const { closeCommandPalette } = interactions
@@ -2141,7 +2145,7 @@ export function ContextViewCanvas({
     const t1 = setTimeout(() => triggerEdgeRedrawRef.current?.(), 250)
     const t2 = setTimeout(() => triggerEdgeRedrawRef.current?.(), 480)
     return () => { cancelAnimationFrame(raf); clearTimeout(t1); clearTimeout(t2) }
-  }, [drawerNodeId, drawerEdge, selectedNodeId, isEdgePanelOpen, search.panelOpen, builderOpen, buildOpen])
+  }, [drawerNodeId, drawerEdge, selectedNodeId, isEdgePanelOpen, search.panelOpen, reviewListOpen, builderOpen, buildOpen])
 
   // A relationship the drawer shows was resolved from THIS view's lines. Leaving
   // the view (or this canvas) closes it, trail and all, rather than carrying a
@@ -6745,6 +6749,8 @@ export function ContextViewCanvas({
         onSaveMatchesAsView={(canSaveSearchAsView || editingSubset) ? onSaveMatchesAsView : undefined}
         saveMatchesLabel={editingSubset ? `Update “${editingSubset.name}”…` : undefined}
       />
+      {/* Like the search panel, it owns its own presence. */}
+      <ChangesExplorer viewId={activeView?.id ?? null} />
       <div className="flex-1 min-w-0 flex flex-col overflow-hidden relative">
       <ContextViewHeader
         showLineageFlow={showLineageFlow}

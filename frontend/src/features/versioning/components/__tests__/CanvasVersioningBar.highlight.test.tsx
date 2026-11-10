@@ -70,6 +70,7 @@ vi.mock('../ViewVersioningPanel', () => ({
 
 import { CanvasVersioningBar } from '../CanvasVersioningBar'
 import { useCanvasStore } from '@/store/canvas'
+import { useReviewStore } from '@/store/reviewStore'
 import { buildChangeSet } from '../../model/changeModel'
 
 const setActiveChangeSet = vi.mocked(branchState.setActiveChangeSet as (cs: unknown) => void)
@@ -78,6 +79,7 @@ beforeEach(() => {
   state.branchId = null
   state.diffError = null
   state.index = undefined
+  useReviewStore.setState({ available: false, listOpen: false })
   useChangeIndex.mockClear()
   setActiveChangeSet.mockClear()
 })
@@ -156,5 +158,56 @@ describe('CanvasVersioningBar — what a comparison drew of its deletions', () =
 
     fireEvent.click(screen.getByRole('button', { name: '500 of 1,200 deleted drawn' }))
     expect(screen.getByText(/^changes on/)).toBeInTheDocument()
+  })
+})
+
+// On the Context View (a review available), what counts changes starts a review beside the canvas,
+// at its operation, instead of opening a list elsewhere.
+describe('CanvasVersioningBar — on the Context View, counts start a review', () => {
+  const origin = { source: 'compare', fromSeq: 3, toSeq: 12 } as const
+  const review = () => {
+    const { listOpen, scope, operation } = useReviewStore.getState()
+    return { listOpen, scope, operation }
+  }
+  beforeEach(() => {
+    state.index = { origin: { fromSeq: 3, toSeq: 12 }, entries: [], total: 0, truncated: false }
+    branchState.activeChangeSet = buildChangeSet([
+      { entityId: 'a', kind: 'node', status: 'added', label: 'a', origin },
+      ...Array.from({ length: 4 }, (_, i) => ({ entityId: `d${i}`, kind: 'node' as const, status: 'removed' as const, label: `d${i}`, origin })),
+    ])
+    useCanvasStore.setState({ deletedDrawn: { drawn: 3, total: 4 } })
+    useReviewStore.setState({ available: true, listOpen: false, scope: null, operation: null, filter: { q: 'old' } })
+  })
+
+  it('reviews the comparison, all of it or one operation, without opening History', () => {
+    render(<CanvasVersioningBar workspaceId="ws1" dataSourceId="ds1" />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Review changes' }))
+    expect(review()).toEqual({ listOpen: true, scope: null, operation: null })
+    expect(useReviewStore.getState().filter).toEqual({})                   // nothing asked for is hidden
+    fireEvent.click(screen.getByRole('button', { name: '3 of 4 deleted drawn' }))
+    expect(review().operation).toBe('removed')
+    fireEvent.click(screen.getByRole('button', { name: 'Review 1 added' }))
+    expect(review().operation).toBe('added')
+    expect(screen.queryByText(/^history on/)).toBeNull()
+  })
+
+  it('reviews a comparison too large to highlight', () => {
+    state.index = { origin: { fromSeq: 3, toSeq: 12 }, entries: [], total: 48_213, truncated: true }
+    render(<CanvasVersioningBar workspaceId="ws1" dataSourceId="ds1" />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Review changes' }))
+    expect(review().listOpen).toBe(true)
+    expect(screen.queryByText(/^history on/)).toBeNull()
+  })
+
+  it("reviews a draft's deletions from what it drew of them, without opening Changes", () => {
+    state.branchId = 'br_1'
+    useCanvasStore.setState({ deletedDrawn: { drawn: 500, total: 1_200 } })
+    render(<CanvasVersioningBar workspaceId="ws1" dataSourceId="ds1" />)
+
+    fireEvent.click(screen.getByRole('button', { name: '500 of 1,200 deleted drawn' }))
+    expect(review()).toEqual({ listOpen: true, scope: null, operation: 'removed' })
+    expect(screen.queryByText(/^changes on/)).toBeNull()
   })
 })

@@ -9,6 +9,43 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Review changes: every change, beside the canvas
+
+The second of three parts toward **Review changes**. In the Context View, every change of a draft,
+a past revision or two revisions compared now lists beside the canvas, however many there are.
+
+### Added
+
+- **Review changes**, a list in the Context View's left rail.
+  - **What it lists:**
+    - a draft's saved changes;
+    - what changed since a past revision, or what one revision changed;
+    - two revisions compared;
+    - on Published, the latest revision.
+  - **What you can do:** show **All**, **Added**, **Modified** or **Deleted**, one at a time with
+    counts; search; filter by entities or relationships, and by type; open a row to see what changed.
+  - The canvas highlights what one revision changed while you review it.
+  - It shares the rail with search results: opening one closes the other, and each comes back as
+    you left it.
+- **Starting a review:**
+  - the counts in the strip above the canvas, each on its own kind of change;
+  - "M of N deleted drawn" and "+N new";
+  - the comparison chip;
+  - a past revision's since-then counts;
+  - **Reviews → Changes**;
+  - **History → Compare**.
+
+### Changed
+
+- **In the Context View, Reviews → Changes is a summary** of what the canvas shows, with **Review
+  changes**: a draft's saved changes, a revision's, or the latest revision on Published, where it
+  used to say to switch to a draft. Your unsaved edits and the draft's views stay above it.
+- **In the Context View, History → Compare offers Review changes** in place of **Highlight on
+  canvas** and its list.
+- The graph and hierarchy layouts keep their lists.
+
+---
+
 ## [Unreleased] — Deleted entities never stand in for children that haven't loaded
 
 The first of three parts toward **Review changes**, a way through every change on the canvas. This

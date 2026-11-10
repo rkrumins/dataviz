@@ -219,14 +219,24 @@ export function ChangesPanel({
   )
 }
 
-/** Compact inline summary of a ChangeSet's counts — for banners / headers. */
-export function ChangeCountChips({ changeSet }: { changeSet: ChangeSet }) {
+/** Compact inline summary of a ChangeSet's counts — for banners / headers. With `onPick`, each
+ *  count is a button that reviews the changes of its operation. */
+export function ChangeCountChips({ changeSet, onPick }: {
+  changeSet: ChangeSet
+  onPick?: (status: ChangeStatus) => void
+}) {
   const { counts } = changeSet
   return (
     <span className="inline-flex items-center gap-1">
-      {counts.added > 0 && <NodeDiffBadge status="added" count={counts.added} />}
-      {counts.modified > 0 && <NodeDiffBadge status="modified" count={counts.modified} />}
-      {counts.removed > 0 && <NodeDiffBadge status="removed" count={counts.removed} />}
+      {(['added', 'modified', 'removed'] as const).map((st) => counts[st] > 0 && (onPick ? (
+        <button key={st} type="button" onClick={() => onPick(st)}
+          aria-label={`Review ${counts[st].toLocaleString()} ${STATUS_META[st].label.toLowerCase()}`}
+          className="rounded-md transition-opacity hover:opacity-80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40">
+          <NodeDiffBadge status={st} count={counts[st]} />
+        </button>
+      ) : (
+        <NodeDiffBadge key={st} status={st} count={counts[st]} />
+      )))}
     </span>
   )
 }

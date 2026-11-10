@@ -7,6 +7,7 @@
 import { act, render, screen, fireEvent } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { useBranchStore } from '@/store/branchStore'
+import { useReviewStore } from '@/store/reviewStore'
 
 const state = vi.hoisted(() => ({ readAt: 12 as number | null, phase: 'complete', head: 44, since: [] as unknown[] }))
 
@@ -47,6 +48,7 @@ beforeEach(() => {
   state.phase = 'complete'
   state.head = 44
   state.since = []
+  useReviewStore.setState({ available: false, listOpen: false, scope: null, operation: null })
   open()
 })
 
@@ -110,5 +112,23 @@ describe('RevisionBanner', () => {
     fireEvent.keyDown(window, { key: 'Escape' })
     expect(useBranchStore.getState().revision?.seq).toBe(12)
     dialog.remove()
+  })
+})
+
+describe('RevisionBanner — on the Context View', () => {
+  it('reviews what changed since, by the operation counted', () => {
+    useReviewStore.setState({ available: true })
+    render(<RevisionBanner workspaceId="ws1" graphId="g1" onCompare={() => {}} />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Review 12 deleted since this revision' }))
+    expect(useReviewStore.getState()).toMatchObject({ listOpen: true, scope: { kind: 'since', seq: 12 }, operation: 'removed' })
+    fireEvent.click(screen.getByRole('button', { name: 'Review 1,200 added since this revision' }))
+    expect(useReviewStore.getState().operation).toBe('added')
+  })
+
+  it('only says the counts elsewhere', () => {
+    render(<RevisionBanner workspaceId="ws1" graphId="g1" onCompare={() => {}} />)
+    expect(screen.getByText('+1.2K')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /^Review / })).toBeNull()
   })
 })

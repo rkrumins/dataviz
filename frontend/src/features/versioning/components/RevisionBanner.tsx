@@ -22,10 +22,13 @@ import { DateTime } from '@/components/ui/DateTime'
 import { useBranchStore, useOpenRevision } from '@/store/branchStore'
 import { useViewExecutionContext } from '@/providers/ViewExecutionContext'
 import { useCanvasStore } from '@/store/canvas'
+import { useReviewStore } from '@/store/reviewStore'
+import type { ChangeListStatus } from '@/services/versioningApiService'
 import { useChangeSummary, useRevision } from '../hooks/useVersioning'
 import { ownerName } from '../model/branchVocab'
 import { RestoreDialog } from './RollbackDialogs'
 import { AT_REVISION_READS, movedOn } from '../model/revisionCopy'
+import { STATUS_META } from './NodeDiffBadge'
 
 const compact = new Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 })
 const whole = new Intl.NumberFormat()
@@ -71,6 +74,9 @@ export function RevisionBanner({
   )
   const newer = head != null && pinned != null ? Math.max(0, head - pinned) : 0
   const sinceQ = useChangeSummary(workspaceId, graphId, since)
+  // On the Context View, each count reviews what changed since, by its operation.
+  const reviewable = useReviewStore((s) => s.available)
+  const startReview = useReviewStore((s) => s.startReview)
   const phase = useCanvasStore((s) => s.hydrationPhase)
   const [restoring, setRestoring] = useState(false)
 
@@ -152,7 +158,10 @@ export function RevisionBanner({
               Rewinding {whole.format(changed)} {changed === 1 ? 'change' : 'changes'}…
             </span>
           ) : since ? (
-            <SinceThen revisions={revisionsSince} counts={counts} loading={sinceQ.isLoading} />
+            <SinceThen revisions={revisionsSince} counts={counts} loading={sinceQ.isLoading}
+              onReview={reviewable && seq != null
+                ? (operation) => startReview({ scope: { kind: 'since', seq }, operation })
+                : undefined} />
           ) : (
             <span>Nothing has changed since.</span>
           )}
@@ -225,11 +234,24 @@ export function RevisionBanner({
 }
 
 /** "Since then: 32 revisions · +1.2k ~340 −12" — how far the graph has moved on. */
-function SinceThen({ revisions, counts, loading }: {
+function SinceThen({ revisions, counts, loading, onReview }: {
   revisions: number | null
   counts?: { added: number; modified: number; removed: number }
   loading: boolean
+  /** Review what changed since, by operation; without it the counts only say. */
+  onReview?: (operation: ChangeListStatus) => void
 }) {
+  const count = (op: ChangeListStatus, sign: string, className: string) => {
+    const n = counts?.[op] ?? 0
+    return onReview ? (
+      <button type="button" onClick={() => onReview(op)} className={cn(className, 'hover:underline')}
+        aria-label={`Review ${whole.format(n)} ${STATUS_META[op].label.toLowerCase()} since this revision`}>
+        {sign}{compact.format(n)}
+      </button>
+    ) : (
+      <span className={className}>{sign}{compact.format(n)}</span>
+    )
+  }
   return (
     <span className="inline-flex items-center gap-1.5">
       <span>Since then:</span>
@@ -248,9 +270,9 @@ function SinceThen({ revisions, counts, loading }: {
         >
           <span className="inline-flex items-center gap-1 tabular-nums font-semibold">
             <span className="text-ink-muted/50 font-normal">·</span>
-            <span className="text-emerald-600 dark:text-emerald-400">+{compact.format(counts.added)}</span>
-            <span className="text-amber-600 dark:text-amber-400">~{compact.format(counts.modified)}</span>
-            <span className="text-rose-600 dark:text-rose-400">−{compact.format(counts.removed)}</span>
+            {count('added', '+', 'text-emerald-600 dark:text-emerald-400')}
+            {count('modified', '~', 'text-amber-600 dark:text-amber-400')}
+            {count('removed', '−', 'text-rose-600 dark:text-rose-400')}
           </span>
         </HoverTip>
       ) : null}

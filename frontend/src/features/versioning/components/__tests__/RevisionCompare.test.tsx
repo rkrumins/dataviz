@@ -26,6 +26,7 @@ vi.mock('../RevisionPicker', () => ({
 }))
 
 import { RevisionCompare } from '../RevisionCompare'
+import { useReviewStore } from '@/store/reviewStore'
 
 const type = (t: string, added: number, modified = 0, removed = 0): ChangeListTypeCount =>
   ({ kind: 'node', type: t, added, modified, removed })
@@ -45,6 +46,7 @@ const base = {
 
 beforeEach(() => {
   state.origins = []
+  useReviewStore.setState({ available: false, listOpen: false, scope: null, operation: null })
   state.summary = summary([type('Table', 800, 200, 5), type('Column', 300, 100)])
 })
 
@@ -90,5 +92,26 @@ describe('RevisionCompare', () => {
     render(<RevisionCompare {...base} from={10} to={20} onChange={() => {}} onHighlight={onHighlight} />)
     fireEvent.click(screen.getByText('Highlight on canvas'))
     expect(onHighlight).toHaveBeenCalledWith(10, 20)
+  })
+})
+
+describe('RevisionCompare — on the Context View', () => {
+  it('reviews the changes beside the canvas, highlighted on it, in place of the list here', () => {
+    useReviewStore.setState({ available: true })
+    const onHighlight = vi.fn()
+    render(<RevisionCompare {...base} from={10} to={30} onChange={() => {}} onHighlight={onHighlight} />)
+
+    expect(screen.queryByText(/^List of/)).toBeNull()
+    expect(screen.queryByText('Highlight on canvas')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Review changes' }))
+    expect(onHighlight).toHaveBeenCalledWith(10, 30)
+    expect(useReviewStore.getState()).toMatchObject({ listOpen: true, scope: null, operation: null })
+  })
+
+  it('keeps its list where nothing can be opened on the canvas', () => {
+    useReviewStore.setState({ available: true })
+    render(<RevisionCompare {...base} from={10} to={30} onChange={() => {}} openBlocked="Open a view first." />)
+    expect(screen.getByText('List of 10→30')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Review changes' })).toBeNull()
   })
 })
