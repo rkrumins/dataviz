@@ -298,6 +298,13 @@ from Sales › crm · by Ana*. Technical users also see its type and qualified n
 - **All**, **Added**, **Modified** and **Deleted** show one kind of change at a time.
 - **Details** opens what the canvas knows of it: an entity's details, or a deleted
   entity's (who deleted it, when, what went with it).
+- **What changed** opens the change field by field, above the bar's buttons:
+  - for something added, what it was added with;
+  - for something modified, each field that changed, before and after;
+  - for something deleted, what it held.
+
+  A relationship also shows its two ends. What changed stays open as you go from
+  change to change, and for your next review, until you close it.
 - **List** opens every change beside the canvas (below).
 - **×** ends the review.
 
@@ -324,6 +331,16 @@ and comes back when you close them.
 The canvas rings what you're reviewing. **Changed in #12** and **The latest
 revision** are highlighted on it while you review them, and the highlight goes when
 you end the review.
+
+### What changed, in an entity's details
+
+When an entity or relationship has changed, its details start with **What
+changed**. It says whether it was added or modified, and where: *in this draft*, or
+*between #41 and #42*. Then it lists each field, as the bar does. You don't need a
+review open: choose any changed entity on the canvas.
+
+A deleted entity's details say how it was deleted instead. Edits you haven't saved
+yet are in **Review & Save**.
 
 ### Deleted inside
 

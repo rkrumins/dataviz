@@ -9,6 +9,26 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Review changes: what changed, field by field
+
+After **Review changes**, what changed in an entity or relationship is one click from wherever you
+meet it, whether it was added, modified or deleted.
+
+### Added
+
+- **What changed, on the review's bar**, opens the current change field by field:
+  - for something added, what it was added with;
+  - for something modified, each field that changed, before and after;
+  - for something deleted, what it held.
+
+  A relationship also shows its two ends. It stays open from change to change, and for your next
+  review, until you close it.
+- **What changed, in an entity's details.** An entity or relationship that changed starts its
+  details with what changed: *Added in this draft*, or *Modified between #41 and #42*, then each
+  field. It's there whether or not a review is open.
+
+---
+
 ## [Unreleased] — Review changes: one at a time, each found on the canvas
 
 The last of three parts toward **Review changes**. In the Context View, you can now go through

@@ -388,8 +388,9 @@ revision's, or a range.
   - It holds the change being visited (`current`, `position`, `visit`, and `visits`, bumped by every
     visit), `navigatorOpen`, and how finding the change went (`found`).
   - Another operation, filter or scope starts at the top.
-  - Only `listPreferred` is persisted (`nexus-review`). `startReview` opens the navigator always,
-    and the list for technical users or whoever chose to keep it (`toggleList`).
+  - Only `listPreferred` and `whatChangedOpen` are persisted (`nexus-review`). `startReview` opens
+    the navigator always, and the list for technical users or whoever chose to keep it
+    (`toggleList`).
 - **`useChangesScope(viewId)`** resolves the scope against the branch store (`resolveScopes`, pure):
   - a draft: `{branchId}`;
   - a revision #N: `{N, headAtOpen}` (the default) or `{N−1, N}`;
@@ -412,8 +413,8 @@ revision's, or a range.
     Filter (kind and type; it names the kind).
   - **The rows** are `ChangeRows`, which `ChangeList` now composes under its own controls. Its call
     sites are unchanged.
-    - **`onActivate`:** picking a row visits it; its chevron still shows the diff. ↑ and ↓ move
-      between rows.
+    - **`onActivate`:** picking a row visits it; its chevron still shows the diff (`ChangeDetail`).
+      ↑ and ↓ move between rows.
     - **`activeEntityId`:** marks the current row, and scrolls to it when it changes (not when a page
       arrives).
   - **`useReviewRail`** shares the rail with search: opening one closes the other. Unmounting the
@@ -427,6 +428,9 @@ revision's, or a range.
     page and lands when it's there. The keys are left to a control's own arrows, and to any open
     `[role="dialog"]` (the lens, a panel).
   - **Details** opens `openNodeDrawer`, or `TombstoneDrawer` for a deletion that isn't drawn.
+  - **What changed** (`toggleWhatChanged`) shows `ChangeDetail` for the current change above the
+    controls, capped at 40vh. It's mounted only while open: one `useChangeEntry` read for each
+    change visited, and none while it's closed. A relationship gets its details here.
   - It visits the first change itself, on start and after a new narrowing.
 - **`useReviewOnCanvas`** is mounted once by `ContextViewCanvas`. It calls `useDrawScope`, and runs
   Locate for every visit, one at a time; a visit overtaken by the next is told so through
@@ -441,6 +445,16 @@ revision's, or a range.
   - **A relationship:** both ends, a deleted end as a deletion.
   - **The outcome:** `found`, `nearby` (landed on an ancestor) or `missing`.
   - It indexes the change set's removals once per change set (a `WeakMap`).
+- **`ChangeDetail`** shows one change in full: `useChangeEntry`, then `EntityDiff`, plus
+  `DeletionDetailsButton` for a deletion. It was `ChangeList`'s row detail; the list's chevron, the
+  navigator and the drawers share it, and with it each change's cached read.
+- **`WhatChangedSection`** leads the entity drawer's body (`EntityViewTab`) and `RelationshipDrawer`
+  when `activeChangeSet` holds the entity (by `urn ?? entityId`) or the relationship (by its entity
+  id). It shows whether a review is open or not.
+  - **What it says:** the status, then "in this draft" or "between #A and #B" (`listOriginOf`), then
+    `ChangeDetail`, read by the change's `entityId` (an imported node's urn is not its id).
+  - **When it's absent:** for an unchanged entity it renders nothing and reads nothing. A tombstone
+    keeps `TombstoneDetails`. Staged edits stay in Review & Save.
 - **`DeletedInsideMark`** sits in `FlatTreeItem`'s badge cluster and reads `deletedHidden`. It shows
   nothing at 0. Choosing it pins up to `DELETED_INSIDE_DRAWN` (200) undrawn deletions under the row
   (`hiddenDeletionsUnder`), and expands the row.
