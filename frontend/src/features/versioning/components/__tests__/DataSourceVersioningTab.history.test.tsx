@@ -178,7 +178,7 @@ describe('DataSourceVersioningTab — history', () => {
     expect(screen.getByText('History (main)')).toBeInTheDocument()
     expect(screen.getByText('Quarter close')).toBeInTheDocument()
     expect(screen.getByText('Add Sales dataset')).toBeInTheDocument()
-    expect(state.historyPages).toHaveBeenCalledWith('ws1', 'g1', { kind: 'graph' })
+    expect(state.historyPages).toHaveBeenCalledWith('ws1', 'g1', { kind: 'graph' }, true, null)   // everyone's
     expect(state.historyMonths).toHaveBeenCalledWith('ws1', 'g1', null, true)
     expect(state.fetchNextPage).toHaveBeenCalled()
     expect(screen.queryByText('This view')).not.toBeInTheDocument()
