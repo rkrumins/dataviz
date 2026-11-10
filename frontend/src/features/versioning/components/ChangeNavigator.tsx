@@ -30,9 +30,11 @@ import { TombstoneDrawer } from './TombstoneDetails'
 
 const OPERATIONS: ChangeListStatus[] = ['added', 'modified', 'removed']
 
-/** A key press meant for something else: typing, a control's own arrows, a dialog. */
+/** A key press meant for something else: typing, a control's own arrows, or a dialog open over the
+ *  canvas (the lens, a panel), which the keys belong to. */
 function forSomethingElse(e: KeyboardEvent): boolean {
   if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return true
+  if (document.querySelector('[role="dialog"]')) return true
   const t = e.target instanceof HTMLElement ? e.target : null
   return !!t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName)
     || !!t.closest('[role="dialog"],[role="radiogroup"],[role="listbox"],[role="menu"]'))

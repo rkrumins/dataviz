@@ -98,6 +98,16 @@ describe('ChangeNavigator', () => {
     expect(s().position).toBe(1)
   })
 
+  it('leaves the arrow keys to a dialog open over the canvas', async () => {
+    renderNavigator()
+    await screen.findByText('amount')
+    const dialog = document.body.appendChild(Object.assign(document.createElement('div'), { role: 'dialog' }))
+    dialog.setAttribute('role', 'dialog')
+    fireEvent.keyDown(window, { key: 'ArrowRight' })
+    expect(s().position).toBe(0)
+    dialog.remove()
+  })
+
   it('shows one operation at a time, from its first change', async () => {
     api.getChangeEntries.mockReset()
     api.getChangeEntries.mockResolvedValue(page([col('c3', 'order_id', 'added')], 0, 1))
