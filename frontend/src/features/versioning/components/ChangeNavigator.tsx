@@ -7,12 +7,14 @@
  * - **One operation at a time**, with counts: All, Added, Modified, Deleted.
  * - **‹ 12 of 1,850 entities ›**, also on ← and →. Each step finds the change on the canvas
  *   (`useReviewOnCanvas`), past the 500 deletions drawn, and loads the next page when it gets there.
+ * - **What changed** shows the change field by field, right there: what an added one was added with,
+ *   each field of a modified one before → after, what a deleted one held. A relationship too.
  * - **Details** opens the change's drawer; **List** the list beside the canvas; **×** ends the review.
  *
  * It sits at the bottom of the canvas, on the floating-chrome tier, and gives way to a trace.
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ChevronLeft, ChevronRight, List, Loader2, PanelLeftOpen, X } from 'lucide-react'
+import { ChevronDown, ChevronLeft, ChevronRight, List, Loader2, PanelLeftOpen, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { DateTime } from '@/components/ui/DateTime'
 import { HoverTip } from '@/components/ui/HoverTip'
@@ -25,6 +27,7 @@ import { useEntityDeletion } from '../hooks/useVersioning'
 import { useReviewList, useReviewRows } from '../hooks/useReviewList'
 import { KIND_LABEL, changeRowLabel, kindCounts } from '../model/changeListSummary'
 import { ownerName } from '../model/branchVocab'
+import { ChangeDetail } from './ChangeDetail'
 import { STATUS_META } from './NodeDiffBadge'
 import { TombstoneDrawer } from './TombstoneDetails'
 
@@ -58,6 +61,8 @@ function Navigator({ viewId }: { viewId: string | null }) {
   const visit = useReviewStore((s) => s.visit)
   const setOperation = useReviewStore((s) => s.setOperation)
   const toggleList = useReviewStore((s) => s.toggleList)
+  const whatChangedOpen = useReviewStore((s) => s.whatChangedOpen)
+  const toggleWhatChanged = useReviewStore((s) => s.toggleWhatChanged)
   const endReview = useReviewStore((s) => s.endReview)
   const technical = usePersonaMode() === 'technical'
 
@@ -148,6 +153,13 @@ function Navigator({ viewId }: { viewId: string | null }) {
         )}
         <div className="flex-1" />
         {found === 'looking' && <Loader2 className="w-3.5 h-3.5 shrink-0 animate-spin text-ink-muted" aria-label="Finding it on the canvas" />}
+        {current && (
+          <button type="button" onClick={toggleWhatChanged} aria-expanded={whatChangedOpen}
+            className="inline-flex items-center gap-0.5 shrink-0 px-1.5 py-0.5 rounded-md text-[11.5px] font-medium text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.06]">
+            What changed
+            <ChevronDown className={cn('w-3.5 h-3.5 transition-transform', whatChangedOpen && 'rotate-180')} aria-hidden />
+          </button>
+        )}
         <HoverTip className="inline-flex" label="End the review">
           <button type="button" onClick={endReview} aria-label="End the review"
             className="p-1 -mr-1 rounded-md text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.06]">
@@ -163,6 +175,14 @@ function Navigator({ viewId }: { viewId: string | null }) {
           {found === 'nearby' ? "It isn't drawn here: this is as near as the canvas gets." : "It isn't on this canvas."}
           {detailsFor && ' Details still says what it was.'}
         </p>
+      )}
+
+      {/* Field by field, for the change the review is on: asked for only while open. */}
+      {whatChangedOpen && current && list.wsId && list.graphId && origin && (
+        <div className="mt-2 max-h-[40vh] overflow-y-auto custom-scrollbar">
+          <ChangeDetail key={current.entityId} wsId={list.wsId} graphId={list.graphId} origin={origin}
+            entityId={current.entityId} label={name} />
+        </div>
       )}
 
       <div className="mt-2 flex flex-wrap items-center gap-2">

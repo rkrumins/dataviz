@@ -2,7 +2,7 @@
  * A review's state: starting one puts the navigator on the canvas, with the list beside it for
  * technical users or whoever chose to keep it; it starts on what was asked for, never narrowed by an
  * earlier search, at the first change. Another list starts at its top; another scope on all its
- * types. Ending it closes both and keeps what it showed.
+ * types. Ending it closes both and keeps what it showed. Only how a person reviews is remembered.
  */
 import { beforeEach, describe, expect, it } from 'vitest'
 
@@ -16,7 +16,7 @@ const row = (entityId: string): ChangeListRow => ({ entityId, kind: 'node', stat
 beforeEach(() => {
   usePersonaStore.setState({ mode: 'business' })
   useReviewStore.setState({
-    available: true, navigatorOpen: false, listOpen: false, listPreferred: null,
+    available: true, navigatorOpen: false, listOpen: false, listPreferred: null, whatChangedOpen: false,
     scope: null, operation: null, filter: {}, current: null, position: 0, found: null,
   })
 })
@@ -44,6 +44,14 @@ describe('reviewStore', () => {
     s().endReview()
     s().startReview()
     expect(s()).toMatchObject({ listOpen: false, listPreferred: false })
+  })
+
+  it('remembers only how a person reviews: the list kept open, and What changed', () => {
+    s().toggleWhatChanged()
+    s().startReview({ operation: 'removed' })
+    s().toggleList()
+    s().visit(row('a'), 3)
+    expect(JSON.parse(localStorage.getItem('nexus-review')!).state).toEqual({ listPreferred: true, whatChangedOpen: true })
   })
 
   it('visits a change, and counts each visit so the same one can be found again', () => {

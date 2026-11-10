@@ -7,8 +7,8 @@
  * Reviews panel's Changes tab, History's comparison — start a review with `startReview` wherever
  * the Context View can show one (`available`). Elsewhere they keep their own lists.
  *
- * Only whether a person keeps the list open is remembered (`listPreferred`): a review is about the
- * canvas in front of you.
+ * Only how a person likes to review is remembered — the list open (`listPreferred`), What changed
+ * open (`whatChangedOpen`): a review is about the canvas in front of you.
  */
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
@@ -47,6 +47,10 @@ interface ReviewState {
   /** Whether this person keeps the list open, once they have chosen; else their persona decides:
    *  technical users get it, business users the navigator alone. */
   listPreferred: boolean | null
+  /** The navigator's "What changed" is open: each change it visits shows field by field.
+   *  Remembered, like the list. */
+  whatChangedOpen: boolean
+  toggleWhatChanged: () => void
   /** null: what the canvas shows (`useChangesScope`'s default). */
   scope: ReviewScope | null
   /** One operation at a time; null for all of them. */
@@ -83,6 +87,8 @@ export const useReviewStore = create<ReviewState>()(
       setListOpen: (listOpen) => set((s) => (s.listOpen === listOpen ? s : { listOpen })),
       toggleList: () => set((s) => ({ listOpen: !s.listOpen, listPreferred: !s.listOpen })),
       listPreferred: null,
+      whatChangedOpen: false,
+      toggleWhatChanged: () => set((s) => ({ whatChangedOpen: !s.whatChangedOpen })),
       scope: null,
       operation: null,
       filter: {},
@@ -106,7 +112,7 @@ export const useReviewStore = create<ReviewState>()(
     }),
     {
       name: 'nexus-review',
-      partialize: (s) => ({ listPreferred: s.listPreferred }),
+      partialize: (s) => ({ listPreferred: s.listPreferred, whatChangedOpen: s.whatChangedOpen }),
     },
   ),
 )

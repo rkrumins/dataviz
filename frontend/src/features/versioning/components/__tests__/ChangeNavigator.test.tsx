@@ -2,15 +2,15 @@
  * ChangeNavigator — a review one change at a time: it starts at the first change and says what it
  * is in plain words (a deletion with who and when, and where it lived; technical users also get the
  * type and qualified name), steps by button and by ← →, loading the next page when it gets there,
- * shows one operation at a time, opens the list (remembered) and the change's details, ends the
- * review, and gives way to a trace.
+ * shows one operation at a time, opens the list (remembered) and the change's details, shows what
+ * changed field by field (a relationship with its ends), ends the review, and gives way to a trace.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { ChangeListPage, ChangeListRow, ChangeListSummary } from '@/services/versioningApiService'
 
-const api = vi.hoisted(() => ({ getChangeSummary: vi.fn(), getChangeEntries: vi.fn(), getEntityDeletion: vi.fn() }))
+const api = vi.hoisted(() => ({ getChangeSummary: vi.fn(), getChangeEntries: vi.fn(), getEntityDeletion: vi.fn(), getChangeEntry: vi.fn() }))
 vi.mock('@/services/versioningApiService', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/services/versioningApiService')>()),
   ...api,
@@ -58,7 +58,10 @@ beforeEach(() => {
   useBranchStore.setState({ workspaceId: 'ws1', dataSourceId: 'ds1', viewId: 'v1', graphId: 'g1', currentBranchId: 'br_1' })
   useCanvasStore.getState().setNodesAndEdges([], [])
   useCanvasStore.setState({ drawerNodeId: null })
-  useReviewStore.setState({ available: true, navigatorOpen: true, listOpen: false, listPreferred: null,
+  api.getChangeEntry.mockImplementation(async (_ws: string, _g: string, _o: unknown, entityId: string) => ({
+    entityId, kind: 'node', status: 'removed', before: { displayName: entityId, dataType: `type-of-${entityId}` }, after: null,
+  }))
+  useReviewStore.setState({ available: true, navigatorOpen: true, listOpen: false, listPreferred: null, whatChangedOpen: false,
     scope: null, operation: null, filter: {}, current: null, position: 0, found: null })
 })
 
@@ -137,6 +140,42 @@ describe('ChangeNavigator', () => {
     await screen.findByText('amount')
     useReviewStore.setState({ found: 'missing' })
     expect(await screen.findByText(/isn't on this canvas/)).toBeInTheDocument()
+  })
+
+  it('shows each change field by field when asked, remembering it, and asks for nothing while closed', async () => {
+    renderNavigator()
+    await screen.findByText('amount')
+    fireEvent.click(screen.getByRole('button', { name: 'Next change' }))
+    expect(api.getChangeEntry).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByRole('button', { name: /What changed/ }))
+    expect(await screen.findByText('type-of-c2')).toBeInTheDocument()
+    expect(s().whatChangedOpen).toBe(true)
+    fireEvent.click(screen.getByRole('button', { name: 'Previous change' }))
+    expect(await screen.findByText('type-of-c1')).toBeInTheDocument()
+    expect(api.getChangeEntry.mock.calls.map((c) => c[3])).toEqual(['c2', 'c1'])     // one read a change
+    expect(api.getChangeEntry).toHaveBeenCalledWith('ws1', 'g1', { branchId: 'br_1' }, 'c1')
+
+    fireEvent.click(screen.getByRole('button', { name: /What changed/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Next change' }))
+    expect(api.getChangeEntry).toHaveBeenCalledTimes(2)
+    expect(s().whatChangedOpen).toBe(false)
+  })
+
+  it("shows a relationship's ends and fields under What changed", async () => {
+    api.getChangeSummary.mockResolvedValue({ ...summary, entityCounts: NONE, edgeCounts: { added: 1, modified: 0, removed: 0 },
+      byType: [{ kind: 'edge', type: 'FLOWS_TO', added: 1, modified: 0, removed: 0 }] })
+    api.getChangeEntries.mockReset()
+    api.getChangeEntries.mockResolvedValue(page([{ entityId: 'r1', kind: 'edge', status: 'added', type: 'FLOWS_TO',
+      structural: false, displayName: 'orders → revenue' }], 0, 1))
+    api.getChangeEntry.mockImplementation(async () => ({ entityId: 'r1', kind: 'edge', status: 'added', before: null,
+      after: { sourceEntityId: 'e-orders', targetEntityId: 'e-revenue', confidence: 0.9 } }))
+    useReviewStore.setState({ whatChangedOpen: true })
+    renderNavigator()
+    expect(await screen.findByText('e-orders')).toBeInTheDocument()
+    expect(screen.getByText('e-revenue')).toBeInTheDocument()
+    expect(screen.getByText('0.9')).toBeInTheDocument()
+    expect(api.getChangeEntry).toHaveBeenCalledWith('ws1', 'g1', { branchId: 'br_1' }, 'r1')
   })
 
   it('gives way to a trace', () => {
