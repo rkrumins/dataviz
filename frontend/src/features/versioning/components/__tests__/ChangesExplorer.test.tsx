@@ -27,6 +27,7 @@ vi.mock('@/services/versioningApiService', async (importOriginal) => ({
 }))
 
 import { useBranchStore } from '@/store/branchStore'
+import { useCanvasStore } from '@/store/canvas'
 import { useReviewStore } from '@/store/reviewStore'
 import { ChangesExplorer } from '../ChangesExplorer'
 
@@ -64,6 +65,7 @@ beforeEach(() => {
   useBranchStore.setState({ workspaceId: 'ws1', dataSourceId: 'ds1', viewId: 'v1', graphId: 'g1', currentBranchId: 'br_1', mainHeadCommitSeq: 42 })
   // The list opens with a review here: this person keeps it open.
   useReviewStore.setState({ available: true, navigatorOpen: true, listOpen: true, listPreferred: true, scope: null, operation: null, filter: {}, current: null, position: 0 })
+  useCanvasStore.setState({ drawerNodeId: null, drawerEdge: null })
 })
 
 describe('ChangesExplorer', () => {
@@ -122,6 +124,20 @@ describe('ChangesExplorer', () => {
     renderRail()
     expect(await screen.findByText(/more than a list here shows/)).toBeInTheDocument()
     expect(api.getChangeEntries).not.toHaveBeenCalled()
+  })
+
+  it('gives way to a drawer on a narrow screen, and comes back after it', async () => {
+    vi.stubGlobal('matchMedia', (query: string) => ({ matches: false, media: query, addEventListener: () => {}, removeEventListener: () => {} }))
+    try {
+      useCanvasStore.setState({ drawerNodeId: 'urn:orders' })
+      renderRail()
+      expect(screen.queryByRole('complementary', { name: 'Review changes' })).toBeNull()
+      act(() => useCanvasStore.setState({ drawerNodeId: null }))
+      expect(await screen.findByRole('complementary', { name: 'Review changes' })).toBeInTheDocument()
+      expect(useReviewStore.getState().listOpen).toBe(true)                  // the choice stands
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 
   it('fetches nothing while no review is open, and closes to the navigator, remembering it', async () => {

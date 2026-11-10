@@ -36,6 +36,8 @@ entities drawn, however deep, whether or not it was loaded.
 ### Changed
 
 - **Closing the list** keeps the review going on the bar; its **×** ends it.
+- **On a screen narrower than 1,280 pixels**, the list makes way while an entity's details are
+  open, and comes back after.
 - **The bar gives way to a trace**, and comes back after it.
 
 ---

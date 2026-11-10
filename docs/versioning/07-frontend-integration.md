@@ -405,7 +405,8 @@ revision's, or a range.
   debounced filter, so they ask for the same pages (one query) in the same order. Nothing is fetched
   while no review is open.
 - **`ChangesExplorer`** sits in the left rail, rendered persistently like `SearchMapPanel`. Its ×
-  closes the list to the navigator.
+  closes the list to the navigator. Below 1,280 px it gives way while a drawer is open, leaving
+  `listOpen` as it was.
   - **The title** is a scope menu.
   - **The controls:** the operation segment (counts for the kind listed), search (debounced), and
     Filter (kind and type; it names the kind).

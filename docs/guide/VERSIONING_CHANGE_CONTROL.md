@@ -309,7 +309,9 @@ the revision open isn't on its canvas. It takes you as near as the canvas gets.
 **List** opens the changes in the place beside the canvas that search results use.
 Opening one closes the other, and each comes back as you left it. Technical users
 get the list with every review; business users get the bar alone. Either way,
-**List** changes it, and your choice is kept for your next review.
+**List** changes it, and your choice is kept for your next review. On a screen
+narrower than 1,280 pixels, the list makes way while an entity's details are open,
+and comes back when you close them.
 
 - **The title** names what it covers. Where there's a choice, it's a menu.
 - **Show one kind of change at a time**, as in the bar, with counts.

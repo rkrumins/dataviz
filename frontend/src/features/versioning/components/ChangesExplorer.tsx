@@ -13,13 +13,14 @@
  * each keeps what it was showing (the review's in `reviewStore`). Closing it keeps the review going
  * on the navigator. It fetches nothing while no review is open.
  */
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { ChevronDown, ListFilter, Search, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Segmented, type SegmentedOption } from '@/components/ui/Segmented'
 import { Skeleton, SkeletonText } from '@/components/ui/Skeleton'
 import type { ChangeListKind, ChangeListStatus } from '@/services/versioningApiService'
+import { useCanvasStore } from '@/store/canvas'
 import { useReviewStore } from '@/store/reviewStore'
 import type { ScopeOption } from '../hooks/useChangesScope'
 import { useReviewList } from '../hooks/useReviewList'
@@ -31,8 +32,26 @@ const RAIL_WIDTH = 376
 const OPERATIONS: ChangeListStatus[] = ['added', 'modified', 'removed']
 type OperationChoice = ChangeListStatus | 'all'
 
+/** Room for the list, the canvas and a drawer side by side. */
+const ROOM_FOR_THREE = '(min-width: 1280px)'
+function useRoomForThree(): boolean {
+  const [roomy, setRoomy] = useState(() => typeof window.matchMedia !== 'function' || window.matchMedia(ROOM_FOR_THREE).matches)
+  useEffect(() => {
+    if (typeof window.matchMedia !== 'function') return
+    const mq = window.matchMedia(ROOM_FOR_THREE)
+    const sync = () => setRoomy(mq.matches)
+    mq.addEventListener('change', sync)
+    return () => mq.removeEventListener('change', sync)
+  }, [])
+  return roomy
+}
+
 export function ChangesExplorer({ viewId }: { viewId: string | null }) {
-  const open = useReviewStore((s) => s.listOpen)
+  // Narrower than that, the list gives way while a drawer is open, and comes back after it: the
+  // review goes on in the navigator.
+  const drawerOpen = useCanvasStore((s) => !!s.drawerNodeId || !!s.drawerEdge)
+  const roomy = useRoomForThree()
+  const open = useReviewStore((s) => s.listOpen) && (roomy || !drawerOpen)
   const list = useReviewList(viewId)
   const { wsId, graphId, options, current } = list
 
