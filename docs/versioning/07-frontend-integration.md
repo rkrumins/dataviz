@@ -376,15 +376,20 @@ Two change-review presentations sit under it:
   entity-type ("17 tables · 40 columns"), with a containment tree whose children page in on demand
   (`summaryFirst`).
 
-### Reviews — every change beside the Context View
-A review lists one change list beside the canvas at any size: a draft's, a revision's, or a range.
+### Reviews — every change on the Context View, one at a time
+A review goes through one change list at any size, on the canvas and beside it: a draft's, a
+revision's, or a range.
 - **`reviewStore`** holds what it lists and how it's narrowed: `scope` (null for the canvas's
   default), one `operation` at a time, and `filter` (kind, type, text). It also holds `listOpen`, and
   `available`, which is true while the Context View is mounted.
   - `startReview({scope, operation})` opens the list with the filter cleared, so an earlier search
     never hides what was asked for.
   - `setScope` starts the type afresh.
-  - It isn't persisted.
+  - It holds the change being visited (`current`, `position`, `visit`, and `visits`, bumped by every
+    visit), `navigatorOpen`, and how finding the change went (`found`).
+  - Another operation, filter or scope starts at the top.
+  - Only `listPreferred` is persisted (`nexus-review`). `startReview` opens the navigator always,
+    and the list for technical users or whoever chose to keep it (`toggleList`).
 - **`useChangesScope(viewId)`** resolves the scope against the branch store (`resolveScopes`, pure):
   - a draft: `{branchId}`;
   - a revision #N: `{N, headAtOpen}` (the default) or `{N−1, N}`;
@@ -396,15 +401,49 @@ A review lists one change list beside the canvas at any size: a draft's, a revis
 - **`useDrawScope`** highlights a scope the canvas can draw without moving in time: what the open
   revision changed, or the latest revision. It clears that highlight when the review ends or moves
   on, unless something else has replaced it.
-- **`ChangesExplorer`** sits in the left rail, rendered persistently like `SearchMapPanel`, and
-  fetches nothing while closed.
+- **`useReviewList` / `useReviewRows`** give the rail and the navigator the same scope, kind and
+  debounced filter, so they ask for the same pages (one query) in the same order. Nothing is fetched
+  while no review is open.
+- **`ChangesExplorer`** sits in the left rail, rendered persistently like `SearchMapPanel`. Its ×
+  closes the list to the navigator.
   - **The title** is a scope menu.
   - **The controls:** the operation segment (counts for the kind listed), search (debounced), and
     Filter (kind and type; it names the kind).
   - **The rows** are `ChangeRows`, which `ChangeList` now composes under its own controls. Its call
     sites are unchanged.
+    - **`onActivate`:** picking a row visits it; its chevron still shows the diff. ↑ and ↓ move
+      between rows.
+    - **`activeEntityId`:** marks the current row, and scrolls to it when it changes (not when a page
+      arrives).
   - **`useReviewRail`** shares the rail with search: opening one closes the other. Unmounting the
     canvas ends the review.
+- **`ChangeNavigator`** sits at the bottom of the canvas (`z-40`, above the trace dock's height), and
+  is hidden during a trace.
+  - **It says what the change is:** status, name, where it lived, and who deleted it and when. The
+    last two come from `useEntityDeletion`, for a deletion only. The technical persona adds the type
+    and qualified name.
+  - **Operation chips**, and **‹ n of N ›** with ←/→. A step past the loaded rows fetches the next
+    page and lands when it's there.
+  - **Details** opens `openNodeDrawer`, or `TombstoneDrawer` for a deletion that isn't drawn.
+  - It visits the first change itself, on start and after a new narrowing.
+- **`useReviewOnCanvas`** is mounted once by `ContextViewCanvas`. It calls `useDrawScope`, and runs
+  Locate for every visit, one at a time; a visit overtaken by the next is told so through
+  `stillWanted`.
+- **`useLocateChange`** finds a change on the canvas:
+  - **An entity that exists:** `getAncestorChains` (one read; parent first, so reversed), then the
+    canvas's `revealSearchHit`.
+  - **A deletion:** it waits up to 2 s for the change set the canvas draws to hold it (a highlight
+    just set is still loading). Then `deletedChain` up to the live anchor, `pinGhosts`, the anchor
+    revealed, the tombstone waited for (`TOMBSTONE_WAIT_MS`, 2 s), the anchor and deleted parents
+    expanded, then select and scroll.
+  - **A relationship:** both ends, a deleted end as a deletion.
+  - **The outcome:** `found`, `nearby` (landed on an ancestor) or `missing`.
+  - It indexes the change set's removals once per change set (a `WeakMap`).
+- **`DeletedInsideMark`** sits in `FlatTreeItem`'s badge cluster and reads `deletedHidden`. It shows
+  nothing at 0. Choosing it pins up to `DELETED_INSIDE_DRAWN` (200) undrawn deletions under the row
+  (`hiddenDeletionsUnder`), and expands the row.
+- **Cost at 5,000 deletions:** a step's ghost pass (index, pick, hidden counts) takes 4 ms at the
+  median and 6 ms at p95, keeping the store to 500 tombstones plus the pins.
 - **The glance surfaces** call `startReview` when `available`, and otherwise behave as before:
   - the bar's `ChangeCountChips` (`onPick`), "+N new" and "M of N deleted drawn";
   - the comparison chip;

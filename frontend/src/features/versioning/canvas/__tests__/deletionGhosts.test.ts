@@ -361,3 +361,42 @@ describe('deletionGhosts — a compact change list, without payloads', () => {
     expect(restoreNeeds(removals, changes, 'urn:t1', CONTAINS, 10, 0)).toBeNull()
   })
 })
+
+describe('deletionGhosts — a draft of 5,000 deletions, gone through one at a time', () => {
+  // 50 live tables, each with 100 deleted columns: 5,000 deletions, ten times what the canvas
+  // draws on its own. A review pins each one it visits.
+  const contains = (id: string, parent: string, child: string) =>
+    removedEdge(id, { sourceEntityId: parent, targetEntityId: child, edgeType: 'CONTAINS' })
+  const changes: GraphChange[] = []
+  for (let t = 0; t < 50; t++) {
+    for (let c = 0; c < 100; c++) {
+      changes.push(removedNode(`urn:t${t}.c${c}`, { displayName: `c${c}`, entityType: 'Column' }))
+      changes.push(contains(`k${t}.${c}`, `urn:t${t}`, `urn:t${t}.c${c}`))
+    }
+  }
+  const cs = buildChangeSet(changes)
+  const tables = Array.from({ length: 50 }, (_, t) => liveNode(`urn:t${t}`))
+
+  it('draws each one visited past the cap, keeping the canvas to 500 and the pins, in well under a step', () => {
+    const pins: string[] = []
+    let slowest = 0
+    let drawn = 0
+    // The review visits the last column of every table: none of them among the 500 drawn.
+    for (let t = 0; t < 50; t++) {
+      pins.push(`urn:t${t}.c99`)
+      const started = performance.now()
+      const pass = reconcileGhosts(cs, tables, [], false, CONTAINS, undefined, undefined, pins)
+      slowest = Math.max(slowest, performance.now() - started)
+      drawn = pass.drawn
+      expect(pass.nodesToAdd.map((n) => n.id)).toContain(`urn:t${t}.c99`)
+    }
+    expect(drawn).toBe(500 + 50)
+    expect(slowest).toBeLessThan(250)
+  })
+
+  it('says how many each table holds undrawn', () => {
+    const { hiddenByParent } = reconcileGhosts(cs, tables, [], false, CONTAINS)
+    expect(hiddenByParent.size).toBe(45)                       // the first five tables' columns fill the 500
+    expect(hiddenByParent.get('urn:t49')).toBe(100)
+  })
+})

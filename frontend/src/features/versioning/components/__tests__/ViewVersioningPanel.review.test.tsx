@@ -47,7 +47,7 @@ beforeEach(() => {
   onClose.mockReset()
   useBranchStore.getState().reset()
   useBranchStore.setState({ workspaceId: 'ws1', dataSourceId: 'ds1', viewId: 'v1', graphId: 'g1', mainHeadCommitSeq: 42 })
-  useReviewStore.setState({ available: true, listOpen: false, scope: null, operation: null, filter: {} })
+  useReviewStore.setState({ available: true, navigatorOpen: false, listOpen: false, scope: null, operation: null, filter: {} })
 })
 
 describe('ViewVersioningPanel — Changes, on the Context View', () => {
@@ -61,7 +61,7 @@ describe('ViewVersioningPanel — Changes, on the Context View', () => {
     expect(h.treeAsked.every((b) => b === null)).toBe(true)            // no tree to fetch for
     fireEvent.click(screen.getByRole('button', { name: 'Review 4 deleted' }))
     expect(onClose).toHaveBeenCalled()
-    expect(useReviewStore.getState()).toMatchObject({ listOpen: true, scope: { kind: 'draft' }, operation: 'removed' })
+    expect(useReviewStore.getState()).toMatchObject({ navigatorOpen: true, scope: { kind: 'draft' }, operation: 'removed' })
   })
 
   it('summarises the latest revision on Published, where it had nothing to say', () => {
@@ -70,7 +70,7 @@ describe('ViewVersioningPanel — Changes, on the Context View', () => {
     expect(screen.getByRole('region', { name: 'The latest revision · #42' })).toBeInTheDocument()
     expect(h.summaryAsked.at(-1)).toEqual({ fromSeq: 41, toSeq: 42 })
     fireEvent.click(screen.getByRole('button', { name: 'Review changes' }))
-    expect(useReviewStore.getState()).toMatchObject({ listOpen: true, scope: { kind: 'in', seq: 42 }, operation: null })
+    expect(useReviewStore.getState()).toMatchObject({ navigatorOpen: true, scope: { kind: 'in', seq: 42 }, operation: null })
   })
 
   it('keeps the draft’s tree, and says to switch to one, elsewhere', () => {

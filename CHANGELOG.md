@@ -9,6 +9,37 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Review changes: one at a time, each found on the canvas
+
+The last of three parts toward **Review changes**. In the Context View, you can now go through
+every change one at a time. Each one is found on the canvas where it is: past the 500 deleted
+entities drawn, however deep, whether or not it was loaded.
+
+### Added
+
+- **A bar at the bottom of the canvas** goes through the changes, starting with the first.
+  - It says what each one is in plain words: *Deleted · orders_legacy · from Sales › crm · by Ana*.
+    Technical users also see the type and qualified name.
+  - **‹ ›**, or **← →**, go to the previous or next change: opened down to, selected and scrolled
+    to. A deletion is drawn where it was, past the 500.
+  - It shows one kind of change at a time, with counts.
+  - **Details** opens the change's details; **List** opens every change beside the canvas; **×**
+    ends the review.
+  - When a change isn't drawn here, the bar says so, and takes you as near as the canvas gets.
+- **The list moves with the bar.** Choosing a row goes to that change; the current one is marked
+  and kept in view; **↑ ↓** move between rows; a row's arrow still shows what changed.
+- **Business users get the bar alone and technical users the list too.** **List** changes it, and
+  the choice is kept for your next review.
+- **"Deleted inside"** on a row, such as **🗑 120**, says how many deletions under it aren't
+  drawn. Choosing it draws them, 200 at a time.
+
+### Changed
+
+- **Closing the list** keeps the review going on the bar; its **×** ends it.
+- **The bar gives way to a trace**, and comes back after it.
+
+---
+
 ## [Unreleased] — Review changes: every change, beside the canvas
 
 The second of three parts toward **Review changes**. In the Context View, every change of a draft,

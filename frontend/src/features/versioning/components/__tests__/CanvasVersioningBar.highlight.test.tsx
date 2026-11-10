@@ -79,7 +79,7 @@ beforeEach(() => {
   state.branchId = null
   state.diffError = null
   state.index = undefined
-  useReviewStore.setState({ available: false, listOpen: false })
+  useReviewStore.setState({ available: false, navigatorOpen: false, listOpen: false })
   useChangeIndex.mockClear()
   setActiveChangeSet.mockClear()
 })
@@ -166,8 +166,8 @@ describe('CanvasVersioningBar — what a comparison drew of its deletions', () =
 describe('CanvasVersioningBar — on the Context View, counts start a review', () => {
   const origin = { source: 'compare', fromSeq: 3, toSeq: 12 } as const
   const review = () => {
-    const { listOpen, scope, operation } = useReviewStore.getState()
-    return { listOpen, scope, operation }
+    const { navigatorOpen, scope, operation } = useReviewStore.getState()
+    return { navigatorOpen, scope, operation }
   }
   beforeEach(() => {
     state.index = { origin: { fromSeq: 3, toSeq: 12 }, entries: [], total: 0, truncated: false }
@@ -176,14 +176,14 @@ describe('CanvasVersioningBar — on the Context View, counts start a review', (
       ...Array.from({ length: 4 }, (_, i) => ({ entityId: `d${i}`, kind: 'node' as const, status: 'removed' as const, label: `d${i}`, origin })),
     ])
     useCanvasStore.setState({ deletedDrawn: { drawn: 3, total: 4 } })
-    useReviewStore.setState({ available: true, listOpen: false, scope: null, operation: null, filter: { q: 'old' } })
+    useReviewStore.setState({ available: true, navigatorOpen: false, listOpen: false, scope: null, operation: null, filter: { q: 'old' } })
   })
 
   it('reviews the comparison, all of it or one operation, without opening History', () => {
     render(<CanvasVersioningBar workspaceId="ws1" dataSourceId="ds1" />)
 
     fireEvent.click(screen.getByRole('button', { name: 'Review changes' }))
-    expect(review()).toEqual({ listOpen: true, scope: null, operation: null })
+    expect(review()).toEqual({ navigatorOpen: true, scope: null, operation: null })
     expect(useReviewStore.getState().filter).toEqual({})                   // nothing asked for is hidden
     fireEvent.click(screen.getByRole('button', { name: '3 of 4 deleted drawn' }))
     expect(review().operation).toBe('removed')
@@ -197,7 +197,7 @@ describe('CanvasVersioningBar — on the Context View, counts start a review', (
     render(<CanvasVersioningBar workspaceId="ws1" dataSourceId="ds1" />)
 
     fireEvent.click(screen.getByRole('button', { name: 'Review changes' }))
-    expect(review().listOpen).toBe(true)
+    expect(review().navigatorOpen).toBe(true)
     expect(screen.queryByText(/^history on/)).toBeNull()
   })
 
@@ -207,7 +207,7 @@ describe('CanvasVersioningBar — on the Context View, counts start a review', (
     render(<CanvasVersioningBar workspaceId="ws1" dataSourceId="ds1" />)
 
     fireEvent.click(screen.getByRole('button', { name: '500 of 1,200 deleted drawn' }))
-    expect(review()).toEqual({ listOpen: true, scope: null, operation: 'removed' })
+    expect(review()).toEqual({ navigatorOpen: true, scope: null, operation: 'removed' })
     expect(screen.queryByText(/^changes on/)).toBeNull()
   })
 })

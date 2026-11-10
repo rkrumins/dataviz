@@ -5,10 +5,13 @@
  * - **The scope is its title:** a menu where the canvas offers more than one.
  * - **One row of controls:** the operation (all, or one of added, modified, deleted, with counts)
  *   and a search. Kind and type sit behind Filter.
- * - **The rows** are `ChangeRows`, the change list's own: opening one shows what changed.
+ * - **The rows** are `ChangeRows`, the change list's own. Picking one makes it the review's current
+ *   change, found on the canvas; its chevron shows what changed. The current change is marked, and
+ *   kept in view as the navigator moves through the list (`useReviewList` gives both the same pages).
  *
  * It shares the Context View's left rail with search results: opening one closes the other, and
- * each keeps what it was showing (the review's in `reviewStore`). It fetches nothing while closed.
+ * each keeps what it was showing (the review's in `reviewStore`). Closing it keeps the review going
+ * on the navigator. It fetches nothing while no review is open.
  */
 import { useMemo, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
@@ -16,12 +19,11 @@ import { ChevronDown, ListFilter, Search, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Segmented, type SegmentedOption } from '@/components/ui/Segmented'
 import { Skeleton, SkeletonText } from '@/components/ui/Skeleton'
-import { useDebouncedValue } from '@/hooks/useDebouncedValue'
 import type { ChangeListKind, ChangeListStatus } from '@/services/versioningApiService'
 import { useReviewStore } from '@/store/reviewStore'
-import { useChangeSummary } from '../hooks/useVersioning'
-import { useChangesScope, useDrawScope, type ScopeOption } from '../hooks/useChangesScope'
-import { KIND_LABEL, changeTotal, kindCounts, kindsOf, typeOptionsOf } from '../model/changeListSummary'
+import type { ScopeOption } from '../hooks/useChangesScope'
+import { useReviewList } from '../hooks/useReviewList'
+import { KIND_LABEL, changeTotal, kindCounts, typeOptionsOf } from '../model/changeListSummary'
 import { ChangeRows, TooLargeToList } from './ChangeList'
 import { NodeDiffBadge, STATUS_META } from './NodeDiffBadge'
 
@@ -31,8 +33,8 @@ type OperationChoice = ChangeListStatus | 'all'
 
 export function ChangesExplorer({ viewId }: { viewId: string | null }) {
   const open = useReviewStore((s) => s.listOpen)
-  const { wsId, graphId, options, current } = useChangesScope(viewId)
-  useDrawScope(current, open)
+  const list = useReviewList(viewId)
+  const { wsId, graphId, options, current } = list
 
   return (
     <AnimatePresence>
@@ -48,7 +50,7 @@ export function ChangesExplorer({ viewId }: { viewId: string | null }) {
         >
           <div className="h-full flex flex-col overflow-hidden" style={{ width: RAIL_WIDTH }}>
             {wsId && graphId && current ? (
-              <Explorer wsId={wsId} graphId={graphId} options={options} current={current} />
+              <Explorer wsId={wsId} graphId={graphId} options={options} current={current} list={list} />
             ) : (
               <>
                 <Header options={[]} current={null} />
@@ -67,14 +69,14 @@ function Header({ options, current, children }: {
   current: ScopeOption | null
   children?: React.ReactNode
 }) {
-  const endReview = useReviewStore((s) => s.endReview)
+  const toggleList = useReviewStore((s) => s.toggleList)
   const setScope = useReviewStore((s) => s.setScope)
   return (
     <div className="px-4 pt-3 pb-3 border-b border-glass-border">
       <div className="flex items-center gap-2">
         <span className="text-[10.5px] font-semibold uppercase tracking-wider text-ink-muted/80">Review changes</span>
         <div className="flex-1" />
-        <button type="button" onClick={endReview} aria-label="Close the review"
+        <button type="button" onClick={toggleList} aria-label="Close the list"
           className="p-1 -mr-1 rounded-md text-ink-muted hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.06]">
           <X className="w-3.5 h-3.5" />
         </button>
@@ -99,26 +101,22 @@ function Header({ options, current, children }: {
   )
 }
 
-function Explorer({ wsId, graphId, options, current }: {
+function Explorer({ wsId, graphId, options, current, list }: {
   wsId: string
   graphId: string
   options: ScopeOption[]
   current: ScopeOption
+  list: ReturnType<typeof useReviewList>
 }) {
   const operation = useReviewStore((s) => s.operation)
   const filter = useReviewStore((s) => s.filter)
   const setOperation = useReviewStore((s) => s.setOperation)
   const setFilter = useReviewStore((s) => s.setFilter)
-  const summaryQ = useChangeSummary(wsId, graphId, current.origin)
-  const s = summaryQ.data ?? null
-
-  const kinds = useMemo(() => (s ? kindsOf(s) : []), [s])
-  const kind: ChangeListKind | undefined = filter.kind && kinds.includes(filter.kind) ? filter.kind : kinds[0]
+  const visiting = useReviewStore((s) => s.current?.entityId ?? null)
+  const visit = useReviewStore((s) => s.visit)
+  const { summaryQ, s, kinds, kind, rowsFilter } = list
   const counts = s && kind ? kindCounts(s, kind) : null
   const typeOptions = useMemo(() => typeOptionsOf(s, kind), [s, kind])
-
-  // Asked for once the typing settles.
-  const q = useDebouncedValue(filter.q ?? '', 250)
   const [filtersShown, setFiltersShown] = useState(false)
   const filtered = !!filter.type || (kinds.length > 1 && kind !== kinds[0])
 
@@ -212,7 +210,8 @@ function Explorer({ wsId, graphId, options, current }: {
           </div>
           <div className="flex-1 min-h-0 flex flex-col gap-2 px-3 pb-3">
             <ChangeRows wsId={wsId} graphId={graphId} origin={current.origin} summary={s} kind={kind}
-              statuses={operation ? [operation] : []} type={filter.type} q={q} fill />
+              statuses={rowsFilter.statuses ?? []} type={rowsFilter.type} q={rowsFilter.q ?? ''} fill
+              activeEntityId={visiting} onActivate={visit} />
           </div>
         </>
       )}

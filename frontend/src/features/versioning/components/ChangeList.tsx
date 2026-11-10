@@ -23,7 +23,7 @@ import type {
   ChangeListKind, ChangeListOrigin, ChangeListRow, ChangeListStatus, ChangeListSummary,
 } from '@/services/versioningApiService'
 import { useChangeEntries, useChangeEntry, useChangeSummary } from '../hooks/useVersioning'
-import { KIND_LABEL, changeTotal, kindCounts, kindsOf, typeOptionsOf } from '../model/changeListSummary'
+import { KIND_LABEL, changeRowLabel as rowLabel, changeTotal, kindCounts, kindsOf, typeOptionsOf } from '../model/changeListSummary'
 import type { GraphChange } from '../model/changeModel'
 import { EntityDiff } from './EntityDiff'
 import { DeletionDetailsButton } from './TombstoneDetails'
@@ -55,10 +55,6 @@ function itemsOf(rows: ChangeListRow[], counts: Map<string, number>): Item[] {
   return out
 }
 
-function rowLabel(row: ChangeListRow): string {
-  if (row.kind === 'node') return row.displayName || row.urn || row.entityId
-  return `${row.sourceName || row.sourceEntityId || '…'} → ${row.targetName || row.targetEntityId || '…'}`
-}
 
 export interface ChangeListProps {
   wsId: string
@@ -182,11 +178,17 @@ export interface ChangeRowsProps {
   maxHeight?: number | string
   /** Fill the height the parent gives them instead, scrolling within it. */
   fill?: boolean
+  /** The change a review is on: marked, and kept in view as it moves. */
+  activeEntityId?: string | null
+  /** Picking a row makes it the review's current change; its chevron still shows what changed.
+   *  ↑ and ↓ move between the rows. */
+  onActivate?: (row: ChangeListRow, index: number) => void
 }
 
 /** A change list's rows, a page at a time, under a line saying how many match. */
 export function ChangeRows({
   wsId, graphId, origin, summary: s, kind: activeKind, statuses, type, q, maxHeight = '60vh', fill = false,
+  activeEntityId = null, onActivate,
 }: ChangeRowsProps) {
   const entriesQ = useChangeEntries(
     wsId, graphId, origin, { kind: activeKind, statuses, type: type || undefined, q },
@@ -231,6 +233,25 @@ export function ChangeRows({
     if (hasMore && !isFetchingNextPage && lastShown >= items.length - PREFETCH_ROWS) void fetchNextPage()
   }, [hasMore, isFetchingNextPage, lastShown, items.length, fetchNextPage])
 
+  // The review's current change, kept in view as it moves — not each time a page arrives, which
+  // would pull back a reader scrolling on.
+  const indexOf = useMemo(() => new Map(rows.map((r, i) => [r.entityId, i])), [rows])
+  const latest = useRef({ items, virtualizer })
+  useEffect(() => { latest.current = { items, virtualizer } })
+  useEffect(() => {
+    if (!activeEntityId) return
+    const at = latest.current.items.findIndex((it) => it.kind === 'row' && it.row.entityId === activeEntityId)
+    if (at >= 0) latest.current.virtualizer.scrollToIndex(at, { align: 'auto' })
+  }, [activeEntityId])
+  const moveBetweenRows = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return
+    const buttons = [...e.currentTarget.querySelectorAll<HTMLButtonElement>('[data-change-row]')]
+    const next = buttons[buttons.indexOf(document.activeElement as HTMLButtonElement) + (e.key === 'ArrowDown' ? 1 : -1)]
+    if (!next) return
+    e.preventDefault()
+    next.focus()
+  }
+
   return (
     <>
       <p className="text-[11px] text-ink-muted tabular-nums" aria-live="polite">
@@ -251,7 +272,7 @@ export function ChangeRows({
           description="Try another type or status, or clear the search." />
       ) : (
         <div ref={scrollRef} className={cn('overflow-y-auto custom-scrollbar -mx-1 px-1', fill && 'flex-1 min-h-0')}
-          style={fill ? undefined : { maxHeight }}>
+          style={fill ? undefined : { maxHeight }} onKeyDown={onActivate ? moveBetweenRows : undefined}>
           <div role="list" aria-label="Changes" className="relative w-full" style={{ height: virtualizer.getTotalSize() }}>
             {virtualItems.map((v) => {
               const item = items[v.index]
@@ -278,7 +299,9 @@ export function ChangeRows({
                     </div>
                   ) : (
                     <Row wsId={wsId} graphId={graphId} origin={origin} row={item.row}
-                      open={open.has(item.row.entityId)} onToggle={() => toggle(item.row.entityId)} />
+                      open={open.has(item.row.entityId)} onToggle={() => toggle(item.row.entityId)}
+                      active={item.row.entityId === activeEntityId}
+                      onActivate={onActivate && (() => onActivate(item.row, indexOf.get(item.row.entityId) ?? 0))} />
                   )}
                 </div>
               )
@@ -290,39 +313,62 @@ export function ChangeRows({
   )
 }
 
-function Row({ wsId, graphId, origin, row, open, onToggle }: {
+function Row({ wsId, graphId, origin, row, open, onToggle, active = false, onActivate }: {
   wsId: string
   graphId: string
   origin: ChangeListOrigin
   row: ChangeListRow
   open: boolean
   onToggle: () => void
+  active?: boolean
+  onActivate?: () => void
 }) {
   const meta = STATUS_META[row.status]
   const label = rowLabel(row)
+  const chevron = <ChevronRight className={cn('w-3.5 h-3.5 text-ink-muted/60 transition-transform shrink-0', open && 'rotate-90')} />
+  const name = (
+    <>
+      <meta.Icon className={cn('w-3.5 h-3.5 shrink-0', meta.text)} aria-label={meta.label} />
+      {row.kind === 'edge' ? (
+        <span className="flex items-center gap-1 min-w-0 text-[13px] text-ink">
+          <span className={cn('truncate', meta.strike)}>{row.sourceName || row.sourceEntityId}</span>
+          <ArrowRight className="w-3 h-3 text-ink-muted/70 shrink-0" />
+          <span className={cn('truncate', meta.strike)}>{row.targetName || row.targetEntityId}</span>
+        </span>
+      ) : (
+        <span className={cn('text-[13px] text-ink truncate', meta.strike)}>{label}</span>
+      )}
+      {row.kind === 'node' && row.qualifiedName && row.qualifiedName !== label && (
+        <span className="text-[11px] text-ink-muted/70 truncate min-w-0 hidden sm:inline">{row.qualifiedName}</span>
+      )}
+    </>
+  )
   return (
-    <div role="listitem" className={cn('mb-1 rounded-lg border-l-2 bg-canvas-overlay/40', meta.accent)}>
-      <button
-        type="button"
-        onClick={onToggle}
-        aria-expanded={open}
-        className="w-full flex items-center gap-1.5 min-w-0 px-2.5 py-1.5 text-left group"
-      >
-        <ChevronRight className={cn('w-3.5 h-3.5 text-ink-muted/60 transition-transform shrink-0', open && 'rotate-90')} />
-        <meta.Icon className={cn('w-3.5 h-3.5 shrink-0', meta.text)} aria-label={meta.label} />
-        {row.kind === 'edge' ? (
-          <span className="flex items-center gap-1 min-w-0 text-[13px] text-ink">
-            <span className={cn('truncate', meta.strike)}>{row.sourceName || row.sourceEntityId}</span>
-            <ArrowRight className="w-3 h-3 text-ink-muted/70 shrink-0" />
-            <span className={cn('truncate', meta.strike)}>{row.targetName || row.targetEntityId}</span>
-          </span>
-        ) : (
-          <span className={cn('text-[13px] text-ink truncate', meta.strike)}>{label}</span>
-        )}
-        {row.kind === 'node' && row.qualifiedName && row.qualifiedName !== label && (
-          <span className="text-[11px] text-ink-muted/70 truncate min-w-0 hidden sm:inline">{row.qualifiedName}</span>
-        )}
-      </button>
+    <div role="listitem" aria-current={active || undefined}
+      className={cn('mb-1 rounded-lg border-l-2 bg-canvas-overlay/40', meta.accent,
+        active && 'bg-accent-lineage/[0.08] ring-1 ring-accent-lineage/40')}>
+      {onActivate ? (
+        <div className="flex items-center min-w-0">
+          <button type="button" onClick={onToggle} aria-expanded={open} aria-label={`What changed in ${label}`}
+            className="pl-2.5 pr-1 py-1.5 rounded-l-lg hover:bg-black/[0.04] dark:hover:bg-white/[0.05]">
+            {chevron}
+          </button>
+          <button type="button" data-change-row onClick={onActivate}
+            className="flex-1 flex items-center gap-1.5 min-w-0 pr-2.5 py-1.5 text-left rounded-r-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40">
+            {name}
+          </button>
+        </div>
+      ) : (
+        <button
+          type="button"
+          onClick={onToggle}
+          aria-expanded={open}
+          className="w-full flex items-center gap-1.5 min-w-0 px-2.5 py-1.5 text-left group"
+        >
+          {chevron}
+          {name}
+        </button>
+      )}
       {open && (
         <div className="px-2.5 pb-2 pl-7">
           <RowDetail wsId={wsId} graphId={graphId} origin={origin} row={row} />
