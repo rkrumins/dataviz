@@ -136,9 +136,10 @@ lineage — the rollups can't be built without one.
    matched against the existing semantic layers and the best fit is proposed; you can pick another,
    or start a new draft from the graph's own schema. Click **Next**.
 4. On **Schema Review**, read the coverage. Gaps are advisory: types the semantic layer doesn't cover
-   are ignored by the rollups and drawn with default styling. The one thing that blocks is a
-   semantic layer with **no lineage relationship at all** — classify at least one relationship as
-   **Lineage**, then click **Next**.
+   are ignored by the rollups and drawn with default styling. A semantic layer with **no lineage
+   relationship at all** is a warning too: the source is onboarded, but no rollups are built for it.
+   That's fine for a graph with only containment edges (pure hierarchies); if the graph does carry
+   data flow, classify at least one relationship as **Lineage**. Click **Next**.
 5. On **Review**, check the summary and click **Complete Setup**. The wizard shows **Setup
    Complete**.
 

@@ -25,6 +25,7 @@ import { WorkspaceStep } from './steps/WorkspaceStep'
 import { AggregationStep } from './steps/AggregationStep'
 import { SemanticStep } from './steps/SemanticStep'
 import { SchemaReviewStep, type SchemaReviewStatusMap } from './steps/SchemaReviewStep'
+import { canProceedPastGate } from './steps/schemaReviewGate'
 import { ReviewStep, type NavigationDestination } from './steps/ReviewStep'
 import {
     aggregationService,
@@ -218,15 +219,16 @@ export function AssetOnboardingWizard({
                     Object.values(formData.ontologySelections).every(s => s.ontologyId === '')
             case 'schemaReview': {
                 // Every catalog item that has an ontology assigned must
-                // pass the resolution gate. Partial coverage and
-                // unclassified relationships are advisory server-side
-                // (resolved stays true) — only a fatal gap (no lineage
-                // relationship at all) keeps resolved=false. Items
-                // without an ontology (skipped) bypass aggregation
-                // entirely so they don't need to be resolved.
+                // have been checked by the resolution gate. Partial coverage
+                // and unclassified relationships are advisory server-side
+                // (resolved stays true). No lineage relationship at all keeps
+                // resolved=false, but the wizard treats it as a warning:
+                // containment-only graphs are legitimate and simply get no
+                // rollups. Items without an ontology (skipped) bypass
+                // aggregation entirely so they don't need to be checked.
                 const required = catalogItems.filter(c => formData.ontologySelections[c.id]?.ontologyId)
                 if (required.length === 0) return true
-                return required.every(c => schemaReviewStatus[c.id]?.resolution?.resolved === true)
+                return required.every(c => canProceedPastGate(schemaReviewStatus[c.id]?.resolution))
             }
             case 'review':
                 return true
@@ -252,7 +254,7 @@ export function AssetOnboardingWizard({
                     .filter(c => {
                         const ontologyId = formData.ontologySelections[c.id]?.ontologyId
                         if (!ontologyId) return false
-                        return !schemaReviewStatus[c.id]?.resolution?.resolved
+                        return !canProceedPastGate(schemaReviewStatus[c.id]?.resolution)
                     })
                     .map(c => `"${c.name}" has unresolved ontology gaps`)
             default:
@@ -288,8 +290,8 @@ export function AssetOnboardingWizard({
             case 'schemaReview': {
                 const required = catalogItems.filter(c => formData.ontologySelections[c.id]?.ontologyId)
                 if (required.length === 0) return 'No sources to review'
-                const resolved = required.filter(c => schemaReviewStatus[c.id]?.resolution?.resolved).length
-                return `${resolved}/${required.length} resolved`
+                const ready = required.filter(c => canProceedPastGate(schemaReviewStatus[c.id]?.resolution)).length
+                return `${ready}/${required.length} ready`
             }
             default:
                 return null
