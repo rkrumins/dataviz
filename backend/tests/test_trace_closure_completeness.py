@@ -515,3 +515,43 @@ def test_containment_pairs_are_fetched_label_bucketed_when_labels_are_known():
         assert "MATCH (s:" in cypher, f"unlabeled anchor would scan the graph: {cypher}"
     # One query per parent label, not one scan per chunk.
     assert {c.split("MATCH (s:")[1].split(")")[0] for c, _ in seen} == {"object", "group"}
+
+
+# ── no lineage vocabulary: a containment-only source ─────────────────────
+
+def test_containment_only_source_walks_nothing_and_owes_nothing():
+    """An ontology with no lineage relationship (pure hierarchy) hands the
+    walk an EMPTY lineage-type list. There is nothing to walk, so the page is
+    complete: no frontier, no cursor, no truncation. It used to build
+    ``[r:]`` relationship patterns — invalid Cypher on a live engine — so
+    every page failed, filed the focus as a ``cut`` frontier entry, and the
+    canvas's hands-free driver re-seeded it until its request failsafe."""
+    import re
+
+    fake = _TraceFake()
+    fake.contain("dom", "leaf_00")
+    fake.contain("dom", "leaf_01")
+    p = _make_provider(fake, hydrate=True)
+
+    # FalkorDB rejects an empty relationship type; the fake string-matches
+    # Cypher, so make the provider's read refuse the way the engine does.
+    real_ro_query = p._ro_query
+
+    async def strict_ro_query(cypher, params=None, timeout=None, **kwargs):
+        if re.search(r"\[\w*:\s*[\]*]", cypher):
+            raise RuntimeError(f"Invalid input: empty relationship type in {cypher}")
+        return await real_ro_query(cypher, params=params, timeout=timeout, **kwargs)
+
+    p._ro_query = strict_ro_query
+
+    for urn, kw in [("dom", {}), ("leaf_00", {}), ("dom", {"seed_urns": ["dom"]})]:
+        r = _run(p.trace_closure(
+            urn, upstream_depth=1, downstream_depth=1,
+            lineage_edge_types=[], containment_edge_types=CT,
+            max_nodes=2000, timeout_ms=5000, **kw,
+        ))
+        assert r.frontier_up == [] and r.frontier_down == [], (urn, kw)
+        assert r.seed_cursor is None, (urn, kw)
+        assert r.truncated is False and r.truncation_reason is None, (urn, kw, r.truncation_reason)
+        assert r.edges == []
+        assert urn in _shipped(r)
