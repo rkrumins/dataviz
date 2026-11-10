@@ -1454,6 +1454,10 @@ def test_no_lineage_types_returns_zero_result():
     ))
     assert result["aggregated_edges_affected"] == 0
     assert result["processed"] == 0
+    # The empty run is still recorded, so a containment-only graph reads as a
+    # current cube instead of one that "needs rebuild" forever.
+    assert fake.meta is not None
+    assert fake.meta["edgeCount"] == 0
 
 
 def test_containment_cycle_is_broken(monkeypatch):

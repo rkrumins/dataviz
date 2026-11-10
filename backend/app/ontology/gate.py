@@ -5,10 +5,9 @@ Pure, side-effect-free. No DB, no HTTP, no logging side effects. All callers
 (API endpoint, AggregationService.trigger, worker re-validation) compute the
 same ResolutionReport from the same inputs.
 
-Hard criteria (block aggregation):
-    4. At least one relationship type has is_lineage=true. Without any lineage
-       classification, an aggregation run can produce nothing — this is the
-       one gap that makes the whole pipeline meaningless.
+Hard criteria (block aggregation): none today. ``blocking_reasons`` stays
+on the report for the data-source-keyed checks (ontology not assigned /
+missing) the callers add around this function.
 
 Soft criteria (warn, do not block):
     1. Every introspected entity type has an entry in entity_type_definitions.
@@ -23,6 +22,11 @@ Soft criteria (warn, do not block):
     6. Each entity type that participates in containment has matching can_contain
        / can_be_contained_by entries.
     7. Root entity types (no incoming containment) appear in root_entity_types.
+    4. At least one relationship type has is_lineage=true. Was the one hard
+       criterion; now advisory (``no_lineage``). A graph with only containment
+       edges (pure hierarchies) is legitimate: the run still stamps node
+       identity (urn / displayName) and indexes the canvas reads, and simply
+       materializes zero AGGREGATED edges.
 """
 import hashlib
 import json
@@ -177,7 +181,7 @@ def check_resolution(
     # leaves the flag at its False default — and resolver.resolve_ontology already unions them for
     # the read/canvas path. Reconciling the parsed flags here (in-memory only; the fingerprint is
     # computed from the raw defs, so this cannot perturb idempotency) means a list-only lineage
-    # classification still satisfies criterion 4 instead of spuriously blocking with ``no_lineage``.
+    # classification still satisfies criterion 4 instead of a spurious ``no_lineage`` advisory.
     _containment_upper = {str(t).upper() for t in (containment_edge_types or [])}
     _lineage_upper = {str(t).upper() for t in (lineage_edge_types or [])}
     for _rid, _rd in user_rel_defs.items():
@@ -234,16 +238,18 @@ def check_resolution(
     if unclassified:
         advisory_warnings.append("unclassified_relationships")
 
-    # Criterion 4 — at least one ``is_lineage`` relationship in the
-    # ontology. Checked against the FULL ontology (not just the
+    # Criterion 4 (advisory) — at least one ``is_lineage`` relationship in
+    # the ontology. Without one the run materializes zero AGGREGATED edges,
+    # which is right for a containment-only graph, so it no longer blocks.
+    # Checked against the FULL ontology (not just the
     # introspected subset) because the ontology's ability to express
     # lineage is independent of any specific graph's current contents.
     # Without this, a stats-cache miss (which produces empty
-    # introspected_edge_ids) would spuriously block re-triggers.
+    # introspected_edge_ids) would spuriously flag ``no_lineage``.
     # Also honor a lineage type that lives ONLY in the top-level list with no
     # rich def (a legitimate "legacy vocabulary" state the repo preserves): the
     # reconcile loop above can only flag ids that exist in ``user_rel_defs``, so
-    # an array-only id would be missed here and spuriously block — even though
+    # an array-only id would be missed here and spuriously flag ``no_lineage`` — even though
     # resolve_ontology and the aggregation worker BOTH union the raw arrays and
     # would run it. Reconcile the gate against the arrays too, so the preflight
     # can never be stricter than the engine it guards.
@@ -252,7 +258,7 @@ def check_resolution(
         or bool(_lineage_upper)
     )
     if not has_lineage:
-        blocking_reasons.append("no_lineage")
+        advisory_warnings.append("no_lineage")
 
     # Advisory — at least one ``is_containment`` relationship. Without
     # one, the aggregation worker has no way to walk the containment

@@ -1623,8 +1623,10 @@ class AggregationWorker:
         """Re-derive (containment, lineage, levels) from the job's pinned
         ontology when the frozen lists are empty, persisting them back
         onto the row so a resume stays stable. Raises ValueError when no
-        ontology is pinned or it yields no lineage types — with enough
-        context to identify the entry path that produced the bad row."""
+        ontology is pinned or it no longer exists — with enough context to
+        identify the entry path that produced the bad row. An ontology that
+        classifies no relationship as lineage (a containment-only graph)
+        re-freezes an empty lineage list and the run materializes nothing."""
         if not job.ontology_id:
             raise ValueError(
                 "No lineage edge types configured — cannot aggregate "
@@ -1669,13 +1671,6 @@ class AggregationWorker:
             if t and t.upper() not in _seen_lineage:
                 lineage_types.append(t)
                 _seen_lineage.add(t.upper())
-        if not lineage_types:
-            raise ValueError(
-                "No lineage edge types configured — the pinned ontology "
-                f"{job.ontology_id!r} classifies no relationship as "
-                "lineage (trigger_source="
-                f"{job.trigger_source!r})"
-            )
         levels = derive_level_map(
             SimpleNamespace(entity_type_definitions=entity_defs)
         )

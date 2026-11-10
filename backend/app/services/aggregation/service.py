@@ -962,10 +962,10 @@ class AggregationService:
                     )
             containment_types = ontology_data.get("containment_edge_types", [])
             lineage_types = ontology_data.get("lineage_edge_types", [])
-            # Empty-lineage is no longer possible here — the gate's
-            # ``no_lineage`` blocking reason already raised
-            # OntologyResolutionError inside ``_resolve_ontology``. The
-            # frozen list still gets persisted for the worker.
+            # Empty lineage is valid (a containment-only graph — the gate
+            # reports ``no_lineage`` as advisory): the run still stamps node
+            # identity and materializes zero AGGREGATED edges. The frozen
+            # list still gets persisted for the worker.
 
             # Request overrides layered over the source's override, the
             # stored global defaults and env — frozen here so the worker
