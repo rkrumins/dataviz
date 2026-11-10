@@ -48,7 +48,7 @@ beforeEach(() => {
   state.phase = 'complete'
   state.head = 44
   state.since = []
-  useReviewStore.setState({ available: false, listOpen: false, scope: null, operation: null })
+  useReviewStore.setState({ available: false, navigatorOpen: false, listOpen: false, scope: null, operation: null })
   open()
 })
 
@@ -121,7 +121,7 @@ describe('RevisionBanner — on the Context View', () => {
     render(<RevisionBanner workspaceId="ws1" graphId="g1" onCompare={() => {}} />)
 
     fireEvent.click(screen.getByRole('button', { name: 'Review 12 deleted since this revision' }))
-    expect(useReviewStore.getState()).toMatchObject({ listOpen: true, scope: { kind: 'since', seq: 12 }, operation: 'removed' })
+    expect(useReviewStore.getState()).toMatchObject({ navigatorOpen: true, scope: { kind: 'since', seq: 12 }, operation: 'removed' })
     fireEvent.click(screen.getByRole('button', { name: 'Review 1,200 added since this revision' }))
     expect(useReviewStore.getState().operation).toBe('added')
   })

@@ -15,7 +15,8 @@ const mount = (searchOpen = false) =>
 
 beforeEach(() => {
   closeSearch.mockReset()
-  useReviewStore.setState({ available: false, listOpen: false, scope: null, operation: null, filter: {} })
+  // The list opens with a review here: this person keeps it open.
+  useReviewStore.setState({ available: false, navigatorOpen: false, listOpen: false, listPreferred: true, scope: null, operation: null, filter: {} })
 })
 
 describe('useReviewRail', () => {
@@ -24,7 +25,7 @@ describe('useReviewRail', () => {
     expect(useReviewStore.getState().available).toBe(true)
     act(() => useReviewStore.getState().startReview({ operation: 'removed' }))
     unmount()
-    expect(useReviewStore.getState()).toMatchObject({ available: false, listOpen: false })
+    expect(useReviewStore.getState()).toMatchObject({ available: false, navigatorOpen: false, listOpen: false })
   })
 
   it('closes the search panel when the review opens', () => {

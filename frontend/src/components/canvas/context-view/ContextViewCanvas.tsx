@@ -346,6 +346,9 @@ import { useProjectionCatchUp, catchUpMessage } from '@/hooks/useProjectionCatch
 import { SearchMapPanel } from '../search/SearchMapPanel'
 import { ChangesExplorer } from '@/features/versioning/components/ChangesExplorer'
 import { useReviewRail } from '@/features/versioning/hooks/useReviewRail'
+import { useReviewOnCanvas } from '@/features/versioning/hooks/useReviewOnCanvas'
+import { useLocateChange } from '@/features/versioning/canvas/useLocateChange'
+import { ChangeNavigator } from '@/features/versioning/components/ChangeNavigator'
 import {
     ViewRowSearchContext,
     ViewSearchSessionContext,
@@ -4438,6 +4441,22 @@ export function ContextViewCanvas({
   // every other reveal does.
   useEffect(() => { revealSearchHitRef.current = revealSearchHit })
 
+  // A review finds each change it visits — opened down to, selected, scrolled to, a deletion past
+  // the 500 drawn — and draws its scope on the canvas.
+  const expandRows = useCallback((ids: readonly string[]) => {
+    setExpandedNodes((prev) => {
+      if (ids.every((id) => prev.has(id))) return prev
+      const next = new Set(prev)
+      for (const id of ids) next.add(id)
+      return next
+    })
+  }, [])
+  const locateChange = useLocateChange({
+    provider, reveal: revealSearchHit, expand: expandRows, scrollIntoView: scrollHitIntoView,
+    isContainmentEdgeType: isContainmentEdge,
+  })
+  useReviewOnCanvas(activeView?.id ?? null, locateChange)
+
   // "Frame matches" — scroll the horizontal canvas container so the first
   // match-bearing node is centered. This is a viewport-not-zoom action since
   // the context view is a horizontal layered layout (no React Flow zoom).
@@ -7456,6 +7475,9 @@ export function ContextViewCanvas({
             if (target) openLens(target)
           }}
         />
+
+        {/* A review, one change at a time. It gives way to a trace. */}
+        <ChangeNavigator viewId={activeView?.id ?? null} hidden={traceActive} />
 
         {/* Frame pill — selection has off-screen neighbors; offer to frame
             them (never auto-scroll) or open the lens. */}

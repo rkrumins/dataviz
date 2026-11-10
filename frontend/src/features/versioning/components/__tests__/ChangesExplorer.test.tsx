@@ -9,6 +9,7 @@ import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { ChangeListPage, ChangeListSummary } from '@/services/versioningApiService'
 
+const scrollToIndex = vi.hoisted(() => vi.fn())
 vi.mock('@tanstack/react-virtual', () => ({
   useVirtualizer: (opts: { count: number; getItemKey?: (i: number) => string | number }) => ({
     getVirtualItems: () => Array.from({ length: opts.count }, (_, index) => ({
@@ -16,6 +17,7 @@ vi.mock('@tanstack/react-virtual', () => ({
     })),
     getTotalSize: () => opts.count * 36,
     measureElement: () => undefined,
+    scrollToIndex,
   }),
 }))
 const api = vi.hoisted(() => ({ getChangeSummary: vi.fn(), getChangeEntries: vi.fn(), getChangeEntry: vi.fn() }))
@@ -25,6 +27,7 @@ vi.mock('@/services/versioningApiService', async (importOriginal) => ({
 }))
 
 import { useBranchStore } from '@/store/branchStore'
+import { useCanvasStore } from '@/store/canvas'
 import { useReviewStore } from '@/store/reviewStore'
 import { ChangesExplorer } from '../ChangesExplorer'
 
@@ -60,7 +63,9 @@ beforeEach(() => {
   api.getChangeEntries.mockResolvedValue(page([row('t1', 'added', 'Table', 'orders'), row('c1', 'removed', 'Column', 'amount')]))
   useBranchStore.getState().reset()
   useBranchStore.setState({ workspaceId: 'ws1', dataSourceId: 'ds1', viewId: 'v1', graphId: 'g1', currentBranchId: 'br_1', mainHeadCommitSeq: 42 })
-  useReviewStore.setState({ available: true, listOpen: true, scope: null, operation: null, filter: {} })
+  // The list opens with a review here: this person keeps it open.
+  useReviewStore.setState({ available: true, navigatorOpen: true, listOpen: true, listPreferred: true, scope: null, operation: null, filter: {}, current: null, position: 0 })
+  useCanvasStore.setState({ drawerNodeId: null, drawerEdge: null })
 })
 
 describe('ChangesExplorer', () => {
@@ -101,7 +106,7 @@ describe('ChangesExplorer', () => {
     expect(screen.getByRole('button', { name: 'Filter: Relationships' })).toBeInTheDocument()
   })
 
-  it("offers the canvas's other scopes in its title, and draws the one it can", async () => {
+  it("offers the canvas's other scopes in its title", async () => {
     useBranchStore.setState({ currentBranchId: null })
     useBranchStore.getState().openRevision({ seq: 12, headAtOpen: 40 })
     renderRail()
@@ -111,7 +116,6 @@ describe('ChangesExplorer', () => {
     expect(api.getChangeSummary).toHaveBeenLastCalledWith('ws1', 'g1', { fromSeq: 12, toSeq: 40 })
     fireEvent.change(title, { target: { value: '1' } })
     await waitFor(() => expect(api.getChangeSummary).toHaveBeenLastCalledWith('ws1', 'g1', { fromSeq: 11, toSeq: 12 }))
-    expect(useBranchStore.getState().highlight).toEqual({ fromSeq: 11, toSeq: 12 })
     expect(screen.getByRole('combobox', { name: 'What to review' })).toHaveDisplayValue('Changed in #12')
   })
 
@@ -122,13 +126,53 @@ describe('ChangesExplorer', () => {
     expect(api.getChangeEntries).not.toHaveBeenCalled()
   })
 
-  it('fetches nothing while closed, and closes the review', async () => {
-    useReviewStore.setState({ listOpen: false })
+  it('gives way to a drawer on a narrow screen, and comes back after it', async () => {
+    vi.stubGlobal('matchMedia', (query: string) => ({ matches: false, media: query, addEventListener: () => {}, removeEventListener: () => {} }))
+    try {
+      useCanvasStore.setState({ drawerNodeId: 'urn:orders' })
+      renderRail()
+      expect(screen.queryByRole('complementary', { name: 'Review changes' })).toBeNull()
+      act(() => useCanvasStore.setState({ drawerNodeId: null }))
+      expect(await screen.findByRole('complementary', { name: 'Review changes' })).toBeInTheDocument()
+      expect(useReviewStore.getState().listOpen).toBe(true)                  // the choice stands
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('fetches nothing while no review is open, and closes to the navigator, remembering it', async () => {
+    useReviewStore.setState({ navigatorOpen: false, listOpen: false })
     renderRail()
     expect(api.getChangeSummary).not.toHaveBeenCalled()
 
-    act(() => useReviewStore.setState({ listOpen: true }))
-    fireEvent.click(await screen.findByRole('button', { name: 'Close the review' }))
-    expect(useReviewStore.getState().listOpen).toBe(false)
+    act(() => useReviewStore.setState({ navigatorOpen: true, listOpen: true }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Close the list' }))
+    expect(useReviewStore.getState()).toMatchObject({ listOpen: false, navigatorOpen: true, listPreferred: false })
+  })
+
+  it('moves between rows with the arrow keys, and keeps the change the navigator moves to in view', async () => {
+    renderRail()
+    await screen.findByText('amount')
+    const orders = screen.getByRole('button', { name: /^Added\s?orders/ })
+    orders.focus()
+    fireEvent.keyDown(orders, { key: 'ArrowDown' })
+    expect(screen.getByRole('button', { name: /^Deleted\s?amount$/ })).toHaveFocus()
+
+    scrollToIndex.mockClear()
+    act(() => useReviewStore.getState().visit({ entityId: 'c1', kind: 'node', status: 'removed', structural: false }, 1))
+    // Items: the Table header, orders, the Column header, amount.
+    expect(scrollToIndex).toHaveBeenCalledWith(3, { align: 'auto' })
+  })
+
+  it('makes a picked row the change the review is on, and marks it', async () => {
+    renderRail()
+    const amount = () => screen.getByRole('button', { name: /^Deleted\s?amount$/ })
+    await screen.findByText('amount')
+    fireEvent.click(amount())
+    expect(useReviewStore.getState()).toMatchObject({ current: { entityId: 'c1' }, position: 1 })
+    expect(amount().closest('[role="listitem"]')).toHaveAttribute('aria-current', 'true')
+    // Its chevron still shows what changed, without moving the review.
+    fireEvent.click(screen.getByRole('button', { name: 'What changed in orders' }))
+    expect(useReviewStore.getState().current?.entityId).toBe('c1')
   })
 })

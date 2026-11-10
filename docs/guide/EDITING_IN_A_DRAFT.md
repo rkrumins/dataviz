@@ -248,15 +248,15 @@ every staged edit away.
 | Dashed halo | Edited, but not saved yet |
 | Green / orange / rose | New / edited / deleted |
 | A struck-through name and **Deleted** | Deleted. Hover **Deleted** to see whether the deletion is saved to this draft or not saved yet. Deleting an entity marks everything inside it and every relationship touching it the same way, until you save or discard |
-| A deleted entity still in its place | A deletion saved to this draft stays visible, struck through, on every layout until the draft is published. It sits under its parent when that parent is on the canvas; up to 500 are drawn, and **Changes** lists them all. When not all of them are drawn, the bar above the canvas says how many are, such as **500 of 1,200 deleted drawn**; choose it to open **Changes**, or in the Context View to review them beside the canvas. Its drawer says who deleted it and when, where it lived and what it held. **Restore** (on the card, the row or the drawer) brings it back with what was deleted inside it and its relationships to entities still there |
+| A deleted entity still in its place | A deletion saved to this draft stays visible, struck through, on every layout until the draft is published. It sits under its parent when that parent is on the canvas; up to 500 are drawn, and **Changes** lists them all. When not all of them are drawn, the bar above the canvas says how many are, such as **500 of 1,200 deleted drawn**; choose it to open **Changes**, or in the Context View to go through them one at a time. There, a row whose deleted entities aren't all drawn says how many, such as **🗑 120**; choose it to draw them. Its drawer says who deleted it and when, where it lived and what it held. **Restore** (on the card, the row or the drawer) brings it back with what was deleted inside it and its relationships to entities still there |
 | Rose dashes | A deleted relationship. It stays drawn until the deletion is saved or discarded |
 
 **Committed**, in the amber strip, hides or shows the rings for changes already
 saved to the draft.
 
 In the Context View, the counts in the amber strip (**+12**, **~40**, **−3**)
-open your draft's saved changes beside the canvas, one kind at a time. See
-[Review changes](/guide/versioning-change-control#review-changes).
+take you through your draft's saved changes on the canvas, one at a time and one
+kind at a time. See [Review changes](/guide/versioning-change-control#review-changes).
 
 ## When someone else changed the same thing
 

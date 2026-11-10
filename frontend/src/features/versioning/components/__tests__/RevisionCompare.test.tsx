@@ -46,7 +46,7 @@ const base = {
 
 beforeEach(() => {
   state.origins = []
-  useReviewStore.setState({ available: false, listOpen: false, scope: null, operation: null })
+  useReviewStore.setState({ available: false, navigatorOpen: false, listOpen: false, scope: null, operation: null })
   state.summary = summary([type('Table', 800, 200, 5), type('Column', 300, 100)])
 })
 
@@ -105,7 +105,7 @@ describe('RevisionCompare — on the Context View', () => {
     expect(screen.queryByText('Highlight on canvas')).toBeNull()
     fireEvent.click(screen.getByRole('button', { name: 'Review changes' }))
     expect(onHighlight).toHaveBeenCalledWith(10, 30)
-    expect(useReviewStore.getState()).toMatchObject({ listOpen: true, scope: null, operation: null })
+    expect(useReviewStore.getState()).toMatchObject({ navigatorOpen: true, scope: null, operation: null })
   })
 
   it('keeps its list where nothing can be opened on the canvas', () => {

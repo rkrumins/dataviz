@@ -25,6 +25,7 @@ import { portView, type NodePorts } from './lineagePorts'
 import { LineagePortGlyph } from './LineagePortGlyph'
 import { SearchMatchBadge } from '../search/SearchMatchBadge'
 import { NarrowRowMark } from '@/features/narrow/NarrowRowMark'
+import { DeletedInsideMark } from '@/features/versioning/canvas/DeletedInsideMark'
 import { useSearchHighlight } from '../search/useSearchHighlight'
 import { DisplayRuleTagChips } from '../property-manager/DisplayRuleTagChips'
 import { useDisplayRuleLook } from '@/store/displayRuleMatchStore'
@@ -935,6 +936,8 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
         {isPendingDelete && <DeletedChip compact={minimal} title={deletedTitle(directDeco)} />}
         {/* On a narrowed canvas: why this row is there (nothing otherwise). */}
         {!isTracing && <NarrowRowMark urn={urnOrId} collapsed={!isExpanded && hasChildren} />}
+        {/* Deletions under this row the canvas hasn't drawn: choosing it draws them here. */}
+        {!isTracing && <DeletedInsideMark urn={urnOrId} onOpen={() => { if (!isExpanded) onToggle(node.id) }} />}
         {(descendantCount > 0 || traceApprox > 0) && (
           <span className={cn(
             "text-[11px] px-2 py-1 rounded-lg flex-shrink-0",

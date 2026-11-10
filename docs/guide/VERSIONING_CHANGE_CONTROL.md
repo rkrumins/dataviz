@@ -262,9 +262,10 @@ you can edit.
 
 ## Review changes
 
-In the Context View, every change lists beside the canvas: a draft's, a past
-revision's, or two revisions compared. That holds however many there are, and
-deletions are listed even where the canvas draws only 500 of them.
+In the Context View, you can go through every change one at a time, each found on
+the canvas where it is: a draft's, a past revision's, or two revisions compared.
+That holds however many there are, and deletions are found even where the canvas
+draws only 500 of them.
 
 **Start a review** from wherever changes are counted:
 
@@ -276,30 +277,58 @@ deletions are listed even where the canvas draws only 500 of them.
 - the counts in a past revision's banner, which list what changed since;
 - **Reviews → Changes → Review changes**.
 
-**What it lists** depends on where you are. The title names it, and where there
-is a choice it opens a menu.
+**What it covers** depends on where you are:
 
-| Where you are | What it lists |
+| Where you are | What it covers |
 | --- | --- |
 | In a draft | **This draft**: its saved changes |
 | A past revision open | **Since #12**: what changed after it. Or **Changed in #12**: what that revision changed |
 | Two revisions compared | **#3 → #12**: everything in between |
 | Published, nothing open | **The latest revision · #42**: what it changed |
 
-**What you can do in the list:**
+### One change at a time
 
-- **Show one kind of change at a time:** **All**, **Added**, **Modified** or
-  **Deleted**, each with its count.
+A bar at the bottom of the canvas takes you through the changes, starting with the
+first. It says what each one is in plain words, such as *Deleted · orders_legacy ·
+from Sales › crm · by Ana*. Technical users also see its type and qualified name.
+
+- **‹** and **›**, or the **←** and **→** keys, go to the previous or next change.
+  Each one is opened on the canvas down to where it sits, selected and scrolled to,
+  however deep it is, and whether or not it was loaded.
+- **All**, **Added**, **Modified** and **Deleted** show one kind of change at a time.
+- **Details** opens what the canvas knows of it: an entity's details, or a deleted
+  entity's (who deleted it, when, what went with it).
+- **List** opens every change beside the canvas (below).
+- **×** ends the review.
+
+When a change isn't drawn here, the bar says so. For example, an entity added after
+the revision open isn't on its canvas. It takes you as near as the canvas gets.
+
+### Every change, beside the canvas
+
+**List** opens the changes in the place beside the canvas that search results use.
+Opening one closes the other, and each comes back as you left it. Technical users
+get the list with every review; business users get the bar alone. Either way,
+**List** changes it, and your choice is kept for your next review. On a screen
+narrower than 1,280 pixels, the list makes way while an entity's details are open,
+and comes back when you close them.
+
+- **The title** names what it covers. Where there's a choice, it's a menu.
+- **Show one kind of change at a time**, as in the bar, with counts.
 - **Search** by name, URN or type.
 - **Filter** by entities or relationships, and by type. The button says which
   kind the list is showing.
-- **Open a row** to see what changed in it. A deleted row offers **Deletion
-  details**.
+- **Choose a row** to go to that change on the canvas; the bar moves with it. Its
+  arrow shows what changed in it. **↑** and **↓** move between rows.
 
 The canvas rings what you're reviewing. **Changed in #12** and **The latest
-revision** are highlighted on it while you review them, and the highlight goes
-when you close the review. Search results share the same place beside the canvas:
-opening one closes the other, and each comes back as you left it.
+revision** are highlighted on it while you review them, and the highlight goes when
+you end the review.
+
+### Deleted inside
+
+A row whose deleted entities aren't all drawn says how many aren't, with a small
+bin, such as **🗑 120**. Choose it to draw them under the row, 200 at a time.
 
 The graph and hierarchy layouts keep their own lists: **Reviews → Changes** for
 a draft, and **History → Compare** for revisions.
