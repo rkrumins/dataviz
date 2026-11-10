@@ -2641,6 +2641,10 @@ class AggregationPipeline:
                 "aggregation pipeline on %s: no effective lineage types; "
                 "nothing to materialize.", self.p._graph_name,
             )
+            # Still record the (empty) run, so a containment-only graph reads
+            # as a current cube rather than a pre-depth-stamp one that
+            # "needs rebuild" forever.
+            await self._stamp_run_meta(0)
             return self._result()
         self._values = _PairValues(len(self._effective_types))
 

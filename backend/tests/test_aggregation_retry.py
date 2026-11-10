@@ -397,3 +397,48 @@ def test_refreeze_recovers_identity_property_from_data_source():
     assert job.identity_property == "id", "self-heal must recover identity from the DS"
     assert job.name_property == "title", "self-heal must recover display-name from the DS"
     assert _json.loads(job.lineage_edge_types) == ["FLOWS"], "edge types still heal"
+
+
+def test_refreeze_accepts_a_containment_only_ontology():
+    """A graph with only containment edges has no lineage to freeze. That is a
+    valid ontology, not a bad row: the self-heal must freeze an empty lineage
+    list (the run then materializes nothing) instead of failing the job."""
+    import json as _json
+    from backend.app.db.models import OntologyORM, WorkspaceDataSourceORM
+    from backend.app.services.aggregation.models import AggregationJobORM
+
+    ont = OntologyORM(
+        id="ont_tree",
+        entity_type_definitions="{}",
+        relationship_type_definitions=_json.dumps(
+            {"CONTAINS": {"is_containment": True, "is_lineage": False}}
+        ),
+    )
+    ds = WorkspaceDataSourceORM(id="ds_tree")
+    job = AggregationJobORM(
+        id="agg_tree", ontology_id="ont_tree", data_source_id="ds_tree",
+        trigger_source="manual",
+    )
+
+    class _GetSession:
+        def __init__(self, objs):
+            self._objs = objs
+
+        async def get(self, model, key):
+            return self._objs.get((model.__name__, key))
+
+        async def commit(self):
+            pass
+
+    session = _GetSession({
+        ("OntologyORM", "ont_tree"): ont,
+        ("WorkspaceDataSourceORM", "ds_tree"): ds,
+    })
+
+    containment, lineage, _levels = asyncio.run(
+        _make_worker()._refreeze_edge_types(session, job)
+    )
+
+    assert containment == ["CONTAINS"]
+    assert lineage == []
+    assert _json.loads(job.lineage_edge_types) == []

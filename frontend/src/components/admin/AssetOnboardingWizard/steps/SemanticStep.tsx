@@ -1381,9 +1381,6 @@ function ResolutionPreviewBanner({
     if (resolution.hierarchyWarnings.length > 0) {
         parts.push(`${resolution.hierarchyWarnings.length} hierarchy warning${resolution.hierarchyWarnings.length !== 1 ? 's' : ''}`)
     }
-    if (resolution.blockingReasons.includes('no_lineage')) {
-        parts.push('No relationship is flagged as Lineage — aggregation will build nothing for this source (fine for containment-only graphs)')
-    }
     if (noContainment) {
         parts.push('No relationship is flagged as Containment — AGGREGATED edges will not propagate up the containment tree (only direct lineage endpoints)')
     }
@@ -1407,7 +1404,7 @@ function ResolutionPreviewBanner({
                 </ul>
                 {hasBlocking && (
                     <div className="text-[11px] opacity-80 pt-0.5">
-                        Review in the next step (Schema Review) — you can still complete onboarding.
+                        Resolve in the next step (Schema Review) before completing onboarding.
                     </div>
                 )}
             </div>
