@@ -83,6 +83,9 @@ export const KEEP_WALKED_FOCALS = 4
  *  drains what it named or advances a cursor, so this should be
  *  unreachable). Reached, it is reported as an ERROR, never as silence. */
 export const WALK_REQUEST_FAILSAFE = 2_000
+/** `truncationReason`s that mean the server could not read part of the page
+ *  (as opposed to `max_nodes`, a budget cut that a continuation completes). */
+const FAILED_PAGE_REASONS: ReadonlySet<string> = new Set(['timeout', 'seed_failed', 'nodes_failed'])
 /** Known urns shipped as `excludeUrns` (wire cap). Budget steering, not
  *  correctness — an edge into an un-excluded known node simply re-arrives
  *  and `mergeClosures` dedupes it. */
@@ -461,7 +464,14 @@ export function useLensWalk(
                 const entry = prev.get(cacheKey)
                 if (!entry) return prev   // session cleared/re-created before this landed
                 const merged = mergeClosures(entry.model, res, mergeCtx)
-                return setEntry(prev, cacheKey, withExtendStatus({ ...entry, model: merged }, statusKey, null))
+                // A page the server failed (it hands the same anchors or
+                // cursor back) that brought nothing would be re-fired by the
+                // driver as-is, up to the failsafe. Keep it as a failed step
+                // instead: the walk stops honestly and `retryWalk` re-arms it.
+                const stalled = FAILED_PAGE_REASONS.has(res.truncationReason ?? '')
+                    && merged.nodes.length === entry.model.nodes.length
+                    && merged.lineageEdges.length === entry.model.lineageEdges.length
+                return setEntry(prev, cacheKey, withExtendStatus({ ...entry, model: merged }, statusKey, stalled ? 'error' : null))
             })
         } catch {
             if (session !== sessionRef.current) return
