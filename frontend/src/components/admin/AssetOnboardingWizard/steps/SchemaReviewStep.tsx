@@ -6,9 +6,10 @@
  * Partial coverage (missing types, unclassified relationships) is
  * ADVISORY: the wizard can proceed — unmapped types are ignored by
  * aggregation and render with fallback styling — and the one-click
- * "Add missing types" extend stays the promoted fix. Only a fatal gap
- * (no lineage relationship at all) blocks, because aggregation would
- * produce nothing.
+ * "Add missing types" extend stays the promoted fix. An ontology with no
+ * lineage relationship at all blocks aggregation server-side, but the
+ * wizard shows it as a warning too: a containment-only graph (pure
+ * hierarchies) is a legitimate source that simply gets no rollups.
  *
  * Published ontologies are immutable — saving classifications creates a
  * new draft version (POST .../new-version) and re-points the wizard
@@ -27,6 +28,7 @@ import {
 import { ontologyDefinitionService } from '@/services/ontologyDefinitionService'
 import { useOntologyMutations } from '@/features/ontology/hooks/useOntologyMutations'
 import type { OnboardingFormData } from '../AssetOnboardingWizard'
+import { canProceedPastGate, WIZARD_WARNING_BLOCKERS } from './schemaReviewGate'
 
 // ─── Types ──────────────────────────────────────────────────────────────
 
@@ -495,9 +497,11 @@ export function SchemaReviewStep({
         }
     }, [statusMap, onStatusChange, updateFormData, providerId, invalidateOntologyCaches])
 
-    const allResolved = itemsWithOntology.every(c => statusMap[c.id]?.resolution?.resolved)
+    const allResolved = itemsWithOntology.every(c => canProceedPastGate(statusMap[c.id]?.resolution))
     const anyAdvisories = itemsWithOntology.some(c =>
         (statusMap[c.id]?.resolution?.advisoryWarnings ?? []).some(w => SUMMARY_ADVISORIES.includes(w)))
+    const anyNoLineage = itemsWithOntology.some(c =>
+        (statusMap[c.id]?.resolution?.blockingReasons ?? []).includes('no_lineage'))
 
     // ─── Render ───────────────────────────────────────────────────────
 
@@ -511,9 +515,9 @@ export function SchemaReviewStep({
                     Review how well each ontology covers its graph. Gaps are
                     advisory — you can proceed, and unmapped types will simply be
                     ignored by aggregation and rendered with default styling —
-                    but one-click fixes below get you to full coverage. Only an
-                    ontology with no lineage relationship at all blocks, since
-                    aggregation would produce nothing.
+                    but one-click fixes below get you to full coverage. An
+                    ontology with no lineage relationship is a warning too: the
+                    source is onboarded, but aggregation has nothing to build.
                 </p>
             </div>
 
@@ -529,8 +533,16 @@ export function SchemaReviewStep({
                     const resolution = status?.resolution
                     const ontologyId = formData.ontologySelections[item.id]?.ontologyId || ''
                     const ontologyName = ontologyNames[ontologyId] || ontologyId
-                    const advisoryCount = resolution?.advisoryWarnings
-                        ?.filter(w => SUMMARY_ADVISORIES.includes(w)).length ?? 0
+                    // Blockers the wizard downgrades (no lineage) count and render as
+                    // warnings alongside the advisories; anything else still blocks.
+                    const blockingReasons = (resolution?.blockingReasons ?? [])
+                        .filter(r => !WIZARD_WARNING_BLOCKERS.includes(r))
+                    const warningReasons = [
+                        ...(resolution?.blockingReasons ?? []).filter(r => WIZARD_WARNING_BLOCKERS.includes(r)),
+                        ...(resolution?.advisoryWarnings ?? []).filter(w => SUMMARY_ADVISORIES.includes(w)),
+                    ]
+                    const advisoryCount = warningReasons.length
+                    const canProceed = canProceedPastGate(resolution)
                     const isOpen = expanded[item.id] ?? (!resolution?.resolved || advisoryCount > 0)
                     const coverage = resolution?.coveragePercent ?? null
 
@@ -550,7 +562,7 @@ export function SchemaReviewStep({
                             key={item.id}
                             className={cn(
                                 "rounded-xl border bg-white dark:bg-slate-800/40 shadow-sm",
-                                status?.error || resolution?.resolved === false
+                                status?.error || (resolution && !canProceed)
                                     ? "border-red-500/30"
                                     : resolution?.resolved && advisoryCount === 0
                                         ? "border-emerald-500/20"
@@ -591,7 +603,7 @@ export function SchemaReviewStep({
                                     <span className="flex items-center gap-1.5 text-xs text-slate-400">
                                         Evaluating…
                                     </span>
-                                ) : !resolution.resolved ? (
+                                ) : !canProceed ? (
                                     <span className="flex items-center gap-1.5 text-xs text-red-500">
                                         <AlertTriangle className="w-4 h-4" /> Blocked
                                     </span>
@@ -615,10 +627,9 @@ export function SchemaReviewStep({
                                         </div>
                                     )}
 
-                                    {resolution && (resolution.blockingReasons.length > 0 ||
-                                        (resolution.advisoryWarnings ?? []).some(w => SUMMARY_ADVISORIES.includes(w))) && (
+                                    {resolution && (blockingReasons.length > 0 || warningReasons.length > 0) && (
                                         <div className="flex flex-wrap gap-1.5">
-                                            {resolution.blockingReasons.map((reason, idx) => {
+                                            {blockingReasons.map((reason, idx) => {
                                                 // Defensive coercion — even though the API
                                                 // contract is List[str], we never want a
                                                 // stray object to surface as "[object Object]".
@@ -635,16 +646,14 @@ export function SchemaReviewStep({
                                                     </span>
                                                 )
                                             })}
-                                            {(resolution.advisoryWarnings ?? [])
-                                                .filter(w => SUMMARY_ADVISORIES.includes(w))
-                                                .map(reason => (
-                                                    <span
-                                                        key={`adv-${reason}`}
-                                                        className="text-[10px] uppercase tracking-wide font-semibold px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-500 border border-amber-500/20"
-                                                    >
-                                                        {REASON_LABELS[reason] ?? reason}
-                                                    </span>
-                                                ))}
+                                            {warningReasons.map(reason => (
+                                                <span
+                                                    key={`adv-${reason}`}
+                                                    className="text-[10px] uppercase tracking-wide font-semibold px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-500 border border-amber-500/20"
+                                                >
+                                                    {REASON_LABELS[reason] ?? reason}
+                                                </span>
+                                            ))}
                                         </div>
                                     )}
 
@@ -736,6 +745,18 @@ export function SchemaReviewStep({
                                         </Section>
                                     )}
 
+                                    {resolution && resolution.blockingReasons.includes('no_lineage') && (
+                                        <div className="px-3 py-2 rounded-md bg-amber-500/[0.08] border border-amber-500/20 text-xs text-amber-500 space-y-0.5">
+                                            <div className="font-medium">No relationship is flagged as Lineage</div>
+                                            <div className="opacity-90">
+                                                You can proceed — the source is onboarded with its containment
+                                                hierarchy, but aggregation has no lineage to roll up, so no aggregated
+                                                edges are built for it. If the graph does carry data flow, mark at least
+                                                one relationship as Lineage above.
+                                            </div>
+                                        </div>
+                                    )}
+
                                     {resolution && (resolution.advisoryWarnings ?? []).includes('no_containment_edges') && (
                                         <div className="px-3 py-2 rounded-md bg-amber-500/[0.08] border border-amber-500/20 text-xs text-amber-500 space-y-0.5">
                                             <div className="font-medium">No relationship is flagged as Containment</div>
@@ -793,15 +814,17 @@ export function SchemaReviewStep({
                     "px-4 py-3 rounded-lg border text-sm",
                     !allResolved
                         ? "bg-red-500/[0.06] border-red-500/20 text-red-500"
-                        : anyAdvisories
+                        : anyAdvisories || anyNoLineage
                             ? "bg-amber-500/[0.06] border-amber-500/20 text-amber-600 dark:text-amber-400"
                             : "bg-emerald-500/[0.06] border-emerald-500/20 text-emerald-600 dark:text-emerald-400",
                 )}>
                     {!allResolved
-                        ? 'A source is blocked: its ontology has no lineage relationship, so aggregation would produce nothing. Classify at least one relationship as Lineage above.'
-                        : anyAdvisories
-                            ? 'Ready to submit. Advisories remain — unmapped or unclassified types will be ignored by aggregation and rendered with default styling. Use the one-click fixes above for full coverage.'
-                            : 'All sources fully resolved — ready to submit.'}
+                        ? 'A source is still being checked or failed its check — see the details above.'
+                        : anyNoLineage
+                            ? 'Ready to submit. A source has no lineage relationship, so aggregation will build nothing for it — fine for containment-only graphs. Classify a relationship as Lineage above if the graph does carry data flow.'
+                            : anyAdvisories
+                                ? 'Ready to submit. Advisories remain — unmapped or unclassified types will be ignored by aggregation and rendered with default styling. Use the one-click fixes above for full coverage.'
+                                : 'All sources fully resolved — ready to submit.'}
                 </div>
             )}
         </div>
@@ -834,7 +857,7 @@ function ClassificationGuidance() {
         {
             label: 'Lineage',
             tone: 'text-emerald-600 dark:text-emerald-400',
-            blurb: 'data flows source → target. These are the edges aggregation materializes — at least one is required or the source is blocked.',
+            blurb: 'data flows source → target. These are the edges aggregation materializes — without one, aggregation builds nothing for the source.',
         },
         {
             label: 'Neither',
