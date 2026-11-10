@@ -382,8 +382,8 @@ revision's, or a range.
 - **`reviewStore`** holds what it lists and how it's narrowed: `scope` (null for the canvas's
   default), one `operation` at a time, and `filter` (kind, type, text). It also holds `listOpen`, and
   `available`, which is true while the Context View is mounted.
-  - `startReview({scope, operation})` opens the list with the filter cleared, so an earlier search
-    never hides what was asked for.
+  - `startReview({scope, operation})` starts with the filter cleared, so an earlier search never
+    hides what was asked for.
   - `setScope` starts the type afresh.
   - It holds the change being visited (`current`, `position`, `visit`, and `visits`, bumped by every
     visit), `navigatorOpen`, and how finding the change went (`found`).
@@ -423,7 +423,8 @@ revision's, or a range.
     last two come from `useEntityDeletion`, for a deletion only. The technical persona adds the type
     and qualified name.
   - **Operation chips**, and **‹ n of N ›** with ←/→. A step past the loaded rows fetches the next
-    page and lands when it's there.
+    page and lands when it's there. The keys are left to a control's own arrows, and to any open
+    `[role="dialog"]` (the lens, a panel).
   - **Details** opens `openNodeDrawer`, or `TombstoneDrawer` for a deletion that isn't drawn.
   - It visits the first change itself, on start and after a new narrowing.
 - **`useReviewOnCanvas`** is mounted once by `ContextViewCanvas`. It calls `useDrawScope`, and runs
