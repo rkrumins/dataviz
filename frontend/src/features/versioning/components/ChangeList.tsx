@@ -20,28 +20,21 @@ import { Segmented, type SegmentedOption } from '@/components/ui/Segmented'
 import { Skeleton, SkeletonText } from '@/components/ui/Skeleton'
 import { useDebouncedValue } from '@/hooks/useDebouncedValue'
 import type {
-  ChangeListCounts, ChangeListKind, ChangeListOrigin, ChangeListRow, ChangeListStatus, ChangeListSummary,
+  ChangeListKind, ChangeListOrigin, ChangeListRow, ChangeListStatus, ChangeListSummary,
 } from '@/services/versioningApiService'
 import { useChangeEntries, useChangeEntry, useChangeSummary } from '../hooks/useVersioning'
+import { KIND_LABEL, changeTotal, kindCounts, kindsOf, typeOptionsOf } from '../model/changeListSummary'
 import type { GraphChange } from '../model/changeModel'
 import { EntityDiff } from './EntityDiff'
 import { DeletionDetailsButton } from './TombstoneDetails'
 import { NodeDiffBadge, STATUS_META } from './NodeDiffBadge'
 
 const STATUSES: ChangeListStatus[] = ['added', 'modified', 'removed']
-const KIND_LABEL: Record<ChangeListKind, string> = {
-  node: 'Entities', edge: 'Relationships', structure: 'Structure',
-}
 /** How near the end of what is loaded the next page is asked for. */
 const PREFETCH_ROWS = 25
 const ROW_HEIGHT = 36
 const HEADER_HEIGHT = 30
 
-const total = (c?: ChangeListCounts | null) => (c ? c.added + c.modified + c.removed : 0)
-
-function kindCounts(s: ChangeListSummary, kind: ChangeListKind): ChangeListCounts | null | undefined {
-  return kind === 'node' ? s.entityCounts : kind === 'edge' ? s.edgeCounts : s.structureCounts
-}
 
 type Item =
   | { kind: 'type'; key: string; type: string | null; count: number }
@@ -86,10 +79,7 @@ export function ChangeList({
   const summaryQ = useChangeSummary(wsId, graphId, summary ? null : origin)
   const s = summary ?? summaryQ.data ?? null
 
-  const kinds = useMemo(
-    () => (s ? (['node', 'edge', 'structure'] as const).filter((k) => total(kindCounts(s, k)) > 0) : []),
-    [s],
-  )
+  const kinds = useMemo(() => (s ? kindsOf(s) : []), [s])
   const [kind, setKind] = useState<ChangeListKind | null>(null)
   const activeKind: ChangeListKind | undefined = kind && kinds.includes(kind) ? kind : kinds[0]
   const [statuses, setStatuses] = useState<ChangeListStatus[]>([])
@@ -99,54 +89,7 @@ export function ChangeList({
   // Narrowing to another kind starts its type afresh.
   const chooseKind = (k: ChangeListKind) => { setKind(k); setType('') }
 
-  const listable = !!s && s.listed > 0 && !!activeKind
-  const entriesQ = useChangeEntries(
-    wsId, graphId, origin, { kind: activeKind, statuses, type: type || undefined, q },
-    { enabled: listable },
-  )
-  const rows = useMemo(() => entriesQ.data?.pages.flatMap((p) => p.entries) ?? [], [entriesQ.data])
-  const matching = entriesQ.data?.pages[0]?.total ?? 0
-
-  const typeCounts = useMemo(() => {
-    const m = new Map<string, number>()
-    for (const t of s?.byType ?? []) {
-      if (t.kind !== activeKind) continue
-      const n = statuses.length ? statuses.reduce((sum, st) => sum + t[st], 0) : t.added + t.modified + t.removed
-      m.set(t.type ?? '', n)
-    }
-    return m
-  }, [s, activeKind, statuses])
-  const typeOptions = useMemo(
-    () => (s?.byType ?? []).filter((t) => t.kind === activeKind)
-      .map((t) => ({ type: t.type ?? '', n: t.added + t.modified + t.removed }))
-      .sort((a, b) => b.n - a.n),
-    [s, activeKind],
-  )
-  const items = useMemo(() => itemsOf(rows, typeCounts), [rows, typeCounts])
-
-  const [open, setOpen] = useState<ReadonlySet<string>>(new Set())
-  const toggle = (id: string) => setOpen((prev) => {
-    const next = new Set(prev)
-    if (next.has(id)) next.delete(id)
-    else next.add(id)
-    return next
-  })
-
-  const scrollRef = useRef<HTMLDivElement>(null)
-  const hasMore = !!entriesQ.hasNextPage
-  const virtualizer = useVirtualizer({
-    count: items.length + (hasMore ? 1 : 0),
-    getScrollElement: () => scrollRef.current,
-    estimateSize: (i) => (items[i]?.kind === 'type' ? HEADER_HEIGHT : ROW_HEIGHT),
-    overscan: 12,
-    getItemKey: (i) => items[i]?.key ?? 'more',
-  })
-  const virtualItems = virtualizer.getVirtualItems()
-  const lastShown = virtualItems.length ? virtualItems[virtualItems.length - 1].index : -1
-  const { fetchNextPage, isFetchingNextPage } = entriesQ
-  useEffect(() => {
-    if (hasMore && !isFetchingNextPage && lastShown >= items.length - PREFETCH_ROWS) void fetchNextPage()
-  }, [hasMore, isFetchingNextPage, lastShown, items.length, fetchNextPage])
+  const typeOptions = useMemo(() => typeOptionsOf(s, activeKind), [s, activeKind])
 
   if (!s) {
     return summaryQ.isError
@@ -161,10 +104,9 @@ export function ChangeList({
   }
 
   const kindOptions: SegmentedOption<ChangeListKind>[] = kinds.map((k) => ({
-    value: k, label: KIND_LABEL[k], count: total(kindCounts(s, k)),
+    value: k, label: KIND_LABEL[k], count: changeTotal(kindCounts(s, k)),
   }))
   const counts = activeKind ? kindCounts(s, activeKind) : null
-  const narrowed = statuses.length > 0 || !!type || !!q.trim()
 
   return (
     <div className={cn('flex flex-col gap-2.5 min-h-0', className)}>
@@ -220,6 +162,77 @@ export function ChangeList({
         )}
       </div>
 
+      <ChangeRows wsId={wsId} graphId={graphId} origin={origin} summary={s}
+        kind={activeKind} statuses={statuses} type={type} q={q} maxHeight={maxHeight} />
+    </div>
+  )
+}
+
+export interface ChangeRowsProps {
+  wsId: string
+  graphId: string
+  origin: ChangeListOrigin
+  summary: ChangeListSummary
+  /** What is listed: changes of one kind, narrowed by status, type and (debounced) text. */
+  kind?: ChangeListKind
+  statuses: ChangeListStatus[]
+  type?: string
+  q: string
+  /** Height the rows may grow to before they scroll. */
+  maxHeight?: number | string
+  /** Fill the height the parent gives them instead, scrolling within it. */
+  fill?: boolean
+}
+
+/** A change list's rows, a page at a time, under a line saying how many match. */
+export function ChangeRows({
+  wsId, graphId, origin, summary: s, kind: activeKind, statuses, type, q, maxHeight = '60vh', fill = false,
+}: ChangeRowsProps) {
+  const entriesQ = useChangeEntries(
+    wsId, graphId, origin, { kind: activeKind, statuses, type: type || undefined, q },
+    { enabled: s.listed > 0 && !!activeKind },
+  )
+  const rows = useMemo(() => entriesQ.data?.pages.flatMap((p) => p.entries) ?? [], [entriesQ.data])
+  const matching = entriesQ.data?.pages[0]?.total ?? 0
+  const narrowed = statuses.length > 0 || !!type || !!q.trim()
+
+  const typeCounts = useMemo(() => {
+    const m = new Map<string, number>()
+    for (const t of s.byType ?? []) {
+      if (t.kind !== activeKind) continue
+      const n = statuses.length ? statuses.reduce((sum, st) => sum + t[st], 0) : t.added + t.modified + t.removed
+      m.set(t.type ?? '', n)
+    }
+    return m
+  }, [s, activeKind, statuses])
+  const items = useMemo(() => itemsOf(rows, typeCounts), [rows, typeCounts])
+
+  const [open, setOpen] = useState<ReadonlySet<string>>(new Set())
+  const toggle = (id: string) => setOpen((prev) => {
+    const next = new Set(prev)
+    if (next.has(id)) next.delete(id)
+    else next.add(id)
+    return next
+  })
+
+  const scrollRef = useRef<HTMLDivElement>(null)
+  const hasMore = !!entriesQ.hasNextPage
+  const virtualizer = useVirtualizer({
+    count: items.length + (hasMore ? 1 : 0),
+    getScrollElement: () => scrollRef.current,
+    estimateSize: (i) => (items[i]?.kind === 'type' ? HEADER_HEIGHT : ROW_HEIGHT),
+    overscan: 12,
+    getItemKey: (i) => items[i]?.key ?? 'more',
+  })
+  const virtualItems = virtualizer.getVirtualItems()
+  const lastShown = virtualItems.length ? virtualItems[virtualItems.length - 1].index : -1
+  const { fetchNextPage, isFetchingNextPage } = entriesQ
+  useEffect(() => {
+    if (hasMore && !isFetchingNextPage && lastShown >= items.length - PREFETCH_ROWS) void fetchNextPage()
+  }, [hasMore, isFetchingNextPage, lastShown, items.length, fetchNextPage])
+
+  return (
+    <>
       <p className="text-[11px] text-ink-muted tabular-nums" aria-live="polite">
         {entriesQ.isLoading ? 'Loading…'
           : narrowed ? `${matching.toLocaleString()} matching`
@@ -237,7 +250,8 @@ export function ChangeList({
         <EmptyState compact icon={SearchX} title="Nothing matches"
           description="Try another type or status, or clear the search." />
       ) : (
-        <div ref={scrollRef} className="overflow-y-auto custom-scrollbar -mx-1 px-1" style={{ maxHeight }}>
+        <div ref={scrollRef} className={cn('overflow-y-auto custom-scrollbar -mx-1 px-1', fill && 'flex-1 min-h-0')}
+          style={fill ? undefined : { maxHeight }}>
           <div role="list" aria-label="Changes" className="relative w-full" style={{ height: virtualizer.getTotalSize() }}>
             {virtualItems.map((v) => {
               const item = items[v.index]
@@ -272,7 +286,7 @@ export function ChangeList({
           </div>
         </div>
       )}
-    </div>
+    </>
   )
 }
 
@@ -353,7 +367,7 @@ function RowDetail({ wsId, graphId, origin, row }: {
 }
 
 /** An origin past what a list holds: what changed, counted, and why it isn't listed. */
-function TooLargeToList({ summary, className }: { summary: ChangeListSummary; className?: string }) {
+export function TooLargeToList({ summary, className }: { summary: ChangeListSummary; className?: string }) {
   const changed = summary.tooLarge?.changed ?? summary.total
   return (
     <div className={cn('rounded-xl border border-glass-border bg-black/[0.02] dark:bg-white/[0.03] px-4 py-3.5', className)}>

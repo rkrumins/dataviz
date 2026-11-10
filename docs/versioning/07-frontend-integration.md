@@ -376,6 +376,44 @@ Two change-review presentations sit under it:
   entity-type ("17 tables · 40 columns"), with a containment tree whose children page in on demand
   (`summaryFirst`).
 
+### Reviews — every change beside the Context View
+A review lists one change list beside the canvas at any size: a draft's, a revision's, or a range.
+- **`reviewStore`** holds what it lists and how it's narrowed: `scope` (null for the canvas's
+  default), one `operation` at a time, and `filter` (kind, type, text). It also holds `listOpen`, and
+  `available`, which is true while the Context View is mounted.
+  - `startReview({scope, operation})` opens the list with the filter cleared, so an earlier search
+    never hides what was asked for.
+  - `setScope` starts the type afresh.
+  - It isn't persisted.
+- **`useChangesScope(viewId)`** resolves the scope against the branch store (`resolveScopes`, pure):
+  - a draft: `{branchId}`;
+  - a revision #N: `{N, headAtOpen}` (the default) or `{N−1, N}`;
+  - a highlight: its range;
+  - Published: `{H−1, H}`.
+
+  A range of one revision is `{kind: 'in'}`, offered once. A choice stands while it is offered; then
+  the default takes over.
+- **`useDrawScope`** highlights a scope the canvas can draw without moving in time: what the open
+  revision changed, or the latest revision. It clears that highlight when the review ends or moves
+  on, unless something else has replaced it.
+- **`ChangesExplorer`** sits in the left rail, rendered persistently like `SearchMapPanel`, and
+  fetches nothing while closed.
+  - **The title** is a scope menu.
+  - **The controls:** the operation segment (counts for the kind listed), search (debounced), and
+    Filter (kind and type; it names the kind).
+  - **The rows** are `ChangeRows`, which `ChangeList` now composes under its own controls. Its call
+    sites are unchanged.
+  - **`useReviewRail`** shares the rail with search: opening one closes the other. Unmounting the
+    canvas ends the review.
+- **The glance surfaces** call `startReview` when `available`, and otherwise behave as before:
+  - the bar's `ChangeCountChips` (`onPick`), "+N new" and "M of N deleted drawn";
+  - the comparison chip;
+  - `RevisionBanner`'s since-then counts (`{kind: 'since'}`);
+  - the Changes tab, now a `ReviewSummaryCard` for the canvas's scope (the draft tree isn't fetched
+    there);
+  - `RevisionCompare`, where **Review changes** highlights the range and opens the list, in place of
+    the inline list.
+
 ---
 
 ## 8. Pull-latest / rebase UX

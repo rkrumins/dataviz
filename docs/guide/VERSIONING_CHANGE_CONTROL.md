@@ -220,6 +220,8 @@ To compare, choose **Compare with now** (on a revision or in the banner) or
 modified and removed, over how many revisions and by whom, which types changed
 most, and every change. **Highlight on canvas** rings them on the graph, up to
 20,000 of them; past that it says how many there are and offers **Open the list**.
+In the Context View, **Review changes** rings them and lists them beside the canvas
+instead (see [Review changes](#review-changes)).
 
 Deleted entities are drawn where they were, struck through and marked
 **Deleted**: under their parent when it's on the canvas, up to 500 of them. Deleted
@@ -227,6 +229,7 @@ relationships are rose dashes. Hover **Deleted** to see between which revisions 
 went. The chip above the canvas counts what was added, modified and deleted; hover
 it for what each mark means. When not every deletion could be drawn, it says how
 many were, such as **3 of 40 deleted drawn**, and **Open the list** lists them all.
+In the Context View, choose the count to review the deletions beside the canvas.
 
 A revision more than 100,000 changes back is too far to draw. It opens as a
 comparison with now instead, and you can still export the graph as it was then.
@@ -256,6 +259,50 @@ On a canvas of that data source you can also:
 
 **Copy URN** is always there. **Restore** is there for a deletion saved to a draft
 you can edit.
+
+## Review changes
+
+In the Context View, every change lists beside the canvas: a draft's, a past
+revision's, or two revisions compared. That holds however many there are, and
+deletions are listed even where the canvas draws only 500 of them.
+
+**Start a review** from wherever changes are counted:
+
+- the counts in the strip above the canvas (**+12**, **~40**, **−1,798**): each
+  one starts on its own kind of change;
+- **500 of 1,798 deleted drawn**, which starts on the deletions;
+- **Review changes** on two revisions compared (the chip above the canvas, or
+  **Reviews → History → Compare**);
+- the counts in a past revision's banner, which list what changed since;
+- **Reviews → Changes → Review changes**.
+
+**What it lists** depends on where you are. The title names it, and where there
+is a choice it opens a menu.
+
+| Where you are | What it lists |
+| --- | --- |
+| In a draft | **This draft**: its saved changes |
+| A past revision open | **Since #12**: what changed after it. Or **Changed in #12**: what that revision changed |
+| Two revisions compared | **#3 → #12**: everything in between |
+| Published, nothing open | **The latest revision · #42**: what it changed |
+
+**What you can do in the list:**
+
+- **Show one kind of change at a time:** **All**, **Added**, **Modified** or
+  **Deleted**, each with its count.
+- **Search** by name, URN or type.
+- **Filter** by entities or relationships, and by type. The button says which
+  kind the list is showing.
+- **Open a row** to see what changed in it. A deleted row offers **Deletion
+  details**.
+
+The canvas rings what you're reviewing. **Changed in #12** and **The latest
+revision** are highlighted on it while you review them, and the highlight goes
+when you close the review. Search results share the same place beside the canvas:
+opening one closes the other, and each comes back as you left it.
+
+The graph and hierarchy layouts keep their own lists: **Reviews → Changes** for
+a draft, and **History → Compare** for revisions.
 
 ## Undo vs. Restore — the distinction that matters
 

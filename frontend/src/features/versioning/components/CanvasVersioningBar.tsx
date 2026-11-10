@@ -41,7 +41,7 @@ import {
   useAbandonDraft, useBranch, useBranchFreshness, useDiffVsMain, useRefreshDraftFromOthers, useResolveGraph,
   useBranchViewChanges, useChangeIndex, useChangeSummary,
 } from '../hooks/useVersioning'
-import { DiffTooLargeError } from '@/services/versioningApiService'
+import { DiffTooLargeError, type ChangeListStatus } from '@/services/versioningApiService'
 import { useActiveDraftAccess } from '../hooks/useActiveDraftAccess'
 import { useActiveBranchGuard, type BranchEviction } from '../hooks/useActiveBranchGuard'
 import { fromChangeIndex, fromDiffVsMain } from '../model/changeAdapters'
@@ -65,6 +65,7 @@ import { CommitDialog } from './CommitDialog'
 import { ForkStrip } from './ForkStrip'
 import { PublishReceiptBanner } from './PublishReceiptBanner'
 import { ViewVersioningPanel, type ViewPanelTab } from './ViewVersioningPanel'
+import { useReviewStore } from '@/store/reviewStore'
 
 /** The most changes a comparison of two revisions is highlighted with; past it, History lists them. */
 const HIGHLIGHT_MAX = 20_000
@@ -154,6 +155,10 @@ export function CanvasVersioningBar({
     setPanelTab('history')
   }, [])
   const uncommitted = useStagedChangeCount()
+  // Where the canvas can show a review (the Context View), what counts changes starts one there.
+  const reviewable = useReviewStore((s) => s.available)
+  const startReview = useReviewStore((s) => s.startReview)
+  const reviewOperation = useCallback((operation: ChangeListStatus) => startReview({ operation }), [startReview])
 
   // Slim: modified entities by id alone — the bar counts changes and rings nodes, and never reads
   // a modified entity's payloads, which a large draft would ship by the hundred megabytes.
@@ -404,8 +409,8 @@ export function CanvasVersioningBar({
             {highlightIndexQ.isLoading ? 'Highlighting…' : tooManyToHighlight != null ? (
               <>
                 {`Too many changes to highlight (${tooManyToHighlight.toLocaleString()}) —`}
-                <button onClick={() => openCompare(highlightOrigin.fromSeq, highlightOrigin.toSeq)}
-                  className="font-semibold hover:underline">Open the list</button>
+                <button onClick={() => (reviewable ? startReview() : openCompare(highlightOrigin.fromSeq, highlightOrigin.toSeq))}
+                  className="font-semibold hover:underline">{reviewable ? 'Review changes' : 'Open the list'}</button>
               </>
             ) : (
               <HoverTip className="inline-flex items-center gap-1.5" label={(
@@ -417,14 +422,21 @@ export function CanvasVersioningBar({
                 </span>
               )}>
                 <span>{`What changed after #${highlightOrigin.fromSeq} up to #${highlightOrigin.toSeq}`}</span>
-                {activeChangeSet?.origin === 'compare' && <ChangeCountChips changeSet={activeChangeSet} />}
-                {deletedDrawn && deletedDrawn.total > deletedDrawn.drawn && (
+                {activeChangeSet?.origin === 'compare' && (
+                  <ChangeCountChips changeSet={activeChangeSet} onPick={reviewable ? reviewOperation : undefined} />
+                )}
+                {deletedDrawn && deletedDrawn.total > deletedDrawn.drawn && (reviewable ? (
+                  <button onClick={() => startReview({ operation: 'removed' })}
+                    className="text-indigo-700/80 dark:text-indigo-300/80 hover:underline">
+                    {deletedDrawn.drawn.toLocaleString()} of {deletedDrawn.total.toLocaleString()} deleted drawn
+                  </button>
+                ) : (
                   <span className="text-indigo-700/80 dark:text-indigo-300/80">
                     {deletedDrawn.drawn.toLocaleString()} of {deletedDrawn.total.toLocaleString()} deleted drawn
                   </span>
-                )}
-                <button onClick={() => openCompare(highlightOrigin.fromSeq, highlightOrigin.toSeq)}
-                  className="font-semibold hover:underline">Open the list</button>
+                ))}
+                <button onClick={() => (reviewable ? startReview() : openCompare(highlightOrigin.fromSeq, highlightOrigin.toSeq))}
+                  className="font-semibold hover:underline">{reviewable ? 'Review changes' : 'Open the list'}</button>
               </HoverTip>
             )}
             <HoverTip className="inline-flex" label="Stop highlighting">
@@ -456,7 +468,7 @@ export function CanvasVersioningBar({
                     detail={`${BRANCH_VOCAB.publish} sends them to the version everyone sees`}
                   >
                     <span className="flex items-center gap-1.5">
-                      <ChangeCountChips changeSet={changeSet} />
+                      <ChangeCountChips changeSet={changeSet} onPick={reviewable ? reviewOperation : undefined} />
                       <span className="text-[11px] text-ink-muted/80">in branch</span>
                     </span>
                   </HoverTip>
@@ -471,7 +483,7 @@ export function CanvasVersioningBar({
                   >
                     <button
                       type="button"
-                      onClick={() => setPanelTab('changes')}
+                      onClick={() => (reviewable ? startReview({ operation: 'added' }) : setPanelTab('changes'))}
                       className="inline-flex items-center rounded-md border border-emerald-500/25 bg-emerald-500/[0.06] px-1.5 py-0.5 text-[11px] font-medium text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/[0.12] transition-colors"
                     >
                       +{createdNotLoaded.toLocaleString()} new
@@ -486,7 +498,7 @@ export function CanvasVersioningBar({
                   >
                     <button
                       type="button"
-                      onClick={() => setPanelTab('changes')}
+                      onClick={() => (reviewable ? startReview({ operation: 'removed' }) : setPanelTab('changes'))}
                       className="inline-flex items-center rounded-md border border-rose-500/25 bg-rose-500/[0.06] px-1.5 py-0.5 text-[11px] font-medium text-rose-600 dark:text-rose-400 hover:bg-rose-500/[0.12] transition-colors"
                     >
                       {deletedDrawn.drawn.toLocaleString()} of {deletedDrawn.total.toLocaleString()} deleted drawn
