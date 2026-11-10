@@ -634,6 +634,29 @@ describe('useLensWalk — the walk completes hands-free (both modes)', () => {
     expectFineCalls(traceClosure, 3)
   })
 
+  it('a step the server failed and that brought nothing is not re-fired: phase error, Retry re-arms it', async () => {
+    // A page the server could not read (a timeout) names the same anchor as
+    // cut again and adds nothing. Re-seeding it hands-free would just ask the
+    // same failing question again, up to the request failsafe.
+    const stalled = () => closureResult({
+      focus: f('b'), nodes: [], truncated: true, truncationReason: 'timeout', frontierDown: [cut('b', 2)],
+    })
+    const { provider, traceClosure } = providerByUrn({
+      a: () => closureResult({ focus: f('a'), nodes: [gn('a'), gn('b')], truncated: true, truncationReason: 'timeout', frontierDown: [cut('b', 2)] }),
+      b: stalled,
+    })
+    const { result } = renderHook(() => useLensWalk('a', provider, 1, false))
+    await waitFor(() => expect(result.current.walkProgressFor('a')?.phase).toBe('error'))
+    await new Promise(r => setTimeout(r, 50))
+    expectFineCalls(traceClosure, 2)        // the first page + ONE re-seed, then it stops
+
+    act(() => result.current.retryWalk('a'))
+    await waitFor(() => expectFineCalls(traceClosure, 3))
+    await waitFor(() => expect(result.current.walkProgressFor('a')?.phase).toBe('error'))
+    await new Promise(r => setTimeout(r, 50))
+    expectFineCalls(traceClosure, 3)        // Retry is one more attempt, not a new loop
+  })
+
   it('closing the lens aborts in-flight work', async () => {
     let seen: AbortSignal | undefined
     const traceClosure = vi.fn((_req: Record<string, unknown>, opts?: { signal?: AbortSignal }) => {
