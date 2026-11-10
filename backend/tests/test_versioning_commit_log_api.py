@@ -22,7 +22,10 @@ def _commit(seq: int, **extra) -> dict:
         "contributors": ["usr_a"], "source_branch_id": "br_a", "source_commit_count": 1,
         "originating_view_id": None, "merkle_root": None,
         "stats": {"create": 1, "update": 0, "delete": 0},
-        "created_at": "2026-10-20T09:00:00+00:00", **extra,
+        "created_at": "2026-10-20T09:00:00+00:00",
+        # How it was made (GraphVersioningService._commit_meta).
+        "actor_kind": "human", "api_key_id": None, "correlation_id": None, "automation": False,
+        "change_reason": None, **extra,
     }
 
 
@@ -121,3 +124,29 @@ async def test_squashed_commits_say_whether_more_follow(test_client, versioning)
     assert [c["commit_seq"] for c in body["commits"]] == [3, 2]
     assert body["hasMore"] is True
     assert svc.calls[-1]["limit"] == 3
+
+
+async def test_history_splits_people_from_automation_and_names_the_keys(test_client, versioning,
+                                                                        monkeypatch):
+    from backend.app.db.repositories import api_key_repo
+
+    asked = []
+
+    async def names_by_ids(_session, key_ids):
+        asked.append(sorted(k for k in key_ids if k))
+        return {"apk_1": "Nightly Snowflake sync"}
+
+    monkeypatch.setattr(api_key_repo, "names_by_ids", names_by_ids)
+    bot = _commit(5, kind="edit", actor="svc_bot", actor_kind="service", api_key_id="apk_1",
+                  correlation_id="req-1", automation=True)
+    svc = versioning([bot, _commit(4)])
+    r = await test_client.get(LOG, params={"origin": "automation"})
+    assert r.status_code == 200, r.text
+    assert svc.calls[-1]["origin"] == "automation"
+    body = r.json()
+    assert body["apiKeyNames"] == {"apk_1": "Nightly Snowflake sync"} and asked == [["apk_1"]]
+    assert body["commits"][0]["automation"] is True and body["commits"][0]["api_key_id"] == "apk_1"
+
+    assert (await test_client.get(LOG, params={"origin": "robots"})).status_code == 422
+    await test_client.get(LOG)
+    assert svc.calls[-1]["origin"] is None

@@ -63,6 +63,8 @@ from .ids import new_entity_id, prefixed_id
 from .merge import three_way_merge
 from .merkle import MerkleTree, content_hash
 from .merkle_store import MerkleStore
+from . import main_activity, provenance
+from .provenance import commit_provenance
 from .ontology import (
     Ontology, OntologyRules, canonicalize_payload_types,
     validate_entities, validate_entities_rich,
@@ -371,13 +373,15 @@ def _copy_versions_sql(model, columns: str) -> "TextClause":
     """``INSERT … SELECT``: version rows of ``model`` written onto a branch as copies of the rows
     ``:src`` names in graph ``:src_graph`` — their payloads, identity ``columns`` and content hashes
     taken in Postgres, never read out — under the new ids ``:ids`` with ``:ops`` and ``:prevs`` (the
-    narrow squash; a fork's merge copies from the fork)."""
+    narrow squash; a fork's merge copies from the fork). Each copy keeps its row's own ``actor`` —
+    who made that change, not who published it (the commit names the publisher); ``:actor`` only
+    for a row that names nobody."""
     table = model.__table__.fullname
     return text(
         f"INSERT INTO {table} (graph_id, id, entity_id, commit_id, commit_seq, branch_id, op, "
         f"content_hash, prev_content_hash, payload, actor, change_reason, created_at, {columns}) "
         "SELECT :graph_id, v.id, s.entity_id, :commit_id, :commit_seq, :branch_id, v.op, "
-        f"s.content_hash, v.prev, s.payload, :actor, NULL, :now, "
+        f"s.content_hash, v.prev, s.payload, COALESCE(s.actor, :actor), NULL, :now, "
         f"{', '.join('s.' + c.strip() for c in columns.split(','))} "
         "FROM unnest(:src, :ids, :ops, :prevs) AS v(src, id, op, prev) "
         f"JOIN {table} AS s ON s.graph_id = :src_graph AND s.id = v.src",
@@ -520,19 +524,29 @@ class DiffTooLarge(RuntimeError):
         self.limit = limit
 
 
+#: Why a draft behind ``main`` must pull before it lands (``NotUpToDate.reason``, doc 19 §3.5).
+PULL_PEOPLE = "people"      # a person changed main since the draft's base
+PULL_OVERLAP = "overlap"    # automation changed an entity the draft changes, or an edge's end
+PULL_SIZE = "size"          # too large a draft to merge onto a moved main: pull, then publish
+
+
 class NotUpToDate(RuntimeError):
     """A draft is behind ``main`` and must pull the latest changes (rebase) before it can be
     merged — the 'require up to date before merging' gate. ``.behind_by`` is how many commits it
-    lags so the UI can prompt a one-click 'Pull latest'."""
+    lags so the UI can prompt a one-click 'Pull latest'; ``.reason`` why it must
+    (``PULL_PEOPLE``, ``PULL_OVERLAP`` or ``PULL_SIZE``: :meth:`GraphVersioningService._pull_needed`)."""
 
-    def __init__(self, branch_id: str, base_seq: int, head_seq: int):
+    def __init__(self, branch_id: str, base_seq: int, head_seq: int, *, reason: str = PULL_PEOPLE):
+        why = {PULL_OVERLAP: "automation changed what it changes since",
+               PULL_SIZE: "it is too large to merge onto a moved main"}.get(reason, "")
         super().__init__(
-            f"draft {branch_id} is out of date (base {base_seq} < main {head_seq}); "
-            f"pull the latest changes before merging")
+            f"draft {branch_id} is out of date (base {base_seq} < main {head_seq})"
+            + (f": {why}" if why else "") + "; pull the latest changes before merging")
         self.branch_id = branch_id
         self.base_seq = base_seq
         self.head_seq = head_seq
         self.behind_by = head_seq - base_seq
+        self.reason = reason
 
 
 class PullRequestExists(RuntimeError):
@@ -573,6 +587,10 @@ _MACHINE_COMMIT_KINDS = ("genesis", "import", "sync")
 # How many of others' newest commits a freshness poll reads for "saved since": a client that sends an
 # old head costs no more than one that keeps up (branch_freshness).
 _SAVED_SINCE_SCAN = 200
+
+# The biggest draft a freshness poll reads in full to say whether automation that moved main touched
+# what it changes (branch_freshness). Past it, publishing says so (``reason: overlap``).
+_FRESHNESS_OVERLAP_MAX = 10_000
 
 # What a live fork in a fork list says of how far it is from its parent (_fork_distance).
 _FORK_DISTANCE = ("ahead", "behind", "update_recommended", "reads_from", "counts_capped")
@@ -763,7 +781,7 @@ class GraphVersioningService:
                 commit_seq=1,
                 kind="genesis",
                 message="genesis",
-                actor=actor,
+                actor=actor, **commit_provenance(actor),
                 merkle_root=MerkleTree.build({}).root,
                 stats={"nodes": 0, "edges": 0},
             )
@@ -1574,7 +1592,7 @@ class GraphVersioningService:
                 parent_commit_id=branch.head_commit_id,
                 kind="checkpoint" if branch.head_commit_id else "edit",
                 message=message or "checkpoint",
-                actor=actor,
+                actor=actor, **commit_provenance(actor),
                 originating_view_id=branch.originating_view_id,   # attribute to the draft's view
             )
             s.add(commit)
@@ -1698,12 +1716,12 @@ class GraphVersioningService:
                 main_id = await self._main_branch_id(s, graph_id)
                 # Require-up-to-date gate (Git "update branch before merging"): a draft that is BEHIND
                 # main must explicitly pull latest (rebase_draft) before it can publish, so the user
-                # reviews the rebased result rather than having main silently folded in at publish time.
+                # reviews the rebased result rather than having main silently folded in at publish time
+                # — unless only automation moved main, on nothing the draft changes (_pull_needed).
                 # This is the branch→main half of the concurrency model (the same-branch half is the
                 # per-entity head CAS in _apply_ops_once); see docs/versioning/03 §3.13. Read under
                 # _lock_graph so the head can't advance between this check and the squash below.
-                if draft.base_commit_seq < graph.main_head_commit_seq:
-                    raise NotUpToDate(branch_id, draft.base_commit_seq, graph.main_head_commit_seq)
+                await self._require_landable(s, graph_id, main_id, draft, graph.main_head_commit_seq)
                 if self._narrow_squash(graph, draft, resolutions):
                     return await self._squash_up_to_date(
                         s, graph, draft, main_id, actor, message,
@@ -1793,7 +1811,8 @@ class GraphVersioningService:
             kind_by_entity, containment_edge_types=containment_edge_types or [],
             ontology_rules=ontology_rules, strict=graph.ontology_enforcement == "strict",
             known=merged_state)
-        await self._write_deltas(s, graph.id, main_id, squash, deltas, kind_by_entity, actor)
+        await self._write_deltas(s, graph.id, main_id, squash, deltas, kind_by_entity, actor,
+                                 editors=await self._editors(s, graph.id, draft.id, deltas))
         return await self._finish_squash(s, graph, draft, main_id, squash, deltas, actor, merged_via)
 
     async def _merged_unchanged(self, s, graph, draft, actor, merged_via: str) -> str:
@@ -1817,7 +1836,7 @@ class GraphVersioningService:
             parent_commit_id=main.head_commit_id,
             kind="squash_publish",
             message=message,
-            actor=actor,
+            actor=actor, **commit_provenance(actor),
             contributors=contributors,
             source_branch_id=draft.id,
             source_commit_ids=source_commits,
@@ -1837,6 +1856,7 @@ class GraphVersioningService:
         main = await s.get(BranchORM, main_id)
         main.head_commit_id = squash.id
         graph.main_head_commit_seq = new_seq       # advance head before merkle
+        main_activity.note(s, graph, squash)
         squash.merkle_root = await self._commit_merkle(s, graph.id, main_id, squash, deltas)
         squash.stats = _delta_stats(deltas)
         return await self._squash_landed(s, graph, draft, squash, actor, merged_via)
@@ -1996,7 +2016,8 @@ class GraphVersioningService:
         del written, prior, known, heads, main, live, ends, standing   # per change: not into the writes
 
         await self._copy_versions(s, gid, main_id, squash, copies, actor)
-        await self._write_deltas(s, gid, main_id, squash, deltas, kind_by_entity, actor)
+        await self._write_deltas(s, gid, main_id, squash, deltas, kind_by_entity, actor,
+                                 editors=await self._editors(s, gid, draft.id, deltas))
         deltas += [Delta(r.entity_id, r.op, None, r.prev_content_hash, r.content_hash) for r in copies]
         del rows, copies, kind_by_entity
         return await self._finish_squash(s, graph, draft, main_id, squash, deltas, actor, merged_via)
@@ -2037,8 +2058,10 @@ class GraphVersioningService:
                 squash = await self._squash_commit(s, graph, draft, main_id, actor, message)
                 (await s.get(BranchORM, main_id)).head_commit_id = squash.id
                 graph.main_head_commit_seq = squash.commit_seq   # what later pages read
+                main_activity.note(s, graph, squash)
             await self._copy_versions(s, gid, main_id, squash, copies, actor)
-            await self._write_deltas(s, gid, main_id, squash, deltas, kinds, actor)
+            await self._write_deltas(s, gid, main_id, squash, deltas, kinds, actor,
+                                     editors=await self._editors(s, gid, draft.id, deltas))
             for op, eid, chash in ([(r.op, r.entity_id, r.content_hash) for r in copies]
                                    + [(d.op, d.entity_id, d.content_hash) for d in deltas]):
                 stats[op] += 1
@@ -2222,6 +2245,24 @@ class GraphVersioningService:
                     break
                 after = ids[-1]
 
+    async def _editors(self, s, graph_id: str, branch_id: str, deltas: Sequence[Delta]) -> Dict[str, str]:
+        """Who made each of ``deltas``' changes on ``branch_id`` — the actor of the entity's head
+        version there — so a squash's version rows on ``main`` name the person who edited each
+        entity, not whoever published the draft (the go-live review's HISTORY-1). An entity the
+        draft didn't change itself (a cascade, a hydrated neighbour) names the publisher."""
+        out: Dict[str, str] = {}
+        ids = [d.entity_id for d in deltas]
+        for model in (NodeVersionORM, EdgeVersionORM):
+            for chunk in _chunks(ids, _IN_LIST_MAX):
+                rows = await s.execute(
+                    select(EntityHeadORM.entity_id, model.actor)
+                    .join(model, and_(model.graph_id == EntityHeadORM.graph_id,
+                                      model.id == EntityHeadORM.head_version_id))
+                    .where(EntityHeadORM.graph_id == graph_id, EntityHeadORM.branch_id == branch_id,
+                           EntityHeadORM.entity_id.in_(chunk)))
+                out.update({eid: who for eid, who in rows.all() if who})
+        return out
+
     async def _copy_versions(self, s, graph_id, branch_id, commit, rows: Sequence["_SquashRow"],
                              actor, src_graph_id: Optional[str] = None) -> None:
         """Write ``rows`` onto ``branch_id`` as copies of the version rows they name — payload,
@@ -2309,13 +2350,14 @@ class GraphVersioningService:
                 squash = CommitORM(
                     graph_id=gid, branch_id=parent_main, commit_seq=base + 1,
                     parent_commit_id=main.head_commit_id, kind="squash_publish", message=message,
-                    actor=actor, contributors=await self._branch_contributors(s, fork.id, fork_main),
+                    actor=actor, **commit_provenance(actor), contributors=await self._branch_contributors(s, fork.id, fork_main),
                     source_branch_id=fork_main, source_commit_ids=source,
                     source_commit_count=len(source))
                 s.add(squash)
                 await s.flush()
                 main.head_commit_id = squash.id
                 parent.main_head_commit_seq = squash.commit_seq   # what later steps read
+                main_activity.note(s, parent, squash)
             await self._copy_versions(s, gid, parent_main, squash, copies, actor, src_graph_id=fork.id)
             await self._write_deltas(s, gid, parent_main, squash, deltas, kinds, actor)
             for op, eid, chash in ([(r.op, r.entity_id, r.content_hash) for r in copies]
@@ -2601,7 +2643,7 @@ class GraphVersioningService:
                 graph_id=graph_id, branch_id=draft.id,
                 commit_seq=await self._next_seq(s, graph_id, draft.id),
                 parent_commit_id=draft.head_commit_id, kind="pull",
-                message=message, actor=actor,
+                message=message, actor=actor, **commit_provenance(actor),
                 originating_view_id=draft.originating_view_id,
                 source_branch_id=main_id,
                 source_commit_ids=incoming["commit_ids"] or None,
@@ -2945,7 +2987,7 @@ class GraphVersioningService:
             revert = CommitORM(
                 graph_id=graph_id, branch_id=main_id, commit_seq=new_seq,
                 parent_commit_id=main.head_commit_id, kind="revert",
-                message=message or f"revert {commit_id}", actor=actor,
+                message=message or f"revert {commit_id}", actor=actor, **commit_provenance(actor),
             )
             s.add(revert)
             await s.flush()
@@ -2955,6 +2997,7 @@ class GraphVersioningService:
             await self._write_deltas(s, graph_id, main_id, revert, deltas, kind_by_entity, actor)
             main.head_commit_id = revert.id
             graph.main_head_commit_seq = new_seq
+            main_activity.note(s, graph, revert)
             revert.merkle_root = await self._commit_merkle(s, graph_id, main_id, revert, deltas)
             graph.updated_at = _now()
             revert.stats = _delta_stats(deltas)
@@ -3033,7 +3076,7 @@ class GraphVersioningService:
             restore = CommitORM(
                 graph_id=graph_id, branch_id=main_id, commit_seq=new_seq,
                 parent_commit_id=main.head_commit_id, kind="restore",
-                message=message or f"restore to {commit_id}", actor=actor,
+                message=message or f"restore to {commit_id}", actor=actor, **commit_provenance(actor),
                 source_commit_ids=[commit_id],         # provenance: the restore target
             )
             s.add(restore)
@@ -3044,6 +3087,7 @@ class GraphVersioningService:
             await self._write_deltas(s, graph_id, main_id, restore, deltas, kind_by_entity, actor)
             main.head_commit_id = restore.id
             graph.main_head_commit_seq = new_seq
+            main_activity.note(s, graph, restore)
             restore.merkle_root = await self._commit_merkle(s, graph_id, main_id, restore, deltas)
             graph.updated_at = _now()
             restore.stats = _delta_stats(deltas)
@@ -3239,7 +3283,7 @@ class GraphVersioningService:
             fork_point = CommitORM(
                 graph_id=fork.id, branch_id=main.id, commit_seq=base_seq,
                 kind="genesis", message=f"fork of {parent_graph_id}@{base_seq}",
-                actor=actor, source_branch_id=parent_main, merkle_root=stored, stats={},
+                actor=actor, **commit_provenance(actor), source_branch_id=parent_main, merkle_root=stored, stats={},
             )
             s.add(fork_point)
             await s.flush()                      # materialise fork_point.id before linking
@@ -3601,7 +3645,7 @@ class GraphVersioningService:
             commit = CommitORM(
                 graph_id=fork.id, branch_id=fork_main, commit_seq=new_seq,
                 parent_commit_id=main.head_commit_id, kind="sync_parent",
-                message=f"Update from {parent_label or parent.id}@{to}", actor=actor,
+                message=f"Update from {parent_label or parent.id}@{to}", actor=actor, **commit_provenance(actor),
                 source_branch_id=parent_main,
             )
             s.add(commit)
@@ -4393,8 +4437,7 @@ class GraphVersioningService:
                 # behind main must pull latest (rebase_draft) before merging, so the reviewed diff is
                 # the diff that actually lands. Read under _lock_graph so main can't advance between
                 # here and the squash.
-                if draft.base_commit_seq < graph.main_head_commit_seq:
-                    raise NotUpToDate(pr.source_branch_id, draft.base_commit_seq, graph.main_head_commit_seq)
+                await self._require_landable(s, graph.id, main_id, draft, graph.main_head_commit_seq)
                 narrow = self._narrow_squash(graph, draft, resolutions)
                 if not narrow:                                # the narrow squash has no conflicts
                     merged_state, conflicts, theirs = await self._compute_merge_bounded(
@@ -6246,6 +6289,7 @@ class GraphVersioningService:
     @staticmethod
     def _commit_meta(c: "CommitORM") -> dict:
         # The commit log's wire shape: keep ``CommitLogEntry`` (endpoints/versioning.py) in step.
+        kind = c.actor_kind or provenance.actor_kind(c.actor)
         return {
             "commit_id": c.id, "commit_seq": c.commit_seq,
             "parent_commit_id": c.parent_commit_id, "kind": c.kind,
@@ -6254,6 +6298,9 @@ class GraphVersioningService:
             "source_commit_count": c.source_commit_count,
             "originating_view_id": c.originating_view_id,
             "merkle_root": c.merkle_root, "stats": c.stats, "created_at": c.created_at,
+            "actor_kind": kind, "api_key_id": c.api_key_id, "correlation_id": c.correlation_id,
+            "automation": provenance.is_automation(kind, c.actor, c.api_key_id),
+            "change_reason": c.change_reason,
         }
 
     async def commit_log(
@@ -6261,6 +6308,7 @@ class GraphVersioningService:
         originating_view_id: Optional[str] = None, published_only: bool = False,
         limit: int = 100, offset: int = 0, before: Optional[int] = None,
         after: Optional[int] = None, viewer: Optional[Viewer] = None,
+        origin: Optional[str] = None,
     ) -> List[dict]:
         """Newest-first commit log for a graph (plan §7). Default: a branch (``main`` if
         unset). When ``originating_view_id`` is given, scope to that view's history.
@@ -6286,11 +6334,14 @@ class GraphVersioningService:
         A fork's log holds only its own divergence — inherited history lives on the parent.
         With a ``viewer``, a draft branch is gated (:meth:`_branch_readable`) and the
         raw view-scoped log drops non-viewable drafts (published_only rows are all on the
-        readable ``main``)."""
+        readable ``main``).
+
+        ``origin``: ``people`` (made by a person by hand) or ``automation`` (a service account,
+        the platform, or any API key — :mod:`.provenance`); every commit when unset."""
         commits, _more = await self.commit_log_page(
             graph_id=graph_id, branch_id=branch_id, originating_view_id=originating_view_id,
             published_only=published_only, limit=limit, offset=offset, before=before,
-            after=after, viewer=viewer)
+            after=after, viewer=viewer, origin=origin)
         return commits
 
     async def commit_log_page(
@@ -6298,6 +6349,7 @@ class GraphVersioningService:
         originating_view_id: Optional[str] = None, published_only: bool = False,
         limit: int = 100, offset: int = 0, before: Optional[int] = None,
         after: Optional[int] = None, viewer: Optional[Viewer] = None,
+        origin: Optional[str] = None,
     ) -> Tuple[List[dict], bool]:
         """:meth:`commit_log`, and whether more commits lie past this page — counted before the
         raw view-scoped log drops drafts the viewer can't read, so a short page there is never
@@ -6329,6 +6381,10 @@ class GraphVersioningService:
                 stmt = stmt.where(CommitORM.commit_seq < before)
             if after is not None:
                 stmt = stmt.where(CommitORM.commit_seq > after)
+            if origin is not None:
+                cols = (CommitORM.actor_kind, CommitORM.actor, CommitORM.api_key_id)
+                stmt = stmt.where(provenance.is_people_sql(*cols) if origin == "people"
+                                  else provenance.is_automation_sql(*cols))
             rows = (await s.execute(
                 stmt.order_by(CommitORM.commit_seq.desc()).limit(limit + 1).offset(offset)
             )).scalars().all()
@@ -7963,9 +8019,22 @@ class GraphVersioningService:
             main_head = graph.main_head_commit_seq or 0
             base = branch.base_commit_seq or 0
             behind_by = 0 if branch.kind == "main" else max(0, main_head - base)
+            main_id = await self._main_branch_id(s, graph_id)
+            people = (await self._people_since(s, graph_id, main_id, base, main_head)) if behind_by else 0
+            # Why the draft must pull before it lands (_pull_needed), so the client can say so before
+            # anyone presses Publish. Behind automation alone, whether it touched what the draft
+            # changes is read only for a draft small enough to read on every poll; a bigger one
+            # finds out when it publishes (``reason: overlap``).
+            reason = PULL_PEOPLE if people else None
+            if behind_by and not people and \
+                    await self._change_count(s, graph_id, branch_id) <= _FRESHNESS_OVERLAP_MAX:
+                reason = await self._pull_needed(s, graph_id, main_id, branch, main_head)
             out = {
                 "behind": behind_by > 0,
                 "behind_by": behind_by,
+                "behind_by_people": people,
+                "pull_required": reason is not None,
+                "pull_reason": reason,
                 "main_head_commit_seq": main_head,
                 "base_commit_seq": base,
                 "status": branch.status,      # a closed draft says so without listing every draft
@@ -8043,13 +8112,17 @@ class GraphVersioningService:
         # — and since the FE swaps Merge for "Pull latest" on that flag, the PR could never be
         # merged (re-pulling short-circuits as already_up_to_date). This now mirrors the gate
         # merge_mr actually enforces (it reads draft.base_commit_seq), so UI and server agree.
-        behind = behind_by = None
+        behind = behind_by = people = None
         src = await s.get(BranchORM, pr.source_branch_id)
         if self._is_draft_mr(pr):
             graph = await s.get(GraphORM, pr.target_graph_id)
             base = (src.base_commit_seq if src else pr.base_commit_seq) or 0
-            behind_by = max(0, (graph.main_head_commit_seq if graph else 0) - base)
+            head = graph.main_head_commit_seq if graph else 0
+            behind_by = max(0, head - base)
             behind = behind_by > 0
+            # Merge waits on a pull only for people's commits (_pull_needed); see branch_freshness.
+            people = (await self._people_since(s, pr.target_graph_id, await self._main_branch_id(
+                s, pr.target_graph_id), base, head)) if behind else 0
         # A live PR shows only the approvals that still hold, so a reviewer whose approval went
         # stale is asked again, and the PR is no longer shown as approved. ``stale`` names them.
         status, approved_by, approval_status = pr.status, pr.approved_by, pr.approval_status
@@ -8068,6 +8141,7 @@ class GraphVersioningService:
             "target_graph_id": pr.target_graph_id, "target_branch": pr.target_branch,
             "base_commit_seq": pr.base_commit_seq, "status": status,
             "behind": behind, "behind_by": behind_by,
+            "behind_by_people": people, "pull_required": None if people is None else people > 0,
             "title": pr.title, "description": pr.description,
             "conflicts": pr.conflicts, "resulting_commit_id": pr.resulting_commit_id,
             "reviewers": pr.reviewers, "approved_by": approved_by, "stale_approved_by": stale,
@@ -8432,6 +8506,95 @@ class GraphVersioningService:
         base.update(await self._state_as_of(s, graph_id, branch_id, as_of_seq))
         return base
 
+    async def _people_since(self, s, graph_id: str, main_id: str, base_seq: int, head_seq: int) -> int:
+        """How many of ``main``'s commits in ``(base_seq, head_seq]`` people made by hand — what
+        makes a draft pull before it lands (:meth:`_pull_needed`). One indexed count over the
+        window, cheap enough for the freshness poll."""
+        if head_seq <= base_seq:
+            return 0
+        return int(await s.scalar(select(func.count()).select_from(CommitORM).where(
+            CommitORM.graph_id == graph_id, CommitORM.branch_id == main_id,
+            CommitORM.commit_seq > base_seq, CommitORM.commit_seq <= head_seq,
+            provenance.is_people_sql(CommitORM.actor_kind, CommitORM.actor, CommitORM.api_key_id),
+        )) or 0)
+
+    async def _require_landable(self, s, graph_id: str, main_id: str, draft: BranchORM,
+                                head_seq: int) -> None:
+        """:class:`NotUpToDate` when ``draft`` must pull before it lands (:meth:`_pull_needed`)."""
+        reason = await self._pull_needed(s, graph_id, main_id, draft, head_seq)
+        if reason is not None:
+            raise NotUpToDate(draft.id, draft.base_commit_seq or 0, head_seq, reason=reason)
+
+    async def _pull_needed(self, s, graph_id: str, main_id: str, draft: BranchORM,
+                           head_seq: int) -> Optional[str]:
+        """Why ``draft`` must pull the latest before it is published or merged, or ``None`` when it
+        may land as it is (doc 19 §3.5).
+
+        Up to date, it lands. Behind ``main``, it still lands when **every** commit since its base
+        is automation's (:func:`.provenance.is_automation` — a service account, the platform, an
+        API key) and none of them changed an entity the draft changes, or met it at an edge (an
+        edge onto a node the draft deletes; a node deleted under an edge the draft makes). Then the
+        bounded merge (:meth:`_compute_merge_bounded`) lands exactly the draft's
+        own changes onto current main, with nothing to merge, and the squash re-checks the ontology
+        and edge integrity against current main, as every publish does. A stream that commits every
+        few minutes would otherwise block every person's publish until they pulled.
+
+        Otherwise the person pulls first, so what they review is what lands, as before:
+        ``PULL_PEOPLE`` when anyone else changed main; ``PULL_OVERLAP`` when automation changed
+        what the draft changes; ``PULL_SIZE`` for a draft past ``SQUASH_PAGED_ABOVE``, which only
+        the paged, up-to-date squash publishes."""
+        base_seq = draft.base_commit_seq or 0
+        if base_seq >= head_seq:
+            return None
+        made = (await s.execute(
+            select(CommitORM.actor_kind, CommitORM.actor, CommitORM.api_key_id).where(
+                CommitORM.graph_id == graph_id, CommitORM.branch_id == main_id,
+                CommitORM.commit_seq > base_seq, CommitORM.commit_seq <= head_seq,
+            ))).all()
+        if not made or not all(provenance.is_automation(k, a, key) for k, a, key in made):
+            return PULL_PEOPLE
+        graph = await s.get(GraphORM, graph_id)
+        if graph is not None and graph.fork_parent_graph_id:
+            return PULL_PEOPLE           # a fork's main also moves with its parent: pull, as before
+        if await self._change_count(s, graph_id, draft.id) > config.SQUASH_PAGED_ABOVE:
+            return PULL_SIZE
+        heads = await self._heads(s, graph_id, draft.id)
+        if set(heads) & await self._changed_in_window(s, graph_id, main_id, base_seq, head_seq):
+            return PULL_OVERLAP          # both changed one entity
+        # Changes of different entities that still meet at an edge. Deleting a node deletes its edges
+        # in the same commit, so the draft would delete an edge automation just made; and an edge the
+        # draft makes would end at a node automation deleted. A new edge onto a node the other side
+        # renamed merges cleanly, and lands.
+        deleted = {e for e, h in heads.items() if h.entity_kind == "node" and h.is_tombstone}
+        if deleted & await self._window_edge_ends(s, graph_id, main_id, base_seq, head_seq):
+            return PULL_OVERLAP
+        ends: set = set()
+        live_edges = [h.head_version_id for h in heads.values()
+                      if h.entity_kind == "edge" and not h.is_tombstone]
+        for chunk in _chunks(live_edges, _IN_LIST_MAX):
+            for src, tgt in (await s.execute(
+                    select(EdgeVersionORM.source_entity_id, EdgeVersionORM.target_entity_id).where(
+                        EdgeVersionORM.graph_id == graph_id, EdgeVersionORM.id.in_(chunk)))).all():
+                ends.update(e for e in (src, tgt) if e)
+        if ends and ends & set((await s.execute(select(NodeVersionORM.entity_id).where(
+                NodeVersionORM.graph_id == graph_id, NodeVersionORM.branch_id == main_id,
+                NodeVersionORM.commit_seq > base_seq, NodeVersionORM.commit_seq <= head_seq,
+                NodeVersionORM.op == "delete").distinct())).scalars()):
+            return PULL_OVERLAP
+        return None
+
+    @staticmethod
+    async def _window_edge_ends(s, graph_id: str, branch_id: str, base_seq: int, head_seq: int) -> set:
+        """The nodes that edges made or changed on ``branch_id`` in ``(base_seq, head_seq]`` end at."""
+        ends: set = set()
+        for src, tgt in (await s.execute(
+                select(EdgeVersionORM.source_entity_id, EdgeVersionORM.target_entity_id).where(
+                    EdgeVersionORM.graph_id == graph_id, EdgeVersionORM.branch_id == branch_id,
+                    EdgeVersionORM.commit_seq > base_seq, EdgeVersionORM.commit_seq <= head_seq,
+                    EdgeVersionORM.op != "delete").distinct())).all():
+            ends.update(e for e in (src, tgt) if e)
+        return ends
+
     async def _branch_own_payloads(
         self, s, graph_id: str, branch_id: str
     ) -> Dict[str, Optional[dict]]:
@@ -8507,8 +8670,9 @@ class GraphVersioningService:
         changed = set(own) | set(resolutions)
         changed |= await self._changed_in_window(s, graph_id, main_id, base_seq, head_seq)
         base = await self._values_at(s, graph_id, main_id, changed, base_seq)
-        # Up to date (always so at publish and merge, whose gates demand it): main's side IS the
-        # base — one copy of every changed payload fewer to hold.
+        # Up to date (so at publish and merge but for a draft behind only automation that touched
+        # none of its entities, _pull_needed): main's side IS the base — one copy of every changed
+        # payload fewer to hold.
         theirs = base if head_seq == base_seq else await self._values_at(s, graph_id, main_id, changed, head_seq)
         ours = {eid: base.get(eid) for eid in changed}
         ours.update(own)
@@ -8760,7 +8924,7 @@ class GraphVersioningService:
             commit = CommitORM(
                 graph_id=graph_id, branch_id=main_id, commit_seq=new_seq,
                 parent_commit_id=main.head_commit_id, kind="import", message=message,
-                actor=actor, idempotency_key=idempotency_key,
+                actor=actor, **commit_provenance(actor), idempotency_key=idempotency_key,
                 stats={"nodes": len(node_deltas), "edges": len(edge_deltas)},
             )
             s.add(commit)
@@ -8768,6 +8932,8 @@ class GraphVersioningService:
             await self._bulk_insert_versions(s, graph_id, main_id, commit, node_deltas, edge_deltas, actor)
             main.head_commit_id = commit.id
             graph.main_head_commit_seq = new_seq
+            if session is None:     # with one, it seeds a graph being enabled: `enabled` says so
+                main_activity.note(s, graph, commit)
             commit.merkle_root = await self._commit_merkle(s, graph_id, main_id, commit, deltas)
             graph.updated_at = _now()
             ps = await s.get(ProjectionStateORM, graph_id)
@@ -9199,13 +9365,14 @@ class GraphVersioningService:
             commit = CommitORM(
                 graph_id=graph_id, branch_id=main_id, commit_seq=new_seq,
                 parent_commit_id=main.head_commit_id, kind="sync", message=message,
-                actor=actor, idempotency_key=idempotency_key, change_reason=source,
+                actor=actor, **commit_provenance(actor), idempotency_key=idempotency_key, change_reason=source,
             )
             s.add(commit)
             await s.flush()
             await self._write_deltas(s, graph_id, main_id, commit, deltas, kind_by_entity, actor)
             main.head_commit_id = commit.id
             graph.main_head_commit_seq = new_seq
+            main_activity.note(s, graph, commit)
             commit.merkle_root = await self._commit_merkle(s, graph_id, main_id, commit, deltas)
             graph.updated_at = _now()
             commit.stats = _delta_stats(deltas)
@@ -9885,7 +10052,7 @@ class GraphVersioningService:
             commit = CommitORM(
                 graph_id=graph_id, branch_id=bid, commit_seq=new_seq,
                 parent_commit_id=branch.head_commit_id, kind="edit",
-                message=message, actor=actor,
+                message=message, actor=actor, **commit_provenance(actor),
                 # Attribute to the draft's view (NULL on main write-throughs) so the
                 # per-view history filter sees interactive canvas saves too.
                 originating_view_id=branch.originating_view_id,
@@ -9901,6 +10068,7 @@ class GraphVersioningService:
             graph.updated_at = _now()
             if branch.kind == "main":
                 graph.main_head_commit_seq = new_seq
+                main_activity.note(s, graph, commit)
                 ps = await s.get(ProjectionStateORM, graph_id)
                 if ps is not None:
                     ps.target_commit_seq = new_seq
@@ -10005,9 +10173,13 @@ class GraphVersioningService:
 
     async def _write_deltas(
         self, s, graph_id, branch_id, commit, deltas: List[Delta], kind_by_entity, actor,
-        *, occ_guard: bool = False,
+        *, occ_guard: bool = False, editors: Optional[Mapping[str, str]] = None,
     ) -> None:
+        """Write ``deltas`` as version rows of ``commit`` and move their heads. Each row names
+        ``actor`` — or, for an entity in ``editors``, who made that change (a squash: the draft's
+        editor, not its publisher)."""
         now = _now()
+        editors = editors or {}
         node_rows: List[dict] = []
         edge_rows: List[dict] = []
         heads: List[dict] = []
@@ -10020,8 +10192,8 @@ class GraphVersioningService:
                     graph_id=graph_id, id=vid, entity_id=d.entity_id, commit_id=commit.id,
                     commit_seq=commit.commit_seq, branch_id=branch_id, op=d.op,
                     content_hash=d.content_hash, prev_content_hash=d.prev_content_hash,
-                    payload=d.payload, actor=actor, change_reason=None, created_at=now,
-                    urn=p.get("urn"), entity_type=p.get("entityType"),
+                    payload=d.payload, actor=editors.get(d.entity_id) or actor, change_reason=None,
+                    created_at=now, urn=p.get("urn"), entity_type=p.get("entityType"),
                     display_name=p.get("displayName"), qualified_name=p.get("qualifiedName"),
                 ))
             else:
@@ -10030,7 +10202,8 @@ class GraphVersioningService:
                     graph_id=graph_id, id=vid, entity_id=d.entity_id, commit_id=commit.id,
                     commit_seq=commit.commit_seq, branch_id=branch_id, op=d.op,
                     content_hash=d.content_hash, prev_content_hash=d.prev_content_hash,
-                    payload=d.payload, actor=actor, change_reason=None, created_at=now,
+                    payload=d.payload, actor=editors.get(d.entity_id) or actor, change_reason=None,
+                    created_at=now,
                     source_entity_id=p.get("sourceEntityId") or p.get("source_entity_id") or "",
                     target_entity_id=p.get("targetEntityId") or p.get("target_entity_id") or "",
                     edge_type=p.get("edgeType"), confidence=p.get("confidence"),

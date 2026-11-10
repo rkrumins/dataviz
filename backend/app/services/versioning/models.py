@@ -435,6 +435,9 @@ class JobORM(VersioningBase):
     on_invalid = Column(Text, nullable=True)              # quarantine | auto_fix | reject_all
     import_format = Column(Text, nullable=True)           # ndjson|csv|tsv|xlsx|json|zip
     field_scope = Column(JSONB, nullable=True)            # E4: allow-list of columns to write
+    # The request that queued it — ``{actor, apiKeyId, correlationId}`` — bound again where it runs
+    # (``provenance.bound``), so its commits and activity events name the key that started it.
+    provenance = Column(JSONB, nullable=True)
     auto_publish = Column(Boolean, nullable=False, default=False, server_default=text("false"))
     source_uri = Column(Text, nullable=True)              # uploaded file
     preview_uri = Column(Text, nullable=True)             # full field-level diff artifact
@@ -577,6 +580,14 @@ class CommitORM(VersioningBase):
     stats = Column(JSONB, nullable=True)
     created_at = Column(Text, nullable=False, default=_now)
     idempotency_key = Column(Text, nullable=True)         # dedup bulk ingest / client retries
+    # Who made it, as the audit trail needs to say (``provenance.commit_provenance``): ``human``,
+    # ``service`` (a service account) or ``system``; the API key it was made through; and the
+    # request it came from — a job's commits carry the request that queued the job. NULL on
+    # commits made before these existed: ``provenance.actor_kind_sql`` derives the kind from
+    # ``actor`` for them.
+    actor_kind = Column(Text, nullable=True)
+    api_key_id = Column(Text, nullable=True)
+    correlation_id = Column(Text, nullable=True)
 
     __table_args__ = _partitioned(
         PrimaryKeyConstraint("graph_id", "id", name="pk_commits"),
@@ -860,6 +871,9 @@ def _ensure_schema_upgrades(conn) -> None:
     # 20261101_1000_gv_fork_sync (its job types are the first step's).
     _bounded_step(conn, "sync_parent and merging were not allowed",
                   lambda: ensure_fork_sync_checks(conn), required=True)
+    # 20261110_1000_gv_commit_prov. Every save writes commits: short tries.
+    _bounded_step(conn, "the commits' provenance columns were not added",
+                  lambda: ensure_commit_provenance_columns(conn), required=True, tries=10)
 
 
 def _bounded_step(conn, failure: str, step, *, required: bool = False, tries: int = 1) -> None:
@@ -1010,6 +1024,32 @@ def ensure_mr_approvals_column(conn) -> None:
     if "approvals" in {c["name"] for c in inspector.get_columns("merge_requests", schema=_SCHEMA)}:
         return
     conn.execute(text(f'ALTER TABLE "{_SCHEMA}"."merge_requests" ADD COLUMN IF NOT EXISTS approvals JSONB'))
+
+
+#: ``commits``' provenance columns (``20261110_1000_gv_commit_prov``): nullable, so adding one is a
+#: catalog change with no rewrite of any partition.
+COMMIT_PROVENANCE_COLUMNS = ("actor_kind", "api_key_id", "correlation_id")
+
+
+def ensure_commit_provenance_columns(conn) -> None:
+    """Add ``commits.actor_kind``, ``api_key_id`` and ``correlation_id`` — who made a commit, with
+    which API key, in which request — and ``jobs.provenance``, the request that queued a job. The
+    commits' columns go on the partitioned parent, which adds them to every partition; all are
+    nullable with no default, so nothing is rewritten. Nothing is backfilled: a commit from before
+    reads its kind from its actor (``provenance.actor_kind_sql``), and its key and request were
+    never recorded. A no-op without the tables, and once the columns are there (an ALTER takes the
+    table's ACCESS EXCLUSIVE lock even when it adds nothing). ``conn`` is a synchronous connection
+    (alembic's bind, or ``run_sync``'s)."""
+    inspector = sa_inspect(conn)
+    if inspector.has_table("commits", schema=_SCHEMA):
+        have = {c["name"] for c in inspector.get_columns("commits", schema=_SCHEMA)}
+        missing = [c for c in COMMIT_PROVENANCE_COLUMNS if c not in have]
+        if missing:
+            conn.execute(text(f'ALTER TABLE "{_SCHEMA}"."commits" '
+                              + ", ".join(f"ADD COLUMN IF NOT EXISTS {c} TEXT" for c in missing)))
+    if inspector.has_table("jobs", schema=_SCHEMA) and "provenance" not in {
+            c["name"] for c in inspector.get_columns("jobs", schema=_SCHEMA)}:
+        conn.execute(text(f'ALTER TABLE "{_SCHEMA}"."jobs" ADD COLUMN IF NOT EXISTS provenance JSONB'))
 
 
 def ensure_mr_merged_source_seq(conn) -> None:

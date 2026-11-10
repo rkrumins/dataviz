@@ -369,10 +369,27 @@ export interface ViewPrCounts {
   onDataSource: number
 }
 
+/** Who made a history entry: a person by hand, or automation (a service account, the platform, or
+ *  anyone's API key — a script acting as them). */
+export type CommitOrigin = 'people' | 'automation'
+
+/** How a commit was made, as every commit log entry says (doc 19 §3.6). */
+export interface CommitProvenance {
+  actor_kind?: 'human' | 'service' | 'system'
+  /** The API key it came through, when it did. */
+  api_key_id?: string | null
+  /** The request it came from. */
+  correlation_id?: string | null
+  automation?: boolean
+  change_reason?: string | null
+}
+
 export interface CommitLogResponse {
   commits: Array<Record<string, unknown>>
   /** actor/contributor id → resolved display name, covering every commit in this response. */
   userNames?: Record<string, string>
+  /** API key id → its name, for every key a commit in this response came through. */
+  apiKeyNames?: Record<string, string>
   /** More commits lie past this page. */
   hasMore?: boolean
   /** One branch's log: the oldest `commit_seq` on this page, to pass back as `before`. */
@@ -508,8 +525,12 @@ export interface PullRequest {
   targetGraphId: string
   targetBranch: string
   baseCommitSeq?: number | null
-  behind?: boolean | null         // draft MR: base lags main head — must pull latest before merge
+  behind?: boolean | null         // draft MR: base lags main head
   behindBy?: number | null
+  /** Of those commits, how many people made. Only they make a pull a must before merging:
+   *  automation that touched none of the draft's entities is merged past. */
+  behindByPeople?: number | null
+  pullRequired?: boolean | null
   status: string
   title?: string | null
   description?: string | null
@@ -660,14 +681,20 @@ export class ForkUpdateConflictsError extends Error {
 }
 
 /** A draft is behind main and must pull the latest changes before it can be merged. */
+/** Why a draft must pull before it lands: someone changed Published (`people`), automation changed
+ *  what the draft changes (`overlap`), or the draft is too large to land behind (`size`). */
+export type PullReason = 'people' | 'overlap' | 'size'
+
 export class NotUpToDateError extends Error {
   branchId?: string
   behindBy?: number
-  constructor(detail: { branchId?: string; behindBy?: number; message?: string }) {
+  reason?: PullReason
+  constructor(detail: { branchId?: string; behindBy?: number; message?: string; reason?: string }) {
     super(detail.message || 'This draft is out of date — pull the latest changes before merging.')
     this.name = 'NotUpToDateError'
     this.branchId = detail.branchId
     this.behindBy = detail.behindBy
+    this.reason = (['people', 'overlap', 'size'] as const).find((r) => r === detail.reason)
   }
 }
 
@@ -1466,6 +1493,12 @@ export function getWatermark(wsId: string, graphId: string): Promise<Watermark> 
 export interface BranchFreshness {
   behind: boolean
   behindBy: number
+  /** Of those commits, how many people made. Only they make pulling a must before publishing:
+   *  automation that touched none of the draft's entities is published past. */
+  behindByPeople?: number
+  pullRequired?: boolean
+  /** Why it must pull (null: it publishes as it is, even behind). */
+  pullReason?: PullReason | null
   mainHeadCommitSeq: number
   baseCommitSeq: number
   /** The draft's own status — how a client learns it was published or discarded. */
@@ -1722,10 +1755,13 @@ export function getCommitLog(
     limit?: number; offset?: number
     /** Only commits older than this `commit_seq` — the previous page's `nextBefore`. */
     before?: number
+    /** Only people's commits, or only automation's. */
+    origin?: CommitOrigin | null
   } = {},
 ): Promise<CommitLogResponse> {
   const sp = new URLSearchParams()
   if (params.branchId) sp.set('branchId', params.branchId)
+  if (params.origin) sp.set('origin', params.origin)
   if (params.originatingViewId) sp.set('originatingViewId', params.originatingViewId)
   if (params.publishedOnly) sp.set('publishedOnly', 'true')
   if (params.limit != null) sp.set('limit', String(params.limit))

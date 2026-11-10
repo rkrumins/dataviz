@@ -45,6 +45,7 @@ const restoreFork = vi.fn()
 const useDataSourcePullRequests = vi.fn((..._args: unknown[]) => ({ data: openPrs, isLoading: false }))
 const freezeMutate = vi.fn()
 let freezeError: Error | null
+let commitLog: { commits: Array<Record<string, unknown>>; userNames?: Record<string, string>; apiKeyNames?: Record<string, string> }
 let dsPolicy: Record<string, unknown> | undefined
 const policyPut = vi.fn()
 
@@ -79,7 +80,7 @@ vi.mock('../../hooks/useVersioning', () => ({
     data: resolved, isLoading: false, isError: !!resolveError, error: resolveError, refetch,
   }),
   useBranches: (...args: [string, string | null, string | null, string[]]) => useBranches(...args),
-  useCommitLog: () => ({ data: { commits: [] } }),
+  useCommitLog: () => ({ data: commitLog }),
   useDataSourcePullRequests: (...args: unknown[]) => useDataSourcePullRequests(...args),
   useForks: () => ({ data: forks, refetch: refetchForks }),
   useSetGraphFrozen: () => ({ mutate: freezeMutate, isPending: false, error: freezeError }),
@@ -144,6 +145,7 @@ beforeEach(() => {
   useDataSourcePullRequests.mockClear()
   freezeMutate.mockReset()
   freezeError = null
+  commitLog = { commits: [] }
   dsPolicy = undefined
   policyPut.mockReset().mockResolvedValue({})
 })
@@ -487,5 +489,28 @@ describe('DataSourceVersioningTab — drafts and reviews', () => {
     expect(screen.getByLabelText('Drafts may be')).toBeDisabled()
     expect(screen.getByLabelText('New drafts start')).toBeDisabled()
     expect(screen.queryByRole('button', { name: 'Save' })).toBeNull()
+  })
+})
+
+describe('DataSourceVersioningTab — recent history', () => {
+  it('counts each commit’s changes and says which automation made them', () => {
+    commitLog = {
+      commits: [
+        { commit_id: 'c2', commit_seq: 2, kind: 'edit', message: 'nightly sync', actor: 'svc_bot',
+          actor_kind: 'service', api_key_id: 'apk_1', automation: true, created_at: '2026-11-09T09:00:00Z',
+          stats: { create: 2, update: 1, delete: 0 } },
+        { commit_id: 'c1', commit_seq: 1, kind: 'squash_publish', message: 'Rename Sales', actor: 'usr_a',
+          actor_kind: 'human', automation: false, created_at: '2026-11-08T09:00:00Z',
+          stats: { create: 0, update: 1, delete: 0 } },
+      ],
+      userNames: { svc_bot: 'Snowflake sync', usr_a: 'Ana Lee' },
+      apiKeyNames: { apk_1: 'Nightly loader' },
+    }
+    renderTab()
+    expect(screen.getByText('3 changes')).toBeInTheDocument()
+    expect(screen.getByText('1 change')).toBeInTheDocument()
+    expect(screen.getByText('Service account')).toBeInTheDocument()
+    expect(screen.getByText('Nightly loader')).toBeInTheDocument()
+    expect(screen.getAllByText('Service account')).toHaveLength(1)   // a person by hand: no chip
   })
 })

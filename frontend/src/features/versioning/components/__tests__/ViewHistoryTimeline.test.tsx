@@ -41,6 +41,8 @@ const COMMITS = [
 ]
 
 const state = vi.hoisted(() => ({
+  commits: null as Array<Record<string, unknown>> | null,
+  origins: [] as Array<string | null | undefined>,
   revisionOn: false,
   hasNextPage: false,
   fetchNextPage: vi.fn(),
@@ -54,13 +56,17 @@ const useCommitDiffSummary = vi.fn((_ws?: string, _gid?: string | null, cid?: st
 
 vi.mock('../../hooks/useVersioning', () => ({
   VERSIONING_KEYS: { revision: (ws?: string, gid?: string | null, seq?: number | null) => ['versioning', 'revision', ws, gid, seq] },
-  useHistoryPages: () => ({
-    data: { pages: [{ commits: COMMITS, userNames: { usr_abc123: 'Ana Lee' }, hasMore: state.hasNextPage }] },
+  useHistoryPages: (_ws: string, _gid: string, _scope: unknown, _enabled?: boolean, origin?: string | null) => {
+    state.origins.push(origin)
+    return {
+    data: { pages: [{ commits: state.commits ?? COMMITS, hasMore: state.hasNextPage,
+      userNames: { usr_abc123: 'Ana Lee', svc_sync: 'Snowflake sync' }, apiKeyNames: { apk_1: 'Nightly loader' } }] },
     isLoading: false,
     hasNextPage: state.hasNextPage,
     isFetchingNextPage: false,
     fetchNextPage: state.fetchNextPage,
-  }),
+  }
+  },
   useHistoryMonths: () => ({
     data: { headSeq: 9, tz: 'UTC', months: [
       { month: '2026-09', count: 4, firstSeq: 2, lastSeq: 5, days: [] },
@@ -99,6 +105,8 @@ function wrap(ui: ReactNode) {
 }
 
 beforeEach(() => {
+  state.commits = null
+  state.origins = []
   state.revisionOn = false
   state.hasNextPage = false
   state.plan = { openable: true, reason: null }
@@ -194,5 +202,72 @@ describe('ViewHistoryTimeline', () => {
     state.revisionOn = true
     wrap(<ViewHistoryTimeline wsId="ws1" graphId="g1" viewId={null} compare={{ fromSeq: 3, toSeq: null }} />)
     expect(screen.getByText('Comparing #3 with now')).toBeInTheDocument()
+  })
+})
+
+describe('ViewHistoryTimeline — people and automation', () => {
+  const bot = (seq: number, at: string, stats: Record<string, number>) => ({
+    commit_id: `cmt_${seq}`, commit_seq: seq, kind: 'edit', message: `sync batch ${seq}`, actor: 'svc_sync',
+    actor_kind: 'service', api_key_id: 'apk_1', automation: true, created_at: at, stats,
+  })
+  const person = { commit_id: 'cmt_5', commit_seq: 5, kind: 'squash_publish', message: 'Rename Sales',
+    actor: 'usr_abc123', actor_kind: 'human', automation: false, created_at: '2026-11-09T12:00:00Z', stats: { update: 1 } }
+
+  it('asks for people’s or automation’s history alone, and says what it shows', async () => {
+    wrap(<ViewHistoryTimeline wsId="ws1" graphId="g1" viewId={null} />)
+    expect(state.origins.at(-1)).toBeNull()
+
+    await userEvent.click(screen.getByRole('radio', { name: /Automation/ }))
+    expect(state.origins.at(-1)).toBe('automation')
+    expect(screen.getByText(/service accounts, the platform, and changes made with an API key/)).toBeInTheDocument()
+    // A month's count is of every revision: not shown over a filtered list.
+    expect(screen.queryByText(/12 revisions/)).toBeNull()
+
+    await userEvent.click(screen.getByRole('radio', { name: /People/ }))
+    expect(state.origins.at(-1)).toBe('people')
+    await userEvent.click(screen.getByRole('button', { name: 'Show everyone' }))
+    expect(state.origins.at(-1)).toBeNull()
+  })
+
+  it('folds a run of one automation’s commits into one row, opened to each on demand', async () => {
+    state.commits = [
+      person,
+      bot(4, '2026-11-09T11:30:00Z', { create: 2, update: 3 }),
+      bot(3, '2026-11-09T10:15:00Z', { update: 4 }),
+      bot(2, '2026-11-09T09:00:00Z', { delete: 1 }),
+    ]
+    wrap(<ViewHistoryTimeline wsId="ws1" graphId="g1" viewId={null} />)
+
+    // The person's change stands alone; the three automated ones are one row.
+    expect(screen.getByText('Rename Sales')).toBeInTheDocument()
+    expect(screen.queryByText('sync batch 3')).toBeNull()
+    const run = screen.getByRole('button', { name: /Snowflake sync.*3 commits/ })
+    expect(run).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.getByText('10 changes')).toBeInTheDocument()
+    expect(screen.getAllByText('Nightly loader').length).toBeGreaterThan(0)
+
+    await userEvent.click(run)
+    expect(run).toHaveAttribute('aria-expanded', 'true')
+    for (const n of [2, 3, 4]) expect(screen.getByText(`sync batch ${n}`)).toBeInTheDocument()
+    await userEvent.click(run)
+    expect(screen.queryByText('sync batch 3')).toBeNull()
+  })
+
+  it('never folds a single automated commit, or commits of different days', () => {
+    state.commits = [bot(3, '2026-11-09T10:00:00Z', { update: 1 }), person,
+      bot(2, '2026-11-08T10:00:00Z', { update: 1 })]
+    wrap(<ViewHistoryTimeline wsId="ws1" graphId="g1" viewId={null} />)
+    expect(screen.getByText('sync batch 3')).toBeInTheDocument()
+    expect(screen.getByText('sync batch 2')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /commits/ })).toBeNull()
+    // Each still says it was automation, and through which key.
+    expect(screen.getAllByText('Service account')).toHaveLength(2)
+  })
+
+  it('says so when no automation has changed the graph', async () => {
+    state.commits = []
+    wrap(<ViewHistoryTimeline wsId="ws1" graphId="g1" viewId={null} />)
+    await userEvent.click(screen.getByRole('radio', { name: /Automation/ }))
+    expect(screen.getByText('No automation has changed this graph yet.')).toBeInTheDocument()
   })
 })

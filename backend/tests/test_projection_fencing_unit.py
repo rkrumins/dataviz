@@ -358,3 +358,47 @@ def test_the_bootstrap_head_flip_bumps_the_epoch_in_the_fenced_transaction():
     assert str(ps.epoch) == str(ProjectionStateORM.epoch + 1), ps.epoch
     (first, s1), (second, s2) = sessions
     assert (first, second) == ("checkpoint", "ps") and s1 is s2
+
+
+def test_a_busy_graph_counts_itself_once_per_interval(monkeypatch):
+    """Doc 19 §3.8: a pass that applied only main's newest commits re-counts the whole graph in both
+    stores at most every PROJECTION_VERIFY_INTERVAL_SECS; one that verified dirty asks again."""
+    from backend.app.services.versioning import config
+
+    proj, ps, _client, _seen = _projector(monkeypatch, ps=_PS(projected=3, target=5))
+    verifies = []
+
+    async def verify(*a, **k):
+        verifies.append(a[3])                     # from_seq
+        return None, False
+    monkeypatch.setattr(proj, "_verify_and_heal", verify)
+    monkeypatch.setattr(config, "PROJECTION_VERIFY_INTERVAL_SECS", 300)
+    for _ in range(3):
+        asyncio.run(proj.project_graph("g1"))
+    assert len(verifies) == 1, verifies
+
+    # A pass that dropped a write is always verified.
+    async def dropped(*a, **k):
+        return 1
+    monkeypatch.setattr(proj, "_apply", dropped)
+    asyncio.run(proj.project_graph("g1"))
+    assert len(verifies) == 2, verifies
+
+    # A dirty verify (healed) asks for the next pass to verify too.
+    async def healed(*a, **k):
+        verifies.append(a[3])
+        return None, True
+    monkeypatch.setattr(proj, "_verify_and_heal", healed)
+    asyncio.run(proj.project_graph("g1"))
+    async def none(*a, **k):
+        return 0
+    monkeypatch.setattr(proj, "_apply", none)
+    monkeypatch.setattr(proj, "_verify_and_heal", verify)
+    asyncio.run(proj.project_graph("g1"))
+    assert len(verifies) == 4, verifies
+
+    # 0 verifies every pass, as before.
+    monkeypatch.setattr(config, "PROJECTION_VERIFY_INTERVAL_SECS", 0)
+    asyncio.run(proj.project_graph("g1"))
+    asyncio.run(proj.project_graph("g1"))
+    assert len(verifies) == 6, verifies

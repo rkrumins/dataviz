@@ -25,7 +25,7 @@ import { Backdrop } from '@/components/ui/Backdrop'
 import { Badge } from '@/components/ui/Badge'
 import { timeAgo } from '@/lib/timeAgo'
 import {
-  ForkNotUpToDateError, HeadMovedError, MergeConflictError, NotUpToDateError,
+  ForkNotUpToDateError, HeadMovedError, MergeConflictError, NotUpToDateError, type PullReason,
   type IncomingChanges, type ResolutionMap,
 } from '@/services/versioningApiService'
 import {
@@ -54,6 +54,16 @@ import { useAppNotifications } from '@/components/ui/notifications'
 import { PrStatusBadge, ApprovalPill, PrKindIcon, derivePrTitle, isDraftMr } from './PrMeta'
 import { ConflictResolver } from './ConflictResolver'
 import { MOTION } from '@/lib/motion'
+import { refusalCopy } from '@/features/versioning/model/provenance'
+
+/** " by 3 changes people made" — what holds a draft's review back from main; people's changes
+ *  are what make it pull, so they are what it counts when the server says. */
+function behindText(pr: { behindBy?: number | null; behindByPeople?: number | null }): string {
+  const people = pr.behindByPeople ?? 0
+  if (people > 0) return ` by ${people} change${people === 1 ? '' : 's'} people made`
+  const n = pr.behindBy ?? 0
+  return n > 0 ? ` by ${n} commit${n === 1 ? '' : 's'}` : ''
+}
 
 function Section({ icon: Icon, title, right, children }: {
   icon: React.ComponentType<{ className?: string }>; title: string; right?: React.ReactNode; children: React.ReactNode
@@ -154,6 +164,8 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
   const [conflicts, setConflicts] = useState<Array<Record<string, unknown>> | null>(null)
   const [resolverError, setResolverError] = useState<string | null>(null)
   const [needsPull, setNeedsPull] = useState(false)
+  // Why it must pull, once a merge was refused for it (the list's `pullRequired` says only whether).
+  const [pullReason, setPullReason] = useState<PullReason | null>(null)
   const [resolveMode, setResolveMode] = useState<'merge' | 'pull'>('merge')
   /** What a pull brought in — reviewed, not just asserted. */
   const [incoming, setIncoming] = useState<IncomingChanges | null>(null)
@@ -192,7 +204,9 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
   // Proactive gate: the server flags a draft MR that lags main head. Mirror it into needsPull so the
   // banner + Pull-latest show up front (the 409 catch in runMerge is the backstop). A clean pull
   // clears it and invalidates this PR, so pr.behind flips false and keeps it cleared.
-  useEffect(() => { setNeedsPull(!terminal && !!pr?.behind) }, [pr?.behind, terminal])
+  // Only people's commits make a pull a must (pullRequired); automation alone is merged past.
+  const mustPull = pr?.pullRequired ?? pr?.behind
+  useEffect(() => { setNeedsPull(!terminal && !!mustPull) }, [mustPull, terminal])
 
   const runMerge = async (resolutions?: ResolutionMap) => {
     if (!pr || unsaved > 0) return
@@ -232,7 +246,8 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
       }
       if (e instanceof NotUpToDateError) {
         setNeedsPull(true)
-        notify('error', 'This draft is out of date — pull the latest changes before merging.')
+        setPullReason(e.reason ?? 'people')
+        notify('error', refusalCopy(e.reason))
         return
       }
       if (e instanceof MergeConflictError) {
@@ -537,7 +552,11 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
         {pr && !terminal && needsPull && (
           <div className="mx-5 mb-1 flex items-start gap-2 px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-600 text-xs">
             <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
-            <span>This draft is behind <strong>main</strong>{pr.behindBy ? ` by ${pr.behindBy} commit${pr.behindBy === 1 ? '' : 's'}` : ''}. Pull the latest changes (resolving any conflicts) before it can be merged.</span>
+            <span>
+              {pullReason === 'overlap'
+                ? <>Automation changed something this draft changes since it started. Pull the latest changes to see what it changed (resolving any conflicts) before it can be merged.</>
+                : <>This draft is behind <strong>main</strong>{behindText(pr)}. Pull the latest changes (resolving any conflicts) before it can be merged.</>}
+            </span>
           </div>
         )}
 

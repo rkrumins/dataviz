@@ -78,7 +78,7 @@ export function PrListRow({
 }) {
   const branchName = pr.sourceBranchName?.trim() || (isDraftMr(pr) ? 'draft' : pr.sourceBranchId?.slice(0, 8)) || 'fork'
   const author = ownerName(pr.actor, pr.userNames)
-  const behind = pr.behind && (pr.behindBy ?? 0) > 0
+  const behind = (pr.pullRequired ?? pr.behind) && (pr.behindBy ?? 0) > 0
   const closePr = useCloseMergeRequest(wsId)
   const [confirming, setConfirming] = useState(false)
   // Only an active PR can be dismissed — never one a job is merging, which the server refuses.

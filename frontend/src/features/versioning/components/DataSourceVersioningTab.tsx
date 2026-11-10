@@ -33,12 +33,13 @@ import { ProjectionHealthCard } from './ProjectionHealthCard'
 import { ProposeToParentButton } from './ProposeToParentButton'
 import { UpdateFromParentButton } from './UpdateFromParentButton'
 import { kindMeta } from '../model/commitKind'
-import { ownerName } from '../model/branchVocab'
+import { actorName, ownerName } from '../model/branchVocab'
+import { CommitProvenance } from './CommitProvenance'
 
 // A missing actor (e.g. a genesis/import commit) is "system" — distinct from an actor id
 // that failed to resolve to a name (which falls back to 'Unknown' via ownerName).
 const actorLabel = (a: unknown, userNames?: Record<string, string>) =>
-  typeof a === 'string' && a ? ownerName(a, userNames) : 'system'
+  actorName(typeof a === 'string' ? a : null, userNames)
 
 function timeAgo(iso?: string): string {
   if (!iso) return ''
@@ -335,7 +336,7 @@ export function DataSourceVersioningTab({ wsId, dataSourceId, itemCount }: {
           <ol className="relative ml-1.5 border-l border-glass-border space-y-3 pl-4">
             {commits.slice(0, 12).map((c, i) => {
               const stats = (c.stats ?? {}) as Record<string, number>
-              const total = (stats.created ?? 0) + (stats.updated ?? 0) + (stats.deleted ?? 0)
+              const total = (stats.create ?? 0) + (stats.update ?? 0) + (stats.delete ?? 0)
               const kind = kindMeta(c.kind)
               return (
                 <li key={(c.commit_id as string) ?? i} className="relative">
@@ -353,6 +354,7 @@ export function DataSourceVersioningTab({ wsId, dataSourceId, itemCount }: {
                       <User className="w-3 h-3" />
                       {actorLabel(c.actor, commitsQ.data?.userNames)}
                     </span>
+                    <CommitProvenance commit={c} apiKeyNames={commitsQ.data?.apiKeyNames} />
                     <span>·</span>
                     <span>{timeAgo(c.created_at as string)}</span>
                     {total > 0 && (

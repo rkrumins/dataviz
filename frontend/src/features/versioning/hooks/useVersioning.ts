@@ -681,14 +681,16 @@ export type HistoryScope =
  *  already listed), so a walk neither skips nor repeats one while new revisions land. */
 export function useHistoryPages(
   wsId: string | undefined, graphId: string | null | undefined, scope: HistoryScope, enabled = true,
+  origin: api.CommitOrigin | null = null,
 ) {
-  const scopeKey = scope.kind === 'draft' ? `draft:${scope.branchId}`
-    : scope.kind === 'view' ? `view:${scope.viewId}` : 'graph'
+  const scopeKey = (scope.kind === 'draft' ? `draft:${scope.branchId}`
+    : scope.kind === 'view' ? `view:${scope.viewId}` : 'graph') + (origin ? `:${origin}` : '')
   return useInfiniteQuery({
     queryKey: VERSIONING_KEYS.historyPages(wsId, graphId, scopeKey),
     queryFn: ({ pageParam }) => api.getCommitLog(wsId!, graphId!, {
       ...(scope.kind === 'draft' ? { branchId: scope.branchId }
         : scope.kind === 'view' ? { originatingViewId: scope.viewId, publishedOnly: true } : {}),
+      ...(origin ? { origin } : {}),
       limit: HISTORY_PAGE,
       ...(pageParam != null ? { before: pageParam } : {}),
     }),

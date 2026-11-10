@@ -22,6 +22,7 @@ from backend.app.services.feature_flags import (
     FeatureDisabledError,
     feature_flags,
 )
+from backend.app.providers import write_batch
 from backend.app.services.versioning.messaging import nudge_projection
 from backend.app.services.versioning.service import ApplyResult, GraphVersioningService
 
@@ -139,13 +140,23 @@ class VersionedWriteProvider:
         return self._gid
 
     async def _record(self, ops: List[dict], message: str,
-                      from_client: bool = True) -> Optional[ApplyResult]:
+                      from_client: bool = True, defer: bool = True) -> Optional[ApplyResult]:
         """Commit the ops to main, then nudge the projector to carry them to FalkorDB.
         ``from_client``: urns resolve to the nodes they name and a create never replaces what holds
-        its id (:meth:`GraphVersioningService.apply_ops`); a whole-graph save opts out."""
+        its id (:meth:`GraphVersioningService.apply_ops`); a whole-graph save opts out.
+
+        Inside a write batch (:mod:`.write_batch`) the ops are held for its one commit and nothing
+        is answered; ``defer`` False commits what the batch holds with them, in order, for a
+        caller that needs the committed answer."""
         ops = [o for o in ops if o is not None]
         if not ops:
             return None
+        batch = write_batch.current()
+        if batch is not None and from_client:
+            if defer and batch.take(self, ops):
+                return None
+            if batch.owner is self:
+                ops = batch.drain() + ops
         gid = await self._graph_id()
         res = await self._svc.apply_ops_detailed(
             graph_id=gid, ops=ops, actor=self._actor,
@@ -154,6 +165,14 @@ class VersionedWriteProvider:
         if res.commit_id is not None:
             await nudge_projection(gid)
         return res
+
+    async def commit_deferred(self, ops: List[dict], message: str) -> Optional[ApplyResult]:
+        """Commit a write batch's ops (:mod:`.write_batch`) as one commit."""
+        return await self._record(ops, message, defer=False)
+
+    async def get_node(self, urn: str) -> Optional[GraphNode]:
+        held = write_batch.node(urn)
+        return held if held is not None else await self._inner.get_node(urn)
 
     async def _endpoint_op(self, urn: str) -> Optional[dict]:
         """A create op for an edge endpoint node main has never recorded (fetched from the
@@ -180,6 +199,7 @@ class VersionedWriteProvider:
             ops.append({"op": "create", "entity_kind": "edge",
                         "entity_id": containment_edge.id, "payload": _edge_payload(containment_edge)})
         await self._record(ops, f"create node {node.urn}")
+        write_batch.held(node, containment_edge)
         return True
 
     async def create_edge(self, edge: GraphEdge) -> bool:
@@ -187,6 +207,7 @@ class VersionedWriteProvider:
         ops = [await self._endpoint_op(edge.source_urn), await self._endpoint_op(edge.target_urn),
                {"op": "create", "entity_kind": "edge", "entity_id": edge.id, "payload": _edge_payload(edge)}]
         await self._record(ops, f"create edge {edge.id}")
+        write_batch.held(None, edge)
         return True
 
     async def update_edge(self, edge_id: str, properties: Dict[str, Any]) -> Optional[GraphEdge]:
@@ -202,7 +223,7 @@ class VersionedWriteProvider:
         eid = found[0]
         res = await self._record([{"op": "update", "entity_kind": "edge", "entity_id": eid,
                                    "payload": {"properties": dict(properties or {})}}],
-                                 f"update edge {eid}")
+                                 f"update edge {eid}", defer=False)
         _, payload = res.written[eid]
         return GraphEdge(
             id=edge_id,
@@ -214,6 +235,10 @@ class VersionedWriteProvider:
 
     async def delete_edge(self, edge_id: str) -> bool:
         await _require_versioning_flag()
+        if write_batch.has_edge(edge_id):              # made earlier in this batch: not on main yet
+            await self._record([{"op": "delete", "entity_kind": "edge", "entity_id": edge_id,
+                                 "payload": None}], f"delete edge {edge_id}")
+            return True
         found = (await self._svc.resolve_edges(graph_id=await self._graph_id(),
                                                edge_ids=[edge_id])).get(edge_id)
         if found is None:

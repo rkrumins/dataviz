@@ -619,6 +619,13 @@ export const docEntries: DocEntry[] = [
     importFn: () => import('@docs/versioning/18-identity.md?raw'),
   },
   {
+    slug: 'versioning-change-streams',
+    section: 'versioning',
+    title: 'Versioning: Change Streams',
+    description: 'Automation that leaves an audit trail and never blocks people: provenance, the people-first gate, and streams',
+    importFn: () => import('@docs/versioning/19-change-streams.md?raw'),
+  },
+  {
     slug: 'versioning-e2e',
     section: 'versioning',
     title: 'Versioning: End-to-End Walkthrough',
