@@ -37,6 +37,7 @@ import { EmptyState } from '@/components/ui/EmptyState'
 import { SkeletonText } from '@/components/ui/Skeleton'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/Tabs'
 import { Section } from './DrawerSection'
+import { WhatChangedSection } from './WhatChangedSection'
 import { PropertyEditor } from './PropertyEditor'
 import { PanelErrorBoundary } from './PanelErrorBoundary'
 import { useDrawerHistoryScope } from './useDrawerHistoryScope'
@@ -391,6 +392,8 @@ function RelationshipPanel({
               <div className="py-3"><TombstoneDetails target={tombstone} /></div>
             ) : (
               <div className="divide-y divide-glass-border">
+                {/* What changed leads, where the canvas's change set holds this relationship. */}
+                <WhatChangedSection id={entityId} />
                 <Section title="Details" icon={Info}>
                   <DetailList>
                     <DetailRow label="Relationship">
