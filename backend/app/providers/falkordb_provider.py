@@ -12907,6 +12907,12 @@ class FalkorDBProvider(GraphDataProvider):
         direction that filled its page.
         """
         n = len(anchors)
+        if not st.ltypes:
+            # No lineage vocabulary (a containment-only source): every anchor
+            # is trivially complete. The queries below would otherwise build
+            # ``[r:]`` patterns the engine rejects, file every anchor as cut,
+            # and the client's hands-free driver would re-seed them forever.
+            return n
         idx = 0
         while idx < n:
             if budget <= 0:
