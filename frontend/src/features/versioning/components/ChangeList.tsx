@@ -22,11 +22,9 @@ import { useDebouncedValue } from '@/hooks/useDebouncedValue'
 import type {
   ChangeListKind, ChangeListOrigin, ChangeListRow, ChangeListStatus, ChangeListSummary,
 } from '@/services/versioningApiService'
-import { useChangeEntries, useChangeEntry, useChangeSummary } from '../hooks/useVersioning'
+import { useChangeEntries, useChangeSummary } from '../hooks/useVersioning'
 import { KIND_LABEL, changeRowLabel as rowLabel, changeTotal, kindCounts, kindsOf, typeOptionsOf } from '../model/changeListSummary'
-import type { GraphChange } from '../model/changeModel'
-import { EntityDiff } from './EntityDiff'
-import { DeletionDetailsButton } from './TombstoneDetails'
+import { ChangeDetail } from './ChangeDetail'
 import { NodeDiffBadge, STATUS_META } from './NodeDiffBadge'
 
 const STATUSES: ChangeListStatus[] = ['added', 'modified', 'removed']
@@ -371,44 +369,10 @@ function Row({ wsId, graphId, origin, row, open, onToggle, active = false, onAct
       )}
       {open && (
         <div className="px-2.5 pb-2 pl-7">
-          <RowDetail wsId={wsId} graphId={graphId} origin={origin} row={row} />
+          <ChangeDetail wsId={wsId} graphId={graphId} origin={origin} entityId={row.entityId} label={label} />
         </div>
       )}
     </div>
-  )
-}
-
-/** One entity before and after, fetched when its row is opened. */
-function RowDetail({ wsId, graphId, origin, row }: {
-  wsId: string
-  graphId: string
-  origin: ChangeListOrigin
-  row: ChangeListRow
-}) {
-  const q = useChangeEntry(wsId, graphId, origin, row.entityId)
-  if (q.isLoading) return <SkeletonText lines={2} className="py-1" />
-  if (q.isError || !q.data) {
-    return <p className="text-[11px] text-ink-muted px-2 py-1.5">Couldn't load this change.</p>
-  }
-  const d = q.data
-  const change: GraphChange = {
-    entityId: d.entityId,
-    kind: d.kind,
-    status: d.status === 'unchanged' ? 'modified' : d.status,
-    label: rowLabel(row),
-    before: d.before ?? undefined,
-    after: d.after ?? undefined,
-    origin: 'branchId' in origin
-      ? { source: 'branch', branchId: origin.branchId }
-      : { source: 'compare', fromSeq: origin.fromSeq, toSeq: origin.toSeq },
-  }
-  if (change.status !== 'removed') return <EntityDiff change={change} />
-  return (
-    <>
-      <EntityDiff change={change} />
-      <DeletionDetailsButton className="mt-1.5"
-        target={{ wsId, graphId, entityId: d.entityId, kind: d.kind, origin, label: change.label }} />
-    </>
   )
 }
 
