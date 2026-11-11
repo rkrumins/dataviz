@@ -93,13 +93,18 @@ spec:
             - name: redis-cache-certs
               mountPath: /certs/cache
               readOnly: true
+          # 8Gi: an import reconciled in memory (GRAPHVER_IMPORT_IN_MEMORY) holds
+          # the fingerprints of every entity it has seen (8 bytes each, about
+          # 270 MB at 33M) beside its batch, and a publish of millions of
+          # changes peaks near 0.5 GiB; two jobs run per pod. See
+          # docs/versioning/08-import-export.md §3e.
           resources:
             requests:
               cpu: "1"
-              memory: 1Gi
+              memory: 2Gi
             limits:
               cpu: "2"
-              memory: 4Gi
+              memory: 8Gi
           # No HTTP health server on this worker yet, so no httpGet probes
           # (they would flap and restart-loop). A crash exits the process and
           # the Deployment restarts it; its jobs' leases lapse and another pod

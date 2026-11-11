@@ -55,6 +55,13 @@ integration's many small changes as a few commits.
     nothing; a chunked body is counted, and refused (`413`) as soon as it passes the limit.
   - Measured with a 4 GiB NDJSON file sent whole: stored as its 257 parts in about 20 s with the
     API process's memory up 1–2 MiB, and every record read back equal to the original.
+- **Reconcile imports in memory** (Admin → Features, `importInMemoryReconcile`, off by default). An
+  import compares its file with the graph a batch at a time before it stages anything: a row that
+  changes nothing is staged slim, already resolved, so a full snapshot sent again writes about what
+  changed. The file is read twice, nodes then edges. Imports into an empty graph, and into types
+  matched by team keys, run as before; an import keeps the way it started.
+  - A snapshot of 200,000 rows sent again with 1% changed: 42–47 s instead of 72–76 s, 60 MB of
+    staged rows instead of 330 MB, 206 MB of WAL instead of 513 MB; the same draft and tallies.
 - **`IMPORT_UPLOAD_CONCURRENCY`** (8): import files one API process takes in at once. One more
   waits up to 30 s for a slot, then is answered `429` with `Retry-After: 15`, before any of it is
   read, so a burst of large files can't take the object store's (or the database's) bandwidth from
@@ -121,6 +128,10 @@ integration's many small changes as a few commits.
   A proxy of your own in front needs the same on the import routes for a file sent in one request
   (in nginx, `client_max_body_size 10g; proxy_request_buffering off;`); uploads in parts need
   nothing.
+- The transfer workers' memory limit is 8 GiB (request 2 GiB), was 4 GiB (1 GiB): an import
+  reconciled in memory holds a filter of what it has seen (about 250 MB for a 4 GB file). Make room
+  on the nodes the transfer lane runs on (k8s `versioning-worker/transfer.yaml`, Helm
+  `versioningWorker.transfer.resources`).
 - A failed import can be resumed or queued again, and a finished one's row preview read, for 3
   days after it ends, where it was 7. Set `IMPORT_STAGING_GC_DAYS=7` to keep the old window.
 - For multi-gigabyte imports, set `OBJECT_STORE_BACKEND` to `s3` or a shared volume: the default

@@ -423,6 +423,11 @@ the graph and writing them, node windows then edge windows.
   row count, and roughly the time. A CSV takes about a quarter longer to import.
 - **Deltas are cheap.** A delta costs what its file holds, not what the graph holds: the 1% delta
   above took 17 seconds into a graph of 4 million entities. Send the first load once, then deltas.
+- **Can't send deltas?** A full snapshot each time is reconciled into its delta by the server: only
+  what changed is written to the graph and published. Ask an administrator to turn on **Admin →
+  Features → Reconcile imports in memory**, so the rows that change nothing aren't staged whole on
+  the way: about a fifth of the staged rows and two fifths less time for a snapshot 1% changed
+  ([Import & export §3f](/docs/versioning-import-export#3f-reconciling-in-memory)).
 - **Memory** stays flat: windows of 10,000 rows, whatever the file's size.
 - **The upload** is the quick part. 16 MiB parts at 4 at a time fill the link, and at
   100 Mbit/s a 4 GB file is up in about 6 minutes.

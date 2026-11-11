@@ -385,6 +385,9 @@ nginx's temp directory and its worker at 4 MB.
   gigabyte of NDJSON stored there took 248 MB of rows (Postgres compresses each 1 MiB chunk) and
   296 MB of WAL — a file that doesn't compress, a gigabyte of each — written into the instance
   every user's requests read from, on top of the import's staged rows (§3c).
+- **Full snapshots.** A file sent again whole, changing little, is best reconciled in memory
+  (§3f, Admin → Features): it stages and logs about what changed. The transfer workers' memory
+  limit is 8 GiB for it.
 - **Retention.** Three settings bound what an import leaves in Postgres, all swept hourly, so each
   goes within the hour after it is due: the uploaded file, `OBJECT_STORE_TTL_HOURS` (24) after it
   arrived; a failed import's file and every ended import's staged rows (3.4–7× the file, more for
@@ -412,6 +415,58 @@ it, the view it places into still editable — then stores this request's file a
 export never queued is started. Two requests racing with one key both get the winner's job; the
 loser's draft never exists (it is opened in the job's transaction, which the refused insert rolls
 back).
+
+### 3f. Reconciling in memory
+
+A file sent again whole — a full snapshot, a few percent of it changed — was staged row by row
+(§3a), every row then rewritten with its resolution, only for nearly all of them to change nothing:
+the import wrote several times the file into Postgres to find its delta. With **Admin → Features →
+Reconcile imports in memory** (`importInMemoryReconcile`, off by default), an import compares its
+rows with the graph in memory first, a batch at a time, and writes about what changed.
+
+**What it does** (`import_worker._stage_pass`). The file is read twice — node rows, then edge rows
+once the node windows are in, so edges are compared with the nodes as they then stand. Each batch
+of `IMPORT_COMMIT_WINDOW` rows is resolved in memory exactly as its window would resolve it
+(`resolve_rows`, with the same lookups). A row whose resolution is *unchanged* is staged as a slim
+row: already resolved, with the entity it matched (a replace's absence check, and a later row
+naming the entity again, read it) and only the links a node leaves for later rows — usually `{}`.
+Every other row — new, updated, deleted, invalid — is staged whole and resolved by its window as
+before. Tallies, the preview (which lists the rows that change something), a replace's deletes,
+and the draft are the same either way.
+
+**When a row may be decided early.** Only when nothing it names was named by a row before it in the
+file (`_Seen`: file ids, urn and identifier-value pointers, qualified names, matched entities): a
+second row for an entity, or a name a new node takes, changes what a later row resolves to, and only
+its window sees that. `_Seen` is a Bloom filter — a false positive only sends a row the usual way.
+
+**When it applies.** To a job that starts with the switch on, into a draft that holds nodes (a first
+load into an empty graph is all new), whose types match imports by no team key (those match across
+the whole file, which only the windows can see). The job keeps the way it started, whatever the
+switch says later: its cursor says so (`mparse:<n>`, `mnode:<row>`, `eparse:<n>`, then `edge:<row>`).
+A pass resumed by another worker decides nothing more — what it would need to know of the rows
+before is gone with the run — and stages the rest whole. A pass whose first 20,000 rows are mostly
+not unchanged (under 10%) stops deciding, and stages the rest whole.
+
+**What it costs.** Memory on the transfer worker: about 12 bits per name the file holds, for its
+`_Seen` (about 250 MB for a 4 GB file; a pass at a time), beside one batch — the transfer workers'
+limit is 8 GiB (`deploy/k8s/base/services/versioning-worker/transfer.yaml`, Helm
+`versioningWorker.transfer.resources`). The file is read twice. Comparing every row with the graph
+is still the import's main cost: what changes is what it writes.
+
+**Measured** (`bench_versioning`'s 100k nodes and 100k edges, published; the same file sent again
+as a replace with 1% of nodes renamed and 0.1% of edges left out, one local Postgres 16):
+
+| | Switch off | Switch on |
+|---|---|---|
+| Import | 72–76 s | 42–47 s |
+| `import_rows` staged | 330 MB | 60–62 MB |
+| WAL | 513–553 MB | 206 MB (more when a checkpoint falls inside it: full-page images) |
+| Tallies and the draft | 1,000 updated, 100 deleted, 198,900 unchanged | the same |
+
+`tests/integration/test_import_in_memory.py` imports the same files both ways — a snapshot sent
+again, rows naming an entity twice either way round, a new node taking an existing node's qualified
+name, an edge whose end the file deletes, edges before their nodes, a view-scoped replace, a worker
+dying in either pass — and requires the same draft, tallies, progress and row resolutions.
 
 ---
 

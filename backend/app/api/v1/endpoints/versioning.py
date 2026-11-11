@@ -3866,7 +3866,8 @@ async def _store_and_start(ie, session: AsyncSession, request: Request, job_id: 
     file takes. And it is one of the ``_IMPORT_BODIES`` this process takes in at once."""
     from backend.app.services.versioning.import_export import uploads
     try:
-        await session.commit()
+        if session is not None:          # a direct caller may hold none
+            await session.commit()
         async with _IMPORT_BODIES.slot():
             with _upload_errors():
                 await ie.store.put_stream(source_uri, uploads.within_limit(request.stream(), fmt))
