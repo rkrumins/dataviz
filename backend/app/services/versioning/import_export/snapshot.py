@@ -46,6 +46,11 @@ _LOOKUP_CHUNK = 5000
 #: A lookup's ids (or urns), as one array (``= ANY``): an IN list of thousands is compiled one bind at
 #: a time, and each length is a statement of its own to prepare and plan.
 _ANY = any_(bindparam("ids", type_=ARRAY(Text)))
+_TARGETS = any_(bindparam("tids", type_=ARRAY(Text)))
+#: Up to this many targets (an import window's), ``edges_between`` seeks both ends in SQL; past it
+#: (a view's every node), the sources alone, the targets checked here: so many chunks of both would
+#: multiply into too many statements.
+_BOTH_ENDS_MAX = 4 * _LOOKUP_CHUNK
 
 #: The session every read here goes through while :func:`pinned_reads` is open.
 _PINNED: ContextVar[Optional[AsyncSession]] = ContextVar("snapshot_pinned_reads", default=None)
@@ -332,17 +337,22 @@ class Snapshot:
 
     async def edges_between(self, sources: Iterable[str], targets: Iterable[str]) -> Dict[tuple, str]:
         """``(source, target, edgeType) -> entity_id`` for the live edges from one of ``sources``
-        to one of ``targets``."""
+        to one of ``targets``. Up to ``_BOTH_ENDS_MAX`` targets, both ends are sought in SQL
+        (``ix_ev_source``, ``ix_ev_target``), so a hub's edges to anything else are never read."""
         sources, targets = set(sources), set(targets)
+        both = len(targets) <= _BOTH_ENDS_MAX
         candidates: Set[str] = set()
         for graph_id, branches in self._branches().items():
             stmt = select(EdgeVersionORM.entity_id, EdgeVersionORM.target_entity_id).where(
                 EdgeVersionORM.graph_id == graph_id, EdgeVersionORM.branch_id.in_(branches),
-                EdgeVersionORM.source_entity_id == _ANY).distinct()
+                EdgeVersionORM.source_entity_id == _ANY,
+                *([EdgeVersionORM.target_entity_id == _TARGETS] if both else [])).distinct()
             for chunk in _chunks(list(sources), _LOOKUP_CHUNK):
-                async with _session() as s:
-                    rows = (await s.execute(stmt, {"ids": list(chunk)})).all()
-                candidates.update(eid for eid, target in rows if target in targets)
+                for ends in (_chunks(list(targets), _LOOKUP_CHUNK) if both else [None]):
+                    async with _session() as s:
+                        rows = (await s.execute(stmt, {"ids": list(chunk), **(
+                            {"tids": list(ends)} if both else {})})).all()
+                    candidates.update(eid for eid, target in rows if target in targets)
         live = await self.lookup_live("edge", candidates)
         return {(w.source_id, w.target_id, w.edge_type): eid for eid, w in live.items()
                 if w.source_id in sources and w.target_id in targets}

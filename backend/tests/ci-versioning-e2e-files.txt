@@ -102,6 +102,7 @@ tests/integration/test_revision_overlay_reads.py
 tests/integration/test_rollup_delta_staging.py
 tests/integration/test_seed_identity.py
 tests/integration/test_shared_draft_members.py
+tests/integration/test_snapshot_edges_between.py
 tests/integration/test_stage2_collaboration_story.py
 tests/integration/test_sync_curation_guard.py
 tests/integration/test_transfer_queue.py
