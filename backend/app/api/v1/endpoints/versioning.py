@@ -3881,6 +3881,8 @@ class CreateUploadRequest(_ApiModel):
     fileName: str = Field(..., max_length=500)
     size: int = Field(..., gt=0)
     format: str = Field("ndjson", max_length=16)
+    #: The part size the client will send, when not the server's own (16 MiB).
+    partBytes: Optional[int] = None
 
 
 @contextmanager
@@ -3915,7 +3917,8 @@ async def create_import_upload(
     ie=Depends(get_import_export_service),
 ):
     """Start a resumable upload of a file to import: how it is to be split, and where its parts go.
-    A file too large for its format is refused here, before any of it is sent (413)."""
+    A client that splits files its own way says its part size (``partBytes``). A file too large for
+    its format is refused here, before any of it is sent (413)."""
     from backend.app.services.versioning.import_export import uploads
     from backend.app.services.versioning.import_export.formats import get_adapter
     try:
@@ -3925,7 +3928,8 @@ async def create_import_upload(
     with _upload_errors():
         record = await uploads.create(
             ie.store, workspace_id=ws_id, data_source_id=meta.get("data_source_id"), graph_id=graph_id,
-            owner=user.id, file_name=body.fileName, size=body.size, fmt=body.format.lower())
+            owner=user.id, file_name=body.fileName, size=body.size, fmt=body.format.lower(),
+            part_bytes=body.partBytes)
     return _upload_view(record, [])
 
 
@@ -3950,13 +3954,16 @@ async def put_import_upload_part(
     ie=Depends(get_import_export_service),
 ):
     """One part of the file, the raw request body. Sending a part again replaces it — until the
-    upload is completed: what is imported is what was there then."""
+    upload is completed: what is imported is what was there then. A part whose Content-Length is
+    not its share of the file is refused before any of it is read."""
     from backend.app.services.versioning.import_export import uploads
     record = await _load_upload(ie, ws_id, graph_id, meta, upload_id, user)
     if record.get("jobId"):
         raise HTTPException(status_code=409, detail="This upload is complete. Upload the file again to change it.")
+    declared = request.headers.get("content-length")
     with _upload_errors():
-        size = await uploads.put_part(ie.store, record, part, request.stream())
+        size = await uploads.put_part(ie.store, record, part, request.stream(),
+                                      declared=int(declared) if declared and declared.isdigit() else None)
     return {"part": part, "size": size}
 
 

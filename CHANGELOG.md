@@ -41,6 +41,10 @@ integration's many small changes as a few commits.
   - The commit log names each key (`apiKeyNames`).
 - **A publish credits each entity to whoever edited it.** Each version on the published graph names
   its editor. The commit still names the publisher, and its contributors everyone who edited.
+- **A resumable import upload takes parts of the client's own size.** `POST …/imports/uploads`
+  takes `partBytes`, from 5 MiB to `MAX_IMPORT_BODY_BYTES` (100 MiB); without it, parts stay
+  16 MiB. A multi-gigabyte file goes up in fewer requests (10 GiB is 103 parts of 100 MiB, not 640),
+  and a client that already splits files its own way only has to say how.
 
 ### Changed
 
@@ -65,6 +69,14 @@ integration's many small changes as a few commits.
   never had.
 - **"What changed" on the behind-Published strip counts changes.** It read node and edge counts that
   commits never had.
+- **An upload part of the wrong size says how the file is split.** A client that split a large file
+  at another size, or sent it whole, had part 0 refused with only "This part is larger than the
+  16777216 bytes it should hold." The `422` now names the size the part should be, the upload's
+  `partBytes`, and how to ask for another. A part whose `Content-Length` shows it is the wrong size
+  is refused before any of its body is read, instead of after 16 MiB of it was written to the store.
+- **Resuming or completing a large upload no longer checks its parts one at a time.** They are
+  looked up eight at a time, so an upload of thousands of parts on a bucket answers in seconds and
+  stays well inside the request's 120 s.
 
 ### Upgrading
 

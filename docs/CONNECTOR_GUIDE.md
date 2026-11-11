@@ -238,11 +238,17 @@ first.
 1. **`POST …/imports/uploads`** `{"fileName": "catalog.ndjson", "size": 4294967296, "format": "ndjson"}`.
    - It answers `201` with `uploadId`, `partBytes` (16 MiB), `parts`, `received` (`[]`) and
      `expiresAt`.
+   - A client that splits files its own way says so: `"partBytes": 67108864` sends 64 MiB parts.
+     It can be from 5 MiB to 100 MiB (`MAX_IMPORT_BODY_BYTES`, the most one request may carry; 32 MB
+     behind the Helm chart's ingress, unless its `proxy-body-size` is raised), else `422`. Larger
+     parts mean fewer requests for a multi-gigabyte file, but each must still arrive within 120 s.
    - A file too large for its format is refused here, `413`, before any of it is sent.
 2. **`PUT …/imports/uploads/{uploadId}/parts/{n}`** for `n` from `0` to `parts - 1`, each with its
-   bytes as the body.
-   - Every part holds exactly `partBytes`, and the last holds the rest; a part of the wrong size is
-     `422`.
+   bytes as the raw body (`application/octet-stream`, not a form).
+   - Part `n` is the file's bytes from `n × partBytes`: every part holds exactly `partBytes`, and
+     the last holds the rest. A part of any other size is `422`, and the answer says the size it
+     should be and how the file is split. A `Content-Length` of another size is refused at once,
+     before any of the body is read or stored.
    - Parts go in any order, and several at once.
    - Sending a part again replaces it — until the upload is completed: then it is `409`.
 3. **`GET …/imports/uploads/{uploadId}`** lists `received`, the parts stored whole. To resume after
@@ -258,7 +264,8 @@ first.
 
 **Timing and the uplink.**
 - **Each request has 120 s.** A 16 MiB part must arrive within that, so N parts at once need about
-  N × 1.1 Mbit/s: 3 need 3.4 Mbit/s and 4 need 4.5 Mbit/s. On a slow link, send fewer at once.
+  N × 1.1 Mbit/s: 3 need 3.4 Mbit/s and 4 need 4.5 Mbit/s. On a slow link, send fewer at once. A
+  100 MiB part needs about 7 Mbit/s of its own.
 - **An upload has 24 hours** from its creation (`expiresAt`) to be completed. After that, its
   parts are swept, and `GET` answers `404`.
 - **What's checked.** Parts are checked by their exact size, and TLS carries them intact. There is

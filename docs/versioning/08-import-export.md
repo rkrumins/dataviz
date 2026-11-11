@@ -281,12 +281,17 @@ A file of up to `IMPORT_MAX_BYTES` (10 GiB; NDJSON, CSV and TSV, which are read 
 arrives in parts (`import_export/uploads.py`), since one request that size would outlast every proxy
 and timeout on the way, and a dropped connection would start it over:
 
-1. `POST …/imports/uploads` `{fileName, size, format}` → `{uploadId, partBytes, parts, expiresAt}`
-   (16 MiB parts). A file too large for its format is refused here (413), before any of it is sent.
+1. `POST …/imports/uploads` `{fileName, size, format, partBytes?}` → `{uploadId, partBytes, parts,
+   expiresAt}`: 16 MiB parts, or the `partBytes` a client asks for, to send parts of its own size
+   (5 MiB to `MAX_IMPORT_BODY_BYTES`, 100 MiB, the most one request may carry). A file too large for
+   its format is refused here (413), before any of it is sent.
 2. `PUT …/imports/uploads/{uploadId}/parts/{n}`, the part as the body: several at once, in any order.
    Each is its own write-once object in the store (a bucket mount never appends or renames), and
-   must hold exactly its share of the file; sending a part again replaces it — until the upload is
-   completed (409): what is imported is what was there then.
+   must hold exactly its share of the file (422 otherwise, saying how the file is split; a
+   `Content-Length` of another size is refused before any of the body is read or stored); sending a
+   part again replaces it — until the upload is completed (409): what is imported is what was there
+   then. Which parts arrived is looked up eight at a time, so `received` and completing an upload
+   of thousands of parts answer in seconds, not minutes.
 3. `GET …/imports/uploads/{uploadId}` → `received`: what a resumed upload doesn't send again.
 4. `POST …/imports/uploads/{uploadId}/complete?reconcileMode&branchId&viewId&autoPublish` → 202, the
    import job (409 while a part is missing). It reads the parts in order as one file. An upload is

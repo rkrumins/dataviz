@@ -1195,6 +1195,7 @@ in [Single Sign-On](/guide/sso-setup).
 | `404` for something you can see in the app | Wrong workspace, data source or id in the path, or a URN not percent-encoded | Check the ids with `GET /api/v1/admin/workspaces`; encode URNs |
 | `410` on `POST …/graph/trace` | The route is retired | Use `POST …/graph/trace/v2` |
 | `413` | The body is larger than the route accepts | For imports, send the file in parts |
+| `422` "Part n must hold exactly … bytes" on `PUT …/imports/uploads/{id}/parts/{n}` | The part isn't the file's bytes from `n × partBytes`: the client split the file at another size, or sent it whole | Split it at the upload's `partBytes`, or start the upload with your own `partBytes` (5 MiB to 100 MiB) |
 | `429` `rate_limited` with a key | More than 1,200 requests a minute with one key, or 120 bad keys a minute from one address | Wait `Retry-After` seconds, then spread your requests out |
 | `503` `api_keys_unavailable` | Keys can't be checked right now — or authorization enforcement is switched off, which stops every key until it's back on | Retry after `Retry-After`; if it lasts, tell your operator |
 | `429` or `503` repeating | The graph store is busy or recovering | Honour `Retry-After`, and spread your requests out |

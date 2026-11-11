@@ -148,7 +148,6 @@ The API server: what it accepts and serves, and which part of the backend each p
 | `GZIP_COMPRESSLEVEL` | `1` | `backend/app/main.py` |
 | `HTTP_TIMEOUT_DATA_SOURCE_MOVE_SECS` | `120` | `backend/app/main.py` |
 | `HTTP_TIMEOUT_VIEW_TRANSFER_SECS` | `120` | `backend/app/main.py` |
-| `MAX_IMPORT_BODY_BYTES` | `104857600` | `backend/app/main.py` |
 | `MAX_REQUEST_BODY_BYTES` | `8388608` | `backend/app/main.py` |
 | `PROVIDER_HEALTH_DS_INDEX_DEADLINE_S` | `1.0` | `backend/app/main.py` |
 | `PROVIDER_HEALTH_DS_INDEX_TTL_S` | `5` | `backend/app/main.py` |
@@ -680,6 +679,7 @@ Drafts and commits, projection into the graph store, and import and export.
 | `GRAPHVER_PROJECTION_VERIFY` | `1` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_PROJECTION_VERIFY_DEEP` | `1` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_PROJECTION_VERIFY_DEEP_MAX_ENTITIES` | `500000` | `backend/app/services/versioning/config.py` |
+| `GRAPHVER_PROJECTION_VERIFY_INTERVAL_SECS` | `300` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_PROJECTION_WAIT_MS` | `2000` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_PURGE_GRACE_DAYS` | `30` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_PURGE_WINDOW` | `25000` | `backend/app/services/versioning/config.py` |
@@ -716,6 +716,7 @@ Drafts and commits, projection into the graph store, and import and export.
 | `IMPORT_STORE_ROOT` | `/tmp/synodic-import-store` | `backend/app/services/versioning/config.py` |
 | `IMPORT_WHOLE_FILE_MAX_BYTES` | `104857600` | `backend/app/services/versioning/import_export/uploads.py` |
 | `INLINE_IMPORT_MAX` | `5000` | `backend/app/services/versioning/config.py` |
+| `MAX_IMPORT_BODY_BYTES` | `104857600` | `backend/app/main.py`, `backend/app/services/versioning/import_export/uploads.py` |
 | `OBJECT_STORE_BACKEND` | `database` | `backend/app/services/versioning/config.py` |
 | `OBJECT_STORE_S3_ADDRESSING` | `auto` | `backend/app/services/versioning/config.py` |
 | `OBJECT_STORE_S3_BUCKET` | (empty) | `backend/app/services/versioning/config.py` |
