@@ -53,6 +53,9 @@ async def _narrowing_run(monkeypatch) -> None:
             gid = r.json()["graphId"]
             r = await c.post(f"{V1}/graphs/{gid}/bulk-ingest", content=_IMPORT_NDJSON, headers=h("alice"))
             assert r.status_code == 200, r.text
+            r = await c.post(f"{V1}/graphs/{gid}/identities/resolve", headers=h("alice"),
+                             json={"identifier": "urn", "values": ["urn:t:root", "urn:t:child"]})
+            ROOT, CHILD = (x["entityId"] for x in r.json()["results"])     # urn:uuid ids, by urn
             B = f"{V1}/graphs/{gid}/branches"
 
             async def level(bid: str, to: str, who: str = "alice"):
@@ -75,9 +78,9 @@ async def _narrowing_run(monkeypatch) -> None:
             # member editor, keeps his staged.
             await svc.add_branch_member(graph_id=gid, branch_id=d, subject_type="user", subject_id="dave",
                                         role="editor", actor="alice")
-            await staged(d, "bob", "urn:t:child", description="from bob")
-            await staged(d, "carol", "urn:t:root", description="from carol")
-            await staged(d, "dave", "urn:t:child", displayName="Dave's child")
+            await staged(d, "bob", CHILD, description="from bob")
+            await staged(d, "carol", ROOT, description="from carol")
+            await staged(d, "dave", CHILD, displayName="Dave's child")
             r = await c.get(f"{B}/{d}/visibility-impact", params={"visibility": "private"}, headers=h("alice"))
             assert r.status_code == 200, r.text
             assert r.json()["saved"] == [{"actor": "bob", "changes": 1}, {"actor": "carol", "changes": 1}]
@@ -87,7 +90,7 @@ async def _narrowing_run(monkeypatch) -> None:
             log = (await c.get(f"{V1}/graphs/{gid}/commits", params={"branchId": d}, headers=h("alice"))).json()
             assert [cm["actor"] for cm in log["commits"][:2]] == ["carol", "bob"], log
             st = (await c.get(f"{B}/{d}/state", headers=h("alice"))).json()["nodes"]
-            assert (st["urn:t:child"].get("description"), st["urn:t:root"].get("description")) == (
+            assert (st[CHILD].get("description"), st[ROOT].get("description")) == (
                 "from bob", "from carol"), st
             for who in ("bob", "carol"):
                 assert (await c.get(f"{B}/{d}", headers=h(who))).status_code == 404
@@ -96,8 +99,8 @@ async def _narrowing_run(monkeypatch) -> None:
 
             # A clash between two who lose it: the second can't be saved; the level stays.
             e = (await c.post(B, json={"visibility": "public"}, headers=h("alice"))).json()["branchId"]
-            await staged(e, "bob", "urn:t:child", description="bob's")
-            await staged(e, "carol", "urn:t:child", description="carol's")
+            await staged(e, "bob", CHILD, description="bob's")
+            await staged(e, "carol", CHILD, description="carol's")
             r = await level(e, "private")
             assert r.status_code == 409, r.text
             assert (r.json()["detail"]["type"], r.json()["detail"]["actors"]) == (
@@ -117,8 +120,8 @@ async def _narrowing_run(monkeypatch) -> None:
             for who in ("erin", "frank"):
                 await svc.add_branch_member(graph_id=gid, branch_id=f, subject_type="user", subject_id=who,
                                             role="editor", actor="alice")
-            await staged(f, "erin", "urn:t:child", description="erin's")
-            await staged(f, "frank", "urn:t:root", description="frank's")
+            await staged(f, "erin", CHILD, description="erin's")
+            await staged(f, "frank", ROOT, description="frank's")
             await svc.remove_branch_member(graph_id=gid, branch_id=f, subject_type="user",
                                            subject_id="erin", actor="alice")
             await svc.add_branch_member(graph_id=gid, branch_id=f, subject_type="user", subject_id="frank",

@@ -70,6 +70,7 @@ tests/integration/test_import_resume_e2e.py
 tests/integration/test_import_validate.py
 tests/integration/test_import_windows.py
 tests/integration/test_import_worker.py
+tests/integration/test_ingest_standard_ids.py
 tests/integration/test_landed_revision.py
 tests/integration/test_layered_lineage_schema_ingest.py
 tests/integration/test_main_activity.py

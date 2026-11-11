@@ -195,7 +195,8 @@ change. A file's keys find those ids:
   No urn is needed. The first import that names the property indexes it (it reads every node
   once); every later one finds rows by it, including nodes people made or edited in the app since.
   A value two nodes hold refuses its rows (`duplicate_value`): keep it unique to one. A partial
-  file — `prop.external_id` and the one field that changed — updates only that field.
+  file — `prop.external_id` and the one field that changed — updates only that field. To write
+  through the entity-id APIs instead, map your ids first: `POST …/identities/resolve`.
 - **The data source's identifier property** (`prop.<identifier>`) finds a node too, for a source
   identified by it. It is reserved: the node's identifier holds its urn.
 - **A `urn:uuid:` your system already gave the entity** is kept as its id, given as its `urn` or

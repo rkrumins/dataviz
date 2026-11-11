@@ -800,6 +800,11 @@ publish.
    source's Versioning tab: `GET …/graphs/{gid}/import-settings` says what it is, where it comes
    from, the replace guard's limits in force, and the properties its imports match by.
 
+   To write by entity id (`POST /graph/changes`) when you know items by your own system's ids,
+   look them up first: `POST …/graphs/{gid}/identities/resolve` with `{"identifier":
+   "prop.external_id", "values": ["E-1", "E-2"]}` answers each value's `entityId` as an import would
+   find it (`found`, `none`, or `duplicate` with both ids), up to 10,000 values a call.
+
    An `idempotencyKey` makes the request safe to send again: the same key from you answers with
    the import it started, with no second draft or job. If the first request broke off before its
    file was stored, its import was failed there and then, and the same key takes it back with this

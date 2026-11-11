@@ -329,6 +329,13 @@ async def _by_a_property(svc, ie, store, monkeypatch) -> None:
              {"kind": "node", f"prop.{KEY}": "K-dup", "entityType": "Table", "displayName": "dup"}]
     job, summary = await _import(ie, store, gid, lines, identifier=by)
     assert [p["current"] for p in await matching.listed(gid)] == [True]
+    # Resolved without importing, as the import found them.
+    resolved = {r["value"]: r for r in await svc.resolve_identities(
+        graph_id=gid, identifier=by, values=["K0", " K0 ", "nope", "K-dup"])}
+    assert resolved["K0"] == {"value": "K0", "status": "found", "entityId": _id(scope, 0)}
+    assert resolved[" K0 "]["entityId"] == _id(scope, 0)
+    assert (resolved["nope"]["status"], resolved["nope"]["entityId"]) == ("none", None)
+    assert (resolved["K-dup"]["status"], len(resolved["K-dup"]["entityIds"])) == ("duplicate", 2)
     async with db.graphver_session() as s:
         res = {r.row_index: r for r in (await s.execute(select(ImportRowORM).where(
             ImportRowORM.job_id == job["job_id"]))).scalars()}

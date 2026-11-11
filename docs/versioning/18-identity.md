@@ -89,8 +89,8 @@ The id is `uuid5(ENTITY_NAMESPACE, "<kind>/<seed>")`.
 | `POST /graph/edges`, a `create_edge` command | — | v7, or v5 with `idempotencyKey` |
 | A draft's `POST …/branches/{bid}/changes` | the create's `entityId`, else its payload's `urn`, else v7, which becomes its urn too | its `entityId`, else v7 |
 | Import, `POST …/imports` ([08 §3b](08-import-export.md#3b-resolve-a-window-at-a-time)) | The entity a row names by the import's `identifier`. Otherwise: the deleted node its urn names, brought back; else a free `urn:uuid:` the row brings as its urn or (by `entity_id`) its entity_id, kept; else v5 derived from the row's urn or identifier value; else, for a row a qualifiedName or team key finds again, v7. A row that names nothing a later import could find it by is refused. The node keeps the urn its row gives (its id when it gives none); an identifier value finds a node and is not stored. | v5 of its ends and type |
-| `…/bulk-ingest` | The row's own id, else its urn, else v7. A node with no urn is given its id as its urn. A second row naming the same node is refused. | the row's own id, else v7 |
-| `…/sync` | The node already holding the row's urn, else the row's own id, else its urn, else v7, which becomes its urn too | the edge already joining the two ends with that type, else the row's own id, else `sync:e:…` |
+| `…/bulk-ingest` | As an import mints it: a `urn:uuid:` the row brings (its `entity_id`, `id` or `urn`), kept; else v5 of its urn, as an import by urn derives it (`pointer_id`); else v5 of its own id; else v7. A node with no urn is given its id as its urn. A second row naming the same node is refused. | a `urn:uuid:` the row brings; else v5 of its own id; else v5 of its ends and type. A second row naming the same edge is refused |
+| `…/sync` | The node already holding the row's urn, else the one holding the row's own id (an id from before, whatever its format), else as `…/bulk-ingest` mints it — and v7 when another node holds the id that derives. A new node with no urn takes its id as its urn | the edge already joining the two ends with that type, else the one holding the row's own id, else as `…/bulk-ingest` mints it (v7 when another holds it) |
 | Enabling version control (`/graph/bootstrap`) | the node's urn, as the graph holds it | the edge's own id, else `<source>|<TYPE>|<target>` |
 | A view package seed | the line's entity id, else v5; a line with neither an id nor a urn is named by that id, its urn too | the line's entity id, else v5 |
 
@@ -99,7 +99,8 @@ The id is `uuid5(ENTITY_NAMESPACE, "<kind>/<seed>")`.
 - a provider's urn (DataHub, OpenMetadata, FalkorDB), which is also a node's id once its graph
   gains version control;
 - a bootstrap edge's `<source>|<TYPE>|<target>`, for an edge with no id of its own;
-- a sync's `sync:e:…`, for an edge with no id;
+- a sync's `sync:e:…`, which syncs gave an edge with no id before the routes minted v5s. A later
+  sync finds such an edge by its ends and keeps its id;
 - `sync:<urn>`, which syncs gave nodes before a new node was named by its urn. A later sync finds
   such a node by its urn and keeps its id.
 

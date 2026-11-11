@@ -128,6 +128,18 @@ integration's many small changes as a few commits.
     data source's own over them (below).
   - In the import dialog, **Replace anyway** imports the file again into the same draft with
     `allowMassDelete`, so its deletions are staged for review.
+- **Look up what your own ids name, without importing:** `POST …/graphs/{gid}/identities/resolve`
+  `{identifier, values}` answers each value's entity id on the published graph as an import naming
+  that identifier would find it (`found`, `none`, or `duplicate` with both ids), up to 10,000 a
+  call. Clients of the entity-id writes (`POST /graph/changes`) map their system's ids first. An
+  API key may call it.
+- **`/bulk-ingest` and `/sync` give new entities the import's ids.** A new node or edge takes a
+  `urn:uuid:`: one the row brings, kept; else derived from its urn (as an import by urn derives
+  it) or its own id, an edge's from its ends and type. Every path that adds entities to a
+  versioned graph now gives the same kind of id, and the same row sent through any of them names
+  the same entity. Entities made before keep their ids (a provider urn, `ent_…`, `sync:e:…`): a
+  sync still finds them by their urn, their ends, or the id they have, and updates and deletes
+  them. Enabling version control still keeps a provider's urns as ids.
 - **Imports that publish themselves pull main when it moved under them.** Several connectors (and
   people) can work on one data source at once, each in a draft of its own. When main moved while
   an import ran, its draft now pulls main — the field-level merge of "Pull latest" — and publishes
@@ -297,6 +309,8 @@ integration's many small changes as a few commits.
     field or qualifiedName) is refused with `no_key`, and so is an edge to it. Give such rows a urn.
   - An imported node's urn is the one its file gave, not the derived id. A client that read a
     node's urn as its id should read its `entity_id`.
+- **New ids from `/bulk-ingest` and `/sync` are `urn:uuid:`s.** A client that read a new node's
+  id as its urn should read its `urn` (it is stored as given) or its `entity_id`.
 - Migration `20261112_1600_import_settings` adds five nullable columns to `workspace_data_sources`
   (`import_identifier`, `import_replace_*`) and `jobs.import_settings` (nullable JSONB); no rewrite.
   Every data source starts with none set, so imports run under the platform's settings as before. A

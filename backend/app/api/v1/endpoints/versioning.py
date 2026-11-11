@@ -3517,7 +3517,8 @@ async def bulk_ingest(
 ):
     """Day-0 / large-delta import: POST an ndjson body (one node/edge per line) →
     one ``import`` commit. Invalid lines are reported, not fatal. Idempotent on
-    ``idempotencyKey``. (Raw body streams; the object-store upload-URL flow for
+    ``idempotencyKey``. New entities take ids as an import mints them: a ``urn:uuid`` the row
+    brings, else one derived from its urn or its own id. (Raw body streams; the object-store upload-URL flow for
     very large loads plugs in here.) It writes main, so it needs publish: a key, its owner's."""
     require_publish_for_main(claims, ws_id)
     rows: List[dict] = []
@@ -3533,6 +3534,7 @@ async def bulk_ingest(
     with _domain_errors():
         report = await svc.bulk_ingest(
             graph_id=graph_id, rows=rows, actor=user.id, idempotency_key=idempotency_key,
+            standard_ids=True,
         )
     if report.get("commit_id"):
         background.add_task(nudge_projection, graph_id)
@@ -3578,6 +3580,7 @@ async def sync_ingest(
             graph_id=graph_id, rows=rows, actor=user.id, source=source,
             idempotency_key=idempotency_key, strategy=strategy, containment_edge_types=cset,
             allow_curation_risk=overrides.force, allow_mass_delete=overrides.allow_mass_delete,
+            standard_ids=True,
         )
     if report.get("commit_id"):
         background.add_task(nudge_projection, graph_id)
@@ -4407,6 +4410,48 @@ async def put_import_settings(
             session, "workspace.versioning.import_settings_updated", **recorder.data_source_target(row),
             details={"from": before, "to": after})
     return await _import_settings_view(row, graph_id)
+
+
+class ResolveIdentitiesRequest(_ApiModel):
+    identifier: str = Field(description="entity_id, urn or prop.<name>, as on an import")
+    values: List[str] = Field(max_length=10000, description="Up to 10,000 values to look up")
+
+
+@router.post("/graphs/{graph_id}/identities/resolve")
+async def resolve_identities(
+    ws_id: str, graph_id: str, body: ResolveIdentitiesRequest,
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    meta: dict = Depends(graph_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """What each value names on the published graph, as an import naming ``identifier`` finds a
+    row's entity — without importing anything: ``{identifier, results: [{value, status,
+    entityId, entityIds?}]}``, ``status`` ``found``, ``none`` or ``duplicate`` (two live nodes hold
+    it: ``entityIds``). For clients of the writes that name entities by id (``POST
+    /graph/changes``, a draft's changes) that know them by an id of their own system. **422** for
+    an identifier it may not name; **409 ``identifier_not_indexed``** for ``prop.<name>`` before an
+    import has built that property's index."""
+    from backend.app.services.versioning.import_export import identifier as identifiers
+    from backend.app.services.versioning.import_export import keys as matching
+    try:
+        identifier = identifiers.parse(body.identifier)
+    except identifiers.IdentifierError as exc:
+        raise HTTPException(status_code=422, detail={"type": "invalid_identifier", "message": str(exc)})
+    if identifier is None:
+        raise HTTPException(status_code=422, detail={
+            "type": "invalid_identifier", "message": "identifier is entity_id, urn or prop.<name>"})
+    identity = await _node_identity_for_meta(session, meta)
+    if identity is not None and identifier == f"prop.{identity.identity_property}":
+        identifier = "urn"                       # that property holds the urn, as on an import
+    try:
+        results = await svc.resolve_identities(graph_id=graph_id, identifier=identifier,
+                                               values=body.values)
+    except matching.NotIndexed as exc:
+        raise HTTPException(status_code=409, detail={"type": "identifier_not_indexed", "message": str(exc)})
+    except matching.NotOnAFork as exc:
+        raise HTTPException(status_code=422, detail={"type": exc.code, "message": str(exc)})
+    return {"identifier": identifier, "results": results}
 
 
 @router.get("/graphs/{graph_id}/imports/{job_id}")
