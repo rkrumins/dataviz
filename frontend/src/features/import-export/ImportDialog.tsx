@@ -19,7 +19,7 @@ import {
   type ImportFormat, type ImportPreviewRow, type ImportSettings, type ImportSummary, type Job, type ReconcileMode,
 } from '@/services/importExportApiService'
 import { prettyBytes } from './format'
-import { formatIdentifier, MATCH_KINDS, parseIdentifier, type Match } from './identifier'
+import { formatIdentifier, identifierLabel, MATCH_KINDS, parseIdentifier, type Match } from './identifier'
 
 export interface ImportDialogProps {
   wsId: string
@@ -199,7 +199,8 @@ export function ImportDialog({ wsId, graphId, branchId, viewId, onClose, onRevie
             />
           )}
           {phase === 'running' && <RunningStep job={job} upload={upload} fileName={file?.name} />}
-          {phase === 'done' && <DoneStep summary={(job?.summary as ImportSummary) ?? null} previewRows={previewRows} />}
+          {phase === 'done' && <DoneStep summary={(job?.summary as ImportSummary) ?? null} previewRows={previewRows}
+            identifier={job?.identifier ?? null} />}
           {phase === 'failed' && <FailedStep error={error} job={job} />}
         </div>
 
@@ -524,7 +525,12 @@ function RunningStep({ job, upload, fileName }: {
 }
 
 // ── done ─────────────────────────────────────────────────────────────────────
-function DoneStep({ summary, previewRows }: { summary: ImportSummary | null; previewRows: ImportPreviewRow[] }) {
+function DoneStep({ summary, previewRows, identifier }: {
+  summary: ImportSummary | null
+  previewRows: ImportPreviewRow[]
+  /** What its rows found their items by. */
+  identifier: string | null
+}) {
   const s = summary
   const changes = s ? s.new + s.updated + s.deleted : 0
   const nothing = s != null && changes === 0
@@ -558,6 +564,11 @@ function DoneStep({ summary, previewRows }: { summary: ImportSummary | null; pre
       {s && (s.unchanged ?? 0) > 0 && (
         <p className="mt-3 text-[11px] text-ink-muted">
           {s.unchanged} row{s.unchanged === 1 ? ' was' : 's were'} already up to date — only real changes are staged.
+        </p>
+      )}
+      {identifier && (
+        <p className="mt-1 text-[11px] text-ink-muted">
+          Matched existing items by {identifierLabel(identifier)}. Every matched item kept its id and history.
         </p>
       )}
 

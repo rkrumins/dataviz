@@ -77,6 +77,8 @@ editing dozens of nodes on the canvas.
    format** is detected for you.
 6. Under **How should it reconcile?**, choose **Add & update** or **Replace
    (authoritative)** — see [Choosing a reconcile mode](#choosing-a-reconcile-mode).
+   Under **Match existing items by**, check how the file's rows find the items
+   already there — see [Matching rows to existing items](#matching-rows-to-existing-items).
 7. Choose **Import**. A CSV, TSV or NDJSON file can be up to 10 GB; a JSON or
    Excel file, which is read whole, up to 100 MB. The dialog shows how much of
    the file is up. If the upload stops (a dropped connection, a closed tab),
@@ -120,6 +122,37 @@ import. A new row needs one: a row with only an `entity_id` you made up for the
 file is refused, because the next import couldn't find what it made and would
 make it again.
 
+### Matching rows to existing items
+
+Every item keeps one id for life, whatever matched it, so its history carries
+on through every import. **Match existing items by** says how a row finds the
+item it describes:
+
+| Choice | A row finds its item by | Use it when |
+| --- | --- | --- |
+| **Entity ID** | its `entity_id`, else its `urn`, else a field its type matches imports by, else a unique qualified name | The file is an export of this data, edited (the default) |
+| **URN** | its `urn` alone (or an `entity_id` of this graph) | Another system names its items by urn, as DataHub does |
+| **A property** | its value of a property you name, such as `external_id` | Another system gives each item an id of its own, kept in a property |
+
+The choice marked **default** is the data source's. A workspace admin sets it on
+the data source's **Versioning** tab, under **Imports**.
+
+- **A row nothing matches** becomes a new item. Its id is made from the key that
+  should have found it, so importing the file again finds it rather than making
+  it twice.
+- **A row with no key at all** (no urn, and no value of the property) is refused,
+  saying so: give it one.
+- **Only the columns a row carries change.** A file of `external_id` and one
+  changed column updates that column on those items and leaves everything else
+  as it is. A row that changes nothing writes nothing.
+- **Matching by a property for the first time** reads every item once, to index
+  the property: minutes on a large graph. The dialog says when an import does
+  this. Later imports only catch the index up, and find items people made or
+  edited on the canvas since.
+- **A value two items hold** refuses the rows that name it, naming both items.
+  Values compare as text, with spaces at either end ignored; `ABC` and `abc` are
+  different values.
+
 ### Choosing a reconcile mode
 
 | Mode | What it does | Use it when |
@@ -130,6 +163,24 @@ make it again.
 > **Warning:** Replace mode can delete data. {brand} always shows you the exact
 > count before you publish, but double-check your file is complete before
 > choosing it.
+
+When the replace guard stops an import, nothing is deleted and the file's rows
+wait on your draft. Most often the file names its items another way: try again
+with another **Match existing items by**. If the file really replaces most of
+what's there, choose **Replace anyway**: the file is imported again into the
+same draft, its deletions included, for you to review before you publish. The
+data source's **Versioning** tab shows the limits the guard uses, and a workspace
+admin can change them there.
+
+### Working beside other drafts
+
+Several people, and several connectors, can change one data source at once,
+each in a draft of their own. When one publishes, the others' drafts are behind
+the published graph: **Pull latest** brings its changes into yours, merging them
+field by field, and asks you to choose only where you both changed the same
+field. A connector whose import publishes itself does the same on its own: it
+pulls the latest and publishes, and waits for a person only on such a conflict,
+or when its draft holds more than 200,000 changes.
 
 Because an import lands on a draft, nothing is final until you publish or it's
 merged through review — you can inspect, adjust, or abandon it like any other

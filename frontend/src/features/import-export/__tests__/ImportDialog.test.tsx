@@ -162,13 +162,14 @@ describe('ImportDialog', () => {
 
     expect(await screen.findByText('4 changes ready to review')).toBeInTheDocument()
     expect(screen.queryByText(/already visible/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/Matched existing items by/)).not.toBeInTheDocument()   // an older server
     expect(screen.getByText(/when this closes/i)).toBeInTheDocument()
   })
 
   it('says why a row was refused, and shows a note on a row that applied', async () => {
     vi.mocked(importInParts).mockResolvedValue({ jobId: 'j1', branchId: 'br1', sourceUri: 's', status: 'pending' })
     vi.mocked(pollJob).mockResolvedValue({ jobId: 'j1', jobType: 'ingest', graphId: 'g1', status: 'completed',
-      summary: { new: 0, updated: 1, deleted: 0, invalid: 1 } } as Job)
+      identifier: 'prop.external_id', summary: { new: 0, updated: 1, deleted: 0, invalid: 1 } } as Job)
     vi.mocked(getImportPreview).mockResolvedValue({ sample: [
       { rowIndex: 0, kind: 'node', status: 'updated', label: 'orders',
         reasons: ["urn 'urn:li:renamed' isn't stored: an import never changes a node's urn"] },
@@ -180,6 +181,7 @@ describe('ImportDialog', () => {
 
     expect(await screen.findByText(/urn 'urn:li:renamed' isn't stored/)).toBeInTheDocument()
     expect(screen.getByText('changed since you exported it: description')).toBeInTheDocument()
+    expect(screen.getByText(/Matched existing items by Property external_id/)).toBeInTheDocument()
   })
 
   it('matches existing items by the graph’s default unless you choose another', async () => {

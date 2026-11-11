@@ -673,7 +673,9 @@ def test_a_second_row_for_one_edge_is_refused_unless_it_says_the_same():
 
 
 # ── By a matching property (identifier=prop.<name>) ─────────────────────────────────────────────
-from backend.app.services.versioning.import_export.resolve import key_pointer_id
+import pytest  # noqa: E402
+
+from backend.app.services.versioning.import_export.resolve import key_pointer_id  # noqa: E402
 
 
 def _by_prop(rows, **indexes):
@@ -732,3 +734,43 @@ def test_by_a_property_a_new_node_takes_the_id_its_value_derives_unless_a_node_h
     assert moved["entity_id"] != key_pointer_id("ds1", "ext", "MOVED"), "a fresh id, not the taken one"
     assert (back["entity_id"], back["payload"]["urn"]) == ("ent_D", "urn:li:gone"), back
     assert all(r["resolved_op"] == "create" for r in res.values())
+
+
+def test_by_a_property_values_compare_as_trimmed_text_and_case_counts():
+    _ops, res = _by_prop([
+        _node_row(0, properties={"ext": "  E1 "}),                 # trimmed: N1's
+        _node_row(1, properties={"ext": "e1"}, displayName="e1"),   # another case: another key
+        _node_row(2, properties={"ext": 12345}),                    # a number: as its text
+    ], urn_to_eid={"E1": "N1", "12345": "N5"}, node_eids={"N1", "N5"},
+        current={"N1": {"urn": "urn:N1", "entityType": "Table", "properties": {"ext": "E1"}},
+                 "N5": {"urn": "urn:N5", "entityType": "Table", "properties": {"ext": "12345"}}})
+    assert res[0]["matched_entity_id"] == "N1" and res[0]["resolved_op"] != "create", res[0]
+    assert res[1]["resolved_op"] == "create", res[1]
+    assert res[2]["matched_entity_id"] == "N5", res[2]
+
+
+@pytest.mark.parametrize("value", ["", "   ", PROP_DELETE, ["E1"], {"id": "E1"}, None])
+def test_by_a_property_a_blank_removed_or_structured_value_is_no_key(value):
+    _ops, res = _by_prop([_node_row(0, properties={"ext": value})], urn_to_eid={"E1": "N1"},
+                         node_eids={"N1"})
+    assert (res[0]["resolved_op"], res[0]["code"]) == ("invalid", "no_key"), res[0]
+
+
+def test_by_a_property_one_value_twice_in_a_file_names_one_node():
+    ops, res = _by_prop([
+        _node_row(0, properties={"ext": "NEW"}, displayName="new"),
+        _node_row(1, properties={"ext": "NEW"}, displayName="new"),          # the same again
+        _node_row(2, properties={"ext": "NEW"}, displayName="renamed"),      # and changing it
+    ])
+    assert [res[i]["resolved_op"] for i in range(3)] == ["create", "unchanged", "invalid"], res
+    assert res[2]["code"] == "named_already" and "row 1 of this file" in res[2]["reasons"][0]
+    assert len([o for o in ops if o["entity_kind"] == "node"]) == 1
+
+
+def test_by_a_property_an_edge_end_no_node_holds_the_value_of_is_refused():
+    ops, res = _by_prop([
+        {"_row_index": 0, "kind": "edge", "op": "upsert", "entity_id": "", "edgeType": "FLOWS",
+         "sourceKeys": {"ext": "NOPE"}, "target_entity_id": "N2"},
+    ], node_eids={"N2"}, current={"N2": {"urn": "urn:N2", "entityType": "Table"}})
+    assert (res[0]["resolved_op"], res[0]["code"]) == ("invalid", "end_not_found"), res[0]
+    assert ops == []
