@@ -330,6 +330,10 @@ behind, reads fall back to Postgres: nothing is lost, only slower.
    Data health: a rebuild rewrites every entity from Postgres and clears what was held. To have a
    stuck entity fail its passes instead, as before this release, set
    `GRAPHVER_PROJECTION_QUARANTINE=0`.
+   - A graph whose verify finds it short of history, or whose window keeps failing, is rebuilt
+     on its own. Its last error says "rebuilding on its own: …" until the rebuild publishes, and
+     `graphver_projection_escalations_total` counts it. A large one is rebuilt a page at a
+     time, across passes of at most 5 minutes each (`GRAPHVER_PROJECTION_PASS_MAX_SECS`).
 5. **Confirm:** Data health shows the graph caught up, with nothing held back, and
    `graphver_projection_lag_seconds_max` falls back to 0.
 

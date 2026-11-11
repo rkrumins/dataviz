@@ -28,7 +28,7 @@ import time
 from collections import Counter
 from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
-from typing import Awaitable, Callable, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Awaitable, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from sqlalchemy import Text, any_, bindparam, case, func, literal, null, or_, select, update
 from sqlalchemy.dialects.postgresql import ARRAY
@@ -358,6 +358,64 @@ async def _write_marker(client, seq: int, epoch: int) -> Optional[str]:
 
 #: Reads a key's pass marker (:func:`read_projection_marker`).
 _MARKER_READ = "MATCH (m:_GVProjMeta) RETURN m.seq"
+
+#: A long pass's resume point on the pass marker, written after each page lands (so a key that lost a
+#: page lost the cursor with it): the window ``(pFrom, pTo]`` the pass is projecting, the step it is on
+#: (``pStep``: a paged window's ``node`` / ``edge``, a streamed rebuild's ``fk_node`` / ``fk_edge`` /
+#: ``node`` / ``edge``) and its position there (``pAfter``). A pass from the same ``pFrom`` resumes it.
+_CURSOR_READ = "MATCH (m:_GVProjMeta) RETURN m.pFrom, m.pTo, m.pStep, m.pAfter"
+_CURSOR_WRITE = ("MERGE (m:_GVProjMeta {id: 'meta'}) "
+                 "SET m.pFrom = $from, m.pTo = $to, m.pStep = $step, m.pAfter = $after")
+_CURSOR_CLEAR = "MATCH (m:_GVProjMeta) REMOVE m.pFrom, m.pTo, m.pStep, m.pAfter"
+
+
+class _PassPartial(Exception):
+    """A pass past ``PROJECTION_PASS_MAX_SECS`` stopped at a page boundary, its cursor written."""
+
+    def __init__(self, written: int) -> None:
+        super().__init__(f"stopped at a page boundary after {written} write(s)")
+        self.written = written
+
+
+class _Cursor:
+    """Where a long pass is, and when it must stop: it writes itself after each page."""
+
+    __slots__ = ("client", "from_seq", "to_seq", "resume", "deadline", "used")
+
+    def __init__(self, client, from_seq: int, to_seq: int, resume: Optional[Tuple[str, str]],
+                 deadline: Optional[float]) -> None:
+        self.client, self.from_seq, self.to_seq = client, from_seq, to_seq
+        self.resume, self.deadline, self.used = resume, deadline, False
+
+    def start(self, step: str, steps: Sequence[str]) -> Optional[str]:
+        """Where ``step`` starts: after the resumed position on the resumed step, from the start
+        on a later one, and None (skip it) on one the resumed pass had finished."""
+        if self.resume is None:
+            return ""
+        at, after = self.resume
+        if at == step:
+            return after
+        return "" if steps.index(step) > steps.index(at) else None
+
+    async def page_done(self, step: str, after: str, written: int) -> None:
+        """After a page has landed: write where the pass is, and stop it past its time."""
+        await _q(self.client, _CURSOR_WRITE, params={"from": self.from_seq, "to": self.to_seq,
+                                                     "step": step, "after": str(after)})
+        self.used = True
+        if self.deadline is not None and time.monotonic() > self.deadline:
+            raise _PassPartial(written)
+
+
+async def _read_cursor(client) -> Optional[Tuple[int, int, str, str]]:
+    try:
+        res = await _q(client, _CURSOR_READ, read_only=True, timeout_ms=5000)
+    except Exception:                                    # unreadable: start over
+        return None
+    rows = getattr(res, "result_set", None) or []
+    if not rows or not rows[0] or rows[0][0] is None or rows[0][1] is None:
+        return None
+    return int(rows[0][0]), int(rows[0][1]), str(rows[0][2] or ""), str(rows[0][3] or "")
+
 
 #: The tombstone sweep's own watermark on the pass marker (``_sweep_tombstoned``): every delete at or
 #: below it is already swept. A marker created by this write alone has no ``seq``, which liveness
@@ -1084,6 +1142,31 @@ class FalkorProjector:
             )).first()
         return row is not None
 
+    async def _escalate(self, graph_id: str, mine: int, reason: str, cause: str) -> bool:
+        """Rebuild a graph its windows cannot bring up to date, on its own (``PROJECTION_ESCALATE``):
+        the reset an operator's rebuild makes (``request_projection_rebuild``), fenced on this pass's
+        epoch, so the next pass reconciles the key in place with committed main (streamed and
+        resumable on a large graph) and publishes. Its last error says why, until then. False when
+        something moved the row first."""
+        from backend.app.jobs.metrics import increment
+        head = select(GraphORM.main_head_commit_seq).where(GraphORM.id == graph_id).scalar_subquery()
+        async with self._session() as s:
+            row = (await s.execute(
+                update(ProjectionStateORM)
+                .where(ProjectionStateORM.graph_id == graph_id, ProjectionStateORM.epoch == mine)
+                .values(projected_commit_seq=0, target_commit_seq=head,
+                        status=_unless_loading("rebuilding"), epoch=ProjectionStateORM.epoch + 1,
+                        failed_attempts=0, next_retry_at=None,
+                        last_error=f"rebuilding on its own: {reason}"[:500])
+                .returning(ProjectionStateORM.graph_id)
+                .execution_options(synchronize_session=False))).first()
+        if row is None:
+            return False
+        increment("graphver_projection_escalations_total", cause=cause)
+        logger.warning("projection of %s is rebuilt in place on its own: %s", graph_id, reason)
+        await nudge_projection(graph_id)
+        return True
+
     async def _yield_superseded(self, graph_id: str, from_seq: int) -> None:
         """A superseded pass may have written after the pass that overtook it: lower the
         watermark to where it began (a no-op after an evict, rebuild or repin, which lowered it
@@ -1181,6 +1264,8 @@ class FalkorProjector:
             await nudge_projection(graph_id)
             return {"projected": from_seq, "applied": 0, "noop": True, "skipped": "superseded"}
         mine, attempts = claimed
+        pass_started = time.monotonic()
+        cursor: Optional[_Cursor] = None
         changes, structural, retypes, rekeys, rollup_pairs = ([], [], [], []), False, [], [], None
         superseded = False
         try:
@@ -1205,6 +1290,19 @@ class FalkorProjector:
                     changes = await self._compute_changes(s, graph, main_id, from_seq, to_seq)
                     paged = changes is None
                     changes = changes or ([], [], [], [])
+                if paged or from_seq <= 0:
+                    # Only these write a cursor (a long pass's resume point): one that stopped at
+                    # a page boundary is finished first, from the same watermark, to its own
+                    # ``pTo``, where it stopped. The window after it is the next pass's.
+                    found = await _read_cursor(client)
+                    resume = None
+                    if found is not None and found[0] == from_seq and from_seq < found[1] <= to_seq:
+                        to_seq, resume = found[1], (found[2], found[3])
+                        logger.info("projection of %s resumes (%d, %d] at %s after %s", graph_id,
+                                    from_seq, to_seq, found[2], found[3] or "the start")
+                    cursor = _Cursor(client, from_seq, to_seq, resume,
+                                     (pass_started + config.PROJECTION_PASS_MAX_SECS)
+                                     if config.PROJECTION_PASS_MAX_SECS > 0 else None)
                 total_items = sum(len(c) for c in changes)
                 prior = None
                 if from_seq > 0 and not paged:
@@ -1245,11 +1343,11 @@ class FalkorProjector:
                 # "everything", so a first seed is the same code path.
                 reconciled = await self._reconcile_in_place(
                     client, graph_id, main_id, to_seq, level_map, track_progress=True,
-                    provider_id=provider_id, owned=owned)
+                    provider_id=provider_id, owned=owned, cursor=cursor)
             elif paged:
                 dropped, structural, paged_writes = await self._apply_paged(
                     client, graph_id, main_id, from_seq, to_seq, level_map=level_map,
-                    provider_id=provider_id, owned=owned)
+                    provider_id=provider_id, owned=owned, cursor=cursor)
             else:
                 await self._rekey_in_place(client, rekeys)
                 await self._relabel_in_place(client, retypes)
@@ -1309,6 +1407,8 @@ class FalkorProjector:
             # to Postgres (the SoR) instead of flipping onto a corrupt cache, and the poll retries
             # it after a backoff.
             published = verify_error is None
+            if published and cursor is not None and (cursor.used or cursor.resume is not None):
+                await _q(client, _CURSOR_CLEAR)          # its window is done: nothing to resume
             if published:
                 # The marker is the pass's LAST FalkorDB write, after the verify and before the
                 # watermark: a replica that confirmed it holds everything the pass wrote.
@@ -1322,10 +1422,26 @@ class FalkorProjector:
                 # winner's, so lower the watermark to where it began; the next pass re-applies.
                 superseded, published = True, False
                 await self._yield_superseded(graph_id, from_seq)
+            elif not published and heal_outcome.get("escalate"):
+                await self._escalate(graph_id, mine, str(heal_outcome["escalate"]), "drift")
             elif not published:
                 logger.error("projection for %s held back at seq %d; holding watermark "
                              "at %d so reads stay on Postgres; retry after backoff — %s", graph_id,
                              to_seq, from_seq, verify_error)
+        except _PassPartial as stop:
+            # Out of its time at a page boundary, its cursor written: not a failure. It publishes
+            # nothing, records no error and no backoff, and asks for the next pass at once, which
+            # resumes where it stopped. Other graphs get their turn meanwhile.
+            logger.info("projection of %s over (%d, %d] %s; the next pass resumes there",
+                        graph_id, from_seq, to_seq, stop)
+            from backend.app.jobs.metrics import increment
+            increment("graphver_projection_passes_total", outcome="partial")
+            if not await asyncio.shield(self._finish(graph_id, mine, published=False, to_seq=to_seq,
+                                                     error=None, attempts=None)):
+                await self._yield_superseded(graph_id, from_seq)
+            await nudge_projection(graph_id)
+            return {"projected": from_seq, "applied": stop.written, "noop": False,
+                    "partial": True, "target": to_seq}
         except (Exception, asyncio.CancelledError) as exc:
             # Reset the "projecting" row committed above so it is not stranded — a stranded row
             # spins the UI's "Refreshing…" badge forever AND blocks the manual rebuild escape
@@ -1367,6 +1483,17 @@ class FalkorProjector:
             except Exception:                          # pragma: no cover - infra
                 logger.warning("could not reset projection status for %s after failure/cancel",
                                graph_id, exc_info=True)
+            # The same window failed under pressure the ladder could not absorb, pass after pass:
+            # rebuild in place instead of retrying it for good.
+            if (not cancelled and not ambiguous and config.PROJECTION_ESCALATE and from_seq > 0
+                    and attempts + 1 >= config.PROJECTION_ESCALATE_AFTER
+                    and _pressure_kind(exc) in ("timeout", "memory")):
+                try:
+                    await asyncio.shield(self._escalate(
+                        graph_id, mine, f"{attempts + 1} passes in a row failed: {exc}"[:300],
+                        "failures"))
+                except Exception:                      # pragma: no cover - infra
+                    logger.warning("could not start a rebuild of %s", graph_id, exc_info=True)
             if ambiguous:
                 return {"projected": from_seq, "applied": 0, "noop": False,
                         "verify_error": str(exc)}
@@ -1960,11 +2087,12 @@ class FalkorProjector:
                 model.commit_seq > from_seq, model.commit_seq <= to_seq))).scalar_one()
         return n
 
-    async def _window_pages(self, s, graph, main_id, from_seq, to_seq, kind: str):
+    async def _window_pages(self, s, graph, main_id, from_seq, to_seq, kind: str, after: str = ""):
         """:meth:`_compute_changes` of the window's ``kind`` entities (``node`` or ``edge``), a page
-        of ``PROJECTION_PAGE`` version rows at a time (a keyset on their ids): each page's entities
-        at their final row in the window. An entity with rows on two pages comes up on both, at
-        the same final value — written twice, never stale."""
+        of ``PROJECTION_PAGE`` version rows at a time (a keyset on their ids, from after ``after``):
+        each page's entities at their final row in the window, with the page's last version id.
+        An entity with rows on two pages comes up on both, at the same final value — written
+        twice, never stale."""
         model = NodeVersionORM if kind == "node" else EdgeVersionORM
         named = ((model.urn, model.entity_type, null(), null()) if kind == "node" else
                  (null(), model.edge_type, model.source_entity_id, model.target_entity_id))
@@ -1975,7 +2103,6 @@ class FalkorProjector:
                  .where(*window, model.entity_id == any_(bindparam("ids", type_=ARRAY(Text))))
                  .order_by(model.entity_id, model.commit_seq.desc(), model.created_at.desc())
                  .distinct(model.entity_id))
-        after = ""
         while True:
             page = (await s.execute(select(model.id, model.entity_id).where(*window, model.id > after)
                                     .order_by(model.id).limit(config.PROJECTION_PAGE))).all()
@@ -1987,7 +2114,8 @@ class FalkorProjector:
                 last[(kind, eid)] = (kind, op, None if op == "delete" else _Pending(
                     (kind, graph.id, vid),
                     (("urn", urn), (type_key, typ), ("sourceEntityId", src), ("targetEntityId", tgt))))
-            yield await self._changes_of(s, graph, main_id, from_seq, last, {}, {}, to_seq=to_seq)
+            yield (await self._changes_of(s, graph, main_id, from_seq, last, {}, {}, to_seq=to_seq),
+                   page[-1][0])
             if len(page) < config.PROJECTION_PAGE:
                 return
             after = page[-1][0]
@@ -2751,7 +2879,8 @@ class FalkorProjector:
                                   level_map, track_progress: bool = False,
                                   rollups_moved_this_pass: bool = False,
                                   provider_id: Optional[str] = None,
-                                  owned: bool = True) -> Dict[str, object]:
+                                  owned: bool = True,
+                                  cursor: Optional[_Cursor] = None) -> Dict[str, object]:
         """Make FalkorDB hold exactly committed main at ``to_seq`` by writing only the
         difference, and move the rollups by that same difference — never dropping the graph.
         See ``projection_reconcile``.
@@ -2781,7 +2910,7 @@ class FalkorProjector:
         if large:
             return await self._reconcile_streamed(
                 client, graph_id, main_id, to_seq, level_map, track_progress=track_progress,
-                provider_id=provider_id, owned=owned)
+                provider_id=provider_id, owned=owned, cursor=cursor)
         async with self._session() as s:
             graph = await s.get(GraphORM, graph_id)
             nodes, edges, types_by_urn = await self._expected_projection(
@@ -2928,7 +3057,7 @@ class FalkorProjector:
 
     async def _reconcile_streamed(self, client, graph_id, main_id, to_seq, level_map, *,
                                   track_progress: bool, provider_id: Optional[str],
-                                  owned: bool) -> Dict[str, object]:
+                                  owned: bool, cursor: Optional[_Cursor] = None) -> Dict[str, object]:
         """:meth:`_reconcile_in_place` for a graph too large to hold: the same end — FalkorDB
         holding exactly committed main at ``to_seq``, written by the difference, never dropped —
         reached a page of each side at a time, so the projector holds a page, never the graph.
@@ -2942,18 +3071,31 @@ class FalkorProjector:
         (``PROJECTION_PAGE``), their keys looked up in FalkorDB through the urn indexes, and what is
         missing, differs or is held twice written (the copies of a node held twice deleted first).
         In a key the platform did not mint nothing is deleted, as in place. The rollups are the
-        batch job's whenever anything changed."""
+        batch job's whenever anything changed.
+
+        ``cursor``: after each page the pass writes where it is (step, and position in it), and
+        stops there past its time (:class:`_PassPartial`). A pass that resumes starts after the
+        last page that landed; what the passes before it wrote is not known to it, so it hands the
+        rollups to the batch job, and a customer's key is swept, as if they had written."""
         async with self._session() as s:
             total = await self._live_count(s, graph_id, main_id)
         progress = self._progress_writer(graph_id, total) if track_progress and total else None
-        done = {"writes": 0, "structural": False, "kept": False}
+        steps = ("fk_node", "fk_edge", "node", "edge")
+        resumed = cursor is not None and cursor.resume is not None
+        done = {"writes": 0, "structural": resumed, "kept": resumed and not owned}
+
+        def begin(step: str, end: int) -> int:
+            """Where an internal-id step starts: its end when a resumed pass had finished it."""
+            at = cursor.start(step, steps) if cursor else ""
+            return end if at is None else int(at or 0)
 
         # ── What FalkorDB holds that main does not: nodes ──
         res = await _q(client, "MATCH (n) RETURN max(id(n))", timeout_ms=_READ_TIMEOUT_MS,
                        read_only=True)
         rows = getattr(res, "result_set", None) or []
         top = rows[0][0] if rows and rows[0] else None
-        for lo in range(0, (int(top) + 1) if top is not None else 0, self._SCAN_PAGE):
+        end = (int(top) + 1) if top is not None else 0
+        for lo in range(begin("fk_node", end), end, self._SCAN_PAGE):
             res = await _q(client, "MATCH (n) WHERE id(n) >= $lo AND id(n) < $hi "
                            "RETURN id(n), labels(n), n.urn, n.gvHash",
                            params={"lo": lo, "hi": lo + self._SCAN_PAGE},
@@ -2998,10 +3140,12 @@ class FalkorProjector:
                                      doomed, param="ids")
                 done["writes"] += len(doomed)
                 done["structural"] = True
+            if cursor is not None:
+                await cursor.page_done("fk_node", lo + self._SCAN_PAGE, done["writes"])
 
         # ── What FalkorDB holds that main does not: relationships (an owned key's alone) ──
         if owned and top is not None:
-            for lo in range(0, int(top) + 1, self._SCAN_PAGE):
+            for lo in range(begin("fk_edge", end), end, self._SCAN_PAGE):
                 res = await _q(client,
                                "MATCH (a)-[r]->(b) WHERE id(a) >= $lo AND id(a) < $hi "
                                f"AND type(r) <> '{ROLLUP_EDGE_TYPE}' "
@@ -3043,25 +3187,33 @@ class FalkorProjector:
                                      loose, param="ids")
                 done["writes"] += len(doomed)
                 done["structural"] |= bool(doomed)
+                if cursor is not None:
+                    await cursor.page_done("fk_edge", lo + self._SCAN_PAGE, done["writes"])
 
         # ── What main holds: nodes, then relationships ──
         twice: Set[Tuple[str, str]] = set()             # nodes held twice: their edges rewritten
         async with self._session() as s:
             graph = await s.get(GraphORM, graph_id)
             for kind in ("node", "edge"):
-                async for page in self._live_head_pages(s, graph, main_id, to_seq, kind):
+                after = cursor.start(kind, steps) if cursor else ""
+                if after is None:
+                    continue                             # a resumed pass had finished these
+                async for page in self._live_head_pages(s, graph, main_id, to_seq, kind,
+                                                        after=after):
                     written = await self._write_missing(client, s, graph, main_id, kind, page,
                                                         level_map, provider_id, owned, twice)
                     done["writes"] += written
                     done["structural"] |= kind == "edge" and bool(written)
                     if progress:
                         await progress(len(page))
+                    if cursor is not None:
+                        await cursor.page_done(kind, page[-1][0], done["writes"])
         if done["kept"]:
             await self._sweep_tombstoned(client, graph_id, main_id, to_seq)
         logger.info("reconcile for %s at seq %d, a page at a time: %d write(s)", graph_id, to_seq,
                     done["writes"])
         return {"writes": done["writes"], "structural": done["structural"],
-                "rollups": "stale" if done["writes"] or done["kept"] else "none"}
+                "rollups": "stale" if done["writes"] or done["kept"] or resumed else "none"}
 
     async def _live_count(self, s, graph_id: str, main_id: str) -> int:
         """How many live entities ``main``'s heads hold — what a full reconcile compares."""
@@ -3069,21 +3221,37 @@ class FalkorProjector:
             EntityHeadORM.graph_id == graph_id, EntityHeadORM.branch_id == main_id,
             EntityHeadORM.is_tombstone.is_(False)))).scalar_one()
 
-    async def _live_head_pages(self, s, graph, main_id, to_seq, kind: str):
+    async def _live_head_pages(self, s, graph, main_id, to_seq, kind: str, after: str = ""):
         """``main``'s live ``kind`` entities at ``to_seq``, ``PROJECTION_PAGE`` at a time in id order
-        (each entity's last row at the seq): ``[(entity_id, version_id, content_hash, urn or
-        source, type, target)]``. The platform's rollups are left out."""
+        from after ``after`` (each entity's last row at the seq): ``[(entity_id, version_id,
+        content_hash, urn or source, type, target)]``. The platform's rollups are left out.
+
+        At main's head its ``entity_heads`` ARE its state, so they are paged by their primary key,
+        each joined to its version by the version's: a page costs its own size. Behind the head, a
+        page is the last version row of each entity at the seq (``DISTINCT ON``), which reads every
+        later version row of the graph again for each page."""
         model = NodeVersionORM if kind == "node" else EdgeVersionORM
         named = ((model.urn, model.entity_type, null()) if kind == "node" else
                  (model.source_entity_id, model.edge_type, model.target_entity_id))
-        after = ""
+        at_head = graph.main_head_commit_seq == to_seq
         while True:
-            rows = (await s.execute(
-                select(model.entity_id, model.id, model.op, model.content_hash, *named)
-                .where(model.graph_id == graph.id, model.branch_id == main_id,
-                       model.commit_seq <= to_seq, model.entity_id > after)
-                .order_by(model.entity_id, model.commit_seq.desc(), model.created_at.desc())
-                .distinct(model.entity_id).limit(config.PROJECTION_PAGE))).all()
+            if at_head:
+                rows = (await s.execute(
+                    select(EntityHeadORM.entity_id, EntityHeadORM.head_version_id,
+                           case((EntityHeadORM.is_tombstone, "delete"), else_="update"),
+                           EntityHeadORM.content_hash, *named)
+                    .join(model, (model.graph_id == EntityHeadORM.graph_id)
+                          & (model.id == EntityHeadORM.head_version_id))
+                    .where(EntityHeadORM.graph_id == graph.id, EntityHeadORM.branch_id == main_id,
+                           EntityHeadORM.entity_kind == kind, EntityHeadORM.entity_id > after)
+                    .order_by(EntityHeadORM.entity_id).limit(config.PROJECTION_PAGE))).all()
+            else:
+                rows = (await s.execute(
+                    select(model.entity_id, model.id, model.op, model.content_hash, *named)
+                    .where(model.graph_id == graph.id, model.branch_id == main_id,
+                           model.commit_seq <= to_seq, model.entity_id > after)
+                    .order_by(model.entity_id, model.commit_seq.desc(), model.created_at.desc())
+                    .distinct(model.entity_id).limit(config.PROJECTION_PAGE))).all()
             if not rows:
                 return
             page = [(eid, vid, chash, a, typ, b) for eid, vid, op, chash, a, typ, b in rows
@@ -3380,6 +3548,17 @@ class FalkorProjector:
                    f"(PG n={pg_n},e={pg_e}; Falkor n={f_n},e={f_e}): something wrote to this graph "
                    f"outside version control. Rebuild replaces it with what history holds")
             logger.error("%s for %s", msg, graph_id)
+            if config.PROJECTION_ESCALATE and from_seq > 0 and heal_outcome is not None:
+                heal_outcome["escalate"] = "it holds more than history after the sweep"
+            return msg, False
+        if from_seq > 0 and config.PROJECTION_ESCALATE and heal_outcome is not None:
+            # Missing committed data: not healed inside this window's pass, whose budget is for
+            # the window. It ends unpublished, and the graph is rebuilt in place by a pass of its
+            # own (streamed, resumable, with progress), as an operator's rebuild would be.
+            msg = (f"projection verify found FalkorDB short of committed main at seq {to_seq} "
+                   f"(PG n={pg_n},e={pg_e} > Falkor n={f_n},e={f_e}); rebuilding in place")
+            logger.warning("%s for %s", msg, graph_id)
+            heal_outcome["escalate"] = "it holds less than history"
             return msg, False
         if from_seq > 0:                                 # missing committed data → reconcile once
             # Incremental window that dropped a committed delta: reconcile the FULL live state in
@@ -3561,18 +3740,30 @@ class FalkorProjector:
         return _on_chunk
 
     async def _apply_paged(self, client, graph_id, main_id, from_seq, to_seq, *, level_map,
-                           provider_id, owned) -> Tuple[int, bool, int]:
+                           provider_id, owned, cursor: Optional[_Cursor] = None) -> Tuple[int, bool, int]:
         """:meth:`_apply` of a window too large to hold (more than ``PROJECTION_PAGED_ABOVE``
         version rows), computed and written a page at a time (:meth:`_window_pages`): every page
         of its nodes, each relabelled first as one window's are, then every page of its edges, so
         an edge's ends are there when it is written. Its Merkle cross-check is left out (the
         verify that follows counts what landed). Returns ``(dropped, structural, written)``:
-        the first two as the one-batch pass has them, and how many changes it wrote."""
+        the first two as the one-batch pass has them, and how many changes it wrote.
+
+        ``cursor``: after each page lands the pass writes where it is, and a pass past its time
+        stops there (:class:`_PassPartial`); one that resumes starts after the last page that
+        landed. Its progress is the window's version rows."""
         dropped, structural, written = 0, False, 0
         async with self._session() as s:
             graph = await s.get(GraphORM, graph_id)
+            total = await self._window_rows(s, graph, main_id, from_seq, to_seq)
+        progress = self._progress_writer(graph_id, total) if total else None
+        async with self._session() as s:
+            graph = await s.get(GraphORM, graph_id)
             for kind in ("node", "edge"):
-                async for changes in self._window_pages(s, graph, main_id, from_seq, to_seq, kind):
+                after = cursor.start(kind, ("node", "edge")) if cursor else ""
+                if after is None:
+                    continue                             # a resumed pass had finished these
+                async for changes, last_id in self._window_pages(s, graph, main_id, from_seq,
+                                                                 to_seq, kind, after=after):
                     moved, retypes, rekeys = await self._window_meta(s, graph, main_id, from_seq,
                                                                      changes)
                     structural = structural or moved
@@ -3584,6 +3775,10 @@ class FalkorProjector:
                                                  provider_id=provider_id, owned=owned,
                                                  prior=prior) or 0
                     written += sum(len(c) for c in changes)
+                    if progress:
+                        await progress(sum(len(c) for c in changes))
+                    if cursor is not None:
+                        await cursor.page_done(kind, last_id, written)
         return dropped, structural, written
 
     async def _apply(self, client, node_upserts, edge_upserts, node_deletes, edge_deletes,

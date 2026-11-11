@@ -172,6 +172,18 @@ integration's many small changes as a few commits.
   held every pass of the graph back until someone rebuilt it.
 - **The tombstone sweep reads only the deletes since the last one,** with no payloads, instead of
   every delete in the graph's history.
+- **A large publish or rebuild no longer has to finish in one pass.** A window too large to hold,
+  and a rebuild of a graph too large to hold, record where they are after each page. A pass past
+  5 minutes (`GRAPHVER_PROJECTION_PASS_MAX_SECS`) stops at a page and the next resumes there, so a
+  crash or a restart loses one page, not the whole job, and other graphs get their turn. A rebuild
+  pages the graph's heads by primary key instead of reading every version of it again for each
+  page.
+- **A graph that cannot be brought up to date rebuilds itself.** The cases:
+  - its verify finds the fast read layer short of history;
+  - on a key the platform minted, it holds more than history after the sweep;
+  - the same window has failed 3 passes in a row under pressure.
+  Such a graph is rebuilt in place on its own, instead of being healed inside the window's pass or
+  held back until someone rebuilds it (`GRAPHVER_PROJECTION_ESCALATE`).
 - **A projection's verify counts no longer scan the graph, and a failed count is not a pass.**
   - On a key the platform owns, the counts are FalkorDB's constant-time ones, less the derived
     labels and rollups.

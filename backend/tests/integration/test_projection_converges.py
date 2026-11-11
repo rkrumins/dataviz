@@ -23,6 +23,10 @@ Pins:
   lands and publishes, unverified, and the watermark lists it. Once the fault clears, the caught-up
   graph gets a pass of its own when the entity is due, which lands it and verifies again. With
   ``GRAPHVER_PROJECTION_QUARANTINE`` off, it fails the pass, as before.
+- A paged window, and a streamed rebuild, under a pass time box that stops each pass after one
+  page, resume from their cursor pass after pass until one publishes the whole of it.
+- Drift a window cannot explain holds the pass back and rebuilds the graph on its own, and the
+  third pressure failure in a row of one window does too; the rebuild then publishes.
 """
 from __future__ import annotations
 
@@ -273,6 +277,90 @@ async def _quarantine(svc, monkeypatch):
         await proj.project_graph(gid)
 
 
+async def _resumable_and_self_healing(svc, monkeypatch):
+    from sqlalchemy import update
+
+    from backend.app.services.versioning import config
+    from backend.app.services.versioning.models import ProjectionStateORM
+
+    fake = TimeoutFalkor()
+    proj = FalkorProjector(graph_client_factory=fake, batch_size=500)
+    gid = await _graph(svc)
+    await _edit_publish(svc, gid, "alice", [_create("A", "a")], "seed")
+    assert (await proj.project_graph(gid))["verify_error"] is None
+    g = fake.graphs[next(iter(fake.graphs))]
+
+    # A window too large to hold, written a page at a time, and a pass time box so short that each
+    # pass stops after one page: each resumes where the last stopped, until one publishes.
+    monkeypatch.setattr(config, "PROJECTION_PAGED_ABOVE", 10)
+    monkeypatch.setattr(config, "PROJECTION_PAGE", 20)
+    monkeypatch.setattr(config, "PROJECTION_PASS_MAX_SECS", 1e-6)
+    await _edit_publish(svc, gid, "alice", [
+        *(_create(f"W{i}", f"w{i}") for i in range(60)),
+        *(_link(f"WL{i}", f"W{i}", "A") for i in range(60))], "a paged window")
+    before, passes = await _watermark(gid), []
+    while True:
+        r = await proj.project_graph(gid)
+        passes.append(r)
+        if not r.get("partial"):
+            break
+        assert await _watermark(gid) == before and g.cursor["from"] == before, (r, g.cursor)
+        assert len(passes) < 20
+    assert r["verify_error"] is None and len(passes) >= 4, passes
+    assert g.cursor is None
+    await _assert_matches_main(svc, fake, gid)
+
+    # A rebuild too large to hold, a page at a time: the same.
+    monkeypatch.setattr(config, "PROJECTION_RECONCILE_STREAMED_ABOVE", 5)
+    monkeypatch.setattr(FalkorProjector, "_SCAN_PAGE", 25)
+    for k in [k for k in g.nodes if k.startswith("urn:t:W")][:5]:
+        g._drop_node(k)                                  # some of it lost
+    assert await svc.request_projection_rebuild(gid)
+    passes = []
+    while True:
+        r = await proj.project_graph(gid)
+        passes.append(r)
+        if not r.get("partial"):
+            break
+        assert len(passes) < 40
+    assert r["verify_error"] is None and len(passes) >= 3, passes
+    await _assert_matches_main(svc, fake, gid)
+    monkeypatch.setattr(config, "PROJECTION_PASS_MAX_SECS", 0)
+
+    # Drift a window cannot explain: the pass holds back and the graph is rebuilt on its own.
+    g._drop_node("urn:t:A")
+    await _edit_publish(svc, gid, "alice", [_create("B", "b")], "one more")
+    proj._verified_at.clear()
+    r = await proj.project_graph(gid)
+    assert r["verify_error"] and "rebuilding in place" in r["verify_error"], r
+    async with db.graphver_session() as s:
+        ps = await s.get(ProjectionStateORM, gid)
+        assert (ps.projected_commit_seq, ps.status) == (0, "rebuilding"), (ps.projected_commit_seq,
+                                                                          ps.status)
+        assert ps.last_error.startswith("rebuilding on its own"), ps.last_error
+    r = await proj.project_graph(gid)
+    assert r["verify_error"] is None and not r["noop"], r
+    await _assert_matches_main(svc, fake, gid)
+
+    # A window that keeps failing under pressure the ladder cannot absorb (nothing held back):
+    # its third failure in a row rebuilds the graph, which projects once the store takes it.
+    monkeypatch.setattr(config, "PROJECTION_QUARANTINE", False)
+    g.poison.add("urn:t:Z")
+    await _edit_publish(svc, gid, "alice", [_create("Z", "z")], "a heavy one")
+    async with db.graphver_session() as s:
+        await s.execute(update(ProjectionStateORM).where(ProjectionStateORM.graph_id == gid)
+                        .values(failed_attempts=2))
+    with pytest.raises(Exception, match="Query timed out"):
+        await proj.project_graph(gid)
+    async with db.graphver_session() as s:
+        ps = await s.get(ProjectionStateORM, gid)
+        assert (ps.projected_commit_seq, ps.failed_attempts, ps.next_retry_at) == (0, 0, None)
+    g.poison.clear()
+    r = await proj.project_graph(gid)
+    assert r["verify_error"] is None, r
+    await _assert_matches_main(svc, fake, gid)
+
+
 def test_a_projection_converges_in_one_pass_whatever_its_statements_can_take(monkeypatch):
     async def no_wait(_seconds):
         return None
@@ -290,6 +378,7 @@ def test_a_projection_converges_in_one_pass_whatever_its_statements_can_take(mon
             await _backoff_and_honest_verify(svc)
             await _urn_change_and_sweep(svc)
             await _quarantine(svc, monkeypatch)
+            await _resumable_and_self_healing(svc, monkeypatch)
         finally:
             await db.dispose_engine()
     asyncio.run(run())

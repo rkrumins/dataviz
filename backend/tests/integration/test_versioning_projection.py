@@ -44,6 +44,7 @@ class FakeGraph:
         self._rel_ids: dict = {}   # relationship id -> internal id (FalkorDB's id(r)), never reused
         self.proj_meta: dict = {}  # the pass marker (_GVProjMeta) — kept apart, never counted
         self.swept_seq = None      # the tombstone sweep's watermark on that marker
+        self.cursor = None         # a long pass's resume point on that marker
 
     async def query(self, cypher: str, params: dict = None):
         params = params or {}
@@ -283,6 +284,15 @@ class FakeGraph:
         if cypher == "MERGE (m:_GVProjMeta {id: 'meta'}) SET m.seq = $seq, m.epoch = $epoch":
             self.proj_meta = dict(params)
             return None
+        if cypher == "MATCH (m:_GVProjMeta) RETURN m.pFrom, m.pTo, m.pStep, m.pAfter":
+            c = self.cursor
+            return _Result([[c["from"], c["to"], c["step"], c["after"]]] if c else [])
+        if cypher.startswith("MERGE (m:_GVProjMeta {id: 'meta'}) SET m.pFrom = $from"):
+            self.cursor = dict(params)
+            return None
+        if cypher == "MATCH (m:_GVProjMeta) REMOVE m.pFrom, m.pTo, m.pStep, m.pAfter":
+            self.cursor = None
+            return None
         if cypher == "MATCH (m:_GVProjMeta) RETURN m.sweptSeq":
             return _Result([[self.swept_seq]] if self.swept_seq is not None else [])
         if cypher == "MERGE (m:_GVProjMeta {id: 'meta'}) SET m.sweptSeq = $seq":
@@ -330,6 +340,7 @@ class FakeGraph:
         self._ids.clear()
         self.proj_meta = {}
         self.swept_seq = None
+        self.cursor = None
 
     def entity_ids(self) -> set:
         return {n["entityId"] for n in self.nodes.values()}

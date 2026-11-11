@@ -137,6 +137,17 @@ PROJECTION_QUARANTINE: bool = os.getenv("GRAPHVER_PROJECTION_QUARANTINE", "1").l
 # A caught-up graph holding quarantined entities is given a pass of its own to retry them once each try is
 # this old; a graph taking commits retries them first on every pass.
 PROJECTION_QUARANTINE_RETRY_SECS: int = int(os.getenv("GRAPHVER_PROJECTION_QUARANTINE_RETRY_SECS", "300"))
+# A pass over a window too large to hold (paged) or a rebuild too large to hold (streamed) stops at the
+# first page boundary past this many seconds: its cursor is on the pass marker, it publishes nothing,
+# records no error and no backoff, and nudges itself, so the next pass resumes after the last page. Other
+# graphs get their turn meanwhile. 0: no limit.
+PROJECTION_PASS_MAX_SECS: float = float(os.getenv("GRAPHVER_PROJECTION_PASS_MAX_SECS", "300"))
+# A graph that cannot be brought up to date by its windows is rebuilt in place on its own: when its verify
+# finds FalkorDB short of committed main, or (a key the platform minted) holding more after the tombstone
+# sweep, and when the same window has failed ESCALATE_AFTER passes in a row on a timeout or memory refusal
+# the statement ladder could not absorb. Off: the old inline heal, and a graph held back until a rebuild.
+PROJECTION_ESCALATE: bool = os.getenv("GRAPHVER_PROJECTION_ESCALATE", "1").lower() not in ("0", "false", "no")
+PROJECTION_ESCALATE_AFTER: int = int(os.getenv("GRAPHVER_PROJECTION_ESCALATE_AFTER", "3"))
 
 # Projection worker: poll cadence for the reconciling loop, read freshness
 # tolerance (a read serves from FalkorDB while projected >= committed - lag),

@@ -193,6 +193,42 @@ This happens after its retries, and for a node delete after its hub path. The pa
 - **Switch.** `GRAPHVER_PROJECTION_QUARANTINE=0` turns it off; a stuck entity then fails every
   pass, as before.
 
+**Long passes stop at a page and resume (the pass cursor).** A window too large to hold is written
+a page at a time (`_apply_paged`), and so is a rebuild of a graph too large to hold
+(`_reconcile_streamed`).
+- **The cursor.** After each page lands, the pass writes where it is on the pass marker:
+  `_GVProjMeta.pFrom`, `pTo`, `pStep`, `pAfter`.
+  - A paged window's steps are `node` and `edge`, each positioned by version id.
+  - A streamed rebuild's are `fk_node` and `fk_edge`, positioned by internal id, then `node` and
+    `edge`, by entity id.
+- **The time box.** Past `GRAPHVER_PROJECTION_PASS_MAX_SECS` (300) the pass stops at the next
+  page boundary. It publishes nothing, records no error and no backoff, and nudges itself. Other
+  graphs get their turn meanwhile.
+- **Resuming.** A pass from the same watermark finishes the cursor's window (`pTo`) first, after
+  the last page that landed, then publishes it. The window after it is the next pass's.
+- **Where it lives.** The cursor is in the key, so a key that lost a page lost the cursor with it,
+  and is projected from the start. It is cleared when its window publishes.
+- **A resumed streamed rebuild** does not know what earlier passes wrote, so it hands the rollups
+  to the batch job.
+- **At main's head,** a rebuild pages main's `entity_heads` by their primary key, each joined to
+  its version by the version's. A page costs its own size, not a `DISTINCT ON` over every version
+  of the graph.
+- **Progress.** A paged window reports it too (`progress_done` / `progress_total`), in version
+  rows.
+
+**A graph that cannot be brought up to date rebuilds itself (`GRAPHVER_PROJECTION_ESCALATE`, on).**
+An incremental pass no longer heals inside itself. It ends unpublished, and makes the reset an
+operator's rebuild makes (`request_projection_rebuild`, fenced on its epoch), when either:
+- its verify finds FalkorDB short of committed main, or, on a key the platform minted, holding more
+  after the tombstone sweep;
+- the same window has failed `GRAPHVER_PROJECTION_ESCALATE_AFTER` passes in a row (3) on a timeout
+  or memory refusal the statement ladder and the quarantine could not absorb.
+
+The next pass reconciles the key in place (streamed and resumable on a large graph) and publishes.
+Until then the graph's last error reads "rebuilding on its own: …".
+`graphver_projection_escalations_total{cause}` counts them. Off, a shortfall is healed inside the
+window's pass and a surplus holds the graph back until a rebuild, as before.
+
 > **Limitation (full-replay memory).** A full replay no longer composes the live state, but its diff
 > still holds whole-graph maps of small tuples **in memory**, `O(N + E)` — narrow ids, not payloads —
 > rather than streaming by keyset. The per-edge endpoint lookup is no longer the bottleneck — since
@@ -665,6 +701,8 @@ boot via `XAUTOCLAIM`. `_project_one` (`worker.py:65`) serializes per-graph via 
 | `GRAPHVER_PROJECTION_INLINE_MAX_ROWS` | 20000 | The largest window `project_now` projects inside the request; larger ones go to the worker. |
 | `GRAPHVER_PROJECTION_QUARANTINE` | on | Hold back one entity's statement that still fails on its own, so the rest of the window publishes (§3). |
 | `GRAPHVER_PROJECTION_QUARANTINE_RETRY_SECS` | 300 | How often a caught-up graph retries what it holds back. |
+| `GRAPHVER_PROJECTION_PASS_MAX_SECS` | 300 | A paged window or streamed rebuild stops at the next page past this, and the next pass resumes (§3); `0`: no limit. |
+| `GRAPHVER_PROJECTION_ESCALATE` / `_ESCALATE_AFTER` | on / 3 | Rebuild a graph on its own on drift, or after this many pressure failures in a row of one window (§3). |
 | `GRAPHVER_PROJECTION_POLL_SECS` | 5 | Reconciling poll cadence (`config.py:115`). |
 | `GRAPHVER_PROJECTION_CONCURRENCY` | 8 | Max graphs projected per pass (`config.py:118`). |
 | `GRAPHVER_READ_MAX_LAG` | 0 | Neighbors-endpoint staleness tolerance (`config.py:119`; see §5 callout). |
