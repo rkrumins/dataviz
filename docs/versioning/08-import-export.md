@@ -1068,12 +1068,15 @@ tests/integration/test_s3_store_minio.py tests/test_object_store.py`.
   Presigned URLs serve package uploads and stored downloads, but not yet a data source's own import
   uploads (`…/imports/uploads`), whose parts still go through the API.
 - **Row-scoped export is API-only** — the UI sends only `props` (`importExportApiService.ts:135-151`).
-- **An import that publishes itself (`autoPublish`) needs `main` not to move while it runs.** Its
-  publish needs the draft up to date with `main`; one that fell behind is kept for review
-  (`summary.publish.reason.type: not_up_to_date`). Bringing a draft of millions of changes up to
-  date (`rebase_draft`) reads them all at once, so for a large import the answer is to import the
-  file again. A worker that stops between an import's finish and its publish job leaves
-  `summary.publish` missing: publish the draft then. A custom draft `name` exists on
+- **An import that publishes itself (`autoPublish`) pulls main when main moved under it**
+  (`_publish_own_draft`): when its publish is queued and again when the queued job runs, a draft
+  behind main is brought up to date (`rebase_draft`, the field-level three-way merge) and queued
+  once it pulls clean, up to three pulls; a same-field conflict waits for review
+  (`summary.publish.reason.type: conflicts`). A pull holds the draft's changes in memory, so a
+  draft of more than `SQUASH_PAGED_ABOVE` (200,000) changes is not pulled on its own
+  (`too_large_to_pull`): import the file again. A paged pull would lift that. A worker that stops
+  between an import's finish and its publish job leaves `summary.publish` missing: publish the
+  draft then. A custom draft `name` exists on
   `create_import_job` but no route exposes it (the draft is named "Import").
 - **`INLINE_IMPORT_MAX` (5,000) two-tier threshold** exists in config as the intended
   "stage small imports client-side, run large ones async" split, but the endpoint currently always

@@ -128,6 +128,16 @@ integration's many small changes as a few commits.
     data source's own over them (below).
   - In the import dialog, **Replace anyway** imports the file again into the same draft with
     `allowMassDelete`, so its deletions are staged for review.
+- **Imports that publish themselves pull main when it moved under them.** Several connectors (and
+  people) can work on one data source at once, each in a draft of its own. When main moved while
+  an import ran, its draft now pulls main — the field-level merge of "Pull latest" — and publishes
+  once it pulls clean, when its publish is queued and again when the job runs (up to three pulls):
+  - entities two imports made alike (same urn or matching value, so the same derived id) merge as
+    one; updates of different fields merge;
+  - a field both sides changed differently waits for review (`summary.publish.reason.type:
+    conflicts`), and a draft of more than 200,000 changes is not pulled on its own
+    (`too_large_to_pull`).
+  Before, any import whose data source was published to meanwhile stopped at `not_up_to_date`.
 - **A graph's own import settings.** A workspace admin sets, on the data source's Versioning tab
   (**Imports**), what its imports' rows are matched by when an import names no `identifier`, and the
   replace guard's limits, each over the platform's:

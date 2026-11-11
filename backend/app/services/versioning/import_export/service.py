@@ -77,6 +77,16 @@ def _refusal(exc: Exception) -> Dict[str, Any]:
 #: How many changed rows a dry run lists (its summary counts them all).
 _VALIDATE_SAMPLE = 200
 
+#: How many times an import that publishes itself pulls main into its draft when main moved under
+#: it (``_publish_own_draft``), before it waits for someone to publish it.
+_AUTO_PULLS = 3
+
+
+def _behind_main(result: Dict[str, Any]) -> bool:
+    """A publish job's answer: refused because its draft is behind main."""
+    detail = (result.get("error") or {}).get("detail")
+    return isinstance(detail, dict) and detail.get("type") == "not_up_to_date"
+
 
 class DryRunTooLarge(ValueError):
     """A file larger than a dry run checks: import it into a draft instead."""
@@ -506,21 +516,64 @@ class ImportExportService:
                     await self._svc.abandon_draft(graph_id=graph_id, branch_id=branch_id, actor=owner)
                     note = {"state": "unchanged"}
                 else:
-                    job = await self.create_publish_job(
-                        workspace_id=ws, data_source_id=ds, graph_id=graph_id, branch_id=branch_id,
-                        actor=owner, message=f"Import {job_id}", auto_publish=True)
-                    note = {"state": "queued", "jobId": job["job_id"]}
+                    note = await self._publish_own_draft(job_id, ws, ds, graph_id, branch_id, owner)
         except Exception as exc:  # noqa: BLE001 — a refusal, or an outage: the draft is kept
             logger.warning("import job %s did not publish itself: %s", job_id, exc)
             note = {"state": "skipped", "reason": _refusal(exc)}
+        await self._note_publish(job_id, note)
+
+    async def _note_publish(self, import_job_id: str, note: Dict[str, Any]) -> None:
+        """Record on the import job how its publish went (``summary.publish``). Never raised."""
         try:
             async with db.graphver_session() as s:
-                row = await s.get(JobORM, job_id)
+                row = await s.get(JobORM, import_job_id)
                 if row is not None:
                     row.summary = {**(row.summary or {}), "publish": note}
                     row.updated_at = _now()
         except Exception:  # pragma: no cover - defensive; must never fail the completed import
-            logger.exception("recording the publish of import job %s failed", job_id)
+            logger.exception("recording the publish of import job %s failed", import_job_id)
+
+    async def _publish_own_draft(self, import_job_id, ws, ds, graph_id, branch_id, owner,
+                                 pulls: int = 0) -> Dict[str, Any]:
+        """Queue the publish of the draft an import opened (``autoPublish``). Main may have moved
+        while the file was imported, so the draft can't land past what came in (a person
+        published, or another import changed what this one changes): then the draft pulls main
+        first, with the field-level merge a person's "Pull latest" runs, as a merge queue rebases,
+        and is queued once it pulls clean — up to ``_AUTO_PULLS`` pulls, counted across the job's
+        attempts (``pulls``). Two imports that made the same entity alike pull clean; a field both
+        changed differently is a conflict, and the draft waits for someone to resolve it. A pull
+        holds the draft's changes in memory, so a draft of more than ``SQUASH_PAGED_ABOVE`` changes
+        is not pulled here: it waits, saying so (``too_large_to_pull``)."""
+        while True:
+            try:
+                job = await self.create_publish_job(
+                    workspace_id=ws, data_source_id=ds, graph_id=graph_id, branch_id=branch_id,
+                    actor=owner, message=f"Import {import_job_id}", auto_publish=True,
+                    import_job_id=import_job_id, pulls=pulls)
+                return {"state": "queued", "jobId": job["job_id"], **({"pulls": pulls} if pulls else {})}
+            except NotUpToDate:
+                if pulls >= _AUTO_PULLS:
+                    raise
+            async with db.graphver_session() as s:
+                changes = await self._svc._change_count(s, graph_id, branch_id)
+            if changes > config.SQUASH_PAGED_ABOVE:
+                return {"state": "skipped", "pulls": pulls, "reason": {
+                    "type": "too_large_to_pull", "changes": changes,
+                    "message": f"Main changed while the file was imported, and the draft's {changes:,} "
+                               f"changes are more than {config.SQUASH_PAGED_ABOVE:,}, the most it pulls "
+                               "from main on its own: import the file again, with other publishing "
+                               "to this data source out of its way."}}
+            pulled = await self._svc.rebase_draft(
+                graph_id=graph_id, branch_id=branch_id, actor=owner,
+                message="pull latest from main to publish the import")
+            pulls += 1
+            if not pulled.get("clean"):
+                conflicts = len(pulled.get("conflicts") or [])
+                return {"state": "skipped", "pulls": pulls, "reason": {
+                    "type": "conflicts", "conflicts": conflicts,
+                    "message": f"Main changed while the file was imported, and {conflicts} of the "
+                               "draft's entities changed there too, in the same fields: the draft "
+                               "waits for someone to resolve them and publish it."}}
 
     async def _apply_view_layout(self, job_id, ws, ds, view_id, branch_id, worker) -> None:
         """Hand the import's newly-created top-level entities to the injected layout writer and record
@@ -662,6 +715,7 @@ class ImportExportService:
         self, *, workspace_id: str, data_source_id: Optional[str], graph_id: str, branch_id: str,
         actor: str, message: str, resolutions: Optional[Dict[str, Any]] = None,
         merge_request_id: Optional[str] = None, auto_publish: bool = False,
+        import_job_id: Optional[str] = None, pulls: int = 0,
     ) -> Dict[str, str]:
         """A publish of a draft too large to publish inside a request — or the merge of its review
         (``merge_request_id``), queued like an export. The request rides in ``field_scope``.
@@ -673,8 +727,9 @@ class ImportExportService:
         or a maintainer :class:`DraftRoleRequired`. A merge its reviewers have not approved is
         :class:`ApprovalRequired` here, before the draft is closed for it, and a draft behind ``main``
         :class:`NotUpToDate`, as a publish inside the request is; the job checks both again. The job
-        is stored already queued: it has no input to wait for. ``auto_publish``: an import publishes
-        its draft (:meth:`_auto_publish`), and the job holds its actor to publish again."""
+        is stored already queued: it has no input to wait for. ``auto_publish``: an import
+        (``import_job_id``) publishes its draft (:meth:`_auto_publish`), and the job holds its actor
+        to publish again; ``pulls``, how often its draft pulled main to get here."""
         fields: Dict[str, Any] = {"actor": actor, "message": message}
         if resolutions:
             fields["resolutions"] = resolutions
@@ -682,6 +737,8 @@ class ImportExportService:
             fields["mergeRequestId"] = merge_request_id
         if auto_publish:
             fields["autoPublish"] = True
+            if import_job_id:
+                fields.update(importJobId=import_job_id, pulls=pulls)
         async with db.graphver_session() as s:
             await self._svc._lock_lifecycle(s, graph_id, shared=True)
             await self._lock_in_workspace(s, graph_id, workspace_id)
@@ -748,7 +805,22 @@ class ImportExportService:
                              "could finish")
         if "error" in result:
             await self._svc.release_publishing(graph_id=job["graphId"], branch_id=job["branchId"])
+            if job.get("importJobId") and _behind_main(result):
+                await self._publish_again(job)
         return result
+
+    async def _publish_again(self, job: Dict[str, Any]) -> None:
+        """An import's own publish that main moved past while it waited its turn: its draft pulls
+        main and is queued again (:meth:`_publish_own_draft`), and the import says so. Never
+        raised: the draft, open again, waits for review whatever happens here."""
+        try:
+            note = await self._publish_own_draft(
+                job["importJobId"], job["workspaceId"], job["dataSourceId"], job["graphId"],
+                job["branchId"], job["actor"], pulls=int(job.get("pulls") or 0))
+        except Exception as exc:  # noqa: BLE001 — a refusal, or an outage: the draft is kept
+            logger.warning("import job %s did not publish itself: %s", job["importJobId"], exc)
+            note = {"state": "skipped", "reason": _refusal(exc)}
+        await self._note_publish(job["importJobId"], note)
 
     async def run_publish_safe(self, job_id: str, lease: Lease) -> None:
         await self._run_safe(job_id, lease, self.run_publish)

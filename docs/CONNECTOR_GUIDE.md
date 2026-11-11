@@ -338,7 +338,7 @@ When the import completes, `summary.publish` on its job says what happened:
 
 | `summary.publish.state` | What happened | What to do |
 |---|---|---|
-| `queued`, with `jobId` | The draft is being published, as a large publish is: a job | Follow `GET …/publish-jobs/{jobId}` to `completed` (with `commitId` and `revisionId`) or `failed` (with `error`) |
+| `queued`, with `jobId` | The draft is being published, as a large publish is: a job. `pulls` says how often its draft first pulled main (below) | Follow `GET …/publish-jobs/{jobId}` to `completed` (with `commitId` and `revisionId`) or `failed` (with `error`) |
 | `unchanged` | The file changed nothing. Its empty draft was closed | Nothing |
 | `skipped`, with `reason` | It wasn't published, and the draft is kept for review | Read `reason.type` (below) |
 | missing, a minute after `completed` | The worker stopped between the two steps | Publish the draft yourself: `POST …/branches/{branchId}/publish` |
@@ -346,13 +346,25 @@ When the import completes, `summary.publish` on its job says what happened:
 Why a publish is skipped (`reason.type`):
 - **`rows_refused`:** some rows weren't imported (refused or unreadable). Look at the import's
   preview, fix the file, and send it again; or fix the draft and publish it.
-- **`not_up_to_date`, with `behindBy`:** someone published to the same data source while the file
-  was imported, so the draft is behind `main`.
-  - A small draft can be updated from main (`POST …/branches/{branchId}/rebase`) and published.
-  - A draft of millions of changes can't: updating it reads every change at once. Import the file
-    again instead, and keep other publishing to that data source out of the import's window.
+- **`conflicts`, with `conflicts` (a count):** someone published to the same data source while the
+  file was imported, and changed some of the same entities' same fields differently. The draft
+  waits for a person to resolve them (the draft's **Pull latest**) and publish it.
+- **`too_large_to_pull`, with `changes`:** main moved while the file was imported, and the draft
+  holds more than `GRAPHVER_SQUASH_PAGED_ABOVE` (200,000) changes, more than it pulls on its own.
+  Import the file again, with other publishing to that data source out of its way.
+- **`not_up_to_date`, with `behindBy`:** main kept moving through every pull it made (three).
+  Update the draft from main (`POST …/branches/{branchId}/rebase`) and publish it, or import again.
 - **Others:** the refusal the publish route would give: the draft closed meanwhile
   (`branch_closed`), the policy changed (`review_required`), …
+
+**Main moved while the file was imported** — another connector or a person published to the same
+data source — and the draft can't land past what came in: then the draft **pulls main first**,
+with the field-level merge a person's "Pull latest" runs, as a merge queue rebases, and is
+published once it pulls clean. That holds when the publish is queued and again when the queued job
+runs. Several connectors can import into one data source at once, each into a draft of its own:
+entities two of them made alike (the same urn or matching value, so the same derived id) merge as
+one, and an update one made merges with the other's updates of other fields. Only a field both
+changed differently waits for a person (`conflicts`). Up to three pulls, counted on the import.
 
 The publish job checks again, when it runs, that the import's owner may still publish. The review
 policy as it is then holds too.
@@ -543,7 +555,9 @@ record contract, and its calls to the routes a key may call.
 | The job failed: "Line N … has no line break within 16 MB" | CR-only line endings, or no line breaks | Save the file with LF or CRLF line endings |
 | The job failed: "… opens a quoted cell that doesn't close" | A CSV quote left open | Close the quote, or escape it as `""` |
 | `summary.invalid` > 0, and `publish.state: skipped` | Rows refused: unknown types, missing ends, … | Read the preview's reasons, fix the file, send it again |
-| `publish.reason.type: not_up_to_date` | Something was published to the data source mid-import | Update a small draft from main and publish it; import a large file again |
+| `publish.reason.type: conflicts` | Someone changed the same fields differently mid-import | Pull latest on the draft, resolve, publish |
+| `publish.reason.type: too_large_to_pull` | Main moved under a draft of more than 200,000 changes | Import the file again, with other publishing out of its way |
+| `publish.reason.type: not_up_to_date` | Main kept moving through three pulls | Update the draft from main and publish it, or import again |
 | `403 publish_required` with `autoPublish` | The key's account isn't a Publisher | Give the account Publisher, or import without `autoPublish` and have a person publish |
 | `403 publish_required` though the account "can manage data" | Its role holds `manage` but not publish: Workspace member, or a custom role made before publish existed | Give it Workspace publisher. An admin sees such roles under Permissions → Roles, and can add publish to one |
 | `403 not_draft_owner` publishing a draft | The draft is someone else's | Merge its merge request (§6) |

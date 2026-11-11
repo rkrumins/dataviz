@@ -6,7 +6,9 @@ job's ``summary.publish`` and never failing the import:
 * a draft with every row applied goes to a publish job, as its owner, marked to check publish again;
 * a file with rows that weren't imported leaves the draft for review;
 * one that changed nothing closes its empty draft;
-* a draft its publish refuses (it fell behind main, it closed) is kept, with the reason;
+* a draft that fell behind main pulls it and is queued once it pulls clean (up to three pulls);
+  one that pulls with conflicts, or is too large to pull on its own, is kept, with the reason;
+* a draft its publish refuses otherwise (it closed) is kept, with the reason;
 * without ``autoPublish`` none of it happens.
 
 Then the routes: asking for it needs publish (an API key: its owner's), a data source whose policy
@@ -59,11 +61,18 @@ def _world(monkeypatch, summary, *, auto_publish=True):
 
     monkeypatch.setattr(ver_db, "graphver_session", session)
     monkeypatch.setattr(service_mod, "ImportWorker", _Worker)
-    did = SimpleNamespace(published=[], abandoned=[])
+    did = SimpleNamespace(published=[], abandoned=[], pulled=[], pull={"clean": True}, changes=8)
 
     class _Versioning:
         async def abandon_draft(self, **kwargs):
             did.abandoned.append(kwargs)
+
+        async def rebase_draft(self, **kwargs):
+            did.pulled.append(kwargs)
+            return did.pull
+
+        async def _change_count(self, _s, _graph_id, _branch_id):
+            return did.changes
 
     svc = ImportExportService(versioning=_Versioning(), store=object())
 
@@ -103,11 +112,11 @@ async def test_an_import_that_changed_nothing_closes_its_empty_draft(monkeypatch
     assert row.summary["publish"] == {"state": "unchanged"}
 
 
-@pytest.mark.parametrize("refusal, kind", [
-    (NotUpToDate("br1", 3, 5), "not_up_to_date"),          # main moved while the file was imported
-    (BranchNotOpen("br1", "abandoned"), "branch_closed"),  # someone closed the draft meanwhile
+@pytest.mark.parametrize("refusal, kind, pulls", [
+    (NotUpToDate("br1", 3, 5), "not_up_to_date", 3),       # main kept moving through three pulls
+    (BranchNotOpen("br1", "abandoned"), "branch_closed", 0),  # someone closed the draft meanwhile
 ])
-async def test_a_draft_its_publish_refuses_is_kept_with_the_reason(monkeypatch, refusal, kind):
+async def test_a_draft_its_publish_refuses_is_kept_with_the_reason(monkeypatch, refusal, kind, pulls):
     svc, row, did = _world(monkeypatch, _DONE)
 
     async def refuse(**_kwargs):
@@ -117,8 +126,55 @@ async def test_a_draft_its_publish_refuses_is_kept_with_the_reason(monkeypatch, 
     assert await svc.run_import("job1") == _DONE                 # complete, whatever the publish
     note = row.summary["publish"]
     assert (note["state"], note["reason"]["type"]) == ("skipped", kind)
+    assert len(did.pulled) == pulls
     if kind == "not_up_to_date":
         assert note["reason"]["behindBy"] == 2
+
+
+async def test_a_draft_main_moved_under_pulls_it_and_is_published(monkeypatch):
+    svc, row, did = _world(monkeypatch, _DONE)
+    behind = [NotUpToDate("br1", 3, 5)]
+
+    async def create_publish_job(**kwargs):
+        if behind:
+            raise behind.pop()
+        did.published.append(kwargs)
+        return {"job_id": "pjob_2"}
+
+    svc.create_publish_job = create_publish_job
+    await svc.run_import("job1")
+    assert [(p["branch_id"], p["actor"]) for p in did.pulled] == [("br1", "alice")]
+    assert row.summary["publish"] == {"state": "queued", "jobId": "pjob_2", "pulls": 1}
+    assert (did.published[0]["import_job_id"], did.published[0]["pulls"]) == ("job1", 1)
+
+
+async def test_a_draft_that_pulls_with_conflicts_waits_for_review(monkeypatch):
+    svc, row, did = _world(monkeypatch, _DONE)
+    did.pull = {"clean": False, "conflicts": [{"entity_id": "n1"}, {"entity_id": "n2"}]}
+
+    async def behind(**_kwargs):
+        raise NotUpToDate("br1", 3, 5)
+
+    svc.create_publish_job = behind
+    await svc.run_import("job1")
+    note = row.summary["publish"]
+    assert (note["state"], note["reason"]["type"], note["reason"]["conflicts"], note["pulls"]) == (
+        "skipped", "conflicts", 2, 1)
+
+
+async def test_a_draft_too_large_to_pull_on_its_own_waits_and_says_so(monkeypatch):
+    svc, row, did = _world(monkeypatch, _DONE)
+    monkeypatch.setattr(service_mod.config, "SQUASH_PAGED_ABOVE", 5)
+
+    async def behind(**_kwargs):
+        raise NotUpToDate("br1", 3, 5)
+
+    svc.create_publish_job = behind
+    await svc.run_import("job1")
+    note = row.summary["publish"]
+    assert (note["state"], note["reason"]["type"], note["reason"]["changes"]) == (
+        "skipped", "too_large_to_pull", 8)
+    assert did.pulled == []
 
 
 async def test_without_auto_publish_nothing_is_published(monkeypatch):
