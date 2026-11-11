@@ -27,6 +27,7 @@ import contextlib
 import logging
 import random
 import sys
+import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -49,7 +50,7 @@ from .entity_serde import edge_payload_from_parts
 from .change_index import (ChangeIndex, ChangeIndexBuilder, ChangeOrigin, IndexCache, compact_entries,
                            entry_dict, stat_changes)
 from .errors import (AccessDenied, AmbiguousSpelling, AmbiguousUrn, BranchNotOpen, ChangeListBusy,
-                     ContentionExhausted, CrossesUpdate, CurationAtRisk, DraftNotReadable,
+                     ContentionExhausted, CrossesUpdate, CurationAtRisk, DraftNotReadable, DraftPruned,
                      EdgeEndsMissing, EntityExists, StagedChangesUnsaved, UniqueViolation,
                      DraftRoleRequired, ForkLimit, ForkNotRestorable, ForkNotUpToDate,
                      ForkUpdateConflicts, GraphMoved, GraphNotWritable,
@@ -579,6 +580,16 @@ ROLE_RANK = {"viewer": 1, "editor": 2, "maintainer": 3}
 # It is also the definition of "live" for the one-live-PR-per-branch invariant (PullRequestExists,
 # uq_mr_live_source_branch): a PR is live until it is merged or closed.
 _TERMINAL_PR_STATUS = ("merged", "closed")
+#: A draft's own rows, table by table — its heads first, so a draft whose removal is cut off reads as
+#: ``main`` from the start — each with the columns of the index that finds a branch's rows, which
+#: its windows are ordered by so each window is an index scan (``purge_worker.delete_window``).
+_DRAFT_ROWS: Tuple[Tuple[str, str], ...] = (
+    ("entity_heads", "graph_id, branch_id, entity_id"),
+    ("working_changes", "graph_id, branch_id, seq"),
+    ("merkle_nodes", "graph_id, branch_id, path, commit_seq"),
+    ("edge_versions", "graph_id, branch_id, commit_seq"),
+    ("node_versions", "graph_id, branch_id, commit_seq"),
+)
 
 # Commit kinds a machine writes; every other kind on main is a person's work. The same split
 # lifecycle.py uses. The sync curation guard reads it (see _human_commit_in_sync_base).
@@ -2688,6 +2699,7 @@ class GraphVersioningService:
         async with self._session() as s:
             branch = await self._get_branch(s, graph_id, branch_id)
             await self._assert_branch_readable(s, branch, viewer)
+            self._require_changes(branch)
             too_large = await self._window_too_large(s, graph_id, branch_id, from_seq, to_seq)
             if too_large is not None:
                 raise DiffTooLarge(too_large, config.DIFF_TREE_MAX_CHANGES)
@@ -2772,7 +2784,8 @@ class GraphVersioningService:
         """Mark an open draft ``abandoned`` (plan §17 #8): it becomes inert — no
         further stage/checkpoint/publish. Re-abandoning is idempotent; ``main`` and
         already-merged drafts cannot be abandoned. The owner abandons it, or a maintainer of
-        a shared draft. Staged rows are left in place for audit (the branch is simply unreachable)."""
+        a shared draft. Staged rows are left in place for audit (the branch is simply unreachable),
+        until the retention window removes the draft's changes (:meth:`prune_closed_drafts`)."""
         async with self._session() as s:
             branch = await self._lock_branch(s, graph_id, branch_id)
             if branch.kind == "main":
@@ -2869,6 +2882,108 @@ class GraphVersioningService:
                 .returning(BranchORM.id)
                 .execution_options(synchronize_session=False)
             )).scalars().all())
+
+    async def prune_closed_drafts(
+        self, *, older_than_days: int, budget_secs: Optional[float] = None,
+        now: Optional[datetime] = None, graph_id: Optional[str] = None,
+    ) -> List[str]:
+        """Remove the changes of drafts merged or abandoned more than ``older_than_days`` ago, and
+        return the ids of those whose removal finished. A merged draft's changes are in ``main`` —
+        the publish copied them there, so nothing on ``main`` reads the draft's rows — and an
+        abandoned one's were never published. Each keeps its record: the branch row, its members,
+        its commits and its review.
+
+        A draft is closed at ``updated_at``, which a publish or an abandon sets, and it is kept
+        while something may still need its rows: a live review, a pending or running job, or a
+        deleted or frozen graph (whose clock restarts at the unfreeze), as :meth:`sweep_idle_drafts`
+        keeps an idle one. ``pruned_at`` is set first, so reads of its changes are refused
+        (:meth:`_require_changes`) before any row goes; then its rows are deleted in windows, each
+        its own transaction, until they are gone (``prune_finished_at``). Neither stamp moves
+        ``updated_at``.
+
+        Spends at most ``budget_secs`` (``DRAFT_PRUNE_PASS_SECS``): a removal cut off is carried on
+        first by the next pass, wherever it runs. Two workers on one draft only repeat each
+        other's deletes; it is called finished only once none of its rows is found. ``graph_id``
+        keeps the pass to one graph's drafts."""
+        from .purge_worker import delete_window
+
+        deadline = time.monotonic() + (config.DRAFT_PRUNE_PASS_SECS if budget_secs is None
+                                       else budget_secs)
+        cutoff = ((now or datetime.now(timezone.utc)) - timedelta(days=older_than_days)).isoformat()
+        # The oldest draft due, as its own aliased select so it is not correlated with the UPDATE
+        # that marks it; a row another worker is marking is skipped, not waited on.
+        b = aliased(BranchORM)
+        live_pr = select(1).where(MergeRequestORM.source_branch_id == b.id,
+                                  MergeRequestORM.status.not_in(_TERMINAL_PR_STATUS))
+        live_job = select(1).where(JobORM.branch_id == b.id, JobORM.status.in_(("pending", "running")))
+        held = select(1).where(GraphORM.id == b.graph_id, or_(
+            GraphORM.deleted_at.isnot(None), GraphORM.lifecycle_state != "live",
+            GraphORM.lifecycle_changed_at >= cutoff))
+        due = (select(b.id).where(
+            b.kind.in_(("draft", "fork_draft")), b.status.in_(("merged", "abandoned")),
+            b.pruned_at.is_(None), b.updated_at < cutoff,
+            ~live_pr.exists(), ~live_job.exists(), ~held.exists(),
+        ).order_by(b.updated_at).limit(1).with_for_update(skip_locked=True))
+        under_way = select(BranchORM.id, BranchORM.graph_id).where(
+            BranchORM.pruned_at.isnot(None), BranchORM.prune_finished_at.is_(None),
+        ).order_by(BranchORM.pruned_at).limit(1)
+        if graph_id is not None:
+            due, under_way = due.where(b.graph_id == graph_id), under_way.where(BranchORM.graph_id == graph_id)
+        finished: List[str] = []
+        while time.monotonic() < deadline:
+            async with self._session() as s:
+                row = (await s.execute(under_way)).first()
+                if row is None:
+                    row = (await s.execute(
+                        update(BranchORM).where(BranchORM.id.in_(due))
+                        .values(pruned_at=_now(), updated_at=BranchORM.updated_at)
+                        .returning(BranchORM.id, BranchORM.graph_id)
+                        .execution_options(synchronize_session=False))).first()
+            if row is None:
+                break                                    # nothing is due
+            branch_id, gid = row
+            removed, gone = 0, True
+            for table, order in _DRAFT_ROWS:
+                while True:
+                    if time.monotonic() >= deadline:
+                        gone = False
+                        break
+                    async with self._session() as s:
+                        n = await delete_window(s, table, order, gid, where="branch_id = :b",
+                                                params={"b": branch_id})
+                    removed += n
+                    if n == 0:
+                        break
+                if not gone:
+                    break
+            if gone:
+                # A window another worker emptied at the same moment deleted nothing here: look again.
+                async with self._session() as s:
+                    for table, _order in _DRAFT_ROWS:
+                        if (await s.execute(text(
+                                f'SELECT 1 FROM "{config.graphver_schema()}"."{table}" '
+                                "WHERE graph_id = :g AND branch_id = :b LIMIT 1"),
+                                {"g": gid, "b": branch_id})).first() is not None:
+                            gone = False
+                            break
+                    if gone:
+                        await s.execute(
+                            update(BranchORM).where(BranchORM.id == branch_id,
+                                                    BranchORM.prune_finished_at.is_(None))
+                            .values(prune_finished_at=_now(), updated_at=BranchORM.updated_at)
+                            .execution_options(synchronize_session=False))
+                        finished.append(branch_id)
+            logger.info("removed %d rows of closed draft %s on graph %s%s", removed, branch_id,
+                        gid, "" if gone else "; carried on next pass")
+        return finished
+
+    @staticmethod
+    def _require_changes(branch: BranchORM) -> None:
+        """:class:`DraftPruned` for a closed draft whose changes were removed
+        (:meth:`prune_closed_drafts`): a read of them would find ``main`` alone, and say the draft
+        changed nothing. Its record still reads."""
+        if branch.pruned_at is not None:
+            raise DraftPruned(branch.id, branch.pruned_at)
 
     async def set_frozen(self, *, graph_id: str, frozen: bool, expected_rev: int) -> Dict[str, object]:
         """Pause (``frozen``) or resume editing of a graph: every content write is refused while
@@ -4246,6 +4361,7 @@ class GraphVersioningService:
             pr = await s.get(MergeRequestORM, mr_id)
             if pr is None:
                 raise ValueError(f"unknown merge request {mr_id}")
+            await self._require_review_changes(s, pr)
             if self._is_draft_mr(pr):
                 graph = await s.get(GraphORM, pr.target_graph_id)
                 draft = await s.get(BranchORM, pr.source_branch_id)
@@ -4261,6 +4377,30 @@ class GraphVersioningService:
                 "conflicts": conflicts,
                 "changes": _delta_stats(net_delta(theirs, merged)),
             }
+
+    async def _review_squash(self, s, pr: MergeRequestORM) -> Optional[CommitORM]:
+        """The commit a merged draft review landed as on ``main``: what merging it changed, which
+        its diff is read from. Merging it again against ``main`` — which already holds it — would
+        change nothing, and the draft's own rows are removed after the retention window. None for
+        an open or closed review, a fork's, or a merge that landed no commit of its own (its draft
+        changed nothing)."""
+        if pr.status != "merged" or not pr.resulting_commit_id or not self._is_draft_mr(pr):
+            return None
+        commit = await s.get(CommitORM, (pr.target_graph_id, pr.resulting_commit_id))
+        if commit is None or commit.source_branch_id != pr.source_branch_id:
+            return None
+        if commit.branch_id != await self._main_branch_id(s, pr.target_graph_id):
+            return None
+        return commit
+
+    async def _require_review_changes(self, s, pr: MergeRequestORM) -> None:
+        """:class:`DraftPruned` for a closed draft review whose draft's changes were removed: what
+        it proposed is gone. A merged one reads from its commit (:meth:`_review_squash`), and an
+        open one's draft is never removed."""
+        if self._is_draft_mr(pr) and pr.status != "merged":
+            draft = await s.get(BranchORM, pr.source_branch_id)
+            if draft is not None:
+                self._require_changes(draft)
 
     async def _pr_merge_states(self, s, pr, containment_edge_types=None):
         """``(merged, theirs)`` for a PR — the 3-way merge result and the target side, the
@@ -4299,15 +4439,24 @@ class GraphVersioningService:
         :meth:`preview_mr` (so the diff's item count equals the preview's change count),
         reshaped into the UI's ``DiffVsMainResponse`` overlay shape. Dispatches draft→main
         vs fork→parent; the diff is the merge's net effect on the target
-        (``net_delta(theirs, merged)``), i.e. what merging this PR changes in the base."""
+        (``net_delta(theirs, merged)``), i.e. what merging this PR changes in the base. A merged
+        draft review's is what its merge changed: its commit on ``main`` (:meth:`_review_squash`)."""
         async with self._session() as s:
             pr = await s.get(MergeRequestORM, pr_id)
             if pr is None:
                 raise ValueError(f"unknown pull request {pr_id}")
-            big = await self._pr_too_large(s, pr)
-            if big is not None:
-                raise DiffTooLarge(big[1], config.DIFF_TREE_MAX_CHANGES)
-            merged, theirs = await self._pr_merge_states(s, pr)
+            squash = await self._review_squash(s, pr)
+            if squash is not None:
+                big = await self._commit_too_large(s, squash.graph_id, squash.id, None)
+                if big is not None:
+                    raise DiffTooLarge(big[2], config.DIFF_TREE_MAX_CHANGES)
+                merged, theirs = await self._commit_diff_states(s, squash.graph_id, squash.id, None)
+            else:
+                await self._require_review_changes(s, pr)
+                big = await self._pr_too_large(s, pr)
+                if big is not None:
+                    raise DiffTooLarge(big[1], config.DIFF_TREE_MAX_CHANGES)
+                merged, theirs = await self._pr_merge_states(s, pr)
         return _deltas_to_diff_vs_main(net_delta(theirs, merged), theirs)
 
     async def diff_pr_summary(
@@ -4322,9 +4471,16 @@ class GraphVersioningService:
             pr = await s.get(MergeRequestORM, pr_id)
             if pr is None:
                 raise ValueError(f"unknown pull request {pr_id}")
-            big = await self._pr_too_large(s, pr)
-            if big is None:
-                merged, theirs = await self._pr_merge_states(s, pr, containment_edge_types)
+            squash = await self._review_squash(s, pr)
+            if squash is None:
+                await self._require_review_changes(s, pr)
+                big = await self._pr_too_large(s, pr)
+                if big is None:
+                    merged, theirs = await self._pr_merge_states(s, pr, containment_edge_types)
+        if squash is not None:
+            return await self.diff_commit_summary(graph_id=squash.graph_id, commit_id=squash.id,
+                                                  containment_edge_types=containment_edge_types,
+                                                  limit=limit)
         if big is not None:
             # Counted from the draft's change index — what the draft changes where it branched
             # off, which is what merging it changes once it is up to date — instead of merging
@@ -4347,10 +4503,17 @@ class GraphVersioningService:
             pr = await s.get(MergeRequestORM, pr_id)
             if pr is None:
                 raise ValueError(f"unknown pull request {pr_id}")
-            big = await self._pr_too_large(s, pr)
-            if big is not None:
-                raise DiffTooLarge(big[1], config.DIFF_TREE_MAX_CHANGES)
-            merged, theirs = await self._pr_merge_states(s, pr, containment_edge_types)
+            squash = await self._review_squash(s, pr)
+            if squash is None:
+                await self._require_review_changes(s, pr)
+                big = await self._pr_too_large(s, pr)
+                if big is not None:
+                    raise DiffTooLarge(big[1], config.DIFF_TREE_MAX_CHANGES)
+                merged, theirs = await self._pr_merge_states(s, pr, containment_edge_types)
+        if squash is not None:
+            return await self.diff_commit_children(
+                graph_id=squash.graph_id, commit_id=squash.id, container_key=container_key,
+                containment_edge_types=containment_edge_types, limit=limit, offset=offset)
         index = _build_diff_hierarchy(merged, theirs, containment_edge_types)
         return _hierarchy_children_view(index, container_key, limit, offset)
 
@@ -4617,7 +4780,9 @@ class GraphVersioningService:
         projection is the hot read path and sits behind the same API.
         """
         async with self._session() as s:
-            await self._assert_branch_readable(s, await self._get_branch(s, graph_id, branch_id), viewer)
+            branch = await self._get_branch(s, graph_id, branch_id)
+            await self._assert_branch_readable(s, branch, viewer)
+            self._require_changes(branch)
             state = (
                 await self._composed_state(s, graph_id, branch_id)
                 if as_of_seq is None
@@ -6441,6 +6606,7 @@ class GraphVersioningService:
         async with self._session() as s:
             branch = await self._get_branch(s, graph_id, branch_id)
             await self._assert_branch_readable(s, branch, viewer)
+            self._require_changes(branch)
             changed = await self._changed_in_window(s, graph_id, branch_id, from_seq, to_seq)
             if not changed:
                 return {"added": [], "removed": [], "modified": {}}
@@ -6485,6 +6651,7 @@ class GraphVersioningService:
         async with self._session() as s:
             branch = await self._get_branch(s, graph_id, branch_id)
             await self._assert_branch_readable(s, branch, viewer)
+            self._require_changes(branch)
             changed_n = await self._change_count(s, graph_id, branch_id)
             if changed_n > config.DIFF_TREE_MAX_CHANGES:
                 raise DiffTooLarge(changed_n, config.DIFF_TREE_MAX_CHANGES)
@@ -7002,6 +7169,7 @@ class GraphVersioningService:
         rollup counts the changed entities by type (the tree's also counts their containers)."""
         branch = await self._get_branch(s, graph_id, branch_id)
         await self._assert_branch_readable(s, branch, viewer)
+        self._require_changes(branch)
         changed = await self._change_count(s, graph_id, branch_id)
         if changed <= config.DIFF_TREE_MAX_CHANGES:
             return None
@@ -7135,6 +7303,7 @@ class GraphVersioningService:
             raise ValueError("main's changes are listed between two of its revisions: "
                              "name fromSeq and toSeq instead of the branch")
         await self._assert_branch_readable(s, branch, viewer)
+        self._require_changes(branch)
         return branch
 
     async def _window_main(self, s, graph_id: str, origin: ChangeOrigin) -> str:
@@ -7388,6 +7557,7 @@ class GraphVersioningService:
             raise ValueError(f"unknown commit {commit_id}")
         branch = await self._get_branch(s, graph_id, commit.branch_id)
         await self._assert_branch_readable(s, branch, viewer)
+        self._require_changes(branch)
         changed = await self._window_too_large(s, graph_id, commit.branch_id,
                                                commit.commit_seq - 1, commit.commit_seq)
         return None if changed is None else (commit, branch, changed)
@@ -7415,6 +7585,7 @@ class GraphVersioningService:
         containers to nest under. Stays O(draft + ancestors): no full-state composition."""
         branch = await self._get_branch(s, graph_id, branch_id)
         await self._assert_branch_readable(s, branch, viewer)
+        self._require_changes(branch)
         main_id = await self._main_branch_id(s, graph_id)
         base_seq = branch.base_commit_seq or 0
         changed: set = set()
@@ -7481,6 +7652,7 @@ class GraphVersioningService:
         branch_id, seq = commit.branch_id, commit.commit_seq
         branch = await self._get_branch(s, graph_id, branch_id)
         await self._assert_branch_readable(s, branch, viewer)
+        self._require_changes(branch)
         changed = await self._changed_in_window(s, graph_id, branch_id, seq - 1, seq)
         if not changed:
             return {}, {}
@@ -8010,6 +8182,7 @@ class GraphVersioningService:
             "status": b.status, "base_commit_seq": b.base_commit_seq,
             "head_commit_id": b.head_commit_id, "originating_view_id": b.originating_view_id,
             "created_by": b.created_by, "created_at": b.created_at, "updated_at": b.updated_at,
+            "pruned_at": b.pruned_at,
         }
 
     async def branch_freshness(self, *, graph_id: str, branch_id: str,
@@ -8385,11 +8558,17 @@ class GraphVersioningService:
         if viewer is not None and not await self._branch_readable(s, branch, viewer):
             raise DraftNotReadable(f"{viewer.actor} cannot view branch {branch.id}")
 
-    async def assert_branch_readable(self, *, graph_id: str, branch_id: str, viewer: Optional["Viewer"]) -> None:
+    async def assert_branch_readable(self, *, graph_id: str, branch_id: str, viewer: Optional["Viewer"],
+                                     changes: bool = False) -> None:
         """Raise ``ValueError`` when ``branch_id`` isn't one of the graph's branches, and
-        ``AccessDenied`` when ``viewer`` may not read it (someone else's private draft)."""
+        ``AccessDenied`` when ``viewer`` may not read it (someone else's private draft). With
+        ``changes`` — the caller reads the draft's changes, not only its record —
+        :class:`DraftPruned` too for a closed draft whose changes were removed."""
         async with self._session() as s:
-            await self._assert_branch_readable(s, await self._get_branch(s, graph_id, branch_id), viewer)
+            branch = await self._get_branch(s, graph_id, branch_id)
+            await self._assert_branch_readable(s, branch, viewer)
+            if changes:
+                self._require_changes(branch)
 
     async def check_view_branch(self, *, data_source_id: Optional[str], branch_id: str, viewer: "Viewer",
                                 write: bool) -> None:

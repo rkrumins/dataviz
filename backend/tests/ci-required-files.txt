@@ -93,6 +93,7 @@ tests/test_draft_overlay_edge_index.py
 tests/test_draft_overlay_lazy.py
 tests/test_draft_overlay_paging.py
 tests/test_draft_overlay_revision.py
+tests/test_draft_retention.py
 tests/test_drafts_policy.py
 tests/test_drift_probe_cost.py
 tests/test_edge_integrity_index.py

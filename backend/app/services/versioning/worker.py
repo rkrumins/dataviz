@@ -116,7 +116,9 @@ class ProjectionWorker:
         unsettled by its publish or abandon is settled (``draft_views``). Import/export artifacts
         older than ``OBJECT_STORE_TTL_HOURS`` are swept from the object store — but never the
         inputs a job may still read — and the staged rows of imports finished more than
-        ``STAGING_GC_DAYS`` ago from ``import_rows``."""
+        ``STAGING_GC_DAYS`` ago from ``import_rows``. Drafts merged or abandoned longer ago than
+        the retention window (``draft_retention``) have their changes removed, for at most
+        ``DRAFT_PRUNE_PASS_SECS`` a pass."""
         if self._versioning is None:
             return []
         swept = await self._versioning.sweep_idle_drafts()
@@ -134,6 +136,14 @@ class ProjectionWorker:
             await sweep_staged_rows(older_than_days=config.STAGING_GC_DAYS)
         except Exception:  # noqa: BLE001 — tried again next pass
             logger.exception("sweeping finished imports' staged rows failed")
+        try:
+            from .draft_retention import retention_days
+
+            days = await retention_days()              # None: unread, so nothing is removed
+            if days:
+                await self._versioning.prune_closed_drafts(older_than_days=days)
+        except Exception:  # noqa: BLE001 — carried on next pass
+            logger.exception("removing closed drafts' changes failed")
         try:
             # Read right before anything is deleted: an input of a queued, running or resumable job
             # is kept however old. Unread, nothing is deleted this pass.

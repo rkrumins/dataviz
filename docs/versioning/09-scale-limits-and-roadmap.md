@@ -303,6 +303,7 @@ hashes/partitions) are marked ⚠. The table is the load-bearing subset.
 | `GRAPHVER_VERSIONED_WRITES` | on | write-through: every provider write → an audited commit, which the projector carries to FalkorDB. `0` opts out only data sources without version control; a versioned graph is always written through versioning |
 | `GRAPHVER_FALKOR_MAX_RESIDENT` / `_BUDGETS` | `0` (not acted on) | per-provider RAM-budget eviction, which Graph residency replaces |
 | `GRAPHVER_DRAFT_TTL_DAYS` / `_SWEEP_SECS` | `30` / daily | auto-abandon idle drafts (not those with a live PR or staged edits, nor on a deleted, frozen or recently unfrozen graph) |
+| `GRAPHVER_DRAFT_RETENTION_DAYS` | `30` | days a merged or abandoned draft keeps its changes before the sweep removes them, keeping its record (`0`: for good; Admin → Versioned graphs → Draft retention overrides it live). At most 5 minutes a sweep |
 | `GRAPHVER_COMMIT_MAX_RETRIES` | `5` | `commit_seq`-collision retry budget |
 | `GRAPHVER_GRAPH_LOCK_TIMEOUT_MS` | `5000` | longest wait for any one graph, draft, lifecycle, move, PR or graph-row lock; a write `_retry_seq` retries (save, checkpoint, pull, publish, merge, revert, restore, sync, bulk ingest) tries `GRAPHVER_COMMIT_MAX_RETRIES` times before 503 `lock_busy`, anything else answers it after one wait |
 | `GRAPHVER_MAX_FORKS_PER_GRAPH` | `10` | live forks per graph; one more is 409 `fork_limit` |

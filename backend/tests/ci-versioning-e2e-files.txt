@@ -27,6 +27,7 @@ tests/integration/test_draft_notifications.py
 tests/integration/test_draft_overlay_delta.py
 tests/integration/test_draft_overlay_ids_not_urns.py
 tests/integration/test_draft_overlay_large.py
+tests/integration/test_draft_prune.py
 tests/integration/test_draft_read_cache_scope.py
 tests/integration/test_draft_transfer.py
 tests/integration/test_entity_summary_and_history.py

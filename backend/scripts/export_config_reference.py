@@ -149,9 +149,17 @@ NOTES: dict[str, tuple[str, str | None]] = {
     ),
     "GRAPHVER_DRAFT_SWEEP_SECS": (
         "Seconds between the versioning worker's sweeps: idle drafts past `GRAPHVER_DRAFT_TTL_DAYS`, "
-        "staged import rows past `IMPORT_STAGING_GC_DAYS`, artifacts past "
-        "`OBJECT_STORE_TTL_HOURS`. Each goes within this long after it is due, so keep it well "
-        "under the shortest of them.",
+        "closed drafts' changes past `GRAPHVER_DRAFT_RETENTION_DAYS`, staged import rows past "
+        "`IMPORT_STAGING_GC_DAYS`, artifacts past `OBJECT_STORE_TTL_HOURS`. Each goes within this "
+        "long after it is due, so keep it well under the shortest of them.",
+        None,
+    ),
+    "GRAPHVER_DRAFT_RETENTION_DAYS": (
+        "Days a merged or abandoned draft keeps its changes before the versioning worker removes "
+        "them; `0` keeps them for good. The draft's record stays (its name, owner, commits and "
+        "review), and a merged draft's changes are in the published graph. A system administrator "
+        "overrides it live: Admin → Versioned graphs → Draft retention. Each sweep spends at most 5 "
+        "minutes on it, so a draft of millions of rows is removed over a few sweeps.",
         None,
     ),
     "MAX_IMPORT_BODY_BYTES": (

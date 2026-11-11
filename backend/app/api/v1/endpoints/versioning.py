@@ -916,6 +916,9 @@ class BranchResponse(_ApiModel):
     access: Optional[Dict[str, bool]] = None
     # The branch read only: who committed to it, most commits first, then the latest (50 at most).
     contributors: Optional[List[str]] = None
+    # A closed draft whose changes were removed after the retention window: since when. Its record
+    # still reads; a read of its changes is 410 ``draft_pruned``.
+    pruned_at: Optional[str] = Field(default=None, alias="prunedAt")
 
 
 class OpenDraftResponse(_ApiModel):
@@ -4349,7 +4352,8 @@ async def _check_export_access(
 
     if branch_id:
         with _domain_errors():
-            await svc.assert_branch_readable(graph_id=graph_id, branch_id=branch_id, viewer=viewer)
+            await svc.assert_branch_readable(graph_id=graph_id, branch_id=branch_id, viewer=viewer,
+                                             changes=True)
     if view_id:
         row = await readable_view(session, view_id, user, claims)
         if row.workspace_id != ws_id or row.data_source_id != meta.get("data_source_id"):

@@ -70,6 +70,18 @@ integration's many small changes as a few commits.
     (`GET …/publish-jobs/{jobId}`) has `commitId` and `revisionId` once it is `completed`.
   - An import that publishes itself (`autoPublish`) gets the same from the job that
     `summary.publish.jobId` names. The reference connector reports it.
+- **Draft retention: a merged or abandoned draft's changes are removed after 30 days.**
+  - The draft's record stays: its name, owner, commits and review. A merged draft's changes are in
+    the published graph, which the publish copied them to, so main's history, credits and reverts are
+    unaffected. As with a squash-merged Git branch, the draft's intermediate commits stay listed but
+    no longer have content.
+  - System administrators set the window live, from 0 (keep for good) to 3650 days
+    (`GET/PUT /admin/versioning/draft-retention`); the default is `GRAPHVER_DRAFT_RETENTION_DAYS`.
+  - The versioning worker removes drafts in windows during its hourly sweep, for at most 5 minutes a
+    sweep. A draft with an open review or a running job is kept, and so are drafts of a deleted or
+    frozen graph.
+  - Reading a removed draft's changes (its diff, state, change list, an export) answers
+    `410 draft_pruned` instead of an empty diff. Branch reads say `prunedAt`.
 - **`IMPORT_UPLOAD_CONCURRENCY`** (8): import files one API process takes in at once. One more
   waits up to 30 s for a slot, then is answered `429` with `Retry-After: 15`, before any of it is
   read, so a burst of large files can't take the object store's (or the database's) bandwidth from
@@ -107,6 +119,9 @@ integration's many small changes as a few commits.
 
 ### Fixed
 
+- **A merged review's Files changed lists what the merge changed.** It merged the draft again
+  against a published graph that already held it, so it was always empty. It now reads the merge's
+  commit.
 - **The data source's Versioning tab shows "N changes" again.** It read stats keys that commits
   never had.
 - **"What changed" on the behind-Published strip counts changes.** It read node and edge counts that
@@ -140,6 +155,12 @@ integration's many small changes as a few commits.
   reconciled in memory holds a filter of what it has seen (about 250 MB for a 4 GB file). Make room
   on the nodes the transfer lane runs on (k8s `versioning-worker/transfer.yaml`, Helm
   `versioningWorker.transfer.resources`).
+- **Draft retention is on by default.** In the first sweeps after the upgrade, every draft merged or
+  abandoned more than 30 days ago loses its changes; each keeps its record. To keep them, set
+  `GRAPHVER_DRAFT_RETENTION_DAYS=0` before upgrading (or a longer window), or save a window under
+  `/admin/versioning/draft-retention` right after. Migration `20261111_1000_gv_draft_prune` adds
+  `platform_settings.gv_draft_retention_days` and `branches.pruned_at` / `prune_finished_at`
+  (nullable, no rewrite). A separate `GRAPHVER_DB_URL` gets the branch columns at start-up.
 - A failed import can be resumed or queued again, and a finished one's row preview read, for 3
   days after it ends, where it was 7. Set `IMPORT_STAGING_GC_DAYS=7` to keep the old window.
 - For multi-gigabyte imports, set `OBJECT_STORE_BACKEND` to `s3` or a shared volume: the default
