@@ -5,6 +5,11 @@ Pins:
 - A job keeps the identifier it was created with (``jobs.identity_strategy``, the job's
   ``identifier``), and its windows resolve by it. With ``urn``, a row named only by a qualifiedName
   or an identifier value is refused (``no_key``); the urn and the entity id find their node.
+- The replace guard: a replace whose file names its entities by another key — it would delete the
+  graph and make it again — is refused before it deletes anything, its rows left on the draft,
+  however often it is imported into that draft; ``allowMassDelete`` lets it through, and the job's
+  ``replaceGuard`` says which, with the counts and the limits. A replace whose first full window
+  finds (almost) nothing stops there (``identifier_matched_nothing``).
 - A recurring snapshot, replaced in full and published each run, under each identifier:
   - every entity keeps its id, and so does every edge;
   - a changed entity gets exactly one new version, and it changes only the changed property;
@@ -61,7 +66,8 @@ def _edge(i: int, j: int) -> dict:
     return {"kind": "edge", "edgeType": "LINEAGE", "sourceUrn": _urn(i), "targetUrn": _urn(j)}
 
 
-async def _import(ie, store, gid, lines, *, identifier, mode="upsert"):
+async def _import(ie, store, gid, lines, *, identifier, mode="upsert", branch_id=None,
+                  allow_mass_delete=False):
     key = storage_key("ws1", gid, "job", f"{os.urandom(3).hex()}.ndjson")
     body = ("\n".join(json.dumps(x) for x in lines) + "\n").encode()
 
@@ -70,9 +76,27 @@ async def _import(ie, store, gid, lines, *, identifier, mode="upsert"):
     await store.put_stream(key, _one())
     job = await ie.create_import_job(workspace_id="ws1", data_source_id=gid, graph_id=gid,
                                      actor="u", import_format="ndjson", source_uri=key,
-                                     reconcile_mode=mode, identifier=identifier)
+                                     reconcile_mode=mode, identifier=identifier,
+                                     branch_id=branch_id, allow_mass_delete=allow_mass_delete)
     summary = await ie.run_import(job["job_id"])
     return job, summary
+
+
+async def _run_job(ie, store, gid, lines, **kw):
+    """An import run the way the transfer lane runs it, so a refusal fails the job: its row."""
+    from backend.app.services.versioning.import_export.import_worker import lease_job
+    key = storage_key("ws1", gid, "job", f"{os.urandom(3).hex()}.ndjson")
+    body = ("\n".join(json.dumps(x) for x in lines) + "\n").encode()
+
+    async def _one():
+        yield body
+    await store.put_stream(key, _one())
+    job = await ie.create_import_job(workspace_id="ws1", data_source_id=gid, graph_id=gid,
+                                     actor="u", import_format="ndjson", source_uri=key,
+                                     reconcile_mode="replace", **kw)
+    lease = await lease_job(job["job_id"])
+    await ie._run_safe(job["job_id"], lease, ie.run_import)
+    return job, await ie.get_job(job["job_id"])
 
 
 async def _versions(svc, gid):
@@ -178,7 +202,48 @@ async def _by_urn_alone(svc, ie, store) -> None:
     assert (await ie.get_job(job["job_id"]))["identifier"] == "urn"
 
 
-def test_a_snapshot_replaced_every_run_keeps_every_id_and_writes_only_what_changed():
+async def _guard(svc, ie, store, monkeypatch) -> None:
+    monkeypatch.setattr(config, "IMPORT_REPLACE_GUARD_MIN_LIVE", 10)
+    monkeypatch.setattr(config, "IMPORT_REPLACE_MIN_MATCH_FRACTION", 0)    # the guard, alone
+    ds = "ds_" + os.urandom(4).hex()
+    gid = (await svc.create_graph(data_source_id=ds, workspace_id="ws1", actor="u"))["graph_id"]
+    await _snapshot(svc, ie, store, gid, [_node(i) for i in range(20)], identifier="urn",
+                    mode="upsert")
+    # A file whose rows name the same tables by another urn: by identifier=urn it matches nothing.
+    other = [{**_node(i), "urn": f"urn:other:{i}"} for i in range(20)]
+    job, got = await _run_job(ie, store, gid, other, identifier="urn")
+    assert got["status"] == "failed" and got["summary"]["failure"]["code"] == "mass_delete_blocked"
+    assert got["summary"]["failure"]["action"] == "allow_mass_delete"
+    guard = got["summary"]["replaceGuard"]
+    assert (guard["state"], guard["live"], guard["deletes"], guard["creates"]) == (
+        "blocked", 20, 20, 20), guard
+    assert guard["limits"] == {"minLive": 10, "deleteFraction": 0.5, "createFraction": 0.5}
+    assert "Nothing was deleted" in got["errorMessage"] and "allowMassDelete" in got["errorMessage"]
+    draft = job["branch_id"]
+    async with svc._session() as s:
+        live = [e for e, h in (await svc._head_index(s, gid, draft)).items() if h.live]
+    assert len(live) == 20, "its rows are on the draft, and nothing was deleted"
+    # Imported again into that draft — its rows there already — it is refused all the same.
+    _job, again = await _run_job(ie, store, gid, other, identifier="urn", branch_id=draft)
+    assert again["summary"]["replaceGuard"]["state"] == "blocked", again["summary"]
+    # Sent with allowMassDelete, it deletes what the file leaves out.
+    _job, allowed = await _run_job(ie, store, gid, other, identifier="urn", branch_id=draft,
+                                   allow_mass_delete=True)
+    assert allowed["status"] == "completed" and allowed["allowMassDelete"], allowed
+    assert allowed["summary"]["replaceGuard"]["state"] == "overridden"
+    assert allowed["summary"]["deleted"] == 20, allowed["summary"]
+
+    # A replace whose first full window finds nothing stops there, before the rest of the file.
+    monkeypatch.setattr(config, "IMPORT_REPLACE_MIN_MATCH_FRACTION", 0.05)
+    monkeypatch.setattr(config, "IMPORT_COMMIT_WINDOW", 5)
+    job, stopped = await _run_job(ie, store, gid, [{**_node(i), "urn": f"urn:third:{i}"}
+                                                   for i in range(12)], identifier="urn")
+    assert stopped["summary"]["failure"]["code"] == "identifier_matched_nothing", stopped["summary"]
+    assert "identifier=urn" in stopped["errorMessage"]
+    assert stopped["summary"]["new"] == 5, "only its first window is on the draft"
+
+
+def test_a_snapshot_replaced_every_run_keeps_every_id_and_writes_only_what_changed(monkeypatch):
     async def run():
         await models.create_schema_and_partitions()
         window, config.IMPORT_COMMIT_WINDOW = config.IMPORT_COMMIT_WINDOW, 7
@@ -190,6 +255,7 @@ def test_a_snapshot_replaced_every_run_keeps_every_id_and_writes_only_what_chang
             for identifier in ("entity_id", "urn"):
                 await _recurring_snapshot(svc, ie, ie.store, identifier)
             await _by_urn_alone(svc, ie, ie.store)
+            await _guard(svc, ie, ie.store, monkeypatch)
         finally:
             config.IMPORT_COMMIT_WINDOW = window
             shutil.rmtree(root, ignore_errors=True)

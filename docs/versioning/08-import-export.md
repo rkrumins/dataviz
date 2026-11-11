@@ -617,6 +617,32 @@ aren't file rows, so they're counted separately into `summary["deleted"]`.
 Replace is always **reviewed on the draft before publish** — the delete-on-absence set is visible in
 the diff, so a mistaken scope is caught before it touches `main`.
 
+**The replace guard.** A file whose rows name their entities by another key than the import's
+`identifier` matches nothing, so a replace of it would delete its scope and make it again, every id
+and its history with it. Before it deletes anything, a replace counts what it would delete and what
+its draft makes (`_guard_replace`): a whole graph's measured against main, so a file imported again
+into the draft an earlier run made it in is judged on what the draft would publish. In a scope of at
+least `IMPORT_REPLACE_GUARD_MIN_LIVE` (1,000) entities, one that would delete at least
+`IMPORT_REPLACE_GUARD_DELETE_FRACTION` (0.5) of them **and** create at least
+`IMPORT_REPLACE_GUARD_CREATE_FRACTION` (0.5) as many is refused. A scope that really shrank creates
+little, and a file that really dropped rows deletes little, so neither is refused.
+
+- **Refused:** nothing is deleted, and the file's rows stay on the draft for review. The job fails
+  with `summary.failure = {code: "mass_delete_blocked", action: "allow_mass_delete"}`, and
+  `summary.replaceGuard` holds `{state, live, deletes, creates, limits, source}`: what it would have
+  done and the limits in force. The message says what to check (the identifier) and how to proceed.
+- **Overridden:** `allowMassDelete=true` on the import (anyone who may run it) deletes all the same;
+  the job keeps the allowance (`jobs.allow_mass_delete`, `allowMassDelete` on the job), its
+  `replaceGuard.state` is `overridden`, and the worker logs it.
+- **Earlier, fail fast:** a whole graph's replace whose first full node window finds an entity for
+  fewer than `IMPORT_REPLACE_MIN_MATCH_FRACTION` (0.05) of the rows decided so far, in a graph of at
+  least `IMPORT_REPLACE_GUARD_MIN_LIVE`, stops there (`identifier_matched_nothing`, action
+  `identifier`), naming its identifier, rather than read the rest of the file first. Nothing is
+  deleted; the rows read so far are on the draft.
+
+The limits are the operator's (env, or Helm `config.imports`); `IMPORT_REPLACE_GUARD=0` turns the
+guard off and `IMPORT_REPLACE_MIN_MATCH_FRACTION=0` the early stop.
+
 ---
 
 ## 7. Format adapters

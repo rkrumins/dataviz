@@ -3844,6 +3844,12 @@ _IDENTIFIER = Query(None, description=(
     "whichever it is"))
 
 
+_ALLOW_MASS_DELETE = Query(False, alias="allowMassDelete", description=(
+    "A replace: delete what the file leaves out even past the replace guard, which refuses a "
+    "replace that would delete most of a scope and create most of it again (a file whose rows name "
+    "their entities by another key)"))
+
+
 def _identifier(value: Optional[str]) -> str:
     """The import's identifier: the request's, checked (422 with the grammar), else the platform's."""
     from backend.app.services.versioning.import_export import identifier as identifiers
@@ -3867,6 +3873,7 @@ async def create_import(
         "with the job it started")),
     auto_publish: bool = _AUTO_PUBLISH,
     identifier: Optional[str] = _IDENTIFIER,
+    allow_mass_delete: bool = _ALLOW_MASS_DELETE,
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
     claims: PermissionClaims = Depends(get_permission_claims),
     meta: dict = Depends(graph_in_workspace),
@@ -3898,7 +3905,7 @@ async def create_import(
                     actor=user.id, import_format=format, provider_id=meta.get("provider_id"),
                     branch_id=branch_id, reconcile_mode=reconcile_mode, scope_view_id=view_id,
                     idempotency_key=key, auto_publish=auto_publish, identifier=identifier,
-                    draft_visibility=(
+                    allow_mass_delete=allow_mass_delete is True, draft_visibility=(
                         await draft_level(session, meta.get("data_source_id")) if branch_id is None else None))
         except IntegrityError:
             # A request with the same key got there first: answer with its job.
@@ -4069,6 +4076,7 @@ async def complete_import_upload(
     view_id: Optional[str] = Query(None, alias="viewId"),
     auto_publish: bool = _AUTO_PUBLISH,
     identifier: Optional[str] = _IDENTIFIER,
+    allow_mass_delete: bool = _ALLOW_MASS_DELETE,
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
     claims: PermissionClaims = Depends(get_permission_claims),
     meta: dict = Depends(graph_in_workspace),
@@ -4099,7 +4107,8 @@ async def complete_import_upload(
                     actor=user.id, import_format=record["format"], provider_id=meta.get("provider_id"),
                     source_uri=uploads.record_key(record), branch_id=branch_id, reconcile_mode=reconcile_mode,
                     scope_view_id=view_id, idempotency_key=key, auto_publish=auto_publish,
-                    identifier=identifier, draft_visibility=(
+                    identifier=identifier, allow_mass_delete=allow_mass_delete is True,
+                    draft_visibility=(
                         await draft_level(session, meta.get("data_source_id")) if branch_id is None else None))
         except IntegrityError:
             # A completion sent at the same time got there first: answer with its import.

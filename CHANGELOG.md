@@ -105,6 +105,19 @@ integration's many small changes as a few commits.
 
   The job keeps it (`identifier` on the job), and a resumed job keeps it too. Anything else is
   `422 invalid_identifier`, saying what it may be. Whichever it is, an entity's id never changes.
+- **A replace import that would delete the graph and make it again is refused** before it deletes
+  anything. That is what a file whose rows name their entities by another key looks like: its rows
+  match nothing, so the run deletes the scope and makes it anew, every id and its history with it.
+  - In a scope of at least 1,000 entities, a replace that would delete at least half of them and
+    create at least half as many fails with `mass_delete_blocked`; its rows stay on the draft.
+  - The job's `summary.replaceGuard` says what it would have done and the limits in force; the
+    message says to check the identifier, or to send `allowMassDelete=true`, which deletes all the
+    same (anyone who may run the import may send it).
+  - A whole-graph replace whose first full window finds an entity for fewer than 5% of its rows stops
+    there, with `identifier_matched_nothing`, instead of reading the rest of the file first.
+  - The operator sets the limits: `IMPORT_REPLACE_GUARD` (on), `IMPORT_REPLACE_GUARD_MIN_LIVE`
+    (1000), `IMPORT_REPLACE_GUARD_DELETE_FRACTION` and `IMPORT_REPLACE_GUARD_CREATE_FRACTION` (0.5),
+    `IMPORT_REPLACE_MIN_MATCH_FRACTION` (0.05); Helm `config.imports`.
 - **Every refused import row carries a code** beside its reasons, in the preview and the dry run:
   `no_key`, `two_entities`, `duplicate_value`, `changed_since_export`, `named_already`,
   `invalid_type`, `missing_type`, `end_not_found`, `edge_moved`, `write_refused`, `invalid_row`
@@ -254,6 +267,11 @@ integration's many small changes as a few commits.
     field or qualifiedName) is refused with `no_key`, and so is an edge to it. Give such rows a urn.
   - An imported node's urn is the one its file gave, not the derived id. A client that read a
     node's urn as its id should read its `entity_id`.
+- **The replace guard is on.** A recurring replace that deletes and re-creates most of its scope
+  each run now fails instead. Fix the file's keys (or `identifier`), or send `allowMassDelete=true`
+  for a run that really replaces everything. `IMPORT_REPLACE_GUARD=0` turns it off. Migration
+  `20261112_1400_gv_job_mass_delete` adds `jobs.allow_mass_delete` (nullable, no rewrite); a
+  separate `GRAPHVER_DB_URL` gets it at start-up.
 - Migration `20261112_1300_gv_import_row_code` adds `import_rows.code` (nullable text, no rewrite).
   A separate `GRAPHVER_DB_URL` gets it at start-up.
 - Migration `20261112_1200_gv_ps_rollup_state` adds `projection_state.rollup_state` (nullable

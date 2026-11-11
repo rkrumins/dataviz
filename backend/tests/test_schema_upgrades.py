@@ -1764,3 +1764,57 @@ async def test_the_import_row_code_migration_round_trips(store):
             await conn.run_sync(run("upgrade"))                     # idempotent
         finally:
             await trans.rollback()
+
+
+# ── jobs.allow_mass_delete (20261112_1400_gv_job_mass_delete) ──
+_JOB_MASS_DELETE = _VERSIONS / "20261112_1400_gv_job_mass_delete.py"
+
+
+def test_a_jobs_mass_delete_allowance_is_declared_and_migrated():
+    assert models.JobORM.__table__.c.allow_mass_delete.nullable
+    migration = _migration(_JOB_MASS_DELETE)
+    assert migration.revision == _JOB_MASS_DELETE.stem and len(migration.revision) <= 32
+    assert migration.down_revision == "20261112_1300_gv_import_row_code"
+
+
+async def _job_columns(conn) -> set:
+    return {r[0] for r in (await conn.execute(text(
+        "SELECT column_name FROM information_schema.columns "
+        "WHERE table_schema = :s AND table_name = 'jobs'"), {"s": models._SCHEMA})).all()}
+
+
+@e2e
+async def test_a_store_alembic_never_reached_gets_the_mass_delete_allowance(store):
+    async with store.connect() as conn:
+        trans = await conn.begin()
+        try:
+            await conn.execute(text(
+                f'ALTER TABLE "{models._SCHEMA}".jobs DROP COLUMN allow_mass_delete'))
+            await conn.run_sync(models._ensure_schema_upgrades)
+            assert "allow_mass_delete" in await _job_columns(conn)
+            await conn.run_sync(models._ensure_schema_upgrades)        # and again: a no-op
+        finally:
+            await trans.rollback()
+
+
+@e2e
+async def test_the_mass_delete_allowance_migration_round_trips(store):
+    migration = _migration(_JOB_MASS_DELETE)
+
+    def run(step):
+        def apply(sync_conn):
+            migration.op = SimpleNamespace(get_bind=lambda: sync_conn,
+                                           execute=lambda sql: sync_conn.execute(text(sql)))
+            getattr(migration, step)()
+        return apply
+
+    async with store.connect() as conn:
+        trans = await conn.begin()
+        try:
+            await conn.run_sync(run("downgrade"))
+            assert "allow_mass_delete" not in await _job_columns(conn)
+            await conn.run_sync(run("upgrade"))
+            assert "allow_mass_delete" in await _job_columns(conn)
+            await conn.run_sync(run("upgrade"))                     # idempotent
+        finally:
+            await trans.rollback()

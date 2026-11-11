@@ -449,6 +449,23 @@ IMPORT_COMMIT_WINDOW: int = int(os.getenv("IMPORT_COMMIT_WINDOW", "10000"))
 # ``entity_id`` (an entity id of the graph, else the urn, the identifier property, a field a type
 # matches imports by, then a unique qualifiedName), or ``urn`` (an entity id, else the urn only).
 IMPORT_IDENTIFIER: str = os.getenv("GRAPHVER_IMPORT_IDENTIFIER", "entity_id")
+# A replace deletes whatever its file leaves out of its scope. One that would delete most of a scope
+# AND make most of it again is what a file whose rows name their entities by another key looks like:
+# its rows match nothing, so the run deletes the scope and makes it anew, every id and its history
+# with it. In a scope of at least IMPORT_REPLACE_GUARD_MIN_LIVE entities, a replace that would delete
+# at least IMPORT_REPLACE_GUARD_DELETE_FRACTION of them and create at least
+# IMPORT_REPLACE_GUARD_CREATE_FRACTION as many is refused before it deletes anything, unless it is
+# sent with allowMassDelete=true. Fractions of the scope's entities, nodes and edges (0.5 = half).
+IMPORT_REPLACE_GUARD: bool = os.getenv("IMPORT_REPLACE_GUARD", "1").lower() not in ("0", "false", "no")
+IMPORT_REPLACE_GUARD_MIN_LIVE: int = int(os.getenv("IMPORT_REPLACE_GUARD_MIN_LIVE", "1000"))
+IMPORT_REPLACE_GUARD_DELETE_FRACTION: float = float(
+    os.getenv("IMPORT_REPLACE_GUARD_DELETE_FRACTION", "0.5"))
+IMPORT_REPLACE_GUARD_CREATE_FRACTION: float = float(
+    os.getenv("IMPORT_REPLACE_GUARD_CREATE_FRACTION", "0.5"))
+# And earlier: a replace whose first full node window finds an entity for fewer than this fraction of
+# its rows, in a graph of at least IMPORT_REPLACE_GUARD_MIN_LIVE entities, stops there, naming its
+# identifier, rather than read the rest of the file first. 0 turns it off.
+IMPORT_REPLACE_MIN_MATCH_FRACTION: float = float(os.getenv("IMPORT_REPLACE_MIN_MATCH_FRACTION", "0.05"))
 # Rows returned inline in a preview before the full diff must be downloaded.
 PREVIEW_SAMPLE_LIMIT: int = int(os.getenv("IMPORT_PREVIEW_SAMPLE_LIMIT", "200"))
 # Two-tier threshold: imports at/below this stage client-side (existing Review & Save); above

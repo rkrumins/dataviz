@@ -727,6 +727,11 @@ Drafts and commits, projection into the graph store, and import and export.
 | `IMPORT_COMMIT_WINDOW` | `10000` | `backend/app/services/versioning/config.py` |
 | `IMPORT_MAX_ROWS` | `0` | `backend/app/services/versioning/config.py` |
 | `IMPORT_PREVIEW_SAMPLE_LIMIT` | `200` | `backend/app/services/versioning/config.py` |
+| `IMPORT_REPLACE_GUARD` | `1` | `backend/app/services/versioning/config.py` |
+| `IMPORT_REPLACE_GUARD_CREATE_FRACTION` | `0.5` | `backend/app/services/versioning/config.py` |
+| `IMPORT_REPLACE_GUARD_DELETE_FRACTION` | `0.5` | `backend/app/services/versioning/config.py` |
+| `IMPORT_REPLACE_GUARD_MIN_LIVE` | `1000` | `backend/app/services/versioning/config.py` |
+| `IMPORT_REPLACE_MIN_MATCH_FRACTION` | `0.05` | `backend/app/services/versioning/config.py` |
 | `IMPORT_STORE_ROOT` | `/tmp/synodic-import-store` | `backend/app/services/versioning/config.py` |
 | `INLINE_IMPORT_MAX` | `5000` | `backend/app/services/versioning/config.py` |
 | `OBJECT_STORE_BACKEND` | `database` | `backend/app/services/versioning/config.py` |

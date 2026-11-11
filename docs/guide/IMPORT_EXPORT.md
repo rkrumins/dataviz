@@ -125,7 +125,7 @@ make it again.
 | Mode | What it does | Use it when |
 | --- | --- | --- |
 | **Add & update** | Creates new items and updates the ones that match. Never deletes anything. | The safe default — you're adding or correcting data. |
-| **Replace (authoritative)** | Treats the file as the *complete* picture of the View you're importing from: its entities missing from the file are deleted. The rest of the data source is untouched. | You're re-uploading a full, canonical export of the View and want it to match exactly. |
+| **Replace (authoritative)** | Treats the file as the *complete* picture of the View you're importing from: its entities missing from the file are deleted. The rest of the data source is untouched. A replace that would delete most of what it covers and create most of it again (a file whose rows don't match the graph's items) is stopped before it deletes anything. | You're re-uploading a full, canonical export of the View and want it to match exactly. |
 
 > **Warning:** Replace mode can delete data. {brand} always shows you the exact
 > count before you publish, but double-check your file is complete before

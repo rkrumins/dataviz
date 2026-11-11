@@ -32,7 +32,8 @@ from . import contract, stream
 from . import identifier as identifiers
 from .export_worker import ExportWorker, example_template_records
 from .formats import get_adapter
-from .import_worker import ImportWorker, _normalize_page, _record_pages, lease_job
+from .import_worker import (IdentifierMatchedNothing, ImportWorker, ReplaceBlocked, _normalize_page,
+                            _record_pages, lease_job)
 from .resolve import _ALREADY_GONE, _STATUS
 from .rowmodel import column_order
 from .runner import INSPECT_TYPES, JOB_TYPES, QUEUED, JobReaper
@@ -155,6 +156,7 @@ class ImportExportService:
         originating_view_id: Optional[str] = None,
         draft_visibility: Optional[str] = None,
         identifier: Optional[str] = None,
+        allow_mass_delete: bool = False,
     ) -> Dict[str, str]:
         """Open/append the working draft and create the import job.
 
@@ -211,6 +213,7 @@ class ImportExportService:
                     field_scope=field_scope, auto_publish=auto_publish,
                     source_uri=uri, idempotency_key=idempotency_key, status="pending",
                     provenance=provenance.snapshot(), identity_strategy=identifier,
+                    allow_mass_delete=bool(allow_mass_delete) or None,
                 )
                 s.add(job)
                 await s.flush()
@@ -376,6 +379,11 @@ class ImportExportService:
                 logger.exception("releasing job %s failed", job_id)
             if isinstance(exc, asyncio.CancelledError):
                 raise
+        except (ReplaceBlocked, IdentifierMatchedNothing) as exc:
+            # Refused by the replace's own checks: nothing deleted, the rows on the draft. The
+            # failure says why (``summary.failure.code``) and what to do (``action``).
+            logger.warning("import job %s stopped: %s", job_id, exc)
+            await lease.fail(str(exc), exc.code, exc.action)
         except Exception as exc:
             logger.exception("job %s failed", job_id)
             if is_transient(exc):          # an outage that outlasted the retry budget: resumable
@@ -1070,6 +1078,8 @@ class ImportExportService:
                 "reconcileMode": row.reconcile_mode, "importFormat": row.import_format,
                 # What an import's rows find their entities by (identifier.py); None for others.
                 "identifier": row.identity_strategy if row.job_type == "ingest" else None,
+                # A replace sent with allowMassDelete: it deletes past the replace guard's limits.
+                "allowMassDelete": bool(row.allow_mass_delete),
                 "sourceUri": row.source_uri, "previewUri": row.preview_uri,
                 "reportUri": row.report_uri, "resultUri": row.result_uri,
                 "summary": row.summary, "errorMessage": row.error_message,

@@ -213,6 +213,12 @@ change. A file's keys find those ids:
   run nightly writes only that day's changes.
 - **A replace deletes nothing while any row is refused,** since the refused row might name what it
   means to keep. The job fails, and the file's other rows stay on its draft.
+- **A replace that would delete most of the graph and make most of it again is refused** before it
+  deletes anything: that is what a file whose rows name their entities by another key looks like.
+  The job fails with `summary.failure.code` `mass_delete_blocked`, and `summary.replaceGuard` says
+  how many it would delete and create and the limits in force (the operator's). Check
+  `identifier`; send `allowMassDelete=true` only when the file really replaces the graph. A
+  replace whose first rows find almost nothing stops early, with `identifier_matched_nothing`.
 - **A row without `baseVersion` sets what it carries.** A connector's own rows are the source's
   truth: if two runs write one field, the later wins.
 - **A row an export wrote carries `baseVersion`,** and is merged with what changed since: only the

@@ -201,6 +201,36 @@ def _chunks(seq: List[Any], size: int):
         yield seq[i:i + size]
 
 
+class ReplaceBlocked(Exception):
+    """A replace that would delete most of its scope and make most of it again, refused before it
+    deletes anything. The job's ``summary.replaceGuard`` says what it would have done, and the limits
+    in force."""
+    code, action = "mass_delete_blocked", "allow_mass_delete"
+
+
+class IdentifierMatchedNothing(Exception):
+    """A replace whose first full node window found an entity for almost none of its rows: by its
+    identifier, the file very likely names its entities by another key. Stopped there."""
+    code, action = "identifier_matched_nothing", "identifier"
+
+
+def replace_verdict(live: int, deletes: int, creates: int, *, allowed: bool) -> Dict[str, Any]:
+    """The replace guard (``IMPORT_REPLACE_GUARD``) on a scope of ``live`` entities, before the
+    import, from which a replace would delete ``deletes`` and into which it made ``creates``:
+    ``state`` ``off`` (the guard is off), ``passed``, ``overridden`` (past the limits, and sent with
+    allowMassDelete) or ``blocked``, with the counts and the limits in force."""
+    limits = {"minLive": config.IMPORT_REPLACE_GUARD_MIN_LIVE,
+              "deleteFraction": config.IMPORT_REPLACE_GUARD_DELETE_FRACTION,
+              "createFraction": config.IMPORT_REPLACE_GUARD_CREATE_FRACTION}
+    past = (live > 0 and live >= limits["minLive"]
+            and deletes >= limits["deleteFraction"] * live
+            and creates >= limits["createFraction"] * live)
+    state = ("off" if not config.IMPORT_REPLACE_GUARD else "passed" if not past
+             else "overridden" if allowed else "blocked")
+    return {"state": state, "live": live, "deletes": deletes, "creates": creates,
+            "limits": limits, "source": "platform"}
+
+
 def _first_layer_id(layers: List[dict]) -> str:
     """The view's first layer (order 0). Stable sort keeps list order on ties / missing order."""
     return sorted(
@@ -372,6 +402,9 @@ class ImportWorker:
         self._identity_read = False
         # What the job's rows find their entities by (identifier.py): the job's, once it is read.
         self._identifier: str = identifiers.platform_default()
+        # The job's reconcile mode, and whether a replace may delete past the replace guard.
+        self._reconcile_mode = "upsert"
+        self._allow_mass_delete = False
         # Reconciling in memory: the file (read again for the edges), and per pass ("node",
         # "edge") what its rows have named — only for a pass this run started — whether it is still
         # deciding, and how many rows it decided and found unchanged.
@@ -388,6 +421,8 @@ class ImportWorker:
         job = await self._job(job_id)
         graph_id, branch_id = job["graph_id"], job["branch_id"]
         self._identifier = job.get("identifier") or identifiers.platform_default()
+        self._reconcile_mode = job.get("reconcile_mode") or "upsert"
+        self._allow_mass_delete = bool(job.get("allow_mass_delete"))
         actor = await self._branch_owner(graph_id, branch_id)
         self._source = (job["source_uri"], job["import_format"])
 
@@ -397,7 +432,11 @@ class ImportWorker:
             job_id, graph_id, branch_id, actor, job.get("reconcile_mode") or "upsert")
         if self._facts:
             await self._derive_facts(job_id, graph_id, branch_id)
-        if not await self._lease.finish("completed", summary=summary, progress=100):
+        # A replace keeps the replace guard's verdict beside its tallies.
+        guard = ((await self._position(job_id)).summary.get("replaceGuard")
+                 if self._reconcile_mode == "replace" else None)
+        if not await self._lease.finish("completed", progress=100,
+                                        summary={**summary, "replaceGuard": guard} if guard else summary):
             raise Superseded(f"import job {job_id} (epoch {self._lease.epoch}) was taken over "
                              "before it could finish")
         return summary
@@ -410,7 +449,8 @@ class ImportWorker:
                 raise ValueError(f"unknown import job {job_id}")
             return {"graph_id": row.graph_id, "branch_id": row.branch_id,
                     "source_uri": row.source_uri, "import_format": row.import_format,
-                    "reconcile_mode": row.reconcile_mode, "identifier": row.identity_strategy}
+                    "reconcile_mode": row.reconcile_mode, "identifier": row.identity_strategy,
+                    "allow_mass_delete": row.allow_mass_delete}
 
     async def _position(self, job_id: str) -> _Position:
         """Where the job has got, read afresh by every unit of work: a unit retried after a fault
@@ -738,6 +778,9 @@ class ImportWorker:
                     "replace deletes whatever the file leaves out — which would include what those "
                     "rows name. The file's other rows are on the draft. Fix those rows and import "
                     "the file again.")
+            if (await self._position(job_id)).cursor != "replace":       # not deleting yet
+                await self._lease.retry_transient(
+                    lambda: self._guard_replace(job_id, snap, graph_id), never=(ReplaceBlocked,))
             await self._lease.retry_transient(
                 lambda: self._delete_absent(job_id, snap, graph_id, branch_id, actor))
         summary = (await self._position(job_id)).summary
@@ -789,7 +832,81 @@ class ImportWorker:
         await self._apply_window(graph_id, branch_id, actor, ops, resolutions, on_commit)
         if kind == "node":
             self._remember_created(rows, ops, resolutions)
+            if pos.cursor in ("node:-1", "mnode:-1") and len(rows) == config.IMPORT_COMMIT_WINDOW:
+                await self._fail_fast(job_id, graph_id)
         return True
+
+    async def _fail_fast(self, job_id: str, graph_id: str) -> None:
+        """After a replace's first full node window: stop (:class:`IdentifierMatchedNothing`) when
+        fewer than ``IMPORT_REPLACE_MIN_MATCH_FRACTION`` of the rows decided so far found an
+        entity, in a graph of at least ``IMPORT_REPLACE_GUARD_MIN_LIVE``, rather than read the rest
+        of the file and have the replace guard refuse it at the end. A replace of a view's scope is
+        left to the guard: its scope isn't the graph."""
+        if (self._reconcile_mode != "replace" or self._scope is not None
+                or config.IMPORT_REPLACE_MIN_MATCH_FRACTION <= 0):
+            return
+        tally = (await self._position(job_id)).summary
+        matched = sum(int(tally.get(k) or 0) for k in ("updated", "unchanged", "deleted"))
+        decided = matched + int(tally.get("new") or 0) + int(tally.get("invalid") or 0)
+        if not decided or matched >= config.IMPORT_REPLACE_MIN_MATCH_FRACTION * decided:
+            return
+        main_id = await self._svc.main_branch_id(graph_id)
+        async with db.graphver_session() as s:
+            live = await self._svc._main_live_count(s, graph_id, main_id)
+        if live < config.IMPORT_REPLACE_GUARD_MIN_LIVE:
+            return
+        raise IdentifierMatchedNothing(
+            f"Stopped after the file's first {decided:,} rows: by identifier={self._identifier}, "
+            f"only {matched:,} of them found an entity, in a graph of {live:,}. The rest would very "
+            "likely make the graph again, and the replace delete it. Check what the file's rows name "
+            "their entities by: identifier=entity_id finds a row's entity id, then its urn, its "
+            "identifier value or a field its type matches imports by; identifier=urn, its entity id "
+            "or its urn. Nothing was deleted; the rows read so far are on the draft.")
+
+    async def _guard_replace(self, job_id: str, snap, graph_id: str) -> None:
+        """Before a replace deletes anything: count what it would delete and what it made, record the
+        verdict on the job's summary (``replaceGuard``, :func:`replace_verdict`), and refuse
+        (:class:`ReplaceBlocked`) past the guard's limits unless the job allows it. Nothing is
+        deleted then, and the file's rows stay on the draft for review.
+
+        A whole graph's replace is measured against main: what main holds, and what the draft holds
+        beyond it — so a file imported again into the draft an earlier import made it in is judged
+        on what the draft would publish, not only on what this run added. A view's, on what this
+        run made."""
+        keep = (await view_entities(snap, self._scope))["keep"] if self._scope else None
+        live = absent = 0
+        for kind in ("edge", "node"):
+            async for page in _in_scope(snap, kind, keep):
+                live += len(page)
+                absent += len(await self._unmatched(job_id, page))
+        pos = await self._position(job_id)
+        made = int(pos.summary.get("new") or 0)
+        if keep is None:
+            main_id = await self._svc.main_branch_id(graph_id)
+            async with db.graphver_session() as s:
+                before = await self._svc._main_live_count(s, graph_id, main_id)
+            creates = max(live - before, made)
+        else:
+            before, creates = max(live - made, 0), made
+        verdict = replace_verdict(before, absent, creates, allowed=self._allow_mass_delete)
+        async with db.graphver_session() as s:
+            await self._lease.checkpoint(s, summary={**pos.summary, "replaceGuard": verdict})
+        if verdict["state"] == "overridden":
+            logger.warning("import job %s deletes %d of %d entities and made %d, past the replace "
+                           "guard, as allowMassDelete asked", job_id, absent, verdict["live"], creates)
+        if verdict["state"] != "blocked":
+            return
+        limits = verdict["limits"]
+        raise ReplaceBlocked(
+            f"Nothing was deleted: this replace would delete {absent:,} of the {verdict['live']:,} "
+            f"entities in its scope, and its draft makes {creates:,} new ones: past the replace "
+            "guard, which refuses one "
+            f"that deletes at least {limits['deleteFraction']:.0%} of a scope of "
+            f"{limits['minLive']:,} or more and creates at least {limits['createFraction']:.0%} as "
+            "many. That is what a file whose rows name their entities by another key looks like: "
+            f"check the import's identifier (identifier={self._identifier}). The file's rows are on "
+            "the draft for review. To delete what it leaves out all the same, import it again with "
+            "allowMassDelete=true.")
 
     def resolve(self, rows, lookups) -> Tuple[List[dict], List[dict]]:
         """:func:`resolve_rows` as this job resolves a batch: by its identifier, through its

@@ -137,6 +137,19 @@ config:
     # failed import, and to see a finished one's row preview. The sweep runs
     # hourly, so they go within the hour after. "1" keeps them a day.
     stagingGcDays: "3"
+  # Replace imports. A replace deletes whatever its file leaves out of its scope; one that would
+  # delete at least replaceGuardDeleteFraction of a scope of replaceGuardMinLive entities or more
+  # AND create at least replaceGuardCreateFraction as many — a file whose rows name their entities
+  # by another key — is refused before it deletes anything, unless sent with allowMassDelete=true.
+  # A replace whose first full window finds an entity for fewer than replaceMinMatchFraction of its
+  # rows stops there. Fractions of the scope's entities (0.5 = half); replaceGuard "0" turns the
+  # guard off, replaceMinMatchFraction "0" the early stop.
+  imports:
+    replaceGuard: "1"
+    replaceGuardMinLive: "1000"
+    replaceGuardDeleteFraction: "0.5"
+    replaceGuardCreateFraction: "0.5"
+    replaceMinMatchFraction: "0.05"
 
 # ── Secrets ───────────────────────────────────────────────────────────
 # create=true renders a Secret from the values below. For production prefer
