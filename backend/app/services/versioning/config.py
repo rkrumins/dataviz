@@ -121,6 +121,11 @@ POOL_TIMEOUT_SECS: int = int(os.getenv("GRAPHVER_POOL_TIMEOUT_SECS", "10"))
 # Bulk ingest / projection batch sizes (rows per COPY / UNWIND chunk).
 INGEST_BATCH_SIZE: int = int(os.getenv("GRAPHVER_INGEST_BATCH_SIZE", "5000"))
 PROJECTION_BATCH_SIZE: int = int(os.getenv("GRAPHVER_PROJECTION_BATCH_SIZE", "5000"))
+# A projector statement that times out (or meets the memory ceiling) is split in half and the halves
+# sent again, down to one row; this many retries at one row, backing off 2 s, 4 s, 8 s (plus jitter)
+# between them, before the row is given up on. The width that worked is kept per graph and statement
+# kind, and grows back by a quarter after eight quick statements, never past PROJECTION_BATCH_SIZE.
+PROJECTION_FLOOR_RETRIES: int = int(os.getenv("GRAPHVER_PROJECTION_FLOOR_RETRIES", "3"))
 
 # Projection worker: poll cadence for the reconciling loop, read freshness
 # tolerance (a read serves from FalkorDB while projected >= committed - lag),

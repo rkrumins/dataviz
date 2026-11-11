@@ -17,10 +17,7 @@ import pytest
 
 from backend.app.services.versioning import db, models
 from backend.app.services.versioning.models import ProjectionStateORM
-from backend.app.services.versioning.projection import (
-    FalkorProjector,
-    _DELETE_EDGES_FALLBACK,
-)
+from backend.app.services.versioning.projection import FalkorProjector
 from backend.app.services.versioning.reconcile import (
     _SCAN_EDGES,
     _SCAN_NODES,
@@ -155,6 +152,14 @@ class FakeGraph:
             for eid in [k for k in self.edges if self._rel_id(k) in params["ids"]]:
                 self.edges.pop(eid, None)
             return None
+        # The same, matched from the source by urn (``_reconcile_streamed``).
+        if cypher.startswith("UNWIND $batch AS it MATCH (a:") and cypher.endswith(
+                "WHERE id(r) = it.rid DELETE r"):
+            for it in params["batch"]:
+                for eid in [k for k, e in self.edges.items() if self._rel_id(k) == it["rid"]
+                            and e["src"] == it["src"] and e["tgt"] == it["tgt"]]:
+                    self.edges.pop(eid, None)
+            return None
         if cypher == "UNWIND $ids AS i MATCH (n) WHERE id(n) = i DETACH DELETE n":
             for u in [u for u in self.nodes if self._id_of(u) in params["ids"]]:
                 self._drop_node(u)
@@ -234,11 +239,6 @@ class FakeGraph:
         if "DELETE r" in cypher and "$batch" in cypher and "{id: item.eid}" in cypher:
             for it in params["batch"]:
                 self.edges.pop(it["eid"], None)
-            return None
-        # Legacy fallback edge delete: UNWIND $ids AS i MATCH ()-[r {id: i}]->() DELETE r
-        if cypher == _DELETE_EDGES_FALLBACK:
-            for i in params["ids"]:
-                self.edges.pop(i, None)
             return None
         # Node delete by (label, urn): UNWIND $urns AS u MATCH (n:{label} {urn: u}) DETACH DELETE n
         if cypher.startswith("UNWIND $urns AS u MATCH (n:") and "DETACH DELETE n" in cypher:

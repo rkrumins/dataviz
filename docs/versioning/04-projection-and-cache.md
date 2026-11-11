@@ -61,12 +61,19 @@ through the projector automatically.
   `:965`, fork-aware) — so every endpoint lookup is a per-label URN **index seek** instead of the
   pre-2026-07 unlabeled full-node-scan-per-row; then sets `id`, `confidence`, and a JSON-stringified
   `properties`.
-- **Deletes** are label-anchored too: `_delete_nodes_cypher` (label + urn, `DETACH DELETE`,
-  `projection.py:105`), `_delete_edges_cypher` (typed + endpoint-anchored, `r.id` matched inside the
-  `(a)->(b)` adjacency, `:109`; ids whose before-state can't be resolved fall back to the legacy
-  per-id scan `_DELETE_EDGES_FALLBACK`, `:123`, WARN-logged), and a heal-only
-  `_delete_nodes_by_pair_cypher` that matches by (label, indexed `urn`) **and confirms `entityId`**
-  so a reused urn is never wrongly deleted (`:127`).
+- **Deletes** are label-anchored too, and none scans the graph:
+  - `_delete_nodes_cypher`: label + urn, `DETACH DELETE`.
+  - `_delete_edges_cypher`: typed + endpoint-anchored, with `r.id` matched inside the `(a)->(b)`
+    adjacency.
+    - A deleted edge is deleted at every position it may hold: where it was before the window, and
+      wherever the window put it (`_edge_positions`, version columns only). That covers an edge
+      created and deleted in one window after a failed attempt wrote it.
+    - An id with no position was never written, so nothing is deleted for it. The per-id scan of
+      every relationship (`MATCH ()-[r {id: i}]->()`) is gone.
+  - `_delete_nodes_by_pair_cypher`, heal only: matches by (label, indexed `urn`) **and confirms
+    `entityId`**, so a reused urn is never wrongly deleted.
+  - A rebuild deletes a relationship by its internal id from its source node, matched by urn
+    (`_reconcile_streamed`), not by scanning every relationship.
 - **Every projector query carries a server-side budget** via `_q` (`projection.py:69`):
   `PROJECTION_FALKOR_WRITE_TIMEOUT_S` (default 60, clamped under the fleet's `TIMEOUT_MAX`) /
   `PROJECTION_FALKOR_READ_TIMEOUT_S` (default 30), plus a client-side hang net. Without an explicit
@@ -132,11 +139,32 @@ A projection pass takes one of two paths:
   edge_upserts, node_deletes, edge_deletes)`; last op per entity wins; `delete` → a delete list,
   else an upsert.
 
-`_apply` (`projection.py:1217`) writes in a fixed order — nodes-in (grouped by label), edges-in
-(grouped by **(type, srcLabel, tgtLabel)** so the endpoint MATCH stays index-eligible), edges-out
-(typed + anchored via `_run_edge_deletes`, `:1258`), nodes-out (grouped by label) — each chunked by
-`PROJECTION_BATCH_SIZE` (default 5000, `config.py:110`), firing the optional progress callback per
-chunk.
+`_apply` writes in a fixed order: nodes-in (grouped by label), edges-in (grouped by **(type,
+srcLabel, tgtLabel)** so the endpoint MATCH stays index-eligible), edges-out (typed + anchored via
+`_run_edge_deletes`), nodes-out (grouped by label).
+
+**Every chunked statement fits its budget (the statement ladder, `_laddered`).** A FalkorDB write
+is clamped to a share of the cluster's failure detector (`clamp_write_budget`: 6 s at a 15 s
+`cluster-node-timeout`). One statement past it used to fail the pass, and the window was replayed
+whole every retry, growing as commits landed. Now every chunked projector statement goes through
+the ladder: node and edge merges, the removed-property read, deletes, relabels, fingerprint reads,
+rollup cells, the tombstone sweep, and the rebuild's deletes.
+- **Chunk width.** Rows go out at a width kept per graph and statement kind, starting at
+  `PROJECTION_BATCH_SIZE` (5000).
+- **On a timeout or memory refusal,** the chunk is split in half and the halves sent again. A
+  connection failure is raised at once, so the pass backs off.
+- **Sizing (AIMD).** A chunk that failed, or used more than half its budget, halves the width.
+  Eight quick chunks in a row grow it by a quarter, but not back to a size that failed until 64
+  quick chunks in a row. So a graph whose statements fit 700 rows settles just under 700.
+- **One row that still fails** is retried `GRAPHVER_PROJECTION_FLOOR_RETRIES` times (3), after 2 s,
+  4 s and 8 s plus jitter, then given up on, failing the pass. A node delete gets one more try
+  first: a hub, whose `DETACH DELETE` must drop every relationship at once, has its relationships
+  deleted 10,000 at a time (halved on a timeout), then the node.
+- **Why sending again is safe.** FalkorDB rolls back a statement it aborts, and every projector
+  write is an idempotent `MERGE`, `SET` or `DELETE`. A rollup write sets the absolute weight it
+  computed.
+- **Reporting.** Each pass logs one line: its statements, rows, slowest statement, splits and
+  narrowest width. A pass that wrote returns them as `stats`.
 
 > **Limitation (full-replay memory).** A full replay no longer composes the live state, but its diff
 > still holds whole-graph maps of small tuples **in memory**, `O(N + E)` — narrow ids, not payloads —
@@ -593,7 +621,8 @@ boot via `XAUTOCLAIM`. `_project_one` (`worker.py:65`) serializes per-graph via 
 
 | Knob | Default | Meaning |
 |---|---|---|
-| `GRAPHVER_PROJECTION_BATCH_SIZE` | 5000 | Rows per MERGE/DELETE chunk (`config.py:110`). |
+| `GRAPHVER_PROJECTION_BATCH_SIZE` | 5000 | Rows per MERGE/DELETE chunk at most; the statement ladder narrows it per graph and statement kind (§3). |
+| `GRAPHVER_PROJECTION_FLOOR_RETRIES` | 3 | Retries of a one-row statement that still times out, backing off 2 s, 4 s, 8 s (§3). |
 | `GRAPHVER_PROJECTION_POLL_SECS` | 5 | Reconciling poll cadence (`config.py:115`). |
 | `GRAPHVER_PROJECTION_CONCURRENCY` | 8 | Max graphs projected per pass (`config.py:118`). |
 | `GRAPHVER_READ_MAX_LAG` | 0 | Neighbors-endpoint staleness tolerance (`config.py:119`; see §5 callout). |

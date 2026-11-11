@@ -138,6 +138,21 @@ integration's many small changes as a few commits.
 - **`POST …/imports` no longer holds a database connection while its file arrives.** Its checks
   (the draft policy, the view) left their transaction open until the response, so every large
   file sent whole would have held one of the pool's connections for as long as it took to arrive.
+- **A projection no longer stays "projecting" because FalkorDB timed out.** One statement past
+  FalkorDB's write budget (6 s on a cluster with a 15 s node timeout) failed the whole pass. The
+  window was replayed whole on every retry, and grew as commits landed, so a publish or import into
+  a large graph could leave reads on Postgres until someone rebuilt the fast read layer.
+  - Every chunked projector statement now splits in half on a timeout or memory refusal and sends
+    the halves again, down to one row.
+  - The width that worked is kept for the graph, and grows back slowly.
+  - A hub node is deleted after its relationships, 10,000 at a time.
+  - Each pass logs what its statements took.
+- **No projector delete scans every relationship in the graph.**
+  - An edge deleted in a publish is deleted, anchored on its ends, at every position it held:
+    before the window, and wherever the window put it. That includes an edge created and deleted
+    in one window after an earlier attempt wrote it.
+  - The old fallback, which matched every relationship by id, is gone. A rebuild's deletes start
+    from the relationship's source node.
 
 ### Upgrading
 

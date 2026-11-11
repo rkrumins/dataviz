@@ -52,7 +52,7 @@ class _Versioning:
     async def get_graph(self, graph_id):
         return {"graph_id": graph_id, "workspace_id": "ws1", "data_source_id": "ds1", "provider_id": None}
 
-    async def assert_branch_readable(self, *, graph_id, branch_id, viewer):
+    async def assert_branch_readable(self, *, graph_id, branch_id, viewer, changes=False):
         if branch_id == "br_private":
             raise AccessDenied(f"{viewer.actor} cannot view branch {branch_id}")
 
