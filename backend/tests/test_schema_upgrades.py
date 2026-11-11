@@ -1552,3 +1552,62 @@ async def test_the_residency_migration_round_trips(store):
             await conn.run_sync(run("upgrade"))                     # idempotent
         finally:
             await trans.rollback()
+
+
+# ── projection_quarantine and projection_state.quarantine_next_at (20261112_1000_gv_proj_quarantine) ──
+_PS_QUARANTINE = _VERSIONS / "20261112_1000_gv_proj_quarantine.py"
+
+
+def test_the_quarantine_is_declared_and_migrated():
+    assert models.ProjectionStateORM.__table__.c.quarantine_next_at.nullable
+    assert {c.name for c in models.ProjectionQuarantineORM.__table__.primary_key} == {
+        "graph_id", "statement", "entity_key"}
+    migration = _migration(_PS_QUARANTINE)
+    assert migration.revision == _PS_QUARANTINE.stem and len(migration.revision) <= 32
+    assert migration.down_revision == "20261111_1000_gv_draft_prune"
+
+
+async def _has_quarantine_table(conn) -> bool:
+    return bool((await conn.execute(text(
+        "SELECT 1 FROM information_schema.tables "
+        "WHERE table_schema = :s AND table_name = 'projection_quarantine'"),
+        {"s": models._SCHEMA})).first())
+
+
+@e2e
+async def test_a_store_alembic_never_reached_gets_the_quarantine(store):
+    async with store.connect() as conn:
+        trans = await conn.begin()
+        try:
+            await conn.execute(text(
+                f'ALTER TABLE "{models._SCHEMA}".projection_state DROP COLUMN quarantine_next_at'))
+            await conn.run_sync(models._ensure_schema_upgrades)
+            assert "quarantine_next_at" in await _ps_columns(conn)
+            await conn.run_sync(models._ensure_schema_upgrades)        # and again: a no-op
+        finally:
+            await trans.rollback()
+
+
+@e2e
+async def test_the_quarantine_migration_round_trips(store):
+    migration = _migration(_PS_QUARANTINE)
+
+    def run(step):
+        def apply(sync_conn):
+            migration.op = SimpleNamespace(get_bind=lambda: sync_conn,
+                                           execute=lambda sql: sync_conn.execute(text(sql)))
+            getattr(migration, step)()
+        return apply
+
+    async with store.connect() as conn:
+        trans = await conn.begin()
+        try:
+            await conn.run_sync(run("downgrade"))
+            assert "quarantine_next_at" not in await _ps_columns(conn)
+            assert not await _has_quarantine_table(conn)
+            await conn.run_sync(run("upgrade"))
+            assert "quarantine_next_at" in await _ps_columns(conn)
+            assert await _has_quarantine_table(conn)
+            await conn.run_sync(run("upgrade"))                     # idempotent
+        finally:
+            await trans.rollback()

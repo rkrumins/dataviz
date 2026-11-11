@@ -466,6 +466,7 @@ class PurgeRunner:
                 f'DELETE FROM "{sch}"."merge_requests" WHERE graph_id = :g',
                 f'DELETE FROM "{sch}"."branches" WHERE graph_id = :g',
                 f'DELETE FROM "{sch}"."projection_state" WHERE graph_id = :g',
+                f'DELETE FROM "{sch}"."projection_quarantine" WHERE graph_id = :g',
                 # Every job for this graph EXCEPT this one. The purge's own row survives as the
                 # receipt: what was deleted, when, by whom, and what we refused to touch.
                 f'DELETE FROM "{sch}"."jobs" WHERE graph_id = :g AND id <> :j',

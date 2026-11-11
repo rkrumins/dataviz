@@ -223,6 +223,9 @@ export interface Watermark {
   /** What the customer's own graph holds that history doesn't (another writer kept writing to it),
    *  kept, not deleted; null when there is none. Brought in with {@link bringIntoHistory}. */
   externalDrift?: ExternalDrift | null
+  /** Entities a projection pass could not write, even one at a time after its retries: held so
+   *  the rest published, and retried every few minutes. Null when there are none. */
+  quarantine?: ProjectionQuarantine | null
   /** Residency (doc 17): the class a system administrator set (null on a fork, which has none),
    *  and whether the key is in FalkorDB — a fork's root's, for a fork — `rehydrating`: being
    *  loaded, `waiting_capacity`: its master has no room for it yet. */
@@ -242,6 +245,20 @@ export interface ExternalDrift {
   nodes?: number | null
   edges?: number | null
   via?: 'verify' | 'notification'
+}
+
+/** What a graph's projection holds back: how many entities, and the oldest 20 with why. */
+export interface ProjectionQuarantine {
+  count: number
+  entities: {
+    statement: string
+    entityKind: 'node' | 'edge'
+    entityKey: string
+    error?: string | null
+    attempts: number
+    firstAt: string
+    lastAt: string
+  }[]
 }
 
 /** Result of kicking a full rebuild of the fast read layer. `alreadyRunning` ⇒ a

@@ -15,6 +15,14 @@ Pins:
   further than its limit.
 - A verify that cannot count publishes, but answers ``unverified`` and is not taken as a clean
   one, so the next pass verifies again.
+- A node whose urn changes moves to the new urn in place, with its edges, and the pass publishes:
+  nothing is left under the old urn for the verify to hold it back for.
+- The tombstone sweep clears a node main deleted that the cache still holds, and records how far
+  it swept (``sweptSeq``), so the next sweep reads only later deletes.
+- An entity whose every statement times out, even alone, is quarantined: the rest of its window
+  lands and publishes, unverified, and the watermark lists it. Once the fault clears, the caught-up
+  graph gets a pass of its own when the entity is due, which lands it and verifies again. With
+  ``GRAPHVER_PROJECTION_QUARANTINE`` off, it fails the pass, as before.
 """
 from __future__ import annotations
 
@@ -174,6 +182,97 @@ async def _backoff_and_honest_verify(svc):
     await _assert_matches_main(svc, fake, gid)
 
 
+async def _urn_change_and_sweep(svc):
+    fake = TimeoutFalkor()
+    proj = FalkorProjector(graph_client_factory=fake, batch_size=500)
+    gid = await _graph(svc)
+    await _edit_publish(svc, gid, "alice", [
+        _create("A", "a"), _create("B", "b"), _create("C", "c"),
+        _link("AB", "A", "B"), _link("CA", "C", "A")], "seed")
+    assert (await proj.project_graph(gid))["verify_error"] is None
+    g = fake.graphs[next(iter(fake.graphs))]
+
+    # A's urn changes: its node moves to the new urn with both its edges, and nothing is left
+    # under the old one for the verify to hold the pass back for.
+    await _edit_publish(svc, gid, "alice", [
+        {"op": "update", "entity_kind": "node", "entity_id": "A",
+         "payload": {"urn": "urn:t:A2"}}], "re-key A")
+    proj._verified_at.clear()
+    r = await proj.project_graph(gid)
+    assert r["verify_error"] is None and not r["noop"], r
+    assert "urn:t:A" not in g.nodes and g.nodes["urn:t:A2"]["entityId"] == "A"
+    assert {(e["src"], e["tgt"]) for e in g.edges.values()} == {
+        ("urn:t:A2", "urn:t:B"), ("urn:t:C", "urn:t:A2")}
+    await _assert_matches_main(svc, fake, gid)
+
+    # A node main deleted that the cache still holds is swept, and the sweep records how far it
+    # has swept, so the next one reads only the deletes after it.
+    await _edit_publish(svc, gid, "alice", [
+        {"op": "delete", "entity_kind": "node", "entity_id": "B", "payload": None}], "drop B")
+    assert (await proj.project_graph(gid))["verify_error"] is None
+    g.nodes["urn:t:B"] = {"urn": "urn:t:B", "entityId": "B", "_label": "Dataset"}   # stranded
+    g._id_of("urn:t:B")
+    await _edit_publish(svc, gid, "alice", [_create("D", "d")], "one more")
+    proj._verified_at.clear()
+    r = await proj.project_graph(gid)
+    assert r["verify_error"] is None, r
+    assert "urn:t:B" not in g.nodes
+    assert g.swept_seq == r["projected"]
+    await _assert_matches_main(svc, fake, gid)
+
+
+async def _quarantine(svc, monkeypatch):
+    from sqlalchemy import select, update
+
+    from backend.app.services.versioning import config
+    from backend.app.services.versioning.models import ProjectionQuarantineORM, ProjectionStateORM
+
+    fake = TimeoutFalkor(poison={"urn:t:P"})
+    proj = FalkorProjector(graph_client_factory=fake, batch_size=500)
+    gid = await _graph(svc)
+    await _edit_publish(svc, gid, "alice", [
+        _create("A", "a"), _create("B", "b"), _link("AB", "A", "B")], "seed")
+    assert (await proj.project_graph(gid))["verify_error"] is None
+    g = fake.graphs[next(iter(fake.graphs))]
+
+    # P's every statement times out, however small: it is held, and the rest of the window lands.
+    await _edit_publish(svc, gid, "alice", [
+        _create("P", "p"), _create("C", "c"), _link("PC", "P", "C"), _link("AC", "A", "C")],
+        "with a poison entity")
+    r = await proj.project_graph(gid)
+    assert r["verify_error"] is None and r["unverified"] and r["quarantined"] == 2, r
+    assert await _watermark(gid) == r["projected"]
+    assert "urn:t:C" in g.nodes and "urn:t:P" not in g.nodes
+    async with db.graphver_session() as s:
+        held = {(q.statement, q.entity_key) for q in (await s.execute(
+            select(ProjectionQuarantineORM).where(ProjectionQuarantineORM.graph_id == gid))).scalars()}
+    assert held == {("node_merge", "urn:t:P"), ("edge_merge", "PC")}, held
+    wm = await svc.projection_watermark(gid)
+    assert wm["quarantine"]["count"] == 2 and wm["quarantine"]["entities"][0]["error"]
+
+    # The fault clears: a caught-up graph's held entities get a pass of their own once due.
+    g.poison.clear()
+    assert (await proj.project_graph(gid))["noop"], "not due yet"
+    async with db.graphver_session() as s:
+        due = (await s.get(ProjectionStateORM, gid)).quarantine_next_at
+        assert due and due > "2026", due
+        await s.execute(update(ProjectionStateORM).where(ProjectionStateORM.graph_id == gid)
+                        .values(quarantine_next_at="2000-01-01T00:00:00+00:00"))
+    r = await proj.project_graph(gid)
+    assert r["verify_error"] is None and not r.get("quarantined") and not r.get("unverified"), r
+    assert (await svc.projection_watermark(gid))["quarantine"] is None
+    async with db.graphver_session() as s:
+        assert (await s.get(ProjectionStateORM, gid)).quarantine_next_at is None
+    await _assert_matches_main(svc, fake, gid)
+
+    # Off, a stuck entity fails the pass, as before.
+    monkeypatch.setattr(config, "PROJECTION_QUARANTINE", False)
+    g.poison.add("urn:t:Q")
+    await _edit_publish(svc, gid, "alice", [_create("Q", "q")], "another")
+    with pytest.raises(Exception, match="Query timed out"):
+        await proj.project_graph(gid)
+
+
 def test_a_projection_converges_in_one_pass_whatever_its_statements_can_take(monkeypatch):
     async def no_wait(_seconds):
         return None
@@ -189,6 +288,8 @@ def test_a_projection_converges_in_one_pass_whatever_its_statements_can_take(mon
             await _hub(svc)
             await _created_and_deleted_in_one_window(svc)
             await _backoff_and_honest_verify(svc)
+            await _urn_change_and_sweep(svc)
+            await _quarantine(svc, monkeypatch)
         finally:
             await db.dispose_engine()
     asyncio.run(run())

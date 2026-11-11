@@ -4846,6 +4846,23 @@ class GraphVersioningService:
             await self._assert_branch_readable(s, await self._get_branch(s, graph_id, branch_id), viewer)
         return await self.materialize_state(graph_id=graph_id, branch_id=branch_id, as_of_seq=seq)
 
+    @staticmethod
+    async def _projection_quarantine(s, graph_id: str, sample: int = 20) -> Optional[Dict[str, object]]:
+        """The entities a projection pass could not write on their own, held so the rest of its
+        window published (``projection_quarantine``): how many, and the oldest ``sample`` with
+        why. None when there are none."""
+        from .models import ProjectionQuarantineORM as Q
+        count = (await s.execute(select(func.count()).select_from(Q)
+                                 .where(Q.graph_id == graph_id))).scalar_one()
+        if not count:
+            return None
+        rows = (await s.execute(select(Q).where(Q.graph_id == graph_id)
+                                .order_by(Q.first_at).limit(sample))).scalars().all()
+        return {"count": int(count), "entities": [
+            {"statement": r.statement, "entityKind": r.entity_kind, "entityKey": r.entity_key,
+             "error": r.error, "attempts": r.attempts, "firstAt": r.first_at, "lastAt": r.last_at}
+            for r in rows]}
+
     async def projection_watermark(self, graph_id: str) -> Dict[str, object]:
         """Read freshness for a graph's FalkorDB projection — attached to reads so
         a client knows whether it's seeing the latest committed `main`.
@@ -4878,6 +4895,8 @@ class GraphVersioningService:
             graph = await s.get(GraphORM, graph_id)
             ps = await s.get(ProjectionStateORM, graph_id)
             committed = graph.main_head_commit_seq if graph else 0
+            quarantine = (await self._projection_quarantine(s, graph_id)
+                          if getattr(ps, "quarantine_next_at", None) else None)
             projected = ps.projected_commit_seq if ps else 0
             # The revision each side is at — the main commit with that seq (one indexed read). The
             # sync indicators show it, so "version #12" can be matched to a commit in History.
@@ -4934,6 +4953,8 @@ class GraphVersioningService:
                 "retired_keys": list(ps.retired_keys or []) if ps else [],
                 # What a customer's key holds that history doesn't, kept and flagged.
                 "external_drift": ps.external_drift if ps else None,
+                # Entities a pass could not write on their own, held so the rest published.
+                "quarantine": quarantine,
                 # Residency (doc 17): the class a system admin set, whether the key is in
                 # FalkorDB (resident, evicted, rehydrating: being loaded, waiting_capacity: its
                 # master has no room for it yet), why it was evicted, its last read and its size.

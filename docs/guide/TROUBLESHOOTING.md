@@ -131,6 +131,7 @@ reads the latest version of its data. Select it for each step, with times. See
 | **In sync · v12** (or **In sync · read 3m ago**) | Current. | Nothing. |
 | **1 version behind**, **Catching up · 2 versions behind** or **Rebuilding · 40%** | Recent changes are still being written to the graph. | Wait. |
 | **Refresh failed · 2 versions behind** | Writing the latest changes failed; views read from the system of record meanwhile. | Tell someone who manages the data source — they can rebuild it from **Data health**. |
+| **Held back** on **Data health** | A few changes couldn't be written to the fast read layer, even one at a time. Everything else is published, and they are retried every few minutes. | Usually nothing: they land once the graph store is healthy. If they stay, rebuild the fast read layer from **Data health**. |
 | **Summaries updating** or **Refreshing** | Lineage summaries are being rebuilt. | Wait. |
 | **Summaries need attention**, **Summaries missing**, or a chip starting **Summaries:** | Lineage summaries failed, are missing, or aren't being served. | Tell your administrator. |
 | **Changed since the last refresh** or **Not read for 2h** | An external graph has changed, or hasn't been read recently. | Wait; tell your administrator if it stays. |

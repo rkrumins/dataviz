@@ -87,6 +87,20 @@ integration's many small changes as a few commits.
   waits up to 30 s for a slot, then is answered `429` with `Retry-After: 15`, before any of it is
   read, so a burst of large files can't take the object store's (or the database's) bandwidth from
   everything else. The Import dialog and the reference connector retry it.
+- **One change that can't be written to the fast read layer no longer holds back the graph.**
+  - A projector statement that still times out for a single entity, after its retries, is held
+    back (`projection_quarantine`), and the rest of the publish lands.
+  - Later passes retry it first, and a caught-up graph retries it every 5 minutes.
+  - **Data health** lists what is held back and why ("Held back"); the watermark carries it as
+    `quarantine`.
+  - While any change is held, passes publish `unverified`.
+  - `GRAPHVER_PROJECTION_QUARANTINE=0` restores the old behaviour.
+- **Projection metrics** on the versioning worker's scrape endpoint (`:9100/metrics`):
+  - `graphver_projection_passes_total{outcome}`;
+  - per-statement durations and splits;
+  - the fleet's lagging graphs, the worst lag in commits and in seconds;
+  - what is held back.
+  Three alerts and a runbook ("Projection behind or holding changes back") come with them.
 
 ### Changed
 
@@ -153,6 +167,11 @@ integration's many small changes as a few commits.
     in one window after an earlier attempt wrote it.
   - The old fallback, which matched every relationship by id, is gone. A rebuild's deletes start
     from the relationship's source node.
+- **A node whose urn changes is moved in place in the fast read layer,** with its edges and rollup
+  cells. A second node was created under the new urn and the old one left behind, so the verify
+  held every pass of the graph back until someone rebuilt it.
+- **The tombstone sweep reads only the deletes since the last one,** with no payloads, instead of
+  every delete in the graph's history.
 - **A projection's verify counts no longer scan the graph, and a failed count is not a pass.**
   - On a key the platform owns, the counts are FalkorDB's constant-time ones, less the derived
     labels and rollups.
@@ -167,6 +186,9 @@ integration's many small changes as a few commits.
 
 ### Upgrading
 
+- Migration `20261112_1000_gv_proj_quarantine` adds the table `graphver.projection_quarantine`
+  (empty) and `projection_state.quarantine_next_at` (nullable text, no rewrite). A separate
+  `GRAPHVER_DB_URL` gets both at start-up.
 - Migration `20261110_1000_gv_commit_prov` adds `commits.actor_kind`, `api_key_id` and
   `correlation_id` (nullable text), and `jobs.provenance` (JSONB). It adds no rows and rewrites
   none; an older commit is classed from its actor. A separate `GRAPHVER_DB_URL` gets the same

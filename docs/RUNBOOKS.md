@@ -26,6 +26,7 @@ each section links to the page with the full background.
 | [Recover the graph store](#recover-the-graph-store) | FalkorDB lost data, won't start, or a shard or region is gone |
 | [Fix slow or timed-out graphs](#fix-slow-or-timed-out-graphs) | Users report slow canvases, `429`s or timeouts |
 | [Subset views and Narrow under load](#subset-views-and-narrow-under-load) | Subset views say "so far" for long, answer `429`, or Narrow is slow |
+| [Projection behind or holding changes back](#projection-behind-or-holding-changes-back) | A graph stays "catching up", Data health shows changes held back, or the projection alerts fire |
 
 ## Back up and restore
 
@@ -305,6 +306,32 @@ and no database connection while it does.
    list views' updates use it).
 5. **A list view stuck on "Updating"** is let go when its lease lapses (5 minutes); the next
    opening takes it on.
+
+## Projection behind or holding changes back
+
+Published changes reach the fast read layer (FalkorDB) through the projection. While it is
+behind, reads fall back to Postgres: nothing is lost, only slower.
+
+1. **See which graph, and why**, on its **Data health** tab (Versioning panel → Data health):
+   - **Backoff**, with failed attempts and the next try: passes are failing. The last error says
+     why. Each failed pass waits longer before the next, up to 15 minutes.
+   - **Held back**: changes that couldn't be written even on their own, each with its error.
+     Everything else is published; they are retried every 5 minutes
+     (`GRAPHVER_PROJECTION_QUARANTINE_RETRY_SECS`) and on every new publish.
+2. **If passes fail with "Query timed out"** they should no longer stay failed: each statement
+   splits in half until it fits the store's budget. Look at
+   `graphver_projection_splits_total`. A rise that levels off is the ladder sizing itself. One that
+   keeps climbing, with passes still failing, means even single rows don't fit: the store is
+   overloaded. Check its CPU and memory, and that `cluster-node-timeout` isn't set lower than the
+   writes need.
+3. **If passes fail to connect,** bring the graph store back first ([Recover the graph
+   store](#recover-the-graph-store)); passes resume on their own.
+4. **If changes stay held back after the store is healthy,** use **Rebuild fast read layer** on
+   Data health: a rebuild rewrites every entity from Postgres and clears what was held. To have a
+   stuck entity fail its passes instead, as before this release, set
+   `GRAPHVER_PROJECTION_QUARANTINE=0`.
+5. **Confirm:** Data health shows the graph caught up, with nothing held back, and
+   `graphver_projection_lag_seconds_max` falls back to 0.
 
 ## Where to next
 

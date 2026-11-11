@@ -213,7 +213,7 @@ def test_owned_key_still_clears_unkeyed(monkeypatch):
 def _stub_sweep(monkeypatch, proj):
     swept = []
 
-    async def sweep(client, graph_id, main_id):
+    async def sweep(client, graph_id, main_id, to_seq):
         swept.append(graph_id)
 
     monkeypatch.setattr(proj, "_sweep_tombstoned", sweep)

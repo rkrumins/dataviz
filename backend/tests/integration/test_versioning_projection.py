@@ -43,6 +43,7 @@ class FakeGraph:
         self._next_id = 0
         self._rel_ids: dict = {}   # relationship id -> internal id (FalkorDB's id(r)), never reused
         self.proj_meta: dict = {}  # the pass marker (_GVProjMeta) — kept apart, never counted
+        self.swept_seq = None      # the tombstone sweep's watermark on that marker
 
     async def query(self, cypher: str, params: dict = None):
         params = params or {}
@@ -282,6 +283,25 @@ class FakeGraph:
         if cypher == "MERGE (m:_GVProjMeta {id: 'meta'}) SET m.seq = $seq, m.epoch = $epoch":
             self.proj_meta = dict(params)
             return None
+        if cypher == "MATCH (m:_GVProjMeta) RETURN m.sweptSeq":
+            return _Result([[self.swept_seq]] if self.swept_seq is not None else [])
+        if cypher == "MERGE (m:_GVProjMeta {id: 'meta'}) SET m.sweptSeq = $seq":
+            self.swept_seq = params["seq"]
+            return None
+        # A node whose urn changed, moved to the new urn in place (``_rekey_in_place``).
+        if cypher.startswith("UNWIND $batch AS it MATCH (n:") and cypher.endswith(
+                "WITH n, it, m WHERE m IS NULL SET n.urn = it.new"):
+            label = cypher.split("MATCH (n:", 1)[1].split(" {urn:", 1)[0]
+            for it in params["batch"]:
+                n = self.nodes.get(it["old"])
+                if n is None or n.get("_label") != label or it["new"] in self.nodes:
+                    continue
+                self.nodes[it["new"]] = {**self.nodes.pop(it["old"]), "urn": it["new"]}
+                self._ids[it["new"]] = self._ids.pop(it["old"])
+                for e in self.edges.values():
+                    e["src"] = it["new"] if e["src"] == it["old"] else e["src"]
+                    e["tgt"] = it["new"] if e["tgt"] == it["old"] else e["tgt"]
+            return None
         raise AssertionError(f"unexpected cypher emitted: {cypher!r}")
 
     def _rel_id(self, eid: str) -> int:
@@ -309,6 +329,7 @@ class FakeGraph:
         self.edges.clear()
         self._ids.clear()
         self.proj_meta = {}
+        self.swept_seq = None
 
     def entity_ids(self) -> set:
         return {n["entityId"] for n in self.nodes.values()}

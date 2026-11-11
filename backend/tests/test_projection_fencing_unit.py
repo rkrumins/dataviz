@@ -120,7 +120,7 @@ def _projector(monkeypatch, *, ps=None, bootstrap_status=None, claim=(5, 2), fin
         return [], [], [], []
 
     async def window_meta(s, graph, main_id, from_seq, changes):
-        return False, []
+        return False, [], []
 
     async def noop(*a, **k):
         return None

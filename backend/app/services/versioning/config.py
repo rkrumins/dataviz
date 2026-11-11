@@ -130,6 +130,13 @@ PROJECTION_FLOOR_RETRIES: int = int(os.getenv("GRAPHVER_PROJECTION_FLOOR_RETRIES
 # version rows itself; a larger one is left to the projection worker, which a nudge wakes. Its 10 s budget
 # would otherwise cancel the pass while FalkorDB still ran its last write.
 PROJECTION_INLINE_MAX_ROWS: int = int(os.getenv("GRAPHVER_PROJECTION_INLINE_MAX_ROWS", "20000"))
+# A projector statement that still fails for one entity on its own, after its retries, is held in
+# projection_quarantine and the rest of its window publishes; later passes retry it first. Off: such an
+# entity fails the pass, and every pass after it, as before.
+PROJECTION_QUARANTINE: bool = os.getenv("GRAPHVER_PROJECTION_QUARANTINE", "1").lower() not in ("0", "false", "no")
+# A caught-up graph holding quarantined entities is given a pass of its own to retry them once each try is
+# this old; a graph taking commits retries them first on every pass.
+PROJECTION_QUARANTINE_RETRY_SECS: int = int(os.getenv("GRAPHVER_PROJECTION_QUARANTINE_RETRY_SECS", "300"))
 
 # Projection worker: poll cadence for the reconciling loop, read freshness
 # tolerance (a read serves from FalkorDB while projected >= committed - lag),

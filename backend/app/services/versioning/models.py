@@ -328,6 +328,10 @@ class ProjectionStateORM(VersioningBase):
     # ``{at, nodes, edges, via}``, NULL when nothing. Cleared once it is gone or brought into
     # history (20261028_1000_gv_ps_unowned).
     external_drift = Column(JSONB, nullable=True)
+    # When the graph's quarantined entities (``projection_quarantine``) are next retried, NULL
+    # when it holds none: what a pass and the poll read, so a graph with nothing held costs no
+    # query of the quarantine (20261112_1000_gv_proj_quarantine).
+    quarantine_next_at = Column(Text, nullable=True)
     last_projected_at = Column(Text, nullable=True)
     last_error = Column(Text, nullable=True)
     # THE GUARDRAIL. A bootstrapped graph is PINNED to the customer's REAL FalkorDB graph — that
@@ -396,6 +400,35 @@ class ProjectionStateORM(VersioningBase):
 _INGEST_ACTIVE = "job_type = 'ingest' AND status IN ('pending','running')"
 JOB_TYPES = ("ingest", "projection", "rebuild", "export", "bootstrap", "publish", "purge",
              "package_inspect", "fork_update", "fork_merge")
+
+
+class ProjectionQuarantineORM(VersioningBase):
+    """A projector statement that still failed for one entity on its own, after its retries: held
+    here so the rest of its window lands and publishes, instead of the entity failing every pass
+    for the whole graph (a dead-letter queue, as a CDC sink keeps one). Each later pass retries the
+    graph's rows first, oldest first; a row that lands, or a newer write of the same entity that
+    lands, removes it. While a graph holds any, its passes publish unverified.
+
+    ``entity_key`` names the entity as the statement does: a node's urn, an edge's id, or its
+    ends. ``cypher`` and ``params`` are the statement and its one row, as sent."""
+
+    __tablename__ = "projection_quarantine"
+
+    graph_id = Column(Text, nullable=False)
+    statement = Column(Text, nullable=False)          # the statement kind: node_merge, edge_delete…
+    entity_key = Column(Text, nullable=False)
+    entity_kind = Column(Text, nullable=False)        # node | edge
+    cypher = Column(Text, nullable=False)
+    params = Column(JSONB, nullable=False)
+    error = Column(Text, nullable=True)
+    attempts = Column(Integer, nullable=False, default=1)
+    first_at = Column(Text, nullable=False, default=_now)
+    last_at = Column(Text, nullable=False, default=_now)
+
+    __table_args__ = _plain(
+        PrimaryKeyConstraint("graph_id", "statement", "entity_key", name="pk_projection_quarantine"),
+        CheckConstraint("entity_kind IN ('node','edge')", name="ck_projection_quarantine_kind"),
+    )
 
 
 class JobORM(VersioningBase):
@@ -838,6 +871,8 @@ def _ensure_schema_upgrades(conn) -> None:
     # 20261017_1500_gv_ps_keys. Never strict here: a store holding two live pins on one key starts
     # without the index rather than not at all.
     _bounded_step(conn, "uq_ps_key was not built", lambda: ensure_ps_key_index(conn, strict=False))
+    _bounded_step(conn, "projection_state.quarantine_next_at was not added",
+                  lambda: ensure_ps_quarantine_column(conn), required=True)
     # 20261017_1550_gv_ps_fencing.
     _bounded_step(conn, "the projection fencing columns were not added",
                   lambda: ensure_ps_fencing_columns(conn), required=True)
@@ -927,6 +962,22 @@ def ensure_ps_fencing_columns(conn) -> None:
     conn.execute(text(
         f"ALTER TABLE {ps} ADD COLUMN IF NOT EXISTS failed_attempts INTEGER NOT NULL DEFAULT 0"))
     conn.execute(text(f"ALTER TABLE {ps} ADD COLUMN IF NOT EXISTS next_retry_at TEXT"))
+
+
+def ensure_ps_quarantine_column(conn) -> None:
+    """Add ``projection_state.quarantine_next_at``: when the graph's quarantined entities are next
+    retried, NULL (every existing graph) when it holds none. Nullable with no default, so nothing
+    is rewritten. A no-op without the table, and once it is there: an ALTER takes the table's
+    ACCESS EXCLUSIVE lock even when it adds nothing, and every worker start runs this. ``conn`` is
+    a synchronous connection (alembic's bind, or ``run_sync``'s)."""
+    inspector = sa_inspect(conn)
+    if not inspector.has_table("projection_state", schema=_SCHEMA):
+        return                            # create_schema_and_partitions builds it from the models
+    if "quarantine_next_at" in {c["name"] for c in inspector.get_columns("projection_state",
+                                                                         schema=_SCHEMA)}:
+        return
+    conn.execute(text(f'ALTER TABLE "{_SCHEMA}"."projection_state" '
+                      "ADD COLUMN IF NOT EXISTS quarantine_next_at TEXT"))
 
 
 def ensure_ps_reseeding_status(conn) -> None:

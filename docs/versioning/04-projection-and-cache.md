@@ -74,6 +74,12 @@ through the projector automatically.
     `entityId`**, so a reused urn is never wrongly deleted.
   - A rebuild deletes a relationship by its internal id from its source node, matched by urn
     (`_reconcile_streamed`), not by scanning every relationship.
+- **A node whose urn changes is moved in place** (`_rekey_in_place`, `SET n.urn`) before the
+  window's merge. It keeps its internal id, its relationships and the rollup cells on it.
+  - A MERGE under the new urn used to create a second node and leave the old one behind, with
+    every edge.
+  - The verify then held every pass back for that extra node until a rebuild.
+  - A node FalkorDB already holds under the new urn is left as it is.
 - **Every projector query carries a server-side budget** via `_q` (`projection.py:69`):
   `PROJECTION_FALKOR_WRITE_TIMEOUT_S` (default 60, clamped under the fleet's `TIMEOUT_MAX`) /
   `PROJECTION_FALKOR_READ_TIMEOUT_S` (default 30), plus a client-side hang net. Without an explicit
@@ -164,7 +170,28 @@ rollup cells, the tombstone sweep, and the rebuild's deletes.
   write is an idempotent `MERGE`, `SET` or `DELETE`. A rollup write sets the absolute weight it
   computed.
 - **Reporting.** Each pass logs one line: its statements, rows, slowest statement, splits and
-  narrowest width. A pass that wrote returns them as `stats`.
+  narrowest width. A pass that wrote returns them as `stats`. The same feed the
+  `graphver_projection_*` metrics ([Observability](../OBSERVABILITY.md)).
+
+**One entity that still fails is held back, not the graph (`projection_quarantine`).** A
+statement that still times out for a single row is held in `graphver.projection_quarantine`.
+This happens after its retries, and for a node delete after its hub path. The pass goes on.
+- **What it holds.** The table keeps the statement and its row, the error, the attempts and
+  when.
+- **What is held.** Node and edge merges and deletes, relabels and re-keys. Reads, rollup cells
+  and deletes by internal id still fail the pass.
+- **Retries.** Every later pass retries the graph's held statements first, oldest first, so its
+  own writes land after them. One that lands leaves the table, and so does any held statement for
+  an entity a later write lands.
+  - A graph that is caught up gets a pass of its own once its held statements are due
+    (`projection_state.quarantine_next_at`, every `GRAPHVER_PROJECTION_QUARANTINE_RETRY_SECS`,
+    300). The poll selects it, and the pass has an empty window.
+  - A full seed rewrites everything, so it clears the graph's rows first.
+- **While any are held,** the graph's passes publish `unverified`: its counts cannot match.
+- **Where it shows.** The watermark lists them (`quarantine: {count, entities}`), and so does the
+  **Data health** tab.
+- **Switch.** `GRAPHVER_PROJECTION_QUARANTINE=0` turns it off; a stuck entity then fails every
+  pass, as before.
 
 > **Limitation (full-replay memory).** A full replay no longer composes the live state, but its diff
 > still holds whole-graph maps of small tuples **in memory**, `O(N + E)` — narrow ids, not payloads —
@@ -322,10 +349,12 @@ A delta dropped silently between verifies is caught by the next one
     triples count, they are taken a window of 20,000 internal node ids at a time
     (`id(n)` ranges seek, relationships windowed by their source), so no statement costs the
     whole key.
-- **FalkorDB has *more* than committed main** (`projection.py:773-794`): first `_sweep_tombstoned`
-  DETACH-DELETEs anything `main` has tombstoned that the incremental pass stranded (matched by
-  committed `urn` with `entityId` confirmed, bounded by delete count — `projection.py:818-861`), then
-  re-counts. Whatever extra remains carries no tombstone and is **not** deleted. In a key the platform
+- **FalkorDB has *more* than committed main**: first `_sweep_tombstoned` DETACH-DELETEs anything
+  `main` has tombstoned that the incremental pass stranded, then re-counts. Nodes are matched by
+  committed `urn` with `entityId` confirmed; edges are typed and anchored on their last ends.
+  It reads only the deletes since the last sweep (`_GVProjMeta.sweptSeq`, version columns, no
+  payloads), not the graph's whole history.
+  A key that lost the marker is swept from the start. Whatever extra remains carries no tombstone and is **not** deleted. In a key the platform
   minted it holds the pass back, with an error that says Rebuild replaces it with what history
   holds: nothing else should write there, so there is nothing to bring into history. In a
   customer's own graph (`owns_falkor_graph` false) it is what the graph's other writers put there —
@@ -634,6 +663,8 @@ boot via `XAUTOCLAIM`. `_project_one` (`worker.py:65`) serializes per-graph via 
 | `GRAPHVER_PROJECTION_BATCH_SIZE` | 5000 | Rows per MERGE/DELETE chunk at most; the statement ladder narrows it per graph and statement kind (§3). |
 | `GRAPHVER_PROJECTION_FLOOR_RETRIES` | 3 | Retries of a one-row statement that still times out, backing off 2 s, 4 s, 8 s (§3). |
 | `GRAPHVER_PROJECTION_INLINE_MAX_ROWS` | 20000 | The largest window `project_now` projects inside the request; larger ones go to the worker. |
+| `GRAPHVER_PROJECTION_QUARANTINE` | on | Hold back one entity's statement that still fails on its own, so the rest of the window publishes (§3). |
+| `GRAPHVER_PROJECTION_QUARANTINE_RETRY_SECS` | 300 | How often a caught-up graph retries what it holds back. |
 | `GRAPHVER_PROJECTION_POLL_SECS` | 5 | Reconciling poll cadence (`config.py:115`). |
 | `GRAPHVER_PROJECTION_CONCURRENCY` | 8 | Max graphs projected per pass (`config.py:118`). |
 | `GRAPHVER_READ_MAX_LAG` | 0 | Neighbors-endpoint staleness tolerance (`config.py:119`; see §5 callout). |

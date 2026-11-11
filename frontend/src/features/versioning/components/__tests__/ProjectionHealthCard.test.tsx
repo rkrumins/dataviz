@@ -227,6 +227,25 @@ describe('ProjectionHealthCard', () => {
     expect(screen.getByText(/1 item and 2 connections/)).toBeInTheDocument()
   })
 
+  it('says what a pass held back, and why, to everyone', () => {
+    wmQ.data = { ...CUSTOMER, quarantine: { count: 2, entities: [
+      { statement: 'node_merge', entityKind: 'node', entityKey: 'urn:t:P', error: 'Query timed out',
+        attempts: 3, firstAt: '2026-11-12T09:00:00Z', lastAt: '2026-11-12T09:05:00Z' },
+      { statement: 'edge_merge', entityKind: 'edge', entityKey: 'PC', error: 'Query timed out',
+        attempts: 3, firstAt: '2026-11-12T09:00:00Z', lastAt: '2026-11-12T09:05:00Z' },
+    ] } }
+    renderCard()
+    expect(screen.getByText('Held back')).toBeInTheDocument()
+    expect(screen.getByText(/2 changes couldn.t be written to the fast read/)).toBeInTheDocument()
+    expect(screen.getByText('urn:t:P · Query timed out')).toBeInTheDocument()
+  })
+
+  it('shows nothing held back when nothing is', () => {
+    wmQ.data = { ...CUSTOMER, quarantine: null }
+    renderCard()
+    expect(screen.queryByText('Held back')).not.toBeInTheDocument()
+  })
+
   it('says when a writer reported changes no count shows', () => {
     wmQ.data = { ...CUSTOMER, externalDrift: { at: '2026-10-28T09:00:00Z', nodes: null, edges: null, via: 'notification' } }
     renderCard()

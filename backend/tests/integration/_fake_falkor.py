@@ -7,7 +7,7 @@ Cypher) with a timeout policy on top. It raises FalkorDB's own ``Query timed out
   ``max_rows`` rows;
 - a ``DETACH DELETE`` would take a node with more than ``hub_degree`` relationships;
 - the statement is the ``fail_after``-th one (a single mid-window failure);
-- a statement names an entity in ``poison``, by urn, entity id or edge id.
+- a statement writes an entity in ``poison``, named by urn, entity id or edge id.
 
 It also answers the hub-safe delete's shapes: a page of a node's relationships deleted, and
 whether any are left.
@@ -20,6 +20,8 @@ from typing import Iterable, Optional
 from backend.tests.integration.test_versioning_projection import FakeFalkor, FakeGraph, _Result
 
 _TIMEOUT = "Query timed out"
+#: A poisoned entity's writes time out; reading it does not (a large payload is slow to write).
+_WRITES = re.compile(r"\b(MERGE|DELETE|SET)\b")
 _PAGE_DELETE = re.compile(r"MATCH \(n:([^ ]+) \{urn: \$u\}\)-\[r\]-\(\) WITH DISTINCT r LIMIT \$k DELETE r")
 _ANY_LEFT = re.compile(r"MATCH \(n:([^ ]+) \{urn: \$u\}\)-\[r\]-\(\) RETURN 1 LIMIT 1")
 
@@ -64,7 +66,7 @@ class TimeoutGraph(FakeGraph):
             self.sizes.append(len(rows))
             if self.max_rows is not None and len(rows) > self.max_rows:
                 raise self._time_out()
-            if self.poison and self._names(rows) & self.poison:
+            if self.poison and self._names(rows) & self.poison and _WRITES.search(cypher):
                 raise self._time_out()
             if (self.hub_degree is not None and "DETACH DELETE n" in cypher
                     and any(len(self._incident(u)) > self.hub_degree

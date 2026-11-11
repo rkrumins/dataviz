@@ -1029,6 +1029,11 @@ class WatermarkModel(_ApiModel):
     # `verify`, or a change notification), null when there is none. Bring it into history with
     # POST /graph/resync.
     external_drift: Optional[Dict[str, Any]] = Field(default=None, alias="externalDrift")
+    # Entities a projection pass could not write on their own, even one at a time after its
+    # retries, held so the rest of the window published: `{count, entities: [{statement,
+    # entityKind, entityKey, error, attempts, firstAt, lastAt}]}` (the oldest 20). Each later pass
+    # retries them first; while any are held the graph publishes unverified. Null when none.
+    quarantine: Optional[Dict[str, Any]] = None
     # A fork has no projection: the root graph whose store it reads through, whose watermark this
     # is (no key of its own). Null for a graph that is no fork.
     reads_through: Optional[str] = Field(default=None, alias="readsThrough")
@@ -2671,6 +2676,7 @@ async def _watermark_model(session: AsyncSession, wm: dict) -> WatermarkModel:
                           next_retry_at=wm.get("next_retry_at"),
                           liveness_error=wm.get("liveness_error"),
                           external_drift=wm.get("external_drift"),
+                          quarantine=wm.get("quarantine"),
                           reads_through=wm.get("reads_through"),
                           reads_from=wm.get("reads_from"),
                           residency=wm.get("residency", "standard"),
