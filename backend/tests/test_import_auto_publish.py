@@ -7,7 +7,8 @@ job's ``summary.publish`` and never failing the import:
 * a file with rows that weren't imported leaves the draft for review;
 * one that changed nothing closes its empty draft;
 * a draft that fell behind main pulls it and is queued once it pulls clean (up to three pulls);
-  one that pulls with conflicts, or is too large to pull on its own, is kept, with the reason;
+  one that pulls with conflicts is kept, with the reason; one too large to pull has its file
+  imported again from the latest main, and its draft closed;
 * a draft its publish refuses otherwise (it closed) is kept, with the reason;
 * without ``autoPublish`` none of it happens.
 
@@ -43,7 +44,7 @@ def _world(monkeypatch, summary, *, auto_publish=True):
     row = SimpleNamespace(workspace_id="ws", data_source_id="ds", scope_view_id=None,
                           reconcile_mode="upsert", branch_id="br1", graph_id="g1",
                           auto_publish=auto_publish, summary=dict(summary), updated_at=None)
-    branch = SimpleNamespace(owner="alice")
+    branch = SimpleNamespace(owner="alice", visibility="private")
 
     @contextlib.asynccontextmanager
     async def session():
@@ -162,19 +163,34 @@ async def test_a_draft_that_pulls_with_conflicts_waits_for_review(monkeypatch):
         "skipped", "conflicts", 2, 1)
 
 
-async def test_a_draft_too_large_to_pull_on_its_own_waits_and_says_so(monkeypatch):
+async def test_a_draft_too_large_to_pull_has_its_file_imported_again_from_main(monkeypatch):
     svc, row, did = _world(monkeypatch, _DONE)
     monkeypatch.setattr(service_mod.config, "SQUASH_PAGED_ABOVE", 5)
+    row.__dict__.update(import_format="ndjson", provider_id="p1", source_uri="s3://f.ndjson",
+                        field_scope=None, identity_strategy="prop.external_id", allow_mass_delete=None,
+                        import_settings={"identifierSource": "data_source"})
+    made, started = [], []
 
     async def behind(**_kwargs):
         raise NotUpToDate("br1", 3, 5)
 
-    svc.create_publish_job = behind
+    async def create_import_job(**kwargs):
+        made.append(kwargs)
+        return {"job_id": "job2", "branch_id": "br2", "source_uri": kwargs["source_uri"]}
+
+    async def start_import(job_id):
+        started.append(job_id)
+
+    svc.create_publish_job, svc.create_import_job, svc.start_import = behind, create_import_job, start_import
     await svc.run_import("job1")
-    note = row.summary["publish"]
-    assert (note["state"], note["reason"]["type"], note["reason"]["changes"]) == (
-        "skipped", "too_large_to_pull", 8)
-    assert did.pulled == []
+    assert row.summary["publish"] == {"state": "imported_again", "jobId": "job2", "pulls": 1, "changes": 8}
+    assert did.pulled == [] and started == ["job2"]
+    assert did.abandoned == [{"graph_id": "g1", "branch_id": "br1", "actor": "alice"}]
+    (again,) = made
+    assert {k: again[k] for k in ("source_uri", "identifier", "auto_publish", "reconcile_mode")} == {
+        "source_uri": "s3://f.ndjson", "identifier": "prop.external_id", "auto_publish": True,
+        "reconcile_mode": "upsert"}
+    assert again["import_settings"] == {"identifierSource": "data_source", "pulls": 1}
 
 
 async def test_without_auto_publish_nothing_is_published(monkeypatch):

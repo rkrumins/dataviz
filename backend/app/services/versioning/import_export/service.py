@@ -512,11 +512,14 @@ class ImportExportService:
             else:
                 async with db.graphver_session() as s:
                     owner = (await s.get(BranchORM, branch_id)).owner
+                    # An import run again for its publish (_import_again) counts the earlier pulls.
+                    kept = getattr(await s.get(JobORM, job_id), "import_settings", None) or {}
                 if not any(summary.get(k) for k in ("new", "updated", "deleted")):
                     await self._svc.abandon_draft(graph_id=graph_id, branch_id=branch_id, actor=owner)
                     note = {"state": "unchanged"}
                 else:
-                    note = await self._publish_own_draft(job_id, ws, ds, graph_id, branch_id, owner)
+                    note = await self._publish_own_draft(job_id, ws, ds, graph_id, branch_id, owner,
+                                                         pulls=int(kept.get("pulls") or 0))
         except Exception as exc:  # noqa: BLE001 — a refusal, or an outage: the draft is kept
             logger.warning("import job %s did not publish itself: %s", job_id, exc)
             note = {"state": "skipped", "reason": _refusal(exc)}
@@ -543,7 +546,8 @@ class ImportExportService:
         attempts (``pulls``). Two imports that made the same entity alike pull clean; a field both
         changed differently is a conflict, and the draft waits for someone to resolve it. A pull
         holds the draft's changes in memory, so a draft of more than ``SQUASH_PAGED_ABOVE`` changes
-        is not pulled here: it waits, saying so (``too_large_to_pull``)."""
+        is not pulled: its file is imported again from the latest main instead
+        (:meth:`_import_again`), within the same count."""
         while True:
             try:
                 job = await self.create_publish_job(
@@ -557,12 +561,8 @@ class ImportExportService:
             async with db.graphver_session() as s:
                 changes = await self._svc._change_count(s, graph_id, branch_id)
             if changes > config.SQUASH_PAGED_ABOVE:
-                return {"state": "skipped", "pulls": pulls, "reason": {
-                    "type": "too_large_to_pull", "changes": changes,
-                    "message": f"Main changed while the file was imported, and the draft's {changes:,} "
-                               f"changes are more than {config.SQUASH_PAGED_ABOVE:,}, the most it pulls "
-                               "from main on its own: import the file again, with other publishing "
-                               "to this data source out of its way."}}
+                return await self._import_again(import_job_id, graph_id, branch_id, owner,
+                                                pulls + 1, changes)
             pulled = await self._svc.rebase_draft(
                 graph_id=graph_id, branch_id=branch_id, actor=owner,
                 message="pull latest from main to publish the import")
@@ -808,6 +808,29 @@ class ImportExportService:
             if job.get("importJobId") and _behind_main(result):
                 await self._publish_again(job)
         return result
+
+    async def _import_again(self, import_job_id, graph_id, branch_id, owner, pulls: int,
+                            changes: int) -> Dict[str, Any]:
+        """A draft too large to pull (more than ``SQUASH_PAGED_ABOVE`` changes) that main moved
+        under: its file is imported again, as it was asked for, into a draft of its own from the
+        latest main, and that import publishes itself in turn. The same rows find the same
+        entities, so nothing is made twice, and a replace is judged against main as it is now. The
+        draft it replaces is closed; ``pulls`` carries on counting (``jobs.import_settings``)."""
+        async with db.graphver_session() as s:
+            row = await s.get(JobORM, import_job_id)
+            branch = await s.get(BranchORM, branch_id)
+        created = await self.create_import_job(
+            workspace_id=row.workspace_id, data_source_id=row.data_source_id, graph_id=graph_id,
+            actor=owner, import_format=row.import_format, provider_id=row.provider_id,
+            source_uri=row.source_uri, reconcile_mode=row.reconcile_mode,
+            scope_view_id=row.scope_view_id, field_scope=row.field_scope, auto_publish=True,
+            identifier=row.identity_strategy, allow_mass_delete=bool(row.allow_mass_delete),
+            import_settings={**(row.import_settings or {}), "pulls": pulls},
+            draft_visibility=branch.visibility)
+        await self._svc.abandon_draft(graph_id=graph_id, branch_id=branch_id, actor=owner)
+        await self.start_import(created["job_id"])
+        return {"state": "imported_again", "jobId": created["job_id"], "pulls": pulls,
+                "changes": changes}
 
     async def _publish_again(self, job: Dict[str, Any]) -> None:
         """An import's own publish that main moved past while it waited its turn: its draft pulls

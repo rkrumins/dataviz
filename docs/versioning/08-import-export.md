@@ -1073,8 +1073,10 @@ tests/integration/test_s3_store_minio.py tests/test_object_store.py`.
   behind main is brought up to date (`rebase_draft`, the field-level three-way merge) and queued
   once it pulls clean, up to three pulls; a same-field conflict waits for review
   (`summary.publish.reason.type: conflicts`). A pull holds the draft's changes in memory, so a
-  draft of more than `SQUASH_PAGED_ABOVE` (200,000) changes is not pulled on its own
-  (`too_large_to_pull`): import the file again. A paged pull would lift that. A worker that stops
+  draft of more than `SQUASH_PAGED_ABOVE` (200,000) changes is not pulled: its file is imported
+  again from the latest main (`_import_again`, `summary.publish.state: imported_again` with the new
+  import's `jobId`), within the same count, and its first draft is closed. A paged pull would save
+  that second read of the file. A worker that stops
   between an import's finish and its publish job leaves `summary.publish` missing: publish the
   draft then. A custom draft `name` exists on
   `create_import_job` but no route exposes it (the draft is named "Import").

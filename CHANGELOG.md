@@ -147,8 +147,10 @@ integration's many small changes as a few commits.
   - entities two imports made alike (same urn or matching value, so the same derived id) merge as
     one; updates of different fields merge;
   - a field both sides changed differently waits for review (`summary.publish.reason.type:
-    conflicts`), and a draft of more than 200,000 changes is not pulled on its own
-    (`too_large_to_pull`).
+    conflicts`);
+  - a draft of more than 200,000 changes isn't pulled (it would hold them all in memory): its file
+    is imported again from the latest main, and that import publishes itself
+    (`summary.publish.state: imported_again`, with its `jobId`). Nothing is made twice.
   Before, any import whose data source was published to meanwhile stopped at `not_up_to_date`.
 - **A graph's own import settings.** A workspace admin sets, on the data source's Versioning tab
   (**Imports**), what its imports' rows are matched by when an import names no `identifier`, and the

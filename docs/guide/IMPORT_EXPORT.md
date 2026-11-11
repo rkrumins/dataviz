@@ -179,8 +179,9 @@ each in a draft of their own. When one publishes, the others' drafts are behind
 the published graph: **Pull latest** brings its changes into yours, merging them
 field by field, and asks you to choose only where you both changed the same
 field. A connector whose import publishes itself does the same on its own: it
-pulls the latest and publishes, and waits for a person only on such a conflict,
-or when its draft holds more than 200,000 changes.
+pulls the latest and publishes, and waits for a person only on such a conflict.
+A very large import (more than 200,000 changes) imports its file again from the
+latest published graph instead of pulling, and publishes that.
 
 Because an import lands on a draft, nothing is final until you publish or it's
 merged through review — you can inspect, adjust, or abandon it like any other

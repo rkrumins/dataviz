@@ -13,7 +13,8 @@ Pins:
   Main then holds one entity per urn, every update, and the ids the first import made.
 - An import that changed a field a person changed differently meanwhile pulls, finds the
   conflict, and waits on its draft for someone to resolve it, saying why. One whose draft is too
-  large to pull on its own (more than ``SQUASH_PAGED_ABOVE`` changes) waits, saying so.
+  large to pull (more than ``SQUASH_PAGED_ABOVE`` changes) has its file imported again from the
+  latest main instead, and that import publishes itself: the same rows, the same entities.
 - After each publish, one projection pass brings FalkorDB to main, a window at a time.
 """
 import asyncio
@@ -150,7 +151,7 @@ async def _run(monkeypatch) -> None:
     assert (await svc.branch_statuses([c["branch_id"]]))[c["branch_id"]] == "open"
     assert (await main_state())["nodes"][t[15]]["properties"]["p"] == "carol"
 
-    # A draft too large to pull on its own waits, saying so.
+    # A draft too large to pull: its file is imported again from the latest main, and published.
     d = await queued([_table(f"urn:t:{i}", p="d") for i in range(16, 20)], "alice")
     await ie.run_import(d["job_id"])
     eves = await svc.open_draft(graph_id=gid, owner="eve")
@@ -159,10 +160,18 @@ async def _run(monkeypatch) -> None:
     await svc.publish(graph_id=gid, branch_id=eves, actor="eve", message="p")
     monkeypatch.setattr(config, "SQUASH_PAGED_ABOVE", 3)
     await ie.run_publish((await note(d))["jobId"])
-    waits = await note(d)
-    assert (waits["state"], waits["reason"]["type"], waits["reason"]["changes"]) == (
-        "skipped", "too_large_to_pull", 4), waits
-    assert (await svc.branch_statuses([d["branch_id"]]))[d["branch_id"]] == "open"
+    again = await note(d)
+    assert (again["state"], again["changes"], again["pulls"]) == ("imported_again", 4, 1), again
+    assert (await svc.branch_statuses([d["branch_id"]]))[d["branch_id"]] == "abandoned"
+    rerun = {"job_id": again["jobId"]}
+    await ie.run_import(rerun["job_id"])
+    assert (await ie.get_job(rerun["job_id"]))["summary"]["updated"] == 4
+    assert (await ie.run_publish((await note(rerun))["jobId"])).get("commitId")
+    await projected()
+    nodes = (await main_state())["nodes"]
+    assert [nodes[t[i]]["properties"]["p"] for i in range(16, 20)] == ["d"] * 4
+    assert nodes[t[12]]["properties"]["p"] == "eve", "what main gained meanwhile stays"
+    assert sum(1 for n in nodes.values() if n["urn"].startswith("urn:t:")) == 20, "nothing made twice"
 
 
 def test_drafts_of_one_graph_import_publish_and_pull_at_once(monkeypatch):
