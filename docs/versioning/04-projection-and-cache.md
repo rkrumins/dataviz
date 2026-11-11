@@ -490,9 +490,16 @@ writes, so every publish that changes its lineage or containment comes here: its
 stale (`source_changed`, cleared when the job completes) and the job is queued in dedicated mode.
 A change signal on such a source (the reconciliation sweep's, a loader's) marks and rebuilds it as
 any source's, rather than only refreshing reads as for a versioned source the projector maintains.
-A publish whose job is turned away because one is already running is not lost: a dedicated job is
-compared afterwards against the fingerprint it took before it ran (`worker._gate_fingerprint`), so
-the sweep sees what was written while it ran and queues another.
+A publish whose job is turned away because one is already running is not lost:
+- **In dedicated mode** the running job is compared afterwards against the fingerprint it took
+  before it ran (`worker._gate_fingerprint`), so the sweep sees what was written while it ran and
+  queues another.
+- **In the source's own graph** the hook records the ask as owed
+  (`projection_state.rollup_state`, `{pending, since, asked}`): the job running may have read the
+  graph before the change that asked. The hook answers `queued`, `active`, `unreachable` or
+  `refused`. An `active` or `unreachable` ask stays owed, and the projection worker's liveness loop
+  asks again, at most every `GRAPHVER_ROLLUP_REASK_SECS` (300) per graph, until one is queued. A
+  refusal (no ontology, a misconfigured provider) is logged and owed no more.
 `resolve_aggregation_edge_types` (`projection_target.py:22-49`) answers such a source's types with
 `"dedicated"` after them, and `_compute_rollup_deltas` and `_reconcile_in_place` then answer `"stale"`
 for a window or reconcile that changes lineage or containment, writing no rollup.
@@ -722,6 +729,7 @@ boot via `XAUTOCLAIM`. `_project_one` (`worker.py:65`) serializes per-graph via 
 | `GRAPHVER_PROJECTION_ESCALATE` / `_ESCALATE_AFTER` | on / 3 | Rebuild a graph on its own on drift, or after this many pressure failures in a row of one window (§3). |
 | `GRAPHVER_ROLLUP_NET_MAX_CELLS` | 200000 | Rollup cells a window nets in memory; past it, in `graphver.rollup_deltas` (§8). |
 | `GRAPHVER_PROJECTION_ROLLUP_INLINE_CAP` | 50000 | The largest moved subtree whose rollups the projector moves itself; a larger move goes to the aggregation job (§8). |
+| `GRAPHVER_ROLLUP_REASK_SECS` | 300 | How often, per graph, liveness asks again for a summaries build a running job turned away (§8); `0`: never. |
 | `GRAPHVER_PROJECTION_POLL_SECS` | 5 | Reconciling poll cadence (`config.py:115`). |
 | `GRAPHVER_PROJECTION_CONCURRENCY` | 8 | Max graphs projected per pass (`config.py:118`). |
 | `GRAPHVER_READ_MAX_LAG` | 0 | Neighbors-endpoint staleness tolerance (`config.py:119`; see §5 callout). |

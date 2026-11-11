@@ -1858,7 +1858,35 @@ class FalkorProjector:
             return {"graph_id": gid, "projected": projected, "reset_to": to_seq, "reason": reason}
 
         done = await asyncio.gather(*[_one(*r) for r in rows])
+        await self._ask_again_for_summaries()
         return [d for d in done if d is not None]
+
+    async def _ask_again_for_summaries(self) -> None:
+        """Ask again for the lineage-summaries builds owed (``projection_state.rollup_state``): a
+        build asked for while a job was already running, which may have read the graph before the
+        change that asked, or while the service was out of reach. Each graph's at most every
+        ``GRAPHVER_ROLLUP_REASK_SECS``; the hook records how each ask went, so one that is
+        queued is owed no more. Never raises."""
+        if self._on_rollups_stale is None or config.ROLLUP_REASK_SECS <= 0:
+            return
+        due = (datetime.now(timezone.utc)
+               - timedelta(seconds=config.ROLLUP_REASK_SECS)).isoformat()
+        try:
+            async with self._session() as s:
+                owed = (await s.execute(
+                    select(ProjectionStateORM.graph_id)
+                    .where(ProjectionStateORM.rollup_state["asked"].astext < due)
+                )).scalars().all()
+        except Exception as exc:                         # pragma: no cover - infra
+            logger.warning("liveness: cannot read which summaries builds are owed: %s", exc)
+            return
+        for gid in owed:
+            logger.info("liveness: asking again for the summaries build of %s", gid)
+            try:
+                await self._on_rollups_stale(gid)
+            except Exception as exc:                     # pragma: no cover - app-layer hooks
+                logger.warning("liveness: the summaries build of %s was not asked for again: %s",
+                               gid, exc)
 
     async def _ask_for_first_summaries(self, graph_id: str, client, projected: int) -> None:
         """Hand the summaries of a key no summaries build ever stamped to the batch job

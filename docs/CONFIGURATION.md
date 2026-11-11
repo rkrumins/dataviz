@@ -702,6 +702,7 @@ Drafts and commits, projection into the graph store, and import and export.
 | `GRAPHVER_REBUILD_TIMEOUT_SECS` | `900` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_RESYNC_MAX_ENTITIES` | `250000` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_ROLLUP_NET_MAX_CELLS` | `200000` | `backend/app/services/versioning/config.py` |
+| `GRAPHVER_ROLLUP_REASK_SECS` | `300` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_SCHEMA` | `graphver` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_SET_FIELDS` | `tags` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_SQUASH_PAGE` | `20000` | `backend/app/services/versioning/config.py` |

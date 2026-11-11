@@ -211,9 +211,17 @@ integration's many small changes as a few commits.
 
   Moving containers whose subtrees hold more than 50,000 entities still goes to the job
   (`GRAPHVER_PROJECTION_ROLLUP_INLINE_CAP`), and so does a window that overlaps one already applied.
+- **A lineage-summaries rebuild the projector asks for is no longer dropped when a job is already
+  running.** That job may have read the graph before the change that asked, so the summaries could
+  stay wrong until something else asked. The ask is now kept (`projection_state.rollup_state`), and
+  the projection worker asks again every 5 minutes (`GRAPHVER_ROLLUP_REASK_SECS`) until a job is
+  queued; so does an ask that could not reach the aggregation service. A source whose summaries
+  live in a dedicated key already queued its own follow-up, and is unchanged.
 
 ### Upgrading
 
+- Migration `20261112_1200_gv_ps_rollup_state` adds `projection_state.rollup_state` (nullable
+  JSONB, no rewrite). A separate `GRAPHVER_DB_URL` gets it at start-up.
 - Migration `20261112_1100_gv_rollup_deltas` adds the table `graphver.rollup_deltas` (empty). A
   separate `GRAPHVER_DB_URL` gets it at start-up.
 - Migration `20261112_1000_gv_proj_quarantine` adds the table `graphver.projection_quarantine`

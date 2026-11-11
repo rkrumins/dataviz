@@ -332,6 +332,12 @@ class ProjectionStateORM(VersioningBase):
     # when it holds none: what a pass and the poll read, so a graph with nothing held costs no
     # query of the quarantine (20261112_1000_gv_proj_quarantine).
     quarantine_next_at = Column(Text, nullable=True)
+    # A lineage-summaries build the projector asked for and did not get: ``{pending, since,
+    # asked}``, where ``pending`` says why (``active``: a job was already running, which may have
+    # read the graph before the change that asked; ``refused``: a hold, or the service could not
+    # be reached). The liveness loop asks again, every GRAPHVER_ROLLUP_REASK_SECS, until one is
+    # queued; NULL when nothing is owed (20261112_1200_gv_ps_rollup_state).
+    rollup_state = Column(JSONB, nullable=True)
     last_projected_at = Column(Text, nullable=True)
     last_error = Column(Text, nullable=True)
     # THE GUARDRAIL. A bootstrapped graph is PINNED to the customer's REAL FalkorDB graph — that
@@ -904,6 +910,8 @@ def _ensure_schema_upgrades(conn) -> None:
     _bounded_step(conn, "uq_ps_key was not built", lambda: ensure_ps_key_index(conn, strict=False))
     _bounded_step(conn, "projection_state.quarantine_next_at was not added",
                   lambda: ensure_ps_quarantine_column(conn), required=True)
+    _bounded_step(conn, "projection_state.rollup_state was not added",
+                  lambda: ensure_ps_rollup_state_column(conn), required=True)
     # 20261017_1550_gv_ps_fencing.
     _bounded_step(conn, "the projection fencing columns were not added",
                   lambda: ensure_ps_fencing_columns(conn), required=True)
@@ -1009,6 +1017,21 @@ def ensure_ps_quarantine_column(conn) -> None:
         return
     conn.execute(text(f'ALTER TABLE "{_SCHEMA}"."projection_state" '
                       "ADD COLUMN IF NOT EXISTS quarantine_next_at TEXT"))
+
+
+def ensure_ps_rollup_state_column(conn) -> None:
+    """Add ``projection_state.rollup_state``: a lineage-summaries build the projector asked for
+    and did not get, NULL (every existing graph) when nothing is owed. Nullable with no default,
+    so nothing is rewritten; a no-op without the table and once the column is there, like
+    :func:`ensure_ps_quarantine_column`."""
+    inspector = sa_inspect(conn)
+    if not inspector.has_table("projection_state", schema=_SCHEMA):
+        return
+    if "rollup_state" in {c["name"] for c in inspector.get_columns("projection_state",
+                                                                   schema=_SCHEMA)}:
+        return
+    conn.execute(text(f'ALTER TABLE "{_SCHEMA}"."projection_state" '
+                      "ADD COLUMN IF NOT EXISTS rollup_state JSONB"))
 
 
 def ensure_ps_reseeding_status(conn) -> None:

@@ -211,6 +211,11 @@ PROJECTION_ROLLUP_INLINE_CAP: int = int(os.getenv("GRAPHVER_PROJECTION_ROLLUP_IN
 # graphver.rollup_deltas past it, then applied a page at a time. (The inline cap above still bounds a
 # MOVED container's subtree: a move of more than that goes to the aggregation job.)
 ROLLUP_NET_MAX_CELLS: int = int(os.getenv("GRAPHVER_ROLLUP_NET_MAX_CELLS", "200000"))
+# A lineage-summaries build the projector asked for and did not get (a job already running, which may
+# have read the graph before the change that asked; a hold; the service out of reach) is asked for
+# again by the liveness loop, at most this often per graph, until one is queued
+# (projection_state.rollup_state). 0: never again.
+ROLLUP_REASK_SECS: int = int(os.getenv("GRAPHVER_ROLLUP_REASK_SECS", "300"))
 # A projection window of more version rows than this (a publish of millions) is written a page of
 # PROJECTION_PAGE rows at a time — all its nodes, then its edges — so the projector holds a page of
 # it, never all of it. Its rollups are moved by delta like any window's (ROLLUP_NET_MAX_CELLS).

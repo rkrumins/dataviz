@@ -4863,6 +4863,29 @@ class GraphVersioningService:
              "error": r.error, "attempts": r.attempts, "firstAt": r.first_at, "lastAt": r.last_at}
             for r in rows]}
 
+    async def note_rollup_ask(self, graph_id: str, outcome: Optional[str]) -> None:
+        """Record how an ask for a graph's lineage-summaries build went. ``active`` (a job was
+        already running, which may have read the graph before the change that asked) and
+        ``unreachable`` keep it owed, in ``projection_state.rollup_state``, for the liveness loop
+        to ask again; anything else (``queued``, ``refused``, None: nothing to ask for) clears it.
+        Never raises: an ask that can't be recorded is made again by the next change that hands
+        the summaries over."""
+        try:
+            async with self._session() as s:
+                ps = await s.get(ProjectionStateORM, graph_id)
+                if ps is None:
+                    return
+                if outcome not in ("active", "unreachable"):
+                    if ps.rollup_state is not None:
+                        ps.rollup_state = None
+                    return
+                now = _now()
+                ps.rollup_state = {"pending": outcome, "asked": now,
+                                   "since": (ps.rollup_state or {}).get("since") or now}
+        except Exception:                                # pragma: no cover - infra
+            logger.warning("the rollup ask for %s (%s) was not recorded", graph_id, outcome,
+                           exc_info=True)
+
     async def projection_watermark(self, graph_id: str) -> Dict[str, object]:
         """Read freshness for a graph's FalkorDB projection — attached to reads so
         a client knows whether it's seeing the latest committed `main`.

@@ -94,13 +94,20 @@ def make_rollup_rebuild_hook(get_aggregation_service):
     A data source in dedicated mode has every publish that changes its lineage or containment
     handed over here, since the projector maintains none of its rollups: its summaries are
     marked stale (``source_changed``, which the job's completion clears) and the rebuild is
-    queued in dedicated mode."""
-    async def _hook(graph_id: str, idempotency_key: Optional[str] = None) -> None:
+    queued in dedicated mode.
+
+    The hook answers how the ask went: ``queued``; ``active``, a job was already running;
+    ``unreachable``, the service could not be asked; ``refused``; or None, nothing to ask for. A
+    job already running may have read the graph before the change that asked, so an in-source
+    ask that was ``active`` or ``unreachable`` stays owed (``note_rollup_ask``), and the
+    projection worker's liveness loop asks again until one is queued. A dedicated one doesn't:
+    its job compares the source's fingerprint when it ends and queues the next itself."""
+    async def _hook(graph_id: str, idempotency_key: Optional[str] = None) -> Optional[str]:
         svc = GraphVersioningService()
         meta = await svc.get_graph(graph_id)
         ds_id = meta.get("data_source_id") if meta else None
         if not ds_id or meta.get("fork_parent_graph_id"):
-            return          # a fork's data source has no rollups of its own (fork_has_no_store)
+            return None     # a fork's data source has no rollups of its own (fork_has_no_store)
         agg = get_aggregation_service()
         mode = await _projection_mode(str(ds_id))
         if mode == "dedicated":
@@ -117,28 +124,42 @@ def make_rollup_rebuild_hook(get_aggregation_service):
             projected = None
         key = idempotency_key or f"gv-rollup-rebuild:{graph_id}:{projected}"
         if agg is None:
-            await _queue_on_control_plane(str(ds_id), key, mode)
-            return
-        from backend.app.services.aggregation.schemas import AggregationTriggerRequest
-        try:
-            async with get_async_session() as s:
-                # idempotency_key: evict/restore churn (each restore is a full seed) collapses
-                # to one job per hour via the service's idempotent-replay window.
-                await agg.trigger(
-                    str(ds_id),
-                    AggregationTriggerRequest(idempotency_key=key, projection_mode=mode),
-                    "api", s)
-            logger.info("queued aggregation rebuild for ds=%s (rollups stale after projection)", ds_id)
-        except Exception as exc:                         # active-job conflict etc. — benign
-            logger.info("rollup rebuild for ds=%s not queued: %s", ds_id, exc)
+            outcome = await _queue_on_control_plane(str(ds_id), key, mode)
+        else:
+            from backend.app.services.aggregation.schemas import AggregationTriggerRequest
+            from backend.app.services.aggregation.service import ConflictError
+            from backend.common.interfaces.provider import ProviderConfigurationError
+            try:
+                async with get_async_session() as s:
+                    # idempotency_key: evict/restore churn (each restore is a full seed)
+                    # collapses to one job per hour via the service's idempotent-replay window.
+                    await agg.trigger(
+                        str(ds_id),
+                        AggregationTriggerRequest(idempotency_key=key, projection_mode=mode),
+                        "api", s)
+                logger.info("queued aggregation rebuild for ds=%s (rollups stale after projection)",
+                            ds_id)
+                outcome = "queued"
+            except ConflictError:
+                logger.info("rollup rebuild for ds=%s not queued yet: a job is already running",
+                            ds_id)
+                outcome = "active"
+            except (ValueError, ProviderConfigurationError) as exc:   # misconfigured: none owed
+                logger.info("rollup rebuild for ds=%s not queued: %s", ds_id, exc)
+                outcome = "refused"
+            except Exception as exc:                     # pragma: no cover - infra
+                logger.warning("rollup rebuild for ds=%s could not be asked for: %s", ds_id, exc)
+                outcome = "unreachable"
+        await svc.note_rollup_ask(graph_id, None if mode == "dedicated" else outcome)
+        return outcome
     return _hook
 
 
-async def _queue_on_control_plane(ds_id: str, idempotency_key: str, mode: str) -> None:
+async def _queue_on_control_plane(ds_id: str, idempotency_key: str, mode: str) -> str:
     """Queue the rollup rebuild on the aggregation control plane — the same route and
-    internal auth the insights purge uses for its post-purge rebuild. Never raises: a
-    409 (a job already active) is the benign outcome, and anything else is logged loudly
-    enough to act on."""
+    internal auth the insights purge uses for its post-purge rebuild. Never raises; answers
+    ``queued``, ``active`` (409: a job is already running), ``refused`` (another refusal, logged
+    loudly enough to act on) or ``unreachable``."""
     import os
     import httpx
     from backend.app.services.aggregation.internal_auth import internal_auth_headers
@@ -157,14 +178,17 @@ async def _queue_on_control_plane(ds_id: str, idempotency_key: str, mode: str) -
         if resp.status_code in (200, 201, 202):
             logger.info("queued aggregation rebuild for ds=%s on the control plane "
                         "(rollups stale after projection)", ds_id)
-        elif resp.status_code == 409:
-            logger.info("rollup rebuild for ds=%s not queued: a job is already active", ds_id)
-        else:
-            logger.warning("rollup rebuild for ds=%s refused by the control plane (HTTP %s) — "
-                           "rebuild via the aggregation UI", ds_id, resp.status_code)
+            return "queued"
+        if resp.status_code == 409:
+            logger.info("rollup rebuild for ds=%s not queued yet: a job is already active", ds_id)
+            return "active"
+        logger.warning("rollup rebuild for ds=%s refused by the control plane (HTTP %s) — "
+                       "rebuild via the aggregation UI", ds_id, resp.status_code)
+        return "refused"
     except Exception as exc:                             # pragma: no cover - infra
-        logger.warning("rollup rebuild for ds=%s could not reach the control plane (%s) — "
-                       "rebuild via the aggregation UI", ds_id, exc)
+        logger.warning("rollup rebuild for ds=%s could not reach the control plane (%s); asked "
+                       "again later", ds_id, exc)
+        return "unreachable"
 
 
 async def _workspace_of(data_source_id: str) -> Optional[str]:
