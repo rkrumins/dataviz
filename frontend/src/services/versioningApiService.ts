@@ -102,6 +102,9 @@ export interface Branch {
   access?: BranchAccess | null
   /** The branch read only: who committed to it, most commits first. */
   contributors?: string[] | null
+  /** A closed draft whose changes draft retention removed: since when. Its record still reads;
+   *  a read of its changes is a 410 (`draft_pruned`). */
+  prunedAt?: string | null
 }
 
 export interface Graph {
@@ -537,6 +540,9 @@ export interface PullRequest {
   description?: string | null
   conflicts?: Array<Record<string, unknown>> | null
   resultingCommitId?: string | null
+  /** The single-PR read only: a merged draft review's commit on main, by seq. Its change list is
+   *  main between `resultingCommitSeq - 1` and it, whether or not its draft's changes were removed. */
+  resultingCommitSeq?: number | null
   reviewers?: string[] | null
   approvedBy?: string[] | null
   /** Reviewers whose approval went stale (the draft changed since): they must approve again. */

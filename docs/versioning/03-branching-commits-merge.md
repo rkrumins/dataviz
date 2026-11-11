@@ -675,6 +675,23 @@ implicit maintainer; its members hold `viewer`, `editor` or `maintainer`, direct
 - The idle-draft sweep (`sweep_idle_drafts`) abandons an open draft idle past `GRAPHVER_DRAFT_TTL_DAYS`,
   but not one with a live PR or staged edits, nor one on a graph that is deleted, not live, or was
   unfrozen within the TTL.
+- Draft retention (`prune_closed_drafts`, the same sweep): a draft merged or abandoned more than
+  `GRAPHVER_DRAFT_RETENTION_DAYS` ago (30; a system administrator sets it live, Admin → Infrastructure
+  → Versioned graphs → Draft retention; `0` keeps them for good) has its changes removed: its heads,
+  staged edits, integrity tree and versions. As with a squash-merged Git branch, the merge commit on
+  `main` holds what it changed (the publish copied its rows there), and the draft's own commits remain
+  as records. The draft's record stays: the branch (`prunedAt`), its members, its commits and its
+  review.
+  - A read of its changes is **410 `draft_pruned`**: its diff, state, change list, commits' diffs, an
+    export of it, a closed review's Files changed. It is never shown as an empty diff.
+  - A merged review's Files changed is its squash commit's, removed or not.
+  - Kept as long as something may still need the rows: a live review (an abandoned draft's review
+    stays open until it is closed), a pending or running job, or a graph that is deleted, not live, or
+    was unfrozen within the window.
+  - Removed in windows, each its own transaction, for at most 5 minutes a sweep; a removal cut off
+    is finished first by the next sweep.
+  - An idle draft is abandoned after `GRAPHVER_DRAFT_TTL_DAYS`, and its changes go
+    `GRAPHVER_DRAFT_RETENTION_DAYS` after that.
 
 ### Publish permission
 

@@ -386,11 +386,15 @@ async def _a_replayed_key_answers_with_its_import(svc, ie, root):
     async def no_source_row(*_args):
         return None                  # the draft it opens starts at the built-in level
 
+    async def commit():
+        return None                  # the request's checks end their transaction before its body
+
     def post(branch_id=None):
         return create_import("ws1", gid, _Body(), format="ndjson", reconcile_mode="upsert",
                              branch_id=branch_id, view_id=None, idempotency_key="k1",
                              auto_publish=False, user=user, claims=None, meta={"data_source_id": gid}, ie=ie,
-                             session=type("S", (), {"get": staticmethod(no_source_row)})())
+                             session=type("S", (), {"get": staticmethod(no_source_row),
+                                                    "commit": staticmethod(commit)})())
     first = await post()
     same = (first["jobId"], first["branchId"], first["sourceUri"])
     again = await post()                                     # its answer was lost: sent again

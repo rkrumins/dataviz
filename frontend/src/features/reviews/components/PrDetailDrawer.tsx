@@ -510,17 +510,26 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
               <Section icon={FileDiff} title="Files changed" right={changeSet ? <ChangeCountChips changeSet={changeSet} /> : undefined}>
                 {diffQ.error instanceof DiffTooLargeError && isDraftPr ? (
                   // Too large to merge in a request for its diff: the draft's own changes, listed a
-                  // page at a time — exactly what merging changes once it is up to date.
+                  // page at a time — exactly what merging changes once it is up to date. Merged, what
+                  // its merge changed: main across its commit, which outlives the draft's own rows.
                   <>
-                    {pr.behind && (
+                    {pr.behind && pr.status !== 'merged' && (
                       <p className="text-[11.5px] text-ink-muted mb-2 leading-relaxed">
                         What this draft changes where it branched off. Once it pulls the latest from{' '}
                         <strong>main</strong>, this is exactly what merging it changes.
                       </p>
                     )}
-                    <ChangeList wsId={wsId} graphId={pr.graphId} origin={{ branchId: pr.sourceBranchId }}
+                    <ChangeList wsId={wsId} graphId={pr.graphId}
+                      origin={pr.status === 'merged' && pr.resultingCommitSeq
+                        ? { fromSeq: pr.resultingCommitSeq - 1, toSeq: pr.resultingCommitSeq }
+                        : { branchId: pr.sourceBranchId }}
                       emptyHint="No changes in this PR." />
                   </>
+                ) : (diffQ.error as { status?: number } | null)?.status === 410 ? (
+                  <p className="text-xs text-ink-muted py-3">
+                    This review was closed, and its draft’s changes were removed after the retention period, so what
+                    it proposed can no longer be shown.
+                  </p>
                 ) : diffQ.isLoading ? (
                   <div className="flex items-center gap-2 text-sm text-ink-muted py-6 justify-center">
                     <Loader2 className="w-4 h-4 animate-spin" /> Computing diff…

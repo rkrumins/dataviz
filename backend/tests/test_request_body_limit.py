@@ -67,6 +67,7 @@ def test_import_routes_get_the_larger_cap():
     """Raising the global cap to suit bulk import would give every
     endpoint a 100 MB budget it never asked for."""
     from backend.app.main import _BodySizeLimitMiddleware
+    from backend.app.services.versioning.import_export import uploads
 
     mw = _BodySizeLimitMiddleware(
         app=None, default_bytes=1_000, large_bytes=100_000,
@@ -74,10 +75,18 @@ def test_import_routes_get_the_larger_cap():
     assert mw._cap_for("/api/v1/admin/providers") == 1_000
     assert mw._cap_for("/api/v1/ws_1/graph/save") == 100_000
     assert mw._cap_for("/api/v1/versioning/graphs/g1/commit") == 100_000
-    # The versioning router is mounted per workspace, so the real bulk
-    # import path carries a workspace segment the prefix has to see past.
-    assert mw._cap_for("/api/v1/ws_1/versioning/graphs/g1/imports") == 100_000
-    assert mw._cap_for("/api/v1/ws_1/versioning/graphs/g1/imports/uploads/iu_1/parts/0") == 100_000
+    # An import's file, whole or as a run of an upload's parts, may be as
+    # large as one import can be — but a JSON or Excel file sent whole is
+    # read whole, and stays at its own cap. The versioning router is
+    # mounted per workspace, so the real paths carry a workspace segment.
+    assert mw._cap_for("/api/v1/ws_1/versioning/graphs/g1/imports") == uploads.MAX_BYTES
+    assert mw._cap_for("/api/v1/ws_1/versioning/graphs/g1/imports", "csv") == uploads.MAX_BYTES
+    for fmt in ("json", "xlsx"):
+        assert mw._cap_for("/api/v1/ws_1/versioning/graphs/g1/imports", fmt) == uploads.WHOLE_FILE_MAX_BYTES
+    assert mw._cap_for("/api/v1/ws_1/versioning/graphs/g1/imports/uploads/iu_1/parts/0") == uploads.MAX_BYTES
+    # Only those: starting or completing an upload is an ordinary request.
+    assert mw._cap_for("/api/v1/ws_1/versioning/graphs/g1/imports/uploads") == 100_000
+    assert mw._cap_for("/api/v1/ws_1/versioning/graphs/g1/imports/uploads/iu_1/complete") == 100_000
     assert mw._cap_for("/api/v1/views/transfer/packages/inspect") == 100_000
     # A view file is up to 64 MB, and its designs travel on to reconcile and import.
     for route in ("inspect", "reconcile", "import"):
@@ -86,7 +95,6 @@ def test_import_routes_get_the_larger_cap():
 
 
 @pytest.mark.parametrize("path", [
-    "/api/v1/ws_1/versioning/graphs/g1/imports",
     "/api/v1/views/transfer/inspect",
     "/api/v1/views/transfer/packages/inspect",
 ])
@@ -108,21 +116,44 @@ async def test_upload_routes_take_up_to_100_mib(csrf_client: AsyncClient, path):
     assert over.status_code == 413, over.text
 
 
-@pytest.mark.parametrize("fmt, says", [
-    ("json", "A JSON file is read whole"), ("json", "NDJSON or CSV"),
-    ("xlsx", "An Excel file is read whole"), ("xlsx", "NDJSON or CSV"),
-    ("ndjson", "/imports/uploads"),
+@pytest.mark.parametrize("path, cap", [
+    ("/api/v1/ws_1/versioning/graphs/g1/imports", "MAX_BYTES"),
+    ("/api/v1/ws_1/versioning/graphs/g1/imports/uploads/iu_1/parts/0", "MAX_BYTES"),
+])
+async def test_an_imports_file_may_come_in_one_request(csrf_client: AsyncClient, path, cap):
+    """A client that sends one large file — to ``…/imports``, or whole to
+    an upload's part 0 — gets it through, up to the most one import can
+    be (10 GiB), and not a byte more. The route itself holds it to its own
+    exact bound as it streams it."""
+    from backend.app.services.versioning.import_export import uploads
+
+    headers = {"Content-Type": "application/octet-stream"}
+    limit = getattr(uploads, cap)
+    send = csrf_client.put if "/parts/" in path else csrf_client.post
+    for size in (4 * 1024 ** 3, limit):
+        under = await send(path, content=b"x", headers={**headers, "Content-Length": str(size)})
+        assert under.status_code != 413, under.text
+    over = await send(path, content=b"x", headers={**headers, "Content-Length": str(limit + 1)})
+    assert over.status_code == 413, over.text
+
+
+@pytest.mark.parametrize("fmt, size, says", [
+    ("json", 100 * 1024 * 1024 + 1, "A JSON file is read whole"),
+    ("json", 100 * 1024 * 1024 + 1, "NDJSON or CSV"),
+    ("xlsx", 100 * 1024 * 1024 + 1, "An Excel file is read whole"),
+    ("xlsx", 100 * 1024 * 1024 + 1, "NDJSON or CSV"),
+    ("ndjson", 10 * 1024 ** 3 + 1, "at most 10 GB"),
 ])
 async def test_an_import_sent_whole_past_the_cap_is_told_how_to_send_it(
-    csrf_client: AsyncClient, fmt, says,
+    csrf_client: AsyncClient, fmt, size, says,
 ):
     """A script that posts a whole file to ``…/imports`` past the cap was
     told only the byte limit. A file read whole (JSON, Excel) has to become
-    NDJSON or CSV to be any larger; any other goes up in parts."""
+    NDJSON or CSV to be any larger; any other is split into several."""
     resp = await csrf_client.post(
         "/api/v1/ws_1/versioning/graphs/g1/imports", params={"format": fmt}, content=b"x",
         headers={"Content-Type": "application/octet-stream",
-                 "Content-Length": str(100 * 1024 * 1024 + 1)},
+                 "Content-Length": str(size)},
     )
     assert resp.status_code == 413, resp.text
     assert says in resp.json()["detail"], resp.json()["detail"]

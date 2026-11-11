@@ -706,6 +706,40 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
         "deprecated": False,
     },
     {
+        "key": "importInMemoryReconcile",
+        "name": "Reconcile imports in memory",
+        "description": (
+            "An import compares its file with the graph in memory, a batch at a time, and writes "
+            "into Postgres only the rows that change something. Needs Version control."
+        ),
+        "impact_when_off": (
+            "Every row of an import's file is staged in Postgres before it is compared with the "
+            "graph, as before. An import already under way keeps the way it started."
+        ),
+        "impact_when_on": (
+            "A file sent again with a few rows changed — a full snapshot — stages only those rows "
+            "whole: the rest are recorded in a few bytes each, so the import writes a fraction of "
+            "the staged rows and WAL, and finishes sooner. The file is read twice, nodes then "
+            "edges. Imports into an empty graph, and into types matched by team keys, run as "
+            "before. Applies to imports that start after it is turned on."
+        ),
+        "category_id": "lineage",
+        "type": "boolean",
+        # OFF by default: a hotfix for imports of full snapshots, so a deployment opts in, and turns
+        # it back off without a redeploy if anything about an import looks wrong.
+        "default_value": json.dumps(False),
+        "options": None,
+        "help_url": "/docs/versioning-import-export#3f-reconciling-in-memory",
+        "admin_hint": (
+            "Turn this on where imports send whole snapshots that change little each time. The "
+            "import workers need the memory for it: about 12 bits per name the file holds (about "
+            "250 MB for a 4 GB file), with 8 GiB per worker pod. Results are the same either "
+            "way; only what is written to get there differs."
+        ),
+        "sort_order": 4,
+        "deprecated": False,
+    },
+    {
         "key": "traceEnabled",
         "name": "Lineage trace",
         "description": (

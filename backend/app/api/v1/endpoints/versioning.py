@@ -26,6 +26,7 @@ import dataclasses
 import inspect
 import json
 import logging
+import os
 from contextlib import contextmanager
 from datetime import datetime
 from typing import Annotated, Any, Dict, List, Literal, Optional, Union
@@ -49,6 +50,7 @@ from backend.app.api.v1.versioning_gate import (SyncOverrides, fork_write_gate, 
                                                 sync_override_gate)
 from backend.app.auth import api_key_auth, api_key_errors
 from backend.app.auth.dependencies import get_current_user, get_permission_claims, requires
+from backend.app.common.bulkhead import Bulkhead
 from backend.app.db.engine import get_db_session
 from backend.app.db.repositories import (api_key_repo, data_source_repo, group_repo, notification_repo,
                                          provider_repo, service_account_repo, user_repo)
@@ -915,6 +917,9 @@ class BranchResponse(_ApiModel):
     access: Optional[Dict[str, bool]] = None
     # The branch read only: who committed to it, most commits first, then the latest (50 at most).
     contributors: Optional[List[str]] = None
+    # A closed draft whose changes were removed after the retention window: since when. Its record
+    # still reads; a read of its changes is 410 ``draft_pruned``.
+    pruned_at: Optional[str] = Field(default=None, alias="prunedAt")
 
 
 class OpenDraftResponse(_ApiModel):
@@ -935,14 +940,25 @@ class CommitResponse(_ApiModel):
     commit_id: str = Field(alias="commitId")
 
 
+class PublishResponse(CommitResponse):
+    """A publish, or a review's merge, done inside the request: the commit it landed as, and the
+    revision of ``main`` that holds it (``revisionId``, what ``asOfSeq`` reads ``main`` as of). One
+    too large for a request answers 202 instead — ``{jobId, graphId, status, statusUrl}`` — and its
+    job (``statusUrl``, :class:`PublishJobResponse`) says the same once it is ``completed``."""
+    revision_id: Optional[int] = Field(default=None, alias="revisionId")
+    status: str = "completed"
+
+
 class PublishJobResponse(_ApiModel):
     """A large draft's publish (or review merge), or a fork review's merge, run as a job: poll until
     it's done. ``error`` is ``{status, detail}``, the answer the route gives when it publishes
-    inside the request."""
+    inside the request. Once ``completed``: the commit it landed as, and the revision of ``main``
+    that holds it (``revisionId``)."""
     job_id: str = Field(alias="jobId")
     graph_id: str = Field(alias="graphId")
     status: str
     commit_id: Optional[str] = Field(default=None, alias="commitId")
+    revision_id: Optional[int] = Field(default=None, alias="revisionId")
     error: Optional[dict] = None
 
 
@@ -1575,6 +1591,9 @@ class PrResponse(_ApiModel):
     description: Optional[str] = None
     conflicts: Optional[List[dict]] = None
     resulting_commit_id: Optional[str] = Field(default=None, alias="resultingCommitId")
+    # The single-PR read only: a merged draft review's commit on main, by seq. Its change list is
+    # main between ``resultingCommitSeq - 1`` and it.
+    resulting_commit_seq: Optional[int] = Field(default=None, alias="resultingCommitSeq")
     reviewers: Optional[List[str]] = None
     approved_by: Optional[List[str]] = Field(default=None, alias="approvedBy")
     # Reviewers whose approval went stale (a content commit since): they must approve again.
@@ -2353,7 +2372,7 @@ async def branch_view_changes(
     return {"branchId": branch_id, "views": visible, "hidden": len(changes) - len(visible)}
 
 
-@router.post("/graphs/{graph_id}/branches/{branch_id}/publish", response_model=CommitResponse)
+@router.post("/graphs/{graph_id}/branches/{branch_id}/publish", response_model=PublishResponse)
 async def publish(
     ws_id: str, graph_id: str, branch_id: str, body: PublishRequest,
     background: BackgroundTasks,
@@ -2391,7 +2410,13 @@ async def publish(
     await _tell_draft_people(session, svc, "draft.published", ws_id=ws_id, meta=_meta, graph_id=graph_id,
                              branch_id=branch_id, actor=user.id)
     background.add_task(project_now, graph_id)   # refresh FalkorDB in-process after commit (async); read-fallback + badge cover the window
-    return {"commit_id": commit_id}
+    return {"commit_id": commit_id,
+            "revision_id": await svc.landed_revision(graph_id=graph_id, commit_id=commit_id)}
+
+
+def _publish_job_url(workspace_id: str, graph_id: str, job_id: str) -> str:
+    """Where a queued publish or merge is followed (``GET …/publish-jobs/{jobId}``)."""
+    return f"/api/v1/{workspace_id}/versioning/graphs/{graph_id}/publish-jobs/{job_id}"
 
 
 async def _queue_publish(ie, *, workspace_id, meta, graph_id, branch_id, actor, body,
@@ -2401,16 +2426,18 @@ async def _queue_publish(ie, *, workspace_id, meta, graph_id, branch_id, actor, 
         graph_id=graph_id, branch_id=branch_id, actor=actor, message=body.message,
         resolutions=body.resolutions, merge_request_id=merge_request_id)
     started = await ie.start_publish(job["job_id"])
-    return JSONResponse(status_code=202, content={"jobId": job["job_id"], "graphId": graph_id,
-                                                  "status": started})
+    return JSONResponse(status_code=202, content={
+        "jobId": job["job_id"], "graphId": graph_id, "status": started,
+        "statusUrl": _publish_job_url(workspace_id, graph_id, job["job_id"])})
 
 
 async def _queue_fork_merge(ie, *, workspace_id, pr_id, actor, body) -> JSONResponse:
     job = await ie.create_fork_merge_job(workspace_id=workspace_id, pr_id=pr_id, actor=actor,
                                          message=body.message)
     started = await ie.start_fork_job(job["job_id"])
-    return JSONResponse(status_code=202, content={"jobId": job["job_id"], "graphId": job["graph_id"],
-                                                  "status": started})
+    return JSONResponse(status_code=202, content={
+        "jobId": job["job_id"], "graphId": job["graph_id"], "status": started,
+        "statusUrl": _publish_job_url(workspace_id, job["graph_id"], job["job_id"])})
 
 
 _JOB_REFUSAL_MAX_VIOLATIONS = 100
@@ -2486,7 +2513,9 @@ async def _publish_from_job(job: dict) -> dict:
         await _tell_draft_people(session, svc, "draft.published", ws_id=job["workspaceId"],
                                  meta=await svc.get_graph(graph_id) or {}, graph_id=graph_id,
                                  branch_id=branch_id, actor=actor)
-    return {"commitId": commit_id}
+    # The revision as it is when the job ends: a draft that changed nothing is held by main's head.
+    return {"commitId": commit_id,
+            "revisionId": await svc.landed_revision(graph_id=graph_id, commit_id=commit_id)}
 
 
 @router.get("/graphs/{graph_id}/publish-jobs/{job_id}", response_model=PublishJobResponse)
@@ -2494,14 +2523,22 @@ async def get_publish_job(
     ws_id: str, graph_id: str, job_id: str,
     _user: User = Depends(requires(_MANAGE, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
     ie=Depends(get_import_export_service),
 ):
     """Where a large draft's publish (or review merge) is, or a fork review's merge (its parent's
-    job): pending, running, completed with its commit, or failed with the answer a publish inside
-    the request would have given."""
+    job): pending, running, completed with its commit and the revision of ``main`` that holds it,
+    or failed with the answer a publish inside the request would have given."""
     answer = _job_answer(await ie.get_job(job_id), job_id, graph_id, ("publish", "fork_merge"),
                          "publish job not found", "publishing failed")
-    answer.pop("summary")
+    summary = answer.pop("summary")
+    if answer["status"] == "completed":
+        # Recorded when the job ended; a fork review's merge, or a job that ended before it was
+        # recorded, is read from its commit.
+        answer["revision_id"] = summary.get("revisionId")
+        if answer["revision_id"] is None:
+            answer["revision_id"] = await svc.landed_revision(graph_id=graph_id,
+                                                              commit_id=answer["commit_id"])
     return answer
 
 
@@ -3964,27 +4001,39 @@ async def create_import(
             if job is None:
                 raise
         else:
-            return await _store_and_start(ie, request, created["job_id"], created["branch_id"],
-                                          created["source_uri"])
+            return await _store_and_start(ie, session, request, created["job_id"], created["branch_id"],
+                                          created["source_uri"], format)
     if _never_arrived(job):
         # Its request broke off before storing the file: this one's file is taken, once the job is
         # taken back under the rules a new import meets (the view it places into included).
         await _check_import_view(session, ws_id, job.get("scopeViewId"), user, claims)
         with _domain_errors():
             if await ie.reclaim_import(job["jobId"], actor=user.id, workspace_id=ws_id):
-                return await _store_and_start(ie, request, job["jobId"], job["branchId"], job["sourceUri"])
+                return await _store_and_start(ie, session, request, job["jobId"], job["branchId"],
+                                              job["sourceUri"], format)
         job = await ie.find_job(graph_id=graph_id, idempotency_key=key)     # another request took it back
     # Still storing its file, queued, running or finished: answered as it is.
     return {"jobId": job["jobId"], "branchId": job["branchId"], "sourceUri": job["sourceUri"],
             "status": job["status"]}
 
 
-async def _store_and_start(ie, request: Request, job_id: str, branch_id: str, source_uri: str) -> dict:
+async def _store_and_start(ie, session: AsyncSession, request: Request, job_id: str, branch_id: str,
+                           source_uri: str, fmt: str) -> dict:
     """Store the request's body as import ``job_id``'s file and queue it. A request that breaks off
     first fails the job there and then (:func:`_abandon_unqueued`): its draft takes the next import
-    now, and the same key sent again takes the job back."""
+    now, and the same key sent again takes the job back. A body past what one import of ``fmt`` can
+    be is refused (413) as soon as it passes it.
+
+    The file can take minutes to arrive, so the request's checks end their transaction first (they
+    only read): its connection goes back to the pool rather than being held for as long as the
+    file takes. And it is one of the ``_IMPORT_BODIES`` this process takes in at once."""
+    from backend.app.services.versioning.import_export import uploads
     try:
-        await ie.store.put_stream(source_uri, request.stream())
+        if session is not None:          # a direct caller may hold none
+            await session.commit()
+        async with _IMPORT_BODIES.slot():
+            with _upload_errors():
+                await ie.store.put_stream(source_uri, uploads.within_limit(request.stream(), fmt))
         status = await ie.start_import(job_id)
     except BaseException:
         await _abandon_unqueued(ie, job_id)
@@ -4005,10 +4054,21 @@ async def _abandon_unqueued(ie, job_id: str) -> None:
 # Resumable uploads: a file of up to IMPORT_MAX_BYTES arrives in parts, then becomes an import
 # (import_export/uploads.py). The single-request POST /imports above stays for scripts.
 
+#: How many import files — sent whole, or as an upload's parts — this process takes in at once.
+#: Each holds little memory (a chunk, or one part on its way to a bucket), but writes to the object
+#: store as fast as it arrives, and one sent whole holds its slot for as long as it takes to arrive.
+#: A burst of them gets this share, and can't take the store's (or the database's, when it is the
+#: store) bandwidth from everything else. One beyond it waits briefly, then is told to retry (429,
+#: Retry-After) before any of its body is read.
+_IMPORT_BODIES = Bulkhead("import uploads", int(os.getenv("IMPORT_UPLOAD_CONCURRENCY", "8")),
+                          wait_seconds=30.0, retry_after_seconds=15)
+
 class CreateUploadRequest(_ApiModel):
     fileName: str = Field(..., max_length=500)
     size: int = Field(..., gt=0)
     format: str = Field("ndjson", max_length=16)
+    #: The part size the client will send, when not the server's own (16 MiB).
+    partBytes: Optional[int] = None
 
 
 @contextmanager
@@ -4043,7 +4103,8 @@ async def create_import_upload(
     ie=Depends(get_import_export_service),
 ):
     """Start a resumable upload of a file to import: how it is to be split, and where its parts go.
-    A file too large for its format is refused here, before any of it is sent (413)."""
+    A client that splits files its own way says its part size (``partBytes``). A file too large for
+    its format is refused here, before any of it is sent (413)."""
     from backend.app.services.versioning.import_export import uploads
     from backend.app.services.versioning.import_export.formats import get_adapter
     try:
@@ -4053,7 +4114,8 @@ async def create_import_upload(
     with _upload_errors():
         record = await uploads.create(
             ie.store, workspace_id=ws_id, data_source_id=meta.get("data_source_id"), graph_id=graph_id,
-            owner=user.id, file_name=body.fileName, size=body.size, fmt=body.format.lower())
+            owner=user.id, file_name=body.fileName, size=body.size, fmt=body.format.lower(),
+            part_bytes=body.partBytes)
     return _upload_view(record, [])
 
 
@@ -4077,15 +4139,20 @@ async def put_import_upload_part(
     meta: dict = Depends(graph_in_workspace),
     ie=Depends(get_import_export_service),
 ):
-    """One part of the file, the raw request body. Sending a part again replaces it — until the
-    upload is completed: what is imported is what was there then."""
+    """One part of the file, the raw request body — or a run of parts from it, up to the whole file
+    to part 0, cut into its parts as it arrives (``lastPart`` says how far it went). Sending a part
+    again replaces it — until the upload is completed: what is imported is what was there then. A
+    body whose Content-Length doesn't end where a part does is refused before any of it is read."""
     from backend.app.services.versioning.import_export import uploads
     record = await _load_upload(ie, ws_id, graph_id, meta, upload_id, user)
     if record.get("jobId"):
         raise HTTPException(status_code=409, detail="This upload is complete. Upload the file again to change it.")
+    declared = request.headers.get("content-length")
     with _upload_errors():
-        size = await uploads.put_part(ie.store, record, part, request.stream())
-    return {"part": part, "size": size}
+        async with _IMPORT_BODIES.slot():
+            size = await uploads.put_part(ie.store, record, part, request.stream(),
+                                          declared=int(declared) if declared and declared.isdigit() else None)
+    return {"part": part, "size": size, "lastPart": (part * record["partBytes"] + size - 1) // record["partBytes"]}
 
 
 @router.post("/graphs/{graph_id}/imports/uploads/{upload_id}/complete", response_model=CreateImportResponse,
@@ -4416,7 +4483,8 @@ async def _check_export_access(
 
     if branch_id:
         with _domain_errors():
-            await svc.assert_branch_readable(graph_id=graph_id, branch_id=branch_id, viewer=viewer)
+            await svc.assert_branch_readable(graph_id=graph_id, branch_id=branch_id, viewer=viewer,
+                                             changes=True)
     if view_id:
         row = await readable_view(session, view_id, user, claims)
         if row.workspace_id != ws_id or row.data_source_id != meta.get("data_source_id"):
@@ -5133,7 +5201,7 @@ async def close_pull_request(
         return await svc.close_pr(pr_id=pr_id, actor=user.id)
 
 
-@router.post("/pulls/{pr_id}/merge", response_model=CommitResponse)
+@router.post("/pulls/{pr_id}/merge", response_model=PublishResponse)
 async def merge_pull_request(
     ws_id: str, pr_id: str, body: MergePrRequest,
     background: BackgroundTasks,
@@ -5166,7 +5234,8 @@ async def merge_pull_request(
     await _bump_main_cache(str(_pr["target_graph_id"]))            # base advanced — invalidate stale canvas reads now
     await _touch_views_data_updated(str(_pr["target_graph_id"]), user.id)   # views' "data updated" freshness
     background.add_task(project_now, str(_pr["target_graph_id"]))   # base graph advanced; refresh FalkorDB in-process (async)
-    return {"commit_id": commit_id}
+    return {"commit_id": commit_id, "revision_id": await svc.landed_revision(
+        graph_id=str(_pr["target_graph_id"]), commit_id=commit_id)}
 
 
 # --------------------------------------------------------------------------- #
@@ -5581,7 +5650,7 @@ async def close_merge_request(
         return await svc.close_pr(pr_id=pr_id, actor=user.id)
 
 
-@router.post("/merge-requests/{pr_id}/merge", response_model=CommitResponse)
+@router.post("/merge-requests/{pr_id}/merge", response_model=PublishResponse)
 async def merge_merge_request(
     ws_id: str, pr_id: str, body: MergePrRequest,
     background: BackgroundTasks,
@@ -5635,4 +5704,4 @@ async def merge_merge_request(
                                  meta=await svc.get_graph(target) or {}, graph_id=target,
                                  branch_id=str(_src_branch), actor=user.id)
     background.add_task(project_now, str(_pr["target_graph_id"]))   # target graph advanced; refresh FalkorDB in-process (async)
-    return {"commit_id": commit_id}
+    return {"commit_id": commit_id, "revision_id": await svc.landed_revision(graph_id=target, commit_id=commit_id)}

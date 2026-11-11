@@ -139,6 +139,8 @@ The API server: what it accepts and serves, and which part of the backend each p
 | `API_DOCS_ENABLED` | (empty) | Serve the interactive API docs and schema (`/docs`, `/redoc`, `/openapi.json`) even with `ENV=production`: `true`, `1` or `yes`. Outside production they are always served. | `backend/app/main.py` |
 | `CORS_ALLOWED_ORIGINS` | (empty) | Browser origins allowed to call the API with credentials, comma-separated, for example `https://lineage.example.com`. The CSRF check trusts the same list. Unset, only `http://localhost:3000` and `http://localhost:5173` are allowed. | `backend/app/main.py`, `backend/auth_service/csrf.py` |
 | `ENV` | `dev` | Deployment type. `production` (or `prod`) turns on the safeguards listed under [Must set in production](#must-set-in-production); any other value relaxes them for local work. | `backend/app/auth/dependencies.py`, `backend/app/db/repositories/connection_repo.py`, `backend/app/main.py` +4 more |
+| `IMPORT_UPLOAD_CONCURRENCY` | `8` | Import files one API process takes in at once — sent whole, or as an upload's parts. Each holds little memory, but writes to the object store as fast as it arrives, and one sent whole holds its slot until it is in. One beyond waits up to 30 s for a slot, then is told to retry (`429`, `Retry-After: 15`) before any of it is read. The fleet takes up to this × processes at once: size it to what the object store (the database, when `OBJECT_STORE_BACKEND=database`) can write, not up with the number of uploaders. | `backend/app/api/v1/endpoints/versioning.py` |
+| `MAX_IMPORT_BODY_BYTES` | `104857600` | The body-size cap on the other routes that take large bodies (the rest of `/versioning/`, `/graph/save`, the view-file routes). An import's file is held to `IMPORT_MAX_BYTES` instead. | `backend/app/main.py` |
 | `SYNODIC_ROLE` | (empty) / `dev` / — *(differs by call site)* | What this process runs: `web` (the API), `worker` (aggregation jobs), `controlplane` (scheduling and recovery) or `dev` (everything in one process, the default). Any role other than `dev` also makes the API write JSON logs. | `backend/app/jobs/metrics_prometheus.py`, `backend/app/middleware/logging.py`, `backend/app/runtime/role.py` |
 
 ### Internal tuning
@@ -148,7 +150,6 @@ The API server: what it accepts and serves, and which part of the backend each p
 | `GZIP_COMPRESSLEVEL` | `1` | `backend/app/main.py` |
 | `HTTP_TIMEOUT_DATA_SOURCE_MOVE_SECS` | `120` | `backend/app/main.py` |
 | `HTTP_TIMEOUT_VIEW_TRANSFER_SECS` | `120` | `backend/app/main.py` |
-| `MAX_IMPORT_BODY_BYTES` | `104857600` | `backend/app/main.py` |
 | `MAX_REQUEST_BODY_BYTES` | `8388608` | `backend/app/main.py` |
 | `PROVIDER_HEALTH_DS_INDEX_DEADLINE_S` | `1.0` | `backend/app/main.py` |
 | `PROVIDER_HEALTH_DS_INDEX_TTL_S` | `5` | `backend/app/main.py` |
@@ -601,6 +602,8 @@ Drafts and commits, projection into the graph store, and import and export.
 | `GRAPHVER_CHANGE_INDEX_CACHE_ENTRIES` | `300000` | Entries the change lists of each web process may hold together; the least recently read go first, and the newest is kept whatever its size. About 90 MB at the default, 300,000. An evicted list is classified again on its next read: about a second at 100,000 changes. | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_CHANGE_INDEX_STATEMENT_TIMEOUT_MS` | `15000` | Longest, in milliseconds, one statement building a change list or the history calendar may run before Postgres cancels it and the reader is told to try again (503 `change_list_busy`). Each is an index range that finishes well inside a second at 100,000 changes. | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_CHANGE_LIST_MAX` | `250000` | Changed entities a change list — a draft's changes, one revision's, two revisions compared — lists, a page at a time; past it the list is counted, not listed. Each list is classified once from content hashes, no payload, and kept for its pages at about 300 bytes an entity, so the default, 250,000, holds about 75 MB while a list is in use. | `backend/app/services/versioning/config.py` |
+| `GRAPHVER_DRAFT_RETENTION_DAYS` | `30` | Days a merged or abandoned draft keeps its changes before the versioning worker removes them; `0` keeps them for good. The draft's record stays (its name, owner, commits and review), and a merged draft's changes are in the published graph. A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → Draft retention. Each sweep spends at most 5 minutes on it, so a draft of millions of rows is removed over a few sweeps. | `backend/app/services/versioning/config.py` |
+| `GRAPHVER_DRAFT_SWEEP_SECS` | `3600` | Seconds between the versioning worker's sweeps: idle drafts past `GRAPHVER_DRAFT_TTL_DAYS`, closed drafts' changes past `GRAPHVER_DRAFT_RETENTION_DAYS`, staged import rows past `IMPORT_STAGING_GC_DAYS`, artifacts past `OBJECT_STORE_TTL_HOURS`. Each goes within this long after it is due, so keep it well under the shortest of them. | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_DROP_FORK_COPIES` | `false` | Set `true` once every pod runs a release whose forks read through their parent's graph: the versioning worker then drops the FalkorDB copies earlier releases made of forks (`<parent key>__fork_<id>`), each only if it is the fork's own and nothing else projects into it or reads it. Off by default, because a pod on an earlier release still reads them. | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_LIVENESS_SECS` | `60` | How often, in seconds, the versioning worker checks that each versioned graph's FalkorDB key still holds what was projected into it, and reseeds one that was lost or restored to an older state. The same check asks for the first summaries build of a key no build has covered yet. `0` turns the check off. | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_OVERLAY_CACHE_ENTRIES` | `400000` | Entries the overlay deltas of drafts' and forks' reads may hold together in each process; the least recently read go first, and the newest is kept whatever its size. An entry holds about 1.2 KB (0.74 KB a draft's, 0.87 KB a fork's, measured, before allocator slack and the chains a rollup read keeps), so the default, 400,000, holds under 512 MB in each web process. An evicted delta is built again on its next read: 2 to 6 s at 50,000 to 145,000 entries. | `backend/app/services/versioning/config.py` |
@@ -608,6 +611,9 @@ Drafts and commits, projection into the graph store, and import and export.
 | `GRAPHVER_PROJECTION_WAIT_REPLICAS` | `0` | Replicas that must confirm a versioned graph's projection before reads are served from it. Fewer within `GRAPHVER_PROJECTION_WAIT_MS` hold it back as `replica_unconfirmed` and retry later. `0` waits for none; set it the same on the API and the versioning worker, which both project. | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_REVISION_REWIND_MAX` | `100000` | Entities the published graph may have changed since a past revision for that revision to open on the canvas (the revision history viewer, behind the `revisionViewerEnabled` switch). A revision is the graph as it is now with what changed since put back, so opening one costs what changed since, never the graph: about 1.2 KB an entity in each web process that reads it, 2 to 4 s to build at the default, 100,000. A revision further back answers 409 `revision_too_far`; its change list, a comparison and an export still reach it. | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_TRANSFER_INPROCESS` | — | No longer read: import, export and publish jobs always run on the versioning worker's transfer lane (`GRAPHVER_WORKER_LANES`). A process that still finds it set logs a warning; remove it. | `backend/app/services/versioning/config.py` |
+| `IMPORT_MAX_BYTES` | `10737418240` | The most one import can be, for a file read a row at a time (NDJSON, CSV, TSV): what an upload may declare, and the body-size cap on the two routes a file comes in on (`…/imports`, and `…/imports/uploads/{id}/parts/{n}`, which may carry the whole file). The frontend's nginx and the Helm ingress allow 10 GiB on those routes: raise them with it. | `backend/app/services/versioning/import_export/uploads.py` |
+| `IMPORT_STAGING_GC_DAYS` | `3` | Days a finished, failed or cancelled import's staged rows (3.4 to 7 times its file, in Postgres, more for shorter rows) are kept after it ends, and a failed import's file with them: the window to resume or re-queue a failed import, and to read a finished one's row preview (the draft's changes stay). `1` keeps them a day. Swept within the hour after (`GRAPHVER_DRAFT_SWEEP_SECS`). Helm: `config.objectStore.stagingGcDays`. | `backend/app/services/versioning/config.py` |
+| `IMPORT_WHOLE_FILE_MAX_BYTES` | `104857600` | The most one JSON or Excel import can be. Those are read whole, into the worker's memory, so they stay small; a larger file is NDJSON or CSV. | `backend/app/services/versioning/import_export/uploads.py` |
 
 ### Internal tuning
 
@@ -633,7 +639,6 @@ Drafts and commits, projection into the graph store, and import and export.
 | `GRAPHVER_DB_URL` | — | `backend/app/services/system_status/probes.py`, `backend/app/services/versioning/config.py` |
 | `GRAPHVER_DEFAULT_AUDIT_TIER` | `commit_only` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_DIFF_TREE_MAX_CHANGES` | `20000` | `backend/app/services/versioning/config.py` |
-| `GRAPHVER_DRAFT_SWEEP_SECS` | `86400` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_DRAFT_TTL_DAYS` | `30` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_DRAIN_SECS` | `40` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_EPHEMERAL_MAX_GRAPHS` | `32` | `backend/app/services/versioning/config.py` |
@@ -680,6 +685,7 @@ Drafts and commits, projection into the graph store, and import and export.
 | `GRAPHVER_PROJECTION_VERIFY` | `1` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_PROJECTION_VERIFY_DEEP` | `1` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_PROJECTION_VERIFY_DEEP_MAX_ENTITIES` | `500000` | `backend/app/services/versioning/config.py` |
+| `GRAPHVER_PROJECTION_VERIFY_INTERVAL_SECS` | `300` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_PROJECTION_WAIT_MS` | `2000` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_PURGE_GRACE_DAYS` | `30` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_PURGE_WINDOW` | `25000` | `backend/app/services/versioning/config.py` |
@@ -714,12 +720,9 @@ Drafts and commits, projection into the graph store, and import and export.
 | `GRAPH_EXPORT_PLAN_BUDGET_SECS` | `20` | `backend/app/services/versioning/import_export/stream.py` |
 | `GRAPH_EXPORT_SLOT_WAIT_SECS` | `900` | `backend/app/services/versioning/import_export/stream.py` |
 | `IMPORT_COMMIT_WINDOW` | `10000` | `backend/app/services/versioning/config.py` |
-| `IMPORT_MAX_BYTES` | `10737418240` | `backend/app/services/versioning/import_export/uploads.py` |
 | `IMPORT_MAX_ROWS` | `0` | `backend/app/services/versioning/config.py` |
 | `IMPORT_PREVIEW_SAMPLE_LIMIT` | `200` | `backend/app/services/versioning/config.py` |
-| `IMPORT_STAGING_GC_DAYS` | `7` | `backend/app/services/versioning/config.py` |
 | `IMPORT_STORE_ROOT` | `/tmp/synodic-import-store` | `backend/app/services/versioning/config.py` |
-| `IMPORT_WHOLE_FILE_MAX_BYTES` | `104857600` | `backend/app/services/versioning/import_export/uploads.py` |
 | `INLINE_IMPORT_MAX` | `5000` | `backend/app/services/versioning/config.py` |
 | `OBJECT_STORE_BACKEND` | `database` | `backend/app/services/versioning/config.py` |
 | `OBJECT_STORE_S3_ADDRESSING` | `auto` | `backend/app/services/versioning/config.py` |

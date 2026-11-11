@@ -2,7 +2,8 @@
 
 The job goes through the same hook the API wires into the import/export service (the target's
 live ontology, the route's refusals, then what a publish sets off), so this runs it end to end
-against Postgres: the draft's changes reach main and the job carries the commit; a draft that fell
+against Postgres: the draft's changes reach main and the job carries the commit, and the revision
+of main that holds it; a draft that fell
 behind main while its job waited is refused with the route's own answer, for the client to raise
 the same error; the
 merge of a draft's review goes the same way, and one its reviewer has not approved is refused
@@ -54,6 +55,7 @@ async def _run(monkeypatch) -> None:
     assert nodes["A"]["properties"] == {"reviewed": True}
     log = await svc.commit_log(graph_id=gid, branch_id=main)
     assert log[0]["commit_id"] == result["commitId"] and log[0]["message"] == "publish by job", log[0]
+    assert result["revisionId"] == log[0]["commit_seq"], (result, log[0])
 
     # A draft that fell behind main while its job waited: refused with the route's own answer. (One
     # already behind is refused before it is queued: test_versioning_publish_fence.)
@@ -119,8 +121,10 @@ async def _run(monkeypatch) -> None:
                                queued=True)
     result = await ie.run_publish(job["job_id"])       # ...died here; the next attempt runs it
     got = await ie.get_job(job["job_id"])
-    assert (got["status"], got["attempt"], result) == ("completed", 2, {"commitId": landed}), got
-    assert [c["commit_id"] for c in await squashes_of(crashed)] == [landed], "published once"
+    squashes = await squashes_of(crashed)
+    assert [c["commit_id"] for c in squashes] == [landed], "published once"
+    assert (got["status"], got["attempt"], result) == (
+        "completed", 2, {"commitId": landed, "revisionId": squashes[0]["commit_seq"]}), got
     assert set_off == [("promote", crashed), ("nudge", gid)]
 
     # A superseded attempt's squash lands between this attempt's look and its publish: the publish
@@ -141,8 +145,10 @@ async def _run(monkeypatch) -> None:
     monkeypatch.setattr(svc, "merged_commit_id", looks_then_the_zombie_lands)
     set_off.clear()
     result = await ie.run_publish(job["job_id"])
-    assert result == {"commitId": zombie[0]} and (await ie.get_job(job["job_id"]))["status"] == "completed"
-    assert [c["commit_id"] for c in await squashes_of(raced)] == zombie
+    squashes = await squashes_of(raced)
+    assert [c["commit_id"] for c in squashes] == zombie
+    assert result == {"commitId": zombie[0], "revisionId": squashes[0]["commit_seq"]}
+    assert (await ie.get_job(job["job_id"]))["status"] == "completed"
     assert set_off == [("promote", raced), ("nudge", gid)]
     await db.dispose_engine()
 

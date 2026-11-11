@@ -25,6 +25,19 @@ loses at most the unit it was in, and the next one carries on from the cursor �
   ``replace``     every window; a replace's deletes under way (run again whole: a deleted entity is
                   no longer there to delete).
 
+Reconciled in memory (the ``importInMemoryReconcile`` switch, when the draft holds nodes to be
+unchanged against): the file is read twice, nodes then edges, and each batch of rows is resolved in
+memory before anything is staged — exactly as its window would resolve it, the rows before it being
+none that name what it names (:class:`_Seen`). A row that changes nothing is staged as a slim row,
+already resolved; every other row is staged whole and resolved by its window, as above. The edges
+are read once the node windows are in, so they are decided against the nodes as they then stand —
+
+  ``mparse:<n>``  the file's node rows staged up to file row n;
+  ``mnode:<row>`` the node windows applied up to staged row ``row``;
+  ``eparse:<n>``  every node window, and the edge rows staged up to file row n;
+  then ``edge:<row>`` and ``replace`` as above. A pass resumed by another run decides nothing more
+  (what it would need to know of the rows before is gone with the run): it stages the rest whole.
+
 A superseded worker (its job taken over, or no longer running) finds out at its next checkpoint,
 whose transaction — the window's work with it — then rolls back.
 """
@@ -76,6 +89,56 @@ _TALLIES = ("new", "updated", "unchanged", "deleted", "invalid")
 # Times a window's other rows are applied again after the write gate refused some of them
 # (``ImportWorker._apply_window``).
 _QUARANTINE_ROUNDS = 4
+#: Admin → Features: reconcile an import in memory, a batch at a time (``_stage_pass``). A row that
+#: changes nothing is decided before it is staged, and recorded as a slim row (``_slim_row``)
+#: instead of whole and then rewritten with its resolution: a file sent again with a few percent
+#: changed writes into Postgres about what changed. Read when a job starts; the job keeps the mode it
+#: started in (its cursor says so) whatever the switch says later.
+IN_MEMORY_SWITCH = "importInMemoryReconcile"
+#: Rows of a pass decided before it judges whether deciding pays, and the share of them that must
+#: have been unchanged for it to go on: an import that mostly adds (a new subtree into a large
+#: graph) stops deciding early and stages the rest whole, as before.
+_DECIDE_PROBE_ROWS = 20_000
+_DECIDE_MIN_UNCHANGED = 0.1
+
+
+class _Seen:
+    """What the rows of one pass of an in-memory import have named so far, in file order — file
+    ids, urns and identifier values, qualified names, the entities they matched — as a Bloom
+    filter. A row may be decided unchanged before the windows only when nothing it names was named
+    before it: a second row for an entity, or a name a new node takes, changes what a later row
+    resolves to, and only its window sees that. A false positive only sends a row the usual way;
+    nothing named is ever missed. 12 bits a name: under 1% false positives at ``capacity``."""
+
+    _PROBES = 4
+
+    def __init__(self, capacity: int) -> None:
+        self._size = max(1 << 16, capacity * 12)
+        self._bits = bytearray((self._size + 7) // 8)
+
+    def _positions(self, name: str):
+        h = hash(name) & 0xFFFF_FFFF_FFFF_FFFF
+        first, step = h & 0xFFFF_FFFF, (h >> 32) | 1
+        return [(first + i * step) % self._size for i in range(self._PROBES)]
+
+    def __contains__(self, name: str) -> bool:
+        return all(self._bits[p >> 3] & (1 << (p & 7)) for p in self._positions(name))
+
+    def add(self, name: str) -> None:
+        for p in self._positions(name):
+            self._bits[p >> 3] |= 1 << (p & 7)
+
+
+async def _in_memory_switch() -> bool:
+    """Whether new imports reconcile in memory (``IN_MEMORY_SWITCH``), as the flag cache has it.
+    A switch that can't be read is off: the import runs as it always has."""
+    from backend.app.services.feature_flags import feature_flags
+    try:
+        return await feature_flags.is_enabled_self_session(IN_MEMORY_SWITCH, default=False)
+    except Exception:  # noqa: BLE001 — unread is off, the way that never surprises anyone
+        logger.warning("imports: the %s switch could not be read; reconciling as before",
+                       IN_MEMORY_SWITCH, exc_info=True)
+        return False
 
 
 def _now() -> str:
@@ -110,9 +173,11 @@ class _Position(NamedTuple):
 
 def _window_after(cursor: Optional[str]) -> Tuple[Optional[str], int]:
     """The kind and row a cursor's next window starts after: ``node:<row>``/``edge:<row>`` →
-    ``(kind, row)``; ``replace`` (or anything else) → ``(None, -1)``, no window left."""
+    ``(kind, row)``; ``replace`` (or anything else) → ``(None, -1)``, no window left. An import
+    reconciled in memory says so in its cursor: ``mnode:<row>`` for its node windows (its edges are
+    staged once they are in), ``eparse:<n>`` while its edges are staged from file row ``n``."""
     kind, _, row = (cursor or "").partition(":")
-    return (kind, int(row)) if kind in ("node", "edge") else (None, -1)
+    return (kind, int(row)) if kind in ("node", "mnode", "eparse", "edge") else (None, -1)
 
 
 def _sniff_format(declared: str, head: bytes) -> str | None:
@@ -302,6 +367,13 @@ class ImportWorker:
         self._keys: Optional[KeyIndex] = None
         self._canon: Dict[str, str] = _canonical_map((ontology or {}).get("node_types"))
         self._identity_read = False
+        # Reconciling in memory: the file (read again for the edges), and per pass ("node",
+        # "edge") what its rows have named — only for a pass this run started — whether it is still
+        # deciding, and how many rows it decided and found unchanged.
+        self._source: Tuple[Optional[str], Optional[str]] = (None, None)
+        self._seen: Dict[str, _Seen] = {}
+        self._deciding: Dict[str, bool] = {}
+        self._decided: Dict[str, List[int]] = {}
 
     async def run(self, job_id: str, *, lease: Optional[Lease] = None) -> Dict[str, int]:
         """Run the import job to the end on ``lease`` — the transfer lane's; called without one,
@@ -311,9 +383,10 @@ class ImportWorker:
         job = await self._job(job_id)
         graph_id, branch_id = job["graph_id"], job["branch_id"]
         actor = await self._branch_owner(graph_id, branch_id)
+        self._source = (job["source_uri"], job["import_format"])
 
         await self._lease.retry_transient(
-            lambda: self._stage(job_id, job["source_uri"], job["import_format"]))
+            lambda: self._stage(job_id, job["source_uri"], job["import_format"], graph_id, branch_id))
         summary = await self._resolve_and_build(
             job_id, graph_id, branch_id, actor, job.get("reconcile_mode") or "upsert")
         if self._facts:
@@ -370,12 +443,21 @@ class ImportWorker:
                 return chunk  # only the first chunk is needed to sniff the file type
         return b""
 
-    async def _stage(self, job_id: str, source_uri: str, fmt: str) -> None:
+    async def _stage(self, job_id: str, source_uri: str, fmt: str, graph_id: Optional[str] = None,
+                     branch_id: Optional[str] = None) -> None:
         """Parse the file into ``import_rows`` from where an earlier run of the job got to, then
         point the job at its first window (``node:-1``), with how many rows it has (``total``).
-        Nothing to do once the job is past parsing."""
+        Nothing to do once the job is past parsing. A new job reconciles in memory instead
+        (:meth:`_stage_pass`, cursor ``mparse``) when :meth:`_in_memory_wanted` says it should."""
         pos = await self._position(job_id)
         cursor = pos.cursor
+        if cursor is None and graph_id and await self._in_memory_wanted(graph_id, branch_id):
+            cursor = "mparse:0"
+        if cursor is not None and cursor.startswith("mparse:"):
+            snap = await open_snapshot(graph_id=graph_id, branch_id=branch_id)
+            await self._decide_state(graph_id, branch_id)
+            await self._stage_pass(job_id, snap, "node", int(cursor.partition(":")[2]))
+            return
         if cursor is not None and not cursor.startswith("parse:"):
             return
         self._skip = int(cursor.partition(":")[2]) if cursor else 0
@@ -387,10 +469,10 @@ class ImportWorker:
                                          total=staged, current_phase="nodes", **tally)
         self._cursor = "node:-1"
 
-    async def _parse(self, job_id: str, source_uri: str, fmt: str) -> Tuple[int, int]:
-        """Stage the file's rows past those already staged. Returns how many rows the file has, and
-        how many of its records are neither a node nor an edge — counted over the whole file, a
-        resumed parse's already staged part too."""
+    async def _reader(self, job_id: str, source_uri: str, fmt: str):
+        """``(adapter, native)``: what reads the file's records, and whether they are a view
+        package's lines (which may be format 2) — checked first, so a file that can't be imported
+        fails before anything is staged."""
         # xlsx IS a zip (PK); its adapter reads it natively. A view package's data is NDJSON read out
         # of its archive (uploads.open_source): nothing to sniff, and no second spool to sniff it.
         if (fmt or "").lower() != "xlsx" and not is_archive_source(source_uri):
@@ -404,8 +486,13 @@ class ImportWorker:
             reason = too_large(await source_size(self._store, source_uri), fmt)
             if reason:
                 raise ValueError(reason)
-        adapter = get_adapter(fmt)
-        native = is_archive_source(source_uri)            # a package: its lines may be format 2
+        return get_adapter(fmt), is_archive_source(source_uri)
+
+    async def _parse(self, job_id: str, source_uri: str, fmt: str) -> Tuple[int, int]:
+        """Stage the file's rows past those already staged. Returns how many rows the file has, and
+        how many of its records are neither a node nor an edge — counted over the whole file, a
+        resumed parse's already staged part too."""
+        adapter, native = await self._reader(job_id, source_uri, fmt)
         batch: List[Dict[str, Any]] = []
         idx = skipped = 0
         # Closed however the parse ends, so a package's spool goes with it.
@@ -424,6 +511,183 @@ class ImportWorker:
         if batch:
             await self._flush(batch)
         return idx, skipped
+
+    async def _in_memory_wanted(self, graph_id: str, branch_id: str) -> bool:
+        """Whether a new job reconciles in memory: the switch is on, its types match imports by no
+        team key (those match across the whole file: only the windows can see that), and the draft
+        holds nodes for its rows to be unchanged against — a first load into an empty graph is all
+        new, so deciding would only add reads."""
+        if not await _in_memory_switch():
+            return False
+        onto = self._ontology or {}
+        if KeyIndex(onto.get("keys"), onto.get("unique")):
+            return False
+        snap = await open_snapshot(graph_id=graph_id, branch_id=branch_id)
+        async with contextlib.aclosing(snap.iter_live("node", limit=1)) as pages:
+            async for _page in pages:
+                return True
+        return False
+
+    async def _decide_state(self, graph_id: str, branch_id: str) -> None:
+        """What a batch is resolved against in memory before any window (as
+        :meth:`validation_state`, with no team keys): what the graph derives node ids in, and the
+        data source's identifier property. The links earlier windows leave come later, read by the
+        first window (:meth:`_identity_state`) — slim rows' among them."""
+        from backend.app.services.node_identity import identity_property
+        self._graph_id, self._branch_id = graph_id, branch_id
+        self._id_scope = await self._svc.identity_scope(graph_id)
+        self._identity_prop = identity_property(self._node_identity)
+
+    async def _stage_pass(self, job_id: str, snap, kind: str, resume: int) -> None:
+        """Stage the file's ``kind`` rows from file row ``resume``, a batch at a time, each batch
+        decided in memory first (:meth:`_decide`): an unchanged row as a slim row, already
+        resolved (counted on the job as it is staged); every other row whole, for its window. Then
+        point the job at the pass's windows: ``mnode:-1`` with how many rows the file has (nodes),
+        or ``edge:-1`` (edges). Each batch commits with the job's cursor (``mparse:<n>`` /
+        ``eparse:<n>``: the file read up to row n), so a resumed pass stages from there."""
+        source_uri, fmt = self._source
+        adapter, native = await self._reader(job_id, source_uri, fmt)
+        if resume == 0:                         # this run starts the pass: it decides
+            capacity = max(1 << 16, await source_size(self._store, source_uri) // 25)
+            self._seen[kind], self._deciding[kind], self._decided[kind] = _Seen(capacity), True, [0, 0]
+        elif kind not in self._seen:            # resumed by another run: nothing more is decided
+            self._deciding[kind] = False
+        prefix, done = ("mparse", "mnode:-1") if kind == "node" else ("eparse", "edge:-1")
+        pos = await self._position(job_id)
+        summary, processed = dict(pos.summary), pos.processed
+        pending: List[Dict[str, Any]] = []
+        idx = skipped = 0
+        async with contextlib.aclosing(open_source(self._store, source_uri)) as chunks:
+            async for page in _record_pages(adapter, chunks):
+                rows, page_skipped = await asyncio.to_thread(_normalize_page, page, native)
+                skipped += page_skipped
+                for row_kind, row in rows:
+                    if row_kind == kind and idx >= resume:
+                        pending.append({**row, "_row_index": idx})
+                    idx += 1
+                    if len(pending) >= config.IMPORT_COMMIT_WINDOW:     # a window's worth
+                        summary, processed = await self._flush_decided(
+                            job_id, snap, kind, pending, summary, processed, f"{prefix}:{idx}")
+                        pending = []
+        end: Dict[str, Any] = {"current_phase": f"{kind}s"}
+        if kind == "node":
+            end["total"] = idx
+            if skipped:         # records that are neither a node nor an edge (a replace refuses them)
+                summary = {**summary, "skipped": skipped}
+        await self._flush_decided(job_id, snap, kind, pending, summary, processed, done, **end)
+        decided, unchanged = self._decided.get(kind) or [0, 0]
+        logger.info("import job %s: %d %s row(s) decided in memory, %d of them unchanged and staged "
+                    "slim", job_id, decided, kind, unchanged)
+
+    async def _flush_decided(self, job_id: str, snap, kind: str, rows: List[Dict[str, Any]],
+                             summary: Dict[str, Any], processed: int, cursor: str,
+                             **values) -> Tuple[Dict[str, Any], int]:
+        """Decide ``rows`` and stage them — the slim and the whole together — with the job's
+        checkpoint (``cursor``, the tallies and progress the slim rows add) in ONE transaction,
+        fenced like :meth:`_flush`. Returns the tallies and progress as the row now holds them."""
+        slim, whole = await self._decide(snap, kind, rows) if rows else ([], [])
+        summary = dict(summary)
+        for _row, res in slim:
+            summary[res["status"]] = int(summary.get(res["status"]) or 0) + 1
+        processed += len(slim)
+        # Each row names only the columns it sets (an unset one stays NULL, as the parse leaves
+        # it), so they go in one INSERT per shape.
+        shapes: Dict[tuple, List[Dict[str, Any]]] = {}
+        for row in [self._slim_row(job_id, kind, row, res) for row, res in slim] + [
+                _whole_row(job_id, kind, row) for row in whole]:
+            shapes.setdefault(tuple(row), []).append(row)
+        self._lease.check()
+        async with db.graphver_session() as s:
+            for group in shapes.values():
+                for chunk in _chunks(group, _PARSE_BATCH):
+                    await s.execute(insert(ImportRowORM.__table__), chunk)
+            await self._lease.checkpoint(s, expect_cursor=self._cursor, last_cursor=cursor,
+                                         processed=processed, summary=summary, **values)
+        self._cursor = cursor
+        return summary, processed
+
+    async def _decide(self, snap, kind: str, rows: List[Dict[str, Any]]):
+        """``(slim, whole)``: which of a batch's rows change nothing, as ``(row, resolution)``,
+        and the rest. The batch is resolved in memory against the draft as it now stands, exactly
+        as its windows would resolve it (``resolve_rows``, with the same lookups); a row is taken as
+        unchanged only when that is the resolution AND nothing it names was named by a row before
+        it (:class:`_Seen`) — then no earlier window can have changed what it resolves to. Once a
+        pass finds deciding doesn't pay (``_DECIDE_PROBE_ROWS``), it stages the rest whole."""
+        seen = self._seen.get(kind)
+        if seen is None or not self._deciding.get(kind):
+            return [], rows
+        lookups = await (self._node_lookups if kind == "node" else self._edge_lookups)(snap, rows)
+        lookups.update(created_from=self._created_from, keys=self._keys, earlier={})
+        scope = self._id_scope
+        _ops, resolutions = await asyncio.to_thread(
+            resolve_rows, rows, lookups, mint_id=new_entity_id, ontology=self._ontology,
+            identity_prop=self._identity_prop, mint_urn=lambda _etype: new_entity_id(),
+            derive_urn=lambda seed: pointer_id(scope, seed))
+        by_index = {res["_row_index"]: res for res in resolutions}
+        slim, whole = [], []
+        for row in rows:
+            res = by_index[row["_row_index"]]
+            names = self._names(kind, row, res)
+            fresh = not any(name in seen for name in names)
+            for name in names:
+                seen.add(name)
+            (slim.append((row, res)) if fresh and res["resolved_op"] == "unchanged" else whole.append(row))
+        counts = self._decided[kind]
+        counts[0] += len(rows)
+        counts[1] += len(slim)
+        if counts[0] >= _DECIDE_PROBE_ROWS and counts[1] < counts[0] * _DECIDE_MIN_UNCHANGED:
+            self._deciding[kind] = False
+            logger.info("import: %d of the first %d %s rows were unchanged; the rest are staged "
+                        "whole, for their windows", counts[1], counts[0], kind)
+        return slim, whole
+
+    def _names(self, kind: str, row: Dict[str, Any], res: Dict[str, Any]) -> List[str]:
+        """What a row names, for :class:`_Seen`: an entity's ids — its own file id, the entity it
+        matched — and for a node the pointers its urn and identifier value make, and its qualified
+        name (a node another row makes with it leaves it naming neither)."""
+        names: List[str] = []
+        if kind == "node":
+            ident = (key_value((row.get("properties") or {}).get(self._identity_prop))
+                     if self._identity_prop else None)
+            names += ["p:" + n for n in pointers(row.get("urn"), ident)]
+            if row.get("qualifiedName"):
+                names.append("q:" + str(row["qualifiedName"]))
+        if row.get("entity_id"):
+            names.append("e:" + str(row["entity_id"]))
+        if res.get("matched_entity_id"):
+            names.append("e:" + str(res["matched_entity_id"]))
+        return names
+
+    def _slim_row(self, job_id: str, kind: str, row: Dict[str, Any], res: Dict[str, Any]) -> Dict[str, Any]:
+        """The staged row of a row decided unchanged: already resolved, with its matched entity
+        (what a replace's absence check and a later row naming it again read), and of the row only
+        the links a node leaves for the rows after it (:meth:`_identity_state`) — the file's own id
+        for it when that is not its id, and an identifier value beside its urn. Nothing else reads
+        an unchanged row (the preview lists the rows that change something), so usually ``{}``."""
+        raw: Dict[str, Any] = {}
+        if kind == "node":
+            fid = row.get("entity_id")
+            if fid and fid != res["matched_entity_id"]:
+                raw["entity_id"] = fid
+            ident = self._identity_prop
+            value = (row.get("properties") or {}).get(ident) if ident else None
+            if value is not None and row.get("urn"):
+                raw.update(urn=row["urn"], properties={ident: value})
+        staged = {"job_id": job_id, "row_index": row["_row_index"], "kind": kind, "raw": raw,
+                  "matched_entity_id": res["matched_entity_id"], "resolved_op": res["resolved_op"],
+                  "status": res["status"]}
+        if res["reasons"]:
+            staged["reasons"] = res["reasons"]
+        return staged
+
+    async def _stage_edges(self, job_id: str, snap, graph_id: str, branch_id: str, resume: int) -> None:
+        """An in-memory import's edge rows, staged once its node windows are in (or from file row
+        ``resume``, resumed): decided against the nodes as they now stand, with the links this
+        job's node rows left."""
+        if not self._identity_read:
+            await self._identity_state(job_id, snap, graph_id, branch_id)
+            self._identity_read = True
+        await self._stage_pass(job_id, snap, "edge", resume)
 
     async def _flush(self, batch: List[Dict[str, Any]]) -> None:
         """Stage a batch of parsed rows — batched multi-row INSERTs, no ORM object per row — and
@@ -484,11 +748,18 @@ class ImportWorker:
         not at all, so a resumed import neither repeats nor skips one, and a superseded worker's
         window rolls back at its checkpoint. A window with no ops commits the rest on its own."""
         pos = await self._position(job_id)
-        kind, after = _window_after(pos.cursor)
+        step, after = _window_after(pos.cursor)
+        if step == "eparse":                        # in memory, part-way through staging its edges
+            await self._stage_edges(job_id, snap, graph_id, branch_id, after)
+            return True
+        kind = "node" if step == "mnode" else step
         rows = await self._window(job_id, kind, after) if kind else []
         if not rows and kind == "node":             # the node windows are done: on to the edges
             await _analyze_graph(graph_id)
-            kind, rows = "edge", await self._window(job_id, "edge", -1)
+            if step == "mnode":                     # in memory: its edges are staged only now
+                await self._stage_edges(job_id, snap, graph_id, branch_id, 0)
+                return True
+            step, kind, rows = "edge", "edge", await self._window(job_id, "edge", -1)
         if not rows:
             return False
         if not self._identity_read:                # once a run, before its first window
@@ -512,7 +783,7 @@ class ImportWorker:
                 summary[res["status"]] = int(summary.get(res["status"]) or 0) + 1
             await self._persist_resolutions(s, job_id, resolutions)
             await self._lease.checkpoint(
-                s, expect_cursor=pos.cursor, last_cursor=f"{kind}:{rows[-1]['_row_index']}",
+                s, expect_cursor=pos.cursor, last_cursor=f"{step}:{rows[-1]['_row_index']}",
                 processed=processed, summary=summary, current_phase=f"{kind}s",
                 progress=min(99, processed * 100 // pos.total) if pos.total else 0)
 
@@ -680,12 +951,15 @@ class ImportWorker:
         return out
 
     async def _window(self, job_id: str, kind: str, after: int) -> List[Dict[str, Any]]:
-        """The next ``IMPORT_COMMIT_WINDOW`` staged rows of ``kind`` after ``after``, in file order."""
+        """The next ``IMPORT_COMMIT_WINDOW`` staged rows of ``kind`` after ``after``, in file order:
+        those not resolved yet — a row an in-memory import decided as it staged it is not read
+        again (the cursor's windows commit with their rows' resolutions, so every row after it is
+        unresolved otherwise)."""
         async with db.graphver_session() as s:
             rows = (await s.execute(
                 select(ImportRowORM.row_index, ImportRowORM.raw)
                 .where(ImportRowORM.job_id == job_id, ImportRowORM.kind == kind,
-                       ImportRowORM.row_index > after)
+                       ImportRowORM.row_index > after, ImportRowORM.resolved_op.is_(None))
                 .order_by(ImportRowORM.row_index).limit(config.IMPORT_COMMIT_WINDOW))).all()
         return [{**raw, "_row_index": idx} for idx, raw in rows]
 
@@ -935,6 +1209,12 @@ def _quarantine(ops: List[dict], resolutions: List[dict], violations) -> Optiona
             res.update(resolved_op="invalid", status="invalid", reasons=reasons[eid],
                        matched_entity_id=None if created else eid)
     return [op for op in ops if op["entity_id"] not in reasons]
+
+
+def _whole_row(job_id: str, kind: str, row: Dict[str, Any]) -> Dict[str, Any]:
+    """A row staged whole, for its window to resolve: as the parse stages every row."""
+    return {"job_id": job_id, "row_index": row["_row_index"], "kind": kind,
+            "raw": {k: v for k, v in row.items() if k != "_row_index"}}
 
 
 def _normalize_page(page: List[Dict[str, Any]], native: bool = False) -> Tuple[List[tuple], int]:

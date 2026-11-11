@@ -316,6 +316,10 @@ class PlatformSettingsORM(Base):
     # the leader alone, each change once, with its activity event.
     gv_residency_on_since = Column(Text, nullable=True)
     gv_residency_phase = Column(Text, nullable=True)
+    # How many days a merged or abandoned draft keeps its changes before the versioning worker
+    # removes them (``versioning.draft_retention``); 0 keeps them for good. NULL: the environment's
+    # ``GRAPHVER_DRAFT_RETENTION_DAYS`` applies.
+    gv_draft_retention_days = Column(Integer, nullable=True)
     updated_at = Column(Text, nullable=True, onupdate=_now)
     updated_by = Column(Text, nullable=True)
 

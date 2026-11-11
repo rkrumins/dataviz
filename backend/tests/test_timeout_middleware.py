@@ -336,6 +336,46 @@ async def test_a_read_whose_path_ends_in_events_keeps_its_deadline(path):
     assert sink.terminal_chunks == 1
 
 
+async def test_an_imports_file_takes_as_long_as_it_takes_to_arrive(monkeypatch):
+    """A multi-gigabyte file sent in one request outlasts any fixed deadline. On the routes an
+    import's file comes in on, the deadline moves on with every piece of the body: one still
+    arriving is never cut off, and one that stops arriving for the tier's time is."""
+    monkeypatch.setenv("HTTP_TIMEOUT_VERSIONING_SECS", "0.2")
+
+    class Trickle:
+        """A body in ``pieces`` pieces, ``gap`` seconds apart."""
+
+        def __init__(self, pieces: int, gap: float) -> None:
+            self.left, self.gap = pieces, gap
+
+        async def __call__(self) -> dict:
+            if self.left == 0:
+                await asyncio.Event().wait()
+            await asyncio.sleep(self.gap)
+            self.left -= 1
+            return {"type": "http.request", "body": b"x", "more_body": self.left > 0}
+
+    async def reads_the_body(scope, receive, send):
+        size, more = 0, True
+        while more:
+            message = await receive()
+            size, more = size + len(message["body"]), message["more_body"]
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": str(size).encode(), "more_body": False})
+
+    mw = _TimeoutMiddleware(reads_the_body)
+    for path in ("/api/v1/ws_1/versioning/graphs/g_1/imports",
+                 "/api/v1/ws_1/versioning/graphs/g_1/imports/uploads/iu_1/parts/0"):
+        await mw(_http_scope(path), Trickle(10, 0.1), sink := _Sink())    # 1 s in all, still arriving
+        assert (sink.status, sink.total_body) == (200, b"10"), path
+        await mw(_http_scope(path), Trickle(2, 0.3), sink := _Sink())     # stops arriving for 0.3 s
+        assert sink.status == 504, path
+
+    await mw(_http_scope("/api/v1/ws_1/versioning/graphs/g_1/imports/uploads"), Trickle(10, 0.1),
+             sink := _Sink())
+    assert sink.status == 504, "any other route keeps its deadline"
+
+
 async def test_streamed_export_bypasses_timeout():
     """A streamed export, or a stored export's download, runs as long as the file takes: a
     deadline would cut it short, and the clean closing chunk would make the truncated file look

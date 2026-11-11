@@ -15,12 +15,13 @@
  * chips; a system administrator sets the class (Always may be refused when its
  * master has no room, with the reason), asks for an evicted graph's load (Load
  * now), and adopts a customer's key onto a platform key after a confirmation
- * that says what changes. "Residency & eviction" opens the policy card.
+ * that says what changes. "Residency & eviction" opens the policy card, and "Draft retention" the
+ * card that says how long a merged or abandoned draft keeps its changes.
  */
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useInfiniteQuery } from '@tanstack/react-query'
-import { Database, Gauge, Loader2, X } from 'lucide-react'
+import { Database, Gauge, Hourglass, Loader2, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import {
     systemStatusService,
@@ -35,6 +36,7 @@ import { formatSince } from './meta'
 import { MoveProjectionDialog } from './MoveProjectionDialog'
 import { ConfirmDialog } from './ConfirmDialog'
 import { ResidencyPolicyCard } from './ResidencyPolicyCard'
+import { DraftRetentionCard } from './DraftRetentionCard'
 
 const STATUS_OPTIONS: { value: NonNullable<VersionedGraphsFilter['status']>; label: string }[] = [
     { value: 'fresh', label: 'In sync' },
@@ -113,6 +115,7 @@ export function VersionedGraphsPanel({ providers, onClose }: Props) {
     const [moving, setMoving] = useState<VersionedGraphRow | null>(null)
     const [adopting, setAdopting] = useState<VersionedGraphRow | null>(null)
     const [showPolicy, setShowPolicy] = useState(false)
+    const [showRetention, setShowRetention] = useState(false)
     const providerName = new Map((providers ?? []).map(p => [p.id, p.name]))
 
     const query = useInfiniteQuery({
@@ -215,6 +218,13 @@ export function VersionedGraphsPanel({ providers, onClose }: Props) {
                     >
                         <Gauge className="w-3.5 h-3.5" /> Residency &amp; eviction
                     </button>
+                    <button
+                        onClick={() => setShowRetention(open => !open)}
+                        aria-expanded={showRetention}
+                        className="inline-flex items-center gap-1 text-[11px] font-medium text-indigo-600 dark:text-indigo-400 hover:underline"
+                    >
+                        <Hourglass className="w-3.5 h-3.5" /> Draft retention
+                    </button>
                     <button onClick={onClose} className="p-1 rounded-md text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5" aria-label="Close versioned graphs">
                         <X className="w-4 h-4" />
                     </button>
@@ -222,6 +232,7 @@ export function VersionedGraphsPanel({ providers, onClose }: Props) {
             </div>
 
             {showPolicy && <ResidencyPolicyCard />}
+            {showRetention && <DraftRetentionCard />}
 
             <div className="px-5 pb-3 flex flex-wrap items-center gap-2">
                 <select aria-label="Provider" className={SELECT_CLS} value={filter.provider ?? ''} onChange={e => setField('provider', e.target.value)}>

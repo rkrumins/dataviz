@@ -297,6 +297,24 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
         ),
         depends_on=("versioningEnabled",),
     ),
+    # Preview: a hotfix for imports of full snapshots, OFF until a deployment opts in. It refuses
+    # nothing: the import worker reads it when a job starts (import_worker._in_memory_switch) and
+    # the job keeps the mode it started in. What an import does is the same either way.
+    "importInMemoryReconcile": FeatureWiring(
+        key="importInMemoryReconcile",
+        posture="capability",
+        stage="experimental",
+        server_gates=(
+            "Whether a new import job decides its unchanged rows in memory, a batch at a time, and "
+            "stages them slim — reading the file twice, nodes then edges — or stages every row whole",
+        ),
+        ui_surfaces=(),
+        still_allowed=(
+            "Every import, with the same result: only how much it writes into Postgres differs",
+            "An import already under way finishes the way it started",
+        ),
+        depends_on=("versioningEnabled",),
+    ),
     # SECURITY: it decides whether a person's own query reaches a data source.
     # An unreadable value must refuse it, not guess.
     "nativeQueryEnabled": FeatureWiring(

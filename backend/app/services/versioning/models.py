@@ -179,6 +179,12 @@ class BranchORM(VersioningBase):
     created_at = Column(Text, nullable=False, default=_now)
     created_by = Column(Text, nullable=True)
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
+    # A closed draft's changes, removed once it has been closed for the retention window
+    # (``draft_retention``): when the removal began — reads of its changes are refused from then —
+    # and when it finished (NULL while it is under way: the next pass carries on). Its record
+    # stays: this row, its members, its commits and its review.
+    pruned_at = Column(Text, nullable=True)
+    prune_finished_at = Column(Text, nullable=True)
 
     __table_args__ = _plain(
         Index("ix_branches_graph", "graph_id"),
@@ -874,6 +880,9 @@ def _ensure_schema_upgrades(conn) -> None:
     # 20261110_1000_gv_commit_prov. Every save writes commits: short tries.
     _bounded_step(conn, "the commits' provenance columns were not added",
                   lambda: ensure_commit_provenance_columns(conn), required=True, tries=10)
+    # 20261111_1000_gv_draft_prune. Every draft request reads branches: short tries.
+    _bounded_step(conn, "the closed drafts' prune columns were not added",
+                  lambda: ensure_branch_prune_columns(conn), required=True, tries=10)
 
 
 def _bounded_step(conn, failure: str, step, *, required: bool = False, tries: int = 1) -> None:
@@ -1050,6 +1059,27 @@ def ensure_commit_provenance_columns(conn) -> None:
     if inspector.has_table("jobs", schema=_SCHEMA) and "provenance" not in {
             c["name"] for c in inspector.get_columns("jobs", schema=_SCHEMA)}:
         conn.execute(text(f'ALTER TABLE "{_SCHEMA}"."jobs" ADD COLUMN IF NOT EXISTS provenance JSONB'))
+
+
+#: ``branches``' columns for a closed draft whose changes were removed
+#: (``20261111_1000_gv_draft_prune``): nullable, so adding them is a catalog change.
+BRANCH_PRUNE_COLUMNS = ("pruned_at", "prune_finished_at")
+
+
+def ensure_branch_prune_columns(conn) -> None:
+    """Add ``branches.pruned_at`` and ``prune_finished_at``: when the removal of a closed draft's
+    changes began, and when it finished. Nullable text with no default, so nothing is
+    rewritten, and every existing draft reads as never pruned. A no-op without the table, and once
+    the columns are there (an ALTER takes the table's ACCESS EXCLUSIVE lock even when it adds
+    nothing). ``conn`` is a synchronous connection (alembic's bind, or ``run_sync``'s)."""
+    inspector = sa_inspect(conn)
+    if not inspector.has_table("branches", schema=_SCHEMA):
+        return                            # create_schema_and_partitions builds it from the models
+    have = {c["name"] for c in inspector.get_columns("branches", schema=_SCHEMA)}
+    missing = [c for c in BRANCH_PRUNE_COLUMNS if c not in have]
+    if missing:
+        conn.execute(text(f'ALTER TABLE "{_SCHEMA}"."branches" '
+                          + ", ".join(f"ADD COLUMN IF NOT EXISTS {c} TEXT" for c in missing)))
 
 
 def ensure_mr_merged_source_seq(conn) -> None:

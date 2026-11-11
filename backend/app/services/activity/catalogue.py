@@ -880,6 +880,9 @@ _EVENT_META.update({
     "platform.residency_policy.updated": ("info", lambda p: (
         "Changed the residency policy of versioned graphs"
     )),
+    "platform.draft_retention.updated": ("warning", lambda p: (
+        "Changed how long merged and abandoned drafts keep their changes"
+    )),
     "platform.versioning.residency_changed": ("info", lambda p: (
         f"Set versioned graph {_detail(p, 'graphId') or '?'} to "
         f"{(_detail(p, 'to') or '?').capitalize()} residency"
@@ -979,6 +982,7 @@ LABELS: dict[str, str] = {
     "platform.versioning.watermarks_reset": "Reseeded versioned graphs",
     "platform.versioning.projection_moved": "Moved a versioned graph projection",
     "platform.residency_policy.updated": "Changed residency policy",
+    "platform.draft_retention.updated": "Changed draft retention",
     "platform.versioning.residency_changed": "Changed a versioned graph's residency",
     "platform.versioning.load_requested": "Asked for a versioned graph's load",
     "platform.versioning.projection_adopted": "Adopted a versioned graph's projection",

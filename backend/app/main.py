@@ -2709,6 +2709,17 @@ def _route_candidates(path: str) -> list[str]:
     return candidates
 
 
+#: The routes an import's file comes in on: whole (``…/imports``), or as a run of an upload's parts
+#: (``…/parts/{n}``, up to the whole file). A body there may be as large as one import can be
+#: (``IMPORT_MAX_BYTES``), and take as long as it takes to arrive: the body-size cap allows it, and
+#: the timeout gives up only on a body that stops arriving. Each route holds its body to its own
+#: exact bound as it reads it, and streams it to the object store: none is ever held whole.
+_IMPORT_BODY_PATHS: tuple[re.Pattern, ...] = (
+    re.compile(r"^/api/v1/[^/]+/versioning/graphs/[^/]+/imports$"),
+    re.compile(r"^/api/v1/[^/]+/versioning/graphs/[^/]+/imports/uploads/[^/]+/parts/[0-9]+$"),
+)
+
+
 class _BodySizeLimitMiddleware(BaseHTTPMiddleware):
     """Refuse a request body larger than the cap, before parsing it.
 
@@ -2752,7 +2763,12 @@ class _BodySizeLimitMiddleware(BaseHTTPMiddleware):
         self._default = default_bytes
         self._large = large_bytes
 
-    def _cap_for(self, path: str) -> int:
+    def _cap_for(self, path: str, fmt: str = "ndjson") -> int:
+        if any(p.match(path) for p in _IMPORT_BODY_PATHS):
+            from backend.app.services.versioning.import_export.uploads import MAX_BYTES, limit_for
+
+            # A JSON or Excel file sent whole is read whole: it stays at its own, smaller cap.
+            return limit_for(fmt) if path.endswith("/imports") else MAX_BYTES
         if path.endswith("/graph/save") or any(
             candidate.startswith(p)
             for candidate in _route_candidates(path)
@@ -2771,7 +2787,7 @@ class _BodySizeLimitMiddleware(BaseHTTPMiddleware):
                     status_code=400,
                     content={"detail": "Malformed Content-Length."},
                 )
-            cap = self._cap_for(request.url.path)
+            cap = self._cap_for(request.url.path, request.query_params.get("format") or "ndjson")
             if declared > cap:
                 logger.warning(
                     "Rejecting %s %s: body %d bytes exceeds the %d cap",
@@ -2787,13 +2803,11 @@ class _BodySizeLimitMiddleware(BaseHTTPMiddleware):
     def _refusal(request: Request, declared: int, cap: int) -> str:
         """What a body past the cap is told. An import sent whole to
         ``…/imports`` is told how to send a larger one: a file read whole
-        (JSON, Excel) as NDJSON or CSV, any other in parts."""
+        (JSON, Excel) as NDJSON or CSV, any other split into several imports."""
         if request.url.path.endswith("/imports"):
             from backend.app.services.versioning.import_export.uploads import too_large
 
-            return too_large(declared, request.query_params.get("format") or "ndjson") or (
-                f"One request can carry at most {cap // (1024 * 1024)} MB of a file. Send a "
-                "larger one in parts: POST …/imports/uploads, then each part.")
+            return too_large(declared, request.query_params.get("format") or "ndjson")
         return f"Request body is {declared} bytes; the limit for this endpoint is {cap}."
 
 
@@ -2941,6 +2955,19 @@ class _TimeoutMiddleware:
                     return timeout
         return self._default_timeout
 
+    @staticmethod
+    def _renewing(receive, deadline, timeout: float):
+        """``receive``, moving ``deadline`` on by ``timeout`` with every piece of the request body:
+        an import's file takes as long as it takes to arrive (gigabytes, over many minutes), and
+        only one that stops arriving for ``timeout`` is cut off. The work after its last piece has
+        the tier's whole ``timeout``, as any request does."""
+        async def renewing():
+            message = await receive()
+            if message["type"] == "http.request" and not deadline.expired():
+                deadline.reschedule(asyncio.get_running_loop().time() + timeout)
+            return message
+        return renewing
+
     def _is_sse_path(self, path: str) -> bool:
         if path in self._SSE_EXACT_PATHS:
             return True
@@ -3021,6 +3048,8 @@ class _TimeoutMiddleware:
             await original_send(message)
 
         deadline = asyncio.timeout(timeout)
+        if any(p.match(path) for p in _IMPORT_BODY_PATHS):
+            receive = self._renewing(receive, deadline, timeout)
         try:
             async with deadline:
                 await self.app(scope, receive, tracked_send)
