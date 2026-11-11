@@ -46,7 +46,7 @@ sequenceDiagram
     loop until finished
         C->>A: GET publish-jobs/{jobId}
     end
-    A-->>C: completed, commitId: the file's deltas are on main
+    A-->>C: completed, commitId, revisionId: the file's deltas are on main
 ```
 
 ## 1. Before you start
@@ -320,7 +320,7 @@ When the import completes, `summary.publish` on its job says what happened:
 
 | `summary.publish.state` | What happened | What to do |
 |---|---|---|
-| `queued`, with `jobId` | The draft is being published, as a large publish is: a job | Follow `GET …/publish-jobs/{jobId}` to `completed` (with `commitId`) or `failed` (with `error`) |
+| `queued`, with `jobId` | The draft is being published, as a large publish is: a job | Follow `GET …/publish-jobs/{jobId}` to `completed` (with `commitId` and `revisionId`) or `failed` (with `error`) |
 | `unchanged` | The file changed nothing. Its empty draft was closed | Nothing |
 | `skipped`, with `reason` | It wasn't published, and the draft is kept for review | Read `reason.type` (below) |
 | missing, a minute after `completed` | The worker stopped between the two steps | Publish the draft yourself: `POST …/branches/{branchId}/publish` |
@@ -338,6 +338,12 @@ Why a publish is skipped (`reason.type`):
 
 The publish job checks again, when it runs, that the import's owner may still publish. The review
 policy as it is then holds too.
+
+A `completed` publish job says where the file landed: `commitId`, the commit on `main`, and
+`revisionId`, the revision of `main` that holds it. Look it up at `GET …/revisions/{revisionId}`,
+or export the published graph as it was then (`POST …/exports?asOfSeq={revisionId}`). A draft
+you publish or merge yourself answers the same, `{commitId, revisionId, status: "completed"}`,
+or, when it is large enough to run as a job, `202` with that job's `statusUrl` to follow.
 
 ## 7. Following a job
 

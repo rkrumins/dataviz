@@ -62,6 +62,14 @@ integration's many small changes as a few commits.
   matched by team keys, run as before; an import keeps the way it started.
   - A snapshot of 200,000 rows sent again with 1% changed: 42–47 s instead of 72–76 s, 60 MB of
     staged rows instead of 330 MB, 206 MB of WAL instead of 513 MB; the same draft and tallies.
+- **A publish or merge says the revision of the published graph that holds it.**
+  - `POST …/branches/{id}/publish`, `POST /merge-requests/{id}/merge` and `POST /pulls/{id}/merge`
+    answer `{commitId, revisionId, status: "completed"}`. `revisionId` is the `commitSeq` of the
+    commit on `main`, which `?asOfSeq` and `GET …/revisions/{seq}` read `main` as of.
+  - One large enough to run as a job answers `202` with a `statusUrl`. The job
+    (`GET …/publish-jobs/{jobId}`) has `commitId` and `revisionId` once it is `completed`.
+  - An import that publishes itself (`autoPublish`) gets the same from the job that
+    `summary.publish.jobId` names. The reference connector reports it.
 - **`IMPORT_UPLOAD_CONCURRENCY`** (8): import files one API process takes in at once. One more
   waits up to 30 s for a slot, then is answered `429` with `Retry-After: 15`, before any of it is
   read, so a burst of large files can't take the object store's (or the database's) bandwidth from

@@ -4588,6 +4588,23 @@ class GraphVersioningService:
         async with self._session() as s:
             return await self._main_branch_id(s, graph_id)
 
+    async def landed_revision(self, *, graph_id: str, commit_id: Optional[str]) -> Optional[int]:
+        """The revision of ``main`` that holds a publish or merge which answered ``commit_id``: its
+        commit's sequence number on ``main`` — what ``asOfSeq`` reads ``main`` as of. A draft that
+        changed nothing lands no commit of its own (``commit_id`` is then its head, or empty): it is
+        held by ``main`` as it is, so its head. ``None`` for a graph that is gone."""
+        async with self._session() as s:
+            graph = await s.get(GraphORM, graph_id)
+            if graph is None:
+                return None
+            if commit_id:
+                seq = await s.scalar(select(CommitORM.commit_seq).where(
+                    CommitORM.graph_id == graph_id, CommitORM.id == commit_id,
+                    CommitORM.branch_id == await self._main_branch_id(s, graph_id)))
+                if seq is not None:
+                    return int(seq)
+            return int(graph.main_head_commit_seq or 0)
+
     async def materialize_state(
         self, *, graph_id: str, branch_id: str, as_of_seq: Optional[int] = None,
         viewer: Optional[Viewer] = None,

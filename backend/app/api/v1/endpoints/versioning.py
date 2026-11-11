@@ -936,14 +936,25 @@ class CommitResponse(_ApiModel):
     commit_id: str = Field(alias="commitId")
 
 
+class PublishResponse(CommitResponse):
+    """A publish, or a review's merge, done inside the request: the commit it landed as, and the
+    revision of ``main`` that holds it (``revisionId``, what ``asOfSeq`` reads ``main`` as of). One
+    too large for a request answers 202 instead — ``{jobId, graphId, status, statusUrl}`` — and its
+    job (``statusUrl``, :class:`PublishJobResponse`) says the same once it is ``completed``."""
+    revision_id: Optional[int] = Field(default=None, alias="revisionId")
+    status: str = "completed"
+
+
 class PublishJobResponse(_ApiModel):
     """A large draft's publish (or review merge), or a fork review's merge, run as a job: poll until
     it's done. ``error`` is ``{status, detail}``, the answer the route gives when it publishes
-    inside the request."""
+    inside the request. Once ``completed``: the commit it landed as, and the revision of ``main``
+    that holds it (``revisionId``)."""
     job_id: str = Field(alias="jobId")
     graph_id: str = Field(alias="graphId")
     status: str
     commit_id: Optional[str] = Field(default=None, alias="commitId")
+    revision_id: Optional[int] = Field(default=None, alias="revisionId")
     error: Optional[dict] = None
 
 
@@ -2308,7 +2319,7 @@ async def branch_view_changes(
     return {"branchId": branch_id, "views": visible, "hidden": len(changes) - len(visible)}
 
 
-@router.post("/graphs/{graph_id}/branches/{branch_id}/publish", response_model=CommitResponse)
+@router.post("/graphs/{graph_id}/branches/{branch_id}/publish", response_model=PublishResponse)
 async def publish(
     ws_id: str, graph_id: str, branch_id: str, body: PublishRequest,
     background: BackgroundTasks,
@@ -2346,7 +2357,13 @@ async def publish(
     await _tell_draft_people(session, svc, "draft.published", ws_id=ws_id, meta=_meta, graph_id=graph_id,
                              branch_id=branch_id, actor=user.id)
     background.add_task(project_now, graph_id)   # refresh FalkorDB in-process after commit (async); read-fallback + badge cover the window
-    return {"commit_id": commit_id}
+    return {"commit_id": commit_id,
+            "revision_id": await svc.landed_revision(graph_id=graph_id, commit_id=commit_id)}
+
+
+def _publish_job_url(workspace_id: str, graph_id: str, job_id: str) -> str:
+    """Where a queued publish or merge is followed (``GET …/publish-jobs/{jobId}``)."""
+    return f"/api/v1/{workspace_id}/versioning/graphs/{graph_id}/publish-jobs/{job_id}"
 
 
 async def _queue_publish(ie, *, workspace_id, meta, graph_id, branch_id, actor, body,
@@ -2356,16 +2373,18 @@ async def _queue_publish(ie, *, workspace_id, meta, graph_id, branch_id, actor, 
         graph_id=graph_id, branch_id=branch_id, actor=actor, message=body.message,
         resolutions=body.resolutions, merge_request_id=merge_request_id)
     started = await ie.start_publish(job["job_id"])
-    return JSONResponse(status_code=202, content={"jobId": job["job_id"], "graphId": graph_id,
-                                                  "status": started})
+    return JSONResponse(status_code=202, content={
+        "jobId": job["job_id"], "graphId": graph_id, "status": started,
+        "statusUrl": _publish_job_url(workspace_id, graph_id, job["job_id"])})
 
 
 async def _queue_fork_merge(ie, *, workspace_id, pr_id, actor, body) -> JSONResponse:
     job = await ie.create_fork_merge_job(workspace_id=workspace_id, pr_id=pr_id, actor=actor,
                                          message=body.message)
     started = await ie.start_fork_job(job["job_id"])
-    return JSONResponse(status_code=202, content={"jobId": job["job_id"], "graphId": job["graph_id"],
-                                                  "status": started})
+    return JSONResponse(status_code=202, content={
+        "jobId": job["job_id"], "graphId": job["graph_id"], "status": started,
+        "statusUrl": _publish_job_url(workspace_id, job["graph_id"], job["job_id"])})
 
 
 _JOB_REFUSAL_MAX_VIOLATIONS = 100
@@ -2441,7 +2460,9 @@ async def _publish_from_job(job: dict) -> dict:
         await _tell_draft_people(session, svc, "draft.published", ws_id=job["workspaceId"],
                                  meta=await svc.get_graph(graph_id) or {}, graph_id=graph_id,
                                  branch_id=branch_id, actor=actor)
-    return {"commitId": commit_id}
+    # The revision as it is when the job ends: a draft that changed nothing is held by main's head.
+    return {"commitId": commit_id,
+            "revisionId": await svc.landed_revision(graph_id=graph_id, commit_id=commit_id)}
 
 
 @router.get("/graphs/{graph_id}/publish-jobs/{job_id}", response_model=PublishJobResponse)
@@ -2449,14 +2470,22 @@ async def get_publish_job(
     ws_id: str, graph_id: str, job_id: str,
     _user: User = Depends(requires(_MANAGE, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
     ie=Depends(get_import_export_service),
 ):
     """Where a large draft's publish (or review merge) is, or a fork review's merge (its parent's
-    job): pending, running, completed with its commit, or failed with the answer a publish inside
-    the request would have given."""
+    job): pending, running, completed with its commit and the revision of ``main`` that holds it,
+    or failed with the answer a publish inside the request would have given."""
     answer = _job_answer(await ie.get_job(job_id), job_id, graph_id, ("publish", "fork_merge"),
                          "publish job not found", "publishing failed")
-    answer.pop("summary")
+    summary = answer.pop("summary")
+    if answer["status"] == "completed":
+        # Recorded when the job ended; a fork review's merge, or a job that ended before it was
+        # recorded, is read from its commit.
+        answer["revision_id"] = summary.get("revisionId")
+        if answer["revision_id"] is None:
+            answer["revision_id"] = await svc.landed_revision(graph_id=graph_id,
+                                                              commit_id=answer["commit_id"])
     return answer
 
 
@@ -5037,7 +5066,7 @@ async def close_pull_request(
         return await svc.close_pr(pr_id=pr_id, actor=user.id)
 
 
-@router.post("/pulls/{pr_id}/merge", response_model=CommitResponse)
+@router.post("/pulls/{pr_id}/merge", response_model=PublishResponse)
 async def merge_pull_request(
     ws_id: str, pr_id: str, body: MergePrRequest,
     background: BackgroundTasks,
@@ -5070,7 +5099,8 @@ async def merge_pull_request(
     await _bump_main_cache(str(_pr["target_graph_id"]))            # base advanced — invalidate stale canvas reads now
     await _touch_views_data_updated(str(_pr["target_graph_id"]), user.id)   # views' "data updated" freshness
     background.add_task(project_now, str(_pr["target_graph_id"]))   # base graph advanced; refresh FalkorDB in-process (async)
-    return {"commit_id": commit_id}
+    return {"commit_id": commit_id, "revision_id": await svc.landed_revision(
+        graph_id=str(_pr["target_graph_id"]), commit_id=commit_id)}
 
 
 # --------------------------------------------------------------------------- #
@@ -5485,7 +5515,7 @@ async def close_merge_request(
         return await svc.close_pr(pr_id=pr_id, actor=user.id)
 
 
-@router.post("/merge-requests/{pr_id}/merge", response_model=CommitResponse)
+@router.post("/merge-requests/{pr_id}/merge", response_model=PublishResponse)
 async def merge_merge_request(
     ws_id: str, pr_id: str, body: MergePrRequest,
     background: BackgroundTasks,
@@ -5539,4 +5569,4 @@ async def merge_merge_request(
                                  meta=await svc.get_graph(target) or {}, graph_id=target,
                                  branch_id=str(_src_branch), actor=user.id)
     background.add_task(project_now, str(_pr["target_graph_id"]))   # target graph advanced; refresh FalkorDB in-process (async)
-    return {"commit_id": commit_id}
+    return {"commit_id": commit_id, "revision_id": await svc.landed_revision(graph_id=target, commit_id=commit_id)}

@@ -840,12 +840,16 @@ publish.
    api POST "/api/v1/$WS/versioning/graphs/$GID/branches/$BRANCH/publish" -d '{"message": "Nightly import"}'
    ```
 
-   A `409 not_up_to_date` means the published graph moved since the draft began: pull the
-   latest in with `POST …/branches/$BRANCH/rebase` (body `{}`), then publish again. A draft
-   that changes more than 20,000 entities publishes as a job: the answer is `202` with a
-   `jobId` to poll at `GET …/graphs/$GID/publish-jobs/$JOB`. An API key publishes where the
-   person or service account it belongs to holds publish (`403 publish_required` elsewhere). Or
-   raise a merge request (`POST …/branches/$BRANCH/merge-requests`) for a person to review.
+   The answer is `{"commitId": "cmt_…", "revisionId": 42, "status": "completed"}`: the commit
+   the draft landed as, and the revision of the published graph that holds it (what `asOfSeq=42`
+   reads the graph as of). A `409 not_up_to_date` means the published graph moved since the
+   draft began: pull the latest in with `POST …/branches/$BRANCH/rebase` (body `{}`), then publish
+   again. A draft that changes more than 20,000 entities publishes as a job: the answer is `202`
+   with `status` and a `statusUrl` (`GET …/graphs/$GID/publish-jobs/$JOB`) to poll until `status`
+   is `completed`, with `commitId` and `revisionId`, or `failed`, with `error`. An API key
+   publishes where the person or service account it belongs to holds publish
+   (`403 publish_required` elsewhere). Or raise a merge request
+   (`POST …/branches/$BRANCH/merge-requests`) for a person to review.
 
    To skip this step, start the import with `autoPublish=true`. It then publishes itself once
    every row is applied, and its job's `summary.publish` says how that went

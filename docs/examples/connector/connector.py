@@ -9,7 +9,8 @@ source's graph, through the documented HTTP API alone (docs/CONNECTOR_GUIDE.md).
    next one, from a state file kept beside the file.
 3. Import it into a draft (``…/complete``). With ``--publish``, the import publishes itself onto the
    published graph once every row is applied (``autoPublish``).
-4. Follow the import, then its publish, and report what they did.
+4. Follow the import, then its publish, and report what they did: once published, the commit it
+   landed as, and the revision of the published graph that holds it (``revisionId``).
 
 Run it again on the same source and nothing changes: every row points at its node by the same urn,
 and the server derives the same ids from them. Change the source, and only what changed is written.
@@ -256,7 +257,8 @@ class Graph:
             raise
         if answer.get("jobId"):                            # a large draft publishes as a job
             return _outcome(self.follow(f"{self.base}/publish-jobs/{answer['jobId']}", "publish"))
-        return {"state": "completed", "commitId": answer.get("commitId")}
+        return {"state": "completed", "commitId": answer.get("commitId"),
+                "revisionId": answer.get("revisionId")}
 
 
 class _Part:
@@ -279,7 +281,8 @@ class _Part:
 
 
 def _outcome(job: dict[str, Any]) -> dict[str, Any]:
-    return {"state": job["status"], "commitId": job.get("commitId"), "error": job.get("error")}
+    return {"state": job["status"], "commitId": job.get("commitId"),
+            "revisionId": job.get("revisionId"), "error": job.get("error")}
 
 
 def _head(path: str, fmt: str) -> bytes:

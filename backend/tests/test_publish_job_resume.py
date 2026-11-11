@@ -58,6 +58,14 @@ class _Versioning:
         self.releases.append(kwargs)
         return [kwargs.get("branch_id")]
 
+    async def landed_revision(self, *, graph_id, commit_id):
+        assert graph_id == "g1"
+        return _REVISION_OF.get(commit_id)
+
+
+#: The revision of main each commit landed as: what a publish job records beside its commit.
+_REVISION_OF = {"cmt_new": 12, "cmt_landed": 11, "cmt_zombie": 13}
+
 
 class _Lease:
     epoch = 2
@@ -142,10 +150,11 @@ _SET_OFF = [("_bump_main_cache", "g1"), ("_touch_views_data_updated", "g1", "usr
 async def test_a_publish_job_publishes_and_sets_off_what_a_publish_does(monkeypatch, set_off):
     svc = _Versioning(merged=[None], publish="cmt_new")
     lease = _Lease()
-    assert await _service(monkeypatch, svc).run_publish("vjob_1", lease) == {"commitId": "cmt_new"}
+    assert await _service(monkeypatch, svc).run_publish("vjob_1", lease) == {"commitId": "cmt_new",
+                                                                               "revisionId": 12}
     assert len(svc.published) == 1 and set_off == _SET_OFF
     assert svc.published[0]["queued"] is True, "the job's own draft is publishing: it may proceed"
-    assert lease.finished == ("completed", {"summary": {"commitId": "cmt_new"}})
+    assert lease.finished == ("completed", {"summary": {"commitId": "cmt_new", "revisionId": 12}})
     assert svc.releases == []
 
 
@@ -208,7 +217,8 @@ async def test_an_import_publishing_itself_holds_its_owner_to_publish_when_it_ru
 
     grants["usr_1"] += ("workspace:datasource:publish",)
     svc = _Versioning(merged=[None], publish="cmt_new")
-    assert await _service(monkeypatch, svc).run_publish("vjob_1", _Lease()) == {"commitId": "cmt_new"}
+    assert await _service(monkeypatch, svc).run_publish("vjob_1", _Lease()) == {"commitId": "cmt_new",
+                                                                                  "revisionId": 12}
 
 
 async def test_a_job_whose_draft_already_merged_publishes_nothing_and_sets_off_the_rest(
@@ -217,9 +227,10 @@ async def test_a_job_whose_draft_already_merged_publishes_nothing_and_sets_off_t
     the overlay promoted and the caches bumped, and nothing is published twice."""
     svc = _Versioning(merged=["cmt_landed"], publish=AssertionError("published twice"))
     lease = _Lease()
-    assert await _service(monkeypatch, svc).run_publish("vjob_1", lease) == {"commitId": "cmt_landed"}
+    assert await _service(monkeypatch, svc).run_publish("vjob_1", lease) == {"commitId": "cmt_landed",
+                                                                               "revisionId": 11}
     assert svc.published == [] and set_off == _SET_OFF
-    assert lease.finished == ("completed", {"summary": {"commitId": "cmt_landed"}})
+    assert lease.finished == ("completed", {"summary": {"commitId": "cmt_landed", "revisionId": 11}})
     assert svc.releases == []
 
 
@@ -228,9 +239,10 @@ async def test_a_publish_refused_because_a_zombie_merged_the_draft_completes(mon
     one's publish ran, which is refused for it (the draft is no longer open)."""
     svc = _Versioning(merged=[None, "cmt_zombie"], publish=BranchNotOpen("br1", "merged"))
     lease = _Lease()
-    assert await _service(monkeypatch, svc).run_publish("vjob_1", lease) == {"commitId": "cmt_zombie"}
+    assert await _service(monkeypatch, svc).run_publish("vjob_1", lease) == {"commitId": "cmt_zombie",
+                                                                               "revisionId": 13}
     assert len(svc.published) == 1 and set_off == _SET_OFF, "set off once, after the merge is found"
-    assert lease.finished == ("completed", {"summary": {"commitId": "cmt_zombie"}})
+    assert lease.finished == ("completed", {"summary": {"commitId": "cmt_zombie", "revisionId": 13}})
     assert svc.releases == []
 
 
