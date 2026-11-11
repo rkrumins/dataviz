@@ -125,7 +125,7 @@ def test_a_window_that_retypes_or_reparents_is_structural():
 
     class _Svc:
         async def _values_at(self, s, gid, branch, ids, seq):
-            return {"n1": {"entityType": "domain"}, "b": {"entityType": "dataset"}}
+            return {"n1": {"entityType": "domain", "urn": "u1"}, "b": {"entityType": "dataset"}}
 
     async def _types(_svc, _gid):
         return (["CONTAINS"], ["TRANSFORMS"])
@@ -145,6 +145,7 @@ def test_a_window_that_retypes_or_reparents_is_structural():
     assert run(([], [], [], [{"rel": "CONTAINS"}])) is True          # a link removed
     assert run(([("n1", "u1", {"entityType": "schemaField"})], [], [], [])) is True  # retype
     assert run(([("n1", "u1", {"entityType": "domain", "displayName": "x"})], [], [], [])) is False
+    assert run(([("n1", "u2", {"entityType": "domain", "urn": "u2"})], [], [], [])) is True  # re-key
     assert run(([], [], [], [])) is False
 
 
