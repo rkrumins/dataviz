@@ -253,7 +253,12 @@ async def project_now(graph_id: str) -> None:
         await nudge_projection(graph_id)
         return
     try:
-        await asyncio.wait_for(proj.project_graph(graph_id), _SYNC_PROJECTION_TIMEOUT_SECS)
+        if not await proj.fits_inline(graph_id):
+            # Too large to finish inside the request: the worker projects it.
+            await nudge_projection(graph_id)
+            return
+        await asyncio.wait_for(proj.project_graph(graph_id, respect_backoff=True),
+                               _SYNC_PROJECTION_TIMEOUT_SECS)
         if orphan:                                       # the old gv_* copy is now unused — reclaim its RAM
             try:
                 # Route the GRAPH.DELETE to the graph's PINNED instance. Without the

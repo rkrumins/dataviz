@@ -89,6 +89,31 @@ class FakeGraph:
                 )
             return _Result([[sum(1 for e in self.edges.values()
                                  if e.get("type") not in excluded)]])
+        # The constant-time counts (``reconcile.falkor_counts`` on a key the projector owns): one
+        # label's nodes, one type's relationships, and the internal-id high-water mark.
+        m = re.fullmatch(r"MATCH \(n:`([^`]+)`\) RETURN count\(n\) AS c", cypher.strip())
+        if m:
+            # (The pass marker is kept apart from ``nodes``, so neither count sees it.)
+            return _Result([[sum(1 for n in self.nodes.values() if n.get("_label") == m.group(1))]])
+        m = re.fullmatch(r"MATCH \(\)-\[r:`([^`]+)`\]->\(\) RETURN count\(r\) AS c", cypher.strip())
+        if m:
+            return _Result([[sum(1 for e in self.edges.values() if e.get("type") == m.group(1))]])
+        if cypher == "MATCH (n) RETURN max(id(n)) AS c":
+            ids = [self._id_of(u) for u in self.nodes]
+            return _Result([[max(ids) if ids else None]])
+        # A customer key's counts, a window of internal node ids at a time (``_paged_counts``).
+        if cypher.startswith("MATCH (n) WHERE id(n) >= $lo AND id(n) < $hi AND n.urn IS NOT NULL") \
+                and cypher.endswith("RETURN count(n) AS c"):
+            excluded = set(re.findall(r"NOT '([^']+)' IN labels\(n\)", cypher))
+            return _Result([[sum(1 for u, n in self.nodes.items()
+                                 if params["lo"] <= self._id_of(u) < params["hi"]
+                                 and n.get("_label") not in excluded and u)]])
+        if cypher.startswith("MATCH (a)-[r]->(b) WHERE id(a) >= $lo AND id(a) < $hi AND type(r) <>") \
+                and cypher.endswith("RETURN count(DISTINCT [a.urn, type(r), b.urn]) AS c"):
+            excluded = set(re.findall(r"type\(r\) <> '([^']+)'", cypher))
+            return _Result([[len({(e["src"], e["type"], e["tgt"]) for e in self.edges.values()
+                                  if e.get("type") not in excluded and e["src"] in self.nodes
+                                  and params["lo"] <= self._id_of(e["src"]) < params["hi"]})]])
         # The same count for a graph the projector does not own (``owned=False``): DISTINCT
         # (source urn, type, target urn) triples between urn-bearing endpoints. Every node here
         # carries a urn (it is keyed by one), so only the type exclusions are evaluated.

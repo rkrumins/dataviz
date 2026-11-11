@@ -773,8 +773,13 @@ class FalkorProjector:
             return True
         return delete
 
-    async def project_graph(self, graph_id: str) -> Dict[str, object]:
+    async def project_graph(self, graph_id: str, *, respect_backoff: bool = False) -> Dict[str, object]:
         """Catch a graph's FalkorDB projection up to its target watermark.
+
+        ``respect_backoff``: a graph whose last pass failed waits out its backoff
+        (``next_retry_at``) and answers ``skipped: backoff``, rather than replaying the window
+        against a store that just failed it. A nudge (the worker) and ``project_now`` pass True; the
+        poll already selects only graphs past their backoff; a rebuild and a load go at once.
 
         Single-flight per graph: publish/merge fan out one ``project_now`` each, so two
         near-simultaneous first merges on a blank graph could otherwise run overlapping
@@ -801,7 +806,7 @@ class FalkorProjector:
                 return {"noop": True, "skipped": "in-flight"}
             stats = _PASS_STATS.set(_PassStats())
             try:
-                return await self._project_graph_locked(graph_id)
+                return await self._project_graph_locked(graph_id, respect_backoff=respect_backoff)
             finally:
                 _PASS_STATS.reset(stats)
         finally:
@@ -811,6 +816,35 @@ class FalkorProjector:
                     await lock_s.execute(select(func.pg_advisory_unlock(lock_arg)))
             finally:
                 await lock_scope.__aexit__(None, None, None)
+
+    async def fits_inline(self, graph_id: str, limit: Optional[int] = None) -> bool:
+        """Whether the graph's next pass is small enough to run inside an interactive request
+        (``project_now``): at most ``limit`` (``PROJECTION_INLINE_MAX_ROWS``) version rows to
+        project, counted no further than that. A first seed or a rebuild never is. A graph this
+        cannot read is left to the pass to judge."""
+        limit = config.PROJECTION_INLINE_MAX_ROWS if limit is None else limit
+        async with self._session() as s:
+            ps = await s.get(ProjectionStateORM, graph_id)
+            graph = await s.get(GraphORM, graph_id)
+            if ps is None or graph is None:
+                return True
+            from_seq = ps.projected_commit_seq
+            to_seq = max(ps.target_commit_seq, graph.main_head_commit_seq)
+            if from_seq >= to_seq:
+                return True
+            if from_seq <= 0:
+                return False
+            main_id = await self._svc._main_branch_id(s, graph_id)
+            rows = 0
+            for model in (NodeVersionORM, EdgeVersionORM):
+                rows += (await s.execute(select(func.count()).select_from(
+                    select(model.id).where(
+                        model.graph_id == graph_id, model.branch_id == main_id,
+                        model.commit_seq > from_seq, model.commit_seq <= to_seq)
+                    .limit(limit + 1).subquery()))).scalar_one()
+                if rows > limit:
+                    return False
+        return True
 
     async def _queue_first_seed(self, graph_id: str, seen_epoch: int) -> bool:
         """Put a graph whose key holds nothing yet in the load queue (``waiting_capacity``),
@@ -909,7 +943,8 @@ class FalkorProjector:
                         epoch=ProjectionStateORM.epoch + 1, next_retry_at=None)
                 .execution_options(synchronize_session=False))
 
-    async def _project_graph_locked(self, graph_id: str) -> Dict[str, object]:
+    async def _project_graph_locked(self, graph_id: str, *,
+                                    respect_backoff: bool = False) -> Dict[str, object]:
         """Projection body — runs under the single-flight lock held by :meth:`project_graph`."""
         # Self-heal the target FIRST (re-points an orphaned graph to the data source's real graph and
         # resets the watermark to replay full main into it). Returns the now-unread orphan to reclaim.
@@ -950,6 +985,9 @@ class FalkorProjector:
                 return {"projected": from_seq, "applied": 0, "noop": True, "skipped": ps.status}
             if from_seq >= to_seq:
                 return {"projected": from_seq, "applied": 0, "noop": True}
+            if respect_backoff and ps.next_retry_at and ps.next_retry_at > _now():
+                return {"projected": from_seq, "applied": 0, "noop": True, "skipped": "backoff",
+                        "retryAt": ps.next_retry_at}
             if name == self.default_graph_name(graph_id):
                 # No REAL FalkorDB target (a test-created graph, or one whose data source the
                 # resolver couldn't heal): nothing ever reads a synthetic ``gv_<id>`` key, and even
@@ -1090,7 +1128,7 @@ class FalkorProjector:
                 if verify else (None, False)
             )
             if verify:                  # a clean verify spaces out the next; any other asks for one
-                if verify_error is None and not healed:
+                if verify_error is None and not healed and not heal_outcome.get("unverified"):
                     self._verified_at[graph_id] = time.monotonic()
                 else:
                     self._verified_at.pop(graph_id, None)
@@ -1233,6 +1271,8 @@ class FalkorProjector:
         # (the watermark did not advance — reads stay on Postgres).
         result = {"projected": to_seq if published else from_seq, "applied": applied,
                   "noop": False, "verify_error": verify_error}
+        if heal_outcome.get("unverified"):
+            result["unverified"] = True
         stats = _PASS_STATS.get()
         if stats is not None:
             result["stats"] = stats.as_dict()
@@ -3050,8 +3090,13 @@ class FalkorProjector:
             if pg is None:
                 return None, False                       # a lagging head — not applicable
             fk = await self._falkor_counts(client, owned)
-        except Exception:
-            logger.debug("projection verify skipped for %s (count failed)", graph_id, exc_info=True)
+        except Exception as exc:
+            # Not a clean verify: the pass publishes what it wrote, but is not counted as checked,
+            # so the next pass verifies again rather than waiting out the interval.
+            logger.warning("projection verify for %s could not count (%s); published unverified, "
+                           "to be verified by the next pass", graph_id, exc)
+            if heal_outcome is not None:
+                heal_outcome["unverified"] = True
             return None, False
         if heal_outcome is not None and not owned:
             heal_outcome["surplus"] = None               # counted: none, unless found below

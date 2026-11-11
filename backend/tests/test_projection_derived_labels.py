@@ -49,6 +49,13 @@ class _Result:
 def _fake_bounded_query(_client, cypher, params=None):
     """Evaluate the emitted cypher against the fixture graph."""
     async def _run():
+        # One label's nodes, or one type's relationships (the constant-time counts).
+        m = re.fullmatch(r"MATCH \(n:`([^`]+)`\) RETURN count\(n\) AS c", cypher)
+        if m:
+            return _Result(sum(1 for labels in _NODES if m.group(1) in labels))
+        m = re.fullmatch(r"MATCH \(\)-\[r:`([^`]+)`\]->\(\) RETURN count\(r\) AS c", cypher)
+        if m:
+            return _Result(sum(1 for t in _EDGES if t == m.group(1)))
         if "labels(n)" in cypher or "MATCH (n)" in cypher:
             excluded = set(re.findall(r"NOT '(\w+)' IN labels\(n\)", cypher))
             return _Result(sum(

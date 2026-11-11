@@ -225,7 +225,7 @@ Key guards:
 |---|---|---|
 | `project_graph` | `projection.py:209` | Catch one graph up to target. |
 | `project_pending(limit, concurrency)` | `projection.py:395` | Catch up all lagging graphs, **stalest first**, `Semaphore(PROJECTION_CONCURRENCY=8)`, keyed by PK (no same-graph race), per-graph failures logged not fatal. |
-| `project_now(graph_id)` | `endpoints/versioning.py:163` | Interactive post-write catch-up; wraps `project_graph` in `asyncio.wait_for(_SYNC_PROJECTION_TIMEOUT_SECS=10.0)` (`versioning.py:115,176`) so a write endpoint stays snappy and defers a long seed to the worker. |
+| `project_now(graph_id)` | `endpoints/versioning.py` | Interactive post-write catch-up. It projects a window of at most `GRAPHVER_PROJECTION_INLINE_MAX_ROWS` (20,000) version rows itself, inside `asyncio.wait_for(_SYNC_PROJECTION_TIMEOUT_SECS=10.0)`; a larger one, or a first seed, it leaves to the worker with a nudge, rather than start a pass its budget would cancel mid-write. Like a nudge, it waits out a failed pass's backoff. |
 | `rebuild_now(graph_id)` | `endpoints/versioning.py:193` | Operator "Rebuild"; `_rebuild_inflight` guard (`:190`), a generous `REBUILD_SYNC_TIMEOUT_SECS=900` budget (`config.py:130`) because a full reseed is O(whole graph). |
 
 ---
@@ -293,7 +293,9 @@ repair it. So the projector (`projection.py:270-299`):
 
 After an apply (when `PROJECTION_VERIFY_ENABLED`, default on), the projector reconciles **live
 node/edge counts** between Postgres and FalkorDB and bounded-heals a mismatch (`_verify_and_heal`).
-It is best-effort — any count failure skips the check.
+A count that fails does not hold the pass back. It is not taken as a clean verify either: the pass
+publishes, answers `unverified`, and the next pass verifies again rather than waiting out the
+interval.
 
 **How often.** A pass that applied only main's newest commits verifies at most every
 `PROJECTION_VERIFY_INTERVAL_SECS` per graph (default 300; `0` verifies every pass). Before, a graph
@@ -310,8 +312,16 @@ A delta dropped silently between verifies is caught by the next one
 - **PG counts** come from `entity_heads` via `reconcile.pg_live_counts` (the single source, shared
   with the reconciler), but **only for a main that is fully caught up** (`_pg_live_counts`); a
   lagging head verifies on catch-up. A fork is never projected (§4).
-- **FalkorDB counts** come from `reconcile.falkor_counts` (`projection.py:735-740`), which excludes
-  `:AGGREGATED` and meta nodes.
+- **FalkorDB counts** come from `reconcile.falkor_counts`, which excludes `:AGGREGATED` and the
+  meta nodes.
+  - **On a key the platform minted,** they are FalkorDB's constant-time counts: unfiltered
+    `count(n)` and `count(r)`, less each derived label's count and the `AGGREGATED` count, all
+    answered from the label and relation matrices. A `WHERE` on every node or relationship was a
+    scan, and timed out on the largest graphs.
+  - **On a customer's key,** where only urn-bearing nodes and distinct `(source, type, target)`
+    triples count, they are taken a window of 20,000 internal node ids at a time
+    (`id(n)` ranges seek, relationships windowed by their source), so no statement costs the
+    whole key.
 - **FalkorDB has *more* than committed main** (`projection.py:773-794`): first `_sweep_tombstoned`
   DETACH-DELETEs anything `main` has tombstoned that the incremental pass stranded (matched by
   committed `urn` with `entityId` confirmed, bounded by delete count — `projection.py:818-861`), then
@@ -623,6 +633,7 @@ boot via `XAUTOCLAIM`. `_project_one` (`worker.py:65`) serializes per-graph via 
 |---|---|---|
 | `GRAPHVER_PROJECTION_BATCH_SIZE` | 5000 | Rows per MERGE/DELETE chunk at most; the statement ladder narrows it per graph and statement kind (§3). |
 | `GRAPHVER_PROJECTION_FLOOR_RETRIES` | 3 | Retries of a one-row statement that still times out, backing off 2 s, 4 s, 8 s (§3). |
+| `GRAPHVER_PROJECTION_INLINE_MAX_ROWS` | 20000 | The largest window `project_now` projects inside the request; larger ones go to the worker. |
 | `GRAPHVER_PROJECTION_POLL_SECS` | 5 | Reconciling poll cadence (`config.py:115`). |
 | `GRAPHVER_PROJECTION_CONCURRENCY` | 8 | Max graphs projected per pass (`config.py:118`). |
 | `GRAPHVER_READ_MAX_LAG` | 0 | Neighbors-endpoint staleness tolerance (`config.py:119`; see §5 callout). |

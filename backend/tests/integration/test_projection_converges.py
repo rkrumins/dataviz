@@ -10,6 +10,11 @@ Pins:
 - An edge created and deleted inside one window, which an earlier failed attempt at the window
   wrote, is deleted where that attempt put it, anchored on its ends: no statement scans the
   graph's relationships for an id.
+- A graph backing off after a failed pass is left alone by a nudge or ``project_now``
+  (``respect_backoff=True``), and projected by a rebuild. ``fits_inline`` counts the window no
+  further than its limit.
+- A verify that cannot count publishes, but answers ``unverified`` and is not taken as a clean
+  one, so the next pass verifies again.
 """
 from __future__ import annotations
 
@@ -129,6 +134,46 @@ async def _created_and_deleted_in_one_window(svc):
     await _assert_matches_main(svc, fake, gid)
 
 
+async def _backoff_and_honest_verify(svc):
+    from sqlalchemy import update
+
+    from backend.app.services.versioning.models import ProjectionStateORM
+
+    fake = TimeoutFalkor()
+    proj = FalkorProjector(graph_client_factory=fake, batch_size=500)
+    gid = await _graph(svc)
+    await _edit_publish(svc, gid, "alice", [_create("A", "a")], "one")
+    assert (await proj.project_graph(gid))["verify_error"] is None
+    await _edit_publish(svc, gid, "alice", [_create("B", "b"), _create("C", "c")], "two")
+    before = await _watermark(gid)
+
+    # A graph backing off is left alone by a nudge or project_now, and not by a rebuild.
+    async with db.graphver_session() as s:
+        await s.execute(update(ProjectionStateORM).where(ProjectionStateORM.graph_id == gid)
+                        .values(next_retry_at="2999-01-01T00:00:00+00:00", failed_attempts=2))
+    r = await proj.project_graph(gid, respect_backoff=True)
+    assert r["skipped"] == "backoff" and r["noop"], r
+    assert await _watermark(gid) == before
+    assert not await proj.fits_inline(gid, limit=1)          # two version rows to project
+    assert await proj.fits_inline(gid, limit=2)
+    r = await proj.project_graph(gid)                         # a rebuild, a load: at once
+    assert r["verify_error"] is None and not r["noop"], r
+    assert await proj.fits_inline(gid, limit=0)               # caught up
+
+    # A verify that cannot count publishes, but is not taken as a clean one.
+    await _edit_publish(svc, gid, "alice", [_create("D", "d")], "three")
+
+    async def cannot_count(*_a, **_k):
+        raise Exception("Query timed out")
+
+    proj._verified_at.clear()
+    proj._falkor_counts = cannot_count
+    r = await proj.project_graph(gid)
+    assert r["unverified"] and r["verify_error"] is None, r
+    assert gid not in proj._verified_at
+    await _assert_matches_main(svc, fake, gid)
+
+
 def test_a_projection_converges_in_one_pass_whatever_its_statements_can_take(monkeypatch):
     async def no_wait(_seconds):
         return None
@@ -143,6 +188,7 @@ def test_a_projection_converges_in_one_pass_whatever_its_statements_can_take(mon
             await _converges(svc)
             await _hub(svc)
             await _created_and_deleted_in_one_window(svc)
+            await _backoff_and_honest_verify(svc)
         finally:
             await db.dispose_engine()
     asyncio.run(run())

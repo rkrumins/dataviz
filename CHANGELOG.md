@@ -153,6 +153,17 @@ integration's many small changes as a few commits.
     in one window after an earlier attempt wrote it.
   - The old fallback, which matched every relationship by id, is gone. A rebuild's deletes start
     from the relationship's source node.
+- **A projection's verify counts no longer scan the graph, and a failed count is not a pass.**
+  - On a key the platform owns, the counts are FalkorDB's constant-time ones, less the derived
+    labels and rollups.
+  - On a customer's key, they are taken 20,000 node ids at a time.
+  - A count that fails, which used to be recorded as a clean verify, now publishes as
+    `unverified`, and the next pass verifies again.
+- **A failed projection waits out its backoff before it is tried again.** A nudge from a publish,
+  and `project_now`, used to retry at once and replay the whole window against a store that had
+  just failed it; a rebuild still runs at once. `project_now` projects a window of up to 20,000
+  version rows inside the request (`GRAPHVER_PROJECTION_INLINE_MAX_ROWS`) and hands a larger one to
+  the worker, rather than starting a pass its 10 s budget would cancel mid-write.
 
 ### Upgrading
 

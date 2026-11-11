@@ -101,7 +101,8 @@ class ProjectionWorker:
                 return None                      # already being projected — skip
             self._inflight.add(graph_id)
         try:
-            return await self._proj.project_graph(graph_id)
+            # A nudge (a publish, a merge) waits out a failed pass's backoff like the poll does.
+            return await self._proj.project_graph(graph_id, respect_backoff=True)
         finally:
             async with self._lock:
                 self._inflight.discard(graph_id)

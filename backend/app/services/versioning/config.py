@@ -126,6 +126,10 @@ PROJECTION_BATCH_SIZE: int = int(os.getenv("GRAPHVER_PROJECTION_BATCH_SIZE", "50
 # between them, before the row is given up on. The width that worked is kept per graph and statement
 # kind, and grows back by a quarter after eight quick statements, never past PROJECTION_BATCH_SIZE.
 PROJECTION_FLOOR_RETRIES: int = int(os.getenv("GRAPHVER_PROJECTION_FLOOR_RETRIES", "3"))
+# project_now (right after a publish or merge, inside the request) projects a window of at most this many
+# version rows itself; a larger one is left to the projection worker, which a nudge wakes. Its 10 s budget
+# would otherwise cancel the pass while FalkorDB still ran its last write.
+PROJECTION_INLINE_MAX_ROWS: int = int(os.getenv("GRAPHVER_PROJECTION_INLINE_MAX_ROWS", "20000"))
 
 # Projection worker: poll cadence for the reconciling loop, read freshness
 # tolerance (a read serves from FalkorDB while projected >= committed - lag),
