@@ -230,9 +230,32 @@ minter is injected) that returns `(ops, resolutions)`:
   |---|---|---|
   | `entity_id` (default) | its `entity_id` (this graph's) → its pointers → a field its type matches imports by → `qualifiedName` (a row with no urn) | `source_entity_id` → `sourceUrn` and `source.<identifier>` → `source.<key>` → `sourceQualifiedName` |
   | `urn` | its `entity_id` (this graph's) → its `urn`; nothing else | `source_entity_id` → `sourceUrn` |
+  | `prop.<name>` | its `entity_id` (this graph's) → its value of the property `<name>`, such as `prop.external_id`; nothing else | `source_entity_id` → `source.<name>` |
 
   Any other `entity_id` is the file's own: it links the file's rows (an edge to a node) and nothing
-  more. A 422 (`invalid_identifier`) says what a request may name; `prop.<name>` is coming.
+  more. A 422 (`invalid_identifier`) says what a request may name. `prop.<the data source's
+  identifier property>` is `urn`, which that property holds.
+- **A matching property's index** (`keys.py`; `graphver.entity_keys`, `graphver.key_index`) finds
+  rows by `prop.<name>`, as Dataverse's alternate keys and Salesforce's external ids do:
+  - **Built** by the first import that names the property, from main's live nodes a page at a time,
+    before its first window: minutes at a million nodes. Every later import reads only main's
+    version log since the index's watermark first, so a node made or edited on the canvas is found
+    by its value, never made again. No write path changes.
+  - **One value, one node.** A value two live nodes hold refuses the rows naming it
+    (`duplicate_value`, naming them), and never guesses. A row matched by its `entity_id` whose
+    value is another node's is refused (`two_entities`).
+  - **A changed value is a new key**: a row with the old value creates a node. To keep the node, send
+    its `entity_id` with the new value once.
+  - **A deleted node keeps its last value**, so a row naming it again brings it back under its id.
+  - A new node's id is `urn:uuid:` v5 of the identity scope, the property and its value
+    (`key_pointer_id`), or a v7 when a live node holds that id; it keeps the value, and its row's
+    urn.
+  - What main's index says is read through the draft: a node the draft changed is read from the
+    draft, and one the draft's view doesn't hold isn't matched.
+  - At most `GRAPHVER_MAX_MATCHING_PROPERTIES` (10) a graph (`too_many_matching_properties`). Not on
+    a fork yet (`matching_property_on_fork`): its main is its parent's and its own. A dry run never
+    builds an index: by a property no import has matched by yet, it answers `409
+    identifier_not_indexed`.
 - **Nodes** match an existing entity by that order (`_named`). A row's **pointers** are its `urn`
   and its value of the data source's identifier property (`prop.<identifier>`), each also in
   canonical form when it is a `urn:uuid:` (`pointers`). A pointer finds the node that carries it as

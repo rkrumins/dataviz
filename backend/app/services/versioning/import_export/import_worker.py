@@ -62,9 +62,10 @@ from ..job_lease import QUEUED, Lease, Superseded
 from ..models import BranchORM, EdgeVersionORM, ImportRowORM, JobORM, NodeVersionORM
 from ..service import OntologyViolation
 from . import identifier as identifiers
+from . import keys as matching
 from .formats import get_adapter
-from .resolve import (KeyIndex, _canonical_map, edge_pointer_id, key_value, pointer_id,
-                      pointer_seed, pointers, resolve_rows)
+from .resolve import (KeyIndex, _canonical_map, edge_pointer_id, key_pointer_id, key_value,
+                      pointer_id, pointer_seed, pointers, resolve_rows)
 from .rowmodel import PROP_DELETE, normalize
 from .snapshot import open_snapshot
 from .stream import view_entities
@@ -405,6 +406,11 @@ class ImportWorker:
         # The job's reconcile mode, and whether a replace may delete past the replace guard.
         self._reconcile_mode = "upsert"
         self._allow_mass_delete = False
+        # identifier=prop.<name>: the property, and the nodes the draft holds a value of it for
+        # beyond what main's index says (its own changes, and this job's windows), both ways.
+        self._prop: Optional[str] = None
+        self._prop_of: Dict[str, Optional[str]] = {}
+        self._prop_holders: Dict[str, set] = {}
         # Reconciling in memory: the file (read again for the edges), and per pass ("node",
         # "edge") what its rows have named — only for a pass this run started — whether it is still
         # deciding, and how many rows it decided and found unchanged.
@@ -583,6 +589,8 @@ class ImportWorker:
         self._graph_id, self._branch_id = graph_id, branch_id
         self._id_scope = await self._svc.identity_scope(graph_id)
         self._identity_prop = identity_property(self._node_identity)
+        self._settle_identifier()
+        await self._prop_state(graph_id, branch_id, build=True)
 
     async def _stage_pass(self, job_id: str, snap, kind: str, resume: int) -> None:
         """Stage the file's ``kind`` rows from file row ``resume``, a batch at a time, each batch
@@ -694,6 +702,8 @@ class ImportWorker:
             names += ["p:" + n for n in pointers(row.get("urn"), ident)]
             if row.get("qualifiedName"):
                 names.append("q:" + str(row["qualifiedName"]))
+            if self._prop and (v := key_value((row.get("properties") or {}).get(self._prop))):
+                names.append("v:" + v)
         if row.get("entity_id"):
             names.append("e:" + str(row["entity_id"]))
         if res.get("matched_entity_id"):
@@ -918,7 +928,66 @@ class ImportWorker:
             identity_prop=self._identity_prop, mint_urn=lambda _etype: new_entity_id(),
             derive_urn=lambda seed: pointer_id(scope, seed),
             derive_edge=lambda source, target, etype: edge_pointer_id(scope, source, target, etype),
-            identifier=self._identifier)
+            identifier=self._identifier,
+            derive_key=(lambda value: key_pointer_id(scope, self._prop, value)) if self._prop else None)
+
+    def _settle_identifier(self) -> None:
+        """Once the data source's identifier property is known: ``prop.<it>`` is the urn, which that
+        property holds; any other ``prop.<name>`` is matched through the property's index."""
+        if self._identity_prop and self._identifier == f"prop.{self._identity_prop}":
+            self._identifier = identifiers.URN
+        self._prop = (self._identifier[len("prop."):] if self._identifier.startswith("prop.")
+                      else None)
+
+    async def _prop_state(self, graph_id: str, branch_id: str, *, build: bool,
+                          job_id: Optional[str] = None) -> None:
+        """For ``identifier=prop.<name>``: the property's index caught up to main's head — built
+        first when no import named it (``build``) — and the values the draft itself holds."""
+        if not self._prop:
+            return
+        if build:
+            await matching.ensure(graph_id, self._prop, job_id=job_id)
+        else:
+            await matching.ensure_ready(graph_id, self._prop)
+        self._prop_of, self._prop_holders = {}, {}
+        for eid, value in (await matching.draft_values(graph_id, branch_id, self._prop)).items():
+            self._note_prop(eid, value)
+
+    def _note_prop(self, eid: str, value: Optional[str]) -> None:
+        """The draft holds ``value`` of the matching property for node ``eid`` (None: none, or it
+        is deleted there)."""
+        old = self._prop_of.get(eid)
+        if old is not None:
+            self._prop_holders.get(old, set()).discard(eid)
+        self._prop_of[eid] = value
+        if value is not None:
+            self._prop_holders.setdefault(value, set()).add(eid)
+
+    async def _prop_hits(self, snap, values) -> Tuple[Dict[str, str], Dict[str, List[str]], Dict[str, str]]:
+        """``(hits, dupes, restore)`` for values of the matching property: the one live node of the
+        draft holding each, the values several hold, and the values only a deleted node held (that
+        node). Main's index, for the nodes the draft hasn't changed and its view holds; the draft's
+        own values for the rest."""
+        values = {v for v in values if v}
+        main = await matching.lookup(self._graph_id, self._prop, values)
+        candidates = {e for v in values for e, live in main.get(v, ())
+                      if live and e not in self._prop_of}
+        visible = set(await snap.lookup_live("node", candidates)) if candidates else set()
+        hits: Dict[str, str] = {}
+        dupes: Dict[str, List[str]] = {}
+        restore: Dict[str, str] = {}
+        for v in values:
+            holders = {e for e, live in main.get(v, ()) if live and e in visible}
+            holders |= self._prop_holders.get(v, set())
+            if len(holders) == 1:
+                hits[v] = next(iter(holders))
+            elif holders:
+                dupes[v] = sorted(holders)
+            else:
+                gone = {e for e, live in main.get(v, ()) if not live and e not in self._prop_of}
+                if len(gone) == 1:
+                    restore[v] = next(iter(gone))
+        return hits, dupes, restore
 
     async def _identity_state(self, job_id: str, snap, graph_id: str, branch_id: str) -> None:
         """What every window resolves new nodes and named ends against, read once a run (a resumed
@@ -931,6 +1000,8 @@ class ImportWorker:
         self._graph_id, self._branch_id = graph_id, branch_id
         self._id_scope = await self._svc.identity_scope(graph_id)
         self._identity_prop = ident = identity_property(self._node_identity)
+        self._settle_identifier()
+        await self._prop_state(graph_id, branch_id, build=True, job_id=job_id)
         self._created_from, self._aliases = {}, {}
         # Only the rows that leave a link: a file id that is not the node's own, or an identifier
         # value beside a urn — never a whole row, which a large job has millions of.
@@ -963,6 +1034,8 @@ class ImportWorker:
         self._graph_id, self._branch_id = graph_id, branch_id
         self._id_scope = await self._svc.identity_scope(graph_id)
         self._identity_prop = identity_property(self._node_identity)
+        self._settle_identifier()
+        await self._prop_state(graph_id, branch_id, build=False)
         onto = self._ontology or {}
         keys = KeyIndex(onto.get("keys"), onto.get("unique"))
         self._keys = keys if keys else None
@@ -1022,6 +1095,12 @@ class ImportWorker:
                   if o.get("op") == "create"}
         for res in resolutions:
             eid = res.get("matched_entity_id")
+            if self._prop and eid and res.get("resolved_op") in ("create", "update", "delete"):
+                props = (by_index.get(res["_row_index"]) or {}).get("properties") or {}
+                if res["resolved_op"] == "delete":
+                    self._note_prop(eid, None)
+                elif self._prop in props or res["resolved_op"] == "create":
+                    self._note_prop(eid, key_value(props.get(self._prop)))
             if res.get("resolved_op") not in _LANDED or not eid:
                 continue
             row = by_index.get(res["_row_index"]) or {}
@@ -1107,7 +1186,10 @@ class ImportWorker:
         """What ``resolve_rows`` needs to match these node rows: the live nodes they name by
         entity_id, urn (or the identifier property's value) or — a row without a urn —
         qualifiedName, each one's current payload; and, of the identities the rows that match
-        nothing would take, which are taken and which a deleted node held."""
+        nothing would take, which are taken and which a deleted node held. By a matching
+        property, the nodes they name by its value instead (:meth:`_prop_node_lookups`)."""
+        if self._prop:
+            return await self._prop_node_lookups(snap, rows)
         ident = self._identity_prop
         wanted = {n for r in rows for n in pointers(
             r.get("urn"), (r.get("properties") or {}).get(ident) if ident else None)}
@@ -1132,10 +1214,51 @@ class ImportWorker:
                 "current": current, "hash_of": hash_of,
                 "bases": await _bases(snap, "node", rows, hash_of), "taken": taken, "restore": restore}
 
+    async def _prop_node_lookups(self, snap, rows) -> Dict[str, Any]:
+        """:meth:`_node_lookups` for ``identifier=prop.<name>``: the live nodes the rows name by
+        entity_id or by the property's value, with their current payloads; and of the ids the rows
+        that match nothing would take (derived from their values), those a live node holds."""
+        values = {v for r in rows if (v := key_value((r.get("properties") or {}).get(self._prop)))}
+        by_id = await snap.lookup_live("node", {r["entity_id"] for r in rows if r.get("entity_id")})
+        hits, dupes, restore = await self._prop_hits(snap, values)
+        named = set(by_id) | set(hits.values())
+        named |= {self._created_from[f] for r in rows if (f := r.get("entity_id")) in self._created_from}
+        derived = {key_pointer_id(self._id_scope, self._prop, v)
+                   for v in values - set(hits) - set(dupes) - set(restore)}
+        taken = set(await snap.lookup_live("node", derived)) if derived else set()
+        current, hash_of = await _heads(snap, "node", named)
+        return {"urn_to_eid": hits, "dupes": dupes, "restore": restore, "taken": taken,
+                "qname_to_eid": {}, "node_eids": named, "current": current, "hash_of": hash_of,
+                "bases": await _bases(snap, "node", rows, hash_of)}
+
+    async def _prop_edge_lookups(self, snap, rows) -> Dict[str, Any]:
+        """:meth:`_edge_lookups` for ``identifier=prop.<name>``: ends named by entity_id (an
+        entity's, or the file's own id of a node the job made) or by ``source.<name>``."""
+        ends = {}
+        for end in ("source", "target"):
+            by_id = await snap.lookup_live("node", {r[f"{end}_entity_id"] for r in rows
+                                                    if r.get(f"{end}_entity_id")})
+            hits, dupes, _restore = await self._prop_hits(snap, {
+                key_value((r.get(f"{end}Keys") or {}).get(self._prop)) for r in rows})
+            more = {self._created_from.get(r.get(f"{end}_entity_id") or "") for r in rows}
+            ends[end] = (by_id, hits, dupes, {e for e in more if e})
+        (src_ids, src_hits, src_dupes, src_more), (tgt_ids, tgt_hits, tgt_dupes, tgt_more) = (
+            ends["source"], ends["target"])
+        edge_to_eid = await snap.edges_between(set(src_ids) | set(src_hits.values()) | src_more,
+                                               set(tgt_ids) | set(tgt_hits.values()) | tgt_more)
+        own = {r["entity_id"] for r in rows if r.get("entity_id")}
+        current, hash_of = await _heads(snap, "edge", set(edge_to_eid.values()) | own)
+        return {"urn_to_eid": {**src_hits, **tgt_hits}, "dupes": {**src_dupes, **tgt_dupes},
+                "qname_to_eid": {}, "node_eids": set(src_ids) | set(tgt_ids),
+                "edge_to_eid": edge_to_eid, "edge_eids": own & set(hash_of), "current": current,
+                "hash_of": hash_of, "bases": await _bases(snap, "edge", rows, hash_of)}
+
     async def _edge_lookups(self, snap, rows) -> Dict[str, Any]:
         """What ``resolve_rows`` needs for these edge rows: the live nodes their endpoints name (by
         entity_id, urn, or — an end without a urn — qualifiedName), the live edges between those
         nodes, and each such edge's current payload."""
+        if self._prop:
+            return await self._prop_edge_lookups(snap, rows)
         ends = {}
         ident = self._identity_prop
         for end in ("source", "target"):

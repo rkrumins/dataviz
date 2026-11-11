@@ -466,6 +466,9 @@ IMPORT_REPLACE_GUARD_CREATE_FRACTION: float = float(
 # its rows, in a graph of at least IMPORT_REPLACE_GUARD_MIN_LIVE entities, stops there, naming its
 # identifier, rather than read the rest of the file first. 0 turns it off.
 IMPORT_REPLACE_MIN_MATCH_FRACTION: float = float(os.getenv("IMPORT_REPLACE_MIN_MATCH_FRACTION", "0.05"))
+# Properties a graph's imports may match nodes by (identifier=prop.<name>), at most: each has an index
+# kept current from the version log, as Dataverse limits alternate keys and Salesforce external ids.
+MAX_MATCHING_PROPERTIES: int = int(os.getenv("GRAPHVER_MAX_MATCHING_PROPERTIES", "10"))
 # Rows returned inline in a preview before the full diff must be downloaded.
 PREVIEW_SAMPLE_LIMIT: int = int(os.getenv("IMPORT_PREVIEW_SAMPLE_LIMIT", "200"))
 # Two-tier threshold: imports at/below this stage client-side (existing Review & Save); above

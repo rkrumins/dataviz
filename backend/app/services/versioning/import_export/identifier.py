@@ -4,7 +4,8 @@
   urn, or its value of the data source's identifier property; else by a field its type matches
   imports by; else, a row with no urn, by a unique qualifiedName.
 * ``urn``: by an entity id of the graph, else by its urn, and nothing else.
-* ``prop.<name>``: by an entity id of the graph, else by its value of the property ``<name>``.
+* ``prop.<name>``: by an entity id of the graph, else by its value of the property ``<name>``,
+  through the property's index (:mod:`.keys`), which the first import naming it builds.
 
 Whichever it is, an entity's id never changes: the identifier only says how a row finds it. An
 import names one, its job keeps it (``jobs.identity_strategy``), and a resumed job keeps it too.
@@ -38,9 +39,9 @@ def parse(value: Optional[str]) -> Optional[str]:
             raise IdentifierError(f"{_GRAMMAR}: prop. needs the property's name")
         if name in (ENTITY_ID, URN):
             raise IdentifierError(f"the {name} is not a property: use identifier={name}")
-        raise IdentifierError(
-            f"identifier=prop.{name} is not available yet: name entity_id or urn, or keep "
-            f"{name} in a field its type matches imports by")
+        if len(name) > 200 or any(c in name for c in "\r\n\t"):
+            raise IdentifierError(f"{_GRAMMAR}: a property's name is one line of up to 200 characters")
+        return f"{_PROP}{name}"
     raise IdentifierError(f"{_GRAMMAR}, not {v!r}")
 
 

@@ -665,6 +665,7 @@ Drafts and commits, projection into the graph store, and import and export.
 | `GRAPHVER_MASTER_HIGH_WATER_PCT` | `80` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_MASTER_LOW_WATER_PCT` | `70` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_MAX_FORKS_PER_GRAPH` | `10` | `backend/app/services/versioning/config.py` |
+| `GRAPHVER_MAX_MATCHING_PROPERTIES` | `10` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_MERKLE_DEPTH` | `4` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_NARROW_SQUASH` | `1` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_ONTOLOGY_ENFORCEMENT` | `strict` | `backend/app/services/versioning/config.py` |

@@ -1818,3 +1818,40 @@ async def test_the_mass_delete_allowance_migration_round_trips(store):
             await conn.run_sync(run("upgrade"))                     # idempotent
         finally:
             await trans.rollback()
+
+
+# ── key_index and entity_keys (20261112_1500_gv_entity_keys) ──
+_ENTITY_KEYS = _VERSIONS / "20261112_1500_gv_entity_keys.py"
+
+
+def test_the_matching_property_index_is_declared_and_migrated():
+    assert [c.name for c in models.EntityKeyORM.__table__.primary_key] == [
+        "graph_id", "key_name", "key_value", "entity_id"]
+    assert [c.name for c in models.KeyIndexORM.__table__.primary_key] == ["graph_id", "key_name"]
+    migration = _migration(_ENTITY_KEYS)
+    assert migration.revision == _ENTITY_KEYS.stem and len(migration.revision) <= 32
+    assert migration.down_revision == "20261112_1400_gv_job_mass_delete"
+
+
+@e2e
+async def test_the_matching_property_migration_round_trips_to_the_models_tables(store):
+    migration = _migration(_ENTITY_KEYS)
+
+    def run(step):
+        def apply(sync_conn):
+            migration.op = SimpleNamespace(get_bind=lambda: sync_conn)
+            getattr(migration, step)()
+        return apply
+
+    async with store.connect() as conn:
+        trans = await conn.begin()
+        try:
+            await conn.run_sync(run("downgrade"))
+            assert await _table_columns(conn, "entity_keys") == []
+            assert await _table_columns(conn, "key_index") == []
+            await conn.run_sync(run("upgrade"))
+            assert await _table_columns(conn, "entity_keys") == _model_columns(models.EntityKeyORM)
+            assert await _table_columns(conn, "key_index") == _model_columns(models.KeyIndexORM)
+            await conn.run_sync(run("upgrade"))                     # idempotent
+        finally:
+            await trans.rollback()

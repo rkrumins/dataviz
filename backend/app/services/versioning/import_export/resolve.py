@@ -248,6 +248,8 @@ _NO_KEY = {
                   "would be created again by every import"),
     "urn": ("it has no urn, and with identifier=urn a row is found by its urn (or the entity_id "
             "of a node in this graph): give it one"),
+    "prop": ("it has no {name}, and with identifier=prop.{name} a row is found by its {name} (or "
+             "the entity_id of a node in this graph): give it one"),
 }
 
 
@@ -408,6 +410,13 @@ def pointer_id(scope: str, name: str) -> str:
     return derived_entity_id("node", f"{scope}/pointer:{name}")
 
 
+def key_pointer_id(scope: str, name: str, value: str) -> str:
+    """The id of a node an import makes for a value of the matching property ``name``
+    (``identifier=prop.<name>``): a ``urn:uuid:`` (v5) of the graph's identity scope, the property
+    and the value, so the same value sent again, from another file or draft, names the same node."""
+    return derived_entity_id("node", f"{scope}/prop.{name}:{value}")
+
+
 def edge_pointer_id(scope: str, source: str, target: str, edge_type: str) -> str:
     """The id of an edge an import makes from ``source`` to ``target``: a ``urn:uuid:`` (v5) of
     the graph's identity scope, its ends' ids and its type (as edge identity compares it), so the
@@ -426,6 +435,7 @@ def resolve_rows(
     derive_urn: Optional[Callable[[str], str]] = None,
     derive_edge: Optional[Callable[[str, str, str], str]] = None,
     identifier: str = "entity_id",
+    derive_key: Optional[Callable[[str], str]] = None,
 ) -> Tuple[List[dict], List[dict]]:
     """Return ``(ops, resolutions)`` for the given normalized ``rows``.
 
@@ -454,7 +464,14 @@ def resolve_rows(
     (``no_key``), rather than created again by every import. A new node keeps the urn its row
     gives, under an id derived from it; one with no urn, or a ``urn:uuid`` (an id) another entity
     holds, takes its id as its urn. ``derive_edge(source, target, type)``: a new edge's id, else
-    ``mint_id``. Each resolution's ``code`` says why a row was refused (:data:`CODES`)."""
+    ``mint_id``. Each resolution's ``code`` says why a row was refused (:data:`CODES`).
+
+    ``prop.<name>``: an entity id of the graph, else the row's value of the property ``<name>``
+    (``indexes["urn_to_eid"]`` then maps the values to the nodes holding them, ``indexes["dupes"]``
+    the values several live nodes hold, which refuse their rows, and ``indexes["restore"]`` a value
+    only a deleted node held to that node); an edge's ends by ``source.<name>``. A new node's id is
+    ``derive_key(value)``, else (one that is live: its value has changed since) a minted one; it
+    keeps the value, and the urn its row gives."""
     urn_to_eid: Dict[str, str] = dict(indexes.get("urn_to_eid") or {})
     qname_to_eid: Dict[str, Optional[str]] = dict(indexes.get("qname_to_eid") or {})   # None: several
     edge_to_eid: Dict[tuple, str] = {(s, t, _etype_key(et)): eid
@@ -484,6 +501,8 @@ def resolve_rows(
     node_type_canon = _canonical_map(ontology.get("node_types")) if ontology else {}
     edge_type_canon = _canonical_map(ontology.get("edge_types")) if ontology else {}
     strict = identifier == "urn"                   # by an entity id or the urn, nothing else
+    prop = identifier[len("prop."):] if identifier.startswith("prop.") else None   # or its value
+    dupes: Mapping[str, Sequence[str]] = indexes.get("dupes") or {}
 
     ops: List[dict] = []
     resolutions: List[dict] = []
@@ -494,14 +513,21 @@ def resolve_rows(
     # ---- pass 1: nodes ----
     for row in node_rows:
         props = row.get("properties") or {}
-        ident = key_value(props.get(identity_prop)) if identity_prop and not strict else None
-        names = pointers(row.get("urn"), ident)
+        ident = (key_value(props.get(identity_prop)) if identity_prop and not strict and not prop
+                 else None)
+        held_value = key_value(props.get(prop)) if prop else None
+        names = ([held_value] if held_value else []) if prop else pointers(row.get("urn"), ident)
         etype = _canon(row.get("entityType"), node_type_canon) if row.get("entityType") else None
-        by_key = (lambda t=etype, p=props: keys.node(t, p)) if keys and not strict else None
+        by_key = ((lambda t=etype, p=props: keys.node(t, p)) if keys and not strict and not prop
+                  else None)
         matched_eid, ambiguous, by = _named(row.get("entity_id"), names,
-                                            None if strict else row.get("qualifiedName"),
+                                            None if strict or prop else row.get("qualifiedName"),
                                             node_eids, urn_to_eid, qname_to_eid, created_from,
                                             qname_from, by_key)
+        if held_value and held_value in dupes and not matched_eid:
+            ambiguous = ("duplicate_value", f"{prop} '{held_value}' is held by "
+                         f"{len(dupes[held_value])} nodes ({', '.join(dupes[held_value][:3])}): "
+                         "make it unique to one, or give the row its entity_id")
         if row.get("op") == "invalid":
             # Still names what it matched: a replace must not read that entity as absent.
             resolutions.append(_resolution(row, "invalid", None if ambiguous else matched_eid,
@@ -541,7 +567,7 @@ def resolve_rows(
             cur = after.get(matched_eid) or current.get(matched_eid) or {}
             notes: List[str] = []
             other = None
-            if mint_urn is not None:                              # an import never re-keys a node
+            if mint_urn is not None and not prop:                 # an import never re-keys a node
                 for column, given in (("urn", key_value(row.get("urn"))), (identity_prop, ident)):
                     said = _identity_edit(given, matched_eid, cur, urn_to_eid)
                     if said == "other":
@@ -549,6 +575,9 @@ def resolve_rows(
                     elif said == "new":
                         notes.append(f"{column} '{given}' isn't stored: an import never changes a "
                                      "node's urn — keep your own id in another property")
+            if prop and held_value and (held_value in dupes
+                                        or urn_to_eid.get(held_value) not in (None, matched_eid)):
+                other = prop                                      # its value is another node's
             if other:
                 resolutions.append(_resolution(row, "invalid", matched_eid, code="two_entities",
                                                reasons=[(
@@ -597,11 +626,12 @@ def resolve_rows(
             continue
         # A urn:uuid entity_id is an entity's own id (an export's, from another environment): one no
         # entity of this graph holds becomes the new node's id. Any other is a link between rows.
-        given_id = uuid_urn(key_value(row.get("entity_id")))
-        if not names and not (given_id and not strict) and (strict or not (
+        given_id = (uuid_urn(key_value(row.get("entity_id"))) if not (strict or prop) else None)
+        if not names and not given_id and (strict or prop or not (
                 row.get("qualifiedName") or (keys and keys.matchable(etype, props)))):
-            resolutions.append(_resolution(row, "invalid", None, code="no_key",
-                                           reasons=[_NO_KEY.get(identifier, _NO_KEY["entity_id"])]))
+            why = (_NO_KEY["prop"].format(name=prop) if prop
+                   else _NO_KEY.get(identifier, _NO_KEY["entity_id"]))
+            resolutions.append(_resolution(row, "invalid", None, code="no_key", reasons=[why]))
             continue
         if not row.get("entityType"):
             resolutions.append(_resolution(row, "invalid", None, code="missing_type",
@@ -621,16 +651,23 @@ def resolve_rows(
         # none; the identifier property is bound to the urn at the write.
         minted = False
         restored = next((n for n in names if n in restore), None)
-        free = next((n for n in names if uuid_urn(n) == n and n not in taken
-                     and n not in node_eids), None)
-        kept = (given_id if given_id and not strict and given_id not in taken
-                and given_id not in node_eids else None)
+        free = None if prop else next((n for n in names if uuid_urn(n) == n and n not in taken
+                                       and n not in node_eids), None)
+        kept = given_id if given_id and given_id not in taken and given_id not in node_eids else None
         seed = pointer_seed(urn, ident)
         # The row's urn as it is stored — but not a urn:uuid, which is an id: a free one is the
         # node's own (above), and one another entity holds is never a second entity's urn.
         own_urn = key_value(urn) if key_value(urn) and not uuid_urn(key_value(urn)) else None
         if mint_urn is None:
             eid, node_urn = mint_id(), urn
+        elif restored and prop:                     # a node a value names, deleted since: back
+            eid = restore.pop(restored)
+            node_urn = own_urn or eid
+        elif prop and derive_key is not None and names:
+            eid = derive_key(names[0])
+            if eid in taken or eid in node_eids:    # the node made for it holds another value now
+                eid = mint_urn(etype)
+            node_urn = own_urn or eid
         elif restored:
             eid, node_urn = restore.pop(restored), restored
         elif free:
@@ -647,8 +684,8 @@ def resolve_rows(
         taken.add(eid)
         if row.get("entity_id"):
             created_from[row["entity_id"]] = eid
-        for name in set(names) | {node_urn} - {None}:     # what the file calls it names it here
-            urn_to_eid[name] = eid
+        for name in (set(names) if prop else set(names) | {node_urn} - {None}):
+            urn_to_eid[name] = eid                        # what the file calls it names it here
         if row.get("qualifiedName"):                      # another entity's too: it names neither
             qn = row["qualifiedName"]
             qname_to_eid[qn] = None if qname_to_eid.get(qn, eid) != eid else eid
@@ -681,9 +718,11 @@ def resolve_rows(
                 reasons=[f"'{row['edgeType']}' is not a valid edge type in this ontology"]))
             continue
         seid, s_ambiguous = _resolve_endpoint(row, "source", node_eids, qname_to_eid, urn_to_eid,
-                                              created_from, qname_from, keys, identity_prop, strict)
+                                              created_from, qname_from, keys, identity_prop, strict,
+                                              prop, dupes)
         teid, t_ambiguous = _resolve_endpoint(row, "target", node_eids, qname_to_eid, urn_to_eid,
-                                              created_from, qname_from, keys, identity_prop, strict)
+                                              created_from, qname_from, keys, identity_prop, strict,
+                                              prop, dupes)
         if not (row.get("edgeType") and seid and teid):
             if row.get("op") == "delete" and row.get("edgeType") and not (s_ambiguous or t_ambiguous):
                 # An end that's gone took its edges with it: nothing is left to delete.
@@ -806,11 +845,21 @@ def _named(eid, names, qname, node_eids, urn_to_eid, qname_to_eid, created_from,
 
 
 def _resolve_endpoint(row, which, node_eids, qname_to_eid, urn_to_eid, created_from,
-                      qname_from, keys=None, identity_prop=None,
-                      strict: bool = False) -> Tuple[str | None, Optional[Tuple[str, str]]]:
+                      qname_from, keys=None, identity_prop=None, strict: bool = False,
+                      prop: Optional[str] = None,
+                      dupes=None) -> Tuple[str | None, Optional[Tuple[str, str]]]:
     """An edge end: by its entity_id, urn or qualifiedName, or by a property of its node
     (``source.<field>``): the identifier property, read as the urn, or a field its type matches by.
-    ``strict`` (``identifier=urn``): by its entity_id or its urn only."""
+    ``strict`` (``identifier=urn``): by its entity_id or its urn only. ``prop``
+    (``identifier=prop.<name>``): by its entity_id or ``source.<name>`` only."""
+    if prop:
+        value = key_value((row.get(f"{which}Keys") or {}).get(prop))
+        if value and value in (dupes or {}):
+            return None, ("duplicate_value", f"{which}.{prop} '{value}' is held by "
+                          f"{len(dupes[value])} nodes: make it unique to one")
+        eid, why, _by = _named(row.get(f"{which}_entity_id"), [value] if value else [], None,
+                               node_eids, urn_to_eid, qname_to_eid, created_from, qname_from)
+        return eid, why
     named = {} if strict else dict(row.get(f"{which}Keys") or {})
     ident = named.pop(identity_prop, None) if identity_prop else None
     by_key = (lambda: keys.end(named)) if keys and named else None

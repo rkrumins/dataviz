@@ -468,6 +468,50 @@ class RollupDeltaORM(VersioningBase):
     )
 
 
+class KeyIndexORM(VersioningBase):
+    """A property imports match nodes by (``identifier=prop.<name>``) and how far its index
+    (``entity_keys``) describes ``main``: ``seq``, a main commit. ``building`` until the first import
+    that named it has read every live node; ``ready`` after, and caught up from main's version log
+    before each import that uses it."""
+
+    __tablename__ = "key_index"
+
+    graph_id = Column(Text, nullable=False)
+    key_name = Column(Text, nullable=False)
+    status = Column(Text, nullable=False, default="building")
+    seq = Column(BigInteger, nullable=False, default=0)
+    # Part-way through the commit after ``seq``, one too large for a page: ``<seq>|<entity id>``, the
+    # last of its versions read.
+    cursor = Column(Text, nullable=True)
+    created_at = Column(Text, nullable=False, default=_now)
+    created_by_job = Column(Text, nullable=True)
+
+    __table_args__ = _plain(
+        PrimaryKeyConstraint("graph_id", "key_name", name="pk_key_index"),
+        CheckConstraint("status IN ('building','ready')", name="ck_key_index_status"),
+    )
+
+
+class EntityKeyORM(VersioningBase):
+    """A node of ``main`` holding ``key_value`` in the matching property ``key_name``: what an import
+    by ``identifier=prop.<name>`` finds it by. A deleted node keeps its last value, ``live`` false, so
+    a row naming it again brings it back under its id. The secondary index reads an entity's own
+    entries, which a version of it replaces."""
+
+    __tablename__ = "entity_keys"
+
+    graph_id = Column(Text, nullable=False)
+    key_name = Column(Text, nullable=False)
+    key_value = Column(Text, nullable=False)
+    entity_id = Column(Text, nullable=False)
+    live = Column(Boolean, nullable=False, default=True)
+
+    __table_args__ = _plain(
+        PrimaryKeyConstraint("graph_id", "key_name", "key_value", "entity_id", name="pk_entity_keys"),
+        Index("ix_entity_keys_entity", "graph_id", "key_name", "entity_id"),
+    )
+
+
 class JobORM(VersioningBase):
     """Crash-recoverable worker job (ingest / projection / rebuild).
 

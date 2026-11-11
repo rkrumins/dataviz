@@ -670,3 +670,65 @@ def test_a_second_row_for_one_edge_is_refused_unless_it_says_the_same():
     assert [res[i]["resolved_op"] for i in range(3)] == ["create", "unchanged", "invalid"]
     assert "row 1 of this file already names this edge" in res[2]["reasons"][0]
     assert len(ops) == 1
+
+
+# ── By a matching property (identifier=prop.<name>) ─────────────────────────────────────────────
+from backend.app.services.versioning.import_export.resolve import key_pointer_id
+
+
+def _by_prop(rows, **indexes):
+    v7s = iter(f"urn:uuid:0192f5a4-0000-7000-8000-00000000000{i}" for i in range(10))
+    base = {"urn_to_eid": {}, "qname_to_eid": {"db.t": "N9"}, "edge_to_eid": {},
+            "node_eids": set(), "current": {}}
+    ops, res = resolve_rows(rows, {**base, **indexes}, mint_id=lambda: next(v7s),
+                            mint_urn=lambda _t: next(v7s), identity_prop="asset_id",
+                            derive_urn=lambda seed: pointer_id("ds1", seed),
+                            derive_key=lambda v: key_pointer_id("ds1", "ext", v),
+                            identifier="prop.ext")
+    return ops, {r["_row_index"]: r for r in res}
+
+
+def test_by_a_property_a_row_is_found_by_its_value_or_its_entity_id_and_nothing_else():
+    held = {"urn": "urn:N1", "entityType": "Table", "properties": {"ext": "E1"}}
+    ops, res = _by_prop([
+        _node_row(0, properties={"ext": "E1", "k": 2}),                      # by its value
+        _node_row(1, entity_id="N2", displayName="by id"),
+        _node_row(2, urn="urn:N1", qualifiedName="db.t", displayName="no"),  # urn, name: not keys
+        {"_row_index": 3, "kind": "edge", "op": "upsert", "entity_id": "", "edgeType": "FLOWS",
+         "sourceKeys": {"ext": "E1"}, "target_entity_id": "N2"},
+    ], urn_to_eid={"E1": "N1"}, node_eids={"N1", "N2"},
+        current={"N1": held, "N2": {"urn": "urn:N2", "entityType": "Table"}})
+    assert (res[0]["resolved_op"], res[0]["matched_entity_id"]) == ("update", "N1")
+    assert ops[0]["payload"] == {"properties": {"k": 2}}, ops[0]
+    assert (res[1]["resolved_op"], res[1]["matched_entity_id"]) == ("update", "N2")
+    assert (res[2]["resolved_op"], res[2]["code"]) == ("invalid", "no_key")
+    assert "give it one" in res[2]["reasons"][0] and "ext" in res[2]["reasons"][0]
+    edge = next(o for o in ops if o["entity_kind"] == "edge")["payload"]
+    assert (edge["sourceEntityId"], edge["targetEntityId"]) == ("N1", "N2")
+
+
+def test_by_a_property_a_value_two_nodes_hold_or_another_nodes_value_is_refused():
+    _ops, res = _by_prop([
+        _node_row(0, properties={"ext": "DUP"}),
+        _node_row(1, entity_id="N2", properties={"ext": "E1"}),               # N1's value
+        {"_row_index": 2, "kind": "edge", "op": "upsert", "entity_id": "", "edgeType": "FLOWS",
+         "sourceKeys": {"ext": "DUP"}, "target_entity_id": "N2"},
+    ], urn_to_eid={"E1": "N1"}, dupes={"DUP": ["N3", "N4"]}, node_eids={"N1", "N2"},
+        current={"N2": {"urn": "urn:N2", "entityType": "Table"}})
+    assert (res[0]["code"], "N3" in res[0]["reasons"][0]) == ("duplicate_value", True), res[0]
+    assert res[1]["code"] == "two_entities", res[1]
+    assert res[2]["code"] == "duplicate_value", res[2]
+
+
+def test_by_a_property_a_new_node_takes_the_id_its_value_derives_unless_a_node_holds_it():
+    ops, res = _by_prop([
+        _node_row(0, properties={"ext": "NEW"}, displayName="new"),
+        _node_row(1, properties={"ext": "MOVED"}, displayName="its id is taken"),
+        _node_row(2, properties={"ext": "GONE"}, urn="urn:li:gone", displayName="back"),
+    ], taken={key_pointer_id("ds1", "ext", "MOVED")}, restore={"GONE": "ent_D"})
+    new, moved, back = ops
+    assert new["entity_id"] == new["payload"]["urn"] == key_pointer_id("ds1", "ext", "NEW")
+    assert new["payload"]["properties"] == {"ext": "NEW"}, "the value is kept"
+    assert moved["entity_id"] != key_pointer_id("ds1", "ext", "MOVED"), "a fresh id, not the taken one"
+    assert (back["entity_id"], back["payload"]["urn"]) == ("ent_D", "urn:li:gone"), back
+    assert all(r["resolved_op"] == "create" for r in res.values())

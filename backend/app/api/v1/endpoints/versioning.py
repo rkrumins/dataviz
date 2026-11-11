@@ -3840,8 +3840,9 @@ class CreateImportResponse(_ApiModel):
 _IDENTIFIER = Query(None, description=(
     "What the file's rows find their entities by: entity_id (the default: an entity id of the "
     "graph, else the urn, the identifier property, a field its type matches imports by, then a "
-    "unique qualifiedName) or urn (an entity id, else the urn only). An entity's id never changes, "
-    "whichever it is"))
+    "unique qualifiedName), urn (an entity id, else the urn only) or prop.<name> (an entity id, "
+    "else the value of the property <name>, such as prop.external_id). An entity's id never "
+    "changes, whichever it is"))
 
 
 _ALLOW_MASS_DELETE = Query(False, alias="allowMassDelete", description=(
@@ -4257,6 +4258,7 @@ async def validate_import(
     ``IMPORT_COMMIT_WINDOW`` rows; **413** past either). **422** when the file can't be read. A
     strict graph's write gate, which runs at commit, can still refuse a row that passes here."""
     from backend.app.services.versioning.import_export.formats import get_adapter
+    from backend.app.services.versioning.import_export import keys as matching
     from backend.app.services.versioning.import_export.service import (
         DryRunTooLarge, IdentityUnavailable,
     )
@@ -4285,6 +4287,11 @@ async def validate_import(
     except IdentityUnavailable as exc:
         raise HTTPException(status_code=503, headers={"Retry-After": "15"},
                             detail={"type": "identity_unavailable", "message": str(exc)})
+    except matching.NotIndexed as exc:
+        raise HTTPException(status_code=409, detail={"type": "identifier_not_indexed",
+                                                     "message": str(exc)})
+    except matching.NotOnAFork as exc:
+        raise HTTPException(status_code=422, detail={"type": exc.code, "message": str(exc)})
     except ValueError as exc:
         raise HTTPException(status_code=422, detail={"type": "invalid_file", "message": str(exc)})
 

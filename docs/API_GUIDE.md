@@ -791,8 +791,9 @@ publish.
    in that view's layout, so it needs edit access to the view too — with a key, **Views: read &
    write**.
 
-   `identifier=` says what the file's rows find their entities by: `entity_id` (the default) or
-   `urn`, which takes a row's entity id or its urn and nothing else. A row it finds is updated with
+   `identifier=` says what the file's rows find their entities by: `entity_id` (the default),
+   `urn`, which takes a row's entity id or its urn and nothing else, or `prop.<name>`, a property
+   of your own such as `prop.external_id`. A row it finds is updated with
    only the fields it carries; one it doesn't is created, keeping its urn, under an id derived from
    it; an entity's id never changes. A refused row says why with a `code` (`no_key`: give it a urn).
 

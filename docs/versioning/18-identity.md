@@ -77,6 +77,7 @@ The id is `uuid5(ENTITY_NAMESPACE, "<kind>/<seed>")`.
 | `POST /graph/edges` with `idempotencyKey`, or a `create_edge` command | the same |
 | A view package seed's line with no id | `<upload>:<offset>`, its place in the upload, so a resumed seed derives the same id |
 | An imported node, named from its row's pointer | `<data source>/pointer:<pointer>`: the data source at the root of the graph's fork lineage, and the row's urn, else its identifier value (a `urn:uuid:` in canonical form). The same file imported again names the same nodes, in a fork or after the graph is made again. |
+| An imported node, by a matching property (`identifier=prop.<name>`) | `<data source>/prop.<name>:<value>`: the same value sent again names the same node. A v7 instead when a live node already holds that id (its value has changed since). |
 | An imported edge | `<data source>/edge:<source id>|<target id>|<TYPE>`: its ends' ids and its type, upper-cased. The same edge sent again, from any file or draft, or after a delete, is the same edge. |
 
 ## 3. Where each id comes from
@@ -146,7 +147,8 @@ graph, on any draft. The same key from someone else is always a new request.
 
 **Running an import again** starts a new job. What happens to each row depends on how it names its
 entity, which the import's `identifier` says ([08 §3b](08-import-export.md#3b-resolve-a-window-at-a-time)):
-`entity_id` (the default) or `urn`.
+`entity_id` (the default), `urn`, or `prop.<name>`: by a property, through its index, which finds a
+node made or edited in the app since the last import too.
 
 - A row that names an entity by its `entity_id` updates it. Every row of an export does.
 - A row's `urn`, or (by `entity_id`) its value of the identifier property, is a **pointer**. It finds

@@ -1,7 +1,7 @@
 """``identifier`` on the import routes: what the request may name, and what it takes otherwise.
 
-An import's rows find their entities by ``entity_id`` (the default) or ``urn``; a request naming
-anything else is a 422 that says what it may name. A request naming none takes the platform's
+An import's rows find their entities by ``entity_id`` (the default), ``urn`` or ``prop.<name>``; a
+request naming anything else is a 422 that says what it may name. A request naming none takes the platform's
 (``GRAPHVER_IMPORT_IDENTIFIER``), unless that is not one an import may name.
 """
 import pytest
@@ -15,6 +15,7 @@ from backend.app.services.versioning.import_export import identifier as identifi
 @pytest.mark.parametrize("given, expect", [
     (None, ("entity_id", "platform")), ("", ("entity_id", "platform")),
     ("entity_id", ("entity_id", "request")), (" urn ", ("urn", "request")),
+    ("prop.external_id", ("prop.external_id", "request")),
 ])
 def test_an_import_takes_the_identifier_it_names_or_the_platforms(given, expect):
     assert identifiers.resolve(given) == expect
@@ -25,7 +26,7 @@ def test_an_import_takes_the_identifier_it_names_or_the_platforms(given, expect)
     ("prop.", "needs the property's name"),
     ("prop.urn", "use identifier=urn"),
     ("prop.entity_id", "use identifier=entity_id"),
-    ("prop.external_id", "not available yet"),
+    ("prop.a\nb", "one line of up to 200 characters"),
 ])
 def test_what_an_import_may_not_name_is_a_422_that_says_what_it_may(given, says):
     with pytest.raises(HTTPException) as caught:

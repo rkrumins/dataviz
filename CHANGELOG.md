@@ -101,7 +101,14 @@ integration's many small changes as a few commits.
   - `identifier=entity_id`, the default (`GRAPHVER_IMPORT_IDENTIFIER`): an entity id of the graph,
     else the urn, the identifier property, a field the type matches imports by, then a unique
     qualifiedName, as before;
-  - `identifier=urn`: an entity id of the graph, else the urn, and nothing else.
+  - `identifier=urn`: an entity id of the graph, else the urn, and nothing else;
+  - `identifier=prop.<name>`: an entity id of the graph, else the row's value of a property of your
+    own, such as `prop.external_id`, as Salesforce's external ids and Dataverse's alternate keys
+    do. An edge names its ends `source.<name>` / `target.<name>`. The first import naming the
+    property indexes it, reading every node once; each later one reads only the version log since,
+    so a node made or edited in the app is found by its value, never made again. A value two nodes
+    hold refuses its rows (`duplicate_value`); a deleted node named again by its last value comes
+    back under its id. At most `GRAPHVER_MAX_MATCHING_PROPERTIES` (10) a graph; not on a fork yet.
 
   The job keeps it (`identifier` on the job), and a resumed job keeps it too. Anything else is
   `422 invalid_identifier`, saying what it may be. Whichever it is, an entity's id never changes.
@@ -267,6 +274,9 @@ integration's many small changes as a few commits.
     field or qualifiedName) is refused with `no_key`, and so is an edge to it. Give such rows a urn.
   - An imported node's urn is the one its file gave, not the derived id. A client that read a
     node's urn as its id should read its `entity_id`.
+- Migration `20261112_1500_gv_entity_keys` adds the tables `graphver.key_index` and
+  `graphver.entity_keys` (empty). A separate `GRAPHVER_DB_URL` gets them at start-up. The first
+  import that names a property reads every node of its graph once to index it.
 - **The replace guard is on.** A recurring replace that deletes and re-creates most of its scope
   each run now fails instead. Fix the file's keys (or `identifier`), or send `allowMassDelete=true`
   for a run that really replaces everything. `IMPORT_REPLACE_GUARD=0` turns it off. Migration
