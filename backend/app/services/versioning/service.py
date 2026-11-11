@@ -8082,6 +8082,11 @@ class GraphVersioningService:
                 meta["source_branch_owner"] = src.owner
                 meta["source_branch_name"] = src.name
                 meta["originating_view_id"] = src.originating_view_id   # for "back to the view" nav
+            # A merged draft review's commit on main, by seq: what its change list pages through
+            # (main between seq - 1 and seq) when it is too large for one diff, its draft's own
+            # rows removed or not.
+            squash = await self._review_squash(s, pr)
+            meta["resulting_commit_seq"] = squash.commit_seq if squash is not None else None
             return meta
 
     @staticmethod

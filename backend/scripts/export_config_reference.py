@@ -158,7 +158,7 @@ NOTES: dict[str, tuple[str, str | None]] = {
         "Days a merged or abandoned draft keeps its changes before the versioning worker removes "
         "them; `0` keeps them for good. The draft's record stays (its name, owner, commits and "
         "review), and a merged draft's changes are in the published graph. A system administrator "
-        "overrides it live: Admin → Versioned graphs → Draft retention. Each sweep spends at most 5 "
+        "overrides it live: Admin → Infrastructure → Versioned graphs → Draft retention. Each sweep spends at most 5 "
         "minutes on it, so a draft of millions of rows is removed over a few sweeps.",
         None,
     ),

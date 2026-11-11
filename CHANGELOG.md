@@ -75,8 +75,9 @@ integration's many small changes as a few commits.
     the published graph, which the publish copied them to, so main's history, credits and reverts are
     unaffected. As with a squash-merged Git branch, the draft's intermediate commits stay listed but
     no longer have content.
-  - System administrators set the window live, from 0 (keep for good) to 3650 days
-    (`GET/PUT /admin/versioning/draft-retention`); the default is `GRAPHVER_DRAFT_RETENTION_DAYS`.
+  - System administrators set the window live, from 0 (keep for good) to 3650 days, under Admin →
+    Infrastructure → Versioned graphs → Draft retention (`GET/PUT /admin/versioning/draft-retention`).
+    The default is `GRAPHVER_DRAFT_RETENTION_DAYS`. A window that removes more asks first.
   - The versioning worker removes drafts in windows during its hourly sweep, for at most 5 minutes a
     sweep. A draft with an open review or a running job is kept, and so are drafts of a deleted or
     frozen graph.

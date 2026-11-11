@@ -676,11 +676,12 @@ implicit maintainer; its members hold `viewer`, `editor` or `maintainer`, direct
   but not one with a live PR or staged edits, nor one on a graph that is deleted, not live, or was
   unfrozen within the TTL.
 - Draft retention (`prune_closed_drafts`, the same sweep): a draft merged or abandoned more than
-  `GRAPHVER_DRAFT_RETENTION_DAYS` ago (30; a system administrator sets it live, Admin → Versioned graphs
-  → Draft retention; `0` keeps them for good) has its changes removed: its heads, staged edits,
-  integrity tree and versions. As with a squash-merged Git branch, the merge commit on `main` holds
-  what it changed (the publish copied its rows there), and the draft's own commits remain as records.
-  The draft's record stays: the branch (`prunedAt`), its members, its commits and its review.
+  `GRAPHVER_DRAFT_RETENTION_DAYS` ago (30; a system administrator sets it live, Admin → Infrastructure
+  → Versioned graphs → Draft retention; `0` keeps them for good) has its changes removed: its heads,
+  staged edits, integrity tree and versions. As with a squash-merged Git branch, the merge commit on
+  `main` holds what it changed (the publish copied its rows there), and the draft's own commits remain
+  as records. The draft's record stays: the branch (`prunedAt`), its members, its commits and its
+  review.
   - A read of its changes is **410 `draft_pruned`**: its diff, state, change list, commits' diffs, an
     export of it, a closed review's Files changed. It is never shown as an empty diff.
   - A merged review's Files changed is its squash commit's, removed or not.

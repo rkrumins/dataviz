@@ -211,6 +211,17 @@ export interface ResidencyPolicy {
 /** A partial change: ``-1`` clears a value back to its default. */
 export type ResidencyPolicyChange = Partial<Record<ResidencyPolicyField, number | boolean | string>>
 
+/** ``GET /api/v1/admin/versioning/draft-retention``: how long a merged or abandoned draft keeps its
+ *  changes before they are removed — ``days`` in force, as ``saved`` (null: the environment's
+ *  ``default``), and the range a value may take. ``0`` keeps them for good. */
+export interface DraftRetention {
+    days: number
+    saved: number | null
+    default: number
+    min: number
+    max: number
+}
+
 export interface ResidencyPreviewItem {
     graphId: string
     dataSourceId: string | null
@@ -414,6 +425,15 @@ export const systemStatusService = {
         authFetch<ResidencyPolicy>('/api/v1/admin/versioning/residency-policy', {
             method: 'PUT',
             body: JSON.stringify(change),
+        }),
+    /** How long a merged or abandoned draft keeps its changes. */
+    draftRetention: (): Promise<DraftRetention> =>
+        authFetch<DraftRetention>('/api/v1/admin/versioning/draft-retention'),
+    /** Save a window, in days (``0`` keeps changes for good); ``null`` goes back to the default. */
+    saveDraftRetention: (days: number | null): Promise<DraftRetention> =>
+        authFetch<DraftRetention>('/api/v1/admin/versioning/draft-retention', {
+            method: 'PUT',
+            body: JSON.stringify({ days }),
         }),
     /** What the next capacity pass would do with ``change`` applied (``{}``: as things stand). */
     previewResidencyPolicy: (change: ResidencyPolicyChange): Promise<ResidencyPreview> =>

@@ -1,5 +1,5 @@
-"""Draft retention: how long a merged or abandoned draft keeps its changes (Admin → Versioned graphs →
-Draft retention). Covered here, without a database:
+"""Draft retention: how long a merged or abandoned draft keeps its changes (Admin → Infrastructure →
+Versioned graphs → Draft retention). Covered here, without a database:
 - where it is stored (``platform_settings.gv_draft_retention_days``, migration
   ``20261111_1000_gv_draft_prune``);
 - how it resolves (``draft_retention``);

@@ -265,9 +265,10 @@ DRAFT_TTL_DAYS: int = int(os.getenv("GRAPHVER_DRAFT_TTL_DAYS", "30"))
 # A merged or abandoned draft keeps its changes this many days, then the same pass removes them in
 # windows and keeps its record: the branch, its members, its commits and its review (a merged
 # draft's changes are in main, in the commit it landed as). 0 keeps them for good. A system
-# administrator overrides it live (Admin → Versioned graphs → Draft retention;
+# administrator overrides it live (Admin → Infrastructure → Versioned graphs → Draft retention;
 # ``draft_retention``). Each pass spends at most DRAFT_PRUNE_PASS_SECS on it, so a draft of
-# millions of rows is removed over a few passes rather than holding the worker or the database.
+# millions of rows is removed over a few passes rather than holding the worker or the
+# database.
 DRAFT_RETENTION_DAYS: int = int(os.getenv("GRAPHVER_DRAFT_RETENTION_DAYS", "30"))
 DRAFT_PRUNE_PASS_SECS: float = 300.0
 

@@ -26,6 +26,7 @@ import pytest
 from sqlalchemy import select, text, update
 
 from backend.app.services.versioning import config, db, models, purge_worker
+from backend.app.services.versioning.change_index import ChangeOrigin
 from backend.app.services.versioning.errors import DraftPruned
 from backend.app.services.versioning.models import BranchORM
 from backend.app.services.versioning.service import GraphVersioningService, Viewer, _DRAFT_ROWS
@@ -156,6 +157,14 @@ async def _cases(svc, monkeypatch):
     squash_summary = await svc.diff_commit_summary(graph_id=gid, commit_id=squash,
                                                    containment_edge_types=[])
     assert squash_summary["counts"] == summary["counts"]
+    # Its change list, for one too large for a diff: main between the commit's seq - 1 and it.
+    seq = (await svc.get_pr(mr))["resulting_commit_seq"]
+    listed = await svc.change_summary(graph_id=gid, origin=ChangeOrigin(from_seq=seq - 1, to_seq=seq),
+                                      containment_edge_types=[])
+    assert listed["listed"] == 2, listed
+    with pytest.raises(DraftPruned):
+        await svc.change_summary(graph_id=gid, origin=ChangeOrigin(branch_id=merged),
+                                 containment_edge_types=[])
 
     # Run again: nothing more is due.
     assert await svc.prune_closed_drafts(older_than_days=30, now=later, graph_id=gid) == []

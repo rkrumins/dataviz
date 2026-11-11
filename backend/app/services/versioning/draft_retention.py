@@ -1,7 +1,7 @@
 """How long a merged or abandoned draft keeps its changes before the versioning worker removes them.
 
-A system administrator sets it live (``/admin/versioning/draft-retention``, Admin → Versioned
-graphs → Draft retention). It is stored on the single ``platform_settings`` row
+A system administrator sets it live (``/admin/versioning/draft-retention``, Admin → Infrastructure
+→ Versioned graphs → Draft retention). It is stored on the single ``platform_settings`` row
 (``gv_draft_retention_days``); NULL there means unset, and ``GRAPHVER_DRAFT_RETENTION_DAYS``
 applies (30). ``0`` keeps every draft's changes for good.
 

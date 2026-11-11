@@ -1545,6 +1545,9 @@ class PrResponse(_ApiModel):
     description: Optional[str] = None
     conflicts: Optional[List[dict]] = None
     resulting_commit_id: Optional[str] = Field(default=None, alias="resultingCommitId")
+    # The single-PR read only: a merged draft review's commit on main, by seq. Its change list is
+    # main between ``resultingCommitSeq - 1`` and it.
+    resulting_commit_seq: Optional[int] = Field(default=None, alias="resultingCommitSeq")
     reviewers: Optional[List[str]] = None
     approved_by: Optional[List[str]] = Field(default=None, alias="approvedBy")
     # Reviewers whose approval went stale (a content commit since): they must approve again.

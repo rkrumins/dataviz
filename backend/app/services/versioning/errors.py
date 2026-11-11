@@ -579,9 +579,9 @@ class ReviewRequired(_HttpMapped, RuntimeError):
 
 class DraftPruned(_HttpMapped, RuntimeError):
     """A read of a closed draft's changes after they were removed. A merged or abandoned draft keeps
-    them for the retention window (Admin → Versioned graphs → Draft retention); after it, only the
-    draft's record stays: its name, owner, commits and review. A merged draft's changes are in
-    ``main``, in the commit it landed as."""
+    them for the retention window (Admin → Infrastructure → Versioned graphs → Draft retention);
+    after it, only the draft's record stays: its name, owner, commits and review. A merged draft's
+    changes are in ``main``, in the commit it landed as."""
 
     status_code = 410
 
