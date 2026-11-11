@@ -116,7 +116,9 @@ integration's many small changes as a few commits.
   (in nginx, `client_max_body_size 10g; proxy_request_buffering off;`); uploads in parts need
   nothing.
 - For multi-gigabyte imports, set `OBJECT_STORE_BACKEND` to `s3` or a shared volume: the default
-  database store keeps every gigabyte as rows, WAL and backups in the management database.
+  database store writes each upload into the management database — for NDJSON or CSV about a
+  quarter of its size as rows and as much again as WAL, the whole of it for a file that doesn't
+  compress.
 
 ### Known limitations
 

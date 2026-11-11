@@ -273,7 +273,11 @@ rows a second: six times the row-at-a-time rate.
 
 The versioning worker's sweep deletes the staged rows of imports finished more than
 `IMPORT_STAGING_GC_DAYS` (7) ago, a batch at a time. Until then a large import's rows take their
-space in Postgres: roughly the file's size again.
+space in Postgres: about 3.4 times the file's size, since each is a JSONB row too small for Postgres
+to compress, with two indexes. Measured with `bench_versioning` (100k nodes and 100k edges, a
+97.5 MB file): 335 MB of `import_rows`, 348 MB of versions and heads on the draft, and 1.06 GB of
+WAL for the one import. Deleted staged rows leave space that autovacuum reuses; the table doesn't
+give it back to the disk.
 
 ### 3d. Resumable uploads
 
@@ -376,9 +380,10 @@ nginx's temp directory and its worker at 4 MB.
 - **`IMPORT_UPLOAD_CONCURRENCY`.** Size it to what the object store can write, not to the number of
   uploaders: the fleet takes up to this × API processes (4 a pod) at once. Raise it for S3; keep it
   low with the database store.
-- **The store.** For multi-gigabyte imports use S3 or a shared volume (§9), not the database: every
-  gigabyte stored there is a gigabyte of rows, of WAL and of backups in the management database, on
-  top of the import's staged rows (§3c).
+- **The store.** For multi-gigabyte imports use S3 or a shared volume (§9), not the database. A
+  gigabyte of NDJSON stored there took 248 MB of rows (Postgres compresses each 1 MiB chunk) and
+  296 MB of WAL — a file that doesn't compress, a gigabyte of each — written into the instance
+  every user's requests read from, on top of the import's staged rows (§3c).
 - **`IMPORT_MAX_BYTES`.** Raising it means raising the frontend nginx's `client_max_body_size` and
   the ingress's `proxy-body-size` with it, on these routes.
 - **Rollouts.** A pod stops after `GUNICORN_GRACEFUL_TIMEOUT` (30 s): a body still arriving is cut
