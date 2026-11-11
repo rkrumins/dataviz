@@ -6,7 +6,9 @@ again; an import whose upload broke off is failed there and then, keyed or not, 
 takes it back (``reclaim_import``) with the new request's file and starts it, if the view it places
 into is still the caller's to edit; an import still storing its file is answered as it is, storing
 nothing; a finished job is answered as it is; a key that started the other kind of job is a 409;
-and a request that loses the race to insert the key answers with the winner's job.
+and a request that loses the race to insert the key answers with the winner's job. A file sent with
+no Content-Length past what one import of its format can be is refused as it arrives, its job failed
+there and then.
 """
 from __future__ import annotations
 
@@ -185,12 +187,16 @@ async def _no_row(*_args, **_kwargs):
     return None                      # no data source row: its draft starts at the built-in level
 
 
+async def _nothing():
+    return None
+
+
 def _post_directly(jobs, key):
     return create_import("ws1", "g1", _CutOff(), format="ndjson", reconcile_mode="upsert",
                          branch_id=None, view_id=None, idempotency_key=key, auto_publish=False,
                          user=SimpleNamespace(id=ME),
                          claims=None, meta={"data_source_id": "ds1"}, ie=jobs,
-                         session=SimpleNamespace(get=_no_row))
+                         session=SimpleNamespace(get=_no_row, commit=_nothing))
 
 
 async def test_a_keyed_upload_that_broke_off_is_taken_back_by_its_retry(test_client, jobs):
@@ -203,6 +209,40 @@ async def test_a_keyed_upload_that_broke_off_is_taken_back_by_its_retry(test_cli
     assert r.status_code == 202, r.text
     assert r.json()["jobId"] == job_id and jobs.started == [job_id]
     assert await _stored(jobs, job_id) == b"A\n"
+
+
+async def test_a_file_sent_whole_is_held_to_its_formats_limit_as_it_arrives(test_client, jobs, monkeypatch):
+    """Only counting finds a body sent with no Content-Length too large: refused as soon as it
+    passes the limit, none of it kept, its job failed there and then (a retry takes it back)."""
+    from backend.app.services.versioning.import_export import uploads
+
+    monkeypatch.setattr(uploads, "MAX_BYTES", 100)
+
+    async def chunked():
+        for _ in range(3):
+            yield b"x" * 64
+
+    r = await test_client.post(f"{URL}/imports", params={"idempotencyKey": "big-1"}, content=chunked())
+    assert r.status_code == 413, r.text
+    assert "One import can be at most" in r.json()["detail"]
+    (job_id,) = jobs.jobs
+    assert jobs.abandoned == [job_id] and jobs.started == []
+    assert not (await jobs.store.stat(jobs.jobs[job_id]["sourceUri"])).exists, "none of it kept"
+
+
+async def test_no_database_connection_is_held_while_the_file_arrives(test_client, jobs, db_session):
+    """A file sent in one request can take minutes to arrive. The request's checks read the
+    database (the drafts policy, the view); their transaction ends before the body is read, so a
+    burst of large imports can't hold the pool's connections for as long as their files take."""
+    seen = []
+
+    async def body():
+        seen.append(db_session.in_transaction())
+        yield b"A\n"
+
+    r = await test_client.post(f"{URL}/imports", params={"idempotencyKey": "big-2"}, content=body())
+    assert r.status_code == 202, r.text
+    assert seen == [False], "the request's transaction was still open while its body arrived"
 
 
 async def test_an_unkeyed_upload_that_broke_off_is_failed_at_once(jobs):

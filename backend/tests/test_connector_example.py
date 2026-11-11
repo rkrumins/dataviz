@@ -85,12 +85,13 @@ class _Server:
                                              "summary": summary})
         if tail.startswith("/publish-jobs/"):
             return httpx.Response(200, json={"jobId": tail.rsplit("/", 1)[1], "graphId": "g1",
-                                             "status": "completed", "commitId": "cmt_1", "error": None})
+                                             "status": "completed", "commitId": "cmt_1", "revisionId": 7,
+                                             "error": None})
         if tail == "/branches/br_1" and method == "GET":
             return httpx.Response(200, json={"branchId": "br_1", "kind": "draft", "status": self.branch})
         if tail == "/branches/br_1/publish":
             self.branch = "merged"
-            return httpx.Response(200, json={"commitId": "cmt_2"})
+            return httpx.Response(200, json={"commitId": "cmt_2", "revisionId": 8, "status": "completed"})
         if tail == "/imports/validate":
             return httpx.Response(200, json={"summary": {"new": 1}, "rows": [], "unknownColumns": [],
                                              "hints": []})
@@ -143,7 +144,7 @@ def test_a_file_goes_up_in_parts_from_disk_and_publishes_itself(world):
     assert server.sent(upload_id) == path.read_bytes(), "every part, in order, as the file has it"
     assert ("POST", f"{BASE}/imports/uploads/{upload_id}/complete", {"autoPublish": "true"}) in server.calls
     assert ("GET", f"{BASE}/publish-jobs/pjob_1", {}) in server.calls
-    assert result["publish"] == {"state": "completed", "commitId": "cmt_1", "error": None}
+    assert result["publish"] == {"state": "completed", "commitId": "cmt_1", "revisionId": 7, "error": None}
     assert connector.succeeded(result)
 
 
@@ -195,7 +196,7 @@ def test_a_publish_the_import_never_wrote_is_done_by_the_connector(world):
     server = _Server(note=None)
     result = connector.run(graph(server), str(path), "ndjson", publish=True, state_path=state)
     assert ("POST", f"{BASE}/branches/br_1/publish", {}) in server.calls
-    assert result["publish"] == {"state": "completed", "commitId": "cmt_2"}
+    assert result["publish"] == {"state": "completed", "commitId": "cmt_2", "revisionId": 8}
     assert connector.succeeded(result)
 
 

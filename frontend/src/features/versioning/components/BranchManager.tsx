@@ -504,7 +504,8 @@ function ArchiveConfirm({
             <h3 className="text-sm font-semibold text-ink">{BRANCH_VOCAB.archive} this draft?</h3>
             <p className="text-[12px] text-ink-muted mt-1">
               <span className="font-medium text-ink">{branch.name || 'Untitled draft'}</span> will be hidden and can no
-              longer be edited or published. Its history is kept for the record.
+              longer be edited or published. Its history is kept for the record; its changes are removed after
+              the retention period an administrator sets (30 days unless changed).
               {isCurrent && ' You’ll be moved back to the Published version.'}
             </p>
           </div>

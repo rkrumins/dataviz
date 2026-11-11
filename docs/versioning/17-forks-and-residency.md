@@ -1122,6 +1122,11 @@ panel's **All versioned graphs**):
   9.4 GB and 2 of unknown size, on master 10.0.0.2:6379") and when: every server reads new values
   within 30 seconds, and the next capacity pass acts on them; a value the server refuses shows next
   to the field it names.
+- **Draft retention** opens the card for how long a merged or abandoned draft keeps its changes
+  ([03](03-branching-commits-merge.md)): the window in force and its default, **Reset** (back to the
+  default), and **Save**. A window that removes more than the one in force, shorter or where there
+  was none, asks first and says what it removes within the hour, for good, and what each draft
+  keeps.
 - **The projection panel** counts graphs **loading** and **waiting for room**.
 
 On the workspace side, a data source's **Versioning** tab (and the Data health tab) shows the graph's

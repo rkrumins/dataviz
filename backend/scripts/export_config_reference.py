@@ -116,6 +116,58 @@ NOTES: dict[str, tuple[str, str | None]] = {
         "once before `FAIR_SHARE_VIEW_FEED_RATE` paces it.",
         None,
     ),
+    # ── Large imports (docs/versioning/08-import-export.md §3e) ─────────────────
+    "IMPORT_MAX_BYTES": (
+        "The most one import can be, for a file read a row at a time (NDJSON, CSV, TSV): what an "
+        "upload may declare, and the body-size cap on the two routes a file comes in on "
+        "(`…/imports`, and `…/imports/uploads/{id}/parts/{n}`, which may carry the whole file). "
+        "The frontend's nginx and the Helm ingress allow 10 GiB on those routes: raise them with "
+        "it.",
+        None,
+    ),
+    "IMPORT_WHOLE_FILE_MAX_BYTES": (
+        "The most one JSON or Excel import can be. Those are read whole, into the worker's memory, "
+        "so they stay small; a larger file is NDJSON or CSV.",
+        None,
+    ),
+    "IMPORT_UPLOAD_CONCURRENCY": (
+        "Import files one API process takes in at once — sent whole, or as an upload's parts. Each "
+        "holds little memory, but writes to the object store as fast as it arrives, and one sent "
+        "whole holds its slot until it is in. One beyond waits up to 30 s for a slot, then is told "
+        "to retry (`429`, `Retry-After: 15`) before any of it is read. The fleet takes up to this "
+        "× processes at once: size it to what the object store (the database, when "
+        "`OBJECT_STORE_BACKEND=database`) can write, not up with the number of uploaders.",
+        None,
+    ),
+    "IMPORT_STAGING_GC_DAYS": (
+        "Days a finished, failed or cancelled import's staged rows (3.4 to 7 times its file, in "
+        "Postgres, more for shorter rows) are kept after it ends, and a failed import's file with them: the window to "
+        "resume or re-queue a failed import, and to read a finished one's row preview (the draft's "
+        "changes stay). `1` keeps them a day. Swept within the hour after "
+        "(`GRAPHVER_DRAFT_SWEEP_SECS`). Helm: `config.objectStore.stagingGcDays`.",
+        None,
+    ),
+    "GRAPHVER_DRAFT_SWEEP_SECS": (
+        "Seconds between the versioning worker's sweeps: idle drafts past `GRAPHVER_DRAFT_TTL_DAYS`, "
+        "closed drafts' changes past `GRAPHVER_DRAFT_RETENTION_DAYS`, staged import rows past "
+        "`IMPORT_STAGING_GC_DAYS`, artifacts past `OBJECT_STORE_TTL_HOURS`. Each goes within this "
+        "long after it is due, so keep it well under the shortest of them.",
+        None,
+    ),
+    "GRAPHVER_DRAFT_RETENTION_DAYS": (
+        "Days a merged or abandoned draft keeps its changes before the versioning worker removes "
+        "them; `0` keeps them for good. The draft's record stays (its name, owner, commits and "
+        "review), and a merged draft's changes are in the published graph. A system administrator "
+        "overrides it live: Admin → Infrastructure → Versioned graphs → Draft retention. Each sweep spends at most 5 "
+        "minutes on it, so a draft of millions of rows is removed over a few sweeps.",
+        None,
+    ),
+    "MAX_IMPORT_BODY_BYTES": (
+        "The body-size cap on the other routes that take large bodies (the rest of `/versioning/`, "
+        "`/graph/save`, the view-file routes). An import's file is held to `IMPORT_MAX_BYTES` "
+        "instead.",
+        None,
+    ),
     "ENV": (
         "Deployment type. `production` (or `prod`) turns on the safeguards listed under "
         "[Must set in production](#must-set-in-production); any other value relaxes them for "

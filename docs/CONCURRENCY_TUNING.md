@@ -292,6 +292,21 @@ A burst being shed that should have been absorbed.
   and a fast 429 is cheaper for everyone than a slow 504. Sustained 429s are not; they
   mean ceiling 4 is below what a single view needs.
 
+### 429 `busy` while files are uploaded for import
+
+An API process takes in `IMPORT_UPLOAD_CONCURRENCY` (8) import files at once: each part, and each
+file sent whole in one request, holds a slot until its body is in. One more waits up to 30 s, then
+is answered 429 with `Retry-After: 15` before any of it is read; the Import dialog and the
+reference connector send it again.
+
+* Occasional 429s during a burst of uploads are the share doing its job: they keep a burst from
+  taking the object store's bandwidth — or the database's, with the default database store — from
+  every other request.
+* Sustained 429s mean more files at once than the share. Raise it only as far as the object store
+  can write (the fleet takes up to it × API processes); with the database store, move
+  multi-gigabyte imports to S3 or a shared volume instead. Design and every limit on the way:
+  [08 §3e](versioning/08-import-export.md).
+
 ### One data source is slow and now everything is slow
 
 The bulkhead is not doing its job. Every graph request holds a `GRAPH_READ` session

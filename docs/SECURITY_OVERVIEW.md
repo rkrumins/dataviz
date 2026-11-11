@@ -712,14 +712,16 @@ one.
 ### Request size and time limits
 
 **How it works.** A request that declares a body larger than its limit is refused with HTTP
-413 before the body is read: 8 MiB for most routes, and 100 MiB for bulk import, versioning
-and view-transfer routes. Every request also runs against a deadline — 30 seconds by default,
+413 before the body is read: 8 MiB for most routes, 100 MiB for versioning and view-transfer
+routes, and 10 GiB for an import's file, which its route streams to storage as it arrives and
+never parses in memory. At most `IMPORT_UPLOAD_CONCURRENCY` import files arrive at once per API
+process; one more gets 429 before any of it is read. Every request also runs against a deadline — 30 seconds by default,
 with longer tiers for graph, trace, aggregation, versioning and view-transfer routes — and
 gets HTTP 504 with `Retry-After` when it runs out. Until the backend has finished starting,
 requests other than liveness probes get HTTP 503 with `Retry-After`.
 
-**How to configure it.** `MAX_REQUEST_BODY_BYTES`, `MAX_IMPORT_BODY_BYTES` and the
-`HTTP_TIMEOUT_*` settings. How to raise the timeouts safely: [Concurrency and Timeout
+**How to configure it.** `MAX_REQUEST_BODY_BYTES`, `MAX_IMPORT_BODY_BYTES`, `IMPORT_MAX_BYTES`,
+`IMPORT_UPLOAD_CONCURRENCY` and the `HTTP_TIMEOUT_*` settings. How to raise the timeouts safely: [Concurrency and Timeout
 Tuning](/docs/concurrency-tuning).
 
 **Where in the code.** `backend/app/main.py` (`_BodySizeLimitMiddleware`, `_TimeoutMiddleware`).

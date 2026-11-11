@@ -20,7 +20,12 @@ ingress:
     # hour, with long gaps while a spreadsheet finds its columns. This
     # edge must allow that hour too, or it would cut exports short.
     nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
-    nginx.ingress.kubernetes.io/proxy-body-size: "32m"
+    # An import's file may come in one request, up to 10 GiB: passed on
+    # as it arrives, not buffered to the controller's disk. The frontend's
+    # nginx still holds every other API route to 100 MB, and the app each
+    # route to its own limit.
+    nginx.ingress.kubernetes.io/proxy-body-size: "10g"
+    nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
 
 # ── Non-secret config (rendered into a ConfigMap) ─────────────────────
 config:
@@ -127,6 +132,11 @@ config:
   objectStore:
     backend: database
     ttlHours: "24"                       # the projection lane's sweep deletes older artifacts
+    # Days a finished import's staged rows (3.4-7x its file, in Postgres)
+    # and a failed import's file are kept: the window to resume or re-queue a
+    # failed import, and to see a finished one's row preview. The sweep runs
+    # hourly, so they go within the hour after. "1" keeps them a day.
+    stagingGcDays: "3"
 
 # ── Secrets ───────────────────────────────────────────────────────────
 # create=true renders a Secret from the values below. For production prefer
@@ -372,9 +382,12 @@ services:
           enabled: false
           prometheusServerAddress: ""   # e.g. http://prometheus-server.monitoring.svc
           jobsPerReplica: 2
+      # 8Gi: an import reconciled in memory (GRAPHVER_IMPORT_IN_MEMORY) holds
+      # the fingerprints of every entity it has seen beside its batch, and a
+      # publish of millions of changes peaks near 0.5 GiB; two jobs per pod.
       resources:
-        requests: { cpu: "1", memory: 1Gi }
-        limits: { cpu: "2", memory: 4Gi }
+        requests: { cpu: "1", memory: 2Gi }
+        limits: { cpu: "2", memory: 8Gi }
     bootstrap:
       # Each pod runs GRAPHVER_BOOTSTRAP_SLOTS (2) jobs, and the fleet runs at
       # most GRAPHVER_BOOTSTRAP_PER_PROVIDER (2) at once against one FalkorDB

@@ -1,7 +1,7 @@
 """Platform administration of the versioned graphs' FalkorDB projections, under
 ``/admin/versioning``: the disaster-recovery reseed of a provider, the fleet inventory, moving
 one graph's projection to another provider or key, adopting a customer's key onto a platform key,
-and residency (doc 17).
+residency (doc 17), and how long a merged or abandoned draft keeps its changes (draft retention).
 
 Every route needs ``system:admin``. None is on the API-key surface (``auth/api_key_surface``), so
 an API key is refused.
@@ -27,7 +27,7 @@ from backend.app.providers.shard_capacity import human_bytes
 from backend.app.services.graph_store.topology import key_slot
 from backend.app.services.system_status import probes
 from backend.app.services.versioning import config as vconfig
-from backend.app.services.versioning import keymigrate, residency, residency_policy
+from backend.app.services.versioning import draft_retention, keymigrate, residency, residency_policy
 from backend.app.services.versioning.errors import (JobActive, ProjectionAlreadyAdopted,
                                                     ProjectionKeyInUse, ProjectionKeyInvalid,
                                                     ProjectionNotAdopted)
@@ -285,6 +285,51 @@ def _validate(body: Dict[str, Any], saved: Dict[str, Any]) -> None:
     except residency_policy.PolicyInvalid as exc:
         raise HTTPException(status_code=422, detail={
             "type": "invalid_residency_policy", "field": exc.field, "message": str(exc)})
+
+
+@router.get("/draft-retention",
+            summary="How long a merged or abandoned draft keeps its changes")
+async def get_draft_retention(
+    _user: User = Depends(requires("system:admin")),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict:
+    """``days`` in force, as ``saved`` (null: ``GRAPHVER_DRAFT_RETENTION_DAYS`` applies, ``default``)
+    and the range a value may take. A draft merged or abandoned more than ``days`` ago has its changes
+    removed by the versioning worker, which keeps its record: the draft, its commits and its review.
+    ``0`` keeps them for good."""
+    return draft_retention.describe(await session.get(PlatformSettingsORM, 1))
+
+
+class DraftRetentionChange(BaseModel):
+    days: Optional[int] = Field(..., ge=draft_retention.MIN_DAYS, le=draft_retention.MAX_DAYS,
+                                description="Days a merged or abandoned draft keeps its changes; 0 "
+                                            "keeps them for good; null goes back to the default")
+
+
+@router.put("/draft-retention",
+            summary="Change how long a merged or abandoned draft keeps its changes")
+async def put_draft_retention(
+    body: DraftRetentionChange,
+    user: User = Depends(requires("system:admin")),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict:
+    """``days`` from 0 to 3650, or null for the default; another value is a 422 and nothing is
+    saved. Recorded with the value before and after. The worker reads it at the start of each pass
+    (hourly): a shorter window removes the changes of the drafts it now reaches within the hour, and
+    removed changes do not come back if the window is lengthened again."""
+    row = await session.get(PlatformSettingsORM, 1)
+    if row is None:
+        row = PlatformSettingsORM(id=1)
+        session.add(row)
+    before = row.gv_draft_retention_days
+    if body.days != before:
+        row.gv_draft_retention_days = body.days
+        row.updated_at = datetime.now(timezone.utc).isoformat()
+        row.updated_by = user.id
+        await recorder.record_for_request(session, "platform.draft_retention.updated",
+                                          details={"from": before, "to": body.days})
+    await session.commit()
+    return draft_retention.describe(row)
 
 
 @router.post("/residency-policy/preview",

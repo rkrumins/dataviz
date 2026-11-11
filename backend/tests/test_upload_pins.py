@@ -126,6 +126,45 @@ async def test_the_worker_sweeps_around_what_jobs_still_read(monkeypatch):
     assert await _sweep(monkeypatch, pins) == [("prune", _KEEP), ("sweep", _KEEP)]
 
 
+async def test_what_is_due_goes_within_the_hour_it_is_due(monkeypatch):
+    """A finished import's staged rows (3.4-7x its file, in Postgres) and its uploaded file go
+    when they are due, not up to a day later: the worker sweeps hourly, keeps staged rows 3 days
+    unless told otherwise, and each pass sweeps with the retention it is configured with."""
+    from backend.app.services import draft_views
+    from backend.app.services.view_transfer import package
+    from backend.app.services.versioning.import_export import import_worker
+    from backend.app.services.versioning.worker import ProjectionWorker
+
+    assert config.STAGING_GC_DAYS == 3
+    assert ProjectionWorker(None, versioning=_Versioning())._sweep_secs == config.DRAFT_SWEEP_SECS <= 3600
+
+    asked = {}
+
+    async def staged(*, older_than_days):
+        asked["staged_days"] = older_than_days
+        return 0
+
+    async def pins():
+        return set()
+
+    async def nothing(*_args, **_kwargs):
+        return {}
+
+    class _Store:
+        async def sweep(self, *, older_than_hours, keep_prefixes=()):
+            asked["artifact_hours"] = older_than_hours
+            return 0
+
+    monkeypatch.setattr(config, "STAGING_GC_DAYS", 1)                 # "keep them a day"
+    monkeypatch.setattr(object_store, "get_object_store", lambda: _Store())
+    monkeypatch.setattr(import_worker, "sweep_staged_rows", staged)
+    monkeypatch.setattr(uploads, "jobs_input_prefixes", pins)
+    monkeypatch.setattr(package, "prune_uploads", nothing)
+    monkeypatch.setattr(draft_views, "settle", nothing)
+    await ProjectionWorker(None, versioning=_Versioning()).sweep_once()
+    assert asked == {"staged_days": 1, "artifact_hours": config.OBJECT_STORE_TTL_HOURS}
+
+
 async def test_nothing_is_swept_when_the_pins_cant_be_read(monkeypatch):
     async def pins():
         raise ConnectionError("graphver is down")

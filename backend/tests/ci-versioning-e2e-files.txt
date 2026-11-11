@@ -27,6 +27,7 @@ tests/integration/test_draft_notifications.py
 tests/integration/test_draft_overlay_delta.py
 tests/integration/test_draft_overlay_ids_not_urns.py
 tests/integration/test_draft_overlay_large.py
+tests/integration/test_draft_prune.py
 tests/integration/test_draft_read_cache_scope.py
 tests/integration/test_draft_transfer.py
 tests/integration/test_entity_summary_and_history.py
@@ -60,12 +61,14 @@ tests/integration/test_import_auto_publish_e2e.py
 tests/integration/test_import_branch_validation.py
 tests/integration/test_import_draft_identity.py
 tests/integration/test_import_idempotency_live.py
+tests/integration/test_import_in_memory.py
 tests/integration/test_import_one_active.py
 tests/integration/test_import_pointers.py
 tests/integration/test_import_resume_e2e.py
 tests/integration/test_import_validate.py
 tests/integration/test_import_windows.py
 tests/integration/test_import_worker.py
+tests/integration/test_landed_revision.py
 tests/integration/test_layered_lineage_schema_ingest.py
 tests/integration/test_main_activity.py
 tests/integration/test_merged_draft_overlay.py

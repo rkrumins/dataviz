@@ -577,6 +577,22 @@ class ReviewRequired(_HttpMapped, RuntimeError):
                          "merges: open a review instead", {"type": "review_required", "branchId": branch_id})
 
 
+class DraftPruned(_HttpMapped, RuntimeError):
+    """A read of a closed draft's changes after they were removed. A merged or abandoned draft keeps
+    them for the retention window (Admin → Infrastructure → Versioned graphs → Draft retention);
+    after it, only the draft's record stays: its name, owner, commits and review. A merged draft's
+    changes are in ``main``, in the commit it landed as."""
+
+    status_code = 410
+
+    def __init__(self, branch_id: str, pruned_at: str):
+        self.branch_id, self.pruned_at = branch_id, pruned_at
+        super().__init__(
+            "This draft is closed, and its changes were removed after the retention period. A "
+            "published draft's changes are in the published graph, in the commit it landed as.",
+            {"type": "draft_pruned", "branchId": branch_id, "prunedAt": pruned_at})
+
+
 HTTP_MAPPED = (BranchNotOpen, MainWriteForbidden, NotDraftOwner, DraftRoleRequired, SelfReview,
                PersonRequired, GroupsUnavailable, IneligibleMember, ServiceAccountMember, HeadMoved,
                LockBusy, ChangeListBusy, RevisionUnsupported, RevisionTooFar, RevisionReadOnly,
@@ -586,4 +602,5 @@ HTTP_MAPPED = (BranchNotOpen, MainWriteForbidden, NotDraftOwner, DraftRoleRequir
                ProjectionKeyInvalid, PublishRequired, GraphNotWritable, VersionConflict,
                AmbiguousSpelling, NotAnEdge, StagedChangesUnsaved, SelfMerge, ReviewRequired,
                IneligibleOwner, ForkUpdateConflicts, ResolutionsWithoutConflict, ForkNotUpToDate,
-               CrossesUpdate, AmbiguousUrn, EntityExists, EdgeEndsMissing, UniqueViolation)
+               CrossesUpdate, AmbiguousUrn, EntityExists, EdgeEndsMissing, UniqueViolation,
+               DraftPruned)

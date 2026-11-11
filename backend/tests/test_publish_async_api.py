@@ -5,7 +5,9 @@ seconds of the web process's event loop. Past ``SYNC_PUBLISH_MAX_CHANGES`` the p
 merge of the draft's review — is queued as a job (202, the job to poll); smaller drafts publish in
 the request as before. The job's status says what the request would have said: its commit, or the
 refusal the route gives (``{status, detail}``), so the client raises the same errors either way.
-A publish the data source's policy rules out is refused by the request, not queued.
+A publish the data source's policy rules out is refused by the request, not queued. Either way the
+answer, once complete, names the revision of main that holds it (``revisionId``), and a queued one
+says where to follow it (``statusUrl``).
 """
 from __future__ import annotations
 
@@ -33,6 +35,9 @@ class _Versioning:
         self.published.append(kw)
         return "cmt_1"
 
+    async def landed_revision(self, *, graph_id, commit_id):
+        return {"cmt_1": 41, "cmt_9": 7}.get(commit_id)
+
     async def get_pr(self, pr_id):
         # No source graph: a fork's review, as the store reads one, so the tests that merge it
         # turn forks on.
@@ -46,6 +51,10 @@ class _Jobs:
         self.jobs = {
             "vjob_done": {"jobId": "vjob_done", "jobType": "publish", "graphId": "g1",
                           "status": "completed", "summary": {"commitId": "cmt_9"}},
+            "vjob_recorded": {"jobId": "vjob_recorded", "jobType": "publish", "graphId": "g1",
+                              "status": "completed", "summary": {"commitId": "cmt_8", "revisionId": 6}},
+            "vjob_running": {"jobId": "vjob_running", "jobType": "publish", "graphId": "g1",
+                             "status": "running", "summary": None},
             "vjob_refused": {"jobId": "vjob_refused", "jobType": "publish", "graphId": "g1",
                              "status": "failed", "errorMessage": "out of date", "summary": {"error": {
                                  "status": 409, "detail": {"type": "not_up_to_date", "behindBy": 2}}}},
@@ -83,7 +92,7 @@ async def test_a_small_draft_publishes_inside_the_request(test_client, services)
     svc, jobs = services
     r = await test_client.post(f"{BASE}/graphs/g1/branches/br_small/publish", json={"message": "m"})
     assert r.status_code == 200, r.text
-    assert r.json() == {"commitId": "cmt_1"}
+    assert r.json() == {"commitId": "cmt_1", "revisionId": 41, "status": "completed"}
     assert len(svc.published) == 1 and jobs.created == []
 
 
@@ -110,7 +119,8 @@ async def test_a_large_draft_publishes_as_a_job(test_client, services):
     assert CHANGES["br_big"] > config.SYNC_PUBLISH_MAX_CHANGES
     r = await test_client.post(f"{BASE}/graphs/g1/branches/br_big/publish", json={"message": "big one"})
     assert r.status_code == 202, r.text
-    assert r.json() == {"jobId": "vjob_new", "graphId": "g1", "status": "pending"}
+    assert r.json() == {"jobId": "vjob_new", "graphId": "g1", "status": "pending",
+                        "statusUrl": "/api/v1/ws1/versioning/graphs/g1/publish-jobs/vjob_new"}
     assert svc.published == [], "nothing is published inside the request"
     assert jobs.started == ["vjob_new"]
     (created,) = jobs.created
@@ -172,7 +182,11 @@ async def test_a_publish_job_says_what_the_request_would_have(test_client, servi
     done = await test_client.get(f"{BASE}/graphs/g1/publish-jobs/vjob_done")
     assert done.status_code == 200, done.text
     assert done.json() == {"jobId": "vjob_done", "graphId": "g1", "status": "completed",
-                           "commitId": "cmt_9", "error": None}
+                           "commitId": "cmt_9", "revisionId": 7, "error": None}
+    recorded = (await test_client.get(f"{BASE}/graphs/g1/publish-jobs/vjob_recorded")).json()
+    assert (recorded["commitId"], recorded["revisionId"]) == ("cmt_8", 6), "as the job recorded it"
+    running = (await test_client.get(f"{BASE}/graphs/g1/publish-jobs/vjob_running")).json()
+    assert (running["status"], running["commitId"], running["revisionId"]) == ("running", None, None)
 
     refused = await test_client.get(f"{BASE}/graphs/g1/publish-jobs/vjob_refused")
     assert refused.json()["status"] == "failed"

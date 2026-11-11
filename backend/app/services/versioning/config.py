@@ -258,8 +258,19 @@ def falkor_budget_for(provider: str) -> int:
     return int(FALKOR_BUDGETS.get(provider, FALKOR_MAX_RESIDENT))
 
 # Draft lifecycle (plan §17 #8): auto-abandon idle drafts after N days, swept by
-# the worker every DRAFT_SWEEP_SECS (default daily).
+# the worker every DRAFT_SWEEP_SECS (default hourly). The same pass deletes finished imports'
+# staged rows (STAGING_GC_DAYS) and expired artifacts (OBJECT_STORE_TTL_HOURS): hourly, they go
+# within the hour after they are due, not up to a day later.
 DRAFT_TTL_DAYS: int = int(os.getenv("GRAPHVER_DRAFT_TTL_DAYS", "30"))
+# A merged or abandoned draft keeps its changes this many days, then the same pass removes them in
+# windows and keeps its record: the branch, its members, its commits and its review (a merged
+# draft's changes are in main, in the commit it landed as). 0 keeps them for good. A system
+# administrator overrides it live (Admin → Infrastructure → Versioned graphs → Draft retention;
+# ``draft_retention``). Each pass spends at most DRAFT_PRUNE_PASS_SECS on it, so a draft of
+# millions of rows is removed over a few passes rather than holding the worker or the
+# database.
+DRAFT_RETENTION_DAYS: int = int(os.getenv("GRAPHVER_DRAFT_RETENTION_DAYS", "30"))
+DRAFT_PRUNE_PASS_SECS: float = 300.0
 
 # Retries when a commit races another writer for the next per-branch commit_seq
 # (uq_commits_branch_seq) — concurrent write-through writes to main.
@@ -268,7 +279,7 @@ COMMIT_MAX_RETRIES: int = int(os.getenv("GRAPHVER_COMMIT_MAX_RETRIES", "5"))
 # 503 lock_busy and retries. Bounded, so a writer queued behind a long publish or sync cannot pin
 # a pooled connection indefinitely; the 5 s matches the lease renewal's and the migrations' bound.
 GRAPH_LOCK_TIMEOUT_MS: int = int(os.getenv("GRAPHVER_GRAPH_LOCK_TIMEOUT_MS", "5000"))
-DRAFT_SWEEP_SECS: int = int(os.getenv("GRAPHVER_DRAFT_SWEEP_SECS", "86400"))
+DRAFT_SWEEP_SECS: int = int(os.getenv("GRAPHVER_DRAFT_SWEEP_SECS", "3600"))
 
 # A draft changing more entities than this has its Changes panel counted, not laid out as a
 # containment tree: the tree is built from every changed payload and their ancestors, in the
@@ -404,9 +415,11 @@ PREVIEW_SAMPLE_LIMIT: int = int(os.getenv("IMPORT_PREVIEW_SAMPLE_LIMIT", "200"))
 INLINE_IMPORT_MAX: int = int(os.getenv("INLINE_IMPORT_MAX", "5000"))
 # Hard ceiling on rows in one import (guardrail); 0 = unlimited.
 IMPORT_MAX_ROWS: int = int(os.getenv("IMPORT_MAX_ROWS", "0"))
-# Retain import/export artifacts + staging rows this many days after a terminal job.
-STAGING_GC_DAYS: int = int(os.getenv("IMPORT_STAGING_GC_DAYS", "7"))
-# The worker's daily sweep deletes object-store artifacts (uploads, exports, view packages)
+# Days a finished import's staged rows (``import_rows``: 3.4-7x its file) are kept after the
+# job ends, and a failed import's file with them, to resume it or queue it again. Its row preview
+# goes with them; the draft's changes stay. 1 keeps them a day.
+STAGING_GC_DAYS: int = int(os.getenv("IMPORT_STAGING_GC_DAYS", "3"))
+# The worker's hourly sweep deletes object-store artifacts (uploads, exports, view packages)
 # written more than this many hours ago.
 OBJECT_STORE_TTL_HOURS: float = float(os.getenv("OBJECT_STORE_TTL_HOURS", "24"))
 # Import, export and publish jobs run ONLY on the versioning worker's transfer lane: the API queues
