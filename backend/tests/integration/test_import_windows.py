@@ -187,7 +187,7 @@ async def _sweep(svc, ie, store) -> None:
             return (await s.execute(select(func.count()).where(ImportRowORM.job_id == job_id))).scalar_one()
 
     assert [await staged(j) for j in jobs] == [5, 5, 5]
-    assert await sweep_staged_rows(older_than_days=7, batch=2) >= 5
+    assert await sweep_staged_rows(older_than_days=config.STAGING_GC_DAYS, batch=2) >= 5
     assert [await staged(j) for j in jobs] == [0, 5, 5]
 
 

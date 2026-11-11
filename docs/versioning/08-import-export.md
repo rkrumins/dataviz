@@ -271,8 +271,9 @@ written in bulk too (`_write_deltas`: multi-row INSERTs for the versions, an `un
 INSERT for the heads, keeping the per-entity compare-and-swap), so an import writes about 1,500–2,500
 rows a second: six times the row-at-a-time rate.
 
-The versioning worker's sweep deletes the staged rows of imports finished more than
-`IMPORT_STAGING_GC_DAYS` (7) ago, a batch at a time. Until then a large import's rows take their
+The versioning worker's hourly sweep (`GRAPHVER_DRAFT_SWEEP_SECS`) deletes the staged rows of
+imports that ended more than `IMPORT_STAGING_GC_DAYS` (3; `1` keeps them a day) ago, a batch at a
+time — completed, failed or cancelled alike — so they go within the hour after they are due. Until then a large import's rows take their
 space in Postgres: about 3.4 times the file's size, since each is a JSONB row too small for Postgres
 to compress, with two indexes. Measured with `bench_versioning` (100k nodes and 100k edges, a
 97.5 MB file): 335 MB of `import_rows`, 348 MB of versions and heads on the draft, and 1.06 GB of
@@ -384,6 +385,15 @@ nginx's temp directory and its worker at 4 MB.
   gigabyte of NDJSON stored there took 248 MB of rows (Postgres compresses each 1 MiB chunk) and
   296 MB of WAL — a file that doesn't compress, a gigabyte of each — written into the instance
   every user's requests read from, on top of the import's staged rows (§3c).
+- **Retention.** Three settings bound what an import leaves in Postgres, all swept hourly, so each
+  goes within the hour after it is due: the uploaded file, `OBJECT_STORE_TTL_HOURS` (24) after it
+  arrived; a failed import's file and every ended import's staged rows (3.4–7× the file, more for
+  shorter rows),
+  `IMPORT_STAGING_GC_DAYS` (3) after the import ended; and the sweep's own cadence,
+  `GRAPHVER_DRAFT_SWEEP_SECS` (3600). Setting `IMPORT_STAGING_GC_DAYS` from 3 to `1` cuts the staged
+  rows a steady stream of imports holds at once to a third; what it costs is a shorter window to retry a failed
+  import without uploading its file again, and to read a finished one's row preview (the draft's
+  changes stay). With the Helm chart: `config.objectStore.stagingGcDays`.
 - **`IMPORT_MAX_BYTES`.** Raising it means raising the frontend nginx's `client_max_body_size` and
   the ingress's `proxy-body-size` with it, on these routes.
 - **Rollouts.** A pod stops after `GUNICORN_GRACEFUL_TIMEOUT` (30 s): a body still arriving is cut
@@ -670,8 +680,10 @@ one place every pod shares:
   last chunk does a single transaction point the key at the new blob and drop the blob it replaced,
   so a reader gets the previous version, whole, until then. A put that fails deletes what it wrote.
 - A read fetches one chunk per short query, from any byte offset (`open_stream(start=…)`).
-- The versioning worker's daily sweep deletes objects older than `OBJECT_STORE_TTL_HOURS`
+- The versioning worker's hourly sweep deletes objects older than `OBJECT_STORE_TTL_HOURS`
   (default 24), and chunks no object names once they are an hour old (a put that died mid-way).
+  An input a job may still read is kept: a pending or running job's, and a failed one's for
+  `IMPORT_STAGING_GC_DAYS`, to resume it or queue it again.
 
 **Or files on a mount.** `OBJECT_STORE_BACKEND=local` keeps the files under `IMPORT_STORE_ROOT`
 instead (`LocalFsObjectStore`), which keeps multi-GB files out of the database. Point it at a
@@ -714,7 +726,7 @@ carries boto3: an `s3` deployment needs images built with `requirements-s3.txt` 
 | Variable | Default | |
 |---|---|---|
 | `OBJECT_STORE_S3_BUCKET` | none (required) | |
-| `OBJECT_STORE_S3_PREFIX` | `synodic-import-store` | Every key goes under it. The daily sweep deletes whatever under it is older than `OBJECT_STORE_TTL_HOURS`, so nothing else may write there. Empty (or `/`) means the default: never the bucket's root. |
+| `OBJECT_STORE_S3_PREFIX` | `synodic-import-store` | Every key goes under it. The hourly sweep deletes whatever under it is older than `OBJECT_STORE_TTL_HOURS`, so nothing else may write there. Empty (or `/`) means the default: never the bucket's root. |
 | `OBJECT_STORE_S3_ENDPOINT_URL` | Amazon S3 | e.g. `http://minio:9000`, `https://storage.googleapis.com` |
 | `OBJECT_STORE_S3_REGION` | boto3's | `auto` for GCS. With `PRESIGN=1` on Amazon S3, the bucket's own region: browsers can't follow S3's region redirect as boto3 does, so a URL signed for another region fails (`AuthorizationQueryParametersError`). |
 | `OBJECT_STORE_S3_ADDRESSING` | `auto` | `path` for MinIO, or `virtual` |

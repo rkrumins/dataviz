@@ -73,6 +73,12 @@ integration's many small changes as a few commits.
   command.
   - A busy or paused graph lands none of the commands, so the batch can be resent as it was.
   - A batch the store refuses as a whole runs command by command, as before.
+- **What an import leaves in Postgres is cleaned up sooner, and on time.**
+  - A finished, failed or cancelled import's staged rows (3.4–7 times its file), and a failed
+    import's file, are kept 3 days after it ends (`IMPORT_STAGING_GC_DAYS`, was 7; `1` keeps them a
+    day; Helm `config.objectStore.stagingGcDays`).
+  - The versioning worker sweeps hourly (`GRAPHVER_DRAFT_SWEEP_SECS`, was daily), so what is due
+    goes within the hour: an uploaded file 24 h after it arrived, not up to 48.
 - **An import's file is cut off only when it stops arriving.** On `…/imports` and
   `…/imports/uploads/{id}/parts/{n}`, every piece of the body moves the 120 s deadline on
   (`HTTP_TIMEOUT_VERSIONING_SECS`), so a file takes as long as it takes, and one stalled for 120 s
@@ -115,6 +121,8 @@ integration's many small changes as a few commits.
   A proxy of your own in front needs the same on the import routes for a file sent in one request
   (in nginx, `client_max_body_size 10g; proxy_request_buffering off;`); uploads in parts need
   nothing.
+- A failed import can be resumed or queued again, and a finished one's row preview read, for 3
+  days after it ends, where it was 7. Set `IMPORT_STAGING_GC_DAYS=7` to keep the old window.
 - For multi-gigabyte imports, set `OBJECT_STORE_BACKEND` to `s3` or a shared volume: the default
   database store writes each upload into the management database — for NDJSON or CSV about a
   quarter of its size as rows and as much again as WAL, the whole of it for a file that doesn't

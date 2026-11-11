@@ -132,6 +132,11 @@ config:
   objectStore:
     backend: database
     ttlHours: "24"                       # the projection lane's sweep deletes older artifacts
+    # Days a finished import's staged rows (3.4-7x its file, in Postgres)
+    # and a failed import's file are kept: the window to resume or re-queue a
+    # failed import, and to see a finished one's row preview. The sweep runs
+    # hourly, so they go within the hour after. "1" keeps them a day.
+    stagingGcDays: "3"
 
 # ── Secrets ───────────────────────────────────────────────────────────
 # create=true renders a Secret from the values below. For production prefer

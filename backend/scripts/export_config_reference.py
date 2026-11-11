@@ -139,6 +139,21 @@ NOTES: dict[str, tuple[str, str | None]] = {
         "`OBJECT_STORE_BACKEND=database`) can write, not up with the number of uploaders.",
         None,
     ),
+    "IMPORT_STAGING_GC_DAYS": (
+        "Days a finished, failed or cancelled import's staged rows (3.4 to 7 times its file, in "
+        "Postgres, more for shorter rows) are kept after it ends, and a failed import's file with them: the window to "
+        "resume or re-queue a failed import, and to read a finished one's row preview (the draft's "
+        "changes stay). `1` keeps them a day. Swept within the hour after "
+        "(`GRAPHVER_DRAFT_SWEEP_SECS`). Helm: `config.objectStore.stagingGcDays`.",
+        None,
+    ),
+    "GRAPHVER_DRAFT_SWEEP_SECS": (
+        "Seconds between the versioning worker's sweeps: idle drafts past `GRAPHVER_DRAFT_TTL_DAYS`, "
+        "staged import rows past `IMPORT_STAGING_GC_DAYS`, artifacts past "
+        "`OBJECT_STORE_TTL_HOURS`. Each goes within this long after it is due, so keep it well "
+        "under the shortest of them.",
+        None,
+    ),
     "MAX_IMPORT_BODY_BYTES": (
         "The body-size cap on the other routes that take large bodies (the rest of `/versioning/`, "
         "`/graph/save`, the view-file routes). An import's file is held to `IMPORT_MAX_BYTES` "

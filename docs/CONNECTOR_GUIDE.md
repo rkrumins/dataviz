@@ -433,8 +433,9 @@ the graph and writing them, node windows then edge windows.
   file took 16.7 GB:
   - **the graph, 13.1 GB, about 26 times the file:** every entity is kept twice, as the draft's
     version and the published copy, with their indexes, about 3.1 KB per entity;
-  - **the staged rows, 3.5 GB, about 7 times the file:** about 840 bytes per row, kept for 7 days
-    (`IMPORT_STAGING_GC_DAYS`);
+  - **the staged rows, 3.5 GB, about 7 times the file:** about 840 bytes per row, kept for 3 days
+    after the import ends (`IMPORT_STAGING_GC_DAYS`; `1` keeps them a day), then swept within the
+    hour;
   - **the uploaded parts, 30 MB:** they compress well.
 
   For 4 GB of rows like these, that is about 105 GB of graph and 28 GB of staged rows. Size
