@@ -19,13 +19,19 @@ class _OkProjector:
     def __init__(self):
         self.calls = []
 
-    async def project_graph(self, gid):
+    async def fits_inline(self, gid):
+        return True                                      # a window small enough to project inline
+
+    async def project_graph(self, gid, respect_backoff=False):
         self.calls.append(gid)
         return {"projected": 1, "applied": 1, "noop": False}
 
 
 class _BoomProjector:
-    async def project_graph(self, gid):
+    async def fits_inline(self, gid):
+        return True
+
+    async def project_graph(self, gid, respect_backoff=False):
         raise RuntimeError("falkor down")
 
 
