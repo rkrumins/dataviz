@@ -222,9 +222,11 @@ minter is injected) that returns `(ops, resolutions)`:
 
 - **What a row may name its entity by** is the import's **`identifier`** (`?identifier=` on
   `POST …/imports`, `…/imports/uploads/{id}/complete` and `…/imports/validate`; kept on the job as
-  `jobs.identity_strategy`, and so by a resumed job; `identifier.py`). Unnamed, it is the platform's
-  `GRAPHVER_IMPORT_IDENTIFIER`, `entity_id` by default. Whichever it is, an entity's id never
-  changes: the identifier only says how a row finds it.
+  `jobs.identity_strategy`, and so by a resumed job; `identifier.py`). Unnamed, it is the graph's
+  default, which a workspace admin sets on the data source's Versioning tab (see [Import
+  settings](#import-settings)), else the platform's `GRAPHVER_IMPORT_IDENTIFIER`, `entity_id` by
+  default. Whichever it is, an entity's id never changes: the identifier only says how a row finds
+  it.
 
   | `identifier` | A node row finds its entity by | An edge's end, by |
   |---|---|---|
@@ -652,8 +654,10 @@ little, and a file that really dropped rows deletes little, so neither is refuse
 
 - **Refused:** nothing is deleted, and the file's rows stay on the draft for review. The job fails
   with `summary.failure = {code: "mass_delete_blocked", action: "allow_mass_delete"}`, and
-  `summary.replaceGuard` holds `{state, live, deletes, creates, limits, source}`: what it would have
-  done and the limits in force. The message says what to check (the identifier) and how to proceed.
+  `summary.replaceGuard` holds `{state, live, deletes, creates, limits, sources}`: what it would have
+  done, the limits in force, and whose each one is (`data_source` or `platform`). The message says
+  what to check (the identifier) and how to proceed; the import dialog offers **Replace anyway**,
+  which imports the file again into the same draft with `allowMassDelete=true`.
 - **Overridden:** `allowMassDelete=true` on the import (anyone who may run it) deletes all the same;
   the job keeps the allowance (`jobs.allow_mass_delete`, `allowMassDelete` on the job), its
   `replaceGuard.state` is `overridden`, and the worker logs it.
@@ -663,8 +667,44 @@ little, and a file that really dropped rows deletes little, so neither is refuse
   `identifier`), naming its identifier, rather than read the rest of the file first. Nothing is
   deleted; the rows read so far are on the draft.
 
-The limits are the operator's (env, or Helm `config.imports`); `IMPORT_REPLACE_GUARD=0` turns the
-guard off and `IMPORT_REPLACE_MIN_MATCH_FRACTION=0` the early stop.
+The limits are the operator's (env, or Helm `config.imports`), and a workspace admin may set a data
+source's own over them (below); `IMPORT_REPLACE_GUARD=0` turns the guard off everywhere and a
+minimum match fraction of 0 the early stop.
+
+### Import settings
+
+A graph's imports run under its data source's own settings, field by field, over the platform's
+(`services/import_settings.py`; `workspace_data_sources.import_*`, NULL where it sets none):
+
+| Setting (API field) | Platform's | What it does |
+|---|---|---|
+| `identifier` | `GRAPHVER_IMPORT_IDENTIFIER` (`entity_id`) | What an import's rows find their entities by when the import names none |
+| `replaceMinLive` | `IMPORT_REPLACE_GUARD_MIN_LIVE` (1,000) | The replace guard judges a scope of at least this many |
+| `replaceDeleteFraction` | `IMPORT_REPLACE_GUARD_DELETE_FRACTION` (0.5) | …refusing a replace that deletes at least this share of it |
+| `replaceCreateFraction` | `IMPORT_REPLACE_GUARD_CREATE_FRACTION` (0.5) | …and creates at least this share as many |
+| `replaceMinMatchFraction` | `IMPORT_REPLACE_MIN_MATCH_FRACTION` (0.05) | A replace whose first node window matches less stops there |
+
+- **Read:** `GET …/graphs/{gid}/import-settings` (anyone who reads the graph, an API key too)
+  answers `overrides` (the graph's own; null where it sets none), `platform`, `effective` (what
+  holds, with `sources`: `data_source` or `platform`), `replaceGuard` (the platform's switch),
+  `followsParent`, and `matchingProperties` — each property its imports match by, with its index's
+  `status` (`building`, `ready`), the main commit it describes (`seq`) and whether that is main's
+  head (`current`) — out of `maxMatchingProperties`.
+- **Set:** `PUT` the same path (workspace admins), field by field; `"inherit"` goes back to the
+  platform's, and a field left out stays. A real change is recorded once in the activity log
+  (`workspace.versioning.import_settings_updated`, with what it was and became). An identifier
+  follows the request grammar (422 `invalid_identifier`); a fraction is between 0 and 1. A fork's
+  settings are its parent's (409 `fork_settings_follow_parent`): set there, they follow to its
+  forks.
+- **Kept on the job.** An import resolves them once, when it is made — its identifier (the
+  request's, else the graph's, else the platform's) and the guard's limits — and keeps them
+  (`jobs.import_settings`: `{identifierSource, replaceLimits: {minLive, deleteFraction,
+  createFraction, minMatchFraction, sources}}`, `importSettings` on the job), so a resumed job runs
+  under what it started with, and a change made meanwhile applies from the next import. A dry run
+  says where its identifier came from (`identifierSource`).
+- **In the app:** the data source's Versioning tab shows them under **Imports**, and the import
+  dialog's **Match existing items by** starts at the graph's default, marked, and says when a
+  property no import has matched by yet is indexed first.
 
 ---
 

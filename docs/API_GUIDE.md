@@ -796,6 +796,9 @@ publish.
    of your own such as `prop.external_id`. A row it finds is updated with
    only the fields it carries; one it doesn't is created, keeping its urn, under an id derived from
    it; an entity's id never changes. A refused row says why with a `code` (`no_key`: give it a urn).
+   Leave `identifier` out and the graph's default applies, which a workspace admin sets on the data
+   source's Versioning tab: `GET …/graphs/{gid}/import-settings` says what it is, where it comes
+   from, the replace guard's limits in force, and the properties its imports match by.
 
    An `idempotencyKey` makes the request safe to send again: the same key from you answers with
    the import it started, with no second draft or job. If the first request broke off before its

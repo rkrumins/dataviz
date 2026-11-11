@@ -32,6 +32,23 @@ export interface ImportSummary {
   deleted: number
   invalid: number
   auto_fixed?: number
+  /** A replace: the replace guard's verdict — what it would delete and made, and the limits. */
+  replaceGuard?: ReplaceGuardVerdict | null
+  /** A failed job: why (`code`) and what to do about it (`action`). */
+  failure?: { code: string; action?: string | null; reason?: string } | null
+}
+
+/** Where an import setting came from: the graph's own, or the platform's. */
+export type ImportSettingSource = 'data_source' | 'platform'
+
+/** The replace guard's verdict on a replace import, before it deletes anything. */
+export interface ReplaceGuardVerdict {
+  state: 'off' | 'passed' | 'overridden' | 'blocked'
+  live: number
+  deletes: number
+  creates: number
+  limits: { minLive: number; deleteFraction: number; createFraction: number }
+  sources: Record<'minLive' | 'deleteFraction' | 'createFraction', ImportSettingSource>
 }
 
 export interface ExportSummary {
@@ -72,6 +89,10 @@ export interface Job {
   attempt?: number | null
   /** Running, but its server stopped answering: another one is about to take it over. */
   stale?: boolean
+  /** An import: what its rows found their entities by (`entity_id`, `urn` or `prop.<name>`). */
+  identifier?: string | null
+  /** A replace sent to delete past the replace guard's limits. */
+  allowMassDelete?: boolean
 }
 
 /** "2 jobs ahead of it" for a job waiting its turn on the server's workers; null when it isn't. */
@@ -149,6 +170,11 @@ export interface CreateImportOptions {
   branchId?: string
   viewId?: string
   idempotencyKey?: string
+  /** What the rows find their entities by: `entity_id`, `urn` or `prop.<name>`; the graph's when
+   *  left out. */
+  identifier?: string
+  /** A replace: delete what the file leaves out even past the replace guard's limits. */
+  allowMassDelete?: boolean
 }
 
 /** The statuses a job ends in. */
@@ -386,10 +412,63 @@ export async function importInParts(
   const params = new URLSearchParams({ reconcileMode: opts.reconcileMode ?? 'upsert' })
   if (opts.branchId) params.set('branchId', opts.branchId)
   if (opts.viewId) params.set('viewId', opts.viewId)
+  if (opts.identifier) params.set('identifier', opts.identifier)
+  if (opts.allowMassDelete) params.set('allowMassDelete', 'true')
   const created = await authFetch<CreateImportResult>(
     `${uploadsUrl(wsId, graphId)}/${upload.uploadId}/complete?${params.toString()}`, { method: 'POST' })
   remember(key, null)
   return created
+}
+
+export interface ImportSettingsValues {
+  /** What an import's rows find their entities by when it names nothing else. */
+  identifier: string
+  /** The replace guard judges a scope of at least this many entities… */
+  replaceMinLive: number
+  /** …and refuses a replace that deletes at least this share of it… */
+  replaceDeleteFraction: number
+  /** …and creates at least this share as many again. */
+  replaceCreateFraction: number
+  /** A replace whose first rows find fewer than this share of entities stops there. */
+  replaceMinMatchFraction: number
+}
+
+/** A property the graph's imports match by, and how far its index is caught up. */
+export interface MatchingProperty {
+  name: string
+  status: 'building' | 'ready'
+  seq: number
+  current: boolean
+  createdAt: string
+}
+
+/** What a graph's imports run under: its own settings over the platform's. */
+export interface ImportSettings {
+  dataSourceId: string | null
+  overrides: { [K in keyof ImportSettingsValues]: ImportSettingsValues[K] | null }
+  platform: ImportSettingsValues
+  effective: ImportSettingsValues & { sources: Record<keyof ImportSettingsValues, ImportSettingSource> }
+  /** The platform's switch: off, no replace is refused. */
+  replaceGuard: boolean
+  /** A fork's are its parent's: set them there. */
+  followsParent: boolean
+  matchingProperties: MatchingProperty[]
+  maxMatchingProperties: number
+}
+
+/** A change to a graph's own settings: `'inherit'` goes back to the platform's. */
+export type ImportSettingsChange = {
+  [K in keyof ImportSettingsValues]?: ImportSettingsValues[K] | 'inherit'
+}
+
+export function getImportSettings(wsId: string, graphId: string): Promise<ImportSettings> {
+  return authFetch<ImportSettings>(`${base(wsId)}/graphs/${graphId}/import-settings`)
+}
+
+export function setImportSettings(wsId: string, graphId: string, change: ImportSettingsChange): Promise<ImportSettings> {
+  return authFetch<ImportSettings>(`${base(wsId)}/graphs/${graphId}/import-settings`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(change),
+  })
 }
 
 export function getImport(wsId: string, graphId: string, jobId: string): Promise<Job> {

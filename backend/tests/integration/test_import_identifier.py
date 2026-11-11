@@ -263,6 +263,20 @@ async def _guard(svc, ie, store, monkeypatch) -> None:
     assert allowed["status"] == "completed" and allowed["allowMassDelete"], allowed
     assert allowed["summary"]["replaceGuard"]["state"] == "overridden"
     assert allowed["summary"]["deleted"] == 20, allowed["summary"]
+    # Its data source's limits hold over the platform's, as its job keeps them: judged only from a
+    # scope of 1,000, the same file goes through, and the verdict says whose limits those were.
+    from types import SimpleNamespace
+    from backend.app.services import import_settings
+    own = SimpleNamespace(**{column: None for column, _api, _d in import_settings.FIELDS})
+    own.import_replace_min_live = 1000
+    _identifier, kept = import_settings.for_import(own, "urn")
+    _job, looser = await _run_job(ie, store, gid, other, identifier="urn", import_settings=kept)
+    assert looser["status"] == "completed", looser
+    assert looser["importSettings"]["replaceLimits"]["minLive"] == 1000
+    guard = looser["summary"]["replaceGuard"]
+    assert (guard["state"], guard["limits"]["minLive"], guard["sources"]["minLive"]) == (
+        "passed", 1000, "data_source"), guard
+    assert looser["summary"]["deleted"] == 20, looser["summary"]
 
     # A replace whose first full window finds nothing stops there, before the rest of the file.
     monkeypatch.setattr(config, "IMPORT_REPLACE_MIN_MATCH_FRACTION", 0.05)
@@ -294,7 +308,12 @@ async def _by_a_property(svc, ie, store, monkeypatch) -> None:
         await ie.validate_import(graph_id=gid, workspace_id="ws1", data_source_id=gid, branch_id=None,
                                  data=json.dumps(_node(0)).encode(), import_format="ndjson",
                                  identifier=by)
+    assert await matching.listed(gid) == []
     await _snapshot(svc, ie, store, gid, [_node(i) for i in range(4)], identifier=by, mode="upsert")
+    # The import settings list it: built, and behind main by the snapshot's own publish until the
+    # next import catches it up.
+    [listed] = await matching.listed(gid)
+    assert (listed["name"], listed["status"], listed["current"]) == (KEY, "ready", False), listed
 
     # On the canvas, after the index was built: a node holding K-ui; node 1's value changed; and
     # two nodes holding K-dup.
@@ -309,6 +328,7 @@ async def _by_a_property(svc, ie, store, monkeypatch) -> None:
              {"kind": "node", f"prop.{KEY}": "K1", "entityType": "Table", "displayName": "K1 again"},
              {"kind": "node", f"prop.{KEY}": "K-dup", "entityType": "Table", "displayName": "dup"}]
     job, summary = await _import(ie, store, gid, lines, identifier=by)
+    assert [p["current"] for p in await matching.listed(gid)] == [True]
     async with db.graphver_session() as s:
         res = {r.row_index: r for r in (await s.execute(select(ImportRowORM).where(
             ImportRowORM.job_id == job["job_id"]))).scalars()}

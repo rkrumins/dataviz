@@ -555,6 +555,10 @@ class JobORM(VersioningBase):
     # A replace import sent with allowMassDelete: past the replace guard's limits, it deletes all the
     # same (20261112_1400_gv_job_mass_delete).
     allow_mass_delete = Column(Boolean, nullable=True)
+    # What an import runs under, as its data source and the platform set it when it was made
+    # (``services.import_settings``): where its identifier came from, and the replace guard's limits
+    # with where each came from. A resumed job keeps them (20261112_1600_import_settings).
+    import_settings = Column(JSONB, nullable=True)
     on_invalid = Column(Text, nullable=True)              # quarantine | auto_fix | reject_all
     import_format = Column(Text, nullable=True)           # ndjson|csv|tsv|xlsx|json|zip
     field_scope = Column(JSONB, nullable=True)            # E4: allow-list of columns to write
@@ -966,6 +970,8 @@ def _ensure_schema_upgrades(conn) -> None:
                   lambda: ensure_import_rows_code_column(conn), required=True)
     _bounded_step(conn, "jobs.allow_mass_delete was not added",
                   lambda: ensure_jobs_mass_delete_column(conn), required=True)
+    _bounded_step(conn, "jobs.import_settings was not added",
+                  lambda: ensure_jobs_import_settings_column(conn), required=True)
     # 20261017_1550_gv_ps_fencing.
     _bounded_step(conn, "the projection fencing columns were not added",
                   lambda: ensure_ps_fencing_columns(conn), required=True)
@@ -1083,6 +1089,18 @@ def ensure_jobs_mass_delete_column(conn) -> None:
     if "allow_mass_delete" in {c["name"] for c in inspector.get_columns("jobs", schema=_SCHEMA)}:
         return
     conn.execute(text(f'ALTER TABLE "{_SCHEMA}"."jobs" ADD COLUMN IF NOT EXISTS allow_mass_delete BOOLEAN'))
+
+
+def ensure_jobs_import_settings_column(conn) -> None:
+    """Add ``jobs.import_settings``: what an import runs under, as resolved when it was made; NULL
+    (every job made before) runs under the platform's. Nullable with no default, so nothing is
+    rewritten; a no-op without the table and once the column is there."""
+    inspector = sa_inspect(conn)
+    if not inspector.has_table("jobs", schema=_SCHEMA):
+        return
+    if "import_settings" in {c["name"] for c in inspector.get_columns("jobs", schema=_SCHEMA)}:
+        return
+    conn.execute(text(f'ALTER TABLE "{_SCHEMA}"."jobs" ADD COLUMN IF NOT EXISTS import_settings JSONB'))
 
 
 def ensure_import_rows_code_column(conn) -> None:

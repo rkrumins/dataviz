@@ -8,11 +8,13 @@
   through the property's index (:mod:`.keys`), which the first import naming it builds.
 
 Whichever it is, an entity's id never changes: the identifier only says how a row finds it. An
-import names one, its job keeps it (``jobs.identity_strategy``), and a resumed job keeps it too.
+import names one, else its data source's default holds, else the platform's
+(``services.import_settings``); its job keeps it (``jobs.identity_strategy``), and a resumed job
+keeps it too.
 """
 from __future__ import annotations
 
-from typing import Optional, Tuple
+from typing import Optional
 
 from .. import config
 
@@ -51,9 +53,3 @@ def platform_default() -> str:
         return parse(config.IMPORT_IDENTIFIER) or ENTITY_ID
     except IdentifierError:
         return ENTITY_ID
-
-
-def resolve(requested: Optional[str]) -> Tuple[str, str]:
-    """``(identifier, source)``: the request's (``request``), else the platform's (``platform``)."""
-    named = parse(requested)
-    return (named, "request") if named else (platform_default(), "platform")

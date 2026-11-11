@@ -215,21 +215,34 @@ class IdentifierMatchedNothing(Exception):
     code, action = "identifier_matched_nothing", "identifier"
 
 
-def replace_verdict(live: int, deletes: int, creates: int, *, allowed: bool) -> Dict[str, Any]:
+def platform_limits() -> Dict[str, Any]:
+    """The replace guard's limits as the platform sets them (``IMPORT_REPLACE_*``): a job made
+    before its data source's were kept on it runs under these."""
+    limits = {"minLive": config.IMPORT_REPLACE_GUARD_MIN_LIVE,
+              "deleteFraction": config.IMPORT_REPLACE_GUARD_DELETE_FRACTION,
+              "createFraction": config.IMPORT_REPLACE_GUARD_CREATE_FRACTION,
+              "minMatchFraction": config.IMPORT_REPLACE_MIN_MATCH_FRACTION}
+    return {**limits, "sources": dict.fromkeys(limits, "platform")}
+
+
+def replace_verdict(live: int, deletes: int, creates: int, *, allowed: bool,
+                    limits: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """The replace guard (``IMPORT_REPLACE_GUARD``) on a scope of ``live`` entities, before the
     import, from which a replace would delete ``deletes`` and into which it made ``creates``:
     ``state`` ``off`` (the guard is off), ``passed``, ``overridden`` (past the limits, and sent with
-    allowMassDelete) or ``blocked``, with the counts and the limits in force."""
-    limits = {"minLive": config.IMPORT_REPLACE_GUARD_MIN_LIVE,
-              "deleteFraction": config.IMPORT_REPLACE_GUARD_DELETE_FRACTION,
-              "createFraction": config.IMPORT_REPLACE_GUARD_CREATE_FRACTION}
-    past = (live > 0 and live >= limits["minLive"]
-            and deletes >= limits["deleteFraction"] * live
-            and creates >= limits["createFraction"] * live)
+    allowMassDelete) or ``blocked``, with the counts, the limits in force (``limits``: the job's,
+    its data source's or the platform's, else the platform's) and where each came from."""
+    limits = limits or platform_limits()
+    names = ("minLive", "deleteFraction", "createFraction")
+    in_force = {name: limits[name] for name in names}
+    past = (live > 0 and live >= in_force["minLive"]
+            and deletes >= in_force["deleteFraction"] * live
+            and creates >= in_force["createFraction"] * live)
     state = ("off" if not config.IMPORT_REPLACE_GUARD else "passed" if not past
              else "overridden" if allowed else "blocked")
+    sources = limits.get("sources") or {}
     return {"state": state, "live": live, "deletes": deletes, "creates": creates,
-            "limits": limits, "source": "platform"}
+            "limits": in_force, "sources": {name: sources.get(name, "platform") for name in names}}
 
 
 def _first_layer_id(layers: List[dict]) -> str:
@@ -406,6 +419,9 @@ class ImportWorker:
         # The job's reconcile mode, and whether a replace may delete past the replace guard.
         self._reconcile_mode = "upsert"
         self._allow_mass_delete = False
+        # The replace guard's and fail-fast's limits: the job's (its data source's or the
+        # platform's, when it was made), with where each came from.
+        self._limits: Dict[str, Any] = platform_limits()
         # identifier=prop.<name>: the property, and the nodes the draft holds a value of it for
         # beyond what main's index says (its own changes, and this job's windows), both ways.
         self._prop: Optional[str] = None
@@ -429,6 +445,7 @@ class ImportWorker:
         self._identifier = job.get("identifier") or identifiers.platform_default()
         self._reconcile_mode = job.get("reconcile_mode") or "upsert"
         self._allow_mass_delete = bool(job.get("allow_mass_delete"))
+        self._limits = (job.get("import_settings") or {}).get("replaceLimits") or platform_limits()
         actor = await self._branch_owner(graph_id, branch_id)
         self._source = (job["source_uri"], job["import_format"])
 
@@ -456,7 +473,8 @@ class ImportWorker:
             return {"graph_id": row.graph_id, "branch_id": row.branch_id,
                     "source_uri": row.source_uri, "import_format": row.import_format,
                     "reconcile_mode": row.reconcile_mode, "identifier": row.identity_strategy,
-                    "allow_mass_delete": row.allow_mass_delete}
+                    "allow_mass_delete": row.allow_mass_delete,
+                    "import_settings": row.import_settings}
 
     async def _position(self, job_id: str) -> _Position:
         """Where the job has got, read afresh by every unit of work: a unit retried after a fault
@@ -848,22 +866,22 @@ class ImportWorker:
 
     async def _fail_fast(self, job_id: str, graph_id: str) -> None:
         """After a replace's first full node window: stop (:class:`IdentifierMatchedNothing`) when
-        fewer than ``IMPORT_REPLACE_MIN_MATCH_FRACTION`` of the rows decided so far found an
-        entity, in a graph of at least ``IMPORT_REPLACE_GUARD_MIN_LIVE``, rather than read the rest
-        of the file and have the replace guard refuse it at the end. A replace of a view's scope is
-        left to the guard: its scope isn't the graph."""
-        if (self._reconcile_mode != "replace" or self._scope is not None
-                or config.IMPORT_REPLACE_MIN_MATCH_FRACTION <= 0):
+        fewer than the job's ``minMatchFraction`` (``IMPORT_REPLACE_MIN_MATCH_FRACTION``, or its
+        data source's) of the rows decided so far found an entity, in a graph of at least its
+        ``minLive``, rather than read the rest of the file and have the replace guard refuse it at
+        the end. A replace of a view's scope is left to the guard: its scope isn't the graph."""
+        min_match = float(self._limits["minMatchFraction"])
+        if self._reconcile_mode != "replace" or self._scope is not None or min_match <= 0:
             return
         tally = (await self._position(job_id)).summary
         matched = sum(int(tally.get(k) or 0) for k in ("updated", "unchanged", "deleted"))
         decided = matched + int(tally.get("new") or 0) + int(tally.get("invalid") or 0)
-        if not decided or matched >= config.IMPORT_REPLACE_MIN_MATCH_FRACTION * decided:
+        if not decided or matched >= min_match * decided:
             return
         main_id = await self._svc.main_branch_id(graph_id)
         async with db.graphver_session() as s:
             live = await self._svc._main_live_count(s, graph_id, main_id)
-        if live < config.IMPORT_REPLACE_GUARD_MIN_LIVE:
+        if live < int(self._limits["minLive"]):
             return
         raise IdentifierMatchedNothing(
             f"Stopped after the file's first {decided:,} rows: by identifier={self._identifier}, "
@@ -898,7 +916,8 @@ class ImportWorker:
             creates = max(live - before, made)
         else:
             before, creates = max(live - made, 0), made
-        verdict = replace_verdict(before, absent, creates, allowed=self._allow_mass_delete)
+        verdict = replace_verdict(before, absent, creates, allowed=self._allow_mass_delete,
+                                  limits=self._limits)
         async with db.graphver_session() as s:
             await self._lease.checkpoint(s, summary={**pos.summary, "replaceGuard": verdict})
         if verdict["state"] == "overridden":
@@ -907,10 +926,12 @@ class ImportWorker:
         if verdict["state"] != "blocked":
             return
         limits = verdict["limits"]
+        whose = ("this data source's" if "data_source" in verdict["sources"].values()
+                 else "the platform's")
         raise ReplaceBlocked(
             f"Nothing was deleted: this replace would delete {absent:,} of the {verdict['live']:,} "
             f"entities in its scope, and its draft makes {creates:,} new ones: past the replace "
-            "guard, which refuses one "
+            f"guard, which by {whose} limits refuses one "
             f"that deletes at least {limits['deleteFraction']:.0%} of a scope of "
             f"{limits['minLive']:,} or more and creates at least {limits['createFraction']:.0%} as "
             "many. That is what a file whose rows name their entities by another key looks like: "

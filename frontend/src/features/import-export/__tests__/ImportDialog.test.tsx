@@ -8,7 +8,11 @@
  *   - an import queued for the server's workers says it is waiting, and how many are ahead of it;
  *   - a running import says how far it has got, and that it resumed when a server took it over;
  *   - closing the dialog stops following the import (it carries on on the server);
- *   - the preview says why a row was refused, and shows a note on a row that applied.
+ *   - the preview says why a row was refused, and shows a note on a row that applied;
+ *   - it matches existing items by the graph's default (sending none: the server applies it) unless
+ *     you choose another; a property must be named, and one no import matched by yet says it is
+ *     indexed first;
+ *   - a replace the replace guard refused can be replaced anyway, into the draft its rows are on.
  */
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -19,12 +23,15 @@ vi.mock('@/services/importExportApiService', async (importOriginal) => ({
   ...await importOriginal<typeof import('@/services/importExportApiService')>(),
   importInParts: vi.fn(),
   getImport: vi.fn(),
+  getImportSettings: vi.fn(),
   getImportPreview: vi.fn(),
   pollJob: vi.fn(),
   triggerBrowserDownload: vi.fn(),
 }))
 
-import { getImportPreview, importInParts, pollJob, triggerBrowserDownload } from '@/services/importExportApiService'
+import {
+  getImportPreview, getImportSettings, importInParts, pollJob, triggerBrowserDownload, type ImportSettings,
+} from '@/services/importExportApiService'
 import { ImportDialog } from '../ImportDialog'
 
 let unmount = () => {}
@@ -41,9 +48,19 @@ function file(name: string, size: number, content = 'kind,urn\n'): File {
   return f
 }
 
+const values = { identifier: 'urn', replaceMinLive: 1000, replaceDeleteFraction: 0.5,
+  replaceCreateFraction: 0.5, replaceMinMatchFraction: 0.05 }
+
 beforeEach(() => {
   vi.mocked(importInParts).mockReset()
   vi.mocked(pollJob).mockReset()
+  vi.mocked(getImportSettings).mockReset().mockResolvedValue({
+    dataSourceId: 'ds1', overrides: { ...values, replaceMinLive: null, replaceDeleteFraction: null,
+      replaceCreateFraction: null, replaceMinMatchFraction: null },
+    platform: { ...values, identifier: 'entity_id' }, effective: { ...values, sources: {} },
+    replaceGuard: true, followsParent: false, maxMatchingProperties: 10,
+    matchingProperties: [{ name: 'external_id', status: 'ready', seq: 4, current: true, createdAt: 't' }],
+  } as unknown as ImportSettings)
 })
 
 describe('ImportDialog', () => {
@@ -163,5 +180,58 @@ describe('ImportDialog', () => {
 
     expect(await screen.findByText(/urn 'urn:li:renamed' isn't stored/)).toBeInTheDocument()
     expect(screen.getByText('changed since you exported it: description')).toBeInTheDocument()
+  })
+
+  it('matches existing items by the graph’s default unless you choose another', async () => {
+    vi.mocked(importInParts).mockResolvedValue({ jobId: 'j1', branchId: 'br1', sourceUri: 's', status: 'pending' })
+    vi.mocked(pollJob).mockReturnValue(new Promise<Job>(() => {}))
+    await userEvent.upload(open(), file('graph.csv', 2048))
+    const urn = await screen.findByRole('radio', { name: /URN · default/ })
+    expect(urn).toHaveAttribute('aria-checked', 'true')
+    await userEvent.click(screen.getByRole('button', { name: /^Import$/ }))
+    expect(vi.mocked(importInParts).mock.calls[0][3]).toMatchObject({ identifier: undefined, allowMassDelete: false })
+  })
+
+  it('matches by a property once it is named, and says one no import matched by yet is indexed first', async () => {
+    vi.mocked(importInParts).mockResolvedValue({ jobId: 'j1', branchId: 'br1', sourceUri: 's', status: 'pending' })
+    vi.mocked(pollJob).mockReturnValue(new Promise<Job>(() => {}))
+    await userEvent.upload(open(), file('graph.csv', 2048))
+    await userEvent.click(await screen.findByRole('radio', { name: /A property/ }))
+    expect(screen.getByText('Name the property its rows are matched by.')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^Import$/ })).toBeDisabled()
+    await userEvent.type(screen.getByLabelText('Property name'), 'sap_id')
+    expect(screen.getByText(/No import has matched by sap_id yet: this one indexes it first/)).toBeInTheDocument()
+    await userEvent.clear(screen.getByLabelText('Property name'))
+    await userEvent.type(screen.getByLabelText('Property name'), 'external_id')
+    expect(screen.queryByText(/No import has matched by/)).not.toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: /^Import$/ }))
+    expect(vi.mocked(importInParts).mock.calls[0][3]).toMatchObject({ identifier: 'prop.external_id' })
+  })
+
+  it('replaces anyway, into the draft its rows are on, once the replace guard refused it', async () => {
+    vi.mocked(importInParts).mockResolvedValue({ jobId: 'j1', branchId: 'br_9', sourceUri: 's', status: 'pending' })
+    vi.mocked(pollJob).mockResolvedValueOnce({ jobId: 'j1', jobType: 'ingest', graphId: 'g1', status: 'failed',
+      branchId: 'br_9', errorMessage: 'Nothing was deleted: this replace would delete 900 of the 1,000 entities',
+      summary: { new: 900, updated: 0, unchanged: 100, deleted: 0, invalid: 0,
+        failure: { code: 'mass_delete_blocked', action: 'allow_mass_delete' } } } as Job)
+      .mockReturnValue(new Promise<Job>(() => {}))
+    await userEvent.upload(open(), file('graph.csv', 2048))
+    await userEvent.click(screen.getByText('Replace (authoritative)'))
+    await userEvent.click(screen.getByRole('button', { name: /^Import$/ }))
+    expect(await screen.findByText(/would delete 900 of the 1,000/)).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: /Replace anyway/ }))
+    expect(vi.mocked(importInParts).mock.calls[1][3]).toMatchObject({
+      reconcileMode: 'replace', branchId: 'br_9', allowMassDelete: true })
+  })
+
+  it('offers no way past a failure the replace guard didn’t make', async () => {
+    vi.mocked(importInParts).mockResolvedValue({ jobId: 'j1', branchId: 'br1', sourceUri: 's', status: 'pending' })
+    vi.mocked(pollJob).mockResolvedValue({ jobId: 'j1', jobType: 'ingest', graphId: 'g1', status: 'failed',
+      branchId: 'br1', errorMessage: 'Stopped after the file’s first 10,000 rows',
+      summary: { failure: { code: 'identifier_matched_nothing', action: 'identifier' } } } as unknown as Job)
+    await userEvent.upload(open(), file('graph.csv', 2048))
+    await userEvent.click(screen.getByRole('button', { name: /^Import$/ }))
+    expect(await screen.findByText(/Stopped after the file’s first/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Replace anyway/ })).not.toBeInTheDocument()
   })
 })

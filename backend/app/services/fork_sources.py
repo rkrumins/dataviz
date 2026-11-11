@@ -24,6 +24,8 @@ from backend.common.interfaces.provider import ProviderConfigurationError
 GOVERNING = (
     "ontology_id", "is_restricted", "access_level", "identity_property", "name_property",
     "draft_default_visibility", "draft_levels", "review_self_approval", "review_self_merge",
+    "import_identifier", "import_replace_min_live", "import_replace_delete_fraction",
+    "import_replace_create_fraction", "import_replace_min_match_fraction",
 )
 
 

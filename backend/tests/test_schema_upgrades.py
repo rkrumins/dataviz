@@ -1855,3 +1855,66 @@ async def test_the_matching_property_migration_round_trips_to_the_models_tables(
             await conn.run_sync(run("upgrade"))                     # idempotent
         finally:
             await trans.rollback()
+
+
+# ── import settings (20261112_1600_import_settings) ──
+_IMPORT_SETTINGS = _VERSIONS / "20261112_1600_import_settings.py"
+_DS_IMPORT_COLUMNS = ("import_identifier", "import_replace_min_live", "import_replace_delete_fraction",
+                      "import_replace_create_fraction", "import_replace_min_match_fraction")
+
+
+def test_import_settings_are_declared_and_migrated():
+    from backend.app.db.models import WorkspaceDataSourceORM
+    assert models.JobORM.__table__.c.import_settings.nullable
+    assert all(WorkspaceDataSourceORM.__table__.c[name].nullable for name in _DS_IMPORT_COLUMNS)
+    migration = _migration(_IMPORT_SETTINGS)
+    assert migration.revision == _IMPORT_SETTINGS.stem and len(migration.revision) <= 32
+    assert migration.down_revision == "20261112_1500_gv_entity_keys"
+    assert [name for name, _kind in migration._COLUMNS] == list(_DS_IMPORT_COLUMNS)
+
+
+@e2e
+async def test_a_store_alembic_never_reached_gets_the_jobs_import_settings(store):
+    async with store.connect() as conn:
+        trans = await conn.begin()
+        try:
+            await conn.execute(text(f'ALTER TABLE "{models._SCHEMA}".jobs DROP COLUMN import_settings'))
+            await conn.run_sync(models._ensure_schema_upgrades)
+            assert "import_settings" in await _job_columns(conn)
+            await conn.run_sync(models._ensure_schema_upgrades)        # and again: a no-op
+        finally:
+            await trans.rollback()
+
+
+async def _ds_columns(conn) -> set:
+    return {r[0] for r in (await conn.execute(text(
+        "SELECT column_name FROM information_schema.columns "
+        "WHERE table_schema = current_schema() AND table_name = 'workspace_data_sources'"))).all()}
+
+
+@e2e
+async def test_the_import_settings_migration_round_trips(store):
+    from alembic.migration import MigrationContext
+    from alembic.operations import Operations
+    migration = _migration(_IMPORT_SETTINGS)
+
+    def run(step):
+        def apply(sync_conn):
+            with Operations.context(MigrationContext.configure(sync_conn)):
+                getattr(migration, step)()
+        return apply
+
+    async with store.connect() as conn:
+        trans = await conn.begin()
+        try:
+            if not await _ds_columns(conn):
+                pytest.skip("no management tables in this database")
+            await conn.run_sync(run("downgrade"))
+            assert "import_settings" not in await _job_columns(conn)
+            assert not set(_DS_IMPORT_COLUMNS) & await _ds_columns(conn)
+            await conn.run_sync(run("upgrade"))
+            assert "import_settings" in await _job_columns(conn)
+            assert set(_DS_IMPORT_COLUMNS) <= await _ds_columns(conn)
+            await conn.run_sync(run("upgrade"))                     # idempotent
+        finally:
+            await trans.rollback()

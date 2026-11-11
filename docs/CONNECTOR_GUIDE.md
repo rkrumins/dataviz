@@ -187,6 +187,9 @@ change. A file's keys find those ids:
   tries an entity id of the graph, then the urn, the identifier property, a field its type matches
   imports by, and a unique qualifiedName; `identifier=urn` takes the entity id or the urn and
   nothing else, as a DataHub-style connector wants. A row the identifier can't find is created.
+  Or have a workspace admin set the graph's default on its data source's Versioning tab, and leave
+  `identifier` out; `GET …/graphs/{gid}/import-settings` says which holds, and the replace guard's
+  limits.
 - **Or key your rows by your system's own id** in a property: `prop.external_id` on each row, and
   `identifier=prop.external_id`; an edge names its ends `source.external_id` / `target.external_id`.
   No urn is needed. The first import that names the property indexes it (it reads every node

@@ -9,6 +9,7 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     Column,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -817,6 +818,15 @@ class WorkspaceDataSourceORM(Base):
     draft_levels = Column(Text, nullable=True)
     review_self_approval = Column(Boolean, nullable=True)
     review_self_merge = Column(Boolean, nullable=True)
+    # This source's import settings (``backend.app.services.import_settings``): what an import's rows
+    # find their entities by when it names no identifier (``entity_id``, ``urn`` or ``prop.<name>``),
+    # and the replace guard's limits. NULL = the platform's (``GRAPHVER_IMPORT_IDENTIFIER``,
+    # ``IMPORT_REPLACE_*``).
+    import_identifier = Column(Text, nullable=True)
+    import_replace_min_live = Column(Integer, nullable=True)
+    import_replace_delete_fraction = Column(Float, nullable=True)
+    import_replace_create_fraction = Column(Float, nullable=True)
+    import_replace_min_match_fraction = Column(Float, nullable=True)
     extra_config = Column(Text, nullable=True)  # JSON — per-data-source config (schema mapping overrides, etc.)
     # Node-identity property — the physical graph property that plays the role
     # the platform's canonical ``urn`` does (universal node identity). NULL means

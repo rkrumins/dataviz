@@ -34,6 +34,6 @@ def test_the_operators_limits_are_the_ones_in_force_and_the_verdict_names_them(m
     verdict = replace_verdict(20, 18, 2, allowed=False)
     assert verdict["state"] == "blocked"
     assert verdict["limits"] == {"minLive": 10, "deleteFraction": 0.9, "createFraction": 0.1}
-    assert verdict["source"] == "platform"
+    assert verdict["sources"] == dict.fromkeys(("minLive", "deleteFraction", "createFraction"), "platform")
     monkeypatch.setattr(config, "IMPORT_REPLACE_GUARD", False)
     assert replace_verdict(20, 18, 2, allowed=False)["state"] == "off"

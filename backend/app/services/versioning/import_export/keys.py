@@ -107,6 +107,20 @@ async def ensure_ready(graph_id: str, name: str) -> int:
     return await _catch_up(graph_id, name)
 
 
+async def listed(graph_id: str) -> List[Dict[str, Any]]:
+    """The properties this graph's imports match by, in the order imports first named them: each
+    one's index ``status`` (``building`` or ``ready``), the main commit it describes (``seq``), and
+    whether that is main's head (``current``; the next import catches it up either way)."""
+    async with db.graphver_session() as s:
+        head = int(await s.scalar(select(GraphORM.main_head_commit_seq).where(
+            GraphORM.id == graph_id)) or 0)
+        rows = (await s.execute(select(KeyIndexORM).where(KeyIndexORM.graph_id == graph_id)
+                                .order_by(KeyIndexORM.created_at, KeyIndexORM.key_name))).scalars().all()
+    return [{"name": r.key_name, "status": r.status, "seq": int(r.seq),
+             "current": r.status == "ready" and not r.cursor and int(r.seq) >= head,
+             "createdAt": r.created_at} for r in rows]
+
+
 def _values_of(page, name: str) -> List[Tuple[str, str]]:
     """``(entity id, value)`` of the nodes in ``page`` that hold one of the property."""
     out = []

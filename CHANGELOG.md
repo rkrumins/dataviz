@@ -124,7 +124,20 @@ integration's many small changes as a few commits.
     there, with `identifier_matched_nothing`, instead of reading the rest of the file first.
   - The operator sets the limits: `IMPORT_REPLACE_GUARD` (on), `IMPORT_REPLACE_GUARD_MIN_LIVE`
     (1000), `IMPORT_REPLACE_GUARD_DELETE_FRACTION` and `IMPORT_REPLACE_GUARD_CREATE_FRACTION` (0.5),
-    `IMPORT_REPLACE_MIN_MATCH_FRACTION` (0.05); Helm `config.imports`.
+    `IMPORT_REPLACE_MIN_MATCH_FRACTION` (0.05); Helm `config.imports`. A workspace admin may set a
+    data source's own over them (below).
+  - In the import dialog, **Replace anyway** imports the file again into the same draft with
+    `allowMassDelete`, so its deletions are staged for review.
+- **A graph's own import settings.** A workspace admin sets, on the data source's Versioning tab
+  (**Imports**), what its imports' rows are matched by when an import names no `identifier`, and the
+  replace guard's limits, each over the platform's:
+  - `GET …/graphs/{gid}/import-settings` (an API key may read it) says what holds and where each
+    comes from, and lists the properties its imports match by, with how far each index is caught
+    up; `PUT` sets them (`"inherit"` goes back to the platform's), recorded in the activity log.
+  - An import resolves them when it is made and keeps them (`importSettings` on the job), so a
+    resumed job runs under what it started with. A fork's are its parent's.
+  - The import dialog's **Match existing items by** (Entity ID, URN, or a property) starts at the
+    graph's default, and says when a property is indexed first.
 - **Every refused import row carries a code** beside its reasons, in the preview and the dry run:
   `no_key`, `two_entities`, `duplicate_value`, `changed_since_export`, `named_already`,
   `invalid_type`, `missing_type`, `end_not_found`, `edge_moved`, `write_refused`, `invalid_row`
@@ -274,6 +287,10 @@ integration's many small changes as a few commits.
     field or qualifiedName) is refused with `no_key`, and so is an edge to it. Give such rows a urn.
   - An imported node's urn is the one its file gave, not the derived id. A client that read a
     node's urn as its id should read its `entity_id`.
+- Migration `20261112_1600_import_settings` adds five nullable columns to `workspace_data_sources`
+  (`import_identifier`, `import_replace_*`) and `jobs.import_settings` (nullable JSONB); no rewrite.
+  Every data source starts with none set, so imports run under the platform's settings as before. A
+  separate `GRAPHVER_DB_URL` gets the jobs column at start-up.
 - Migration `20261112_1500_gv_entity_keys` adds the tables `graphver.key_index` and
   `graphver.entity_keys` (empty). A separate `GRAPHVER_DB_URL` gets them at start-up. The first
   import that names a property reads every node of its graph once to index it.

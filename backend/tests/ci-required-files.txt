@@ -149,6 +149,7 @@ tests/test_import_replace_scope.py
 tests/test_import_resolve.py
 tests/test_import_resume.py
 tests/test_import_rowmodel.py
+tests/test_import_settings.py
 tests/test_import_template.py
 tests/test_import_uploads.py
 tests/test_import_view_assignments.py

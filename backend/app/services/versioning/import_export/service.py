@@ -158,6 +158,7 @@ class ImportExportService:
         draft_visibility: Optional[str] = None,
         identifier: Optional[str] = None,
         allow_mass_delete: bool = False,
+        import_settings: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, str]:
         """Open/append the working draft and create the import job.
 
@@ -184,7 +185,8 @@ class ImportExportService:
         """
         if branch_id == "main":
             raise MainWriteForbidden()
-        # What its rows find their entities by: the request's, else the platform's (identifier.py).
+        # What its rows find their entities by: the caller's (the request's, else its data
+        # source's: ``services.import_settings``, kept as ``import_settings``), else the platform's.
         identifier = identifier or identifiers.platform_default()
 
         async def insert() -> Dict[str, str]:
@@ -215,6 +217,7 @@ class ImportExportService:
                     source_uri=uri, idempotency_key=idempotency_key, status="pending",
                     provenance=provenance.snapshot(), identity_strategy=identifier,
                     allow_mass_delete=bool(allow_mass_delete) or None,
+                    import_settings=import_settings,
                 )
                 s.add(job)
                 await s.flush()
@@ -1082,6 +1085,9 @@ class ImportExportService:
                 "identifier": row.identity_strategy if row.job_type == "ingest" else None,
                 # A replace sent with allowMassDelete: it deletes past the replace guard's limits.
                 "allowMassDelete": bool(row.allow_mass_delete),
+                # Where its identifier came from, and the replace guard's limits it runs under
+                # (``services.import_settings``); None for a job made before they were kept.
+                "importSettings": row.import_settings if row.job_type == "ingest" else None,
                 "sourceUri": row.source_uri, "previewUri": row.preview_uri,
                 "reportUri": row.report_uri, "resultUri": row.result_uri,
                 "summary": row.summary, "errorMessage": row.error_message,

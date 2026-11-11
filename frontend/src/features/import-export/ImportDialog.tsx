@@ -14,11 +14,12 @@ import {
 import { cn } from '@/lib/utils'
 import { Backdrop } from '@/components/ui/Backdrop'
 import {
-  detectFormat, getImport, getImportPreview, importInParts, importLimit, jobProgressText, MAX_IMPORT_BYTES, pollJob,
-  queuePosition, resumeNote, templateDownloadUrl, triggerBrowserDownload,
-  type ImportFormat, type ImportPreviewRow, type ImportSummary, type Job, type ReconcileMode,
+  detectFormat, getImport, getImportPreview, getImportSettings, importInParts, importLimit, jobProgressText,
+  MAX_IMPORT_BYTES, pollJob, queuePosition, resumeNote, templateDownloadUrl, triggerBrowserDownload,
+  type ImportFormat, type ImportPreviewRow, type ImportSettings, type ImportSummary, type Job, type ReconcileMode,
 } from '@/services/importExportApiService'
 import { prettyBytes } from './format'
+import { formatIdentifier, MATCH_KINDS, parseIdentifier, type Match } from './identifier'
 
 export interface ImportDialogProps {
   wsId: string
@@ -48,6 +49,22 @@ function unsupportedReason(name: string): string | null {
     : null
 }
 
+/** Why a property can't be matched by (Import is then off), or what matching by it first costs. */
+function matchNote(match: Match | null, settings: ImportSettings | null): { block: boolean; text: string } | null {
+  if (match?.kind !== 'prop') return null
+  const name = match.name.trim()
+  if (!name) return { block: true, text: 'Name the property its rows are matched by.' }
+  if (!settings) return null
+  const known = settings.matchingProperties.find((p) => p.name === name)
+  if (known?.status === 'ready') return null
+  if (!known && settings.matchingProperties.length >= settings.maxMatchingProperties) {
+    return { block: true, text: `This graph's imports already match by ${settings.maxMatchingProperties} `
+      + 'properties, its most: match by one of them, by Entity ID or by URN.' }
+  }
+  return { block: false, text: `No import has matched by ${name} yet: this one indexes it first, reading `
+    + 'every item once (minutes on a large graph). Later ones only catch up.' }
+}
+
 /** Refused before any of it uploads: the server holds the same limits. */
 function tooLargeReason(size: number, format: ImportFormat): string | null {
   const cap = importLimit(format)
@@ -71,7 +88,15 @@ export function ImportDialog({ wsId, graphId, branchId, viewId, onClose, onRevie
   const [dragging, setDragging] = useState(false)
   const [previewRows, setPreviewRows] = useState<ImportPreviewRow[]>([])
   const [upload, setUpload] = useState<{ sent: number; total: number } | null>(null)
+  // What its rows find their items by: null takes the graph's default, which the server applies.
+  const [match, setMatch] = useState<Match | null>(null)
+  const [settings, setSettings] = useState<ImportSettings | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
+  useEffect(() => {
+    let live = true
+    getImportSettings(wsId, graphId).then((got) => { if (live) setSettings(got) }).catch(() => {})
+    return () => { live = false }
+  }, [wsId, graphId])
   // Leaving stops an upload in flight (choosing the same file again resumes it), and stops
   // following the import (it carries on on the server).
   const uploadRun = useRef<AbortController | null>(null)
@@ -91,8 +116,10 @@ export function ImportDialog({ wsId, graphId, branchId, viewId, onClose, onRevie
   }, [handleFile])
 
   const warning = file ? unsupportedReason(file.name) ?? tooLargeReason(file.size, format) : null
+  const note = matchNote(match, settings)
 
-  async function start() {
+  /** ``past``: the replace the guard refused, sent again to delete all the same, into its draft. */
+  async function start(past?: { branchId: string }) {
     if (!file) return
     setPhase('running')
     setError(null)
@@ -103,12 +130,14 @@ export function ImportDialog({ wsId, graphId, branchId, viewId, onClose, onRevie
     uploadRun.current = run
     try {
       const created = await importInParts(wsId, graphId, file, {
-        format, reconcileMode, branchId, viewId, signal: run.signal,
+        format, reconcileMode, branchId: past?.branchId ?? branchId, viewId, signal: run.signal,
+        identifier: match ? formatIdentifier(match) : undefined, allowMassDelete: !!past,
         onProgress: (sent, total) => setUpload({ sent, total }),
       })
       setResultBranch(created.branchId)
       const done = await pollJob(() => getImport(wsId, graphId, created.jobId), { onTick: setJob, signal: run.signal })
       if (done.status === 'failed' || done.status === 'cancelled') {
+        setJob(done)
         setError(done.errorMessage
           || (done.status === 'cancelled' ? 'The import was cancelled.' : 'The import could not be completed.'))
         setPhase('failed')
@@ -165,12 +194,13 @@ export function ImportDialog({ wsId, graphId, branchId, viewId, onClose, onRevie
               inputRef={inputRef} reconcileMode={reconcileMode} setReconcileMode={setReconcileMode}
               format={format} setFormat={(f) => { setFormat(f); setAutoDetected(false) }} autoDetected={autoDetected}
               warning={warning} viewScoped={!!viewId}
+              match={match} setMatch={setMatch} graphDefault={settings?.effective.identifier ?? null} note={note}
               onDownloadTemplate={(fmt) => triggerBrowserDownload(templateDownloadUrl(wsId, graphId, fmt), `import-template.${fmt}`)}
             />
           )}
           {phase === 'running' && <RunningStep job={job} upload={upload} fileName={file?.name} />}
           {phase === 'done' && <DoneStep summary={(job?.summary as ImportSummary) ?? null} previewRows={previewRows} />}
-          {phase === 'failed' && <FailedStep error={error} />}
+          {phase === 'failed' && <FailedStep error={error} job={job} />}
         </div>
 
         {/* Footer */}
@@ -185,7 +215,7 @@ export function ImportDialog({ wsId, graphId, branchId, viewId, onClose, onRevie
               {phase === 'done' ? 'Close' : 'Cancel'}
             </button>
             {phase === 'choose' && (
-              <button onClick={start} disabled={!file || !!warning}
+              <button onClick={() => void start()} disabled={!file || !!warning || !!note?.block}
                 className="flex items-center gap-2 px-5 py-2 rounded-xl bg-indigo-500 text-white text-sm font-semibold hover:bg-indigo-600 transition-colors disabled:opacity-40 disabled:cursor-not-allowed shadow-sm shadow-indigo-500/20">
                 <UploadCloud className="w-4 h-4" /> Import
               </button>
@@ -194,6 +224,12 @@ export function ImportDialog({ wsId, graphId, branchId, viewId, onClose, onRevie
               <button onClick={() => resultBranch && onReviewChanges?.(resultBranch)}
                 className="flex items-center gap-2 px-5 py-2 rounded-xl bg-indigo-500 text-white text-sm font-semibold hover:bg-indigo-600 transition-colors shadow-sm shadow-indigo-500/20">
                 Review changes <ArrowRight className="w-4 h-4" />
+              </button>
+            )}
+            {phase === 'failed' && blocked(job) && job?.branchId && (
+              <button onClick={() => void start({ branchId: job.branchId! })}
+                className="flex items-center gap-2 px-4 py-2 rounded-xl border border-rose-300 dark:border-rose-800/60 text-rose-600 dark:text-rose-400 text-sm font-semibold hover:bg-rose-50 dark:hover:bg-rose-950/30 transition-colors">
+                <Trash2 className="w-4 h-4" /> Replace anyway
               </button>
             )}
             {phase === 'failed' && (
@@ -226,11 +262,18 @@ function ChooseStep(props: {
   warning: string | null
   viewScoped: boolean
   onDownloadTemplate: (format: ImportFormat) => void
+  match: Match | null
+  setMatch: (m: Match) => void
+  /** The graph's default identifier; null while it isn't known (the server applies it). */
+  graphDefault: string | null
+  note: { block: boolean; text: string } | null
 }) {
   const {
     file, setFile, dragging, setDragging, onDrop, inputRef, reconcileMode, setReconcileMode,
-    format, setFormat, autoDetected, warning, viewScoped,
+    format, setFormat, autoDetected, warning, viewScoped, match, setMatch, graphDefault, note,
   } = props
+  const fallback = graphDefault ? parseIdentifier(graphDefault) : null
+  const shown = match ?? fallback
   return (
     <div className="grid md:grid-cols-2">
       {/* Left — the guide (persistent context) */}
@@ -362,6 +405,35 @@ function ChooseStep(props: {
                   : "You'll see exactly what would be deleted in the review before anything is published."}
               </p>
             </div>
+          )}
+        </div>
+
+        <div>
+          <label className="block text-xs font-medium text-ink-secondary mb-2">Match existing items by</label>
+          <div role="radiogroup" aria-label="Match existing items by"
+            className="flex items-center gap-1 rounded-xl bg-black/[0.03] dark:bg-white/[0.04] p-1">
+            {MATCH_KINDS.map((m) => (
+              <button key={m.kind} role="radio" aria-checked={shown?.kind === m.kind}
+                onClick={() => setMatch({ kind: m.kind, name: m.kind === 'prop' ? (shown?.name ?? '') : '' })}
+                className={cn('flex-1 px-2 py-1.5 rounded-lg text-[11px] font-semibold transition-colors',
+                  shown?.kind === m.kind ? 'bg-white dark:bg-white/10 text-ink shadow-sm' : 'text-ink-muted hover:text-ink')}>
+                {m.label}{fallback?.kind === m.kind && <>{' '}<span className="font-normal text-ink-muted">· default</span></>}
+              </button>
+            ))}
+          </div>
+          {shown?.kind === 'prop' && (
+            <input aria-label="Property name" placeholder="external_id" value={shown.name}
+              onChange={(e) => setMatch({ kind: 'prop', name: e.target.value })}
+              className="mt-2 w-full px-2.5 py-1.5 rounded-lg bg-canvas-elevated border border-glass-border text-[12px] font-mono text-ink focus:outline-none focus:border-indigo-500/50" />
+          )}
+          <p className="text-[11px] text-ink-muted mt-1.5 leading-relaxed">
+            {shown ? MATCH_KINDS.find((m) => m.kind === shown.kind)!.help
+              : 'This graph’s default applies, unless you choose another.'}
+          </p>
+          {note && (
+            <p className={cn('text-[11px] mt-1 leading-relaxed', note.block ? 'text-amber-700 dark:text-amber-400' : 'text-ink-muted')}>
+              {note.text}
+            </p>
           )}
         </div>
       </div>
@@ -579,7 +651,12 @@ function Stat({ n, label, icon, tone }: { n: number; label: string; icon: React.
 }
 
 // ── failed ───────────────────────────────────────────────────────────────────
-function FailedStep({ error }: { error: string | null }) {
+/** A replace the replace guard refused: nothing deleted, its rows on the draft. */
+function blocked(job: Job | null): boolean {
+  return (job?.summary as ImportSummary | null | undefined)?.failure?.code === 'mass_delete_blocked'
+}
+
+function FailedStep({ error, job }: { error: string | null; job: Job | null }) {
   return (
     <div className="px-8 py-10 max-w-2xl mx-auto flex items-start gap-4">
       <div className="w-11 h-11 rounded-xl bg-rose-50 dark:bg-rose-950/30 text-rose-500 flex items-center justify-center flex-shrink-0">
@@ -588,6 +665,12 @@ function FailedStep({ error }: { error: string | null }) {
       <div className="min-w-0">
         <h3 className="text-lg font-bold text-ink">Import didn't complete</h3>
         <p className="text-sm text-ink-muted mt-1 break-words">{error}</p>
+        {blocked(job) && (
+          <p className="text-[11px] text-ink-muted mt-3 leading-relaxed">
+            Try again with another way to match existing items, or replace anyway to delete what the
+            file leaves out: the deletions are staged on your draft, to review before you publish.
+          </p>
+        )}
       </div>
     </div>
   )

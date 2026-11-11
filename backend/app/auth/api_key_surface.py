@@ -208,7 +208,7 @@ SURFACE: dict[tuple[str, str], Rule] = {
         "create_graph", "resolve_graph_open",
         "bulk_ingest", "sync_ingest", "publish", "get_publish_job",
         "list_imports", "import_template", "import_schema", "create_import",
-        "get_import",
+        "get_import", "get_import_settings",
         "get_import_preview", "create_import_upload", "get_import_upload",
         "put_import_upload_part", "complete_import_upload",
         "list_exports", "plan_export", "stream_export", "get_export",

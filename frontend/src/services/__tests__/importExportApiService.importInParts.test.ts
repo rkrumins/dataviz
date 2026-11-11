@@ -61,6 +61,18 @@ describe('importInParts', () => {
     expect(localStorage.length).toBe(0)
   })
 
+  it('starts the import by the identifier it names, and past the replace guard when asked', async () => {
+    server()
+    vi.mocked(fetchWithTimeout).mockImplementation(async () => new Response(null, { status: 200 }))
+
+    await importInParts('ws1', 'g1', FILE, {
+      format: 'ndjson', reconcileMode: 'replace', identifier: 'prop.external_id', allowMassDelete: true,
+    })
+
+    const complete = vi.mocked(authFetch).mock.calls.find(([url]) => String(url).includes('/complete'))!
+    expect(complete[0]).toContain('complete?reconcileMode=replace&identifier=prop.external_id&allowMassDelete=true')
+  })
+
   it('resumes an upload of the same file, sending only what the server lacks', async () => {
     server()
     vi.mocked(fetchWithTimeout).mockImplementation(async (url) =>

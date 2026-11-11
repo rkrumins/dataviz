@@ -3851,11 +3851,19 @@ _ALLOW_MASS_DELETE = Query(False, alias="allowMassDelete", description=(
     "their entities by another key)"))
 
 
-def _identifier(value: Optional[str]) -> str:
-    """The import's identifier: the request's, checked (422 with the grammar), else the platform's."""
+async def _import_settings_for(session: AsyncSession, data_source_id: Optional[str],
+                               requested: Optional[str]) -> tuple:
+    """``(identifier, settings)``: what an import into the data source's graph runs under
+    (``services.import_settings``) — the request's identifier, checked (422 with the grammar), else
+    the data source's, else the platform's; and what its job keeps: where the identifier came from,
+    and the replace guard's limits with where each came from."""
+    from backend.app.db.models import WorkspaceDataSourceORM
+    from backend.app.services import import_settings
     from backend.app.services.versioning.import_export import identifier as identifiers
+    row = (await session.get(WorkspaceDataSourceORM, data_source_id)
+           if data_source_id and session is not None else None)     # a direct caller may hold none
     try:
-        return identifiers.resolve(value)[0]
+        return import_settings.for_import(row, requested)
     except identifiers.IdentifierError as exc:
         raise HTTPException(status_code=422, detail={"type": "invalid_identifier",
                                                      "message": str(exc)})
@@ -3892,7 +3900,7 @@ async def create_import(
         get_adapter(format)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
-    identifier = _identifier(identifier)
+    identifier, settings = await _import_settings_for(session, meta.get("data_source_id"), identifier)
     await _check_import_view(session, ws_id, view_id, user, claims)
     if auto_publish:
         await _may_auto_publish(session, claims, ws_id, meta, branch_id)
@@ -3906,7 +3914,8 @@ async def create_import(
                     actor=user.id, import_format=format, provider_id=meta.get("provider_id"),
                     branch_id=branch_id, reconcile_mode=reconcile_mode, scope_view_id=view_id,
                     idempotency_key=key, auto_publish=auto_publish, identifier=identifier,
-                    allow_mass_delete=allow_mass_delete is True, draft_visibility=(
+                    allow_mass_delete=allow_mass_delete is True, import_settings=settings,
+                    draft_visibility=(
                         await draft_level(session, meta.get("data_source_id")) if branch_id is None else None))
         except IntegrityError:
             # A request with the same key got there first: answer with its job.
@@ -4089,7 +4098,7 @@ async def complete_import_upload(
     time, or after an answer that was lost — answers with that import, and one whose completion
     broke off before it was queued is queued now."""
     from backend.app.services.versioning.import_export import uploads
-    identifier = _identifier(identifier)
+    identifier, settings = await _import_settings_for(session, meta.get("data_source_id"), identifier)
     record = await _load_upload(ie, ws_id, graph_id, meta, upload_id, user)
     await _check_import_view(session, ws_id, view_id, user, claims)
     if auto_publish:
@@ -4109,7 +4118,7 @@ async def complete_import_upload(
                     source_uri=uploads.record_key(record), branch_id=branch_id, reconcile_mode=reconcile_mode,
                     scope_view_id=view_id, idempotency_key=key, auto_publish=auto_publish,
                     identifier=identifier, allow_mass_delete=allow_mass_delete is True,
-                    draft_visibility=(
+                    import_settings=settings, draft_visibility=(
                         await draft_level(session, meta.get("data_source_id")) if branch_id is None else None))
         except IntegrityError:
             # A completion sent at the same time got there first: answer with its import.
@@ -4250,6 +4259,7 @@ async def validate_import(
     meta: dict = Depends(graph_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
     ie=Depends(get_import_export_service),
+    session: AsyncSession = Depends(get_db_session),
 ):
     """Check a file as an import would read it, without importing it: every row parsed and
     resolved against ``main`` (or the draft ``branchId``) — what it would create, update, leave
@@ -4266,7 +4276,7 @@ async def validate_import(
         get_adapter(format)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
-    identifier = _identifier(identifier)
+    identifier, settings = await _import_settings_for(session, meta.get("data_source_id"), identifier)
     body = bytearray()
     async for chunk in request.stream():
         body += chunk
@@ -4278,10 +4288,11 @@ async def validate_import(
         with _domain_errors():
             await svc.assert_branch_readable(graph_id=graph_id, branch_id=branch_id, viewer=viewer)
     try:                                       # the draft is checked above: what is left is the file
-        return await ie.validate_import(
+        checked = await ie.validate_import(
             graph_id=graph_id, workspace_id=ws_id, data_source_id=meta.get("data_source_id"),
             branch_id=branch_id, data=bytes(body), import_format=format.lower(),
             identifier=identifier)
+        return {**checked, "identifierSource": settings["identifierSource"]}
     except DryRunTooLarge as exc:
         raise HTTPException(status_code=413, detail={"type": "too_large", "message": str(exc)})
     except IdentityUnavailable as exc:
@@ -4294,6 +4305,108 @@ async def validate_import(
         raise HTTPException(status_code=422, detail={"type": exc.code, "message": str(exc)})
     except ValueError as exc:
         raise HTTPException(status_code=422, detail={"type": "invalid_file", "message": str(exc)})
+
+
+# --------------------------------------------------------------------------- #
+# Import settings                                                              #
+# --------------------------------------------------------------------------- #
+_Fraction = Union[Annotated[float, Field(ge=0, le=1)], Literal["inherit"]]
+
+
+class ImportSettingsChange(_ApiModel):
+    """A graph's own import settings, on a write (``services.import_settings``): a field left out
+    stays as it is, and ``"inherit"`` clears it, so the platform's holds."""
+    identifier: Optional[str] = Field(default=None, description=(
+        "What its imports' rows find their entities by when an import names no identifier: "
+        "entity_id, urn or prop.<name>"))
+    replace_min_live: Optional[Union[Annotated[int, Field(ge=0)], Literal["inherit"]]] = Field(
+        default=None, alias="replaceMinLive")
+    replace_delete_fraction: Optional[_Fraction] = Field(default=None, alias="replaceDeleteFraction")
+    replace_create_fraction: Optional[_Fraction] = Field(default=None, alias="replaceCreateFraction")
+    replace_min_match_fraction: Optional[_Fraction] = Field(default=None, alias="replaceMinMatchFraction")
+
+
+class ImportSettingsResponse(_ApiModel):
+    data_source_id: Optional[str] = Field(alias="dataSourceId")
+    overrides: Dict[str, Any]
+    platform: Dict[str, Any]
+    effective: Dict[str, Any]
+    replace_guard: bool = Field(alias="replaceGuard")
+    follows_parent: bool = Field(alias="followsParent")
+    matching_properties: List[Dict[str, Any]] = Field(alias="matchingProperties")
+    max_matching_properties: int = Field(alias="maxMatchingProperties")
+
+
+async def _settings_row(session: AsyncSession, meta: dict):
+    from backend.app.db.models import WorkspaceDataSourceORM
+    ds_id = meta.get("data_source_id")
+    return await session.get(WorkspaceDataSourceORM, ds_id) if ds_id else None
+
+
+async def _import_settings_view(row, graph_id: str) -> dict:
+    from backend.app.services import import_settings
+    from backend.app.services.versioning import config as gv_config
+    from backend.app.services.versioning.import_export import keys as matching
+    return {"dataSourceId": row.id if row is not None else None,
+            "overrides": import_settings.settings_of(row), "platform": import_settings.platform(),
+            "effective": import_settings.resolve(row), "replaceGuard": gv_config.IMPORT_REPLACE_GUARD,
+            "followsParent": bool(row is not None and row.fork_of_data_source_id),
+            "matchingProperties": await matching.listed(graph_id),
+            "maxMatchingProperties": gv_config.MAX_MATCHING_PROPERTIES}
+
+
+@router.get("/graphs/{graph_id}/import-settings", response_model=ImportSettingsResponse)
+async def get_import_settings(
+    ws_id: str, graph_id: str,
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    meta: dict = Depends(graph_in_workspace),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """What this graph's imports run under when they name nothing else: what their rows find their
+    entities by (``identifier``) and the replace guard's limits — the graph's own (``overrides``;
+    null where it sets none), the platform's, and what holds (``effective``, with where each came
+    from) — and the properties its imports match by, with how far each one's index is caught up."""
+    return await _import_settings_view(await _settings_row(session, meta), graph_id)
+
+
+@router.put("/graphs/{graph_id}/import-settings", response_model=ImportSettingsResponse)
+async def put_import_settings(
+    ws_id: str, graph_id: str, body: ImportSettingsChange,
+    _user: User = Depends(requires("workspace:admin", workspace="ws_id")),
+    meta: dict = Depends(graph_in_workspace),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Set this graph's import settings (workspace admins), field by field; ``"inherit"`` goes back
+    to the platform's. An import that names its own identifier still uses it, and one already made
+    keeps the settings it was made with. A fork's are its parent's (409
+    ``fork_settings_follow_parent``). A change is recorded in the activity log."""
+    from backend.app.services import fork_sources, import_settings
+    from backend.app.services.activity import recorder
+    from backend.app.services.versioning.import_export import identifier as identifiers
+    row = await _settings_row(session, meta)
+    if row is None:
+        raise HTTPException(status_code=409, detail={
+            "type": "no_data_source", "message": "This graph has no data source to keep its import "
+            "settings on: its imports run under the platform's."})
+    changes = import_settings.changes_from(body)
+    if changes.get("identifier", "inherit") != "inherit":
+        try:
+            changes["identifier"] = identifiers.parse(changes["identifier"])
+        except identifiers.IdentifierError as exc:
+            raise HTTPException(status_code=422, detail={"type": "invalid_identifier",
+                                                         "message": str(exc)})
+        if changes["identifier"] is None:
+            raise HTTPException(status_code=422, detail={
+                "type": "invalid_identifier",
+                "message": "identifier is entity_id, urn or prop.<name>, or inherit"})
+    governing = fork_sources.governing(row)
+    before, after = import_settings.apply(row, changes)
+    await fork_sources.follow_parent(session, row, governing)
+    if after:
+        await recorder.record_for_request(
+            session, "workspace.versioning.import_settings_updated", **recorder.data_source_target(row),
+            details={"from": before, "to": after})
+    return await _import_settings_view(row, graph_id)
 
 
 @router.get("/graphs/{graph_id}/imports/{job_id}")
