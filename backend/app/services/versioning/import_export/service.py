@@ -29,11 +29,11 @@ from ..job_lease import Draining, Lease, Superseded, friendly_infra_error, is_tr
 from ..models import BranchORM, GraphORM, ImportRowORM, JobORM, MergeRequestORM
 from ..service import AccessDenied, GraphVersioningService, NotUpToDate, Viewer
 from . import contract, stream
-from ..ids import new_entity_id, uuid_urn
+from . import identifier as identifiers
 from .export_worker import ExportWorker, example_template_records
 from .formats import get_adapter
 from .import_worker import ImportWorker, _normalize_page, _record_pages, lease_job
-from .resolve import _ALREADY_GONE, _STATUS, pointer_id, resolve_rows
+from .resolve import _ALREADY_GONE, _STATUS
 from .rowmodel import column_order
 from .runner import INSPECT_TYPES, JOB_TYPES, QUEUED, JobReaper
 from .snapshot import open_snapshot
@@ -76,15 +76,12 @@ def _refusal(exc: Exception) -> Dict[str, Any]:
 _VALIDATE_SAMPLE = 200
 
 
-def _named_by_pointer(row: Dict[str, Any], identity_prop: Optional[str]) -> bool:
-    """A node row named by a pointer that isn't kept: a urn, or identifier value, that isn't a
-    ``urn:uuid:`` (a free one is kept as the id)."""
-    held = (row.get("properties") or {}).get(identity_prop) if identity_prop else None
-    return any(v and not uuid_urn(str(v)) for v in (row.get("urn"), held))
-
-
 class DryRunTooLarge(ValueError):
     """A file larger than a dry run checks: import it into a draft instead."""
+
+
+class IdentityUnavailable(RuntimeError):
+    """The data source's node identity can't be read, so a dry run can't match as an import would."""
 
 
 def _label(row: Dict[str, Any]) -> Optional[str]:
@@ -157,6 +154,7 @@ class ImportExportService:
         name: Optional[str] = None,
         originating_view_id: Optional[str] = None,
         draft_visibility: Optional[str] = None,
+        identifier: Optional[str] = None,
     ) -> Dict[str, str]:
         """Open/append the working draft and create the import job.
 
@@ -183,6 +181,8 @@ class ImportExportService:
         """
         if branch_id == "main":
             raise MainWriteForbidden()
+        # What its rows find their entities by: the request's, else the platform's (identifier.py).
+        identifier = identifier or identifiers.platform_default()
 
         async def insert() -> Dict[str, str]:
             uri, draft_id = source_uri, branch_id
@@ -210,7 +210,7 @@ class ImportExportService:
                     reconcile_mode=reconcile_mode, import_format=import_format,
                     field_scope=field_scope, auto_publish=auto_publish,
                     source_uri=uri, idempotency_key=idempotency_key, status="pending",
-                    provenance=provenance.snapshot(),
+                    provenance=provenance.snapshot(), identity_strategy=identifier,
                 )
                 s.add(job)
                 await s.flush()
@@ -401,7 +401,7 @@ class ImportExportService:
                        "status": r.status, "matchedEntityId": r.matched_entity_id,
                        "label": (r.raw or {}).get("displayName") or (r.raw or {}).get("qualifiedName")
                                 or (r.raw or {}).get("urn") or "",
-                       "reasons": r.reasons or []} for r in rows]
+                       "reasons": r.reasons or [], "code": r.code} for r in rows]
         return {"job": job, "summary": job.get("summary"), "sample": sample,
                 "previewDownloadUrl": job.get("previewUri"),
                 "rejectedDownloadUrl": job.get("reportUri")}
@@ -449,7 +449,9 @@ class ImportExportService:
             ontology = await self._ontology_resolver(ws, ds)
         node_identity = None
         if self._identity_resolver is not None:
-            node_identity = await self._identity_resolver(ws, ds)
+            # Read, never guessed: a fault is waited out, then fails the job, resumably.
+            node_identity = await (lease.retry_transient(lambda: self._identity_resolver(ws, ds))
+                                   if lease is not None else self._identity_resolver(ws, ds))
         worker = ImportWorker(self._svc, self._store, scope=scope, ontology=ontology,
                               facts=bool(view_id and self._layout_writer is not None),
                               node_identity=node_identity)
@@ -928,8 +930,11 @@ class ImportExportService:
         from backend.app.services.node_identity import identity_property
         ontology = (await self._ontology_resolver(workspace_id, data_source_id)
                     if self._ontology_resolver is not None else None)
-        identity = (await self._identity_resolver(workspace_id, data_source_id)
-                    if self._identity_resolver is not None else None)
+        try:                        # a template or schema without it says less, and matches nothing
+            identity = (await self._identity_resolver(workspace_id, data_source_id)
+                        if self._identity_resolver is not None else None)
+        except Exception:
+            identity = None
         return ontology, identity_property(identity) if identity is not None else None
 
     async def build_template(self, *, export_format: str = "csv",
@@ -964,14 +969,16 @@ class ImportExportService:
 
     async def validate_import(self, *, graph_id: str, workspace_id: str,
                               data_source_id: Optional[str], branch_id: Optional[str],
-                              data: bytes, import_format: str) -> Dict[str, Any]:
+                              data: bytes, import_format: str,
+                              identifier: Optional[str] = None) -> Dict[str, Any]:
         """A dry run of importing ``data``: parsed, normalized and resolved against ``main`` (or
         the draft ``branch_id``) as an import resolves a window — the same matching, the same new
         ids, the same reasons a row is refused — and nothing written: no draft opened, no job
         made. One window at most (``IMPORT_COMMIT_WINDOW`` rows; ``ValueError`` past it): a larger
         file is imported into a draft, which is itself a dry run until published. Not run here:
         the write gate a strict graph applies at commit, and the deletions a ``replace`` would
-        make — the import's preview shows those."""
+        make — the import's preview shows those. ``identifier``: what its rows find their entities
+        by, as an import naming it would (:mod:`.identifier`); the platform's when None."""
         adapter = get_adapter(import_format)
 
         async def _chunks():
@@ -990,11 +997,17 @@ class ImportExportService:
                 raise DryRunTooLarge(f"a dry run checks up to {config.IMPORT_COMMIT_WINDOW:,} rows; "
                                      "import a larger file into a draft and read its preview")
         ontology, _identity = await self.contract_context(workspace_id, data_source_id)
-        node_identity = (await self._identity_resolver(workspace_id, data_source_id)
-                         if self._identity_resolver is not None else None)
+        try:
+            node_identity = (await self._identity_resolver(workspace_id, data_source_id)
+                             if self._identity_resolver is not None else None)
+        except Exception as exc:
+            raise IdentityUnavailable("the data source's node identity can't be read right now, "
+                                      "so rows can't be matched as an import would: try again "
+                                      "shortly") from exc
         branch = branch_id or await self._svc.main_branch_id(graph_id)
         snap = await open_snapshot(graph_id=graph_id, branch_id=branch_id)
         worker = ImportWorker(self._svc, self._store, ontology=ontology, node_identity=node_identity)
+        worker._identifier = identifier or identifiers.platform_default()
         await worker.validation_state(snap, graph_id, branch, rows)
         nodes = [r for r in rows if r["kind"] == "node"]
         edges = [r for r in rows if r["kind"] == "edge"]
@@ -1007,11 +1020,7 @@ class ImportExportService:
             lookups["edge_to_eid"] = more["edge_to_eid"]
             lookups["edge_eids"] = more["edge_eids"]
         lookups.update(created_from={}, keys=worker._keys)
-        scope = worker._id_scope
-        _ops, resolutions = await asyncio.to_thread(
-            resolve_rows, nodes + edges, lookups, mint_id=new_entity_id, ontology=ontology,
-            identity_prop=worker._identity_prop, mint_urn=lambda _etype: new_entity_id(),
-            derive_urn=lambda seed: pointer_id(scope, seed))
+        _ops, resolutions = await asyncio.to_thread(worker.resolve, nodes + edges, lookups)
         summary = {"new": 0, "updated": 0, "unchanged": 0, "deleted": 0, "invalid": 0,
                    "skipped": skipped}
         for res in resolutions:
@@ -1020,20 +1029,17 @@ class ImportExportService:
         changed = [res for res in resolutions if res["resolved_op"] != "unchanged"]
         sample = [{"rowIndex": res["_row_index"], "kind": by_index[res["_row_index"]]["kind"],
                    "op": res["resolved_op"], "matchedEntityId": res.get("matched_entity_id"),
-                   "label": _label(by_index[res["_row_index"]]), "reasons": res.get("reasons") or []}
+                   "label": _label(by_index[res["_row_index"]]), "reasons": res.get("reasons") or [],
+                   "code": res.get("code")}
                   for res in sorted(changed, key=lambda r: r["_row_index"])[:_VALIDATE_SAMPLE]]
-        named = sum(1 for res in resolutions if res["resolved_op"] == "create"
-                    and _named_by_pointer(by_index[res["_row_index"]], worker._identity_prop))
-        hints = [(f"{named} new {'node is' if named == 1 else 'nodes are'} named by a urn your file "
-                  "gives. A urn finds its node again on the next import but isn't stored, so "
-                  "exports and search show the node's urn:uuid; to see your own id, keep it in a "
-                  "property marked \"Match imports by this\".")] if named else []
+        hints: List[str] = []
         gone = sum(1 for res in resolutions if _ALREADY_GONE in (res.get("reasons") or ()))
         if gone:                             # unchanged, so not among the rows listed
             hints.append(f"{gone} delete {'row finds' if gone == 1 else 'rows find'} nothing to "
                          "delete: what they name isn't in the graph (deleted already, or never "
                          "there). They change nothing; check their names if you expected them to.")
         return {"format": import_format, "checkedAgainst": branch_id or "main",
+                "identifier": worker._identifier,
                 "schemaVersion": contract.FORMAT_VERSION, "summary": summary, "rows": sample,
                 "rowsTruncated": len(changed) > len(sample),
                 "unknownColumns": contract.unknown_columns(records), "hints": hints}
@@ -1062,6 +1068,8 @@ class ImportExportService:
                 "workspaceId": row.workspace_id, "dataSourceId": row.data_source_id,
                 "providerId": row.provider_id, "scopeViewId": row.scope_view_id,
                 "reconcileMode": row.reconcile_mode, "importFormat": row.import_format,
+                # What an import's rows find their entities by (identifier.py); None for others.
+                "identifier": row.identity_strategy if row.job_type == "ingest" else None,
                 "sourceUri": row.source_uri, "previewUri": row.preview_uri,
                 "reportUri": row.report_uri, "resultUri": row.result_uri,
                 "summary": row.summary, "errorMessage": row.error_message,

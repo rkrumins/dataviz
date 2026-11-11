@@ -3687,15 +3687,17 @@ async def _resolve_ontology_types(workspace_id, data_source_id):
 
 async def _resolve_node_identity_for_import(workspace_id, data_source_id):
     """The data source's resolved node-identity mapping for an import's writes (see
-    :func:`_node_identity_for_meta`). Runs in the worker's background context, so it opens its own
-    session; ``None`` — nothing bound — when it can't be read."""
+    :func:`_node_identity_for_meta`); ``None`` when it defines none. Runs in the worker's background
+    context, so it opens its own session. A mapping that can't be read raises, never reads as none:
+    an import that matched by urn alone because its identifier property was unknown would create
+    the nodes it should have found."""
+    from backend.app.db.engine import get_async_session
     try:
-        from backend.app.db.engine import get_async_session
         async with get_async_session() as session:
             return await _node_identity_for_meta(session, {"data_source_id": data_source_id})
     except Exception:
-        logger.exception("node-identity resolution failed for an import: nothing is bound")
-        return None
+        logger.exception("node-identity resolution failed for an import (ds=%s)", data_source_id)
+        raise
 
 
 async def _write_view_import_assignments(ws, ds, view_id, branch_id, created_nodes, batch_edges):
@@ -3835,6 +3837,23 @@ class CreateImportResponse(_ApiModel):
     status: str
 
 
+_IDENTIFIER = Query(None, description=(
+    "What the file's rows find their entities by: entity_id (the default: an entity id of the "
+    "graph, else the urn, the identifier property, a field its type matches imports by, then a "
+    "unique qualifiedName) or urn (an entity id, else the urn only). An entity's id never changes, "
+    "whichever it is"))
+
+
+def _identifier(value: Optional[str]) -> str:
+    """The import's identifier: the request's, checked (422 with the grammar), else the platform's."""
+    from backend.app.services.versioning.import_export import identifier as identifiers
+    try:
+        return identifiers.resolve(value)[0]
+    except identifiers.IdentifierError as exc:
+        raise HTTPException(status_code=422, detail={"type": "invalid_identifier",
+                                                     "message": str(exc)})
+
+
 @router.post("/graphs/{graph_id}/imports", response_model=CreateImportResponse, status_code=202)
 async def create_import(
     ws_id: str, graph_id: str,
@@ -3847,6 +3866,7 @@ async def create_import(
         "Makes the request safe to send again: the same key, from the same caller, answers "
         "with the job it started")),
     auto_publish: bool = _AUTO_PUBLISH,
+    identifier: Optional[str] = _IDENTIFIER,
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
     claims: PermissionClaims = Depends(get_permission_claims),
     meta: dict = Depends(graph_in_workspace),
@@ -3864,6 +3884,7 @@ async def create_import(
         get_adapter(format)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
+    identifier = _identifier(identifier)
     await _check_import_view(session, ws_id, view_id, user, claims)
     if auto_publish:
         await _may_auto_publish(session, claims, ws_id, meta, branch_id)
@@ -3876,7 +3897,8 @@ async def create_import(
                     workspace_id=ws_id, data_source_id=meta.get("data_source_id"), graph_id=graph_id,
                     actor=user.id, import_format=format, provider_id=meta.get("provider_id"),
                     branch_id=branch_id, reconcile_mode=reconcile_mode, scope_view_id=view_id,
-                    idempotency_key=key, auto_publish=auto_publish, draft_visibility=(
+                    idempotency_key=key, auto_publish=auto_publish, identifier=identifier,
+                    draft_visibility=(
                         await draft_level(session, meta.get("data_source_id")) if branch_id is None else None))
         except IntegrityError:
             # A request with the same key got there first: answer with its job.
@@ -4046,6 +4068,7 @@ async def complete_import_upload(
     branch_id: Optional[str] = Query(None, alias="branchId"),
     view_id: Optional[str] = Query(None, alias="viewId"),
     auto_publish: bool = _AUTO_PUBLISH,
+    identifier: Optional[str] = _IDENTIFIER,
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
     claims: PermissionClaims = Depends(get_permission_claims),
     meta: dict = Depends(graph_in_workspace),
@@ -4057,6 +4080,7 @@ async def complete_import_upload(
     time, or after an answer that was lost — answers with that import, and one whose completion
     broke off before it was queued is queued now."""
     from backend.app.services.versioning.import_export import uploads
+    identifier = _identifier(identifier)
     record = await _load_upload(ie, ws_id, graph_id, meta, upload_id, user)
     await _check_import_view(session, ws_id, view_id, user, claims)
     if auto_publish:
@@ -4075,7 +4099,7 @@ async def complete_import_upload(
                     actor=user.id, import_format=record["format"], provider_id=meta.get("provider_id"),
                     source_uri=uploads.record_key(record), branch_id=branch_id, reconcile_mode=reconcile_mode,
                     scope_view_id=view_id, idempotency_key=key, auto_publish=auto_publish,
-                    draft_visibility=(
+                    identifier=identifier, draft_visibility=(
                         await draft_level(session, meta.get("data_source_id")) if branch_id is None else None))
         except IntegrityError:
             # A completion sent at the same time got there first: answer with its import.
@@ -4210,6 +4234,7 @@ async def validate_import(
     ws_id: str, graph_id: str, request: Request,
     format: str = Query("ndjson"),
     branch_id: Optional[str] = Query(None, alias="branchId"),
+    identifier: Optional[str] = _IDENTIFIER,
     _user: User = Depends(requires(_READ, workspace="ws_id")),
     viewer: Viewer = Depends(viewer_ctx),
     meta: dict = Depends(graph_in_workspace),
@@ -4223,11 +4248,14 @@ async def validate_import(
     ``IMPORT_COMMIT_WINDOW`` rows; **413** past either). **422** when the file can't be read. A
     strict graph's write gate, which runs at commit, can still refuse a row that passes here."""
     from backend.app.services.versioning.import_export.formats import get_adapter
-    from backend.app.services.versioning.import_export.service import DryRunTooLarge
+    from backend.app.services.versioning.import_export.service import (
+        DryRunTooLarge, IdentityUnavailable,
+    )
     try:
         get_adapter(format)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
+    identifier = _identifier(identifier)
     body = bytearray()
     async for chunk in request.stream():
         body += chunk
@@ -4241,9 +4269,13 @@ async def validate_import(
     try:                                       # the draft is checked above: what is left is the file
         return await ie.validate_import(
             graph_id=graph_id, workspace_id=ws_id, data_source_id=meta.get("data_source_id"),
-            branch_id=branch_id, data=bytes(body), import_format=format.lower())
+            branch_id=branch_id, data=bytes(body), import_format=format.lower(),
+            identifier=identifier)
     except DryRunTooLarge as exc:
         raise HTTPException(status_code=413, detail={"type": "too_large", "message": str(exc)})
+    except IdentityUnavailable as exc:
+        raise HTTPException(status_code=503, headers={"Retry-After": "15"},
+                            detail={"type": "identity_unavailable", "message": str(exc)})
     except ValueError as exc:
         raise HTTPException(status_code=422, detail={"type": "invalid_file", "message": str(exc)})
 

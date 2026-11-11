@@ -1711,3 +1711,56 @@ async def test_the_rollup_state_migration_round_trips(store):
             await conn.run_sync(run("upgrade"))                     # idempotent
         finally:
             await trans.rollback()
+
+
+# ── import_rows.code (20261112_1300_gv_import_row_code) ──
+_IMPORT_ROW_CODE = _VERSIONS / "20261112_1300_gv_import_row_code.py"
+
+
+def test_the_import_row_code_is_declared_and_migrated():
+    assert models.ImportRowORM.__table__.c.code.nullable
+    migration = _migration(_IMPORT_ROW_CODE)
+    assert migration.revision == _IMPORT_ROW_CODE.stem and len(migration.revision) <= 32
+    assert migration.down_revision == "20261112_1200_gv_ps_rollup_state"
+
+
+async def _import_row_columns(conn) -> set:
+    return {r[0] for r in (await conn.execute(text(
+        "SELECT column_name FROM information_schema.columns "
+        "WHERE table_schema = :s AND table_name = 'import_rows'"), {"s": models._SCHEMA})).all()}
+
+
+@e2e
+async def test_a_store_alembic_never_reached_gets_the_import_row_code(store):
+    async with store.connect() as conn:
+        trans = await conn.begin()
+        try:
+            await conn.execute(text(f'ALTER TABLE "{models._SCHEMA}".import_rows DROP COLUMN code'))
+            await conn.run_sync(models._ensure_schema_upgrades)
+            assert "code" in await _import_row_columns(conn)
+            await conn.run_sync(models._ensure_schema_upgrades)        # and again: a no-op
+        finally:
+            await trans.rollback()
+
+
+@e2e
+async def test_the_import_row_code_migration_round_trips(store):
+    migration = _migration(_IMPORT_ROW_CODE)
+
+    def run(step):
+        def apply(sync_conn):
+            migration.op = SimpleNamespace(get_bind=lambda: sync_conn,
+                                           execute=lambda sql: sync_conn.execute(text(sql)))
+            getattr(migration, step)()
+        return apply
+
+    async with store.connect() as conn:
+        trans = await conn.begin()
+        try:
+            await conn.run_sync(run("downgrade"))
+            assert "code" not in await _import_row_columns(conn)
+            await conn.run_sync(run("upgrade"))
+            assert "code" in await _import_row_columns(conn)
+            await conn.run_sync(run("upgrade"))                     # idempotent
+        finally:
+            await trans.rollback()

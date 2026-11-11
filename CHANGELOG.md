@@ -96,6 +96,20 @@ integration's many small changes as a few commits.
     `quarantine`.
   - While any change is held, passes publish `unverified`.
   - `GRAPHVER_PROJECTION_QUARANTINE=0` restores the old behaviour.
+- **An import says what its rows find their entities by: `identifier`.** On `POST …/imports`,
+  `…/imports/uploads/{id}/complete` and `…/imports/validate`:
+  - `identifier=entity_id`, the default (`GRAPHVER_IMPORT_IDENTIFIER`): an entity id of the graph,
+    else the urn, the identifier property, a field the type matches imports by, then a unique
+    qualifiedName, as before;
+  - `identifier=urn`: an entity id of the graph, else the urn, and nothing else.
+
+  The job keeps it (`identifier` on the job), and a resumed job keeps it too. Anything else is
+  `422 invalid_identifier`, saying what it may be. Whichever it is, an entity's id never changes.
+- **Every refused import row carries a code** beside its reasons, in the preview and the dry run:
+  `no_key`, `two_entities`, `duplicate_value`, `changed_since_export`, `named_already`,
+  `invalid_type`, `missing_type`, `end_not_found`, `edge_moved`, `write_refused`, `invalid_row`
+  (and `already_gone` for a delete with nothing to delete). A client acts on the code instead of
+  parsing the words.
 - **Projection metrics** on the versioning worker's scrape endpoint (`:9100/metrics`):
   - `graphver_projection_passes_total{outcome}`;
   - per-statement durations and splits;
@@ -105,6 +119,17 @@ integration's many small changes as a few commits.
 
 ### Changed
 
+- **An imported node keeps the urn its file gives it.** It was stored under the id derived from
+  the urn, which became its urn too, so exports and search showed a `urn:uuid` instead of the
+  source's name. Its id is still derived from the urn, so a re-import finds it the same way. A node
+  given no urn, or a `urn:uuid` another entity holds, has its id as its urn, as before.
+- **A node row that names nothing a later import could find it by is refused** (`no_key`): only
+  the file's own `entity_id`, or only a unique field's value. It was created again by every import,
+  and a replace then deleted the one before it, so the node's history began again each run.
+- **An export's `urn:uuid` entity id is kept** as the new node's id when no entity of the graph
+  holds it, so an entity keeps one id from one environment to the next.
+- **A new imported edge's id is derived from its ends and type** (v5), where it was minted (v7): the
+  same edge sent again, from another file or draft, or after a delete, is the same edge.
 - **People publish past automation.** A draft behind Published publishes and merges without a pull
   when only automation moved Published (a service account, the platform, or any API key) and none
   of it touched what the draft changes, or met it at an edge.
@@ -191,6 +216,10 @@ integration's many small changes as a few commits.
   - On a customer's key, they are taken 20,000 node ids at a time.
   - A count that fails, which used to be recorded as a clean verify, now publishes as
     `unverified`, and the next pass verifies again.
+- **An import never matches by urn alone because the data source's identifier couldn't be read.**
+  A failure to read it read as "no identifier property", so rows that relied on it were created
+  again. The job now waits it out and fails, resumably, and a dry run answers `503
+  identity_unavailable` with `Retry-After`.
 - **A failed projection waits out its backoff before it is tried again.** A nudge from a publish,
   and `project_now`, used to retry at once and replay the whole window against a store that had
   just failed it; a rebuild still runs at once. `project_now` projects a window of up to 20,000
@@ -220,6 +249,13 @@ integration's many small changes as a few commits.
 
 ### Upgrading
 
+- **Two import changes an integration may notice:**
+  - A node row that gives only the file's own `entity_id` (no urn, identifier value, matching
+    field or qualifiedName) is refused with `no_key`, and so is an edge to it. Give such rows a urn.
+  - An imported node's urn is the one its file gave, not the derived id. A client that read a
+    node's urn as its id should read its `entity_id`.
+- Migration `20261112_1300_gv_import_row_code` adds `import_rows.code` (nullable text, no rewrite).
+  A separate `GRAPHVER_DB_URL` gets it at start-up.
 - Migration `20261112_1200_gv_ps_rollup_state` adds `projection_state.rollup_state` (nullable
   JSONB, no rewrite). A separate `GRAPHVER_DB_URL` gets it at start-up.
 - Migration `20261112_1100_gv_rollup_deltas` adds the table `graphver.rollup_deltas` (empty). A

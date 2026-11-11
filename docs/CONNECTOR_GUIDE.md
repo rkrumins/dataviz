@@ -123,7 +123,7 @@ connector written against it keeps working.
 | Columns | What they say |
 |---|---|
 | `kind` | `node` or `edge` |
-| `urn`, `entity_id` | Which node a row is, as a pointer ([§3](#3-identity-point-at-nodes-dont-name-them)) |
+| `urn`, `entity_id` | Which node a row is ([§3](#3-identity-point-at-nodes-dont-name-them)) |
 | `entityType` | A node's type, one the data source's ontology names. Needed to create a node |
 | `displayName`, `description`, `sourceSystem`, `layerAssignment` | A node's own fields |
 | `qualifiedName` | A node's qualified name. Where no `urn` matches, an import finds a node by it |
@@ -176,21 +176,24 @@ api GET "/api/v1/$WS/versioning/graphs/$GID/imports/schema" > import-record.json
 
 ## 3. Identity: point at nodes, don't name them
 
-The platform names every node itself (a `urn:uuid:`), so ids stay stable and opaque. A file's ids
-are **pointers**:
+The platform names every node itself (a `urn:uuid:`), so ids stay stable and opaque, and never
+change. A file's keys find those ids:
 
 - **`urn` is your system's name for the thing.** Use one that never changes, such as
-  `urn:acme:table:sales.orders`. The first import creates the node with an id derived from that
-  urn. Every later import finds it by the same urn, so re-running a file updates instead of
-  duplicating — whichever draft it goes to, in a fork, or after the graph is made again. The urn
-  is not stored on the node.
-- **The data source's identifier property** (`prop.<identifier>`) is a pointer too, for a source
-  identified by it. It is reserved: the node's identifier holds its platform urn.
-- **A `urn:uuid:` your system already gave the entity** is kept as its id. Use that when the same
-  entity must have the same id in several environments.
-- **`entity_id` is file-local.** It links rows of one file — an edge to a node row — and nothing
-  more, unless it is a node's real id, as in an export. A row that points by nothing else is
-  created again on every import.
+  `urn:acme:table:sales.orders`. The first import creates the node, keeping that urn, under an id
+  derived from it. Every later import finds it by the same urn, so re-running a file updates
+  instead of duplicating — whichever draft it goes to, in a fork, or after the graph is made again.
+- **Say what your rows are found by** with `identifier`: `identifier=entity_id` (the default)
+  tries an entity id of the graph, then the urn, the identifier property, a field its type matches
+  imports by, and a unique qualifiedName; `identifier=urn` takes the entity id or the urn and
+  nothing else, as a DataHub-style connector wants. A row the identifier can't find is created.
+- **The data source's identifier property** (`prop.<identifier>`) finds a node too, for a source
+  identified by it. It is reserved: the node's identifier holds its urn.
+- **A `urn:uuid:` your system already gave the entity** is kept as its id, given as its `urn` or
+  as its `entity_id`. Use that when the same entity must have the same id in several environments.
+- **`entity_id` is file-local** unless it is a node's real id, as in an export: it links rows of one
+  file — an edge to a node row — and nothing more. A node row that gives nothing else a later import
+  could find it by is refused (code `no_key`), rather than created again on every import.
 - **Keep your own key as a property** if people should see or search it: `prop.sap_id`. Mark the
   field "Match imports by this" in the ontology to match rows by it, and "Must be unique" to keep it
   unique.

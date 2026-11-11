@@ -583,6 +583,9 @@ class ImportRowORM(VersioningBase):
     resolved_op = Column(Text, nullable=True)             # create|update|delete|unchanged|invalid
     status = Column(Text, nullable=True)                  # new|updated|unchanged|deleted|invalid|auto_fixed
     reasons = Column(JSONB, nullable=True)                # violations / suggestions
+    # Why the row was refused, as a stable code a client acts on (resolve.CODES); the reasons say
+    # it in words (20261112_1300_gv_import_row_code).
+    code = Column(Text, nullable=True)
     content_hash = Column(Text, nullable=True)            # of the normalized payload
     base_content_hash = Column(Text, nullable=True)       # echoed OCC token from the file
 
@@ -912,6 +915,8 @@ def _ensure_schema_upgrades(conn) -> None:
                   lambda: ensure_ps_quarantine_column(conn), required=True)
     _bounded_step(conn, "projection_state.rollup_state was not added",
                   lambda: ensure_ps_rollup_state_column(conn), required=True)
+    _bounded_step(conn, "import_rows.code was not added",
+                  lambda: ensure_import_rows_code_column(conn), required=True)
     # 20261017_1550_gv_ps_fencing.
     _bounded_step(conn, "the projection fencing columns were not added",
                   lambda: ensure_ps_fencing_columns(conn), required=True)
@@ -1017,6 +1022,18 @@ def ensure_ps_quarantine_column(conn) -> None:
         return
     conn.execute(text(f'ALTER TABLE "{_SCHEMA}"."projection_state" '
                       "ADD COLUMN IF NOT EXISTS quarantine_next_at TEXT"))
+
+
+def ensure_import_rows_code_column(conn) -> None:
+    """Add ``import_rows.code``: why a staged row was refused, as a stable code, NULL for every row
+    staged before. Nullable with no default, so nothing is rewritten; a no-op without the table and
+    once the column is there."""
+    inspector = sa_inspect(conn)
+    if not inspector.has_table("import_rows", schema=_SCHEMA):
+        return
+    if "code" in {c["name"] for c in inspector.get_columns("import_rows", schema=_SCHEMA)}:
+        return
+    conn.execute(text(f'ALTER TABLE "{_SCHEMA}"."import_rows" ADD COLUMN IF NOT EXISTS code TEXT'))
 
 
 def ensure_ps_rollup_state_column(conn) -> None:

@@ -220,31 +220,47 @@ whole-state importer (~4.4 KB per entity) reached 1.4 GB.
 Each window goes through `resolve_rows` (`resolve.py`) — a **pure, deterministic** function (the id
 minter is injected) that returns `(ops, resolutions)`:
 
-- **Nodes** match an existing entity by **`entity_id` → its pointers → a field the type matches
-  imports by → `qualifiedName`** (rows that point by nothing; `_named`). A row's **pointers** are its
-  `urn` and its value of the data source's identifier property (`prop.<identifier>`), each also in
-  canonical form when it is a `urn:uuid:` (`pointers`). They are not stored: a pointer finds the node
-  that carries it as its urn, the node an earlier import derived its id from it (`pointer_id`), or,
-  for an identifier value given beside a different urn, the node a row of this job gave it to. Two
-  pointers that name two entities refuse the row, and so does a value several live entities carry.
-  No match ⇒ a **new node with one identity, the server's to decide**:
+- **What a row may name its entity by** is the import's **`identifier`** (`?identifier=` on
+  `POST …/imports`, `…/imports/uploads/{id}/complete` and `…/imports/validate`; kept on the job as
+  `jobs.identity_strategy`, and so by a resumed job; `identifier.py`). Unnamed, it is the platform's
+  `GRAPHVER_IMPORT_IDENTIFIER`, `entity_id` by default. Whichever it is, an entity's id never
+  changes: the identifier only says how a row finds it.
+
+  | `identifier` | A node row finds its entity by | An edge's end, by |
+  |---|---|---|
+  | `entity_id` (default) | its `entity_id` (this graph's) → its pointers → a field its type matches imports by → `qualifiedName` (a row with no urn) | `source_entity_id` → `sourceUrn` and `source.<identifier>` → `source.<key>` → `sourceQualifiedName` |
+  | `urn` | its `entity_id` (this graph's) → its `urn`; nothing else | `source_entity_id` → `sourceUrn` |
+
+  Any other `entity_id` is the file's own: it links the file's rows (an edge to a node) and nothing
+  more. A 422 (`invalid_identifier`) says what a request may name; `prop.<name>` is coming.
+- **Nodes** match an existing entity by that order (`_named`). A row's **pointers** are its `urn`
+  and its value of the data source's identifier property (`prop.<identifier>`), each also in
+  canonical form when it is a `urn:uuid:` (`pointers`). A pointer finds the node that carries it as
+  its urn, the node an earlier import derived its id from it (`pointer_id`), or, for an identifier
+  value given beside a different urn, the node a row of this job gave it to. Two pointers that name
+  two entities refuse the row, and so does a value several live entities carry.
+  No match ⇒ a **new node, its id the server's to decide**:
   1. the deleted node its pointer names, brought back;
-  2. else a free `urn:uuid:` the row brings, kept;
+  2. else a free `urn:uuid:` the row brings as its urn, or (by `entity_id`) as its `entity_id`, kept
+     as its id — an export's, from another environment, so an entity keeps one id everywhere;
   3. else `urn:uuid:` v5 of the graph's identity scope (the data source at the root of its fork
      lineage, `identity_scope`) and its first pointer, which a re-import derives again;
-  4. else (it points by nothing) a new `urn:uuid:` (a UUIDv7).
+  4. else, a row a later import still finds (by a `qualifiedName`, or a field its type matches
+     imports by), a new `urn:uuid:` (a UUIDv7).
 
-  That one value is the node's `entity_id`, its `urn` and (bound at the write) its identifier
-  property alike, as a canvas create's are ([18 · Identity](18-identity.md)). A matched row never
-  writes its pointers over the node's own urn or identifier. The row joins the window's indexes, and
-  — once its window commits — the job's, by the file's `entity_id` it came with and any second name,
-  whether it matched or made its node, so a later window's rows and edges (and those of the same
-  file imported again) find it.
-- **Edges** resolve each endpoint the same way (`entity_id` — an entity's, or the file's own id of a
-  node the job matched or created — → the pointers `urn` and `source.<identifier>` → `source.<key>`
-  → `qualifiedName`,
-  `_resolve_endpoint`) and key on the `(source_eid, target_eid, edge_type)` triple — the same keying
-  `sync_ingest` uses.
+  A row that names nothing a later import could find it by — only the file's own `entity_id`, or
+  only a unique field's value — is **refused** (`no_key`), rather than created again by every
+  import (and deleted by every replace). The new node **keeps the urn its row gives**; one that gives
+  none, or gives a `urn:uuid:` another entity holds (an id is never a second entity's urn), has its
+  id as its urn. Its identifier property holds the urn, bound at the write
+  ([18 · Identity](18-identity.md)). A matched row never writes over the node's own urn or
+  identifier. The row joins the window's indexes, and — once its window commits — the job's, by
+  the file's `entity_id` it came with and any second name, whether it matched or made its node, so a
+  later window's rows and edges (and those of the same file imported again) find it.
+- **Edges** resolve each endpoint as the table says (`_resolve_endpoint`) and key on the
+  `(source_eid, target_eid, edge_type)` triple — the same keying `sync_ingest` uses. A new edge's id
+  is `urn:uuid:` v5 of the identity scope, its ends' ids and its type (`edge_pointer_id`), so the
+  same edge sent again, from any file or draft, is the same edge.
 - **Team keys and unique fields** are flags on an entity type's fields in the ontology ("Match
   imports by this", "Must be unique"). The worker reads the values the file uses once a run and
   finds their holders in one pass over the draft's live nodes of those types (`KeyIndex`), so memory
@@ -256,8 +272,25 @@ The lookups by `qualifiedName`, and replace's check of which entities some row m
 indexes (migration `20260927_1000_import_indexes`).
 
 > **Invariant — partial acceptance.** An unresolvable or ontology-invalid row is **quarantined**
-> (`resolved_op = "invalid"` + a human reason), never aborting the batch (`resolve.py:14, 154-164`).
-> The tally lands on `job.summary` and the reasons on the `import_rows` row.
+> (`resolved_op = "invalid"` + a human reason), never aborting the batch. The tally lands on
+> `job.summary`, and the reasons and a stable **`code`** on the `import_rows` row; the preview and
+> the dry run return both.
+>
+> | `code` | The row was refused because |
+> |---|---|
+> | `no_key` | it names nothing a later import could find it by again |
+> | `two_entities` | the keys it gives name two different entities |
+> | `duplicate_value` | a value it is matched by, or must keep unique, is held by another entity |
+> | `named_already` | an earlier row of the file names the same entity, and says otherwise |
+> | `changed_since_export` | its entity changed since the file was exported, in the same field |
+> | `invalid_type` / `missing_type` | its type isn't one the ontology defines / a new one has none |
+> | `end_not_found` | an end of the edge names no node |
+> | `edge_moved` | its ends or type differ from the edge its `entity_id` names |
+> | `write_refused` | the graph's write gate refused it |
+> | `invalid_row` | the record can't be read as a node or an edge |
+>
+> `already_gone` marks a delete of what the graph doesn't hold: it changes nothing and is not
+> refused.
 
 ### 3c. Apply
 
@@ -480,8 +513,8 @@ Two mechanisms deliver it.
   *field*, not an identity, so a rename doesn't fork the entity. A matched node keeps its own urn.
   Since a new node's id is derived from its pointer, re-importing the same file — or an export,
   whose rows carry the nodes' own ids — updates the nodes it created instead of adding them again.
-  A row that points by nothing but the file's own `entity_id` is created again. (Glossary:
-  `entity_id` in [`README.md`](README.md).)
+  A row that points by nothing but the file's own `entity_id` is refused (`no_key`) rather than
+  created again. (Glossary: `entity_id` in [`README.md`](README.md).)
 - **Type-tolerant, field-level diff.** `_changed_fields` / `_changed_props` (`resolve.py:41-84`)
   compare each provided field against the current stored value with `_scalar_eq`
   (`resolve.py:31-38`), which treats `5 == "5"` and `True == "True"` — essential because CSV
@@ -513,9 +546,9 @@ with its reason; none is applied or dropped in silence.
   Tags merge as a set. A stale `_op=delete` is refused. A row with no `baseVersion` (a script's)
   sets what it carries, as before; so does one whose version the graph doesn't hold (another
   graph's export).
-- **A pointer is never stored.** A matched row whose `urn` or identifier value names nothing gets a
-  note, *"urn '…' isn't stored: an import never changes a node's urn"*, and its other edits apply.
-  One that names another entity refuses the row.
+- **An import never re-keys a node.** A matched row whose `urn` or identifier value names nothing
+  gets a note, *"urn '…' isn't stored: an import never changes a node's urn"*, and its other edits
+  apply. One that names another entity refuses the row (`two_entities`).
 - **An exported edge keeps its ends.** An edge row whose `entity_id` is a live edge, but whose ends
   or type resolve to another triple, is refused rather than added as a second edge. To re-point an
   edge, delete its row and add a new one. A row whose ends match updates that edge, even beside a

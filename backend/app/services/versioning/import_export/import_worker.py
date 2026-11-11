@@ -57,13 +57,14 @@ from sqlalchemy.dialects.postgresql import ARRAY
 from backend.app.services.view_placement import NodeFacts, suggest_placement
 
 from .. import config, db
-from ..ids import new_entity_id
+from ..ids import new_entity_id, uuid_urn
 from ..job_lease import QUEUED, Lease, Superseded
 from ..models import BranchORM, EdgeVersionORM, ImportRowORM, JobORM, NodeVersionORM
 from ..service import OntologyViolation
+from . import identifier as identifiers
 from .formats import get_adapter
-from .resolve import (KeyIndex, _canonical_map, key_value, pointer_id, pointer_seed, pointers,
-                      resolve_rows)
+from .resolve import (KeyIndex, _canonical_map, edge_pointer_id, key_value, pointer_id,
+                      pointer_seed, pointers, resolve_rows)
 from .rowmodel import PROP_DELETE, normalize
 from .snapshot import open_snapshot
 from .stream import view_entities
@@ -76,11 +77,13 @@ _PERSIST_BATCH = 5000
 # Record a batch of resolutions: each column one array parameter, so the statement never changes.
 _RESOLVE_ROWS = text(
     f"UPDATE {ImportRowORM.__table__.fullname} AS r SET matched_entity_id = v.eid, resolved_op = v.op, "
-    "status = v.status, reasons = v.reasons::jsonb "
-    "FROM unnest(:idx, :eids, :ops, :statuses, :reasons) AS v(row_index, eid, op, status, reasons) "
+    "status = v.status, reasons = v.reasons::jsonb, code = v.code "
+    "FROM unnest(:idx, :eids, :ops, :statuses, :reasons, :codes) "
+    "AS v(row_index, eid, op, status, reasons, code) "
     "WHERE r.job_id = :job_id AND r.row_index = v.row_index",
 ).bindparams(bindparam("idx", type_=ARRAY(BigInteger)),
-             *(bindparam(name, type_=ARRAY(Text)) for name in ("eids", "ops", "statuses", "reasons")))
+             *(bindparam(name, type_=ARRAY(Text))
+               for name in ("eids", "ops", "statuses", "reasons", "codes")))
 # A node row's resolutions that leave it naming a node later rows may point at.
 _LANDED = ("create", "update", "unchanged")
 # What an import's summary tallies, per row by its resolution (``deleted`` also counts what a
@@ -367,6 +370,8 @@ class ImportWorker:
         self._keys: Optional[KeyIndex] = None
         self._canon: Dict[str, str] = _canonical_map((ontology or {}).get("node_types"))
         self._identity_read = False
+        # What the job's rows find their entities by (identifier.py): the job's, once it is read.
+        self._identifier: str = identifiers.platform_default()
         # Reconciling in memory: the file (read again for the edges), and per pass ("node",
         # "edge") what its rows have named — only for a pass this run started — whether it is still
         # deciding, and how many rows it decided and found unchanged.
@@ -382,6 +387,7 @@ class ImportWorker:
         self._lease = lease or await lease_job(job_id)
         job = await self._job(job_id)
         graph_id, branch_id = job["graph_id"], job["branch_id"]
+        self._identifier = job.get("identifier") or identifiers.platform_default()
         actor = await self._branch_owner(graph_id, branch_id)
         self._source = (job["source_uri"], job["import_format"])
 
@@ -404,7 +410,7 @@ class ImportWorker:
                 raise ValueError(f"unknown import job {job_id}")
             return {"graph_id": row.graph_id, "branch_id": row.branch_id,
                     "source_uri": row.source_uri, "import_format": row.import_format,
-                    "reconcile_mode": row.reconcile_mode}
+                    "reconcile_mode": row.reconcile_mode, "identifier": row.identity_strategy}
 
     async def _position(self, job_id: str) -> _Position:
         """Where the job has got, read afresh by every unit of work: a unit retried after a fault
@@ -618,11 +624,7 @@ class ImportWorker:
             return [], rows
         lookups = await (self._node_lookups if kind == "node" else self._edge_lookups)(snap, rows)
         lookups.update(created_from=self._created_from, keys=self._keys, earlier={})
-        scope = self._id_scope
-        _ops, resolutions = await asyncio.to_thread(
-            resolve_rows, rows, lookups, mint_id=new_entity_id, ontology=self._ontology,
-            identity_prop=self._identity_prop, mint_urn=lambda _etype: new_entity_id(),
-            derive_urn=lambda seed: pointer_id(scope, seed))
+        _ops, resolutions = await asyncio.to_thread(self.resolve, rows, lookups)
         by_index = {res["_row_index"]: res for res in resolutions}
         slim, whole = [], []
         for row in rows:
@@ -678,6 +680,8 @@ class ImportWorker:
                   "status": res["status"]}
         if res["reasons"]:
             staged["reasons"] = res["reasons"]
+        if res.get("code"):
+            staged["code"] = res["code"]
         return staged
 
     async def _stage_edges(self, job_id: str, snap, graph_id: str, branch_id: str, resume: int) -> None:
@@ -768,12 +772,7 @@ class ImportWorker:
         lookups = await (self._node_lookups if kind == "node" else self._edge_lookups)(snap, rows)
         lookups.update(created_from=self._created_from, keys=self._keys,
                        earlier=await self._earlier(job_id, kind, rows[0]["_row_index"], lookups))
-        scope = self._id_scope
-        ops, resolutions = await asyncio.to_thread(       # a window of pure-Python matching
-            resolve_rows, rows, lookups, mint_id=new_entity_id,     # a urn:uuid (UUIDv7) each
-            ontology=self._ontology, identity_prop=self._identity_prop,
-            mint_urn=lambda _etype: new_entity_id(),
-            derive_urn=lambda seed: pointer_id(scope, seed))
+        ops, resolutions = await asyncio.to_thread(self.resolve, rows, lookups)  # pure Python
         processed = pos.processed + len(rows)
 
         async def on_commit(s) -> None:
@@ -791,6 +790,18 @@ class ImportWorker:
         if kind == "node":
             self._remember_created(rows, ops, resolutions)
         return True
+
+    def resolve(self, rows, lookups) -> Tuple[List[dict], List[dict]]:
+        """:func:`resolve_rows` as this job resolves a batch: by its identifier, through its
+        ontology's gate, a new node's id derived from its key in the graph's identity scope (else a
+        urn:uuid minted, v7), a new edge's from its ends and type."""
+        scope = self._id_scope
+        return resolve_rows(
+            rows, lookups, mint_id=new_entity_id, ontology=self._ontology,
+            identity_prop=self._identity_prop, mint_urn=lambda _etype: new_entity_id(),
+            derive_urn=lambda seed: pointer_id(scope, seed),
+            derive_edge=lambda source, target, etype: edge_pointer_id(scope, source, target, etype),
+            identifier=self._identifier)
 
     async def _identity_state(self, job_id: str, snap, graph_id: str, branch_id: str) -> None:
         """What every window resolves new nodes and named ends against, read once a run (a resumed
@@ -994,8 +1005,11 @@ class ImportWorker:
             named |= {e for r in rows if (e := self._keys.node(
                 self._canon.get(str(r.get("entityType") or "").lower(), r.get("entityType")),
                 r.get("properties"))[0])}
+        # And a urn:uuid entity_id no live node holds, which a create may keep as its id.
+        own_ids = {u for r in rows if (u := uuid_urn(r.get("entity_id"))) and u not in by_id}
         taken, restore = await self._svc.identities_taken(
-            graph_id=self._graph_id, branch_id=self._branch_id, names=wanted - set(urn_to_eid))
+            graph_id=self._graph_id, branch_id=self._branch_id,
+            names=(wanted - set(urn_to_eid)) | own_ids)
         current, hash_of = await _heads(snap, "node", named)
         return {"urn_to_eid": urn_to_eid, "qname_to_eid": qname_to_eid, "node_eids": named,
                 "current": current, "hash_of": hash_of,
@@ -1130,7 +1144,8 @@ class ImportWorker:
                 "job_id": job_id, "idx": [r["_row_index"] for r in chunk],
                 "eids": [r["matched_entity_id"] for r in chunk],
                 "ops": [r["resolved_op"] for r in chunk], "statuses": [r["status"] for r in chunk],
-                "reasons": [json.dumps(r["reasons"]) if r["reasons"] else None for r in chunk]})
+                "reasons": [json.dumps(r["reasons"]) if r["reasons"] else None for r in chunk],
+                "codes": [r.get("code") for r in chunk]})
 
 
 async def _analyze_graph(graph_id: str) -> None:
@@ -1207,7 +1222,7 @@ def _quarantine(ops: List[dict], resolutions: List[dict], violations) -> Optiona
         if eid in reasons and res["resolved_op"] in ("create", "update", "delete"):
             created = res["resolved_op"] == "create"       # a minted id names nothing now
             res.update(resolved_op="invalid", status="invalid", reasons=reasons[eid],
-                       matched_entity_id=None if created else eid)
+                       matched_entity_id=None if created else eid, code="write_refused")
     return [op for op in ops if op["entity_id"] not in reasons]
 
 

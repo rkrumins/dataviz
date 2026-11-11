@@ -115,8 +115,10 @@ for one item, or an edge whose ends you changed, are refused the same way. To
 point an edge somewhere else, delete its row (set `_op` to `delete`) and add a
 new one.
 
-A `urn` you give a new item finds it again on the next import, but isn't kept
-on the item. To see your own id on it, put the id in a property too.
+A `urn` you give a new item is kept on it, and finds it again on the next
+import. A new row needs one: a row with only an `entity_id` you made up for the
+file is refused, because the next import couldn't find what it made and would
+make it again.
 
 ### Choosing a reconcile mode
 

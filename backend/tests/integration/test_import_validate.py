@@ -63,11 +63,20 @@ async def _run(svc) -> None:
     assert rows[1]["op"] == "create" and rows[1]["matchedEntityId"] == pointer_id(ds, "urn:li:new"), \
         "the id an import would give it"
     assert rows[2]["op"] == "invalid" and "not a valid entity type" in rows[2]["reasons"][0]
+    assert rows[2]["code"] == "invalid_type" and rows[1]["code"] is None
     assert rows[3]["op"] == "create" and rows[3]["kind"] == "edge", "an edge to a node made above it"
     assert out["unknownColumns"] == ["prop_owner"] and out["checkedAgainst"] == "main"
-    # The new node is named by a urn it won't carry: the dry run says so, and what to do instead.
-    assert len(out["hints"]) == 1 and out["hints"][0].startswith("1 new node is named by a urn")
+    assert out["identifier"] == "entity_id" and out["hints"] == [], out["hints"]
     assert await _counts(gid) == before, "no job, no draft, no commit"
+
+    # By urn alone, a row a qualifiedName names is refused: the same file, read as that import would.
+    by_name = _ndjson({"kind": "node", "qualifiedName": "db.a", "entityType": "Table"},
+                      {"kind": "node", "urn": "urn:A", "entityType": "Table", "displayName": "A"})
+    strict = await ie.validate_import(graph_id=gid, workspace_id="ws1", data_source_id=ds,
+                                      branch_id=None, data=by_name, import_format="ndjson",
+                                      identifier="urn")
+    assert strict["identifier"] == "urn" and [(r["rowIndex"], r["code"]) for r in strict["rows"]] == [
+        (0, "no_key")], strict["rows"]
 
     # Against a draft that already renamed A, the same row changes nothing.
     draft = await svc.open_draft(graph_id=gid, owner="u")

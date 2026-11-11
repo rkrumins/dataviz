@@ -445,6 +445,10 @@ def object_store_s3() -> dict:
 # window is also what a resumed import redoes at most, and what the job's lease waits out before a
 # stopping worker hands the job back — so a few seconds of work, not minutes.
 IMPORT_COMMIT_WINDOW: int = int(os.getenv("IMPORT_COMMIT_WINDOW", "10000"))
+# What an import's rows find their entities by when the request names nothing (``identifier``):
+# ``entity_id`` (an entity id of the graph, else the urn, the identifier property, a field a type
+# matches imports by, then a unique qualifiedName), or ``urn`` (an entity id, else the urn only).
+IMPORT_IDENTIFIER: str = os.getenv("GRAPHVER_IMPORT_IDENTIFIER", "entity_id")
 # Rows returned inline in a preview before the full diff must be downloaded.
 PREVIEW_SAMPLE_LIMIT: int = int(os.getenv("IMPORT_PREVIEW_SAMPLE_LIMIT", "200"))
 # Two-tier threshold: imports at/below this stage client-side (existing Review & Save); above
