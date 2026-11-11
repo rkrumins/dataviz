@@ -139,6 +139,8 @@ The API server: what it accepts and serves, and which part of the backend each p
 | `API_DOCS_ENABLED` | (empty) | Serve the interactive API docs and schema (`/docs`, `/redoc`, `/openapi.json`) even with `ENV=production`: `true`, `1` or `yes`. Outside production they are always served. | `backend/app/main.py` |
 | `CORS_ALLOWED_ORIGINS` | (empty) | Browser origins allowed to call the API with credentials, comma-separated, for example `https://lineage.example.com`. The CSRF check trusts the same list. Unset, only `http://localhost:3000` and `http://localhost:5173` are allowed. | `backend/app/main.py`, `backend/auth_service/csrf.py` |
 | `ENV` | `dev` | Deployment type. `production` (or `prod`) turns on the safeguards listed under [Must set in production](#must-set-in-production); any other value relaxes them for local work. | `backend/app/auth/dependencies.py`, `backend/app/db/repositories/connection_repo.py`, `backend/app/main.py` +4 more |
+| `IMPORT_UPLOAD_CONCURRENCY` | `8` | Import files one API process takes in at once — sent whole, or as an upload's parts. Each holds little memory, but writes to the object store as fast as it arrives, and one sent whole holds its slot until it is in. One beyond waits up to 30 s for a slot, then is told to retry (`429`, `Retry-After: 15`) before any of it is read. The fleet takes up to this × processes at once: size it to what the object store (the database, when `OBJECT_STORE_BACKEND=database`) can write, not up with the number of uploaders. | `backend/app/api/v1/endpoints/versioning.py` |
+| `MAX_IMPORT_BODY_BYTES` | `104857600` | The body-size cap on the other routes that take large bodies (the rest of `/versioning/`, `/graph/save`, the view-file routes). An import's file is held to `IMPORT_MAX_BYTES` instead. | `backend/app/main.py` |
 | `SYNODIC_ROLE` | (empty) / `dev` / — *(differs by call site)* | What this process runs: `web` (the API), `worker` (aggregation jobs), `controlplane` (scheduling and recovery) or `dev` (everything in one process, the default). Any role other than `dev` also makes the API write JSON logs. | `backend/app/jobs/metrics_prometheus.py`, `backend/app/middleware/logging.py`, `backend/app/runtime/role.py` |
 
 ### Internal tuning
@@ -607,6 +609,8 @@ Drafts and commits, projection into the graph store, and import and export.
 | `GRAPHVER_PROJECTION_WAIT_REPLICAS` | `0` | Replicas that must confirm a versioned graph's projection before reads are served from it. Fewer within `GRAPHVER_PROJECTION_WAIT_MS` hold it back as `replica_unconfirmed` and retry later. `0` waits for none; set it the same on the API and the versioning worker, which both project. | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_REVISION_REWIND_MAX` | `100000` | Entities the published graph may have changed since a past revision for that revision to open on the canvas (the revision history viewer, behind the `revisionViewerEnabled` preview). A revision is the graph as it is now with what changed since put back, so opening one costs what changed since, never the graph: about 1.2 KB an entity in each web process that reads it, 2 to 4 s to build at the default, 100,000. A revision further back answers 409 `revision_too_far`; its change list, a comparison and an export still reach it. | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_TRANSFER_INPROCESS` | — | No longer read: import, export and publish jobs always run on the versioning worker's transfer lane (`GRAPHVER_WORKER_LANES`). A process that still finds it set logs a warning; remove it. | `backend/app/services/versioning/config.py` |
+| `IMPORT_MAX_BYTES` | `10737418240` | The most one import can be, for a file read a row at a time (NDJSON, CSV, TSV): what an upload may declare, and the body-size cap on the two routes a file comes in on (`…/imports`, and `…/imports/uploads/{id}/parts/{n}`, which may carry the whole file). The frontend's nginx and the Helm ingress allow 10 GiB on those routes: raise them with it. | `backend/app/services/versioning/import_export/uploads.py` |
+| `IMPORT_WHOLE_FILE_MAX_BYTES` | `104857600` | The most one JSON or Excel import can be. Those are read whole, into the worker's memory, so they stay small; a larger file is NDJSON or CSV. | `backend/app/services/versioning/import_export/uploads.py` |
 
 ### Internal tuning
 
@@ -709,14 +713,11 @@ Drafts and commits, projection into the graph store, and import and export.
 | `GRAPH_EXPORT_PLAN_BUDGET_SECS` | `20` | `backend/app/services/versioning/import_export/stream.py` |
 | `GRAPH_EXPORT_SLOT_WAIT_SECS` | `900` | `backend/app/services/versioning/import_export/stream.py` |
 | `IMPORT_COMMIT_WINDOW` | `10000` | `backend/app/services/versioning/config.py` |
-| `IMPORT_MAX_BYTES` | `10737418240` | `backend/app/services/versioning/import_export/uploads.py` |
 | `IMPORT_MAX_ROWS` | `0` | `backend/app/services/versioning/config.py` |
 | `IMPORT_PREVIEW_SAMPLE_LIMIT` | `200` | `backend/app/services/versioning/config.py` |
 | `IMPORT_STAGING_GC_DAYS` | `7` | `backend/app/services/versioning/config.py` |
 | `IMPORT_STORE_ROOT` | `/tmp/synodic-import-store` | `backend/app/services/versioning/config.py` |
-| `IMPORT_WHOLE_FILE_MAX_BYTES` | `104857600` | `backend/app/services/versioning/import_export/uploads.py` |
 | `INLINE_IMPORT_MAX` | `5000` | `backend/app/services/versioning/config.py` |
-| `MAX_IMPORT_BODY_BYTES` | `104857600` | `backend/app/main.py`, `backend/app/services/versioning/import_export/uploads.py` |
 | `OBJECT_STORE_BACKEND` | `database` | `backend/app/services/versioning/config.py` |
 | `OBJECT_STORE_S3_ADDRESSING` | `auto` | `backend/app/services/versioning/config.py` |
 | `OBJECT_STORE_S3_BUCKET` | (empty) | `backend/app/services/versioning/config.py` |

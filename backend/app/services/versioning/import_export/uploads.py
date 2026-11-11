@@ -4,7 +4,9 @@ A multi-GB file can't be one request: it would outlast the proxies and timeouts 
 dropped connection would start it over. So the dialog asks for an upload (the file's name, size and
 format), sends the file ``PART_BYTES`` at a time (or the ``partBytes`` a client asked for, to send
 parts of its own size), several parts at once and in any order, and asks
-which parts arrived to resume after a failure or a reload. Each part is written once, as its own
+which parts arrived to resume after a failure or a reload. A client may instead send a run of parts
+in one request, up to the whole file: it is cut into its parts as it arrives (:func:`put_part`).
+Each part is written once, as its own
 object, so a store on a bucket's mount never appends or renames. Completing the upload starts the
 import, which reads the parts in order as one stream (:func:`open_source`). Parts are swept with
 every other artifact after ``OBJECT_STORE_TTL_HOURS``, so an upload has a day to finish.
@@ -43,10 +45,10 @@ from ..models import JobORM
 #: Bytes per part: small enough to cross a slow link inside the API's 120 s request timeout.
 PART_BYTES = 16 * 1024 * 1024
 #: The part sizes a client may ask for instead. At least 5 MiB, S3's own floor for a part, so a
-#: 10 GiB file is at most 2,048 parts. At most the largest body the API takes on an import route
-#: (``MAX_IMPORT_BODY_BYTES``, the setting main.py's body-size cap reads), so a part always gets in.
+#: 10 GiB file is at most 2,048 parts. At most 100 MiB: a part is what a dropped connection costs,
+#: and a client that would send more at once sends a run of parts in one request.
 MIN_PART_BYTES = 5 * 1024 * 1024
-MAX_PART_BYTES = int(os.getenv("MAX_IMPORT_BODY_BYTES", str(100 * 1024 ** 2)))
+MAX_PART_BYTES = 100 * 1024 * 1024
 #: Parts looked up at once to find which arrived: thousands of parts take seconds, not minutes,
 #: and one request holds only a few of the database's connections.
 _STAT_CONCURRENCY = 8
@@ -209,43 +211,100 @@ async def load(store, *, workspace_id: str, data_source_id: Optional[str], graph
 
 
 def _wrong_size(record: Dict[str, Any], n: int, got: str) -> str:
-    """Why part ``n`` was refused (``got``: what came instead), and how the file is split — and, for
-    an import's upload, how to ask for parts of another size (a package's takes no ``partBytes``)."""
-    why = (f"Part {n} must hold exactly {part_size(record, n)} bytes, and {got}. This upload splits "
-           f"the file into {record['parts']} parts of partBytes ({record['partBytes']}) bytes, the last "
-           "holding the rest: part n is the file's bytes from n × partBytes, sent as the raw request body.")
+    """Why a body sent to part ``n`` was refused (``got``: what came instead), and how the file is
+    split — and, for an import's upload, how to ask for parts of another size (a package's takes no
+    ``partBytes``)."""
+    pb = record["partBytes"]
+    if n == record["parts"] - 1:
+        must = f"Part {n} must hold exactly {part_size(record, n)} bytes, the rest of the file"
+    else:
+        must = (f"Part {n} must hold exactly {pb} bytes, or run on from it to the end of a later part "
+                f"(a multiple of {pb} bytes) or of the file ({record['size'] - n * pb} bytes)")
+    why = (f"{must}, and {got}. This upload splits the file into {record['parts']} parts of partBytes "
+           f"({pb}) bytes, the last holding the rest: part n starts at byte n × partBytes of the file, "
+           "sent as the raw request body.")
     if _PACKAGE_ID.match(record["uploadId"]):
         return why
     return (f"{why} To send parts of another size, start the upload with that partBytes "
             f"({_mb(MIN_PART_BYTES)} to {_mb(MAX_PART_BYTES)}).")
 
 
-async def _exactly(chunks: AsyncIterator[bytes], limit: int, refusal: str) -> AsyncIterator[bytes]:
-    """Pass ``chunks`` through, refusing more than ``limit`` bytes as soon as they arrive."""
-    seen = 0
-    async for chunk in chunks:
-        seen += len(chunk)
-        if seen > limit:
-            raise UploadError(refusal)
-        yield chunk
+def _ends_on_a_part(record: Dict[str, Any], n: int, length: int) -> bool:
+    """Whether a body of ``length`` bytes sent to part ``n`` ends where a part does."""
+    end = n * record["partBytes"] + length
+    return length > 0 and (end == record["size"] or (end < record["size"] and end % record["partBytes"] == 0))
+
+
+class _Body:
+    """A request body taken a part at a time: :meth:`part` yields its next ``size`` bytes (fewer if
+    it ends first), and :meth:`more` says whether any of it is left. It holds one chunk at most."""
+
+    def __init__(self, chunks: AsyncIterator[bytes]) -> None:
+        self._chunks = chunks.__aiter__()
+        self._held = b""
+        self._ended = False
+
+    async def more(self) -> bool:
+        while not self._held and not self._ended:
+            try:
+                self._held = await self._chunks.__anext__()
+            except StopAsyncIteration:
+                self._ended = True
+        return bool(self._held)
+
+    async def part(self, size: int) -> AsyncIterator[bytes]:
+        while size and await self.more():
+            chunk, self._held = self._held[:size], self._held[size:]
+            size -= len(chunk)
+            yield chunk
 
 
 async def put_part(store, record: Dict[str, Any], n: int, chunks: AsyncIterator[bytes], *,
                    declared: Optional[int] = None) -> int:
-    """Store part ``n``, replacing any earlier try. It must hold exactly its share of the file: a
-    request that says it holds another (``declared``, its Content-Length) is refused before any of
-    it is read or stored, and one that sends another is refused as soon as that shows."""
+    """Store part ``n`` — and the parts after it, when the body runs on, each as its bytes arrive —
+    replacing any earlier try. Returns the bytes stored.
+
+    The body is the file's bytes from part ``n``'s start: exactly part ``n``, or on to the end of a
+    later part or of the file, so one request can carry the whole file (to part 0), or the rest of
+    it from the first part missing. One that says it ends anywhere else (``declared``, its
+    Content-Length) is refused before any of it is read. One that does end anywhere else, or runs
+    past the file, is refused once that shows, and none of it is kept. One cut off — the client
+    went away, or stopped sending — keeps the parts it brought whole: send the rest from the first
+    one missing."""
     if not 0 <= n < record["parts"]:
         raise UploadError(f"This upload has parts 0 to {record['parts'] - 1}; there is no part {n}.")
-    expected = part_size(record, n)
-    if declared is not None and declared != expected:
+    if declared is not None and not _ends_on_a_part(record, n, declared):
         raise UploadError(_wrong_size(record, n, f"this request's body is {declared} bytes"))
-    key = upload_key(record, f"part-{n:05d}")
-    stat = await store.put_stream(key, _exactly(chunks, expected, _wrong_size(record, n, "more arrived")))
-    if stat.size != expected:
-        await store.delete(key)
-        raise UploadError(_wrong_size(record, n, f"{stat.size} arrived") + " Send it again.")
-    return stat.size
+    body, written, stored = _Body(chunks), [], 0
+    try:
+        for k in range(n, record["parts"]):
+            expected = part_size(record, k)
+            key = upload_key(record, f"part-{k:05d}")
+            stat = await store.put_stream(key, body.part(expected))
+            written.append(key)
+            if stat.size != expected:
+                if k == n:
+                    raise UploadError(_wrong_size(record, n, f"{stat.size} arrived") + " Send it again.")
+                raise UploadError(_wrong_size(record, n, f"the body ended {stat.size} bytes into part {k}"))
+            stored += stat.size
+            if not await body.more():
+                return stored
+        raise UploadError(_wrong_size(record, n, "more arrived than the file holds from there"))
+    except UploadError:
+        for key in written:             # the body as a whole was wrong: none of it is kept
+            await store.delete(key)
+        raise
+
+
+async def within_limit(chunks: AsyncIterator[bytes], fmt: str) -> AsyncIterator[bytes]:
+    """An import's file sent in one request, refused (413) as soon as it passes what one import of
+    ``fmt`` can be: a body with no Content-Length (chunked) is held to that too."""
+    cap, seen = limit_for(fmt), 0
+    async for chunk in chunks:
+        seen += len(chunk)
+        if seen > cap:
+            raise UploadError(too_large(seen, fmt), 413)
+        yield chunk
 
 
 async def received(store, record: Dict[str, Any]) -> List[int]:

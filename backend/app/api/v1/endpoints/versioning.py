@@ -26,6 +26,7 @@ import dataclasses
 import inspect
 import json
 import logging
+import os
 from contextlib import contextmanager
 from datetime import datetime
 from typing import Annotated, Any, Dict, List, Literal, Optional, Union
@@ -48,6 +49,7 @@ from backend.app.api.v1.versioning_gate import (SyncOverrides, fork_write_gate, 
                                                 sync_override_gate)
 from backend.app.auth import api_key_auth, api_key_errors
 from backend.app.auth.dependencies import get_current_user, get_permission_claims, requires
+from backend.app.common.bulkhead import Bulkhead
 from backend.app.db.engine import get_db_session
 from backend.app.db.repositories import (api_key_repo, data_source_repo, group_repo, notification_repo,
                                          provider_repo, service_account_repo, user_repo)
@@ -3836,27 +3838,38 @@ async def create_import(
             if job is None:
                 raise
         else:
-            return await _store_and_start(ie, request, created["job_id"], created["branch_id"],
-                                          created["source_uri"])
+            return await _store_and_start(ie, session, request, created["job_id"], created["branch_id"],
+                                          created["source_uri"], format)
     if _never_arrived(job):
         # Its request broke off before storing the file: this one's file is taken, once the job is
         # taken back under the rules a new import meets (the view it places into included).
         await _check_import_view(session, ws_id, job.get("scopeViewId"), user, claims)
         with _domain_errors():
             if await ie.reclaim_import(job["jobId"], actor=user.id, workspace_id=ws_id):
-                return await _store_and_start(ie, request, job["jobId"], job["branchId"], job["sourceUri"])
+                return await _store_and_start(ie, session, request, job["jobId"], job["branchId"],
+                                              job["sourceUri"], format)
         job = await ie.find_job(graph_id=graph_id, idempotency_key=key)     # another request took it back
     # Still storing its file, queued, running or finished: answered as it is.
     return {"jobId": job["jobId"], "branchId": job["branchId"], "sourceUri": job["sourceUri"],
             "status": job["status"]}
 
 
-async def _store_and_start(ie, request: Request, job_id: str, branch_id: str, source_uri: str) -> dict:
+async def _store_and_start(ie, session: AsyncSession, request: Request, job_id: str, branch_id: str,
+                           source_uri: str, fmt: str) -> dict:
     """Store the request's body as import ``job_id``'s file and queue it. A request that breaks off
     first fails the job there and then (:func:`_abandon_unqueued`): its draft takes the next import
-    now, and the same key sent again takes the job back."""
+    now, and the same key sent again takes the job back. A body past what one import of ``fmt`` can
+    be is refused (413) as soon as it passes it.
+
+    The file can take minutes to arrive, so the request's checks end their transaction first (they
+    only read): its connection goes back to the pool rather than being held for as long as the
+    file takes. And it is one of the ``_IMPORT_BODIES`` this process takes in at once."""
+    from backend.app.services.versioning.import_export import uploads
     try:
-        await ie.store.put_stream(source_uri, request.stream())
+        await session.commit()
+        async with _IMPORT_BODIES.slot():
+            with _upload_errors():
+                await ie.store.put_stream(source_uri, uploads.within_limit(request.stream(), fmt))
         status = await ie.start_import(job_id)
     except BaseException:
         await _abandon_unqueued(ie, job_id)
@@ -3876,6 +3889,15 @@ async def _abandon_unqueued(ie, job_id: str) -> None:
 
 # Resumable uploads: a file of up to IMPORT_MAX_BYTES arrives in parts, then becomes an import
 # (import_export/uploads.py). The single-request POST /imports above stays for scripts.
+
+#: How many import files — sent whole, or as an upload's parts — this process takes in at once.
+#: Each holds little memory (a chunk, or one part on its way to a bucket), but writes to the object
+#: store as fast as it arrives, and one sent whole holds its slot for as long as it takes to arrive.
+#: A burst of them gets this share, and can't take the store's (or the database's, when it is the
+#: store) bandwidth from everything else. One beyond it waits briefly, then is told to retry (429,
+#: Retry-After) before any of its body is read.
+_IMPORT_BODIES = Bulkhead("import uploads", int(os.getenv("IMPORT_UPLOAD_CONCURRENCY", "8")),
+                          wait_seconds=30.0, retry_after_seconds=15)
 
 class CreateUploadRequest(_ApiModel):
     fileName: str = Field(..., max_length=500)
@@ -3953,18 +3975,20 @@ async def put_import_upload_part(
     meta: dict = Depends(graph_in_workspace),
     ie=Depends(get_import_export_service),
 ):
-    """One part of the file, the raw request body. Sending a part again replaces it — until the
-    upload is completed: what is imported is what was there then. A part whose Content-Length is
-    not its share of the file is refused before any of it is read."""
+    """One part of the file, the raw request body — or a run of parts from it, up to the whole file
+    to part 0, cut into its parts as it arrives (``lastPart`` says how far it went). Sending a part
+    again replaces it — until the upload is completed: what is imported is what was there then. A
+    body whose Content-Length doesn't end where a part does is refused before any of it is read."""
     from backend.app.services.versioning.import_export import uploads
     record = await _load_upload(ie, ws_id, graph_id, meta, upload_id, user)
     if record.get("jobId"):
         raise HTTPException(status_code=409, detail="This upload is complete. Upload the file again to change it.")
     declared = request.headers.get("content-length")
     with _upload_errors():
-        size = await uploads.put_part(ie.store, record, part, request.stream(),
-                                      declared=int(declared) if declared and declared.isdigit() else None)
-    return {"part": part, "size": size}
+        async with _IMPORT_BODIES.slot():
+            size = await uploads.put_part(ie.store, record, part, request.stream(),
+                                          declared=int(declared) if declared and declared.isdigit() else None)
+    return {"part": part, "size": size, "lastPart": (part * record["partBytes"] + size - 1) // record["partBytes"]}
 
 
 @router.post("/graphs/{graph_id}/imports/uploads/{upload_id}/complete", response_model=CreateImportResponse,

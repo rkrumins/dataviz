@@ -189,7 +189,7 @@ Absent properties and blank cells are left as they are.
 | Size | Send it as | How it lands |
 |---|---|---|
 | Up to 8 MiB a request (`MAX_REQUEST_BODY_BYTES`) | `POST /graph/changes` | One atomic commit per request. |
-| Up to 100 MB (`MAX_IMPORT_BODY_BYTES`) | `POST …/imports`, with the file as the body | Windows of 10,000 rows, each one commit on the draft. Memory stays flat, and a job a worker drops is resumed. |
+| Up to 10 GiB (`IMPORT_MAX_BYTES`; 100 MB as JSON or Excel) | `POST …/imports`, with the file as the body | Windows of 10,000 rows, each one commit on the draft. Memory stays flat, and a job a worker drops is resumed. |
 | Up to 10 GiB, as NDJSON, CSV or TSV | `POST …/imports/uploads`, then each part, then `…/complete` | The same, and the upload resumes part by part. |
 
 ## 6. Referencing an entity from outside

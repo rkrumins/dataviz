@@ -2,8 +2,11 @@
 
 Pins: a file is split into fixed parts (the last holds the rest), of the size a client asks for
 within bounds; a part must hold exactly its share, and a wrong one is not kept — one that says so in
-its Content-Length is refused before any of it is read; sending a part again replaces it; which
-parts arrived is what a client resumes from, looked up several at a time; the parts read back in
+its Content-Length is refused before any of it is read; one request may carry a run of parts, up to
+the whole file, cut into its parts as it arrives — a run that ends off a part, or past the file,
+keeps none of itself, and one cut off keeps the parts it brought whole; sending a part again
+replaces it; which parts arrived is what a client resumes from, looked up several at a time; the
+parts read back in
 order as one file, however they arrived; a file too large for its format is refused before any of
 it is sent; an upload is its owner's only. Through the API: a client that splits a file its own way
 says so and is taken at its word, and one that doesn't is told how the file is split; an upload
@@ -38,6 +41,12 @@ DATA = b"".join(b'{"kind":"node","urn":"urn:%d"}\n' % i for i in range(7))   # 7
 
 async def _body(data: bytes):
     yield data
+
+
+async def _chunked(data: bytes, size: int = 7):
+    """``data`` in small pieces, as a request body arrives: pieces straddle the parts."""
+    for i in range(0, len(data), size):
+        yield data[i:i + size]
 
 
 @pytest.fixture
@@ -137,6 +146,53 @@ async def test_a_part_that_says_it_is_the_wrong_size_is_refused_before_it_is_rea
     assert "Part 0 must hold exactly 64 bytes" in str(wrong.value)
     assert "partBytes (" in str(wrong.value) and "start the upload with" not in str(wrong.value), \
         "a package's upload takes no partBytes of its own"
+
+
+async def test_one_request_may_carry_a_run_of_parts_up_to_the_whole_file(tmp_path, small_parts):
+    """A client that sends its file in one request sends it to part 0: it is cut into its parts as
+    it arrives. A run from a later part is the rest of the file from there, or up to a part's end."""
+    store = LocalFsObjectStore(tmp_path)
+    record = await _upload(store)
+    assert await uploads.put_part(store, record, 0, _chunked(DATA), declared=len(DATA)) == len(DATA)
+    assert await uploads.received(store, record) == [0, 1, 2, 3]
+    assert b"".join([c async for c in uploads.open_source(store, uploads.record_key(record))]) == DATA
+
+    other = await _upload(store)
+    assert await uploads.put_part(store, other, 1, _chunked(DATA[64:192])) == 128      # parts 1 and 2
+    assert await uploads.put_part(store, other, 2, _chunked(DATA[128:])) == 82        # 2 again, and 3
+    assert await uploads.received(store, other) == [1, 2, 3]
+
+
+async def test_a_run_that_ends_off_a_part_or_past_the_file_keeps_none_of_it(tmp_path, small_parts):
+    """A body that is wrong as a whole — split at another size, or wrapped in something — is
+    refused, and the whole parts it held are not kept as if they were the file's."""
+    store = LocalFsObjectStore(tmp_path)
+    record = await _upload(store)
+    for n, data, says in ((0, DATA[:100], "the body ended 36 bytes into part 1"),
+                          (2, DATA[128:] + b"x", "more arrived than the file holds from there")):
+        with pytest.raises(UploadError) as wrong:
+            await uploads.put_part(store, record, n, _chunked(data))
+        assert says in str(wrong.value)
+    assert await uploads.received(store, record) == []
+    with pytest.raises(UploadError, match="this request's body is 100 bytes"):
+        await uploads.put_part(store, record, 0, _chunked(DATA[:100]), declared=100)
+
+
+async def test_a_run_cut_off_keeps_the_parts_it_brought_whole(tmp_path, small_parts):
+    """A file sent in one request whose connection drops resumes from the first part missing, not
+    from its start."""
+    store = LocalFsObjectStore(tmp_path)
+    record = await _upload(store)
+
+    async def cut_off():
+        yield DATA[:150]
+        raise ConnectionResetError("the client went away")
+
+    with pytest.raises(ConnectionResetError):
+        await uploads.put_part(store, record, 0, cut_off())
+    assert await uploads.received(store, record) == [0, 1], "part 2 was cut short: not kept"
+    await uploads.put_part(store, record, 2, _chunked(DATA[128:]), declared=len(DATA) - 128)
+    assert b"".join([c async for c in uploads.open_source(store, uploads.record_key(record))]) == DATA
 
 
 async def test_which_parts_arrived_is_looked_up_several_at_a_time(tmp_path, small_parts, monkeypatch):
@@ -287,13 +343,30 @@ async def test_a_part_larger_than_the_upload_splits_the_file_into_is_told_how_to
     async def streamed():
         yield DATA[:100]
 
-    for body in (DATA[:100], streamed()):
+    for body, says in ((DATA[:100], "this request's body is 100 bytes"),
+                       (streamed(), "the body ended 36 bytes into part 1")):
         r = await test_client.put(url, content=body)
         assert r.status_code == 422, r.text
         detail = r.json()["detail"]
-        assert "Part 0 must hold exactly 64 bytes" in detail and "start the upload with that partBytes" in detail
-    assert "this request's body is 100 bytes" in r.json()["detail"] or "more arrived" in r.json()["detail"]
-    assert (await test_client.get(f"{BASE}/{up['uploadId']}")).json()["received"] == []
+        assert "Part 0 must hold exactly 64 bytes" in detail and says in detail
+        assert "start the upload with that partBytes" in detail
+    assert (await test_client.get(f"{BASE}/{up['uploadId']}")).json()["received"] == [], \
+        "none of a wrong body is kept"
+
+
+async def test_a_client_may_send_the_whole_file_to_part_0(test_client, api):
+    """What a client that sends one large file does: it is cut into the upload's parts as it
+    arrives, and the upload completes as one sent part by part does."""
+    up = (await test_client.post(BASE, json={"fileName": "big.ndjson", "size": len(DATA), "format": "ndjson"})).json()
+    url = f"{BASE}/{up['uploadId']}"
+    for body in (DATA, _chunked(DATA)):                     # with a Content-Length, and without
+        r = await test_client.put(f"{url}/parts/0", content=body)
+        assert r.status_code == 200, r.text
+        assert r.json() == {"part": 0, "size": len(DATA), "lastPart": 3}
+    assert (await test_client.get(url)).json()["received"] == [0, 1, 2, 3]
+    assert (await test_client.post(f"{url}/complete")).status_code == 202
+    (job,) = api.created
+    assert b"".join([c async for c in uploads.open_source(api.store, job["source_uri"])]) == DATA
 
 
 async def test_a_client_that_splits_files_its_own_way_says_so(test_client, api, part_bounds):
@@ -313,6 +386,41 @@ async def test_a_client_that_splits_files_its_own_way_says_so(test_client, api, 
     odd = await test_client.post(BASE, json={"fileName": "f", "size": len(DATA), "format": "ndjson",
                                              "partBytes": 1})
     assert odd.status_code == 422 and "partBytes can be from 32 to 128 bytes" in odd.json()["detail"]
+
+
+async def test_import_files_past_this_processs_share_are_told_to_retry(test_client, api, monkeypatch):
+    """A burst of large files can't take the object store's bandwidth from everything else: past
+    this process's share, an import's file waits briefly for a slot, then is told to retry before
+    any of it is read; a slot frees once its body is in."""
+    from backend.app.api.v1.endpoints import versioning as endpoints
+    from backend.app.common.bulkhead import Bulkhead
+
+    share = Bulkhead("import uploads", 1, wait_seconds=0.05, retry_after_seconds=15)
+    monkeypatch.setattr(endpoints, "_IMPORT_BODIES", share)
+    up = (await test_client.post(BASE, json={"fileName": "big.ndjson", "size": len(DATA), "format": "ndjson"})).json()
+    url = f"{BASE}/{up['uploadId']}"
+    go, read = asyncio.Event(), []
+
+    async def slow():
+        yield DATA[:64]
+        await go.wait()
+        yield DATA[64:]
+
+    async def unread():
+        read.append(True)
+        yield DATA[:64]
+
+    first = asyncio.create_task(test_client.put(f"{url}/parts/0", content=slow()))
+    for _ in range(200):
+        if share.full:
+            break
+        await asyncio.sleep(0.01)
+    busy = await test_client.put(f"{url}/parts/1", content=unread())
+    assert busy.status_code == 429 and busy.headers["Retry-After"] == "15", busy.text
+    assert read == [], "refused before any of its body was read"
+    go.set()
+    assert (await first).status_code == 200
+    assert (await test_client.put(f"{url}/parts/1", content=DATA[64:128])).status_code == 200
 
 
 async def test_an_upload_says_when_it_expires(test_client, api):

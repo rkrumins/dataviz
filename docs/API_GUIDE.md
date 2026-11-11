@@ -463,8 +463,10 @@ There is no single paging scheme; each route documents its own in the explorer.
 | Limit | Default | Applies to | Answer when exceeded |
 |---|---|---|---|
 | Request body | 8 MB (`MAX_REQUEST_BODY_BYTES`) | Most routes | `413` |
-| Request body | 100 MB (`MAX_IMPORT_BODY_BYTES`) | Imports, `/versioning/` routes, view-file routes, `/graph/save` | `413` |
-| Request body through the web proxy | 100 MB (32 MB through the Helm chart's ingress) | Every `/api/` route | `413` from the proxy |
+| Request body | 10 GiB (`IMPORT_MAX_BYTES`; 100 MB as JSON or Excel) | An import's file: `…/imports`, `…/imports/uploads/{id}/parts/{n}` | `413` |
+| Request body | 100 MB (`MAX_IMPORT_BODY_BYTES`) | Other `/versioning/` routes, view-file routes, `/graph/save` | `413` |
+| Request body through the web proxy | 100 MB; 10 GiB on the two import routes, passed on unbuffered | Every `/api/` route | `413` from the proxy |
+| Import files taken in at once | 8 per API process (`IMPORT_UPLOAD_CONCURRENCY`) | The two import routes | `429` `busy` with `Retry-After` |
 | Time | 30 s (`HTTP_TIMEOUT_DEFAULT_SECS`) | Most routes | `504 REQUEST_TIMEOUT` |
 | Time | 120 s | `/graph/` routes — trace and search included; the rolled-up edge reads get 90 s — and `/versioning/` and view-transfer routes | `504 REQUEST_TIMEOUT` |
 
@@ -772,14 +774,17 @@ publish.
    ```
 
    A team that sends files from another system: see [Building a Connector](/docs/connector-guide).
-2. For a file up to 100 MB (32 MB behind the Helm chart's ingress), send it as the request body.
-   A larger one goes up in resumable parts ([Building a Connector](/docs/connector-guide)). The
-   answer is `202` with the import job and the draft it writes to:
+2. Send the file as the request body: up to 10 GiB as NDJSON, CSV or TSV, 100 MB as JSON or
+   Excel. A dropped connection starts it over, so on a link that drops, send it as a resumable
+   upload instead (step 3). The answer is `202` with the import job and the draft it writes to:
 
    ```bash
    api POST "/api/v1/$WS/versioning/graphs/$GID/imports?format=ndjson&reconcileMode=upsert" \
-       --data-binary @lineage.ndjson | jq '{jobId, branchId, status}'
+       -T lineage.ndjson | jq '{jobId, branchId, status}'
    ```
+
+   `-T` streams the file from disk. `--data-binary @lineage.ndjson` would read all of it into
+   memory first.
 
    `format` is `ndjson`, `csv`, `tsv`, `json` or `xlsx`. `reconcileMode=replace` also deletes
    everything in scope that the file doesn't mention. `viewId=` places what the import creates
@@ -791,9 +796,9 @@ publish.
    file was stored, its import was failed there and then, and the same key takes it back with this
    one's file — if you could start that import now. A key you used for an export answers
    `409 idempotency_key_reused`.
-3. For a larger file — up to 10 GiB as NDJSON, CSV or TSV; JSON and Excel files stay at
-   100 MB — send it in parts instead. Ask for an upload, send each part (numbered from `0`),
-   then complete it:
+3. To resume after a dropped connection, send the file as a resumable upload — up to 10 GiB as
+   NDJSON, CSV or TSV; JSON and Excel files stay at 100 MB. Ask for an upload, send each part
+   (numbered from `0`), then complete it:
 
    ```bash
    SIZE=$(wc -c < lineage.ndjson)
@@ -810,6 +815,18 @@ publish.
 
    If the loop stops, `GET …/imports/uploads/$ID` lists the parts already `received`; send
    the others and complete. An upload has a day to finish.
+
+   Or send the whole file to part `0` in one request: it is cut into its parts as it arrives. If
+   it breaks off, the parts it brought whole are kept; send the rest of the file to the first part
+   missing, then complete:
+
+   ```bash
+   api PUT "/api/v1/$WS/versioning/graphs/$GID/imports/uploads/$ID/parts/0" -T lineage.ndjson | jq .
+   # Broke off? The first part missing, and the file from there:
+   N=$(api GET "/api/v1/$WS/versioning/graphs/$GID/imports/uploads/$ID" | jq '[range(.parts)] - .received | first')
+   tail -c +$((N * PART + 1)) lineage.ndjson |
+     api PUT "/api/v1/$WS/versioning/graphs/$GID/imports/uploads/$ID/parts/$N" -T - | jq .
+   ```
 4. Poll the job until `status` is `completed` (or `failed`, with `errorMessage`):
 
    ```bash
@@ -1195,7 +1212,8 @@ in [Single Sign-On](/guide/sso-setup).
 | `404` for something you can see in the app | Wrong workspace, data source or id in the path, or a URN not percent-encoded | Check the ids with `GET /api/v1/admin/workspaces`; encode URNs |
 | `410` on `POST …/graph/trace` | The route is retired | Use `POST …/graph/trace/v2` |
 | `413` | The body is larger than the route accepts | For imports, send the file in parts |
-| `422` "Part n must hold exactly … bytes" on `PUT …/imports/uploads/{id}/parts/{n}` | The part isn't the file's bytes from `n × partBytes`: the client split the file at another size, or sent it whole | Split it at the upload's `partBytes`, or start the upload with your own `partBytes` (5 MiB to 100 MiB) |
+| `422` "Part n must hold exactly … bytes" on `PUT …/imports/uploads/{id}/parts/{n}` | The body isn't the file's bytes from `n × partBytes` to the end of a part or of the file: the client split the file at another size | Split it at the upload's `partBytes`, start the upload with your own `partBytes` (5 MiB to 100 MiB), or send the whole file to part `0` |
+| `429` `busy` on an import's file or part | The API is taking in as many import files at once as it allows | Send it again after `Retry-After` |
 | `429` `rate_limited` with a key | More than 1,200 requests a minute with one key, or 120 bad keys a minute from one address | Wait `Retry-After` seconds, then spread your requests out |
 | `503` `api_keys_unavailable` | Keys can't be checked right now — or authorization enforcement is switched off, which stops every key until it's back on | Retry after `Retry-After`; if it lasts, tell your operator |
 | `429` or `503` repeating | The graph store is busy or recovering | Honour `Retry-After`, and spread your requests out |

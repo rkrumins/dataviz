@@ -37,8 +37,8 @@ from typing import Any
 
 import httpx
 
-#: Parts sent at once. Each part (16 MiB) must arrive within the API's 120 s, so a slow uplink wants
-#: fewer: 4 at once needs about 4.5 Mbit/s.
+#: Parts sent at once. A part is cut off only when its body stops arriving for 120 s, so a slow
+#: uplink just takes longer; fewer at once still finish sooner each, and lose less to a drop.
 PARALLEL = 4
 #: Answers worth asking again for: the server was busy, timed out, or failed for a moment.
 RETRY = frozenset({408, 425, 429, 500, 502, 503, 504})

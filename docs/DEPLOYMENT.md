@@ -152,8 +152,10 @@ front of port 3080.
 1. Point a DNS name at the server, for example `lineage.example.com`.
 2. Forward the proxy to `http://127.0.0.1:3080` and have it send `X-Forwarded-Proto: https`.
    The web container passes that header to the API, which then treats the request as
-   secure and sends HSTS. Allow request bodies up to 100 MB (the web container's own limit,
-   for imports) and a read timeout of at least 180 seconds, so the app's own timeout
+   secure and sends HSTS. Allow request bodies up to 10 GB and pass them on as they arrive
+   (nginx: `client_max_body_size 10g; proxy_request_buffering off;`), so an import's file can come
+   in one request — the web container allows that on the import routes and 100 MB elsewhere — and
+   a read timeout of at least 180 seconds, so the app's own timeout
    messages reach users instead of the proxy's — up to an hour if people export whole data
    sources, which stream for as long as that. With Caddy, which obtains the certificate and
    sets the forwarded headers itself, this is enough:

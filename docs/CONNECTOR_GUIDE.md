@@ -230,8 +230,9 @@ first.
 
 | File | Send it with |
 |---|---|
-| Up to 100 MB (32 MB behind the Helm chart's ingress) | `POST …/imports?format=ndjson&idempotencyKey=…`, with the file as the body |
-| Up to 10 GiB (NDJSON, CSV or TSV) | The resumable upload, below. Use it for anything over a few MB: every part is small, and a dropped connection costs one part |
+| Up to 10 GiB (NDJSON, CSV or TSV), in parts | The resumable upload, below. Use it for anything over a few MB: a dropped connection costs one part |
+| Up to 10 GiB, as one body | The resumable upload with the whole file sent to part 0 (step 2): it is cut into parts as it arrives, and a dropped connection keeps every whole part |
+| Up to 10 GiB, as one body, no resuming | `POST …/imports?format=ndjson&idempotencyKey=…`, with the file as the body. A dropped connection starts it over. JSON and Excel files: 100 MB |
 
 **The resumable upload, step by step:**
 
@@ -239,9 +240,8 @@ first.
    - It answers `201` with `uploadId`, `partBytes` (16 MiB), `parts`, `received` (`[]`) and
      `expiresAt`.
    - A client that splits files its own way says so: `"partBytes": 67108864` sends 64 MiB parts.
-     It can be from 5 MiB to 100 MiB (`MAX_IMPORT_BODY_BYTES`, the most one request may carry; 32 MB
-     behind the Helm chart's ingress, unless its `proxy-body-size` is raised), else `422`. Larger
-     parts mean fewer requests for a multi-gigabyte file, but each must still arrive within 120 s.
+     It can be from 5 MiB to 100 MiB, else `422`. Larger parts mean fewer requests for a
+     multi-gigabyte file; a dropped connection costs a larger part.
    - A file too large for its format is refused here, `413`, before any of it is sent.
 2. **`PUT …/imports/uploads/{uploadId}/parts/{n}`** for `n` from `0` to `parts - 1`, each with its
    bytes as the raw body (`application/octet-stream`, not a form).
@@ -249,7 +249,14 @@ first.
      the last holds the rest. A part of any other size is `422`, and the answer says the size it
      should be and how the file is split. A `Content-Length` of another size is refused at once,
      before any of the body is read or stored.
+   - **Or send a run of parts in one request**: the file's bytes from `n × partBytes` on to the end
+     of a later part or of the file — the whole file, to part `0`. It is cut into its parts as it
+     arrives, and the answer's `lastPart` says how far it went. A run that ends anywhere else is
+     `422`, and none of it is kept. One cut off keeps the parts it brought whole: `GET` the upload
+     (step 3) and send the rest of the file to the first part missing.
    - Parts go in any order, and several at once.
+   - `429` with `Retry-After`: the server is taking in as many files at once as it allows. Send the
+     part again after that many seconds (the reference connector does).
    - Sending a part again replaces it — until the upload is completed: then it is `409`.
 3. **`GET …/imports/uploads/{uploadId}`** lists `received`, the parts stored whole. To resume after
    a failure or a restart, send the others. Keep `uploadId`, or you start again: a new upload knows
@@ -263,9 +270,10 @@ first.
    - A part still missing is `409`.
 
 **Timing and the uplink.**
-- **Each request has 120 s.** A 16 MiB part must arrive within that, so N parts at once need about
-  N × 1.1 Mbit/s: 3 need 3.4 Mbit/s and 4 need 4.5 Mbit/s. On a slow link, send fewer at once. A
-  100 MiB part needs about 7 Mbit/s of its own.
+- **A request is cut off only when its body stops arriving**: 120 s with nothing at the API, 60 s
+  at the bundled proxies, however long the body takes in all. A slow link takes longer; it doesn't
+  fail. Behind the GKE load balancer a request has an hour in all: a 4 GiB file in one request
+  needs 9.5 Mbit/s there, and parts need nothing.
 - **An upload has 24 hours** from its creation (`expiresAt`) to be completed. After that, its
   parts are swept, and `GET` answers `404`.
 - **What's checked.** Parts are checked by their exact size, and TLS carries them intact. There is
@@ -436,11 +444,11 @@ the graph and writing them, node windows then edge windows.
   - Above about 1 GB, set `OBJECT_STORE_BACKEND=s3` (an image with `requirements-s3.txt`), or
     `local` on a volume every API and transfer-worker pod mounts. Parts are swept a day after they
     arrive.
-- **Proxies.** Parts are 16 MiB, under every limit on the way, so the resumable upload needs
-  nothing raised.
-  - Behind the Helm chart, a single-request import over 32 MB is refused by the ingress
-    (`ingress.annotations."nginx.ingress.kubernetes.io/proxy-body-size"`). The app takes up to
-    100 MB.
+- **Proxies.** The bundled ones (the frontend's nginx, the Helm chart's ingress) pass an import's
+  file on as it arrives, up to 10 GiB, without buffering it.
+  - A proxy of your own in front must do the same on `…/imports` and
+    `…/imports/uploads/*/parts/*`, for a file sent as one body: in nginx,
+    `client_max_body_size 10g; proxy_request_buffering off;`. Parts of 16 MiB need nothing raised.
   - Every proxy must allow a request at least 120 s.
 - **One import at a time per draft, two per worker.** `GRAPHVER_TRANSFER_SLOTS` (2) jobs run at
   once on each transfer worker. Run more workers for more at once.
@@ -497,8 +505,9 @@ record contract, and its calls to the routes a key may call.
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `413` on `POST …/imports` | Over 100 MB, or over 32 MB behind the Helm ingress | Use the resumable upload |
-| Parts keep timing out (`504`, or the client's own timeout) | The uplink can't carry that many 16 MiB parts within 120 s | Send fewer at once |
+| `413` on `POST …/imports` | Over 10 GiB (100 MB as JSON or Excel), or a proxy of your own caps the body | Split the file, or send JSON or Excel as NDJSON or CSV; raise your proxy's limit on the import routes |
+| `504` on a part, or on a file sent as one body | Nothing of its body arrived for 120 s | Check the client is still sending; on a slow uplink, send fewer parts at once |
+| `429` `busy` on a part, or on a file sent as one body | The API is taking in as many import files at once as it allows | Send it again after `Retry-After` |
 | `404` resuming an upload | It expired (24 h), or it is another caller's | Start a new upload |
 | `409` on a part | The upload is complete | Start a new upload to send a different file |
 | The job failed: "Line N … has no line break within 16 MB" | CR-only line endings, or no line breaks | Save the file with LF or CRLF line endings |

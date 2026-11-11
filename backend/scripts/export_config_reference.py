@@ -116,6 +116,35 @@ NOTES: dict[str, tuple[str, str | None]] = {
         "once before `FAIR_SHARE_VIEW_FEED_RATE` paces it.",
         None,
     ),
+    # ── Large imports (docs/versioning/08-import-export.md §3e) ─────────────────
+    "IMPORT_MAX_BYTES": (
+        "The most one import can be, for a file read a row at a time (NDJSON, CSV, TSV): what an "
+        "upload may declare, and the body-size cap on the two routes a file comes in on "
+        "(`…/imports`, and `…/imports/uploads/{id}/parts/{n}`, which may carry the whole file). "
+        "The frontend's nginx and the Helm ingress allow 10 GiB on those routes: raise them with "
+        "it.",
+        None,
+    ),
+    "IMPORT_WHOLE_FILE_MAX_BYTES": (
+        "The most one JSON or Excel import can be. Those are read whole, into the worker's memory, "
+        "so they stay small; a larger file is NDJSON or CSV.",
+        None,
+    ),
+    "IMPORT_UPLOAD_CONCURRENCY": (
+        "Import files one API process takes in at once — sent whole, or as an upload's parts. Each "
+        "holds little memory, but writes to the object store as fast as it arrives, and one sent "
+        "whole holds its slot until it is in. One beyond waits up to 30 s for a slot, then is told "
+        "to retry (`429`, `Retry-After: 15`) before any of it is read. The fleet takes up to this "
+        "× processes at once: size it to what the object store (the database, when "
+        "`OBJECT_STORE_BACKEND=database`) can write, not up with the number of uploaders.",
+        None,
+    ),
+    "MAX_IMPORT_BODY_BYTES": (
+        "The body-size cap on the other routes that take large bodies (the rest of `/versioning/`, "
+        "`/graph/save`, the view-file routes). An import's file is held to `IMPORT_MAX_BYTES` "
+        "instead.",
+        None,
+    ),
     "ENV": (
         "Deployment type. `production` (or `prod`) turns on the safeguards listed under "
         "[Must set in production](#must-set-in-production); any other value relaxes them for "

@@ -20,7 +20,12 @@ ingress:
     # hour, with long gaps while a spreadsheet finds its columns. This
     # edge must allow that hour too, or it would cut exports short.
     nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
-    nginx.ingress.kubernetes.io/proxy-body-size: "32m"
+    # An import's file may come in one request, up to 10 GiB: passed on
+    # as it arrives, not buffered to the controller's disk. The frontend's
+    # nginx still holds every other API route to 100 MB, and the app each
+    # route to its own limit.
+    nginx.ingress.kubernetes.io/proxy-body-size: "10g"
+    nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
 
 # ── Non-secret config (rendered into a ConfigMap) ─────────────────────
 config:

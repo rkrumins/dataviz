@@ -278,20 +278,23 @@ space in Postgres: roughly the file's size again.
 ### 3d. Resumable uploads
 
 A file of up to `IMPORT_MAX_BYTES` (10 GiB; NDJSON, CSV and TSV, which are read a row at a time)
-arrives in parts (`import_export/uploads.py`), since one request that size would outlast every proxy
-and timeout on the way, and a dropped connection would start it over:
+arrives in parts (`import_export/uploads.py`), so a dropped connection costs a part, not the file.
+A part is bytes, not rows: the parts are read back in order as one stream, so a row split across
+two parts is whole again when it is parsed.
 
 1. `POST …/imports/uploads` `{fileName, size, format, partBytes?}` → `{uploadId, partBytes, parts,
    expiresAt}`: 16 MiB parts, or the `partBytes` a client asks for, to send parts of its own size
-   (5 MiB to `MAX_IMPORT_BODY_BYTES`, 100 MiB, the most one request may carry). A file too large for
-   its format is refused here (413), before any of it is sent.
+   (5 MiB to 100 MiB). A file too large for its format is refused here (413), before any of it is
+   sent.
 2. `PUT …/imports/uploads/{uploadId}/parts/{n}`, the part as the body: several at once, in any order.
    Each is its own write-once object in the store (a bucket mount never appends or renames), and
    must hold exactly its share of the file (422 otherwise, saying how the file is split; a
-   `Content-Length` of another size is refused before any of the body is read or stored); sending a
-   part again replaces it — until the upload is completed (409): what is imported is what was there
-   then. Which parts arrived is looked up eight at a time, so `received` and completing an upload
-   of thousands of parts answer in seconds, not minutes.
+   `Content-Length` of another size is refused before any of the body is read or stored). Or the
+   body runs on from part n through later parts — up to the whole file, sent to part 0 — and is
+   cut into its parts as it arrives (§3e). Sending a part again replaces it — until the upload is
+   completed (409): what is imported is what was there then. Which parts arrived is looked up
+   eight at a time, so `received` and completing an upload of thousands of parts answer in
+   seconds, not minutes.
 3. `GET …/imports/uploads/{uploadId}` → `received`: what a resumed upload doesn't send again.
 4. `POST …/imports/uploads/{uploadId}/complete?reconcileMode&branchId&viewId&autoPublish` → 202, the
    import job (409 while a part is missing). It reads the parts in order as one file. An upload is
@@ -303,8 +306,8 @@ The Import dialog sends three parts at a time, retries a part the server failed 
 refused), shows how much is up, and resumes: the same file chosen again (name, size and modification
 time) after a failure or a reload sends only the missing parts. An upload is its owner's only, and
 its parts are swept with every other artifact after `OBJECT_STORE_TTL_HOURS` (24), so it has a day
-to finish (`expiresAt`). `POST …/imports` (the file as the request body, up to 100 MB; 32 MB through
-the Helm chart's ingress) stays for small files. A line — or a quoted CSV record — longer than
+to finish (`expiresAt`). `POST …/imports` takes the file as one request body, up to the same
+`IMPORT_MAX_BYTES` (100 MB for JSON and Excel), but resumes nothing (§3e). A line — or a quoted CSV record — longer than
 `formats.MAX_RECORD_BYTES` (16 MiB) fails the import with the line's number: a file with CR-only line
 endings, or a quote left open, would otherwise be read whole into the worker's memory.
 
@@ -319,6 +322,67 @@ layout edits. Published is never written before review. A view package's data fo
 same draft after it (`importing.stage_update`, the file's design) keeps the placements an import
 made there (`assignedBy: 'import'`) that the file does not place itself, on a layer it has. A new
 view's package places what the file's own layout names: roots its data adds beside it go unplaced.
+
+### 3e. Large files: one body of gigabytes, without taking the services down
+
+A client may send its whole file — gigabytes — as one request. Three ways in, which all end in the
+same stored file and the same import:
+
+| How | A dropped connection | Use it for |
+|---|---|---|
+| A resumable upload, a part per request, several at once | costs that part | The default: the dialog, the reference connector, any link that drops |
+| A resumable upload, a run of parts in one request, up to the whole file to part 0 | keeps the parts it brought whole: send the rest from the first one missing | A client that sends one file as one body |
+| `POST …/imports`, the file as the body | fails the import there and then; the same `idempotencyKey` starts it again, from the first byte | Scripts, and files that arrive in minutes |
+
+**A run of parts** (`uploads.put_part`). The body is the file's bytes from part n's start. `_Body`
+hands the store the next part's bytes as they arrive, holding one chunk; each part is stored as its
+own object when it is whole, then the next begins, so the layout is the one a part-per-request
+upload makes, and `received`, completing and the import read it the same way. The body must end
+where a part does, or at the end of the file. A `Content-Length` that says otherwise is refused
+(422) before any of the body is read. A body that turns out to end anywhere else, or runs past the
+file, is refused once that shows, and *none* of its parts is kept: a body that is wrong as a whole —
+split at another size, or wrapped in a form — must not leave parts behind that pass for the file's.
+One cut off (the client went away, stopped sending, or the pod was rolled) keeps the parts it
+brought whole, because each is exactly the bytes at its offset.
+
+**Nothing holds a whole body, and nothing waits on it.** Every layer on the two routes a file comes
+in on (`…/imports` and `…/imports/uploads/{id}/parts/{n}`; `main._IMPORT_BODY_PATHS`) passes the
+body on as it arrives:
+
+| Layer | What it does with an import's body | Set in |
+|---|---|---|
+| GKE load balancer | Allows the whole request `timeoutSec` (3600 s): a 4 GiB file in one request needs 9.5 Mbit/s | `deploy/k8s/base/services/frontend/backendconfig.yaml` |
+| Helm ingress (ingress-nginx) | `proxy-body-size: 10g`, `proxy-request-buffering: off`; gives up on a body that stalls 60 s | `deploy/helm/dataviz/values.yaml` |
+| Frontend nginx | `client_max_body_size 10g`, `proxy_request_buffering off`: never written to the pod's disk; `client_body_timeout` 60 s between reads. Every other `/api/` route stays at 100 MB | `frontend/nginx.conf` |
+| Body-size cap | `IMPORT_MAX_BYTES` (10 GiB) by `Content-Length`; a JSON or Excel file sent whole, 100 MB. A chunked body is counted by its route: `uploads.within_limit` on `…/imports` (413 once past), the upload's own layout on a run | `main._BodySizeLimitMiddleware` |
+| Timeout | The versioning tier (`HTTP_TIMEOUT_VERSIONING_SECS`, 120 s) as a stall bound: every piece of the body moves the deadline on, so only a body that stops arriving for 120 s is cut off; the work after its last piece has the tier's 120 s | `main._TimeoutMiddleware._renewing` |
+| Admission | `IMPORT_UPLOAD_CONCURRENCY` (8) bodies per API process. One beyond waits up to 30 s for a slot, then is answered `429` with `Retry-After: 15` before any of its body is read. The dialog and the connector both retry a 429 | `versioning._IMPORT_BODIES` |
+| Database connections | None held while a body arrives. The parts route runs no query on the request's session; `…/imports` commits its checks (they only read) before it reads the body | `versioning._store_and_start` |
+| Memory | One chunk per body (a socket read), plus the store's buffer: 8 MiB for the database store, one 16 MiB part for S3, none for a volume | §9 |
+
+Measured, in one process with a store on local disk and no network between — the server's own
+cost, not a link's: a 4 GiB NDJSON file (10.1M records) sent whole to part 0 is stored as its 257
+parts in about 20 s with the process's memory up 1–2 MiB, and every record parses back equal to the
+original; cut off 2.5 GiB in, it keeps parts 0–159 and completes from part 160; sent whole to
+`…/imports`, chunked, it is stored in 12 s with no growth in memory; a 4 GiB CSV (50.6M rows with
+quoted multi-line cells) sent whole parses back row for row. Through `frontend/nginx.conf`, a
+4 GiB body (with a `Content-Length`, and chunked) reached the app whole, with nothing written to
+nginx's temp directory and its worker at 4 MB.
+
+**Tuning.**
+- **Part size.** 16 MiB is what a dropped connection costs. A fast, steady link can ask for up to
+  100 MiB (`partBytes`): fewer requests and objects. A run of parts is a client's way to send more
+  per request without giving up resuming.
+- **`IMPORT_UPLOAD_CONCURRENCY`.** Size it to what the object store can write, not to the number of
+  uploaders: the fleet takes up to this × API processes (4 a pod) at once. Raise it for S3; keep it
+  low with the database store.
+- **The store.** For multi-gigabyte imports use S3 or a shared volume (§9), not the database: every
+  gigabyte stored there is a gigabyte of rows, of WAL and of backups in the management database, on
+  top of the import's staged rows (§3c).
+- **`IMPORT_MAX_BYTES`.** Raising it means raising the frontend nginx's `client_max_body_size` and
+  the ingress's `proxy-body-size` with it, on these routes.
+- **Rollouts.** A pod stops after `GUNICORN_GRACEFUL_TIMEOUT` (30 s): a body still arriving is cut
+  off. A run keeps its whole parts and resumes; a `POST …/imports` is failed and sent again.
 
 An `idempotencyKey` makes `POST …/imports` and `POST …/exports` safe to send again. The route stores
 it as its sender's (`<user id>:<key>`), and `ix_jobs_idem_active` keeps one job per key on a graph,
@@ -792,6 +856,12 @@ tests/integration/test_s3_store_minio.py tests/test_object_store.py`.
   worker keeps dying fails once it has been taken over more than 3 times.
 - **JSON and xlsx imports are read whole** (a JSON array and a zip aren't line-streamable), so they
   stay at 100 MB; NDJSON, CSV and TSV go to 10 GB (§3d). Every format *writes* streaming.
+- **A file sent whole to `POST …/imports` resumes nothing**: a dropped connection starts it over.
+  Sent whole to an upload's part 0 instead, it keeps every whole part (§3e).
+- **A run of parts is stored a part at a time**: on S3 a part is sent to the bucket before the next
+  is read, so one request moves at the slower of the client's link and the bucket's.
+- **Nothing checks an upload's bytes beyond their count**: no checksum is taken. TLS carries them
+  intact; a client resuming an upload must send the same file (the connector keys it by sha256).
 - **A 10 GB import takes hours**: about 1,500–2,500 rows a second (a 10 GB NDJSON file holds ~40M
   rows). It runs on the transfer lane; `get_job` reports its phase and the rows processed.
 - **A large import's staged rows take their space in Postgres** until they are swept (§3c).

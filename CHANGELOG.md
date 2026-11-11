@@ -42,9 +42,23 @@ integration's many small changes as a few commits.
 - **A publish credits each entity to whoever edited it.** Each version on the published graph names
   its editor. The commit still names the publisher, and its contributors everyone who edited.
 - **A resumable import upload takes parts of the client's own size.** `POST …/imports/uploads`
-  takes `partBytes`, from 5 MiB to `MAX_IMPORT_BODY_BYTES` (100 MiB); without it, parts stay
-  16 MiB. A multi-gigabyte file goes up in fewer requests (10 GiB is 103 parts of 100 MiB, not 640),
-  and a client that already splits files its own way only has to say how.
+  takes `partBytes`, from 5 MiB to 100 MiB; without it, parts stay 16 MiB. A multi-gigabyte file
+  goes up in fewer requests (10 GiB is 103 parts of 100 MiB, not 640), and a client that already
+  splits files its own way only has to say how.
+- **An import's file can come in one request, up to 10 GiB** (NDJSON, CSV and TSV; JSON and Excel
+  stay at 100 MB).
+  - Sent whole to an upload's part 0 (`PUT …/imports/uploads/{id}/parts/0`), it is cut into the
+    upload's parts as it arrives; the answer's `lastPart` says how far it went. Cut off, it keeps
+    every part it brought whole: send the rest of the file to the first part missing. A body that
+    ends off a part's end, or runs past the file, is refused and none of it is kept.
+  - `POST …/imports` takes a file of up to 10 GiB as its body, where it took 100 MB. It resumes
+    nothing; a chunked body is counted, and refused (`413`) as soon as it passes the limit.
+  - Measured with a 4 GiB NDJSON file sent whole: stored as its 257 parts in about 20 s with the
+    API process's memory up 1–2 MiB, and every record read back equal to the original.
+- **`IMPORT_UPLOAD_CONCURRENCY`** (8): import files one API process takes in at once. One more
+  waits up to 30 s for a slot, then is answered `429` with `Retry-After: 15`, before any of it is
+  read, so a burst of large files can't take the object store's (or the database's) bandwidth from
+  everything else. The Import dialog and the reference connector retry it.
 
 ### Changed
 
@@ -59,6 +73,13 @@ integration's many small changes as a few commits.
   command.
   - A busy or paused graph lands none of the commands, so the batch can be resent as it was.
   - A batch the store refuses as a whole runs command by command, as before.
+- **An import's file is cut off only when it stops arriving.** On `…/imports` and
+  `…/imports/uploads/{id}/parts/{n}`, every piece of the body moves the 120 s deadline on
+  (`HTTP_TIMEOUT_VERSIONING_SECS`), so a file takes as long as it takes, and one stalled for 120 s
+  is cut off. A part no longer has to arrive within 120 s in all.
+- **The frontend's nginx and the Helm ingress pass an import's file on as it arrives**, up to
+  10 GiB on those two routes, instead of writing it to their own disk first. Every other `/api/`
+  route keeps its 100 MB limit at nginx.
 - **The projector's whole-graph verify runs at most every 5 minutes per graph** on incremental
   passes (`GRAPHVER_PROJECTION_VERIFY_INTERVAL_SECS`; `0` = every pass). It always runs on a full
   seed, a dropped write, or after a verify that healed or failed.
@@ -77,6 +98,9 @@ integration's many small changes as a few commits.
 - **Resuming or completing a large upload no longer checks its parts one at a time.** They are
   looked up eight at a time, so an upload of thousands of parts on a bucket answers in seconds and
   stays well inside the request's 120 s.
+- **`POST …/imports` no longer holds a database connection while its file arrives.** Its checks
+  (the draft policy, the view) left their transaction open until the response, so every large
+  file sent whole would have held one of the pool's connections for as long as it took to arrive.
 
 ### Upgrading
 
@@ -86,6 +110,13 @@ integration's many small changes as a few commits.
   columns at start-up.
 - Clients that read `409 not_up_to_date` can use its new `reason`. A draft that is behind only
   automation, on nothing it changes, is no longer refused.
+- The Helm chart's ingress annotations change: `proxy-body-size` is `10g` (was `32m`) and
+  `proxy-request-buffering` is `off`. A values file that sets its own annotations should take both.
+  A proxy of your own in front needs the same on the import routes for a file sent in one request
+  (in nginx, `client_max_body_size 10g; proxy_request_buffering off;`); uploads in parts need
+  nothing.
+- For multi-gigabyte imports, set `OBJECT_STORE_BACKEND` to `s3` or a shared volume: the default
+  database store keeps every gigabyte as rows, WAL and backups in the management database.
 
 ### Known limitations
 
