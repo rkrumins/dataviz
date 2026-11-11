@@ -98,6 +98,7 @@ tests/integration/test_resync_identity_invariant.py
 tests/integration/test_review_inbox_open_prs.py
 tests/integration/test_review_policy.py
 tests/integration/test_revision_overlay_reads.py
+tests/integration/test_rollup_delta_staging.py
 tests/integration/test_seed_identity.py
 tests/integration/test_shared_draft_members.py
 tests/integration/test_stage2_collaboration_story.py

@@ -20,8 +20,9 @@ Pins:
 - The tombstone sweep clears a node main deleted that the cache still holds, and records how far
   it swept (``sweptSeq``), so the next sweep reads only later deletes.
 - An entity whose every statement times out, even alone, is quarantined: the rest of its window
-  lands and publishes, unverified, and the watermark lists it. Once the fault clears, the caught-up
-  graph gets a pass of its own when the entity is due, which lands it and verifies again. With
+  lands and publishes, unverified, and the watermark lists it. A rebuild meanwhile holds it again,
+  and hands the rollups to the aggregation job. Once the fault clears, the caught-up graph gets a
+  pass of its own when the entity is due, which lands it and verifies again. With
   ``GRAPHVER_PROJECTION_QUARANTINE`` off, it fails the pass, as before.
 - A paged window, and a streamed rebuild, under a pass time box that stops each pass after one
   page, resume from their cursor pass after pass until one publishes the whole of it.
@@ -253,6 +254,19 @@ async def _quarantine(svc, monkeypatch):
     assert held == {("node_merge", "urn:t:P"), ("edge_merge", "PC")}, held
     wm = await svc.projection_watermark(gid)
     assert wm["quarantine"]["count"] == 2 and wm["quarantine"]["entities"][0]["error"]
+
+    # A rebuild while they are held hands the rollups to the job: they moved with P's window, which
+    # the key lacked, so moving them by the rebuild's difference would count P's edge twice.
+    stale = []
+
+    async def rollups_stale(graph_id):
+        stale.append(graph_id)
+
+    proj._on_rollups_stale = rollups_stale
+    assert await svc.request_projection_rebuild(gid)
+    r = await proj.project_graph(gid)
+    assert r["verify_error"] is None and r["quarantined"] == 2 and stale == [gid], (r, stale)
+    proj._on_rollups_stale = None
 
     # The fault clears: a caught-up graph's held entities get a pass of their own once due.
     g.poison.clear()

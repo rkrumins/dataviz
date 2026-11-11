@@ -199,9 +199,9 @@ not to the projector.) See [04](04-projection-and-cache.md).
 - **Read-freshness is computed two ways.** `ContextEngine` uses strict `projected ≥ committed`; the
   neighbors endpoint applies `READ_MAX_LAG`. They coincide at the default `READ_MAX_LAG=0`; a non-zero
   lag would make the two surfaces disagree on when to serve FalkorDB vs Postgres.
-- **A large or overlapping projection window still rebuilds rollups in full.** A window over
-  `PROJECTION_ROLLUP_INLINE_CAP` (50,000) or an overlap punts to `"stale"` → full rebuild. See
-  [04](04-projection-and-cache.md).
+- **A large restructure or an overlapping window still rebuilds rollups in full.** A window of any
+  size is maintained by delta, but a move of a subtree over `PROJECTION_ROLLUP_INLINE_CAP` (50,000)
+  or an overlap punts to `"stale"` → full rebuild. See [04](04-projection-and-cache.md) §8.
 - **`gv:<id>` urn fallback can mint phantoms.** A node that *should* carry a `urn` but doesn't projects
   under a synthetic `gv:<entity_id>` key with a WARN — an explicit "FalkorDB ⊄ Postgres" signal for
   reconciliation, not a handled case.
@@ -312,7 +312,8 @@ hashes/partitions) are marked ⚠. The table is the load-bearing subset.
 | `GRAPHVER_SET_FIELDS` | `tags` | payload fields merged as unordered sets in 3-way merge |
 | `IMPORT_COMMIT_WINDOW` / `INLINE_IMPORT_MAX` | `10000` / `5000` | import windowing / inline-vs-async threshold |
 | `OBJECT_STORE_BACKEND` | `database` | where import/export artifacts live: `database`, `local` (a shared mount) or `s3` (opt-in) |
-| `GRAPHVER_PROJECTION_ROLLUP_INLINE_CAP` | `50000` | largest projection window whose rollups are maintained incrementally |
+| `GRAPHVER_PROJECTION_ROLLUP_INLINE_CAP` | `50000` | largest moved subtree whose rollups the projector maintains itself; a window's own lineage edges have no cap |
+| `GRAPHVER_ROLLUP_NET_MAX_CELLS` | `200000` | rollup cells a projection window nets in memory; past it, in `graphver.rollup_deltas` |
 | `GRAPHVER_RESYNC_MAX_ENTITIES` | `250000` | largest graph a re-sync may attempt; `0` disables the guard ([11](11-resync-at-any-scale.md)) |
 | `GRAPHVER_BOOTSTRAP_MERKLE_MAX` | `1000000` | above this, an enable-VC copy defers the Merkle root rather than building it in memory |
 | `GRAPHVER_PURGE_GRACE_DAYS` | `30` | undo window before a deleted data source's version history is purged |

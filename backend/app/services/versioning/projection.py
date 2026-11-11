@@ -692,6 +692,184 @@ UNRESOLVED = _Unresolved()
 
 
 
+#: Chains a rollup delta keeps cached across its pages, at most (``_compute_rollup_deltas``).
+_CHAIN_CACHE_MAX = 200000
+#: What a staged cell carries besides its weights and types: the ends' depths, levels and labels,
+#: and the level digest (``_CellsOut.convert``).
+_STAMPS = ("sd", "td", "sl", "tl", "slb", "tlb", "dg")
+
+
+class _CellsOut:
+    """Netted cells keyed by entity ids → the pairs the apply writes, keyed by urn: the level
+    stamps, the urns and labels FalkorDB keys the ends by, and the level digest."""
+
+    def __init__(self, svc, graph, main_id: str, from_seq: int, to_seq: int,
+                 use_canonical: bool, level_map: Dict[str, int]) -> None:
+        self.svc, self.graph, self.main_id = svc, graph, main_id
+        self.from_seq, self.to_seq = from_seq, to_seq
+        self.use_canonical, self.level_map = use_canonical, level_map
+
+    async def convert(self, s, pairs: Dict[Tuple[str, str], Dict[str, object]]
+                      ) -> Dict[Tuple[str, str], Dict[str, object]]:
+        if not pairs:
+            return {}
+        ids = {i for k in pairs for i in k}
+        # FalkorDB keys nodes by urn; versioned entity ids usually ARE urns, but imported
+        # entities may differ — resolve through the entities' rows, with the SAME gv:<id>
+        # fallback the raw projection uses (_node_urn) so the MATCH always hits. entityType is
+        # what the node merge labeled the cache node with — carried so _apply_rollups anchors
+        # every match on the per-label URN index instead of an unlabeled full scan per row.
+        vals = await self.svc._skeletons_at(s, self.graph.id, self.main_id, ids, self.to_seq)
+        urn_of = {i: ((vals.get(i) or {}).get("urn") or f"gv:{i}") for i in ids}
+        lbl_of = {i: str(((vals.get(i) or {}).get("entityType")) or "Entity") for i in ids}
+        digest = None
+        if self.use_canonical:
+            # Level stamps for every surviving cell: the node's type level as of the window's
+            # end (as of its start for a node the window deleted).
+            def level(v) -> Optional[int]:
+                et_id = (v or {}).get("entityType") or None
+                return self.level_map.get(et_id) if et_id else None
+
+            lv = {i: level(vals.get(i)) for i in ids}
+            gone = [i for i in ids if lv[i] is None]
+            if gone:
+                was = await self.svc._skeletons_at(s, self.graph.id, self.main_id, gone,
+                                                   self.from_seq)
+                lv.update({i: level(was.get(i)) for i in gone if level(was.get(i)) is not None})
+            for (sx, tx), e in pairs.items():
+                sl, tl = lv.get(sx), lv.get(tx)
+                if sl is not None and tl is not None:
+                    e["sl"], e["tl"] = sl, tl
+            if self.level_map:
+                from backend.app.services.ontology_levels import compute_level_digest
+                digest = compute_level_digest(self.level_map)
+        out: Dict[Tuple[str, str], Dict[str, object]] = {}
+        for (sx, tx), v in pairs.items():                # distinct ids can share a urn — SUM
+            e = out.setdefault((urn_of[sx], urn_of[tx]), {"dw": 0, "types": set()})
+            e["dw"] += v["dw"]
+            if "dwc" in v:
+                e["dwc"] = e.get("dwc", 0) + v["dwc"]
+            e["types"] |= v["types"]
+            e.setdefault("slb", lbl_of[sx])
+            e.setdefault("tlb", lbl_of[tx])
+            if "sl" in v:
+                e["sl"], e["tl"] = v["sl"], v["tl"]
+            if "sd" in v:
+                e["sd"], e["td"] = v["sd"], v["td"]
+            if digest is not None:
+                e["dg"] = digest
+        return {k: v for k, v in out.items() if v["dw"] != 0 or v.get("dwc", 0) != 0}
+
+
+class _CellNet:
+    """A window's net lineage-summary deltas by cell: ``dw`` (the cube regime's), ``dwc`` (the
+    canonical one's; None outside canonical mode), the raw types, and the two ends' depths.
+
+    Held in memory by ``(source id, target id)`` up to ``cap`` cells. Past it, the cells are
+    converted to the pairs the apply writes (``conversion``) and added to ``rollup_deltas`` by urn
+    pair, and the memory let go: a window of any size nets in bounded memory, and each pair is one
+    row, applied once (:meth:`pages`)."""
+
+    def __init__(self, session_factory, graph_id: str, to_seq: int, cap: int,
+                 conversion: _CellsOut) -> None:
+        self._session, self.graph_id, self.to_seq, self.cap = session_factory, graph_id, to_seq, cap
+        self.conversion = conversion
+        self.cells: Dict[Tuple[str, str], list] = {}
+        self.staged = False                          # Postgres is touched only once it stages
+
+    def add(self, s_: str, t_: str, dw: int, dwc: Optional[int], typ: Optional[str],
+            sd: Optional[int], td: Optional[int]) -> None:
+        cell = self.cells.get((s_, t_))
+        if cell is None:
+            cell = self.cells[(s_, t_)] = [0, None if dwc is None else 0, set(), sd, td]
+        cell[0] += dw
+        if dwc is not None:
+            cell[1] = (cell[1] or 0) + dwc
+        if typ:
+            cell[2].add(typ)
+        if sd is not None:
+            cell[3], cell[4] = sd, td
+
+    async def page_done(self, s) -> None:
+        if len(self.cells) > self.cap:
+            await self.flush(s)
+
+    async def flush(self, s) -> None:
+        """Add the cells held in memory to ``rollup_deltas`` as the pairs the apply writes, summing
+        a pair already there, and let them go. The first deletes what a pass that stopped left."""
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
+        from .models import RollupDeltaORM as R
+        pairs = await self.conversion.convert(s, self.netted())
+        self.cells.clear()
+        if not self.staged:
+            async with self._session() as w:
+                await w.execute(R.__table__.delete().where(R.graph_id == self.graph_id))
+            self.staged = True
+        rows = [{"graph_id": self.graph_id, "to_seq": self.to_seq, "s": s_, "t": t_,
+                 "dw": v["dw"], "dwc": v.get("dwc"), "types": sorted(v["types"]),
+                 **{k: v.get(k) for k in _STAMPS}} for (s_, t_), v in pairs.items()]
+        for chunk in _batches(rows, 2000):           # 14 binds a row, under asyncpg's 32,767
+            stmt = pg_insert(R).values(chunk)
+            new = stmt.excluded
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["graph_id", "to_seq", "s", "t"],
+                set_={"dw": R.dw + new.dw, "dwc": R.dwc + new.dwc,
+                      "types": R.types.op("||")(new.types),
+                      **{k: func.coalesce(getattr(new, k), getattr(R, k)) for k in _STAMPS}})
+            async with self._session() as w:
+                await w.execute(stmt)
+
+    async def clear(self) -> None:
+        """Forget the cells: those in memory, and once it has staged, the graph's rows."""
+        from .models import RollupDeltaORM as R
+        self.cells.clear()
+        if self.staged:
+            async with self._session() as w:
+                await w.execute(R.__table__.delete().where(R.graph_id == self.graph_id))
+
+    def netted(self) -> Dict[Tuple[str, str], Dict[str, object]]:
+        """The cells held in memory as the pair dicts the conversion takes, the zeros dropped."""
+        out: Dict[Tuple[str, str], Dict[str, object]] = {}
+        for key, (dw, dwc, types, sd, td) in self.cells.items():
+            if dw == 0 and not dwc:
+                continue
+            e: Dict[str, object] = {"dw": dw, "types": set(types)}
+            if dwc is not None:
+                e["dwc"] = dwc
+            if sd is not None:
+                e["sd"], e["td"] = sd, td
+            out[key] = e
+        return out
+
+    async def pages(self, size: int):
+        """The staged pairs a page at a time, in ``(s, t)`` order, as the apply writes them; those
+        that netted to nothing dropped."""
+        from sqlalchemy import tuple_
+        from .models import RollupDeltaORM as R
+        cols = [R.s, R.t, R.dw, R.dwc, R.types, *(getattr(R, k) for k in _STAMPS)]
+        after: Tuple[str, str] = ("", "")
+        while True:
+            async with self._session() as w:
+                rows = (await w.execute(
+                    select(*cols).where(R.graph_id == self.graph_id, R.to_seq == self.to_seq,
+                                        tuple_(R.s, R.t) > tuple_(*after))
+                    .order_by(R.s, R.t).limit(size))).all()
+            page: Dict[Tuple[str, str], Dict[str, object]] = {}
+            for s_, t_, dw, dwc, types, *stamps in rows:
+                if dw == 0 and not dwc:
+                    continue
+                e: Dict[str, object] = {"dw": int(dw), "types": set(types or [])}
+                if dwc is not None:
+                    e["dwc"] = int(dwc)
+                e.update((k, v) for k, v in zip(_STAMPS, stamps) if v is not None)
+                page[(s_, t_)] = e
+            if page:
+                yield page
+            if len(rows) < size:
+                return
+            after = (rows[-1][0], rows[-1][1])
+
+
 class FalkorProjector:
     """Projects committed `main` state of a graph into its FalkorDB graph."""
 
@@ -917,18 +1095,18 @@ class FalkorProjector:
                         .values(quarantine_next_at=retry_at if left else None)
                         .execution_options(synchronize_session=False))
 
-    async def _retry_quarantined(self, client, graph_id: str, *, full_seed: bool) -> None:
+    async def _retry_quarantined(self, client, graph_id: str, *, full_seed: bool) -> bool:
         """Before a pass writes: retry the graph's quarantined statements, oldest first, so its
         own writes land after them. One that lands leaves the table; one that still times out
         stays, counted. A full seed rewrites every entity itself, so its graph's rows are cleared
-        instead. What is still held is the pass's (``_PASS_HELD``)."""
+        instead: True when there were any. What is still held is the pass's (``_PASS_HELD``)."""
         held = _PASS_HELD.get()
         async with self._session() as s:
             if full_seed:
-                await s.execute(ProjectionQuarantineORM.__table__.delete().where(
-                    ProjectionQuarantineORM.graph_id == graph_id))
+                cleared = (await s.execute(ProjectionQuarantineORM.__table__.delete().where(
+                    ProjectionQuarantineORM.graph_id == graph_id))).rowcount
                 await self._mark_held(s, graph_id)
-                return
+                return bool(cleared)
             rows = (await s.execute(select(ProjectionQuarantineORM)
                                     .where(ProjectionQuarantineORM.graph_id == graph_id)
                                     .order_by(ProjectionQuarantineORM.first_at))).scalars().all()
@@ -957,6 +1135,7 @@ class FalkorProjector:
                         row.statement, row.entity_key, row.attempts + 1)
         async with self._session() as s:
             await self._mark_held(s, graph_id)
+        return False
 
     def _hub_safe_delete(self, client, label: str):
         """``at_floor`` for a node delete that still times out on its own: a hub, whose
@@ -1276,8 +1455,9 @@ class FalkorProjector:
             if unspelled:
                 await self._learn_spelling(client, graph_id)
             # What earlier passes quarantined goes first, so this pass's own writes land after it.
+            cleared = False
             if quarantine_next_at is not None:
-                await self._retry_quarantined(client, graph_id, full_seed=from_seq <= 0)
+                cleared = await self._retry_quarantined(client, graph_id, full_seed=from_seq <= 0)
             async with self._session() as s:
                 graph = await s.get(GraphORM, graph_id)
                 main_id = await self._svc._main_branch_id(s, graph_id)
@@ -1311,17 +1491,6 @@ class FalkorProjector:
                     if not owned:
                         prior = await self._properties_before(s, graph, main_id, from_seq,
                                                               changes[0])
-                # Incremental :AGGREGATED rollup maintenance for a publish window. A full
-                # replay's rollups are moved by the reconcile's own diff instead.
-                # A failure here must NEVER wedge raw-edge projection — degrade to the rebuild.
-                if from_seq > 0 and self._edge_types_resolver is not None:
-                    try:
-                        rollup_pairs = await self._compute_rollup_deltas(
-                            s, graph, main_id, from_seq, to_seq)
-                    except Exception:                        # pragma: no cover - defensive
-                        logger.exception("rollup delta computation failed for %s — queuing rebuild",
-                                         graph_id)
-                        rollup_pairs = "stale"
 
             # Ontology entity-type→level map so projected nodes carry n.level (parity with
             # save_custom_graph). Best-effort: {} when unavailable, leaving level unset.
@@ -1344,6 +1513,11 @@ class FalkorProjector:
                 reconciled = await self._reconcile_in_place(
                     client, graph_id, main_id, to_seq, level_map, track_progress=True,
                     provider_id=provider_id, owned=owned, cursor=cursor)
+                if cleared:
+                    # What was held back was missing from the key when its window's rollups
+                    # moved, so they already count what the reconcile has just written: moving
+                    # them by its difference would count it twice. The job rebuilds them.
+                    reconciled = {**reconciled, "rollups": "stale"}
             elif paged:
                 dropped, structural, paged_writes = await self._apply_paged(
                     client, graph_id, main_id, from_seq, to_seq, level_map=level_map,
@@ -1355,6 +1529,19 @@ class FalkorProjector:
                                             provider_id=provider_id, owned=owned,
                                             prior=prior) or 0
             window_rollups_applied = False
+            # Incremental :AGGREGATED rollup maintenance for a publish window, once its raw writes
+            # have landed: a pass that stops part-way computes none. A full replay's rollups are
+            # moved by the reconcile's own diff instead. A failure here must NEVER wedge raw-edge
+            # projection — degrade to the rebuild.
+            if from_seq > 0 and self._edge_types_resolver is not None:
+                try:
+                    async with self._session() as s:
+                        rollup_pairs = await self._compute_rollup_deltas(
+                            s, graph, main_id, from_seq, to_seq)
+                except Exception:                        # pragma: no cover - defensive
+                    logger.exception("rollup delta computation failed for %s — queuing rebuild",
+                                     graph_id)
+                    rollup_pairs = "stale"
             if rollup_pairs and rollup_pairs != "stale":
                 window_rollups_applied = True
                 # After the raw upserts, so pair endpoints exist. Idempotent per window
@@ -2175,9 +2362,9 @@ class FalkorProjector:
                            "for %s (from_seq=%d to_seq=%d) — content drift repaired", recovered,
                            graph.id, from_seq, to_seq)
 
-    # Largest rollup change maintained inline (lineage edges in a window, a moved container's
-    # subtree, a reconcile's contributions); above it the on_rollups_stale hook queues the batch
-    # job. See ``config.PROJECTION_ROLLUP_INLINE_CAP``.
+    # Largest restructure whose rollups are maintained inline (a moved container's subtree, a
+    # reconcile's contributions); above it the on_rollups_stale hook queues the batch job. A
+    # window's own lineage edges have no cap. See ``config.PROJECTION_ROLLUP_INLINE_CAP``.
     _MOVE_EDGE_CAP = config.PROJECTION_ROLLUP_INLINE_CAP
 
     async def _containment_types(self, graph_id: str) -> Optional[Set[str]]:
@@ -2268,12 +2455,15 @@ class FalkorProjector:
         """Net ``:AGGREGATED`` rollup adjustments implied by this window's committed changes:
         +1 over the ancestor-pair product for each created lineage edge (post-window chains),
         -1 for each deleted one (pre-window chains), and a bounded recount for lineage edges
-        under containers that were MOVED in the window. O(window delta × chain depth²).
+        under containers that were MOVED in the window. O(window delta × chain depth²), in any
+        size of window: its edges are read a page of ids at a time, and netted in bounded memory.
 
-        Returns ``{(src_urn, tgt_urn): {"dw": int, "types": set}}``, ``None`` when nothing
-        rollup-affecting changed, or the sentinel ``"stale"`` when a move exceeded the cap —
-        and, for a data source whose rollups live in a dedicated key (the resolver's
-        ``"dedicated"``), whenever lineage or containment changed: none is written here."""
+        Returns ``{(src_urn, tgt_urn): {"dw": int, "types": set}}``; past
+        ``GRAPHVER_ROLLUP_NET_MAX_CELLS`` cells, the :class:`_CellNet` holding them in
+        ``rollup_deltas`` instead; ``None`` when nothing rollup-affecting changed; or the sentinel
+        ``"stale"`` when a move exceeded the cap — and, for a data source whose rollups live in a
+        dedicated key (the resolver's ``"dedicated"``), whenever lineage or containment changed:
+        none is written here."""
         try:
             sets = await self._edge_types_resolver(self._svc, graph.id)
         except Exception:                                # pragma: no cover - app-layer resolution
@@ -2301,67 +2491,14 @@ class FalkorProjector:
         def _etype(p) -> str:
             return str((p or {}).get("edgeType") or "").upper()
 
-        rows = (await s.execute(
-            select(EdgeVersionORM.entity_id, EdgeVersionORM.op, EdgeVersionORM.payload)
-            .where(EdgeVersionORM.graph_id == graph.id, EdgeVersionORM.branch_id == main_id,
-                   EdgeVersionORM.commit_seq > from_seq, EdgeVersionORM.commit_seq <= to_seq)
-            .order_by(EdgeVersionORM.commit_seq).limit(self._MOVE_EDGE_CAP + 1)
-        )).all()
-        if not rows:
-            return None
-        if len(rows) > self._MOVE_EDGE_CAP:
-            # More edge rows than the inline cap allows changes: the job takes the window over
-            # before any more of it is read (a publish of millions is that many payloads).
-            return "stale"
-        final: Dict[str, Optional[dict]] = {}
-        for eid, op, payload in rows:                    # last row in window wins
-            final[eid] = None if op == "delete" else payload
-        # Net contribution per touched edge = its value BEFORE the window vs AFTER it.
-        # Op labels alone lose real cases the worker batches into one window: create+update
-        # (last op 'update' would hide the +1), delete+revert-recreate (spurious +1 for an
-        # edge that never stopped being live), and endpoint/type rewrites via update.
-        before = await self._svc._values_at(s, graph.id, main_id, list(final), from_seq)
-
         def _sig(p: Optional[dict]):
             return None if not p else (*_edge_endpoints(p), _etype(p))
 
-        lineage_creates: Dict[str, dict] = {}
-        lineage_deletes: Dict[str, dict] = {}
-        moved: set = set()
-        for eid, new in final.items():
-            old = before.get(eid)
-            if _sig(old) == _sig(new):
-                continue                                 # payload-only change — no rollup impact
-            if old is not None:
-                et = _etype(old)
-                if et in lineage_types:
-                    lineage_deletes[eid] = old
-                elif et in cont_types:
-                    moved.add(_edge_endpoints(old)[1])
-            if new is not None:
-                et = _etype(new)
-                if et in lineage_types:
-                    lineage_creates[eid] = new
-                elif et in cont_types:
-                    moved.add(_edge_endpoints(new)[1])
-        moved.discard("")
-        if "dedicated" in sets[3:]:
-            # The aggregation job builds these rollups in a key of their own: this key gets
-            # none, and a window that changes lineage or containment hands them to the job.
-            return "stale" if lineage_creates or lineage_deletes or moved else None
-        if len(lineage_creates) + len(lineage_deletes) > self._MOVE_EDGE_CAP:
-            # Past the inline cap the aggregation JOB takes over — it too writes only the
-            # difference. Below it the chains come from one batched climb (``prefetch``).
-            return "stale"
-        if not lineage_creates and not lineage_deletes and not moved:
-            return None
-
         anc_cache: Dict[Tuple[str, Optional[int]], Tuple[List[str], Dict[str, List[str]]]] = {}
-        lvl_cache: Dict[Tuple[str, Optional[int]], Optional[int]] = {}
 
         async def prefetch(ids, as_of: Optional[int]) -> None:
-            """Every chain a window needs at one seq, in ONE batched climb — a query per
-            containment LEVEL, not per node — so a 10,000-edge window costs what a 10-edge
+            """Every chain a page needs at one seq, in ONE batched climb — a query per
+            containment LEVEL, not per node — so a 10,000-edge page costs what a 10-edge
             one does in round trips. (Per node, a deep hierarchy re-read the same top-level
             containers' edges for every distinct leaf.)"""
             need = {i for i in ids if i and (i, as_of) not in anc_cache}
@@ -2396,28 +2533,17 @@ class FalkorProjector:
                 anc_cache[key] = (list(seen), child_parent)
             return anc_cache[key]
 
-        async def levels_of(ids, as_of: Optional[int]) -> Dict[str, Optional[int]]:
-            need = [i for i in ids if (i, as_of) not in lvl_cache]
-            if need:
-                vals = await self._svc._values_at(s, graph.id, main_id, need, as_of)
-                for i in need:
-                    et_id = ((vals.get(i) or {}).get("entityType")) or None
-                    lvl_cache[(i, as_of)] = level_map.get(et_id) if et_id else None
-            return {i: lvl_cache[(i, as_of)] for i in ids}
-
-        pairs: Dict[Tuple[str, str], Dict[str, object]] = {}
+        conversion = _CellsOut(self._svc, graph, main_id, from_seq, to_seq, use_canonical, level_map)
+        net = _CellNet(self._session, graph.id, to_seq, config.ROLLUP_NET_MAX_CELLS, conversion)
 
         async def contribute(p: dict, sign: int, as_of: Optional[int]) -> None:
-            """Accumulate this raw edge's delta into BOTH pair sets via
-            the shared ``pair_rules`` (the same rules the batch pipeline
-            and the write hooks run): ``dw`` = the full ancestor-closure
-            cross-product (what a CUBE-regime graph stores), ``dwc`` = the
-            canonical depth-bridged subset (what a BOUNDARY-regime graph
-            stores). The stored regime is only knowable from the graph
-            itself, so _apply_rollups picks the matching delta at apply
-            time. Closures have SET semantics — a diamond's shared
-            grandparent gets each edge's delta exactly once — and every
-            ancestry of a multi-parent node is linked."""
+            """Net this raw edge's delta into BOTH pair sets via the shared ``pair_rules`` (the
+            same rules the batch pipeline and the write hooks run): ``dw`` = the full
+            ancestor-closure cross-product (what a CUBE-regime graph stores), ``dwc`` = the
+            canonical depth-bridged subset (what a BOUNDARY-regime graph stores). The stored
+            regime is only knowable from the graph itself, so _apply_rollups picks the matching
+            delta at apply time. Closures have SET semantics — a diamond's shared grandparent gets
+            each edge's delta exactly once — and every ancestry of a multi-parent node is linked."""
             from backend.common.providers.pair_rules import (
                 ancestor_closure, boundary_pairs, cube_pairs,
             )
@@ -2440,107 +2566,118 @@ class FalkorProjector:
                 ))
                 depths = {**t_cl, **s_cl}
                 for sx, tx in cube:
-                    e = pairs.setdefault(
-                        (sx, tx), {"dw": 0, "dwc": 0, "types": set()},
-                    )
-                    e["dw"] += sign
-                    if (sx, tx) in canon:
-                        e["dwc"] += sign
-                    e["sd"], e["td"] = depths.get(sx), depths.get(tx)
-                    if sign > 0 and et:
-                        e["types"].add(et)
+                    net.add(sx, tx, sign, sign if (sx, tx) in canon else 0,
+                            et if sign > 0 and et else None, depths.get(sx), depths.get(tx))
                 return
             for sx in cs:
                 for tx in ct:
-                    if sx == tx:
-                        continue
-                    e = pairs.setdefault((sx, tx), {"dw": 0, "types": set()})
-                    e["dw"] += sign
-                    if sign > 0 and et:
-                        e["types"].add(et)
+                    if sx != tx:
+                        net.add(sx, tx, sign, None, et if sign > 0 and et else None, None, None)
 
-        await prefetch({x for p in lineage_creates.values() for x in _edge_endpoints(p)}, to_seq)
-        await prefetch({x for p in lineage_deletes.values() for x in _edge_endpoints(p)}, from_seq)
-        handled = set()
-        for eid, p in lineage_creates.items():
-            await contribute(p, +1, to_seq)
-            handled.add(eid)
-        for eid, p in lineage_deletes.items():
-            await contribute(p, -1, from_seq)
-            handled.add(eid)
+        # The window's edges a page of distinct ids at a time, each at its value BEFORE the window
+        # against AFTER it, from the version rows' identity columns (never a payload). Op labels
+        # alone lose real cases the worker batches into one window: create+update (last op
+        # 'update' would hide the +1), delete+revert-recreate (spurious +1 for an edge that never
+        # stopped being live), and endpoint/type rewrites via update.
+        window = (EdgeVersionORM.graph_id == graph.id, EdgeVersionORM.branch_id == main_id,
+                  EdgeVersionORM.commit_seq > from_seq, EdgeVersionORM.commit_seq <= to_seq)
+        moved: set = set()
+        changed = False
+        after = ""
+        while True:
+            ids = list((await s.execute(
+                select(EdgeVersionORM.entity_id).where(*window, EdgeVersionORM.entity_id > after)
+                .distinct().order_by(EdgeVersionORM.entity_id).limit(config.PROJECTION_PAGE)
+            )).scalars().all())
+            if not ids:
+                break
+            before = await self._svc._skeletons_at(s, graph.id, main_id, ids, from_seq)
+            now = await self._svc._skeletons_at(s, graph.id, main_id, ids, to_seq)
+            creates: Dict[str, dict] = {}
+            deletes: Dict[str, dict] = {}
+            children: set = set()
+            for eid in ids:
+                old, new = before.get(eid), now.get(eid)
+                if _sig(old) == _sig(new):
+                    continue                             # payload-only change — no rollup impact
+                if old is not None:
+                    et = _etype(old)
+                    if et in lineage_types:
+                        deletes[eid] = old
+                    elif et in cont_types:
+                        children.add(_edge_endpoints(old)[1])
+                if new is not None:
+                    et = _etype(new)
+                    if et in lineage_types:
+                        creates[eid] = new
+                    elif et in cont_types:
+                        children.add(_edge_endpoints(new)[1])
+            children.discard("")
+            if "dedicated" in sets[3:] and (creates or deletes or children):
+                # The aggregation job builds these rollups in a key of their own: this key gets
+                # none, and a window that changes lineage or containment hands them to the job.
+                await net.clear()
+                return "stale"
+            if children:
+                # A child that gained or lost a parent MOVED if it is there on both sides of the
+                # window. One the window created or deleted has no lineage on the other side to
+                # move: a node's edges are created after it and deleted with it, so its own are
+                # among the window's lineage changes, counted below. (So a large import of new,
+                # contained nodes is no move.)
+                was = await self._svc._skeletons_at(s, graph.id, main_id, children, from_seq)
+                still = await self._svc._skeletons_at(s, graph.id, main_id, children, to_seq)
+                moved.update(c for c in children
+                             if was.get(c) is not None and still.get(c) is not None)
+                if len(moved) > self._MOVE_EDGE_CAP:
+                    await net.clear()                    # a restructure: the aggregation job's
+                    return "stale"
+            changed = changed or bool(creates or deletes)
+            await prefetch({x for p in creates.values() for x in _edge_endpoints(p)}, to_seq)
+            await prefetch({x for p in deletes.values() for x in _edge_endpoints(p)}, from_seq)
+            for p in creates.values():
+                await contribute(p, +1, to_seq)
+            for p in deletes.values():
+                await contribute(p, -1, from_seq)
+            await net.page_done(s)
+            if len(anc_cache) > _CHAIN_CACHE_MAX:
+                anc_cache.clear()                        # bounded, whatever the window's size
+            if len(ids) < config.PROJECTION_PAGE:
+                break
+            after = ids[-1]
+        if not changed and not moved:
+            await net.clear()
+            return None
 
         if moved:
             # Moved subtrees: every lineage edge under them changes rollup pairs. Remove the
-            # pre-window contribution, add the post-window one — bounded by _MOVE_EDGE_CAP.
+            # pre-window contribution, add the post-window one — bounded by _MOVE_EDGE_CAP: a
+            # bigger move is a restructure, which the aggregation job takes.
             subtree = await self._svc._containment_descendants(
                 s, graph.id, main_id, set(moved), cont_types, to_seq, cap=self._MOVE_EDGE_CAP + 1)
             if len(subtree) > self._MOVE_EDGE_CAP:
+                await net.clear()
                 return "stale"
             # as-of to_seq (not head): a commit landing after this window must not leak in.
             inc = await self._svc._incident_live_edges(s, graph.id, main_id, subtree, to_seq)
-            moved_edges = {eid: p for eid, p in inc.items()
-                           if eid not in handled and _etype(p) in lineage_types}
-            if len(moved_edges) > self._MOVE_EDGE_CAP:
+            lineage = {eid: p for eid, p in inc.items() if _etype(p) in lineage_types}
+            if len(lineage) > self._MOVE_EDGE_CAP:
+                await net.clear()
                 return "stale"
+            # Those the window itself changed are counted above, each on its own side's chains.
+            was = await self._svc._skeletons_at(s, graph.id, main_id, list(lineage), from_seq)
+            moved_edges = {eid: p for eid, p in lineage.items() if _sig(was.get(eid)) == _sig(p)}
             ends = {x for p in moved_edges.values() for x in _edge_endpoints(p)}
             await prefetch(ends, from_seq)
             await prefetch(ends, to_seq)
             for eid, p in moved_edges.items():
                 await contribute(p, -1, from_seq)
                 await contribute(p, +1, to_seq)
+            await net.page_done(s)
 
-        pairs = {
-            k: v for k, v in pairs.items()
-            if v["dw"] != 0 or v.get("dwc", 0) != 0
-        }
-        if not pairs:
-            return None
-        if use_canonical:
-            # Level stamps for every surviving cell in one batched read: the node's type
-            # level as of the window's end (as of its start for a node the window deleted).
-            ids = {i for k in pairs for i in k}
-            lv = await levels_of(ids, to_seq)
-            gone = [i for i in ids if lv.get(i) is None]
-            if gone:
-                lv.update({i: v for i, v in (await levels_of(gone, from_seq)).items()
-                           if v is not None})
-            for (sx, tx), e in pairs.items():
-                sl, tl = lv.get(sx), lv.get(tx)
-                if sl is not None and tl is not None:
-                    e["sl"], e["tl"] = sl, tl
-        # FalkorDB keys nodes by urn; versioned entity ids usually ARE urns, but imported
-        # entities may differ — resolve through the entities' payloads, with the SAME
-        # gv:<id> fallback the raw projection uses (_node_urn) so the MATCH always hits.
-        ids = {i for k in pairs for i in k}
-        vals = await self._svc._values_at(s, graph.id, main_id, ids, to_seq)
-        urn_of = {i: ((vals.get(i) or {}).get("urn") or f"gv:{i}") for i in ids}
-        # entityType is what the node merge labeled the cache node with —
-        # carried so _apply_rollups anchors every match on the per-label
-        # URN index instead of an unlabeled full scan per row.
-        lbl_of = {i: str(((vals.get(i) or {}).get("entityType")) or "Entity") for i in ids}
-        digest = None
-        if use_canonical and level_map:
-            from backend.app.services.ontology_levels import compute_level_digest
-            digest = compute_level_digest(level_map)
-        out: Dict[Tuple[str, str], Dict[str, object]] = {}
-        for (sx, tx), v in pairs.items():                # distinct ids can share a urn — SUM, don't overwrite
-            e = out.setdefault((urn_of[sx], urn_of[tx]), {"dw": 0, "types": set()})
-            e["dw"] += v["dw"]
-            if "dwc" in v:
-                e["dwc"] = e.get("dwc", 0) + v["dwc"]
-            e["types"] |= v["types"]
-            e.setdefault("slb", lbl_of[sx])
-            e.setdefault("tlb", lbl_of[tx])
-            if "sl" in v:
-                e["sl"], e["tl"] = v["sl"], v["tl"]
-            if "sd" in v:
-                e["sd"], e["td"] = v["sd"], v["td"]
-            if digest is not None:
-                e["dg"] = digest
-        out = {
-            k: v for k, v in out.items()
-            if v["dw"] != 0 or v.get("dwc", 0) != 0
-        }
+        if net.staged:
+            await net.flush(s)
+            return net
+        out = await conversion.convert(s, net.netted())
         return out or None
 
     async def _apply_rollups(self, client, pairs: Dict, from_seq: int, to_seq: int) -> bool:
@@ -2551,7 +2688,17 @@ class FalkorProjector:
         projector on a different window) can't be reconciled incrementally: returns False so
         the caller queues a rebuild instead of guessing. Weight ≤ 0 deletes the rollup.
         Property shape mirrors the aggregation worker (weight / sourceEdgeTypes / aggKey /
-        latestUpdate), so a later full rebuild MERGEs onto the same relationships."""
+        latestUpdate), so a later full rebuild MERGEs onto the same relationships.
+
+        Cells netted in ``rollup_deltas`` (a :class:`_CellNet`) are applied a page at a time,
+        and their rows deleted however this returns."""
+        try:
+            return await self._apply_rollups_once(client, pairs, from_seq, to_seq)
+        finally:
+            if isinstance(pairs, _CellNet):
+                await pairs.clear()
+
+    async def _apply_rollups_once(self, client, pairs, from_seq: int, to_seq: int) -> bool:
         # Graph-level high-water mark for rollup application (a meta node, wiped with the
         # graph on full seeds). Catches what per-pair stamps can't: a prior application
         # whose pairs don't recur in this (grown/concurrent) window.
@@ -2563,7 +2710,12 @@ class FalkorProjector:
         if marker > from_seq:
             return False                                 # partial/foreign overlap — rebuild, don't guess
 
-        if not await self._write_rollup_deltas(client, pairs, to_seq, guard_from_seq=from_seq):
+        if isinstance(pairs, _CellNet):
+            async for page in pairs.pages(config.PROJECTION_PAGE):
+                if not await self._write_rollup_deltas(client, page, to_seq,
+                                                       guard_from_seq=from_seq):
+                    return False
+        elif not await self._write_rollup_deltas(client, pairs, to_seq, guard_from_seq=from_seq):
             return False
         # Marker written only after EVERY chunk landed — a mid-apply crash leaves it behind
         # the watermark, so the retry re-applies with per-pair gvSeq stamps de-duplicating.

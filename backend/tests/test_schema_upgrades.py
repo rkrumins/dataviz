@@ -1608,6 +1608,58 @@ async def test_the_quarantine_migration_round_trips(store):
             await conn.run_sync(run("upgrade"))
             assert "quarantine_next_at" in await _ps_columns(conn)
             assert await _has_quarantine_table(conn)
+            assert await _table_columns(conn, "projection_quarantine") == _model_columns(
+                models.ProjectionQuarantineORM)
+            await conn.run_sync(run("upgrade"))                     # idempotent
+        finally:
+            await trans.rollback()
+
+
+async def _table_columns(conn, table: str) -> list:
+    """``(name, type, nullable)`` per column of a graphver table, in order."""
+    return [tuple(r) for r in (await conn.execute(text(
+        "SELECT column_name, data_type, is_nullable = 'YES' FROM information_schema.columns "
+        "WHERE table_schema = :s AND table_name = :t ORDER BY ordinal_position"),
+        {"s": models._SCHEMA, "t": table})).all()]
+
+
+def _model_columns(orm) -> list:
+    """The same, as the model declares them: what a migration's own DDL must match."""
+    from sqlalchemy.dialects import postgresql
+    return [(c.name, c.type.compile(dialect=postgresql.dialect()).lower(), bool(c.nullable))
+            for c in orm.__table__.columns]
+
+
+# ── rollup_deltas (20261112_1100_gv_rollup_deltas) ──
+_ROLLUP_DELTAS = _VERSIONS / "20261112_1100_gv_rollup_deltas.py"
+
+
+def test_the_rollup_deltas_table_is_declared_and_migrated():
+    assert [c.name for c in models.RollupDeltaORM.__table__.primary_key] == [
+        "graph_id", "to_seq", "s", "t"]
+    migration = _migration(_ROLLUP_DELTAS)
+    assert migration.revision == _ROLLUP_DELTAS.stem and len(migration.revision) <= 32
+    assert migration.down_revision == "20261112_1000_gv_proj_quarantine"
+
+
+@e2e
+async def test_the_rollup_deltas_migration_round_trips_to_the_models_table(store):
+    migration = _migration(_ROLLUP_DELTAS)
+
+    def run(step):
+        def apply(sync_conn):
+            migration.op = SimpleNamespace(get_bind=lambda: sync_conn)
+            getattr(migration, step)()
+        return apply
+
+    async with store.connect() as conn:
+        trans = await conn.begin()
+        try:
+            await conn.run_sync(run("downgrade"))
+            assert await _table_columns(conn, "rollup_deltas") == []
+            await conn.run_sync(run("upgrade"))
+            assert await _table_columns(conn, "rollup_deltas") == _model_columns(
+                models.RollupDeltaORM)
             await conn.run_sync(run("upgrade"))                     # idempotent
         finally:
             await trans.rollback()

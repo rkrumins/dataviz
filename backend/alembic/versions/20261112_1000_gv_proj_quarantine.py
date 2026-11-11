@@ -27,10 +27,7 @@ from alembic import op
 import sqlalchemy as sa
 
 from backend.app.services.versioning import config as gv_config
-from backend.app.services.versioning.models import (
-    ProjectionQuarantineORM,
-    ensure_ps_quarantine_column,
-)
+from backend.app.services.versioning.models import ensure_ps_quarantine_column
 
 revision: str = "20261112_1000_gv_proj_quarantine"
 down_revision: Union[str, None] = "20261111_1000_gv_draft_prune"
@@ -50,7 +47,13 @@ def upgrade() -> None:
     if not sa.inspect(bind).has_schema(gv_config.graphver_schema()):
         return                              # create_schema_and_partitions builds both
     _bound_lock_wait()
-    ProjectionQuarantineORM.__table__.create(bind, checkfirst=True)
+    bind.execute(sa.text(
+        f'CREATE TABLE IF NOT EXISTS "{gv_config.graphver_schema()}"."projection_quarantine" ('
+        "graph_id text NOT NULL, statement text NOT NULL, entity_key text NOT NULL, "
+        "entity_kind text NOT NULL, cypher text NOT NULL, params jsonb NOT NULL, error text, "
+        "attempts integer NOT NULL, first_at text NOT NULL, last_at text NOT NULL, "
+        "CONSTRAINT pk_projection_quarantine PRIMARY KEY (graph_id, statement, entity_key), "
+        "CONSTRAINT ck_projection_quarantine_kind CHECK (entity_kind IN ('node','edge')))"))
     ensure_ps_quarantine_column(bind)
 
 

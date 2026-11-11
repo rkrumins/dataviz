@@ -15,6 +15,7 @@ _EXPECTED_TABLES = {
     "graphs", "branches", "branch_members", "merge_requests", "projection_state",
     "jobs", "import_rows", "commits", "node_versions", "edge_versions", "entity_heads",
     "merkle_nodes", "working_changes", "bootstrap_nodes", "fork_bases",
+    "projection_quarantine", "rollup_deltas",
 }
 
 

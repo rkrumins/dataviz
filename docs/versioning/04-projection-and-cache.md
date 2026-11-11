@@ -186,7 +186,10 @@ This happens after its retries, and for a node delete after its hub path. The pa
   - A graph that is caught up gets a pass of its own once its held statements are due
     (`projection_state.quarantine_next_at`, every `GRAPHVER_PROJECTION_QUARANTINE_RETRY_SECS`,
     300). The poll selects it, and the pass has an empty window.
-  - A full seed rewrites everything, so it clears the graph's rows first.
+  - A full seed rewrites everything, so it clears the graph's rows first. It also hands the
+    `:AGGREGATED` rollups to the aggregation job (§8): they moved with the held entities' window,
+    which the key lacked, so moving them by the reconcile's difference would count those entities
+    twice.
 - **While any are held,** the graph's passes publish `unverified`: its counts cannot match.
 - **Where it shows.** The watermark lists them (`quarantine: {count, entities}`), and so does the
   **Data health** tab.
@@ -429,21 +432,34 @@ Coarse-grained lineage edges (column→table, etc.) are materialized in FalkorDB
 relationships. The projector maintains them **incrementally per committed window** so a publish's
 rollups are fresh without waiting for a full aggregation job.
 
-- **Compute deltas** — `_compute_rollup_deltas` (`projection.py:499-636`) nets rollup adjustments from
-  the window's edge rows. It compares each touched edge's value **before vs after the window** (via
-  `_values_at(from_seq)`) using a `(src, tgt, edgeType)` signature (`:534-561`) — robust to
-  create+update, delete+recreate, and endpoint/type rewrites that op-labels alone would mishandle.
-  Each lineage create contributes **+1** and each delete **−1** over the **Cartesian product of the
-  endpoints' containment-ancestor chains** (`contribute`, `projection.py:582-602`); moved containers
-  trigger a bounded recount of the subtree's lineage edges (`:604-619`). Complexity: O(window delta ×
-  chain depth²).
-- **Bounded, else stale** — if lineage creates+deletes or a moved subtree exceed `_MOVE_EDGE_CAP=1000`
-  (`projection.py:497,563,609,615`), it returns the sentinel `"stale"` — a bulk import/sync window is
-  the aggregation *job's* territory, not the projector's inline math.
-- **Apply idempotently** — `_apply_rollups` (`projection.py:638-699`) stamps a graph-level
-  `_GVRollupMeta.seq` high-water marker and a per-pair `gvSeq`. A retried window skips already-stamped
-  pairs (weights never double-count); a partial/foreign overlap returns `False` so the caller rebuilds
-  rather than guesses. The property shape (`weight`, `sourceEdgeTypes`, `aggKey`, `gvSeq`,
+- **Compute deltas, after the raw writes** — once a window's raw writes have landed,
+  `_compute_rollup_deltas` nets rollup adjustments from its edges. A pass that stops part-way (§3)
+  computes none; the pass that finishes the window does. It reads the window's distinct edge ids a
+  page at a time (`GRAPHVER_PROJECTION_PAGE`, a keyset on the id), and compares each edge's value
+  **before vs after the window** (`_skeletons_at(from_seq)` and `_skeletons_at(to_seq)`, from the
+  version rows' type and end columns, never a payload) using a `(src, tgt, edgeType)` signature —
+  robust to create+update, delete+recreate, and endpoint/type rewrites that op-labels alone would
+  mishandle. Each lineage create contributes **+1** and each delete **−1** over the **Cartesian
+  product of the endpoints' containment-ancestor chains** (`contribute`, one batched climb per page);
+  moved containers trigger a bounded recount of the subtree's lineage edges. Complexity: O(window
+  delta × chain depth²), in any size of window.
+- **Netted in bounded memory** — contributions net by cell (`_CellNet`) in memory up to
+  `GRAPHVER_ROLLUP_NET_MAX_CELLS` (200,000) cells. Past that, the cells are converted to what the
+  apply writes (urns, labels, level stamps) and added to `graphver.rollup_deltas`, one row per cell
+  keyed by its ends' urns, summed on conflict. A pass that stopped while netting there leaves rows
+  the next one deletes before it starts, so nothing is counted twice.
+- **Bounded only for restructures** — a window's own lineage edges have no cap: a publish of millions
+  is maintained by delta. A *move* is a node there before and after the window that gained or lost
+  a containment parent; a node the window created or deleted is none, since its lineage is the
+  window's own (a node's edges are created after it and deleted with it). So a large import of new,
+  contained nodes is no move. Moves whose nodes, subtree, or lineage under it exceed
+  `PROJECTION_ROLLUP_INLINE_CAP` (50,000) return the sentinel `"stale"`: a restructure is the
+  aggregation *job's* territory, not the projector's inline math.
+- **Apply idempotently** — `_apply_rollups` stamps a graph-level `_GVRollupMeta.seq` high-water marker
+  and a per-pair `gvSeq`. A retried window skips already-stamped pairs (weights never double-count); a
+  partial/foreign overlap returns `False` so the caller rebuilds rather than guesses. Cells netted in
+  `rollup_deltas` are applied a page at a time, the marker after the last, and their rows are deleted
+  however the apply ends. The property shape (`weight`, `sourceEdgeTypes`, `aggKey`, `gvSeq`,
   `latestUpdate`) **mirrors the aggregation worker**, so a later full rebuild MERGEs onto the same
   relationships.
 
@@ -486,11 +502,12 @@ for a window or reconcile that changes lineage or containment, writing no rollup
 > path (`backend/app/services/versioning/__main__.py:94`), so a full-seed wipe, a `"stale"` window
 > or a heal-reseed queues the rollup rebuild on every wiring.
 
-> **Limitation (large windows and forks).** Incremental rollups now carry level and depth stamps
-> (`sourceLevel`, `targetLevel`, `sourceDepth`, `targetDepth`, `levelDigest`), but a window over
-> `PROJECTION_ROLLUP_INLINE_CAP` (50,000) or an overlapping one still punts to `"stale"` → full
-> rebuild. A fork has no rollups of its own: it is never projected, and reads its root's with its own
-> changes over them ([17](17-forks-and-residency.md) §2).
+> **Limitation (restructures, overlaps and forks).** Incremental rollups carry level and depth stamps
+> (`sourceLevel`, `targetLevel`, `sourceDepth`, `targetDepth`, `levelDigest`), and a window of any
+> size is maintained by delta, but a move of a subtree over `PROJECTION_ROLLUP_INLINE_CAP` (50,000)
+> or an overlapping window still punts to `"stale"` → full rebuild. A fork has no rollups of its own:
+> it is never projected, and reads its root's with its own changes over them
+> ([17](17-forks-and-residency.md) §2).
 
 ---
 
@@ -703,6 +720,8 @@ boot via `XAUTOCLAIM`. `_project_one` (`worker.py:65`) serializes per-graph via 
 | `GRAPHVER_PROJECTION_QUARANTINE_RETRY_SECS` | 300 | How often a caught-up graph retries what it holds back. |
 | `GRAPHVER_PROJECTION_PASS_MAX_SECS` | 300 | A paged window or streamed rebuild stops at the next page past this, and the next pass resumes (§3); `0`: no limit. |
 | `GRAPHVER_PROJECTION_ESCALATE` / `_ESCALATE_AFTER` | on / 3 | Rebuild a graph on its own on drift, or after this many pressure failures in a row of one window (§3). |
+| `GRAPHVER_ROLLUP_NET_MAX_CELLS` | 200000 | Rollup cells a window nets in memory; past it, in `graphver.rollup_deltas` (§8). |
+| `GRAPHVER_PROJECTION_ROLLUP_INLINE_CAP` | 50000 | The largest moved subtree whose rollups the projector moves itself; a larger move goes to the aggregation job (§8). |
 | `GRAPHVER_PROJECTION_POLL_SECS` | 5 | Reconciling poll cadence (`config.py:115`). |
 | `GRAPHVER_PROJECTION_CONCURRENCY` | 8 | Max graphs projected per pass (`config.py:118`). |
 | `GRAPHVER_READ_MAX_LAG` | 0 | Neighbors-endpoint staleness tolerance (`config.py:119`; see §5 callout). |
@@ -725,7 +744,7 @@ Consolidated here and expanded in [09 · Scale & Limits](09-scale-limits-and-roa
    heads, but is not keyset-streamed (§3).
 3. **No eviction budget is set anywhere** (default 0 = unlimited; the loop runs and skips) and the
    **ephemeral time-travel pool is config-only** with no call sites (§11).
-4. **Large or overlapping windows rebuild rollups in full** (§8).
+4. **Overlapping windows, and moves of more than 50,000 entities, rebuild rollups in full** (§8).
 5. **Reconcile sorted-merge assumes ASCII collation** (§12).
 6. **`gv:<id>` urn fallback can mint phantom nodes** — a reconciliation signal, not a handled case
    (§2).

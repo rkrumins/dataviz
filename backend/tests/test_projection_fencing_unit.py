@@ -402,3 +402,30 @@ def test_a_busy_graph_counts_itself_once_per_interval(monkeypatch):
     asyncio.run(proj.project_graph("g1"))
     asyncio.run(proj.project_graph("g1"))
     assert len(verifies) == 6, verifies
+
+
+def test_a_rebuild_that_clears_held_changes_hands_the_rollups_to_the_job(monkeypatch):
+    """A full seed clears the graph's held statements and rewrites them. Their window's rollups
+    moved while the key lacked them, so moving the rollups by the reconcile's difference would
+    count them twice: the rollups go to the job instead. With nothing held, they move."""
+    for cleared, expect in ((True, ["g1"]), (False, [])):
+        ps = _PS(projected=0, target=5)
+        ps.status, ps.quarantine_next_at = "rebuilding", "2000-01-01T00:00:00+00:00"
+        proj, ps, _client, _seen = _projector(monkeypatch, ps=ps)
+        stale = []
+
+        async def rollups_stale(graph_id):
+            stale.append(graph_id)
+
+        async def retry(client, graph_id, *, full_seed, cleared=cleared):
+            assert full_seed
+            return cleared
+
+        async def reconcile(*a, **k):
+            return {"writes": 1, "rollups": "applied", "structural": False}
+
+        proj._on_rollups_stale = rollups_stale
+        monkeypatch.setattr(proj, "_retry_quarantined", retry)
+        monkeypatch.setattr(proj, "_reconcile_in_place", reconcile)
+        r = asyncio.run(proj.project_graph("g1"))
+        assert r["projected"] == 5 and stale == expect, (r, stale)

@@ -90,7 +90,8 @@ integration's many small changes as a few commits.
 - **One change that can't be written to the fast read layer no longer holds back the graph.**
   - A projector statement that still times out for a single entity, after its retries, is held
     back (`projection_quarantine`), and the rest of the publish lands.
-  - Later passes retry it first, and a caught-up graph retries it every 5 minutes.
+  - Later passes retry it first, and a caught-up graph retries it every 5 minutes. A rebuild
+    while anything is held rebuilds the lineage summaries too.
   - **Data health** lists what is held back and why ("Held back"); the watermark carries it as
     `quarantine`.
   - While any change is held, passes publish `unverified`.
@@ -195,9 +196,26 @@ integration's many small changes as a few commits.
   just failed it; a rebuild still runs at once. `project_now` projects a window of up to 20,000
   version rows inside the request (`GRAPHVER_PROJECTION_INLINE_MAX_ROWS`) and hands a larger one to
   the worker, rather than starting a pass its 10 s budget would cancel mid-write.
+- **A large publish no longer rebuilds the lineage summaries of the whole graph.** A publish of
+  more than 50,000 edge changes handed its summaries (`:AGGREGATED`) to the aggregation job, which
+  reads every node and edge of the graph. That included any publish large enough to be projected
+  a page at a time. Now a publish of any size moves them by delta, as a small one did:
+  - its edges are read a page at a time, from the version rows' ends and types, never a payload;
+  - what they change nets by summary cell in memory up to 200,000 cells
+    (`GRAPHVER_ROLLUP_NET_MAX_CELLS`), and past that in `graphver.rollup_deltas`, so the
+    projector's memory stays flat;
+  - the cells are written a page at a time, after the publish's own writes have landed. A pass
+    that stops part-way computes none;
+  - new nodes inside containers are no longer counted as moved containers, so a large import of
+    them no longer passes the move limit.
+
+  Moving containers whose subtrees hold more than 50,000 entities still goes to the job
+  (`GRAPHVER_PROJECTION_ROLLUP_INLINE_CAP`), and so does a window that overlaps one already applied.
 
 ### Upgrading
 
+- Migration `20261112_1100_gv_rollup_deltas` adds the table `graphver.rollup_deltas` (empty). A
+  separate `GRAPHVER_DB_URL` gets it at start-up.
 - Migration `20261112_1000_gv_proj_quarantine` adds the table `graphver.projection_quarantine`
   (empty) and `projection_state.quarantine_next_at` (nullable text, no rewrite). A separate
   `GRAPHVER_DB_URL` gets both at start-up.

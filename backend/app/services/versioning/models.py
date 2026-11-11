@@ -431,6 +431,37 @@ class ProjectionQuarantineORM(VersioningBase):
     )
 
 
+class RollupDeltaORM(VersioningBase):
+    """A projection window's net lineage-summary deltas, while it has more cells than it nets in
+    memory (``GRAPHVER_ROLLUP_NET_MAX_CELLS``): one row per ``:AGGREGATED`` cell the window moves,
+    keyed by its ends' urns, with ``dw`` (the cube regime's delta), ``dwc`` (the canonical one's;
+    NULL outside canonical mode), the raw types, and the stamps the cell is written with. Each part
+    of the window netted in memory adds to its cells here; the pass then applies them a page at a
+    time and deletes its rows. Rows a pass did not finish are deleted by the next one that nets
+    here, before it starts."""
+
+    __tablename__ = "rollup_deltas"
+
+    graph_id = Column(Text, nullable=False)
+    to_seq = Column(BigInteger, nullable=False)
+    s = Column(Text, nullable=False)
+    t = Column(Text, nullable=False)
+    dw = Column(BigInteger, nullable=False, default=0)
+    dwc = Column(BigInteger, nullable=True)
+    types = Column(JSONB, nullable=False, default=list)
+    sd = Column(Integer, nullable=True)
+    td = Column(Integer, nullable=True)
+    sl = Column(Integer, nullable=True)
+    tl = Column(Integer, nullable=True)
+    slb = Column(Text, nullable=True)
+    tlb = Column(Text, nullable=True)
+    dg = Column(Text, nullable=True)
+
+    __table_args__ = _plain(
+        PrimaryKeyConstraint("graph_id", "to_seq", "s", "t", name="pk_rollup_deltas"),
+    )
+
+
 class JobORM(VersioningBase):
     """Crash-recoverable worker job (ingest / projection / rebuild).
 

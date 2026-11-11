@@ -201,14 +201,19 @@ PROJECTION_VERIFY_DEEP: bool = os.getenv("GRAPHVER_PROJECTION_VERIFY_DEEP", "1")
 # is skipped on the automatic rebuild (count verify still runs); the on-demand reconcile ("Check sync")
 # can still deep-diff any size when an operator explicitly asks. 0 disables the ceiling.
 PROJECTION_VERIFY_DEEP_MAX_ENTITIES: int = int(os.getenv("GRAPHVER_PROJECTION_VERIFY_DEEP_MAX_ENTITIES", "500000"))
-# Largest rollup change the projector applies itself, by delta (a window's or a reconcile's
-# lineage-edge contributions; a moved container's subtree). Chains are resolved in one batched
-# climb per window and the pair math is in memory, so tens of thousands of edges stay inline;
-# past this the aggregation batch job — which also writes only the difference — takes over.
+# Largest restructure whose rollups the projector moves itself, by delta: a moved container's subtree
+# (and the lineage edges under it), and a reconcile's lineage-edge contributions. Past this the
+# aggregation batch job — which also writes only the difference — takes over. A publish window's own
+# lineage edges have no such cap (ROLLUP_NET_MAX_CELLS below).
 PROJECTION_ROLLUP_INLINE_CAP: int = int(os.getenv("GRAPHVER_PROJECTION_ROLLUP_INLINE_CAP", "50000"))
+# A window's lineage summaries are moved by delta whatever its size: its edges are read a page at a time
+# (PROJECTION_PAGE) and their contributions netted by cell, in memory up to this many cells and in
+# graphver.rollup_deltas past it, then applied a page at a time. (The inline cap above still bounds a
+# MOVED container's subtree: a move of more than that goes to the aggregation job.)
+ROLLUP_NET_MAX_CELLS: int = int(os.getenv("GRAPHVER_ROLLUP_NET_MAX_CELLS", "200000"))
 # A projection window of more version rows than this (a publish of millions) is written a page of
 # PROJECTION_PAGE rows at a time — all its nodes, then its edges — so the projector holds a page of
-# it, never all of it; and its rollups go to the aggregation job.
+# it, never all of it. Its rollups are moved by delta like any window's (ROLLUP_NET_MAX_CELLS).
 PROJECTION_PAGED_ABOVE: int = int(os.getenv("GRAPHVER_PROJECTION_PAGED_ABOVE", "200000"))
 PROJECTION_PAGE: int = int(os.getenv("GRAPHVER_PROJECTION_PAGE", "20000"))
 # A full reconcile (a first seed, a rebuild, a heal) holds both sides of a graph — what Postgres
