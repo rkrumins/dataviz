@@ -136,10 +136,12 @@ async def _build(graph_id: str, name: str, job_id: Optional[str]) -> None:
     """Read every live node of main, as of its head now, into the index, then mark it ready. Each
     build records the commit it reads at before it writes, and the index keeps the earliest: two
     imports building it at once, or a build that died part-way and the one after it, leave rows of
-    several commits, and the catch-up from the earliest applies the log again over all of them. A
-    build that ends after another's catch-up moved the index past its commit takes it back to that
-    commit, so the next catch-up applies the log again over the rows it wrote too (``_apply``
-    brings each node to its last version whatever its rows held)."""
+    several commits, and the catch-up from the earliest applies the log again over all of them.
+    Each page a build writes takes the index back to its commit, in the page's transaction under
+    the lock, and so does its end: once another build's catch-up has moved the index past it (or
+    part-way through a commit after it), the next catch-up applies the log again over those rows
+    too, whole commits from there, whether or not this build ends (``_apply`` brings each node to
+    its last version whatever its rows held)."""
     snap = await open_snapshot(graph_id=graph_id)                   # main, pinned at its head
     async with db.graphver_session() as s:
         stmt = pg_insert(KeyIndexORM).values(
@@ -154,6 +156,9 @@ async def _build(graph_id: str, name: str, job_id: Optional[str]) -> None:
         read += len(page)
         if held:
             async with db.graphver_session() as s:
+                await _lock(s, graph_id, name)
+                row = await s.get(KeyIndexORM, (graph_id, name), populate_existing=True)
+                row.seq, row.cursor = min(int(row.seq), snap.as_of_seq), None
                 for i in range(0, len(held), 2000):
                     await s.execute(pg_insert(EntityKeyORM).values([
                         {"graph_id": graph_id, "key_name": name, "key_value": v, "entity_id": e,

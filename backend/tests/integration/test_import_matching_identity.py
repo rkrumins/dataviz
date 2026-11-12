@@ -7,9 +7,12 @@ Pins:
 - A draft behind main matches as it sees the graph: a node main deleted after the draft's base is
   still the draft's, matched and updated rather than made again over itself, keeping what the row
   doesn't carry; one main gave another value keeps its old one there. So too when main deletes it
-  while the import runs, and another import catches the index up past that.
+  while the import runs, and another import catches the index up past that; and when a fault cuts
+  the read of main's changes short, which the window's retry reads again. Their payloads are read a
+  chunk at a time.
 - A build of an index that ends after another build's catch-up moved the index past its own commit
-  leaves no stale value: the catch-up after it applies the log again over its rows.
+  leaves no stale value: the catch-up after it applies the log again over its rows. So too when the
+  build fails after writing them, and when that catch-up was part-way through a commit.
 - A dry run against main reads main's index alone, no head of main, and a value only a deleted node
   held brings that node back, as an import does.
 - A dry run refuses an edge whose end's value two nodes hold as ``duplicate_value``, as the import
@@ -28,11 +31,11 @@ from sqlalchemy import select
 
 from backend.app.services.storage.object_store import LocalFsObjectStore, storage_key
 from backend.app.services.versioning import config, db, models
-from backend.app.services.versioning.import_export import keys as matching
+from backend.app.services.versioning.import_export import import_worker, keys as matching
 from backend.app.services.versioning.import_export.import_worker import ImportWorker
 from backend.app.services.versioning.import_export.service import ImportExportService
 from backend.app.services.versioning.import_export.snapshot import open_snapshot
-from backend.app.services.versioning.models import ImportRowORM, NodeVersionORM
+from backend.app.services.versioning.models import ImportRowORM, KeyIndexORM, NodeVersionORM
 from backend.app.services.versioning.service import GraphVersioningService
 
 pytestmark = [pytest.mark.integration, pytest.mark.skipif(
@@ -93,9 +96,9 @@ async def _seed(svc, ie, gid, lines):
     return [rows[i].matched_entity_id for i in range(len(lines))]
 
 
-async def _validate(ie, gid, lines):
+async def _validate(ie, gid, lines, *, branch_id=None):
     out = await ie.validate_import(graph_id=gid, workspace_id="ws1", data_source_id=gid,
-                                   branch_id=None, data=_ndjson(lines), import_format="ndjson",
+                                   branch_id=branch_id, data=_ndjson(lines), import_format="ndjson",
                                    identifier=BY)
     return {r["rowIndex"]: r for r in out["rows"]}
 
@@ -183,6 +186,52 @@ def test_a_node_main_deletes_while_an_import_runs_is_still_the_drafts(monkeypatc
     _run(body)
 
 
+def test_a_fault_reading_mains_changes_is_read_again_by_the_windows_retry(monkeypatch):
+    async def body(svc, ie):
+        gid = await _graph(svc)
+        [x] = await _seed(svc, ie, gid, [_node("A", displayName="x", **{"prop.keep": "x1"})])
+        draft = await svc.open_draft(graph_id=gid, owner="u")
+        await svc.apply_ops(graph_id=gid, actor="alice", message="canvas", ops=[
+            {"op": "delete", "entity_kind": "node", "entity_id": x, "payload": None}])
+        real, faults = matching._values_of, []
+
+        def values_of(page, name):          # the draft's view of what main changed: a failover once
+            if not faults:
+                faults.append(name)
+                raise ConnectionResetError("server closed the connection unexpectedly")
+            return real(page, name)
+        monkeypatch.setattr(matching, "_values_of", values_of)
+        _job, rows = await _import(ie, gid, [_node("A", displayName="x again")], branch_id=draft)
+        assert faults == [KEY]
+        assert (rows[0].resolved_op, rows[0].matched_entity_id) == ("update", x), rows[0].reasons
+        async with svc._session() as s:
+            values = await svc._current_values(s, gid, draft, [x])
+        assert values[x]["properties"]["keep"] == "x1", values
+    _run(body)
+
+
+def test_a_draft_reads_what_main_changed_a_chunk_of_payloads_at_a_time(monkeypatch):
+    async def body(svc, ie):
+        gid = await _graph(svc)
+        ids = await _seed(svc, ie, gid, [_node(v, displayName=v) for v in "ABC"])
+        draft = await svc.open_draft(graph_id=gid, owner="u")
+        await svc.apply_ops(graph_id=gid, actor="alice", message="canvas", ops=[
+            {"op": "update", "entity_kind": "node", "entity_id": eid,
+             "payload": {"properties": {KEY: f"{v}2"}}} for eid, v in zip(ids, "ABC")])
+        monkeypatch.setattr(import_worker, "_PERSIST_BATCH", 2)
+        pages, real = [], matching._values_of
+
+        def values_of(page, name):
+            pages.append(len(page))
+            return real(page, name)
+        monkeypatch.setattr(matching, "_values_of", values_of)
+        rows = await _validate(ie, gid, [_node(v, displayName=f"{v} again") for v in "ABC"],
+                               branch_id=draft)
+        assert sorted(pages) == [1, 2], "never every node main changed at once"
+        assert [rows[i]["matchedEntityId"] for i in range(3)] == ids, rows
+    _run(body)
+
+
 def test_a_build_ending_after_another_builds_catch_up_leaves_no_stale_value(monkeypatch):
     async def body(svc, ie):
         gid = await _graph(svc)
@@ -210,6 +259,60 @@ def test_a_build_ending_after_another_builds_catch_up_leaves_no_stale_value(monk
         monkeypatch.setattr(matching, "open_snapshot", slower)
         await matching.ensure(gid, KEY)
         assert await matching.lookup(gid, KEY, ["v1", "v2"]) == {"v2": [(x, True)]}
+    _run(body)
+
+
+@pytest.mark.parametrize("part_way", [False, True], ids=["caught-up", "part-way-through-a-commit"])
+def test_a_build_failing_after_another_builds_catch_up_leaves_no_stale_value(monkeypatch, part_way):
+    async def body(svc, ie):
+        gid = await _graph(svc)
+        nodes = [_canvas(1, "v1"), _canvas(2, "w1")]
+        x, y = (n["entity_id"] for n in nodes)
+        await svc.apply_ops(graph_id=gid, actor="alice", message="canvas", ops=nodes)
+        before = (await open_snapshot(graph_id=gid)).as_of_seq
+        await svc.apply_ops(graph_id=gid, actor="alice", message="canvas", ops=[      # one commit
+            {"op": "update", "entity_kind": "node", "entity_id": eid,
+             "payload": {"properties": {KEY: v}}} for eid, v in ((x, "v2"), (y, "w2"))])
+        real, apply, applied = matching.open_snapshot, matching._apply, []
+
+        async def one_page(*args):
+            applied.append(1)
+            if len(applied) > 1:
+                raise ConnectionResetError("server closed the connection unexpectedly")
+            await apply(*args)
+
+        async def slower(**_kw):
+            """A build that read main before x's and y's change, and wrote its page only after
+            another build ended and its catch-up read past that commit — or read the first of the
+            commit's two pages and stopped there — then lost its connection."""
+            snap = await real(graph_id=gid, as_of_seq=before)
+            pages = snap.iter_live
+
+            async def iter_live(kind, payload=False, limit=None):
+                async with db.graphver_session() as s:
+                    (await s.get(KeyIndexORM, (gid, KEY))).status = "ready"
+                if part_way:
+                    monkeypatch.setattr(matching, "_PAGE", 1)
+                    monkeypatch.setattr(matching, "_apply", one_page)
+                    with pytest.raises(ConnectionResetError):
+                        await matching._catch_up(gid, KEY)
+                    monkeypatch.setattr(matching, "_apply", apply)
+                    async with db.graphver_session() as s:
+                        assert (await s.get(KeyIndexORM, (gid, KEY))).cursor, "part-way through it"
+                else:
+                    await matching._catch_up(gid, KEY)
+                async for page in pages(kind, payload, limit):
+                    yield page
+                raise ConnectionResetError("server closed the connection unexpectedly")
+            snap.iter_live = iter_live
+            return snap
+        monkeypatch.setattr(matching, "open_snapshot", slower)
+        with pytest.raises(ConnectionResetError):
+            await matching.ensure(gid, KEY)
+        monkeypatch.setattr(matching, "open_snapshot", real)
+        await matching.ensure(gid, KEY)                         # its retry, or the next import
+        assert await matching.lookup(gid, KEY, ["v1", "w1", "v2", "w2"]) == {
+            "v2": [(x, True)], "w2": [(y, True)]}
     _run(body)
 
 

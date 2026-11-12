@@ -985,17 +985,18 @@ class ImportWorker:
         """On a draft: the nodes main changed after its base (since the last call), noted as the
         draft sees them — its own value, else main's at its base — since main's index says what
         main's head holds. A node main deleted since is live in the draft; one main gave another
-        value keeps its old one there. As many as main's changes since the base."""
+        value keeps its old one there. As many as main's changes since the base, their payloads
+        read a chunk at a time and only their values kept; the commit they are read to moves once
+        every one is noted, so a window retried after a fault here reads the rest again."""
         if self._prop_seq is None:
             return
-        moved, self._prop_seq = await matching.changed_on_main(self._graph_id, self._prop_seq)
-        moved = [e for e in moved if e not in self._prop_of]
-        if not moved:
-            return
-        live = await snap.lookup_live("node", moved, payload=True)
-        held = dict(await asyncio.to_thread(matching._values_of, list(live.values()), self._prop))
-        for eid in moved:
-            self._note_prop(eid, held.get(eid))
+        moved, seq = await matching.changed_on_main(self._graph_id, self._prop_seq)
+        for chunk in _chunks([e for e in moved if e not in self._prop_of], _PERSIST_BATCH):
+            live = await snap.lookup_live("node", chunk, payload=True)
+            held = dict(await asyncio.to_thread(matching._values_of, list(live.values()), self._prop))
+            for eid in chunk:
+                self._note_prop(eid, held.get(eid))
+        self._prop_seq = seq
 
     def _note_prop(self, eid: str, value: Optional[str]) -> None:
         """The draft holds ``value`` of the matching property for node ``eid`` (None: none, or it
