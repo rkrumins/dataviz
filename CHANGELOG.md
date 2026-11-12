@@ -143,14 +143,15 @@ integration's many small changes as a few commits.
 - **Imports that publish themselves pull main when it moved under them.** Several connectors (and
   people) can work on one data source at once, each in a draft of its own. When main moved while
   an import ran, its draft now pulls main — the field-level merge of "Pull latest" — and publishes
-  once it pulls clean, when its publish is queued and again when the job runs (up to three pulls):
+  once it pulls clean, when its publish is queued and again inside the publish job when it runs, so
+  the job a connector follows ends published or refused with the reason (up to three pulls):
   - entities two imports made alike (same urn or matching value, so the same derived id) merge as
     one; updates of different fields merge;
   - a field both sides changed differently waits for review (`summary.publish.reason.type:
     conflicts`);
-  - a draft of more than 200,000 changes isn't pulled (it would hold them all in memory): its file
-    is imported again from the latest main, and that import publishes itself
-    (`summary.publish.state: imported_again`, with its `jobId`). Nothing is made twice.
+  - what main gained meanwhile stays, even in a field the file carries unchanged;
+  - a draft of any size pulls: past 200,000 changes ("Pull latest" too), reading only the
+    entities main changed as well, never the whole draft.
   Before, any import whose data source was published to meanwhile stopped at `not_up_to_date`.
 - **A graph's own import settings.** A workspace admin sets, on the data source's Versioning tab
   (**Imports**), what its imports' rows are matched by when an import names no `identifier`, and the

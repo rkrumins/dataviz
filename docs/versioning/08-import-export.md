@@ -1068,15 +1068,14 @@ tests/integration/test_s3_store_minio.py tests/test_object_store.py`.
   Presigned URLs serve package uploads and stored downloads, but not yet a data source's own import
   uploads (`…/imports/uploads`), whose parts still go through the API.
 - **Row-scoped export is API-only** — the UI sends only `props` (`importExportApiService.ts:135-151`).
-- **An import that publishes itself (`autoPublish`) pulls main when main moved under it**
-  (`_publish_own_draft`): when its publish is queued and again when the queued job runs, a draft
-  behind main is brought up to date (`rebase_draft`, the field-level three-way merge) and queued
-  once it pulls clean, up to three pulls; a same-field conflict waits for review
-  (`summary.publish.reason.type: conflicts`). A pull holds the draft's changes in memory, so a
-  draft of more than `SQUASH_PAGED_ABOVE` (200,000) changes is not pulled: its file is imported
-  again from the latest main (`_import_again`, `summary.publish.state: imported_again` with the new
-  import's `jobId`), within the same count, and its first draft is closed. A paged pull would save
-  that second read of the file. A worker that stops
+- **An import that publishes itself (`autoPublish`) pulls main when main moved under it**:
+  when its publish is queued (`_publish_own_draft`), a draft behind main is brought up to date
+  (`rebase_draft`, the field-level three-way merge) and queued once it pulls clean; when the queued
+  job runs and finds main moved again, the job pulls the draft it holds and publishes it again
+  itself (`_pull_and_publish`), so the job a client follows ends published or refused with the
+  reason. Up to three pulls; a same-field conflict waits for review (`conflicts`, on the job's
+  error and `summary.publish.reason`). A draft past `SQUASH_PAGED_ABOVE` (200,000) changes pulls
+  reading only its entities main changed too, and what they meet at an edge (`_pull_paged`). A worker that stops
   between an import's finish and its publish job leaves `summary.publish` missing: publish the
   draft then. A custom draft `name` exists on
   `create_import_job` but no route exposes it (the draft is named "Import").

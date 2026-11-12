@@ -2556,7 +2556,7 @@ class GraphVersioningService:
     async def rebase_draft(
         self, *, graph_id: str, branch_id: str, actor: str,
         resolutions: Optional[Mapping[str, Optional[dict]]] = None,
-        message: str = "pull latest from main",
+        message: str = "pull latest from main", publishing_ok: bool = False,
     ) -> Dict[str, object]:
         """Pull the latest ``main`` into a draft ("update branch"): re-base the draft's edits onto
         current main with the same field-level 3-way merge as publish, but writing the result back
@@ -2578,6 +2578,11 @@ class GraphVersioningService:
         rewrite to YOUR edits and ``incoming`` is what came in from main. They are different things:
         conflating them is why the UI could only ever report the former.
 
+        A draft past ``SQUASH_PAGED_ABOVE`` changes is pulled reading only its entities main
+        changed too, and what they meet at an edge (:meth:`_pull_paged`): the same merge, holding
+        O(what main changed) rather than the whole draft. ``publishing_ok``: the draft's own publish
+        job pulls the draft it holds (``publishing``), to publish it again.
+
         ``_retry_seq``-wrapped like every other commit-writing path. It has to be, now that a pull
         ALWAYS commits: two concurrent pulls on one draft would otherwise both allocate the same
         ``commit_seq`` and one would die on ``uq_commits_branch_seq``. (It escaped that before only
@@ -2588,14 +2593,14 @@ class GraphVersioningService:
             f"rebase {branch_id}",
             lambda: self._rebase_draft_once(
                 graph_id=graph_id, branch_id=branch_id, actor=actor,
-                resolutions=resolutions, message=message,
+                resolutions=resolutions, message=message, publishing_ok=publishing_ok,
             ),
         )
 
     async def _rebase_draft_once(
         self, *, graph_id: str, branch_id: str, actor: str,
         resolutions: Optional[Mapping[str, Optional[dict]]] = None,
-        message: str = "pull latest from main",
+        message: str = "pull latest from main", publishing_ok: bool = False,
     ) -> Dict[str, object]:
         """One attempt at :meth:`rebase_draft` — re-run wholesale by ``_retry_seq`` on a seq
         collision, so it must re-read all state from a fresh session (it does)."""
@@ -2607,7 +2612,7 @@ class GraphVersioningService:
             draft = await self._lock_branch(s, graph_id, branch_id)
             if draft.kind == "main":
                 raise MainWriteForbidden()
-            self._require_open(draft)
+            self._require_open(draft, publishing_ok=publishing_ok)
             await self._require_edit(s, draft, actor, ())
             graph = await s.get(GraphORM, graph_id)
             main_id = await self._main_branch_id(s, graph_id)
@@ -2618,11 +2623,20 @@ class GraphVersioningService:
                         "incoming": _EMPTY_INCOMING, "base_commit_seq": draft.base_commit_seq,
                         "already_up_to_date": True}
 
-            # The draft's own edits, read once: the merge and the rewrite below use the same read.
-            own = await self._branch_own_payloads(s, graph_id, draft.id)
+            # The draft's own edits, read once: the merge and the rewrite below use the same read. A
+            # draft past SQUASH_PAGED_ABOVE reads only those main changed too, and what they meet at
+            # an edge: nothing else it holds can merge to anything but itself (_pull_paged).
+            paged = await self._change_count(s, graph_id, draft.id) > config.SQUASH_PAGED_ABOVE
+            if paged:
+                own = await self._own_payloads_of(s, graph_id, draft.id, await self._changed_in_window(
+                    s, graph_id, main_id, from_seq, to_seq))
+            else:
+                own = await self._branch_own_payloads(s, graph_id, draft.id)
             merged_state, conflicts, theirs = await self._compute_merge_bounded(
                 s, graph_id, graph, draft, main_id, dict(resolutions or {}), own=own
             )
+            if paged and not conflicts:
+                await self._pull_paged(s, graph_id, draft.id, own, merged_state)
             if conflicts:
                 # The draft's own value of each conflicting entity, to resolve from — just those.
                 seeds = await self._current_values(
@@ -8860,6 +8874,54 @@ class GraphVersioningService:
         for eid, vid in kindvid.items():
             out[eid] = payload_by_vid.get(vid)
         return out
+
+    async def _own_payloads_of(self, s, graph_id: str, branch_id: str, ids) -> Dict[str, Optional[dict]]:
+        """:meth:`_branch_own_payloads` for ``ids`` only: the branch's own heads among them."""
+        out: Dict[str, Optional[dict]] = {}
+        refs, vid_of = [], {}
+        for chunk in _chunks(list(ids), _IN_LIST_MAX):
+            for h in (await s.execute(select(EntityHeadORM).where(
+                    EntityHeadORM.graph_id == graph_id, EntityHeadORM.branch_id == branch_id,
+                    EntityHeadORM.entity_id.in_(chunk)))).scalars():
+                if h.is_tombstone:
+                    out[h.entity_id] = None
+                else:
+                    vid_of[h.entity_id] = h.head_version_id
+                    refs.append((h.entity_kind, graph_id, h.head_version_id))
+        payloads = await self._payloads_by_version(s, refs)
+        out.update({eid: payloads.get(vid) for eid, vid in vid_of.items()})
+        return out
+
+    async def _pull_paged(self, s, graph_id: str, branch_id: str, own: Dict[str, Optional[dict]],
+                          merged: Dict[str, Optional[dict]]) -> None:
+        """Complete the merge of a pull that read only the draft's entities main changed too
+        (``own``, a large draft's): add the draft's own entities the rest of the pull reasons
+        about, each merging to itself. They are its live edges onto a node main deleted, which the
+        cascade then deletes, as a pull reading the whole draft would; and the draft's own value of
+        each end of a live edge in the merge, for the integrity check. So the pull rewrites the same
+        entities whichever way it read the draft, holding O(what main changed), never O(draft)."""
+        gone = [eid for eid, v in merged.items() if v is None]
+        extra: Dict[str, Optional[dict]] = {}
+        for chunk in _chunks(gone, _IN_LIST_MAX // 2):
+            rows = await s.execute(
+                select(EdgeVersionORM.entity_id, EdgeVersionORM.payload).join(EntityHeadORM, and_(
+                    EntityHeadORM.graph_id == EdgeVersionORM.graph_id,
+                    EntityHeadORM.branch_id == EdgeVersionORM.branch_id,
+                    EntityHeadORM.entity_id == EdgeVersionORM.entity_id,
+                    EntityHeadORM.head_version_id == EdgeVersionORM.id)).where(
+                    EdgeVersionORM.graph_id == graph_id, EdgeVersionORM.branch_id == branch_id,
+                    or_(EdgeVersionORM.source_entity_id.in_(chunk),
+                        EdgeVersionORM.target_entity_id.in_(chunk)),
+                    EntityHeadORM.is_tombstone.is_(False)))
+            extra.update({eid: p for eid, p in rows.all() if p and eid not in merged})
+        ends: set = set()
+        for p in (*merged.values(), *extra.values()):
+            if p:
+                ends.update(e for e in _edge_src_tgt(p) if e)
+        extra.update(await self._own_payloads_of(
+            s, graph_id, branch_id, [e for e in ends if e not in merged and e not in extra]))
+        own.update(extra)
+        merged.update(extra)
 
     async def _compute_merge(self, s, graph_id, graph, draft, main_id, resolutions, own=None):
         """3-way merge a draft onto current main.

@@ -7,14 +7,15 @@ Pins:
   the same five new tables and the same edge, alike: their ids are derived from the urns, so both
   name the same entities.
 - A person edits a node one of the imports also changes, in another field, in a draft of their own.
-- Each import publishes itself. The first lands. The second's publish finds main moved under it,
-  so its draft pulls main (the field-level merge a person's "Pull latest" runs) and is queued
-  again: the entities both made merge as one, and it lands. The person pulls and publishes too.
-  Main then holds one entity per urn, every update, and the ids the first import made.
+- Each import publishes itself. The first lands. The second's publish job finds main moved under
+  it, so it pulls main into the draft (the field-level merge a person's "Pull latest" runs) and
+  publishes it again: the entities both made merge as one, and it lands. The person pulls and
+  publishes too. Main then holds one entity per urn, every update, and the ids the first import
+  made.
 - An import that changed a field a person changed differently meanwhile pulls, finds the
-  conflict, and waits on its draft for someone to resolve it, saying why. One whose draft is too
-  large to pull (more than ``SQUASH_PAGED_ABOVE`` changes) has its file imported again from the
-  latest main instead, and that import publishes itself: the same rows, the same entities.
+  conflict, and its job ends refused, the draft waiting for someone to resolve it, saying why. A
+  draft past ``SQUASH_PAGED_ABOVE`` changes pulls the same way, reading only what main changed
+  too: what main gained meanwhile stays, in a field the file carries unchanged too.
 - After each publish, one projection pass brings FalkorDB to main, a window at a time.
 """
 import asyncio
@@ -109,12 +110,9 @@ async def _run(monkeypatch) -> None:
 
     assert (await ie.run_publish(first["jobId"])).get("commitId")
     await projected()
-    # Main moved under the second: its publish pulls main into its draft and is queued again.
-    refused = await ie.run_publish(second["jobId"])
-    assert refused["error"]["detail"]["type"] == "not_up_to_date", refused
-    again = await note(b)
-    assert (again["state"], again["pulls"]) == ("queued", 1), again
-    assert (await ie.run_publish(again["jobId"])).get("commitId")
+    # Main moved under the second: its publish job pulls main into its draft and publishes it.
+    assert (await ie.run_publish(second["jobId"])).get("commitId")
+    assert await note(b) == {"state": "queued", "jobId": second["jobId"], "pulls": 1}
     await projected()
 
     # The person pulls what both feeds published, and publishes.
@@ -144,33 +142,30 @@ async def _run(monkeypatch) -> None:
     await svc.publish(graph_id=gid, branch_id=carols, actor="carol", message="p")
     await projected()
     held = await ie.run_publish((await note(c))["jobId"])
-    assert held["error"]["detail"]["type"] == "not_up_to_date", held
+    assert (held["error"]["detail"]["type"], held["error"]["detail"]["conflicts"]) == ("conflicts", 1), held
     waits = await note(c)
-    assert (waits["state"], waits["reason"]["type"], waits["reason"]["conflicts"]) == (
-        "skipped", "conflicts", 1), waits
+    assert (waits["state"], waits["reason"]["type"], waits["pulls"]) == ("skipped", "conflicts", 1), waits
     assert (await svc.branch_statuses([c["branch_id"]]))[c["branch_id"]] == "open"
     assert (await main_state())["nodes"][t[15]]["properties"]["p"] == "carol"
 
-    # A draft too large to pull: its file is imported again from the latest main, and published.
+    # A draft past SQUASH_PAGED_ABOVE changes pulls reading only what main changed too, and lands.
     d = await queued([_table(f"urn:t:{i}", p="d") for i in range(16, 20)], "alice")
     await ie.run_import(d["job_id"])
     eves = await svc.open_draft(graph_id=gid, owner="eve")
     await svc.apply_ops(graph_id=gid, branch_id=eves, actor="eve", message="p", ops=[
-        {"op": "update", "entity_kind": "node", "entity_id": t[12], "payload": {"properties": {"p": "eve"}}}])
+        {"op": "update", "entity_kind": "node", "entity_id": t[12], "payload": {"properties": {"p": "eve"}}},
+        # A field the file carries, unchanged: main's new value is kept, not the file's old one.
+        {"op": "update", "entity_kind": "node", "entity_id": t[16], "payload": {"displayName": "sixteen"}}])
     await svc.publish(graph_id=gid, branch_id=eves, actor="eve", message="p")
     monkeypatch.setattr(config, "SQUASH_PAGED_ABOVE", 3)
-    await ie.run_publish((await note(d))["jobId"])
-    again = await note(d)
-    assert (again["state"], again["changes"], again["pulls"]) == ("imported_again", 4, 1), again
-    assert (await svc.branch_statuses([d["branch_id"]]))[d["branch_id"]] == "abandoned"
-    rerun = {"job_id": again["jobId"]}
-    await ie.run_import(rerun["job_id"])
-    assert (await ie.get_job(rerun["job_id"]))["summary"]["updated"] == 4
-    assert (await ie.run_publish((await note(rerun))["jobId"])).get("commitId")
+    assert (await ie.run_publish((await note(d))["jobId"])).get("commitId")
+    assert (await note(d))["pulls"] == 1
+    assert (await svc.branch_statuses([d["branch_id"]]))[d["branch_id"]] == "merged"
     await projected()
     nodes = (await main_state())["nodes"]
     assert [nodes[t[i]]["properties"]["p"] for i in range(16, 20)] == ["d"] * 4
     assert nodes[t[12]]["properties"]["p"] == "eve", "what main gained meanwhile stays"
+    assert nodes[t[16]]["displayName"] == "sixteen", "in a field the file carries unchanged too"
     assert sum(1 for n in nodes.values() if n["urn"].startswith("urn:t:")) == 20, "nothing made twice"
 
 
