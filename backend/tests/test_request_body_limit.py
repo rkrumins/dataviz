@@ -84,8 +84,13 @@ def test_import_routes_get_the_larger_cap():
     for fmt in ("json", "xlsx"):
         assert mw._cap_for("/api/v1/ws_1/versioning/graphs/g1/imports", fmt) == uploads.WHOLE_FILE_MAX_BYTES
     assert mw._cap_for("/api/v1/ws_1/versioning/graphs/g1/imports/uploads/iu_1/parts/0") == uploads.MAX_BYTES
-    # Only those: starting or completing an upload is an ordinary request.
-    assert mw._cap_for("/api/v1/ws_1/versioning/graphs/g1/imports/uploads") == 100_000
+    # So may the file itself, sent as the body that starts an upload. Its JSON description is a few
+    # hundred bytes, and completing an upload is an ordinary request.
+    start = "/api/v1/ws_1/versioning/graphs/g1/imports/uploads"
+    assert mw._cap_for(start, "ndjson", "application/octet-stream") == uploads.MAX_BYTES
+    assert mw._cap_for(start, "csv", "text/csv") == uploads.MAX_BYTES
+    for described in ("application/json", "application/json; charset=utf-8", None):
+        assert mw._cap_for(start, "ndjson", described) == uploads.DESCRIPTION_MAX_BYTES
     assert mw._cap_for("/api/v1/ws_1/versioning/graphs/g1/imports/uploads/iu_1/complete") == 100_000
     assert mw._cap_for("/api/v1/views/transfer/packages/inspect") == 100_000
     # A view file is up to 64 MB, and its designs travel on to reconcile and import.
@@ -157,3 +162,49 @@ async def test_an_import_sent_whole_past_the_cap_is_told_how_to_send_it(
     )
     assert resp.status_code == 413, resp.text
     assert says in resp.json()["detail"], resp.json()["detail"]
+
+
+
+_UPLOAD_START = "/api/v1/ws_1/versioning/graphs/g1/imports/uploads"
+
+
+async def test_a_file_may_be_the_body_that_starts_an_upload(csrf_client: AsyncClient):
+    """A client that puts the file itself in the body that starts an upload gets it through, up to
+    the most one import can be, and not a byte more."""
+    from backend.app.services.versioning.import_export import uploads
+
+    for size in (4 * 1024 ** 3, uploads.MAX_BYTES):
+        under = await csrf_client.post(_UPLOAD_START, content=b"x",
+                                       headers={"Content-Type": "application/octet-stream",
+                                                "Content-Length": str(size)})
+        assert under.status_code != 413, under.text
+    over = await csrf_client.post(_UPLOAD_START, content=b"x",
+                                  headers={"Content-Type": "application/octet-stream",
+                                           "Content-Length": str(uploads.MAX_BYTES + 1)})
+    assert over.status_code == 413 and "at most 10 GB" in over.json()["detail"], over.text
+
+
+async def test_a_large_body_sent_as_json_to_start_an_upload_is_told_how_to_send_the_file(
+    csrf_client: AsyncClient,
+):
+    """A JSON body there is the upload's description: one larger than a description can be is a
+    file sent as JSON, and is told, before any of it is read, how to send the file itself."""
+    from backend.app.services.versioning.import_export import uploads
+
+    resp = await csrf_client.post(_UPLOAD_START, content=b"x",
+                                  headers={"Content-Type": "application/json",
+                                           "Content-Length": str(uploads.DESCRIPTION_MAX_BYTES + 1)})
+    assert resp.status_code == 413, resp.text
+    assert "application/octet-stream" in resp.json()["detail"]
+
+
+@pytest.mark.parametrize("headers", [
+    {"Content-Type": "application/json"},
+    {"Content-Type": "application/json; charset=utf-8"},
+    {},  # read as JSON, as FastAPI reads a body with no type
+])
+async def test_an_uploads_description_passes(csrf_client: AsyncClient, headers):
+    """The description itself goes on: what answers it here is the CSRF check behind this one."""
+    resp = await csrf_client.post(_UPLOAD_START, content=b'{"fileName": "a.ndjson", "size": 10}',
+                                  headers=headers)
+    assert resp.status_code != 413, resp.text

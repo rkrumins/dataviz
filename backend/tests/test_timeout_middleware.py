@@ -365,13 +365,14 @@ async def test_an_imports_file_takes_as_long_as_it_takes_to_arrive(monkeypatch):
 
     mw = _TimeoutMiddleware(reads_the_body)
     for path in ("/api/v1/ws_1/versioning/graphs/g_1/imports",
+                 "/api/v1/ws_1/versioning/graphs/g_1/imports/uploads",
                  "/api/v1/ws_1/versioning/graphs/g_1/imports/uploads/iu_1/parts/0"):
         await mw(_http_scope(path), Trickle(10, 0.1), sink := _Sink())    # 1 s in all, still arriving
         assert (sink.status, sink.total_body) == (200, b"10"), path
         await mw(_http_scope(path), Trickle(2, 0.3), sink := _Sink())     # stops arriving for 0.3 s
         assert sink.status == 504, path
 
-    await mw(_http_scope("/api/v1/ws_1/versioning/graphs/g_1/imports/uploads"), Trickle(10, 0.1),
+    await mw(_http_scope("/api/v1/ws_1/versioning/graphs/g_1/imports/uploads/iu_1/complete"), Trickle(10, 0.1),
              sink := _Sink())
     assert sink.status == 504, "any other route keeps its deadline"
 

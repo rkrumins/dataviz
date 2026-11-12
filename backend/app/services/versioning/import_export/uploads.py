@@ -86,6 +86,34 @@ def limit_for(fmt: str) -> int:
     return WHOLE_FILE_MAX_BYTES if fmt.lower() in WHOLE_FILE_FORMATS else MAX_BYTES
 
 
+#: An upload starts with its description, a few hundred bytes of JSON, or with the file itself as
+#: the body, sent as anything else. A JSON body larger than this is a file sent as JSON.
+DESCRIPTION_MAX_BYTES = 64 * 1024
+DESCRIPTION_TOO_LARGE = (
+    'A JSON body here is the upload\'s description, {"fileName", "size", "format"}: at most 64 KB. To '
+    "send the file itself as the body, send it as application/octet-stream (or text/csv), with "
+    "?fileName= and ?format=.")
+FORM_REFUSED = (
+    "Send the file's bytes as the request body, not as a form (multipart/form-data): with curl, "
+    "--data-binary @file or -T file rather than -F; in Postman, Body → binary. Guide: "
+    "/docs/import-export-api#from-your-service-upsert-and-full-replace")
+
+
+def _media_type(content_type: Optional[str]) -> str:
+    return (content_type or "").split(";", 1)[0].strip().lower()
+
+
+def sent_as_json(content_type: Optional[str]) -> bool:
+    """Whether a body is JSON, as FastAPI reads one: a body with no type counts."""
+    kind = _media_type(content_type)
+    return not kind or kind == "application/json" or kind.endswith("+json")
+
+
+def is_form(content_type: Optional[str]) -> bool:
+    """Whether a body is a form: its file would come wrapped in the form's own lines."""
+    return _media_type(content_type) == "multipart/form-data"
+
+
 def too_large(size: int, fmt: str) -> Optional[str]:
     """Why a file of ``size`` bytes in ``fmt`` can't be imported, or ``None``."""
     cap = limit_for(fmt)
@@ -130,26 +158,79 @@ async def save(store, record: Dict[str, Any]) -> None:
     await store.put_stream(record_key(record), _once(json.dumps(record).encode("utf-8")))
 
 
-async def create(store, *, workspace_id: str, data_source_id: Optional[str], graph_id: str, owner: str,
-                 file_name: str, size: int, fmt: str, part_bytes: Optional[int] = None) -> Dict[str, Any]:
-    """Start an upload of ``size`` bytes: its record, saying how the file is to be split — into
-    ``part_bytes`` parts when the client asks for a size of its own, else ``PART_BYTES``."""
+def _checked_part_bytes(part_bytes: Optional[int]) -> int:
+    """The part size a client asked for, within bounds, else ``PART_BYTES``."""
+    if part_bytes is None:
+        return PART_BYTES
+    if not MIN_PART_BYTES <= part_bytes <= MAX_PART_BYTES:
+        raise UploadError(f"partBytes can be from {MIN_PART_BYTES} to {MAX_PART_BYTES} bytes "
+                          f"({_mb(MIN_PART_BYTES)} to {_mb(MAX_PART_BYTES)}), and {part_bytes} isn't.")
+    return part_bytes
+
+
+def _checked_size(size: int, fmt: str) -> None:
     if size <= 0:
         raise UploadError("The file is empty.")
     reason = too_large(size, fmt)
     if reason:
         raise UploadError(reason, 413)
-    if part_bytes is None:
-        part_bytes = PART_BYTES
-    elif not MIN_PART_BYTES <= part_bytes <= MAX_PART_BYTES:
-        raise UploadError(f"partBytes can be from {MIN_PART_BYTES} to {MAX_PART_BYTES} bytes "
-                          f"({_mb(MIN_PART_BYTES)} to {_mb(MAX_PART_BYTES)}), and {part_bytes} isn't.")
-    record = {
+
+
+def _new_record(*, workspace_id: str, data_source_id: Optional[str], graph_id: str, owner: str,
+                file_name: str, fmt: str, part_bytes: int) -> Dict[str, Any]:
+    return {
         "uploadId": f"iu_{uuid.uuid4().hex}", "owner": owner, "workspaceId": workspace_id,
-        "dataSourceId": data_source_id, "graphId": graph_id, "fileName": file_name, "size": size,
-        "format": fmt, "partBytes": part_bytes, "parts": math.ceil(size / part_bytes),
-        "createdAt": datetime.now(timezone.utc).isoformat(),
+        "dataSourceId": data_source_id, "graphId": graph_id, "fileName": file_name,
+        "format": fmt, "partBytes": part_bytes, "createdAt": datetime.now(timezone.utc).isoformat(),
     }
+
+
+async def create(store, *, workspace_id: str, data_source_id: Optional[str], graph_id: str, owner: str,
+                 file_name: str, size: int, fmt: str, part_bytes: Optional[int] = None) -> Dict[str, Any]:
+    """Start an upload of ``size`` bytes: its record, saying how the file is to be split — into
+    ``part_bytes`` parts when the client asks for a size of its own, else ``PART_BYTES``."""
+    _checked_size(size, fmt)
+    record = _new_record(workspace_id=workspace_id, data_source_id=data_source_id, graph_id=graph_id,
+                         owner=owner, file_name=file_name, fmt=fmt, part_bytes=_checked_part_bytes(part_bytes))
+    record.update(size=size, parts=math.ceil(size / record["partBytes"]))
+    await save(store, record)
+    return record
+
+
+async def create_from_body(store, chunks: AsyncIterator[bytes], *, workspace_id: str,
+                           data_source_id: Optional[str], graph_id: str, owner: str, file_name: str,
+                           fmt: str, declared: Optional[int] = None,
+                           part_bytes: Optional[int] = None) -> Dict[str, Any]:
+    """Start an upload with its file: a request body of any size, stored as the upload's parts as it
+    arrives — whether it says its size (``declared``, its Content-Length) or is streamed without
+    one — one chunk held at a time, each part written once as its own object.
+
+    The upload exists once the whole body is in: its record, with the size that arrived, is written
+    last, so a body that breaks off leaves no upload, only parts nothing names, which the store's
+    sweep takes. A body past what one import of ``fmt`` can be is refused (413) — one that says so
+    before any of it is read, a streamed one as soon as it passes it — and keeps none of itself."""
+    if declared is not None:
+        _checked_size(declared, fmt)
+    record = _new_record(workspace_id=workspace_id, data_source_id=data_source_id, graph_id=graph_id,
+                         owner=owner, file_name=file_name, fmt=fmt, part_bytes=_checked_part_bytes(part_bytes))
+    body, written, size = _Body(within_limit(chunks, fmt)), [], 0
+    try:
+        while True:
+            key = upload_key(record, f"part-{len(written):05d}")
+            written.append(key)
+            size += (await store.put_stream(key, body.part(record["partBytes"]))).size
+            if not await body.more():
+                break
+        if size == 0:
+            raise UploadError("The file is empty.")
+        if declared is not None and size != declared:
+            raise UploadError(f"The body ended {size} bytes in, short of the {declared} its Content-Length "
+                              "said. Send it again.")
+    except UploadError:
+        for key in written:             # refused: none of it is kept
+            await store.delete(key)
+        raise
+    record.update(size=size, parts=len(written))
     await save(store, record)
     return record
 

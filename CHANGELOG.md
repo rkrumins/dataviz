@@ -53,6 +53,13 @@ integration's many small changes as a few commits.
     ends off a part's end, or runs past the file, is refused and none of it is kept.
   - `POST …/imports` takes a file of up to 10 GiB as its body, where it took 100 MB. It resumes
     nothing; a chunked body is counted, and refused (`413`) as soon as it passes the limit.
+  - **Or as the body that starts an upload**: `POST …/imports/uploads?fileName=…&format=…` with
+    the file's contents as the body, in place of its name and size. Any type but JSON is the file
+    (`application/octet-stream`, `text/csv`…), sent with its `Content-Length` or streamed without
+    one. It is stored as the upload's parts as it arrives, one chunk held at a time, and answers
+    `201` with every part `received`; complete it as any upload. The upload exists once the whole
+    body is in: one that breaks off leaves none. A JSON body there is still the upload's
+    description.
   - Measured with a 4 GiB NDJSON file sent whole: stored as its 257 parts in about 20 s with the
     API process's memory up 1–2 MiB, and every record read back equal to the original.
 - **Reconcile imports in memory** (Admin → Features, `importInMemoryReconcile`, off by default). An
@@ -288,6 +295,13 @@ integration's many small changes as a few commits.
   never had.
 - **"What changed" on the behind-Published strip counts changes.** It read node and edge counts that
   commits never had.
+- **A file sent as a form was imported with the form's own lines in it.** `curl -F`, Postman's
+  form-data and `requests.post(files=…)` wrap a file in a multipart form, and `POST …/imports`
+  read the wrapping as the file's first and last rows. An import, an upload's start or a part sent
+  as a form is now `415`, saying how to send the file's bytes as the body.
+- **A file sent to `POST …/imports/uploads` was told only a byte limit or a validation error.** It
+  is now taken as the upload's file (above); a JSON body too large to be a description (over
+  64 KB) is told how to send the file instead.
 - **An upload part of the wrong size says how the file is split.** A client that split a large file
   at another size, or sent it whole, had part 0 refused with only "This part is larger than the
   16777216 bytes it should hold." The `422` now names the size the part should be, the upload's
@@ -430,8 +444,8 @@ integration's many small changes as a few commits.
 - The Helm chart's ingress annotations change: `proxy-body-size` is `10g` (was `32m`) and
   `proxy-request-buffering` is `off`. A values file that sets its own annotations should take both.
   A proxy of your own in front needs the same on the import routes for a file sent in one request
-  (in nginx, `client_max_body_size 10g; proxy_request_buffering off;`); uploads in parts need
-  nothing.
+  (`…/imports`, `…/imports/uploads` and `…/imports/uploads/{id}/parts/{n}`; in nginx,
+  `client_max_body_size 10g; proxy_request_buffering off;`); uploads in parts need nothing.
 - The transfer workers' memory limit is 8 GiB (request 2 GiB), was 4 GiB (1 GiB): an import
   reconciled in memory holds a filter of what it has seen (about 250 MB for a 4 GB file). Make room
   on the nodes the transfer lane runs on (k8s `versioning-worker/transfer.yaml`, Helm

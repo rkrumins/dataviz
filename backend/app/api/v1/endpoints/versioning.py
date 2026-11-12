@@ -3921,6 +3921,7 @@ async def create_import(
     writes to ``main`` — unless ``autoPublish`` asks it to publish its draft once it has finished.
     ``branchId`` stacks onto an existing draft (repeat imports, like manual edits)."""
     from backend.app.services.versioning.import_export.formats import get_adapter
+    _refuse_a_form(request)
     try:
         get_adapter(format)
     except ValueError as exc:
@@ -4043,28 +4044,83 @@ async def _load_upload(ie, ws_id: str, graph_id: str, meta: dict, upload_id: str
                                   graph_id=graph_id, upload_id=upload_id, owner=user.id)
 
 
-@router.post("/graphs/{graph_id}/imports/uploads", status_code=201)
+def _refuse_a_form(request: Request) -> None:
+    """A file sent as a form would be read with the form's own lines in it: say how to send it."""
+    from backend.app.services.versioning.import_export import uploads
+    if uploads.is_form(request.headers.get("content-type")):
+        raise HTTPException(status_code=415, detail=uploads.FORM_REFUSED)
+
+
+async def _upload_description(request: Request) -> CreateUploadRequest:
+    """The JSON body that starts an upload, read no further than a description can be."""
+    from fastapi.exceptions import RequestValidationError
+    from pydantic import ValidationError
+
+    from backend.app.services.versioning.import_export import uploads
+    raw = b""
+    async for chunk in request.stream():
+        raw += chunk
+        if len(raw) > uploads.DESCRIPTION_MAX_BYTES:
+            raise HTTPException(status_code=413, detail=uploads.DESCRIPTION_TOO_LARGE)
+    try:
+        return CreateUploadRequest.model_validate_json(raw)
+    except ValidationError as exc:
+        raise RequestValidationError([{**e, "loc": ("body", *e["loc"])} for e in exc.errors(include_url=False)])
+
+
+@router.post("/graphs/{graph_id}/imports/uploads", status_code=201, openapi_extra={"requestBody": {
+    "required": True, "content": {
+        "application/json": {"schema": CreateUploadRequest.model_json_schema()},
+        "application/octet-stream": {"schema": {"type": "string", "format": "binary"}}}}})
 async def create_import_upload(
-    ws_id: str, graph_id: str, body: CreateUploadRequest,
+    ws_id: str, graph_id: str, request: Request,
+    file_name: Optional[str] = Query(None, alias="fileName", max_length=500,
+                                     description="With the file as the body: its name"),
+    fmt: str = Query("ndjson", alias="format", max_length=16,
+                     description="With the file as the body: its format, as POST …/imports takes it"),
+    part_bytes: Optional[int] = Query(None, alias="partBytes",
+                                      description="With the file as the body: the size of its parts"),
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
     meta: dict = Depends(graph_in_workspace),
     ie=Depends(get_import_export_service),
 ):
-    """Start a resumable upload of a file to import: how it is to be split, and where its parts go.
-    A client that splits files its own way says its part size (``partBytes``). A file too large for
-    its format is refused here, before any of it is sent (413)."""
+    """Start a resumable upload of a file to import. The body is either:
+
+    * **the upload's description**, as JSON (``{"fileName", "size", "format", "partBytes"}``): how
+      the file is to be split, and the parts follow (``PUT …/parts/{n}``, up to the whole file to
+      part 0). A client that splits files its own way says its part size (``partBytes``).
+    * **the file itself**, sent as anything but JSON (``application/octet-stream``, ``text/csv``…),
+      with its Content-Length or streamed without one, and ``fileName``, ``format`` and
+      ``partBytes`` as query parameters. It is stored as the upload's parts as it arrives, one chunk
+      held at a time, and the answer has every part received. The upload exists once the whole
+      body is in: one that breaks off leaves none.
+
+    Either way ``…/complete`` imports it. A file too large for its format is refused (413): one that
+    says its size, before any of it is read; a streamed one, as soon as it passes the limit."""
     from backend.app.services.versioning.import_export import uploads
     from backend.app.services.versioning.import_export.formats import get_adapter
+    as_file = not uploads.sent_as_json(request.headers.get("content-type"))
+    if as_file:
+        _refuse_a_form(request)
+        name = file_name or f"upload.{fmt.lower()}"
+    else:
+        body = await _upload_description(request)
+        name, size, fmt, part_bytes = body.fileName, body.size, body.format, body.partBytes
     try:
-        get_adapter(body.format)
+        get_adapter(fmt)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
+    where = {"workspace_id": ws_id, "data_source_id": meta.get("data_source_id"), "graph_id": graph_id,
+             "owner": user.id, "file_name": name, "fmt": fmt.lower(), "part_bytes": part_bytes}
     with _upload_errors():
-        record = await uploads.create(
-            ie.store, workspace_id=ws_id, data_source_id=meta.get("data_source_id"), graph_id=graph_id,
-            owner=user.id, file_name=body.fileName, size=body.size, fmt=body.format.lower(),
-            part_bytes=body.partBytes)
-    return _upload_view(record, [])
+        if not as_file:
+            return _upload_view(await uploads.create(ie.store, size=size, **where), [])
+        declared = request.headers.get("content-length")
+        async with _IMPORT_BODIES.slot():
+            record = await uploads.create_from_body(
+                ie.store, request.stream(), declared=int(declared) if declared and declared.isdigit() else None,
+                **where)
+    return _upload_view(record, list(range(record["parts"])))
 
 
 @router.get("/graphs/{graph_id}/imports/uploads/{upload_id}")
@@ -4092,6 +4148,7 @@ async def put_import_upload_part(
     again replaces it — until the upload is completed: what is imported is what was there then. A
     body whose Content-Length doesn't end where a part does is refused before any of it is read."""
     from backend.app.services.versioning.import_export import uploads
+    _refuse_a_form(request)
     record = await _load_upload(ie, ws_id, graph_id, meta, upload_id, user)
     if record.get("jobId"):
         raise HTTPException(status_code=409, detail="This upload is complete. Upload the file again to change it.")
