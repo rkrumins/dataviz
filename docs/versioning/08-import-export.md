@@ -261,7 +261,8 @@ minter is injected) that returns `(ops, resolutions)`:
     one main gave another value keeps its old one. A dry run against main reads main's index alone.
   - At most `GRAPHVER_MAX_MATCHING_PROPERTIES` (10) a graph (`too_many_matching_properties`). Not on
     a fork yet (`matching_property_on_fork`): its main is its parent's and its own, and a property
-    default it takes from its parent is `entity_id` there ([Import settings](#import-settings)).
+    default it takes from its parent is `entity_id` there, all but `prop.<identifier>`, which is
+    `urn` ([Import settings](#import-settings)).
     A dry run never builds an index: by a property no import has matched by yet, it answers
     `409 identifier_not_indexed`.
 - **Nodes** match an existing entity by that order (`_named`). A row's **pointers** are its `urn`
@@ -681,7 +682,10 @@ little, and a file that really dropped rows deletes little, so neither is refuse
   `summary.replaceGuard` holds `{state, live, deletes, creates, limits, sources}`: what it would have
   done, the limits in force, and whose each one is (`data_source` or `platform`). The message says
   what to check (the identifier) and how to proceed; the import dialog offers **Replace anyway**,
-  which imports the file again into the same draft with `allowMassDelete=true`.
+  which imports the file again into the same draft with `allowMassDelete=true`. A view's replace
+  places what it made in the draft's copy of the view first, as a completed one does
+  (`summary.viewAssignments`): the run again into that draft makes nothing, and finds what the
+  first made in the view's scope, so once published the view shows it.
 - **Overridden:** `allowMassDelete=true` on the import (anyone who may run it) deletes all the same;
   the job keeps the allowance (`jobs.allow_mass_delete`, `allowMassDelete` on the job), its
   `replaceGuard.state` is `overridden`, and the worker logs it. It never stops early (below).
@@ -723,7 +727,10 @@ A graph's imports run under its data source's own settings, field by field, over
   forks. But a fork can't match by a property yet, so where its parent's default identifier (or
   the platform's) is a `prop.<name>`, a fork's imports match by `entity_id`: its
   `effective.identifier` says so, from `fork`, and so does an import's `identifierSource`. An
-  import that names the property is refused there (`matching_property_on_fork`).
+  import that names the property is refused there (`matching_property_on_fork`). Neither holds for
+  `prop.<identifier>`, the data source's identifier property (as `node_identity` resolves it: the
+  data source's, its provider's, its workspace's or the platform's): it is `urn`, on a fork too,
+  whether it is the default or the import names it.
 - **Kept on the job.** An import resolves them once, when it is made — its identifier (the
   request's, else the graph's, else the platform's) and the guard's limits — and keeps them
   (`jobs.import_settings`: `{identifierSource, replaceLimits: {minLive, deleteFraction,
@@ -733,7 +740,7 @@ A graph's imports run under its data source's own settings, field by field, over
 - **In the app:** the data source's Versioning tab shows them under **Imports**, and the import
   dialog's **Match existing items by** starts at the graph's default, marked, and says when a
   property no import has matched by yet is indexed first. On a fork whose parent's default is a
-  property, both say its imports match by Entity ID.
+  property other than its identifier property, both say its imports match by Entity ID.
 
 ---
 

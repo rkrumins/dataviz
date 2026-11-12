@@ -3875,20 +3875,31 @@ _ALLOW_MASS_DELETE = Query(False, alias="allowMassDelete", description=(
     "nothing"))
 
 
+async def _identity_property_of(session: AsyncSession, row) -> Optional[str]:
+    """The property data source ``row`` identifies its nodes by, kept equal to the urn
+    (``node_identity.identity_property``), as an import's worker reads it: ``prop.<it>`` is matched
+    as the urn. None for none."""
+    from backend.app.services.node_identity import identity_property
+    if row is None:
+        return None
+    return identity_property(await _node_identity_for_meta(session, {"data_source_id": row.id}))
+
+
 async def _import_settings_for(session: AsyncSession, data_source_id: Optional[str],
                                requested: Optional[str], *, fork: bool = False) -> tuple:
     """``(identifier, settings)``: what an import into the data source's graph (``fork``: a fork's)
     runs under (``services.import_settings``) — the request's identifier, checked (422 with the
     grammar), else the data source's, else the platform's, a property default ``entity_id`` on a
-    fork; and what its job keeps: where the identifier came from, and the replace guard's limits
-    with where each came from."""
+    fork but for its identifier property; and what its job keeps: where the identifier came from,
+    and the replace guard's limits with where each came from."""
     from backend.app.db.models import WorkspaceDataSourceORM
     from backend.app.services import import_settings
     from backend.app.services.versioning.import_export import identifier as identifiers
     row = (await session.get(WorkspaceDataSourceORM, data_source_id)
            if data_source_id and session is not None else None)     # a direct caller may hold none
+    identity = await _identity_property_of(session, row) if fork else None
     try:
-        return import_settings.for_import(row, requested, fork=fork)
+        return import_settings.for_import(row, requested, fork=fork, identity_property=identity)
     except identifiers.IdentifierError as exc:
         raise HTTPException(status_code=422, detail={"type": "invalid_identifier",
                                                      "message": str(exc)})
@@ -4441,13 +4452,15 @@ async def _settings_row(session: AsyncSession, meta: dict):
     return await session.get(WorkspaceDataSourceORM, ds_id) if ds_id else None
 
 
-async def _import_settings_view(row, graph_id: str, *, fork: bool = False) -> dict:
+async def _import_settings_view(session: AsyncSession, row, graph_id: str, *,
+                                fork: bool = False) -> dict:
     from backend.app.services import import_settings
     from backend.app.services.versioning import config as gv_config
     from backend.app.services.versioning.import_export import keys as matching
+    identity = await _identity_property_of(session, row) if fork else None
     return {"dataSourceId": row.id if row is not None else None,
             "overrides": import_settings.settings_of(row), "platform": import_settings.platform(),
-            "effective": import_settings.resolve(row, fork=fork),
+            "effective": import_settings.resolve(row, fork=fork, identity_property=identity),
             "replaceGuard": gv_config.IMPORT_REPLACE_GUARD,
             "followsParent": bool(row is not None and row.fork_of_data_source_id),
             "matchingProperties": await matching.listed(graph_id),
@@ -4466,7 +4479,7 @@ async def get_import_settings(
     null where it sets none), the platform's, and what holds (``effective``, with where each came
     from; on a fork, ``entity_id`` from ``fork`` for a property default it can't match by) — and the
     properties its imports match by, with how far each one's index is caught up."""
-    return await _import_settings_view(await _settings_row(session, meta), graph_id,
+    return await _import_settings_view(session, await _settings_row(session, meta), graph_id,
                                        fork=bool(meta.get("fork_parent_graph_id")))
 
 
@@ -4507,7 +4520,8 @@ async def put_import_settings(
         await recorder.record_for_request(
             session, "workspace.versioning.import_settings_updated", **recorder.data_source_target(row),
             details={"from": before, "to": after})
-    return await _import_settings_view(row, graph_id, fork=bool(meta.get("fork_parent_graph_id")))
+    return await _import_settings_view(session, row, graph_id,
+                                       fork=bool(meta.get("fork_parent_graph_id")))
 
 
 class ResolveIdentitiesRequest(_ApiModel):

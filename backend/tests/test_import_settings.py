@@ -8,7 +8,8 @@ identifier, and the replace guard's limits.
 * Anyone who reads the graph reads them, an API key too; workspace admins set them, never with a
   key. ``"inherit"`` clears a field, a field left out stays, and a real change is recorded once. A
   fork's are its parent's, but for a property default: a fork's rows can't be matched by a property
-  yet, so there it is ``entity_id``, its source ``fork``, in its settings and on its imports.
+  yet, so there it is ``entity_id``, its source ``fork``, in its settings and on its imports — all
+  but the data source's identifier property, which holds the urn, and stays.
 """
 from __future__ import annotations
 
@@ -89,6 +90,24 @@ def test_on_a_fork_a_property_default_is_entity_id_and_says_why(monkeypatch):
     monkeypatch.setattr(config, "IMPORT_IDENTIFIER", "prop.sap_id")
     assert import_settings.for_import(None, None, fork=True)[0] == "entity_id"
     assert import_settings.for_import(None, None)[0] == "prop.sap_id"
+
+
+def test_on_a_fork_a_default_of_its_identifier_property_stays_as_its_parents(monkeypatch):
+    # The property its data source identifies nodes by holds the urn: matched as the urn, on a
+    # fork too.
+    row = _row(import_identifier="prop.asset_id")
+    identifier, kept = import_settings.for_import(row, None, fork=True, identity_property="asset_id")
+    assert (identifier, kept["identifierSource"]) == ("prop.asset_id", "data_source")
+    effective = import_settings.resolve(row, fork=True, identity_property="asset_id")
+    assert (effective["identifier"], effective["sources"]["identifier"]) == ("prop.asset_id", "data_source")
+    # Any other property is entity_id there.
+    other = _row(import_identifier="prop.external_id")
+    assert import_settings.for_import(other, None, fork=True, identity_property="asset_id")[0] == "entity_id"
+    # The platform's default alike; and with no identifier property, a property is never the urn.
+    monkeypatch.setattr(config, "IMPORT_IDENTIFIER", "prop.asset_id")
+    identifier, kept = import_settings.for_import(None, None, fork=True, identity_property="asset_id")
+    assert (identifier, kept["identifierSource"]) == ("prop.asset_id", "platform")
+    assert import_settings.for_import(None, None, fork=True)[0] == "entity_id"
 
 
 def test_the_guard_runs_under_the_limits_its_job_was_made_with():
@@ -276,6 +295,36 @@ async def test_on_a_fork_its_parents_property_default_is_entity_id_and_its_impor
     assert resp.status_code == 202, resp.text
     [made] = imports.made
     assert (made["identifier"], made["import_settings"]["identifierSource"]) == ("entity_id", "fork")
+
+
+@pytest.mark.asyncio
+async def test_on_a_fork_a_default_of_its_identifier_property_stays_and_its_imports_run_by_it(
+        test_client, db_session, estate, graph, tmp_path):
+    from backend.app.services import fork_sources
+    from backend.app.services.storage.object_store import LocalFsObjectStore
+    # Its provider identifies the nodes by asset_id: neither data source's row names it.
+    (await db_session.get(ProviderORM, "prov_1")).identity_property = "asset_id"
+    parent = await db_session.get(WorkspaceDataSourceORM, "ds_1")
+    parent.import_identifier = "prop.asset_id"
+    db_session.add(fork_sources.fork_row(parent, ds_id="dsfork_1", name="try", parent_graph_id="g_0",
+                                         actor="u"))
+    await db_session.commit()
+    graph.ds, graph.parent = "dsfork_1", "g_0"
+    feature_flags._cache = {"versioningEnabled": True, "forksEnabled": True}
+    effective = (await test_client.get(_PATH)).json()["effective"]
+    assert (effective["identifier"], effective["sources"]["identifier"]) == (
+        "prop.asset_id", "data_source")
+
+    imports = _Imports(LocalFsObjectStore(tmp_path))
+    app.dependency_overrides[V.get_import_export_service] = lambda: imports
+    try:
+        resp = await test_client.post("/api/v1/ws_1/versioning/graphs/g_1/imports", content=b"{}\n")
+    finally:
+        app.dependency_overrides.pop(V.get_import_export_service, None)
+    assert resp.status_code == 202, resp.text
+    [made] = imports.made
+    assert (made["identifier"], made["import_settings"]["identifierSource"]) == (
+        "prop.asset_id", "data_source")
 
 
 @pytest.mark.asyncio

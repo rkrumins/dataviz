@@ -3,8 +3,9 @@
 Pins:
 - A view's replace is judged on the view as main holds it, and on what its draft makes. A file
   naming the view's entities by other urns matches none of them and makes them all again outside
-  the view: refused, and refused again when sent into the draft that holds its rows. Sent with
-  allowMassDelete, it deletes the view's own entities and nothing else.
+  the view: refused, what it made placed in the draft's view for review, and refused again when
+  sent into the draft that holds its rows. Sent with allowMassDelete, it deletes the view's own
+  entities and nothing else, and the view's draft copy shows what the file made.
 - A fork's replace is judged on the main it reads, its parent's and its own. A file naming the
   entities it inherits by other urns stops after its first window, and is refused at the end with
   the early stop off; a file that really leaves out part of the fork's main goes through.
@@ -30,10 +31,21 @@ pytestmark = [pytest.mark.integration, pytest.mark.skipif(
 
 #: The view's placements, as its scope resolver reads them on the import's draft.
 VIEW = {"scope": None}
+#: The urns of the new roots each call of the layout writer placed in the view.
+PLACED: list = []
 
 
 async def _scope(_ws, _ds, _view_id, _branch_id):
     return VIEW["scope"]
+
+
+async def _place(_ws, _ds, _view_id, _branch_id, created_nodes, _edges):
+    """The layout writer: each node an import made placed in the draft's view (none here is
+    another's child), where the scope resolver reads it next."""
+    urns = {n["urn"] for n in created_nodes}
+    PLACED.append(urns)
+    VIEW["scope"]["assigned_urns"] += sorted(urns)
+    return {"added": len(urns)}
 
 
 def _urn(key: str, i: int) -> str:
@@ -92,7 +104,7 @@ def _run(case, monkeypatch):
         try:
             svc = GraphVersioningService()
             ie = ImportExportService(versioning=svc, store=LocalFsObjectStore(root),
-                                     replace_scope_resolver=_scope)
+                                     replace_scope_resolver=_scope, layout_writer=_place)
             await case(svc, ie, ie.store)
         finally:
             shutil.rmtree(root, ignore_errors=True)
@@ -113,26 +125,31 @@ def test_a_views_replace_is_judged_on_the_view_as_main_holds_it(monkeypatch):
         gid = await _graph(svc, ie, store, _chain("v", 12) + [_row("x", i) for i in range(3)])
         VIEW["scope"] = {"assigned_urns": [_urn("v", i) for i in range(12)], "inherit_urns": [],
                          "containment_types": []}
+        PLACED.clear()
         # The view's tables by other urns: by identifier=urn the file matches none of them, and
         # makes all 23 again outside the view.
-        other = _chain("o", 12)
+        other, made = _chain("o", 12), {_urn("o", i) for i in range(12)}
         job, got = await _run_job(ie, store, gid, other, scope_view_id="v1")
         assert got["status"] == "failed", got
         assert got["summary"]["failure"]["code"] == "mass_delete_blocked", got["summary"]
         assert _counts(got) == ("blocked", 23, 23, 23), got["summary"]["replaceGuard"]
+        # What it made is on the draft for review, placed in the draft's view.
+        assert (PLACED, got["summary"]["viewAssignments"]) == ([made], {"added": 12})
         draft = job["branch_id"]
         # Sent again into that draft, its rows match what the first run made there, and the draft
         # still makes the view again: refused all the same.
         _job, again = await _run_job(ie, store, gid, other, scope_view_id="v1", branch_id=draft)
         assert (again["summary"]["unchanged"], again["summary"]["new"]) == (23, 0), again["summary"]
         assert _counts(again) == ("blocked", 23, 23, 23), again["summary"]["replaceGuard"]
-        # With allowMassDelete it deletes the view's own entities, and nothing else.
+        # With allowMassDelete it deletes the view's own entities, and nothing else. It makes
+        # nothing, and the view's draft copy places what the first run made: published, the view
+        # shows the file's entities.
         _job, allowed = await _run_job(ie, store, gid, other, scope_view_id="v1", branch_id=draft,
                                        allow_mass_delete=True)
         assert allowed["status"] == "completed", allowed
         assert _counts(allowed)[0] == "overridden" and allowed["summary"]["deleted"] == 23
-        assert await _urns(svc, gid, draft) == (
-            {_urn("o", i) for i in range(12)} | {_urn("x", i) for i in range(3)})
+        assert await _urns(svc, gid, draft) == made | {_urn("x", i) for i in range(3)}
+        assert PLACED == [made] and made <= set(VIEW["scope"]["assigned_urns"])
     _run(case, monkeypatch)
 
 

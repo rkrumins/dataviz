@@ -461,8 +461,15 @@ class ImportWorker:
 
         await self._lease.retry_transient(
             lambda: self._stage(job_id, job["source_uri"], job["import_format"], graph_id, branch_id))
-        summary = await self._resolve_and_build(
-            job_id, graph_id, branch_id, actor, job.get("reconcile_mode") or "upsert")
+        try:
+            summary = await self._resolve_and_build(
+                job_id, graph_id, branch_id, actor, job.get("reconcile_mode") or "upsert")
+        except ReplaceBlocked:
+            # Refused before it deleted anything, every row applied: what it made is on the draft
+            # for review, so it is placed in the draft's view as a completed run's is.
+            if self._facts:
+                await self._derive_facts(job_id, graph_id, branch_id)
+            raise
         if self._facts:
             await self._derive_facts(job_id, graph_id, branch_id)
         # A replace keeps the replace guard's verdict beside its tallies.

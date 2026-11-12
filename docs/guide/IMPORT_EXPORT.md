@@ -201,7 +201,9 @@ in the app with its own `external_id` is found by it, not made twice.
 The choice marked **default** is the data source's. A workspace admin sets it on
 the data source's **Versioning** tab, under **Imports**. A fork can't match by a
 property yet, so where its parent's default is a property, a fork's is
-**Entity ID**, and the dialog says so.
+**Entity ID**, and the dialog says so. The property the data source identifies
+its items by is the exception: it holds their urn, so a fork matches by it as
+its parent does.
 
 - **A row nothing matches** becomes a new item. Its id is made from the key that
   should have found it, so importing the file again finds it rather than making
@@ -231,10 +233,11 @@ property yet, so where its parent's default is a property, a fork's is
 > choosing it.
 
 When the replace guard stops an import, nothing is deleted and the file's rows
-wait on your draft. Most often the file names its items another way: try again
-with another **Match existing items by**. If the file really replaces most of
-what's there, choose **Replace anyway**: the file is imported again into the
-same draft, its deletions included, for you to review before you publish. The
+wait on your draft, the items they made placed in the draft's copy of the View.
+Most often the file names its items another way: try again with another **Match
+existing items by**. If the file really replaces most of what's there, choose
+**Replace anyway**: the file is imported again into the same draft, its
+deletions included, for you to review before you publish. The
 data source's **Versioning** tab shows the limits the guard uses, and a workspace
 admin can change them there.
 

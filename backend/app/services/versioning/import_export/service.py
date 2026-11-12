@@ -490,8 +490,17 @@ class ImportExportService:
                               node_identity=node_identity)
         # Called directly (tools, tests faking ImportWorker) there is no lease to pass on: the
         # worker takes the job itself.
-        summary = await (worker.run(job_id, lease=lease) if lease is not None
-                         else worker.run(job_id))
+        try:
+            summary = await (worker.run(job_id, lease=lease) if lease is not None
+                             else worker.run(job_id))
+        except ReplaceBlocked:
+            # A view's replace the guard refused leaves what it made on the draft for review: placed
+            # in the draft's view too, so the override — the file imported again into that draft
+            # with allowMassDelete, which makes nothing — finds it in the view's scope, and the
+            # view shows it once the draft is published.
+            if view_id and self._layout_writer is not None and worker.created_node_facts:
+                await self._apply_view_layout(job_id, ws, ds, view_id, branch_id, worker)
+            raise
         # Post-commit: a view-scoped import that created new top-level entities writes canonical layer
         # assignments so the curated view shows them right away. Best-effort — never fails the import.
         if view_id and self._layout_writer is not None and worker.created_node_facts:
@@ -574,9 +583,10 @@ class ImportExportService:
     async def _apply_view_layout(self, job_id, ws, ds, view_id, branch_id, worker) -> None:
         """Hand the import's newly-created top-level entities to the injected layout writer and record
         the outcome on ``job.summary`` (``viewAssignments: {added: N}`` or ``{error: ...}``). The
-        import is already committed and marked ``completed`` by the worker before this runs, so any
-        failure here is isolated: it is logged + noted, never raised (which would flip the job to
-        ``failed`` via ``run_import_safe``)."""
+        import is already committed — marked ``completed`` by the worker, or refused by the
+        replace guard with every row applied — before this runs, so any failure here is isolated:
+        it is logged + noted, never raised (which would flip a completed job to ``failed`` via
+        ``run_import_safe``)."""
         try:
             try:
                 result = await self._layout_writer(

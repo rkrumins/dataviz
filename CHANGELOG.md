@@ -157,7 +157,9 @@ integration's many small changes as a few commits.
     `IMPORT_REPLACE_MIN_MATCH_FRACTION` (0.05); Helm `config.imports`. A workspace admin may set a
     data source's own over them (below).
   - In the import dialog, **Replace anyway** imports the file again into the same draft with
-    `allowMassDelete`, so its deletions are staged for review.
+    `allowMassDelete`, so its deletions are staged for review. A view's refused replace places what
+    it made in the draft's copy of the view first, as a completed one does, so once published the
+    view shows the file's entities.
 - **Look up what your own ids name, without importing:** `POST …/graphs/{gid}/identities/resolve`
   `{identifier, values}` answers each value's entity id on the published graph as an import naming
   that identifier would find it (`found`, `none`, or `duplicate` with both ids), up to 10,000 a
@@ -197,7 +199,8 @@ integration's many small changes as a few commits.
     resumed job runs under what it started with. A fork's are its parent's, but a fork can't
     match by a property yet: where the default is a `prop.<name>`, a fork's imports match by
     `entity_id`, from `fork` (`effective.sources.identifier`, `identifierSource`), and its import
-    dialog says so.
+    dialog says so. The data source's identifier property stays: it holds the urn, and a fork's
+    imports match it as `urn`, as its parent's do.
   - The import dialog's **Match existing items by** (Entity ID, URN, or a property) starts at the
     graph's default, and says when a property is indexed first.
 - **Every refused import row carries a code** beside its reasons, in the preview and the dry run:

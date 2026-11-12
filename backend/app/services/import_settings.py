@@ -6,8 +6,9 @@ the platform's (``GRAPHVER_IMPORT_IDENTIFIER``, ``IMPORT_REPLACE_*``). NULL at t
 "not set here". They are read where an import is made and kept on its job (``jobs.import_settings``),
 so a job runs to the end under the settings it started with, resumed or not. A fork's are its
 parent's (``fork_sources.GOVERNING``), but for a ``prop.<name>`` identifier: a fork's rows can't be
-matched by a property yet (``keys.NotOnAFork``), so there that default is ``entity_id``. The
-guard's on/off switch, ``IMPORT_REPLACE_GUARD``, is the platform's alone.
+matched by a property yet (``keys.NotOnAFork``), so there that default is ``entity_id`` — unless
+the property is the data source's identifier property, which holds the urn and is matched as
+``urn``. The guard's on/off switch, ``IMPORT_REPLACE_GUARD``, is the platform's alone.
 """
 from __future__ import annotations
 
@@ -46,32 +47,35 @@ def settings_of(row: Any) -> Dict[str, Any]:
             for column, api, _default in FIELDS}
 
 
-def resolve(row: Any, *, fork: bool = False) -> Dict[str, Any]:
+def resolve(row: Any, *, fork: bool = False,
+            identity_property: Optional[str] = None) -> Dict[str, Any]:
     """The settings a data source's imports run under (``row`` may be None), each with where it came
     from (``sources``: ``data_source`` or ``platform``). On a fork's graph (``fork``) a
-    ``prop.<name>`` identifier, which a fork can't match by yet, is ``entity_id``, from ``fork``.
-    Pure."""
+    ``prop.<name>`` identifier, which a fork can't match by yet, is ``entity_id``, from ``fork`` —
+    but ``prop.<identity_property>``, the data source's identifier property, which holds the urn:
+    an import matches it as ``urn``, on a fork too. Pure."""
     own, values, sources = settings_of(row), {}, {}
     for _column, api, default in FIELDS:
         if own[api] is not None:
             values[api], sources[api] = own[api], SOURCE_DATA_SOURCE
         else:
             values[api], sources[api] = default(), SOURCE_PLATFORM
-    if fork and values["identifier"].startswith("prop."):
+    held_by_urn = bool(identity_property) and values["identifier"] == f"prop.{identity_property}"
+    if fork and values["identifier"].startswith("prop.") and not held_by_urn:
         values["identifier"], sources["identifier"] = identifiers.ENTITY_ID, SOURCE_FORK
     return {**values, "sources": sources}
 
 
-def for_import(row: Any, requested: Optional[str], *,
-               fork: bool = False) -> Tuple[str, Dict[str, Any]]:
-    """What an import into ``row``'s graph (``fork``: a fork's) runs under: its identifier (the
-    request's, checked —
+def for_import(row: Any, requested: Optional[str], *, fork: bool = False,
+               identity_property: Optional[str] = None) -> Tuple[str, Dict[str, Any]]:
+    """What an import into ``row``'s graph (``fork``: a fork's, whose data source identifies its
+    nodes by ``identity_property``) runs under: its identifier (the request's, checked —
     :class:`~backend.app.services.versioning.import_export.identifier.IdentifierError` — else the
     data source's, else the platform's, as :func:`resolve` has it), and what its job keeps: where
     the identifier came from (``identifierSource``: ``request``, ``data_source``, ``platform``, or
     ``fork``) and the replace guard's limits with where each came from (``replaceLimits``). A
     property the request names is kept, on a fork too."""
-    effective = resolve(row, fork=fork)
+    effective = resolve(row, fork=fork, identity_property=identity_property)
     named = identifiers.parse(requested)
     identifier, source = ((named, SOURCE_REQUEST) if named
                           else (effective["identifier"], effective["sources"]["identifier"]))
