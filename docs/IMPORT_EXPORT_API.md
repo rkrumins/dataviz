@@ -387,12 +387,32 @@ The commit is the system of record at once. The graph you read and trace catches
 
 ```bash
 curl -sS "$BASE/api/v1/$WS/versioning/graphs/$GID/watermark" -H "Authorization: Bearer $TOKEN" \
-  | jq '{committed, fresh}'
+  | jq '{committed, served, fresh}'
 ```
 
 `committed` is the published graph's head revision: the `revisionId` your publish answered, or a
-later one. `fresh` turns `true` once the graph holds it (`projected` has reached `committed`):
-poll until it does before you read what you published through the graph.
+later one. `served` is the revision reads of the graph show right now. `fresh` turns `true` once
+the graph holds the head (`projected` has reached `committed`).
+
+While the graph catches up, reads don't wait and don't fail. Every read of the published graph
+(the canvas, `…/graph/…` reads, traces, native queries) answers from the revision it last
+finished, complete with its connections, and `served` names it. A large import can take a while
+to be written; reads keep answering from the revision before it until then. The app's sync chip
+says the same to people ("Showing #12 · writing #14").
+
+To read your own change through the graph, poll until `served` reaches the `revisionId` your
+publish answered:
+
+```bash
+until [ "$(curl -sS "$BASE/api/v1/$WS/versioning/graphs/$GID/watermark" \
+  -H "Authorization: Bearer $TOKEN" | jq --argjson r "$REVISION" '(.served // 0) >= $r')" = true ]; do
+  sleep 2
+done
+```
+
+`served` is `null` only while the graph holds no revision at all: just enabled, moved to another
+graph store, or unloaded to free memory. Reads come from the system of record then, slower and
+without the rolled-up connections between collapsed items.
 
 ## Walkthrough 1: by entity id — export, edit in a spreadsheet, import back
 

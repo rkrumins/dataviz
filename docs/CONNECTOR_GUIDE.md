@@ -127,7 +127,7 @@ connector written against it keeps working.
 | `entityType` | A node's type, one the data source's ontology names. Needed to create a node |
 | `displayName`, `description`, `sourceSystem`, `layerAssignment` | A node's own fields |
 | `qualifiedName` | A node's qualified name. Where no `urn` matches, an import finds a node by it |
-| `tags` | A node's tags: a JSON list, or a `;`-separated cell. Tags a row adds are added to the node's tags; a stale exported row's removals apply too |
+| `tags` | A node's tags: a JSON list, or a comma-separated cell. Tags a row adds are added to the node's tags; a stale exported row's removals apply too |
 | `edgeType`, `confidence` | An edge's type (one the ontology names), and an optional confidence from 0 to 1 |
 | `sourceUrn`, `targetUrn`, `source_entity_id`, `target_entity_id`, `sourceQualifiedName`, `targetQualifiedName` | How each end of an edge is found |
 | `source.<field>`, `target.<field>` | An edge's end, found by a field of its node: the data source's identifier, or a field marked "Match imports by this" |
