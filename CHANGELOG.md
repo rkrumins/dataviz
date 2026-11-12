@@ -131,15 +131,19 @@ integration's many small changes as a few commits.
 - **Look up what your own ids name, without importing:** `POST …/graphs/{gid}/identities/resolve`
   `{identifier, values}` answers each value's entity id on the published graph as an import naming
   that identifier would find it (`found`, `none`, or `duplicate` with both ids), up to 10,000 a
-  call. Clients of the entity-id writes (`POST /graph/changes`) map their system's ids first. An
-  API key may call it.
+  call; on a fork, what it inherits from its parent included. Clients of the entity-id writes
+  (`POST /graph/changes`) map their system's ids first. An API key may call it.
 - **`/bulk-ingest` and `/sync` give new entities the import's ids.** A new node or edge takes a
   `urn:uuid:`: one the row brings, kept; else derived from its urn (as an import by urn derives
   it) or its own id, an edge's from its ends and type. Every path that adds entities to a
   versioned graph now gives the same kind of id, and the same row sent through any of them names
-  the same entity. Entities made before keep their ids (a provider urn, `ent_…`, `sync:e:…`): a
-  sync still finds them by their urn, their ends, or the id they have, and updates and deletes
-  them. Enabling version control still keeps a provider's urns as ids.
+  the same entity: a sync of the rows a bulk ingest or an earlier sync took changes nothing, a row
+  with no urn included, whatever urn its node has been given since. Entities made before keep their
+  ids (a provider urn, `ent_…`, `sync:e:…`): a sync still finds them by their urn, their ends, or the
+  id they have, and updates and deletes them. A row with no urn that names a node by an id from
+  before is taken as it comes, as it always was: a node an earlier `/bulk-ingest` gave its id as its
+  urn loses that urn on its first sync, as it did then. One a sync deleted that a later sync sends
+  again comes back under its id. Enabling version control still keeps a provider's urns as ids.
 - **Imports that publish themselves pull main when it moved under them.** Several connectors (and
   people) can work on one data source at once, each in a draft of its own. When main moved while
   an import ran, its draft now pulls main — the field-level merge of "Pull latest" — and publishes
