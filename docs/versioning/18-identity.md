@@ -160,7 +160,9 @@ node made or edited in the app since the last import too.
 - A row that brings only the file's own `entity_id` is refused (`no_key`): that id links the file's
   rows to each other and nothing more, so the row would be created again by every import, and
   under `reconcileMode=replace` each run would delete the node the previous run made.
-- A row whose urn and identifier value point at two different entities is refused.
+- A row whose urn and identifier value point at two different entities is refused. So is a row,
+  by `prop.<name>`, that would make a new node with a urn another node holds (`two_entities`):
+  to change that node's value, send its `entity_id` with the new one.
 - A matched row's urn or identifier value that names nothing is reported on the row, not applied.
   An import never changes a node's urn.
 - A row an export wrote, imported after its entity changed, applies only the cells it changed; see

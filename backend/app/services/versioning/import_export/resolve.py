@@ -471,7 +471,9 @@ def resolve_rows(
     the values several live nodes hold, which refuse their rows, and ``indexes["restore"]`` a value
     only a deleted node held to that node); an edge's ends by ``source.<name>``. A new node's id is
     ``derive_key(value)``, else (one that is live: its value has changed since) a minted one; it
-    keeps the value, and the urn its row gives."""
+    keeps the value, and the urn its row gives — unless a live node (``indexes["urn_held"]``: urn
+    -> that node) or a node an earlier row of the batch makes holds that urn, which refuses the
+    row (``two_entities``)."""
     urn_to_eid: Dict[str, str] = dict(indexes.get("urn_to_eid") or {})
     qname_to_eid: Dict[str, Optional[str]] = dict(indexes.get("qname_to_eid") or {})   # None: several
     edge_to_eid: Dict[tuple, str] = {(s, t, _etype_key(et)): eid
@@ -503,6 +505,7 @@ def resolve_rows(
     strict = identifier == "urn"                   # by an entity id or the urn, nothing else
     prop = identifier[len("prop."):] if identifier.startswith("prop.") else None   # or its value
     dupes: Mapping[str, Sequence[str]] = indexes.get("dupes") or {}
+    urn_held: Dict[str, str] = dict(indexes.get("urn_held") or {})   # by prop: urn -> its node
 
     ops: List[dict] = []
     resolutions: List[dict] = []
@@ -658,6 +661,13 @@ def resolve_rows(
         # The row's urn as it is stored — but not a urn:uuid, which is an id: a free one is the
         # node's own (above), and one another entity holds is never a second entity's urn.
         own_urn = key_value(urn) if key_value(urn) and not uuid_urn(key_value(urn)) else None
+        # By a property, a urn another node holds is never a second node's: the projection keys
+        # nodes by their urn.
+        if prop and own_urn in urn_held:
+            resolutions.append(_resolution(row, "invalid", None, code="two_entities", reasons=[
+                f"its urn '{own_urn}' is node {urn_held[own_urn]}'s, which holds another {prop}: "
+                f"to change that node's {prop}, send its entity_id with the new value"]))
+            continue
         if mint_urn is None:
             eid, node_urn = mint_id(), urn
         elif restored and prop:                     # a node a value names, deleted since: back
@@ -686,6 +696,8 @@ def resolve_rows(
             created_from[row["entity_id"]] = eid
         for name in (set(names) if prop else set(names) | {node_urn} - {None}):
             urn_to_eid[name] = eid                        # what the file calls it names it here
+        if prop and own_urn:
+            urn_held[own_urn] = eid
         if row.get("qualifiedName"):                      # another entity's too: it names neither
             qn = row["qualifiedName"]
             qname_to_eid[qn] = None if qname_to_eid.get(qn, eid) != eid else eid

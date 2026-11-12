@@ -115,8 +115,11 @@ integration's many small changes as a few commits.
     do. An edge names its ends `source.<name>` / `target.<name>`. The first import naming the
     property indexes it, reading every node once; each later one reads only the version log since,
     so a node made or edited in the app is found by its value, never made again. A value two nodes
-    hold refuses its rows (`duplicate_value`); a deleted node named again by its last value comes
-    back under its id. At most `GRAPHVER_MAX_MATCHING_PROPERTIES` (10) a graph; not on a fork yet.
+    hold refuses its rows (`duplicate_value`), and so does a new node's urn that another node holds
+    (`two_entities`: send that node's entity id to change its value); a deleted node named again by
+    its last value comes back under its id. A draft behind main matches by the values it holds: a
+    node main changed or deleted after the draft's base keeps its value there. At most
+    `GRAPHVER_MAX_MATCHING_PROPERTIES` (10) a graph; not on a fork yet.
 
   The job keeps it (`identifier` on the job), and a resumed job keeps it too. Anything else is
   `422 invalid_identifier`, saying what it may be. Whichever it is, an entity's id never changes.
@@ -125,11 +128,15 @@ integration's many small changes as a few commits.
   match nothing, so the run deletes the scope and makes it anew, every id and its history with it.
   - In a scope of at least 1,000 entities, a replace that would delete at least half of them and
     create at least half as many fails with `mass_delete_blocked`; its rows stay on the draft.
+    The scope is counted on the main its draft reads (a fork's with its parent's), and what the
+    draft makes is all it holds beyond that main, so a view's replace by other keys is refused
+    too, and so is the same file sent again into its draft.
   - The job's `summary.replaceGuard` says what it would have done and the limits in force; the
     message says to check the identifier, or to send `allowMassDelete=true`, which deletes all the
     same (anyone who may run the import may send it).
   - A whole-graph replace whose first full window finds an entity for fewer than 5% of its rows stops
-    there, with `identifier_matched_nothing`, instead of reading the rest of the file first.
+    there, with `identifier_matched_nothing`, instead of reading the rest of the file first, unless
+    it was sent with `allowMassDelete=true`.
   - The operator sets the limits: `IMPORT_REPLACE_GUARD` (on), `IMPORT_REPLACE_GUARD_MIN_LIVE`
     (1000), `IMPORT_REPLACE_GUARD_DELETE_FRACTION` and `IMPORT_REPLACE_GUARD_CREATE_FRACTION` (0.5),
     `IMPORT_REPLACE_MIN_MATCH_FRACTION` (0.05); Helm `config.imports`. A workspace admin may set a
@@ -172,7 +179,10 @@ integration's many small changes as a few commits.
     comes from, and lists the properties its imports match by, with how far each index is caught
     up; `PUT` sets them (`"inherit"` goes back to the platform's), recorded in the activity log.
   - An import resolves them when it is made and keeps them (`importSettings` on the job), so a
-    resumed job runs under what it started with. A fork's are its parent's.
+    resumed job runs under what it started with. A fork's are its parent's, but a fork can't
+    match by a property yet: where the default is a `prop.<name>`, a fork's imports match by
+    `entity_id`, from `fork` (`effective.sources.identifier`, `identifierSource`), and its import
+    dialog says so.
   - The import dialog's **Match existing items by** (Entity ID, URN, or a property) starts at the
     graph's default, and says when a property is indexed first.
 - **Every refused import row carries a code** beside its reasons, in the preview and the dry run:

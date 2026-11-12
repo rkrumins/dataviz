@@ -199,7 +199,9 @@ just `prop.external_id` and the column that changed — `E-1001` with a new
 in the app with its own `external_id` is found by it, not made twice.
 
 The choice marked **default** is the data source's. A workspace admin sets it on
-the data source's **Versioning** tab, under **Imports**.
+the data source's **Versioning** tab, under **Imports**. A fork can't match by a
+property yet, so where its parent's default is a property, a fork's is
+**Entity ID**, and the dialog says so.
 
 - **A row nothing matches** becomes a new item. Its id is made from the key that
   should have found it, so importing the file again finds it rather than making

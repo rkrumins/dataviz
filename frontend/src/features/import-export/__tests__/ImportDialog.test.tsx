@@ -11,7 +11,7 @@
  *   - the preview says why a row was refused, and shows a note on a row that applied;
  *   - it matches existing items by the graph's default (sending none: the server applies it) unless
  *     you choose another; a property must be named, and one no import matched by yet says it is
- *     indexed first;
+ *     indexed first; a fork whose parent's default is a property says it matches by Entity ID;
  *   - a replace the replace guard refused can be replaced anyway, into the draft its rows are on.
  */
 import { render, screen, waitFor } from '@testing-library/react'
@@ -192,6 +192,22 @@ describe('ImportDialog', () => {
     expect(urn).toHaveAttribute('aria-checked', 'true')
     await userEvent.click(screen.getByRole('button', { name: /^Import$/ }))
     expect(vi.mocked(importInParts).mock.calls[0][3]).toMatchObject({ identifier: undefined, allowMassDelete: false })
+  })
+
+  it('on a fork whose parent matches by a property, matches by Entity ID and says why', async () => {
+    const base = await vi.mocked(getImportSettings)('ws1', 'g1')
+    vi.mocked(getImportSettings).mockResolvedValue({
+      ...base, followsParent: true, overrides: { ...base.overrides, identifier: 'prop.external_id' },
+      effective: { ...values, identifier: 'entity_id', sources: { identifier: 'fork' } },
+    } as unknown as ImportSettings)
+    vi.mocked(importInParts).mockResolvedValue({ jobId: 'j1', branchId: 'br1', sourceUri: 's', status: 'pending' })
+    vi.mocked(pollJob).mockReturnValue(new Promise<Job>(() => {}))
+    await userEvent.upload(open(), file('graph.csv', 2048))
+    expect(await screen.findByRole('radio', { name: /Entity ID · default/ })).toHaveAttribute('aria-checked', 'true')
+    expect(screen.getByText(/its parent’s default is a property, and a fork can’t match by one yet/))
+      .toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: /^Import$/ }))
+    expect(vi.mocked(importInParts).mock.calls[0][3]).toMatchObject({ identifier: undefined })
   })
 
   it('matches by a property once it is named, and says one no import matched by yet is indexed first', async () => {

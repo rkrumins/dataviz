@@ -423,10 +423,13 @@ class ImportWorker:
         # platform's, when it was made), with where each came from.
         self._limits: Dict[str, Any] = platform_limits()
         # identifier=prop.<name>: the property, and the nodes the draft holds a value of it for
-        # beyond what main's index says (its own changes, and this job's windows), both ways.
+        # beyond what main's index says (its own changes, this job's windows, and the nodes main
+        # changed after the draft's base), both ways; and the main commit those last are read to
+        # (None on main, whose index is its view).
         self._prop: Optional[str] = None
         self._prop_of: Dict[str, Optional[str]] = {}
         self._prop_holders: Dict[str, set] = {}
+        self._prop_seq: Optional[int] = None
         # Reconciling in memory: the file (read again for the edges), and per pass ("node",
         # "edge") what its rows have named — only for a pass this run started — whether it is still
         # deciding, and how many rows it decided and found unchanged.
@@ -525,7 +528,7 @@ class ImportWorker:
             cursor = "mparse:0"
         if cursor is not None and cursor.startswith("mparse:"):
             snap = await open_snapshot(graph_id=graph_id, branch_id=branch_id)
-            await self._decide_state(graph_id, branch_id)
+            await self._decide_state(snap, graph_id, branch_id)
             await self._stage_pass(job_id, snap, "node", int(cursor.partition(":")[2]))
             return
         if cursor is not None and not cursor.startswith("parse:"):
@@ -598,7 +601,7 @@ class ImportWorker:
                 return True
         return False
 
-    async def _decide_state(self, graph_id: str, branch_id: str) -> None:
+    async def _decide_state(self, snap, graph_id: str, branch_id: str) -> None:
         """What a batch is resolved against in memory before any window (as
         :meth:`validation_state`, with no team keys): what the graph derives node ids in, and the
         data source's identifier property. The links earlier windows leave come later, read by the
@@ -608,7 +611,7 @@ class ImportWorker:
         self._id_scope = await self._svc.identity_scope(graph_id)
         self._identity_prop = identity_property(self._node_identity)
         self._settle_identifier()
-        await self._prop_state(graph_id, branch_id, build=True)
+        await self._prop_state(snap, graph_id, branch_id, build=True)
 
     async def _stage_pass(self, job_id: str, snap, kind: str, resume: int) -> None:
         """Stage the file's ``kind`` rows from file row ``resume``, a batch at a time, each batch
@@ -808,7 +811,7 @@ class ImportWorker:
                     "the file again.")
             if (await self._position(job_id)).cursor != "replace":       # not deleting yet
                 await self._lease.retry_transient(
-                    lambda: self._guard_replace(job_id, snap, graph_id), never=(ReplaceBlocked,))
+                    lambda: self._guard_replace(job_id, snap), never=(ReplaceBlocked,))
             await self._lease.retry_transient(
                 lambda: self._delete_absent(job_id, snap, graph_id, branch_id, actor))
         summary = (await self._position(job_id)).summary
@@ -861,26 +864,27 @@ class ImportWorker:
         if kind == "node":
             self._remember_created(rows, ops, resolutions)
             if pos.cursor in ("node:-1", "mnode:-1") and len(rows) == config.IMPORT_COMMIT_WINDOW:
-                await self._fail_fast(job_id, graph_id)
+                await self._fail_fast(job_id, snap)
         return True
 
-    async def _fail_fast(self, job_id: str, graph_id: str) -> None:
+    async def _fail_fast(self, job_id: str, snap) -> None:
         """After a replace's first full node window: stop (:class:`IdentifierMatchedNothing`) when
         fewer than the job's ``minMatchFraction`` (``IMPORT_REPLACE_MIN_MATCH_FRACTION``, or its
-        data source's) of the rows decided so far found an entity, in a graph of at least its
-        ``minLive``, rather than read the rest of the file and have the replace guard refuse it at
-        the end. A replace of a view's scope is left to the guard: its scope isn't the graph."""
+        data source's) of the rows decided so far found an entity, in a graph whose main as the
+        draft reads it (a fork's with its parent's) holds at least its ``minLive``, rather than read
+        the rest of the file and have the replace guard refuse it at the end. A replace of a view's
+        scope is left to the guard: its scope isn't the graph. One sent with allowMassDelete goes
+        on, as the guard lets it through."""
         min_match = float(self._limits["minMatchFraction"])
-        if self._reconcile_mode != "replace" or self._scope is not None or min_match <= 0:
+        if (self._reconcile_mode != "replace" or self._scope is not None or self._allow_mass_delete
+                or min_match <= 0):
             return
         tally = (await self._position(job_id)).summary
         matched = sum(int(tally.get(k) or 0) for k in ("updated", "unchanged", "deleted"))
         decided = matched + int(tally.get("new") or 0) + int(tally.get("invalid") or 0)
         if not decided or matched >= min_match * decided:
             return
-        main_id = await self._svc.main_branch_id(graph_id)
-        async with db.graphver_session() as s:
-            live = await self._svc._main_live_count(s, graph_id, main_id)
+        live = await _live_count(snap.main_at_base())
         if live < int(self._limits["minLive"]):
             return
         raise IdentifierMatchedNothing(
@@ -889,33 +893,38 @@ class ImportWorker:
             "likely make the graph again, and the replace delete it. Check what the file's rows name "
             "their entities by: identifier=entity_id finds a row's entity id, then its urn, its "
             "identifier value or a field its type matches imports by; identifier=urn, its entity id "
-            "or its urn. Nothing was deleted; the rows read so far are on the draft.")
+            "or its urn. Nothing was deleted; the rows read so far are on the draft. If the file "
+            "really replaces the graph, import it again with allowMassDelete=true.")
 
-    async def _guard_replace(self, job_id: str, snap, graph_id: str) -> None:
+    async def _guard_replace(self, job_id: str, snap) -> None:
         """Before a replace deletes anything: count what it would delete and what it made, record the
         verdict on the job's summary (``replaceGuard``, :func:`replace_verdict`), and refuse
         (:class:`ReplaceBlocked`) past the guard's limits unless the job allows it. Nothing is
         deleted then, and the file's rows stay on the draft for review.
 
-        A whole graph's replace is measured against main: what main holds, and what the draft holds
-        beyond it — so a file imported again into the draft an earlier import made it in is judged
-        on what the draft would publish, not only on what this run added. A view's, on what this
-        run made."""
+        A replace is measured against the main its draft reads (a fork's with its parent's): its
+        scope as main holds it, and what the draft makes beyond main — so a file imported again into
+        the draft an earlier import made it in is judged on what the draft would publish, not only
+        on what this run added. A whole graph's scope is every entity main holds, and the draft makes
+        what it holds beyond them. A view's is those of the view's entities main holds, and the
+        draft makes every entity it holds that main doesn't: a file naming the view's entities by
+        another key makes them all again outside the view, where its placements don't reach."""
         keep = (await view_entities(snap, self._scope))["keep"] if self._scope else None
-        live = absent = 0
+        main = snap.main_at_base()
+        live = absent = before = 0
         for kind in ("edge", "node"):
             async for page in _in_scope(snap, kind, keep):
                 live += len(page)
                 absent += len(await self._unmatched(job_id, page))
+                if keep is not None:
+                    before += len(await main.lookup_live(kind, page))
         pos = await self._position(job_id)
         made = int(pos.summary.get("new") or 0)
         if keep is None:
-            main_id = await self._svc.main_branch_id(graph_id)
-            async with db.graphver_session() as s:
-                before = await self._svc._main_live_count(s, graph_id, main_id)
+            before = await _live_count(main)
             creates = max(live - before, made)
         else:
-            before, creates = max(live - made, 0), made
+            creates = await _made_on_draft(snap, main)
         verdict = replace_verdict(before, absent, creates, allowed=self._allow_mass_delete,
                                   limits=self._limits)
         async with db.graphver_session() as s:
@@ -960,10 +969,11 @@ class ImportWorker:
         self._prop = (self._identifier[len("prop."):] if self._identifier.startswith("prop.")
                       else None)
 
-    async def _prop_state(self, graph_id: str, branch_id: str, *, build: bool,
+    async def _prop_state(self, snap, graph_id: str, branch_id: str, *, build: bool,
                           job_id: Optional[str] = None) -> None:
         """For ``identifier=prop.<name>``: the property's index caught up to main's head — built
-        first when no import named it (``build``) — and the values the draft itself holds."""
+        first when no import named it (``build``) — and, on a draft, the values the draft itself
+        holds. On main (a dry run) the index is main's view, and nothing more is read."""
         if not self._prop:
             return
         if build:
@@ -971,8 +981,28 @@ class ImportWorker:
         else:
             await matching.ensure_ready(graph_id, self._prop)
         self._prop_of, self._prop_holders = {}, {}
+        self._prop_seq = snap.base_seq if snap.is_draft else None
+        if not snap.is_draft:
+            return
         for eid, value in (await matching.draft_values(graph_id, branch_id, self._prop)).items():
             self._note_prop(eid, value)
+
+    async def _prop_moved_on_main(self, snap) -> None:
+        """On a draft: the nodes main changed after its base (since the last call), noted as the
+        draft sees them — its own value, else main's at its base — since main's index says what
+        main's head holds. A node main deleted since is live in the draft; one main gave another
+        value keeps its old one there. As many as main's changes since the base, their payloads
+        read a chunk at a time and only their values kept; the commit they are read to moves once
+        every one is noted, so a window retried after a fault here reads the rest again."""
+        if self._prop_seq is None:
+            return
+        moved, seq = await matching.changed_on_main(self._graph_id, self._prop_seq)
+        for chunk in _chunks([e for e in moved if e not in self._prop_of], _PERSIST_BATCH):
+            live = await snap.lookup_live("node", chunk, payload=True)
+            held = dict(await asyncio.to_thread(matching._values_of, list(live.values()), self._prop))
+            for eid in chunk:
+                self._note_prop(eid, held.get(eid))
+        self._prop_seq = seq
 
     def _note_prop(self, eid: str, value: Optional[str]) -> None:
         """The draft holds ``value`` of the matching property for node ``eid`` (None: none, or it
@@ -987,10 +1017,12 @@ class ImportWorker:
     async def _prop_hits(self, snap, values) -> Tuple[Dict[str, str], Dict[str, List[str]], Dict[str, str]]:
         """``(hits, dupes, restore)`` for values of the matching property: the one live node of the
         draft holding each, the values several hold, and the values only a deleted node held (that
-        node). Main's index, for the nodes the draft hasn't changed and its view holds; the draft's
-        own values for the rest."""
+        node). Main's index, for the nodes neither the draft nor main has changed since the draft's
+        base, where the draft's view holds them; the draft's view of the rest (main's changes read
+        after the index, so they cover whatever it says)."""
         values = {v for v in values if v}
         main = await matching.lookup(self._graph_id, self._prop, values)
+        await self._prop_moved_on_main(snap)
         candidates = {e for v in values for e, live in main.get(v, ())
                       if live and e not in self._prop_of}
         visible = set(await snap.lookup_live("node", candidates)) if candidates else set()
@@ -1022,7 +1054,7 @@ class ImportWorker:
         self._id_scope = await self._svc.identity_scope(graph_id)
         self._identity_prop = ident = identity_property(self._node_identity)
         self._settle_identifier()
-        await self._prop_state(graph_id, branch_id, build=True, job_id=job_id)
+        await self._prop_state(snap, graph_id, branch_id, build=True, job_id=job_id)
         self._created_from, self._aliases = {}, {}
         # Only the rows that leave a link: a file id that is not the node's own, or an identifier
         # value beside a urn — never a whole row, which a large job has millions of.
@@ -1056,7 +1088,7 @@ class ImportWorker:
         self._id_scope = await self._svc.identity_scope(graph_id)
         self._identity_prop = identity_property(self._node_identity)
         self._settle_identifier()
-        await self._prop_state(graph_id, branch_id, build=False)
+        await self._prop_state(snap, graph_id, branch_id, build=False)
         onto = self._ontology or {}
         keys = KeyIndex(onto.get("keys"), onto.get("unique"))
         self._keys = keys if keys else None
@@ -1108,16 +1140,19 @@ class ImportWorker:
 
     def _remember_created(self, rows, ops, resolutions) -> None:
         """A committed node window's rows, for the windows after it: the node each matched or
-        created, by the file entity id and second name it came with; and a create's team key
-        values. Only what landed — a row the write gate turned away named nothing any later row
-        may point at."""
+        created, by the file entity id and second name it came with; a create's team key values;
+        and the matching property's value each node now holds, as its op wrote it (a stale row's
+        update keeps the node's newer value of a cell it left as exported). Only what landed — a
+        row the write gate turned away named nothing any later row may point at."""
         by_index = {r["_row_index"]: r for r in rows}
         urn_of = {o["entity_id"]: (o.get("payload") or {}).get("urn") for o in ops
                   if o.get("op") == "create"}
+        wrote = {o["entity_id"]: (o.get("payload") or {}).get("properties") or {} for o in ops
+                 if o.get("op") in ("create", "update")}
         for res in resolutions:
             eid = res.get("matched_entity_id")
             if self._prop and eid and res.get("resolved_op") in ("create", "update", "delete"):
-                props = (by_index.get(res["_row_index"]) or {}).get("properties") or {}
+                props = wrote.get(eid) or {}
                 if res["resolved_op"] == "delete":
                     self._note_prop(eid, None)
                 elif self._prop in props or res["resolved_op"] == "create":
@@ -1241,8 +1276,10 @@ class ImportWorker:
     async def _prop_node_lookups(self, snap, rows) -> Dict[str, Any]:
         """:meth:`_node_lookups` for ``identifier=prop.<name>``: the live nodes the rows name by
         entity_id or by the property's value, with their current payloads; and of the ids the rows
-        that match nothing would take (derived from their values), those a live node holds."""
+        that match nothing would take (derived from their values), those a live node holds, and of
+        their urns, the live node holding each."""
         values = {v for r in rows if (v := key_value((r.get("properties") or {}).get(self._prop)))}
+        urns = {u for r in rows if (u := key_value(r.get("urn"))) and not uuid_urn(u)}
         by_id = await snap.lookup_live("node", {r["entity_id"] for r in rows if r.get("entity_id")})
         hits, dupes, restore = await self._prop_hits(snap, values)
         named = set(by_id) | set(hits.values())
@@ -1252,6 +1289,7 @@ class ImportWorker:
         taken = set(await snap.lookup_live("node", derived)) if derived else set()
         current, hash_of = await _heads(snap, "node", named)
         return {"urn_to_eid": hits, "dupes": dupes, "restore": restore, "taken": taken,
+                "urn_held": await snap.nodes_by_urn(urns) if urns else {},
                 "qname_to_eid": {}, "node_eids": named, "current": current, "hash_of": hash_of,
                 "bases": await _bases(snap, "node", rows, hash_of)}
 
@@ -1539,6 +1577,33 @@ async def _bases(snap, kind: str, rows, hash_of: Dict[str, str]) -> Dict[tuple, 
                        tuple_(model.entity_id, model.content_hash).in_(chunk),
                        model.payload.is_not(None)))).all()})
     return out
+
+
+async def _live_count(snap) -> int:
+    """How many entities ``snap`` holds live: from main's head pointers, in one indexed count, when
+    it is a graph's own main at its head (:meth:`~.snapshot.Snapshot.head_counts`); else counted a
+    page at a time — a fork's main is its parent's and its own."""
+    counts = await snap.head_counts()
+    if counts is not None:
+        return sum(counts.values())
+    live = 0
+    for kind in ("node", "edge"):
+        async for page in snap.iter_live(kind):
+            live += len(page)
+    return live
+
+
+async def _made_on_draft(snap, main) -> int:
+    """How many entities the draft ``snap`` holds live that ``main``, the main it reads, doesn't:
+    what this import, an earlier one into the draft or a person made there. A page of the draft's
+    own heads at a time, each looked up in main."""
+    made = 0
+    for kind in ("node", "edge"):
+        async for page in snap.layers[-1].scan(kind, snap.page_size):
+            ids = [w.entity_id for w in page if w.live]
+            if ids:
+                made += len(ids) - len(await main.lookup_live(kind, ids))
+    return made
 
 
 async def _in_scope(snap, kind: str, keep):

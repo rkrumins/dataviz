@@ -1129,7 +1129,7 @@ class ImportExportService:
         lookups: Dict[str, Any] = await worker._node_lookups(snap, nodes) if nodes else {}
         if edges:                                    # one call: an edge finds a node made above it
             more = await worker._edge_lookups(snap, edges)
-            for key in ("urn_to_eid", "qname_to_eid", "current", "hash_of", "bases"):
+            for key in ("urn_to_eid", "qname_to_eid", "current", "hash_of", "bases", "dupes"):
                 lookups[key] = {**more.get(key, {}), **lookups.get(key, {})}
             lookups["node_eids"] = set(lookups.get("node_eids") or ()) | more["node_eids"]
             lookups["edge_to_eid"] = more["edge_to_eid"]

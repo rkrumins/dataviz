@@ -3,7 +3,8 @@
  *   - each setting shows the graph's own value, or the platform's, named;
  *   - a workspace admin matches by a property (once it is named), changes a limit as a percentage,
  *     or goes back to the platform's, and only what changed is sent;
- *   - anyone else, and anyone on a fork (whose settings are its parent's), reads them;
+ *   - anyone else, and anyone on a fork (whose settings are its parent's), reads them; a fork whose
+ *     parent's default is a property says its imports match by Entity ID;
  *   - the properties imports match by are listed with how far each index is caught up, and a guard
  *     the platform turned off says so.
  */
@@ -65,6 +66,16 @@ describe('ImportSettingsFields', () => {
     rerender(<ImportSettingsFields settings={settings({ followsParent: true })} canEdit onSave={vi.fn()} />)
     expect(screen.getByLabelText(/deletes at least/)).toBeDisabled()
     expect(screen.getByText(/A fork’s import settings are its parent’s/)).toBeInTheDocument()
+  })
+
+  it('on a fork whose parent matches by a property, says its imports match by Entity ID', () => {
+    const own = settings()
+    render(<ImportSettingsFields canEdit onSave={vi.fn()} settings={settings({
+      followsParent: true, overrides: { ...none, identifier: 'prop.external_id' },
+      effective: { ...own.effective, sources: { ...own.effective.sources, identifier: 'fork' } } })} />)
+    expect(screen.getByLabelText('Match existing items by')).toHaveValue('prop')
+    expect(screen.getByText('A fork can’t match by a property yet, so its imports match by Entity ID.'))
+      .toBeInTheDocument()
   })
 
   it('lists the properties imports match by, and says when the platform turned the guard off', () => {

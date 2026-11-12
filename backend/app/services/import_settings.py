@@ -5,8 +5,9 @@ Each field resolves on its own: the data source's own (``WorkspaceDataSourceORM.
 the platform's (``GRAPHVER_IMPORT_IDENTIFIER``, ``IMPORT_REPLACE_*``). NULL at the data source means
 "not set here". They are read where an import is made and kept on its job (``jobs.import_settings``),
 so a job runs to the end under the settings it started with, resumed or not. A fork's are its
-parent's (``fork_sources.GOVERNING``). The guard's on/off switch, ``IMPORT_REPLACE_GUARD``, is the
-platform's alone.
+parent's (``fork_sources.GOVERNING``), but for a ``prop.<name>`` identifier: a fork's rows can't be
+matched by a property yet (``keys.NotOnAFork``), so there that default is ``entity_id``. The
+guard's on/off switch, ``IMPORT_REPLACE_GUARD``, is the platform's alone.
 """
 from __future__ import annotations
 
@@ -15,7 +16,8 @@ from typing import Any, Dict, Optional, Tuple
 from backend.app.services.versioning import config
 from backend.app.services.versioning.import_export import identifier as identifiers
 
-SOURCE_REQUEST, SOURCE_DATA_SOURCE, SOURCE_PLATFORM = "request", "data_source", "platform"
+SOURCE_REQUEST, SOURCE_DATA_SOURCE, SOURCE_PLATFORM, SOURCE_FORK = (
+    "request", "data_source", "platform", "fork")
 
 #: (column, API field, the platform's value)
 FIELDS = (
@@ -44,25 +46,32 @@ def settings_of(row: Any) -> Dict[str, Any]:
             for column, api, _default in FIELDS}
 
 
-def resolve(row: Any) -> Dict[str, Any]:
+def resolve(row: Any, *, fork: bool = False) -> Dict[str, Any]:
     """The settings a data source's imports run under (``row`` may be None), each with where it came
-    from (``sources``: ``data_source`` or ``platform``). Pure."""
+    from (``sources``: ``data_source`` or ``platform``). On a fork's graph (``fork``) a
+    ``prop.<name>`` identifier, which a fork can't match by yet, is ``entity_id``, from ``fork``.
+    Pure."""
     own, values, sources = settings_of(row), {}, {}
     for _column, api, default in FIELDS:
         if own[api] is not None:
             values[api], sources[api] = own[api], SOURCE_DATA_SOURCE
         else:
             values[api], sources[api] = default(), SOURCE_PLATFORM
+    if fork and values["identifier"].startswith("prop."):
+        values["identifier"], sources["identifier"] = identifiers.ENTITY_ID, SOURCE_FORK
     return {**values, "sources": sources}
 
 
-def for_import(row: Any, requested: Optional[str]) -> Tuple[str, Dict[str, Any]]:
-    """What an import into ``row``'s graph runs under: its identifier (the request's, checked —
+def for_import(row: Any, requested: Optional[str], *,
+               fork: bool = False) -> Tuple[str, Dict[str, Any]]:
+    """What an import into ``row``'s graph (``fork``: a fork's) runs under: its identifier (the
+    request's, checked —
     :class:`~backend.app.services.versioning.import_export.identifier.IdentifierError` — else the
-    data source's, else the platform's), and what its job keeps: where the identifier came from
-    (``identifierSource``: ``request``, ``data_source`` or ``platform``) and the replace guard's
-    limits with where each came from (``replaceLimits``)."""
-    effective = resolve(row)
+    data source's, else the platform's, as :func:`resolve` has it), and what its job keeps: where
+    the identifier came from (``identifierSource``: ``request``, ``data_source``, ``platform``, or
+    ``fork``) and the replace guard's limits with where each came from (``replaceLimits``). A
+    property the request names is kept, on a fork too."""
+    effective = resolve(row, fork=fork)
     named = identifiers.parse(requested)
     identifier, source = ((named, SOURCE_REQUEST) if named
                           else (effective["identifier"], effective["sources"]["identifier"]))

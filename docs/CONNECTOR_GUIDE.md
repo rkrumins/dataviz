@@ -231,7 +231,8 @@ Each identifier, walked through with its requests and answers: [Export, edit off
   The job fails with `summary.failure.code` `mass_delete_blocked`, and `summary.replaceGuard` says
   how many it would delete and create and the limits in force (the operator's). Check
   `identifier`; send `allowMassDelete=true` only when the file really replaces the graph. A
-  replace whose first rows find almost nothing stops early, with `identifier_matched_nothing`.
+  replace whose first rows find almost nothing stops early, with `identifier_matched_nothing`,
+  unless it was sent with `allowMassDelete=true`.
 - **A row without `baseVersion` sets what it carries.** A connector's own rows are the source's
   truth: if two runs write one field, the later wins.
 - **A row an export wrote carries `baseVersion`,** and is merged with what changed since: only the

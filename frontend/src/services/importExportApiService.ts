@@ -38,8 +38,9 @@ export interface ImportSummary {
   failure?: { code: string; action?: string | null; reason?: string } | null
 }
 
-/** Where an import setting came from: the graph's own, or the platform's. */
-export type ImportSettingSource = 'data_source' | 'platform'
+/** Where an import setting came from: the graph's own, or the platform's; `fork`: a fork matches
+ *  by Entity ID where its parent's default is a property, which a fork can't match by yet. */
+export type ImportSettingSource = 'data_source' | 'platform' | 'fork'
 
 /** The replace guard's verdict on a replace import, before it deletes anything. */
 export interface ReplaceGuardVerdict {
