@@ -221,7 +221,7 @@ file of every column with a worked row of each type.
 | Add a property | Add a `prop.<name>` column, or export with `props=<name>` to get one | Sets it where a row gives a value |
 | Add a node | A row with no `entity_id`: its `entityType`, a key, and its fields | Makes it under an id derived from its key. It keeps the urn it gives; with none, its id is its urn |
 | Add an edge | A row with `kind` `edge`, its `edgeType`, and its two ends | Makes it under an id derived from its ends and type, or finds the edge already there |
-| Delete a node or an edge | Set `_op` to `delete` on its row | Deletes it. A node goes with the edges on it. To delete what a node contains, give those rows `_op` `delete` too |
+| Delete a node or an edge | Set `_op` to `delete` on its row | Deletes it. A node goes with the edges on it and what it contains (its containment subtree, by the ontology's containment types). Under `replace`, a node the file leaves out goes, but nothing a row names goes with it |
 | Re-point an edge | Set `_op` to `delete` on its row, and add a row for the new edge | Deletes one, makes the other |
 
 - **Delete a node's edge rows with it.** Remove them from the file, or set `_op` to `delete` on

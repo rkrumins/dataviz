@@ -3688,6 +3688,8 @@ async def _resolve_ontology_types(workspace_id, data_source_id):
                          "target": list(getattr(d, "target_types", None) or [])}
                      for t, d in rels.items()}
         return {"node_types": node_types, "edge_types": edge_types,
+                # What a row's _op=delete takes with it: the node's containment subtree.
+                "containment": list(getattr(resolved, "containment_edge_types", []) or []),
                 "keys": {t: fs for t, fs in flagged("reconciliation_key").items() if fs},
                 "unique": {t: fs for t, fs in flagged("unique").items() if fs},
                 "fields": {t: fs for t, fs in fields.items() if fs}, "edge_ends": edge_ends}

@@ -1148,9 +1148,12 @@ class ImportWorker:
                     await on_commit(s)
                 return
             try:
+                # A row's _op=delete takes what the node contains, as a delete on the canvas does.
                 await self._svc.apply_ops(graph_id=graph_id, ops=ops, actor=actor,
                                           branch_id=branch_id, message="import", on_commit=on_commit,
-                                          node_identity=self._node_identity)
+                                          node_identity=self._node_identity,
+                                          containment_edge_types=(self._ontology or {}).get(
+                                              "containment") or None)
                 return
             except OntologyViolation as exc:
                 rest = _quarantine(ops, resolutions, exc.violations) if attempt < _QUARANTINE_ROUNDS else None
@@ -1355,7 +1358,8 @@ class ImportWorker:
     async def _delete_absent(self, job_id, snap, graph_id, branch_id, actor) -> int:
         """Replace mode: the file is the authoritative snapshot for its scope, so every entity in
         scope that no row matched is deleted (reviewed on the draft before publish; ``apply_ops``
-        cascades containment and incident edges). Edges first, then nodes, a page at a time, each
+        cascades incident edges, and nothing a row named goes with an absent container: what it
+        contains is deleted only when it is absent too). Edges first, then nodes, a page at a time, each
         page's deletes committed with the job's checkpoint (cursor ``replace``) and their count. A
         view-scoped replace can delete only the view's own entities (its placements and their
         containment descendants, and the edges between them), never the rest of the data source.
