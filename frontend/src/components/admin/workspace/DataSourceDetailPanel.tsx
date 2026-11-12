@@ -680,6 +680,7 @@ export function DataSourceDetailPanel({
                                     dataSourceId={ds.id}
                                     // A cold stats cache reads 0 / stale: no size beats a wrong one.
                                     itemCount={stats && !stats.computing ? stats.nodeCount + stats.edgeCount : null}
+                                    views={views}
                                 />
                             )}
                             </>)}

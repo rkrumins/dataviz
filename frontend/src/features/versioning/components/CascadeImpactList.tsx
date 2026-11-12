@@ -5,7 +5,8 @@
  * deleting, say, a Domain — before committing. Lists are capped for sanity ("+N more").
  */
 import { ArrowRight } from 'lucide-react'
-import { NodeDiffBadge } from './NodeDiffBadge'
+import { cn } from '@/lib/utils'
+import { NodeDiffBadge, STATUS_META } from './NodeDiffBadge'
 
 interface ImpactEntity {
   entityId?: string
@@ -30,16 +31,33 @@ const short = (id?: string) => {
   return s.length > 30 ? `…${s.slice(-28)}` : s || '—'
 }
 
-export function CascadeImpactList({ impact, rootUrn }: { impact: CascadeImpact; rootUrn?: string }) {
+export function CascadeImpactList({ impact, rootUrn, past = false }: {
+  impact: CascadeImpact
+  rootUrn?: string
+  /** A deletion that was made, not one about to be: what it removed. */
+  past?: boolean
+}) {
   if (impact.nodeTotal <= 1 && impact.edgeTotal === 0) return null
   const childNodes = impact.nodes.filter((n) => (n.urn ?? n.entityId) !== rootUrn)
   const moreNodes = impact.nodeTotal - impact.nodes.length
   const moreEdges = impact.edgeTotal - impact.edges.length
+  // A relationship's ends by name where the impact lists them (the entities going with it).
+  const names = new Map<string, string>()
+  for (const n of impact.nodes) {
+    const name = n.displayName ? String(n.displayName) : undefined
+    if (!name) continue
+    if (n.entityId) names.set(String(n.entityId), name)
+    if (n.urn) names.set(String(n.urn), name)
+  }
+  const nameOf = (id?: string) => (id && names.get(id)) || short(id)
+  // An end goes with the relationship only when it is one of the entities removed too.
+  const gone = new Set(impact.nodes.flatMap((n) => [n.entityId, n.urn]).filter((id): id is string => !!id).map(String))
+  const isGone = (id?: string) => !!id && gone.has(id)
 
   return (
     <div className="mt-2 rounded-lg border border-rose-500/20 bg-rose-500/[0.04] p-2.5 space-y-2.5">
       <p className="text-[11px] text-ink-muted">
-        Also removes{' '}
+        {past ? 'Also removed' : 'Also removes'}{' '}
         <span className="font-semibold text-rose-500 tabular-nums">{Math.max(0, impact.nodeTotal - 1)}</span>{' '}
         contained {impact.nodeTotal === 2 ? 'entity' : 'entities'} and{' '}
         <span className="font-semibold text-rose-500 tabular-nums">{impact.edgeTotal}</span>{' '}
@@ -53,7 +71,7 @@ export function CascadeImpactList({ impact, rootUrn }: { impact: CascadeImpact; 
             {childNodes.map((n) => (
               <li key={String(n.entityId ?? n.urn)} className="flex items-center gap-2 text-[12px]">
                 <NodeDiffBadge status="removed" />
-                <span className="text-ink truncate" title={String(n.urn ?? n.entityId)}>
+                <span className={cn('text-ink truncate', STATUS_META.removed.strike)} title={String(n.urn ?? n.entityId)}>
                   {String(n.displayName ?? n.urn ?? n.entityId)}
                 </span>
                 {n.entityType && <span className="text-[10px] text-ink-muted shrink-0">· {String(n.entityType)}</span>}
@@ -72,9 +90,9 @@ export function CascadeImpactList({ impact, rootUrn }: { impact: CascadeImpact; 
               <li key={String(e.entityId)} className="flex items-center gap-1.5 text-[11px] text-ink-muted min-w-0">
                 <NodeDiffBadge status="removed" />
                 <span className="font-medium text-ink/80 shrink-0">{String(e.edgeType ?? 'edge')}</span>
-                <span className="font-mono truncate" title={String(e.sourceEntityId ?? '')}>{short(e.sourceEntityId)}</span>
+                <span className={cn('truncate', isGone(e.sourceEntityId) && STATUS_META.removed.strike)} title={String(e.sourceEntityId ?? '')}>{nameOf(e.sourceEntityId)}</span>
                 <ArrowRight className="w-3 h-3 shrink-0" />
-                <span className="font-mono truncate" title={String(e.targetEntityId ?? '')}>{short(e.targetEntityId)}</span>
+                <span className={cn('truncate', isGone(e.targetEntityId) && STATUS_META.removed.strike)} title={String(e.targetEntityId ?? '')}>{nameOf(e.targetEntityId)}</span>
               </li>
             ))}
             {moreEdges > 0 && <li className="text-[11px] text-ink-muted/80 pl-1">+ {moreEdges} more…</li>}

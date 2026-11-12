@@ -5,7 +5,7 @@
  *     tree). So after you save, your work doesn't "disappear" — it moves from Pending to Committed
  *     in the same view.
  *   • Commits — the branch's history commit-by-commit (this draft / this view / whole graph), each
- *     expandable to its own diff (GitHub-style). With the revision viewer (a preview) it is
+ *     expandable to its own diff (GitHub-style). With the revision viewer (on by default) it is
  *     History: each revision of Published opens on the canvas as the graph was then, any month is a
  *     click away, and two revisions compare — the drawer widening for the comparison.
  *   • Pull Requests — raised from this view, or the whole data source.
@@ -23,6 +23,10 @@ import { useRevisionViewer } from '../hooks/useRevisionViewer'
 import type { CompareRequest } from '@/store/versioningPanelStore'
 import { DraftViewChanges } from './DraftViewChanges'
 import { ChangeTreePanel } from './ChangeTreePanel'
+import { ReviewSummaryCard } from './ReviewSummaryCard'
+import { useChangesScope } from '../hooks/useChangesScope'
+import { useReviewStore } from '@/store/reviewStore'
+import type { ChangeListStatus } from '@/services/versioningApiService'
 import { ViewPrList } from '../../reviews/components/ViewPrList'
 import { ViewHistoryTimeline } from './ViewHistoryTimeline'
 import { DataHealthTab } from './DataHealthTab'
@@ -109,7 +113,16 @@ export function ViewVersioningPanel({
 
   // Request the backend max of top-level groups so "all branch changes" is genuinely complete —
   // the truncation advisory only appears past it (far beyond any real schema's top-level containers).
-  const summaryQ = useBranchDiffSummary(wsId, graphId, branchId ?? null, 1000)
+  // On the Context View, Changes summarises what the canvas shows and reviews it beside the canvas;
+  // elsewhere it lists a draft's changes as a tree.
+  const reviewable = useReviewStore((s) => s.available)
+  const startReview = useReviewStore((s) => s.startReview)
+  const { current: reviewScope } = useChangesScope(viewId)
+  const review = (operation: ChangeListStatus | null) => {
+    onClose()
+    startReview({ scope: reviewScope?.scope ?? null, operation })
+  }
+  const summaryQ = useBranchDiffSummary(wsId, graphId, reviewable ? null : branchId ?? null, 1000)
   const viewChangesQ = useBranchViewChanges(wsId, graphId, branchId ?? null)
   const fetchChildren = useCallback(
     (key: string, offset: number) =>
@@ -150,7 +163,7 @@ export function ViewVersioningPanel({
 
         <div className="flex items-center gap-1 px-3 pt-2 border-b border-glass-border/60">
           {TABS.map(({ id, label: tabLabel, Icon }) => {
-            // While the preview is on, the history is a place to travel in time, not a commit log.
+            // While the revision viewer is on, the history is a place to travel in time, not a commit log.
             const label = id === 'history' && revisionViewer ? 'History' : tabLabel
             return (
             <button
@@ -181,21 +194,29 @@ export function ViewVersioningPanel({
                     <DraftViewChanges changes={viewChangesQ.data} branchId={branchId} onNavigate={onClose} />
                   </div>
                 )}
-                <div>
-                  <p className="text-[10px] font-semibold uppercase tracking-wider text-ink-muted/70 mb-2 px-0.5">
-                    Committed in this branch
-                  </p>
-                  <ChangeTreePanel
-                    summary={summaryQ.data}
-                    isLoading={summaryQ.isLoading}
-                    fetchChildren={fetchChildren}
-                    origin={{ source: 'branch', branchId }}
-                    emptyHint="Nothing committed to this branch yet — saved canvas edits show up here."
-                    summaryFirst
-                    list={{ wsId, graphId, origin: { branchId } }}
-                  />
-                </div>
+                {reviewable && reviewScope ? (
+                  <ReviewSummaryCard wsId={wsId} graphId={graphId} option={reviewScope} onReview={review}
+                    title="Committed in this branch"
+                    emptyHint="Nothing committed to this branch yet — saved canvas edits show up here." />
+                ) : (
+                  <div>
+                    <p className="text-[10px] font-semibold uppercase tracking-wider text-ink-muted/70 mb-2 px-0.5">
+                      Committed in this branch
+                    </p>
+                    <ChangeTreePanel
+                      summary={summaryQ.data}
+                      isLoading={summaryQ.isLoading}
+                      fetchChildren={fetchChildren}
+                      origin={{ source: 'branch', branchId }}
+                      emptyHint="Nothing committed to this branch yet — saved canvas edits show up here."
+                      summaryFirst
+                      list={{ wsId, graphId, origin: { branchId } }}
+                    />
+                  </div>
+                )}
               </div>
+            ) : reviewable && reviewScope ? (
+              <ReviewSummaryCard wsId={wsId} graphId={graphId} option={reviewScope} onReview={review} />
             ) : (
               <div className="py-10 text-center">
                 <p className="text-sm text-ink-muted">Switch to a draft to review its changes.</p>

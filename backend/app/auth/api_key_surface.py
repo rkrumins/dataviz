@@ -164,7 +164,7 @@ SURFACE: dict[tuple[str, str], Rule] = {
         "query_nodes", "query_nodes_page", "get_node_degrees",
         "get_node_ancestor_chains", "query_edges", "get_edges_between",
         "get_edges_beneath", "get_aggregated_edges",
-        "search_nodes", "search_advanced", "search_counts", "search_catalog",
+        "search_nodes", "search_names", "search_advanced", "search_counts", "search_catalog",
         "search_explain", "search_membership", "search_ancestor_counts",
         "search_export", "search_resolve",
         "get_lineage_trace_deprecated", "trace_v2", "trace_closure",
@@ -204,7 +204,7 @@ SURFACE: dict[tuple[str, str], Rule] = {
         "get_change_summary", "get_change_entries", "get_change_entry", "get_change_index",
         "get_history_months", "get_revision",
         "get_restore_preview",
-        "get_entity_history", "get_entity_summary",
+        "get_entity_history", "get_entity_summary", "get_entity_deletion", "get_deletion_cascade",
         "create_graph", "resolve_graph_open",
         "bulk_ingest", "sync_ingest", "publish", "get_publish_job",
         "list_imports", "import_template", "import_schema", "create_import",
@@ -226,6 +226,8 @@ SURFACE: dict[tuple[str, str], Rule] = {
     ),
     # A dry run checks a file against the graph and writes nothing.
     **_entries("versioning", RESOURCE, "validate_import", "create_export", reads_only=True),
+    # Opening many rows of a change list at once only reads them.
+    **_entries("versioning", RESOURCE, "get_change_entries_batch", reads_only=True),
 
     # ── Data sources: their state, their jobs, and change signals ────
     # Not here: anything on the Ingestion cockpit's any-workspace gate

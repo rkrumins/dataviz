@@ -7,7 +7,7 @@
 import type { ComponentType } from 'react'
 import {
   ArrowDownRight, ArrowUpLeft, Check, Code, Copy, ExternalLink, Eye, Focus, GitBranch, GitBranchPlus,
-  Pencil, RotateCcw, SlidersHorizontal, Trash2,
+  Pencil, SlidersHorizontal,
 } from 'lucide-react'
 import { useCanvasStore } from '@/store/canvas'
 import { usePersonaMode } from '@/store/persona'
@@ -17,6 +17,8 @@ import { HoverTip } from '@/components/ui/HoverTip'
 import { TabsList, TabsTrigger } from '@/components/ui/Tabs'
 import { DrawerHeader } from '../shell/DrawerShell'
 import { DrawerTopBar, KindBadge } from '../shell/DrawerTopBar'
+import { useEntityChangeDecoration, deletedTitle } from '@/features/versioning/canvas/useDiffDecoration'
+import { DeletedChip, STATUS_META } from '@/features/versioning/components/NodeDiffBadge'
 
 export type EntityTab = 'view' | 'edit' | 'json'
 
@@ -30,8 +32,8 @@ interface TraceAction {
 }
 
 export function EntityHeader({
-  nodeId, titleId, typeName, colors, confidence, title, technicalLine, isGhost, onRestore,
-  onTraceUp, onTraceDown, onFullTrace, onFocusConnections, copiedUrn, onCopyUrn, externalUrl,
+  nodeId, titleId, typeName, colors, confidence, title, technicalLine, isGhost,
+  onTraceUp, onTraceDown, onFullTrace, traceBlocked, onFocusConnections, copiedUrn, onCopyUrn, externalUrl,
   editable, editBlocked, dirty, onStartEditing, onClose, onFocusNode, customizing = false, onCustomize,
 }: {
   nodeId: string
@@ -42,10 +44,11 @@ export function EntityHeader({
   title: string
   technicalLine?: string
   isGhost: boolean
-  onRestore: () => void
   onTraceUp?: (nodeId: string) => void
   onTraceDown?: (nodeId: string) => void
   onFullTrace?: (nodeId: string) => void
+  /** Why the canvas can't trace from here — shown on the trace actions, disabled. */
+  traceBlocked?: string
   onFocusConnections?: (nodeId: string) => void
   copiedUrn: boolean
   onCopyUrn: () => void
@@ -66,6 +69,9 @@ export function EntityHeader({
   onCustomize?: () => void
 }) {
   const technical = usePersonaMode() === 'technical'
+  // A deletion — saved to the draft (a ghost) or not saved yet — reads as it does on the canvas.
+  const deco = useEntityChangeDecoration().for(nodeId)
+  const tombstone = isGhost || deco?.status === 'removed'
   // Upstream and downstream wear the product's lineage direction pair (lib/lineageDirectionColors.ts)
   // — the canvas's ports, the lineage cards below, the Focus Lens and a trace.
   const traces: TraceAction[] = [
@@ -88,6 +94,7 @@ export function EntityHeader({
         badge={(
           <>
             <KindBadge label={typeName} bg={colors.bg} fg={colors.text} />
+            {tombstone && <DeletedChip title={deletedTitle(deco) ?? 'Deleted in this draft'} />}
             {confidence !== undefined && (
               <span className={cn('text-xs font-medium tabular-nums',
                 confidence >= 0.8 ? 'text-emerald-600 dark:text-emerald-400' : confidence >= 0.5 ? 'text-amber-600 dark:text-amber-400' : 'text-rose-600 dark:text-rose-400')}>
@@ -100,34 +107,20 @@ export function EntityHeader({
 
       {/* The name — Technical mode adds the fully-qualified identity underneath, and only when it
           says something the name does not. Focus lands here when the entity shown changes. */}
-      <h2 id={titleId} tabIndex={-1} className={cn('text-xl font-display font-semibold text-ink leading-tight outline-none break-words', technicalLine ? 'mb-1' : 'mb-4')}>
+      <h2 id={titleId} tabIndex={-1} className={cn('text-xl font-display font-semibold text-ink leading-tight outline-none break-words', technicalLine ? 'mb-1' : 'mb-4', tombstone && STATUS_META.removed.strike)}>
         {title}
       </h2>
       {technicalLine && <p className="text-xs font-mono text-ink-muted break-all mb-4">{technicalLine}</p>}
 
-      {isGhost ? (
-        // Committed-deletion ghost → a Restore banner takes the place of the trace and edit actions.
-        <div className="mb-4 p-3 rounded-xl bg-rose-500/10 border border-rose-500/30">
-          <div className="flex items-center gap-2 mb-1.5">
-            <Trash2 className="w-4 h-4 text-rose-500" aria-hidden />
-            <span className="text-sm font-semibold text-rose-600 dark:text-rose-400">Deleted in this draft</span>
-          </div>
-          <p className="text-xs text-ink-muted mb-3">
-            Removed on this branch — it disappears once the draft merges. Restore to bring it back
-            (nested under its parent when that parent still exists).
-          </p>
-          <Button size="sm" variant="ghost" leftIcon={RotateCcw} onClick={onRestore}
-            className="border border-rose-500/30 text-rose-600 dark:text-rose-400 hover:text-rose-700 dark:hover:text-rose-300 hover:bg-rose-500/10">
-            Restore
-          </Button>
-        </div>
-      ) : (
+      {/* A tombstone has no lineage to trace: its details, below, take the place of these. */}
+      {!isGhost && (
         <div className="grid grid-cols-3 gap-2 mb-4">
           {traces.map(({ label, hint, icon: Icon, run, tone }) => (
             <button
               key={label}
               type="button"
-              disabled={!run}
+              disabled={!run || !!traceBlocked}
+              title={traceBlocked}
               onClick={() => run && trace(run)}
               className={cn(
                 'group flex flex-col items-center gap-1.5 p-3 rounded-xl border transition-[background-color,transform] duration-150',

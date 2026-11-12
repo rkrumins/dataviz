@@ -168,49 +168,187 @@ More terms are in the [Glossary](/guide/glossary).
 
 1. Open a View on a data source with version control.
 2. In the View's header, choose **Reviews**. The **Changes & Reviews** panel
-   opens — on **Changes** if you're in a draft, on **Commits** if you're on
-   **Published**.
-3. On **Commits**, choose the scope: **This draft**, **This view** (changes made
+   opens — on **Changes** if you're in a draft, on **History** if you're on
+   **Published**. (It's called **Commits** if an administrator has turned off
+   the revision viewer; see below.)
+3. On **History**, choose the scope: **This draft**, **This view** (changes made
    from this View) or **Whole graph**. Select a revision to see its changes.
 
 After a merge or publish, the banner *Merged — your changes are now live* (or
 *Published — …*) offers **View in history** too. A data source's **Versioning**
-tab lists its recent commits, drafts and open merge requests.
+tab lists its drafts, open merge requests and its whole history.
 
 The history is listed newest first, by month and day, and keeps loading older
 revisions as you scroll — all the way back to the first.
 
 ### See the graph as it was
 
-> **Preview.** This needs **Revision history viewer: the graph as it was** turned
-> on under Admin → Features. While it is, the **Commits** tab is called **History**.
+> **On by default.** An administrator can turn it off under Admin → Features →
+> **Revision history viewer: the graph as it was**. Then no past revision opens
+> or compares, and the **History** tab is called **Commits** again.
 
 Like checking out an earlier commit, you can open the published graph as it was at
 any revision, read-only, and compare any two revisions.
 
 1. In **Reviews → History**, open a revision's **⋯** menu and choose **Open on
    canvas**. Or choose **Months** to go to the end of any month or day: darker
-   months saw more revisions.
+   months saw more revisions. A data source's **Versioning** tab has the same
+   history: choose a view under **Open in**, and its revisions open there.
 2. The canvas shows the graph as it was. The banner above it says when that was,
    which revision it is and who made it, and how much has changed since.
 3. Choose **Back to Published** (or press **Esc**) to return to the graph as it is now.
 
 While a past revision is open:
 
-- **Nothing can be edited**, and search, traces, Narrow, display rules and subset
-  views are off: they read the graph as it is now.
+- **Search finds entities by name as they were then**, ignoring case. In the
+  Context View, type in the search box; on the other layouts, choose **Search**.
+- **Lineage traces follow the flows as they ran then**: the Context View's trace
+  and Lens, and the lineage in an entity's details on any layout.
+- **Nothing can be edited**, and Advanced Search, display rules, subset views,
+  Narrow and the graph and hierarchy layouts' trace are off: they read the graph
+  as it is now. Each says so.
 - **The layout is today's**: the view's layers and the ontology as they are now.
 - **Exporting** downloads the graph as it was.
 - **The address in your browser** (`?rev=…`) opens the same revision for anyone
   who can read the data source. **Copy link** on a revision gives you one.
+- **When Published moves on**, the banner keeps counting the changes since up to
+  when you opened the revision, and says *Published has moved on*. **Update**
+  counts them up to now.
 
 To compare, choose **Compare with now** (on a revision or in the banner) or
 **Compare with…** and then the other revision. You see how much was added,
 modified and removed, over how many revisions and by whom, which types changed
-most, and every change. **Highlight on canvas** rings them on the graph.
+most, and every change. **Highlight on canvas** rings them on the graph, up to
+20,000 of them; past that it says how many there are and offers **Open the list**.
+In the Context View, **Review changes** rings them and lists them beside the canvas
+instead (see [Review changes](#review-changes)).
+
+Deleted entities are drawn where they were, struck through and marked
+**Deleted**: under their parent when it's on the canvas, up to 500 of them. Deleted
+relationships are rose dashes. Hover **Deleted** to see between which revisions it
+went. The chip above the canvas counts what was added, modified and deleted; hover
+it for what each mark means. When not every deletion could be drawn, it says how
+many were, such as **3 of 40 deleted drawn**, and **Open the list** lists them all.
+In the Context View, choose the count to review the deletions beside the canvas.
 
 A revision more than 100,000 changes back is too far to draw. It opens as a
 comparison with now instead, and you can still export the graph as it was then.
+One open while Published moves that far on is handed over the same way.
+
+### A deleted entity's details
+
+Select a deleted entity or relationship drawn where it was, or choose **Deletion
+details** on a deleted row of any list of changes. You see:
+
+- **Who deleted it, when, and in which revision.** For a deletion published from a
+  draft, who published it too, and the message it was published with.
+- **Where it lived**: the entities it sat in, or the two a relationship joined.
+- **What it held** when it was deleted.
+- **What went with it**, when you unfold it: what it contained, and the
+  relationships that went with them.
+- **Its history**, when you unfold it. Each published revision's number shows what
+  that revision changed.
+
+On a canvas of that data source you can also:
+
+- **Open just before it was deleted**: the graph as it was the revision before, with
+  the entity selected. A revision too far back opens as a comparison with now
+  instead. Save or discard your unsaved edits first.
+- **See the change**: the revision that deleted it, compared with the one before. For
+  a deletion in your draft, its **Changes**.
+
+**Copy URN** is always there. **Restore** is there for a deletion saved to a draft
+you can edit.
+
+## Review changes
+
+In the Context View, you can go through every change one at a time, each found on
+the canvas where it is: a draft's, a past revision's, or two revisions compared.
+That holds however many there are, and deletions are found even where the canvas
+draws only 500 of them.
+
+**Start a review** from wherever changes are counted:
+
+- the counts in the strip above the canvas (**+12**, **~40**, **−1,798**): each
+  one starts on its own kind of change;
+- **500 of 1,798 deleted drawn**, which starts on the deletions;
+- **Review changes** on two revisions compared (the chip above the canvas, or
+  **Reviews → History → Compare**);
+- the counts in a past revision's banner, which list what changed since;
+- **Reviews → Changes → Review changes**.
+
+**What it covers** depends on where you are:
+
+| Where you are | What it covers |
+| --- | --- |
+| In a draft | **This draft**: its saved changes |
+| A past revision open | **Since #12**: what changed after it. Or **Changed in #12**: what that revision changed |
+| Two revisions compared | **#3 → #12**: everything in between |
+| Published, nothing open | **The latest revision · #42**: what it changed |
+
+### One change at a time
+
+A bar at the bottom of the canvas takes you through the changes, starting with the
+first. It says what each one is in plain words, such as *Deleted · orders_legacy ·
+from Sales › crm · by Ana*. Technical users also see its type and qualified name.
+
+- **‹** and **›**, or the **←** and **→** keys, go to the previous or next change.
+  Each one is opened on the canvas down to where it sits, selected and scrolled to,
+  however deep it is, and whether or not it was loaded.
+- **All**, **Added**, **Modified** and **Deleted** show one kind of change at a time.
+- **Details** opens what the canvas knows of it: an entity's details, or a deleted
+  entity's (who deleted it, when, what went with it).
+- **What changed** opens the change field by field, above the bar's buttons:
+  - for something added, what it was added with;
+  - for something modified, each field that changed, before and after;
+  - for something deleted, what it held.
+
+  A relationship also shows its two ends. What changed stays open as you go from
+  change to change, and for your next review, until you close it.
+- **List** opens every change beside the canvas (below).
+- **×** ends the review.
+
+When a change isn't drawn here, the bar says so. For example, an entity added after
+the revision open isn't on its canvas. It takes you as near as the canvas gets.
+
+### Every change, beside the canvas
+
+**List** opens the changes in the place beside the canvas that search results use.
+Opening one closes the other, and each comes back as you left it. Technical users
+get the list with every review; business users get the bar alone. Either way,
+**List** changes it, and your choice is kept for your next review. On a screen
+narrower than 1,280 pixels, the list makes way while an entity's details are open,
+and comes back when you close them.
+
+- **The title** names what it covers. Where there's a choice, it's a menu.
+- **Show one kind of change at a time**, as in the bar, with counts.
+- **Search** by name, URN or type.
+- **Filter** by entities or relationships, and by type. The button says which
+  kind the list is showing.
+- **Choose a row** to go to that change on the canvas; the bar moves with it. Its
+  arrow shows what changed in it. **↑** and **↓** move between rows.
+
+The canvas rings what you're reviewing. **Changed in #12** and **The latest
+revision** are highlighted on it while you review them, and the highlight goes when
+you end the review.
+
+### What changed, in an entity's details
+
+When an entity or relationship has changed, its details start with **What
+changed**. It says whether it was added or modified, and where: *in this draft*, or
+*between #41 and #42*. Then it lists each field, as the bar does. You don't need a
+review open: choose any changed entity on the canvas.
+
+A deleted entity's details say how it was deleted instead. Edits you haven't saved
+yet are in **Review & Save**.
+
+### Deleted inside
+
+A row whose deleted entities aren't all drawn says how many aren't, with a small
+bin, such as **🗑 120**. Choose it to draw them under the row, 200 at a time.
+
+The graph and hierarchy layouts keep their own lists: **Reviews → Changes** for
+a draft, and **History → Compare** for revisions.
 
 ## Undo vs. Restore — the distinction that matters
 
@@ -252,6 +390,32 @@ a draft that's wrong is simply discarded.
 > **Tip:** If in doubt, Undo first. It's the narrower, safer tool. Reach for
 > Restore only when you need to reset everything back to a specific point, or
 > when Undo tells you it can't apply cleanly.
+
+### Bring back one deleted entity
+
+When the published graph lost one entity you want back, and the rest of its
+revision should stay, bring back just that entity through your draft.
+
+1. Open the deleted entity's details (see [A deleted entity's details](#a-deleted-entitys-details)).
+2. Choose **Restore into my draft**. Your draft opens if it isn't open yet.
+3. The entity comes back where it was. So do what it contained and its
+   relationships to entities your draft still has, each under its own id.
+   **Review & Save** opens with them.
+4. Save, then publish your draft. The entity is back as it was, with the same id.
+   Its history keeps both revisions: the one that deleted it and the one that
+   brought it back.
+
+It doesn't restore, and says why, when:
+
+- your draft began before the deletion, so it still has the entity: pull the
+  latest from Published into your draft first;
+- your draft has the entity, or something deleted with it, again;
+- your draft no longer has what held it: restore that first;
+- too much went with it (over 1,000 entities or 5,000 relationships): undo the
+  change that deleted it instead.
+
+**Restore into my draft** is for people who can manage the data source, with
+editing and version control on, on a view they can edit.
 
 ## Work in a fork
 

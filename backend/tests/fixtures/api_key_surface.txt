@@ -105,6 +105,8 @@ GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/diff/entries resource
 GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/diff/entries/{entity_id} resource
 GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/diff/index resource
 GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/diff/summary resource
+GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/entities/{entity_id}/deletion resource
+GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/entities/{entity_id}/deletion/cascade resource
 GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/entities/{entity_id}/history resource
 GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/entities/{entity_id}/summary resource
 GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/exports resource
@@ -189,6 +191,7 @@ POST /api/v1/{ws_id}/graph/search/counts resource reads-only
 POST /api/v1/{ws_id}/graph/search/explain resource reads-only
 POST /api/v1/{ws_id}/graph/search/exports resource reads-only
 POST /api/v1/{ws_id}/graph/search/membership resource reads-only
+POST /api/v1/{ws_id}/graph/search/names resource reads-only
 POST /api/v1/{ws_id}/graph/search/resolve resource reads-only
 POST /api/v1/{ws_id}/graph/search/view-feed resource reads-only
 POST /api/v1/{ws_id}/graph/trace resource reads-only
@@ -206,6 +209,7 @@ POST /api/v1/{ws_id}/versioning/graphs/{graph_id}/branches/{branch_id}/merge-req
 POST /api/v1/{ws_id}/versioning/graphs/{graph_id}/branches/{branch_id}/publish resource
 POST /api/v1/{ws_id}/versioning/graphs/{graph_id}/branches/{branch_id}/rebase resource
 POST /api/v1/{ws_id}/versioning/graphs/{graph_id}/bulk-ingest resource
+POST /api/v1/{ws_id}/versioning/graphs/{graph_id}/diff/entries/batch resource reads-only
 POST /api/v1/{ws_id}/versioning/graphs/{graph_id}/exports resource reads-only
 POST /api/v1/{ws_id}/versioning/graphs/{graph_id}/exports/{job_id}/cancel resource
 POST /api/v1/{ws_id}/versioning/graphs/{graph_id}/imports resource

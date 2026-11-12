@@ -505,7 +505,7 @@ NOTES: dict[str, tuple[str, str | None]] = {
     "GRAPHVER_REVISION_REWIND_MAX": (
         "Entities the published graph may have changed since a past revision for that revision "
         "to open on the canvas (the revision history viewer, behind the `revisionViewerEnabled` "
-        "preview). A revision is the graph as it is now with what changed since put back, so "
+        "switch). A revision is the graph as it is now with what changed since put back, so "
         "opening one costs what changed since, never the graph: about 1.2 KB an entity in each "
         "web process that reads it, 2 to 4 s to build at the default, 100,000. A revision "
         "further back answers 409 `revision_too_far`; its change list, a comparison and an "

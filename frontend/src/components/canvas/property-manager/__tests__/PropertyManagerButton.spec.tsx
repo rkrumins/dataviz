@@ -11,6 +11,8 @@ import { act, render, screen, cleanup } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { OFF_AT_REVISION } from '@/features/versioning/model/revisionCopy'
+
 import { PropertyManagerButton, PROPERTY_MANAGER_SEEN_KEY } from '../PropertyManagerButton'
 
 const HINT = /New — Property Manager/
@@ -77,5 +79,22 @@ describe('PropertyManagerButton first-run coachmark', () => {
         expect(onToggle).toHaveBeenCalledTimes(1)
         expect(screen.queryByText(HINT)).toBeNull()
         expect(localStorage.getItem(PROPERTY_MANAGER_SEEN_KEY)).toBe('1')
+    })
+})
+
+describe('PropertyManagerButton where the manager can’t be opened', () => {
+    beforeEach(() => { localStorage.clear() })
+    afterEach(() => { cleanup() })
+
+    it('is off and says why, and no coachmark invites the click', async () => {
+        const user = userEvent.setup()
+        const { onToggle } = mount({ blocked: OFF_AT_REVISION })
+        const button = screen.getByRole('button', { name: /Properties/ })
+        expect(button).toBeDisabled()
+        expect(screen.queryByText(HINT)).toBeNull()
+        await user.click(button)
+        expect(onToggle).not.toHaveBeenCalled()
+        await user.hover(button.parentElement!)
+        expect(await screen.findByRole('tooltip')).toHaveTextContent(OFF_AT_REVISION)
     })
 })

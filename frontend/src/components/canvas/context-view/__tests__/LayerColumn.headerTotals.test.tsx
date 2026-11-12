@@ -114,6 +114,20 @@ describe('LayerColumn — header totals', () => {
         expect(pill().getAttribute('title')).toContain('2 loaded · 4,999 in this layer')
     })
 
+    // Tombstones — deleted entities a draft or comparison draws where they were —
+    // aren't entities the layer holds, nor children loaded toward a childCount.
+    it('leaves tombstones out of what the layer holds', () => {
+        const kids = [
+            node('c1'), node('c2'),
+            node('gone-1', { isGhost: true }), node('gone-2', { isGhost: true, childCount: 40 }),
+        ]
+        renderColumn({
+            nodes: [node('root', { childCount: 5000 }, kids)],
+            loadedChildren: new Map([['root', ['c1', 'c2']]]),
+        })
+        expect(pill().getAttribute('title')).toContain('3 loaded · 5,001 in this layer')
+    })
+
     it('adds nothing for a row the server said has no more pages', () => {
         renderColumn({ nodes: bigRoot(), exhaustedParents: new Map([['root', 5000]]) })
         expect(pill().getAttribute('title')).toContain('1 loaded · 1 in this layer')

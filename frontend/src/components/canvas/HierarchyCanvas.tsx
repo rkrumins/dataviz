@@ -34,7 +34,12 @@ import { InlineNodeEditor } from './InlineNodeEditor'
 import { CommandPalette } from './CommandPalette'
 import { SearchMatchBadge } from './search/SearchMatchBadge'
 import { useSearchHighlight } from './search/useSearchHighlight'
-import { useEntityChangeDecoration, nodeDecorationClass } from '@/features/versioning/canvas/useDiffDecoration'
+import { useEntityChangeDecoration, nodeDecorationClass, deletedTitle } from '@/features/versioning/canvas/useDiffDecoration'
+import { useDeletionGhosts } from '@/features/versioning/canvas/useDeletionGhosts'
+import { useRestoreGhost } from '@/features/versioning/canvas/useRestoreGhost'
+import { useRevisionReveal } from '@/features/versioning/hooks/useRevisionReveal'
+import { isGhostEdge, isGhostNode } from '@/features/versioning/canvas/deletionGhosts'
+import { DeletedChip, STATUS_META } from '@/features/versioning/components/NodeDiffBadge'
 import { useCanvasInteractions } from '@/hooks/useCanvasInteractions'
 import { useCanvasKeyboard } from '@/hooks/useCanvasKeyboard'
 import { useDuplicateSubtree } from '@/hooks/useDuplicateSubtree'
@@ -55,7 +60,10 @@ import { useDisplayRuleEngine } from '@/hooks/useDisplayRuleEngine'
 import { useViewLibrary } from '@/hooks/useViewLibrary'
 import { useEffectiveBranchId } from '@/store/branchStore'
 import { CanvasSearchTrigger } from './search/CanvasSearchTrigger'
+import { RevisionNameSearchPanel } from './search/RevisionNameSearchPanel'
 import { useRevealSearchHit } from '@/hooks/useRevealSearchHit'
+import { useRevisionCapabilities } from '@/features/versioning/hooks/useAtRevision'
+import { OFF_AT_REVISION } from '@/features/versioning/model/revisionCopy'
 import { TraceToolbar } from './TraceToolbar'
 import { useCanvasTrace } from '@/hooks/useCanvasTrace'
 import type { HierarchyNode } from '@/types/hierarchy'
@@ -114,19 +122,28 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
   const [propertyManagerOpen, setPropertyManagerOpen] = useState(false)
   const activeView = useSchemaStore((s) => s.getActiveView())
   const provider = useGraphProvider()
+  // A past revision is read as it was: what reads the graph as it is now (display rules, the
+  // rolled-up trace, Advanced Search) is off there, and nothing is edited.
+  const { editing, displayRules, rolledUpTraces, advancedSearch } = useRevisionCapabilities()
+  const traceBlocked = rolledUpTraces ? undefined : OFF_AT_REVISION
   // Property Manager display-rule engine — publishes match sets so the
-  // HierarchyContainer rows render tag chips.
-  useDisplayRuleEngine(activeView?.id ?? null)
+  // HierarchyContainer rows render tag chips. Rules match through search, which reads the graph
+  // as it is now: off at a past revision.
+  useDisplayRuleEngine(displayRules ? activeView?.id ?? null : null)
   // The view's display rules (the draft's own, on a draft) and saved queries, from its library.
   const libraryBranchId = useEffectiveBranchId(
     activeView?.workspaceId ?? '', activeView?.dataSourceId ?? null, activeView?.id ?? null)
   useViewLibrary(activeView?.id ?? null, libraryBranchId)
+  // A deletion saved to the draft stays where it was, struck through, until published.
+  useDeletionGhosts(!!libraryBranchId)
+  const restoreGhost = useRestoreGhost()
   const revealSearchHit = useRevealSearchHit({ setExpandedNodes, provider })
 
   // Edit Mode State (shared across canvases). `surface` distinguishes the
-  // 400px rail from the wider Build Mode panel — only one mounts at a time.
-  const builderOpen = useHierarchyBuilderStore(s => s.isOpen && s.surface === 'rail')
-  const buildOpen = useHierarchyBuilderStore(s => s.isOpen && s.surface === 'build')
+  // 400px rail from the wider Build Mode panel — only one mounts at a time,
+  // and neither where nothing is edited.
+  const builderOpen = useHierarchyBuilderStore(s => s.isOpen && s.surface === 'rail') && editing
+  const buildOpen = useHierarchyBuilderStore(s => s.isOpen && s.surface === 'build') && editing
   const [activeEdgeType, setActiveEdgeType] = useState<string>('manual')
 
   // Build containment hierarchy using shared hook (must precede trace + traceContextSet)
@@ -184,11 +201,12 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
   // UX-first Canvas Interactions (context menu, inline edit, quick create, command palette)
   // Graph mutations (create/update/delete node + edge) 403 server-side when the admin turns
   // editModeEnabled off (graph.py's require_edit_mode), so the affordances that reach those
-  // routes are hidden rather than left to fail.
-  const editModeEnabled = useFeature('editModeEnabled')
+  // routes are hidden rather than left to fail. A past revision is read-only: hidden there too.
+  const editModeEnabled = useFeature('editModeEnabled') && editing
   const { duplicateSubtree } = useDuplicateSubtree()
   const interactions = useCanvasInteractions({
-    onTraceNode: (nodeId) => trace.startTrace(nodeId),
+    readOnly: !editing,
+    onTraceNode: traceBlocked ? undefined : (nodeId) => trace.startTrace(nodeId),
     onNodeCreated: (nodeId) => selectNode(nodeId),
     duplicateSubtree,
     onNodeDuplicated: (originalId, newUrn) => {
@@ -218,7 +236,8 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
       const response = await fetchWithTimeout('/api/v1/graph/save', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ nodes, edges })
+        // Never the deletions drawn where they were: they are not the graph.
+        body: JSON.stringify({ nodes: nodes.filter((n) => !isGhostNode(n)), edges: edges.filter((e) => !isGhostEdge(e)) })
       })
       if (!response.ok) throw new Error('Failed to save graph')
       alert('Graph saved successfully!')
@@ -317,6 +336,8 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
       useCanvasStore.getState().pulseNode(nodeId)
     }, 100)
   }, [flatNodes, selectNode])
+  // "Open just before it was deleted" lands on the entity, revealed and selected.
+  useRevisionReveal(expandToNode)
 
   // Toggle node expansion with lazy loading
   const toggleNode = useCallback(async (nodeId: string) => {
@@ -347,6 +368,9 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
       cancelChildLoad(nodeId)
       return
     }
+
+    // A deleted entity's children are on the canvas already, as deletions: none to fetch.
+    if (useCanvasStore.getState().nodes.some((n) => n.id === nodeId && isGhostNode(n))) return
 
     // 2. Load Children using Generic Hook
     pendingLoadRef.current.add(nodeId)
@@ -404,6 +428,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
           <PropertyManagerButton
             open={propertyManagerOpen}
             onToggle={() => setPropertyManagerOpen((v) => !v)}
+            blocked={displayRules ? undefined : OFF_AT_REVISION}
           />
         )}
       </div>
@@ -494,6 +519,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
                 <HierarchyContainer
                   key={rootNode.id}
                   node={rootNode}
+                  onRestore={editModeEnabled && libraryBranchId ? restoreGhost : undefined}
                   schema={schema}
                   selectedNodeId={selectedNodeId}
                   expandedNodes={expandedNodes}
@@ -548,7 +574,9 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
             onTraceUp={trace.traceUpstream}
             onTraceDown={trace.traceDownstream}
             onFullTrace={trace.traceFullLineage}
+            traceBlocked={traceBlocked}
             onFocusNode={expandToNode}
+            canRestore={editModeEnabled && !!libraryBranchId}
           />
         )}
       </div>{/* end tree + right-rail row */}
@@ -584,13 +612,15 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
 
       {/* Advanced search — same SearchMapPanel surface mounted on every
           canvas. Trigger handles ⌘⇧F globally; panel is a flex-sibling
-          drawer alongside EntityDrawer. */}
+          drawer alongside EntityDrawer. At a past revision the search is
+          by name, as the names were. */}
       <CanvasSearchTrigger
         open={advancedSearchOpen}
         onToggle={() => setAdvancedSearchOpen((v) => !v)}
+        namesOnly={!advancedSearch}
       />
       <AnimatePresence>
-        {activeView?.id && advancedSearchOpen && (
+        {activeView?.id && advancedSearchOpen && (advancedSearch ? (
           <SearchMapPanel
             key="advanced-search-panel"
             open={advancedSearchOpen}
@@ -600,7 +630,14 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
               revealSearchHit(urn, ancestorPath)
             }
           />
-        )}
+        ) : (
+          <RevisionNameSearchPanel
+            key="name-search-panel"
+            viewId={activeView.id}
+            onClose={() => setAdvancedSearchOpen(false)}
+            onRevealNode={revealSearchHit}
+          />
+        ))}
       </AnimatePresence>
 
       {/* Property Manager — display-rule tag overlay drawer. */}
@@ -639,6 +676,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
           })
         } : undefined}
         onTraceNode={(id) => trace.startTrace(id)}
+        traceBlocked={traceBlocked}
         onCopyUrn={interactions.copyUrn}
         onEditEdge={interactions.editEdge}
         onDeleteEdge={editModeEnabled ? interactions.deleteEdge : undefined}
@@ -689,9 +727,12 @@ interface HierarchyContainerProps {
   isTraceActive?: boolean
   traceContextSet?: Set<string>
   traceFocusId?: string | null
+  /** Bring back a deletion saved to the draft — offered where the canvas can be edited. */
+  onRestore?: (urn: string) => void
 }
 
-function HierarchyContainer({
+// Exported for its tests.
+export function HierarchyContainer({
   node,
   schema,
   selectedNodeId,
@@ -705,6 +746,7 @@ function HierarchyContainer({
   isTraceActive = false,
   traceContextSet = new Set(),
   traceFocusId = null,
+  onRestore,
 }: HierarchyContainerProps) {
   const entityType = schema?.entityTypes.find((et) => et.id === node.typeId)
   const visual = entityType?.visual
@@ -715,6 +757,8 @@ function HierarchyContainer({
   const isSearchResult = searchResults.includes(node.id)
   // Where a click doesn't open an entity's details, its row offers them.
   const offerDetails = !useOpensDetailsOnSelect()
+  // Nothing is added inside anything on a past revision, which is read-only.
+  const { editing } = useRevisionCapabilities()
 
   // W2.1 — advanced-search match decoration. Lights up the row when
   // the URN is a direct match, surfaces an N-level subtree count
@@ -730,6 +774,8 @@ function HierarchyContainer({
   } = useSearchHighlight(node.urn ?? node.id, { isSelected })
   // Change decoration — staged (dashed) + committed-vs-main (solid), default-on on a draft.
   const changeDeco = useEntityChangeDecoration().for(node.urn ?? node.id)
+  // Deleted — saved to the draft or not yet: struck through, with the Deleted chip.
+  const tombstone = changeDeco?.status === 'removed'
 
   // Trace highlighting
   const isHighlighted = isTraceActive && traceContextSet.has(node.id)
@@ -807,7 +853,10 @@ function HierarchyContainer({
         style={{
           borderColor: isFocusNode ? '#fbbf24' : isHighlighted ? '#c084fc' : visual?.color ?? '#6b7280',
           borderLeftWidth: '4px',
-          ['--tw-ring-color' as string]: isFocusNode ? '#fbbf24' : isHighlighted ? '#c084fc' : visual?.color ?? '#6b7280',
+          // Not under a change decoration's own ring: this inline colour would paint it the type's.
+          ...((!changeDeco || isSelected || isFocusNode || isHighlighted) && {
+            ['--tw-ring-color' as string]: isFocusNode ? '#fbbf24' : isHighlighted ? '#c084fc' : visual?.color ?? '#6b7280',
+          }),
           ...(ruleLook.fillColor && {
             backgroundColor: `color-mix(in srgb, ${ruleLook.fillColor} 14%, var(--nx-bg-elevated))`,
           }),
@@ -865,6 +914,7 @@ function HierarchyContainer({
               >
                 {entityType?.name ?? node.typeId}
               </span>
+              {tombstone && <DeletedChip title={deletedTitle(changeDeco)} />}
               {hasChildren && (
                 <span className="px-1.5 py-0.5 rounded text-2xs font-medium bg-black/5 dark:bg-white/10 text-ink-muted">
                   {node.children.length}
@@ -872,7 +922,7 @@ function HierarchyContainer({
               )}
             </div>
             <div className="flex items-center gap-2 min-w-0">
-              <h4 className="text-sm font-medium text-ink truncate flex-1 min-w-0">
+              <h4 className={cn("text-sm font-medium text-ink truncate flex-1 min-w-0", tombstone && STATUS_META.removed.strike)}>
                 {node.name}
               </h4>
               {/* W2.1 — N-level subtree match count. Shown only on
@@ -931,9 +981,24 @@ function HierarchyContainer({
             </button>
           )}
 
+          {/* Restore — a deletion saved to the draft, back where it was */}
+          {node.data?.isGhost === true && onRestore && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation()
+                onRestore(node.urn ?? node.id)
+              }}
+              className="flex items-center justify-center w-6 h-6 rounded-md text-rose-500 dark:text-rose-400 hover:bg-rose-500/10 transition-all hover:scale-110 active:scale-95"
+              title={`Restore ${node.name}`}
+              aria-label={`Restore ${node.name}`}
+            >
+              <LucideIcons.RotateCcw className="w-4 h-4" />
+            </button>
+          )}
+
           {/* Add child — hover-visible; direct store import so the recursive
               render never threads an onAddChild prop down every level. */}
-          {(entityType?.hierarchy?.canContain?.length ?? 0) > 0 && (
+          {editing && !tombstone && (entityType?.hierarchy?.canContain?.length ?? 0) > 0 && (
             <button
               onClick={(e) => {
                 e.stopPropagation()
@@ -982,6 +1047,7 @@ function HierarchyContainer({
                     isTraceActive={isTraceActive}
                     traceContextSet={traceContextSet}
                     traceFocusId={traceFocusId}
+                    onRestore={onRestore}
                   />
                 ))}
               </div>

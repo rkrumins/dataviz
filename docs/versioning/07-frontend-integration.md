@@ -221,6 +221,120 @@ one language. It merges two layers (`useDiffDecoration.ts:30-61`):
 > unmistakable at a glance. `activeChangeSet` is populated by the bar's effect from
 > `useDiffVsMain` → `fromDiffVsMain` (`CanvasVersioningBar.tsx:59-66`).
 
+**A deletion reads the same on every surface.** Every card, row, list and the drawer header strikes
+the name through (`STATUS_META.removed.strike`) and shows a `DeletedChip` (`NodeDiffBadge.tsx`).
+The chip's hover says which deletion it is (`deletedTitle`). It is never colour alone, and lists call
+the status **Deleted**. A staged `delete_entity` also marks what it takes with it: the entities and
+links in its `before.cascade`, the delete-impact preview it was staged with.
+
+A deleted link is drawn in `DELETED_LINE`: rose, dashed `2 4`, apart from a roll-up's dash.
+- **When a line is deleted.** The projection marks a line `isDeleted` only when every link it draws
+  is a deletion (`isDeletedEdge`: a ghost, or `isPending: 'delete'`). One live link keeps it live.
+- **Where it is drawn.** The Context View overlay (`LineageFlowOverlay`) and the graph layout's
+  `LineageEdge` and containment lines.
+- **Unsaved deletions.** `withStagedDeletions` keeps them drawn: a link deleted on its own, from the
+  copy staged with it; one an entity delete takes, marked in place.
+- **Unsaved-change halos.** The overlay finds a line's staged-change halo by its member links' ids,
+  not the drawn line's `bundle-…` id.
+
+**Saved deletions are drawn on every layout** (`useDeletionGhosts`, mounted by the Context View, the
+graph and the hierarchy).
+- **Which are drawn.** `pickGhosts` draws the deletions whose old parent is on the canvas, and those
+  that had none, then what each held, parent-first, at most `GHOST_CAP` (500). One whose parent is
+  not loaded waits for it: the hook re-runs whenever the canvas's node count changes.
+- **Drawn on request, past the cap.** The canvas store's `ghostPins` (`pinGhosts`) are drawn first,
+  each with the deleted entities above it (`deletedChain`), outside the cap, wherever what it hangs
+  from is on the canvas.
+  - At most `PINNED_GHOSTS_MAX` (500). The oldest ask is dropped first, and one asked for again
+    becomes the newest.
+  - They belong to the change set they were asked in (`ghostPinsOrigin`). Another draft or comparison
+    starts without them; a refetch of the same one keeps them.
+- **What isn't drawn, per row.** `reconcileGhosts` returns `hiddenByParent`, which the hook publishes
+  as `deletedHidden`: for each parent on the canvas, live or a ghost, how many deletions directly
+  under it aren't drawn.
+- **Parent links.** A deleted parent link is re-added only into a ghost, so a child moved elsewhere
+  never gets a second parent.
+- **Ghosts are not the graph.** They are left out of the legacy save, and they never page:
+  `loadChildren`, the first-page auto-load and the "N more" row skip a ghost. Nor are they a
+  parent's loaded children, wherever those are weighed against its `childCount`:
+  - `loadChildren`'s "all loaded" check, and `shouldAutoLoadFirstPage` (a parent holding only ghosts
+    still loads its first page);
+  - the column's "N more" row and header totals;
+  - and, through `withoutTombstones`, the anchor's remainder, the lineage aggregation's holders and
+    a sort flip's "fully loaded".
+
+  A reveal's level holding its child and ghosts is still unbrowsed, so its "N more" row doesn't
+  page itself.
+- **Restore** (`useRestoreGhost`) stages the subtree with every id kept. A node comes back by urn,
+  its parent link under its own id (`containmentEdgeId`). The lineage links deleted with it come back
+  under theirs (`buildRestoreLinks`, `restoreOf`) where the other end is restored or still live.
+  Saving it nets the draft's diff for them to nothing.
+- **Where Restore is offered.** The card, the Context View row, the hierarchy row and the drawer
+  offer it only where the canvas can be edited.
+
+**Compact change lists draw their deletions too.** A comparison highlighted on the canvas and a
+draft past the tree's cap (20,000 changes) read `/diff/index`, which names a deleted entity but
+holds no payload.
+- **What they were.** The hook picks from the index as from a full diff, then asks
+  `POST …/diff/entries/batch` for the picked ones it doesn't know yet: one request, at most the cap.
+  Each answer seeds that row's `useChangeEntry` cache (`[…changeList(origin), 'entry', id]`), so
+  its change-list row opens at once. A full diff makes no request.
+- **Comparisons.** They draw on any canvas. A draft's `committedDiffHidden` hides neither their
+  rings nor their ghosts. Their decoration carries `between` (the two revisions), so a ghost reads
+  "Deleted after #A, by #B".
+- **How many are drawn.** The canvas store's `deletedDrawn` holds drawn of total; ones being
+  fetched count as drawn, so it doesn't flicker, and a failed fetch takes them off. When not all are
+  drawn, the comparison chip and the draft bar say "M of N deleted drawn" and open the list. The
+  comparison chip also counts its changes, with `ChangeLegend` on hover, worded for a comparison.
+- **Restore on a large draft** first fetches what the subtree and its links were (`restoreNeeds`,
+  500 a request). It refuses past `RESTORE_NODES_MAX` (1,000 entities) or `RESTORE_LINKS_MAX`
+  (2,000 links) rather than bring back part of it.
+
+**A deletion's details** (`TombstoneDetails`) take a `TombstoneTarget`: the entity id, its kind, and
+the change list it was deleted in (a draft, or main between two revisions).
+- **What it reads.** `useEntityDeletion` (`…/entities/{eid}/deletion`, `atSeq` the window's newer
+  end) when shown, and `useDeletionCascade` (`…/deletion/cascade`) and `EntityHistory` only when
+  their parts are unfolded. All three retry a busy server (`BUSY_RETRY`).
+- **Two hosts.**
+  - On the canvas, the entity drawer and the relationship drawer show it for a tombstone, in place
+    of the live view. Its change in the canvas's change set gives the entity id (an imported node's
+    urn is not its id) and the origin (`listOriginOf`).
+  - Elsewhere, `TombstoneDrawer`, a portal at `z-[120]`/`[121]`, opens it above any panel.
+    `DeletionDetailsButton` opens that drawer from a deleted row of `ChangeList`, `ChangeTreePanel`
+    (given its `list`), `ChangesPanel` (given `details`; Files changed passes it) and
+    `EntityHistory`'s delete rows. Nothing is asked until it is clicked.
+- **What moves the canvas** is offered only inside a view (`useViewExecutionContext`) on the same
+  graph, and only with the revision viewer on.
+  - **See the change** asks the versioning panel for the comparison `N−1 → N`
+    (`useVersioningPanelStore.openCompare`), or for Changes after a draft's deletion.
+  - **Open just before it was deleted** fetches revision `N−1`'s plan.
+    - Openable: it opens the revision with `OpenRevision.reveal` set to the entity's urn (a link's
+      source end).
+    - Not openable: it opens the comparison with now.
+    - Disabled while edits are unsaved.
+  - **`useRevisionReveal`**, mounted by the three canvases with their own reveal, runs once the
+    canvas reads that revision (`asOfSeq`) and has drawn it.
+    - It has drawn when hydration was seen in progress and is complete, or when the entity is
+      already there, live. Published never has it, so it never fires early.
+    - It reveals the entity, selects it, opens its drawer, and clears `reveal`.
+- **`EntityHistory`** links a published revision's `#N` to the same comparison.
+- **`DrawerActivity`** says **Deleted**, in rose, when the summary says the entity doesn't `exist`
+  on the line.
+
+**Restoring a published deletion** (`useRestoreDeletion`, in `useRestoreGhost.ts`) is the details'
+**Restore into my draft**. It is offered for a published deletion inside a writable view on its
+graph, to someone with `workspace:datasource:manage`, with edit mode and version control on.
+1. It closes an open revision and opens the person's draft (`ensureDraftOpen`).
+2. It asks the cascade with `into=<draft>`. A refusal (`draft_predates`, `recreated`, `parent_gone`,
+   `too_large`) is said as a notice, and nothing is staged.
+3. It builds the restore from what came back: `buildRestoreSubtree` (nodes under their urns, each
+   nested by its parent link's id) with `live` as what the draft has, and `buildRestoreLinks` (links
+   under their ids), leaving out `skippedLinks`.
+4. It stages them parent-first into the draft's own slice, setting the staged scope first
+   (`stagedScopeKey`, which `CanvasRouter` also uses). The canvas switches to the draft only on its
+   next render, and the restore must not land in Published's slice.
+5. It opens Review & Save, with a notice of what came back.
+
 ---
 
 ## 7. The versioning chrome — the bar, the bridge, the panel
@@ -261,6 +375,99 @@ Two change-review presentations sit under it:
 - **`ChangeTreePanel`** — hierarchical, lazy, business-reader-facing: an impact header rolls up per
   entity-type ("17 tables · 40 columns"), with a containment tree whose children page in on demand
   (`summaryFirst`).
+
+### Reviews — every change on the Context View, one at a time
+A review goes through one change list at any size, on the canvas and beside it: a draft's, a
+revision's, or a range.
+- **`reviewStore`** holds what it lists and how it's narrowed: `scope` (null for the canvas's
+  default), one `operation` at a time, and `filter` (kind, type, text). It also holds `listOpen`, and
+  `available`, which is true while the Context View is mounted.
+  - `startReview({scope, operation})` starts with the filter cleared, so an earlier search never
+    hides what was asked for.
+  - `setScope` starts the type afresh.
+  - It holds the change being visited (`current`, `position`, `visit`, and `visits`, bumped by every
+    visit), `navigatorOpen`, and how finding the change went (`found`).
+  - Another operation, filter or scope starts at the top.
+  - Only `listPreferred` and `whatChangedOpen` are persisted (`nexus-review`). `startReview` opens
+    the navigator always, and the list for technical users or whoever chose to keep it
+    (`toggleList`).
+- **`useChangesScope(viewId)`** resolves the scope against the branch store (`resolveScopes`, pure):
+  - a draft: `{branchId}`;
+  - a revision #N: `{N, headAtOpen}` (the default) or `{N−1, N}`;
+  - a highlight: its range;
+  - Published: `{H−1, H}`.
+
+  A range of one revision is `{kind: 'in'}`, offered once. A choice stands while it is offered; then
+  the default takes over.
+- **`useDrawScope`** highlights a scope the canvas can draw without moving in time: what the open
+  revision changed, or the latest revision. It clears that highlight when the review ends or moves
+  on, unless something else has replaced it.
+- **`useReviewList` / `useReviewRows`** give the rail and the navigator the same scope, kind and
+  debounced filter, so they ask for the same pages (one query) in the same order. Nothing is fetched
+  while no review is open.
+- **`ChangesExplorer`** sits in the left rail, rendered persistently like `SearchMapPanel`. Its ×
+  closes the list to the navigator. Below 1,280 px it gives way while a drawer is open, leaving
+  `listOpen` as it was.
+  - **The title** is a scope menu.
+  - **The controls:** the operation segment (counts for the kind listed), search (debounced), and
+    Filter (kind and type; it names the kind).
+  - **The rows** are `ChangeRows`, which `ChangeList` now composes under its own controls. Its call
+    sites are unchanged.
+    - **`onActivate`:** picking a row visits it; its chevron still shows the diff (`ChangeDetail`).
+      ↑ and ↓ move between rows.
+    - **`activeEntityId`:** marks the current row, and scrolls to it when it changes (not when a page
+      arrives).
+  - **`useReviewRail`** shares the rail with search: opening one closes the other. Unmounting the
+    canvas ends the review.
+- **`ChangeNavigator`** sits at the bottom of the canvas (`z-40`, above the trace dock's height), and
+  is hidden during a trace.
+  - **It says what the change is:** status, name, where it lived, and who deleted it and when. The
+    last two come from `useEntityDeletion`, for a deletion only. The technical persona adds the type
+    and qualified name.
+  - **Operation chips**, and **‹ n of N ›** with ←/→. A step past the loaded rows fetches the next
+    page and lands when it's there. The keys are left to a control's own arrows, and to any open
+    `[role="dialog"]` (the lens, a panel).
+  - **Details** opens `openNodeDrawer`, or `TombstoneDrawer` for a deletion that isn't drawn.
+  - **What changed** (`toggleWhatChanged`) shows `ChangeDetail` for the current change above the
+    controls, capped at 40vh. It's mounted only while open: one `useChangeEntry` read for each
+    change visited, and none while it's closed. A relationship gets its details here.
+  - It visits the first change itself, on start and after a new narrowing.
+- **`useReviewOnCanvas`** is mounted once by `ContextViewCanvas`. It calls `useDrawScope`, and runs
+  Locate for every visit, one at a time; a visit overtaken by the next is told so through
+  `stillWanted`.
+- **`useLocateChange`** finds a change on the canvas:
+  - **An entity that exists:** `getAncestorChains` (one read; parent first, so reversed), then the
+    canvas's `revealSearchHit`.
+  - **A deletion:** it waits up to 2 s for the change set the canvas draws to hold it (a highlight
+    just set is still loading). Then `deletedChain` up to the live anchor, `pinGhosts`, the anchor
+    revealed, the tombstone waited for (`TOMBSTONE_WAIT_MS`, 2 s), the anchor and deleted parents
+    expanded, then select and scroll.
+  - **A relationship:** both ends, a deleted end as a deletion.
+  - **The outcome:** `found`, `nearby` (landed on an ancestor) or `missing`.
+  - It indexes the change set's removals once per change set (a `WeakMap`).
+- **`ChangeDetail`** shows one change in full: `useChangeEntry`, then `EntityDiff`, plus
+  `DeletionDetailsButton` for a deletion. It was `ChangeList`'s row detail; the list's chevron, the
+  navigator and the drawers share it, and with it each change's cached read.
+- **`WhatChangedSection`** leads the entity drawer's body (`EntityViewTab`) and `RelationshipDrawer`
+  when `activeChangeSet` holds the entity (by `urn ?? entityId`) or the relationship (by its entity
+  id). It shows whether a review is open or not.
+  - **What it says:** the status, then "in this draft" or "between #A and #B" (`listOriginOf`), then
+    `ChangeDetail`, read by the change's `entityId` (an imported node's urn is not its id).
+  - **When it's absent:** for an unchanged entity it renders nothing and reads nothing. A tombstone
+    keeps `TombstoneDetails`. Staged edits stay in Review & Save.
+- **`DeletedInsideMark`** sits in `FlatTreeItem`'s badge cluster and reads `deletedHidden`. It shows
+  nothing at 0. Choosing it pins up to `DELETED_INSIDE_DRAWN` (200) undrawn deletions under the row
+  (`hiddenDeletionsUnder`), and expands the row.
+- **Cost at 5,000 deletions:** a step's ghost pass (index, pick, hidden counts) takes 4 ms at the
+  median and 6 ms at p95, keeping the store to 500 tombstones plus the pins.
+- **The glance surfaces** call `startReview` when `available`, and otherwise behave as before:
+  - the bar's `ChangeCountChips` (`onPick`), "+N new" and "M of N deleted drawn";
+  - the comparison chip;
+  - `RevisionBanner`'s since-then counts (`{kind: 'since'}`);
+  - the Changes tab, now a `ReviewSummaryCard` for the canvas's scope (the draft tree isn't fetched
+    there);
+  - `RevisionCompare`, where **Review changes** highlights the range and opens the list, in place of
+    the inline list.
 
 ---
 
@@ -377,7 +584,7 @@ param with the active branch, making a view+branch shareable and bookmarkable.
 
 ## 12a. A past revision on the canvas (`?rev=`, the revision viewer)
 
-Behind the **`revisionViewerEnabled`** preview (`useRevisionViewer`: the switch, and
+Behind the **`revisionViewerEnabled`** switch, on unless an administrator turns it off (`useRevisionViewer`: the switch, and
 `workspace:datasource:read` — a view's share link never reaches history), a view can read the
 published graph **as it was at revision K**, read-only — like checking out a commit.
 
@@ -391,26 +598,53 @@ published graph **as it was at revision K**, read-only — like checking out a c
   source's own chrome (`TODAYS_PATHS`: `/stats`, `/introspection`, `/metadata/ontology|schema`). The
   server answers each read as the graph was or refuses it — never from now. `useRevisionGuard`
   closes a revision that isn't one, and hands one too far back to draw (or a fork's) to History's
-  comparison with now (`versioningPanelStore.openCompare`). The context exposes `asOfSeq`.
+  comparison with now (`versioningPanelStore.openCompare`) — by its plan, or once a read at it is
+  refused `revision_too_far` because Published moved too far on while it was open (the provider
+  dispatches `REVISION_TOO_FAR_EVENT`). The context exposes `asOfSeq`.
 - **One canvas per revision** — `CanvasRouter` keys the canvas component by the revision, so nothing
   a canvas remembers of what it drew (expansions, rollups asked for, layer assignments, the
   display-rule latch) crosses between the graph as it was and as it is; the trace clears and the
   reference model's assignment status resets as on a branch switch.
 - **Read-only, with the way back kept** — `canEnterEdit` is false, `useEntityEditing` blocks with
-  `AT_REVISION`, `ensureDraftOpen` opens nothing and says why. Search (the header box keeps its place
-  and says why it is off), traces, Narrow, display rules, subset-view layers (`subsetIssue:
-  'revision'`), the entity drawer's lineage walk and `?trace=`/`?lens=`/`?narrow=` links are off: they
-  read the graph as it is now. Unlike `readOnly`, the versioning bar stays: it is the way back.
+  `AT_REVISION`, `ensureDraftOpen` opens nothing and says why. The graph and hierarchy layouts'
+  interactions are `readOnly` (`useCanvasInteractions`), and they draw no line, re-draw none, delete
+  nothing on Backspace and mount no builder. Unlike `readOnly`, the versioning bar stays: it is the
+  way back.
+- **What a revision reads** — `useRevisionCapabilities()` says, in one place. The provider holds
+  every graph read to the server's list (`providers/revisionReads.ts`; the fixture
+  `backend/tests/fixtures/revision_reads.txt` is both sides' list, and a test on each holds its own to
+  it) and refuses the rest before sending them, with the server's 501 `revision_unsupported`: a
+  canvas at a revision sends no request that fails.
+  - **On, as the graph was:** name search — `searchAdvanced` sends a one-leaf query on names to
+    `/search/names` and answers a finished page (the Context View's header box in names mode,
+    `useViewSearchSessionController({ namesOnly })`; the other layouts' `RevisionNameSearchPanel`) —
+    and lineage traces on `/trace/closure`: the Context View's trace, the Lens and `?trace=`/`?lens=`
+    links, and the drawer's lineage walk, each without its coarse leg.
+  - **Off, saying why** (`OFF_AT_REVISION`), because they read the graph as it is now: Advanced
+    Search, display rules (Properties), subset-view layers (`subsetIssue: 'revision'`), Narrow and
+    `?narrow=`, the rolled-up trace (the graph and hierarchy layouts' only one), and editing.
 - **Chrome** — `RevisionBanner` (mounted by `CanvasVersioningBar`) says when, which revision, whose
   and how far the graph has moved on since; "Opening…" until the canvas reads it, "Rewinding N
   changes…" while it draws; Compare with now, Restore graph to here (publishers), Back to Published
   (Esc, unless a dialog has it). Exporting at a revision exports it (`ExportTarget.asOfSeq`).
+  "Since then" counts up to the head it was opened at (`OpenRevision.headAtOpen`), not each new
+  one: once Published moves on, the banner and the history rows say so, and Update re-pins it
+  (`repinRevision`).
+- **Highlight on canvas** asks `…/diff/index?max=20000`: past that, the chip says how many changes
+  there are and opens the list instead of drawing. A draft's rings ask for every change.
+- **Busy** — a change list, the history and a revision's plan answered 503 `change_list_busy` or
+  `revision_busy` (a `BusyError`) are asked again up to three times after its Retry-After, held to
+  1–10 s with jitter (`BUSY_RETRY`); a 4xx is not asked again, any other failure once.
 - **History** — `ViewHistoryTimeline` pages by `before` (`useHistoryPages`), virtualized, grouped by
-  month and day in the reader's time zone with a pinned month header; with the preview each revision
+  month and day in the reader's time zone with a pinned month header; with the switch on each revision
   of Published opens, compares (`RevisionCompare`, `RevisionPicker`) and copies its link, and
-  `HistoryMonthPicker` goes to the end of any month or day (`useHistoryMonths`).
+  `HistoryMonthPicker` goes to the end of any month or day (`useHistoryMonths`). The data source's
+  Versioning tab shows the same timeline in whole-graph scope; there a revision opens, highlights and
+  copies its link in the view picked under "Open in" (remembered per data source), and with no
+  views only those three are off.
 - **Deep link** — `useRevisionDeepLink` two-way-syncs `?rev=K` like `?branch=` (§12): applied once
   the view is resolved, dropped when it names no past revision, and a `?branch=` beside it goes.
+  `?rev=T&hl=K` also highlights what changed after K up to T, read once and then dropped.
 
 ---
 

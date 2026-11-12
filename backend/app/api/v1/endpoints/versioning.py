@@ -41,7 +41,8 @@ from backend.app.api.raw_path_route import RawPathSegmentRoute
 from backend.common.property_patch import InvalidPatch, normalize_update
 from backend.common.service_accounts import is_service_account
 from backend.app.services.versioning.entity_audit import (
-    HISTORY_DEFAULT_LIMIT, HISTORY_MAX_LIMIT, InvalidCursor, entity_history_page, entity_summary)
+    HISTORY_DEFAULT_LIMIT, HISTORY_MAX_LIMIT, InvalidCursor, entity_deletion, entity_history_page,
+    entity_summary)
 from backend.app.api.v1.feature_gate import require_feature
 from backend.app.api.v1.capability_gate import require_ds_read_or_view
 from backend.app.api.v1.versioning_gate import (SyncOverrides, fork_write_gate, require_forks_enabled,
@@ -1204,6 +1205,20 @@ class EntitySummaryResponse(_ApiModel):
     user_names: Dict[str, str] = Field(default_factory=dict, alias="userNames")
 
 
+class EntityDeletionResponse(_ApiModel):
+    """How an entity came to be deleted on the line being read, what it held and where it lived
+    (see entity_audit). ``deleted`` is null while the line has it."""
+    entity_id: str = Field(alias="entityId")
+    kind: str
+    urn: Optional[str] = None
+    # {seq, commitId, commitKind, message, at, deletedBy, mergedBy?, mergedAt?, inDraft}
+    deleted: Optional[dict] = None
+    last_value: Optional[dict] = Field(default=None, alias="lastValue")
+    ancestors: List[dict] = Field(default_factory=list)       # [{urn, displayName, entityType}], root first
+    ends: Optional[dict] = None                               # an edge's {source, target}: {urn, displayName}
+    user_names: Dict[str, str] = Field(default_factory=dict, alias="userNames")
+
+
 class CommitLogEntry(_ApiModel):
     """One commit as the log returns it, under the stored row's own (snake_case) names —
     ``GraphVersioningService._commit_meta``."""
@@ -1261,6 +1276,25 @@ class DiffEntry(_ApiModel):
     urn: Optional[str] = None
     source_urn: Optional[str] = Field(default=None, alias="sourceUrn")
     target_urn: Optional[str] = Field(default=None, alias="targetUrn")
+
+
+class DeletionCascadeEntry(DiffEntry):
+    status: str = "removed"
+
+
+class DeletionCascadeResponse(_ApiModel):
+    """What a deletion took with it, to restore it whole (``deletion_cascade``)."""
+    origin: Dict[str, Any]
+    root: str
+    total: Optional[Dict[str, int]] = None          # {nodes, links}; null for a list too large to list
+    removed: List[DeletionCascadeEntry] = Field(default_factory=list)
+    restorable: bool
+    # not_deleted | too_large; with `into`: draft_predates | recreated | parent_gone
+    reason: Optional[str] = None
+    # With `into`: the urns it hangs from that the draft has, and the links whose other end it hasn't.
+    live: Optional[List[str]] = None
+    skipped_links: Optional[List[str]] = Field(default=None, alias="skippedLinks")
+    detail: Optional[Dict[str, Any]] = None         # parent_gone: {parentId, parentName}
 
 
 class DiffVsMainResponse(_ApiModel):
@@ -1388,6 +1422,18 @@ class ChangeEntryResponse(_ApiModel):
     status: str
     before: Optional[dict] = None
     after: Optional[dict] = None
+
+
+class ChangeEntriesBatchRequest(_ApiModel):
+    """The origin as the list routes name it in their query, and the entities to open."""
+    branch_id: Optional[str] = Field(default=None, alias="branchId")
+    from_seq: Optional[int] = Field(default=None, alias="fromSeq", ge=0)
+    to_seq: Optional[int] = Field(default=None, alias="toSeq", ge=1)
+    ids: List[str] = Field(min_length=1, max_length=500)
+
+
+class ChangeEntriesBatchResponse(_ApiModel):
+    entries: List[ChangeEntryResponse]
 
 
 class ChangeIndexResponse(_ApiModel):
@@ -1581,6 +1627,7 @@ class PrResponse(_ApiModel):
 # request's management session — never as a cross-store join inside the service.
 _ACTOR_ID_FIELDS = (
     "owner", "created_by", "actor", "merged_by", "closed_by", "source_branch_owner", "deleted_by",
+    "deletedBy", "mergedBy",
 )
 _ACTOR_ID_LIST_FIELDS = ("contributors", "reviewers", "approved_by", "stale_approved_by")
 
@@ -2873,7 +2920,8 @@ async def get_state(
     svc: GraphVersioningService = Depends(get_versioning_service),
 ):
     with _domain_errors():
-        state = await svc.materialize_state(graph_id=graph_id, branch_id=branch_id, as_of_seq=as_of_seq, viewer=viewer)
+        state = await svc.materialize_state(graph_id=graph_id, branch_id=branch_id, as_of_seq=as_of_seq,
+                                            viewer=viewer, max_entities=vconfig.STATE_READ_MAX)
     wm = await svc.projection_watermark(graph_id)
     return {"nodes": state["nodes"], "edges": state["edges"],
             "watermark": {"committed": wm["committed"], "projected": wm["projected"], "fresh": wm["fresh"]}}
@@ -2889,7 +2937,8 @@ async def get_commit_state(
 ):
     """Full graph state as of a specific commit (time-travel by commit id)."""
     with _domain_errors():
-        state = await svc.state_at_commit(graph_id=graph_id, commit_id=commit_id, viewer=viewer)
+        state = await svc.state_at_commit(graph_id=graph_id, commit_id=commit_id, viewer=viewer,
+                                          max_entities=vconfig.STATE_READ_MAX)
     wm = await svc.projection_watermark(graph_id)
     return {"nodes": state["nodes"], "edges": state["edges"],
             "watermark": {"committed": wm["committed"], "projected": wm["projected"], "fresh": wm["fresh"]}}
@@ -2962,6 +3011,35 @@ async def get_entity_summary(
     await _attach_user_names(session, [e for e in (summary["created"], summary["updated"]) if e],
                              wrapper=summary)
     return summary
+
+
+@router.get("/graphs/{graph_id}/entities/{entity_id}/deletion", response_model=EntityDeletionResponse)
+async def get_entity_deletion(
+    ws_id: str, graph_id: str, entity_id: str,
+    branch_id: Optional[str] = Query(None, alias="branchId"),
+    at_seq: Optional[int] = Query(None, alias="atSeq", ge=0,
+                                  description="Read main as of this revision (default: where the "
+                                  "draft branched off, or main's head)"),
+    kind: Optional[str] = Query(None, pattern="^(node|edge)$"),
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    viewer: Viewer = Depends(viewer_ctx),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """How the entity came to be deleted, as the line being read has it: the revision, who
+    deleted it (in the draft it was published from) and who published it, what it held then, and
+    where it lived — a node's ancestors, an edge's ends. ``deleted`` is null while the line has
+    it. Bounded: a few index lookups, never the whole history."""
+    await _assert_line_readable(svc, graph_id, branch_id, viewer)
+    cset = await _live_containment_types(session, ws_id, _meta.get("data_source_id"))
+    with _domain_errors():
+        deletion = await entity_deletion(svc, graph_id=graph_id, entity_id=entity_id,
+                                         branch_id=branch_id, at_seq=at_seq, kind=kind,
+                                         containment_edge_types=cset)
+    await _attach_user_names(session, [deletion["deleted"]] if deletion["deleted"] else [],
+                             wrapper=deletion)
+    return deletion
 
 
 @router.get("/graphs/{graph_id}/commits", response_model=CommitLogResponse)
@@ -3289,12 +3367,61 @@ async def get_change_entry(
                                       viewer=viewer)
 
 
+@router.post("/graphs/{graph_id}/diff/entries/batch", response_model=ChangeEntriesBatchResponse)
+async def get_change_entries_batch(
+    ws_id: str, graph_id: str, body: ChangeEntriesBatchRequest,
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    viewer: Viewer = Depends(viewer_ctx),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+):
+    """Up to 500 entities' values before and after, for one origin — ``/diff/entries/{entityId}``
+    for each, read together: the rows a person opens at once (what a deletion removed). Ids the
+    origin did not change are left out. Changes nothing; a POST for the length of its id list."""
+    origin = _change_origin(body.branch_id, body.from_seq, body.to_seq)
+    with _domain_errors():
+        return await svc.change_entries_batch(graph_id=graph_id, origin=origin,
+                                              entity_ids=body.ids, viewer=viewer)
+
+
+@router.get("/graphs/{graph_id}/entities/{entity_id}/deletion/cascade",
+            response_model=DeletionCascadeResponse)
+async def get_deletion_cascade(
+    ws_id: str, graph_id: str, entity_id: str,
+    branch_id: Optional[str] = Query(None, alias="branchId", description=_ORIGIN_DOC["branch_id"]),
+    from_seq: Optional[int] = Query(None, alias="fromSeq", ge=0, description=_ORIGIN_DOC["from_seq"]),
+    to_seq: Optional[int] = Query(None, alias="toSeq", ge=1, description=_ORIGIN_DOC["to_seq"]),
+    into: Optional[str] = Query(None, description="A draft to restore it into: what it would "
+                                "meet there, and whether it can be"),
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    viewer: Viewer = Depends(viewer_ctx),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """What a change list's removal of the entity took with it, to restore it whole: the node,
+    the removed subtree under it (parent first) and the removed links with an end among them,
+    each with the value it had before. Read from the origin's change list; capped at 1,000
+    nodes and 5,000 links (``restorable: false``, ``reason: too_large``). ``into`` names the
+    draft it would be restored into: what it hangs from there, the links it can't take, and
+    whether the draft can take it at all."""
+    origin = _change_origin(branch_id, from_seq, to_seq)
+    await _assert_line_readable(svc, graph_id, into, viewer)
+    cset = await _live_containment_types(session, ws_id, _meta.get("data_source_id"))
+    with _domain_errors():
+        return await svc.deletion_cascade(graph_id=graph_id, origin=origin, entity_id=entity_id,
+                                          containment_edge_types=cset, viewer=viewer, into=into)
+
+
 @router.get("/graphs/{graph_id}/diff/index", response_model=ChangeIndexResponse)
 async def get_change_index(
     ws_id: str, graph_id: str,
     branch_id: Optional[str] = Query(None, alias="branchId", description=_ORIGIN_DOC["branch_id"]),
     from_seq: Optional[int] = Query(None, alias="fromSeq", ge=0, description=_ORIGIN_DOC["from_seq"]),
     to_seq: Optional[int] = Query(None, alias="toSeq", ge=1, description=_ORIGIN_DOC["to_seq"]),
+    max_entries: Optional[int] = Query(None, alias="max", ge=0, description=(
+        "The most entries to answer with: an origin with more is answered with its total and "
+        "no entries (truncated)")),
     _user: User = Depends(requires(_READ, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
     viewer: Viewer = Depends(viewer_ctx),
@@ -3304,12 +3431,13 @@ async def get_change_index(
     """Every change of an origin as a short array, without names or payloads — what the canvas
     marks entities by and finds a draft's new entities and their parents from: about 70 bytes a
     change, where the full diff was a kilobyte or more. ``truncated`` past
-    ``GRAPHVER_CHANGE_LIST_MAX``, with no entries."""
+    ``GRAPHVER_CHANGE_LIST_MAX``, or past ``max`` when it is given, with no entries."""
     origin = _change_origin(branch_id, from_seq, to_seq)
     cset = await _live_containment_types(session, ws_id, _meta.get("data_source_id"))
     with _domain_errors():
         return await svc.change_index_compact(graph_id=graph_id, origin=origin,
-                                              containment_edge_types=cset, viewer=viewer)
+                                              containment_edge_types=cset, viewer=viewer,
+                                              max_entries=max_entries)
 
 
 @router.get("/graphs/{graph_id}/history/months", response_model=HistoryMonthsResponse)

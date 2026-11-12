@@ -106,6 +106,9 @@ export interface SearchDropdownProps {
     onSeeAll: () => void
     onRefine: () => void
     onRetry: () => void
+    /** A past revision: names only, across the whole view — no See all, no Refine, and no chip that
+     *  would look somewhere else. */
+    namesOnly?: boolean
 }
 
 
@@ -113,6 +116,7 @@ export const SearchDropdown: FC<SearchDropdownProps> = ({
     anchorRef, listId, text, quick, rows, activeIndex, running, error, zero,
     count, plus, recents, stale, layerOf,
     onActivate, onPick, onCrumb, onRecent, onNarrow, onSeeAll, onRefine, onRetry,
+    namesOnly = false,
 }) => {
     const [box, setBox] = useState<
         { top: number; left: number; width: number } | null
@@ -163,7 +167,7 @@ export const SearchDropdown: FC<SearchDropdownProps> = ({
     const countLabel = count === null
         ? null
         : `${count.toLocaleString()}${plus ? '+' : ''}`
-    const hints = narrowingHints(count, quick)
+    const hints = narrowingHints(count, quick).filter((h) => !namesOnly || namesHint(h.patch))
 
     // Rows that no longer answer the box are still worth showing — the
     // alternative is a list that blinks out on every keystroke — but they
@@ -204,7 +208,7 @@ export const SearchDropdown: FC<SearchDropdownProps> = ({
             if (trimmed === '') return <Note>{GUIDANCE}</Note>
             if (error) return <ErrorState message={error} onRetry={onRetry} />
             if (zero) {
-                return <ZeroState text={trimmed} quick={quick} onWiden={onNarrow} onRefine={onRefine} />
+                return <ZeroState text={trimmed} quick={quick} onWiden={onNarrow} onRefine={namesOnly ? undefined : onRefine} namesOnly={namesOnly} />
             }
             if (oneChar) {
                 return <Note>{`Keep typing — or press ↵ to search for "${trimmed}"`}</Note>
@@ -229,7 +233,7 @@ export const SearchDropdown: FC<SearchDropdownProps> = ({
                     <span className="ml-auto shrink-0 hidden sm:flex items-center gap-1 text-[9.5px] text-ink-muted/60">
                         <kbd className="kbd">↑↓</kbd>
                         <kbd className="kbd">↵</kbd> reveal
-                        <kbd className="kbd">⌘↵</kbd> all
+                        {!namesOnly && <kbd className="kbd">⌘↵</kbd>}{!namesOnly && ' all'}
                         <kbd className="kbd">esc</kbd>
                     </span>
                 </div>
@@ -278,13 +282,21 @@ export const SearchDropdown: FC<SearchDropdownProps> = ({
                     'flex items-center gap-2 px-3 py-1.5',
                     'border-t border-black/[0.06] dark:border-white/[0.06]',
                 )}>
-                    <FooterButton onClick={onSeeAll}>
-                        See all{countLabel ? ` ${countLabel}` : ''} results →
-                    </FooterButton>
-                    <FooterButton onClick={onRefine} accent>
-                        <LucideIcons.Sparkles className="w-3 h-3" strokeWidth={2.4} />
-                        Refine
-                    </FooterButton>
+                    {namesOnly ? (
+                        <span className="text-[10.5px] text-ink-muted/70">
+                            Names as they were at this revision
+                        </span>
+                    ) : (
+                        <>
+                            <FooterButton onClick={onSeeAll}>
+                                See all{countLabel ? ` ${countLabel}` : ''} results →
+                            </FooterButton>
+                            <FooterButton onClick={onRefine} accent>
+                                <LucideIcons.Sparkles className="w-3 h-3" strokeWidth={2.4} />
+                                Refine
+                            </FooterButton>
+                        </>
+                    )}
                 </div>
             </>
         )
@@ -417,23 +429,34 @@ function RecentsList({ listId, recents, activeIndex, onActivate, onRecent }: {
 }
 
 
-function ZeroState({ text, quick, onWiden, onRefine }: {
+/** Whether a chip's patch still searches names over the whole view: only how a name matches. */
+function namesHint(patch: Partial<QuickQuery>): boolean {
+    return patch.lookIn === undefined && patch.scope === undefined
+}
+
+
+function ZeroState({ text, quick, onWiden, onRefine, namesOnly }: {
     text: string
     quick: QuickQuery
     onWiden: (patch: Partial<QuickQuery>) => void
-    onRefine: () => void
+    onRefine?: () => void
+    namesOnly: boolean
 }) {
     return (
         <div className="px-3 py-3">
-            <p className="text-[12.5px] text-ink">{nothingFound(text, quick)}</p>
+            <p className="text-[12.5px] text-ink">
+                {namesOnly ? nothingFound(text, { ...quick, lookIn: 'name', scope: 'view' }) : nothingFound(text, quick)}
+            </p>
             <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                {wideningHints(quick).map((hint) => (
+                {wideningHints(quick).filter((h) => !namesOnly || namesHint(h.patch)).map((hint) => (
                     <Chip key={hint.label} onClick={() => onWiden(hint.patch)}>{hint.label}</Chip>
                 ))}
-                <Chip onClick={onRefine} accent>
-                    <LucideIcons.Sparkles className="w-3 h-3" strokeWidth={2.4} />
-                    Refine
-                </Chip>
+                {onRefine && (
+                    <Chip onClick={onRefine} accent>
+                        <LucideIcons.Sparkles className="w-3 h-3" strokeWidth={2.4} />
+                        Refine
+                    </Chip>
+                )}
             </div>
         </div>
     )

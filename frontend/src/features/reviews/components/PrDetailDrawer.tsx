@@ -535,7 +535,7 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
                     <Loader2 className="w-4 h-4 animate-spin" /> Computing diff…
                   </div>
                 ) : changeSet ? (
-                  <ChangesPanel changeSet={changeSet} emptyHint="No changes in this PR." />
+                  <ChangesPanel changeSet={changeSet} emptyHint="No changes in this PR." details={{ wsId, graphId: pr.graphId }} />
                 ) : (
                   <p className="text-xs text-ink-muted py-3">Diff unavailable.</p>
                 )}

@@ -15,6 +15,7 @@
 import type { ViewDefinitionDiff } from '@/services/viewVersionsApiService'
 import type { GraphEdge, GraphNode } from '@/providers/GraphDataProvider'
 import { fetchWithTimeout } from './fetchWithTimeout'
+import { parseRetryAfterMs } from './graphRequestFailure'
 import { pollJob } from './importExportApiService'
 import { useHealthStore } from '@/store/health'
 import { readJsonLossless } from '@/lib/losslessJson'
@@ -862,7 +863,7 @@ async function vfetchResponse(url: string, init?: RequestInit & { timeoutMs?: nu
     } catch {
       /* non-JSON error body */
     }
-    throw versioningError(res.status, body?.detail, text || res.statusText)
+    throw versioningError(res.status, body?.detail, text || res.statusText, res.headers.get('Retry-After'))
   }
   return res
 }
@@ -918,10 +919,28 @@ export class DiffTooLargeError extends Error {
   }
 }
 
+/** The server was too busy to prepare a read in time — a change list or the history calendar (503
+ *  `change_list_busy`), the graph as it was or what opening it takes (503 `revision_busy`) — and
+ *  says when to ask again (`retryAfterMs`, its Retry-After). Nothing is wrong with what was asked. */
+export class BusyError extends Error {
+  readonly status = 503
+  constructor(
+    readonly code: 'change_list_busy' | 'revision_busy',
+    readonly retryAfterMs: number | null,
+    message?: string,
+  ) {
+    super(message ?? 'This is taking too long to prepare; try again in a moment.')
+    this.name = 'BusyError'
+  }
+}
+
 /** The error a versioning API refusal (`status`, `detail`) raises — the same whether it came back
  *  from the request or from a job the request queued (a large draft's publish). */
-function versioningError(status: number, detail: RefusalDetail, fallback: string): Error {
+function versioningError(status: number, detail: RefusalDetail, fallback: string, retryAfter?: string | null): Error {
   const d = typeof detail === 'object' && detail ? detail : undefined
+  if (status === 503 && (d?.type === 'change_list_busy' || d?.type === 'revision_busy')) {
+    return new BusyError(d.type, parseRetryAfterMs(retryAfter ?? null), d.message)
+  }
   if (status === 409 && d?.type === 'merge_conflict') {
     return new MergeConflictError(d.conflicts ?? [], (d.current ?? {}) as Record<string, EntityView>)
   }
@@ -1830,6 +1849,81 @@ export function getEntitySummary(
   )
 }
 
+/** How an entity came to be deleted on the line being read: the revision, who deleted it (in the
+ *  draft it was published from) and who published it. `deleted` is null while the line has it. */
+export interface EntityDeletion {
+  entityId: string
+  kind: 'node' | 'edge'
+  urn?: string | null
+  deleted: {
+    seq: number
+    commitId: string
+    commitKind?: string | null
+    message?: string | null
+    at: string
+    deletedBy?: string | null
+    /** Who published it, where that is someone else. */
+    mergedBy?: string | null
+    /** When it was published, where that is another time. */
+    mergedAt?: string | null
+    /** Deleted in the draft being read, not published yet. */
+    inDraft: boolean
+  } | null
+  /** What it held when it was deleted. */
+  lastValue?: Record<string, unknown> | null
+  /** A node's ancestors as they were just before, root first. */
+  ancestors: Array<{ urn: string; displayName?: string | null; entityType?: string | null }>
+  /** An edge's ends as they were just before. */
+  ends?: { source?: { urn: string; displayName?: string | null } | null; target?: { urn: string; displayName?: string | null } | null } | null
+  userNames?: Record<string, string>
+}
+
+export function getEntityDeletion(
+  wsId: string, graphId: string, entityId: string,
+  params: { branchId?: string | null; atSeq?: number | null; kind?: 'node' | 'edge' } = {},
+): Promise<EntityDeletion> {
+  const sp = new URLSearchParams()
+  if (params.branchId) sp.set('branchId', params.branchId)
+  if (params.atSeq != null) sp.set('atSeq', String(params.atSeq))
+  if (params.kind) sp.set('kind', params.kind)
+  const qs = sp.toString()
+  return vfetch<EntityDeletion>(
+    `${base(wsId)}/graphs/${graphId}/entities/${encodeURIComponent(entityId)}/deletion${qs ? `?${qs}` : ''}`,
+  )
+}
+
+/** What a change list's removal of an entity took with it, to restore it whole: the node, the
+ *  removed subtree under it (parent first) and the removed links touching it, each with its value
+ *  before. Past its caps it is counted (`restorable: false`, `reason: 'too_large'`). */
+export interface DeletionCascade {
+  origin: ChangeListOrigin
+  root: string
+  /** Null for a change list too large to list. */
+  total: { nodes: number; links: number } | null
+  removed: Array<ChangeListEntry & { urn?: string | null; sourceUrn?: string | null; targetUrn?: string | null }>
+  restorable: boolean
+  /** `not_deleted`, `too_large`; with `into`: `draft_predates`, `recreated` or `parent_gone`. */
+  reason?: string | null
+  /** With `into`: the urns it hangs from that the draft has — its old parent first, then its links'
+   *  other ends. */
+  live?: string[] | null
+  /** With `into`: the links whose other end the draft hasn't, left out of a restore. */
+  skippedLinks?: string[] | null
+  /** `parent_gone`: the old parent the draft no longer has. */
+  detail?: { parentId?: string; parentName?: string | null } | null
+}
+
+/** With `into` (a draft), also what restoring it there would meet, and whether it can be. */
+export function getDeletionCascade(
+  wsId: string, graphId: string, entityId: string, origin: ChangeListOrigin, into?: string | null,
+): Promise<DeletionCascade> {
+  const sp = changeOriginParams(origin)
+  if (into) sp.set('into', into)
+  return vfetch<DeletionCascade>(
+    `${base(wsId)}/graphs/${graphId}/entities/${encodeURIComponent(entityId)}/deletion/cascade?${sp}`,
+  )
+}
+
 export function getDiff(
   wsId: string,
   graphId: string,
@@ -2038,7 +2132,7 @@ export interface ChangeListIndex {
   origin: Record<string, unknown>
   entries: ChangeIndexEntry[]
   total: number
-  /** Too large to list: no entries. */
+  /** Too large to list, or more than the `max` asked for: no entries. */
   truncated: boolean
 }
 
@@ -2086,11 +2180,23 @@ export function getChangeEntry(
   )
 }
 
-/** Every change of an origin as a short array — what the canvas marks entities by. */
+/** Up to 500 entities' entries of one origin, in one request: what the canvas draws deleted entities
+ *  from where the origin's change list carries no payloads (two revisions compared, a draft past the
+ *  tree's cap). An id the origin did not change is left out. */
+export function getChangeEntriesBatch(
+  wsId: string, graphId: string, origin: ChangeListOrigin, ids: string[],
+): Promise<{ entries: ChangeListEntry[] }> {
+  return vfetch(`${base(wsId)}/graphs/${graphId}/diff/entries/batch`, jsonBody({ ...origin, ids }))
+}
+
+/** Every change of an origin as a short array — what the canvas marks entities by. With `max`, an
+ *  origin with more changes than that comes back with its total alone (`truncated`, no entries). */
 export function getChangeIndex(
-  wsId: string, graphId: string, origin: ChangeListOrigin,
+  wsId: string, graphId: string, origin: ChangeListOrigin, max?: number,
 ): Promise<ChangeListIndex> {
-  return vfetch<ChangeListIndex>(`${base(wsId)}/graphs/${graphId}/diff/index?${changeOriginParams(origin)}`)
+  const sp = changeOriginParams(origin)
+  if (max != null) sp.set('max', String(max))
+  return vfetch<ChangeListIndex>(`${base(wsId)}/graphs/${graphId}/diff/index?${sp}`)
 }
 
 // ============================================

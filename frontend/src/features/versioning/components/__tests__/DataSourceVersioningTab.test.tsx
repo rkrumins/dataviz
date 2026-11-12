@@ -19,7 +19,8 @@
  * Its Drafts and reviews section shows each setting as the workspace's, naming its value, or this
  * data source's own; a workspace admin overrides one or goes back to the workspace's, and only
  * those are sent. Anyone else reads it.
- * The data hooks are stubbed; the card itself has its own spec.
+ * The data hooks are stubbed; the card and the history (DataSourceVersioningTab.history.test.tsx)
+ * have their own specs.
  */
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter, useLocation } from 'react-router-dom'
@@ -45,7 +46,6 @@ const restoreFork = vi.fn()
 const useDataSourcePullRequests = vi.fn((..._args: unknown[]) => ({ data: openPrs, isLoading: false }))
 const freezeMutate = vi.fn()
 let freezeError: Error | null
-let commitLog: { commits: Array<Record<string, unknown>>; userNames?: Record<string, string>; apiKeyNames?: Record<string, string> }
 let dsPolicy: Record<string, unknown> | undefined
 const policyPut = vi.fn()
 
@@ -80,7 +80,6 @@ vi.mock('../../hooks/useVersioning', () => ({
     data: resolved, isLoading: false, isError: !!resolveError, error: resolveError, refetch,
   }),
   useBranches: (...args: [string, string | null, string | null, string[]]) => useBranches(...args),
-  useCommitLog: () => ({ data: commitLog }),
   useDataSourcePullRequests: (...args: unknown[]) => useDataSourcePullRequests(...args),
   useForks: () => ({ data: forks, refetch: refetchForks }),
   useSetGraphFrozen: () => ({ mutate: freezeMutate, isPending: false, error: freezeError }),
@@ -101,6 +100,7 @@ vi.mock('@/features/reviews/components/PrListRow', () => ({
   PrListRow: ({ pr }: { pr: { title: string } }) => <div>{pr.title}</div>,
 }))
 vi.mock('@/features/reviews/components/PrDetailDrawer', () => ({ PrDetailDrawer: () => null }))
+vi.mock('../ViewHistoryTimeline', () => ({ ViewHistoryTimeline: () => null }))
 vi.mock('../ProjectionHealthCard', () => ({
   ProjectionHealthCard: ({ graphId, showActions, dataSourceId }: {
     graphId: string; showActions?: boolean; dataSourceId?: string
@@ -120,7 +120,7 @@ function Where() {
 const renderTab = (dataSourceId = 'ds1') =>
   render(
     <MemoryRouter initialEntries={['/workspaces/ws1?ds=ds1&dstab=versioning']}>
-      <DataSourceVersioningTab wsId="ws1" dataSourceId={dataSourceId} />
+      <DataSourceVersioningTab wsId="ws1" dataSourceId={dataSourceId} views={[]} />
       <Where />
     </MemoryRouter>,
   )
@@ -145,7 +145,6 @@ beforeEach(() => {
   useDataSourcePullRequests.mockClear()
   freezeMutate.mockReset()
   freezeError = null
-  commitLog = { commits: [] }
   dsPolicy = undefined
   policyPut.mockReset().mockResolvedValue({})
 })
@@ -489,28 +488,5 @@ describe('DataSourceVersioningTab — drafts and reviews', () => {
     expect(screen.getByLabelText('Drafts may be')).toBeDisabled()
     expect(screen.getByLabelText('New drafts start')).toBeDisabled()
     expect(screen.queryByRole('button', { name: 'Save' })).toBeNull()
-  })
-})
-
-describe('DataSourceVersioningTab — recent history', () => {
-  it('counts each commit’s changes and says which automation made them', () => {
-    commitLog = {
-      commits: [
-        { commit_id: 'c2', commit_seq: 2, kind: 'edit', message: 'nightly sync', actor: 'svc_bot',
-          actor_kind: 'service', api_key_id: 'apk_1', automation: true, created_at: '2026-11-09T09:00:00Z',
-          stats: { create: 2, update: 1, delete: 0 } },
-        { commit_id: 'c1', commit_seq: 1, kind: 'squash_publish', message: 'Rename Sales', actor: 'usr_a',
-          actor_kind: 'human', automation: false, created_at: '2026-11-08T09:00:00Z',
-          stats: { create: 0, update: 1, delete: 0 } },
-      ],
-      userNames: { svc_bot: 'Snowflake sync', usr_a: 'Ana Lee' },
-      apiKeyNames: { apk_1: 'Nightly loader' },
-    }
-    renderTab()
-    expect(screen.getByText('3 changes')).toBeInTheDocument()
-    expect(screen.getByText('1 change')).toBeInTheDocument()
-    expect(screen.getByText('Service account')).toBeInTheDocument()
-    expect(screen.getByText('Nightly loader')).toBeInTheDocument()
-    expect(screen.getAllByText('Service account')).toHaveLength(1)   // a person by hand: no chip
   })
 })

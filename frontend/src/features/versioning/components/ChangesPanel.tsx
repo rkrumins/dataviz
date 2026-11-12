@@ -7,13 +7,22 @@
  * old GraphChangesReviewDialog but is fully source-agnostic. When the changes are
  * staged (discardable), each row gets a Discard affordance.
  */
-import { useMemo, useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import { ChevronRight, Trash2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { HoverTip } from '@/components/ui/HoverTip'
 import type { ChangeKind, ChangeSet, ChangeStatus, GraphChange } from '../model/changeModel'
 import { STATUS_META, NodeDiffBadge } from './NodeDiffBadge'
 import { EntityDiff } from './EntityDiff'
+import { edgeEnds } from '../canvas/deletionGhosts'
+import type { ChangeListOrigin } from '@/services/versioningApiService'
+import { DeletionDetailsButton } from './TombstoneDetails'
+
+/** An entity by name where the change set has it, else the end of its id. */
+type NameOf = (id: string) => string
+/** The graph a set's changes are in, for a deletion's details. */
+type Details = { wsId: string; graphId: string }
+const idTail = (id: string) => (id.length > 24 ? `…${id.slice(-22)}` : id)
 
 const STATUS_ORDER: ChangeStatus[] = ['added', 'modified', 'removed']
 const KIND_TITLE: Record<ChangeKind, string> = { node: 'Entities', edge: 'Relationships' }
@@ -33,16 +42,33 @@ function group(changes: GraphChange[]): Grouped {
   return out
 }
 
+/** The change list a change is in: a draft, or main between two revisions. */
+const listOrigin = (c: GraphChange): ChangeListOrigin | null =>
+  c.origin.source === 'branch' ? { branchId: c.origin.branchId }
+    : c.origin.source === 'compare' ? { fromSeq: c.origin.fromSeq, toSeq: c.origin.toSeq }
+      : null
+
 function ChangeRow({
   change,
   onDiscard,
+  nameOf,
+  details,
 }: {
   change: GraphChange
   onDiscard?: (stagedChangeId: string) => void
+  nameOf: NameOf
+  details?: Details
 }) {
   const [open, setOpen] = useState(false)
   const meta = STATUS_META[change.status]
+  // A deleted link says which two entities it joined, not only its type.
+  const ends = change.kind === 'edge' && change.status === 'removed' ? edgeEnds(change) : {}
+  const label = ends.source && ends.target
+    ? `${change.label} · ${nameOf(ends.source)} → ${nameOf(ends.target)}`
+    : change.label
   const canDiscard = onDiscard && change.origin.source === 'staged'
+  // A saved deletion offers who deleted it and what went with it.
+  const deletedIn = details && change.status === 'removed' ? listOrigin(change) : null
   return (
     <div className={cn('rounded-lg border-l-2 bg-canvas-overlay/40', meta.accent)}>
       <div className="flex items-center gap-2 px-2.5 py-1.5">
@@ -54,8 +80,8 @@ function ChangeRow({
             className={cn('w-3.5 h-3.5 text-ink-muted/60 transition-transform shrink-0', open && 'rotate-90')}
           />
           <meta.Icon className={cn('w-3.5 h-3.5 shrink-0', meta.text)} />
-          <span className="text-sm text-ink truncate group-hover:text-ink" title={change.label}>
-            {change.label}
+          <span className={cn('text-sm text-ink truncate group-hover:text-ink', meta.strike)} title={label}>
+            {label}
           </span>
         </button>
         {canDiscard && (
@@ -77,6 +103,10 @@ function ChangeRow({
       {open && (
         <div className="px-2.5 pb-2 pl-7">
           <EntityDiff change={change} />
+          {details && deletedIn && (
+            <DeletionDetailsButton className="mt-1.5"
+              target={{ ...details, entityId: change.entityId, kind: change.kind, origin: deletedIn, label }} />
+          )}
         </div>
       )}
     </div>
@@ -86,16 +116,20 @@ function ChangeRow({
 function StatusRows({
   items,
   onDiscard,
+  nameOf,
+  details,
 }: {
   items: GraphChange[]
   onDiscard?: (stagedChangeId: string) => void
+  nameOf: NameOf
+  details?: Details
 }) {
   const [shown, setShown] = useState(ROWS_SHOWN)
   const rest = items.length - shown
   return (
     <div className="space-y-1">
       {items.slice(0, shown).map((c) => (
-        <ChangeRow key={c.entityId} change={c} onDiscard={onDiscard} />
+        <ChangeRow key={c.entityId} change={c} onDiscard={onDiscard} nameOf={nameOf} details={details} />
       ))}
       {rest > 0 && (
         <button
@@ -114,10 +148,14 @@ function KindGroup({
   kind,
   byStatus,
   onDiscard,
+  nameOf,
+  details,
 }: {
   kind: ChangeKind
   byStatus: Record<ChangeStatus, GraphChange[]>
   onDiscard?: (stagedChangeId: string) => void
+  nameOf: NameOf
+  details?: Details
 }) {
   if (STATUS_ORDER.every((s) => byStatus[s].length === 0)) return null
   return (
@@ -138,7 +176,7 @@ function KindGroup({
                 </span>
                 <span className="text-[11px] text-ink-muted tabular-nums">{items.length.toLocaleString()}</span>
               </div>
-              <StatusRows items={items} onDiscard={onDiscard} />
+              <StatusRows items={items} onDiscard={onDiscard} nameOf={nameOf} details={details} />
             </div>
           )
         })}
@@ -152,14 +190,18 @@ export function ChangesPanel({
   onDiscard,
   className,
   emptyHint = 'No changes yet.',
+  details,
 }: {
   changeSet: ChangeSet
   /** Provided only for staged (discardable) change sets. */
   onDiscard?: (stagedChangeId: string) => void
   className?: string
   emptyHint?: string
+  /** The graph of a saved set: its deletions offer their details. */
+  details?: Details
 }) {
   const grouped = useMemo(() => group(changeSet.changes), [changeSet])
+  const nameOf = useCallback<NameOf>((id) => changeSet.byEntityId.get(id)?.label ?? idTail(id), [changeSet])
 
   if (changeSet.changes.length === 0) {
     return (
@@ -171,20 +213,30 @@ export function ChangesPanel({
 
   return (
     <div className={cn('space-y-4', className)}>
-      <KindGroup kind="node" byStatus={grouped.node} onDiscard={onDiscard} />
-      <KindGroup kind="edge" byStatus={grouped.edge} onDiscard={onDiscard} />
+      <KindGroup kind="node" byStatus={grouped.node} onDiscard={onDiscard} nameOf={nameOf} details={details} />
+      <KindGroup kind="edge" byStatus={grouped.edge} onDiscard={onDiscard} nameOf={nameOf} details={details} />
     </div>
   )
 }
 
-/** Compact inline summary of a ChangeSet's counts — for banners / headers. */
-export function ChangeCountChips({ changeSet }: { changeSet: ChangeSet }) {
+/** Compact inline summary of a ChangeSet's counts — for banners / headers. With `onPick`, each
+ *  count is a button that reviews the changes of its operation. */
+export function ChangeCountChips({ changeSet, onPick }: {
+  changeSet: ChangeSet
+  onPick?: (status: ChangeStatus) => void
+}) {
   const { counts } = changeSet
   return (
     <span className="inline-flex items-center gap-1">
-      {counts.added > 0 && <NodeDiffBadge status="added" count={counts.added} />}
-      {counts.modified > 0 && <NodeDiffBadge status="modified" count={counts.modified} />}
-      {counts.removed > 0 && <NodeDiffBadge status="removed" count={counts.removed} />}
+      {(['added', 'modified', 'removed'] as const).map((st) => counts[st] > 0 && (onPick ? (
+        <button key={st} type="button" onClick={() => onPick(st)}
+          aria-label={`Review ${counts[st].toLocaleString()} ${STATUS_META[st].label.toLowerCase()}`}
+          className="rounded-md transition-opacity hover:opacity-80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40">
+          <NodeDiffBadge status={st} count={counts[st]} />
+        </button>
+      ) : (
+        <NodeDiffBadge key={st} status={st} count={counts[st]} />
+      )))}
     </span>
   )
 }

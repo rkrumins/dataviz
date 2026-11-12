@@ -56,7 +56,12 @@ import { PropertyManagerButton } from './property-manager/PropertyManagerButton'
 import { useDisplayRuleEngine } from '@/hooks/useDisplayRuleEngine'
 import { useViewLibrary } from '@/hooks/useViewLibrary'
 import { useEffectiveBranchId } from '@/store/branchStore'
+import { useWithStagedDeletions, isDeletedEdge, DELETED_LINE } from '@/features/versioning/canvas/useDiffDecoration'
+import { useDeletionGhosts } from '@/features/versioning/canvas/useDeletionGhosts'
+import { useRevisionReveal } from '@/features/versioning/hooks/useRevisionReveal'
+import { isGhostEdge, isGhostNode } from '@/features/versioning/canvas/deletionGhosts'
 import { CanvasSearchTrigger } from './search/CanvasSearchTrigger'
+import { RevisionNameSearchPanel } from './search/RevisionNameSearchPanel'
 import { useRevealSearchHit } from '@/hooks/useRevealSearchHit'
 import { EdgeDetailPanel, generateEdgeTypeFilters } from '../panels/EdgeDetailPanel'
 
@@ -109,6 +114,8 @@ import { usePreferencesStore } from '@/store/preferences'
 import { usePersonaMode } from '@/store/persona'
 import { drawerWidthCss } from '@/components/panels/shell/drawerWidth'
 import { useFeature } from '@/store/features'
+import { useRevisionCapabilities } from '@/features/versioning/hooks/useAtRevision'
+import { OFF_AT_REVISION } from '@/features/versioning/model/revisionCopy'
 
 // Types
 import type { HierarchyNode } from '@/types/hierarchy'
@@ -167,6 +174,10 @@ export function GraphCanvas({ className }: { className?: string }) {
   // extra control panel, the layout-direction switch and the edge-details
   // panel are the Technical view's.
   const technical = usePersonaMode() === 'technical'
+  // A past revision is read as it was: what reads the graph as it is now (display rules, the
+  // rolled-up trace, Advanced Search) is off there, and nothing is edited.
+  const { editing, displayRules, rolledUpTraces, advancedSearch } = useRevisionCapabilities()
+  const traceBlocked = rolledUpTraces ? undefined : OFF_AT_REVISION
 
   // 4. Local state
   const [showLineageFlow, setShowLineageFlow] = useState(true)
@@ -174,9 +185,9 @@ export function GraphCanvas({ className }: { className?: string }) {
   // Hierarchy Builder open state — drives right-rail mutual exclusion with the
   // inspectors ("creation takes the rail"). Selector, not getState-in-render.
   // `surface` distinguishes the 400px rail from the wider Build Mode panel —
-  // only one of the two (never both) mounts at a time.
-  const builderOpen = useHierarchyBuilderStore((s) => s.isOpen && s.surface === 'rail')
-  const buildOpen = useHierarchyBuilderStore((s) => s.isOpen && s.surface === 'build')
+  // only one of the two (never both) mounts at a time, and neither where nothing is edited.
+  const builderOpen = useHierarchyBuilderStore((s) => s.isOpen && s.surface === 'rail') && editing
+  const buildOpen = useHierarchyBuilderStore((s) => s.isOpen && s.surface === 'build') && editing
   const [activeEdgeType, setActiveEdgeType] = useState<string>('manual')
   // Advanced search (Map + Builder + Power tools + Ask) — mounted as a
   // flex-sibling drawer alongside EntityDrawer / EdgeDetailPanel.
@@ -186,11 +197,14 @@ export function GraphCanvas({ className }: { className?: string }) {
   // sets so GenericNode renders the tag chips.
   const [propertyManagerOpen, setPropertyManagerOpen] = useState(false)
   const activeView = useSchemaStore((s) => s.getActiveView())
-  useDisplayRuleEngine(activeView?.id ?? null)
+  // Display rules match through search, which reads the graph as it is now: off at a past revision.
+  useDisplayRuleEngine(displayRules ? activeView?.id ?? null : null)
   // The view's display rules (the draft's own, on a draft) and saved queries, from its library.
   const libraryBranchId = useEffectiveBranchId(
     activeView?.workspaceId ?? '', activeView?.dataSourceId ?? null, activeView?.id ?? null)
   useViewLibrary(activeView?.id ?? null, libraryBranchId)
+  // A deletion saved to the draft stays where it was, struck through, until published.
+  useDeletionGhosts(!!libraryBranchId)
   // A relationship the drawer shows was resolved from THIS view's lines —
   // leaving the view (or this canvas) closes it, trail and all.
   useEffect(() => () => {
@@ -436,12 +450,14 @@ export function GraphCanvas({ className }: { className?: string }) {
     return findVisibleAncestor(parent)
   }, [visibleNodeIds, parentMap])
 
+  // Links deleted but not saved yet stay drawn, as deleted links, until saved or discarded.
+  const edgesWithStagedDeletions = useWithStagedDeletions(rawEdges)
   const allVisibleEdges = useMemo(() => {
     const result: Array<typeof rawEdges[0] & { _isContainment: boolean; _isProjected: boolean }> = []
     const seen = new Set<string>() // Deduplicate projected edges
     const linesByKey = new Map<string, (typeof result)[number]>()
 
-    for (const edge of rawEdges) {
+    for (const edge of edgesWithStagedDeletions) {
       const edgeType = normalizeEdgeType(edge)
       const isContainment = isContainmentEdge(edgeType)
 
@@ -519,8 +535,12 @@ export function GraphCanvas({ className }: { className?: string }) {
       } as any)
     })
 
+    // A line is a deletion when every link it draws is one; one live link keeps it live.
+    for (const line of linesByKey.values()) {
+      (line.data as { isDeleted?: boolean }).isDeleted = (line.data as { members: LineageEdgeType[] }).members.every(isDeletedEdge)
+    }
     return result
-  }, [rawEdges, visibleNodeIds, isContainmentEdge, findVisibleAncestor, aggregatedEdges])
+  }, [edgesWithStagedDeletions, visibleNodeIds, isContainmentEdge, findVisibleAncestor, aggregatedEdges])
 
   // A Connections search's matched edges light their lines as a channel of
   // their own: the reader's own highlights (useEdgeFiltersStore) stay theirs.
@@ -704,6 +724,8 @@ export function GraphCanvas({ className }: { className?: string }) {
       })
     },
   })
+  // "Open just before it was deleted" lands on the entity, revealed and selected.
+  useRevisionReveal(revealAndFocus)
 
   // Multi-locate: reveal a batch of targets in parallel, then fit the
   // viewport so all of them are on screen. Each reveal runs the same
@@ -838,7 +860,9 @@ export function GraphCanvas({ className }: { className?: string }) {
         else next.add(nodeId)
         return next
       })
-      if (!wasExpanded && !pendingLoadRef.current.has(nodeId)) {
+      // A deleted entity's children are on the canvas already, as deletions: none to fetch.
+      const ghost = useCanvasStore.getState().nodes.some((n) => n.id === nodeId && isGhostNode(n))
+      if (!wasExpanded && !pendingLoadRef.current.has(nodeId) && !ghost) {
         pendingLoadRef.current.add(nodeId)
         try {
           await loadChildren(nodeId)
@@ -897,7 +921,8 @@ export function GraphCanvas({ className }: { className?: string }) {
       })
       .map(edge => {
         if (edge._isContainment) {
-          // Containment: thin dashed gray — shows hierarchy structure
+          // Containment: thin dashed gray — shows hierarchy structure; a deleted one, rose.
+          const deleted = isDeletedEdge(edge)
           return {
             id: edge.id,
             source: edge.source,
@@ -905,8 +930,8 @@ export function GraphCanvas({ className }: { className?: string }) {
             type: 'smoothstep' as const,
             animated: false,
             style: {
-              stroke: '#94a3b8',
-              strokeDasharray: '6,4',
+              stroke: deleted ? DELETED_LINE.color : '#94a3b8',
+              strokeDasharray: deleted ? DELETED_LINE.dash : '6,4',
               strokeWidth: 1.5,
               opacity: isHighlightActive ? 0.3 : 0.6,
             },
@@ -945,6 +970,7 @@ export function GraphCanvas({ className }: { className?: string }) {
             edgeCount: (edge.data as any)?.edgeCount,
             sourceEdgeCount: (edge.data as any)?.edgeCount,
             isSearchMatch: isSearchMatch && !isHighlightActive,
+            isDeleted: (edge.data as { isDeleted?: boolean })?.isDeleted === true,
           },
         }
       })
@@ -953,8 +979,8 @@ export function GraphCanvas({ className }: { className?: string }) {
 
   // Graph mutations (create/update/delete node + edge) 403 server-side when the admin turns
   // editModeEnabled off (graph.py's require_edit_mode), so the affordances that reach those
-  // routes are hidden rather than left to fail.
-  const editModeEnabled = useFeature('editModeEnabled')
+  // routes are hidden rather than left to fail. A past revision is read-only: hidden there too.
+  const editModeEnabled = useFeature('editModeEnabled') && editing
 
   // A card's More button opens the menu its right-click does. interactions is
   // defined later, so this and the edge menu below reach it through a ref.
@@ -990,6 +1016,7 @@ export function GraphCanvas({ className }: { className?: string }) {
         onToggleExpanded: stableOnToggle,
         onTraceUpstream: trace.traceUpstream,
         onTraceDownstream: trace.traceDownstream,
+        traceBlocked,
         onOpenMenu: openNodeMenu,
         // Add inside stages an entity: offered in a draft, with editing on.
         canAddInside: editModeEnabled && !!libraryBranchId,
@@ -1044,6 +1071,7 @@ export function GraphCanvas({ className }: { className?: string }) {
     mergedHighlightNodes,
     stableOnLoadMore,
     stableOnToggle,
+    traceBlocked,
     openNodeMenu,
     editModeEnabled,
     libraryBranchId,
@@ -1087,14 +1115,14 @@ export function GraphCanvas({ className }: { className?: string }) {
   const onNodeDoubleClick: NodeMouseHandler = useCallback(
     (event, node) => {
       if (event.shiftKey) {
-        // Shift+Double-click: trace
-        trace.toggleTrace(node.id)
+        // Shift+Double-click: trace, where the canvas can
+        if (rolledUpTraces) trace.toggleTrace(node.id)
       } else {
         // Regular double-click: expand/collapse
         toggleNode(node.id)
       }
     },
-    [trace, toggleNode],
+    [trace, toggleNode, rolledUpTraces],
   )
 
   const onPaneClick = useCallback(() => clearSelection(), [clearSelection])
@@ -1292,7 +1320,8 @@ export function GraphCanvas({ className }: { className?: string }) {
       const response = await fetchWithTimeout('/api/v1/graph/save', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ nodes: rawNodes, edges: rawEdges }),
+        // Never the deletions drawn where they were: they are not the graph.
+        body: JSON.stringify({ nodes: rawNodes.filter((n) => !isGhostNode(n)), edges: rawEdges.filter((e) => !isGhostEdge(e)) }),
       })
       if (!response.ok) throw new Error('Failed to save graph')
       alert('Graph saved successfully!')
@@ -1321,7 +1350,8 @@ export function GraphCanvas({ className }: { className?: string }) {
   // 19. Canvas interactions (context menu, inline edit, quick create, command palette)
   const { duplicateSubtree } = useDuplicateSubtree()
   const interactions = useCanvasInteractions({
-    onTraceNode: (nodeId) => trace.startTrace(nodeId),
+    readOnly: !editing,
+    onTraceNode: traceBlocked ? undefined : (nodeId) => trace.startTrace(nodeId),
     onNodeCreated: (nodeId) => selectNode(nodeId),
     duplicateSubtree,
     onNodeDuplicated: (originalId, newUrn) => {
@@ -1413,6 +1443,7 @@ export function GraphCanvas({ className }: { className?: string }) {
           <PropertyManagerButton
             open={propertyManagerOpen}
             onToggle={() => setPropertyManagerOpen((v) => !v)}
+            blocked={displayRules ? undefined : OFF_AT_REVISION}
           />
         )}
       </div>
@@ -1506,6 +1537,11 @@ export function GraphCanvas({ className }: { className?: string }) {
           onNodeMouseEnter={onNodeMouseEnter}
           onNodeMouseLeave={onNodeMouseLeave}
           onPaneClick={onPaneClick}
+          // Drawing a line, re-drawing one and Backspace on a selection (React Flow's own delete,
+          // into onNodesChange) edit the graph: none of them where nothing is edited.
+          nodesConnectable={editing}
+          edgesReconnectable={editing}
+          deleteKeyCode={editing ? 'Backspace' : null}
           onConnect={onConnect}
           onReconnect={onReconnect}
           onEdgeClick={onEdgeClick}
@@ -1663,8 +1699,10 @@ export function GraphCanvas({ className }: { className?: string }) {
           onTraceUp={trace.traceUpstream}
           onTraceDown={trace.traceDownstream}
           onFullTrace={trace.traceFullLineage}
+          traceBlocked={traceBlocked}
           onFocusNode={revealAndFocus}
           onLocateMany={locateManyOnCanvas}
+          canRestore={editModeEnabled && !!libraryBranchId}
         />
       )}
       {/* Read-only here: this canvas has no save path for graph edits. */}
@@ -1675,14 +1713,16 @@ export function GraphCanvas({ className }: { className?: string }) {
 
       {/* Advanced search trigger + panel. The trigger handles ⌘⇧F
           globally; the panel mounts as a flex-sibling drawer (parity
-          with ContextViewCanvas). Disabled when no view is active. */}
+          with ContextViewCanvas). Disabled when no view is active.
+          At a past revision the search is by name, as the names were. */}
       <CanvasSearchTrigger
         open={advancedSearchOpen}
         onToggle={() => setAdvancedSearchOpen((v) => !v)}
         hideButton={isEdgePanelOpen}
+        namesOnly={!advancedSearch}
       />
       <AnimatePresence>
-        {activeView?.id && advancedSearchOpen && (
+        {activeView?.id && advancedSearchOpen && (advancedSearch ? (
           <SearchMapPanel
             key="advanced-search-panel"
             open={advancedSearchOpen}
@@ -1692,7 +1732,14 @@ export function GraphCanvas({ className }: { className?: string }) {
               revealSearchHit(urn, ancestorPath)
             }
           />
-        )}
+        ) : (
+          <RevisionNameSearchPanel
+            key="name-search-panel"
+            viewId={activeView.id}
+            onClose={() => setAdvancedSearchOpen(false)}
+            onRevealNode={revealSearchHit}
+          />
+        ))}
       </AnimatePresence>
 
       {/* Property Manager — display-rule tag overlay drawer. */}
@@ -1730,6 +1777,7 @@ export function GraphCanvas({ className }: { className?: string }) {
           })
         } : undefined}
         onTraceNode={(id) => trace.startTrace(id)}
+        traceBlocked={traceBlocked}
         onCopyUrn={interactions.copyUrn}
         onEditEdge={interactions.editEdge}
         onDeleteEdge={editModeEnabled ? interactions.deleteEdge : undefined}

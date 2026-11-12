@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { synthesizeGhostNode, synthesizeGhostEdge, reconcileGhosts, buildRestoreChange, buildRestoreSubtree, isGhostNode, isGhostEdge } from '../deletionGhosts'
+import { synthesizeGhostNode, synthesizeGhostEdge, reconcileGhosts, buildRestoreChange, buildRestoreSubtree, buildRestoreLinks, indexRemovals, pickGhosts, deletedChain, restoreNeeds, isGhostNode, isGhostEdge } from '../deletionGhosts'
 import { buildChangeSet, type GraphChange } from '../../model/changeModel'
 
 const removedNode = (urn: string, before: Record<string, unknown>): GraphChange => ({
@@ -193,3 +193,210 @@ describe('deletionGhosts — restoring a large deleted subtree', () => {
   })
 })
 
+
+describe('deletionGhosts — which deletions a canvas draws', () => {
+  const contains = (id: string, parent: string, child: string) =>
+    removedEdge(id, { sourceEntityId: parent, targetEntityId: child, edgeType: 'CONTAINS' })
+  const changes = [
+    removedNode('urn:root-gone', { displayName: 'Root gone', entityType: 'T' }),                  // had no parent
+    removedNode('urn:t1', { displayName: 'T1', entityType: 'T' }), contains('k1', 'urn:db', 'urn:t1'),
+    removedNode('urn:c1', { displayName: 'C1', entityType: 'T' }), contains('k2', 'urn:t1', 'urn:c1'),
+    removedNode('urn:far', { displayName: 'Far', entityType: 'T' }), contains('k3', 'urn:not-loaded', 'urn:far'),
+  ]
+  const removals = indexRemovals(changes, CONTAINS)
+
+  it('draws those under a parent on the canvas, and those that had none — parent first', () => {
+    expect(pickGhosts(removals, new Set(['urn:db']))).toEqual(['urn:root-gone', 'urn:t1', 'urn:c1'])
+  })
+
+  it('leaves out one whose parent is not loaded: at its layer top it would read as elsewhere', () => {
+    expect(pickGhosts(removals, new Set(['urn:db']))).not.toContain('urn:far')
+    expect(pickGhosts(removals, new Set(['urn:db', 'urn:not-loaded']))).toContain('urn:far')
+  })
+
+  it('draws at most the cap, breadth first', () => {
+    expect(pickGhosts(removals, new Set(['urn:db']), 2)).toEqual(['urn:root-gone', 'urn:t1'])
+    const many = Array.from({ length: 900 }, (_, i) => removedNode(`urn:n${i}`, { displayName: `n${i}`, entityType: 'T' }))
+    const cs = buildChangeSet(many)
+    expect(reconcileGhosts(cs, [], [], false, CONTAINS).nodesToAdd).toHaveLength(500)
+  })
+
+  it("never re-adds a moved child's old parent link: it would have two parents", () => {
+    // urn:moved is live (moved to another parent); its link to its old parent was removed.
+    const cs = buildChangeSet([contains('k-old', 'urn:old-parent', 'urn:moved')])
+    const { edgesToAdd } = reconcileGhosts(cs, [liveNode('urn:old-parent'), liveNode('urn:moved')], [], false, CONTAINS)
+    expect(edgesToAdd).toEqual([])
+  })
+
+  it('brings a deleted child in once its parent is loaded', () => {
+    const cs = buildChangeSet(changes)
+    expect(reconcileGhosts(cs, [], [], false, CONTAINS).nodesToAdd.map((n) => n.id)).toEqual(['urn:root-gone'])
+    expect(reconcileGhosts(cs, [liveNode('urn:db')], [], false, CONTAINS).nodesToAdd.map((n) => n.id))
+      .toEqual(['urn:root-gone', 'urn:t1', 'urn:c1'])
+  })
+})
+
+describe('deletionGhosts — deletions someone asked to see, past the cap', () => {
+  const contains = (id: string, parent: string, child: string) =>
+    removedEdge(id, { sourceEntityId: parent, targetEntityId: child, edgeType: 'CONTAINS' })
+  const t = (urn: string) => removedNode(urn, { displayName: urn.slice(4), entityType: 'T' })
+  // urn:db is live. Deleted under it: t1 (holding c1 and c2), t2 and t3. urn:far sat under a parent
+  // the canvas hasn't loaded, and urn:root-gone had no parent.
+  const changes = [
+    t('urn:t1'), contains('k1', 'urn:db', 'urn:t1'),
+    t('urn:c1'), contains('k2', 'urn:t1', 'urn:c1'),
+    t('urn:c2'), contains('k3', 'urn:t1', 'urn:c2'),
+    t('urn:t2'), contains('k4', 'urn:db', 'urn:t2'),
+    t('urn:t3'), contains('k5', 'urn:db', 'urn:t3'),
+    t('urn:far'), contains('k6', 'urn:not-loaded', 'urn:far'),
+    t('urn:root-gone'),
+  ]
+  const removals = indexRemovals(changes, CONTAINS)
+  const db = new Set(['urn:db'])
+
+  it('walks a deletion up through the deletions above it, to what it hung from', () => {
+    expect(deletedChain(removals, 'urn:c2')).toEqual({ chain: ['urn:t1', 'urn:c2'], anchor: 'urn:db' })
+    expect(deletedChain(removals, 'urn:root-gone')).toEqual({ chain: ['urn:root-gone'], anchor: undefined })
+    expect(deletedChain(removals, 'urn:db').chain).toEqual([])                  // not a deletion
+  })
+
+  it('draws a pinned deletion with the deletions above it, outside the cap', () => {
+    expect(pickGhosts(removals, db, 1)).toEqual(['urn:t1'])
+    // c2 and the t1 it sat in, then the walk's one: the cap is for the walk alone.
+    expect(pickGhosts(removals, db, 1, ['urn:c2'])).toEqual(['urn:t1', 'urn:c2', 'urn:t2'])
+  })
+
+  it('leaves out a pin whose chain hangs from something the canvas has not loaded', () => {
+    expect(pickGhosts(removals, db, 0, ['urn:far'])).toEqual([])
+    expect(pickGhosts(removals, new Set(['urn:db', 'urn:not-loaded']), 0, ['urn:far'])).toEqual(['urn:far'])
+  })
+
+  it('draws a pin that had no parent at the top, and ignores one that is no deletion here', () => {
+    expect(pickGhosts(removals, new Set(), 0, ['urn:root-gone', 'urn:elsewhere'])).toEqual(['urn:root-gone'])
+  })
+
+  it('still walks what a pinned entity held, within the cap', () => {
+    expect(pickGhosts(removals, db, 4, ['urn:t1'])).toEqual(['urn:t1', 'urn:t2', 'urn:t3', 'urn:root-gone', 'urn:c1'])
+  })
+
+  it('says, for each parent on the canvas, how many deletions under it are not drawn', () => {
+    const cs = buildChangeSet(changes)
+    const drawnByCap = reconcileGhosts(cs, [liveNode('urn:db')], [], false, CONTAINS, 2)
+    expect(drawnByCap.nodesToAdd.map((n) => n.id)).toEqual(['urn:t1', 'urn:t2'])
+    // t3 under db, and both of the drawn t1's columns. Not urn:far: its parent isn't on the canvas.
+    expect(Object.fromEntries(drawnByCap.hiddenByParent)).toEqual({ 'urn:db': 1, 'urn:t1': 2 })
+
+    const asked = reconcileGhosts(cs, [liveNode('urn:db')], [], false, CONTAINS, 2, undefined, ['urn:c2'])
+    expect(asked.nodesToAdd.map((n) => n.id)).toEqual(['urn:t1', 'urn:c2', 'urn:t2', 'urn:t3'])
+    expect(Object.fromEntries(asked.hiddenByParent)).toEqual({ 'urn:t1': 1 })
+    expect([asked.drawn, asked.total]).toEqual([4, 7])
+  })
+})
+
+describe('deletionGhosts — a restore brings links back under their ids', () => {
+  const flow = (id: string, s: string, t: string) =>
+    removedEdge(id, { sourceEntityId: s, targetEntityId: t, edgeType: 'FLOWS_TO', properties: { job: 'nightly' } })
+  const changes = [
+    removedNode('urn:t1', { displayName: 'T1', entityType: 'T' }),
+    removedEdge('k1', { sourceEntityId: 'urn:db', targetEntityId: 'urn:t1', edgeType: 'CONTAINS' }),
+    removedNode('urn:t2', { displayName: 'T2', entityType: 'T' }),
+    flow('f-live', 'urn:t1', 'urn:report'),       // the other end is live
+    flow('f-gone', 'urn:t1', 'urn:t2'),           // the other end is deleted, and not restored
+    removedEdge('k-other', { sourceEntityId: 'urn:t1', targetEntityId: 'urn:x', edgeType: 'CONTAINS' }),
+  ]
+  const cs = buildChangeSet(changes)
+
+  it("nests the entity under its parent by the parent link's own id", () => {
+    expect(buildRestoreChange('urn:t1', cs, new Set(['urn:db']), CONTAINS)?.after).toMatchObject({
+      parentUrn: 'urn:db', containmentEdgeType: 'CONTAINS', containmentEdgeId: 'k1',
+    })
+  })
+
+  it('restores the links whose other end will be there, and no parent link', () => {
+    const restored = buildRestoreSubtree('urn:t1', cs, new Set(['urn:db']), CONTAINS)
+    const links = buildRestoreLinks(restored, changes, (u) => u !== 'urn:t2', CONTAINS)
+    expect(links).toEqual([expect.objectContaining({
+      type: 'create_edge', targetId: 'f-live',
+      after: expect.objectContaining({ restoreOf: 'f-live', edgeType: 'FLOWS_TO', properties: { job: 'nightly' },
+        source: 'urn:t1', target: 'urn:report' }),
+      summary: "Restore link FLOWS_TO: 'T1' → 'urn:report'",
+    })])
+  })
+
+  it('restores a link between two entities restored together', () => {
+    const both = [...buildRestoreSubtree('urn:t1', cs, new Set(['urn:db']), CONTAINS),
+      ...buildRestoreSubtree('urn:t2', cs, new Set(), CONTAINS)]
+    const ids = buildRestoreLinks(both, changes, () => false, CONTAINS).map((l) => l.targetId)
+    expect(ids).toEqual(['f-gone'])
+  })
+})
+
+describe('deletionGhosts — a compact change list, without payloads', () => {
+  // As /diff/index answers: a removed node with no `before`, its parent link with type and ends only.
+  const bare = (urn: string): GraphChange => ({ entityId: urn, urn, kind: 'node', status: 'removed', label: urn, origin: { source: 'compare', fromSeq: 1, toSeq: 9 } })
+  const link = (id: string, s: string, t: string, edgeType: string): GraphChange => ({
+    entityId: id, kind: 'edge', status: 'removed', label: edgeType, origin: { source: 'compare', fromSeq: 1, toSeq: 9 },
+    before: { edgeType, sourceEntityId: s, targetEntityId: t },
+  })
+  const changes = [bare('urn:t1'), link('k1', 'urn:db', 'urn:t1', 'CONTAINS'), bare('urn:c1'), link('k2', 'urn:t1', 'urn:c1', 'CONTAINS'),
+    link('f1', 'urn:c1', 'urn:report', 'FLOWS_TO')]
+
+  it('says which deletions to fetch before drawing them, and draws them once fetched', () => {
+    const cs = buildChangeSet(changes)
+    const first = reconcileGhosts(cs, [liveNode('urn:db')], [], false, CONTAINS)
+    expect(first.missing).toEqual(['urn:t1', 'urn:c1'])
+    expect(first.nodesToAdd).toEqual([])
+    expect([first.drawn, first.total]).toEqual([0, 2])
+    const befores = new Map([['urn:t1', { displayName: 'T1', entityType: 'T' }], ['urn:c1', { displayName: 'C1', entityType: 'T' }]])
+    const then = reconcileGhosts(cs, [liveNode('urn:db')], [], false, CONTAINS, undefined, befores)
+    expect(then.missing).toEqual([])
+    expect(then.nodesToAdd.map((n) => n.id)).toEqual(['urn:t1', 'urn:c1'])
+    expect([then.drawn, then.total]).toEqual([2, 2])
+  })
+
+  it('knows what a restore must fetch, and refuses past its caps', () => {
+    const removals = indexRemovals(changes, CONTAINS)
+    expect(restoreNeeds(removals, changes, 'urn:t1', CONTAINS, 10, 10)).toEqual({ nodeIds: ['urn:t1', 'urn:c1'], linkIds: ['f1'] })
+    expect(restoreNeeds(removals, changes, 'urn:t1', CONTAINS, 1, 10)).toBeNull()
+    expect(restoreNeeds(removals, changes, 'urn:t1', CONTAINS, 10, 0)).toBeNull()
+  })
+})
+
+describe('deletionGhosts — a draft of 5,000 deletions, gone through one at a time', () => {
+  // 50 live tables, each with 100 deleted columns: 5,000 deletions, ten times what the canvas
+  // draws on its own. A review pins each one it visits.
+  const contains = (id: string, parent: string, child: string) =>
+    removedEdge(id, { sourceEntityId: parent, targetEntityId: child, edgeType: 'CONTAINS' })
+  const changes: GraphChange[] = []
+  for (let t = 0; t < 50; t++) {
+    for (let c = 0; c < 100; c++) {
+      changes.push(removedNode(`urn:t${t}.c${c}`, { displayName: `c${c}`, entityType: 'Column' }))
+      changes.push(contains(`k${t}.${c}`, `urn:t${t}`, `urn:t${t}.c${c}`))
+    }
+  }
+  const cs = buildChangeSet(changes)
+  const tables = Array.from({ length: 50 }, (_, t) => liveNode(`urn:t${t}`))
+
+  it('draws each one visited past the cap, keeping the canvas to 500 and the pins, in well under a step', () => {
+    const pins: string[] = []
+    let slowest = 0
+    let drawn = 0
+    // The review visits the last column of every table: none of them among the 500 drawn.
+    for (let t = 0; t < 50; t++) {
+      pins.push(`urn:t${t}.c99`)
+      const started = performance.now()
+      const pass = reconcileGhosts(cs, tables, [], false, CONTAINS, undefined, undefined, pins)
+      slowest = Math.max(slowest, performance.now() - started)
+      drawn = pass.drawn
+      expect(pass.nodesToAdd.map((n) => n.id)).toContain(`urn:t${t}.c99`)
+    }
+    expect(drawn).toBe(500 + 50)
+    expect(slowest).toBeLessThan(250)
+  })
+
+  it('says how many each table holds undrawn', () => {
+    const { hiddenByParent } = reconcileGhosts(cs, tables, [], false, CONTAINS)
+    expect(hiddenByParent.size).toBe(45)                       // the first five tables' columns fill the 500
+    expect(hiddenByParent.get('urn:t49')).toBe(100)
+  })
+})

@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 import contextlib
 import hashlib
 import inspect
@@ -42,6 +42,7 @@ from backend.common.models.search import (
     SearchCountsRequest,
     SearchExportRequest,
     SearchMembershipRequest,
+    SearchHit,
     SearchResolveRequest,
     SearchQuery,
 )
@@ -239,11 +240,17 @@ async def get_context_engine(
             viewer = Viewer(actor=user.id if user else "",
                             can_manage=has_permission(claims, "workspace:datasource:manage", workspace_id=ws_id),
                             can_read=has_permission(claims, "workspace:datasource:read", workspace_id=ws_id))
-            return await ContextEngine.for_workspace(
+            engine = await ContextEngine.for_workspace(
                 ws_id, provider_manager, session, data_source_id=dataSourceId,
                 actor=(user.id if user else None), branch_id=branchId, viewer=viewer,
                 as_of_seq=asOfSeq,
             )
+            # A past revision is put together here, before the route takes any of the store's
+            # slots (``_bounded_compute``): its first read is seconds of Postgres work.
+            warm = getattr(engine.provider, "warm", None) if asOfSeq is not None else None
+            if warm is not None:
+                await warm()
+            return engine
         if connectionId:
             return await ContextEngine.for_connection(
                 connectionId, provider_manager, session, actor=(user.id if user else None))
@@ -1971,6 +1978,50 @@ async def search_nodes(
     engine: ContextEngine = Depends(get_context_engine),
 ):
     return await engine.search_nodes(query, limit=limit, offset=offset)
+
+
+class NameSearchRequest(BaseModel):
+    """A name search: ``q`` in each node's name or qualified name, ignoring case."""
+    q: str = Field(..., min_length=1, max_length=512)
+    match: Literal["substring", "prefix", "suffix", "exact"] = "substring"
+    entity_types: Optional[List[str]] = Field(None, alias="entityTypes", max_length=100)
+    limit: int = Field(20, ge=1, le=50)
+    offset: int = Field(0, ge=0, le=1000)
+
+    model_config = {"populate_by_name": True}
+
+
+class NameSearchPage(BaseModel):
+    """One page of a name search, and where the next starts."""
+    hits: List[SearchHit]
+    has_more: bool = Field(alias="hasMore")
+    next_offset: int = Field(alias="nextOffset")
+
+    model_config = {"populate_by_name": True}
+
+
+@router.post("/search/names", response_model=NameSearchPage, response_model_by_alias=True)
+async def search_names(
+    body: NameSearchRequest,
+    engine: ContextEngine = Depends(get_context_engine),
+):
+    """Nodes whose name or qualified name matches ``q`` — ``match`` substring, prefix, suffix or
+    exact, ignoring case — of ``entityTypes`` when given: one page, each hit with its ancestors
+    (``ancestorPath``, root first), so the canvas can open the way to it.
+
+    The one search that reads a past revision exactly (``?asOfSeq=``): what changed since is
+    judged by its value then, everything else is the store's. Pages come in one fixed order, at
+    most 50 hits at a time and 1,000 deep — a name search, not a listing: narrow it to go
+    further. Slot-bounded like the other reads. A reader that cannot search names answers as
+    deep search does: 503 while the graph loads into memory, else 501 with why."""
+    async def compute() -> Dict[str, Any]:
+        return await engine.search_names(body.q, match=body.match, entity_types=body.entity_types,
+                                         limit=body.limit, offset=body.offset)
+
+    try:
+        return await _bounded_compute(engine, compute)()
+    except NotImplementedError as exc:
+        raise (_graph_loading() or HTTPException(status_code=501, detail=str(exc))) from exc
 
 
 def _map_validation_error(detail: str) -> HTTPException:

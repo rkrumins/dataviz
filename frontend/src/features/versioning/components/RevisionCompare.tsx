@@ -8,15 +8,17 @@
  * the list always agree — and none of it reads a payload until a row is opened.
  *
  * From here the comparison goes on to the canvas: highlighted on the newer revision, or either end
- * opened as the graph was then.
+ * opened as the graph was then. On the Context View, **Review changes** highlights it and lists the
+ * changes beside the canvas (`ChangesExplorer`), in place of the list here.
  */
 import { useMemo } from 'react'
-import { ArrowLeft, ArrowRight, Download, Eye, GitCompareArrows, Info, Sparkles } from 'lucide-react'
+import { ArrowLeft, ArrowRight, Download, Eye, GitCompareArrows, Info, ListChecks, Sparkles } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { HoverTip } from '@/components/ui/HoverTip'
 import { Skeleton } from '@/components/ui/Skeleton'
 import { UserAvatar } from '@/components/ui/UserAvatar'
 import type { ChangeListSummary, ChangeListTypeCount } from '@/services/versioningApiService'
+import { useReviewStore } from '@/store/reviewStore'
 import { useChangeSummary } from '../hooks/useVersioning'
 import { ownerName } from '../model/branchVocab'
 import { ChangeList } from './ChangeList'
@@ -33,11 +35,11 @@ const TYPES_SHOWN = 7
 const KINDS = [
   { key: 'added', label: 'Added', mark: 'bg-emerald-500 dark:bg-emerald-600' },
   { key: 'modified', label: 'Modified', mark: 'bg-amber-500 dark:bg-amber-600' },
-  { key: 'removed', label: 'Removed', mark: 'bg-rose-500 dark:bg-rose-600' },
+  { key: 'removed', label: 'Deleted', mark: 'bg-rose-500 dark:bg-rose-600' },
 ] as const
 
 export function RevisionCompare({
-  wsId, graphId, from, to, headSeq, notice = null, canOpen,
+  wsId, graphId, from, to, headSeq, notice = null, canOpen, openBlocked = null,
   onChange, onBack, onOpen, onHighlight, onExport,
 }: {
   wsId: string
@@ -50,6 +52,8 @@ export function RevisionCompare({
   notice?: 'too_far' | 'fork' | null
   /** The canvas can open revisions (the revision viewer). */
   canOpen: boolean
+  /** Why neither end can be opened or highlighted from here (nowhere to open them), or null. */
+  openBlocked?: string | null
   onChange: (from: number, to: number | null) => void
   onBack: () => void
   /** Open a revision on the canvas; null is Published as it is now. */
@@ -63,6 +67,10 @@ export function RevisionCompare({
   const summaryQ = useChangeSummary(wsId, graphId, range)
   const summary = summaryQ.data
   const sameEnds = newer != null && from >= newer
+  // On the Context View the changes are reviewed beside the canvas, highlighted on it, rather than
+  // listed here.
+  const reviewable = useReviewStore((s) => s.available) && canOpen && !openBlocked
+  const startReview = useReviewStore((s) => s.startReview)
 
   // Two ends in order: the older first, whichever was picked.
   const pick = (a: number | null, b: number | null) => {
@@ -128,32 +136,45 @@ export function RevisionCompare({
           <TypeBreakdown summary={summary} loading={summaryQ.isLoading} />
 
           <div className="flex flex-wrap items-center gap-1.5">
-            {canOpen && range && (
-              <HoverTip className="inline-flex" label="Highlight on canvas"
-                detail={`Opens ${to == null ? 'Published as it is now' : `revision #${range.toSeq}`} with these changes ringed.`}>
+            {reviewable && range && (
+              <HoverTip className="inline-flex" label="Review changes"
+                detail={`Highlights them on ${to == null ? 'Published as it is now' : `revision #${range.toSeq}`}, and lists them beside it.`}>
                 <button
-                  onClick={() => onHighlight(range.fromSeq, range.toSeq)}
+                  onClick={() => { onHighlight(range.fromSeq, range.toSeq); startReview() }}
                   className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-white bg-gradient-to-r from-indigo-500 to-violet-600 hover:from-indigo-600 hover:to-violet-700 shadow-sm shadow-indigo-500/20 active:scale-[0.98]"
+                >
+                  <ListChecks className="w-3.5 h-3.5" /> Review changes
+                </button>
+              </HoverTip>
+            )}
+            {canOpen && range && !reviewable && (
+              <HoverTip className="inline-flex" label="Highlight on canvas"
+                detail={openBlocked ?? `Opens ${to == null ? 'Published as it is now' : `revision #${range.toSeq}`} with these changes ringed.`}>
+                <button
+                  disabled={!!openBlocked}
+                  onClick={() => onHighlight(range.fromSeq, range.toSeq)}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-white bg-gradient-to-r from-indigo-500 to-violet-600 hover:from-indigo-600 hover:to-violet-700 shadow-sm shadow-indigo-500/20 active:scale-[0.98] disabled:opacity-40"
                 >
                   <Sparkles className="w-3.5 h-3.5" /> Highlight on canvas
                 </button>
               </HoverTip>
             )}
             {canOpen && !notice && (
-              <button onClick={() => onOpen(from)}
-                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold text-indigo-700 dark:text-indigo-300 bg-indigo-500/10 hover:bg-indigo-500/20">
+              <button disabled={!!openBlocked} onClick={() => onOpen(from)}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold text-indigo-700 dark:text-indigo-300 bg-indigo-500/10 hover:bg-indigo-500/20 disabled:opacity-40 disabled:cursor-default">
                 <Eye className="w-3.5 h-3.5" /> Open #{from}
               </button>
             )}
             {canOpen && to != null && (
-              <button onClick={() => onOpen(to)}
-                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold text-indigo-700 dark:text-indigo-300 bg-indigo-500/10 hover:bg-indigo-500/20">
+              <button disabled={!!openBlocked} onClick={() => onOpen(to)}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold text-indigo-700 dark:text-indigo-300 bg-indigo-500/10 hover:bg-indigo-500/20 disabled:opacity-40 disabled:cursor-default">
                 <Eye className="w-3.5 h-3.5" /> Open #{to}
               </button>
             )}
+            {canOpen && openBlocked && <span className="text-[11px] text-ink-muted">{openBlocked}</span>}
           </div>
 
-          {range && (
+          {range && !reviewable && (
             <div>
               <p className="text-[10px] font-semibold uppercase tracking-wider text-ink-muted/70 mb-2 px-0.5">The changes</p>
               <ChangeList
@@ -172,7 +193,7 @@ export function RevisionCompare({
   )
 }
 
-/** Added · Modified · Removed · Revisions · Contributors — the comparison at a glance. */
+/** Added · Modified · Deleted · Revisions · Contributors — the comparison at a glance. */
 function KpiRow({ summary, loading }: { summary?: ChangeListSummary; loading: boolean }) {
   const counts = summary?.counts
   const approx = !!summary?.approximate

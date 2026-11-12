@@ -37,12 +37,16 @@ import { EmptyState } from '@/components/ui/EmptyState'
 import { SkeletonText } from '@/components/ui/Skeleton'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/Tabs'
 import { Section } from './DrawerSection'
+import { WhatChangedSection } from './WhatChangedSection'
 import { PropertyEditor } from './PropertyEditor'
 import { PanelErrorBoundary } from './PanelErrorBoundary'
 import { useDrawerHistoryScope } from './useDrawerHistoryScope'
 import { DrawerBody, DrawerFooter, DrawerFrame, DrawerHeader, DrawerShell } from './shell/DrawerShell'
 import { DrawerTopBar, KindBadge } from './shell/DrawerTopBar'
 import { DrawerActivity } from './shell/DrawerActivity'
+import { useBranchStore } from '@/store/branchStore'
+import { listOriginOf } from '@/features/versioning/canvas/useDeletionGhosts'
+import { TombstoneDetails, type TombstoneTarget } from '@/features/versioning/components/TombstoneDetails'
 import { CopyableId, EntityRef } from './shell/EntityRef'
 import { JsonView } from './shell/JsonView'
 import { StageBar } from './shell/StageBar'
@@ -134,9 +138,19 @@ function RelationshipPanel({
   // ── The relationship itself: the drawer's own read, else what the canvas knows ──
   const { record, entityId, unsaved, isLoading: recordLoading, isError: recordError, refetch } = useRelationshipRecord(target)
   const canvasEdge = useCanvasStore((s) => edgeIndexOf(s.edges).get(target.id))
+  // A deleted link drawn where it was shows how it came to be deleted, in place of what a live one
+  // shows: its change names it and the change list it was deleted in.
+  const changeSet = useBranchStore((s) => s.activeChangeSet)
+  const isGhost = (canvasEdge?.data as { isGhost?: boolean } | undefined)?.isGhost === true
   const type = record?.edgeType ?? target.edgeType
   const kind = edgeKind(type, relationshipTypes, containmentTypes)
   const copy = relationshipCopy(type, relationshipTypes)
+  const tombstone = useMemo((): TombstoneTarget | null => {
+    const removed = isGhost ? changeSet?.byEntityId.get(target.id) : undefined
+    const origin = listOriginOf(changeSet)
+    if (!removed || removed.status !== 'removed' || !origin || !scope.wsId || !scope.graphId) return null
+    return { wsId: scope.wsId, graphId: scope.graphId, entityId: removed.entityId, kind: 'edge', origin, label: copy.label }
+  }, [isGhost, changeSet, target.id, scope.wsId, scope.graphId, copy.label])
   const color = useEdgeVisual(type).strokeColor
   const confidence = record?.confidence ?? canvasEdge?.data?.confidence
 
@@ -374,54 +388,60 @@ function RelationshipPanel({
           )}
 
           <TabsContent value="view">
-            <div className="divide-y divide-glass-border">
-              <Section title="Details" icon={Info}>
-                <DetailList>
-                  <DetailRow label="Relationship">
-                    <span className="flex items-center gap-1.5 flex-wrap">
-                      <TypeChip type={type} label={copy.label} />
-                      {copy.label.toUpperCase() !== type.toUpperCase() && <code className="text-[11px] font-mono text-ink-muted">{type}</code>}
-                    </span>
-                  </DetailRow>
-                  <DetailRow label="Meaning">{copy.description ?? KIND_COPY[kind].meaning}</DetailRow>
-                  <DetailRow label="Kind">{KIND_COPY[kind].label}</DetailRow>
-                  <DetailRow label="From"><EntityRef endpoint={source} onOpen={opener.open} /></DetailRow>
-                  <DetailRow label="To"><EntityRef endpoint={dest} onOpen={opener.open} /></DetailRow>
-                  <DetailRow label="ID"><CopyableId id={entityId ?? target.id} /></DetailRow>
-                </DetailList>
-              </Section>
-
-              <Section title="Properties" icon={FileText} flush={hasProps}>
-                {recordLoading && !pendingEdit ? (
-                  <SkeletonText lines={3} />
-                ) : recordError ? (
-                  <Notice tone="warn" action={{ label: 'Retry', onClick: () => { void refetch() } }}>
-                    <span className="inline-flex items-center gap-2"><AlertCircle className="w-4 h-4" aria-hidden />Couldn’t load this relationship’s properties.</span>
-                  </Notice>
-                ) : hasProps ? (
-                  <PanelErrorBoundary resetKeys={[entityId ?? target.id]}>
-                    <PropertyEditor value={shownProps} onChange={() => {}} readOnly searchable groupByPath bare />
-                  </PanelErrorBoundary>
-                ) : (
-                  <EmptyState compact icon={FileText} title="No properties yet"
-                    description={editable ? 'Record what this flow carries, how often, who owns it.' : undefined}
-                    action={editable ? { label: 'Add properties', onClick: startEdit } : undefined} />
-                )}
-              </Section>
-
-              {historyOn && !unsaved && entityId && (
-                <Section title="History" icon={History}>
-                  <EntityHistory
-                    wsId={scope.wsId!}
-                    graphId={scope.graphId!}
-                    entityId={entityId}
-                    mainBranchId={scope.mainBranchId}
-                    branchId={scope.branchId}
-                    kind="edge"
-                  />
+            {tombstone ? (
+              <div className="py-3"><TombstoneDetails target={tombstone} /></div>
+            ) : (
+              <div className="divide-y divide-glass-border">
+                {/* What changed leads, where the canvas's change set holds this relationship. */}
+                <WhatChangedSection id={entityId} />
+                <Section title="Details" icon={Info}>
+                  <DetailList>
+                    <DetailRow label="Relationship">
+                      <span className="flex items-center gap-1.5 flex-wrap">
+                        <TypeChip type={type} label={copy.label} />
+                        {copy.label.toUpperCase() !== type.toUpperCase() && <code className="text-[11px] font-mono text-ink-muted">{type}</code>}
+                      </span>
+                    </DetailRow>
+                    <DetailRow label="Meaning">{copy.description ?? KIND_COPY[kind].meaning}</DetailRow>
+                    <DetailRow label="Kind">{KIND_COPY[kind].label}</DetailRow>
+                    <DetailRow label="From"><EntityRef endpoint={source} onOpen={opener.open} /></DetailRow>
+                    <DetailRow label="To"><EntityRef endpoint={dest} onOpen={opener.open} /></DetailRow>
+                    <DetailRow label="ID"><CopyableId id={entityId ?? target.id} /></DetailRow>
+                  </DetailList>
                 </Section>
-              )}
-            </div>
+
+                <Section title="Properties" icon={FileText} flush={hasProps}>
+                  {recordLoading && !pendingEdit ? (
+                    <SkeletonText lines={3} />
+                  ) : recordError ? (
+                    <Notice tone="warn" action={{ label: 'Retry', onClick: () => { void refetch() } }}>
+                      <span className="inline-flex items-center gap-2"><AlertCircle className="w-4 h-4" aria-hidden />Couldn’t load this relationship’s properties.</span>
+                    </Notice>
+                  ) : hasProps ? (
+                    <PanelErrorBoundary resetKeys={[entityId ?? target.id]}>
+                      <PropertyEditor value={shownProps} onChange={() => {}} readOnly searchable groupByPath bare />
+                    </PanelErrorBoundary>
+                  ) : (
+                    <EmptyState compact icon={FileText} title="No properties yet"
+                      description={editable ? 'Record what this flow carries, how often, who owns it.' : undefined}
+                      action={editable ? { label: 'Add properties', onClick: startEdit } : undefined} />
+                  )}
+                </Section>
+
+                {historyOn && !unsaved && entityId && (
+                  <Section title="History" icon={History}>
+                    <EntityHistory
+                      wsId={scope.wsId!}
+                      graphId={scope.graphId!}
+                      entityId={entityId}
+                      mainBranchId={scope.mainBranchId}
+                      branchId={scope.branchId}
+                      kind="edge"
+                    />
+                  </Section>
+                )}
+              </div>
+            )}
           </TabsContent>
 
           {editable && (

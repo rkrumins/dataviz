@@ -18,11 +18,12 @@
  * skips or repeats one while new ones land, and never stops at a cap — grouped by month and day in
  * the reader's time zone, and drawn a window at a time: years of revisions scroll as lightly as ten.
  *
- * With the revision viewer (the `revisionViewerEnabled` preview) this is where to travel in time:
+ * With the revision viewer (the `revisionViewerEnabled` switch) this is where to travel in time:
  * each revision of Published opens on the canvas as the graph was then, compares with now or with
  * another, and copies a link to itself; the month picker goes to the end of any month or day; and
  * a comparison of two revisions opens here ({@link RevisionCompare}). Undo and Restore stay with
- * the people who can publish.
+ * the people who can publish. Away from the canvas (a data source's Versioning tab) the same actions
+ * open, highlight and link to a revision somewhere else — in one of its views.
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type ComponentType } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
@@ -133,7 +134,12 @@ export function ViewHistoryTimeline({
   branchId,
   canManage = false,
   compare: compareRequest = null,
+  headSeq: givenHead = null,
+  openBlocked: unavailable = null,
   onNavigate,
+  onOpenRevision,
+  onHighlight,
+  revisionLink,
   onExport,
   onComparingChange,
 }: {
@@ -146,8 +152,21 @@ export function ViewHistoryTimeline({
   /** Open on a comparison of two revisions (the banner's "Compare with now", a revision too far
    *  back to draw). */
   compare?: CompareRequest | null
+  /** Published's head where the branch store holds another graph's, or none (away from the
+   *  canvas): what is now until the history's months say. */
+  headSeq?: number | null
+  /** Why no revision can be opened from here, or null (a data source with no view to open one in):
+   *  Open, Highlight and Copy link are disabled, saying so, and the month picker offers no Open. */
+  openBlocked?: string | null
   /** A revision was opened on the canvas: the drawer gets out of the way. */
   onNavigate?: () => void
+  /** Away from the canvas, a revision opens elsewhere (in a view of the data source) — once asked
+   *  whether it can be drawn, as on the canvas. */
+  onOpenRevision?: (seq: number) => void
+  /** Away from the canvas, a comparison is highlighted elsewhere. */
+  onHighlight?: (fromSeq: number, toSeq: number) => void
+  /** The link Copy link copies, instead of this page with `?rev=`. */
+  revisionLink?: (seq: number) => string
   /** Export Published as it was at a revision. */
   onExport?: (seq: number) => void
   /** A comparison opened or closed (the drawer widens for one). */
@@ -170,7 +189,7 @@ export function ViewHistoryTimeline({
   const [revertTarget, setRevertTarget] = useState<Record<string, unknown> | null>(null)
   const [restoreTarget, setRestoreTarget] = useState<Record<string, unknown> | null>(null)
 
-  // Travelling in time (the preview): open, compare, link.
+  // Travelling in time (the revision viewer): open, compare, link.
   const revisionViewer = useRevisionViewer(wsId)
   const [compare, setCompare] = useState<CompareRequest | null>(compareRequest)
   const [askedCompare, setAskedCompare] = useState(compareRequest)
@@ -183,16 +202,19 @@ export function ViewHistoryTimeline({
   const openRevision = useBranchStore((s) => s.openRevision)
   // Opening a revision leaves the draft: unsaved edits would be parked out of sight.
   const unsaved = useStagedChangeCount()
-  const openBlocked = unsaved > 0 ? 'Save or discard your unsaved edits first.' : null
+  const openBlocked = unavailable ?? (unsaved > 0 ? 'Save or discard your unsaved edits first.' : null)
   const setHighlight = useBranchStore((s) => s.setHighlight)
   const closeRevision = useBranchStore((s) => s.closeRevision)
+  // While a revision is open on the canvas, every "since then" counts up to the head it opened at.
+  const pinnedHead = useBranchStore((s) => s.revision?.headAtOpen ?? null)
+  const repinRevision = useBranchStore((s) => s.repinRevision)
 
   const historyScope: HistoryScope = scope === 'draft' && branchId ? { kind: 'draft', branchId }
     : scope === 'view' && viewId ? { kind: 'view', viewId } : { kind: 'graph' }
   const pages = useHistoryPages(wsId, graphId, historyScope, true, origin)
   const monthsQ = useHistoryMonths(wsId, graphId, scope === 'view' ? viewId : null, scope !== 'draft')
   const resolvedHead = useBranchStore((s) => s.mainHeadCommitSeq)
-  const headSeq = monthsQ.data?.headSeq ?? resolvedHead
+  const headSeq = monthsQ.data?.headSeq ?? givenHead ?? resolvedHead
   const commits = useMemo(() => (pages.data?.pages ?? []).flatMap((p) => p.commits as Commit[]), [pages.data])
   const userNames = useMemo(
     () => Object.assign({}, ...(pages.data?.pages ?? []).map((p) => p.userNames ?? {})) as Record<string, string>,
@@ -263,9 +285,14 @@ export function ViewHistoryTimeline({
         setCompare({ fromSeq: seq, toSeq: null, notice: plan.reason === 'fork' ? 'fork' : 'too_far' })
         return
       }
+      if (onOpenRevision) {
+        onOpenRevision(seq)
+        return
+      }
       const commit = c ?? plan.commit
       openRevision({
         seq,
+        headAtOpen: plan.headSeq,
         commitId: (commit.commit_id as string) ?? null,
         createdAt: (commit.created_at as string) ?? null,
         message: (commit.message as string) ?? null,
@@ -275,26 +302,29 @@ export function ViewHistoryTimeline({
     } catch (e) {
       notify('error', e instanceof Error ? e.message : "That revision couldn't be opened.")
     }
-  }, [qc, wsId, graphId, openRevision, onNavigate, notify])
+  }, [qc, wsId, graphId, openRevision, onNavigate, onOpenRevision, notify])
 
   const copyLink = useCallback(async (seq: number) => {
     const url = new URL(window.location.href)
     url.searchParams.set('rev', String(seq))
     url.searchParams.delete('branch')
     try {
-      await navigator.clipboard.writeText(url.toString())
+      await navigator.clipboard.writeText(revisionLink ? revisionLink(seq) : url.toString())
       notify('success', `Link copied — it opens the graph as it was at revision #${seq}.`)
     } catch {
       notify('error', "The link couldn't be copied.")
     }
-  }, [notify])
+  }, [notify, revisionLink])
 
   const revisionActionsFor = (c: Commit): RevisionRowActions | undefined => {
     const seq = c.commit_seq
     if (!revisionViewer || scope === 'draft' || typeof seq !== 'number') return undefined
     return {
       headSeq,
+      pinnedHeadSeq: pinnedHead,
+      onRepin: () => repinRevision(headSeq),
       openBlocked,
+      linkBlocked: unavailable,
       onOpen: () => void openOnCanvas(seq, c),
       onCompareWithNow: () => setCompare({ fromSeq: seq, toSeq: null }),
       onCompareWith: () => setPickingFrom(seq),
@@ -336,11 +366,19 @@ export function ViewHistoryTimeline({
           headSeq={headSeq}
           notice={compare.notice ?? null}
           canOpen={revisionViewer}
+          openBlocked={openBlocked}
           onChange={(fromSeq, toSeq) => setCompare({ fromSeq, toSeq })}
           onBack={() => setCompare(null)}
-          onOpen={(seq) => { if (seq == null || seq >= headSeq) { closeRevision(); onNavigate?.() } else void openOnCanvas(seq) }}
+          onOpen={(seq) => {
+            if (seq != null && seq < headSeq) void openOnCanvas(seq)
+            // Published as it is now: on the canvas, the revision it reads closes; away from it, the head opens.
+            else if (onOpenRevision) onOpenRevision(headSeq)
+            else { closeRevision(); onNavigate?.() }
+          }}
           onHighlight={(fromSeq, toSeq) => {
-            if (toSeq >= headSeq) {
+            if (onHighlight) {
+              onHighlight(fromSeq, toSeq)
+            } else if (toSeq >= headSeq) {
               closeRevision()
               setHighlight({ fromSeq, toSeq })
               onNavigate?.()

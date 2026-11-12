@@ -31,6 +31,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { GraphDataProvider, TraceClosureRequest } from '@/providers/GraphDataProvider'
+import { useRevisionCapabilities } from '@/features/versioning/hooks/useAtRevision'
 import { RELEASE_MEMORY_EVENT } from '@/lib/memoryEvents'
 import {
     toLensClosure,
@@ -236,6 +237,7 @@ export function useLensWalk(
     // One shape internally. `focusKey` keeps the memo (and every effect that
     // depends on the list) stable across the fresh array a caller re-creates
     // on each render.
+    const rolledUp = useRevisionCapabilities().rolledUpTraces
     const focusKey = typeof focus === 'string' ? focus : (focus ?? []).join('\u0000')
     const focusUrns = useMemo<readonly string[]>(
         () => (focus === null ? EMPTY_FOCUS : typeof focus === 'string' ? [focus] : [...focus]),
@@ -342,8 +344,10 @@ export function useLensWalk(
             model: emptyWalkModel(urn), status: 'loading', error: null, extendStatus: fineLoading,
             depth: initialDepth,
         }))
-        bumpRequests(cacheKey, 2)
-        const coarseLeg = provider.traceClosure({
+        // At a past revision the rollup cells are the graph as it is now: the server answers a
+        // coarse leg with the fine page, so it is not asked for.
+        bumpRequests(cacheKey, rolledUp ? 2 : 1)
+        const coarseLeg = !rolledUp ? Promise.resolve() : provider.traceClosure({
             urn, direction: 'both', upstreamDepth: 1, downstreamDepth: 1, grain: 'coarse',
         }, { signal }).then(res => {
             if (session !== sessionRef.current || res.grain !== 'coarse') return
@@ -392,7 +396,7 @@ export function useLensWalk(
             }))
         }
         await coarseLeg
-    }, [provider, initialDepth, fullWalk, bumpRequests, releaseStaleFocals])
+    }, [provider, initialDepth, fullWalk, bumpRequests, releaseStaleFocals, rolledUp])
 
     /** Shared by every continuation op: fetch one further page and merge it
      *  into the CURRENT focal's model — `focusUrn` is captured here at call

@@ -174,6 +174,9 @@ export interface ViewSearchSessionOptions {
     /** Warm a hit's spine without expanding anything, so the reveal that
      *  follows does not pay the round-trip. */
     prefetchHit: (urn: string, ancestorPath: AncestorRef[]) => Promise<void>
+    /** A past revision: the box searches names, across the whole view, and nothing else — the
+     *  one search that reads the graph as it was (`/search/names`). No scope, no panel. */
+    namesOnly?: boolean
 }
 
 export interface ViewSearchSession {
@@ -273,7 +276,7 @@ export interface ViewSearchSession {
 
 
 export function useViewSearchSessionController(
-    { viewId, layers, assignments, placementSpec, curated, revealHit, prefetchHit }: ViewSearchSessionOptions,
+    { viewId, layers, assignments, placementSpec, curated, revealHit, prefetchHit, namesOnly = false }: ViewSearchSessionOptions,
 ): ViewSearchSession {
     const advanced = useAdvancedSearch(viewId, { clearOnUnmount: false })
     const [quick, setQuickState] = useState<QuickQuery>(DEFAULT_QUICK)
@@ -319,34 +322,40 @@ export function useViewSearchSessionController(
         void advancedRef.current.runPredicate(runnable.predicate, SEARCH_OPTIONS)
     }, [])
 
+    // At a past revision whatever the box holds is asked as a name search over the whole view.
+    const compile = useCallback((q: QuickQuery, minLength: number) => runnableFor(
+        namesOnly ? { ...q, lookIn: 'name', scope: 'view' } : q, minLength,
+    ), [namesOnly])
+
     const debouncedQuick = useDebouncedValue(quick, DEBOUNCE_MS)
     useEffect(() => {
-        const runnable = runnableFor(debouncedQuick, QUICK_MIN_LENGTH)
+        const runnable = compile(debouncedQuick, QUICK_MIN_LENGTH)
         // The debounced lane — and ONLY this lane — skips a query that is
         // already the running one: Enter, then the debounce landing 300 ms
         // behind it, would otherwise ask the server the same thing twice.
         if (!runnable || advancedRef.current.runState?.hash === runnable.hash) return
         dispatch(runnable)
-    }, [debouncedQuick, dispatch])
+    }, [debouncedQuick, dispatch, compile])
 
     const runNow = useCallback((patch?: Partial<QuickQuery>) => {
         // Deliberately unguarded. Enter on unchanged text means "ask
         // again" — and after a failure it is the only way back, since
         // `runState` then holds that very hash with status 'failed'.
-        const runnable = runnableFor(
+        const runnable = compile(
             patch ? { ...quick, ...patch } : quick,
             EXPLICIT_MIN_LENGTH,
         )
         if (runnable) dispatch(runnable)
-    }, [dispatch, quick])
+    }, [dispatch, quick, compile])
 
     const setQuick = useCallback((partial: Partial<QuickQuery>) => {
         setQuickState((prev) => ({ ...prev, ...partial }))
     }, [])
 
     const setScope = useCallback((scope: Exclude<QuickScope, 'view'>) => {
+        if (namesOnly) return                       // the whole view only, at a revision
         setQuickState((prev) => ({ ...prev, scope }))
-    }, [])
+    }, [namesOnly])
 
     const clearScope = useCallback(() => {
         setQuickState((prev) => ({ ...prev, scope: 'view' }))
@@ -357,12 +366,12 @@ export function useViewSearchSessionController(
     // Enter actually ran is a legitimate yes.
     const runStateHash = advanced.runState?.hash
     const resultMatchesQuick = useMemo(() => {
-        const runnable = runnableFor(quick, EXPLICIT_MIN_LENGTH)
+        const runnable = compile(quick, EXPLICIT_MIN_LENGTH)
         // Never compare the two sides directly. With an empty box and no run
         // both are undefined, and `undefined === undefined` would hand every
         // consumer a standing result for a query that does not exist.
         return runnable !== null && runStateHash === runnable.hash
-    }, [quick, runStateHash])
+    }, [quick, runStateHash, compile])
 
     // Opening decides what the panel opens ON, once, here — rather than
     // the panel deriving it from "are there results right now?". That
@@ -373,10 +382,12 @@ export function useViewSearchSessionController(
     // answer to open ON?", and a query still running is not one yet —
     // the user who just hit ⌘⇧F should land on the builder, not on a
     // skeleton. Collapsing asks the weaker "will anything remain?".
+    // The panel's groups and builder read the graph as it is now: none at a revision.
     const openPanel = useCallback(() => {
+        if (namesOnly) return
         setPanelOpen(true)
         setRefineOpen(advancedRef.current.view.kind !== 'results')
-    }, [])
+    }, [namesOnly])
     const closePanel = useCallback(() => {
         setPanelOpen(false)
         // Refine is a mode of the open panel, not a state of its own.
@@ -389,9 +400,10 @@ export function useViewSearchSessionController(
         else openPanel()
     }, [panelOpen, closePanel, openPanel])
     const refine = useCallback(() => {
+        if (namesOnly) return
         setPanelOpen(true)
         setRefineOpen(true)
-    }, [])
+    }, [namesOnly])
     const closeRefine = useCallback(() => {
         // Collapsing has to leave something behind. Before the first run,
         // after a Clear and after a view switch the builder IS the panel:

@@ -41,7 +41,7 @@ import {
   useAbandonDraft, useBranch, useBranchFreshness, useDiffVsMain, useRefreshDraftFromOthers, useResolveGraph,
   useBranchViewChanges, useChangeIndex, useChangeSummary,
 } from '../hooks/useVersioning'
-import { DiffTooLargeError } from '@/services/versioningApiService'
+import { DiffTooLargeError, type ChangeListStatus } from '@/services/versioningApiService'
 import { useActiveDraftAccess } from '../hooks/useActiveDraftAccess'
 import { useActiveBranchGuard, type BranchEviction } from '../hooks/useActiveBranchGuard'
 import { fromChangeIndex, fromDiffVsMain } from '../model/changeAdapters'
@@ -53,6 +53,9 @@ import { BootstrapProgress } from './BootstrapProgress'
 import { EnableVersioningFlow } from './EnableVersioningFlow'
 import { BranchSwitcher } from './BranchSwitcher'
 import { PullBeforeMergeBanner } from './PullBeforeMergeBanner'
+import { DeletedChip, STATUS_META } from './NodeDiffBadge'
+import { DELETED_LINE } from '../canvas/useDiffDecoration'
+import { GHOST_CAP } from '../canvas/deletionGhosts'
 import { ReadRouteChip } from './ReadRouteChip'
 import { RefreshingBadge } from './RefreshingBadge'
 import { ChangeCountChips } from './ChangesPanel'
@@ -62,6 +65,10 @@ import { CommitDialog } from './CommitDialog'
 import { ForkStrip } from './ForkStrip'
 import { PublishReceiptBanner } from './PublishReceiptBanner'
 import { ViewVersioningPanel, type ViewPanelTab } from './ViewVersioningPanel'
+import { useReviewStore } from '@/store/reviewStore'
+
+/** The most changes a comparison of two revisions is highlighted with; past it, History lists them. */
+const HIGHLIGHT_MAX = 20_000
 
 interface CanvasVersioningBarProps {
   workspaceId: string
@@ -115,11 +122,12 @@ export function CanvasVersioningBar({
   const [compare, setCompare] = useState<CompareRequest | null>(null)
   const [exportAt, setExportAt] = useState<number | null>(null)
 
-  // Travelling in time (the revision viewer, a preview): the past revision this view reads, its
+  // Travelling in time (the revision viewer): the past revision this view reads, its
   // `?rev=` link, and two revisions highlighted on the canvas.
   const revisionViewer = useRevisionViewer(workspaceId)
   const revisionSeq = useEffectiveRevision(workspaceId, dataSourceId, viewId)
   const openRevision = useBranchStore((s) => s.openRevision)
+  const setHighlight = useBranchStore((s) => s.setHighlight)
   const scopeViewId = useBranchStore((s) => s.viewId)
   useRevisionDeepLink({
     enabled: revisionViewer && !!graphId,
@@ -128,16 +136,18 @@ export function CanvasVersioningBar({
     scopeViewId,
     activeViewId: viewId,
     openRevision,
+    setHighlight,
   })
   const highlight = useRevisionHighlight()
-  const setHighlight = useBranchStore((s) => s.setHighlight)
   const highlightOrigin = useMemo(
     () => (revisionViewer && !isDraft && highlight ? { fromSeq: highlight.fromSeq, toSeq: highlight.toSeq } : null),
     [revisionViewer, isDraft, highlight],
   )
-  const highlightIndexQ = useChangeIndex(workspaceId, graphId, highlightOrigin)
-  const highlightCountsQ = useChangeSummary(workspaceId, graphId,
-    highlightOrigin && highlightIndexQ.data?.truncated ? highlightOrigin : null)
+  // A comparison's whole index can hold hundreds of thousands of changes, in one response: ask for
+  // no more than the canvas rings. Past that the server answers with how many, which the chip says
+  // instead of drawing.
+  const highlightIndexQ = useChangeIndex(workspaceId, graphId, highlightOrigin, HIGHLIGHT_MAX)
+  const tooManyToHighlight = highlightIndexQ.data?.truncated ? highlightIndexQ.data.total : null
   const canPublish = usePermission('workspace:datasource:publish', workspaceId)
   const versioningEnabled = useFeature('versioningEnabled')
   const openCompare = useCallback((fromSeq: number, toSeq: number | null) => {
@@ -145,13 +155,17 @@ export function CanvasVersioningBar({
     setPanelTab('history')
   }, [])
   const uncommitted = useStagedChangeCount()
+  // Where the canvas can show a review (the Context View), what counts changes starts one there.
+  const reviewable = useReviewStore((s) => s.available)
+  const startReview = useReviewStore((s) => s.startReview)
+  const reviewOperation = useCallback((operation: ChangeListStatus) => startReview({ operation }), [startReview])
 
   // Slim: modified entities by id alone — the bar counts changes and rings nodes, and never reads
   // a modified entity's payloads, which a large draft would ship by the hundred megabytes.
   const diffQ = useDiffVsMain(workspaceId, graphId, isDraft ? branchId : null, { slim: true })
   // Past the tree's cap the slim diff is refused (409): the draft's compact change index — about
-  // 70 bytes a change, no payloads — rings its nodes and finds what it created instead. Its
-  // removed nodes, which only a payload can draw, go undrawn (no ghosts).
+  // 70 bytes a change, no payloads — rings its nodes and finds what it created instead. What its
+  // removed nodes were is asked for just the ones the canvas draws (useDeletionGhosts).
   const large = diffQ.error instanceof DiffTooLargeError
   const draftOrigin = useMemo(() => (isDraft && branchId ? { branchId } : null), [isDraft, branchId])
   const indexQ = useChangeIndex(workspaceId, graphId, large ? draftOrigin : null)
@@ -168,6 +182,8 @@ export function CanvasVersioningBar({
   const changeCount = changeSet.counts.added + changeSet.counts.modified + changeSet.counts.removed
   // New entities a curated view could not draw: it draws a page of what the draft created.
   const createdNotLoaded = useCanvasStore((s) => s.createdRootsNotLoaded)
+  // Deleted entities drawn where they were, of how many the canvas's change set holds.
+  const deletedDrawn = useCanvasStore((s) => s.deletedDrawn)
   const loadingChanges = diffQ.isLoading || (large && (indexQ.isLoading || countsQ.isLoading))
   // A draft's rings are its own diff's: whatever replaced them (a revision closed, a highlight
   // cleared) gives way to them again.
@@ -175,12 +191,11 @@ export function CanvasVersioningBar({
   useEffect(() => {
     if (isDraft && activeChangeSet !== changeSet) setActiveChangeSet(changeSet)
   }, [isDraft, changeSet, activeChangeSet, setActiveChangeSet])
-  // Two revisions compared, ringed on the canvas showing the newer one.
+  // Two revisions compared, ringed on the canvas showing the newer one — unless too many changed.
   useEffect(() => {
-    if (isDraft || !highlightOrigin || !highlightIndexQ.data) return
-    setActiveChangeSet(fromChangeIndex(highlightIndexQ.data, { source: 'compare', ...highlightOrigin },
-      highlightCountsQ.data?.counts))
-  }, [isDraft, highlightOrigin, highlightIndexQ.data, highlightCountsQ.data, setActiveChangeSet])
+    if (isDraft || !highlightOrigin || !highlightIndexQ.data || highlightIndexQ.data.truncated) return
+    setActiveChangeSet(fromChangeIndex(highlightIndexQ.data, { source: 'compare', ...highlightOrigin }))
+  }, [isDraft, highlightOrigin, highlightIndexQ.data, setActiveChangeSet])
 
   // One-shot bridge: the Context View header's "Changes" button (far from this bar)
   // asks to open the versioning panel via useVersioningPanelStore. Honour the request
@@ -394,7 +409,39 @@ export function CanvasVersioningBar({
         {highlightOrigin && (
           <span className="inline-flex items-center gap-1.5 pl-2 pr-1 py-0.5 rounded-full text-[11px] font-medium bg-indigo-500/10 text-indigo-700 dark:text-indigo-300 border border-indigo-500/20">
             <Sparkles className="w-3 h-3" />
-            {highlightIndexQ.isLoading ? 'Highlighting…' : `What changed after #${highlightOrigin.fromSeq} up to #${highlightOrigin.toSeq}`}
+            {highlightIndexQ.isLoading ? 'Highlighting…' : tooManyToHighlight != null ? (
+              <>
+                {`Too many changes to highlight (${tooManyToHighlight.toLocaleString()}) —`}
+                <button onClick={() => (reviewable ? startReview() : openCompare(highlightOrigin.fromSeq, highlightOrigin.toSeq))}
+                  className="font-semibold hover:underline">{reviewable ? 'Review changes' : 'Open the list'}</button>
+              </>
+            ) : (
+              <HoverTip className="inline-flex items-center gap-1.5" label={(
+                <span className="block">
+                  <span className="block text-[12px] font-semibold leading-snug text-ink">
+                    What changed after #{highlightOrigin.fromSeq} up to #{highlightOrigin.toSeq}, on the canvas
+                  </span>
+                  <ChangeLegend comparison />
+                </span>
+              )}>
+                <span>{`What changed after #${highlightOrigin.fromSeq} up to #${highlightOrigin.toSeq}`}</span>
+                {activeChangeSet?.origin === 'compare' && (
+                  <ChangeCountChips changeSet={activeChangeSet} onPick={reviewable ? reviewOperation : undefined} />
+                )}
+                {deletedDrawn && deletedDrawn.total > deletedDrawn.drawn && (reviewable ? (
+                  <button onClick={() => startReview({ operation: 'removed' })}
+                    className="text-indigo-700/80 dark:text-indigo-300/80 hover:underline">
+                    {deletedDrawn.drawn.toLocaleString()} of {deletedDrawn.total.toLocaleString()} deleted drawn
+                  </button>
+                ) : (
+                  <span className="text-indigo-700/80 dark:text-indigo-300/80">
+                    {deletedDrawn.drawn.toLocaleString()} of {deletedDrawn.total.toLocaleString()} deleted drawn
+                  </span>
+                ))}
+                <button onClick={() => (reviewable ? startReview() : openCompare(highlightOrigin.fromSeq, highlightOrigin.toSeq))}
+                  className="font-semibold hover:underline">{reviewable ? 'Review changes' : 'Open the list'}</button>
+              </HoverTip>
+            )}
             <HoverTip className="inline-flex" label="Stop highlighting">
               <button onClick={() => setHighlight(null)} aria-label="Stop highlighting"
                 className="p-0.5 rounded-full hover:bg-indigo-500/15"><X className="w-3 h-3" /></button>
@@ -424,7 +471,7 @@ export function CanvasVersioningBar({
                     detail={`${BRANCH_VOCAB.publish} sends them to the version everyone sees`}
                   >
                     <span className="flex items-center gap-1.5">
-                      <ChangeCountChips changeSet={changeSet} />
+                      <ChangeCountChips changeSet={changeSet} onPick={reviewable ? reviewOperation : undefined} />
                       <span className="text-[11px] text-ink-muted/80">in branch</span>
                     </span>
                   </HoverTip>
@@ -439,10 +486,25 @@ export function CanvasVersioningBar({
                   >
                     <button
                       type="button"
-                      onClick={() => setPanelTab('changes')}
+                      onClick={() => (reviewable ? startReview({ operation: 'added' }) : setPanelTab('changes'))}
                       className="inline-flex items-center rounded-md border border-emerald-500/25 bg-emerald-500/[0.06] px-1.5 py-0.5 text-[11px] font-medium text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/[0.12] transition-colors"
                     >
                       +{createdNotLoaded.toLocaleString()} new
+                    </button>
+                  </HoverTip>
+                )}
+                {deletedDrawn && deletedDrawn.total > deletedDrawn.drawn && (
+                  <HoverTip
+                    className="inline-flex"
+                    label={`${(deletedDrawn.total - deletedDrawn.drawn).toLocaleString()} deleted ${deletedDrawn.total - deletedDrawn.drawn === 1 ? 'entity isn’t' : 'entities aren’t'} drawn here`}
+                    detail={`A deleted entity is drawn where it was, under a parent shown here, ${GHOST_CAP} at most. Changes lists every one.`}
+                  >
+                    <button
+                      type="button"
+                      onClick={() => (reviewable ? startReview({ operation: 'removed' }) : setPanelTab('changes'))}
+                      className="inline-flex items-center rounded-md border border-rose-500/25 bg-rose-500/[0.06] px-1.5 py-0.5 text-[11px] font-medium text-rose-600 dark:text-rose-400 hover:bg-rose-500/[0.12] transition-colors"
+                    >
+                      {deletedDrawn.drawn.toLocaleString()} of {deletedDrawn.total.toLocaleString()} deleted drawn
                     </button>
                   </HoverTip>
                 )}
@@ -612,6 +674,43 @@ export function CanvasVersioningBar({
  *  layered under the real tooltip layer. Both are one `HoverTip` now: the
  *  action leads, the legend is the body. `label` takes a node precisely so a
  *  legend like this does not need a second component. */
+/** What the canvas's change marks mean: the rings, the colours, and how a deletion reads. */
+/** What the marks on the canvas mean: a draft's own changes, or two revisions compared, where
+ *  nothing is a draft's and nothing waits to be published. */
+function ChangeLegend({ comparison = false }: { comparison?: boolean }) {
+  return (
+    <span className="mt-2 block space-y-1.5 text-[11px] leading-snug text-ink-muted">
+      <span className="flex items-center gap-2">
+        <span className="w-4 h-4 rounded ring-2 ring-emerald-500/70 inline-block shrink-0" />
+        {comparison ? 'solid ring = changed in these revisions' : 'solid ring = saved to this draft'}
+      </span>
+      {!comparison && (
+        <span className="flex items-center gap-2">
+          <span className="w-4 h-4 rounded outline-dashed outline-2 outline-offset-1 outline-emerald-400/80 inline-block shrink-0" />
+          dashed halo = edited but not saved
+        </span>
+      )}
+      <span className="flex items-center gap-3 border-t border-glass-border/60 pt-1.5">
+        <span className="inline-flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-emerald-500" />new</span>
+        <span className="inline-flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-orange-500" />edited</span>
+        <span className="inline-flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-rose-500" />deleted</span>
+      </span>
+      <span className="flex items-center gap-2 border-t border-glass-border/60 pt-1.5">
+        <DeletedChip />
+        <span>
+          <span className={STATUS_META.removed.strike}>struck name</span> = {comparison ? 'deleted, drawn where it was' : 'deleted, kept in its place until published'}
+        </span>
+      </span>
+      <span className="flex items-center gap-2">
+        <svg width="28" height="6" aria-hidden className="shrink-0">
+          <line x1="1" y1="3" x2="27" y2="3" stroke={DELETED_LINE.color} strokeWidth="2" strokeDasharray={DELETED_LINE.dash} strokeLinecap="round" />
+        </svg>
+        rose dashes = a deleted link
+      </span>
+    </span>
+  )
+}
+
 function ChangeHighlightControl({
   committedHidden,
   onToggle,
@@ -629,21 +728,7 @@ function ChangeHighlightControl({
           <span className="block text-[12px] font-semibold leading-snug text-ink">
             {committedHidden ? 'Show saved changes on the canvas' : 'Hide saved changes on the canvas'}
           </span>
-          <span className="mt-2 block space-y-1.5 text-[11px] leading-snug text-ink-muted">
-            <span className="flex items-center gap-2">
-              <span className="w-4 h-4 rounded ring-2 ring-emerald-500/70 inline-block shrink-0" />
-              solid ring = saved to this draft
-            </span>
-            <span className="flex items-center gap-2">
-              <span className="w-4 h-4 rounded outline-dashed outline-2 outline-offset-1 outline-emerald-400/80 inline-block shrink-0" />
-              dashed halo = edited but not saved
-            </span>
-            <span className="flex items-center gap-3 border-t border-glass-border/60 pt-1.5">
-              <span className="inline-flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-emerald-500" />new</span>
-              <span className="inline-flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-orange-500" />edited</span>
-              <span className="inline-flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-rose-500" />deleted</span>
-            </span>
-          </span>
+          <ChangeLegend />
         </span>
       )}
     >

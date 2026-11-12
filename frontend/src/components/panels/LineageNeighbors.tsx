@@ -37,7 +37,7 @@ import {
   type NeighborRecord,
 } from '@/lib/lineage-neighbors'
 import { useGraphProviderIfAvailable } from '@/providers/GraphProviderContext'
-import { useViewExecutionContext } from '@/providers/ViewExecutionContext'
+import { useRevisionCapabilities } from '@/features/versioning/hooks/useAtRevision'
 import { useViewLineageEdgeTypes } from '@/hooks/useViewSchema'
 import { useLensLineage, EDGE_FETCH_LIMIT } from '@/hooks/useLensLineage'
 import { useLensWalk } from '@/hooks/useLensWalk'
@@ -135,15 +135,17 @@ export function LineageNeighbors({ nodeId, onFocusNode, onLocateMany, onRevealPa
   // neighbours), so a leaf walks at once — as does anything the rollups
   // cannot answer: no rollup lane, no cells, or a failed read.
   const provider = useGraphProviderIfAvailable()
-  // A walk reads the graph as it is now: at a past revision the drawer lists what the canvas reads.
-  const atRevision = (useViewExecutionContext()?.asOfSeq ?? null) != null
-  const walkCapable = !atRevision && typeof provider?.traceClosure === 'function'
+  // At a past revision the walk reads the flows as they ran then; its rollup cells are the graph as
+  // it is now, so it walks the raw flows from the start.
+  const { lineageTrace, rolledUpTraces } = useRevisionCapabilities()
+  const walkCapable = lineageTrace && typeof provider?.traceClosure === 'function'
+  const coarseCapable = walkCapable && rolledUpTraces
   const focalChildCount = useCanvasStore((s) => nodeIndexOf(s.nodes).get(nodeId)?.data?.childCount as number | undefined)
   const isLeafFocal = focalChildCount === 0
-  const coarse = useCoarseLineage(walkCapable && nodeId && !isLeafFocal ? nodeId : null, walkCapable ? provider : null)
+  const coarse = useCoarseLineage(coarseCapable && nodeId && !isLeafFocal ? nodeId : null, coarseCapable ? provider : null)
   const coarseHasCells = coarse.status === 'done' && !coarse.servedFine
     && (coarse.model?.lineageEdges.some((e) => e.kind === 'rollup') ?? false)
-  const coarseCannotAnswer = coarse.status === 'error' || coarse.status === 'unsupported'
+  const coarseCannotAnswer = !coarseCapable || coarse.status === 'error' || coarse.status === 'unsupported'
     || (coarse.status === 'done' && !coarseHasCells)
   /** The focal the reader asked for columns on — a new focal starts closed. */
   const [fineAskedFor, setFineAskedFor] = useState<string | null>(null)

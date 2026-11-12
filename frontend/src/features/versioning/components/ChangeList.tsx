@@ -20,27 +20,19 @@ import { Segmented, type SegmentedOption } from '@/components/ui/Segmented'
 import { Skeleton, SkeletonText } from '@/components/ui/Skeleton'
 import { useDebouncedValue } from '@/hooks/useDebouncedValue'
 import type {
-  ChangeListCounts, ChangeListKind, ChangeListOrigin, ChangeListRow, ChangeListStatus, ChangeListSummary,
+  ChangeListKind, ChangeListOrigin, ChangeListRow, ChangeListStatus, ChangeListSummary,
 } from '@/services/versioningApiService'
-import { useChangeEntries, useChangeEntry, useChangeSummary } from '../hooks/useVersioning'
-import type { GraphChange } from '../model/changeModel'
-import { EntityDiff } from './EntityDiff'
+import { useChangeEntries, useChangeSummary } from '../hooks/useVersioning'
+import { KIND_LABEL, changeRowLabel as rowLabel, changeTotal, kindCounts, kindsOf, typeOptionsOf } from '../model/changeListSummary'
+import { ChangeDetail } from './ChangeDetail'
 import { NodeDiffBadge, STATUS_META } from './NodeDiffBadge'
 
 const STATUSES: ChangeListStatus[] = ['added', 'modified', 'removed']
-const KIND_LABEL: Record<ChangeListKind, string> = {
-  node: 'Entities', edge: 'Relationships', structure: 'Structure',
-}
 /** How near the end of what is loaded the next page is asked for. */
 const PREFETCH_ROWS = 25
 const ROW_HEIGHT = 36
 const HEADER_HEIGHT = 30
 
-const total = (c?: ChangeListCounts | null) => (c ? c.added + c.modified + c.removed : 0)
-
-function kindCounts(s: ChangeListSummary, kind: ChangeListKind): ChangeListCounts | null | undefined {
-  return kind === 'node' ? s.entityCounts : kind === 'edge' ? s.edgeCounts : s.structureCounts
-}
 
 type Item =
   | { kind: 'type'; key: string; type: string | null; count: number }
@@ -61,10 +53,6 @@ function itemsOf(rows: ChangeListRow[], counts: Map<string, number>): Item[] {
   return out
 }
 
-function rowLabel(row: ChangeListRow): string {
-  if (row.kind === 'node') return row.displayName || row.urn || row.entityId
-  return `${row.sourceName || row.sourceEntityId || '…'} → ${row.targetName || row.targetEntityId || '…'}`
-}
 
 export interface ChangeListProps {
   wsId: string
@@ -85,10 +73,7 @@ export function ChangeList({
   const summaryQ = useChangeSummary(wsId, graphId, summary ? null : origin)
   const s = summary ?? summaryQ.data ?? null
 
-  const kinds = useMemo(
-    () => (s ? (['node', 'edge', 'structure'] as const).filter((k) => total(kindCounts(s, k)) > 0) : []),
-    [s],
-  )
+  const kinds = useMemo(() => (s ? kindsOf(s) : []), [s])
   const [kind, setKind] = useState<ChangeListKind | null>(null)
   const activeKind: ChangeListKind | undefined = kind && kinds.includes(kind) ? kind : kinds[0]
   const [statuses, setStatuses] = useState<ChangeListStatus[]>([])
@@ -98,54 +83,7 @@ export function ChangeList({
   // Narrowing to another kind starts its type afresh.
   const chooseKind = (k: ChangeListKind) => { setKind(k); setType('') }
 
-  const listable = !!s && s.listed > 0 && !!activeKind
-  const entriesQ = useChangeEntries(
-    wsId, graphId, origin, { kind: activeKind, statuses, type: type || undefined, q },
-    { enabled: listable },
-  )
-  const rows = useMemo(() => entriesQ.data?.pages.flatMap((p) => p.entries) ?? [], [entriesQ.data])
-  const matching = entriesQ.data?.pages[0]?.total ?? 0
-
-  const typeCounts = useMemo(() => {
-    const m = new Map<string, number>()
-    for (const t of s?.byType ?? []) {
-      if (t.kind !== activeKind) continue
-      const n = statuses.length ? statuses.reduce((sum, st) => sum + t[st], 0) : t.added + t.modified + t.removed
-      m.set(t.type ?? '', n)
-    }
-    return m
-  }, [s, activeKind, statuses])
-  const typeOptions = useMemo(
-    () => (s?.byType ?? []).filter((t) => t.kind === activeKind)
-      .map((t) => ({ type: t.type ?? '', n: t.added + t.modified + t.removed }))
-      .sort((a, b) => b.n - a.n),
-    [s, activeKind],
-  )
-  const items = useMemo(() => itemsOf(rows, typeCounts), [rows, typeCounts])
-
-  const [open, setOpen] = useState<ReadonlySet<string>>(new Set())
-  const toggle = (id: string) => setOpen((prev) => {
-    const next = new Set(prev)
-    if (next.has(id)) next.delete(id)
-    else next.add(id)
-    return next
-  })
-
-  const scrollRef = useRef<HTMLDivElement>(null)
-  const hasMore = !!entriesQ.hasNextPage
-  const virtualizer = useVirtualizer({
-    count: items.length + (hasMore ? 1 : 0),
-    getScrollElement: () => scrollRef.current,
-    estimateSize: (i) => (items[i]?.kind === 'type' ? HEADER_HEIGHT : ROW_HEIGHT),
-    overscan: 12,
-    getItemKey: (i) => items[i]?.key ?? 'more',
-  })
-  const virtualItems = virtualizer.getVirtualItems()
-  const lastShown = virtualItems.length ? virtualItems[virtualItems.length - 1].index : -1
-  const { fetchNextPage, isFetchingNextPage } = entriesQ
-  useEffect(() => {
-    if (hasMore && !isFetchingNextPage && lastShown >= items.length - PREFETCH_ROWS) void fetchNextPage()
-  }, [hasMore, isFetchingNextPage, lastShown, items.length, fetchNextPage])
+  const typeOptions = useMemo(() => typeOptionsOf(s, activeKind), [s, activeKind])
 
   if (!s) {
     return summaryQ.isError
@@ -160,10 +98,9 @@ export function ChangeList({
   }
 
   const kindOptions: SegmentedOption<ChangeListKind>[] = kinds.map((k) => ({
-    value: k, label: KIND_LABEL[k], count: total(kindCounts(s, k)),
+    value: k, label: KIND_LABEL[k], count: changeTotal(kindCounts(s, k)),
   }))
   const counts = activeKind ? kindCounts(s, activeKind) : null
-  const narrowed = statuses.length > 0 || !!type || !!q.trim()
 
   return (
     <div className={cn('flex flex-col gap-2.5 min-h-0', className)}>
@@ -219,6 +156,102 @@ export function ChangeList({
         )}
       </div>
 
+      <ChangeRows wsId={wsId} graphId={graphId} origin={origin} summary={s}
+        kind={activeKind} statuses={statuses} type={type} q={q} maxHeight={maxHeight} />
+    </div>
+  )
+}
+
+export interface ChangeRowsProps {
+  wsId: string
+  graphId: string
+  origin: ChangeListOrigin
+  summary: ChangeListSummary
+  /** What is listed: changes of one kind, narrowed by status, type and (debounced) text. */
+  kind?: ChangeListKind
+  statuses: ChangeListStatus[]
+  type?: string
+  q: string
+  /** Height the rows may grow to before they scroll. */
+  maxHeight?: number | string
+  /** Fill the height the parent gives them instead, scrolling within it. */
+  fill?: boolean
+  /** The change a review is on: marked, and kept in view as it moves. */
+  activeEntityId?: string | null
+  /** Picking a row makes it the review's current change; its chevron still shows what changed.
+   *  ↑ and ↓ move between the rows. */
+  onActivate?: (row: ChangeListRow, index: number) => void
+}
+
+/** A change list's rows, a page at a time, under a line saying how many match. */
+export function ChangeRows({
+  wsId, graphId, origin, summary: s, kind: activeKind, statuses, type, q, maxHeight = '60vh', fill = false,
+  activeEntityId = null, onActivate,
+}: ChangeRowsProps) {
+  const entriesQ = useChangeEntries(
+    wsId, graphId, origin, { kind: activeKind, statuses, type: type || undefined, q },
+    { enabled: s.listed > 0 && !!activeKind },
+  )
+  const rows = useMemo(() => entriesQ.data?.pages.flatMap((p) => p.entries) ?? [], [entriesQ.data])
+  const matching = entriesQ.data?.pages[0]?.total ?? 0
+  const narrowed = statuses.length > 0 || !!type || !!q.trim()
+
+  const typeCounts = useMemo(() => {
+    const m = new Map<string, number>()
+    for (const t of s.byType ?? []) {
+      if (t.kind !== activeKind) continue
+      const n = statuses.length ? statuses.reduce((sum, st) => sum + t[st], 0) : t.added + t.modified + t.removed
+      m.set(t.type ?? '', n)
+    }
+    return m
+  }, [s, activeKind, statuses])
+  const items = useMemo(() => itemsOf(rows, typeCounts), [rows, typeCounts])
+
+  const [open, setOpen] = useState<ReadonlySet<string>>(new Set())
+  const toggle = (id: string) => setOpen((prev) => {
+    const next = new Set(prev)
+    if (next.has(id)) next.delete(id)
+    else next.add(id)
+    return next
+  })
+
+  const scrollRef = useRef<HTMLDivElement>(null)
+  const hasMore = !!entriesQ.hasNextPage
+  const virtualizer = useVirtualizer({
+    count: items.length + (hasMore ? 1 : 0),
+    getScrollElement: () => scrollRef.current,
+    estimateSize: (i) => (items[i]?.kind === 'type' ? HEADER_HEIGHT : ROW_HEIGHT),
+    overscan: 12,
+    getItemKey: (i) => items[i]?.key ?? 'more',
+  })
+  const virtualItems = virtualizer.getVirtualItems()
+  const lastShown = virtualItems.length ? virtualItems[virtualItems.length - 1].index : -1
+  const { fetchNextPage, isFetchingNextPage } = entriesQ
+  useEffect(() => {
+    if (hasMore && !isFetchingNextPage && lastShown >= items.length - PREFETCH_ROWS) void fetchNextPage()
+  }, [hasMore, isFetchingNextPage, lastShown, items.length, fetchNextPage])
+
+  // The review's current change, kept in view as it moves — not each time a page arrives, which
+  // would pull back a reader scrolling on.
+  const indexOf = useMemo(() => new Map(rows.map((r, i) => [r.entityId, i])), [rows])
+  const latest = useRef({ items, virtualizer })
+  useEffect(() => { latest.current = { items, virtualizer } })
+  useEffect(() => {
+    if (!activeEntityId) return
+    const at = latest.current.items.findIndex((it) => it.kind === 'row' && it.row.entityId === activeEntityId)
+    if (at >= 0) latest.current.virtualizer.scrollToIndex(at, { align: 'auto' })
+  }, [activeEntityId])
+  const moveBetweenRows = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return
+    const buttons = [...e.currentTarget.querySelectorAll<HTMLButtonElement>('[data-change-row]')]
+    const next = buttons[buttons.indexOf(document.activeElement as HTMLButtonElement) + (e.key === 'ArrowDown' ? 1 : -1)]
+    if (!next) return
+    e.preventDefault()
+    next.focus()
+  }
+
+  return (
+    <>
       <p className="text-[11px] text-ink-muted tabular-nums" aria-live="polite">
         {entriesQ.isLoading ? 'Loading…'
           : narrowed ? `${matching.toLocaleString()} matching`
@@ -236,7 +269,8 @@ export function ChangeList({
         <EmptyState compact icon={SearchX} title="Nothing matches"
           description="Try another type or status, or clear the search." />
       ) : (
-        <div ref={scrollRef} className="overflow-y-auto custom-scrollbar -mx-1 px-1" style={{ maxHeight }}>
+        <div ref={scrollRef} className={cn('overflow-y-auto custom-scrollbar -mx-1 px-1', fill && 'flex-1 min-h-0')}
+          style={fill ? undefined : { maxHeight }} onKeyDown={onActivate ? moveBetweenRows : undefined}>
           <div role="list" aria-label="Changes" className="relative w-full" style={{ height: virtualizer.getTotalSize() }}>
             {virtualItems.map((v) => {
               const item = items[v.index]
@@ -263,7 +297,9 @@ export function ChangeList({
                     </div>
                   ) : (
                     <Row wsId={wsId} graphId={graphId} origin={origin} row={item.row}
-                      open={open.has(item.row.entityId)} onToggle={() => toggle(item.row.entityId)} />
+                      open={open.has(item.row.entityId)} onToggle={() => toggle(item.row.entityId)}
+                      active={item.row.entityId === activeEntityId}
+                      onActivate={onActivate && (() => onActivate(item.row, indexOf.get(item.row.entityId) ?? 0))} />
                   )}
                 </div>
               )
@@ -271,81 +307,77 @@ export function ChangeList({
           </div>
         </div>
       )}
-    </div>
+    </>
   )
 }
 
-function Row({ wsId, graphId, origin, row, open, onToggle }: {
+function Row({ wsId, graphId, origin, row, open, onToggle, active = false, onActivate }: {
   wsId: string
   graphId: string
   origin: ChangeListOrigin
   row: ChangeListRow
   open: boolean
   onToggle: () => void
+  active?: boolean
+  onActivate?: () => void
 }) {
   const meta = STATUS_META[row.status]
   const label = rowLabel(row)
+  const chevron = <ChevronRight className={cn('w-3.5 h-3.5 text-ink-muted/60 transition-transform shrink-0', open && 'rotate-90')} />
+  const name = (
+    <>
+      <meta.Icon className={cn('w-3.5 h-3.5 shrink-0', meta.text)} aria-label={meta.label} />
+      {row.kind === 'edge' ? (
+        <span className="flex items-center gap-1 min-w-0 text-[13px] text-ink">
+          <span className={cn('truncate', meta.strike)}>{row.sourceName || row.sourceEntityId}</span>
+          <ArrowRight className="w-3 h-3 text-ink-muted/70 shrink-0" />
+          <span className={cn('truncate', meta.strike)}>{row.targetName || row.targetEntityId}</span>
+        </span>
+      ) : (
+        <span className={cn('text-[13px] text-ink truncate', meta.strike)}>{label}</span>
+      )}
+      {row.kind === 'node' && row.qualifiedName && row.qualifiedName !== label && (
+        <span className="text-[11px] text-ink-muted/70 truncate min-w-0 hidden sm:inline">{row.qualifiedName}</span>
+      )}
+    </>
+  )
   return (
-    <div role="listitem" className={cn('mb-1 rounded-lg border-l-2 bg-canvas-overlay/40', meta.accent)}>
-      <button
-        type="button"
-        onClick={onToggle}
-        aria-expanded={open}
-        className="w-full flex items-center gap-1.5 min-w-0 px-2.5 py-1.5 text-left group"
-      >
-        <ChevronRight className={cn('w-3.5 h-3.5 text-ink-muted/60 transition-transform shrink-0', open && 'rotate-90')} />
-        <meta.Icon className={cn('w-3.5 h-3.5 shrink-0', meta.text)} aria-label={meta.label} />
-        {row.kind === 'edge' ? (
-          <span className="flex items-center gap-1 min-w-0 text-[13px] text-ink">
-            <span className="truncate">{row.sourceName || row.sourceEntityId}</span>
-            <ArrowRight className="w-3 h-3 text-ink-muted/70 shrink-0" />
-            <span className="truncate">{row.targetName || row.targetEntityId}</span>
-          </span>
-        ) : (
-          <span className="text-[13px] text-ink truncate">{label}</span>
-        )}
-        {row.kind === 'node' && row.qualifiedName && row.qualifiedName !== label && (
-          <span className="text-[11px] text-ink-muted/70 truncate min-w-0 hidden sm:inline">{row.qualifiedName}</span>
-        )}
-      </button>
+    <div role="listitem" aria-current={active || undefined}
+      className={cn('mb-1 rounded-lg border-l-2 bg-canvas-overlay/40', meta.accent,
+        active && 'bg-accent-lineage/[0.08] ring-1 ring-accent-lineage/40')}>
+      {onActivate ? (
+        <div className="flex items-center min-w-0">
+          <button type="button" onClick={onToggle} aria-expanded={open} aria-label={`What changed in ${label}`}
+            className="pl-2.5 pr-1 py-1.5 rounded-l-lg hover:bg-black/[0.04] dark:hover:bg-white/[0.05]">
+            {chevron}
+          </button>
+          <button type="button" data-change-row onClick={onActivate}
+            className="flex-1 flex items-center gap-1.5 min-w-0 pr-2.5 py-1.5 text-left rounded-r-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40">
+            {name}
+          </button>
+        </div>
+      ) : (
+        <button
+          type="button"
+          onClick={onToggle}
+          aria-expanded={open}
+          className="w-full flex items-center gap-1.5 min-w-0 px-2.5 py-1.5 text-left group"
+        >
+          {chevron}
+          {name}
+        </button>
+      )}
       {open && (
         <div className="px-2.5 pb-2 pl-7">
-          <RowDetail wsId={wsId} graphId={graphId} origin={origin} row={row} />
+          <ChangeDetail wsId={wsId} graphId={graphId} origin={origin} entityId={row.entityId} label={label} />
         </div>
       )}
     </div>
   )
 }
 
-/** One entity before and after, fetched when its row is opened. */
-function RowDetail({ wsId, graphId, origin, row }: {
-  wsId: string
-  graphId: string
-  origin: ChangeListOrigin
-  row: ChangeListRow
-}) {
-  const q = useChangeEntry(wsId, graphId, origin, row.entityId)
-  if (q.isLoading) return <SkeletonText lines={2} className="py-1" />
-  if (q.isError || !q.data) {
-    return <p className="text-[11px] text-ink-muted px-2 py-1.5">Couldn't load this change.</p>
-  }
-  const d = q.data
-  const change: GraphChange = {
-    entityId: d.entityId,
-    kind: d.kind,
-    status: d.status === 'unchanged' ? 'modified' : d.status,
-    label: rowLabel(row),
-    before: d.before ?? undefined,
-    after: d.after ?? undefined,
-    origin: 'branchId' in origin
-      ? { source: 'branch', branchId: origin.branchId }
-      : { source: 'compare', fromSeq: origin.fromSeq, toSeq: origin.toSeq },
-  }
-  return <EntityDiff change={change} />
-}
-
 /** An origin past what a list holds: what changed, counted, and why it isn't listed. */
-function TooLargeToList({ summary, className }: { summary: ChangeListSummary; className?: string }) {
+export function TooLargeToList({ summary, className }: { summary: ChangeListSummary; className?: string }) {
   const changed = summary.tooLarge?.changed ?? summary.total
   return (
     <div className={cn('rounded-xl border border-glass-border bg-black/[0.02] dark:bg-white/[0.03] px-4 py-3.5', className)}>

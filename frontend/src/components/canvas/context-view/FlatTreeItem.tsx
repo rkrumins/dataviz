@@ -13,7 +13,8 @@ import { useViewEntityType } from '@/hooks/useViewSchema'
 import { useCanvasStore } from '@/store/canvas'
 import { generateIconFallback } from '@/lib/type-visuals'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
-import { useEntityChangeDecoration } from '@/features/versioning/canvas/useDiffDecoration'
+import { useEntityChangeDecoration, deletedTitle } from '@/features/versioning/canvas/useDiffDecoration'
+import { DeletedChip, STATUS_META } from '@/features/versioning/components/NodeDiffBadge'
 import { usePreferencesStore } from '@/store/preferences'
 import { usePersonaMode } from '@/store/persona'
 import { resolveEntityName, technicalIdentity } from '@/lib/entityDisplayName'
@@ -24,6 +25,7 @@ import { portView, type NodePorts } from './lineagePorts'
 import { LineagePortGlyph } from './LineagePortGlyph'
 import { SearchMatchBadge } from '../search/SearchMatchBadge'
 import { NarrowRowMark } from '@/features/narrow/NarrowRowMark'
+import { DeletedInsideMark } from '@/features/versioning/canvas/DeletedInsideMark'
 import { useSearchHighlight } from '../search/useSearchHighlight'
 import { DisplayRuleTagChips } from '../property-manager/DisplayRuleTagChips'
 import { useDisplayRuleLook } from '@/store/displayRuleMatchStore'
@@ -91,6 +93,8 @@ interface FlatTreeItemProps {
   onContextMenu: (e: React.MouseEvent, id: string) => void
   onDoubleClick: (id: string, event?: React.MouseEvent) => void
   onAddChild?: (parentId: string) => void
+  /** Bring back a deletion saved to the draft — offered where the canvas can be edited. */
+  onRestore?: (urn: string) => void
   onFocus: (node: HierarchyNode) => void
   onToggleSearch?: (id: string) => void
   isSearchVisible?: boolean
@@ -166,6 +170,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
   onContextMenu,
   onDoubleClick,
   onAddChild,
+  onRestore,
   onFocus,
   onToggleSearch,
   isSearchVisible = false,
@@ -827,8 +832,8 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
           textClass,
           (isHighlighted || isOnLineage) ? "text-accent-lineage" : isSelected ? "text-ink" : isContext ? "text-ink-secondary" : "text-ink/90",
           isHovered && !isSelected && "text-ink",
-          // Strikethrough for a delete (staged or committed) makes the destruction intent unmissable
-          isPendingDelete && "line-through decoration-rose-300/80 decoration-2",
+          // Struck through for a delete (staged or committed): the destruction intent is unmissable
+          isPendingDelete && STATUS_META.removed.strike,
           // 3-line cap + word-wrap. ``break-words`` triggers only
           // when a word genuinely cannot fit, so normal labels
           // stay on a single line. The 3-line ceiling handles
@@ -928,8 +933,11 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
           then reaches into the row's padding instead of making the row
           taller than the virtualizer's estimate. */}
       <div className={cn("flex items-center gap-1.5 flex-shrink-0 relative z-[5]", minimal && "h-5")}>
+        {isPendingDelete && <DeletedChip compact={minimal} title={deletedTitle(directDeco)} />}
         {/* On a narrowed canvas: why this row is there (nothing otherwise). */}
         {!isTracing && <NarrowRowMark urn={urnOrId} collapsed={!isExpanded && hasChildren} />}
+        {/* Deletions under this row the canvas hasn't drawn: choosing it draws them here. */}
+        {!isTracing && <DeletedInsideMark urn={urnOrId} onOpen={() => { if (!isExpanded) onToggle(node.id) }} />}
         {(descendantCount > 0 || traceApprox > 0) && (
           <span className={cn(
             "text-[11px] px-2 py-1 rounded-lg flex-shrink-0",
@@ -1051,8 +1059,23 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
           </button>
         )}
 
+        {/* Restore — a deletion saved to the draft, back where it was */}
+        {node.data?.isGhost === true && onRestore && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation()
+              onRestore(node.urn ?? node.id)
+            }}
+            className="flex items-center justify-center p-1.5 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-500 dark:text-rose-400 transition-all duration-200 hover:scale-110 active:scale-95 leading-none"
+            title={`Restore ${displayName}`}
+            aria-label={`Restore ${displayName}`}
+          >
+            <LucideIcons.RotateCcw className="w-3 h-3 block" />
+          </button>
+        )}
+
         {/* Add child button */}
-        {entityType?.hierarchy?.canContain && entityType.hierarchy.canContain.length > 0 && onAddChild && (
+        {entityType?.hierarchy?.canContain && entityType.hierarchy.canContain.length > 0 && onAddChild && !isPendingDelete && (
           <button
             onClick={(e) => {
               e.stopPropagation()

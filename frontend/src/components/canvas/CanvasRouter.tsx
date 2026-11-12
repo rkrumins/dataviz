@@ -25,7 +25,7 @@ import { useTraceStore } from '@/hooks/useUnifiedTrace'
 import { useBranchStore } from '@/store/branchStore'
 import { useReferenceModelStore } from '@/store/referenceModelStore'
 import { useFeature } from '@/store/features'
-import { useStagedChangesStore } from '@/store/stagedChangesStore'
+import { stagedScopeKey, useStagedChangesStore } from '@/store/stagedChangesStore'
 import { CanvasVersioningBar } from '@/features/versioning/components/CanvasVersioningBar'
 import { useStagedDraftPersistence } from '@/features/canvas-drafts/useStagedDraftPersistence'
 import { RestoredDraftBanner } from '@/features/canvas-drafts/RestoredDraftBanner'
@@ -143,17 +143,17 @@ export function CanvasRouter({ className, layoutType: layoutTypeProp }: CanvasRo
   // canvas itself rehydrates from the branch-scoped provider via ViewExecutionContext.)
   const scopeWs = useBranchStore((s) => s.workspaceId)
   const scopeDs = useBranchStore((s) => s.dataSourceId)
-  const stagedScopeKey = `${scopeWs ?? ''}::${scopeDs ?? ''}::${currentBranchId ?? 'main'}`
+  const scopeKey = stagedScopeKey(scopeWs, scopeDs, currentBranchId)
   useEffect(() => {
-    useStagedChangesStore.getState().setScope(stagedScopeKey)
-  }, [stagedScopeKey])
+    useStagedChangesStore.getState().setScope(scopeKey)
+  }, [scopeKey])
 
   // Persist unsaved staged work to localStorage under the same scope key so a
   // refresh restores it (with a banner) instead of losing it. Only meaningful
   // in a draft (staged edits require an open branch); on 'main' the snapshot
   // stays empty. See features/canvas-drafts/.
   const { restoredCount, dismissRestored, discardAllStaged } = useStagedDraftPersistence(
-    currentBranchId ? stagedScopeKey : null,
+    currentBranchId ? scopeKey : null,
     currentBranchId,
     hydrationPhase === 'complete',
   )

@@ -20,6 +20,7 @@ tests/integration/test_bootstrap_job.py
 tests/integration/test_children_paging_exact_live.py
 tests/integration/test_children_sibling_lineage_live.py
 tests/integration/test_commit_provenance.py
+tests/integration/test_deletion_restore.py
 tests/integration/test_draft_awareness.py
 tests/integration/test_draft_levels.py
 tests/integration/test_draft_narrowing.py
@@ -96,6 +97,7 @@ tests/integration/test_repair_revert_commit.py
 tests/integration/test_resync_identity_invariant.py
 tests/integration/test_review_inbox_open_prs.py
 tests/integration/test_review_policy.py
+tests/integration/test_revision_bounds_postgres.py
 tests/integration/test_revision_overlay_reads.py
 tests/integration/test_seed_identity.py
 tests/integration/test_shared_draft_members.py

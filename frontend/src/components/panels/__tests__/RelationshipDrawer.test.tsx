@@ -3,14 +3,17 @@
  * owner relies on: it names both ends and walks to them on the shared trail,
  * says who created and last changed the relationship, lets a raw lineage
  * relationship be edited (staged), reversed and deleted in a draft, keeps roll-ups,
- * hierarchy links and published relationships read-only with the reason, and
- * guards unsaved edits against a move away.
+ * hierarchy links and published relationships read-only with the reason,
+ * guards unsaved edits against a move away, and leads with What changed for a
+ * relationship the canvas's changes hold.
  */
 import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { GraphEdge } from '@/providers/GraphDataProvider'
+import { useBranchStore } from '@/store/branchStore'
 import { useCanvasStore, type DrawerEdgeTarget, type LineageEdge, type LineageNode } from '@/store/canvas'
+import { buildChangeSet } from '@/features/versioning/model/changeModel'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { useFeaturesStore } from '@/store/features'
 
@@ -23,6 +26,8 @@ const h = vi.hoisted(() => ({
   /** The relationships beneath a roll-up, as the data source answers. */
   beneath: { data: undefined, isLoading: false, isError: false } as { data?: { edges: GraphEdge[]; total: number; truncated: boolean }; isLoading: boolean; isError: boolean },
   beneathCalls: [] as unknown[][],
+  /** What the drawer's What changed read. */
+  entryArgs: [] as unknown[],
 }))
 
 vi.mock('@/hooks/useRelationshipRecord', () => ({
@@ -48,6 +53,7 @@ vi.mock('@/features/versioning/hooks/useVersioning', () => ({
     isLoading: false,
   }),
   useBranches: () => ({ data: [] }),
+  useChangeEntry: (...args: unknown[]) => { h.entryArgs = args; return { isLoading: true } },
   useProjectionWatermark: () => ({ data: { committed: 3, projected: 3, fresh: true, status: 'idle', lastProjectedAt: '2026-02-02T00:00:00Z' } }),
 }))
 vi.mock('@/providers/GraphProviderContext', async (importOriginal) => ({
@@ -402,5 +408,20 @@ describe('RelationshipDrawer — a connection', () => {
       expect(screen.getByText(/Expand either end — or double-click the line/)).toBeInTheDocument()
       expect(screen.getByRole('list', { name: /Roll-ups this line stands for/ })).toBeInTheDocument()
     })
+  })
+})
+
+describe('RelationshipDrawer — a changed relationship', () => {
+  afterEach(() => useBranchStore.getState().reset())
+
+  it('leads with What changed, by its entity id rather than the canvas line\'s', () => {
+    h.record = { ...h.record!, id: 'rel-1' }
+    useBranchStore.setState({ workspaceId: 'ws', graphId: 'g', activeChangeSet: buildChangeSet([{
+      entityId: 'rel-1', kind: 'edge', status: 'added', label: 'FLOWS_TO', origin: { source: 'branch', branchId: 'd1' },
+    }]) })
+    setup(rel('e1'))
+    render(<RelationshipDrawer canEdit />)
+    expect(screen.getAllByRole('heading', { level: 3 })[0]).toHaveTextContent('What changed')
+    expect(h.entryArgs).toEqual(['ws', 'g', { branchId: 'd1' }, 'rel-1'])
   })
 })

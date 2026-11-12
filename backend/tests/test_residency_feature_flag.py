@@ -32,7 +32,7 @@ def test_graph_residency_ships_off_in_lineage_after_forks():
                      key=lambda d: d["sort_order"])
     assert [d["key"] for d in lineage] == [
         "versioningEnabled", "forksEnabled", "residencyEnabled", "traceEnabled",
-        "importInMemoryReconcile"]
+        "importInMemoryReconcile", "revisionViewerEnabled"]
     # It refuses nothing, so there is nothing to tell a user it stopped.
     assert "residencyEnabled" not in REFUSAL_MESSAGES
 

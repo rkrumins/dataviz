@@ -9,6 +9,447 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Review changes: what changed, field by field
+
+After **Review changes**, what changed in an entity or relationship is one click from wherever you
+meet it, whether it was added, modified or deleted.
+
+### Added
+
+- **What changed, on the review's bar**, opens the current change field by field:
+  - for something added, what it was added with;
+  - for something modified, each field that changed, before and after;
+  - for something deleted, what it held.
+
+  A relationship also shows its two ends. It stays open from change to change, and for your next
+  review, until you close it.
+- **What changed, in an entity's details.** An entity or relationship that changed starts its
+  details with what changed: *Added in this draft*, or *Modified between #41 and #42*, then each
+  field. It's there whether or not a review is open.
+
+---
+
+## [Unreleased] — Review changes: one at a time, each found on the canvas
+
+The last of three parts toward **Review changes**. In the Context View, you can now go through
+every change one at a time. Each one is found on the canvas where it is: past the 500 deleted
+entities drawn, however deep, whether or not it was loaded.
+
+### Added
+
+- **A bar at the bottom of the canvas** goes through the changes, starting with the first.
+  - It says what each one is in plain words: *Deleted · orders_legacy · from Sales › crm · by Ana*.
+    Technical users also see the type and qualified name.
+  - **‹ ›**, or **← →**, go to the previous or next change: opened down to, selected and scrolled
+    to. A deletion is drawn where it was, past the 500.
+  - It shows one kind of change at a time, with counts.
+  - **Details** opens the change's details; **List** opens every change beside the canvas; **×**
+    ends the review.
+  - When a change isn't drawn here, the bar says so, and takes you as near as the canvas gets.
+- **The list moves with the bar.** Choosing a row goes to that change; the current one is marked
+  and kept in view; **↑ ↓** move between rows; a row's arrow still shows what changed.
+- **Business users get the bar alone and technical users the list too.** **List** changes it, and
+  the choice is kept for your next review.
+- **"Deleted inside"** on a row, such as **🗑 120**, says how many deletions under it aren't
+  drawn. Choosing it draws them, 200 at a time.
+
+### Changed
+
+- **Closing the list** keeps the review going on the bar; its **×** ends it.
+- **On a screen narrower than 1,280 pixels**, the list makes way while an entity's details are
+  open, and comes back after.
+- **The bar gives way to a trace**, and comes back after it.
+
+---
+
+## [Unreleased] — Review changes: every change, beside the canvas
+
+The second of three parts toward **Review changes**. In the Context View, every change of a draft,
+a past revision or two revisions compared now lists beside the canvas, however many there are.
+
+### Added
+
+- **Review changes**, a list in the Context View's left rail.
+  - **What it lists:**
+    - a draft's saved changes;
+    - what changed since a past revision, or what one revision changed;
+    - two revisions compared;
+    - on Published, the latest revision.
+  - **What you can do:** show **All**, **Added**, **Modified** or **Deleted**, one at a time with
+    counts; search; filter by entities or relationships, and by type; open a row to see what changed.
+  - The canvas highlights what one revision changed while you review it.
+  - It shares the rail with search results: opening one closes the other, and each comes back as
+    you left it.
+- **Starting a review:**
+  - the counts in the strip above the canvas, each on its own kind of change;
+  - "M of N deleted drawn" and "+N new";
+  - the comparison chip;
+  - a past revision's since-then counts;
+  - **Reviews → Changes**;
+  - **History → Compare**.
+
+### Changed
+
+- **In the Context View, Reviews → Changes is a summary** of what the canvas shows, with **Review
+  changes**: a draft's saved changes, a revision's, or the latest revision on Published, where it
+  used to say to switch to a draft. Your unsaved edits and the draft's views stay above it.
+- **In the Context View, History → Compare offers Review changes** in place of **Highlight on
+  canvas** and its list.
+- The graph and hierarchy layouts keep their lists.
+
+---
+
+## [Unreleased] — Deleted entities never stand in for children that haven't loaded
+
+The first of three parts toward **Review changes**, a way through every change on the canvas. This
+part fixes how deleted entities drawn where they were (tombstones) count, and lets the canvas draw
+one past the 500 it draws on its own.
+
+### Fixed
+
+- **A container could stop loading its children** because tombstones counted as loaded children.
+  - One whose tombstones filled its child count never loaded the children it still has.
+  - One expanded with only tombstones inside didn't load its first page.
+- **Counts came up short for the same reason:**
+  - a row's "N more";
+  - its column's total, whose header also counted tombstones as entities the layer holds;
+  - a layer anchor's remainder.
+- **Paging went wrong for the same reason:**
+  - a sort flip re-sorted a partial page as if it were whole;
+  - lineage roll-ups skipped a container that still had children to load.
+- **A deleted container could offer "Load more"**, or ask for children the graph no longer has.
+- **A search reveal beside tombstones paged the levels it opened.** Tombstones aren't a page anyone
+  scrolled to, so the level waits, as one holding only the revealed entity does.
+
+### Added
+
+- **The canvas can draw a deletion past its 500 on request**, with the deleted entities above it,
+  and knows how many deletions under each row it hasn't drawn. Locate and "N deleted inside" use
+  this in the next parts.
+  - At most 500 are drawn on request, the oldest ask dropped first.
+  - Another draft or comparison starts without them.
+
+---
+
+## [Unreleased] — Bring back one deleted entity through your draft
+
+Bringing back a published deletion meant undoing the whole revision that made it, or restoring the
+whole graph to before it. Now one entity can come back on its own.
+
+### Added
+
+- **Restore into my draft**, in a published deletion's details, brings back the entity. What it
+  contained and its relationships come too, each under its own id.
+  - They are staged in your draft, which opens if it isn't open, and **Review & Save** opens with
+    them.
+  - Once saved and published, the entity is back as it was, with the same id.
+- **It says why it can't, rather than staging what won't save:**
+  - your draft began before the deletion (pull the latest first);
+  - your draft has it again;
+  - your draft no longer has what held it;
+  - too much went with it.
+- **`…/deletion/cascade?into=<draft>`** says what a restore would meet in a draft: what it hangs
+  from there, the links it can't take, and whether the draft can take it at all.
+
+---
+
+## [Unreleased] — Who deleted it, when, and what went with it
+
+A deleted entity said only that it was deleted. Now its details say who deleted it, when and in which
+revision, where it lived, what it held and what went with it, wherever it is seen.
+
+### Added
+
+- **A deleted entity's details.** Select a deleted entity or relationship drawn where it was, or
+  choose **Deletion details** on a deleted row of any list of changes. They show:
+  - who deleted it, when and in which revision;
+  - for a deletion published from a draft, who published it, and the message it was published with;
+  - where it lived, and what it held.
+
+  **What went with it** and its **History** unfold on request.
+- **Open just before it was deleted**, on a canvas: the graph as it was the revision before, with the
+  entity selected. Too far back, it opens the comparison with now instead.
+- **See the change**: the revision that deleted it, or your draft's **Changes**.
+- **A published revision's number links to what it changed**, in an entity's history.
+- **`GET …/entities/{eid}/deletion`** and **`GET …/entities/{eid}/deletion/cascade`** say how an
+  entity came to be deleted and what went with it. Both only read, so an API key that only reads may
+  call them.
+
+### Changed
+
+- **The drawer of a deleted entity** shows its details, and **Restore** beside them. It used to show
+  only a banner.
+- **The drawer's footer says "Deleted"**, in rose, with who and when, for an entity its line no
+  longer has.
+
+### Fixed
+
+- **A relationship deleted with an entity struck through both its ends**, in a delete's preview too,
+  even the one that is still there. Only an end that went as well is struck through now.
+
+---
+
+## [Unreleased] — Deletions drawn where they were, in comparisons and in large drafts
+
+Two revisions compared on the canvas showed only rings: what the newer one no longer had wasn't
+drawn at all. Nor was anything a draft of more than 20,000 changes deleted.
+
+### Added
+
+- **A comparison draws its deletions where they were**, as a draft does: struck through and marked
+  **Deleted** under their parent, up to 500, with deleted relationships in rose dashes. Hover
+  **Deleted** to see between which revisions it went.
+- **The comparison chip counts what changed**, added, modified and deleted, and hovering it shows
+  what each mark means.
+- **When not every deletion is drawn, the canvas says how many are**, such as **3 of 40 deleted
+  drawn**, and opens the list: the comparison's, or the draft's **Changes**.
+- **`POST …/diff/entries/batch`** reads up to 500 rows of a change list, before and after, in one
+  request. It changes nothing, so an API key that only reads may call it.
+
+### Changed
+
+- **A draft of more than 20,000 changes draws its deletions too.** **Restore** works there for up
+  to 1,000 entities and 2,000 relationships deleted together. Past that it says so, rather than
+  bring back part of them.
+- **A deletion drawn on the canvas opens at once in a change list**: what it was is already loaded.
+
+### Fixed
+
+- **Hiding a draft's saved changes also hid the rings of a comparison** highlighted on Published
+  afterwards.
+
+---
+
+## [Unreleased] — Saved deletions stay in place on every layout, and come back whole
+
+A deletion saved to a draft stayed visible only in the Context View; the graph and hierarchy layouts
+dropped it, and **Restore** left its relationships behind.
+
+### Changed
+
+- **Every layout keeps a saved deletion where it was** until the draft is published: struck
+  through, under its parent, with **Restore**. The graph and hierarchy layouts used to drop it.
+- **A deletion waits for its parent.** It is drawn under its parent once the parent is on the
+  canvas, and comes back when you expand a collapsed parent again. Before, it was drawn at the top of
+  its layer when its parent wasn't loaded, and disappeared for good after a collapse.
+- **At most 500 deletions are drawn on a canvas**; **Changes** lists them all. Before, every one was.
+- **Restore brings back what was deleted with an entity**: what it held, and its relationships to
+  entities still there. Each comes back under its own id, so saving it leaves no trace in the draft's
+  changes. Before, its relationships stayed deleted, and its parent link came back under a new id.
+- **Restore is offered only where you can edit** this canvas: on the card, the Context View row, the
+  hierarchy row and the drawer.
+
+### Fixed
+
+- **A child moved to another parent could show under both parents** while the draft held its old
+  link as a deletion.
+- **The graph and hierarchy layouts' legacy Save would have sent deletions as live entities.**
+- **A graph card showed a stray 0** where its entity held nothing, as every deletion drawn there does.
+
+---
+
+## [Unreleased] — Deleted entities read the same everywhere
+
+A deleted entity looked different on every surface, or not deleted at all. Now every card, row and
+list, and the details drawer, shows a deletion the same way: the name struck through and a quiet
+**Deleted** chip. A deleted relationship is drawn in rose dashes.
+
+### Changed
+
+- **One look for a deletion, on every layout.** On a graph card, a Context View row, a hierarchy row
+  and the drawer, a deleted entity's name is struck through and a **Deleted** chip sits beside it.
+  Hovering the chip says whether the deletion is saved to this draft or not saved yet. Lists call
+  it **Deleted**, where they said **Removed**.
+- **Deleting an entity marks everything it takes with it** (its contents and every relationship
+  touching them) until you save or discard. Before, only the entity itself was marked.
+- **A deleted relationship stays drawn, in rose dashes**, until the deletion is saved or discarded;
+  before, it disappeared at once.
+  - A saved deletion draws the same way, where it used to look like a live relationship.
+  - A line that also draws a live relationship stays live.
+- **The change lists name deleted relationships by their ends.** **Files changed** in a review says
+  `FLOWS_TO · Orders → Revenue`, not only `FLOWS_TO`. A delete's preview names the entities, not
+  their ids. Removed entries are struck through in every list and tree.
+- **The canvas legend** (hover **Committed**) explains the struck name, the **Deleted** chip and the
+  rose dashes.
+
+### Fixed
+
+- **The hierarchy's change ring showed the entity type's colour**, not rose, amber or green.
+- **The Context View's halo for a relationship edited but not saved never appeared.** It was looked
+  up by the drawn line's id instead of its relationships'.
+
+---
+
+## [Unreleased] — The graph as it was, on by default
+
+**Revision history viewer: the graph as it was** (`revisionViewerEnabled`) is no longer a preview.
+It is on by default, as an active capability under **Lineage**, beside Version control.
+
+Anyone who can read a data source can now:
+- open its published graph as it was at any revision;
+- search its names and trace its lineage as they were then;
+- compare any two revisions.
+
+They can do this from a view's **History** or from the data source's **Versioning** tab.
+
+### Changed
+
+- **`revisionViewerEnabled` defaults on.** A value that can't be read counts as on, as it does for
+  every capability. Turned off, it works as it did: every graph read that names a past revision
+  answers 403 `feature_disabled`, and the **History** tab is called **Commits**.
+- **A switch's default follows the code.** On start, the registry sync now sets each definition's
+  `default_value` from the code, as it already did for its name and copy.
+  - A default changed through the definitions API is put back.
+  - A value an administrator stored is never touched.
+  - Besides this switch, it changes no value a deployment reads. The only other default changed
+    since the registry began, `semanticLayerNonAdminEditing`'s in July, is stored in every database.
+
+### Upgrading
+
+- **From 0.2.0, nothing to do.** The switch is new in this release, and it arrives on.
+- **A deployment running unreleased code that already had the switch** may have it stored off. A
+  stored "off" stays off.
+  - A database stores every switch's value when it is first started.
+  - Saving **Admin → Features** stores every switch's value again.
+  - So it is stored off where the database was first started since the switch arrived, or where that
+    page was saved since. Turn it on there: **Revision history viewer: the graph as it was**.
+  - Otherwise it comes on by itself. No migration changes a stored value.
+
+---
+
+## [Unreleased] — The graph as it was, on every layout and from the data source
+
+Every layout can now read the graph as it was at a past revision without sending a request the
+server refuses. Its names can be searched and, in the Context View, its lineage traced as they
+were. A data source's Versioning tab opens its revisions in a view. What the canvas asks of a
+comparison is bounded too. All of it is still behind the `revisionViewerEnabled` preview.
+
+### Added
+
+- **Search names at a past revision, on every layout.** The Context View's search box searches
+  names as they were then, and its **Look in** is a fixed **Names**. On the graph and hierarchy
+  layouts, **Search** opens a name search in place of Advanced Search: 50 matches a page, and
+  **Load more**.
+- **Trace lineage at a past revision** in the Context View: the trace, the Lens and their links
+  follow the flows as they ran then. On every layout, so does the lineage in an entity's details.
+- **The data source's Versioning tab opens its revisions.** It lists Published's whole history,
+  with its months, comparisons and what each revision changed; it used to list the last 12.
+  - Pick a view under **Open in**; the choice is remembered for the data source.
+  - A revision then **Opens** in that view, **Highlights** a comparison on it, or copies its link.
+  - With no views, comparing still works.
+- **A link can highlight a comparison**: `/views/{view}?rev=T&hl=K` opens revision T with what
+  changed after K highlighted.
+- `GET …/diff/index?max=N` answers past N changes with the total and no entries (`truncated`).
+
+### Changed
+
+- **At a past revision, what reads the graph as it is now is off on every layout, and says why.**
+  - That is Advanced Search, display rules (**Properties**), subset views, Narrow, the graph and
+    hierarchy layouts' trace (it is rolled up) and editing.
+  - The graph and hierarchy layouts used to offer them and have the server refuse them.
+  - The client now holds every read at a revision to the server's list, so none is refused.
+- **Highlight on canvas draws at most 20,000 of a comparison's changes.**
+  - It used to download all of them, up to 250,000.
+  - Past that, it says **Too many changes to highlight (N)** and offers **Open the list**.
+  - A draft's rings are unchanged.
+- **"Since then" counts up to the head a revision was opened at.**
+  - Each publish used to make the banner and the history ask for a new comparison.
+  - Once Published moves on, they say **Published has moved on: N newer revisions · Update**.
+- **A busy server is asked again when it says to.**
+  - A change list, the history or a revision's plan answered 503 `change_list_busy` or
+    `revision_busy` is asked again up to three times, after its Retry-After held to 1–10 s.
+  - A 4xx is not asked again; any other failure is asked once more, as before.
+- **A revision that Published moves too far on from while it is open** is handed over to its
+  comparison with now, as one too far back to open is. The canvas used to keep loading.
+
+### Fixed
+
+- **Backspace on a selected card at a past revision** removed it from the graph layout's canvas
+  (React Flow's own delete). It does nothing there now.
+- **A comparison's Open and Highlight** didn't wait for unsaved edits to be saved or discarded, as
+  a revision's own **Open on canvas** does. Opening one would have parked them out of sight.
+
+### Known limitations
+
+- `?max=` shortens the answer, not the server's work: the comparison is still put together, within
+  `GRAPHVER_CHANGE_LIST_MAX`, to count it.
+- The view picked under **Open in** is remembered in this browser only.
+
+---
+
+## [Unreleased] — The graph as it was: name search and lineage traces, within bounds
+
+Reading the published graph as it was at a past revision (`?asOfSeq`, still the
+`revisionViewerEnabled` preview) now answers name searches and lineage closures exactly. It also
+stays within bounds: no read of the past can hold FalkorDB's slots, pile up builds or run
+unbounded.
+
+### Added
+
+- **Name search at a revision**: `POST /graph/search/names`.
+  - It matches each node's name or qualified name, ignoring case, by substring, prefix, suffix or
+    exact match, optionally narrowed by entity type.
+  - A page holds at most 50 hits and reaches 1,000 deep. Each hit carries its ancestors, root
+    first.
+  - At a revision, whatever changed since is judged by its name then.
+  - It works on main and drafts too while their FalkorDB copy is current. While it catches up it
+    answers as Advanced Search does: 503 while the graph loads, else 501. API keys can call it.
+- **Lineage closures at a revision**: `/trace/closure` with `?asOfSeq` walks the flows as they ran
+  then. Advanced Search and rolled-up traces still answer 501 at a revision.
+- **Settings**:
+  - `GRAPHVER_REVISION_STATEMENT_TIMEOUT_MS` (15,000);
+  - `GRAPHVER_REVISION_BUILDS_MAX` (2);
+  - `GRAPHVER_REVISION_BUILD_WAIT_MS` (3,000);
+  - `GRAPHVER_REVISION_CACHE_ENTRIES` (150,000);
+  - `GRAPHVER_STATE_READ_MAX` (50,000).
+
+### Changed
+
+- **A past revision is put together before its read takes a FalkorDB slot.**
+  - At most two are put together at once per process. A third waits up to 3 s, then answers
+    **503 `revision_busy`** with `Retry-After`. A reader of a revision already being put together
+    waits for that one.
+  - Revisions keep to their own share of the delta cache, so opening them never evicts a draft's.
+- **Every statement reading the past is bounded** by the revision statement timeout: past it,
+  503 `revision_busy` (retryable). A revision that takes longer than that to count is "too far
+  back", for that head.
+- **"Since then"** is summed in Postgres, not by reading every commit row in the window.
+- **The Postgres reader's closures** (a projection catching up) now report what they didn't
+  finish, as FalkorDB's do:
+  - the next hop past the requested depth;
+  - what the node budget or the deadline cut, which the Lens re-roots from.
+
+  Each re-root finds more, and the deadline is honoured.
+- **Reads over Postgres** (drafts, and main while its projection catches up) resolve urns in one
+  batched read, not one lookup per urn.
+
+### Fixed
+
+- **A re-pointed edge served for its old end.** An edge re-pointed since a revision, or in a
+  draft, was returned for a query on its current end with its other value. A canvas or a trace
+  could follow it to the wrong place.
+- **The state cap counted only today's entities.** A whole state as of a revision held to it
+  could hold more than the cap: what had been deleted since never counted.
+
+### Upgrading
+
+- `…/branches/{bid}/state` and `…/commits/{cid}/state` answer **409 `state_too_large`** past
+  50,000 entities. Export instead (`POST …/exports`, with `asOfSeq` for the past), which streams
+  any size.
+- `…/branches/{bid}/diff` answers **409 `too_large_for_tree`** past `GRAPHVER_DIFF_TREE_MAX_CHANGES`.
+  Page it as a change list.
+
+### Known limitations
+
+- A name search at a revision doesn't search inside one container; it searches the whole graph.
+- Node degrees at a revision answer 501 while the projection catches up, as main's do; the canvas
+  asks again later.
+- Right after a burst of writes, before Postgres has refreshed its statistics, reading the past
+  can be several times slower. In one measurement, a 10,000-change revision took 24 s to put
+  together, against 0.5 s afterwards. The bounds hold while it lasts.
+
+---
+
 ## [Unreleased] — Automation that leaves an audit trail, and never blocks people
 
 Integrations that change a versioned graph often left history hard to read: every commit looked

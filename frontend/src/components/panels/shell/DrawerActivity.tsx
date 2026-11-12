@@ -8,7 +8,7 @@
  * published graph after the draft began is said above the cards: the draft still shows the entity
  * as it was.
  */
-import { AlertTriangle, Loader2, PencilLine, RefreshCcw } from 'lucide-react'
+import { AlertTriangle, Loader2, PencilLine, RefreshCcw, Trash2 } from 'lucide-react'
 import type { EntityEvent, EntitySummary } from '@/services/versioningApiService'
 import { useProjectionWatermark } from '@/features/versioning/hooks/useVersioning'
 import { actorName } from '@/features/versioning/model/branchVocab'
@@ -30,6 +30,8 @@ export function DrawerActivity({ summary, loading, wsId, graphId, inDraft }: {
   const name = (e: EntityEvent) => actorName(e.actor ?? undefined, summary?.userNames)
   const updated = summary?.updated
   const created = summary?.created
+  // An entity the line no longer has was last changed by its deletion: who deleted it, and when.
+  const deleted = summary?.exists === false
 
   return (
     <div className="space-y-2">
@@ -41,10 +43,10 @@ export function DrawerActivity({ summary, loading, wsId, graphId, inDraft }: {
       )}
       <div className="grid grid-cols-[3fr_2fr] gap-2">
         <FreshnessStat
-          icon={<PencilLine className="w-4 h-4" />}
-          label={updated?.inDraft ? 'Updated · draft' : 'Updated'}
+          icon={deleted ? <Trash2 className="w-4 h-4" /> : <PencilLine className="w-4 h-4" />}
+          label={`${deleted ? 'Deleted' : 'Updated'}${updated?.inDraft ? ' · draft' : ''}`}
           iso={updated?.at}
-          tone="indigo"
+          tone={deleted ? 'rose' : 'indigo'}
           loading={loading}
           emptyText="No changes yet"
           by={updated ? { id: updated.actor && updated.actor !== 'system' ? updated.actor : null, name: name(updated) } : undefined}

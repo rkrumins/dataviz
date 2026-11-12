@@ -53,7 +53,7 @@ from ..models.graph import (
 from backend.common.models.graph import TraceClosureResult, TraceFrontierNode
 from .base import GraphDataProvider
 from .index_policy import edge_index_ddl
-from backend.common.interfaces.provider import ProviderConfigurationError
+from backend.common.interfaces.provider import NAME_MATCH_OPS, ProviderConfigurationError
 from backend.common.derived_artifacts import is_derived_edge_type, is_derived_label
 from backend.common.property_patch import apply_properties_patch
 from backend.app.services.native_query.parse_cost import MAX_PARSE_COST, parse_cost
@@ -6707,6 +6707,52 @@ class FalkorDBProvider(GraphDataProvider):
     async def search_nodes(self, query: str, limit: int = 10, offset: int = 0) -> List[GraphNode]:
         q = NodeQuery(search_query=query, limit=limit, offset=offset)
         return await self.get_nodes(q)
+
+    @_search_reads
+    async def search_names(
+        self, query: str, *, match: str = "substring", entity_types: Optional[List[str]] = None,
+        limit: int = 20, offset: int = 0,
+    ) -> NodePage:
+        """One page of the nodes whose name or qualified name matches ``query``, ignoring case
+        (``match``: substring, prefix, suffix or exact, as :data:`NAME_MATCH_OPS` spells them), of
+        ``entity_types`` when given, in (displayName, urn) order — the name Advanced Search shows
+        (``display_name_expr``). What a past revision's name search reads of the store as it is
+        now (``DraftOverlayProvider.search_names``). One row past the page says whether another
+        follows."""
+        from .falkordb_search.relevance import display_name_expr
+        await self._ensure_connected()
+        q = (query or "").strip().lower()
+        if not q:
+            return NodePage(nodes=[], hasMore=False, nextOffset=offset)
+        op = NAME_MATCH_OPS[match]
+        cond = (f"(toLower({display_name_expr(getattr(self, '_name_property', None))}) {op} $q "
+                f"OR toLower(toString(n.qualifiedName)) {op} $q)")
+        params = {"q": q, "skip": int(offset), "limit": int(limit) + 1}
+        page = "WITH n ORDER BY n.displayName, n.urn, id(n) SKIP $skip LIMIT $limit RETURN n"
+        types = list(self._alias_entity_types([str(t) for t in entity_types or []]))
+        if types:                                  # per-label scans, as get_nodes' label union
+            union = " UNION ".join(f"MATCH (n:{_sanitize_label(t)}) WHERE {cond} RETURN n"
+                                   for t in types)
+            cypher = f"CALL {{ {union} }} {page}"
+        else:
+            cypher = f"MATCH (n) WHERE {cond} {page}"
+
+        async def _read():
+            try:
+                return await self._ro_query(cypher, params=params, timeout=self._NODES_QUERY_TIMEOUT,
+                                            op="nodes.search_names")
+            except Exception as e:
+                if await self._is_verified_missing_graph(e):
+                    return None
+                raise
+
+        anchors = [_sanitize_label(t) for t in types]
+        result = await self._read_decoded_fresh(
+            _read, lambda r: bool(anchors) and self._decoded_without(getattr(r, "result_set", None), anchors))
+        nodes = [n for n in (self._extract_node_from_result(row[0])
+                             for row in (getattr(result, "result_set", None) or [])) if n]
+        return NodePage(nodes=nodes[:limit], hasMore=len(nodes) > limit,
+                        nextOffset=offset + min(len(nodes), limit))
 
     @_search_reads
     async def deep_search(self, query, *, deadline_ms=None):

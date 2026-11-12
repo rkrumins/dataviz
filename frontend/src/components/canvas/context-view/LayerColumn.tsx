@@ -77,6 +77,7 @@ interface LayerColumnProps {
   onContextMenu: (e: React.MouseEvent, id: string) => void
   onDoubleClick: (id: string, event?: React.MouseEvent) => void
   onAddChild?: (parentId: string) => void
+  onRestore?: (urn: string) => void
   onAddToLayer?: (layerId: string) => void
   /**
    * True only for a `kind === 'blank'` model — one authored from nothing.
@@ -330,13 +331,23 @@ function getItemKey(item: FlatTreeNode, _index: number): string {
  * avoid (three `children-with-edges` and three notifications for one three-deep
  * hit). Being carried somewhere is not the same as scrolling there, so the
  * sentinel stays disarmed until the container holds something the reader
- * actually asked for. The button is unaffected.
+ * actually asked for. The button is unaffected. Tombstones beside the revealed
+ * child aren't a page either: the canvas draws those on its own.
  */
 function holdsOnlyRevealedChildren(node: HierarchyNode): boolean {
-  return node.children.length > 0
-    && node.children.every(
+  const live = node.children.filter((child) => child.data?.isGhost !== true)
+  return live.length > 0
+    && live.every(
       (child) => (child.data as { viaReveal?: boolean } | undefined)?.viaReveal === true,
     )
+}
+
+/** The children a row draws that the graph still has: tombstones (deleted entities drawn where
+ *  they were) don't count toward its childCount. */
+function liveChildCount(children: readonly HierarchyNode[]): number {
+  let n = 0
+  for (const child of children) if (child.data?.isGhost !== true) n++
+  return n
 }
 
 export const LayerColumn = React.memo(function LayerColumn({
@@ -353,6 +364,7 @@ export const LayerColumn = React.memo(function LayerColumn({
   onContextMenu,
   onDoubleClick,
   onAddChild,
+  onRestore,
   onAddToLayer,
   isBlankModel = false,
   onBuildToLayer,
@@ -820,8 +832,9 @@ export const LayerColumn = React.memo(function LayerColumn({
         // In trace mode the trace API already returns the complete set of
         // trace-relevant nodes; pulling more siblings just produces noise that
         // useTraceFilteredHierarchy hides anyway. Suppress the "X more" pill.
-        const loaded = Math.max(node.children.length, loadedChildren?.get(node.id)?.length ?? 0)
-        const hasMore = !isTracing && loaded < childCount && !activeQuery
+        // A tombstone has nothing more to load: the graph no longer has it.
+        const loaded = Math.max(liveChildCount(node.children), loadedChildren?.get(node.id)?.length ?? 0)
+        const hasMore = !isTracing && node.data?.isGhost !== true && loaded < childCount && !activeQuery
           && exhaustedParents?.get(node.id) !== childCount
 
         // What the session found INSIDE this container, at any depth — the
@@ -924,7 +937,8 @@ export const LayerColumn = React.memo(function LayerColumn({
 
   const viewEntityTypes = useViewEntityTypes()
   // Header totals, 'Layer + known children'. `loadedCount` is the entities
-  // loaded into this column, nested included; group wrappers are not entities.
+  // loaded into this column, nested included; group wrappers are not entities,
+  // and nor are tombstones (deleted entities drawn where they were).
   // `layerTotal` adds what the column knows is still unloaded: each row's
   // childCount less its loaded children (wherever drawn; none once the server
   // said no more pages), the anchor's remainder, and the type feeds' remainder.
@@ -946,12 +960,12 @@ export const LayerColumn = React.memo(function LayerColumn({
     while (stack.length > 0) {
       const n = stack.pop()!
       for (const c of n.children) stack.push(c)
-      if (n.isLogical) continue
+      if (n.isLogical || n.data?.isGhost === true) continue
       loadedCount++
       const childCount = (n.data.childCount as number) || (n.data._collapsedChildCount as number) || 0
       if (childCount === 0 || exhaustedParents?.get(n.id) === childCount) continue
       if (coveredByFeed.has(String(n.typeId).toLowerCase())) continue
-      unloaded += Math.max(0, childCount - Math.max(n.children.length, loadedChildren?.get(n.id)?.length ?? 0))
+      unloaded += Math.max(0, childCount - Math.max(liveChildCount(n.children), loadedChildren?.get(n.id)?.length ?? 0))
     }
     return { loadedCount, layerTotal: loadedCount + unloaded }
   }, [nodes, anchorMore, feedMore, exhaustedParents, loadedChildren, viewEntityTypes])
@@ -3157,6 +3171,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                         onContextMenu={onContextMenu}
                         onDoubleClick={onDoubleClick}
                         onAddChild={onAddChild}
+                        onRestore={onRestore}
                         onFocus={handleFocus}
                         onToggleSearch={toggleSearchNode}
                         isSearchVisible={activeSearchNodes.has(node.id)}

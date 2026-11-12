@@ -15,7 +15,8 @@ import type { EntityInstance, EntityVisualConfig } from '@/types/schema'
 
 import { SearchMatchBadge } from '../search/SearchMatchBadge'
 import { useSearchHighlight } from '../search/useSearchHighlight'
-import { useEntityChangeDecoration, nodeDecorationClass } from '@/features/versioning/canvas/useDiffDecoration'
+import { useEntityChangeDecoration, nodeDecorationClass, deletedTitle } from '@/features/versioning/canvas/useDiffDecoration'
+import { DeletedChip, STATUS_META } from '@/features/versioning/components/NodeDiffBadge'
 import { useRestoreGhost } from '@/features/versioning/canvas/useRestoreGhost'
 import { DisplayRuleTagChips } from '../property-manager/DisplayRuleTagChips'
 import { useDisplayRuleLook } from '@/store/displayRuleMatchStore'
@@ -47,6 +48,8 @@ interface GenericNodeData extends EntityInstance {
   onToggleExpanded?: (nodeId: string) => void
   onTraceUpstream?: (id: string) => void
   onTraceDownstream?: (id: string) => void
+  // Why the host can't trace from here: the trace pair says so, disabled
+  traceBlocked?: string
   onOpenMenu?: (e: React.MouseEvent, id: string) => void
   // The host lets this person add entities here (a draft, for an editor)
   canAddInside?: boolean
@@ -88,6 +91,7 @@ export const GenericNode = memo(function GenericNode({
   const onToggleExpanded = entityData.onToggleExpanded
   const onTraceUpstream = entityData.onTraceUpstream
   const onTraceDownstream = entityData.onTraceDownstream
+  const traceBlocked = entityData.traceBlocked
   const onOpenMenu = entityData.onOpenMenu
 
   const hiddenCount = (entityData as any)._hiddenCount || 0
@@ -204,6 +208,8 @@ export const GenericNode = memo(function GenericNode({
   const search = useSearchHighlight(searchUrn, { isSelected: !!selected })
   // Change decoration — staged (dashed) + committed-vs-main (solid), default-on on a draft.
   const changeDeco = useEntityChangeDecoration().for(searchUrn)
+  // Deleted — saved to the draft or not yet: struck through, with the Deleted chip.
+  const tombstone = changeDeco?.status === 'removed'
   // The view's display rules: a tint and a frame for this card. A trace, a
   // focus or a change decoration paints the same card, and wins.
   const ruleLook = useDisplayRuleLook(
@@ -260,6 +266,7 @@ export const GenericNode = memo(function GenericNode({
               <ToolbarButton
                 icon="ArrowUpRight"
                 label="Trace Upstream"
+                blocked={traceBlocked}
                 onClick={(e) => {
                   e.stopPropagation()
                   onTraceUpstream?.(id)
@@ -268,6 +275,7 @@ export const GenericNode = memo(function GenericNode({
               <ToolbarButton
                 icon="ArrowDownLeft"
                 label="Trace Downstream"
+                blocked={traceBlocked}
                 onClick={(e) => {
                   e.stopPropagation()
                   onTraceDownstream?.(id)
@@ -303,7 +311,7 @@ export const GenericNode = memo(function GenericNode({
 
       {/* Ghost (committed deletion) toolbar — read-only entity, so the only action is to bring it
           back. Restore stages a resurrect (create over the tombstone by its original urn). */}
-      {isGhost && !!selected && (
+      {isGhost && !!selected && !!entityData.canAddInside && (
         <NodeToolbar
           isVisible
           position={Position.Top}
@@ -343,7 +351,6 @@ export const GenericNode = memo(function GenericNode({
           "bg-canvas-elevated",
           !!selected && !isTraced && "ring-2 ring-offset-2",
           !!dragging && "opacity-80 cursor-grabbing",
-          isGhost && "opacity-60",
           // W2.1 — advanced-search direct-match glow (reuses the
           // shared ``search-match-pulse`` keyframes used by
           // FlatTreeItem + HierarchyCanvas so all canvases pulse
@@ -432,20 +439,24 @@ export const GenericNode = memo(function GenericNode({
 
           {/* Content */}
           <div className="flex-1 min-w-0">
-            {/* Type Badge */}
-            <span
-              className="text-2xs font-medium uppercase tracking-wider"
-              style={{ color: visual.color }}
-            >
-              {entityType.name}
-            </span>
+            {/* Type Badge, and the Deleted chip of a deletion */}
+            <div className="flex items-center gap-1.5 min-w-0">
+              <span
+                className="text-2xs font-medium uppercase tracking-wider truncate"
+                style={{ color: visual.color }}
+              >
+                {entityType.name}
+              </span>
+              {tombstone && <DeletedChip compact={visual.size === 'xs'} title={deletedTitle(changeDeco)} />}
+            </div>
 
             {/* Primary Label + W2.1 search match badge */}
             <div className="flex items-center gap-1.5 min-w-0">
               <h3 className={cn(
                 "font-medium text-ink leading-tight truncate flex-1 min-w-0",
                 visual.size === 'xs' ? 'text-xs' :
-                  visual.size === 'sm' ? 'text-sm' : 'text-sm'
+                  visual.size === 'sm' ? 'text-sm' : 'text-sm',
+                tombstone && STATUS_META.removed.strike
               )}>
                 {primaryLabel}
               </h3>
@@ -541,7 +552,7 @@ export const GenericNode = memo(function GenericNode({
         )}
 
         {/* Child Count for collapsed nodes */}
-        {entityData.childCount && !entityData.isExpanded && (
+        {(entityData.childCount ?? 0) > 0 && !entityData.isExpanded && (
           <div className="mt-2 text-2xs text-ink-muted">
             {entityData.childCount} {entityData.childCount === 1 ? 'child' : 'children'}
           </div>
@@ -632,6 +643,7 @@ export const GenericNode = memo(function GenericNode({
     (!next.selected || (
       prevD.onTraceUpstream === nextD.onTraceUpstream &&
       prevD.onTraceDownstream === nextD.onTraceDownstream &&
+      prevD.traceBlocked === nextD.traceBlocked &&
       prevD.onOpenMenu === nextD.onOpenMenu &&
       prevD.canAddInside === nextD.canAddInside
     ))
@@ -749,16 +761,18 @@ function FieldRenderer({ field, value, color, size }: FieldRendererProps) {
   }
 }
 
-// Toolbar Button Component
-function ToolbarButton({ icon, label, onClick }: { icon: string; label: string; onClick?: (e: React.MouseEvent) => void }) {
+// Toolbar Button Component — `blocked` disables it and says why
+function ToolbarButton({ icon, label, onClick, blocked }: { icon: string; label: string; onClick?: (e: React.MouseEvent) => void; blocked?: string }) {
   return (
     <button
-      title={label}
+      title={blocked ?? label}
       aria-label={label}
       onClick={onClick}
+      disabled={!!blocked}
       className={cn(
         "w-7 h-7 rounded-md flex items-center justify-center",
         "text-ink-secondary hover:text-ink hover:bg-black/5 dark:hover:bg-white/10",
+        "disabled:opacity-40 disabled:cursor-not-allowed",
         "transition-colors"
       )}
     >

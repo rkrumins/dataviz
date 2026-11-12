@@ -17,6 +17,7 @@ import { normalizeEdgeType } from '@/store/schema'
 import type { HierarchyNode } from '@/types/hierarchy'
 import type { MatchedEdge } from '@/store/searchStore'
 import { NO_PLACE_FOUND, containmentUpPath } from './useAncestorChains'
+import { isDeletedEdge } from '@/features/versioning/canvas/useDiffDecoration'
 
 // ============================================
 // Types
@@ -985,6 +986,9 @@ export function useEdgeProjection({
       // A bundle is a roll-up when it summarises something other than the raw
       // relationship between the two cards it touches.
       const isGhost = isAggregated || drawn.some((e: any) => e._lifted === true)
+      // A deleted line: every link it draws is a deletion, saved to the draft or not yet. One live
+      // link among them keeps it live.
+      const isDeleted = drawn.every(isDeletedEdge)
       // Nothing but the rest of an open container's children: a faint line.
       const isResidual = drawn.every((e: { _residual?: boolean }) => e._residual === true)
 
@@ -1025,6 +1029,7 @@ export function useEdgeProjection({
         target: targetId,
         isBundled: edgeCount > 1,
         isGhost,
+        isDeleted,
         edgeCount,
         // At the top level too: that is where `bySignificance` reads it.
         bundleSize,
@@ -1081,6 +1086,7 @@ export function useEdgeProjection({
           // A pair that summarises anything in either direction IS a summary —
           // matching the OR its isAggregated sibling already uses.
           isGhost: fwd.isGhost || rev.isGhost,
+          isDeleted: fwd.isDeleted && rev.isDeleted,
           edgeCount,
           bundleSize,
           types: typesArr,

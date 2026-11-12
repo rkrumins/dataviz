@@ -22,7 +22,7 @@ describe('branchStore — a past revision', () => {
   it('opens on Published, leaving the draft, and closes back to the graph as it is', () => {
     const s = useBranchStore.getState()
     s.switchToDraft('br_1', 'v1')
-    s.openRevision({ seq: 12, message: 'Quarter close' })
+    s.openRevision({ seq: 12, headAtOpen: 40, message: 'Quarter close' })
     expect(useBranchStore.getState()).toMatchObject({
       revision: { seq: 12, message: 'Quarter close' }, currentBranchId: null,
     })
@@ -32,15 +32,15 @@ describe('branchStore — a past revision', () => {
 
   it('closes when a draft opens, when Published is chosen, and when the scope changes', () => {
     const s = useBranchStore.getState()
-    s.openRevision({ seq: 12 })
+    s.openRevision({ seq: 12, headAtOpen: 40 })
     s.switchToDraft('br_1')
     expect(useBranchStore.getState().revision).toBeNull()
 
-    useBranchStore.getState().openRevision({ seq: 12 })
+    useBranchStore.getState().openRevision({ seq: 12, headAtOpen: 40 })
     useBranchStore.getState().switchToMain()
     expect(useBranchStore.getState().revision).toBeNull()
 
-    useBranchStore.getState().openRevision({ seq: 12 })
+    useBranchStore.getState().openRevision({ seq: 12, headAtOpen: 40 })
     useBranchStore.getState().setResolved(SCOPE, resolved)          // the same view, refetched
     expect(useBranchStore.getState().revision?.seq).toBe(12)
     useBranchStore.getState().setResolved({ ...SCOPE, viewId: 'v2' }, resolved)
@@ -48,7 +48,7 @@ describe('branchStore — a past revision', () => {
   })
 
   it('reads in the scope it was opened in, and nowhere else', () => {
-    useBranchStore.getState().openRevision({ seq: 7 })
+    useBranchStore.getState().openRevision({ seq: 7, headAtOpen: 40 })
     expect(renderHook(() => useEffectiveRevision('ws1', 'ds1', 'v1')).result.current).toBe(7)
     expect(renderHook(() => useEffectiveRevision('ws1', 'ds1')).result.current).toBe(7)
     expect(renderHook(() => useEffectiveRevision('ws1', 'ds1', 'v2')).result.current).toBeNull()
@@ -70,12 +70,31 @@ describe('branchStore — a past revision', () => {
     expect(useBranchStore.getState().activeChangeSet).toBeNull()
   })
 
+  it('keeps the head it opened at as Published moves on, until it is re-pinned to a newer one', () => {
+    const s = useBranchStore.getState()
+    s.setHighlight({ fromSeq: 3, toSeq: 12 })
+    s.openRevision({ seq: 12, headAtOpen: 40 })
+    const rings = buildChangeSet([])
+    useBranchStore.getState().setActiveChangeSet(rings)
+    useBranchStore.getState().setResolved(SCOPE, { ...resolved, mainHeadCommitSeq: 43 })    // a publish
+    expect(useBranchStore.getState().revision?.headAtOpen).toBe(40)
+
+    // Re-pinned, it is the same revision: its highlight and rings stay.
+    useBranchStore.getState().repinRevision(43)
+    expect(useBranchStore.getState()).toMatchObject({
+      revision: { seq: 12, headAtOpen: 43 }, highlight: { fromSeq: 3, toSeq: 12 }, activeChangeSet: rings,
+    })
+    useBranchStore.getState().closeRevision()
+    useBranchStore.getState().repinRevision(44)
+    expect(useBranchStore.getState().revision).toBeNull()
+  })
+
   it('keeps a highlight only while it shows the revision on the canvas', () => {
     const s = useBranchStore.getState()
     s.setHighlight({ fromSeq: 3, toSeq: 12 })
-    s.openRevision({ seq: 12 })
+    s.openRevision({ seq: 12, headAtOpen: 40 })
     expect(useBranchStore.getState().highlight).toEqual({ fromSeq: 3, toSeq: 12 })
-    useBranchStore.getState().openRevision({ seq: 20 })
+    useBranchStore.getState().openRevision({ seq: 20, headAtOpen: 40 })
     expect(useBranchStore.getState().highlight).toBeNull()
     useBranchStore.getState().setHighlight({ fromSeq: 3, toSeq: 20 })
     useBranchStore.getState().closeRevision()

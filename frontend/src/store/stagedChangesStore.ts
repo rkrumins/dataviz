@@ -248,6 +248,12 @@ function collectStagedSubtree(all: StagedChange[], root: StagedChange): StagedCh
   return [...victims].sort((a, b) => (depthById.get(b.id) ?? 0) - (depthById.get(a.id) ?? 0))
 }
 
+/** The staged slice of a workspace, data source and branch: a draft's staged edits never show on
+ *  another branch, Published's included. */
+export const stagedScopeKey = (
+  wsId: string | null | undefined, dataSourceId: string | null | undefined, branchId: string | null | undefined,
+): string => `${wsId ?? ''}::${dataSourceId ?? ''}::${branchId ?? 'main'}`
+
 export const useStagedChangesStore = create<StagedChangesState>((set, get) => ({
   changes: [],
   isReviewPanelOpen: false,

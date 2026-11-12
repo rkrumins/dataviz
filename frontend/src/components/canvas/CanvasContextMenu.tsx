@@ -66,6 +66,8 @@ export interface ContextMenuAction {
     icon: keyof typeof LucideIcons
     shortcut?: string
     disabled?: boolean
+    /** Shown as its tooltip: why it is disabled. */
+    title?: string
     danger?: boolean
     dividerAfter?: boolean
     onClick: () => void
@@ -88,6 +90,8 @@ export interface CanvasContextMenuProps {
     onDeleteNode?: (id: string) => void
     onCreateChild?: (parentId: string) => void
     onTraceNode?: (id: string) => void
+    /** Why Trace Lineage can't run here; the item says so, disabled. */
+    traceBlocked?: string
     /** Open the Lineage Lens on this node — its immediate connections,
      *  grouped and searchable. */
     onFocusConnections?: (id: string) => void
@@ -134,6 +138,7 @@ export function CanvasContextMenu({
     onDeleteNode,
     onCreateChild,
     onTraceNode,
+    traceBlocked,
     onFocusConnections,
     onCopyUrn,
     onConnect,
@@ -231,6 +236,8 @@ export function CanvasContextMenu({
                     label: 'Trace Lineage',
                     icon: 'GitBranch',
                     shortcut: 'T',
+                    disabled: !!traceBlocked,
+                    title: traceBlocked,
                     onClick: () => { onTraceNode(target.id); onClose() }
                 })
             }
@@ -500,7 +507,7 @@ export function CanvasContextMenu({
         result.push(...customActions)
 
         return result
-    }, [target, onEditNode, onDuplicateNode, onDuplicateWithOptions, onDeleteNode, onCreateChild, onTraceNode, onFocusConnections,
+    }, [target, onEditNode, onDuplicateNode, onDuplicateWithOptions, onDeleteNode, onCreateChild, onTraceNode, traceBlocked, onFocusConnections,
         onCopyUrn, onConnect, onLinkNode, onEditEdge, onDeleteEdge, onReverseEdge, onCreateNode, onPaste,
         onSelectAll, customActions, queryActions, layers, onMoveToLayer, layerMenu, onClose, narrowActions.length, technical])
 
@@ -687,6 +694,7 @@ export function CanvasContextMenu({
                                     <button
                                         onClick={action.onClick}
                                         disabled={action.disabled}
+                                        title={action.title}
                                         className={cn(
                                             "w-full flex items-center justify-between gap-3 px-3 py-2 text-sm transition-colors",
                                             action.disabled

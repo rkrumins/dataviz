@@ -67,6 +67,7 @@ import { saveStagedChangesToDraft } from '@/features/versioning/model/saveStaged
 import { VERSIONING_KEYS, useResolveGraph, useProjectionWatermark } from '@/features/versioning/hooks/useVersioning'
 import { useActiveDraftAccess } from '@/features/versioning/hooks/useActiveDraftAccess'
 import { useViewExecutionContext } from '@/providers/ViewExecutionContext'
+import { revisionCapabilities } from '@/features/versioning/hooks/useAtRevision'
 import { deriveViewCapabilities } from '@/lib/viewAccess'
 import { edgeTypeCopy, relationshipLabel } from '@/lib/relationshipLabel'
 import { connectedEdgeTypes, deriveConnectableEdges } from '@/services/ontologyPreflightService'
@@ -85,6 +86,7 @@ import { useRevealPartners, REVEAL_PARTNERS_CAP } from '@/hooks/useRevealPartner
 import { primeLineageFor } from '@/lib/primeLineageFor'
 import { lookupRetryDelayMs } from '@/config/polling'
 import { shouldAutoLoadFirstPage } from './autoLoadFirstPage'
+import { withoutTombstones } from './loadedChildren'
 import { feedRemainder } from './feedRemainder'
 import {
   childLoadMessage, connectionsLoadedMessage, layersPlacedMessage, loadingChildrenMessage,
@@ -161,6 +163,9 @@ import type { ViewLayerConfig, LayerNodeSortAlgo, LayerNodeSortMode } from '@/ty
 import { defaultReferenceModelLayers } from './constants'
 import { useLayerAssignment } from '@/hooks/useLayerAssignment'
 import { useDeletionGhosts } from '@/features/versioning/canvas/useDeletionGhosts'
+import { useRestoreGhost } from '@/features/versioning/canvas/useRestoreGhost'
+import { useRevisionReveal } from '@/features/versioning/hooks/useRevisionReveal'
+import { useWithStagedDeletions } from '@/features/versioning/canvas/useDiffDecoration'
 import { useContainmentHierarchy } from '@/hooks/useContainmentHierarchy'
 import { useEdgeProjection } from '@/hooks/useEdgeProjection'
 import { useHighlightState } from '@/hooks/useHighlightState'
@@ -339,6 +344,11 @@ import { useFailoverRetry } from '@/hooks/useFailoverRetry'
 import { StaleDataBanner } from '@/components/insights/StaleDataBanner'
 import { useProjectionCatchUp, catchUpMessage } from '@/hooks/useProjectionCatchUp'
 import { SearchMapPanel } from '../search/SearchMapPanel'
+import { ChangesExplorer } from '@/features/versioning/components/ChangesExplorer'
+import { useReviewRail } from '@/features/versioning/hooks/useReviewRail'
+import { useReviewOnCanvas } from '@/features/versioning/hooks/useReviewOnCanvas'
+import { useLocateChange } from '@/features/versioning/canvas/useLocateChange'
+import { ChangeNavigator } from '@/features/versioning/components/ChangeNavigator'
 import {
     ViewRowSearchContext,
     ViewSearchSessionContext,
@@ -1056,6 +1066,7 @@ export function ContextViewCanvas({
   // Reconstruct committed-draft deletions as read-only rose "ghost" nodes (from the draft-vs-main
   // diff) so a deletion stays visible in red until merged — surviving refresh. Draft-only.
   useDeletionGhosts(isDraft)
+  const restoreGhost = useRestoreGhost()
   const canManage = usePermission('workspace:datasource:manage', scopeWsId ?? undefined)
   const graphId = useGraphId()
   // And the draft must be the caller's to write: someone else's, or one made private under them,
@@ -1067,9 +1078,10 @@ export function ContextViewCanvas({
   // for this caller (shared/enterprise view opened without membership).
   const viewExecCtx = useViewExecutionContext()
   const readOnly = viewExecCtx?.readOnly ?? false
-  // A past revision is read-only too, but keeps the versioning bar: it is the way back.
-  const atRevision = (viewExecCtx?.asOfSeq ?? null) != null
-  const canEnterEdit = !!graphId && !readOnly && !atRevision
+  // A past revision is read-only too, but keeps the versioning bar: it is the way back. What else it
+  // allows is one answer for the whole canvas (useAtRevision.ts).
+  const revisionCaps = revisionCapabilities(viewExecCtx?.asOfSeq)
+  const canEnterEdit = !!graphId && !readOnly && revisionCaps.editing
   // The branch switcher moved down here out of CanvasVersioningBar, into the slot
   // the duplicated title block used to occupy. It must appear on exactly the terms
   // the bar did — CanvasRouter mounts that bar only when versioning is on, the view
@@ -1535,7 +1547,7 @@ export function ContextViewCanvas({
   // Orphaned entities (Display menu → Advanced): a power-user panel, closed by default.
   const [orphansOpen, setOrphansOpen] = useState(false)
   // Display rules match through search, which reads the graph as it is now: off at a past revision.
-  useDisplayRuleEngine(atRevision ? null : activeView?.id ?? null)
+  useDisplayRuleEngine(revisionCaps.displayRules ? activeView?.id ?? null : null)
   // The view's display rules (the draft's own, on a draft) and saved queries, from its library.
   useViewLibrary(activeView?.id ?? null, effectiveBranchId)
 
@@ -1967,6 +1979,11 @@ export function ContextViewCanvas({
   const { nodeMap, childMap, parentMap } = useContainmentHierarchy({
     nodes, edges, isContainmentEdge, fingerprint: nodeEdgeFingerprint,
   })
+  // The children each parent holds that the graph still has, to weigh against its childCount.
+  const loadedChildMap = useMemo(
+    () => withoutTombstones(childMap, (id) => nodeMap.get(id)?.data?.isGhost === true),
+    [childMap, nodeMap],
+  )
 
   // Flag-on, and only while some valid entry cascades: a loaded node with no loaded parent and no
   // valid entry of its own asks for its containment chain, so a hand placement on an ancestor the
@@ -2008,13 +2025,13 @@ export function ContextViewCanvas({
       const total = Number((anchor.data as Record<string, unknown> | undefined)?.childCount ?? 0) || 0
       const pager = childPaging[layer.anchorUrn]
       if (pager && !pager.hasMore && pager.childCount === total) continue
-      const loaded = (childMap.get(layer.anchorUrn) ?? []).length
+      const loaded = (loadedChildMap.get(layer.anchorUrn) ?? []).length
       if (total > loaded) {
         out.set(layer.id, { anchorUrn: layer.anchorUrn, remaining: total - loaded })
       }
     }
     return out
-  }, [sortedLayers, nodeMap, childMap, childPaging])
+  }, [sortedLayers, nodeMap, loadedChildMap, childPaging])
 
 
   // Track previous aggregation target fingerprint to avoid redundant fetches
@@ -2079,7 +2096,10 @@ export function ContextViewCanvas({
     curated: activeEntityScope === 'curated',
     revealHit: revealHitForSearch,
     prefetchHit: prefetchSearchHitSpine,
+    namesOnly: !revisionCaps.advancedSearch,
   })
+  // The left rail holds search results or a review's list of changes, one at a time.
+  const reviewListOpen = useReviewRail(search.panelOpen, search.closePanel)
   // Search, from the command palette: a question in plain words, or the
   // panel opened out into Search Studio.
   const { closeCommandPalette } = interactions
@@ -2128,7 +2148,7 @@ export function ContextViewCanvas({
     const t1 = setTimeout(() => triggerEdgeRedrawRef.current?.(), 250)
     const t2 = setTimeout(() => triggerEdgeRedrawRef.current?.(), 480)
     return () => { cancelAnimationFrame(raf); clearTimeout(t1); clearTimeout(t2) }
-  }, [drawerNodeId, drawerEdge, selectedNodeId, isEdgePanelOpen, search.panelOpen, builderOpen, buildOpen])
+  }, [drawerNodeId, drawerEdge, selectedNodeId, isEdgePanelOpen, search.panelOpen, reviewListOpen, builderOpen, buildOpen])
 
   // A relationship the drawer shows was resolved from THIS view's lines. Leaving
   // the view (or this canvas) closes it, trail and all, rather than carrying a
@@ -2379,9 +2399,9 @@ export function ContextViewCanvas({
   }
   const bulkSelectionCount = bulkSelection.length
   // The server refuses trace requests when this is off; the header hides its
-  // Trace and Focus for it, and the SelectionBar follows suit.
-  // …and a trace reads the graph as it is now: off over a past revision too.
-  const traceEnabled = useFeature('traceEnabled') && !atRevision
+  // Trace and Focus for it, and the SelectionBar follows suit. At a past revision a
+  // trace walks the flows as they ran then.
+  const traceEnabled = useFeature('traceEnabled') && revisionCaps.lineageTrace
   // Closes itself when the canvas or the selection stops allowing it.
   useEffect(() => {
     if (bulkLinkSurface && (!canvasWritable || bulkSelectionCount < 2)) useBulkLinkStore.getState().close()
@@ -2466,8 +2486,7 @@ export function ContextViewCanvas({
   // opens normally: a link arrives from outside and must never be able to
   // break the canvas.
   const [initialTraceShare] = useState(() => {
-    // A trace reads the graph as it is now: a link's is not opened over a past revision.
-    const raw = atRevision ? null : new URLSearchParams(window.location.search).get('trace')
+    const raw = new URLSearchParams(window.location.search).get('trace')
     return raw ? decodeTraceShare(raw) : null
   })
   // Direction visibility — the dock's upstream/downstream toggles. Reset
@@ -4093,7 +4112,7 @@ export function ContextViewCanvas({
         const total = Number(node.data?.childCount ?? 0) || 0
         const pager = childPaging[id]
         if (pager && !pager.hasMore && pager.childCount === total) return
-        if (total > (childMap.get(id) ?? []).length) holders.add(node.urn || id)
+        if (total > (loadedChildMap.get(id) ?? []).length) holders.add(node.urn || id)
       })
       const aggregationHolders = [...holders].sort()
 
@@ -4110,7 +4129,7 @@ export function ContextViewCanvas({
     }, delay)
 
     return () => clearTimeout(fetchDebounced)
-  }, [showLineageFlow, nodesByLayer, fetchAggregated, nodes.length, expandedNodes, traceActive, aggregatedCacheVersion, loadingNodes, lineageGranularity, fetchHolders, anchorMoreByLayer, displayMap, childMap, childPaging])
+  }, [showLineageFlow, nodesByLayer, fetchAggregated, nodes.length, expandedNodes, traceActive, aggregatedCacheVersion, loadingNodes, lineageGranularity, fetchHolders, anchorMoreByLayer, displayMap, loadedChildMap, childPaging])
 
   // Source-changed self-refresh: while the aggregated overlay is flagged
   // `source_changed`, poll readiness and invalidate the aggregated cache once
@@ -4220,7 +4239,7 @@ export function ContextViewCanvas({
       const kids = childMap.get(nodeId) ?? []
       if (kids.length === 0) continue
       const childCount = (displayMap.get(nodeId)?.data?.childCount as number) ?? 0
-      if (childCount > 0 && kids.length >= childCount) continue // fully loaded — exact client re-sort
+      if (childCount > 0 && (loadedChildMap.get(nodeId) ?? []).length >= childCount) continue // fully loaded — exact client re-sort
       refetchParents.push(nodeId)
       const stack = [...kids]
       while (stack.length > 0) {
@@ -4346,6 +4365,8 @@ export function ContextViewCanvas({
     if (!isDrawnRow(nodeId)) await revealPartnersRef.current?.([nodeId], { anchoredOnly: true })
     return revealAndFocus(nodeId, revealOpts)
   }, [expandTraceChain, scrollHitIntoView, revealAndFocus, traceWriteLocked, isDrawnRow])
+  // "Open just before it was deleted" lands on the entity, revealed and selected.
+  useRevisionReveal(revealOnCanvas)
 
   // Multi-locate (T24 F5): reveal each target (expanding collapsed
   // ancestors), then walk each one through the SAME virtualizer-aware
@@ -4419,6 +4440,22 @@ export function ContextViewCanvas({
   // fired while a trace is on screen must go through the same write lock
   // every other reveal does.
   useEffect(() => { revealSearchHitRef.current = revealSearchHit })
+
+  // A review finds each change it visits — opened down to, selected, scrolled to, a deletion past
+  // the 500 drawn — and draws its scope on the canvas.
+  const expandRows = useCallback((ids: readonly string[]) => {
+    setExpandedNodes((prev) => {
+      if (ids.every((id) => prev.has(id))) return prev
+      const next = new Set(prev)
+      for (const id of ids) next.add(id)
+      return next
+    })
+  }, [])
+  const locateChange = useLocateChange({
+    provider, reveal: revealSearchHit, expand: expandRows, scrollIntoView: scrollHitIntoView,
+    isContainmentEdgeType: isContainmentEdge,
+  })
+  useReviewOnCanvas(activeView?.id ?? null, locateChange)
 
   // "Frame matches" — scroll the horizontal canvas container so the first
   // match-bearing node is centered. This is a viewport-not-zoom action since
@@ -4554,7 +4591,7 @@ export function ContextViewCanvas({
     'ctx-assignments',
     assignmentStatus === 'loading',
     'Arranging layers…',
-    () => layersPlacedMessage(effectiveAssignments.size, storeLayers.length, unassignedNodes.length),
+    () => layersPlacedMessage(effectiveAssignments.size, storeLayers.length, unassignedNodes.filter((n) => n.data?.isGhost !== true).length),
     // An errored pass leaves `effectiveAssignments` at its previous value —
     // an empty Map on a first load — so without this a provider blip reports
     // the green "Placed 0 items across 6 layers", once per bounded retry.
@@ -4587,7 +4624,7 @@ export function ContextViewCanvas({
   // inside those, resolved on the server and shared by everyone asking the same
   // thing. A preview switch (`viewMembershipEnabled`); nothing is saved.
   // Narrowing reads the graph as it is now: off over a past revision.
-  const narrowEnabled = useFeature('viewMembershipEnabled') && !atRevision
+  const narrowEnabled = useFeature('viewMembershipEnabled') && revisionCaps.narrow
   const narrowViewId = activeView?.id ?? null
   const narrowComposer = useNarrowStore((s) => s.composer)
   const narrowApplied = useNarrowStore((s) => (s.viewId === narrowViewId ? s.applied : null))
@@ -4621,7 +4658,7 @@ export function ContextViewCanvas({
   // clean. A malformed token decodes to null and the view opens normally.
   const [initialNarrowShare] = useState(() => {
     // Narrowing reads the graph as it is now: not over a past revision.
-    const raw = atRevision ? null : new URLSearchParams(window.location.search).get('narrow')
+    const raw = revisionCaps.narrow ? new URLSearchParams(window.location.search).get('narrow') : null
     return raw ? decodeNarrowShare(raw) : null
   })
   const narrowShareUsed = useRef(false)
@@ -5318,8 +5355,10 @@ export function ContextViewCanvas({
     }
     return chains
   }, [ancestorChains, searchEdges])
+  // Links deleted but not saved yet stay drawn, as deleted links, until saved or discarded.
+  const edgesWithStagedDeletions = useWithStagedDeletions(edges) as typeof edges
   const { visibleLineageEdges: browseVisibleLineageEdges, unresolvedEdgeCount, offCanvasByNode } = useEdgeProjection({
-    edges: overlay.active ? (EMPTY_EDGES as typeof edges) : edges,
+    edges: overlay.active ? (EMPTY_EDGES as typeof edges) : edgesWithStagedDeletions,
     aggregatedEdges: overlay.active ? (EMPTY_AGG_EDGES as typeof aggregatedEdges) : aggregatedEdges,
     nodesByLayer: renderByLayer, expandedNodes,
     displayFlat: renderFlat, displayMap: renderMap, urnToIdMap,
@@ -6067,8 +6106,9 @@ export function ContextViewCanvas({
       .filter((urn) => assignments[urn]?.layerId && !nodeMap.get(urn))
       .map((urn) => ({ urn, label: fallbackNameFromUrn(urn), layerName: layerNames.get(assignments[urn].layerId) }))
   }, [placementsCheck, activeViewId, hydrationStatus, traceActive, activeReferenceLayout, sortedLayers, nodeMap])
+  // A deletion drawn where it was is not an entity the view failed to place.
   const unassignedEntities = useMemo(() =>
-    unassignedNodes.map((n) => ({
+    unassignedNodes.filter((n) => n.data?.isGhost !== true).map((n) => ({
       id: n.id,
       label: (n.data?.label ?? n.data?.businessLabel ?? n.id) as string,
       type: n.data?.type as string | undefined,
@@ -6105,7 +6145,7 @@ export function ContextViewCanvas({
     // A link that carries both opens the TRACE: it is the more specific
     // state, and two overlays racing each other on arrival is nobody's
     // intent. The lens token is dropped with the param strip below.
-    if (initialTraceShare || atRevision) return null
+    if (initialTraceShare) return null
     const raw = new URLSearchParams(window.location.search).get('lens')
     return raw ? decodeLensShare(raw) : null
   })
@@ -6728,6 +6768,8 @@ export function ContextViewCanvas({
         onSaveMatchesAsView={(canSaveSearchAsView || editingSubset) ? onSaveMatchesAsView : undefined}
         saveMatchesLabel={editingSubset ? `Update “${editingSubset.name}”…` : undefined}
       />
+      {/* Like the search panel, it owns its own presence. */}
+      <ChangesExplorer viewId={activeView?.id ?? null} />
       <div className="flex-1 min-w-0 flex flex-col overflow-hidden relative">
       <ContextViewHeader
         showLineageFlow={showLineageFlow}
@@ -7434,6 +7476,9 @@ export function ContextViewCanvas({
           }}
         />
 
+        {/* A review, one change at a time. It gives way to a trace. */}
+        <ChangeNavigator viewId={activeView?.id ?? null} hidden={traceActive} />
+
         {/* Frame pill — selection has off-screen neighbors; offer to frame
             them (never auto-scroll) or open the lens. */}
         <AnimatePresence>
@@ -7825,6 +7870,7 @@ export function ContextViewCanvas({
                 // Create affordances render only in draft (edit) mode —
                 // Published shows zero mutation entry points for anyone.
                 onAddChild={canvasWritable && !subsetView ? handleAddChildEntity : undefined}
+                onRestore={canvasWritable ? restoreGhost : undefined}
                 onAddToLayer={canEditGraph && !subsetView ? openBuilderForLayer : undefined}
                 onBuildToLayer={canEditGraph && !subsetView ? openBuildForLayer : undefined}
                 onBeginConnect={canvasWritable ? edgeConnect.beginDrag : undefined}
@@ -7847,7 +7893,7 @@ export function ContextViewCanvas({
                 loadingNodes={loadingNodes}
                 failedNodes={failedNodes}
                 exhaustedParents={exhaustedParents}
-                loadedChildren={childMap}
+                loadedChildren={loadedChildMap}
                 placedApart={placedApart}
                 placedOut={placedOut}
                 onRevealPlacement={revealPlacementParent}

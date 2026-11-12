@@ -21,6 +21,7 @@ vi.mock('../hierarchyBuilderStore', () => ({
 }))
 
 import { BuilderEmptyState } from '../BuilderEmptyState'
+import { StaticViewSchemaProvider, type ResolvedViewSchema } from '@/providers/ViewExecutionContext'
 import { useAuthStore } from '@/store/auth'
 import { DEFAULT_FEATURES, useFeaturesStore } from '@/store/features'
 
@@ -64,6 +65,18 @@ describe('BuilderEmptyState', () => {
     render(<BuilderEmptyState />)
     expect(screen.getByText('This model is empty')).toBeInTheDocument()
     expect(screen.getByText(/Editing is turned off for this workspace/)).toBeInTheDocument()
+    expect(screen.queryByText(/Someone with edit access/)).toBeNull()
+    expect(screen.queryByRole('button')).toBeNull()
+  })
+
+  it('offers nothing to build on a past revision, which is read-only', () => {
+    grant({ ws_1: ['workspace:datasource:manage'] })
+    const schema: ResolvedViewSchema = {
+      entityTypes: [], relationshipTypes: [], containmentEdgeTypes: [], lineageEdgeTypes: [], rootEntityTypes: [],
+    }
+    render(<StaticViewSchemaProvider schema={schema} asOfSeq={12}><BuilderEmptyState /></StaticViewSchemaProvider>)
+    expect(screen.getByText('This model is empty')).toBeInTheDocument()
+    expect(screen.getByText('Nothing had been added by this revision.')).toBeInTheDocument()
     expect(screen.queryByText(/Someone with edit access/)).toBeNull()
     expect(screen.queryByRole('button')).toBeNull()
   })

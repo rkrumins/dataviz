@@ -12,7 +12,7 @@ import pytest
 
 from backend.app.services.versioning.change_index import (
     ChangeIndex, ChangeIndexBuilder, ChangeOrigin, IndexCache, classify, compact_entries,
-    entry_dict, stat_changes,
+    entry_dict, removed_subtree, stat_changes,
 )
 
 
@@ -105,6 +105,33 @@ def test_filters_and_pages_are_offsets_into_one_order():
     assert len(second) == 2
     # The same filter is served from the kept view, not filtered again.
     assert index.view(kind="node") is index.view(kind="node")
+
+
+def test_a_removal_is_walked_down_its_subtree_parent_first():
+    """What removing a node took with it: the removed nodes its removed containment leads down to,
+    each after its parent, and the removed links with an end among them. A link it did not
+    remove, a removal elsewhere and a child that moved out first are not its own."""
+    h = "h1"
+    index = _built([
+        ("P", node(h, "parent"), node("h2", "parent")),        # stays (and changes)
+        ("R", node(h, "root"), None), ("K1", node(h, "k1"), None), ("K2", node(h, "k2"), None),
+        ("G", node(h, "grandchild"), None), ("X", node(h, "elsewhere"), None),
+        ("M", node(h, "moved"), node(h, "moved")),            # moved out before: no change of its own
+        ("p_r", edge(h, "CONTAINS", "P", "R"), None),         # its old parent's link
+        ("r_k1", edge(h, "CONTAINS", "R", "K1"), None), ("r_k2", edge(h, "CONTAINS", "R", "K2"), None),
+        ("k2_g", edge(h, "CONTAINS", "K2", "G"), None),
+        ("r_m", edge(h, "CONTAINS", "R", "M"), None),         # removed by the move, not the deletion
+        ("g_p", edge(h, "FLOWS_TO", "G", "P"), None),         # lineage to what stayed
+        ("x_p", edge(h, "FLOWS_TO", "X", "P"), None),         # someone else's
+        ("r_p", None, edge(h, "FLOWS_TO", "R", "P")),         # added, not removed
+    ])
+    nodes, links = removed_subtree(index, "R")
+    assert [e.entity_id for e in nodes] == ["R", "K1", "K2", "G"]
+    assert {e.entity_id for e in links} == {"p_r", "r_k1", "r_k2", "k2_g", "g_p"}
+    assert [e.entity_id for e in removed_subtree(index, "K2")[0]] == ["K2", "G"]
+    assert removed_subtree(index, "g_p") == ([], [index.entries[index.by_id["g_p"]]])
+    for kept in ("P", "M", "r_p", "unknown"):
+        assert removed_subtree(index, kept) == ([], [])
 
 
 def test_an_origin_past_the_cap_is_counted_and_lists_nothing():

@@ -22,13 +22,15 @@ from collections import ChainMap, OrderedDict
 from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Tuple, TypeVar
 
 from backend.app.services.versioning import config as vconfig
-from backend.app.services.versioning.errors import RevisionReadOnly, RevisionUnsupported
-from backend.common.interfaces.provider import resolve_identities_by_query
+from backend.app.services import graph_waits
+from backend.app.services.versioning.errors import (RevisionBusy, RevisionReadOnly,
+                                                    RevisionUnsupported)
+from backend.common.interfaces.provider import name_matches, resolve_identities_by_query
 from backend.common.models.graph import (
     AggregatedEdgeInfo, AggregatedEdgeResult, ChildrenWithEdgesResult, EdgeQuery, GraphEdge,
     GraphNode, NodePage, NodeQuery, TopLevelNodesResult, TraceClosureResult, TraceResult,
 )
-from .versioned_branch_provider import VersionedBranchProvider
+from .versioned_branch_provider import VersionedBranchProvider, bounded_closure
 
 #: The overlay patches whatever trace shape it is handed and hands the SAME
 #: shape back — a closure in, a closure out. Declaring the base type lost
@@ -73,6 +75,23 @@ def _by_name(d: "_OverlayDelta", urns: Iterable[str]) -> List[str]:
         n = d.node_index.get(u)
         return ((n.display_name or "").casefold() if n is not None else "", u)
     return sorted(urns, key=key)
+
+
+def _named_matches(d: "_OverlayDelta", q: str, match: str, types: set) -> List[str]:
+    """The nodes the patch set holds a value of — made on the overlay, or changed on it — whose
+    type is among ``types`` (any, when none) and whose name or qualified name matches ``q`` under
+    ``match`` (``name_matches``), judged by the overlay's value, in name order. Pure CPU."""
+    found: List[Tuple[str, str]] = []
+    for urn in d.node_new:
+        n = d.node_index.get(urn)
+        if n is not None and (not types or n.entity_type in types) and (
+                name_matches(n.display_name, q, match) or name_matches(n.qualified_name, q, match)):
+            found.append(((n.display_name or "").casefold(), urn))
+    for urn, (etype, name, qname) in d.node_named.items():
+        if (not types or etype in types) and (
+                name_matches(name, q, match) or name_matches(qname, q, match)):
+            found.append((name.casefold(), urn))
+    return [urn for _name, urn in sorted(found)]
 
 
 def _created_first(created: List[str], offset: int, limit: int) -> Tuple[List[str], Optional[Dict[str, int]]]:
@@ -126,6 +145,13 @@ class _OverlayDelta:
         # Nodes the draft modified or created, by urn → entity id: a read loads the ones it serves
         # (load()).
         self.node_modified: Dict[str, str] = {m["urn"]: m["entityId"] for m in raw.get("nodesModified", [])}
+        # Each of those as its version row names it on the overlay — its type, name and qualified
+        # name, which a name search judges it by unloaded — and the urns the store holds any of
+        # them under where that is another: the store's hit under one is a node changed here.
+        self.node_named: Dict[str, Tuple[str, str, Optional[str]]] = {
+            m["urn"]: (m.get("entityType") or "unknown", m.get("displayName") or "",
+                       m.get("qualifiedName")) for m in raw.get("nodesModified", [])}
+        self.base_urns: set = {m["baseUrn"] for m in raw.get("nodesModified", []) if m.get("baseUrn")}
         # A skeleton's default_factory fields are given, not left to model_construct: it resolves
         # each through ``inspect.signature`` per instance, and on a 100k+100k draft that was 35 s of
         # CPU — and garbage enough to set off full collections that stalled the event loop.
@@ -305,11 +331,44 @@ def _line(key: tuple) -> tuple:
     return key[0], key[1], key[3]
 
 
+def _is_revision(key: tuple) -> bool:
+    """Whether a cache key is a past revision's (its version ``("rev", K, head)``)."""
+    version = key[2]
+    return isinstance(version, tuple) and bool(version) and version[0] == "rev"
+
+
+# Turns at putting a past revision together, per event loop (asyncio primitives are bound to one).
+_BUILD_TURNS: Dict[asyncio.AbstractEventLoop, asyncio.Semaphore] = {}
+
+
+async def _build_turn() -> asyncio.Semaphore:
+    """A turn at putting a revision together: ``REVISION_BUILDS_MAX`` at a time in this process,
+    waited for up to ``REVISION_BUILD_WAIT_MS`` — holding nothing of the request meanwhile
+    (``graph_waits.waiting``) — else :class:`RevisionBusy`. Returns the semaphore, to release."""
+    loop = asyncio.get_running_loop()
+    turns = _BUILD_TURNS.get(loop)
+    if turns is None:
+        for gone in [lp for lp in _BUILD_TURNS if lp.is_closed()]:
+            del _BUILD_TURNS[gone]
+        turns = _BUILD_TURNS[loop] = asyncio.Semaphore(max(1, vconfig.REVISION_BUILDS_MAX))
+    if turns.locked():
+        try:
+            async with graph_waits.waiting():
+                await asyncio.wait_for(turns.acquire(), vconfig.REVISION_BUILD_WAIT_MS / 1000)
+        except asyncio.TimeoutError:
+            raise RevisionBusy("builds_saturated", retry_after=2) from None
+    else:
+        await turns.acquire()
+    return turns
+
+
 # A fork's patch set as its delta keeps it for the next extension: each list's entries as tuples
 # of these fields, over the strings the index holds already — no dict per entry (1,043 bytes an
 # entry with the index became 865; the index alone holds 737).
 _KEPT_FIELDS = {"nodesUpsert": ("urn", "entityId", "entityType", "displayName", "qualifiedName", "lazy"),
-                "nodesModified": ("entityId", "urn"), "nodesRemove": ("entityId", "urn"),
+                "nodesModified": ("entityId", "urn", "entityType", "displayName", "qualifiedName",
+                                  "baseUrn"),
+                "nodesRemove": ("entityId", "urn"),
                 "edgesUpsert": ("id", "sourceUrn", "targetUrn", "edgeType", "lazy", "was"),
                 "edgesRemove": ("id", "sourceUrn", "targetUrn", "edgeType")}
 _WAS_FIELDS = ("sourceUrn", "targetUrn", "edgeType")
@@ -336,6 +395,8 @@ def _unkept(kept: Dict[str, Any]) -> Dict[str, Any]:
                 was = x.pop("was")
                 if was is not None:
                     x["was"] = dict(zip(_WAS_FIELDS, was))
+            elif key == "nodesModified" and x["baseUrn"] is None:
+                del x["baseUrn"]
             rows.append(x)
         out[key] = rows
     return out
@@ -379,11 +440,18 @@ class _DeltaCache:
 
     Bounded by the entries its deltas hold together (``GRAPHVER_OVERLAY_CACHE_ENTRIES``), not by
     their number: many drafts and forks read at once each keep theirs, and the newest is kept
-    whatever its size. A delta supersedes the older ones of its draft or fork."""
+    whatever its size. A delta supersedes the older ones of its draft or fork.
 
-    def __init__(self, max_entries: Optional[int] = None):
+    Past revisions are kept within a budget of their own (``GRAPHVER_REVISION_CACHE_ENTRIES``),
+    and go first when the whole is over its bound: opening revisions never evicts a draft's
+    delta. Putting a new revision together takes a turn (:func:`_build_turn`)."""
+
+    def __init__(self, max_entries: Optional[int] = None,
+                 max_revision_entries: Optional[int] = None):
         self._max = max_entries
+        self._max_revision = max_revision_entries
         self._held = 0
+        self._revision_held = 0
         self._items: "OrderedDict[tuple, _OverlayDelta]" = OrderedDict()
         self._building: Dict[tuple, asyncio.Task] = {}
 
@@ -402,10 +470,32 @@ class _DeltaCache:
             return hit
         task = self._building.get(key)
         if task is None or task.get_loop() is not asyncio.get_running_loop():
-            task = asyncio.ensure_future(build())
-            self._building[key] = task
-            task.add_done_callback(lambda t, k=key: self._settle(k, t))
-        return await asyncio.shield(task)          # one reader giving up doesn't cancel the build
+            turn = await _build_turn() if _is_revision(key) else None
+            hit = self._items.get(key)                 # landed, or begun, while waiting for a turn
+            task = self._building.get(key)
+            if hit is not None or (task is not None and task.get_loop() is asyncio.get_running_loop()):
+                if turn is not None:
+                    turn.release()
+                if hit is not None:
+                    self._items.move_to_end(key)
+                    return hit
+            else:
+                task = asyncio.ensure_future(build())
+                self._building[key] = task
+                task.add_done_callback(lambda t, k=key: self._settle(k, t))
+                if turn is not None:
+                    task.add_done_callback(lambda _t, turn=turn: turn.release())
+                return await asyncio.shield(task)  # one reader giving up doesn't cancel the build
+        if _is_revision(key) and not task.done():
+            async with graph_waits.waiting():          # another reader's build: wait holding nothing
+                return await asyncio.shield(task)
+        return await asyncio.shield(task)
+
+    def _drop(self, key: tuple) -> None:
+        size = self._items.pop(key).size
+        self._held -= size
+        if _is_revision(key):
+            self._revision_held -= size
 
     def _settle(self, key: tuple, task: asyncio.Task) -> None:
         if self._building.get(key) is task:
@@ -413,12 +503,24 @@ class _DeltaCache:
         if task.cancelled() or task.exception() is not None:
             return
         for old in [k for k in self._items if _line(k) == _line(key)]:
-            self._held -= self._items.pop(old).size
+            self._drop(old)
         delta = self._items[key] = task.result()
         self._held += delta.size
+        if _is_revision(key):
+            self._revision_held += delta.size
+            limit = (vconfig.REVISION_CACHE_ENTRIES if self._max_revision is None
+                     else self._max_revision)
+            while self._revision_held > limit:         # older revisions go, never the newest
+                older = next((k for k in self._items if _is_revision(k) and k != key), None)
+                if older is None:
+                    break
+                self._drop(older)
         limit = vconfig.OVERLAY_CACHE_ENTRIES if self._max is None else self._max
         while self._held > limit and len(self._items) > 1:
-            self._held -= self._items.popitem(last=False)[1].size
+            # Revisions first, the least recently read first; the newest is kept whatever its size.
+            victim = (next((k for k in self._items if _is_revision(k) and k != key), None)
+                      or next(k for k in self._items if k != key))
+            self._drop(victim)
 
 
 _DELTAS = _DeltaCache()
@@ -554,6 +656,11 @@ class DraftOverlayProvider:
             shared = await _DELTAS.get(key, build)
             self._delta = shared.for_request(self._load_modified, self._load_edges)
         return self._delta
+
+    async def warm(self) -> None:
+        """Put this read's delta together now, before the read takes any of the store's slots: a
+        past revision's first read is seconds of Postgres, which must not hold a FalkorDB slot."""
+        await self._delta_()
 
     def _at(self) -> Dict[str, Any]:
         """Where values load from: the branch's head, or main at the revision being read."""
@@ -740,17 +847,58 @@ class DraftOverlayProvider:
         seen = {n.urn for n in out}
         return await d.served([u for u in matches if u not in seen]) + out
 
+    async def search_names(self, query: str, *, match: str = "substring",
+                           entity_types: Optional[List[str]] = None, limit: int = 20,
+                           offset: int = 0) -> NodePage:
+        """``FalkorDBProvider.search_names`` on the overlay's own state — at a past revision, the
+        graph as it was — and exact: a node the patch set holds no value of is the store's,
+        unchanged, so the store's match or not; one it holds a value of is judged by that value,
+        from its version row (``_named_matches``). So the patch set's matches come first, in name
+        order, then the store's, less every node the patch set changed or took out; positions are
+        in that one order (:func:`_created_first`). Over a Postgres reader (a stale projection)
+        the overlay's own state is searched there instead, as exactly."""
+        fn = getattr(self._base, "search_names", None)
+        if fn is None:
+            raise NotImplementedError(
+                f"{getattr(self._base, 'name', type(self._base).__name__)} does not search names")
+        if isinstance(self._base, VersionedBranchProvider):
+            return await self._writer.search_names(query, match=match, entity_types=entity_types,
+                                                   limit=limit, offset=offset)
+        d = await self._delta_()
+        q = (query or "").strip().lower()
+        if d.empty or not q:
+            return await fn(query, match=match, entity_types=entity_types, limit=limit,
+                            offset=offset)
+        mine = await asyncio.to_thread(_named_matches, d, q, match, set(entity_types or ()))
+        page, rest = _created_first(mine, offset, limit)
+        nodes = await d.served(page)
+        if rest is None:                                   # the patch set's matches fill it
+            return NodePage(nodes=nodes, hasMore=True, nextOffset=offset + limit)
+        base = await fn(query, match=match, entity_types=entity_types, **rest)
+        nodes += [n for n in base.nodes if n.urn not in d.node_remove
+                  and n.urn not in d.node_modified and n.urn not in d.base_urns]
+        return NodePage(nodes=nodes, hasMore=base.has_more, nextOffset=len(mine) + base.next_offset)
+
     async def get_edges(self, query: EdgeQuery) -> List[GraphEdge]:
         base = await self._base.get_edges(query)
         d = await self._delta_()
         if d.empty:
             return base
-        out = [d.edge_upsert.get(e.id, e) for e in base if e.id not in d.edge_remove]
-        seen = {e.id for e in out}
         src = set(query.source_urns or [])
         tgt = set(query.target_urns or [])
         anyu = set(query.any_urns or [])
         ets = set(query.edge_types or [])
+        types = {t.upper() for t in ets}
+
+        def asked(e: GraphEdge) -> bool:
+            """Whether the overlay's value of a store edge still is one the query asks for: an
+            edge the overlay re-pointed or re-typed was found by its ends and type in the store."""
+            return ((not src or e.source_urn in src) and (not tgt or e.target_urn in tgt)
+                    and (not anyu or e.source_urn in anyu or e.target_urn in anyu)
+                    and (not types or (e.edge_type or "").upper() in types))
+        out = [v for e in base if e.id not in d.edge_remove
+               for v in (d.edge_upsert.get(e.id, e),) if v is e or asked(v)]
+        seen = {e.id for e in out}
         added = 0
         named = src or tgt or anyu                     # the ends asked about: walk just theirs
         pool = ((e for u in sorted(named) for e in d.edges_at.get(u, ())) if named
@@ -1167,7 +1315,13 @@ class DraftOverlayProvider:
         exclude_urns: Optional[List[str]] = None, after_cursor: Optional[str] = None,
         seed_cursor: Optional[str] = None,
     ) -> TraceClosureResult:
-        self._now_only("Lineage trace")
+        if self._as_of is not None:
+            # The past: walked over this overlay's own reads, each as it was then — never the
+            # store's closure, which walks the graph as it is now.
+            return await bounded_closure(
+                self, urn, upstream_depth, downstream_depth, lineage_edge_types,
+                containment_edge_types, max_nodes, timeout_ms, seed_urns=seed_urns,
+                exclude_urns=exclude_urns, after_cursor=after_cursor, seed_cursor=seed_cursor)
         # Overlay lineage deltas can make frontier totalCount advisory-stale —
         # acceptable (it is a cue, not a ledger).
         #

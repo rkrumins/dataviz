@@ -360,3 +360,19 @@ async def test_the_code_owns_what_turning_a_switch_on_means(db_session, monkeypa
     await db_session.flush()
     await seeding.seed_feature_registry(db_session)
     assert (await db_session.get(FeatureDefinitionORM, "traceEnabled")).impact_when_on == said
+
+
+async def test_a_default_that_changes_reaches_a_database_seeded_before_it(db_session):
+    """A switch's default is the code's too: a database seeded while the graph-as-it-was viewer
+    shipped off reads it on once it ships on, unless an administrator stored a value of their own
+    (that lives in the flags' config row, which the registry sync never touches)."""
+    import json
+    from backend.app.db import seed_feature_registry as seeding
+    from backend.app.db.models import FeatureDefinitionORM
+
+    await seeding.seed_feature_registry(db_session)
+    row = await db_session.get(FeatureDefinitionORM, "revisionViewerEnabled")
+    row.default_value = json.dumps(False)                 # as the first seed wrote it
+    await db_session.flush()
+    await seeding.seed_feature_registry(db_session)
+    assert json.loads((await db_session.get(FeatureDefinitionORM, "revisionViewerEnabled")).default_value) is True

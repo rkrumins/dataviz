@@ -286,6 +286,37 @@ def compact_entries(index: ChangeIndex) -> List[list]:
     return out
 
 
+def removed_subtree(index: ChangeIndex, root: str) -> Tuple[List[ChangeEntry], List[ChangeEntry]]:
+    """What removing ``root`` took with it, as ``index`` lists it: ``(nodes, links)`` — the node
+    and the removed nodes its removed containment links lead down to, parent first, and every
+    removed link with an end among them (the one to its old parent included). A containment
+    link goes with its child: one to a child that is still there was removed when that child
+    moved away, not by this deletion, which would have taken the child too. A removed link is
+    its own; ``([], [])`` when the index does not list ``root`` as removed. Containment points
+    from parent (source) to child (target), as the delete cascade walks it. O(entries): run it
+    in a thread."""
+    i = index.by_id.get(root)
+    if i is None or index.entries[i].status != "removed":
+        return [], []
+    if index.entries[i].kind == "edge":
+        return [], [index.entries[i]]
+    removed = [e for e in index.entries if e.status == "removed"]
+    nodes = {e.entity_id: e for e in removed if e.kind == "node"}
+    children: Dict[str, List[str]] = {}
+    for e in removed:
+        if e.structural and e.tgt in nodes:
+            children.setdefault(e.src or "", []).append(e.tgt)
+    order, seen = [nodes[root]], {root}
+    for parent in order:                    # grows as it is walked: breadth first, parent first
+        for child in children.get(parent.entity_id, ()):
+            if child not in seen:
+                seen.add(child)
+                order.append(nodes[child])
+    links = [e for e in removed if e.kind == "edge"
+             and (e.tgt in seen if e.structural else (e.src in seen or e.tgt in seen))]
+    return order, links
+
+
 def stat_changes(stats: Any) -> Tuple[int, int, int]:
     """``(create, update, delete)`` a revision recorded of itself in ``commits.stats``. Imports
     and genesis record ``{nodes, edges}`` (everything they brought in); the rest record

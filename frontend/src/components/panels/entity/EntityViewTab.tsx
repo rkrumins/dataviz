@@ -18,6 +18,7 @@ import type { RevealSearchHit } from '@/hooks/useRevealSearchHit'
 import { IconButton } from '@/components/ui/Button'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { Section } from '../DrawerSection'
+import { WhatChangedSection } from '../WhatChangedSection'
 import { PropertyEditor } from '../PropertyEditor'
 import { PanelErrorBoundary } from '../PanelErrorBoundary'
 import { LineageNeighbors } from '../LineageNeighbors'
@@ -151,6 +152,8 @@ export function EntityViewTab({
           propertyKeys={featurableKeys(fields, form, userProps)} onDone={onDoneCustomizing} />
       )}
       <div className="divide-y divide-glass-border">
+        {/* What changed leads, where the canvas's change set holds this entity. */}
+        <WhatChangedSection id={nodeId} />
         {sections.map((id) => <Fragment key={id}>{render[id]()}</Fragment>)}
       </div>
     </>

@@ -372,3 +372,26 @@ describe('SearchDropdown — geometry', () => {
         Object.defineProperty(window, 'innerWidth', { value: previous, configurable: true })
     })
 })
+
+
+describe('SearchDropdown — names only, at a past revision', () => {
+    it('offers no See all, no Refine and no chip that looks somewhere else', () => {
+        renderDropdown({ count: 500, rows: [hit('a')], namesOnly: true })
+
+        expect(screen.queryByRole('button', { name: /see all/i })).not.toBeInTheDocument()
+        expect(screen.queryByRole('button', { name: /refine/i })).not.toBeInTheDocument()
+        expect(screen.queryByRole('button', { name: 'Names only' })).not.toBeInTheDocument()
+        expect(screen.getByText('Names as they were at this revision')).toBeInTheDocument()
+    })
+
+    it('widens nothing but how a name matches when nothing is found', () => {
+        renderDropdown({
+            rows: [], count: 0, zero: true, namesOnly: true,
+            quick: { ...DEFAULT_QUICK, text: 'orders', match: 'prefix', lookIn: 'name' },
+        })
+
+        expect(screen.getByRole('button', { name: 'Contains' })).toBeInTheDocument()
+        expect(screen.queryByRole('button', { name: 'Look in everything' })).not.toBeInTheDocument()
+        expect(screen.queryByRole('button', { name: /refine/i })).not.toBeInTheDocument()
+    })
+})

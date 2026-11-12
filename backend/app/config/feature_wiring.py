@@ -857,15 +857,17 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
     "revisionViewerEnabled": FeatureWiring(
         key="revisionViewerEnabled",
         posture="capability",
-        stage="experimental",
+        stage="active",
         server_gates=(
             "Every /graph read that names a past revision (?asOfSeq=) — the canvas, its nodes, "
-            "edges, children and rollups as they were then",
+            "edges, children and rollups, name search and lineage traces as they were then",
         ),
         ui_surfaces=(
             "Reviews → History: Open on canvas, Compare with now, Compare with… and Copy link on a "
             "revision, the month picker, and two revisions compared",
-            "The canvas: the past-revision banner, its ?rev= link, and a comparison highlighted",
+            "A data source's Versioning tab: its history, opened in one of its views",
+            "The canvas: the past-revision banner, its ?rev= link, a comparison highlighted, and "
+            "name search and traces of the graph as it was",
         ),
         still_allowed=(
             "Every read of the graph as it is now, and every draft",

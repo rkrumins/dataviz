@@ -4,17 +4,19 @@
  * the raw details, placement, history, Copy URN and the JSON tab to the
  * Technical view. Customize shows, hides and reorders sections and features
  * properties per type; the Technical view keeps every section in the order it
- * always had.
+ * always had. Either leads with What changed for an entity the canvas's changes hold.
  */
 import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { useBranchStore } from '@/store/branchStore'
 import { useCanvasStore, type LineageNode } from '@/store/canvas'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { useFeaturesStore } from '@/store/features'
 import { usePersonaStore } from '@/store/persona'
 import { usePreferencesStore } from '@/store/preferences'
 import { useSchemaStore } from '@/store/schema'
+import { buildChangeSet } from '@/features/versioning/model/changeModel'
 
 vi.mock('../../useDrawerHistoryScope', () => ({
   useDrawerHistoryScope: () => ({ wsId: undefined, graphId: null, mainBranchId: null, branchId: null }),
@@ -23,6 +25,7 @@ vi.mock('@/features/versioning/hooks/useVersioning', () => ({
   useEntitySummary: () => ({ data: undefined, isLoading: false }),
   useProjectionWatermark: () => ({ data: undefined }),
   useBranches: () => ({ data: [] }),
+  useChangeEntry: () => ({ isLoading: true }),
 }))
 /** In a draft: the drawer's own `canEdit` decides. */
 const editingNow = { offered: true, blocked: null }
@@ -136,5 +139,21 @@ describe('EntityDrawer — the Technical view', () => {
     expect(shown.indexOf('Properties')).toBeGreaterThan(shown.indexOf('Identifier'))
     expect(screen.getByRole('tab', { name: /JSON/ })).toBeInTheDocument()
     expect(copyUrnAction()).toBeInTheDocument()
+  })
+})
+
+describe('EntityDrawer — a changed entity', () => {
+  beforeEach(() => useBranchStore.setState({ workspaceId: 'ws', graphId: 'g', activeChangeSet: buildChangeSet([{
+    entityId: 'urn:orders', kind: 'node', status: 'modified', label: 'Orders', origin: { source: 'branch', branchId: 'd1' },
+  }]) }))
+  afterEach(() => useBranchStore.getState().reset())
+
+  it('leads with What changed, in either view', () => {
+    for (const mode of ['business', 'technical'] as const) {
+      usePersonaStore.setState({ mode })
+      const { unmount } = render(<EntityDrawer />)
+      expect(headings()[0]).toBe('What changed')
+      unmount()
+    }
   })
 })
