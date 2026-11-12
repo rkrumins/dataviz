@@ -251,9 +251,14 @@ minter is injected) that returns `(ops, resolutions)`:
   - **A deleted node keeps its last value**, so a row naming it again brings it back under its id.
   - A new node's id is `urn:uuid:` v5 of the identity scope, the property and its value
     (`key_pointer_id`), or a v7 when a live node holds that id; it keeps the value, and its row's
-    urn.
+    urn. A urn a live node holds, or a node an earlier row of the file makes, refuses the row
+    (`two_entities`, naming that node): one urn is never two nodes', and to change that node's
+    value its row sends its `entity_id`.
   - What main's index says is read through the draft: a node the draft changed is read from the
-    draft, and one the draft's view doesn't hold isn't matched.
+    draft, and one the draft's view doesn't hold isn't matched. A node main changed after the
+    draft's base — read from main's version log since the base, as many as main's changes — is
+    read as the draft sees it, main at its base: one main deleted since is still the draft's, and
+    one main gave another value keeps its old one. A dry run against main reads main's index alone.
   - At most `GRAPHVER_MAX_MATCHING_PROPERTIES` (10) a graph (`too_many_matching_properties`). Not on
     a fork yet (`matching_property_on_fork`): its main is its parent's and its own. A dry run never
     builds an index: by a property no import has matched by yet, it answers `409

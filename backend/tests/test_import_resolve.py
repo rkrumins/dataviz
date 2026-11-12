@@ -774,3 +774,23 @@ def test_by_a_property_an_edge_end_no_node_holds_the_value_of_is_refused():
     ], node_eids={"N2"}, current={"N2": {"urn": "urn:N2", "entityType": "Table"}})
     assert (res[0]["resolved_op"], res[0]["code"]) == ("invalid", "end_not_found"), res[0]
     assert ops == []
+
+
+def test_by_a_property_a_new_nodes_urn_another_node_holds_refuses_the_row():
+    """One urn, one node: a new node's urn that a live node holds, or a node an earlier row of the
+    file makes, refuses its row, naming that node — the projection keys nodes by their urn."""
+    ops, res = _by_prop([
+        _node_row(0, properties={"ext": "E2"}, urn="urn:li:orders", displayName="new value"),
+        _node_row(1, properties={"ext": "A"}, urn="urn:li:x", displayName="a"),
+        _node_row(2, properties={"ext": "B"}, urn="urn:li:x", displayName="b"),        # row 1's
+        _node_row(3, properties={"ext": "GONE"}, urn="urn:li:orders", displayName="back"),
+        _node_row(4, properties={"ext": "GONE"}, urn="urn:li:gone", displayName="back"),
+    ], urn_held={"urn:li:orders": "N1"}, restore={"GONE": "ent_D"})
+    assert (res[0]["resolved_op"], res[0]["code"]) == ("invalid", "two_entities"), res[0]
+    assert "N1" in res[0]["reasons"][0] and "entity_id" in res[0]["reasons"][0], res[0]
+    made = key_pointer_id("ds1", "ext", "A")
+    assert (res[1]["resolved_op"], res[1]["matched_entity_id"]) == ("create", made)
+    assert (res[2]["code"], made in res[2]["reasons"][0]) == ("two_entities", True), res[2]
+    assert res[3]["code"] == "two_entities", "a node brought back takes no other node's urn"
+    assert (res[4]["resolved_op"], res[4]["matched_entity_id"]) == ("create", "ent_D"), res[4]
+    assert [o["payload"]["urn"] for o in ops] == ["urn:li:x", "urn:li:gone"], ops

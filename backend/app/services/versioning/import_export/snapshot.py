@@ -252,13 +252,16 @@ class Snapshot:
     """One pinned view of a versioned graph's state, readable a page at a time."""
 
     def __init__(self, layers: List[Layer], *, graph_id: str, branch_id: str, main_branch_id: str,
-                 as_of_seq: Optional[int], page_size: int = PAGE_SIZE) -> None:
+                 as_of_seq: Optional[int], page_size: int = PAGE_SIZE,
+                 base_seq: Optional[int] = None) -> None:
         self.layers = layers
         self.graph_id = graph_id
         self.branch_id = branch_id
         self.main_branch_id = main_branch_id
         #: The commit ``main`` is pinned to (the seq an export reports and a re-read repeats).
         self.as_of_seq = as_of_seq
+        #: A draft's base: the commit of ``main`` it reads main at (None on main).
+        self.base_seq = base_seq
         self.page_size = page_size
 
     @property
@@ -439,7 +442,8 @@ async def open_snapshot(*, graph_id: str, branch_id: Optional[str] = None, as_of
             # A draft as it stands now: main where it branched, then its own (staged) changes.
             layers = await _main_layers(s, graph_id, base_seq) + [HeadsLayer(graph_id, branch_id)]
         else:
-            layers = (await _main_layers(s, graph_id, min(as_of_seq, base_seq))
+            base_seq = min(as_of_seq, base_seq)
+            layers = (await _main_layers(s, graph_id, base_seq)
                       + [VersionLayer(graph_id, branch_id, as_of_seq)])
         return Snapshot(layers, graph_id=graph_id, branch_id=branch_id, main_branch_id=main_id,
-                        as_of_seq=as_of_seq, page_size=page_size)
+                        as_of_seq=as_of_seq, page_size=page_size, base_seq=base_seq)

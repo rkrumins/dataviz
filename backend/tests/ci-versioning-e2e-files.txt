@@ -64,6 +64,7 @@ tests/integration/test_import_draft_identity.py
 tests/integration/test_import_idempotency_live.py
 tests/integration/test_import_identifier.py
 tests/integration/test_import_in_memory.py
+tests/integration/test_import_matching_identity.py
 tests/integration/test_import_one_active.py
 tests/integration/test_import_pointers.py
 tests/integration/test_import_resume_e2e.py

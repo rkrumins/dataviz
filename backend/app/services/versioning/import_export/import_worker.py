@@ -423,10 +423,13 @@ class ImportWorker:
         # platform's, when it was made), with where each came from.
         self._limits: Dict[str, Any] = platform_limits()
         # identifier=prop.<name>: the property, and the nodes the draft holds a value of it for
-        # beyond what main's index says (its own changes, and this job's windows), both ways.
+        # beyond what main's index says (its own changes, this job's windows, and the nodes main
+        # changed after the draft's base), both ways; and the main commit those last are read to
+        # (None on main, whose index is its view).
         self._prop: Optional[str] = None
         self._prop_of: Dict[str, Optional[str]] = {}
         self._prop_holders: Dict[str, set] = {}
+        self._prop_seq: Optional[int] = None
         # Reconciling in memory: the file (read again for the edges), and per pass ("node",
         # "edge") what its rows have named — only for a pass this run started — whether it is still
         # deciding, and how many rows it decided and found unchanged.
@@ -525,7 +528,7 @@ class ImportWorker:
             cursor = "mparse:0"
         if cursor is not None and cursor.startswith("mparse:"):
             snap = await open_snapshot(graph_id=graph_id, branch_id=branch_id)
-            await self._decide_state(graph_id, branch_id)
+            await self._decide_state(snap, graph_id, branch_id)
             await self._stage_pass(job_id, snap, "node", int(cursor.partition(":")[2]))
             return
         if cursor is not None and not cursor.startswith("parse:"):
@@ -598,7 +601,7 @@ class ImportWorker:
                 return True
         return False
 
-    async def _decide_state(self, graph_id: str, branch_id: str) -> None:
+    async def _decide_state(self, snap, graph_id: str, branch_id: str) -> None:
         """What a batch is resolved against in memory before any window (as
         :meth:`validation_state`, with no team keys): what the graph derives node ids in, and the
         data source's identifier property. The links earlier windows leave come later, read by the
@@ -608,7 +611,7 @@ class ImportWorker:
         self._id_scope = await self._svc.identity_scope(graph_id)
         self._identity_prop = identity_property(self._node_identity)
         self._settle_identifier()
-        await self._prop_state(graph_id, branch_id, build=True)
+        await self._prop_state(snap, graph_id, branch_id, build=True)
 
     async def _stage_pass(self, job_id: str, snap, kind: str, resume: int) -> None:
         """Stage the file's ``kind`` rows from file row ``resume``, a batch at a time, each batch
@@ -960,10 +963,11 @@ class ImportWorker:
         self._prop = (self._identifier[len("prop."):] if self._identifier.startswith("prop.")
                       else None)
 
-    async def _prop_state(self, graph_id: str, branch_id: str, *, build: bool,
+    async def _prop_state(self, snap, graph_id: str, branch_id: str, *, build: bool,
                           job_id: Optional[str] = None) -> None:
         """For ``identifier=prop.<name>``: the property's index caught up to main's head — built
-        first when no import named it (``build``) — and the values the draft itself holds."""
+        first when no import named it (``build``) — and, on a draft, the values the draft itself
+        holds. On main (a dry run) the index is main's view, and nothing more is read."""
         if not self._prop:
             return
         if build:
@@ -971,8 +975,27 @@ class ImportWorker:
         else:
             await matching.ensure_ready(graph_id, self._prop)
         self._prop_of, self._prop_holders = {}, {}
+        self._prop_seq = snap.base_seq if snap.is_draft else None
+        if not snap.is_draft:
+            return
         for eid, value in (await matching.draft_values(graph_id, branch_id, self._prop)).items():
             self._note_prop(eid, value)
+
+    async def _prop_moved_on_main(self, snap) -> None:
+        """On a draft: the nodes main changed after its base (since the last call), noted as the
+        draft sees them — its own value, else main's at its base — since main's index says what
+        main's head holds. A node main deleted since is live in the draft; one main gave another
+        value keeps its old one there. As many as main's changes since the base."""
+        if self._prop_seq is None:
+            return
+        moved, self._prop_seq = await matching.changed_on_main(self._graph_id, self._prop_seq)
+        moved = [e for e in moved if e not in self._prop_of]
+        if not moved:
+            return
+        live = await snap.lookup_live("node", moved, payload=True)
+        held = dict(await asyncio.to_thread(matching._values_of, list(live.values()), self._prop))
+        for eid in moved:
+            self._note_prop(eid, held.get(eid))
 
     def _note_prop(self, eid: str, value: Optional[str]) -> None:
         """The draft holds ``value`` of the matching property for node ``eid`` (None: none, or it
@@ -987,10 +1010,12 @@ class ImportWorker:
     async def _prop_hits(self, snap, values) -> Tuple[Dict[str, str], Dict[str, List[str]], Dict[str, str]]:
         """``(hits, dupes, restore)`` for values of the matching property: the one live node of the
         draft holding each, the values several hold, and the values only a deleted node held (that
-        node). Main's index, for the nodes the draft hasn't changed and its view holds; the draft's
-        own values for the rest."""
+        node). Main's index, for the nodes neither the draft nor main has changed since the draft's
+        base, where the draft's view holds them; the draft's view of the rest (main's changes read
+        after the index, so they cover whatever it says)."""
         values = {v for v in values if v}
         main = await matching.lookup(self._graph_id, self._prop, values)
+        await self._prop_moved_on_main(snap)
         candidates = {e for v in values for e, live in main.get(v, ())
                       if live and e not in self._prop_of}
         visible = set(await snap.lookup_live("node", candidates)) if candidates else set()
@@ -1022,7 +1047,7 @@ class ImportWorker:
         self._id_scope = await self._svc.identity_scope(graph_id)
         self._identity_prop = ident = identity_property(self._node_identity)
         self._settle_identifier()
-        await self._prop_state(graph_id, branch_id, build=True, job_id=job_id)
+        await self._prop_state(snap, graph_id, branch_id, build=True, job_id=job_id)
         self._created_from, self._aliases = {}, {}
         # Only the rows that leave a link: a file id that is not the node's own, or an identifier
         # value beside a urn — never a whole row, which a large job has millions of.
@@ -1056,7 +1081,7 @@ class ImportWorker:
         self._id_scope = await self._svc.identity_scope(graph_id)
         self._identity_prop = identity_property(self._node_identity)
         self._settle_identifier()
-        await self._prop_state(graph_id, branch_id, build=False)
+        await self._prop_state(snap, graph_id, branch_id, build=False)
         onto = self._ontology or {}
         keys = KeyIndex(onto.get("keys"), onto.get("unique"))
         self._keys = keys if keys else None
@@ -1108,16 +1133,19 @@ class ImportWorker:
 
     def _remember_created(self, rows, ops, resolutions) -> None:
         """A committed node window's rows, for the windows after it: the node each matched or
-        created, by the file entity id and second name it came with; and a create's team key
-        values. Only what landed — a row the write gate turned away named nothing any later row
-        may point at."""
+        created, by the file entity id and second name it came with; a create's team key values;
+        and the matching property's value each node now holds, as its op wrote it (a stale row's
+        update keeps the node's newer value of a cell it left as exported). Only what landed — a
+        row the write gate turned away named nothing any later row may point at."""
         by_index = {r["_row_index"]: r for r in rows}
         urn_of = {o["entity_id"]: (o.get("payload") or {}).get("urn") for o in ops
                   if o.get("op") == "create"}
+        wrote = {o["entity_id"]: (o.get("payload") or {}).get("properties") or {} for o in ops
+                 if o.get("op") in ("create", "update")}
         for res in resolutions:
             eid = res.get("matched_entity_id")
             if self._prop and eid and res.get("resolved_op") in ("create", "update", "delete"):
-                props = (by_index.get(res["_row_index"]) or {}).get("properties") or {}
+                props = wrote.get(eid) or {}
                 if res["resolved_op"] == "delete":
                     self._note_prop(eid, None)
                 elif self._prop in props or res["resolved_op"] == "create":
@@ -1238,8 +1266,10 @@ class ImportWorker:
     async def _prop_node_lookups(self, snap, rows) -> Dict[str, Any]:
         """:meth:`_node_lookups` for ``identifier=prop.<name>``: the live nodes the rows name by
         entity_id or by the property's value, with their current payloads; and of the ids the rows
-        that match nothing would take (derived from their values), those a live node holds."""
+        that match nothing would take (derived from their values), those a live node holds, and of
+        their urns, the live node holding each."""
         values = {v for r in rows if (v := key_value((r.get("properties") or {}).get(self._prop)))}
+        urns = {u for r in rows if (u := key_value(r.get("urn"))) and not uuid_urn(u)}
         by_id = await snap.lookup_live("node", {r["entity_id"] for r in rows if r.get("entity_id")})
         hits, dupes, restore = await self._prop_hits(snap, values)
         named = set(by_id) | set(hits.values())
@@ -1249,6 +1279,7 @@ class ImportWorker:
         taken = set(await snap.lookup_live("node", derived)) if derived else set()
         current, hash_of = await _heads(snap, "node", named)
         return {"urn_to_eid": hits, "dupes": dupes, "restore": restore, "taken": taken,
+                "urn_held": await snap.nodes_by_urn(urns) if urns else {},
                 "qname_to_eid": {}, "node_eids": named, "current": current, "hash_of": hash_of,
                 "bases": await _bases(snap, "node", rows, hash_of)}
 

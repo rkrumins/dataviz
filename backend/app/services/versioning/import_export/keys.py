@@ -136,7 +136,10 @@ async def _build(graph_id: str, name: str, job_id: Optional[str]) -> None:
     """Read every live node of main, as of its head now, into the index, then mark it ready. Each
     build records the commit it reads at before it writes, and the index keeps the earliest: two
     imports building it at once, or a build that died part-way and the one after it, leave rows of
-    several commits, and the catch-up from the earliest applies the log again over all of them."""
+    several commits, and the catch-up from the earliest applies the log again over all of them. A
+    build that ends after another's catch-up moved the index past its commit takes it back to that
+    commit, so the next catch-up applies the log again over the rows it wrote too (``_apply``
+    brings each node to its last version whatever its rows held)."""
     snap = await open_snapshot(graph_id=graph_id)                   # main, pinned at its head
     async with db.graphver_session() as s:
         stmt = pg_insert(KeyIndexORM).values(
@@ -159,6 +162,7 @@ async def _build(graph_id: str, name: str, job_id: Optional[str]) -> None:
         await _lock(s, graph_id, name)
         row = await s.get(KeyIndexORM, (graph_id, name), populate_existing=True)
         row.status, row.cursor = "ready", None                      # at the earliest build's seq
+        row.seq = min(int(row.seq), snap.as_of_seq)
     logger.info("matching property %s of graph %s indexed: %d live nodes read, at main commit %s",
                 name, graph_id, read, snap.as_of_seq)
 
@@ -250,6 +254,20 @@ async def lookup(graph_id: str, name: str, values: Iterable[str]) -> Dict[str, L
             for v, e, live in (await s.execute(stmt, {"vals": wanted[i:i + 2000]})).all():
                 out.setdefault(v, []).append((e, bool(live)))
     return out
+
+
+async def changed_on_main(graph_id: str, after: int) -> Tuple[List[str], int]:
+    """``(ids, seq)``: the nodes main's commits after ``after`` changed, up to main's commit
+    ``seq`` (``after`` when none did) — what main's index says of them a draft based at ``after``
+    doesn't see. As many as main's changes since, by the version log's branch index."""
+    async with db.graphver_session() as s:
+        main_id = await _main_id(s, graph_id)
+        rows = (await s.execute(
+            select(NodeVersionORM.entity_id, func.max(NodeVersionORM.commit_seq))
+            .where(NodeVersionORM.graph_id == graph_id, NodeVersionORM.branch_id == main_id,
+                   NodeVersionORM.commit_seq > after)
+            .group_by(NodeVersionORM.entity_id))).all()
+    return [e for e, _seq in rows], max([after, *(int(seq) for _e, seq in rows)])
 
 
 async def draft_values(graph_id: str, branch_id: str, name: str) -> Dict[str, Optional[str]]:

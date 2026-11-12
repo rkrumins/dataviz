@@ -107,8 +107,11 @@ integration's many small changes as a few commits.
     do. An edge names its ends `source.<name>` / `target.<name>`. The first import naming the
     property indexes it, reading every node once; each later one reads only the version log since,
     so a node made or edited in the app is found by its value, never made again. A value two nodes
-    hold refuses its rows (`duplicate_value`); a deleted node named again by its last value comes
-    back under its id. At most `GRAPHVER_MAX_MATCHING_PROPERTIES` (10) a graph; not on a fork yet.
+    hold refuses its rows (`duplicate_value`), and so does a new node's urn that another node holds
+    (`two_entities`: send that node's entity id to change its value); a deleted node named again by
+    its last value comes back under its id. A draft behind main matches by the values it holds: a
+    node main changed or deleted after the draft's base keeps its value there. At most
+    `GRAPHVER_MAX_MATCHING_PROPERTIES` (10) a graph; not on a fork yet.
 
   The job keeps it (`identifier` on the job), and a resumed job keeps it too. Anything else is
   `422 invalid_identifier`, saying what it may be. Whichever it is, an entity's id never changes.
