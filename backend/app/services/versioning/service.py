@@ -4912,6 +4912,7 @@ class GraphVersioningService:
         already running, which may have read the graph before the change that asked) and
         ``unreachable`` keep it owed, in ``projection_state.rollup_state``, for the liveness loop
         to ask again; anything else (``queued``, ``refused``, None: nothing to ask for) clears it.
+        What a full seed owes the job (``moved``, which its publish hands over) stays either way.
         Never raises: an ask that can't be recorded is made again by the next change that hands
         the summaries over."""
         try:
@@ -4919,13 +4920,16 @@ class GraphVersioningService:
                 ps = await s.get(ProjectionStateORM, graph_id)
                 if ps is None:
                     return
+                state = ps.rollup_state if isinstance(ps.rollup_state, dict) else {}
+                moved = state.get("moved")
+                kept = {"moved": moved} if moved else {}
                 if outcome not in ("active", "unreachable"):
-                    if ps.rollup_state is not None:
-                        ps.rollup_state = None
+                    if ps.rollup_state != (kept or None):
+                        ps.rollup_state = kept or None
                     return
                 now = _now()
                 ps.rollup_state = {"pending": outcome, "asked": now,
-                                   "since": (ps.rollup_state or {}).get("since") or now}
+                                   "since": state.get("since") or now, **kept}
         except Exception:                                # pragma: no cover - infra
             logger.warning("the rollup ask for %s (%s) was not recorded", graph_id, outcome,
                            exc_info=True)
@@ -4966,8 +4970,12 @@ class GraphVersioningService:
             graph = await s.get(GraphORM, graph_id)
             ps = await s.get(ProjectionStateORM, graph_id)
             committed = graph.main_head_commit_seq if graph else 0
+            # What a pass retries: an evicted, waiting or trashed graph's are not (a load's full
+            # seed clears them, or the purge).
             quarantine = (await self._projection_quarantine(s, graph_id)
-                          if getattr(ps, "quarantine_next_at", None) else None)
+                          if getattr(ps, "quarantine_next_at", None)
+                          and ps.status not in ("evicted", "waiting_capacity")
+                          and graph is not None and graph.deleted_at is None else None)
             projected = ps.projected_commit_seq if ps else 0
             status = ps.status if ps else "idle"
             fresh = serves_head(projected, committed, status)

@@ -336,13 +336,16 @@ class ProjectionStateORM(VersioningBase):
     # asked}``, where ``pending`` says why (``active``: a job was already running, which may have
     # read the graph before the change that asked; ``refused``: a hold, or the service could not
     # be reached). The liveness loop asks again, every GRAPHVER_ROLLUP_REASK_SECS, until one is
-    # queued; NULL when nothing is owed (20261112_1200_gv_ps_rollup_state).
-    rollup_state = Column(JSONB, nullable=True)
+    # queued. ``moved``: the summaries already count writes the next full seed brings (it cleared
+    # what was held, or a window that moved them escalated), so the full seed that publishes hands
+    # them to the job instead of moving them by its difference, and clears it. NULL when nothing
+    # is owed (20261112_1200_gv_ps_rollup_state): None is stored as SQL NULL, not JSON ``null``.
+    rollup_state = Column(JSONB(none_as_null=True), nullable=True)
     # The version of main the key holds whole: the seq of the last window a pass published into
     # it. A rebuild in place keeps it, as the key keeps that version until the rebuild publishes,
     # so reads stay on the key while the projection catches up or rebuilds (``serving_seq``).
     # NULL when the key holds no published version: never written, written from nothing (a move,
-    # an Adopt, a repin), lost, evicted or reset (20261112_1700_gv_ps_served).
+    # an Adopt, a repin), lost, evicted or reset (20261112_1800_gv_ps_served).
     served_commit_seq = Column(BigInteger, nullable=True)
     last_projected_at = Column(Text, nullable=True)
     last_error = Column(Text, nullable=True)
@@ -367,6 +370,10 @@ class ProjectionStateORM(VersioningBase):
     # Consecutive failed passes, and when the poll may retry (ISO-8601 UTC, like _now()).
     failed_attempts = Column(Integer, nullable=False, default=0, server_default=text("0"))
     next_retry_at = Column(Text, nullable=True)
+    # The passes in a row that failed on a timeout or memory refusal the statement ladder could not
+    # absorb, which the escalation counts (GRAPHVER_PROJECTION_ESCALATE_AFTER): a pass that ends any
+    # other way sets it back to 0 (20261112_1700_gv_ps_pressure).
+    pressure_failures = Column(Integer, nullable=False, default=0, server_default=text("0"))
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
     # Residency (20261030_1300_gv_ps_residency). The class a system admin set: ``always`` (never
     # evicted), ``standard`` (evicted when unread for the Standard idle time or under memory
@@ -421,8 +428,9 @@ class ProjectionQuarantineORM(VersioningBase):
     graph's rows first, oldest first; a row that lands, or a newer write of the same entity that
     lands, removes it. While a graph holds any, its passes publish unverified.
 
-    ``entity_key`` names the entity as the statement does: a node's urn, an edge's id, or its
-    ends. ``cypher`` and ``params`` are the statement and its one row, as sent."""
+    ``entity_key`` names the entity as the statement does: a node's urn, or an edge's id with its
+    type and ends (``<id>@<type>:<source urn>-><target urn>``). ``cypher`` and ``params`` are the
+    statement and its one row, as sent."""
 
     __tablename__ = "projection_quarantine"
 
@@ -972,6 +980,8 @@ def _ensure_schema_upgrades(conn) -> None:
                   lambda: ensure_ps_quarantine_column(conn), required=True)
     _bounded_step(conn, "projection_state.rollup_state was not added",
                   lambda: ensure_ps_rollup_state_column(conn), required=True)
+    _bounded_step(conn, "projection_state.pressure_failures was not added",
+                  lambda: ensure_ps_pressure_failures_column(conn), required=True)
     _bounded_step(conn, "projection_state.served_commit_seq was not added",
                   lambda: ensure_ps_served_column(conn), required=True)
     _bounded_step(conn, "import_rows.code was not added",
@@ -1136,6 +1146,21 @@ def ensure_ps_rollup_state_column(conn) -> None:
         return
     conn.execute(text(f'ALTER TABLE "{_SCHEMA}"."projection_state" '
                       "ADD COLUMN IF NOT EXISTS rollup_state JSONB"))
+
+
+def ensure_ps_pressure_failures_column(conn) -> None:
+    """Add ``projection_state.pressure_failures``: the passes in a row that failed under pressure,
+    0 for every existing graph. Its default is a constant, which Postgres keeps in the catalog, so
+    nothing is rewritten; a no-op without the table and once the column is there, like
+    :func:`ensure_ps_quarantine_column`."""
+    inspector = sa_inspect(conn)
+    if not inspector.has_table("projection_state", schema=_SCHEMA):
+        return
+    if "pressure_failures" in {c["name"] for c in inspector.get_columns("projection_state",
+                                                                        schema=_SCHEMA)}:
+        return
+    conn.execute(text(f'ALTER TABLE "{_SCHEMA}"."projection_state" '
+                      "ADD COLUMN IF NOT EXISTS pressure_failures INTEGER NOT NULL DEFAULT 0"))
 
 
 def ensure_ps_served_column(conn) -> None:

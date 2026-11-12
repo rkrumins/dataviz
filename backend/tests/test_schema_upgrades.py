@@ -1920,15 +1920,64 @@ async def test_the_import_settings_migration_round_trips(store):
             await trans.rollback()
 
 
-# ── projection_state.served_commit_seq (20261112_1700_gv_ps_served) ──
-_PS_SERVED = _VERSIONS / "20261112_1700_gv_ps_served.py"
+# ── projection_state.pressure_failures (20261112_1700_gv_ps_pressure) ──
+_PS_PRESSURE = _VERSIONS / "20261112_1700_gv_ps_pressure.py"
+
+
+def test_the_pressure_failures_are_declared_and_migrated():
+    column = models.ProjectionStateORM.__table__.c.pressure_failures
+    assert not column.nullable and str(column.server_default.arg) == "0"
+    migration = _migration(_PS_PRESSURE)
+    assert migration.revision == _PS_PRESSURE.stem and len(migration.revision) <= 32
+    assert migration.down_revision == "20261112_1600_import_settings"
+
+
+@e2e
+async def test_a_store_alembic_never_reached_gets_the_pressure_failures(store):
+    async with store.connect() as conn:
+        trans = await conn.begin()
+        try:
+            await conn.execute(text(
+                f'ALTER TABLE "{models._SCHEMA}".projection_state DROP COLUMN pressure_failures'))
+            await conn.run_sync(models._ensure_schema_upgrades)
+            assert "pressure_failures" in await _ps_columns(conn)
+            await conn.run_sync(models._ensure_schema_upgrades)        # and again: a no-op
+        finally:
+            await trans.rollback()
+
+
+@e2e
+async def test_the_pressure_failures_migration_round_trips(store):
+    migration = _migration(_PS_PRESSURE)
+
+    def run(step):
+        def apply(sync_conn):
+            migration.op = SimpleNamespace(get_bind=lambda: sync_conn,
+                                           execute=lambda sql: sync_conn.execute(text(sql)))
+            getattr(migration, step)()
+        return apply
+
+    async with store.connect() as conn:
+        trans = await conn.begin()
+        try:
+            await conn.run_sync(run("downgrade"))
+            assert "pressure_failures" not in await _ps_columns(conn)
+            await conn.run_sync(run("upgrade"))
+            assert "pressure_failures" in await _ps_columns(conn)
+            await conn.run_sync(run("upgrade"))                     # idempotent
+        finally:
+            await trans.rollback()
+
+
+# ── projection_state.served_commit_seq (20261112_1800_gv_ps_served) ──
+_PS_SERVED = _VERSIONS / "20261112_1800_gv_ps_served.py"
 
 
 def test_the_served_version_is_declared_and_migrated():
     assert models.ProjectionStateORM.__table__.c.served_commit_seq.nullable
     migration = _migration(_PS_SERVED)
     assert migration.revision == _PS_SERVED.stem and len(migration.revision) <= 32
-    assert migration.down_revision == "20261112_1600_import_settings"
+    assert migration.down_revision == "20261112_1700_gv_ps_pressure"
 
 
 @e2e

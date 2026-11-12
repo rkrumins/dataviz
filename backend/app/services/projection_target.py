@@ -97,7 +97,8 @@ def make_rollup_rebuild_hook(get_aggregation_service):
     queued in dedicated mode.
 
     The hook answers how the ask went: ``queued``; ``active``, a job was already running;
-    ``unreachable``, the service could not be asked; ``refused``; or None, nothing to ask for. A
+    ``unreachable``, the service could not be asked, or failed to take it (the control plane's
+    5xx); ``refused``; or None, nothing to ask for. A
     job already running may have read the graph before the change that asked, so an in-source
     ask that was ``active`` or ``unreachable`` stays owed (``note_rollup_ask``), and the
     projection worker's liveness loop asks again until one is queued. A dedicated one doesn't:
@@ -158,8 +159,9 @@ def make_rollup_rebuild_hook(get_aggregation_service):
 async def _queue_on_control_plane(ds_id: str, idempotency_key: str, mode: str) -> str:
     """Queue the rollup rebuild on the aggregation control plane — the same route and
     internal auth the insights purge uses for its post-purge rebuild. Never raises; answers
-    ``queued``, ``active`` (409: a job is already running), ``refused`` (another refusal, logged
-    loudly enough to act on) or ``unreachable``."""
+    ``queued``, ``active`` (409: a job is already running), ``unreachable`` (it could not be
+    reached, or answered a 5xx: it failed, or is still starting) or ``refused`` (any other
+    answer, logged loudly enough to act on)."""
     import os
     import httpx
     from backend.app.services.aggregation.internal_auth import internal_auth_headers
@@ -182,6 +184,10 @@ async def _queue_on_control_plane(ds_id: str, idempotency_key: str, mode: str) -
         if resp.status_code == 409:
             logger.info("rollup rebuild for ds=%s not queued yet: a job is already active", ds_id)
             return "active"
+        if resp.status_code >= 500:
+            logger.warning("rollup rebuild for ds=%s not queued: the control plane answered "
+                           "HTTP %s; asked again later", ds_id, resp.status_code)
+            return "unreachable"
         logger.warning("rollup rebuild for ds=%s refused by the control plane (HTTP %s) — "
                        "rebuild via the aggregation UI", ds_id, resp.status_code)
         return "refused"

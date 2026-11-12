@@ -269,7 +269,8 @@ def test_an_edge_delete_also_finds_the_id_the_graph_knows_it_by():
         {"eid": "edge:X", "src": "urn:a", "tgt": "urn:b",
          "rel": "FLOWS", "slb": "Table", "tlb": "Dataset"}]))
     (params,) = [p for c, p, _t in client.calls if "DELETE r" in c]
-    assert params["batch"] == [{"eid": "edge:X", "pid": "X", "src": "urn:a", "tgt": "urn:b"}]
+    assert params["batch"] == [{"eid": "edge:X", "pid": "X", "src": "urn:a", "tgt": "urn:b",
+                                "rel": "FLOWS"}]
 
 
 def test_a_customer_graph_keeps_the_id_its_relationship_has():

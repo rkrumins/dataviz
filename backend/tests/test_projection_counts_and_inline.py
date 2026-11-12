@@ -8,7 +8,8 @@ Pins:
 - On a customer's key, the counts are taken a window of internal node ids at a time, so no
   statement costs the whole key.
 - ``project_now`` projects a window ``fits_inline`` passes, and leaves a larger one to the worker
-  with a nudge, rather than starting a pass its 10 s budget would cancel.
+  with a nudge, rather than starting a pass its 10 s budget would cancel. Either way it drops the
+  ``gv_<id>`` key the target repair hands back.
 """
 from __future__ import annotations
 
@@ -52,7 +53,7 @@ async def test_a_customer_keys_counts_go_a_window_of_node_ids_at_a_time():
 
 class _Projector:
     def __init__(self, fits):
-        self.fits, self.projected = fits, []
+        self.fits, self.projected, self.dropped = fits, [], []
 
     async def fits_inline(self, graph_id):
         return self.fits
@@ -60,6 +61,9 @@ class _Projector:
     async def project_graph(self, graph_id, **_kw):
         self.projected.append(graph_id)
         return {"noop": False}
+
+    async def drop_graph(self, name, provider_id=None):
+        self.dropped.append((name, provider_id))
 
 
 @pytest.mark.parametrize("fits", [True, False])
@@ -77,3 +81,28 @@ async def test_project_now_projects_a_small_window_and_hands_a_large_one_to_the_
     monkeypatch.setattr(endpoints, "nudge_projection", nudge)
     await endpoints.project_now("g1")
     assert (proj.projected, nudged) == ((["g1"], []) if fits else ([], ["g1"]))
+
+
+@pytest.mark.parametrize("fits", [True, False])
+async def test_project_now_drops_the_orphan_the_repair_hands_back_either_way(monkeypatch, fits):
+    """The repair re-points a ``gv_<id>`` pin and hands the old key back once: it is dropped on its
+    pinned instance whether the pass runs inline or the worker is nudged, whose own repair then
+    finds the pin moved and has nothing to drop."""
+    proj = _Projector(fits)
+
+    async def repair(_gid):
+        return "gv_g1"
+
+    async def nudge(_gid):
+        return None
+
+    class _Svc:
+        async def projection_watermark(self, graph_id):
+            return {"falkor_provider": "prov_1"}
+
+    monkeypatch.setattr(endpoints, "_repair_projection_target", repair)
+    monkeypatch.setattr(endpoints, "_get_projector", lambda: proj)
+    monkeypatch.setattr(endpoints, "nudge_projection", nudge)
+    monkeypatch.setattr(endpoints, "get_versioning_service", lambda: _Svc())
+    await endpoints.project_now("g1")
+    assert proj.dropped == [("gv_g1", "prov_1")]

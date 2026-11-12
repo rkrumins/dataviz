@@ -165,7 +165,10 @@ rollup cells, the tombstone sweep, and the rebuild's deletes.
 - **One row that still fails** is retried `GRAPHVER_PROJECTION_FLOOR_RETRIES` times (3), after 2 s,
   4 s and 8 s plus jitter, then given up on, failing the pass. A node delete gets one more try
   first: a hub, whose `DETACH DELETE` must drop every relationship at once, has its relationships
-  deleted 10,000 at a time (halved on a timeout), then the node.
+  deleted 10,000 at a time (halved on a timeout), then the node. That holds wherever the delete
+  names the node: by label and urn in a window, and in a rebuild for every copy of a node the key
+  holds twice; by internal id in a rebuild (a node main no longer holds); by label, urn and entity
+  id in the tombstone sweep.
 - **Why sending again is safe.** FalkorDB rolls back a statement it aborts, and every projector
   write is an idempotent `MERGE`, `SET` or `DELETE`. A rollup write sets the absolute weight it
   computed.
@@ -177,22 +180,37 @@ rollup cells, the tombstone sweep, and the rebuild's deletes.
 statement that still times out for a single row is held in `graphver.projection_quarantine`.
 This happens after its retries, and for a node delete after its hub path. The pass goes on.
 - **What it holds.** The table keeps the statement and its row, the error, the attempts and
-  when.
+  when. A node is named by its urn; an edge by its id where the statement puts it, with its type
+  and ends (`<id>@<type>:<source urn>-><target urn>`).
 - **What is held.** Node and edge merges and deletes, relabels and re-keys. Reads, rollup cells
   and deletes by internal id still fail the pass.
+- **Edges that wait for a held node.** An edge merge whose end node the pass holds, and the key
+  lacks under the label the edge matches (a new node whose merge is held, say), is held with it,
+  not sent: it would match no node, and be lost once the node lands. All of a chunk's are held in
+  one write. A node the key holds, whose own update is held, still matches, so its edges are
+  written.
 - **Retries.** Every later pass retries the graph's held statements first, oldest first, so its
   own writes land after them. One that lands leaves the table, and so does any held statement for
-  an entity a later write lands.
+  an entity a later write lands: for an edge, a write at the same type and ends. A write of the
+  edge somewhere else supersedes nothing held where it was.
+  - An edge merge held for its end node is not tried while that node is still held after its own
+    retry, and stays held. Held after the node, it is retried after it.
   - A graph that is caught up gets a pass of its own once its held statements are due
     (`projection_state.quarantine_next_at`, every `GRAPHVER_PROJECTION_QUARANTINE_RETRY_SECS`,
     300). The poll selects it, and the pass has an empty window.
-  - A full seed rewrites everything, so it clears the graph's rows first. It also hands the
-    `:AGGREGATED` rollups to the aggregation job (§8): they moved with the held entities' window,
-    which the key lacked, so moving them by the reconcile's difference would count those entities
-    twice.
+  - A full seed that starts over rewrites everything, so it clears the graph's rows first. A full
+    seed that resumes from its cursor (below) writes nothing again before where it stopped, so it
+    retries them instead, as a window does.
+  - The rollups moved with the held entities' window, which the key lacked, so moving them by the
+    reconcile's difference would count those entities twice. Clearing the rows therefore records,
+    in the same transaction, that the `:AGGREGATED` rollups are owed the aggregation job (§8):
+    `projection_state.rollup_state.moved`. Every full seed reads it, hands the rollups to the job
+    instead of moving them, and the one that publishes clears it, whatever passes failed first.
 - **While any are held,** the graph's passes publish `unverified`: its counts cannot match.
 - **Where it shows.** The watermark lists them (`quarantine: {count, entities}`), and so does the
-  **Data health** tab.
+  **Data health** tab, while the graph is projected. An evicted graph, one waiting for room in
+  memory, or a trashed one is retried by nothing: its rows are cleared by its load's full seed, or
+  by the purge, and neither the watermark nor `graphver_projection_quarantined` counts them.
 - **Switch.** `GRAPHVER_PROJECTION_QUARANTINE=0` turns it off; a stuck entity then fails every
   pass, as before.
 
@@ -201,21 +219,37 @@ a page at a time (`_apply_paged`), and so is a rebuild of a graph too large to h
 (`_reconcile_streamed`).
 - **The cursor.** After each page lands, the pass writes where it is on the pass marker:
   `_GVProjMeta.pFrom`, `pTo`, `pStep`, `pAfter`.
-  - A paged window's steps are `node` and `edge`, each positioned by version id.
+  - A paged window's steps are `node` and `edge`, each positioned by version id. Its cursor also
+    carries what its pages so far did that the pass publishing the window must know:
+    `pStructural`, a retype, re-key or containment change, and `pDropped`, the writes that did not
+    land.
   - A streamed rebuild's are `fk_node` and `fk_edge`, positioned by internal id, then `node` and
     `edge`, by entity id.
 - **The time box.** Past `GRAPHVER_PROJECTION_PASS_MAX_SECS` (300) the pass stops at the next
   page boundary. It publishes nothing, records no error and no backoff, and nudges itself. Other
-  graphs get their turn meanwhile.
+  graphs get their turn meanwhile. A rebuild that stops so stays `rebuilding` (a load
+  `rehydrating`), so the pass that resumes it is never taken for a first seed: with the Graph
+  residency switch on, that would queue the graph for a load into a fresh key and leave the
+  rebuild's pages behind.
 - **Resuming.** A pass from the same watermark finishes the cursor's window (`pTo`) first, after
-  the last page that landed, then publishes it. The window after it is the next pass's.
+  the last page that landed, then publishes it. The window after it is the next pass's. A resumed
+  paged window starts from what its cursor says the pages before it did, so the pass that
+  publishes it bumps the graph's generation for a retype an earlier pass made, and verifies a write
+  an earlier pass dropped.
 - **Where it lives.** The cursor is in the key, so a key that lost a page lost the cursor with it,
-  and is projected from the start. It is cleared when its window publishes.
+  and is projected from the start. A pass that has gone through all its pages clears it, whether
+  its verify publishes the window or holds it back: the pass after one held back projects the
+  window from the start, rather than resume past its last page and write nothing. An operator's
+  rebuild (`POST …/projection/rebuild`) clears it too once it is accepted, after a rebuild that
+  stopped part-way and then failed, so it replays main from the start.
 - **A resumed streamed rebuild** does not know what earlier passes wrote, so it hands the rollups
   to the batch job.
 - **At main's head,** a rebuild pages main's `entity_heads` by their primary key, each joined to
   its version by the version's. A page costs its own size, not a `DISTINCT ON` over every version
-  of the graph.
+  of the graph. Main's head is read again after each such page: a commit moves the head and the
+  heads in one transaction, so once one has landed, that page and the rest are read as of the
+  rebuild's seq instead. The rebuild never writes what the commit made of an entity (a new type,
+  a new urn) as a second node beside the one it kept; the next window moves it in place.
 - **Progress.** A paged window reports it too (`progress_done` / `progress_total`), in version
   rows.
 
@@ -225,10 +259,17 @@ operator's rebuild makes (`request_projection_rebuild`, fenced on its epoch), wh
 - its verify finds FalkorDB short of committed main, or, on a key the platform minted, holding more
   after the tombstone sweep;
 - the same window has failed `GRAPHVER_PROJECTION_ESCALATE_AFTER` passes in a row (3) on a timeout
-  or memory refusal the statement ladder and the quarantine could not absorb.
+  or memory refusal the statement ladder and the quarantine could not absorb. They are counted in
+  `projection_state.pressure_failures`: a pass that ends any other way (published, held back, or
+  failed on something else, such as a connection error) starts the count again, and a cancel
+  leaves it. `failed_attempts`, which spaces out the retries, counts every failure.
 
 The next pass reconciles the key in place (streamed and resumable on a large graph) and publishes.
-Until then the graph's last error reads "rebuilding on its own: …".
+Until then the graph's last error reads "rebuilding on its own: …". A window that moved the
+`:AGGREGATED` rollups before its verify, or owed them to the job, records that they are owed
+(`rollup_state.moved`, as above) in the same reset: they already count what the rebuild writes, so
+the rebuild hands them to the job, as the inline heal did, rather than moving them by its
+difference again.
 `graphver_projection_escalations_total{cause}` counts them. Off, a shortfall is healed inside the
 window's pass and a surplus holds the graph back until a rebuild, as before.
 
@@ -525,10 +566,12 @@ A publish whose job is turned away because one is already running is not lost:
   queues another.
 - **In the source's own graph** the hook records the ask as owed
   (`projection_state.rollup_state`, `{pending, since, asked}`): the job running may have read the
-  graph before the change that asked. The hook answers `queued`, `active`, `unreachable` or
-  `refused`. An `active` or `unreachable` ask stays owed, and the projection worker's liveness loop
-  asks again, at most every `GRAPHVER_ROLLUP_REASK_SECS` (300) per graph, until one is queued. A
-  refusal (no ontology, a misconfigured provider) is logged and owed no more.
+  graph before the change that asked. Recording it keeps a `moved` a full seed owes (§3). The
+  hook answers `queued`, `active`, `unreachable` or `refused`. An `active` or `unreachable` ask
+  stays owed, and the projection worker's liveness loop asks again, at most every
+  `GRAPHVER_ROLLUP_REASK_SECS` (300) per graph, until one is queued. A control plane that answers
+  a 5xx (it failed, or is still starting) is `unreachable`. A refusal (a 4xx: no ontology, a
+  misconfigured provider) is logged and owed no more.
 `resolve_aggregation_edge_types` (`projection_target.py:22-49`) answers such a source's types with
 `"dedicated"` after them, and `_compute_rollup_deltas` and `_reconcile_in_place` then answer `"stale"`
 for a window or reconcile that changes lineage or containment, writing no rollup.

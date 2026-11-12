@@ -253,13 +253,10 @@ async def project_now(graph_id: str) -> None:
         await nudge_projection(graph_id)
         return
     try:
-        if not await proj.fits_inline(graph_id):
-            # Too large to finish inside the request: the worker projects it.
-            await nudge_projection(graph_id)
-            return
-        await asyncio.wait_for(proj.project_graph(graph_id, respect_backoff=True),
-                               _SYNC_PROJECTION_TIMEOUT_SECS)
-        if orphan:                                       # the old gv_* copy is now unused — reclaim its RAM
+        # The old gv_* copy is unused once the pin moved off it — reclaim its RAM now, whether
+        # the pass runs here or in the worker: the repair hands it back only once, and the
+        # worker's own repair finds the pin already moved.
+        if orphan:
             try:
                 # Route the GRAPH.DELETE to the graph's PINNED instance. Without the
                 # provider_id the factory falls back to the env-default instance —
@@ -269,6 +266,12 @@ async def project_now(graph_id: str) -> None:
                 await proj.drop_graph(orphan, wm.get("falkor_provider"))
             except Exception as exc:
                 logger.warning("could not drop orphan projection graph %s: %s", orphan, exc)
+        if not await proj.fits_inline(graph_id):
+            # Too large to finish inside the request: the worker projects it.
+            await nudge_projection(graph_id)
+            return
+        await asyncio.wait_for(proj.project_graph(graph_id, respect_backoff=True),
+                               _SYNC_PROJECTION_TIMEOUT_SECS)
     except Exception as exc:
         logger.warning("synchronous projection for %s failed; deferring to async worker: %s", graph_id, exc)
         await nudge_projection(graph_id)
@@ -2715,10 +2718,12 @@ async def rebuild_projection(
     cache — the "rebuild the cache" operator action. Pins an unpinned graph to its data source's
     real graph first; 409 if there is still no FalkorDB target (nothing to rebuild). Idempotent: a
     projection/rebuild already in flight returns ``started=false``/``alreadyRunning=true`` untouched.
-    The catch-up runs in-process as a background task (same path publish/merge use) and is scheduled
-    ALWAYS — even when ``started=false`` — so a stranded 'projecting'/'rebuilding' status on a
-    worker-less deployment self-heals (``project_now`` is an idempotent catch-up, a no-op when the
-    cache is already fresh)."""
+    A rebuild it starts replays main from the start: it clears the pass cursor a rebuild that
+    stopped part-way and then failed left in the key (best effort, when this process reaches
+    FalkorDB). The catch-up runs in-process as a background task (same path publish/merge use)
+    and is scheduled ALWAYS — even when ``started=false`` — so a stranded 'projecting'/'rebuilding'
+    status on a worker-less deployment self-heals (``project_now`` is an idempotent catch-up, a
+    no-op when the cache is already fresh)."""
     await _repair_projection_target(graph_id)            # self-heal: pin an unpinned graph when possible
     try:
         wm = await svc.projection_watermark(graph_id)
@@ -2733,6 +2738,11 @@ async def rebuild_projection(
         started = await svc.request_projection_rebuild(graph_id)
     except ConcurrencyError as exc:            # enabling version control hasn't finished
         raise HTTPException(status_code=409, detail={"type": "bootstrapping", "message": str(exc)})
+    proj = _get_projector() if started else None
+    if proj is not None:
+        # The rebuild replays main from the start: a pass that stopped part-way and then failed
+        # left its cursor in the key, which the rebuild's first pass would otherwise resume.
+        await proj.forget_cursor(graph_id)
     # Schedule the catch-up unconditionally: even on the already-in-flight (started=False) path,
     # rebuild_now is an idempotent catch-up (and self-deduplicates per graph), so a status
     # stranded by a lost worker self-heals. Unlike project_now's 10s interactive ceiling, the

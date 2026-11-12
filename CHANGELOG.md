@@ -89,11 +89,19 @@ integration's many small changes as a few commits.
   everything else. The Import dialog and the reference connector retry it.
 - **One change that can't be written to the fast read layer no longer holds back the graph.**
   - A projector statement that still times out for a single entity, after its retries, is held
-    back (`projection_quarantine`), and the rest of the publish lands.
-  - Later passes retry it first, and a caught-up graph retries it every 5 minutes. A rebuild
-    while anything is held rebuilds the lineage summaries too.
+    back (`projection_quarantine`), and the rest of the publish lands. An edge to a node held back
+    that the fast read layer does not have yet is held with it, and written once the node is; an
+    edge to a node it has, whose own update is held, is written.
+  - Later passes retry it first, and a caught-up graph retries it every 5 minutes. A held delete of
+    an edge where it was stays held when the edge is written where it now is. A rebuild that
+    resumes from where its last pass stopped retries what that pass held.
+  - A rebuild while anything is held rebuilds the lineage summaries too. So does a rebuild a
+    graph starts on its own after a publish that moved them, as the heal it replaced did. Each is
+    recorded (`projection_state.rollup_state.moved`) until a rebuild publishes, so a rebuild that
+    fails first does not lose it.
   - **Data health** lists what is held back and why ("Held back"); the watermark carries it as
-    `quarantine`.
+    `quarantine`, for a graph being projected. A graph unloaded, waiting for memory or trashed is
+    retried by nothing, so neither lists it, and `graphver_projection_quarantined` leaves it out.
   - While any change is held, passes publish `unverified`.
   - `GRAPHVER_PROJECTION_QUARANTINE=0` restores the old behaviour.
 - **An import says what its rows find their entities by: `identifier`.** On `POST …/imports`,
@@ -262,7 +270,9 @@ integration's many small changes as a few commits.
   - Every chunked projector statement now splits in half on a timeout or memory refusal and sends
     the halves again, down to one row.
   - The width that worked is kept for the graph, and grows back slowly.
-  - A hub node is deleted after its relationships, 10,000 at a time.
+  - A hub node is deleted after its relationships, 10,000 at a time: in a publish, in the tombstone
+    sweep, and in a rebuild, where a stale hub otherwise failed every pass, and a hub the key held
+    twice kept the rebuild from publishing.
   - Each pass logs what its statements took.
 - **No projector delete scans every relationship in the graph.**
   - An edge deleted in a publish is deleted, anchored on its ends, at every position it held:
@@ -281,10 +291,21 @@ integration's many small changes as a few commits.
   crash or a restart loses one page, not the whole job, and other graphs get their turn. A rebuild
   pages the graph's heads by primary key instead of reading every version of it again for each
   page.
+  - A window resumed so still tells readers to drop what they cached for nodes an earlier pass
+    retyped or re-keyed, and verifies a write an earlier pass could not land.
+  - A rebuild stopped so stays a rebuild: with Graph residency on, it is resumed, not loaded again
+    into a fresh key as a first seed.
+  - A pass that went through its pages leaves nothing to resume, whatever its verify found, so a
+    rebuild held back by its verify runs again from the start. An operator's rebuild, once
+    accepted, also starts from the beginning, not from where a failed one stopped.
+  - A rebuild reads the graph as of its own revision once a commit lands while it runs, so it no
+    longer writes a second node for an entity that commit retyped or re-keyed.
 - **A graph that cannot be brought up to date rebuilds itself.** The cases:
   - its verify finds the fast read layer short of history;
   - on a key the platform minted, it holds more than history after the sweep;
-  - the same window has failed 3 passes in a row under pressure.
+  - the same window has failed 3 passes in a row under pressure, with no other outcome between them
+    (`projection_state.pressure_failures`): a connection failure or a held-back pass starts the
+    count again.
   Such a graph is rebuilt in place on its own, instead of being healed inside the window's pass or
   held back until someone rebuilds it (`GRAPHVER_PROJECTION_ESCALATE`).
 - **A projection's verify counts no longer scan the graph, and a failed count is not a pass.**
@@ -321,7 +342,8 @@ integration's many small changes as a few commits.
   running.** That job may have read the graph before the change that asked, so the summaries could
   stay wrong until something else asked. The ask is now kept (`projection_state.rollup_state`), and
   the projection worker asks again every 5 minutes (`GRAPHVER_ROLLUP_REASK_SECS`) until a job is
-  queued; so does an ask that could not reach the aggregation service. A source whose summaries
+  queued; so does an ask that could not reach the aggregation service, or that its control plane
+  answered with a server error (5xx). A source whose summaries
   live in a dedicated key already queued its own follow-up, and is unchanged.
 
 ### Upgrading
@@ -330,7 +352,7 @@ integration's many small changes as a few commits.
   client that reads its own change right after publishing it should poll
   `GET …/graphs/{gid}/watermark` until `served` reaches the `revisionId` its publish returned.
   `GRAPHVER_READ_MAX_LAG=0` restores the strict rule (the head only; reads go to Postgres while the
-  graph catches up). Migration `20261112_1700_gv_ps_served` adds `projection_state.served_commit_seq`
+  graph catches up). Migration `20261112_1800_gv_ps_served` adds `projection_state.served_commit_seq`
   (nullable, no rewrite); a separate `GRAPHVER_DB_URL` gets it at start-up. Every graph starts with
   none, and a graph behind its head serves its watermark until its next pass publishes.
 - **Two import changes an integration may notice:**
@@ -340,6 +362,8 @@ integration's many small changes as a few commits.
     node's urn as its id should read its `entity_id`.
 - **New ids from `/bulk-ingest` and `/sync` are `urn:uuid:`s.** A client that read a new node's
   id as its urn should read its `urn` (it is stored as given) or its `entity_id`.
+- Migration `20261112_1700_gv_ps_pressure` adds `projection_state.pressure_failures` (integer,
+  default 0, no rewrite). A separate `GRAPHVER_DB_URL` gets it at start-up.
 - Migration `20261112_1600_import_settings` adds five nullable columns to `workspace_data_sources`
   (`import_identifier`, `import_replace_*`) and `jobs.import_settings` (nullable JSONB); no rewrite.
   Every data source starts with none set, so imports run under the platform's settings as before. A

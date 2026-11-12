@@ -13,9 +13,9 @@ is bounded like the others (``_bound_lock_wait``) and safe to re-run;
 ``models._ensure_schema_upgrades`` mirrors it at start-up for a separate ``GRAPHVER_DB_URL``
 alembic never reaches. The downgrade drops it: reads then go to Postgres during a rebuild again.
 
-Revision ID: 20261112_1700_gv_ps_served
-Revises: 20261112_1600_import_settings
-Create Date: 2026-11-12 17:00
+Revision ID: 20261112_1800_gv_ps_served
+Revises: 20261112_1700_gv_ps_pressure
+Create Date: 2026-11-12 18:00
 """
 from __future__ import annotations
 
@@ -27,8 +27,8 @@ import sqlalchemy as sa
 from backend.app.services.versioning import config as gv_config
 from backend.app.services.versioning.models import ensure_ps_served_column
 
-revision: str = "20261112_1700_gv_ps_served"
-down_revision: Union[str, None] = "20261112_1600_import_settings"
+revision: str = "20261112_1800_gv_ps_served"
+down_revision: Union[str, None] = "20261112_1700_gv_ps_pressure"
 branch_labels = None
 depends_on = None
 
