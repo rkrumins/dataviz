@@ -19,7 +19,9 @@
 * A paged window resumed from its cursor knows what the pages earlier passes wrote did (a
   structural change, writes dropped), and carries it on in every page's cursor.
 * A full replay that stops at a page stays ``rebuilding``; a window that stops so goes back to
-  idle.
+  idle. With the Graph residency switch on, a key holding the cursor of a rebuild that stopped so
+  is resumed, not queued for a load as a first seed, also once a pass that failed after it has
+  left the graph idle; asking for the cursor does not create a key that is not there.
 * Only passes that fail in a row on a timeout or a memory refusal (``pressure_failures``) rebuild
   a window: a pass that ends any other way starts the count again, a cancel leaves it.
 * The summaries a rebuild owes the job (``rollup_state.moved``) are handed over by the full seed
@@ -630,6 +632,48 @@ def test_a_full_replay_that_stops_at_a_page_stays_a_rebuild(monkeypatch):
         monkeypatch.setattr(proj, "_apply_paged", stop)
         r = asyncio.run(proj.project_graph("g1"))
         assert r["partial"] and seen["finish"][0][2]["status"] == status, (r, seen["finish"])
+
+
+def test_with_residency_on_a_key_holding_a_stopped_rebuild_is_resumed_not_queued(monkeypatch):
+    """With the Graph residency switch on, a pass from 0 over an idle key the platform owns is a
+    first seed, queued for a load, unless the key holds the cursor of a rebuild that stopped at a
+    page: a pass that failed or was cancelled after it left the graph idle, and this pass claims
+    the row and resumes it in place. A key with no cursor, one that does not exist (asking does
+    not create it) or one out of reach is queued, as before."""
+    stopped = [[0, 5, "fk_edge", "20000", False, 0]]
+    for found, queued in ((stopped, False), ([], True), ("missing", True), ("unreachable", True)):
+        proj, _ps, client, seen = _projector(monkeypatch, ps=_PS(projected=0, target=5))
+        asked = []
+
+        async def ro_query(cypher, params=None, found=found, **k):
+            if found == "missing":
+                raise RuntimeError("Invalid graph operation on empty key")
+            return SimpleNamespace(result_set=found if cypher == projection._CURSOR_READ else [])
+
+        def unreachable(name, provider_id=None):
+            raise ConnectionError("FalkorDB is down")
+
+        async def on(session=None):
+            return True
+
+        async def queue(graph_id, seen_epoch):
+            asked.append(graph_id)
+            return True
+
+        async def reconcile(*a, **k):
+            return {"writes": 0, "rollups": "none", "structural": False}
+
+        client.ro_query = ro_query
+        if found == "unreachable":
+            proj._client = unreachable
+        monkeypatch.setattr(projection.residency_policy, "switch_state", on)
+        monkeypatch.setattr(proj, "_queue_first_seed", queue)
+        monkeypatch.setattr(proj, "_reconcile_in_place", reconcile)
+        r = asyncio.run(proj.project_graph("g1"))
+        expect = (["g1"], False) if queued else ([], True)          # (queued, claimed)
+        assert (asked, bool(seen["claim"])) == expect, (found, r)
+        if found == "missing":
+            assert client.queries == [], client.queries           # nothing sent that makes the key
 
 
 def test_only_failures_in_a_row_under_pressure_rebuild_a_window(monkeypatch):

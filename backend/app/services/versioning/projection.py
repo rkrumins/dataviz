@@ -427,7 +427,9 @@ _Found = Tuple[int, int, str, str, bool, int]
 
 async def _read_cursor(client) -> Optional[_Found]:
     try:
-        res = await _q(client, _CURSOR_READ, read_only=True, timeout_ms=5000)
+        # A key that does not exist holds none, and asking must not create it (``missing``): the
+        # first-seed gate asks before a new graph's load is admitted.
+        res = await _q(client, _CURSOR_READ, read_only=True, missing="raise", timeout_ms=5000)
     except Exception:                                    # unreadable: start over
         return None
     rows = getattr(res, "result_set", None) or []
@@ -1542,13 +1544,21 @@ class FalkorProjector:
             except ConcurrencyError:
                 return {"projected": from_seq, "applied": 0, "noop": True, "skipped": "bootstrapping"}
         if (from_seq == 0 and to_seq > 1 and owned and ps.status == "idle"
-                and await residency_policy.switch_state() is not False
-                and await self._queue_first_seed(graph_id, seen_epoch)):
+                and await residency_policy.switch_state() is not False):
             # Residency (doc 17): the first seed of a key the platform owns — a new graph's whole
             # main, in one go — is a full write, admitted as a load is: it takes its turn in the
             # load queue, and the capacity loop seeds it on a master with room for it. Also while
-            # the switch cannot be read: nothing is written unadmitted on a guess.
-            return {"projected": 0, "applied": 0, "noop": True, "skipped": "waiting_capacity"}
+            # the switch cannot be read: nothing is written unadmitted on a guess. A key holding the
+            # cursor of a rebuild that stopped at a page is no first seed, also once a pass that
+            # failed or was cancelled after it has left the graph idle: this pass resumes it in
+            # place.
+            try:
+                found = await _read_cursor(await self._graph_client(name, provider_id))
+            except Exception:                            # out of reach: nothing known to resume
+                found = None
+            if not _resumes(found, 0, to_seq) and await self._queue_first_seed(graph_id,
+                                                                              seen_epoch):
+                return {"projected": 0, "applied": 0, "noop": True, "skipped": "waiting_capacity"}
 
         # Claim the row before touching FalkorDB. Losing the claim means something reset the
         # watermark since the read (an evict, a rebuild, a repin): leave the key alone and let the
@@ -3004,17 +3014,20 @@ class FalkorProjector:
         return True
 
     async def _urn_label_for(
-        self, s, graph: GraphORM, main_id: str, entity_id: str,
+        self, s, graph: GraphORM, main_id: str, entity_id: str, *,
+        at_seq: Optional[int] = None,
     ) -> Tuple[str, str]:
         """Latest committed (urn, entityType) for an entity on `main`;
         ``(gv:<eid>, <its latest entityType>)`` for a node that
         never had a urn, and ``(gv:<eid>, "Entity")`` when nothing resolves.
         The entityType is exactly what the node merge labeled the cache node
-        with, so labeled anchors built from it always hit."""
+        with, so labeled anchors built from it always hit. ``at_seq``: as of
+        that seq, not the latest."""
+        at = (NodeVersionORM.commit_seq <= at_seq,) if at_seq is not None else ()
         row = (await s.execute(
             select(NodeVersionORM.urn, NodeVersionORM.payload).where(
                 NodeVersionORM.graph_id == graph.id, NodeVersionORM.branch_id == main_id,
-                NodeVersionORM.entity_id == entity_id, NodeVersionORM.urn.is_not(None),
+                NodeVersionORM.entity_id == entity_id, NodeVersionORM.urn.is_not(None), *at,
             ).order_by(NodeVersionORM.commit_seq.desc()).limit(1)
         )).first()
         if row and row[0]:
@@ -3024,7 +3037,7 @@ class FalkorProjector:
         row = (await s.execute(
             select(NodeVersionORM.entity_type).where(
                 NodeVersionORM.graph_id == graph.id, NodeVersionORM.branch_id == main_id,
-                NodeVersionORM.entity_id == entity_id, NodeVersionORM.op != "delete",
+                NodeVersionORM.entity_id == entity_id, NodeVersionORM.op != "delete", *at,
             ).order_by(NodeVersionORM.commit_seq.desc()).limit(1)
         )).first()
         if row:
@@ -3039,14 +3052,16 @@ class FalkorProjector:
 
     async def _endpoint(
         self, s, graph: GraphORM, main_id: str, entity_id: str,
-        urn_of: Dict[str, str], label_of: Dict[str, str],
+        urn_of: Dict[str, str], label_of: Dict[str, str], *, at_seq: Optional[int] = None,
     ) -> Tuple[str, str]:
         """(urn, label) for an edge endpoint via the window caches, falling
-        back to the committed rows for endpoints outside the window."""
+        back to the committed rows for endpoints outside the window (as of
+        ``at_seq``, when given)."""
         urn = urn_of.get(entity_id)
         label = label_of.get(entity_id)
         if urn is None or label is None:
-            r_urn, r_label = await self._urn_label_for(s, graph, main_id, entity_id)
+            r_urn, r_label = await self._urn_label_for(s, graph, main_id, entity_id,
+                                                       at_seq=at_seq)
             urn = urn if urn is not None else r_urn
             label = label if label is not None else r_label
             urn_of[entity_id], label_of[entity_id] = urn, label
@@ -3054,19 +3069,20 @@ class FalkorProjector:
 
     async def _prefetch_endpoints(
         self, s, graph: GraphORM, main_id: str, entity_ids: Iterable[str],
-        urn_of: Dict[str, str], label_of: Dict[str, str],
+        urn_of: Dict[str, str], label_of: Dict[str, str], *, at_seq: Optional[int] = None,
     ) -> None:
         """Fill the window caches with the (urn, label) :meth:`_urn_label_for` gives each of
-        ``entity_ids`` not in them yet: the latest urn-bearing version row on ``main``, read for
-        ``_ENDPOINT_CHUNK`` ids per statement instead of one statement per id — the per-endpoint
-        reads were a 100k-edge window's 100k round trips. An id this does not resolve (no urn at
-        all) is left to :meth:`_endpoint`'s own fallback."""
+        ``entity_ids`` not in them yet: the latest urn-bearing version row on ``main`` (at
+        ``at_seq``, when given), read for ``_ENDPOINT_CHUNK`` ids per statement instead of one
+        statement per id — the per-endpoint reads were a 100k-edge window's 100k round trips. An
+        id this does not resolve (no urn at all) is left to :meth:`_endpoint`'s own fallback."""
         want = [e for e in dict.fromkeys(entity_ids) if e and (e not in urn_of or e not in label_of)]
+        at = (NodeVersionORM.commit_seq <= at_seq,) if at_seq is not None else ()
         for chunk in _batches(want, _ENDPOINT_CHUNK):
             rows = (await s.execute(
                 select(NodeVersionORM.entity_id, NodeVersionORM.urn, NodeVersionORM.entity_type)
                 .where(NodeVersionORM.graph_id == graph.id, NodeVersionORM.branch_id == main_id,
-                       NodeVersionORM.entity_id.in_(chunk), NodeVersionORM.urn.is_not(None))
+                       NodeVersionORM.entity_id.in_(chunk), NodeVersionORM.urn.is_not(None), *at)
                 .order_by(NodeVersionORM.entity_id, NodeVersionORM.commit_seq.desc(),
                           NodeVersionORM.created_at.desc())
                 .distinct(NodeVersionORM.entity_id))).all()
@@ -3525,8 +3541,8 @@ class FalkorProjector:
                     continue                             # a resumed pass had finished these
                 async for page in self._live_head_pages(s, graph, main_id, to_seq, kind,
                                                         after=after):
-                    written = await self._write_missing(client, s, graph, main_id, kind, page,
-                                                        level_map, provider_id, owned, twice)
+                    written = await self._write_missing(client, s, graph, main_id, to_seq, kind,
+                                                        page, level_map, provider_id, owned, twice)
                     done["writes"] += written
                     done["structural"] |= kind == "edge" and bool(written)
                     if progress:
@@ -3615,13 +3631,15 @@ class FalkorProjector:
                 return
             after = rows[-1][0]
 
-    async def _write_missing(self, client, s, graph, main_id, kind, page, level_map,
+    async def _write_missing(self, client, s, graph, main_id, to_seq, kind, page, level_map,
                              provider_id, owned, twice_nodes: Set[Tuple[str, str]]) -> int:
         """Write what of ``page`` (:meth:`_live_head_pages`) FalkorDB lacks or holds differently;
         returns how many writes it took. As in place: a key held twice is rewritten (its copies
         deleted first, on an owned key) — but a customer's relationship held twice, one copy as
         main says, is left as it is — and so is every relationship on a node held twice
-        (``twice_nodes``, filled in by the node pages)."""
+        (``twice_nodes``, filled in by the node pages). A relationship's ends are keyed as main
+        has them at ``to_seq``, as the node pages are: a commit since then that retyped or re-keyed
+        an end would key it on a node the pass did not write, and its write would match nothing."""
         lm, wanted = level_map or {}, {}
         if kind == "node":
             for eid, vid, chash, urn, etype, _x in page:
@@ -3634,10 +3652,12 @@ class FalkorProjector:
             label_of: Dict[str, str] = {}
             await self._prefetch_endpoints(s, graph, main_id,
                                            [e for row in page for e in (row[3], row[5])],
-                                           urn_of, label_of)
+                                           urn_of, label_of, at_seq=to_seq)
             for eid, vid, chash, src, etype, tgt in page:
-                su, slb = await self._endpoint(s, graph, main_id, src, urn_of, label_of)
-                tu, tlb = await self._endpoint(s, graph, main_id, tgt, urn_of, label_of)
+                su, slb = await self._endpoint(s, graph, main_id, src, urn_of, label_of,
+                                               at_seq=to_seq)
+                tu, tlb = await self._endpoint(s, graph, main_id, tgt, urn_of, label_of,
+                                               at_seq=to_seq)
                 rel = spelled_type(etype)
                 wanted[(spelled_label(slb), su, rel, spelled_label(tlb), tu)] = (
                     eid, ("edge", graph.id, vid), _edge_fingerprint(rel, chash))
@@ -3741,7 +3761,7 @@ class FalkorProjector:
 
     async def _edge_keys_at(self, s, graph, main_id, to_seq, eids) -> Dict[str, EdgeKey]:
         """For each of the relationship ids ``eids`` live on ``main`` at ``to_seq``, the key the
-        projector writes it under."""
+        projector writes it under there: its ends as main has them at ``to_seq`` too."""
         out: Dict[str, EdgeKey] = {}
         rows = []
         for chunk in _batches(sorted(set(eids)), _ENDPOINT_CHUNK):
@@ -3759,10 +3779,10 @@ class FalkorProjector:
         urn_of: Dict[str, str] = {}
         label_of: Dict[str, str] = {}
         await self._prefetch_endpoints(s, graph, main_id, [e for r in live for e in (r[3], r[5])],
-                                       urn_of, label_of)
+                                       urn_of, label_of, at_seq=to_seq)
         for eid, _op, _h, src, etype, tgt in live:
-            su, slb = await self._endpoint(s, graph, main_id, src, urn_of, label_of)
-            tu, tlb = await self._endpoint(s, graph, main_id, tgt, urn_of, label_of)
+            su, slb = await self._endpoint(s, graph, main_id, src, urn_of, label_of, at_seq=to_seq)
+            tu, tlb = await self._endpoint(s, graph, main_id, tgt, urn_of, label_of, at_seq=to_seq)
             out[eid] = (spelled_label(slb), su, spelled_type(etype), spelled_label(tlb), tu)
         return out
 

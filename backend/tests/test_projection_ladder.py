@@ -248,7 +248,7 @@ async def test_a_streamed_rebuild_deletes_a_node_held_twice_whose_copy_is_a_hub(
     g, written = _HeldTwice(degree=25), []
     p = _rebuilding(monkeypatch, written)
     twice = set()
-    await p._write_missing(g, None, SimpleNamespace(id="g1"), "main1", "node",
+    await p._write_missing(g, None, SimpleNamespace(id="g1"), "main1", 5, "node",
                            [("H", "v1", "c1", "urn:h", "Dataset", None)], {}, None, True, twice)
     assert (g.copies, g.pages, written) == (0, [10, 10, 5], ["urn:h"])
     assert twice == {("Dataset", "urn:h")}

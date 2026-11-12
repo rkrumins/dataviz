@@ -361,12 +361,13 @@ integration's many small changes as a few commits.
   - A window resumed so still tells readers to drop what they cached for nodes an earlier pass
     retyped or re-keyed, and verifies a write an earlier pass could not land.
   - A rebuild stopped so stays a rebuild: with Graph residency on, it is resumed, not loaded again
-    into a fresh key as a first seed.
+    into a fresh key as a first seed, also after a pass that failed or was cancelled after it.
   - A pass that went through its pages leaves nothing to resume, whatever its verify found, so a
     rebuild held back by its verify runs again from the start. An operator's rebuild, once
     accepted, also starts from the beginning, not from where a failed one stopped.
   - A rebuild reads the graph as of its own revision once a commit lands while it runs, so it no
-    longer writes a second node for an entity that commit retyped or re-keyed.
+    longer writes a second node for an entity that commit retyped or re-keyed, nor deletes or
+    leaves out that entity's relationships.
 - **A graph that cannot be brought up to date rebuilds itself.** The cases:
   - its verify finds the fast read layer short of history;
   - on a key the platform minted, it holds more than history after the sweep;

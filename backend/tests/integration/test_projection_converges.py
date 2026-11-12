@@ -37,13 +37,17 @@ Pins:
   rebuild retries what its earlier passes held, rather than dropping it. A paged window that
   retypes nodes bumps the graph's generation when it publishes, though the pass that publishes it
   wrote nothing itself. With the Graph residency switch on, a rebuild that stops at a page stays
-  rebuilding, and the next pass resumes it rather than queue the graph for a load.
+  rebuilding, and the next pass resumes it rather than queue the graph for a load. So does the
+  pass after one that failed or was cancelled after it, which left the graph idle at seq 0: the
+  rebuild's cursor in the key says it is no first seed.
 - A rebuild that went through its pages and was held back by its verify leaves no cursor, nor does
   an operator's rebuild accepted after one that stopped part-way and then failed: the next pass
   reconciles the key from the start, and puts back what it lost meanwhile.
-- A commit that lands while a rebuild pages main's heads is not written into the seq the rebuild
-  publishes: a node it retypes or re-keys keeps its label and urn until the next window moves it
-  in place, so no second node is ever made for it.
+- A commit that lands while a rebuild pages the key or main's heads is not written into the seq
+  the rebuild publishes: a node it retypes or re-keys keeps its label and urn until the next window
+  moves it in place, so no second node is ever made for it. Its relationships are keyed on it as
+  the rebuild has it, so none is deleted or left out, in a key that holds everything or a fresh
+  one (a first seed).
 - Drift a window cannot explain holds the pass back and rebuilds the graph on its own, and the
   third pressure failure in a row of one window does too, but not failures of another kind before
   it; the rebuild then publishes. A window that moved the lineage summaries before it escalated
@@ -607,56 +611,121 @@ async def _a_rebuild_that_did_not_publish_starts_over(svc, monkeypatch):
         monkeypatch.setattr(config, k, v)
 
 
+async def _a_stopped_rebuild_outlives_a_failed_pass(svc, monkeypatch):
+    from backend.app.services.versioning import config, residency_policy
+    from backend.app.services.versioning.models import ProjectionStateORM
+
+    async def residency_on(session=None):
+        return True
+
+    saved = {k: getattr(config, k) for k in ("PROJECTION_RECONCILE_STREAMED_ABOVE",
+                                              "PROJECTION_PAGE", "PROJECTION_PASS_MAX_SECS")}
+    switch_state = residency_policy.switch_state
+    # With the Graph residency switch on, a rebuild stops at a page, and the pass after it fails or
+    # is cancelled, which leaves the graph idle at seq 0. The pass after that is not taken for a
+    # first seed and queued for a load into a fresh key: it finds the rebuild's cursor in the key
+    # and resumes it there, after the page it stopped at, pass after pass until it publishes.
+    for exc in (RuntimeError("the store went away"), asyncio.CancelledError()):
+        fake = TimeoutFalkor()
+        proj = FalkorProjector(graph_client_factory=fake, batch_size=500)
+        gid = await _graph(svc)
+        await _edit_publish(svc, gid, "alice", [_create(f"S{i:02d}", f"s{i}") for i in range(30)],
+                            "seed")
+        assert (await proj.project_graph(gid))["verify_error"] is None
+        g = fake.graphs[next(iter(fake.graphs))]
+        monkeypatch.setattr(residency_policy, "switch_state", residency_on)
+        monkeypatch.setattr(config, "PROJECTION_RECONCILE_STREAMED_ABOVE", 5)
+        monkeypatch.setattr(config, "PROJECTION_PAGE", 10)
+        monkeypatch.setattr(config, "PROJECTION_PASS_MAX_SECS", 1e-6)
+        assert await svc.request_projection_rebuild(gid)
+        assert (await proj.project_graph(gid)).get("partial")
+        stopped = dict(g.cursor)
+
+        async def fails(*a, exc=exc, **k):
+            raise exc
+
+        proj._reconcile_in_place = fails
+        with pytest.raises(type(exc)):
+            await proj.project_graph(gid)
+        del proj._reconcile_in_place
+        async with db.graphver_session() as s:
+            ps = await s.get(ProjectionStateORM, gid)
+            assert (ps.status, ps.projected_commit_seq) == ("idle", 0), exc
+        # One page on from where it stopped: a pass that started over would write the cursor of
+        # the same first page again.
+        r = await proj.project_graph(gid)
+        assert r.get("partial") and g.cursor != stopped, (exc, r, stopped, g.cursor)
+        passes = [r]
+        while r.get("partial"):
+            assert len(passes) < 40, passes
+            r = await proj.project_graph(gid)
+            passes.append(r)
+        assert r["verify_error"] is None, passes
+        await _assert_matches_main(svc, fake, gid)
+        monkeypatch.setattr(residency_policy, "switch_state", switch_state)
+        for k, v in saved.items():
+            monkeypatch.setattr(config, k, v)
+
+
 async def _a_rebuild_projects_main_at_its_seq(svc, monkeypatch):
     from sqlalchemy import select
 
     from backend.app.services.versioning import config
     from backend.app.services.versioning.models import GraphORM
 
-    fake = TimeoutFalkor()
-    proj = FalkorProjector(graph_client_factory=fake, batch_size=500)
-    gid = await _graph(svc)
-    await _edit_publish(svc, gid, "alice", [_create(f"R{i:02d}", f"r{i}") for i in range(30)],
-                        "seed")
-    assert (await proj.project_graph(gid))["verify_error"] is None
-    g = fake.graphs[next(iter(fake.graphs))]
     saved = {k: getattr(config, k) for k in ("PROJECTION_RECONCILE_STREAMED_ABOVE",
                                               "PROJECTION_PAGE")}
-    monkeypatch.setattr(config, "PROJECTION_RECONCILE_STREAMED_ABOVE", 5)
-    monkeypatch.setattr(config, "PROJECTION_PAGE", 10)
-    async with db.graphver_session() as s:
-        head = await s.scalar(select(GraphORM.main_head_commit_seq).where(GraphORM.id == gid))
+    # A commit lands while the rebuild pages: it retypes R25 and re-keys R26, on a later page, each
+    # with a relationship. In a fresh key (a first seed), while the rebuild pages main's heads
+    # (after their first page); in a key that holds everything, then too, or earlier, while it
+    # pages the key's nodes. The rebuild projects main at its own seq, a relationship's ends too:
+    # neither node is written as a second node beside the one the key holds, and both
+    # relationships are written, or kept, on the nodes it wrote.
+    for fresh, step in ((True, "_write_missing"), (False, "_write_missing"),
+                        (False, "_live_labels")):
+        fake = TimeoutFalkor()
+        proj = FalkorProjector(graph_client_factory=fake, batch_size=500)
+        gid = await _graph(svc)
+        await _edit_publish(svc, gid, "alice", [
+            *(_create(f"R{i:02d}", f"r{i}") for i in range(30)),
+            _link("L1", "R25", "R00"), _link("L2", "R26", "R01")], "seed")
+        if not fresh:
+            assert (await proj.project_graph(gid))["verify_error"] is None
+        monkeypatch.setattr(config, "PROJECTION_RECONCILE_STREAMED_ABOVE", 5)
+        monkeypatch.setattr(config, "PROJECTION_PAGE", 10)
+        async with db.graphver_session() as s:
+            head = await s.scalar(select(GraphORM.main_head_commit_seq).where(GraphORM.id == gid))
+        real, landed = getattr(proj, step), []
 
-    # A commit lands while the rebuild pages main's heads (after its first page): it retypes R25 and
-    # re-keys R26, on a later page. The rebuild projects main at its own seq, so neither is written
-    # as a second node beside the one the key holds.
-    write_missing, landed = proj._write_missing, []
+        async def a_commit_lands_meanwhile(*a, real=real, landed=landed, gid=gid, **k):
+            if not landed:
+                landed.append(True)
+                await _edit_publish(svc, gid, "alice", [
+                    {"op": "update", "entity_kind": "node", "entity_id": "R25",
+                     "payload": {"entityType": "Table"}},
+                    {"op": "update", "entity_kind": "node", "entity_id": "R26",
+                     "payload": {"urn": "urn:t:R26b"}}], "while the rebuild pages")
+            return await real(*a, **k)
 
-    async def a_commit_lands_meanwhile(*a, **k):
-        if not landed:
-            landed.append(True)
-            await _edit_publish(svc, gid, "alice", [
-                {"op": "update", "entity_kind": "node", "entity_id": "R25",
-                 "payload": {"entityType": "Table"}},
-                {"op": "update", "entity_kind": "node", "entity_id": "R26",
-                 "payload": {"urn": "urn:t:R26b"}}], "while the rebuild pages")
-        return await write_missing(*a, **k)
+        if not fresh:
+            assert await svc.request_projection_rebuild(gid)
+        setattr(proj, step, a_commit_lands_meanwhile)
+        r = await proj.project_graph(gid)
+        delattr(proj, step)
+        g = fake.graphs[next(iter(fake.graphs))]
+        assert landed and r["projected"] == head and r["verify_error"] is None, (step, r)
+        assert g.nodes["urn:t:R25"]["_label"] == "Dataset" and "urn:t:R26b" not in g.nodes
+        assert set(g.edges) == {"L1", "L2"}, (fresh, step, g.edges)
 
-    assert await svc.request_projection_rebuild(gid)
-    proj._write_missing = a_commit_lands_meanwhile
-    r = await proj.project_graph(gid)
-    del proj._write_missing
-    assert landed and r["projected"] == head and r["verify_error"] is None, r
-    assert g.nodes["urn:t:R25"]["_label"] == "Dataset" and "urn:t:R26b" not in g.nodes
-
-    # The window after it moves both in place: one node each, as main has them.
-    r = await proj.project_graph(gid)
-    assert r["projected"] == head + 1 and r["verify_error"] is None, r
-    assert g.nodes["urn:t:R25"]["_label"] == "Table" and "urn:t:R26" not in g.nodes
-    assert len(g.nodes) == 30
-    await _assert_matches_main(svc, fake, gid)
-    for k, v in saved.items():
-        monkeypatch.setattr(config, k, v)
+        # The window after it moves both in place, their relationships with them: one node each,
+        # as main has them.
+        r = await proj.project_graph(gid)
+        assert r["projected"] == head + 1 and r["verify_error"] is None, r
+        assert g.nodes["urn:t:R25"]["_label"] == "Table" and "urn:t:R26" not in g.nodes
+        assert len(g.nodes) == 30
+        await _assert_matches_main(svc, fake, gid)
+        for k, v in saved.items():
+            monkeypatch.setattr(config, k, v)
 
 
 async def _an_escalation_owes_its_rebuild_the_summaries(svc):
@@ -923,6 +992,7 @@ def test_a_projection_converges_in_one_pass_whatever_its_statements_can_take(mon
             await _a_held_update_keeps_its_edges(svc)
             await _resumed_rebuild_keeps_what_it_held(svc, monkeypatch)
             await _a_rebuild_that_did_not_publish_starts_over(svc, monkeypatch)
+            await _a_stopped_rebuild_outlives_a_failed_pass(svc, monkeypatch)
             await _a_rebuild_projects_main_at_its_seq(svc, monkeypatch)
             await _an_escalation_owes_its_rebuild_the_summaries(svc)
             await _a_summaries_state_that_is_no_object_owes_nothing(svc)

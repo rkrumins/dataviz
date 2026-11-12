@@ -230,7 +230,9 @@ a page at a time (`_apply_paged`), and so is a rebuild of a graph too large to h
   graphs get their turn meanwhile. A rebuild that stops so stays `rebuilding` (a load
   `rehydrating`), so the pass that resumes it is never taken for a first seed: with the Graph
   residency switch on, that would queue the graph for a load into a fresh key and leave the
-  rebuild's pages behind.
+  rebuild's pages behind. A pass after it that fails or is cancelled leaves the graph `idle` at
+  seq 0, as any failed pass does, so the first-seed check also reads the key's cursor (with
+  `GRAPH.RO_QUERY`, which creates no key): a key holding one the pass resumes is no first seed.
 - **Resuming.** A pass from the same watermark finishes the cursor's window (`pTo`) first, after
   the last page that landed, then publishes it. The window after it is the next pass's. A resumed
   paged window starts from what its cursor says the pages before it did, so the pass that
@@ -249,7 +251,11 @@ a page at a time (`_apply_paged`), and so is a rebuild of a graph too large to h
   of the graph. Main's head is read again after each such page: a commit moves the head and the
   heads in one transaction, so once one has landed, that page and the rest are read as of the
   rebuild's seq instead. The rebuild never writes what the commit made of an entity (a new type,
-  a new urn) as a second node beside the one it kept; the next window moves it in place.
+  a new urn) as a second node beside the one it kept; the next window moves it in place. A
+  relationship's ends are keyed as of the rebuild's seq too, where it checks the relationships the
+  key holds and where it writes main's: keyed by what such a commit made of an end, one the key
+  holds would be deleted, and one it lacks written against a node the rebuild did not write,
+  matching nothing.
 - **Progress.** A paged window reports it too (`progress_done` / `progress_total`), in version
   rows.
 
