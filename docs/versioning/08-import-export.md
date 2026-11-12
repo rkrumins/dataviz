@@ -354,7 +354,11 @@ two parts is whole again when it is parsed.
 1. `POST …/imports/uploads` `{fileName, size, format, partBytes?}` → `{uploadId, partBytes, parts,
    expiresAt}`: 16 MiB parts, or the `partBytes` a client asks for, to send parts of its own size
    (5 MiB to 100 MiB). A file too large for its format is refused here (413), before any of it is
-   sent.
+   sent. Or the body is the file itself, sent as anything but JSON (`?fileName&format&partBytes`),
+   with a `Content-Length` or streamed without one (`create_from_body`): it is written as the
+   upload's parts as it arrives, one chunk held at a time, and the record last, with the size that
+   arrived, so a body that breaks off leaves no upload, only parts nothing names, which the
+   store's sweep takes. A JSON body is read no further than a description can be (64 KB).
 2. `PUT …/imports/uploads/{uploadId}/parts/{n}`, the part as the body: several at once, in any order.
    Each is its own write-once object in the store (a bucket mount never appends or renames), and
    must hold exactly its share of the file (422 otherwise, saying how the file is split; a
@@ -365,6 +369,14 @@ two parts is whole again when it is parsed.
    eight at a time, so `received` and completing an upload of thousands of parts answer in
    seconds, not minutes.
 3. `GET …/imports/uploads/{uploadId}` → `received`: what a resumed upload doesn't send again.
+
+   Every body a file's bytes come in on — `POST …/imports`, the upload's start, a part — may say
+   what it hashes to (`Content-Digest`, RFC 9530, `sha-256` or `sha-512`). It is hashed as it
+   arrives (`uploads.checked`), and one that doesn't match is refused (422) once it is in: an
+   upload's parts are dropped, the last included (each part's key is noted before it is written),
+   an upload started with it is never written, and an import's job is failed unqueued. A form
+   (`multipart/form-data`) is refused on all three (415): its own lines would be read as the
+   file's.
 4. `POST …/imports/uploads/{uploadId}/complete?reconcileMode&branchId&viewId&autoPublish` → 202, the
    import job (409 while a part is missing). It reads the parts in order as one file. An upload is
    imported once: its job's idempotency key is `upload:{uploadId}`, so asking again — after a lost

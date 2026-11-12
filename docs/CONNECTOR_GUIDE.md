@@ -255,7 +255,14 @@ first.
 |---|---|
 | Up to 10 GiB (NDJSON, CSV or TSV), in parts | The resumable upload, below. Use it for anything over a few MB: a dropped connection costs one part |
 | Up to 10 GiB, as one body | The resumable upload with the whole file sent to part 0 (step 2): it is cut into parts as it arrives, and a dropped connection keeps every whole part |
-| Up to 10 GiB, as one body, no resuming | `POST …/imports?format=ndjson&idempotencyKey=…`, with the file as the body. A dropped connection starts it over. JSON and Excel files: 100 MB |
+| Up to 10 GiB, as one body, no resuming | `POST …/imports?format=ndjson&idempotencyKey=…`, with the file as the body, sized or streamed. A dropped connection starts it over. JSON and Excel files: 100 MB |
+| Up to 10 GiB, as one body, stored as an upload | `POST …/imports/uploads?fileName=…&format=ndjson`, with the file as the body in place of the description: stored as its parts as it arrives, then complete it (step 4). A dropped connection starts it over |
+
+Every way, the body is the file's bytes (`application/octet-stream`), never a form (`415`). Send
+`Content-Digest: sha-256=:<base64>:` (RFC 9530) with it to have the server check what arrived: a
+body that doesn't match is refused (`422`) and none of it is kept. The same requests in curl,
+Python, Node.js, Go and Java, for an upsert and a full replace: [Export, edit offline, import back →
+From your service](/docs/import-export-api#from-your-service-upsert-and-full-replace).
 
 **The resumable upload, step by step:**
 
@@ -534,7 +541,16 @@ pip install httpx
 export SYNODIC_URL=https://synodic.example.com SYNODIC_TOKEN=nxsat_…
 python docs/examples/connector/connector.py --file catalog.ndjson --workspace "$WS" --graph "$GID" --check
 python docs/examples/connector/connector.py --file catalog.ndjson --workspace "$WS" --graph "$GID" --publish
+# A full snapshot, which deletes what the source no longer has:
+python docs/examples/connector/connector.py --file catalog.ndjson --workspace "$WS" --graph "$GID" \
+    --replace --identifier urn --publish
 ```
+
+`--replace` sends `reconcileMode=replace`, `--identifier` the `identifier`, `--allow-mass-delete`
+`allowMassDelete=true`, and `--branch br_…` imports into that open draft, which the connector then
+publishes itself with `--publish`. A replace the guard refused fails with its code
+(`mass_delete_blocked`); send it again with `--allow-mass-delete --branch <its branchId>` if the
+deletes are meant.
 
 What the connector does:
 - **Sending:** 4 parts at a time from disk, each retried after `Retry-After` on `429`/`503`, or

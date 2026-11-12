@@ -786,7 +786,8 @@ The whole round trip, once for each identifier, with every request and answer: [
    ```
 
    `-T` streams the file from disk. `--data-binary @lineage.ndjson` would read all of it into
-   memory first.
+   memory first. The same from Python, Node.js, Go or Java, for an upsert and a full replace:
+   [From your service](/docs/import-export-api#from-your-service-upsert-and-full-replace).
 
    `format` is `ndjson`, `csv`, `tsv`, `json` or `xlsx`. `reconcileMode=replace` also deletes
    everything in scope that the file doesn't mention. `viewId=` places what the import creates
@@ -831,6 +832,10 @@ The whole round trip, once for each identifier, with every request and answer: [
 
    If the loop stops, `GET …/imports/uploads/$ID` lists the parts already `received`; send
    the others and complete. An upload has a day to finish.
+
+   Or send the file itself as the body that starts the upload, in place of the description
+   (`POST …/imports/uploads?fileName=lineage.ndjson&format=ndjson`, `-T lineage.ndjson`): it is
+   stored as its parts as it arrives, and the answer has every part `received`. Then complete it.
 
    Or send the whole file to part `0` in one request: it is cut into its parts as it arrives. If
    it breaks off, the parts it brought whole are kept; send the rest of the file to the first part

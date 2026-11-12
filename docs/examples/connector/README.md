@@ -35,6 +35,24 @@ Without `--publish`, the import lands in a draft for someone to review and publi
 non-zero when the import fails, or when it couldn't publish itself; the printed `publish.reason`
 says why. Run it again and nothing changes.
 
+A full snapshot each night, which deletes what the source no longer has:
+
+```bash
+python connector.py --file nightly.ndjson --workspace ws_… --graph graph_… --replace --identifier urn --publish
+```
+
+| Option | Sends | Does |
+|---|---|---|
+| `--replace` | `reconcileMode=replace` | Deletes what the file leaves out; without it, an upsert writes only what the file names |
+| `--identifier entity_id\|urn\|prop.<name>` | `identifier` | What the file's rows find their items by. Left out, the graph's default |
+| `--allow-mass-delete` | `allowMassDelete=true` | Lets a replace delete past the replace guard |
+| `--branch br_…` | `branchId` | Imports into that open draft, beside what it holds. With `--publish`, the connector publishes the draft once the import is in (an import into a draft doesn't publish itself) |
+
+A replace the guard refused fails with `import failed (mass_delete_blocked): …`, and its rows wait
+on the draft. If the deletes are meant, send the file again into that draft:
+`--replace --allow-mass-delete --branch <its branchId> --publish`. An upload in progress is kept per
+file and options, so a run with other options starts its own.
+
 `backend/tests/test_connector_example.py` keeps it honest. Every record must pass the record
 contract, and the same source must give the same file. The test's server answers as the API does:
 parts, resume, `Retry-After`, the publish and its fallback. Every call the connector makes must be
