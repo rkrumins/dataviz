@@ -201,7 +201,7 @@ the log line.
 | `429` | `rate_limited` · `busy` | Too many runs by this person · too many at once on this source (`Retry-After`) |
 | `499` | `cancelled` | The person went away |
 | `501` | `native_query_unavailable` | A draft or branch, a fork's data source (it reads through its parent: run it on the parent), or a source that isn't FalkorDB or Neo4j |
-| `503` | `unavailable` · `audit_unavailable` | The source isn't answering, or a versioned source's published graph is catching up · the run couldn't be recorded |
+| `503` | `unavailable` · `audit_unavailable` | The source isn't answering, or a versioned source's graph holds no published version yet (being built after a move or a first seed; while it only catches up, queries run on the version it last published) · the run couldn't be recorded |
 | `504` | `native_query_timeout` | The query ran past its time |
 | `500` | `native_query_failed` | Anything else (logged with the request id) |
 

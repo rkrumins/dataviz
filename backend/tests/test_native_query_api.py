@@ -564,7 +564,7 @@ def versioned(monkeypatch):
     async def ids(**_kw):
         return frozenset({DS})
 
-    holder = {"wm": {"fresh": True, "status": "idle", "falkor_provider": None,
+    holder = {"wm": {"fresh": True, "status": "idle", "served": 3, "falkor_provider": None,
                      "falkor_graph_name": DS}}
 
     async def graph_by_ds(self, data_source_id):
@@ -587,16 +587,30 @@ async def test_a_versioned_source_whose_projection_holds_main_runs(
     assert r.status_code == 200, r.text
 
 
+async def test_a_versioned_source_whose_projection_is_catching_up_runs_on_what_it_holds(
+        test_client: AsyncClient, db_session, estate, engine, versioned):
+    """Just published: while the projection catches up, its key serves the version it last
+    published, complete, as the canvas reads it, and a native query runs on it."""
+    versioned["wm"] = {"fresh": False, "status": "projecting", "served": 2, "falkor_provider": None,
+                       "falkor_graph_name": DS}
+    engine["engine"].manager_cache_key = ("prov_native", DS)
+    with signed_in(person("usr_reader"), READER):
+        r = await run(test_client)
+    assert r.status_code == 200, r.text
+
+
 @pytest.mark.parametrize("wm", [
-    # Behind main: just published, or re-seeding after a liveness reset.
-    {"fresh": False, "status": "projecting", "falkor_provider": None, "falkor_graph_name": DS},
+    # Holding no version yet: written from nothing, or re-seeding after a liveness reset.
+    {"fresh": False, "status": "rebuilding", "served": None, "falkor_provider": None,
+     "falkor_graph_name": DS},
     # Moved: the key this provider reads is no longer the one the projection publishes.
-    {"fresh": True, "status": "idle", "falkor_provider": None, "falkor_graph_name": "gvp_moved"},
+    {"fresh": True, "status": "idle", "served": 3, "falkor_provider": None,
+     "falkor_graph_name": "gvp_moved"},
 ])
-async def test_a_versioned_source_whose_projection_is_behind_says_so_and_runs_nothing(
+async def test_a_versioned_source_whose_projection_holds_no_version_says_so_and_runs_nothing(
         test_client: AsyncClient, db_session, estate, engine, versioned, wm):
-    """The canvas and search read such a graph from Postgres, or say it is catching up; a native
-    query can only read FalkorDB, whose rows would be old, partial or none at all."""
+    """The canvas and search read such a graph from Postgres; a native query can only read
+    FalkorDB, whose rows would be partial or none at all."""
     versioned["wm"] = wm
     engine["engine"].manager_cache_key = ("prov_native", DS)
     with signed_in(person("usr_reader"), READER):
@@ -622,7 +636,8 @@ async def test_a_versioned_source_out_of_falkordb_is_loading_whatever_the_switch
     monkeypatch.setattr(residency, "request_load", request_load)
     residency_policy._MEMO.update(policy=residency_policy.defaults(), at=residency_policy._clock())
     versioned["wm"] = {"fresh": False, "status": "evicted", "residency": "standard", "committed": 3,
-                       "size_bytes": None, "falkor_provider": None, "falkor_graph_name": DS}
+                       "served": None, "size_bytes": None, "falkor_provider": None,
+                       "falkor_graph_name": DS}
     engine["engine"].manager_cache_key = ("prov_native", DS)
     try:
         with signed_in(person("usr_reader"), READER):

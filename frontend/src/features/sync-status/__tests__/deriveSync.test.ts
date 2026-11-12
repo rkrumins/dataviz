@@ -36,6 +36,31 @@ describe('deriveSync — a versioned (managed) graph', () => {
       .toBe('Rebuilding · 40%')
   })
 
+  it('says views show an earlier version, which and until when, while the graph is written to a newer one', () => {
+    const older = { commitId: 'cmt_older', createdAt: '2026-09-24T20:06:00Z' }
+    const v = deriveSync(versioned({ projected: 9, fresh: false, status: 'projecting', served: 9, servedRevision: older }), NOW)
+    expect(v).toMatchObject({ tone: 'busy', showingOlder: true, chip: 'Showing #9 · writing #11',
+      headline: 'Showing an earlier version while the graph updates' })
+    expect(v.detail).toMatch(/^Views show version #9, published .+ ago, until version #11 is written to the graph, then refresh on their own$/)
+    expect(v.lanes[1]).toMatchObject({ version: 9, revision: older })
+    expect(v.lanes[1].lines[0]).toBe('Views show version #9 until version #11 is written, then refresh on their own')
+    expect(v.lanes[1].lines.join(' ')).not.toMatch(/system of record/)
+    // A rebuild resets the watermark, not what views show; a failed pass still shows it, in red.
+    expect(deriveSync(versioned({ projected: 0, fresh: false, status: 'rebuilding', served: 9, progressDone: 45, progressTotal: 100 }), NOW))
+      .toMatchObject({ showingOlder: true, chip: 'Showing #9 · rebuilding 45%' })
+    expect(deriveSync(versioned({ projected: 9, fresh: false, served: 9, lastError: 'Query timed out' }), NOW))
+      .toMatchObject({ tone: 'bad', showingOlder: true, chip: 'Showing #9 · refresh failed' })
+  })
+
+  it('says views read the system of record only when the graph has no version to show', () => {
+    const v = deriveSync(versioned({ projected: 0, fresh: false, status: 'rebuilding', served: null }), NOW)
+    expect(v).toMatchObject({ showingOlder: false, chip: 'Rebuilding…', headline: 'Catching up' })
+    expect(v.lanes[1].lines).toContain('Views read from the system of record until it catches up')
+    // An older server, which does not say what views show: as before.
+    expect(deriveSync(versioned({ projected: 9, fresh: false, status: 'projecting' }), NOW))
+      .toMatchObject({ showingOlder: false, chip: 'Catching up · 2 versions behind' })
+  })
+
   it('says the automation is handling the summaries — queued or running — instead of asking for a rebuild', () => {
     const queued = deriveSync(versioned({}, { ...okSummaries, jobId: 'agg_1', jobStatus: 'pending' }), NOW)
     expect(queued).toMatchObject({ tone: 'busy', chip: 'Summaries updating' })

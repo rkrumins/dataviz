@@ -1045,6 +1045,7 @@ class CapacityLoop:
                        ProjectionStateORM.status == "rehydrating",
                        ProjectionStateORM.epoch == r["epoch"])
                 .values(status="evicted", evicted_reason="load_stalled", projected_commit_seq=0,
+                        served_commit_seq=None,
                         rehydrating_since=None, epoch=ProjectionStateORM.epoch + 1,
                         updated_at=_now())
                 .returning(ProjectionStateORM.falkor_graph_name, ProjectionStateORM.falkor_provider)

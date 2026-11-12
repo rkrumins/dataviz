@@ -56,6 +56,8 @@ export interface SyncVerdict {
   lanes: SyncLane[]
   /** Something is moving right now — poll faster, animate the rail. */
   busy: boolean
+  /** Views show an earlier version, complete, while the graph is written to the newer one. */
+  showingOlder?: boolean
 }
 
 const RANK: Record<SyncTone, number> = { idle: 0, ok: 1, busy: 2, warn: 3, bad: 4 }
@@ -151,7 +153,12 @@ export function deriveSync(doc: SyncStatus | undefined, now: number = Date.now()
 
   if (doc.kind === 'versioned' && doc.versioned) {
     const v = doc.versioned
-    const behind = Math.max(0, v.committed - v.projected)
+    // While the graph is behind, views show the version it last finished, complete (`served`),
+    // until the new one is written; null: they read the system of record instead. A server that
+    // does not say (undefined) is read as before.
+    const showingOlder = !v.fresh && v.served != null
+    const shown = showingOlder ? v.served! : v.projected
+    const behind = Math.max(0, v.committed - shown)
     const active = v.status === 'projecting' || v.status === 'rebuilding'
     const pct = v.progressTotal ? Math.round(((v.progressDone ?? 0) / v.progressTotal) * 100) : null
     const record: SyncLane = {
@@ -167,18 +174,30 @@ export function deriveSync(doc: SyncStatus | undefined, now: number = Date.now()
       : active ? 'busy'
       : v.fresh ? 'ok'
       : behind <= 1 ? 'warn' : 'bad'
+    // Views read the system of record only when the graph has no version to show (or, from a
+    // server that does not say, when its last refresh failed, as before).
+    const readsRecord = !v.fresh && (v.served === null || (v.served === undefined && !!v.lastError))
     const graph: SyncLane = {
-      key: 'graph', title: 'Graph', tech: 'FalkorDB', version: v.projected, tone: graphTone,
-      revision: v.projectedRevision, progress: v.status === 'rebuilding' ? pct : null,
+      key: 'graph', title: 'Graph', tech: 'FalkorDB', version: shown, tone: graphTone,
+      revision: showingOlder ? v.servedRevision : v.projectedRevision,
+      progress: v.status === 'rebuilding' ? pct : null,
       status: graphTone === 'ok' ? `Version #${v.projected} · in sync`
+        : showingOlder ? (
+          v.status === 'rebuilding' ? `Showing #${shown} · rebuilding${pct != null ? ` ${pct}%` : '…'}`
+          : active ? `Showing #${shown} · writing #${v.committed}`
+          : v.lastError ? `Showing #${shown} · refresh failed`
+          : `Showing #${shown} · ${versions(behind)} behind`)
         : v.status === 'rebuilding' ? (pct != null ? `Rebuilding · ${pct}%` : 'Rebuilding…')
         : active ? `Catching up · ${versions(behind)} behind`
         : v.lastError ? `Refresh failed · ${versions(behind)} behind`
         : `${versions(behind)} behind`,
       lines: [
+        ...(showingOlder
+          ? [`Views show version #${shown} until version #${v.committed} is written, then refresh on their own`]
+          : []),
         v.lastProjectedAt ? `Written ${ago(v.lastProjectedAt)}` : 'Not written yet',
         ...(countLine ? [`${countLine}${counts?.readAt ? ` · counted ${ago(counts.readAt)}` : ''}`] : []),
-        ...(v.lastError && !v.fresh ? ['Views read from the system of record until it catches up'] : []),
+        ...(readsRecord ? ['Views read from the system of record until it catches up'] : []),
       ],
       next: graphTone === 'ok' ? 'Written automatically after every publish'
         : active ? undefined
@@ -195,12 +214,16 @@ export function deriveSync(doc: SyncStatus | undefined, now: number = Date.now()
       : graph.status
     const headline = graph.tone === 'ok'
       ? summaries.tone === 'ok' || summaries.tone === 'idle' ? 'Everything is in sync' : 'The graph is in sync'
+      : showingOlder ? 'Showing an earlier version while the graph updates'
       : graph.tone === 'busy' ? 'Catching up' : 'The graph is behind'
+    const shownAt = showingOlder && v.servedRevision?.createdAt ? `, published ${ago(v.servedRevision.createdAt)},` : ''
     const detail = graph.tone === 'ok'
       ? `Published version #${v.committed} is in the graph${summaries.tone === 'ok' || summaries.tone === 'idle' ? '' : ` · summaries: ${summaries.status.toLowerCase()}`}`
-      : `The system of record is at #${v.committed}; the graph holds #${v.projected}`
+      : showingOlder
+        ? `Views show version #${shown}${shownAt} until version #${v.committed} is written to the graph, then refresh on their own`
+        : `The system of record is at #${v.committed}; the graph holds #${v.projected}`
     return { kind: 'versioned', kindLabel: KIND_TEXT.versioned.label, kindExplainer: KIND_TEXT.versioned.explainer,
-      tone, chip, headline, detail, lanes, busy }
+      tone, chip, headline, detail, lanes, busy, showingOlder }
   }
 
   // External: judged on evidence read from the graph, not on stored verdicts.

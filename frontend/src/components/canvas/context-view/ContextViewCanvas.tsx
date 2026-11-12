@@ -64,7 +64,7 @@ import { usePermission, useAuthStore } from '@/store/auth'
 import { graphStoreLimitsPath } from '@/components/admin/shared/aggregationKnobs'
 import { canvasScopeWorkspaceId } from '@/lib/canvasScope'
 import { saveStagedChangesToDraft } from '@/features/versioning/model/saveStagedChangesToDraft'
-import { VERSIONING_KEYS, useResolveGraph, useProjectionWatermark } from '@/features/versioning/hooks/useVersioning'
+import { VERSIONING_KEYS, useResolveGraph } from '@/features/versioning/hooks/useVersioning'
 import { useActiveDraftAccess } from '@/features/versioning/hooks/useActiveDraftAccess'
 import { useViewExecutionContext } from '@/providers/ViewExecutionContext'
 import { deriveViewCapabilities } from '@/lib/viewAccess'
@@ -1742,23 +1742,9 @@ export function ContextViewCanvas({
     useBranchStore.getState().bumpDraftEpoch()
   }, [queryClient, rereadBranchView])
   // After a publish/merge, `main@head` moves and the FalkorDB projection (which the canvas +
-  // Properties panel read) catches up ASYNCHRONOUSLY. The immediate post-merge re-hydration reads
-  // the still-stale projection, so merged properties don't appear until a later refresh. Watch the
-  // projection watermark: when it finishes (fresh false→true), re-hydrate so the canvas reflects the
-  // freshly-projected state with no manual refresh.
-  // Versioning reads are membership-gated and meaningless to a read-only
-  // shared viewer (no drafts, no projection to chase) — don't fire them.
-  const projFresh = useProjectionWatermark(
-    readOnly ? undefined : scopeWsId ?? undefined,
-    readOnly ? null : graphId,
-  ).data?.fresh
-  const prevProjFreshRef = useRef<boolean | undefined>(undefined)
-  useEffect(() => {
-    if (prevProjFreshRef.current === false && projFresh === true) {
-      useBranchStore.getState().bumpMainEpoch()
-    }
-    prevProjFreshRef.current = projFresh
-  }, [projFresh])
+  // Properties panel read) catches up ASYNCHRONOUSLY, serving the version it last finished until
+  // then. The view page re-hydrates when it finishes, for every viewer and canvas
+  // (useRefreshWhenGraphUpdated).
   const undoStagedChange = useStagedChangesStore(s => s.undo)
   const redoStagedChange = useStagedChangesStore(s => s.redo)
 

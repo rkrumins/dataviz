@@ -631,6 +631,33 @@ def serves_head(projected: int, committed: int, status: Optional[str]) -> bool:
     return projected >= committed and status != "rehydrating"
 
 
+# A key in none of these states has nothing to serve: it is out of FalkorDB or being loaded into
+# it, or an operator reset it (doc 17; ``reseeding``).
+_SERVES_NOTHING = ("rehydrating", "evicted", "waiting_capacity", "reseeding")
+
+
+def serving_seq(projected: int, committed: int, status: Optional[str],
+                served: Optional[int]) -> Optional[int]:
+    """The version of main a projection's key serves reads of main at; None sends them to Postgres.
+
+    The head while the key holds it (:func:`serves_head`). Behind it, while the projection catches
+    up or rebuilds in place: the version the key last published (its watermark, or during a
+    rebuild, which resets that, ``served_commit_seq``) — complete with its lineage summaries, with
+    part of the next window or of the rebuild's repairs over it. ``GRAPHVER_READ_MAX_LAG`` caps how
+    many versions behind (0: the head only). None while the key is out of FalkorDB, being loaded
+    or reset, or holds no published version (a first seed, a move, an Adopt, a lost key). Seq 1 is
+    a graph's genesis, its empty first commit: a key at it holds nothing anyone published — a new
+    graph's key is empty, and an enabled source's own graph is not yet a version history holds."""
+    if serves_head(projected, committed, status):
+        return committed
+    if status in _SERVES_NOTHING:
+        return None
+    held = projected or served or 0
+    if held <= 1 or (config.READ_MAX_LAG >= 0 and committed - held > config.READ_MAX_LAG):
+        return None
+    return held
+
+
 def residency_state_of(status: str, projected: int, key: Optional[str],
                        graph_id: str) -> Optional[str]:
     """Whether a graph's key is in FalkorDB, as residency shows it (doc 17): ``evicted``,
@@ -4923,8 +4950,12 @@ class GraphVersioningService:
         if root is not None and root.id != graph_id:
             wm = await self.projection_watermark(root.id)
             reads_from = await self.fork_reads_from(graph_id)
-            if reads_from == "postgres":
-                wm["read_route"] = {**wm["read_route"], "main": "postgres"}
+            # A fork lays its patch set over its root's store at the root's head only
+            # (ContextEngine._fork_main_reader): behind it, the fork reads Postgres.
+            on_store = bool(wm["fresh"]) and reads_from != "postgres"
+            wm["served"] = wm["committed"] if on_store else None
+            wm["served_revision"] = wm["committed_revision"] if on_store else None
+            wm["read_route"] = {**wm["read_route"], "main": "falkordb" if on_store else "postgres"}
             return {**wm, "reads_through": root.id, "reads_from": reads_from,
                     "falkor_graph_name": None, "falkor_provider": None,
                     "owns_falkor_graph": False, "retired_keys": [], "external_drift": None,
@@ -4936,15 +4967,18 @@ class GraphVersioningService:
             quarantine = (await self._projection_quarantine(s, graph_id)
                           if getattr(ps, "quarantine_next_at", None) else None)
             projected = ps.projected_commit_seq if ps else 0
+            status = ps.status if ps else "idle"
+            fresh = serves_head(projected, committed, status)
+            served = serving_seq(projected, committed, status, ps.served_commit_seq if ps else None)
             # The revision each side is at — the main commit with that seq (one indexed read). The
             # sync indicators show it, so "version #12" can be matched to a commit in History.
             revisions: Dict[int, CommitORM] = {}
-            if graph and (committed or projected):
+            if graph and (committed or projected or served):
                 main_id = await self._main_branch_id(s, graph_id)
                 rows = (await s.execute(
                     select(CommitORM).where(
                         CommitORM.graph_id == graph_id, CommitORM.branch_id == main_id,
-                        CommitORM.commit_seq.in_({committed, projected}),
+                        CommitORM.commit_seq.in_({committed, projected, served or 0}),
                     )
                 )).scalars().all()
                 revisions = {int(c.commit_seq): c for c in rows}
@@ -4955,11 +4989,14 @@ class GraphVersioningService:
                     "commit_id": c.id, "created_at": c.created_at,
                     "actor": c.actor, "message": c.message,
                 }
-            status = ps.status if ps else "idle"
-            fresh = serves_head(projected, committed, status)
             return {
                 "committed_revision": _rev(committed),
                 "projected_revision": _rev(projected),
+                # The version reads of main are served at (``serving_seq``): the head, or, while
+                # the projection catches up or rebuilds, the version the key last published. None:
+                # reads of main go to Postgres.
+                "served": served,
+                "served_revision": None if served is None else _rev(served),
                 "committed": committed,
                 "projected": projected,
                 "target": ps.target_commit_seq if ps else 0,
@@ -4967,10 +5004,10 @@ class GraphVersioningService:
                 "falkor_graph_name": ps.falkor_graph_name if ps else None,
                 "falkor_provider": ps.falkor_provider if ps else None,
                 "fresh": fresh,
-                # Where reads go, by ContextEngine.for_workspace's rule: main from FalkorDB only
-                # while the projection holds the head, else Postgres; a draft always overlays
-                # whatever serves main.
-                "read_route": {"main": "falkordb" if fresh else "postgres",
+                # Where reads go, by ContextEngine.for_workspace's rule: main from FalkorDB while
+                # its key serves a version of it (``served``), else Postgres; a draft always
+                # overlays whatever serves main.
+                "read_route": {"main": "falkordb" if served is not None else "postgres",
                                "drafts": "overlay"},
                 # Failure reason + last success + live full-reseed progress — the Data
                 # health UI needs these to converge to an honest done/failed state.
@@ -5076,6 +5113,7 @@ class GraphVersioningService:
             old = ps.falkor_graph_name
             ps.falkor_graph_name = falkor_graph_name
             ps.projected_commit_seq = 0      # replay full main into the real graph on the next projection
+            ps.served_commit_seq = None      # which holds no version of it yet
             ps.epoch = ProjectionStateORM.epoch + 1     # a pass in flight must not write over it
             return old
 
@@ -5186,6 +5224,7 @@ class GraphVersioningService:
                          "afterSeq": graph.main_head_commit_seq, "movedBy": actor}
                 ps.falkor_graph_name, ps.falkor_provider, ps.owns_falkor_graph = key, provider, True
                 ps.projected_commit_seq = 0
+                ps.served_commit_seq = None        # the new key is written from nothing
                 ps.target_commit_seq = graph.main_head_commit_seq
                 out = ps.status in ("evicted", "waiting_capacity", "rehydrating")
                 if not out:
@@ -5277,6 +5316,7 @@ class GraphVersioningService:
                 drift = ps.external_drift
                 ps.falkor_graph_name, ps.owns_falkor_graph, ps.shard_map = key, True, shard_map
                 ps.projected_commit_seq = 0
+                ps.served_commit_seq = None        # the new key is written from nothing
                 ps.target_commit_seq = graph.main_head_commit_seq
                 ps.status = "reseeding"
                 ps.external_drift = None
@@ -5328,8 +5368,8 @@ class GraphVersioningService:
             ids = (await s.execute(
                 update(ps)
                 .where(*resettable, ~loading)
-                .values(projected_commit_seq=0, epoch=ps.epoch + 1, status="reseeding",
-                        last_error=None,
+                .values(projected_commit_seq=0, served_commit_seq=None, epoch=ps.epoch + 1,
+                        status="reseeding", last_error=None,
                         failed_attempts=0, next_retry_at=None, updated_at=_now())
                 .returning(ps.graph_id)
                 .execution_options(synchronize_session=False)
@@ -5337,8 +5377,8 @@ class GraphVersioningService:
             requeued = (await s.execute(
                 update(ps)
                 .where(*resettable, loading)
-                .values(projected_commit_seq=0, epoch=ps.epoch + 1, status="evicted",
-                        rehydrating_since=None, last_error=None,
+                .values(projected_commit_seq=0, served_commit_seq=None, epoch=ps.epoch + 1,
+                        status="evicted", rehydrating_since=None, last_error=None,
                         failed_attempts=0, next_retry_at=None, updated_at=_now())
                 .returning(ps.graph_id)
                 .execution_options(synchronize_session=False)

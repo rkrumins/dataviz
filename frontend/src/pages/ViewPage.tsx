@@ -16,6 +16,7 @@ import { ViewPageHeader } from '@/components/views/ViewPageHeader'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { ViewExecutionProvider } from '@/providers/ViewExecutionContext'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
+import { useRefreshWhenGraphUpdated } from '@/features/sync-status/useSyncStatus'
 
 export function ViewPage() {
   const { viewId } = useParams<{ viewId: string }>()
@@ -25,6 +26,9 @@ export function ViewPage() {
     viewWorkspaceName, viewProviderId, access,
   } = useViewNavigation(viewId)
   const workspaces = useWorkspacesStore(s => s.workspaces)
+  // While the graph is updated, the view shows the version it last finished (the header's sync
+  // chip says so); when the new one is in, the view refetches it.
+  useRefreshWhenGraphUpdated(viewWorkspaceId, viewDataSourceId, view?.id)
 
   // Tab title: "{View} · {Workspace} · {Brand}". The API response names the
   // workspace even for non-members; the store lookup is only a fallback for

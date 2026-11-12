@@ -310,7 +310,10 @@ and no database connection while it does.
 ## Projection behind or holding changes back
 
 Published changes reach the fast read layer (FalkorDB) through the projection. While it is
-behind, reads fall back to Postgres: nothing is lost, only slower.
+behind, reads keep the version it last finished, complete, and the view's sync chip says an
+earlier version is showing ("Showing #12 · writing #14"): nothing is lost, only not the newest yet.
+A graph whose key holds no version (written from nothing after a move, or evicted) reads from
+Postgres meanwhile, slower and without its lineage summaries.
 
 1. **See which graph, and why**, on its **Data health** tab (Versioning panel → Data health):
    - **Backoff**, with failed attempts and the next try: passes are failing. The last error says

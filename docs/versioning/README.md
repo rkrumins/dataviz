@@ -141,9 +141,10 @@ the changed entities differ (the "draft = main ⊕ sparse delta" overlay).
   worker ≈ **604**; the import/export vertical ≈ **3,180**; plus the provider layer and a
   `frontend/src/features/versioning/` module. Covered by **72** `test_versioning_*` integration
   test files.
-- **Read routing.** `main` fresh → live **FalkorDB**; `main` lagging (just after a merge) → Postgres
-  composition (read-your-writes); a **draft** → `DraftOverlayProvider`; **as-of** / historical →
-  Postgres snapshot.
+- **Read routing.** `main` → live **FalkorDB** while its key serves a version of it: the head, or
+  while it catches up or rebuilds, the version it last published (the sync chip says so); a key with
+  no version (written from nothing, evicted) → Postgres composition; a **draft** →
+  `DraftOverlayProvider`; **as-of** / historical → Postgres snapshot.
 - **Deployment.** The versioning worker (`python -m backend.app.services.versioning`) runs the lanes
   `GRAPHVER_WORKER_LANES` names: `projection` (FalkorDB projection, sweeps), `transfer` (import,
   export and publish jobs, package checks) and `bootstrap` ("Enable version control", purges, the

@@ -1130,7 +1130,8 @@ class Reaper:
                         .where(ProjectionStateORM.graph_id == gid,
                                ProjectionStateORM.falkor_graph_name == name)
                         .values(falkor_graph_name=None, falkor_provider=None,
-                                owns_falkor_graph=False, projected_commit_seq=0, status="idle",
+                                owns_falkor_graph=False, projected_commit_seq=0,
+                                served_commit_seq=None, status="idle",
                                 epoch=ProjectionStateORM.epoch + 1, updated_at=_now())
                         .execution_options(synchronize_session=False))
                 dropped += 1

@@ -1285,6 +1285,16 @@ class FalkorProjector:
             )).first()
         return tuple(row) if row is not None else None
 
+    async def _forget_served(self, graph_id: str, mine: int) -> None:
+        """The key holds no version of main (``served_commit_seq``), while the row is this pass's
+        (epoch ``mine``): reads of main go to Postgres until a pass publishes into it."""
+        async with self._session() as s:
+            await s.execute(
+                update(ProjectionStateORM)
+                .where(ProjectionStateORM.graph_id == graph_id, ProjectionStateORM.epoch == mine)
+                .values(served_commit_seq=None)
+                .execution_options(synchronize_session=False))
+
     async def _finish(self, graph_id: str, mine: int, *, published: bool, to_seq: int,
                       error: Optional[str], attempts: Optional[int],
                       surplus: object = _UNCOUNTED) -> bool:
@@ -1300,8 +1310,9 @@ class FalkorProjector:
         values = {"status": _unless_loading("idle"), "last_error": error,
                   "progress_done": None, "progress_total": None}      # progress is over either way
         if published:
-            values.update(projected_commit_seq=to_seq, last_projected_at=_now(),
-                          failed_attempts=0, next_retry_at=None)
+            # The key now holds main at to_seq whole: reads serve it there until the next publish.
+            values.update(projected_commit_seq=to_seq, served_commit_seq=to_seq,
+                          last_projected_at=_now(), failed_attempts=0, next_retry_at=None)
             if surplus is not _UNCOUNTED:
                 drift = ProjectionStateORM.external_drift
                 notified = drift["via"].astext == "notification"
@@ -1452,6 +1463,11 @@ class FalkorProjector:
             # build (a genuine suspension point), so a cancellation here must ALSO reset the
             # already-claimed "projecting" row rather than strand it.
             client = await self._graph_client(name, provider_id)
+            # A full pass on a key that is gone (lost, and rebuilt before liveness saw it) writes
+            # it from nothing: it holds no version to serve meanwhile, so reads go to Postgres.
+            # Read first, before any GRAPH.QUERY below makes the key again.
+            if from_seq <= 0 and (await read_projection_marker(client))[0] is False:
+                await self._forget_served(graph_id, mine)
             if unspelled:
                 await self._learn_spelling(client, graph_id)
             # What earlier passes quarantined goes first, so this pass's own writes land after it.
@@ -1843,6 +1859,8 @@ class FalkorProjector:
                            ProjectionStateORM.projected_commit_seq == projected,
                            ProjectionStateORM.status == "idle")
                     .values(projected_commit_seq=to_seq, epoch=ProjectionStateORM.epoch + 1,
+                            # What the key still holds whole: the marker's version, or nothing.
+                            served_commit_seq=to_seq or None,
                             last_error=reason, failed_attempts=0, next_retry_at=None,
                             updated_at=_now(),
                             **({"status": "evicted", "evicted_reason": "lost"} if lost else {}))

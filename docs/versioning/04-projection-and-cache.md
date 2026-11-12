@@ -321,17 +321,45 @@ stateDiagram-v2
 - **The projector advances `projected`** to `to_seq` after the apply lands (`projection.py:322`).
 - **Freshness** is `projection_watermark` (`service.py:1606`), which returns `committed`
   (`graph.main_head_commit_seq`), `projected`, `target`, `status`, plus **`fresh = projected >=
-  committed`** and the fields the Data-health UI polls (`last_error`, `progress_*`).
+  committed`**, **`served`** (below) and the fields the Data-health UI polls (`last_error`,
+  `progress_*`).
 - **Live rebuild progress** is written throttled — at most ~1/s, always on the final item — by
   `_progress_writer` (`projection.py:863-885`), so the progress bar moves without a DB write per
   chunk. Best-effort; a progress write can never fail the projection.
 
-> **Limitation (freshness is defined twice).** Two read paths decide "serve FalkorDB vs Postgres"
-> differently. The **ContextEngine** uses strict `fresh` — `projected >= committed`
-> (`context_engine.py:127`) — ignoring `READ_MAX_LAG`. The **neighbors endpoint** additionally allows
-> a tolerance: `projected >= committed - READ_MAX_LAG` (`versioning.py:1747`). With the default
-> `READ_MAX_LAG=0` (`config.py:119`) the two coincide, but a non-zero lag would make the surfaces
-> disagree on when the cache is trusted. Unify before relying on `READ_MAX_LAG` in production.
+### Serving while it updates
+
+Reads of main stay on the key while the projection catches up or rebuilds, at the version the key
+holds, and stay available and complete. One rule decides it for every read path (ContextEngine, the
+neighbors endpoint, native queries): `serving_seq(projected, committed, status, served_commit_seq)`
+in `service.py`, reported on the watermark as `served` (with its `served_revision`).
+
+| The key | Reads of main are served from | `served` |
+|---|---|---|
+| holds the head (`fresh`) | the key | `committed` |
+| catching up after a publish or an import (`projected < committed`) | the key, at the version it last published | `projected` |
+| rebuilt in place (a rebuild resets `projected` to 0, not what the key holds) | the key, at the version it held | `served_commit_seq` |
+| written from nothing (a first seed, a move, an Adopt, a repin), lost, evicted, being loaded or reset | Postgres (`VersionedBranchProvider`), slower and without the lineage summaries | `null` |
+
+- **`projection_state.served_commit_seq`** is the version the key holds whole: every pass that
+  publishes sets it to its `to_seq`; a rebuild keeps it; a move, an Adopt, a repin, an eviction, a
+  purge and an operator reset clear it; liveness lowers it with the watermark (to the marker's seq,
+  or `NULL` for a missing key). A full pass that finds its key gone clears it before writing
+  (`_forget_served`), so a lost key rebuilt before liveness saw it serves nothing meanwhile.
+- **What a reader sees while it updates.** The version the key last published, with part of the
+  next window or of the rebuild's repairs over it, until the pass publishes; then
+  `after_projection` bumps the read cache's generation and the view refetches (the frontend's
+  `useRefreshWhenGraphUpdated`, on the sync chip's poll). The view header's sync chip says an earlier
+  version is showing, which, and which is being written ("Showing #12 · writing #14"); the read-route
+  chip says the same in the Technical view.
+- **A draft** overlays whatever serves main, the key at its served version included: it shows main as
+  main's readers see it. Its cached reads are keyed by that version too, so none outlives the update.
+  **A past revision** (`?asOfSeq=K`) reads the key only while it holds K or later (the patch set
+  rewinds everything changed after K); else Postgres. **A fork** reads through its root's key only
+  while the root's key holds its head, as before: its patch set is over the root's head.
+- **`GRAPHVER_READ_MAX_LAG`** caps how many versions behind the key may serve: `-1` (default) any; `0`
+  the head only, as before this, so a read the key is behind for goes to Postgres
+  (read-your-writes for a person's own change, at the cost of the lineage summaries meanwhile).
 
 ---
 
@@ -349,9 +377,10 @@ repair it. So the projector (`projection.py:270-299`):
    MERGE will create it, `:295-297`); **any other drop error re-raises** (`:298-299`) so a MERGE never
    runs over a half-broken drop.
 
-> **Decision.** FalkorDB is rebuildable and reads fall back to Postgres while `projected < committed`,
-> so the brief empty window during a clean rebuild is never actually served — which is what makes a
-> drop-then-reseed safe as the default rebuild strategy.
+> **Decision.** A full replay reconciles the key in place and never drops it, so the key keeps the
+> version it last published until the rebuild publishes, and reads keep serving that version
+> (`served_commit_seq`, §5). Only a key written from nothing serves nothing until its first pass
+> publishes: reads of it go to Postgres meanwhile.
 
 ---
 
@@ -583,10 +612,10 @@ provider per request:
 
 | Situation | Provider | Anchor |
 |---|---|---|
-| `main`, projection **fresh** | live **FalkorDB** provider (hot path; the only place materialized rollups live) | `context_engine.py:142` (`base = provider`) |
-| `main`, projection **lagging** (just after a merge) | `VersionedBranchProvider` (Postgres composition — read-your-writes) | `context_engine.py:147-151` |
+| `main`, the key serves a version of it (fresh, catching up, or rebuilt in place, §5) | live **FalkorDB** provider at that version (hot path; the only place materialized rollups live) | `context_engine.py` (`main_served`) |
+| `main`, the key holds no version (written from nothing, out of FalkorDB, or `GRAPHVER_READ_MAX_LAG` past) | `VersionedBranchProvider` (Postgres composition) | `context_engine.py` (`not main_served`) |
 | a live **draft** | `DraftOverlayProvider` wrapping whatever serves main | `context_engine.py:130-146` |
-| `main` **at a past revision** (`?asOfSeq=K`, the revision history viewer) | `DraftOverlayProvider(as_of_seq=K)` wrapping whatever serves main, with the patch set of everything main changed since K put back; read-only | `context_engine.py` (`revision`) |
+| `main` **at a past revision** (`?asOfSeq=K`, the revision history viewer) | `DraftOverlayProvider(as_of_seq=K)` over the key while it holds K or later, else over the Postgres reader, with the patch set of everything main changed since K put back; read-only | `context_engine.py` (`revision`) |
 | **as-of / historical** (versioning routes) | `VersionedBranchProvider(as_of_seq=…)` (read-only snapshot) — routed through the versioning service, not constructed here | `versioned_branch_provider.py:50` |
 
 - **`DraftOverlayProvider`** (`draft_overlay_provider.py:97`) serves a draft as **main ⊕ sparse
@@ -620,7 +649,8 @@ provider per request:
   lifecycle delegate transparently via `__getattr__` (`:86`), but **a write lands only as an
   audited commit** on main in Postgres and never reaches the inner provider; `_record` (`:141`)
   then nudges the projector, the one writer of the graph's FalkorDB data, to carry it there.
-  Until it does, ContextEngine serves main from Postgres (read-your-writes). A data source with
+  Until it does, reads of main show the version the key last published, and the view's sync chip
+  says so (§5). A data source with
   no versioned graph refuses the write (`VersioningNotEnabled`, 409; `_graph_id`, `:119`).
   `set_containment_edge_types`/`set_ontology_rules` are intercepted (`:99-117`) so every recorded
   commit enforces containment/ontology rules. ContextEngine always wraps a versioned graph's
@@ -732,7 +762,7 @@ boot via `XAUTOCLAIM`. `_project_one` (`worker.py:65`) serializes per-graph via 
 | `GRAPHVER_ROLLUP_REASK_SECS` | 300 | How often, per graph, liveness asks again for a summaries build a running job turned away (§8); `0`: never. |
 | `GRAPHVER_PROJECTION_POLL_SECS` | 5 | Reconciling poll cadence (`config.py:115`). |
 | `GRAPHVER_PROJECTION_CONCURRENCY` | 8 | Max graphs projected per pass (`config.py:118`). |
-| `GRAPHVER_READ_MAX_LAG` | 0 | Neighbors-endpoint staleness tolerance (`config.py:119`; see §5 callout). |
+| `GRAPHVER_READ_MAX_LAG` | -1 | How many versions behind its head a key may serve reads of main while it updates (§5): `-1` any, `0` the head only (reads go to Postgres while it catches up). |
 | `GRAPHVER_PROJECTION_VERIFY` | on | Post-apply count reconcile + heal (`config.py:124`). |
 | `GRAPHVER_PROJECTION_VERIFY_INTERVAL_SECS` | 300 | Per graph, how often an incremental pass runs that verify (§7); `0` = every pass. |
 | `GRAPHVER_PROJECTION_INPROCESS` | off | Run the worker lanes in the web process, only with `SYNODIC_ROLE=dev` (`config.py:158`). |
@@ -747,7 +777,9 @@ boot via `XAUTOCLAIM`. `_project_one` (`worker.py:65`) serializes per-graph via 
 
 Consolidated here and expanded in [09 · Scale & Limits](09-scale-limits-and-roadmap.md):
 
-1. **Read-freshness defined twice** (ContextEngine strict vs neighbors `READ_MAX_LAG`) (§5).
+1. **Reads while the graph updates show an earlier version** (§5): a change, a person's own
+   included, shows once the pass that carries it publishes; the sync chip says so meanwhile.
+   `GRAPHVER_READ_MAX_LAG=0` reads it from Postgres at once instead, without the lineage summaries.
 2. **A full re-projection holds `O(N + E)` ids in memory** — it reconciles in place from narrow
    heads, but is not keyset-streamed (§3).
 3. **No eviction budget is set anywhere** (default 0 = unlimited; the loop runs and skips) and the

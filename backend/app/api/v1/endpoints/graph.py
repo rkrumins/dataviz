@@ -804,21 +804,26 @@ async def get_alignment_analysis(
     # ``aggregation_status == 'ready'`` records that the batch aggregation job
     # succeeded — nothing more. For a versioned source the rolled-up
     # connections are served out of a graph the projector maintains, and while
-    # ``projected_commit_seq`` trails ``main_head_commit_seq`` every main read
-    # falls back to the version log, which holds none of them. Read here rather
-    # than in the findings block below so the ``aggregation`` block itself —
-    # which the unprofiled early return also serves — cannot claim a
-    # canonicalized read path that is not actually being used.
+    # ``projected_commit_seq`` trails ``main_head_commit_seq`` main reads stay
+    # on that graph at the version it last published (``serving_seq``), unless
+    # it holds none — then they fall back to the version log, which holds none
+    # of them. Read here rather than in the findings block below so the
+    # ``aggregation`` block itself — which the unprofiled early return also
+    # serves — cannot claim a canonicalized read path that is not actually
+    # being used.
     proj_behind: Optional[int] = None
     proj_error: Optional[str] = None
     proj_checked_at: Optional[str] = None
+    proj_serving = False
     try:
         from sqlalchemy import select as _select
         from backend.app.services.versioning.models import GraphORM, ProjectionStateORM
         _proj_row = (await session.execute(
             _select(ProjectionStateORM.projected_commit_seq,
                    GraphORM.main_head_commit_seq,
-                   ProjectionStateORM.last_error)
+                   ProjectionStateORM.last_error,
+                   ProjectionStateORM.status,
+                   ProjectionStateORM.served_commit_seq)
             .join(GraphORM, GraphORM.id == ProjectionStateORM.graph_id)
             .where(GraphORM.data_source_id == ds_id,
                    ProjectionStateORM.falkor_graph_name.isnot(None))
@@ -828,6 +833,9 @@ async def get_alignment_analysis(
             proj_error = _proj_row[2] or None
             if _proj_row[0] is not None and _proj_row[1] is not None:
                 proj_behind = max(0, int(_proj_row[1]) - int(_proj_row[0]))
+                from backend.app.services.versioning.service import serving_seq
+                proj_serving = serving_seq(int(_proj_row[0]), int(_proj_row[1]), _proj_row[3],
+                                           _proj_row[4]) is not None
     except Exception:  # versioning schema absent (test contexts) — never break Data health
         _proj_row = None
     # None means UNKNOWN (not versioned, unpinned, or the store could not be
@@ -838,10 +846,11 @@ async def get_alignment_analysis(
     )
 
     # Only a READY aggregation serves reads through the canonicalized
-    # (declared-spelling, index-aligned) graph — AND only while the projection
-    # is current. Behind it, reads come from the version log instead, so
-    # claiming canonicalized here is simply false.
-    canonicalized = agg_status == "ready" and projector_current is not False
+    # (declared-spelling, index-aligned) graph — AND only while the projection's
+    # key serves main: current, or behind but serving the version it last
+    # published. Behind with nothing to serve, reads come from the version log
+    # instead, so claiming canonicalized there is simply false.
+    canonicalized = agg_status == "ready" and (projector_current is not False or proj_serving)
     aggregation_block = {
         "status": agg_status,
         "lastAggregatedAt": last_aggregated_at,
@@ -905,16 +914,21 @@ async def get_alignment_analysis(
     # projection fell behind. That combination hid a wedged projection for 14
     # hours: the board drew no lineage on drill-down and every surface claimed
     # to be healthy.
+    # Behind while its key still serves the version it last published, reads stay complete,
+    # only not the newest: a warning, not the wedge.
     row = _proj_row
     if row is not None and row[0] is not None and row[1] is not None and row[0] < row[1]:
         findings.append({
-            "severity": "critical",
+            "severity": "warning" if proj_serving else "critical",
             "code": "PROJECTION_STALE",
             "message": (
                 f"This source's graph is {row[1] - row[0]} commit(s) behind what has been "
-                f"published (projected {row[0]}, published {row[1]}). Until it catches up, "
-                f"reads are served from the version log, which holds no aggregated lineage — "
-                f"so rolled-up connections will not appear on a canvas."
+                f"published (projected {row[0]}, published {row[1]}). "
+                + ("Until it catches up, reads show the version it last finished, with its "
+                   "connections; the newer changes appear once it is written."
+                   if proj_serving else
+                   "Until it catches up, reads are served from the version log, which holds no "
+                   "aggregated lineage — so rolled-up connections will not appear on a canvas.")
                 + (f" Last error: {row[2]}" if row[2] else "")
             ),
         })
@@ -2353,7 +2367,7 @@ async def search_native(
     if not await _holds_published_graph(granted.data_source_id, provider):
         raise (await _native_loading(request_id)) or _native_refusal(
             request_id, 503, "unavailable",
-            "The published graph is catching up. Try again in a moment.", retry_after=5,
+            "The published graph is being built. Try again in a moment.", retry_after=5,
         )
     run = NativeRun(
         workspace_id=ws_id, data_source_id=granted.data_source_id,
@@ -2373,10 +2387,12 @@ async def search_native(
 
 async def _holds_published_graph(data_source_id: str, provider) -> bool:
     """Whether ``provider`` reads what a versioned source has published, as ContextEngine
-    requires before reading main from FalkorDB: the projection has caught up, in the key it
-    publishes. Until then that key's rows are old, partial or gone (an evicted graph), and a
-    native query has no Postgres reader to fall back on. Always, for a source without version
-    control, or when the versioned set can't be read (``physical_key`` reads the own key then)."""
+    requires before reading main from FalkorDB: the key the projection publishes serves a version
+    of main — its head, or while the projection catches up or rebuilds in place, the version it
+    last published (``serving_seq``). A key that holds none (a first seed, a move, an evicted
+    graph) is empty or partial, and a native query has no Postgres reader to fall back on.
+    Always, for a source without version control, or when the versioned set can't be read
+    (``physical_key`` reads the own key then)."""
     from backend.app.services import versioned_sources
     from backend.app.services.versioning.service import GraphVersioningService
 
@@ -2395,7 +2411,7 @@ async def _holds_published_graph(data_source_id: str, provider) -> bool:
     gid = str(graph["graph_id"])
     wm = await svc.projection_watermark(gid)
     await residency.mark(graph, wm)         # out of FalkorDB? whatever the switch says
-    return bool(wm["fresh"]) and versioned_sources.serves_pin(
+    return wm["served"] is not None and versioned_sources.serves_pin(
         getattr(provider, "manager_cache_key", None), wm.get("falkor_provider"),
         wm.get("falkor_graph_name"), gid)
 
@@ -2915,6 +2931,11 @@ class _SyncVersioned(BaseModel):
     progress_total: Optional[int] = Field(None, alias="progressTotal")
     committed_revision: Optional[_SyncRevision] = Field(None, alias="committedRevision")
     projected_revision: Optional[_SyncRevision] = Field(None, alias="projectedRevision")
+    # The version views show: the head while in sync; while the graph is updated, the version it
+    # last finished, shown complete until the new one is in; null when views read the system of
+    # record (nothing written yet, or out of the graph).
+    served: Optional[int] = None
+    served_revision: Optional[_SyncRevision] = Field(None, alias="servedRevision")
 
     class Config:
         populate_by_name = True
@@ -3075,7 +3096,8 @@ async def get_sync_status(
     graph = await svc.get_graph_by_data_source(dataSourceId)
     if graph and str(graph.get("workspace_id")) == str(ws_id):
         wm = await svc.projection_watermark(str(graph["graph_id"]))
-        revs = [r for r in (wm.get("committed_revision"), wm.get("projected_revision")) if r]
+        revs = [r for r in (wm.get("committed_revision"), wm.get("projected_revision"),
+                            wm.get("served_revision")) if r]
         actors = {r["actor"] for r in revs if r.get("actor")}
         names = {}
         if actors:
@@ -3097,6 +3119,7 @@ async def get_sync_status(
                 progress_done=wm.get("progress_done"), progress_total=wm.get("progress_total"),
                 committed_revision=_rev(wm.get("committed_revision")),
                 projected_revision=_rev(wm.get("projected_revision")),
+                served=wm.get("served"), served_revision=_rev(wm.get("served_revision")),
             ),
             summaries=summaries, counts=counts,
         )

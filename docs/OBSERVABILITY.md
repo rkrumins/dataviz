@@ -254,7 +254,7 @@ their series are complete: alert on those.
 | Cache Redis unreachable | `increase(graph_cache_unreachable_total[5m]) > 0` | Every process computes for itself; shared caching, the election and fair share are off until it's back |
 | Label scans per request | `rate(search_raw_labels_total{answer="read"}[5m])` well above the rate of data changes | The scan of every node is no longer shared: check the cache Redis |
 | Lists held | `increase(live_view_refresh_total{outcome="held"}[1h]) > 0` | An auto-updating view would lose half its members: an editor must look |
-| Projection behind | `graphver_projection_lag_seconds_max > 300` for 10 minutes | Published changes aren't in the fast read layer; reads fall back to Postgres. See [Projection behind or holding changes back](/docs/runbooks#projection-behind-or-holding-changes-back) |
+| Projection behind | `graphver_projection_lag_seconds_max > 300` for 10 minutes | Published changes aren't in the fast read layer; reads show the version it last finished. See [Projection behind or holding changes back](/docs/runbooks#projection-behind-or-holding-changes-back) |
 | Changes held back | `graphver_projection_quarantined > 0` for 30 minutes | Something can't be written to the graph store even on its own. Same runbook |
 | Passes failing | `increase(graphver_projection_passes_total{outcome="failed"}[15m]) > 0` for 30 minutes | Every pass of some graph fails: usually the graph store is unreachable or out of memory |
 

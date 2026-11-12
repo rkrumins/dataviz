@@ -177,6 +177,21 @@ integration's many small changes as a few commits.
 
 ### Changed
 
+- **A graph being updated keeps showing the version it last finished, complete, and says so.**
+  After a publish or an import, or while its fast read layer was rebuilt, a versioned graph's reads
+  went to Postgres, which composes the graph without its lineage summaries: the canvas drew the
+  items and almost none of the connections between them, and nothing said why.
+  - Reads now stay on FalkorDB at the version it last published until the newer one is written,
+    for the canvas, a draft over it, the neighbors read and native queries alike. A rebuild in
+    place keeps serving the version the key held.
+  - The view header's sync chip says an earlier version is showing, which, and what is being
+    written: "Showing an earlier version · updating…" (Business view), "Showing #12 · writing #14"
+    or "Showing #12 · rebuilding 45%" (Technical view), with which and until when on hover. The
+    canvas bar's read-route chip says the same in the Technical view.
+  - When the newer version is in, the view refetches it by itself, for every viewer and canvas.
+  - Postgres serves main only while FalkorDB holds no version of it: a graph just enabled, moved to
+    another key, or unloaded.
+  - The watermark and sync status report `served` and `servedRevision`: the version reads show.
 - **An imported node keeps the urn its file gives it.** It was stored under the id derived from
   the urn, which became its urn too, so exports and search showed a `urn:uuid` instead of the
   source's name. Its id is still derived from the urn, so a re-import finds it the same way. A node
@@ -307,6 +322,13 @@ integration's many small changes as a few commits.
 
 ### Upgrading
 
+- **Reads of a graph being updated show the version before the update until it is written.** A
+  client that reads its own change right after publishing it should poll
+  `GET …/graphs/{gid}/watermark` until `served` reaches the `revisionId` its publish returned.
+  `GRAPHVER_READ_MAX_LAG=0` restores the strict rule (the head only; reads go to Postgres while the
+  graph catches up). Migration `20261112_1700_gv_ps_served` adds `projection_state.served_commit_seq`
+  (nullable, no rewrite); a separate `GRAPHVER_DB_URL` gets it at start-up. Every graph starts with
+  none, and a graph behind its head serves its watermark until its next pass publishes.
 - **Two import changes an integration may notice:**
   - A node row that gives only the file's own `entity_id` (no urn, identifier value, matching
     field or qualifiedName) is refused with `no_key`, and so is an edge to it. Give such rows a urn.

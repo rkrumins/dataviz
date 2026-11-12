@@ -170,7 +170,12 @@ PROJECTION_WAIT_MS: int = int(os.getenv("GRAPHVER_PROJECTION_WAIT_MS", "2000"))
 # watermark to 0, a marker behind it to the marker's seq, and the poll reseeds. A key no summaries
 # build has stamped gets its first one asked for. 0 turns it off.
 LIVENESS_SECS: int = int(os.getenv("GRAPHVER_LIVENESS_SECS", "60"))
-READ_MAX_LAG: int = int(os.getenv("GRAPHVER_READ_MAX_LAG", "0"))
+# How many versions behind main's head a read of main may be served from the FalkorDB key while
+# the projection catches up or rebuilds in place (``serving_seq``): the version the key last
+# published, complete with its lineage summaries, and the view says the graph is being updated.
+# -1 (the default): however far behind. 0: the head only, as before, so a read the key is behind
+# for goes to Postgres, which composes the graph without its lineage summaries.
+READ_MAX_LAG: int = int(os.getenv("GRAPHVER_READ_MAX_LAG", "-1"))
 # After each projection, cheaply reconcile live node/edge COUNTS between Postgres
 # (the SoR) and FalkorDB (the cache); on a mismatch, bounded-heal by reseeding the
 # graph from Postgres once. Guards against a silently dropped delete leaving the

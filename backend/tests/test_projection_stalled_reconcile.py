@@ -224,6 +224,23 @@ def test_an_unversioned_source_is_untouched_by_projection_fields():
 
 # ── The health reading itself ───────────────────────────────────────────
 
+def test_a_key_behind_that_serves_its_last_version_is_not_stalled():
+    """While the key serves the version it last published (behind, idle, or
+    rebuilt in place), main reads stay on it with their rollups: nothing is
+    missing from the canvas, so the verdict stays managed."""
+    from backend.app.services.aggregation.reconcile_sweeper import (
+        _projection_ctx,
+    )
+
+    for h in (_health(projected_commit_seq=380, main_head_commit_seq=400),
+              _health(projected_commit_seq=0, main_head_commit_seq=400,
+                      served_commit_seq=380)):
+        assert h.behind is True and h.serving is True
+        assert h.stalled is False and h.current is True
+        v = evaluate(_versioned(**_projection_ctx(h)), POLICY)
+        assert v.drift_state == "managed" and v.skip == "platform_mastered"
+
+
 def test_an_unpinned_graph_is_never_stalled():
     """No real graph target means nothing is projected BY DESIGN — reads come
     from Postgres because that is the plan, not because anything is wedged.
@@ -322,7 +339,9 @@ def stub_health(monkeypatch):
 async def test_readiness_under_a_wedge_does_not_report_plain_ready(
     agg_session, stub_health,
 ):
-    stub_health["ds_v"] = _health(projected_commit_seq=95, last_error="boom")
+    # Behind, and its key holds no version to serve (written from nothing):
+    # main reads come from the version log, which holds no rollups.
+    stub_health["ds_v"] = _health(projected_commit_seq=0, last_error="boom")
 
     r = await _service().get_readiness("ds_v", agg_session)
 
@@ -334,13 +353,31 @@ async def test_readiness_under_a_wedge_does_not_report_plain_ready(
         "rolled-up connections were not reaching a canvas at all"
     )
     assert r.projector_current is False
-    assert r.projection_commits_behind == 5
+    assert r.projection_commits_behind == 100
     assert r.projection_last_error == "boom"
     assert r.projection_checked_at == "2026-08-30T12:00:00+00:00"
     # isReady deliberately still tracks the JOB: the progress banner and the
     # readiness poll both stop on it, and flipping it here would leave them
     # running forever.
     assert r.is_ready is True
+
+
+@pytest.mark.asyncio
+async def test_readiness_while_the_key_serves_its_last_version_is_ready(
+    agg_session, stub_health,
+):
+    """Behind, but the key still serves the version it last published, rollups
+    included: the connections are on the canvas, of that version, and the sync
+    chip says a newer one is being written. The gap stays on the wire as
+    evidence; nothing says the connections are missing."""
+    stub_health["ds_v"] = _health(projected_commit_seq=95, last_error="boom")
+
+    r = await _service().get_readiness("ds_v", agg_session)
+
+    assert r.message == "Aggregation complete. Views can be created."
+    assert r.projector_current is True
+    assert r.projection_commits_behind == 5
+    assert r.projection_last_error == "boom"
 
 
 @pytest.mark.asyncio

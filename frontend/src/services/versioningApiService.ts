@@ -190,6 +190,10 @@ export interface Watermark {
   committed: number
   projected: number
   fresh: boolean
+  /** The version reads of published show: `committed` while fresh; while the graph is updated
+   *  (catching up or rebuilding), the version it last finished, served complete until the new one
+   *  is in; null when published is read from Postgres (nothing written yet, or out of FalkorDB). */
+  served?: number | null
   status?: string   // idle | projecting | rebuilding | evicted | reseeding (an operator reset; a reseed is queued) — only projecting/rebuilding = actively catching up
   /** Seq the projection is catching up TO (0 when no projection state exists). */
   target?: number
@@ -212,8 +216,9 @@ export interface Watermark {
   nextRetryAt?: string | null
   /** Why the last liveness check lowered the watermark (the key lost what it held), else null. */
   livenessError?: string | null
-  /** Which store serves reads, by the server's own routing rule: published from FalkorDB while the
-   *  projection holds the head, else Postgres; a draft is always an overlay on whatever serves it. */
+  /** Which store serves reads, by the server's own routing rule: published from FalkorDB while its
+   *  key holds a version of it (`served`), else Postgres; a draft is always an overlay on whatever
+   *  serves it. */
   readRoute?: { main: 'falkordb' | 'postgres'; drafts: 'overlay' }
   /** A fork's: the root graph whose store its reads go through, and whose watermark this is. */
   readsThrough?: string | null

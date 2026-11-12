@@ -210,6 +210,7 @@ tests/test_projection_labeled_writes.py
 tests/test_projection_liveness_unit.py
 tests/test_projection_property_removal_unit.py
 tests/test_projection_reconcile_unit.py
+tests/test_projection_serving.py
 tests/test_projection_single_flight.py
 tests/test_projection_stalled_reconcile.py
 tests/test_projection_verify_unit.py

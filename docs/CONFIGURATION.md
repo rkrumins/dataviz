@@ -698,7 +698,7 @@ Drafts and commits, projection into the graph store, and import and export.
 | `GRAPHVER_PROJECTION_WAIT_MS` | `2000` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_PURGE_GRACE_DAYS` | `30` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_PURGE_WINDOW` | `25000` | `backend/app/services/versioning/config.py` |
-| `GRAPHVER_READ_MAX_LAG` | `0` | `backend/app/services/versioning/config.py` |
+| `GRAPHVER_READ_MAX_LAG` | `-1` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_REAP_POLL_SECS` | `900` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_REBUILD_LOCK_TTL` | `120` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_REBUILD_TIMEOUT_SECS` | `900` | `backend/app/services/versioning/config.py` |

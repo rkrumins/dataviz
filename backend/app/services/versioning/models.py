@@ -338,6 +338,12 @@ class ProjectionStateORM(VersioningBase):
     # be reached). The liveness loop asks again, every GRAPHVER_ROLLUP_REASK_SECS, until one is
     # queued; NULL when nothing is owed (20261112_1200_gv_ps_rollup_state).
     rollup_state = Column(JSONB, nullable=True)
+    # The version of main the key holds whole: the seq of the last window a pass published into
+    # it. A rebuild in place keeps it, as the key keeps that version until the rebuild publishes,
+    # so reads stay on the key while the projection catches up or rebuilds (``serving_seq``).
+    # NULL when the key holds no published version: never written, written from nothing (a move,
+    # an Adopt, a repin), lost, evicted or reset (20261112_1700_gv_ps_served).
+    served_commit_seq = Column(BigInteger, nullable=True)
     last_projected_at = Column(Text, nullable=True)
     last_error = Column(Text, nullable=True)
     # THE GUARDRAIL. A bootstrapped graph is PINNED to the customer's REAL FalkorDB graph — that
@@ -966,6 +972,8 @@ def _ensure_schema_upgrades(conn) -> None:
                   lambda: ensure_ps_quarantine_column(conn), required=True)
     _bounded_step(conn, "projection_state.rollup_state was not added",
                   lambda: ensure_ps_rollup_state_column(conn), required=True)
+    _bounded_step(conn, "projection_state.served_commit_seq was not added",
+                  lambda: ensure_ps_served_column(conn), required=True)
     _bounded_step(conn, "import_rows.code was not added",
                   lambda: ensure_import_rows_code_column(conn), required=True)
     _bounded_step(conn, "jobs.allow_mass_delete was not added",
@@ -1128,6 +1136,22 @@ def ensure_ps_rollup_state_column(conn) -> None:
         return
     conn.execute(text(f'ALTER TABLE "{_SCHEMA}"."projection_state" '
                       "ADD COLUMN IF NOT EXISTS rollup_state JSONB"))
+
+
+def ensure_ps_served_column(conn) -> None:
+    """Add ``projection_state.served_commit_seq``: the version of main a graph's key holds whole,
+    NULL (every existing graph) until its next pass publishes; until then a key behind its head
+    serves at its watermark, as ``serving_seq`` reads it. Nullable with no default, so nothing is
+    rewritten; a no-op without the table and once the column is there, like
+    :func:`ensure_ps_rollup_state_column`."""
+    inspector = sa_inspect(conn)
+    if not inspector.has_table("projection_state", schema=_SCHEMA):
+        return
+    if "served_commit_seq" in {c["name"] for c in inspector.get_columns("projection_state",
+                                                                        schema=_SCHEMA)}:
+        return
+    conn.execute(text(f'ALTER TABLE "{_SCHEMA}"."projection_state" '
+                      "ADD COLUMN IF NOT EXISTS served_commit_seq BIGINT"))
 
 
 def ensure_ps_reseeding_status(conn) -> None:

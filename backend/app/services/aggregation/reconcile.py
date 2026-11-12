@@ -141,6 +141,9 @@ class Observation:
     # legitimately trails the head while one is in flight, so this is the
     # normal state for the seconds after every publish rather than a wedge.
     projection_in_progress: bool = False
+    # The key still serves main a version of it while behind: the one it last published, rollups
+    # included (``ProjectorHealth.serving``). The canvas has its connections, of that version.
+    projection_serving: bool = False
 
     # ── public.data_source_stats (the stats service's output) ─────────
     has_stats: bool = False
@@ -194,15 +197,19 @@ class Observation:
     def projection_stalled(self) -> bool:
         """The projector that owns this source's rollups is not current.
 
-        ONE narrow fact: the watermark trails the published head and no pass is
-        closing the gap. That is precisely — and only — what every string this
-        verdict renders asserts. Main reads fall back to the version log, which
-        holds no ``:AGGREGATED`` rows, so aggregated lineage is missing from
-        the product right now, and it clears on its own the moment the
-        watermark catches up.
+        ONE narrow fact: the watermark trails the published head, no pass is
+        closing the gap, and the key serves no version of main. That is
+        precisely — and only — what every string this verdict renders asserts.
+        Main reads fall back to the version log, which holds no ``:AGGREGATED``
+        rows, so aggregated lineage is missing from the product right now, and
+        it clears on its own the moment the watermark catches up.
 
-        Two readings are deliberately NOT this state, because for neither is
+        Three readings are deliberately NOT this state, because for none is
         any of that sentence true:
+
+        * A key behind its head that still serves the version it last
+          published (``projection_serving``): its rollups are on the canvas, of
+          that version, and the sync chip says a newer one is being written.
 
         * A pass in flight (``projecting``/``rebuilding``). It is working, not
           wedged; the prescribed action ("someone has to look at version
@@ -217,7 +224,7 @@ class Observation:
           (``projection_last_error``, still on the wire and still in the
           infrastructure panel's not-publishing list), not a verdict.
         """
-        if self.projection_in_progress:
+        if self.projection_in_progress or self.projection_serving:
             return False
         behind = self.projection_commits_behind
         return behind is not None and behind > 0

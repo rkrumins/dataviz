@@ -109,6 +109,29 @@ view reads is in sync — for example **In sync · read 5m ago**, **Summaries
 need attention** or **Changed since the last refresh**. Select it for when each step last ran
 and what happens next. (The chip is hidden on narrow screens.)
 
+#### While a versioned graph is updated
+
+After a publish or an import, the graph store takes a moment to write the new
+version — longer for a large change, or while the graph is being rebuilt. The
+view doesn't wait, and nothing on it breaks: it shows the version the graph
+store last finished, complete with its connections, and the chip says so.
+
+| The chip says | It means |
+| --- | --- |
+| **Showing an earlier version · updating…** (Business view) | You're seeing the version before the latest. Hover for which one, and which is being written. |
+| **Showing #12 · writing #14** (Technical view) | Version #12 is on screen; #14 is being written to the graph store. |
+| **Showing #12 · rebuilding 45%** | The graph store is being rebuilt; #12 stays on screen until it finishes. |
+| **Showing #12 · refresh failed** | Writing the newer version failed; it's retried automatically. A manager can rebuild it from **Data health**. |
+
+When the newer version is in, the view refreshes by itself and the chip goes
+back to **In sync**. Your published changes are safe throughout: they're
+saved the moment you publish, and only showing them waits.
+
+A graph the store holds no version of yet — just enabled, moved to another
+graph store, or unloaded to free memory — is read from the system of record
+until it's written. It's slower, and some connections between collapsed
+items may not show until then.
+
 ### Messages on a view while it loads
 
 | The view shows | It means |

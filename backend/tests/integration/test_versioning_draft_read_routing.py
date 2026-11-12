@@ -2,11 +2,12 @@
 
 The graph endpoints gained an optional branchId; this asserts the selection rule that backs it.
 A resolved draft on a versioned graph is served by the DraftOverlayProvider — main ⊕ the draft's
-sparse delta — wrapping WHATEVER serves main (the live provider when the FalkorDB projection is fresh,
-else the Postgres main reader), so a no-change draft reads identically to main. For 'main' (and
-omission, and the opaque main id) the rule is read-your-writes: the live provider when the projection
-is fresh (the hot path), but the Postgres reader when the projection lags the committed head (e.g.
-just after a merge) so the change is visible immediately. An unknown branch on a versioned graph is a
+sparse delta — wrapping WHATEVER serves main (the live provider while the FalkorDB projection's key
+serves a version of main, else the Postgres main reader), so a no-change draft reads identically to
+main. For 'main' (and omission, and the opaque main id) the live provider serves while the key holds
+a version: the head (the hot path), or, while the projection catches up after a merge or rebuilds
+in place, the version it last published — reads stay complete, and the view says a newer one is on
+its way. Only a key that holds no version reads main from Postgres. An unknown branch on a versioned graph is a
 KeyError (which the dependency maps to HTTP 404); and a branchId against a NON-versioned data source
 is ignored (lenient). A fresh projection serves main only through a provider that reads the pinned
 key (``serves_pin``): one resolved to another key falls back to Postgres. No FalkorDB — the live provider is a stub since only the *selection* is under
@@ -81,8 +82,8 @@ async def _run() -> None:
     ContextEngine._resolve_ontology = _noop
     data_source_repo.get_data_source_orm = _no_ds
     try:
-        # resolved draft on a versioned graph → the overlay provider, bound to that branch. The
-        # real watermark here is NOT fresh (no projector ran), so the overlay's base is the Postgres
+        # resolved draft on a versioned graph → the overlay provider, bound to that branch. No
+        # projector ran, so the key holds no version of main and the overlay's base is the Postgres
         # main reader — a draft still reads main ⊕ its delta, just with a Postgres base.
         eng = await _for_workspace(ds, draft)
         assert isinstance(eng.provider, DraftOverlayProvider)
@@ -90,7 +91,8 @@ async def _run() -> None:
         assert isinstance(eng.provider._base, VersionedBranchProvider) and eng.provider._base._branch == main
 
         # The watermark's readRoute names the store this rule picks, from the same real watermark:
-        # stale main is served from Postgres, and a draft always overlays whatever serves main.
+        # main with no version in its key is served from Postgres, and a draft always overlays
+        # whatever serves main.
         assert (await svc.projection_watermark(gid))["read_route"] == {"main": "postgres", "drafts": "overlay"}
         assert isinstance((await _for_workspace(ds, "main")).provider, VersionedBranchProvider)
         # Once the projection holds the head, both say FalkorDB (the live provider).
@@ -99,6 +101,18 @@ async def _run() -> None:
         live_main = (await _for_workspace(ds, "main")).provider
         assert isinstance(live_main, VersionedWriteProvider) and isinstance(live_main._inner, _StubProvider)
         assert isinstance((await _for_workspace(ds, draft)).provider._base, _StubProvider)
+
+        # A rebuild resets the watermark to 0, not what the key holds: it is rebuilt in place, and
+        # reads keep the version it last published until the rebuild publishes.
+        published = (await svc.projection_watermark(gid))["committed"]
+        assert await svc.request_projection_rebuild(gid)
+        wm = await svc.projection_watermark(gid)
+        assert (wm["projected"], wm["status"], wm["served"]) == (0, "rebuilding", published)
+        assert wm["read_route"] == {"main": "falkordb", "drafts": "overlay"} and not wm["fresh"]
+        assert isinstance((await _for_workspace(ds, "main")).provider, VersionedWriteProvider)
+        assert isinstance((await _for_workspace(ds, draft)).provider._base, _StubProvider)
+        await FalkorProjector(graph_client_factory=FakeFalkor()).project_graph(gid)
+        assert (await svc.projection_watermark(gid))["fresh"] is True
 
         # Fresh, but the provider in hand serves another key than the pin (a move committed after
         # it was resolved, or a stale versioned-set cache): main and a draft's base read Postgres.
@@ -125,7 +139,7 @@ async def _run() -> None:
         # 'main' (explicit alias), the opaque main id, and omission, projection FRESH → live
         # provider, wrapped so a write commits to versioning even with GRAPHVER_VERSIONED_WRITES=0
         async def _fresh(self, graph_id):
-            return {"fresh": True, "committed": 1, "projected": 1}
+            return {"fresh": True, "committed": 1, "projected": 1, "served": 1}
         GraphVersioningService.projection_watermark = _fresh
         for b in ("main", main, None):
             e = await _for_workspace(ds, b)
@@ -138,15 +152,27 @@ async def _run() -> None:
         assert isinstance(e_draft_fresh.provider, DraftOverlayProvider)
         assert isinstance(e_draft_fresh.provider._base, _StubProvider)
 
-        # same reads, but the projection LAGS the committed head → read-your-writes serves main
-        # from the Postgres reader so a just-merged change is visible before the projector catches up
-        async def _stale(self, graph_id):
-            return {"fresh": False, "committed": 2, "projected": 1}
-        GraphVersioningService.projection_watermark = _stale
+        # same reads, but the projection LAGS the committed head → its key still serves the version
+        # it last published, complete, until the newer one is in: the live provider, main and draft
+        async def _behind(self, graph_id):
+            return {"fresh": False, "committed": 2, "projected": 1, "served": 1}
+        GraphVersioningService.projection_watermark = _behind
+        for b in ("main", main, None):
+            e = await _for_workspace(ds, b)
+            assert isinstance(e.provider, VersionedWriteProvider)
+            assert isinstance(e.provider._inner, _StubProvider)
+        assert isinstance((await _for_workspace(ds, draft)).provider._base, _StubProvider)
+
+        # behind, and its key holds no version (written from nothing: a move, a first seed) →
+        # the Postgres reader, for main and under a draft
+        async def _empty(self, graph_id):
+            return {"fresh": False, "committed": 2, "projected": 0, "served": None}
+        GraphVersioningService.projection_watermark = _empty
         for b in ("main", main, None):
             e = await _for_workspace(ds, b)
             assert isinstance(e.provider, VersionedBranchProvider)
             assert e.provider._branch == main
+        assert isinstance((await _for_workspace(ds, draft)).provider._base, VersionedBranchProvider)
 
         # unknown branch on a versioned graph → KeyError (the dependency maps this to HTTP 404)
         with pytest.raises(KeyError):

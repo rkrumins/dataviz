@@ -993,6 +993,12 @@ class WatermarkModel(_ApiModel):
     committed: int       # main_head_commit_seq
     projected: int       # projection_state.projected_commit_seq
     fresh: bool          # projected >= committed
+    # The version reads of main show: `committed` while fresh; while the graph catches up or
+    # rebuilds, the version it last finished writing, served complete until the new one is in;
+    # null when reads go to Postgres (nothing written yet, or out of FalkorDB). Set on GET
+    # …/watermark and on neighbors reads.
+    served: Optional[int] = None
+    served_revision: Optional[RevisionModel] = Field(default=None, alias="servedRevision")
     # Set on GET …/watermark (and the rebuild response); the slim watermark on state and
     # neighbors reads leaves it null — those carry their own `source`.
     read_route: Optional[ReadRouteModel] = Field(default=None, alias="readRoute")
@@ -2659,6 +2665,8 @@ async def _watermark_model(session: AsyncSession, wm: dict) -> WatermarkModel:
                 if wm.get("falkor_provider") else None)
     return WatermarkModel(committed=wm["committed"], projected=wm["projected"],
                           fresh=wm["fresh"], status=wm["status"],
+                          served=wm.get("served"),
+                          served_revision=_revision_model(wm.get("served_revision")),
                           read_route=ReadRouteModel(**wm["read_route"]),
                           target=wm.get("target", 0),
                           last_error=wm.get("last_error"),
@@ -3403,16 +3411,16 @@ async def graph_neighbors(
 async def _serve_neighbors(svc, read_factory, graph_id, *, urn, depth, direction,
                            edge_types, limit, branch_id=None, as_of_seq=None, fork=False):
     wm = await svc.projection_watermark(graph_id)
-    wm_out = {"committed": wm["committed"], "projected": wm["projected"], "fresh": wm["fresh"]}
+    wm_out = {"committed": wm["committed"], "projected": wm["projected"], "fresh": wm["fresh"],
+              "served": wm["served"]}
     # FalkorDB projection is main@head only; drafts / as-of reads must use Postgres, and so does a
     # fork, which has no projection of its own (it reads through its parent's, with its changes).
     is_head_main = as_of_seq is None and not fork and (
         branch_id is None or branch_id == await svc.main_branch_id(graph_id))
+    # The key serves main at the version it holds (serving_seq): the head, or the version it last
+    # published while it catches up or rebuilds. At 0 it holds nothing to read.
     can_falkor = bool(
-        is_head_main and read_factory is not None and wm["falkor_graph_name"]
-        and wm["status"] not in ("evicted", "rehydrating")  # a load serves once it is ready
-        and wm["projected"] >= wm["committed"] - vconfig.READ_MAX_LAG
-        and wm["projected"] > 0       # at 0 the key is empty or mid-reconcile (moved, reseeding)
+        is_head_main and read_factory is not None and wm["falkor_graph_name"] and wm["served"]
     )
     if can_falkor:
         await acquire_lease(graph_id)            # pin so an eviction sweep can't drop it mid-read
