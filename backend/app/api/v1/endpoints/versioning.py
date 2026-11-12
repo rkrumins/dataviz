@@ -3922,6 +3922,7 @@ async def create_import(
     ``branchId`` stacks onto an existing draft (repeat imports, like manual edits)."""
     from backend.app.services.versioning.import_export.formats import get_adapter
     _refuse_a_form(request)
+    digest = _body_digest(request)
     try:
         get_adapter(format)
     except ValueError as exc:
@@ -3951,7 +3952,7 @@ async def create_import(
                 raise
         else:
             return await _store_and_start(ie, session, request, created["job_id"], created["branch_id"],
-                                          created["source_uri"], format)
+                                          created["source_uri"], format, digest)
     if _never_arrived(job):
         # Its request broke off before storing the file: this one's file is taken, once the job is
         # taken back under the rules a new import meets (the view it places into included).
@@ -3959,7 +3960,7 @@ async def create_import(
         with _domain_errors():
             if await ie.reclaim_import(job["jobId"], actor=user.id, workspace_id=ws_id):
                 return await _store_and_start(ie, session, request, job["jobId"], job["branchId"],
-                                              job["sourceUri"], format)
+                                              job["sourceUri"], format, digest)
         job = await ie.find_job(graph_id=graph_id, idempotency_key=key)     # another request took it back
     # Still storing its file, queued, running or finished: answered as it is.
     return {"jobId": job["jobId"], "branchId": job["branchId"], "sourceUri": job["sourceUri"],
@@ -3967,11 +3968,12 @@ async def create_import(
 
 
 async def _store_and_start(ie, session: AsyncSession, request: Request, job_id: str, branch_id: str,
-                           source_uri: str, fmt: str) -> dict:
+                           source_uri: str, fmt: str, digest: Optional[tuple] = None) -> dict:
     """Store the request's body as import ``job_id``'s file and queue it. A request that breaks off
     first fails the job there and then (:func:`_abandon_unqueued`): its draft takes the next import
     now, and the same key sent again takes the job back. A body past what one import of ``fmt`` can
-    be is refused (413) as soon as it passes it.
+    be is refused (413) as soon as it passes it, and one that doesn't hash to its ``digest`` (422)
+    once it is in: neither is queued.
 
     The file can take minutes to arrive, so the request's checks end their transaction first (they
     only read): its connection goes back to the pool rather than being held for as long as the
@@ -3982,7 +3984,8 @@ async def _store_and_start(ie, session: AsyncSession, request: Request, job_id: 
             await session.commit()
         async with _IMPORT_BODIES.slot():
             with _upload_errors():
-                await ie.store.put_stream(source_uri, uploads.within_limit(request.stream(), fmt))
+                await ie.store.put_stream(source_uri,
+                                          uploads.checked(uploads.within_limit(request.stream(), fmt), digest))
         status = await ie.start_import(job_id)
     except BaseException:
         await _abandon_unqueued(ie, job_id)
@@ -4051,6 +4054,14 @@ def _refuse_a_form(request: Request) -> None:
         raise HTTPException(status_code=415, detail=uploads.FORM_REFUSED)
 
 
+def _body_digest(request: Request) -> Optional[tuple]:
+    """What the request's ``Content-Digest`` (RFC 9530) says its body hashes to, checked as it
+    arrives; one that can't be read or checked is refused before anything is made."""
+    from backend.app.services.versioning.import_export import uploads
+    with _upload_errors():
+        return uploads.content_digest(request.headers.get("content-digest"))
+
+
 async def _upload_description(request: Request) -> CreateUploadRequest:
     """The JSON body that starts an upload, read no further than a description can be."""
     from fastapi.exceptions import RequestValidationError
@@ -4102,6 +4113,7 @@ async def create_import_upload(
     as_file = not uploads.sent_as_json(request.headers.get("content-type"))
     if as_file:
         _refuse_a_form(request)
+        digest = _body_digest(request)
         name = file_name or f"upload.{fmt.lower()}"
     else:
         body = await _upload_description(request)
@@ -4119,7 +4131,7 @@ async def create_import_upload(
         async with _IMPORT_BODIES.slot():
             record = await uploads.create_from_body(
                 ie.store, request.stream(), declared=int(declared) if declared and declared.isdigit() else None,
-                **where)
+                digest=digest, **where)
     return _upload_view(record, list(range(record["parts"])))
 
 
@@ -4149,13 +4161,14 @@ async def put_import_upload_part(
     body whose Content-Length doesn't end where a part does is refused before any of it is read."""
     from backend.app.services.versioning.import_export import uploads
     _refuse_a_form(request)
+    digest = _body_digest(request)
     record = await _load_upload(ie, ws_id, graph_id, meta, upload_id, user)
     if record.get("jobId"):
         raise HTTPException(status_code=409, detail="This upload is complete. Upload the file again to change it.")
     declared = request.headers.get("content-length")
     with _upload_errors():
         async with _IMPORT_BODIES.slot():
-            size = await uploads.put_part(ie.store, record, part, request.stream(),
+            size = await uploads.put_part(ie.store, record, part, request.stream(), digest=digest,
                                           declared=int(declared) if declared and declared.isdigit() else None)
     return {"part": part, "size": size, "lastPart": (part * record["partBytes"] + size - 1) // record["partBytes"]}
 

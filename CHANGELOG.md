@@ -62,6 +62,14 @@ integration's many small changes as a few commits.
     description.
   - Measured with a 4 GiB NDJSON file sent whole: stored as its 257 parts in about 20 s with the
     API process's memory up 1–2 MiB, and every record read back equal to the original.
+- **An import's file is checked against the digest its client sends.** `POST …/imports`, the body
+  that starts an upload and `PUT …/parts/{n}` take a `Content-Digest` header (RFC 9530):
+  `sha-256=:<base64>:` or `sha-512=:…:`, of that request's body. It is checked as the body
+  arrives; one that doesn't match is refused (`422`) once it is in, and none of it is kept or
+  imported (a part sent again with the right bytes takes its place; an import's job is failed
+  unqueued, and the same `idempotencyKey` takes it back). A header that can't be read, or names
+  only other algorithms, is `400` before any of the body is read. Without the header, nothing
+  changes.
 - **Reconcile imports in memory** (Admin → Features, `importInMemoryReconcile`, off by default). An
   import compares its file with the graph a batch at a time before it stages anything: a row that
   changes nothing is staged slim, already resolved, so a full snapshot sent again writes about what

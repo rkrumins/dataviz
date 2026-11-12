@@ -233,6 +233,48 @@ async def test_a_file_too_large_for_its_format_is_refused_before_it_is_sent(tmp_
                                          fmt="ndjson"))
 
 
+def _digest(data: bytes, alg: str = "sha-256") -> str:
+    """``data``'s RFC 9530 Content-Digest."""
+    import base64
+    import hashlib
+    return f"{alg}=:{base64.b64encode(hashlib.new(alg.replace('-', ''), data).digest()).decode()}:"
+
+
+def test_a_content_digest_is_read_or_refused():
+    import hashlib
+    assert uploads.content_digest(None) is None and uploads.content_digest("  ") is None
+    assert uploads.content_digest(_digest(DATA)) == ("sha-256", hashlib.sha256(DATA).digest())
+    both = f"{_digest(DATA)}, {_digest(DATA, 'sha-512')}"
+    assert uploads.content_digest(both) == ("sha-512", hashlib.sha512(DATA).digest()), "the strongest named"
+    for header, says in (("md5=:abc=:", "checks sha-256 and sha-512"), ("sha-256=abc", "can't be read"),
+                         ("sha-256=:not base64!:", "can't be read")):
+        with pytest.raises(UploadError) as refused:
+            uploads.content_digest(header)
+        assert refused.value.status == 400 and says in str(refused.value), str(refused.value)
+
+
+async def test_a_body_that_doesnt_match_its_digest_keeps_none_of_itself(tmp_path, small_parts):
+    """Checked as it arrives, refused once it is in: a run of parts, the whole file to part 0, or the
+    file that starts an upload, none of it is kept — its last part included, which was whole."""
+    store = LocalFsObjectStore(tmp_path)
+    record = await _upload(store)
+    wrong = uploads.content_digest(_digest(DATA[::-1]))
+    with pytest.raises(UploadError) as refused:
+        await uploads.put_part(store, record, 0, _chunked(DATA), digest=wrong)
+    assert refused.value.status == 422 and "Content-Digest" in str(refused.value)
+    assert await uploads.received(store, record) == []
+    assert await uploads.put_part(store, record, 0, _chunked(DATA), digest=uploads.content_digest(_digest(DATA))) \
+        == len(DATA)
+    assert await uploads.received(store, record) == [0, 1, 2, 3]
+
+    with pytest.raises(UploadError) as refused:
+        await uploads.create_from_body(store, _chunked(DATA), **_where(owner="u1", file_name="f.ndjson",
+                                                                       fmt="ndjson"), digest=wrong)
+    assert refused.value.status == 422
+    assert sorted(p.name for p in tmp_path.rglob("part-*")) == [f"part-0000{n}" for n in range(4)], \
+        "only the upload sent whole above"
+
+
 async def test_an_upload_is_its_owners_only(tmp_path):
     store = LocalFsObjectStore(tmp_path)
     record = await _upload(store)
@@ -435,6 +477,30 @@ async def test_a_file_that_starts_an_upload_and_cant_be_imported_keeps_none_of_i
     described = await test_client.post(BASE, json={"fileName": "big.ndjson", "size": 0})
     assert described.status_code == 422, described.text
     assert described.json()["detail"][0]["loc"] == ["body", "size"]
+
+
+async def test_a_file_that_says_its_digest_is_checked_wherever_a_file_goes(test_client, api):
+    """A part, or the file that starts an upload, whose Content-Digest doesn't match what arrived is
+    refused (422) and not kept; one that can't be read or checked is refused (400) before any of it
+    is read."""
+    up = (await test_client.post(BASE, json={"fileName": "big.ndjson", "size": len(DATA), "format": "ndjson"})).json()
+    url = f"{BASE}/{up['uploadId']}"
+    bad = await test_client.put(f"{url}/parts/0", content=DATA, headers={"Content-Digest": _digest(b"other")})
+    assert bad.status_code == 422 and "Content-Digest" in bad.json()["detail"], bad.text
+    assert (await test_client.get(url)).json()["received"] == []
+    good = await test_client.put(f"{url}/parts/0", content=DATA, headers={"Content-Digest": _digest(DATA)})
+    assert good.status_code == 200 and good.json()["lastPart"] == 3, good.text
+
+    started = await test_client.post(BASE, content=DATA, headers={"Content-Type": "application/octet-stream",
+                                                                    "Content-Digest": _digest(DATA, "sha-512")})
+    assert started.status_code == 201 and started.json()["received"] == [0, 1, 2, 3], started.text
+    refused = await test_client.post(BASE, content=DATA, headers={"Content-Type": "application/octet-stream",
+                                                                    "Content-Digest": _digest(b"other")})
+    assert refused.status_code == 422, refused.text
+    for header in ("md5=:abc=:", "sha-256=abc"):
+        unread = await test_client.post(BASE, content=DATA, headers={"Content-Type": "application/octet-stream",
+                                                                       "Content-Digest": header})
+        assert unread.status_code == 400, unread.text
 
 
 async def test_a_file_sent_as_a_form_is_refused_wherever_a_file_goes(test_client, api):
