@@ -207,8 +207,10 @@ tests/test_projection_derived_labels.py
 tests/test_projection_fencing_unit.py
 tests/test_projection_foreign_key_guard.py
 tests/test_projection_labeled_writes.py
+tests/test_projection_ladder.py
 tests/test_projection_liveness_unit.py
 tests/test_projection_property_removal_unit.py
+tests/test_projection_quarantine_unit.py
 tests/test_projection_reconcile_unit.py
 tests/test_projection_single_flight.py
 tests/test_projection_stalled_reconcile.py

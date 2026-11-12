@@ -22,12 +22,14 @@ Pins:
 - The tombstone sweep clears a node main deleted that the cache still holds, and records how far
   it swept (``sweptSeq``), so the next sweep reads only later deletes.
 - An entity whose every statement times out, even alone, is quarantined: the rest of its window
-  lands and publishes, unverified, and the watermark lists it. An edge of a held node is held with
-  it, and stays held while the node's retry fails. A rebuild meanwhile holds them again, and hands
-  the rollups to the aggregation job, even when the rebuild that cleared what was held failed
-  before it published. Once the fault clears, the caught-up graph gets a pass of its own when the
-  entity is due, which lands it, then its edge, and verifies again. With
+  lands and publishes, unverified, and the watermark lists it. An edge of a held node the key
+  lacks is held with it, and stays held while the node's retry fails. A rebuild meanwhile holds
+  them again, and hands the rollups to the aggregation job, even when the rebuild that cleared what
+  was held failed before it published. Once the fault clears, the caught-up graph gets a pass of
+  its own when the entity is due, which lands it, then its edge, and verifies again. With
   ``GRAPHVER_PROJECTION_QUARANTINE`` off, it fails the pass, as before.
+- A held update of a node the key holds keeps its edges: an edge to it, in its window or a later
+  one, is written, and only the update is held.
 - A held delete of an edge where it was is kept when the edge is written where it now is, and
   lands once the fault clears.
 - A paged window, and a streamed rebuild, under a pass time box that stops each pass after one
@@ -38,6 +40,10 @@ Pins:
   moved the lineage summaries before it escalated owes its rebuild them
   (``projection_state.rollup_state.moved``), which an ask recorded meanwhile keeps: the rebuild
   hands them to the job rather than moving them by its difference, and its publish clears it.
+- A summaries state that is not a JSON object (the JSON ``null`` a cleared ask left before) owes
+  nothing: an ask is recorded over it, a window publishes over it, and what an escalation or a
+  rebuild that clears what is held owes over it is an object, handed over and cleared as above. A
+  cleared ask leaves SQL NULL.
 """
 from __future__ import annotations
 
@@ -449,6 +455,47 @@ async def _held_delete_where_an_edge_was(svc):
     await _assert_matches_main(svc, fake, gid)
 
 
+async def _a_held_update_keeps_its_edges(svc):
+    from sqlalchemy import select, update
+
+    from backend.app.services.versioning.models import ProjectionQuarantineORM, ProjectionStateORM
+
+    fake = TimeoutFalkor()
+    proj = FalkorProjector(graph_client_factory=fake, batch_size=500)
+    gid = await _graph(svc)
+    await _edit_publish(svc, gid, "alice", [
+        _create("A", "a"), _create("X", "x"), _link("AX", "A", "X")], "seed")
+    assert (await proj.project_graph(gid))["verify_error"] is None
+    g = fake.graphs[next(iter(fake.graphs))]
+
+    # X's update times out, even alone, and is held. X stays in the key as it was, so an edge to it
+    # still matches: Y->X, and B->X a window later while X's retry still fails, are written.
+    g.poison.add("urn:t:X")
+    await _edit_publish(svc, gid, "alice", [
+        {"op": "update", "entity_kind": "node", "entity_id": "X", "payload": {"displayName": "x2"}},
+        _create("Y", "y"), _link("YX", "Y", "X")], "update X, add Y->X")
+    r = await proj.project_graph(gid)
+    assert r["verify_error"] is None and r["quarantined"] == 1, r
+    await _edit_publish(svc, gid, "alice", [_create("B", "b"), _link("BX", "B", "X")], "add B->X")
+    r = await proj.project_graph(gid)
+    assert r["verify_error"] is None and r["quarantined"] == 1, r
+    assert sorted(g.edges) == ["AX", "BX", "YX"], g.edges
+    async with db.graphver_session() as s:
+        held = {(q.statement, q.entity_key) for q in (await s.execute(
+            select(ProjectionQuarantineORM)
+            .where(ProjectionQuarantineORM.graph_id == gid))).scalars()}
+    assert held == {("node_merge", "urn:t:X")}, held
+
+    # The fault clears: X's update lands once due, and the graph verifies.
+    g.poison.clear()
+    async with db.graphver_session() as s:
+        await s.execute(update(ProjectionStateORM).where(ProjectionStateORM.graph_id == gid)
+                        .values(quarantine_next_at="2000-01-01T00:00:00+00:00"))
+    r = await proj.project_graph(gid)
+    assert r["verify_error"] is None and not r.get("quarantined") and not r.get("unverified"), r
+    await _assert_matches_main(svc, fake, gid)
+
+
 async def _resumed_rebuild_keeps_what_it_held(svc, monkeypatch):
     from sqlalchemy import update
 
@@ -532,6 +579,79 @@ async def _an_escalation_owes_its_rebuild_the_summaries(svc):
     assert r["verify_error"] is None and moved == [True] and stale == [gid], (r, moved, stale)
     async with db.graphver_session() as s:
         assert (await s.get(ProjectionStateORM, gid)).rollup_state is None
+    await _assert_matches_main(svc, fake, gid)
+
+
+async def _a_summaries_state_that_is_no_object_owes_nothing(svc):
+    from sqlalchemy import JSON, func, select, update
+
+    from backend.app.services.versioning.models import ProjectionStateORM as PS
+
+    fake = TimeoutFalkor()
+    proj = FalkorProjector(graph_client_factory=fake, batch_size=500)
+    gid = await _graph(svc)
+    await _edit_publish(svc, gid, "alice", [_create("A", "a")], "seed")
+    assert (await proj.project_graph(gid))["verify_error"] is None
+    g = fake.graphs[next(iter(fake.graphs))]
+    stale = []
+
+    async def rollups_stale(graph_id):
+        stale.append(graph_id)
+
+    proj._on_rollups_stale = rollups_stale
+
+    async def state():
+        async with db.graphver_session() as s:
+            return tuple((await s.execute(
+                select(func.jsonb_typeof(PS.rollup_state), PS.rollup_state)
+                .where(PS.graph_id == gid))).one())
+
+    async def store(value):
+        async with db.graphver_session() as s:
+            await s.execute(update(PS).where(PS.graph_id == gid).values(rollup_state=value))
+
+    async def a_window_publishes(name):
+        await _edit_publish(svc, gid, "alice", [_create(name, name.lower())], name)
+        r = await proj.project_graph(gid)
+        assert r["verify_error"] is None and await _watermark(gid) == r["projected"], r
+
+    # An owed ask later queued leaves nothing owed: SQL NULL, not JSON null.
+    await svc.note_rollup_ask(gid, "active")
+    await svc.note_rollup_ask(gid, "queued")
+    assert await state() == (None, None)
+
+    # A state that is not an object (the JSON null a clear left before, or anything else) owes
+    # nothing: an ask is recorded over it, and a window publishes over it and leaves NULL.
+    for i, legacy in enumerate((JSON.NULL, [None, {"moved": "2026-01-01T00:00:00+00:00"}])):
+        await store(legacy)
+        await svc.note_rollup_ask(gid, "active")
+        assert (await state())[1]["pending"] == "active"
+        await store(legacy)
+        await a_window_publishes(f"W{i}")
+        assert await state() == (None, None)
+
+    # Owed over JSON null, by an escalation: an object, which the rebuild hands to the job and its
+    # publish clears.
+    await store(JSON.NULL)
+    async with db.graphver_session() as s:
+        epoch = (await s.get(PS, gid)).epoch
+    assert await proj._escalate(gid, epoch, "it holds less than history", "drift",
+                                summaries_moved=True)
+    kind, owed = await state()
+    assert kind == "object" and owed.keys() == {"moved"}, (kind, owed)
+    r = await proj.project_graph(gid)
+    assert r["verify_error"] is None and stale == [gid] and await state() == (None, None), r
+
+    # And by a rebuild that clears what is held: the same, and the next window publishes.
+    g.poison.add("urn:t:P")
+    await _edit_publish(svc, gid, "alice", [_create("P", "p")], "held")
+    assert (await proj.project_graph(gid))["quarantined"] == 1
+    g.poison.clear()
+    await store(JSON.NULL)
+    assert await svc.request_projection_rebuild(gid)
+    r = await proj.project_graph(gid)
+    assert r["verify_error"] is None and stale == [gid, gid] and await state() == (None, None), r
+    await a_window_publishes("Last")
     await _assert_matches_main(svc, fake, gid)
 
 
@@ -637,8 +757,10 @@ def test_a_projection_converges_in_one_pass_whatever_its_statements_can_take(mon
             await _backoff_and_honest_verify(svc)
             await _urn_change_and_sweep(svc)
             await _held_delete_where_an_edge_was(svc)
+            await _a_held_update_keeps_its_edges(svc)
             await _resumed_rebuild_keeps_what_it_held(svc, monkeypatch)
             await _an_escalation_owes_its_rebuild_the_summaries(svc)
+            await _a_summaries_state_that_is_no_object_owes_nothing(svc)
             await _quarantine(svc, monkeypatch)
             await _resumable_and_self_healing(svc, monkeypatch)
         finally:

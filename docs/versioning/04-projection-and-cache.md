@@ -166,8 +166,9 @@ rollup cells, the tombstone sweep, and the rebuild's deletes.
   4 s and 8 s plus jitter, then given up on, failing the pass. A node delete gets one more try
   first: a hub, whose `DETACH DELETE` must drop every relationship at once, has its relationships
   deleted 10,000 at a time (halved on a timeout), then the node. That holds wherever the delete
-  names the node: by label and urn in a window, by internal id in a rebuild (a node main no longer
-  holds), by label, urn and entity id in the tombstone sweep.
+  names the node: by label and urn in a window, and in a rebuild for every copy of a node the key
+  holds twice; by internal id in a rebuild (a node main no longer holds); by label, urn and entity
+  id in the tombstone sweep.
 - **Why sending again is safe.** FalkorDB rolls back a statement it aborts, and every projector
   write is an idempotent `MERGE`, `SET` or `DELETE`. A rollup write sets the absolute weight it
   computed.
@@ -182,14 +183,18 @@ This happens after its retries, and for a node delete after its hub path. The pa
   when. A node is named by its urn; an edge by its id where the statement puts it, with its type
   and ends (`<id>@<type>:<source urn>-><target urn>`).
 - **What is held.** Node and edge merges and deletes, relabels and re-keys. Reads, rollup cells
-  and deletes by internal id still fail the pass. An edge merge whose end node the pass holds is
-  held with it, not sent: it would match no node, and be lost once the node lands.
+  and deletes by internal id still fail the pass.
+- **Edges that wait for a held node.** An edge merge whose end node the pass holds, and the key
+  lacks under the label the edge matches (a new node whose merge is held, say), is held with it,
+  not sent: it would match no node, and be lost once the node lands. All of a chunk's are held in
+  one write. A node the key holds, whose own update is held, still matches, so its edges are
+  written.
 - **Retries.** Every later pass retries the graph's held statements first, oldest first, so its
   own writes land after them. One that lands leaves the table, and so does any held statement for
   an entity a later write lands: for an edge, a write at the same type and ends. A write of the
   edge somewhere else supersedes nothing held where it was.
-  - An edge merge whose end node is still held after its own retry is not tried, and stays held.
-    Held after the node, it is retried after it.
+  - An edge merge held for its end node is not tried while that node is still held after its own
+    retry, and stays held. Held after the node, it is retried after it.
   - A graph that is caught up gets a pass of its own once its held statements are due
     (`projection_state.quarantine_next_at`, every `GRAPHVER_PROJECTION_QUARANTINE_RETRY_SECS`,
     300). The poll selects it, and the pass has an empty window.

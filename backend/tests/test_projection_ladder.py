@@ -11,13 +11,19 @@ Pins:
 - One row that still fails is retried ``PROJECTION_FLOOR_RETRIES`` times, waiting longer each time,
   then handed to ``at_floor``. Unhandled, it fails the pass.
 - ``on_result`` sees every chunk that landed, halves included; ``progress`` counts them.
+- A rebuild deletes every copy of a node the key holds twice, in place or a page at a time, and a
+  copy that is a hub has its relationships deleted a page at a time first, then the copies.
 """
 from __future__ import annotations
+
+import contextlib
+from types import SimpleNamespace
 
 import pytest
 
 from backend.app.services.versioning import config, projection
 from backend.app.services.versioning.projection import FalkorProjector, _PassStats, _PASS_STATS
+from backend.app.services.versioning.projection_reconcile import ActualNode, ExpectedNode
 
 
 class _Graph:
@@ -164,3 +170,85 @@ async def test_on_result_and_progress_see_every_chunk_that_landed():
     assert sorted(r for chunk, _n in seen for r in chunk) == list(range(10))
     assert all(len(chunk) == n for chunk, n in seen)
     assert sum(counted) == 10
+
+
+class _HeldTwice:
+    """A key holding ``urn:h`` twice under ``Dataset``, one copy a hub: a ``DETACH DELETE`` of it
+    times out while any of its relationships are left, which go ``$k`` at a time."""
+
+    def __init__(self, degree):
+        self.rels, self.copies, self.pages = degree, 2, []
+
+    async def query(self, cypher, params=None, timeout=None):
+        params = params or {}
+        if cypher.endswith("RETURN u, n.gvHash"):                   # the copies the key holds
+            return SimpleNamespace(result_set=[["urn:h", "a"], ["urn:h", "b"]][:self.copies])
+        if "DETACH DELETE" in cypher:
+            assert params["urns"] == ["urn:h"], params
+            if self.rels:
+                raise Exception("Query timed out")
+            self.copies = 0
+        elif cypher.startswith("MATCH (n:Dataset {urn: $u}) MATCH (n)-[r]-()"):
+            if cypher.endswith("RETURN 1 LIMIT 1"):
+                return SimpleNamespace(result_set=[[1]] if self.rels else [])
+            self.pages.append(min(self.rels, params["k"]))
+            self.rels -= self.pages[-1]
+        return SimpleNamespace(result_set=[])
+
+
+def _rebuilding(monkeypatch, written):
+    """A projector whose rebuild reads and writes everything but the deletes through stubs: main
+    holds one node, ``urn:h``, and what it writes is recorded in ``written``."""
+    monkeypatch.setattr(projection, "_HUB_PAGE", 10)
+
+    @contextlib.asynccontextmanager
+    async def session():
+        async def get(_model, _key):
+            return SimpleNamespace(id="g1")
+        yield SimpleNamespace(get=get)
+
+    p = FalkorProjector(graph_client_factory=lambda *_a: None, session_factory=session,
+                        batch_size=50)
+
+    async def payloads(_s, refs):
+        return {ref[2]: {"urn": "urn:h", "entityType": "Dataset"} for ref in refs}
+
+    async def apply(_client, node_upserts, *_a, **_k):
+        written.extend(urn for _eid, urn, _p in node_upserts)
+        return 0
+
+    monkeypatch.setattr(p._svc, "_payloads_by_version", payloads)
+    monkeypatch.setattr(p, "_apply", apply)
+    return p
+
+
+async def test_a_rebuild_in_place_deletes_a_node_held_twice_whose_copy_is_a_hub(monkeypatch):
+    g, written = _HeldTwice(degree=25), []
+    p = _rebuilding(monkeypatch, written)
+
+    async def live_count(*_a):
+        return 1
+
+    async def expected(*_a):
+        return ({("Dataset", "urn:h"): ExpectedNode(entity_id="H", ref=("node", "g1", "v1"),
+                                                    fp="a")}, {}, {"urn:h": "Dataset"})
+
+    async def scan(_client):                       # one key, held by two nodes
+        held = ("Dataset", "urn:h")
+        return {held: ActualNode(fp="a")}, {held: 2}, {}, set(), []
+
+    monkeypatch.setattr(p, "_live_count", live_count)
+    monkeypatch.setattr(p, "_expected_projection", expected)
+    monkeypatch.setattr(p, "_scan_projection", scan)
+    await p._reconcile_in_place(g, "g1", "main1", 5, {})
+    assert (g.copies, g.pages, written) == (0, [10, 10, 5], ["urn:h"])
+
+
+async def test_a_streamed_rebuild_deletes_a_node_held_twice_whose_copy_is_a_hub(monkeypatch):
+    g, written = _HeldTwice(degree=25), []
+    p = _rebuilding(monkeypatch, written)
+    twice = set()
+    await p._write_missing(g, None, SimpleNamespace(id="g1"), "main1", "node",
+                           [("H", "v1", "c1", "urn:h", "Dataset", None)], {}, None, True, twice)
+    assert (g.copies, g.pages, written) == (0, [10, 10, 5], ["urn:h"])
+    assert twice == {("Dataset", "urn:h")}

@@ -90,7 +90,8 @@ integration's many small changes as a few commits.
 - **One change that can't be written to the fast read layer no longer holds back the graph.**
   - A projector statement that still times out for a single entity, after its retries, is held
     back (`projection_quarantine`), and the rest of the publish lands. An edge to a node held back
-    is held with it, and written once the node is.
+    that the fast read layer does not have yet is held with it, and written once the node is; an
+    edge to a node it has, whose own update is held, is written.
   - Later passes retry it first, and a caught-up graph retries it every 5 minutes. A held delete of
     an edge where it was stays held when the edge is written where it now is. A rebuild that
     resumes from where its last pass stopped retries what that pass held.
@@ -250,8 +251,8 @@ integration's many small changes as a few commits.
     the halves again, down to one row.
   - The width that worked is kept for the graph, and grows back slowly.
   - A hub node is deleted after its relationships, 10,000 at a time: in a publish, in the tombstone
-    sweep, and in a rebuild of a graph too large to hold, which a stale hub otherwise failed for
-    good.
+    sweep, and in a rebuild, where a stale hub otherwise failed every pass, and a hub the key held
+    twice kept the rebuild from publishing.
   - Each pass logs what its statements took.
 - **No projector delete scans every relationship in the graph.**
   - An edge deleted in a publish is deleted, anchored on its ends, at every position it held:

@@ -9,7 +9,8 @@ Cypher) with a timeout policy on top. It raises FalkorDB's own ``Query timed out
 - the statement is the ``fail_after``-th one (a single mid-window failure);
 - a statement writes an entity in ``poison``, named by urn, entity id or edge id, or writes an edge
   between two ends named there as ``<source urn>-><target urn>``. An edge that only ends at a
-  poisoned node does not time out: as in FalkorDB, its MATCH finds no node, and it is not written.
+  poisoned node does not time out, as in FalkorDB: it is written when the key holds that node, and
+  its MATCH finds nothing when it does not.
 
 It also answers the hub-safe delete's shapes: a page of a node's relationships deleted, and
 whether any are left, the node matched by label and urn, by internal id, or by label, urn and

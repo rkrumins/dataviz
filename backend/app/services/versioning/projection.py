@@ -430,9 +430,11 @@ def _owe_summaries():
     writes the next full seed brings (a window moved them for entities the key lacked), so that
     seed hands them to the batch job instead of moving them by its difference. Kept until a pass
     publishes (``_finish``), whatever passes fail first; only a full seed publishes while it is
-    set."""
-    return func.coalesce(ProjectionStateORM.rollup_state, func.jsonb_build_object()).op("||")(
-        func.jsonb_build_object("moved", _now()))
+    set. A state that is not a JSON object (SQL NULL, or the JSON ``null`` an older clear wrote)
+    owes nothing else."""
+    state = ProjectionStateORM.rollup_state
+    return case((func.jsonb_typeof(state) == "object", state),
+                else_=func.jsonb_build_object()).op("||")(func.jsonb_build_object("moved", _now()))
 
 
 #: The tombstone sweep's own watermark on the pass marker (``_sweep_tombstoned``): every delete at or
@@ -1052,8 +1054,9 @@ class FalkorProjector:
             at += len(chunk)
 
     async def _quarantine(self, kind: str, cypher: str, params: dict, why: str) -> bool:
-        """Hold a single row's statement that still fails in ``projection_quarantine``, so the rest
-        of the window lands (``GRAPHVER_PROJECTION_QUARANTINE``); ``why`` is its recorded error.
+        """Hold a statement that still fails in ``projection_quarantine``, so the rest of the window
+        lands (``GRAPHVER_PROJECTION_QUARANTINE``); ``why`` is its recorded error. Each row of its
+        list parameter is held as a statement of its own, all in one transaction and one log line.
         False — the pass fails, as before — when it is off, outside a pass, or for a statement it
         does not hold."""
         held = _PASS_HELD.get()
@@ -1061,25 +1064,30 @@ class FalkorProjector:
         if not config.PROJECTION_QUARANTINE or held is None or spec is None:
             return False
         entity_kind, key_of = spec
-        row = next(v for v in params.values() if isinstance(v, list))[0]
-        key = key_of(row)
+        param, rows = next((k, v) for k, v in params.items() if isinstance(v, list))
+        by_key = {key_of(row): row for row in rows}
         from sqlalchemy.dialects.postgresql import insert as pg_insert
-        stmt = pg_insert(ProjectionQuarantineORM).values(
-            graph_id=held.graph_id, statement=kind, entity_key=key, entity_kind=entity_kind,
-            cypher=cypher, params=json.loads(json.dumps(params, default=str)),
-            error=why[:500], attempts=1, first_at=_now(), last_at=_now())
+        stmt = pg_insert(ProjectionQuarantineORM.__table__)
         stmt = stmt.on_conflict_do_update(
             index_elements=["graph_id", "statement", "entity_key"],
             set_={"cypher": stmt.excluded.cypher, "params": stmt.excluded.params,
                   "error": stmt.excluded.error, "last_at": stmt.excluded.last_at,
                   "attempts": ProjectionQuarantineORM.attempts + 1})
+        now = _now()
         async with self._session() as s:
-            await s.execute(stmt)
+            await s.execute(stmt, [
+                {"graph_id": held.graph_id, "statement": kind, "entity_key": key,
+                 "entity_kind": entity_kind, "cypher": cypher,
+                 "params": json.loads(json.dumps({**params, param: [row]}, default=str)),
+                 "error": why[:500], "attempts": 1, "first_at": now, "last_at": now}
+                for key, row in by_key.items()])
             await self._mark_held(s, held.graph_id)
-        held.keys.add((entity_kind, key))
-        held.added += 1
-        logger.error("projection of %s: %s for %s %s quarantined (%s), and the rest of the window "
-                     "goes on", held.graph_id, kind, entity_kind, key, why)
+        held.keys.update((entity_kind, key) for key in by_key)
+        held.added += len(by_key)
+        more = f" and {len(by_key) - 1} more" if len(by_key) > 1 else ""
+        logger.error("projection of %s: %s for %s %s%s quarantined (%s), and the rest of the "
+                     "window goes on", held.graph_id, kind, entity_kind, next(iter(by_key)), more,
+                     why)
         return True
 
     async def _release(self, kind: str, chunk: list) -> None:
@@ -1091,7 +1099,7 @@ class FalkorProjector:
         if held is None or not held.keys or spec is None:
             return
         entity_kind, key_of = spec
-        landed = {key_of(row) for row in chunk} & {k for ek, k in held.keys if ek == entity_kind}
+        landed = {k for k in map(key_of, chunk) if (entity_kind, k) in held.keys}
         if not landed:
             return
         async with self._session() as s:
@@ -1117,8 +1125,9 @@ class FalkorProjector:
     async def _retry_quarantined(self, client, graph_id: str, *, full_seed: bool) -> bool:
         """Before a pass writes: retry the graph's quarantined statements, oldest first, so its
         own writes land after them. One that lands leaves the table; one that still times out
-        stays, counted, and so does an edge merge whose end node is still held, which would match
-        nothing. A full seed that starts over rewrites every entity itself, so its graph's rows are
+        stays, counted, and so does an edge merge held for an end node the key lacked, untried
+        while that node is still held: it would match nothing (:meth:`_hold_waiting_edges`). A
+        full seed that starts over rewrites every entity itself, so its graph's rows are
         cleared instead, and the summaries are owed the job in the same transaction
         (:func:`_owe_summaries`): True when there were any. What is still held is the pass's
         (``_PASS_HELD``)."""
@@ -1329,7 +1338,8 @@ class FalkorProjector:
         record the error and, unless ``attempts`` is None (a cancel), back off. Never writes the
         target or the key, which belong to the publishers and the repin. Returns False when the
         pass was superseded. A published pass takes the summaries a full seed owed the batch job
-        (``rollup_state.moved``, :func:`_owe_summaries`): it hands them over once published.
+        (``rollup_state.moved``, :func:`_owe_summaries`): it hands them over once published. A
+        state that is not a JSON object becomes NULL.
 
         On a customer's key a published pass also says what it found there that history doesn't
         hold: ``surplus`` (nodes, edges) becomes ``external_drift``, and none clears the count it
@@ -1338,11 +1348,12 @@ class FalkorProjector:
         values = {"status": _unless_loading("idle"), "last_error": error,
                   "progress_done": None, "progress_total": None}      # progress is over either way
         if published:
+            state = ProjectionStateORM.rollup_state
+            handed = func.nullif(state.op("-")(literal("moved")), func.jsonb_build_object())
             values.update(projected_commit_seq=to_seq, last_projected_at=_now(),
                           failed_attempts=0, next_retry_at=None,
-                          rollup_state=func.nullif(
-                              ProjectionStateORM.rollup_state.op("-")(literal("moved")),
-                              func.jsonb_build_object()))
+                          rollup_state=case((func.jsonb_typeof(state) == "object", handed),
+                                            else_=null()))
             if surplus is not _UNCOUNTED:
                 drift = ProjectionStateORM.external_drift
                 notified = drift["via"].astext == "notification"
@@ -1448,7 +1459,8 @@ class FalkorProjector:
             # the pass retries them, and publishes where it is.
             quarantine_next_at = getattr(ps, "quarantine_next_at", None)
             # The lineage summaries already count what this full seed writes (``_owe_summaries``).
-            summaries_moved = bool((getattr(ps, "rollup_state", None) or {}).get("moved"))
+            rollup_state = getattr(ps, "rollup_state", None)
+            summaries_moved = isinstance(rollup_state, dict) and bool(rollup_state.get("moved"))
             if from_seq >= to_seq and not (from_seq > 0 and quarantine_next_at
                                            and quarantine_next_at <= _now()):
                 return {"projected": from_seq, "applied": 0, "noop": True}
@@ -3245,8 +3257,7 @@ class FalkorProjector:
         # Duplicates first, so the writes below land on the single node / relationship each
         # key should have.
         for label, urns in _group([(u, l) for (l, u) in duplicated]).items():
-            await self._laddered(client, "node_delete", _delete_nodes_cypher(_sanitize_label(label)),
-                                 urns, param="urns")
+            await self._delete_nodes_by_urn(client, _sanitize_label(label), urns)
         await self._delete_nodes_by_id(client, unkeyed)
         await self._delete_edges_by_key(client, list(parallel), progress)
 
@@ -3465,6 +3476,15 @@ class FalkorProjector:
                              at_floor=self._hub_safe_delete(
                                  client, "MATCH (n) WHERE id(n) = $u", cypher, "ids"))
 
+    async def _delete_nodes_by_urn(self, client, label: str, urns, progress=None) -> None:
+        """Delete every node ``label`` holds under each of ``urns``, every copy of one held twice
+        included; a hub among them has its relationships deleted a page at a time first
+        (:meth:`_hub_safe_delete`)."""
+        cypher = _delete_nodes_cypher(label)
+        await self._laddered(client, "node_delete", cypher, urns, param="urns", progress=progress,
+                             at_floor=self._hub_safe_delete(
+                                 client, f"MATCH (n:{label} {{urn: $u}})", cypher, "urns"))
+
     async def _live_count(self, s, graph_id: str, main_id: str) -> int:
         """How many live entities ``main``'s heads hold — what a full reconcile compares."""
         return (await s.execute(select(func.count()).select_from(EntityHeadORM).where(
@@ -3555,9 +3575,7 @@ class FalkorProjector:
         if twice and owned:
             if kind == "node":
                 for label, urns in _group([(u, lb) for lb, u in twice]).items():
-                    await self._laddered(client, "node_delete",
-                                         _delete_nodes_cypher(_sanitize_label(label)), urns,
-                                         param="urns")
+                    await self._delete_nodes_by_urn(client, _sanitize_label(label), urns)
             else:
                 await self._delete_edges_by_key(client, twice)
             writes += len(twice)
@@ -4124,10 +4142,6 @@ class FalkorProjector:
             if landed and landed[0]:
                 dropped += len(part) - int(landed[0][0] or 0)
 
-        # An edge whose end node is held waits with it: sent now it would match nothing, and be lost
-        # once the node lands. Held after the node, it is retried after it.
-        held = _PASS_HELD.get()
-        waiting = {k for ek, k in held.keys if ek == "node"} if held is not None else set()
         for (rel, sl, tl), ups in by_rel.items():
             cypher = _edge_merge_cypher(rel, sl, tl, keep_id=not owned)
             for batch in _batches(ups, self._batch):
@@ -4136,11 +4150,8 @@ class FalkorProjector:
                     item = _edge_item(eid, su, tu, p)
                     item["gvHash"] = _edge_fingerprint(rel, content_hash(p))
                     item["rel"] = rel                    # for its quarantine key; the cypher has it
-                    if (su in waiting or tu in waiting) and await self._quarantine(
-                            "edge_merge", cypher, {"batch": [item]},
-                            "an end node is held in quarantine"):
-                        continue
                     chunk.append(item)
+                chunk = await self._hold_waiting_edges(client, cypher, chunk, sl, tl)
                 await self._laddered(client, "edge_merge", cypher, chunk,
                                      on_result=count_landed, progress=progress)
 
@@ -4150,12 +4161,35 @@ class FalkorProjector:
         for urn, label in node_deletes:
             ndel_by.setdefault(spelled_label(label), []).append(urn)
         for label, urns in ndel_by.items():
-            cypher = _delete_nodes_cypher(label)
-            await self._laddered(client, "node_delete", cypher, urns, param="urns",
-                                 progress=progress,
-                                 at_floor=self._hub_safe_delete(
-                                     client, f"MATCH (n:{label} {{urn: $u}})", cypher, "urns"))
+            await self._delete_nodes_by_urn(client, label, urns, progress)
         return dropped
+
+    async def _hold_waiting_edges(self, client, cypher: str, chunk: list, sl: str, tl: str) -> list:
+        """What of an edge merge's ``chunk`` (``sl``/``tl`` its ends' labels) to send. An edge one
+        of whose end nodes the pass holds, and the key lacks under that label (a new node whose
+        merge is held, say), waits with it: sent now it would match nothing, and be lost once the
+        node lands. It is held instead, after the node, so it is retried after it; all of the
+        chunk's in one write. An end node the key holds (its own update held) matches, and its
+        edges are sent."""
+        held = _PASS_HELD.get()
+        if held is None or not held.keys:
+            return chunk
+        sides = (("src", sl), ("tgt", tl))
+        ends = {(label, str(item[end])) for item in chunk for end, label in sides
+                if ("node", str(item[end])) in held.keys}
+        if not ends:
+            return chunk
+        for label, urns in _group([(u, label) for label, u in ends]).items():
+            ends -= {(label, u) for u in await self._held_urns(client, label, urns)}
+        send, waiting = [], []
+        for item in chunk:
+            (waiting if any((label, str(item[end])) in ends for end, label in sides)
+             else send).append(item)
+        if waiting and await self._quarantine("edge_merge", cypher, {"batch": waiting},
+                                              "an end node is held in quarantine, and the key "
+                                              "lacks it"):
+            return send
+        return chunk
 
     async def _ensure_urn_indexes(self, client, provider_id: Optional[str],
                                   labels: Iterable[Optional[str]]) -> None:

@@ -339,8 +339,8 @@ class ProjectionStateORM(VersioningBase):
     # queued. ``moved``: the summaries already count writes the next full seed brings (it cleared
     # what was held, or a window that moved them escalated), so the full seed that publishes hands
     # them to the job instead of moving them by its difference, and clears it. NULL when nothing
-    # is owed (20261112_1200_gv_ps_rollup_state).
-    rollup_state = Column(JSONB, nullable=True)
+    # is owed (20261112_1200_gv_ps_rollup_state): None is stored as SQL NULL, not JSON ``null``.
+    rollup_state = Column(JSONB(none_as_null=True), nullable=True)
     last_projected_at = Column(Text, nullable=True)
     last_error = Column(Text, nullable=True)
     # THE GUARDRAIL. A bootstrapped graph is PINNED to the customer's REAL FalkorDB graph — that

@@ -4876,7 +4876,8 @@ class GraphVersioningService:
                 ps = await s.get(ProjectionStateORM, graph_id)
                 if ps is None:
                     return
-                moved = (ps.rollup_state or {}).get("moved")
+                state = ps.rollup_state if isinstance(ps.rollup_state, dict) else {}
+                moved = state.get("moved")
                 kept = {"moved": moved} if moved else {}
                 if outcome not in ("active", "unreachable"):
                     if ps.rollup_state != (kept or None):
@@ -4884,7 +4885,7 @@ class GraphVersioningService:
                     return
                 now = _now()
                 ps.rollup_state = {"pending": outcome, "asked": now,
-                                   "since": (ps.rollup_state or {}).get("since") or now, **kept}
+                                   "since": state.get("since") or now, **kept}
         except Exception:                                # pragma: no cover - infra
             logger.warning("the rollup ask for %s (%s) was not recorded", graph_id, outcome,
                            exc_info=True)
