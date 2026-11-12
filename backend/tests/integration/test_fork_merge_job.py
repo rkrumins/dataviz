@@ -89,7 +89,8 @@ def test_a_large_review_is_merged_by_a_job_that_holds_it_merging(monkeypatch, fo
                                         pinned_seq=pinned, queued=True)
             result = await ie.run_fork_job(job_id)                   # ...died: the next one runs
             got = await ie.get_job(job_id)
-            assert (got["status"], got["attempt"], result) == ("completed", 2, {"commitId": landed}), got
+            assert (got["status"], got["attempt"], result["commitId"], result["outcome"]) == (
+                "completed", 2, landed, "published"), got
             meta = await svc.get_pr(pr)
             assert (meta["status"], meta["resulting_commit_id"]) == ("merged", landed)
             r = await c.get(f"/api/v1/{WS}/versioning/graphs/{gid}/publish-jobs/{job_id}")
@@ -176,7 +177,7 @@ def test_a_merge_job_whose_review_merged_under_it_completes_with_that_merge(monk
                 return seen
             monkeypatch.setattr(api_svc, "get_pr", looks_then_the_zombie_lands)
             result = await ie.run_fork_job(r.json()["jobId"])
-            assert result == {"commitId": zombie[0]}, result
+            assert (result["commitId"], result["outcome"]) == (zombie[0], "published"), result
             assert (await ie.get_job(r.json()["jobId"]))["status"] == "completed"
     _run(case)
 

@@ -1856,13 +1856,16 @@ class GraphVersioningService:
         return await self._finish_squash(s, graph, draft, main_id, squash, deltas, actor, merged_via)
 
     async def _merged_unchanged(self, s, graph, draft, actor, merged_via: str) -> str:
-        """A squash that changes nothing on ``main``: the draft is merged all the same."""
+        """A squash that changes nothing on ``main``: the draft is merged all the same, and no commit
+        is written. ``""`` says so — a publish or merge that landed no commit of its own
+        (:meth:`publish_outcome` answers it ``unchanged``); never the draft's own head, which is
+        not on ``main``."""
         draft.status = "merged"
         draft.base_commit_seq = graph.main_head_commit_seq
         # Nothing reaches main, yet the branch is merged all the same (what it holds in views
         # goes live with it), so no review raised from it may be left live either.
         await self._resolve_live_prs(s, draft.id, None, actor, merged_via)
-        return draft.head_commit_id or ""
+        return ""
 
     async def _squash_commit(self, s, graph, draft, main_id, actor, message) -> "CommitORM":
         """The ``squash_publish`` commit a squash of ``draft`` writes onto ``main``, at the next seq."""
@@ -4663,7 +4666,7 @@ class GraphVersioningService:
                         ontology_rules=ontology_rules,
                     )
                 pr.status = "merged"
-                pr.resulting_commit_id = commit_id
+                pr.resulting_commit_id = commit_id or None   # a draft that changed nothing lands none
                 pr.merged_at = _now()
                 pr.merged_by = actor
                 pr.updated_at = _now()
@@ -4795,11 +4798,18 @@ class GraphVersioningService:
         async with self._session() as s:
             return await self._main_branch_id(s, graph_id)
 
-    async def landed_revision(self, *, graph_id: str, commit_id: Optional[str]) -> Optional[int]:
-        """The revision of ``main`` that holds a publish or merge which answered ``commit_id``: its
-        commit's sequence number on ``main`` — what ``asOfSeq`` reads ``main`` as of. A draft that
-        changed nothing lands no commit of its own (``commit_id`` is then its head, or empty): it is
-        held by ``main`` as it is, so its head. ``None`` for a graph that is gone."""
+    async def publish_outcome(self, *, graph_id: str,
+                              commit_id: Optional[str]) -> Optional[Dict[str, Any]]:
+        """What a publish or merge which answered ``commit_id`` did to ``main``:
+
+        * ``published``: it landed as that commit (``commit_id``), and ``revision_id`` is the
+          commit's sequence number on ``main`` — what ``asOfSeq`` reads ``main`` as of;
+        * ``unchanged``: ``main`` held what it carried already, so it wrote no commit
+          (``commit_id`` None) and ``main`` did not move. ``revision_id`` is ``main``'s head: the
+          revision that holds it. So too for a ``commit_id`` that is not on ``main``, such as the
+          draft's own head an older publish answered.
+
+        ``None`` for a graph that is gone."""
         async with self._session() as s:
             graph = await s.get(GraphORM, graph_id)
             if graph is None:
@@ -4809,8 +4819,9 @@ class GraphVersioningService:
                     CommitORM.graph_id == graph_id, CommitORM.id == commit_id,
                     CommitORM.branch_id == await self._main_branch_id(s, graph_id)))
                 if seq is not None:
-                    return int(seq)
-            return int(graph.main_head_commit_seq or 0)
+                    return {"outcome": "published", "commit_id": commit_id, "revision_id": int(seq)}
+            return {"outcome": "unchanged", "commit_id": None,
+                    "revision_id": int(graph.main_head_commit_seq or 0)}
 
     async def materialize_state(
         self, *, graph_id: str, branch_id: str, as_of_seq: Optional[int] = None,
@@ -7256,7 +7267,7 @@ class GraphVersioningService:
         superseded) after the squash committed and before the job finished, and publishing again
         only fails on a merged draft. The squash commit names the draft (``source_branch_id``); a
         draft whose squash changed nothing is merged with no commit of its own, and then the answer
-        is what the publish returned, the draft's head (``""`` when it has none)."""
+        is what the publish returned: ``""``, no commit."""
         async with self._session() as s:
             draft = await s.get(BranchORM, branch_id)
             if draft is None or draft.graph_id != graph_id or draft.status != "merged":
@@ -7265,7 +7276,7 @@ class GraphVersioningService:
                 CommitORM.graph_id == graph_id, CommitORM.kind == "squash_publish",
                 CommitORM.source_branch_id == branch_id,
             ).order_by(CommitORM.commit_seq.desc()).limit(1))
-            return squash or draft.head_commit_id or ""
+            return squash or ""
 
     @staticmethod
     async def _change_count(s, graph_id: str, branch_id: str) -> int:

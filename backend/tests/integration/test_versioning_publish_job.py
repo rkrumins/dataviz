@@ -124,7 +124,7 @@ async def _run(monkeypatch) -> None:
     squashes = await squashes_of(crashed)
     assert [c["commit_id"] for c in squashes] == [landed], "published once"
     assert (got["status"], got["attempt"], result) == (
-        "completed", 2, {"commitId": landed, "revisionId": squashes[0]["commit_seq"]}), got
+        "completed", 2, {"commitId": landed, "revisionId": squashes[0]["commit_seq"], "outcome": "published"}), got
     assert set_off == [("promote", crashed), ("nudge", gid)]
 
     # A superseded attempt's squash lands between this attempt's look and its publish: the publish
@@ -147,7 +147,7 @@ async def _run(monkeypatch) -> None:
     result = await ie.run_publish(job["job_id"])
     squashes = await squashes_of(raced)
     assert [c["commit_id"] for c in squashes] == zombie
-    assert result == {"commitId": zombie[0], "revisionId": squashes[0]["commit_seq"]}
+    assert result == {"commitId": zombie[0], "revisionId": squashes[0]["commit_seq"], "outcome": "published"}
     assert (await ie.get_job(job["job_id"]))["status"] == "completed"
     assert set_off == [("promote", raced), ("nudge", gid)]
     await db.dispose_engine()

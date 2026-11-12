@@ -270,7 +270,7 @@ class Graph:
         while True:
             branch = self.api("GET", f"{self.base}/branches/{branch_id}")
             if branch["status"] == "merged":
-                return {"state": "completed"}
+                return {"state": "published"}
             if branch["status"] != "publishing":
                 break
             self.sleep(10)
@@ -284,7 +284,7 @@ class Graph:
             raise
         if answer.get("jobId"):                            # a large draft publishes as a job
             return _outcome(self.follow(f"{self.base}/publish-jobs/{answer['jobId']}", "publish"))
-        return {"state": "completed", "commitId": answer.get("commitId"),
+        return {"state": answer.get("outcome") or "published", "commitId": answer.get("commitId") or None,
                 "revisionId": answer.get("revisionId")}
 
 
@@ -308,7 +308,11 @@ class _Part:
 
 
 def _outcome(job: dict[str, Any]) -> dict[str, Any]:
-    return {"state": job["status"], "commitId": job.get("commitId"),
+    """A publish job as the run reports it, in the words the import's own note uses: ``published``
+    with its commit; ``unchanged`` — main held the changes already, so nothing was committed
+    (``commitId`` null) and ``revisionId`` is the revision that holds them; or ``failed``."""
+    state = (job.get("outcome") or "published") if job["status"] == "completed" else job["status"]
+    return {"state": state, "commitId": job.get("commitId") or None,
             "revisionId": job.get("revisionId"), "error": job.get("error")}
 
 
@@ -365,7 +369,7 @@ def succeeded(result: dict[str, Any]) -> bool:
     """Imported — and, when asked, published, or there was nothing to publish."""
     if result["job"]["status"] != "completed":
         return False
-    return "publish" not in result or result["publish"]["state"] in ("completed", "unchanged")
+    return "publish" not in result or result["publish"]["state"] in ("published", "unchanged")
 
 
 def main(argv: list[str] | None = None) -> int:

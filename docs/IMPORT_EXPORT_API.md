@@ -43,7 +43,7 @@ sequenceDiagram
     W->>W: match every row, write the draft
     S->>A: GET imports/{jobId} until completed
     S->>A: POST branches/{branchId}/publish
-    A-->>S: commitId, revisionId
+    A-->>S: outcome, commitId, revisionId
 ```
 
 ## Before you start
@@ -361,10 +361,17 @@ curl -sS -X POST "$BASE/api/v1/$WS/versioning/graphs/$GID/branches/$BRANCH/publi
 ```
 
 `GET …/diff/entries?branchId=$BRANCH` lists the changes a page at a time. A publish answers
-`{commitId, revisionId, status: "completed"}`: the commit the draft landed as, and the revision of
-the published graph that holds it. A draft of more than 20,000 changes publishes as a job: the
-answer is `202` with a `statusUrl` (`GET …/publish-jobs/{jobId}`) to poll until `completed`, with
-`commitId` and `revisionId`, or `failed`, with `error`. To have a person review it first, open a
+`{outcome, commitId, revisionId, status: "completed"}`:
+
+- `outcome: "published"`: the draft landed as `commitId`, and `revisionId` is the revision of the
+  published graph that holds it;
+- `outcome: "unchanged"`: the published graph had the draft's changes already (someone made the
+  same changes first), so **nothing was committed**: `commitId` is `null` — never a blank, and never
+  another commit's id — and `revisionId` is the revision that already holds them.
+
+A draft of more than 20,000 changes publishes as a job: the answer is `202` with a `statusUrl`
+(`GET …/publish-jobs/{jobId}`) to poll until `completed`, with the same `outcome`, `commitId` and
+`revisionId`, or `failed`, with `error`. To have a person review it first, open a
 merge request instead: `POST …/branches/$BRANCH/merge-requests`.
 
 **Others published meanwhile?** A draft that started before someone else published is behind the
@@ -387,8 +394,9 @@ job's `summary.publish`:
 
 | `state` | What happened | What to do |
 |---|---|---|
-| `queued`, with `jobId` | The draft is being published, as a job. `pulls` says how often it pulled the published graph first | Follow `GET …/publish-jobs/{jobId}` to `completed` (`commitId`, `revisionId`) or `failed` (`error`) |
-| `unchanged` | The file changed nothing. Its empty draft was closed | Nothing |
+| `queued`, with `jobId` | The draft is being published, as a job. `pulls` says how often it pulled the published graph first | Follow `GET …/publish-jobs/{jobId}` to `completed` (`outcome`, `commitId`, `revisionId`) or `failed` (`error`), or read the import again: when the job ends, this note says how |
+| `published`, with `jobId`, `commitId`, `revisionId` | The draft landed as `commitId`; `revisionId` holds it | Nothing |
+| `unchanged`, with `commitId: null`, `revisionId` | Nothing to publish: the file changed nothing (its empty draft was closed), or the published graph had its changes already when its publish job ran. Nothing was committed; `revisionId` is the revision that holds the data | Nothing |
 | `skipped`, with `reason` | It wasn't published; the draft waits for review. `reason.type` says why: `rows_refused` (some rows were refused), `conflicts` (someone changed the same fields differently meanwhile), `not_up_to_date` (the published graph kept moving through three pulls), or the refusal a publish would give | Fix and import again, or resolve the draft and publish it |
 
 When the published graph moved while the file was imported, the draft pulls it first with the same
@@ -604,7 +612,7 @@ curl -sS -X POST "$BASE/api/v1/$WS/versioning/graphs/$GID/branches/$BRANCH/publi
 ```
 
 ```json
-{"commitId": "cmt_01M77NRXJ9H76KNP49GR7HGSTV", "revisionId": 4, "status": "completed"}
+{"commitId": "cmt_01M77NRXJ9H76KNP49GR7HGSTV", "revisionId": 4, "status": "completed", "outcome": "published"}
 ```
 
 **7. See what changed.** `orders` has three versions: the load, the colleague's and yours. Each
@@ -638,7 +646,7 @@ wait_for "imports/vjob_01M77NSA4QGA5SWNTG2NK7SX4C" | jq .summary
 ```
 
 ```json
-{"new": 0, "deleted": 0, "invalid": 0, "publish": {"state": "unchanged"}, "updated": 0, "unchanged": 6}
+{"new": 0, "deleted": 0, "invalid": 0, "publish": {"state": "unchanged", "commitId": null, "revisionId": 4}, "updated": 0, "unchanged": 6}
 ```
 
 Its rows are older than the graph now, and each is merged with what changed since: every cell you
@@ -726,7 +734,7 @@ wait_for "publish-jobs/vjob_01M77NSB4A334W2Y2EW34VP6RQ"
 
 ```json
 {"jobId": "vjob_01M77NSB4A334W2Y2EW34VP6RQ", "graphId": "graph_01M77NSAEADB9QD69M3GVP0XZ8", "status": "completed",
- "commitId": "cmt_01M77NSB6JPQSJPH851DWT5708", "revisionId": 2, "error": null}
+ "commitId": "cmt_01M77NSB6JPQSJPH851DWT5708", "revisionId": 2, "error": null, "outcome": "published"}
 ```
 
 Each table keeps its urn, under an id derived from it: `urn:li:dataset:shop.customers` is
@@ -804,11 +812,11 @@ nothing new:
 ```
 
 ```bash
-wait_for "publish-jobs/vjob_01M77NSRMETWG7N9CADQAP9NGV" | jq '{status, commitId, revisionId}'
+wait_for "publish-jobs/vjob_01M77NSRMETWG7N9CADQAP9NGV" | jq '{status, outcome, commitId, revisionId}'
 ```
 
 ```json
-{"status": "completed", "commitId": "cmt_01M77NSRQ57HQTARQ585QGJNQE", "revisionId": 3}
+{"status": "completed", "outcome": "published", "commitId": "cmt_01M77NSRQ57HQTARQ585QGJNQE", "revisionId": 3}
 ```
 
 `customers` is the same node, `urn:uuid:1ed01762-…`, with its new owner. `refunds` is
@@ -823,7 +831,7 @@ wait_for "imports/vjob_01M77NT35EBRPA9FKVEQQGCD19" | jq '.summary | {new, update
 ```
 
 ```json
-{"new": 0, "updated": 0, "unchanged": 6, "deleted": 0, "invalid": 0, "publish": {"state": "unchanged"}}
+{"new": 0, "updated": 0, "unchanged": 6, "deleted": 0, "invalid": 0, "publish": {"state": "unchanged", "commitId": null, "revisionId": 3}}
 ```
 
 ## Walkthrough 3: by a property — an ERP's own ids

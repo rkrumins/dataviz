@@ -1137,7 +1137,15 @@ tests/integration/test_s3_store_minio.py tests/test_object_store.py`.
   error and `summary.publish.reason`). A draft past `SQUASH_PAGED_ABOVE` (200,000) changes pulls
   reading only its entities main changed too, and what they meet at an edge (`_pull_paged`). A worker that stops
   between an import's finish and its publish job leaves `summary.publish` missing: publish the
-  draft then. A custom draft `name` exists on
+  draft then. When its publish job ends, the job writes the import's note in the same transaction
+  as its own fenced finish (`Lease.finish(then=…)`, `_note_publish_ended`): `published` with
+  `commitId` and `revisionId`, `unchanged` (main held the draft's changes already: nothing
+  committed, `commitId` null, `revisionId` main's head), or `skipped` with the refusal as `reason`,
+  keeping `jobId`, `pulls` and `refusedRows`. An import that changed nothing notes `unchanged`
+  with `commitId` null and main's head as `revisionId`. Every publish and merge answer, inside
+  the request or as a job, says `outcome` the same way (`publish_outcome`): a squash that changes
+  nothing writes no commit and answers `""` inside the service (`_merged_unchanged`), never the
+  draft's own head. A custom draft `name` exists on
   `create_import_job` but no route exposes it (the draft is named "Import").
 - **`INLINE_IMPORT_MAX` (5,000) two-tier threshold** exists in config as the intended
   "stage small imports client-side, run large ones async" split, but the endpoint currently always

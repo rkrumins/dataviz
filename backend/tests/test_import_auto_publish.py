@@ -34,6 +34,7 @@ from backend.app.services.versioning.errors import BranchNotOpen
 from backend.app.services.versioning.import_export import service as service_mod
 from backend.app.services.versioning.import_export import uploads
 from backend.app.services.versioning.import_export.service import ImportExportService
+from backend.app.services.versioning.job_lease import Superseded
 from backend.app.services.versioning.models import BranchORM
 from backend.app.services.versioning.service import NotUpToDate
 
@@ -71,6 +72,10 @@ def _world(monkeypatch, summary, *, auto_publish=True, settings=None):
     class _Versioning:
         async def abandon_draft(self, **kwargs):
             did.abandoned.append(kwargs)
+
+        async def publish_outcome(self, *, graph_id, commit_id):       # main's head is revision 9
+            assert (graph_id, commit_id) == ("g1", None)
+            return {"outcome": "unchanged", "commit_id": None, "revision_id": 9}
 
         async def rebase_draft(self, **kwargs):
             did.pulled.append(kwargs)
@@ -132,7 +137,8 @@ async def test_an_import_that_changed_nothing_closes_its_empty_draft(monkeypatch
     await svc.run_import("job1")
     assert did.published == []
     assert did.abandoned == [{"graph_id": "g1", "branch_id": "br1", "actor": "alice"}]
-    assert row.summary["publish"] == {"state": "unchanged"}
+    assert row.summary["publish"] == {"state": "unchanged", "commitId": None, "revisionId": 9}, (
+        "nothing committed, so no commit named; the revision of main that holds the file's content")
 
 
 @pytest.mark.parametrize("refusal, kind, pulls", [
@@ -185,20 +191,22 @@ async def test_a_draft_that_pulls_with_conflicts_waits_for_review(monkeypatch):
         "skipped", "conflicts", 2, 1)
 
 
-def _publish_world(monkeypatch, answers, *, pull=None, pulls=0, import_job="job1"):
+def _publish_world(monkeypatch, answers, *, pull=None, pulls=0, import_job="job1", note=None,
+                   finishes=True):
     """Publish job pjob_1 of import ``import_job``'s draft br1 (owned by alice), its draft already
     pulled ``pulls`` times; the publish answers ``answers`` in turn. Returns the service, the
     import's row, and what the job did."""
     job = SimpleNamespace(field_scope={"actor": "alice", "message": "m", "autoPublish": True,
                                        **({"importJobId": import_job, "pulls": pulls} if import_job else {})},
                           graph_id="g1", branch_id="br1", workspace_id="ws", data_source_id="ds")
-    imported = SimpleNamespace(summary={"publish": {"state": "queued", "jobId": "pjob_1"}}, updated_at=None)
+    imported = SimpleNamespace(summary={"publish": note or {"state": "queued", "jobId": "pjob_1"}},
+                               updated_at=None)
     did = SimpleNamespace(pulled=[], released=0, published=0, finished=None, counted=[], merged=None)
 
     @contextlib.asynccontextmanager
     async def session():
         class _Session:
-            async def get(self, _orm, key):
+            async def get(self, _orm, key, **_kwargs):
                 return job if key == "pjob_1" else imported
         yield _Session()
 
@@ -223,10 +231,14 @@ def _publish_world(monkeypatch, answers, *, pull=None, pulls=0, import_job="job1
 
         async def checkpoint(self, _s, **values):
             did.counted.append(values["field_scope"]["pulls"])
+            job.field_scope = values["field_scope"]
 
-        async def finish(self, status="completed", **values):
+        async def finish(self, status="completed", *, then=None, **values):
             did.finished = {"status": status, **values}
-            return True
+            if finishes and then is not None:
+                async with session() as s:
+                    await then(s)
+            return finishes
 
     async def hook(job):
         did.published += 1
@@ -241,12 +253,14 @@ _BEHIND = {"error": {"status": 409, "detail": {"type": "not_up_to_date", "behind
 
 
 async def test_its_publish_job_finding_main_moved_pulls_the_draft_it_holds_and_publishes_it(monkeypatch):
-    svc, imported, did, lease = _publish_world(monkeypatch, [_BEHIND, {"commitId": "c9"}])
-    assert await svc.run_publish("pjob_1", lease) == {"commitId": "c9"}
+    landed = {"commitId": "c9", "revisionId": 4, "outcome": "published"}
+    svc, imported, did, lease = _publish_world(monkeypatch, [_BEHIND, landed])
+    assert await svc.run_publish("pjob_1", lease) == landed
     assert [(p["branch_id"], p["actor"], p["publishing_ok"]) for p in did.pulled] == [("br1", "alice", True)]
     assert did.finished["status"] == "completed" and did.released == 0
     assert did.counted == [1], "each pull counted on the job, for an attempt that takes it over"
-    assert imported.summary["publish"] == {"state": "queued", "jobId": "pjob_1", "pulls": 1}
+    assert imported.summary["publish"] == {"state": "published", "jobId": "pjob_1", "commitId": "c9",
+                                           "revisionId": 4, "pulls": 1}, "the import says how it ended"
 
 
 async def test_its_publish_job_ends_refused_with_the_conflicts_a_pull_found(monkeypatch):
@@ -294,6 +308,52 @@ async def test_its_publish_job_ends_refused_saying_what_refused_its_pull(monkeyp
     assert did.finished["status"] == "failed" and did.released == 1
     assert (imported.summary["publish"]["state"], imported.summary["publish"]["reason"]["type"]) == (
         "skipped", "graph_not_writable")
+
+
+async def test_its_publish_job_that_finds_main_holding_its_changes_says_unchanged(monkeypatch):
+    """Another import (or a person) made the same changes first: after its pull the draft changes
+    nothing, so nothing is committed. The import says unchanged, names no commit, and gives the
+    revision that holds its changes — keeping the rows it went on without."""
+    unchanged = {"commitId": None, "revisionId": 5, "outcome": "unchanged"}
+    svc, imported, did, lease = _publish_world(
+        monkeypatch, [_BEHIND, unchanged], note={"state": "queued", "jobId": "pjob_1", "refusedRows": 2})
+    assert await svc.run_publish("pjob_1", lease) == unchanged
+    assert imported.summary["publish"] == {"state": "unchanged", "jobId": "pjob_1", "commitId": None,
+                                           "revisionId": 5, "pulls": 1, "refusedRows": 2}
+
+
+async def test_its_publish_job_merged_with_no_commit_of_its_own_ends_unchanged(monkeypatch):
+    """The draft merged under its pull (an earlier attempt published it) and that publish committed
+    nothing (``merged_commit_id`` is "", not None): the job ends unchanged, not refused."""
+    def refused_for_it(did):
+        did.merged = ""
+        raise BranchNotOpen("br1", "merged")
+
+    svc, imported, did, lease = _publish_world(monkeypatch, [_BEHIND], pull=refused_for_it)
+    assert await svc.run_publish("pjob_1", lease) == {"commitId": ""}
+    assert did.finished["status"] == "completed" and did.released == 0
+    assert (imported.summary["publish"]["state"], imported.summary["publish"]["commitId"]) == ("unchanged", None)
+
+
+async def test_its_publish_job_refused_for_any_reason_says_skipped_and_why(monkeypatch):
+    """Not only a refused pull: a publish refused outright (review required, the owner no longer
+    allowed to publish, …) ends the import's note too, saying why — never left at queued."""
+    refused = {"error": {"status": 409, "detail": {"type": "review_required", "message": "review it"}}}
+    svc, imported, did, lease = _publish_world(monkeypatch, [refused])
+    await svc.run_publish("pjob_1", lease)
+    assert did.finished["status"] == "failed" and did.released == 1
+    assert imported.summary["publish"] == {"state": "skipped", "jobId": "pjob_1",
+                                           "reason": {"type": "review_required", "message": "review it"}}
+
+
+async def test_a_superseded_publish_job_leaves_the_imports_note_alone(monkeypatch):
+    """The note is written with the job's fenced finish: an attempt no longer the job's writes
+    neither, and the attempt that holds it says how it ended."""
+    svc, imported, did, lease = _publish_world(
+        monkeypatch, [{"commitId": "c9", "revisionId": 4, "outcome": "published"}], finishes=False)
+    with pytest.raises(Superseded):
+        await svc.run_publish("pjob_1", lease)
+    assert imported.summary["publish"] == {"state": "queued", "jobId": "pjob_1"}
 
 
 async def test_a_persons_publish_job_main_moved_under_is_refused_as_before(monkeypatch):

@@ -33,6 +33,9 @@ export function PublishReceiptBanner({
 
   const { added, modified, removed } = receipt.counts
   const total = added + modified + removed
+  // Main held these changes already (someone, or another import, made them first): nothing new
+  // was published, so there is no new version to look at.
+  const unchanged = receipt.outcome === 'unchanged'
   const parts: Array<{ n: number; label: string; cls: string }> = [
     { n: added, label: 'added', cls: 'text-emerald-600 dark:text-emerald-400' },
     { n: modified, label: 'updated', cls: 'text-amber-600 dark:text-amber-400' },
@@ -53,10 +56,14 @@ export function PublishReceiptBanner({
 
       <div className="min-w-0 flex-1">
         <p className="text-sm font-semibold text-ink tracking-tight">
-          {receipt.via === 'review' ? 'Merged — your changes are now live' : 'Published — your changes are now live'}
+          {unchanged
+            ? 'Already live — the published graph had these changes'
+            : receipt.via === 'review' ? 'Merged — your changes are now live' : 'Published — your changes are now live'}
         </p>
         <p className="text-[11px] text-ink-muted mt-0.5">
-          {total > 0 ? (
+          {unchanged ? (
+            'Nothing new was published, so there is no new version.'
+          ) : total > 0 ? (
             <>
               {parts.map((p, i) => (
                 <span key={p.label}>
@@ -74,14 +81,14 @@ export function PublishReceiptBanner({
         </p>
       </div>
 
-      <button
+      {!unchanged && <button
         onClick={onViewCommit}
         className="shrink-0 inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold
                    text-emerald-700 dark:text-emerald-300 bg-emerald-500/10 hover:bg-emerald-500/20 transition-colors"
       >
         <History className="w-3.5 h-3.5" />
         View in history
-      </button>
+      </button>}
       <HoverTip className="inline-flex shrink-0" label="Hide this notice">
         <button
           onClick={clear}

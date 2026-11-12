@@ -220,7 +220,7 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
       // The receipt is the confirmation, and it survives the navigation below — a notification would not.
       // It is the graph's the merge landed in: a fork's parent, for a fork's review.
       setReceipt({
-        commitId: res.commitId, graphId: pr.targetGraphId,
+        commitId: res.commitId, outcome: res.outcome, graphId: pr.targetGraphId,
         counts: changeSet?.counts ?? { added: 0, modified: 0, removed: 0 }, via: 'review',
       })
       // A fork's review has no view to go back to, and its fork lives on: the drawer stays, and

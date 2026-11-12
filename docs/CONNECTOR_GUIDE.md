@@ -46,7 +46,7 @@ sequenceDiagram
     loop until finished
         C->>A: GET publish-jobs/{jobId}
     end
-    A-->>C: completed, commitId, revisionId: the file's deltas are on main
+    A-->>C: completed, outcome, commitId, revisionId: the file's deltas are on main
 ```
 
 ## 1. Before you start
@@ -350,8 +350,9 @@ When the import completes, `summary.publish` on its job says what happened:
 
 | `summary.publish.state` | What happened | What to do |
 |---|---|---|
-| `queued`, with `jobId` | The draft is being published, as a large publish is: a job. `pulls` says how often its draft pulled main (below) | Follow `GET …/publish-jobs/{jobId}` to `completed` (with `commitId` and `revisionId`) or `failed` (with `error`, whose `detail.type` is one of the reasons below) |
-| `unchanged` | The file changed nothing. Its empty draft was closed | Nothing |
+| `queued`, with `jobId` | The draft is being published, as a large publish is: a job. `pulls` says how often its draft pulled main (below) | Follow `GET …/publish-jobs/{jobId}` to `completed` (with `outcome`, `commitId` and `revisionId`) or `failed` (with `error`, whose `detail.type` is one of the reasons below). Or read the import again: when the job ends, its note says how |
+| `published`, with `jobId`, `commitId`, `revisionId` | The publish job landed the draft as `commitId`; `revisionId` holds it | Nothing |
+| `unchanged`, with `commitId: null`, `revisionId` | Nothing to publish: the file changed nothing (its empty draft was closed), or main had its changes already when the publish ran (another run made them first). Nothing was committed, so no commit is named; `revisionId` is the revision of main that holds the data | Nothing: the run succeeded |
 | `skipped`, with `reason` | It wasn't published, and the draft is kept for review | Read `reason.type` (below) |
 | missing, a minute after `completed` | The worker stopped between the two steps | Publish the draft yourself: `POST …/branches/{branchId}/publish` |
 

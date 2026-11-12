@@ -34,7 +34,7 @@ sequenceDiagram
     S->>A: GET imports/{jobId} until completed
     W->>W: publish the draft (autoPublish)
     S->>A: GET publish-jobs/{jobId} until completed
-    A-->>S: commitId, revisionId
+    A-->>S: outcome, commitId, revisionId
 ```
 
 1. **You send the file** in a request: its bytes are the body. The API stores it as it arrives and
@@ -56,7 +56,7 @@ sequenceDiagram
 | **Published graph** (*main*) | What everyone sees, traces and exports. Only a publish changes it |
 | **Draft** (*branch*) | Changes kept apart from the published graph until they are published (`br_…`). An import always writes one |
 | **Import job** | The work of reading your file into a draft (`vjob_…`). You poll it until it ends |
-| **Publish job** | The work of landing a draft on the published graph. It ends with a `commitId` and a `revisionId` |
+| **Publish job** | The work of landing a draft on the published graph. It ends `published`, with the `commitId` it landed as and its `revisionId`, or `unchanged`: the published graph had the changes already, so nothing was committed (`commitId` is null) |
 | **Upsert** | `reconcileMode=upsert`, the default: write what the file names, and leave everything else as it is |
 | **Full replace** | `reconcileMode=replace`: the same, and also delete what the file leaves out |
 | **Identifier** | How each row finds the item it describes: `entity_id`, `urn`, or `prop.<name>`, a property of your own ([choosing one](/docs/import-export-api#the-model-in-one-minute)) |
@@ -136,24 +136,32 @@ publish to the revision that holds them:
 
 ```bash
 curl -sS "$BASE/api/v1/$WS/versioning/graphs/$GID/publish-jobs/vjob_01M77ZCFATXE3EW9H2KW477TRZ" \
-  -H "Authorization: Bearer $TOKEN" | jq '{status, commitId, revisionId}'
+  -H "Authorization: Bearer $TOKEN" | jq '{status, outcome, commitId, revisionId}'
 ```
 
 ```json
-{"status": "completed", "commitId": "cmt_01M77ZCFCS88FC2VA5X705A9SP", "revisionId": 2}
+{"status": "completed", "outcome": "published", "commitId": "cmt_01M78ZWGY1P478K6R37K2N6SFZ", "revisionId": 2}
 ```
 
 That's it: revision 2 of the published graph holds your three tables and their two edges, each
-with an id of its own that never changes.
+with an id of its own that never changes. The import says so too, once its publish has ended, so
+reading the import alone is enough:
+
+```json
+"publish": {"jobId": "vjob_01M78ZWGF1EH56N91DD2FXQR6F", "state": "published",
+            "commitId": "cmt_01M78ZWGY1P478K6R37K2N6SFZ", "revisionId": 2}
+```
 
 **Send the same file again** and nothing changes. Every row finds its item unchanged, so the
-import writes nothing, and its empty draft is closed instead of published:
+import writes nothing, and its empty draft is closed instead of published. Nothing is committed,
+so no commit is named — `commitId` is `null`, not a blank — and `revisionId` is the revision of
+the published graph that already holds the file's content:
 
 ```json
 {
   "status": "completed",
   "summary": {"new": 0, "updated": 0, "unchanged": 5, "deleted": 0, "invalid": 0,
-              "publish": {"state": "unchanged"}}
+              "publish": {"state": "unchanged", "commitId": null, "revisionId": 2}}
 }
 ```
 
@@ -236,8 +244,9 @@ leave `autoPublish` out, and publish it yourself ([step 6](/docs/import-export-a
 
 | You get | It means | Do |
 |---|---|---|
-| The import `completed`, `summary.publish.state: "queued"` | The draft is being published | Follow `GET …/publish-jobs/{jobId}` to `completed`: its `revisionId` is the published revision that holds your change |
-| `summary.publish.state: "unchanged"` | The file changed nothing | Nothing |
+| The import `completed`, `summary.publish.state: "queued"` | The draft is being published | Follow `GET …/publish-jobs/{jobId}` to `completed`, or read the import again: once the job ends, `summary.publish` says how |
+| `summary.publish.state: "published"` (or the publish job's `outcome: "published"`) | Your change is live: the draft landed as `commitId` | `revisionId` is the published revision that holds it |
+| `summary.publish.state: "unchanged"` (or `outcome: "unchanged"`) | Nothing to publish: the file changed nothing, or the published graph had its changes already (another run made them first). Nothing was committed, so `commitId` is `null` | Nothing: `revisionId` is the revision that holds your data |
 | `summary.publish.state: "skipped"`, with `reason.type` | The draft waits for review: `rows_refused`, `conflicts` or `not_up_to_date` | For refused rows, read `summary.refused` ([When rows are refused](#when-rows-are-refused)); otherwise resolve the draft and publish it |
 | The import `failed`, `summary.failure.code: "mass_delete_blocked"` | A replace that would delete most of what's there ([the replace guard](/docs/import-export-api#the-replace-guard)) | Check `identifier` first. If you meant it, import the file again with `allowMassDelete=true&branchId=<its branchId>`, then publish that draft (`POST …/branches/{branchId}/publish`) |
 | `failed`, `rows_refused` | A replace with rows it couldn't apply deletes nothing | Fix the rows `summary.refused` names and send it again, or send it with `maxRefusedRows` ([When rows are refused](#when-rows-are-refused)) |
@@ -493,7 +502,7 @@ def published(job):
         sys.exit(f"import {job['status']} ({failure.get('code')}): {job.get('errorMessage')}")
     counts = {k: summary.get(k) for k in ("new", "updated", "unchanged", "deleted", "invalid")}
     note = summary.get("publish") or {}
-    if note.get("state") != "queued":           # "unchanged", or "skipped" with its reason
+    if note.get("state") != "queued":           # ended: "published" or "unchanged", or "skipped" with its reason
         return {**counts, "publish": note}
     pub = follow(f"publish-jobs/{note['jobId']}")
     if pub["status"] != "completed":
@@ -596,7 +605,7 @@ async function published(job) {
   const { new: created, updated, unchanged, deleted, invalid } = summary
   const counts = { new: created, updated, unchanged, deleted, invalid }
   const note = summary.publish ?? {}
-  if (note.state !== 'queued') return { ...counts, publish: note } // "unchanged", or "skipped" with its reason
+  if (note.state !== 'queued') return { ...counts, publish: note } // ended: "published" or "unchanged", or "skipped" with its reason
   const pub = await follow(`publish-jobs/${note.jobId}`)
   if (pub.status !== 'completed') throw new Error(`publish ${pub.status}: ${pub.error}`)
   return { ...counts, revisionId: pub.revisionId }
@@ -735,7 +744,7 @@ func published(job map[string]any) map[string]any {
 		out[k] = summary[k]
 	}
 	note, _ := summary["publish"].(map[string]any)
-	if note["state"] != "queued" { // "unchanged", or "skipped" with its reason
+	if note["state"] != "queued" { // ended: "published" or "unchanged", or "skipped" with its reason
 		out["publish"] = note
 		return out
 	}
@@ -871,7 +880,7 @@ public class SendImport {
         Map<String, String> out = new LinkedHashMap<>();
         for (String k : new String[] {"new", "updated", "unchanged", "deleted", "invalid"}) out.put(k, field(job, k));
         String publish = job.substring(job.indexOf("\"publish\""));
-        if (!"queued".equals(field(publish, "state"))) {   // "unchanged", or "skipped" with its reason
+        if (!"queued".equals(field(publish, "state"))) {   // ended: "published" or "unchanged", or "skipped" with its reason
             out.put("publish", field(publish, "state"));
             return out;
         }

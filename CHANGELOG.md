@@ -248,6 +248,26 @@ integration's many small changes as a few commits.
 
 ### Changed
 
+- **A publish, merge or import that changes nothing says `unchanged`, instead of a blank commit.**
+  Nothing is committed when nothing changed, and that was so before; but the answer named a
+  commit anyway: `""`, or the draft's own head, which isn't on main. Following an import never
+  gave its commit at all.
+  - Every publish and merge answer, inside the request or as a job (`POST …/branches/{bid}/publish`,
+    `…/merge-requests/{id}/merge`, `…/pulls/{id}/merge`, `GET …/publish-jobs/{jobId}`), now carries
+    `outcome`: `published`, with the `commitId` it landed as; or `unchanged`, with `commitId: null`.
+    `revisionId` is the revision of main that holds the content either way: the new commit's, or
+    main's head, which doesn't move.
+  - A job recorded before this is read the same way: a commit that isn't on main is `unchanged`.
+  - An import's `summary.publish` ends with its publish job, written in the same transaction as the
+    job's finish: `published` with `commitId` and `revisionId`, `unchanged`, or `skipped` with the
+    reason, keeping `jobId`, `pulls` and `refusedRows`. A refusal of any kind is noted, not only a
+    refused pull. An import that changed nothing notes `unchanged` with `commitId: null` and
+    `revisionId`. Reading the import alone now tells you how its publish went.
+  - A review merged with no change records no resulting commit (it recorded its draft's head).
+  - The app took a queued publish that changed nothing for a failure ("Publishing failed"); it is a
+    success now, and the receipt reads "Already live — the published graph had these changes", with
+    no version to open. The reference connector reports `published` or `unchanged`.
+
 - **A graph being updated keeps showing the version it last finished, complete, and says so.**
   After a publish or an import, or while its fast read layer was rebuilt, a versioned graph's reads
   went to Postgres, which composes the graph without its lineage summaries: the canvas drew the
@@ -303,6 +323,12 @@ integration's many small changes as a few commits.
   seed, a dropped write, or after a verify that healed or failed.
 
 ### Fixed
+
+- **An import's publish job that found its draft merged with no commit of its own completes.** When
+  the draft merged under the job's pull (an earlier attempt published it) and that publish
+  committed nothing, the job read the empty answer as "not merged" and failed with a refusal.
+- **An import's publish note keeps `refusedRows` through its pulls.** Each pull's progress note
+  replaced the note, dropping how many rows the import went on without.
 
 - **An export's plan answers within 5 s, whatever the graph.** On a large graph, the Export
   dialog's first request (`GET …/exports/plan`) could outlast the gateway in front of the app and
@@ -440,6 +466,13 @@ integration's many small changes as a few commits.
   live in a dedicated key already queued its own follow-up, and is unchanged.
 
 ### Upgrading
+
+- **`commitId` is `null`, not `""`, when a publish or merge changes nothing; read `outcome`.** A
+  client that tested `commitId` for truth keeps working. One that compared it with `""`, or took a
+  blank (or a draft's commit) for a failure, checks `outcome == "unchanged"` instead; the revision
+  that holds its data is `revisionId`. An import's `summary.publish.state` can now also read
+  `published` once its publish job ends (it stayed `queued`), so a client that followed the job
+  when it read `queued` keeps working, and one that reads the import later finds the end there.
 
 - **Reads of a graph being updated show the version before the update until it is written.** A
   client that reads its own change right after publishing it should poll

@@ -2218,8 +2218,8 @@ export async function publishBranch(
   graphId: string,
   branchId: string,
   data: { message: string; resolutions?: ResolutionMap },
-): Promise<CommitResponse> {
-  return followPublish(wsId, await vfetch<CommitResponse | QueuedPublish>(
+): Promise<PublishResult> {
+  return followPublish(wsId, await vfetch<PublishResult | QueuedPublish>(
     `${base(wsId)}/graphs/${graphId}/branches/${branchId}/publish`, jsonBody(data)))
 }
 
@@ -2234,24 +2234,47 @@ interface PublishJob {
   jobId: string
   status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'
   commitId: string | null
+  revisionId?: number | null
+  /** Once completed, what it did to main (see `PublishResult`). */
+  outcome?: PublishOutcome | null
   /** The refusal a publish inside the request would have given. */
   error: { status: number; detail: RefusalDetail } | null
+}
+
+/** What a publish or review merge did to main: `published` as a new commit, or `unchanged` —
+ *  main held its changes already, so nothing was committed. */
+export type PublishOutcome = 'published' | 'unchanged'
+
+/** A publish's (or review merge's) answer. `commitId` is the commit it landed as, null when
+ *  `unchanged`: nothing was committed. `revisionId` is the revision of main that holds it. */
+export interface PublishResult {
+  commitId: string | null
+  revisionId?: number | null
+  outcome: PublishOutcome
+}
+
+/** An answer as `PublishResult` says it; one from a server that didn't say its outcome, read from
+ *  its commit (none, or a blank one, committed nothing). */
+function asResult(a: { commitId?: string | null; revisionId?: number | null; outcome?: PublishOutcome | null }): PublishResult {
+  const commitId = a.commitId || null
+  return { commitId, revisionId: a.revisionId ?? null, outcome: a.outcome ?? (commitId ? 'published' : 'unchanged') }
 }
 
 /** How long a queued publish may go unanswered before the publish gives up (tests shorten it). */
 export const PUBLISH_JOB_POLL = { patienceMs: 120_000 }
 
-/** The commit a publish (or review merge) made — at once, or once the job it queued is done. A
- *  refused job raises the error the request would have raised. Followed like every job
- *  (`pollJob`): a failed poll (a network blip, a web pod restarting) doesn't stop the job, so it is
- *  asked again until it goes unanswered too long. */
-async function followPublish(wsId: string, answer: CommitResponse | QueuedPublish): Promise<CommitResponse> {
-  if (!('jobId' in answer)) return answer
+/** What a publish (or review merge) did — at once, or once the job it queued is done: a commit,
+ *  or `unchanged` with none (main held its changes already), which is a success too. A refused
+ *  job raises the error the request would have raised. Followed like every job (`pollJob`): a
+ *  failed poll (a network blip, a web pod restarting) doesn't stop the job, so it is asked again
+ *  until it goes unanswered too long. */
+async function followPublish(wsId: string, answer: PublishResult | QueuedPublish): Promise<PublishResult> {
+  if (!('jobId' in answer)) return asResult(answer)
   const job = await pollJob(
     () => vfetch<PublishJob>(`${base(wsId)}/graphs/${answer.graphId}/publish-jobs/${answer.jobId}`),
     { patienceMs: PUBLISH_JOB_POLL.patienceMs },
   )
-  if (job.status === 'completed' && job.commitId) return { commitId: job.commitId }
+  if (job.status === 'completed') return asResult(job)
   throw versioningError(job.error?.status ?? 500, job.error?.detail, 'Publishing failed')
 }
 
@@ -2362,8 +2385,8 @@ export async function mergeMergeRequest(
   wsId: string,
   prId: string,
   data: { message: string; resolutions?: ResolutionMap },
-): Promise<CommitResponse> {
-  return followPublish(wsId, await vfetch<CommitResponse | QueuedPublish>(
+): Promise<PublishResult> {
+  return followPublish(wsId, await vfetch<PublishResult | QueuedPublish>(
     `${base(wsId)}/merge-requests/${prId}/merge`, jsonBody(data)))
 }
 

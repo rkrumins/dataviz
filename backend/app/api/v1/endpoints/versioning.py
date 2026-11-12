@@ -948,19 +948,26 @@ class CommitResponse(_ApiModel):
 
 
 class PublishResponse(CommitResponse):
-    """A publish, or a review's merge, done inside the request: the commit it landed as, and the
-    revision of ``main`` that holds it (``revisionId``, what ``asOfSeq`` reads ``main`` as of). One
-    too large for a request answers 202 instead — ``{jobId, graphId, status, statusUrl}`` — and its
-    job (``statusUrl``, :class:`PublishJobResponse`) says the same once it is ``completed``."""
+    """A publish, or a review's merge, done inside the request, and what it did to ``main``
+    (``outcome``):
+
+    * ``published``: it landed as ``commitId``, and ``revisionId`` is the revision of ``main`` that
+      holds it (what ``asOfSeq`` reads ``main`` as of);
+    * ``unchanged``: ``main`` held what it carried already, so nothing was committed —
+      ``commitId`` is null and ``main`` did not move — and ``revisionId`` is the revision of
+      ``main`` that holds it, its head.
+
+    One too large for a request answers 202 instead — ``{jobId, graphId, status, statusUrl}`` —
+    and its job (``statusUrl``, :class:`PublishJobResponse`) says the same once ``completed``."""
+    commit_id: Optional[str] = Field(default=None, alias="commitId")
     revision_id: Optional[int] = Field(default=None, alias="revisionId")
     status: str = "completed"
+    outcome: str = "published"
 
 
-class PublishJobResponse(_ApiModel):
-    """A large draft's publish (or review merge), or a fork review's merge, run as a job: poll until
-    it's done. ``error`` is ``{status, detail}``, the answer the route gives when it publishes
-    inside the request. Once ``completed``: the commit it landed as, and the revision of ``main``
-    that holds it (``revisionId``)."""
+class _JobAnswer(_ApiModel):
+    """A job run instead of a request: poll until it's done. ``error`` is ``{status, detail}``, the
+    answer the route gives when it runs inside the request."""
     job_id: str = Field(alias="jobId")
     graph_id: str = Field(alias="graphId")
     status: str
@@ -969,7 +976,16 @@ class PublishJobResponse(_ApiModel):
     error: Optional[dict] = None
 
 
-class UpdateJobResponse(PublishJobResponse):
+class PublishJobResponse(_JobAnswer):
+    """A large draft's publish (or review merge), or a fork review's merge, run as a job. Once
+    ``completed``, what it did to ``main`` (``outcome``), as :class:`PublishResponse` says it:
+    ``published`` as ``commitId``, held by revision ``revisionId``; or ``unchanged`` — nothing was
+    committed (``commitId`` null), and ``revisionId`` is the revision that holds it. ``outcome`` is
+    null until then."""
+    outcome: Optional[str] = None
+
+
+class UpdateJobResponse(_JobAnswer):
     """A fork's Update from parent run as a job: what ``POST …/update-from-parent`` says once it
     has run (``commitId``, ``parentSeq``, ``wrote``, ``upToDate``), or its refusal (``error``)."""
     parent_seq: Optional[int] = Field(default=None, alias="parentSeq")
@@ -2382,8 +2398,24 @@ async def publish(
     await _tell_draft_people(session, svc, "draft.published", ws_id=ws_id, meta=_meta, graph_id=graph_id,
                              branch_id=branch_id, actor=user.id)
     background.add_task(project_now, graph_id)   # refresh FalkorDB in-process after commit (async); read-fallback + badge cover the window
-    return {"commit_id": commit_id,
-            "revision_id": await svc.landed_revision(graph_id=graph_id, commit_id=commit_id)}
+    return await _publish_answer(svc, graph_id, commit_id)
+
+
+async def _publish_answer(svc: GraphVersioningService, graph_id: str,
+                          commit_id: Optional[str]) -> Dict[str, Any]:
+    """What a publish or merge that answered ``commit_id`` did to ``main``, as every route and job
+    says it (:class:`PublishResponse`): ``outcome`` ``published``, as ``commit_id``; or
+    ``unchanged``, ``commit_id`` None — nothing was committed — and, either way, the revision of
+    ``main`` that holds it. A graph gone meanwhile has no revision to say."""
+    return await svc.publish_outcome(graph_id=graph_id, commit_id=commit_id) or {
+        "outcome": "published" if commit_id else "unchanged", "commit_id": commit_id or None,
+        "revision_id": None}
+
+
+def _job_summary(answer: Dict[str, Any]) -> Dict[str, Any]:
+    """:func:`_publish_answer` as a publish or merge job records it on its summary."""
+    return {"commitId": answer["commit_id"], "revisionId": answer["revision_id"],
+            "outcome": answer["outcome"]}
 
 
 def _publish_job_url(workspace_id: str, graph_id: str, job_id: str) -> str:
@@ -2485,9 +2517,8 @@ async def _publish_from_job(job: dict) -> dict:
         await _tell_draft_people(session, svc, "draft.published", ws_id=job["workspaceId"],
                                  meta=await svc.get_graph(graph_id) or {}, graph_id=graph_id,
                                  branch_id=branch_id, actor=actor)
-    # The revision as it is when the job ends: a draft that changed nothing is held by main's head.
-    return {"commitId": commit_id,
-            "revisionId": await svc.landed_revision(graph_id=graph_id, commit_id=commit_id)}
+    # As it is when the job ends: a draft that changed nothing committed nothing, and main's head holds it.
+    return _job_summary(await _publish_answer(svc, graph_id, commit_id))
 
 
 @router.get("/graphs/{graph_id}/publish-jobs/{job_id}", response_model=PublishJobResponse)
@@ -2499,18 +2530,22 @@ async def get_publish_job(
     ie=Depends(get_import_export_service),
 ):
     """Where a large draft's publish (or review merge) is, or a fork review's merge (its parent's
-    job): pending, running, completed with its commit and the revision of ``main`` that holds it,
-    or failed with the answer a publish inside the request would have given."""
+    job): pending, running, completed with what it did to ``main`` (``outcome``: ``published`` as
+    its commit, or ``unchanged``, nothing committed) and the revision of ``main`` that holds it, or
+    failed with the answer a publish inside the request would have given."""
     answer = _job_answer(await ie.get_job(job_id), job_id, graph_id, ("publish", "fork_merge"),
                          "publish job not found", "publishing failed")
     summary = answer.pop("summary")
     if answer["status"] == "completed":
-        # Recorded when the job ended; a fork review's merge, or a job that ended before it was
-        # recorded, is read from its commit.
-        answer["revision_id"] = summary.get("revisionId")
-        if answer["revision_id"] is None:
-            answer["revision_id"] = await svc.landed_revision(graph_id=graph_id,
-                                                              commit_id=answer["commit_id"])
+        # Recorded when the job ended. A job that ended before it recorded its outcome is read from
+        # its commit — one that isn't on main (none, or its draft's own head) committed nothing —
+        # and keeps the revision it recorded.
+        if summary.get("outcome") is None:
+            answer.update(await _publish_answer(svc, graph_id, answer["commit_id"]))
+        else:
+            answer["outcome"], answer["commit_id"] = summary["outcome"], answer["commit_id"] or None
+        if summary.get("revisionId") is not None:
+            answer["revision_id"] = summary["revisionId"]
     return answer
 
 
@@ -5225,7 +5260,7 @@ async def _fork_merge_from_job(job: dict) -> dict:
     await _bump_main_cache(graph_id)
     await _touch_views_data_updated(graph_id, actor)
     await nudge_projection(graph_id)
-    return {"commitId": commit_id}
+    return _job_summary(await _publish_answer(svc, graph_id, commit_id))
 
 
 @router.post("/graphs/{graph_id}/pulls", response_model=OpenPrResponse, status_code=201)
@@ -5477,8 +5512,7 @@ async def merge_pull_request(
     await _bump_main_cache(str(_pr["target_graph_id"]))            # base advanced — invalidate stale canvas reads now
     await _touch_views_data_updated(str(_pr["target_graph_id"]), user.id)   # views' "data updated" freshness
     background.add_task(project_now, str(_pr["target_graph_id"]))   # base graph advanced; refresh FalkorDB in-process (async)
-    return {"commit_id": commit_id, "revision_id": await svc.landed_revision(
-        graph_id=str(_pr["target_graph_id"]), commit_id=commit_id)}
+    return await _publish_answer(svc, str(_pr["target_graph_id"]), commit_id)
 
 
 # --------------------------------------------------------------------------- #
@@ -5947,4 +5981,4 @@ async def merge_merge_request(
                                  meta=await svc.get_graph(target) or {}, graph_id=target,
                                  branch_id=str(_src_branch), actor=user.id)
     background.add_task(project_now, str(_pr["target_graph_id"]))   # target graph advanced; refresh FalkorDB in-process (async)
-    return {"commit_id": commit_id, "revision_id": await svc.landed_revision(graph_id=target, commit_id=commit_id)}
+    return await _publish_answer(svc, target, commit_id)
