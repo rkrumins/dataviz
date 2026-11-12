@@ -268,6 +268,15 @@ class Snapshot:
     def is_draft(self) -> bool:
         return self.branch_id != self.main_branch_id
 
+    def main_at_base(self) -> "Snapshot":
+        """The ``main`` a draft reads: its layers below its own, at its base (a fork's with its
+        parent's under them). A snapshot of main is that already."""
+        if not self.is_draft:
+            return self
+        return Snapshot(self.layers[:-1], graph_id=self.graph_id, branch_id=self.main_branch_id,
+                        main_branch_id=self.main_branch_id, as_of_seq=self.base_seq,
+                        page_size=self.page_size)
+
     async def iter_live(self, kind: str, payload: bool = False,
                         limit: Optional[int] = None) -> AsyncIterator[List[Winner]]:
         """Every live entity of ``kind``, once each, a page at a time (order: by layer, then id),

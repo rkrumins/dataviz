@@ -260,9 +260,10 @@ minter is injected) that returns `(ops, resolutions)`:
     read as the draft sees it, main at its base: one main deleted since is still the draft's, and
     one main gave another value keeps its old one. A dry run against main reads main's index alone.
   - At most `GRAPHVER_MAX_MATCHING_PROPERTIES` (10) a graph (`too_many_matching_properties`). Not on
-    a fork yet (`matching_property_on_fork`): its main is its parent's and its own. A dry run never
-    builds an index: by a property no import has matched by yet, it answers `409
-    identifier_not_indexed`.
+    a fork yet (`matching_property_on_fork`): its main is its parent's and its own, and a property
+    default it takes from its parent is `entity_id` there ([Import settings](#import-settings)).
+    A dry run never builds an index: by a property no import has matched by yet, it answers
+    `409 identifier_not_indexed`.
 - **Nodes** match an existing entity by that order (`_named`). A row's **pointers** are its `urn`
   and its value of the data source's identifier property (`prop.<identifier>`), each also in
   canonical form when it is a `urn:uuid:` (`pointers`). A pointer finds the node that carries it as
@@ -650,10 +651,14 @@ the diff, so a mistaken scope is caught before it touches `main`.
 **The replace guard.** A file whose rows name their entities by another key than the import's
 `identifier` matches nothing, so a replace of it would delete its scope and make it again, every id
 and its history with it. Before it deletes anything, a replace counts what it would delete and what
-its draft makes (`_guard_replace`): a whole graph's measured against main, so a file imported again
-into the draft an earlier run made it in is judged on what the draft would publish. In a scope of at
-least `IMPORT_REPLACE_GUARD_MIN_LIVE` (1,000) entities, one that would delete at least
-`IMPORT_REPLACE_GUARD_DELETE_FRACTION` (0.5) of them **and** create at least
+its draft makes (`_guard_replace`), measured against the main its draft reads (a fork's with its
+parent's), so a file imported again into the draft an earlier run made it in is judged on what the
+draft would publish. A whole graph's scope is every entity main holds. A view's is those of the
+view's entities main holds, and its draft makes every entity the draft holds that main doesn't: a
+file naming the view's entities by another key makes them again outside the view, where its
+placements don't reach, so it is refused like a whole graph's, and so is the same file sent again
+into its draft. In a scope of at least `IMPORT_REPLACE_GUARD_MIN_LIVE` (1,000) entities, one that
+would delete at least `IMPORT_REPLACE_GUARD_DELETE_FRACTION` (0.5) of them **and** create at least
 `IMPORT_REPLACE_GUARD_CREATE_FRACTION` (0.5) as many is refused. A scope that really shrank creates
 little, and a file that really dropped rows deletes little, so neither is refused.
 
@@ -665,12 +670,13 @@ little, and a file that really dropped rows deletes little, so neither is refuse
   which imports the file again into the same draft with `allowMassDelete=true`.
 - **Overridden:** `allowMassDelete=true` on the import (anyone who may run it) deletes all the same;
   the job keeps the allowance (`jobs.allow_mass_delete`, `allowMassDelete` on the job), its
-  `replaceGuard.state` is `overridden`, and the worker logs it.
+  `replaceGuard.state` is `overridden`, and the worker logs it. It never stops early (below).
 - **Earlier, fail fast:** a whole graph's replace whose first full node window finds an entity for
-  fewer than `IMPORT_REPLACE_MIN_MATCH_FRACTION` (0.05) of the rows decided so far, in a graph of at
-  least `IMPORT_REPLACE_GUARD_MIN_LIVE`, stops there (`identifier_matched_nothing`, action
-  `identifier`), naming its identifier, rather than read the rest of the file first. Nothing is
-  deleted; the rows read so far are on the draft.
+  fewer than `IMPORT_REPLACE_MIN_MATCH_FRACTION` (0.05) of the rows decided so far, in a graph whose
+  main (a fork's with its parent's) holds at least `IMPORT_REPLACE_GUARD_MIN_LIVE`, stops there
+  (`identifier_matched_nothing`, action `identifier`), naming its identifier, rather than read the
+  rest of the file first. Nothing is deleted; the rows read so far are on the draft. One sent with
+  `allowMassDelete=true` reads the whole file, as the guard would let it through.
 
 The limits are the operator's (env, or Helm `config.imports`), and a workspace admin may set a data
 source's own over them (below); `IMPORT_REPLACE_GUARD=0` turns the guard off everywhere and a
@@ -691,16 +697,19 @@ A graph's imports run under its data source's own settings, field by field, over
 
 - **Read:** `GET …/graphs/{gid}/import-settings` (anyone who reads the graph, an API key too)
   answers `overrides` (the graph's own; null where it sets none), `platform`, `effective` (what
-  holds, with `sources`: `data_source` or `platform`), `replaceGuard` (the platform's switch),
-  `followsParent`, and `matchingProperties` — each property its imports match by, with its index's
-  `status` (`building`, `ready`), the main commit it describes (`seq`) and whether that is main's
-  head (`current`) — out of `maxMatchingProperties`.
+  holds, with `sources`: `data_source`, `platform`, or `fork`, below), `replaceGuard` (the
+  platform's switch), `followsParent`, and `matchingProperties` — each property its imports match
+  by, with its index's `status` (`building`, `ready`), the main commit it describes (`seq`) and
+  whether that is main's head (`current`) — out of `maxMatchingProperties`.
 - **Set:** `PUT` the same path (workspace admins), field by field; `"inherit"` goes back to the
   platform's, and a field left out stays. A real change is recorded once in the activity log
   (`workspace.versioning.import_settings_updated`, with what it was and became). An identifier
   follows the request grammar (422 `invalid_identifier`); a fraction is between 0 and 1. A fork's
   settings are its parent's (409 `fork_settings_follow_parent`): set there, they follow to its
-  forks.
+  forks. But a fork can't match by a property yet, so where its parent's default identifier (or
+  the platform's) is a `prop.<name>`, a fork's imports match by `entity_id`: its
+  `effective.identifier` says so, from `fork`, and so does an import's `identifierSource`. An
+  import that names the property is refused there (`matching_property_on_fork`).
 - **Kept on the job.** An import resolves them once, when it is made — its identifier (the
   request's, else the graph's, else the platform's) and the guard's limits — and keeps them
   (`jobs.import_settings`: `{identifierSource, replaceLimits: {minLive, deleteFraction,
@@ -709,7 +718,8 @@ A graph's imports run under its data source's own settings, field by field, over
   says where its identifier came from (`identifierSource`).
 - **In the app:** the data source's Versioning tab shows them under **Imports**, and the import
   dialog's **Match existing items by** starts at the graph's default, marked, and says when a
-  property no import has matched by yet is indexed first.
+  property no import has matched by yet is indexed first. On a fork whose parent's default is a
+  property, both say its imports match by Entity ID.
 
 ---
 

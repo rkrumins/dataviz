@@ -134,6 +134,11 @@ export function ImportSettingsFields({ settings, canEdit, onSave }: {
           </ul>
         )}
       </div>
+      {settings.effective.sources.identifier === 'fork' && (
+        <p className="text-[11px] text-ink-muted mt-2">
+          A fork can’t match by a property yet, so its imports match by Entity ID.
+        </p>
+      )}
       {settings.followsParent
         ? <p className="text-[11px] text-ink-muted mt-2">A fork’s import settings are its parent’s: change them there.</p>
         : !canEdit && <p className="text-[11px] text-ink-muted mt-2">Only a workspace admin can change these.</p>}

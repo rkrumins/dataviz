@@ -811,7 +811,7 @@ class ImportWorker:
                     "the file again.")
             if (await self._position(job_id)).cursor != "replace":       # not deleting yet
                 await self._lease.retry_transient(
-                    lambda: self._guard_replace(job_id, snap, graph_id), never=(ReplaceBlocked,))
+                    lambda: self._guard_replace(job_id, snap), never=(ReplaceBlocked,))
             await self._lease.retry_transient(
                 lambda: self._delete_absent(job_id, snap, graph_id, branch_id, actor))
         summary = (await self._position(job_id)).summary
@@ -864,26 +864,27 @@ class ImportWorker:
         if kind == "node":
             self._remember_created(rows, ops, resolutions)
             if pos.cursor in ("node:-1", "mnode:-1") and len(rows) == config.IMPORT_COMMIT_WINDOW:
-                await self._fail_fast(job_id, graph_id)
+                await self._fail_fast(job_id, snap)
         return True
 
-    async def _fail_fast(self, job_id: str, graph_id: str) -> None:
+    async def _fail_fast(self, job_id: str, snap) -> None:
         """After a replace's first full node window: stop (:class:`IdentifierMatchedNothing`) when
         fewer than the job's ``minMatchFraction`` (``IMPORT_REPLACE_MIN_MATCH_FRACTION``, or its
-        data source's) of the rows decided so far found an entity, in a graph of at least its
-        ``minLive``, rather than read the rest of the file and have the replace guard refuse it at
-        the end. A replace of a view's scope is left to the guard: its scope isn't the graph."""
+        data source's) of the rows decided so far found an entity, in a graph whose main as the
+        draft reads it (a fork's with its parent's) holds at least its ``minLive``, rather than read
+        the rest of the file and have the replace guard refuse it at the end. A replace of a view's
+        scope is left to the guard: its scope isn't the graph. One sent with allowMassDelete goes
+        on, as the guard lets it through."""
         min_match = float(self._limits["minMatchFraction"])
-        if self._reconcile_mode != "replace" or self._scope is not None or min_match <= 0:
+        if (self._reconcile_mode != "replace" or self._scope is not None or self._allow_mass_delete
+                or min_match <= 0):
             return
         tally = (await self._position(job_id)).summary
         matched = sum(int(tally.get(k) or 0) for k in ("updated", "unchanged", "deleted"))
         decided = matched + int(tally.get("new") or 0) + int(tally.get("invalid") or 0)
         if not decided or matched >= min_match * decided:
             return
-        main_id = await self._svc.main_branch_id(graph_id)
-        async with db.graphver_session() as s:
-            live = await self._svc._main_live_count(s, graph_id, main_id)
+        live = await _live_count(snap.main_at_base())
         if live < int(self._limits["minLive"]):
             return
         raise IdentifierMatchedNothing(
@@ -892,33 +893,38 @@ class ImportWorker:
             "likely make the graph again, and the replace delete it. Check what the file's rows name "
             "their entities by: identifier=entity_id finds a row's entity id, then its urn, its "
             "identifier value or a field its type matches imports by; identifier=urn, its entity id "
-            "or its urn. Nothing was deleted; the rows read so far are on the draft.")
+            "or its urn. Nothing was deleted; the rows read so far are on the draft. If the file "
+            "really replaces the graph, import it again with allowMassDelete=true.")
 
-    async def _guard_replace(self, job_id: str, snap, graph_id: str) -> None:
+    async def _guard_replace(self, job_id: str, snap) -> None:
         """Before a replace deletes anything: count what it would delete and what it made, record the
         verdict on the job's summary (``replaceGuard``, :func:`replace_verdict`), and refuse
         (:class:`ReplaceBlocked`) past the guard's limits unless the job allows it. Nothing is
         deleted then, and the file's rows stay on the draft for review.
 
-        A whole graph's replace is measured against main: what main holds, and what the draft holds
-        beyond it — so a file imported again into the draft an earlier import made it in is judged
-        on what the draft would publish, not only on what this run added. A view's, on what this
-        run made."""
+        A replace is measured against the main its draft reads (a fork's with its parent's): its
+        scope as main holds it, and what the draft makes beyond main — so a file imported again into
+        the draft an earlier import made it in is judged on what the draft would publish, not only
+        on what this run added. A whole graph's scope is every entity main holds, and the draft makes
+        what it holds beyond them. A view's is those of the view's entities main holds, and the
+        draft makes every entity it holds that main doesn't: a file naming the view's entities by
+        another key makes them all again outside the view, where its placements don't reach."""
         keep = (await view_entities(snap, self._scope))["keep"] if self._scope else None
-        live = absent = 0
+        main = snap.main_at_base()
+        live = absent = before = 0
         for kind in ("edge", "node"):
             async for page in _in_scope(snap, kind, keep):
                 live += len(page)
                 absent += len(await self._unmatched(job_id, page))
+                if keep is not None:
+                    before += len(await main.lookup_live(kind, page))
         pos = await self._position(job_id)
         made = int(pos.summary.get("new") or 0)
         if keep is None:
-            main_id = await self._svc.main_branch_id(graph_id)
-            async with db.graphver_session() as s:
-                before = await self._svc._main_live_count(s, graph_id, main_id)
+            before = await _live_count(main)
             creates = max(live - before, made)
         else:
-            before, creates = max(live - made, 0), made
+            creates = await _made_on_draft(snap, main)
         verdict = replace_verdict(before, absent, creates, allowed=self._allow_mass_delete,
                                   limits=self._limits)
         async with db.graphver_session() as s:
@@ -1567,6 +1573,33 @@ async def _bases(snap, kind: str, rows, hash_of: Dict[str, str]) -> Dict[tuple, 
                        tuple_(model.entity_id, model.content_hash).in_(chunk),
                        model.payload.is_not(None)))).all()})
     return out
+
+
+async def _live_count(snap) -> int:
+    """How many entities ``snap`` holds live: from main's head pointers, in one indexed count, when
+    it is a graph's own main at its head (:meth:`~.snapshot.Snapshot.head_counts`); else counted a
+    page at a time — a fork's main is its parent's and its own."""
+    counts = await snap.head_counts()
+    if counts is not None:
+        return sum(counts.values())
+    live = 0
+    for kind in ("node", "edge"):
+        async for page in snap.iter_live(kind):
+            live += len(page)
+    return live
+
+
+async def _made_on_draft(snap, main) -> int:
+    """How many entities the draft ``snap`` holds live that ``main``, the main it reads, doesn't:
+    what this import, an earlier one into the draft or a person made there. A page of the draft's
+    own heads at a time, each looked up in main."""
+    made = 0
+    for kind in ("node", "edge"):
+        async for page in snap.layers[-1].scan(kind, snap.page_size):
+            ids = [w.entity_id for w in page if w.live]
+            if ids:
+                made += len(ids) - len(await main.lookup_live(kind, ids))
+    return made
 
 
 async def _in_scope(snap, kind: str, keep):

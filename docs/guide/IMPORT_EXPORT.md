@@ -135,7 +135,9 @@ item it describes:
 | **A property** | its value of a property you name, such as `external_id` | Another system gives each item an id of its own, kept in a property |
 
 The choice marked **default** is the data source's. A workspace admin sets it on
-the data source's **Versioning** tab, under **Imports**.
+the data source's **Versioning** tab, under **Imports**. A fork can't match by a
+property yet, so where its parent's default is a property, a fork's is
+**Entity ID**, and the dialog says so.
 
 - **A row nothing matches** becomes a new item. Its id is made from the key that
   should have found it, so importing the file again finds it rather than making

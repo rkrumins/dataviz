@@ -49,8 +49,13 @@ function unsupportedReason(name: string): string | null {
     : null
 }
 
-/** Why a property can't be matched by (Import is then off), or what matching by it first costs. */
+/** Why a property can't be matched by (Import is then off), what matching by it first costs, or why
+ *  a fork's default isn't its parent's. */
 function matchNote(match: Match | null, settings: ImportSettings | null): { block: boolean; text: string } | null {
+  if (!match && settings?.effective.sources.identifier === 'fork') {
+    return { block: false, text: 'This fork matches by Entity ID: its parent’s default is a property, and a '
+      + 'fork can’t match by one yet.' }
+  }
   if (match?.kind !== 'prop') return null
   const name = match.name.trim()
   if (!name) return { block: true, text: 'Name the property its rows are matched by.' }

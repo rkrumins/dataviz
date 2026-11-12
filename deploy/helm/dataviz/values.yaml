@@ -142,8 +142,8 @@ config:
   # AND create at least replaceGuardCreateFraction as many — a file whose rows name their entities
   # by another key — is refused before it deletes anything, unless sent with allowMassDelete=true.
   # A replace whose first full window finds an entity for fewer than replaceMinMatchFraction of its
-  # rows stops there. Fractions of the scope's entities (0.5 = half); replaceGuard "0" turns the
-  # guard off, replaceMinMatchFraction "0" the early stop.
+  # rows stops there, unless sent with allowMassDelete=true. Fractions of the scope's entities
+  # (0.5 = half); replaceGuard "0" turns the guard off, replaceMinMatchFraction "0" the early stop.
   imports:
     replaceGuard: "1"
     replaceGuardMinLive: "1000"

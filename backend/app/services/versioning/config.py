@@ -464,7 +464,8 @@ IMPORT_REPLACE_GUARD_CREATE_FRACTION: float = float(
     os.getenv("IMPORT_REPLACE_GUARD_CREATE_FRACTION", "0.5"))
 # And earlier: a replace whose first full node window finds an entity for fewer than this fraction of
 # its rows, in a graph of at least IMPORT_REPLACE_GUARD_MIN_LIVE entities, stops there, naming its
-# identifier, rather than read the rest of the file first. 0 turns it off.
+# identifier, rather than read the rest of the file first, unless it is sent with
+# allowMassDelete=true. 0 turns it off.
 IMPORT_REPLACE_MIN_MATCH_FRACTION: float = float(os.getenv("IMPORT_REPLACE_MIN_MATCH_FRACTION", "0.05"))
 # Properties a graph's imports may match nodes by (identifier=prop.<name>), at most: each has an index
 # kept current from the version log, as Dataverse limits alternate keys and Salesforce external ids.
