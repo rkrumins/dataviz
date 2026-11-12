@@ -284,13 +284,16 @@ class FakeGraph:
         if cypher == "MERGE (m:_GVProjMeta {id: 'meta'}) SET m.seq = $seq, m.epoch = $epoch":
             self.proj_meta = dict(params)
             return None
-        if cypher == "MATCH (m:_GVProjMeta) RETURN m.pFrom, m.pTo, m.pStep, m.pAfter":
+        if cypher == ("MATCH (m:_GVProjMeta) RETURN m.pFrom, m.pTo, m.pStep, m.pAfter, "
+                      "m.pStructural, m.pDropped"):
             c = self.cursor
-            return _Result([[c["from"], c["to"], c["step"], c["after"]]] if c else [])
+            return _Result([[c["from"], c["to"], c["step"], c["after"], c["structural"],
+                             c["dropped"]]] if c else [])
         if cypher.startswith("MERGE (m:_GVProjMeta {id: 'meta'}) SET m.pFrom = $from"):
             self.cursor = dict(params)
             return None
-        if cypher == "MATCH (m:_GVProjMeta) REMOVE m.pFrom, m.pTo, m.pStep, m.pAfter":
+        if cypher == ("MATCH (m:_GVProjMeta) REMOVE m.pFrom, m.pTo, m.pStep, m.pAfter, "
+                      "m.pStructural, m.pDropped"):
             self.cursor = None
             return None
         if cypher == "MATCH (m:_GVProjMeta) RETURN m.sweptSeq":

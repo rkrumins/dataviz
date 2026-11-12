@@ -219,21 +219,37 @@ a page at a time (`_apply_paged`), and so is a rebuild of a graph too large to h
 (`_reconcile_streamed`).
 - **The cursor.** After each page lands, the pass writes where it is on the pass marker:
   `_GVProjMeta.pFrom`, `pTo`, `pStep`, `pAfter`.
-  - A paged window's steps are `node` and `edge`, each positioned by version id.
+  - A paged window's steps are `node` and `edge`, each positioned by version id. Its cursor also
+    carries what its pages so far did that the pass publishing the window must know:
+    `pStructural`, a retype, re-key or containment change, and `pDropped`, the writes that did not
+    land.
   - A streamed rebuild's are `fk_node` and `fk_edge`, positioned by internal id, then `node` and
     `edge`, by entity id.
 - **The time box.** Past `GRAPHVER_PROJECTION_PASS_MAX_SECS` (300) the pass stops at the next
   page boundary. It publishes nothing, records no error and no backoff, and nudges itself. Other
-  graphs get their turn meanwhile.
+  graphs get their turn meanwhile. A rebuild that stops so stays `rebuilding` (a load
+  `rehydrating`), so the pass that resumes it is never taken for a first seed: with the Graph
+  residency switch on, that would queue the graph for a load into a fresh key and leave the
+  rebuild's pages behind.
 - **Resuming.** A pass from the same watermark finishes the cursor's window (`pTo`) first, after
-  the last page that landed, then publishes it. The window after it is the next pass's.
+  the last page that landed, then publishes it. The window after it is the next pass's. A resumed
+  paged window starts from what its cursor says the pages before it did, so the pass that
+  publishes it bumps the graph's generation for a retype an earlier pass made, and verifies a write
+  an earlier pass dropped.
 - **Where it lives.** The cursor is in the key, so a key that lost a page lost the cursor with it,
-  and is projected from the start. It is cleared when its window publishes.
+  and is projected from the start. A pass that has gone through all its pages clears it, whether
+  its verify publishes the window or holds it back: the pass after one held back projects the
+  window from the start, rather than resume past its last page and write nothing. An operator's
+  rebuild (`POST …/projection/rebuild`) clears it too once it is accepted, after a rebuild that
+  stopped part-way and then failed, so it replays main from the start.
 - **A resumed streamed rebuild** does not know what earlier passes wrote, so it hands the rollups
   to the batch job.
 - **At main's head,** a rebuild pages main's `entity_heads` by their primary key, each joined to
   its version by the version's. A page costs its own size, not a `DISTINCT ON` over every version
-  of the graph.
+  of the graph. Main's head is read again after each such page: a commit moves the head and the
+  heads in one transaction, so once one has landed, that page and the rest are read as of the
+  rebuild's seq instead. The rebuild never writes what the commit made of an entity (a new type,
+  a new urn) as a second node beside the one it kept; the next window moves it in place.
 - **Progress.** A paged window reports it too (`progress_done` / `progress_total`), in version
   rows.
 
@@ -243,7 +259,10 @@ operator's rebuild makes (`request_projection_rebuild`, fenced on its epoch), wh
 - its verify finds FalkorDB short of committed main, or, on a key the platform minted, holding more
   after the tombstone sweep;
 - the same window has failed `GRAPHVER_PROJECTION_ESCALATE_AFTER` passes in a row (3) on a timeout
-  or memory refusal the statement ladder and the quarantine could not absorb.
+  or memory refusal the statement ladder and the quarantine could not absorb. They are counted in
+  `projection_state.pressure_failures`: a pass that ends any other way (published, held back, or
+  failed on something else, such as a connection error) starts the count again, and a cancel
+  leaves it. `failed_attempts`, which spaces out the retries, counts every failure.
 
 The next pass reconciles the key in place (streamed and resumable on a large graph) and publishes.
 Until then the graph's last error reads "rebuilding on its own: …". A window that moved the
@@ -521,7 +540,8 @@ A publish whose job is turned away because one is already running is not lost:
   graph before the change that asked. Recording it keeps a `moved` a full seed owes (§3). The
   hook answers `queued`, `active`, `unreachable` or `refused`. An `active` or `unreachable` ask
   stays owed, and the projection worker's liveness loop asks again, at most every
-  `GRAPHVER_ROLLUP_REASK_SECS` (300) per graph, until one is queued. A refusal (no ontology, a
+  `GRAPHVER_ROLLUP_REASK_SECS` (300) per graph, until one is queued. A control plane that answers
+  a 5xx (it failed, or is still starting) is `unreachable`. A refusal (a 4xx: no ontology, a
   misconfigured provider) is logged and owed no more.
 `resolve_aggregation_edge_types` (`projection_target.py:22-49`) answers such a source's types with
 `"dedicated"` after them, and `_compute_rollup_deltas` and `_reconcile_in_place` then answer `"stale"`

@@ -13,6 +13,8 @@ its rebuild is queued in that mode.
 
 An ask a running job turns away is not dropped: that job may have read the graph before the change
 that asked, so the hook records it owed (``note_rollup_ask``) for the liveness loop to make again.
+So is one the control plane could not take: out of reach, or answering a 5xx. Only a 4xx refusal is
+owed no more.
 """
 import asyncio
 import contextlib
@@ -190,6 +192,9 @@ def test_the_edge_types_mark_a_dedicated_source(monkeypatch, mode, types):
     (409, "in_source", "active", "active"),     # a job runs: it may have read the graph before
     (202, "in_source", "queued", "queued"),
     (403, "in_source", "refused", "refused"),
+    (422, "in_source", "refused", "refused"),   # no ontology: nothing to ask for again
+    (500, "in_source", "unreachable", "unreachable"),   # it failed: asked again
+    (503, "in_source", "unreachable", "unreachable"),   # still starting
     (409, "dedicated", "active", None),         # its job queues the next itself when it ends
 ])
 def test_the_control_planes_answer_says_what_is_owed(monkeypatch, status, mode, outcome, owed):

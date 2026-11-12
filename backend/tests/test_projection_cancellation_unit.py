@@ -108,7 +108,8 @@ async def _run(monkeypatch, hang_at: str, projected=3, target=5) -> _FakePS:
         ps.status = "rebuilding" if from_seq <= 0 else "projecting"
         return seen_epoch + 1, ps.failed_attempts
 
-    async def fake_finish(graph_id, mine, *, published, to_seq, error, attempts, surplus=None):
+    async def fake_finish(graph_id, mine, *, published, to_seq, error, attempts, surplus=None,
+                          **_kw):
         ps.status, ps.last_error = "idle", error
         return True
     monkeypatch.setattr(proj, "_claim", fake_claim)

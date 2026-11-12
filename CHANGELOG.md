@@ -271,10 +271,21 @@ integration's many small changes as a few commits.
   crash or a restart loses one page, not the whole job, and other graphs get their turn. A rebuild
   pages the graph's heads by primary key instead of reading every version of it again for each
   page.
+  - A window resumed so still tells readers to drop what they cached for nodes an earlier pass
+    retyped or re-keyed, and verifies a write an earlier pass could not land.
+  - A rebuild stopped so stays a rebuild: with Graph residency on, it is resumed, not loaded again
+    into a fresh key as a first seed.
+  - A pass that went through its pages leaves nothing to resume, whatever its verify found, so a
+    rebuild held back by its verify runs again from the start. An operator's rebuild, once
+    accepted, also starts from the beginning, not from where a failed one stopped.
+  - A rebuild reads the graph as of its own revision once a commit lands while it runs, so it no
+    longer writes a second node for an entity that commit retyped or re-keyed.
 - **A graph that cannot be brought up to date rebuilds itself.** The cases:
   - its verify finds the fast read layer short of history;
   - on a key the platform minted, it holds more than history after the sweep;
-  - the same window has failed 3 passes in a row under pressure.
+  - the same window has failed 3 passes in a row under pressure, with no other outcome between them
+    (`projection_state.pressure_failures`): a connection failure or a held-back pass starts the
+    count again.
   Such a graph is rebuilt in place on its own, instead of being healed inside the window's pass or
   held back until someone rebuilds it (`GRAPHVER_PROJECTION_ESCALATE`).
 - **A projection's verify counts no longer scan the graph, and a failed count is not a pass.**
@@ -311,7 +322,8 @@ integration's many small changes as a few commits.
   running.** That job may have read the graph before the change that asked, so the summaries could
   stay wrong until something else asked. The ask is now kept (`projection_state.rollup_state`), and
   the projection worker asks again every 5 minutes (`GRAPHVER_ROLLUP_REASK_SECS`) until a job is
-  queued; so does an ask that could not reach the aggregation service. A source whose summaries
+  queued; so does an ask that could not reach the aggregation service, or that its control plane
+  answered with a server error (5xx). A source whose summaries
   live in a dedicated key already queued its own follow-up, and is unchanged.
 
 ### Upgrading
@@ -323,6 +335,8 @@ integration's many small changes as a few commits.
     node's urn as its id should read its `entity_id`.
 - **New ids from `/bulk-ingest` and `/sync` are `urn:uuid:`s.** A client that read a new node's
   id as its urn should read its `urn` (it is stored as given) or its `entity_id`.
+- Migration `20261112_1700_gv_ps_pressure` adds `projection_state.pressure_failures` (integer,
+  default 0, no rewrite). A separate `GRAPHVER_DB_URL` gets it at start-up.
 - Migration `20261112_1600_import_settings` adds five nullable columns to `workspace_data_sources`
   (`import_identifier`, `import_replace_*`) and `jobs.import_settings` (nullable JSONB); no rewrite.
   Every data source starts with none set, so imports run under the platform's settings as before. A

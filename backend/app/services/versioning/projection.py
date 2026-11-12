@@ -364,11 +364,17 @@ _MARKER_READ = "MATCH (m:_GVProjMeta) RETURN m.seq"
 #: A long pass's resume point on the pass marker, written after each page lands (so a key that lost a
 #: page lost the cursor with it): the window ``(pFrom, pTo]`` the pass is projecting, the step it is on
 #: (``pStep``: a paged window's ``node`` / ``edge``, a streamed rebuild's ``fk_node`` / ``fk_edge`` /
-#: ``node`` / ``edge``) and its position there (``pAfter``). A pass from the same ``pFrom`` resumes it.
-_CURSOR_READ = "MATCH (m:_GVProjMeta) RETURN m.pFrom, m.pTo, m.pStep, m.pAfter"
+#: ``node`` / ``edge``) and its position there (``pAfter``). A paged window's also says what its pages
+#: so far did that the pass publishing it must know: whether one made a structural change
+#: (``pStructural``), and how many writes they dropped (``pDropped``). A pass from the same ``pFrom``
+#: resumes it. It is cleared once its pages are done, and when an operator's rebuild is accepted.
+_CURSOR_READ = ("MATCH (m:_GVProjMeta) "
+                "RETURN m.pFrom, m.pTo, m.pStep, m.pAfter, m.pStructural, m.pDropped")
 _CURSOR_WRITE = ("MERGE (m:_GVProjMeta {id: 'meta'}) "
-                 "SET m.pFrom = $from, m.pTo = $to, m.pStep = $step, m.pAfter = $after")
-_CURSOR_CLEAR = "MATCH (m:_GVProjMeta) REMOVE m.pFrom, m.pTo, m.pStep, m.pAfter"
+                 "SET m.pFrom = $from, m.pTo = $to, m.pStep = $step, m.pAfter = $after, "
+                 "m.pStructural = $structural, m.pDropped = $dropped")
+_CURSOR_CLEAR = ("MATCH (m:_GVProjMeta) "
+                 "REMOVE m.pFrom, m.pTo, m.pStep, m.pAfter, m.pStructural, m.pDropped")
 
 
 class _PassPartial(Exception):
@@ -380,14 +386,18 @@ class _PassPartial(Exception):
 
 
 class _Cursor:
-    """Where a long pass is, and when it must stop: it writes itself after each page."""
+    """Where a long pass is, and when it must stop: it writes itself after each page.
+    ``structural`` and ``dropped``: for a paged window, what the pages earlier passes wrote did
+    (:meth:`FalkorProjector._apply_paged`)."""
 
-    __slots__ = ("client", "from_seq", "to_seq", "resume", "deadline", "used")
+    __slots__ = ("client", "from_seq", "to_seq", "resume", "deadline", "used",
+                 "structural", "dropped")
 
     def __init__(self, client, from_seq: int, to_seq: int, resume: Optional[Tuple[str, str]],
-                 deadline: Optional[float]) -> None:
+                 deadline: Optional[float], *, structural: bool = False, dropped: int = 0) -> None:
         self.client, self.from_seq, self.to_seq = client, from_seq, to_seq
         self.resume, self.deadline, self.used = resume, deadline, False
+        self.structural, self.dropped = structural, dropped
 
     def start(self, step: str, steps: Sequence[str]) -> Optional[str]:
         """Where ``step`` starts: after the resumed position on the resumed step, from the start
@@ -399,16 +409,23 @@ class _Cursor:
             return after
         return "" if steps.index(step) > steps.index(at) else None
 
-    async def page_done(self, step: str, after: str, written: int) -> None:
-        """After a page has landed: write where the pass is, and stop it past its time."""
-        await _q(self.client, _CURSOR_WRITE, params={"from": self.from_seq, "to": self.to_seq,
-                                                     "step": step, "after": str(after)})
+    async def page_done(self, step: str, after: str, written: int, *, structural: bool = False,
+                        dropped: int = 0) -> None:
+        """After a page has landed: write where the pass is (and, for a paged window, what its
+        pages so far did: ``structural``, ``dropped``), and stop it past its time."""
+        await _q(self.client, _CURSOR_WRITE, params={
+            "from": self.from_seq, "to": self.to_seq, "step": step, "after": str(after),
+            "structural": structural, "dropped": dropped})
         self.used = True
         if self.deadline is not None and time.monotonic() > self.deadline:
             raise _PassPartial(written)
 
 
-async def _read_cursor(client) -> Optional[Tuple[int, int, str, str]]:
+#: A cursor as read: ``(pFrom, pTo, pStep, pAfter, pStructural, pDropped)``.
+_Found = Tuple[int, int, str, str, bool, int]
+
+
+async def _read_cursor(client) -> Optional[_Found]:
     try:
         res = await _q(client, _CURSOR_READ, read_only=True, timeout_ms=5000)
     except Exception:                                    # unreadable: start over
@@ -416,10 +433,12 @@ async def _read_cursor(client) -> Optional[Tuple[int, int, str, str]]:
     rows = getattr(res, "result_set", None) or []
     if not rows or not rows[0] or rows[0][0] is None or rows[0][1] is None:
         return None
-    return int(rows[0][0]), int(rows[0][1]), str(rows[0][2] or ""), str(rows[0][3] or "")
+    row = rows[0]
+    return (int(row[0]), int(row[1]), str(row[2] or ""), str(row[3] or ""), bool(row[4]),
+            int(row[5] or 0))
 
 
-def _resumes(found: Optional[Tuple[int, int, str, str]], from_seq: int, to_seq: int) -> bool:
+def _resumes(found: Optional[_Found], from_seq: int, to_seq: int) -> bool:
     """Whether the cursor ``found`` is a pass from ``from_seq`` that stopped part-way to a ``pTo``
     this pass reaches: this pass finishes it, after the last page that landed."""
     return found is not None and found[0] == from_seq and from_seq < found[1] <= to_seq
@@ -964,6 +983,20 @@ class FalkorProjector:
         from backend.app.providers.graph_generation import bump_graph_generation
         await bump_graph_generation(name, reason="projection cache drop")
 
+    async def forget_cursor(self, graph_id: str) -> None:
+        """Clear the pass cursor in a graph's key, so its next pass projects from the start: an
+        operator's rebuild, accepted after a rebuild that stopped part-way and then failed, starts
+        over rather than resume it. Best effort: a key out of reach keeps it."""
+        async with self._session() as s:
+            ps = await s.get(ProjectionStateORM, graph_id)
+        if ps is None or ps.falkor_graph_name in (None, self.default_graph_name(graph_id)):
+            return
+        try:
+            await _q(await self._graph_client(ps.falkor_graph_name, ps.falkor_provider),
+                     _CURSOR_CLEAR)
+        except Exception as exc:                         # pragma: no cover - infra
+            logger.warning("could not clear the pass cursor of %s: %s", graph_id, exc)
+
     def _width(self, client, kind: str) -> _Width:
         """The sticky width of statement ``kind`` on ``client``'s graph."""
         key = (str(getattr(client, "name", "") or id(client)), kind)
@@ -1333,20 +1366,30 @@ class FalkorProjector:
 
     async def _finish(self, graph_id: str, mine: int, *, published: bool, to_seq: int,
                       error: Optional[str], attempts: Optional[int],
-                      surplus: object = _UNCOUNTED) -> bool:
+                      surplus: object = _UNCOUNTED, status: str = "idle",
+                      pressure: Optional[bool] = False) -> bool:
         """End a pass while the row is still its own (epoch ``mine``): publish ``to_seq``, or
-        record the error and, unless ``attempts`` is None (a cancel), back off. Never writes the
-        target or the key, which belong to the publishers and the repin. Returns False when the
-        pass was superseded. A published pass takes the summaries a full seed owed the batch job
-        (``rollup_state.moved``, :func:`_owe_summaries`): it hands them over once published. A
-        state that is not a JSON object becomes NULL.
+        record the error and, unless ``attempts`` is None (a cancel, or a pass that stopped at a
+        page), back off. Never writes the target or the key, which belong to the publishers and
+        the repin. Returns False when the pass was superseded. A published pass takes the
+        summaries a full seed owed the batch job (``rollup_state.moved``, :func:`_owe_summaries`):
+        it hands them over once published. A state that is not a JSON object becomes NULL.
+
+        ``status``: the row's status once the pass ends (a load in flight stays ``rehydrating``),
+        ``idle``, or ``rebuilding`` for a full replay that stopped at a page, so the pass that
+        resumes it is not taken for a first seed. ``pressure``: the pass failed on a timeout or a
+        memory refusal, one more in a row (``pressure_failures``, which the escalation counts);
+        False, any other end, starts the count again; None, a cancel, leaves it.
 
         On a customer's key a published pass also says what it found there that history doesn't
         hold: ``surplus`` (nodes, edges) becomes ``external_drift``, and none clears the count it
         recorded before. A flag a change notification raised stays (its ``via`` says so) until
         the changes are brought into history."""
-        values = {"status": _unless_loading("idle"), "last_error": error,
+        values = {"status": _unless_loading(status), "last_error": error,
                   "progress_done": None, "progress_total": None}      # progress is over either way
+        if pressure is not None:
+            values["pressure_failures"] = (ProjectionStateORM.pressure_failures + 1 if pressure
+                                           else 0)
         if published:
             state = ProjectionStateORM.rollup_state
             handed = func.nullif(state.op("-")(literal("moved")), func.jsonb_build_object())
@@ -1390,7 +1433,7 @@ class FalkorProjector:
                 .where(ProjectionStateORM.graph_id == graph_id, ProjectionStateORM.epoch == mine)
                 .values(projected_commit_seq=0, target_commit_seq=head,
                         status=_unless_loading("rebuilding"), epoch=ProjectionStateORM.epoch + 1,
-                        failed_attempts=0, next_retry_at=None,
+                        failed_attempts=0, pressure_failures=0, next_retry_at=None,
                         last_error=f"rebuilding on its own: {reason}"[:500],
                         **({"rollup_state": _owe_summaries()} if summaries_moved else {}))
                 .returning(ProjectionStateORM.graph_id)
@@ -1435,6 +1478,8 @@ class FalkorProjector:
             from_seq = ps.projected_commit_seq
             to_seq = max(ps.target_commit_seq, graph.main_head_commit_seq)
             seen_epoch = ps.epoch
+            # The passes before this one that failed in a row under pressure (the escalation's).
+            pressure_failures = getattr(ps, "pressure_failures", 0)
             name = ps.falkor_graph_name or self.default_graph_name(graph_id)
             provider_id = ps.falkor_provider    # pinned instance; None → env default
             owned = bool(ps.owns_falkor_graph)  # how the verify counts it (falkor_counts)
@@ -1540,14 +1585,15 @@ class FalkorProjector:
                     # ``pTo``, where it stopped. The window after it is the next pass's.
                     if paged:
                         found = await _read_cursor(client)
-                    resume = None
+                    resume, before = None, (False, 0)
                     if _resumes(found, from_seq, to_seq):
-                        to_seq, resume = found[1], (found[2], found[3])
+                        to_seq, resume, before = found[1], (found[2], found[3]), found[4:]
                         logger.info("projection of %s resumes (%d, %d] at %s after %s", graph_id,
                                     from_seq, to_seq, found[2], found[3] or "the start")
                     cursor = _Cursor(client, from_seq, to_seq, resume,
                                      (pass_started + config.PROJECTION_PASS_MAX_SECS)
-                                     if config.PROJECTION_PASS_MAX_SECS > 0 else None)
+                                     if config.PROJECTION_PASS_MAX_SECS > 0 else None,
+                                     structural=before[0], dropped=before[1])
                 total_items = sum(len(c) for c in changes)
                 prior = None
                 if from_seq > 0 and not paged:
@@ -1661,8 +1707,10 @@ class FalkorProjector:
             # to Postgres (the SoR) instead of flipping onto a corrupt cache, and the poll retries
             # it after a backoff.
             published = verify_error is None
-            if published and cursor is not None and (cursor.used or cursor.resume is not None):
-                await _q(client, _CURSOR_CLEAR)          # its window is done: nothing to resume
+            if cursor is not None and (cursor.used or cursor.resume is not None):
+                # Its pages are done, whatever the verify found: a pass after this one projects
+                # the window from the start, rather than resuming past its last page.
+                await _q(client, _CURSOR_CLEAR)
             if published:
                 # The marker is the pass's LAST FalkorDB write, after the verify and before the
                 # watermark: a replica that confirmed it holds everything the pass wrote.
@@ -1689,13 +1737,16 @@ class FalkorProjector:
         except _PassPartial as stop:
             # Out of its time at a page boundary, its cursor written: not a failure. It publishes
             # nothing, records no error and no backoff, and asks for the next pass at once, which
-            # resumes where it stopped. Other graphs get their turn meanwhile.
+            # resumes where it stopped. Other graphs get their turn meanwhile. A full replay stays
+            # a rebuild: back at idle, the next pass would be queued as a first seed, for a load
+            # into a fresh key.
             logger.info("projection of %s over (%d, %d] %s; the next pass resumes there",
                         graph_id, from_seq, to_seq, stop)
             from backend.app.jobs.metrics import increment
             increment("graphver_projection_passes_total", outcome="partial")
-            if not await asyncio.shield(self._finish(graph_id, mine, published=False, to_seq=to_seq,
-                                                     error=None, attempts=None)):
+            if not await asyncio.shield(self._finish(
+                    graph_id, mine, published=False, to_seq=to_seq, error=None, attempts=None,
+                    status="rebuilding" if from_seq <= 0 else "idle")):
                 await self._yield_superseded(graph_id, from_seq)
             await nudge_projection(graph_id)
             return {"projected": from_seq, "applied": stop.written, "noop": False,
@@ -1712,6 +1763,7 @@ class FalkorProjector:
             cancelled = isinstance(exc, asyncio.CancelledError)
             # Not a fault of the pass: the graph spells a type two ways, until someone fixes it.
             ambiguous = isinstance(exc, AmbiguousSpelling)
+            pressure = _pressure_kind(exc) in ("timeout", "memory")
             from backend.app.jobs.metrics import increment
             increment("graphver_projection_passes_total",
                       outcome="cancelled" if cancelled else "failed")
@@ -1730,7 +1782,8 @@ class FalkorProjector:
                 # 900s budget at once.
                 error = "projection cancelled (timeout)" if cancelled else str(exc)[:500]
                 if not await self._finish(graph_id, mine, published=False, to_seq=to_seq,
-                                          error=error, attempts=None if cancelled else attempts):
+                                          error=error, attempts=None if cancelled else attempts,
+                                          pressure=None if cancelled else pressure):
                     await self._yield_superseded(graph_id, from_seq)
 
             # Shield the reset so a SECOND cancellation (e.g. uvicorn shutdown mid-cleanup) can't
@@ -1741,14 +1794,15 @@ class FalkorProjector:
             except Exception:                          # pragma: no cover - infra
                 logger.warning("could not reset projection status for %s after failure/cancel",
                                graph_id, exc_info=True)
-            # The same window failed under pressure the ladder could not absorb, pass after pass:
-            # rebuild in place instead of retrying it for good.
+            # The same window failed under pressure the ladder could not absorb, pass after pass
+            # with nothing else in between (``pressure_failures``): rebuild in place instead of
+            # retrying it for good.
             if (not cancelled and not ambiguous and config.PROJECTION_ESCALATE and from_seq > 0
-                    and attempts + 1 >= config.PROJECTION_ESCALATE_AFTER
-                    and _pressure_kind(exc) in ("timeout", "memory")):
+                    and pressure and pressure_failures + 1 >= config.PROJECTION_ESCALATE_AFTER):
                 try:
                     await asyncio.shield(self._escalate(
-                        graph_id, mine, f"{attempts + 1} passes in a row failed: {exc}"[:300],
+                        graph_id, mine,
+                        f"{pressure_failures + 1} passes in a row failed: {exc}"[:300],
                         "failures"))
                 except Exception:                      # pragma: no cover - infra
                     logger.warning("could not start a rebuild of %s", graph_id, exc_info=True)
@@ -3499,7 +3553,13 @@ class FalkorProjector:
         At main's head its ``entity_heads`` ARE its state, so they are paged by their primary key,
         each joined to its version by the version's: a page costs its own size. Behind the head, a
         page is the last version row of each entity at the seq (``DISTINCT ON``), which reads every
-        later version row of the graph again for each page."""
+        later version row of the graph again for each page.
+
+        Main's head is read again after each page of heads: a commit moves it and the heads in one
+        transaction, so while it is still ``to_seq`` the page held main at ``to_seq``. Once a commit
+        has landed, that page and the rest are read as of ``to_seq``: the heads would hold what the
+        commit made of an entity (a new type, a new urn), which the pass writing ``to_seq`` must not
+        write as a second node beside the one it kept."""
         model = NodeVersionORM if kind == "node" else EdgeVersionORM
         named = ((model.urn, model.entity_type, null()) if kind == "node" else
                  (model.source_entity_id, model.edge_type, model.target_entity_id))
@@ -3515,6 +3575,10 @@ class FalkorProjector:
                     .where(EntityHeadORM.graph_id == graph.id, EntityHeadORM.branch_id == main_id,
                            EntityHeadORM.entity_kind == kind, EntityHeadORM.entity_id > after)
                     .order_by(EntityHeadORM.entity_id).limit(config.PROJECTION_PAGE))).all()
+                if await s.scalar(select(GraphORM.main_head_commit_seq)
+                                  .where(GraphORM.id == graph.id)) != to_seq:
+                    at_head = False
+                    continue                             # this page again, as of to_seq
             else:
                 rows = (await s.execute(
                     select(model.entity_id, model.id, model.op, model.content_hash, *named)
@@ -4017,12 +4081,17 @@ class FalkorProjector:
         of its nodes, each relabelled first as one window's are, then every page of its edges, so
         an edge's ends are there when it is written. Its Merkle cross-check is left out (the
         verify that follows counts what landed). Returns ``(dropped, structural, written)``:
-        the first two as the one-batch pass has them, and how many changes it wrote.
+        the first two as the one-batch pass has them, for the whole window, and how many
+        changes this pass wrote.
 
-        ``cursor``: after each page lands the pass writes where it is, and a pass past its time
-        stops there (:class:`_PassPartial`); one that resumes starts after the last page that
-        landed. Its progress is the window's version rows."""
-        dropped, structural, written = 0, False, 0
+        ``cursor``: after each page lands the pass writes where it is, and what the window's
+        pages so far did (a structural change, writes dropped); a pass past its time stops there
+        (:class:`_PassPartial`). One that resumes starts after the last page that landed, from
+        what its cursor says those pages did, so the pass that publishes the window bumps the
+        graph's generation for a retype an earlier pass made, and verifies a write it dropped.
+        Its progress is the window's version rows."""
+        dropped, structural, written = ((cursor.dropped, cursor.structural, 0) if cursor
+                                        else (0, False, 0))
         async with self._session() as s:
             graph = await s.get(GraphORM, graph_id)
             total = await self._window_rows(s, graph, main_id, from_seq, to_seq)
@@ -4049,7 +4118,8 @@ class FalkorProjector:
                     if progress:
                         await progress(sum(len(c) for c in changes))
                     if cursor is not None:
-                        await cursor.page_done(kind, last_id, written)
+                        await cursor.page_done(kind, last_id, written, structural=structural,
+                                               dropped=dropped)
         return dropped, structural, written
 
     async def _apply(self, client, node_upserts, edge_upserts, node_deletes, edge_deletes,
