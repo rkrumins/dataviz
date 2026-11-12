@@ -170,7 +170,7 @@ def _publish_world(monkeypatch, answers, *, pull=None, pulls=0, import_job="job1
                                        **({"importJobId": import_job, "pulls": pulls} if import_job else {})},
                           graph_id="g1", branch_id="br1", workspace_id="ws", data_source_id="ds")
     imported = SimpleNamespace(summary={"publish": {"state": "queued", "jobId": "pjob_1"}}, updated_at=None)
-    did = SimpleNamespace(pulled=[], released=0, published=0, finished=None)
+    did = SimpleNamespace(pulled=[], released=0, published=0, finished=None, counted=[], merged=None)
 
     @contextlib.asynccontextmanager
     async def session():
@@ -181,11 +181,13 @@ def _publish_world(monkeypatch, answers, *, pull=None, pulls=0, import_job="job1
 
     class _Versioning:
         async def merged_commit_id(self, **_kwargs):
-            return None
+            return did.merged
 
         async def rebase_draft(self, **kwargs):
             did.pulled.append(kwargs)
-            return pull or {"clean": True}
+            if isinstance(pull, Exception):
+                raise pull
+            return pull(did) if callable(pull) else pull or {"clean": True}
 
         async def release_publishing(self, **_kwargs):
             did.released += 1
@@ -196,13 +198,16 @@ def _publish_world(monkeypatch, answers, *, pull=None, pulls=0, import_job="job1
         def check(self):
             pass
 
+        async def checkpoint(self, _s, **values):
+            did.counted.append(values["field_scope"]["pulls"])
+
         async def finish(self, status="completed", **values):
             did.finished = {"status": status, **values}
             return True
 
-    async def hook(_job):
+    async def hook(job):
         did.published += 1
-        return answers.pop(0)
+        return {"commitId": job["mergedCommitId"]} if "mergedCommitId" in job else answers.pop(0)
 
     monkeypatch.setattr(ver_db, "graphver_session", session)
     svc = ImportExportService(versioning=_Versioning(), store=object(), publish_hook=hook)
@@ -217,6 +222,7 @@ async def test_its_publish_job_finding_main_moved_pulls_the_draft_it_holds_and_p
     assert await svc.run_publish("pjob_1", lease) == {"commitId": "c9"}
     assert [(p["branch_id"], p["actor"], p["publishing_ok"]) for p in did.pulled] == [("br1", "alice", True)]
     assert did.finished["status"] == "completed" and did.released == 0
+    assert did.counted == [1], "each pull counted on the job, for an attempt that takes it over"
     assert imported.summary["publish"] == {"state": "queued", "jobId": "pjob_1", "pulls": 1}
 
 
@@ -237,6 +243,34 @@ async def test_its_publish_job_pulls_no_more_than_three_times_counting_the_impor
     assert result["error"]["detail"]["type"] == "not_up_to_date"
     assert len(did.pulled) == 2 and did.published == 3 and did.finished["status"] == "failed"
     assert (imported.summary["publish"]["state"], imported.summary["publish"]["pulls"]) == ("skipped", 3)
+
+
+async def test_its_publish_job_ends_published_when_an_earlier_attempt_published_the_draft(monkeypatch):
+    # The draft merges while this attempt pulls (a worker that took the job over published it):
+    # whether the pull lands first or is refused for it, that publish is this job's.
+    def merges_meanwhile(did):
+        did.merged = "c7"
+        return {"clean": True}
+
+    def refused_for_it(did):
+        did.merged = "c7"
+        raise BranchNotOpen("br1", "merged")
+
+    for pull in (merges_meanwhile, refused_for_it):
+        svc, imported, did, lease = _publish_world(monkeypatch, [_BEHIND], pull=pull)
+        assert await svc.run_publish("pjob_1", lease) == {"commitId": "c7"}, pull.__name__
+        assert did.finished["status"] == "completed" and did.released == 0
+
+
+async def test_its_publish_job_ends_refused_saying_what_refused_its_pull(monkeypatch):
+    from backend.app.services.versioning.errors import GraphNotWritable
+    svc, imported, did, lease = _publish_world(
+        monkeypatch, [_BEHIND], pull=GraphNotWritable("frozen"))
+    result = await svc.run_publish("pjob_1", lease)
+    assert result["error"]["detail"]["type"] == "graph_not_writable", result
+    assert did.finished["status"] == "failed" and did.released == 1
+    assert (imported.summary["publish"]["state"], imported.summary["publish"]["reason"]["type"]) == (
+        "skipped", "graph_not_writable")
 
 
 async def test_a_persons_publish_job_main_moved_under_is_refused_as_before(monkeypatch):

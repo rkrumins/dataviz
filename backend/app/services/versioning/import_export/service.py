@@ -24,10 +24,10 @@ from sqlalchemy.exc import IntegrityError
 from backend.app.services.storage.object_store import get_object_store, storage_key
 
 from .. import config, db, provenance
-from ..errors import JobActive, MainWriteForbidden
+from ..errors import JobActive, MainWriteForbidden, _HttpMapped
 from ..job_lease import Draining, Lease, Superseded, friendly_infra_error, is_transient
 from ..models import BranchORM, GraphORM, ImportRowORM, JobORM, MergeRequestORM
-from ..service import AccessDenied, GraphVersioningService, NotUpToDate, Viewer
+from ..service import AccessDenied, ConcurrencyError, GraphVersioningService, NotUpToDate, Viewer
 from . import contract, stream
 from . import identifier as identifiers
 from . import keys as matching
@@ -784,16 +784,12 @@ class ImportExportService:
         lease = lease or await lease_job(job_id)
         async with db.graphver_session() as s:
             row = await s.get(JobORM, job_id)
-            job = {**(row.field_scope or {}), "graphId": row.graph_id, "branchId": row.branch_id,
+            fields = dict(row.field_scope or {})
+            job = {**fields, "graphId": row.graph_id, "branchId": row.branch_id,
                    "workspaceId": row.workspace_id, "dataSourceId": row.data_source_id}
-        merged = await self._svc.merged_commit_id(graph_id=job["graphId"], branch_id=job["branchId"])
-        result = await self._publish_hook(job if merged is None else {**job, "mergedCommitId": merged})
-        if "error" in result:
-            merged = await self._svc.merged_commit_id(graph_id=job["graphId"], branch_id=job["branchId"])
-            if merged is not None:
-                result = await self._publish_hook({**job, "mergedCommitId": merged})
+        result = await self._publish_once(job)
         if job.get("importJobId") and _behind_main(result):
-            result = await self._pull_and_publish(job_id, job, lease, result)
+            result = await self._pull_and_publish(job_id, job, fields, lease, result)
         values: Dict[str, Any] = {"summary": result}
         if "error" in result:
             detail = result["error"].get("detail")
@@ -806,27 +802,51 @@ class ImportExportService:
             await self._svc.release_publishing(graph_id=job["graphId"], branch_id=job["branchId"])
         return result
 
-    async def _pull_and_publish(self, job_id: str, job: Dict[str, Any], lease: Lease,
-                                result: Dict[str, Any]) -> Dict[str, Any]:
+    async def _publish_once(self, job: Dict[str, Any]) -> Dict[str, Any]:
+        """The hook's answer to publishing ``job``'s draft. Refused because the draft merged under
+        it (an earlier attempt's squash landed first), it runs only what a publish sets off."""
+        merged = await self._svc.merged_commit_id(graph_id=job["graphId"], branch_id=job["branchId"])
+        result = await self._publish_hook(job if merged is None else {**job, "mergedCommitId": merged})
+        if "error" in result:
+            merged = await self._svc.merged_commit_id(graph_id=job["graphId"], branch_id=job["branchId"])
+            if merged is not None:
+                result = await self._publish_hook({**job, "mergedCommitId": merged})
+        return result
+
+    async def _pull_and_publish(self, job_id: str, job: Dict[str, Any], fields: Dict[str, Any],
+                                lease: Lease, result: Dict[str, Any]) -> Dict[str, Any]:
         """An import's own publish (``job``) refused because main moved past its draft while it
         waited its turn (``result``): the job pulls main into the draft it holds, with the merge of
         "Pull latest", and publishes it again, up to ``_AUTO_PULLS`` pulls counted on from the
         import's (``pulls``). So the job a client follows ends published, or refused saying why: a
         field both changed differently (``conflicts``), which waits on the draft for someone to
-        resolve it, or main moving on every time (``not_up_to_date``). The import's
-        ``summary.publish`` follows along."""
+        resolve it, or main moving on every time (``not_up_to_date``), or what refused the pull
+        (the graph frozen meanwhile, …). Each pull is counted on the job (``field_scope.pulls``),
+        fenced, so an attempt that takes the job over counts on. The import's ``summary.publish``
+        follows along."""
         pulls = int(job.get("pulls") or 0)
         while _behind_main(result) and pulls < _AUTO_PULLS:
             lease.check()
-            pulled = await self._svc.rebase_draft(
-                graph_id=job["graphId"], branch_id=job["branchId"], actor=job["actor"],
-                message="pull latest from main to publish the import", publishing_ok=True)
+            try:
+                pulled = await self._svc.rebase_draft(
+                    graph_id=job["graphId"], branch_id=job["branchId"], actor=job["actor"],
+                    message="pull latest from main to publish the import", publishing_ok=True)
+            except (_HttpMapped, ConcurrencyError) as exc:
+                # The draft merged under the pull (an earlier attempt published it): that publish
+                # is this job's. Anything else refused the pull, and says why.
+                if await self._svc.merged_commit_id(graph_id=job["graphId"], branch_id=job["branchId"]):
+                    result = await self._publish_once(job)
+                else:
+                    result = {"error": {"status": getattr(exc, "status_code", 409), "detail": _refusal(exc)}}
+                break
             pulls += 1
+            async with db.graphver_session() as s:
+                await lease.checkpoint(s, field_scope={**fields, "pulls": pulls})
             if not pulled.get("clean"):
                 result = {"error": {"status": 409, "detail": _conflicts(pulled)}}
                 break
             await self._note_publish(job["importJobId"], {"state": "queued", "jobId": job_id, "pulls": pulls})
-            result = await self._publish_hook(job)
+            result = await self._publish_once(job)
         if "error" in result:
             await self._note_publish(job["importJobId"], {
                 "state": "skipped", "jobId": job_id, "pulls": pulls, "reason": result["error"].get("detail")})

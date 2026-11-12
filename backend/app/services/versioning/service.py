@@ -2624,12 +2624,13 @@ class GraphVersioningService:
                         "already_up_to_date": True}
 
             # The draft's own edits, read once: the merge and the rewrite below use the same read. A
-            # draft past SQUASH_PAGED_ABOVE reads only those main changed too, and what they meet at
-            # an edge: nothing else it holds can merge to anything but itself (_pull_paged).
+            # draft past SQUASH_PAGED_ABOVE reads only those main changed too or a resolution names,
+            # and what they meet at an edge: nothing else it holds can merge to anything but itself
+            # (_pull_paged).
             paged = await self._change_count(s, graph_id, draft.id) > config.SQUASH_PAGED_ABOVE
             if paged:
-                own = await self._own_payloads_of(s, graph_id, draft.id, await self._changed_in_window(
-                    s, graph_id, main_id, from_seq, to_seq))
+                own = await self._own_payloads_of(s, graph_id, draft.id, set(resolutions or ()) | (
+                    await self._changed_in_window(s, graph_id, main_id, from_seq, to_seq)))
             else:
                 own = await self._branch_own_payloads(s, graph_id, draft.id)
             merged_state, conflicts, theirs = await self._compute_merge_bounded(
