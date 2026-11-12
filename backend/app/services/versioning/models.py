@@ -336,7 +336,10 @@ class ProjectionStateORM(VersioningBase):
     # asked}``, where ``pending`` says why (``active``: a job was already running, which may have
     # read the graph before the change that asked; ``refused``: a hold, or the service could not
     # be reached). The liveness loop asks again, every GRAPHVER_ROLLUP_REASK_SECS, until one is
-    # queued; NULL when nothing is owed (20261112_1200_gv_ps_rollup_state).
+    # queued. ``moved``: the summaries already count writes the next full seed brings (it cleared
+    # what was held, or a window that moved them escalated), so the full seed that publishes hands
+    # them to the job instead of moving them by its difference, and clears it. NULL when nothing
+    # is owed (20261112_1200_gv_ps_rollup_state).
     rollup_state = Column(JSONB, nullable=True)
     last_projected_at = Column(Text, nullable=True)
     last_error = Column(Text, nullable=True)
@@ -415,8 +418,9 @@ class ProjectionQuarantineORM(VersioningBase):
     graph's rows first, oldest first; a row that lands, or a newer write of the same entity that
     lands, removes it. While a graph holds any, its passes publish unverified.
 
-    ``entity_key`` names the entity as the statement does: a node's urn, an edge's id, or its
-    ends. ``cypher`` and ``params`` are the statement and its one row, as sent."""
+    ``entity_key`` names the entity as the statement does: a node's urn, or an edge's id with its
+    type and ends (``<id>@<type>:<source urn>-><target urn>``). ``cypher`` and ``params`` are the
+    statement and its one row, as sent."""
 
     __tablename__ = "projection_quarantine"
 

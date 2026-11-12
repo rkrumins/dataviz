@@ -7,10 +7,13 @@ Cypher) with a timeout policy on top. It raises FalkorDB's own ``Query timed out
   ``max_rows`` rows;
 - a ``DETACH DELETE`` would take a node with more than ``hub_degree`` relationships;
 - the statement is the ``fail_after``-th one (a single mid-window failure);
-- a statement writes an entity in ``poison``, named by urn, entity id or edge id.
+- a statement writes an entity in ``poison``, named by urn, entity id or edge id, or writes an edge
+  between two ends named there as ``<source urn>-><target urn>``. An edge that only ends at a
+  poisoned node does not time out: as in FalkorDB, its MATCH finds no node, and it is not written.
 
 It also answers the hub-safe delete's shapes: a page of a node's relationships deleted, and
-whether any are left.
+whether any are left, the node matched by label and urn, by internal id, or by label, urn and
+entity id.
 """
 from __future__ import annotations
 
@@ -22,8 +25,9 @@ from backend.tests.integration.test_versioning_projection import FakeFalkor, Fak
 _TIMEOUT = "Query timed out"
 #: A poisoned entity's writes time out; reading it does not (a large payload is slow to write).
 _WRITES = re.compile(r"\b(MERGE|DELETE|SET)\b")
-_PAGE_DELETE = re.compile(r"MATCH \(n:([^ ]+) \{urn: \$u\}\)-\[r\]-\(\) WITH DISTINCT r LIMIT \$k DELETE r")
-_ANY_LEFT = re.compile(r"MATCH \(n:([^ ]+) \{urn: \$u\}\)-\[r\]-\(\) RETURN 1 LIMIT 1")
+_NODE = r"MATCH \(n(?::[^ ]+ \{urn: \$u\})?\)(?: WHERE (?:id\(n\) = \$u|n\.entityId = \$e))?"
+_PAGE_DELETE = re.compile(_NODE + r" MATCH \(n\)-\[r\]-\(\) WITH DISTINCT r LIMIT \$k DELETE r")
+_ANY_LEFT = re.compile(_NODE + r" MATCH \(n\)-\[r\]-\(\) RETURN 1 LIMIT 1")
 
 
 class TimeoutGraph(FakeGraph):
@@ -40,12 +44,29 @@ class TimeoutGraph(FakeGraph):
     def _incident(self, urn: str) -> list:
         return [k for k, e in self.edges.items() if urn in (e["src"], e["tgt"])]
 
+    def _urn_of(self, row) -> Optional[str]:
+        """The urn of the node a delete's row names: a urn, an internal id or a ``{urn, eid}``."""
+        if isinstance(row, int):
+            return next((u for u, i in self._ids.items() if i == row), None)
+        return row if isinstance(row, str) else row.get("urn")
+
+    def _hub(self, cypher: str, params: dict) -> Optional[str]:
+        """The urn of the node a hub-safe delete's statement matches, if it holds one."""
+        if "id(n) = $u" in cypher:
+            return self._urn_of(params["u"])
+        node = self.nodes.get(params["u"])
+        if node is None or ("$e" in cypher and node.get("entityId") != params["e"]):
+            return None
+        return params["u"]
+
     @staticmethod
     def _names(rows) -> set:
         out = set()
         for row in rows:
             if isinstance(row, dict):
-                out.update(str(v) for k, v in row.items() if k in ("urn", "eid", "entityId", "src", "tgt"))
+                out.update(str(v) for k, v in row.items() if k in ("urn", "eid", "entityId"))
+                if "src" in row and "tgt" in row:
+                    out.add(f"{row['src']}->{row['tgt']}")
             else:
                 out.add(str(row))
         return out
@@ -69,18 +90,17 @@ class TimeoutGraph(FakeGraph):
             if self.poison and self._names(rows) & self.poison and _WRITES.search(cypher):
                 raise self._time_out()
             if (self.hub_degree is not None and "DETACH DELETE n" in cypher
-                    and any(len(self._incident(u)) > self.hub_degree
-                            for u in ([r if isinstance(r, str) else r.get("urn") for r in rows]))):
+                    and any(len(self._incident(self._urn_of(r))) > self.hub_degree for r in rows)):
                 raise self._time_out()
-        m = _PAGE_DELETE.fullmatch(cypher)
-        if m:
-            if params["u"] in self.poison:
+        if _PAGE_DELETE.fullmatch(cypher):
+            urn = self._hub(cypher, params)
+            if urn in self.poison:
                 raise self._time_out()
-            for k in self._incident(params["u"])[:int(params["k"])]:
+            for k in self._incident(urn)[:int(params["k"])]:
                 self.edges.pop(k, None)
             return None
         if _ANY_LEFT.fullmatch(cypher):
-            return _Result([[1]] if self._incident(params["u"]) else [])
+            return _Result([[1]] if self._incident(self._hub(cypher, params)) else [])
         return await super().query(cypher, params)
 
 

@@ -89,11 +89,18 @@ integration's many small changes as a few commits.
   everything else. The Import dialog and the reference connector retry it.
 - **One change that can't be written to the fast read layer no longer holds back the graph.**
   - A projector statement that still times out for a single entity, after its retries, is held
-    back (`projection_quarantine`), and the rest of the publish lands.
-  - Later passes retry it first, and a caught-up graph retries it every 5 minutes. A rebuild
-    while anything is held rebuilds the lineage summaries too.
+    back (`projection_quarantine`), and the rest of the publish lands. An edge to a node held back
+    is held with it, and written once the node is.
+  - Later passes retry it first, and a caught-up graph retries it every 5 minutes. A held delete of
+    an edge where it was stays held when the edge is written where it now is. A rebuild that
+    resumes from where its last pass stopped retries what that pass held.
+  - A rebuild while anything is held rebuilds the lineage summaries too. So does a rebuild a
+    graph starts on its own after a publish that moved them, as the heal it replaced did. Each is
+    recorded (`projection_state.rollup_state.moved`) until a rebuild publishes, so a rebuild that
+    fails first does not lose it.
   - **Data health** lists what is held back and why ("Held back"); the watermark carries it as
-    `quarantine`.
+    `quarantine`, for a graph being projected. A graph unloaded, waiting for memory or trashed is
+    retried by nothing, so neither lists it, and `graphver_projection_quarantined` leaves it out.
   - While any change is held, passes publish `unverified`.
   - `GRAPHVER_PROJECTION_QUARANTINE=0` restores the old behaviour.
 - **An import says what its rows find their entities by: `identifier`.** On `POST …/imports`,
@@ -242,7 +249,9 @@ integration's many small changes as a few commits.
   - Every chunked projector statement now splits in half on a timeout or memory refusal and sends
     the halves again, down to one row.
   - The width that worked is kept for the graph, and grows back slowly.
-  - A hub node is deleted after its relationships, 10,000 at a time.
+  - A hub node is deleted after its relationships, 10,000 at a time: in a publish, in the tombstone
+    sweep, and in a rebuild of a graph too large to hold, which a stale hub otherwise failed for
+    good.
   - Each pass logs what its statements took.
 - **No projector delete scans every relationship in the graph.**
   - An edge deleted in a publish is deleted, anchored on its ends, at every position it held:

@@ -12,6 +12,11 @@
   not confirm holds the watermark as ``replica_unconfirmed``.
 * The bootstrap head flip bumps the epoch in the transaction its lease fences.
 * An explicit rebuild that finds a pass in flight, or loses its fence, nudges the worker.
+* A rebuild that resumes from its cursor retries what its earlier passes held; one that starts
+  over clears it.
+* The summaries a rebuild owes the job (``rollup_state.moved``) are handed over by the full seed
+  that publishes, never moved by its difference again; a window that moved them and escalates
+  owes its rebuild them.
 
 Pure unit tests — no Postgres, no FalkorDB (fakes in the style of
 ``test_projection_cancellation_unit.py``).
@@ -429,3 +434,88 @@ def test_a_rebuild_that_clears_held_changes_hands_the_rollups_to_the_job(monkeyp
         monkeypatch.setattr(proj, "_reconcile_in_place", reconcile)
         r = asyncio.run(proj.project_graph("g1"))
         assert r["projected"] == 5 and stale == expect, (r, stale)
+
+
+def test_a_rebuild_that_resumes_retries_what_its_earlier_passes_held(monkeypatch):
+    """A full seed that resumes from its cursor writes nothing again before where it stopped, so
+    what its earlier passes held is retried, as a window retries it, never cleared unwritten. One
+    that starts over clears it."""
+    for cursor, expect in (([[0, 5, "node", "ent_9"]], False), ([], True)):
+        ps = _PS(projected=0, target=5)
+        ps.status, ps.quarantine_next_at = "rebuilding", "2000-01-01T00:00:00+00:00"
+        proj, ps, client, _seen = _projector(monkeypatch, ps=ps)
+        retried = []
+
+        async def query(cypher, params=None, cursor=cursor, **k):
+            return SimpleNamespace(result_set=cursor if cypher == projection._CURSOR_READ else [])
+
+        async def retry(client, graph_id, *, full_seed):
+            retried.append(full_seed)
+            return False
+
+        async def reconcile(*a, **k):
+            return {"writes": 0, "rollups": "none", "structural": False}
+
+        client.query = query
+        monkeypatch.setattr(proj, "_retry_quarantined", retry)
+        monkeypatch.setattr(proj, "_reconcile_in_place", reconcile)
+        asyncio.run(proj.project_graph("g1"))
+        assert retried == [expect], (cursor, retried)
+
+
+def test_a_full_seed_owed_the_summaries_hands_them_to_the_job(monkeypatch):
+    """The summaries a rebuild owes the job (``rollup_state.moved``: a rebuild before it cleared
+    what was held, or the window that escalated moved them) are handed over by the full seed that
+    publishes, never moved by its difference again, whatever it finds."""
+    for state, expect in (({"moved": "2026-11-12T00:00:00+00:00"}, (True, ["g1"])),
+                          (None, (False, []))):
+        ps = _PS(projected=0, target=5)
+        ps.status, ps.rollup_state = "rebuilding", state
+        proj, ps, _client, _seen = _projector(monkeypatch, ps=ps)
+        stale, moved = [], []
+
+        async def rollups_stale(graph_id):
+            stale.append(graph_id)
+
+        async def reconcile(*a, rollups_moved_this_pass=False, **k):
+            moved.append(rollups_moved_this_pass)
+            return {"writes": 1, "rollups": "applied", "structural": False}
+
+        proj._on_rollups_stale = rollups_stale
+        monkeypatch.setattr(proj, "_reconcile_in_place", reconcile)
+        r = asyncio.run(proj.project_graph("g1"))
+        assert r["projected"] == 5 and (moved[0], stale) == expect, (r, moved, stale)
+
+
+def test_an_escalation_owes_its_rebuild_the_summaries_its_window_moved(monkeypatch):
+    """A window that moved the summaries, or owed them to the job, and then escalates owes its
+    rebuild them, as the heal it replaces passed ``rollups_moved_this_pass``. One that moved
+    none owes nothing."""
+    for deltas, applied, expect in (({("a", "b"): {"dw": 1}}, True, True),
+                                    ("stale", False, True), ({}, False, False)):
+        proj, _ps, _client, _seen = _projector(monkeypatch, ps=_PS(projected=3, target=5),
+                                               verify_error="short")
+        escalated = []
+
+        async def compute(*a, deltas=deltas):
+            return deltas
+
+        async def apply_rollups(*a, applied=applied):
+            return applied
+
+        async def verify(*a, heal_outcome=None, **k):
+            heal_outcome["escalate"] = "it holds less than history"
+            return "short", False
+
+        async def escalate(graph_id, mine, reason, cause, *, summaries_moved=False):
+            escalated.append(summaries_moved)
+            return True
+
+        proj._edge_types_resolver = object()
+        monkeypatch.setattr(proj, "_compute_rollup_deltas", compute)
+        monkeypatch.setattr(proj, "_apply_rollups", apply_rollups)
+        monkeypatch.setattr(proj, "_verify_and_heal", verify)
+        monkeypatch.setattr(proj, "_escalate", escalate)
+        monkeypatch.setattr(config, "PROJECTION_VERIFY_INTERVAL_SECS", 0)
+        asyncio.run(proj.project_graph("g1"))
+        assert escalated == [expect], (deltas, escalated)

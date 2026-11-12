@@ -243,7 +243,7 @@ their series are complete: alert on those.
 | `graphver_projection_statement_seconds_count` / `_sum{kind}` | counter | versioning worker; API | Every projector statement by kind (`node_merge`, `edge_merge`, `node_delete`, `edge_delete`, `rollup_write` and others): the average is `_sum / _count` |
 | `graphver_projection_splits_total{kind,cause}` | counter | versioning worker; API | A statement split in half because the graph store refused it: `cause` is `timeout` or `memory`. A steady rise is the statement ladder sizing itself; it should level off |
 | `graphver_projection_lagging_graphs`, `graphver_projection_lag_commits_max`, `graphver_projection_lag_seconds_max` | gauge | versioning worker | On every poll: how many graphs are projected below their head, the most commits one is behind, and the longest since one of them last published |
-| `graphver_projection_quarantined` | gauge | versioning worker | Changes held back across graphs: a statement that still failed for one entity on its own. Each graph's are listed on its **Data health** tab |
+| `graphver_projection_quarantined` | gauge | versioning worker | Changes held back across the graphs being projected: a statement that still failed for one entity on its own, or an edge held with its end node. A graph evicted, waiting for room in memory or trashed is not counted, since nothing retries its rows until it is loaded again. Each graph's are listed on its **Data health** tab |
 
 ### Alerts worth having
 

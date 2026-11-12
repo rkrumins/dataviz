@@ -301,15 +301,17 @@ _PASS_STATS: ContextVar[Optional[_PassStats]] = ContextVar("projection_pass_stat
 #: The statements a single entity's failure is quarantined for (``projection_quarantine``): kind →
 #: (entity kind, the key its row names the entity by). Not a read, whose answer the pass needs; not a
 #: rollup cell, whose weight is derived and re-derived; not a delete by internal id, which could name
-#: another node once FalkorDB reuses the id. Those still fail the pass.
+#: another node once FalkorDB reuses the id. Those still fail the pass. A node is named by its urn; an
+#: edge by its id where the statement puts it, with its type and ends (``<eid>@<type>:<src>-><tgt>``):
+#: a write of the edge somewhere else supersedes nothing held there.
 _QUARANTINABLE: Dict[str, Tuple[str, Callable[[object], str]]] = {
     "node_merge": ("node", lambda row: str(row["urn"])),
     "node_delete": ("node", lambda row: str(row)),
     "node_delete_pair": ("node", lambda row: str(row["urn"])),
     "relabel": ("node", lambda row: str(row)),
     "rekey": ("node", lambda row: str(row["old"])),
-    "edge_merge": ("edge", lambda row: str(row["eid"])),
-    "edge_delete": ("edge", lambda row: str(row["eid"])),
+    "edge_merge": ("edge", lambda row: f"{row['eid']}@{row['rel']}:{row['src']}->{row['tgt']}"),
+    "edge_delete": ("edge", lambda row: f"{row['eid']}@{row['rel']}:{row['src']}->{row['tgt']}"),
 }
 
 
@@ -415,6 +417,22 @@ async def _read_cursor(client) -> Optional[Tuple[int, int, str, str]]:
     if not rows or not rows[0] or rows[0][0] is None or rows[0][1] is None:
         return None
     return int(rows[0][0]), int(rows[0][1]), str(rows[0][2] or ""), str(rows[0][3] or "")
+
+
+def _resumes(found: Optional[Tuple[int, int, str, str]], from_seq: int, to_seq: int) -> bool:
+    """Whether the cursor ``found`` is a pass from ``from_seq`` that stopped part-way to a ``pTo``
+    this pass reaches: this pass finishes it, after the last page that landed."""
+    return found is not None and found[0] == from_seq and from_seq < found[1] <= to_seq
+
+
+def _owe_summaries():
+    """``projection_state.rollup_state`` with ``moved`` set: the lineage summaries already count
+    writes the next full seed brings (a window moved them for entities the key lacked), so that
+    seed hands them to the batch job instead of moving them by its difference. Kept until a pass
+    publishes (``_finish``), whatever passes fail first; only a full seed publishes while it is
+    set."""
+    return func.coalesce(ProjectionStateORM.rollup_state, func.jsonb_build_object()).op("||")(
+        func.jsonb_build_object("moved", _now()))
 
 
 #: The tombstone sweep's own watermark on the pass marker (``_sweep_tombstoned``): every delete at or
@@ -1013,7 +1031,7 @@ class FalkorProjector:
                                 raise
                             failure = floor_exc
                     if await self._quarantine(kind, cypher, {**(params or {}), param: chunk},
-                                              failure):
+                                              str(failure)):
                         return
                     raise failure
                 elapsed = _clock() - started
@@ -1033,10 +1051,11 @@ class FalkorProjector:
             await send(chunk)
             at += len(chunk)
 
-    async def _quarantine(self, kind: str, cypher: str, params: dict, exc: BaseException) -> bool:
+    async def _quarantine(self, kind: str, cypher: str, params: dict, why: str) -> bool:
         """Hold a single row's statement that still fails in ``projection_quarantine``, so the rest
-        of the window lands (``GRAPHVER_PROJECTION_QUARANTINE``). False — the pass fails, as
-        before — when it is off, outside a pass, or for a statement it does not hold."""
+        of the window lands (``GRAPHVER_PROJECTION_QUARANTINE``); ``why`` is its recorded error.
+        False — the pass fails, as before — when it is off, outside a pass, or for a statement it
+        does not hold."""
         held = _PASS_HELD.get()
         spec = _QUARANTINABLE.get(kind)
         if not config.PROJECTION_QUARANTINE or held is None or spec is None:
@@ -1048,7 +1067,7 @@ class FalkorProjector:
         stmt = pg_insert(ProjectionQuarantineORM).values(
             graph_id=held.graph_id, statement=kind, entity_key=key, entity_kind=entity_kind,
             cypher=cypher, params=json.loads(json.dumps(params, default=str)),
-            error=str(exc)[:500], attempts=1, first_at=_now(), last_at=_now())
+            error=why[:500], attempts=1, first_at=_now(), last_at=_now())
         stmt = stmt.on_conflict_do_update(
             index_elements=["graph_id", "statement", "entity_key"],
             set_={"cypher": stmt.excluded.cypher, "params": stmt.excluded.params,
@@ -1059,14 +1078,14 @@ class FalkorProjector:
             await self._mark_held(s, held.graph_id)
         held.keys.add((entity_kind, key))
         held.added += 1
-        logger.error("projection of %s: %s for %s %s still failed on its own after %d retries (%s); "
-                     "quarantined, and the rest of the window goes on", held.graph_id, kind,
-                     entity_kind, key, config.PROJECTION_FLOOR_RETRIES, exc)
+        logger.error("projection of %s: %s for %s %s quarantined (%s), and the rest of the window "
+                     "goes on", held.graph_id, kind, entity_kind, key, why)
         return True
 
     async def _release(self, kind: str, chunk: list) -> None:
         """A chunk that landed wrote its entities as they are now: any of them the graph holds in
-        quarantine, under any statement, is released — a newer write superseded it."""
+        quarantine, under any statement, is released — a newer write superseded it. An edge is
+        released only where the chunk wrote it: its key names its type and ends."""
         held = _PASS_HELD.get()
         spec = _QUARANTINABLE.get(kind)
         if held is None or not held.keys or spec is None:
@@ -1098,19 +1117,32 @@ class FalkorProjector:
     async def _retry_quarantined(self, client, graph_id: str, *, full_seed: bool) -> bool:
         """Before a pass writes: retry the graph's quarantined statements, oldest first, so its
         own writes land after them. One that lands leaves the table; one that still times out
-        stays, counted. A full seed rewrites every entity itself, so its graph's rows are cleared
-        instead: True when there were any. What is still held is the pass's (``_PASS_HELD``)."""
+        stays, counted, and so does an edge merge whose end node is still held, which would match
+        nothing. A full seed that starts over rewrites every entity itself, so its graph's rows are
+        cleared instead, and the summaries are owed the job in the same transaction
+        (:func:`_owe_summaries`): True when there were any. What is still held is the pass's
+        (``_PASS_HELD``)."""
         held = _PASS_HELD.get()
         async with self._session() as s:
             if full_seed:
                 cleared = (await s.execute(ProjectionQuarantineORM.__table__.delete().where(
                     ProjectionQuarantineORM.graph_id == graph_id))).rowcount
                 await self._mark_held(s, graph_id)
+                if cleared:
+                    await s.execute(update(ProjectionStateORM)
+                                    .where(ProjectionStateORM.graph_id == graph_id)
+                                    .values(rollup_state=_owe_summaries())
+                                    .execution_options(synchronize_session=False))
                 return bool(cleared)
             rows = (await s.execute(select(ProjectionQuarantineORM)
                                     .where(ProjectionQuarantineORM.graph_id == graph_id)
                                     .order_by(ProjectionQuarantineORM.first_at))).scalars().all()
         for row in rows:
+            if row.statement == "edge_merge" and held is not None and any(
+                    ("node", str(item[end])) in held.keys
+                    for item in row.params.get("batch") or () for end in ("src", "tgt")):
+                held.keys.add((row.entity_kind, row.entity_key))
+                continue
             try:
                 await _q(client, row.cypher, params=row.params)
             except Exception as exc:
@@ -1137,28 +1169,33 @@ class FalkorProjector:
             await self._mark_held(s, graph_id)
         return False
 
-    def _hub_safe_delete(self, client, label: str):
+    def _hub_safe_delete(self, client, node: str, cypher: str, param: str,
+                         bind: Callable[[object], dict] = lambda row: {"u": row}):
         """``at_floor`` for a node delete that still times out on its own: a hub, whose
         ``DETACH DELETE`` must drop every relationship on it in one statement. Its relationships are
-        deleted a page at a time first (``_HUB_PAGE``, halved on a timeout), then the node."""
-        async def delete(urn, _exc) -> bool:
+        deleted a page at a time first (``_HUB_PAGE``, halved on a timeout), then the node, by the
+        statement that timed out (``cypher``, the row as ``$<param>``). ``node`` matches the row's
+        node as ``n``, from the parameters ``bind`` makes of the row: by label and urn in a window,
+        by internal id in a rebuild, by label, urn and entity id in the tombstone sweep."""
+        async def delete(row, _exc) -> bool:
+            at = bind(row)
             page = _HUB_PAGE
             while True:
                 try:
-                    await _q(client, f"MATCH (n:{label} {{urn: $u}})-[r]-() WITH DISTINCT r "
-                                     "LIMIT $k DELETE r", params={"u": urn, "k": page})
+                    await _q(client, f"{node} MATCH (n)-[r]-() WITH DISTINCT r LIMIT $k DELETE r",
+                             params={**at, "k": page})
                 except Exception as exc:
                     if _pressure_kind(exc) in ("timeout", "memory") and page > 1:
                         page = max(1, page // 2)
                         continue
                     raise
-                res = await _q(client, f"MATCH (n:{label} {{urn: $u}})-[r]-() RETURN 1 LIMIT 1",
-                               params={"u": urn}, timeout_ms=_READ_TIMEOUT_MS, read_only=True)
+                res = await _q(client, f"{node} MATCH (n)-[r]-() RETURN 1 LIMIT 1",
+                               params=at, timeout_ms=_READ_TIMEOUT_MS, read_only=True)
                 if not (getattr(res, "result_set", None) or []):
                     break
-            await _q(client, _delete_nodes_cypher(label), params={"urns": [urn]})
+            await _q(client, cypher, params={param: [row]})
             logger.warning("projection: node %s on %s deleted after its relationships, a page at "
-                           "a time", urn, getattr(client, "name", "the graph"))
+                           "a time", row, getattr(client, "name", "the graph"))
             return True
         return delete
 
@@ -1291,7 +1328,8 @@ class FalkorProjector:
         """End a pass while the row is still its own (epoch ``mine``): publish ``to_seq``, or
         record the error and, unless ``attempts`` is None (a cancel), back off. Never writes the
         target or the key, which belong to the publishers and the repin. Returns False when the
-        pass was superseded.
+        pass was superseded. A published pass takes the summaries a full seed owed the batch job
+        (``rollup_state.moved``, :func:`_owe_summaries`): it hands them over once published.
 
         On a customer's key a published pass also says what it found there that history doesn't
         hold: ``surplus`` (nodes, edges) becomes ``external_drift``, and none clears the count it
@@ -1301,7 +1339,10 @@ class FalkorProjector:
                   "progress_done": None, "progress_total": None}      # progress is over either way
         if published:
             values.update(projected_commit_seq=to_seq, last_projected_at=_now(),
-                          failed_attempts=0, next_retry_at=None)
+                          failed_attempts=0, next_retry_at=None,
+                          rollup_state=func.nullif(
+                              ProjectionStateORM.rollup_state.op("-")(literal("moved")),
+                              func.jsonb_build_object()))
             if surplus is not _UNCOUNTED:
                 drift = ProjectionStateORM.external_drift
                 notified = drift["via"].astext == "notification"
@@ -1321,12 +1362,15 @@ class FalkorProjector:
             )).first()
         return row is not None
 
-    async def _escalate(self, graph_id: str, mine: int, reason: str, cause: str) -> bool:
+    async def _escalate(self, graph_id: str, mine: int, reason: str, cause: str, *,
+                        summaries_moved: bool = False) -> bool:
         """Rebuild a graph its windows cannot bring up to date, on its own (``PROJECTION_ESCALATE``):
         the reset an operator's rebuild makes (``request_projection_rebuild``), fenced on this pass's
         epoch, so the next pass reconciles the key in place with committed main (streamed and
         resumable on a large graph) and publishes. Its last error says why, until then. False when
-        something moved the row first."""
+        something moved the row first. ``summaries_moved``: the escalating window moved the lineage
+        summaries, or owed them to the batch job, so the rebuild hands them to the job
+        (:func:`_owe_summaries`), as the heal it replaces did."""
         from backend.app.jobs.metrics import increment
         head = select(GraphORM.main_head_commit_seq).where(GraphORM.id == graph_id).scalar_subquery()
         async with self._session() as s:
@@ -1336,7 +1380,8 @@ class FalkorProjector:
                 .values(projected_commit_seq=0, target_commit_seq=head,
                         status=_unless_loading("rebuilding"), epoch=ProjectionStateORM.epoch + 1,
                         failed_attempts=0, next_retry_at=None,
-                        last_error=f"rebuilding on its own: {reason}"[:500])
+                        last_error=f"rebuilding on its own: {reason}"[:500],
+                        **({"rollup_state": _owe_summaries()} if summaries_moved else {}))
                 .returning(ProjectionStateORM.graph_id)
                 .execution_options(synchronize_session=False))).first()
         if row is None:
@@ -1402,6 +1447,8 @@ class FalkorProjector:
             # A caught-up graph whose quarantined entities are due goes on, with an empty window:
             # the pass retries them, and publishes where it is.
             quarantine_next_at = getattr(ps, "quarantine_next_at", None)
+            # The lineage summaries already count what this full seed writes (``_owe_summaries``).
+            summaries_moved = bool((getattr(ps, "rollup_state", None) or {}).get("moved"))
             if from_seq >= to_seq and not (from_seq > 0 and quarantine_next_at
                                            and quarantine_next_at <= _now()):
                 return {"projected": from_seq, "applied": 0, "noop": True}
@@ -1454,10 +1501,15 @@ class FalkorProjector:
             client = await self._graph_client(name, provider_id)
             if unspelled:
                 await self._learn_spelling(client, graph_id)
-            # What earlier passes quarantined goes first, so this pass's own writes land after it.
+            # What earlier passes quarantined goes first, so this pass's own writes land after it. A
+            # full replay that resumes writes nothing again where its earlier passes were, so it
+            # retries what they held, as a window does, rather than clearing it.
+            found = await _read_cursor(client) if from_seq <= 0 else None
             cleared = False
             if quarantine_next_at is not None:
-                cleared = await self._retry_quarantined(client, graph_id, full_seed=from_seq <= 0)
+                cleared = await self._retry_quarantined(
+                    client, graph_id,
+                    full_seed=from_seq <= 0 and not _resumes(found, from_seq, to_seq))
             async with self._session() as s:
                 graph = await s.get(GraphORM, graph_id)
                 main_id = await self._svc._main_branch_id(s, graph_id)
@@ -1474,9 +1526,10 @@ class FalkorProjector:
                     # Only these write a cursor (a long pass's resume point): one that stopped at
                     # a page boundary is finished first, from the same watermark, to its own
                     # ``pTo``, where it stopped. The window after it is the next pass's.
-                    found = await _read_cursor(client)
+                    if paged:
+                        found = await _read_cursor(client)
                     resume = None
-                    if found is not None and found[0] == from_seq and from_seq < found[1] <= to_seq:
+                    if _resumes(found, from_seq, to_seq):
                         to_seq, resume = found[1], (found[2], found[3])
                         logger.info("projection of %s resumes (%d, %d] at %s after %s", graph_id,
                                     from_seq, to_seq, found[2], found[3] or "the start")
@@ -1512,11 +1565,13 @@ class FalkorProjector:
                 # "everything", so a first seed is the same code path.
                 reconciled = await self._reconcile_in_place(
                     client, graph_id, main_id, to_seq, level_map, track_progress=True,
+                    rollups_moved_this_pass=cleared or summaries_moved,
                     provider_id=provider_id, owned=owned, cursor=cursor)
-                if cleared:
-                    # What was held back was missing from the key when its window's rollups
-                    # moved, so they already count what the reconcile has just written: moving
-                    # them by its difference would count it twice. The job rebuilds them.
+                if cleared or summaries_moved:
+                    # What was held back, or what the window that escalated did not land, was
+                    # missing from the key when its window's rollups moved, so they already count
+                    # what the reconcile has just written: moving them by its difference would
+                    # count it twice. The job rebuilds them.
                     reconciled = {**reconciled, "rollups": "stale"}
             elif paged:
                 dropped, structural, paged_writes = await self._apply_paged(
@@ -1610,7 +1665,11 @@ class FalkorProjector:
                 superseded, published = True, False
                 await self._yield_superseded(graph_id, from_seq)
             elif not published and heal_outcome.get("escalate"):
-                await self._escalate(graph_id, mine, str(heal_outcome["escalate"]), "drift")
+                # The rebuild must not move the summaries by its difference again for writes of
+                # this window they already count, nor drop a hand-off the window owed the job.
+                await self._escalate(graph_id, mine, str(heal_outcome["escalate"]), "drift",
+                                     summaries_moved=window_rollups_applied
+                                     or rollup_pairs == "stale")
             elif not published:
                 logger.error("projection for %s held back at seq %d; holding watermark "
                              "at %d so reads stay on Postgres; retry after backoff — %s", graph_id,
@@ -2000,10 +2059,15 @@ class FalkorProjector:
         - ``graphver_projection_lag_commits_max``: the most commits one of them is behind;
         - ``graphver_projection_lag_seconds_max``: the longest since one of them last published;
         - ``graphver_projection_quarantined``: entities held in quarantine, across graphs.
-        Best effort: a failure is logged, and the poll goes on."""
+        Each counts only the graphs a pass projects. Best effort: a failure is logged, and the
+        poll goes on."""
         from backend.app.jobs.metrics import gauge_set
         head = func.greatest(ProjectionStateORM.target_commit_seq, GraphORM.main_head_commit_seq)
         behind = ProjectionStateORM.projected_commit_seq < head
+        # As the poll selects them: an evicted, waiting or trashed graph's held rows are retried by
+        # nothing (a load's full seed clears them, or the purge).
+        projected = (GraphORM.deleted_at.is_(None), GraphORM.fork_parent_graph_id.is_(None),
+                     ProjectionStateORM.status.notin_(("evicted", "waiting_capacity")))
         try:
             async with self._session() as s:
                 lagging, commits, since = (await s.execute(
@@ -2011,11 +2075,13 @@ class FalkorProjector:
                            func.min(ProjectionStateORM.last_projected_at))
                     .select_from(ProjectionStateORM)
                     .join(GraphORM, GraphORM.id == ProjectionStateORM.graph_id)
-                    .where(behind, GraphORM.deleted_at.is_(None),
-                           GraphORM.fork_parent_graph_id.is_(None),
-                           ProjectionStateORM.status.notin_(("evicted", "waiting_capacity"))))).one()
-                held = (await s.execute(select(func.count()).select_from(
-                    ProjectionQuarantineORM))).scalar_one()
+                    .where(behind, *projected))).one()
+                held = (await s.execute(
+                    select(func.count()).select_from(ProjectionQuarantineORM)
+                    .join(ProjectionStateORM,
+                          ProjectionStateORM.graph_id == ProjectionQuarantineORM.graph_id)
+                    .join(GraphORM, GraphORM.id == ProjectionQuarantineORM.graph_id)
+                    .where(*projected))).scalar_one()
         except Exception:                                    # pragma: no cover - infra
             logger.debug("projection lag gauges not read", exc_info=True)
             return
@@ -3181,9 +3247,7 @@ class FalkorProjector:
         for label, urns in _group([(u, l) for (l, u) in duplicated]).items():
             await self._laddered(client, "node_delete", _delete_nodes_cypher(_sanitize_label(label)),
                                  urns, param="urns")
-        await self._laddered(client, "node_delete_id",
-                             "UNWIND $ids AS i MATCH (n) WHERE id(n) = i DETACH DELETE n",
-                             unkeyed, param="ids")
+        await self._delete_nodes_by_id(client, unkeyed)
         await self._delete_edges_by_key(client, list(parallel), progress)
 
         await self._relabel_in_place(client, diff.relabels, progress)
@@ -3315,9 +3379,7 @@ class FalkorProjector:
             if doomed and not owned:
                 done["kept"] = True
             elif doomed:
-                await self._laddered(client, "node_delete_id",
-                                     "UNWIND $ids AS i MATCH (n) WHERE id(n) = i DETACH DELETE n",
-                                     doomed, param="ids")
+                await self._delete_nodes_by_id(client, doomed)
                 done["writes"] += len(doomed)
                 done["structural"] = True
             if cursor is not None:
@@ -3394,6 +3456,14 @@ class FalkorProjector:
                     done["writes"])
         return {"writes": done["writes"], "structural": done["structural"],
                 "rollups": "stale" if done["writes"] or done["kept"] or resumed else "none"}
+
+    async def _delete_nodes_by_id(self, client, ids) -> None:
+        """Delete nodes by the internal ids this pass read from a key the platform owns; a hub
+        among them has its relationships deleted a page at a time first (:meth:`_hub_safe_delete`)."""
+        cypher = "UNWIND $ids AS i MATCH (n) WHERE id(n) = i DETACH DELETE n"
+        await self._laddered(client, "node_delete_id", cypher, ids, param="ids",
+                             at_floor=self._hub_safe_delete(
+                                 client, "MATCH (n) WHERE id(n) = $u", cypher, "ids"))
 
     async def _live_count(self, s, graph_id: str, main_id: str) -> int:
         """How many live entities ``main``'s heads hold — what a full reconcile compares."""
@@ -3890,8 +3960,11 @@ class FalkorProjector:
         # Reads no query stats — the FalkorDB asyncio client mis-parses them; removal is measured
         # by the caller's re-count (mirrors the incremental delete in ``_apply``).
         for label, pairs in pairs_by_label.items():
-            await self._laddered(client, "node_delete_pair", _delete_nodes_by_pair_cypher(label),
-                                 pairs, param="pairs")
+            cypher = _delete_nodes_by_pair_cypher(label)
+            await self._laddered(client, "node_delete_pair", cypher, pairs, param="pairs",
+                                 at_floor=self._hub_safe_delete(
+                                     client, f"MATCH (n:{label} {{urn: $u}}) WHERE n.entityId = $e",
+                                     cypher, "pairs", lambda p: {"u": p["urn"], "e": p["eid"]}))
         await self._run_edge_deletes(client, edge_deletes)
         await _q(client, _SWEPT_WRITE, params={"seq": to_seq})
 
@@ -4051,15 +4124,24 @@ class FalkorProjector:
             if landed and landed[0]:
                 dropped += len(part) - int(landed[0][0] or 0)
 
+        # An edge whose end node is held waits with it: sent now it would match nothing, and be lost
+        # once the node lands. Held after the node, it is retried after it.
+        held = _PASS_HELD.get()
+        waiting = {k for ek, k in held.keys if ek == "node"} if held is not None else set()
         for (rel, sl, tl), ups in by_rel.items():
+            cypher = _edge_merge_cypher(rel, sl, tl, keep_id=not owned)
             for batch in _batches(ups, self._batch):
                 chunk = []
                 for eid, su, tu, p, _slb, _tlb in await self._loaded(batch, 3):
                     item = _edge_item(eid, su, tu, p)
                     item["gvHash"] = _edge_fingerprint(rel, content_hash(p))
+                    item["rel"] = rel                    # for its quarantine key; the cypher has it
+                    if (su in waiting or tu in waiting) and await self._quarantine(
+                            "edge_merge", cypher, {"batch": [item]},
+                            "an end node is held in quarantine"):
+                        continue
                     chunk.append(item)
-                await self._laddered(client, "edge_merge",
-                                     _edge_merge_cypher(rel, sl, tl, keep_id=not owned), chunk,
+                await self._laddered(client, "edge_merge", cypher, chunk,
                                      on_result=count_landed, progress=progress)
 
         await self._run_edge_deletes(client, edge_deletes, progress=progress)
@@ -4068,9 +4150,11 @@ class FalkorProjector:
         for urn, label in node_deletes:
             ndel_by.setdefault(spelled_label(label), []).append(urn)
         for label, urns in ndel_by.items():
-            await self._laddered(client, "node_delete", _delete_nodes_cypher(label), urns,
-                                 param="urns", progress=progress,
-                                 at_floor=self._hub_safe_delete(client, label))
+            cypher = _delete_nodes_cypher(label)
+            await self._laddered(client, "node_delete", cypher, urns, param="urns",
+                                 progress=progress,
+                                 at_floor=self._hub_safe_delete(
+                                     client, f"MATCH (n:{label} {{urn: $u}})", cypher, "urns"))
         return dropped
 
     async def _ensure_urn_indexes(self, client, provider_id: Optional[str],
@@ -4182,7 +4266,7 @@ class FalkorProjector:
                    spelled_label(e.get("tlb")))
             del_by.setdefault(key, []).append(
                 {"eid": e["eid"], "pid": e["eid"].removeprefix("edge:"),
-                 "src": e["src"], "tgt": e["tgt"]}
+                 "src": e["src"], "tgt": e["tgt"], "rel": key[0]}
             )
         for (rel, sl, tl), items in del_by.items():
             await self._laddered(client, "edge_delete", _delete_edges_cypher(rel, sl, tl), items,

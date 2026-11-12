@@ -6,7 +6,9 @@ Pins:
   creates, updates and deletes, each in one pass. The pass publishes, FalkorDB equals main, and
   its ``stats`` show the statements it split.
 - A hub, a node with more relationships than one statement can delete, is deleted: its
-  relationships go a page at a time, then the node, and the pass publishes.
+  relationships go a page at a time, then the node, and the pass publishes. So is a hub main deleted
+  that the key still holds, by the tombstone sweep, and a hub main never held, by a rebuild of a
+  graph too large to hold.
 - An edge created and deleted inside one window, which an earlier failed attempt at the window
   wrote, is deleted where that attempt put it, anchored on its ends: no statement scans the
   graph's relationships for an id.
@@ -20,14 +22,22 @@ Pins:
 - The tombstone sweep clears a node main deleted that the cache still holds, and records how far
   it swept (``sweptSeq``), so the next sweep reads only later deletes.
 - An entity whose every statement times out, even alone, is quarantined: the rest of its window
-  lands and publishes, unverified, and the watermark lists it. A rebuild meanwhile holds it again,
-  and hands the rollups to the aggregation job. Once the fault clears, the caught-up graph gets a
-  pass of its own when the entity is due, which lands it and verifies again. With
+  lands and publishes, unverified, and the watermark lists it. An edge of a held node is held with
+  it, and stays held while the node's retry fails. A rebuild meanwhile holds them again, and hands
+  the rollups to the aggregation job, even when the rebuild that cleared what was held failed
+  before it published. Once the fault clears, the caught-up graph gets a pass of its own when the
+  entity is due, which lands it, then its edge, and verifies again. With
   ``GRAPHVER_PROJECTION_QUARANTINE`` off, it fails the pass, as before.
+- A held delete of an edge where it was is kept when the edge is written where it now is, and
+  lands once the fault clears.
 - A paged window, and a streamed rebuild, under a pass time box that stops each pass after one
-  page, resume from their cursor pass after pass until one publishes the whole of it.
+  page, resume from their cursor pass after pass until one publishes the whole of it. A resumed
+  rebuild retries what its earlier passes held, rather than dropping it.
 - Drift a window cannot explain holds the pass back and rebuilds the graph on its own, and the
-  third pressure failure in a row of one window does too; the rebuild then publishes.
+  third pressure failure in a row of one window does too; the rebuild then publishes. A window that
+  moved the lineage summaries before it escalated owes its rebuild them
+  (``projection_state.rollup_state.moved``), which an ask recorded meanwhile keeps: the rebuild
+  hands them to the job rather than moving them by its difference, and its publish clears it.
 """
 from __future__ import annotations
 
@@ -123,6 +133,50 @@ async def _hub(svc):
     assert not r["noop"] and r["verify_error"] is None, r
     g = await _assert_matches_main(svc, fake, gid)
     assert "HUB" not in g.entity_ids() and not g.edges
+
+
+async def _stale_hubs(svc, monkeypatch):
+    from backend.app.services.versioning import config
+
+    fake = TimeoutFalkor(hub_degree=50)
+    proj = FalkorProjector(graph_client_factory=fake, batch_size=500)
+    gid = await _graph(svc)
+    await _edit_publish(svc, gid, "alice", [
+        _create("HUB", "hub"),
+        *(_create(f"L{i}", f"leaf{i}") for i in range(120)),
+        *(_link(f"H{i}", "HUB", f"L{i}") for i in range(120)),
+    ], "a hub")
+    assert (await proj.project_graph(gid))["verify_error"] is None
+    g = fake.graphs[next(iter(fake.graphs))]
+    hub, spokes = dict(g.nodes["urn:t:HUB"]), {k: dict(e) for k, e in g.edges.items()}
+    await _edit_publish(svc, gid, "alice", [
+        {"op": "delete", "entity_kind": "node", "entity_id": "HUB", "payload": None}], "drop it")
+    assert (await proj.project_graph(gid))["verify_error"] is None
+
+    # The key holds the hub main deleted again, with its relationships (a restored snapshot): the
+    # tombstone sweep deletes them a page at a time, then the hub, and the pass publishes.
+    g.nodes["urn:t:HUB"] = hub
+    g._id_of("urn:t:HUB")
+    g.edges.update(spokes)
+    await _edit_publish(svc, gid, "alice", [_create("D", "d")], "one more")
+    proj._verified_at.clear()
+    r = await proj.project_graph(gid)
+    assert r["verify_error"] is None and not r.get("quarantined"), r
+    assert "urn:t:HUB" not in g.nodes and not g.edges
+    await _assert_matches_main(svc, fake, gid)
+
+    # A rebuild of a graph too large to hold, whose key holds a hub main never had: the same.
+    streamed_above = config.PROJECTION_RECONCILE_STREAMED_ABOVE
+    monkeypatch.setattr(config, "PROJECTION_RECONCILE_STREAMED_ABOVE", 5)
+    g.nodes["urn:t:STALE"] = {**hub, "urn": "urn:t:STALE", "entityId": "STALE"}
+    g._id_of("urn:t:STALE")
+    g.edges.update({f"S{i}": {**e, "src": "urn:t:STALE"} for i, e in enumerate(spokes.values())})
+    assert await svc.request_projection_rebuild(gid)
+    r = await proj.project_graph(gid)
+    assert r["verify_error"] is None and not r["noop"], r
+    assert "urn:t:STALE" not in g.nodes and not g.edges
+    await _assert_matches_main(svc, fake, gid)
+    monkeypatch.setattr(config, "PROJECTION_RECONCILE_STREAMED_ABOVE", streamed_above)
 
 
 async def _created_and_deleted_in_one_window(svc):
@@ -240,7 +294,23 @@ async def _quarantine(svc, monkeypatch):
     assert (await proj.project_graph(gid))["verify_error"] is None
     g = fake.graphs[next(iter(fake.graphs))]
 
+    async def make_due():
+        async with db.graphver_session() as s:
+            await s.execute(update(ProjectionStateORM).where(ProjectionStateORM.graph_id == gid)
+                            .values(quarantine_next_at="2000-01-01T00:00:00+00:00"))
+
+    async def held_rows():
+        async with db.graphver_session() as s:
+            return {(q.statement, q.entity_key): q.error for q in (await s.execute(
+                select(ProjectionQuarantineORM)
+                .where(ProjectionQuarantineORM.graph_id == gid))).scalars()}
+
+    async def owed():
+        async with db.graphver_session() as s:
+            return ((await s.get(ProjectionStateORM, gid)).rollup_state or {}).get("moved")
+
     # P's every statement times out, however small: it is held, and the rest of the window lands.
+    # Its edge PC, which would match no node, is held with it.
     await _edit_publish(svc, gid, "alice", [
         _create("P", "p"), _create("C", "c"), _link("PC", "P", "C"), _link("AC", "A", "C")],
         "with a poison entity")
@@ -248,24 +318,74 @@ async def _quarantine(svc, monkeypatch):
     assert r["verify_error"] is None and r["unverified"] and r["quarantined"] == 2, r
     assert await _watermark(gid) == r["projected"]
     assert "urn:t:C" in g.nodes and "urn:t:P" not in g.nodes
-    async with db.graphver_session() as s:
-        held = {(q.statement, q.entity_key) for q in (await s.execute(
-            select(ProjectionQuarantineORM).where(ProjectionQuarantineORM.graph_id == gid))).scalars()}
-    assert held == {("node_merge", "urn:t:P"), ("edge_merge", "PC")}, held
+    held = await held_rows()
+    pc = ("edge_merge", "PC@FLOWS_TO:urn:t:P->urn:t:C")
+    assert set(held) == {("node_merge", "urn:t:P"), pc}, held
+    assert "end node is held" in held[pc], held
     wm = await svc.projection_watermark(gid)
     assert wm["quarantine"]["count"] == 2 and wm["quarantine"]["entities"][0]["error"]
 
+    # Unloaded, nothing retries them: neither the gauge nor the watermark counts them.
+    from backend.app.jobs import metrics
+
+    gauges = {}
+    monkeypatch.setattr(metrics, "gauge_set", lambda name, value, **_k: gauges.update({name: value}))
+
+    async def status(to):
+        async with db.graphver_session() as s:
+            await s.execute(update(ProjectionStateORM).where(ProjectionStateORM.graph_id == gid)
+                            .values(status=to))
+
+    for _ in range(3):                       # other graphs' rows may come and go meanwhile
+        await proj._report_lag()
+        loaded = gauges["graphver_projection_quarantined"]
+        await status("evicted")
+        await proj._report_lag()
+        unloaded = gauges["graphver_projection_quarantined"]
+        await status("idle")
+        if loaded - unloaded == 2:
+            break
+    assert loaded - unloaded == 2, (loaded, unloaded)
+    await status("evicted")
+    assert (await svc.projection_watermark(gid))["quarantine"] is None
+    await status("idle")
+
+    # Due while P still fails: PC is not tried without it, and stays held.
+    await make_due()
+    r = await proj.project_graph(gid)
+    assert r["verify_error"] is None and r["quarantined"] == 2, r
+    assert set(await held_rows()) == {("node_merge", "urn:t:P"), pc}
+
     # A rebuild while they are held hands the rollups to the job: they moved with P's window, which
-    # the key lacked, so moving them by the rebuild's difference would count P's edge twice.
+    # the key lacked, so moving them by the rebuild's difference would count P's edge twice. The
+    # rebuild that cleared the rows owes the job that until one publishes, though it fails first.
     stale = []
 
     async def rollups_stale(graph_id):
         stale.append(graph_id)
 
     proj._on_rollups_stale = rollups_stale
+    reconcile = proj._reconcile_in_place
+
+    async def fails(*_a, **_k):
+        raise Exception("Query timed out")
+
+    proj._reconcile_in_place = fails
     assert await svc.request_projection_rebuild(gid)
+    with pytest.raises(Exception, match="Query timed out"):
+        await proj.project_graph(gid)
+    assert not await held_rows() and await owed()
+    moved = []
+
+    async def records(*a, **k):
+        moved.append(k.get("rollups_moved_this_pass"))
+        return await reconcile(*a, **k)
+
+    proj._reconcile_in_place = records
     r = await proj.project_graph(gid)
     assert r["verify_error"] is None and r["quarantined"] == 2 and stale == [gid], (r, stale)
+    assert moved == [True] and not await owed(), moved
+    proj._reconcile_in_place = reconcile
     proj._on_rollups_stale = None
 
     # The fault clears: a caught-up graph's held entities get a pass of their own once due.
@@ -274,8 +394,7 @@ async def _quarantine(svc, monkeypatch):
     async with db.graphver_session() as s:
         due = (await s.get(ProjectionStateORM, gid)).quarantine_next_at
         assert due and due > "2026", due
-        await s.execute(update(ProjectionStateORM).where(ProjectionStateORM.graph_id == gid)
-                        .values(quarantine_next_at="2000-01-01T00:00:00+00:00"))
+    await make_due()
     r = await proj.project_graph(gid)
     assert r["verify_error"] is None and not r.get("quarantined") and not r.get("unverified"), r
     assert (await svc.projection_watermark(gid))["quarantine"] is None
@@ -289,6 +408,131 @@ async def _quarantine(svc, monkeypatch):
     await _edit_publish(svc, gid, "alice", [_create("Q", "q")], "another")
     with pytest.raises(Exception, match="Query timed out"):
         await proj.project_graph(gid)
+
+
+async def _held_delete_where_an_edge_was(svc):
+    from sqlalchemy import update
+
+    from backend.app.services.versioning.models import ProjectionStateORM
+
+    fake = TimeoutFalkor()
+    proj = FalkorProjector(graph_client_factory=fake, batch_size=500)
+    gid = await _graph(svc)
+    await _edit_publish(svc, gid, "alice", [
+        _create("A", "a"), _create("B", "b"), _create("C", "c"), _link("E", "A", "B")], "seed")
+    assert (await proj.project_graph(gid))["verify_error"] is None
+    g = fake.graphs[next(iter(fake.graphs))]
+
+    # E moves from A->B to A->C: written where it now is, and its delete where it was times out,
+    # even alone, and is held.
+    g.poison.add("urn:t:A->urn:t:B")
+    await _edit_publish(svc, gid, "alice", [
+        {"op": "update", "entity_kind": "edge", "entity_id": "E", "payload": _edge("A", "C")}],
+        "move E")
+    r = await proj.project_graph(gid)
+    assert r["verify_error"] is None and r["quarantined"] == 1, r
+
+    # E written again where it now is supersedes nothing where it was: the delete stays held.
+    await _edit_publish(svc, gid, "alice", [
+        {"op": "update", "entity_kind": "edge", "entity_id": "E",
+         "payload": {**_edge("A", "C"), "properties": {"tier": "gold"}}}], "touch E")
+    r = await proj.project_graph(gid)
+    assert r["verify_error"] is None and r["quarantined"] == 1, r
+
+    # The fault clears: the delete lands once due.
+    g.poison.clear()
+    async with db.graphver_session() as s:
+        await s.execute(update(ProjectionStateORM).where(ProjectionStateORM.graph_id == gid)
+                        .values(quarantine_next_at="2000-01-01T00:00:00+00:00"))
+    r = await proj.project_graph(gid)
+    assert r["verify_error"] is None and not r.get("quarantined"), r
+    await _assert_matches_main(svc, fake, gid)
+
+
+async def _resumed_rebuild_keeps_what_it_held(svc, monkeypatch):
+    from sqlalchemy import update
+
+    from backend.app.services.versioning import config
+    from backend.app.services.versioning.models import ProjectionStateORM
+
+    fake = TimeoutFalkor(poison={"urn:t:P"})
+    proj = FalkorProjector(graph_client_factory=fake, batch_size=500)
+    gid = await _graph(svc)
+    await _edit_publish(svc, gid, "alice", [
+        _create("P", "p"), *(_create(f"R{i}", f"r{i}") for i in range(50))], "seed")
+    saved = {k: getattr(config, k) for k in ("PROJECTION_RECONCILE_STREAMED_ABOVE",
+                                              "PROJECTION_PAGE", "PROJECTION_PASS_MAX_SECS")}
+    monkeypatch.setattr(config, "PROJECTION_RECONCILE_STREAMED_ABOVE", 5)
+    monkeypatch.setattr(config, "PROJECTION_PAGE", 20)
+    monkeypatch.setattr(config, "PROJECTION_PASS_MAX_SECS", 1e-6)
+
+    # A first seed too large to hold, stopped after each page: P, held on the first page, is
+    # retried by each pass that resumes, not dropped, and the last publishes with it held.
+    passes = []
+    while True:
+        r = await proj.project_graph(gid)
+        passes.append(r)
+        if not r.get("partial"):
+            break
+        assert len(passes) < 20
+    assert len(passes) >= 3 and r["verify_error"] is None and r["quarantined"] == 1, passes
+    for k, v in saved.items():
+        monkeypatch.setattr(config, k, v)
+
+    # The fault clears: P lands once due, and the graph verifies.
+    fake.graphs[next(iter(fake.graphs))].poison.clear()
+    async with db.graphver_session() as s:
+        await s.execute(update(ProjectionStateORM).where(ProjectionStateORM.graph_id == gid)
+                        .values(quarantine_next_at="2000-01-01T00:00:00+00:00"))
+    r = await proj.project_graph(gid)
+    assert r["verify_error"] is None and not r.get("quarantined") and not r.get("unverified"), r
+    await _assert_matches_main(svc, fake, gid)
+
+
+async def _an_escalation_owes_its_rebuild_the_summaries(svc):
+    from backend.app.services.versioning.models import ProjectionStateORM
+
+    fake = TimeoutFalkor()
+    proj = FalkorProjector(graph_client_factory=fake, batch_size=500)
+    gid = await _graph(svc)
+    await _edit_publish(svc, gid, "alice", [
+        _create("A", "a"), _create("B", "b"), _link("AB", "A", "B")], "seed")
+    assert (await proj.project_graph(gid))["verify_error"] is None
+
+    async def rollup_state():
+        async with db.graphver_session() as s:
+            return (await s.get(ProjectionStateORM, gid)).rollup_state or {}
+
+    # A window that moved the summaries escalates, while an earlier ask is still owed: the rebuild
+    # owes the job them too, and an ask recorded meanwhile keeps that.
+    await svc.note_rollup_ask(gid, "active")
+    async with db.graphver_session() as s:
+        epoch = (await s.get(ProjectionStateORM, gid)).epoch
+    assert await proj._escalate(gid, epoch, "it holds less than history", "drift",
+                                summaries_moved=True)
+    owed = await rollup_state()
+    assert owed["moved"] and owed["pending"] == "active", owed
+    await svc.note_rollup_ask(gid, "queued")
+    assert (await rollup_state()).keys() == {"moved"}
+
+    # The rebuild hands them to the job rather than moving them by its difference, and its
+    # publish takes what was owed.
+    stale, moved = [], []
+    reconcile = proj._reconcile_in_place
+
+    async def records(*a, **k):
+        moved.append(k.get("rollups_moved_this_pass"))
+        return await reconcile(*a, **k)
+
+    async def rollups_stale(graph_id):
+        stale.append(graph_id)
+
+    proj._reconcile_in_place, proj._on_rollups_stale = records, rollups_stale
+    r = await proj.project_graph(gid)
+    assert r["verify_error"] is None and moved == [True] and stale == [gid], (r, moved, stale)
+    async with db.graphver_session() as s:
+        assert (await s.get(ProjectionStateORM, gid)).rollup_state is None
+    await _assert_matches_main(svc, fake, gid)
 
 
 async def _resumable_and_self_healing(svc, monkeypatch):
@@ -388,9 +632,13 @@ def test_a_projection_converges_in_one_pass_whatever_its_statements_can_take(mon
         try:
             await _converges(svc)
             await _hub(svc)
+            await _stale_hubs(svc, monkeypatch)
             await _created_and_deleted_in_one_window(svc)
             await _backoff_and_honest_verify(svc)
             await _urn_change_and_sweep(svc)
+            await _held_delete_where_an_edge_was(svc)
+            await _resumed_rebuild_keeps_what_it_held(svc, monkeypatch)
+            await _an_escalation_owes_its_rebuild_the_summaries(svc)
             await _quarantine(svc, monkeypatch)
             await _resumable_and_self_healing(svc, monkeypatch)
         finally:
