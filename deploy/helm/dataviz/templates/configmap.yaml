@@ -70,6 +70,15 @@ data:
   OBJECT_STORE_BACKEND: {{ .Values.config.objectStore.backend | quote }}
   OBJECT_STORE_TTL_HOURS: {{ .Values.config.objectStore.ttlHours | quote }}
   IMPORT_STAGING_GC_DAYS: {{ .Values.config.objectStore.stagingGcDays | quote }}
+  # A replace import that would delete most of its scope and create most of it again is refused
+  # before it deletes anything, unless sent with allowMassDelete (config.imports).
+  IMPORT_REPLACE_GUARD: {{ .Values.config.imports.replaceGuard | quote }}
+  IMPORT_REPLACE_GUARD_MIN_LIVE: {{ .Values.config.imports.replaceGuardMinLive | quote }}
+  IMPORT_REPLACE_GUARD_DELETE_FRACTION: {{ .Values.config.imports.replaceGuardDeleteFraction | quote }}
+  IMPORT_REPLACE_GUARD_CREATE_FRACTION: {{ .Values.config.imports.replaceGuardCreateFraction | quote }}
+  IMPORT_REPLACE_MIN_MATCH_FRACTION: {{ .Values.config.imports.replaceMinMatchFraction | quote }}
+  # How many refused rows an import goes on without, when it doesn't say (config.imports).
+  IMPORT_MAX_REFUSED_ROWS: {{ .Values.config.imports.maxRefusedRows | quote }}
 
   # Read by two roles on purpose: the controlplane warms on this cadence and
   # every web process snaps its analytics windows to the same grid. One

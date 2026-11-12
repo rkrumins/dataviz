@@ -42,9 +42,9 @@ class _Server:
     once and reports how its publish went (``note``: a ``summary.publish``, or ``None`` when the
     worker never wrote one), and a publish job that lands."""
 
-    def __init__(self, *, note=None, busy=frozenset(), branch="open"):
+    def __init__(self, *, note=None, busy=frozenset(), branch="open", failure=None):
         self.calls, self.uploads, self.polls = [], {}, 0
-        self.note, self.busy, self.branch = note, set(busy), branch
+        self.note, self.busy, self.branch, self.failure = note, set(busy), branch, failure
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         method, path = request.method, request.url.path
@@ -79,6 +79,10 @@ class _Server:
                 return httpx.Response(200, json={"jobId": "vjob_1", "branchId": "br_1", "status": "running",
                                                  "phase": "nodes", "processed": 1, "total": 2})
             summary = {"new": 9, "updated": 0, "unchanged": 0, "deleted": 0, "invalid": 0}
+            if self.failure is not None:
+                return httpx.Response(200, json={"jobId": "vjob_1", "branchId": "br_1", "status": "failed",
+                                                 "errorMessage": "Nothing was deleted: …",
+                                                 "summary": {**summary, "failure": self.failure}})
             if self.note is not None:
                 summary["publish"] = self.note
             return httpx.Response(200, json={"jobId": "vjob_1", "branchId": "br_1", "status": "completed",
@@ -142,7 +146,8 @@ def test_a_file_goes_up_in_parts_from_disk_and_publishes_itself(world):
     result = connector.run(graph(server), str(path), "ndjson", publish=True, state_path=state)
     (upload_id,) = server.uploads
     assert server.sent(upload_id) == path.read_bytes(), "every part, in order, as the file has it"
-    assert ("POST", f"{BASE}/imports/uploads/{upload_id}/complete", {"autoPublish": "true"}) in server.calls
+    assert ("POST", f"{BASE}/imports/uploads/{upload_id}/complete",
+            {"reconcileMode": "upsert", "autoPublish": "true"}) in server.calls
     assert ("GET", f"{BASE}/publish-jobs/pjob_1", {}) in server.calls
     assert result["publish"] == {"state": "completed", "commitId": "cmt_1", "revisionId": 7, "error": None}
     assert connector.succeeded(result)
@@ -244,3 +249,51 @@ def test_every_call_it_makes_is_one_an_api_key_may_make(world):
     unknown = sorted(f"{m} {p}" for m, p in calls
                      if not any(m == method and regex.match(p) for method, regex in routes))
     assert not unknown, unknown
+
+
+def test_a_full_replace_is_completed_as_one_and_publishes_itself(world):
+    """``--replace --identifier urn --publish``: the upload is completed as a replace matched by
+    urn, which publishes itself."""
+    path, state, graph, _slept = world
+    server = _Server(note={"state": "queued", "jobId": "pjob_1"})
+    result = connector.run(graph(server), str(path), "ndjson", publish=True, state_path=state,
+                           replace=True, identifier="urn")
+    (upload_id,) = server.uploads
+    assert ("POST", f"{BASE}/imports/uploads/{upload_id}/complete",
+            {"reconcileMode": "replace", "identifier": "urn", "autoPublish": "true"}) in server.calls
+    assert connector.succeeded(result)
+
+
+def test_a_run_may_go_on_without_its_refused_rows(world):
+    """``--max-refused-rows`` sends the budget with the import, as the server takes it."""
+    path, state, graph, _slept = world
+    server = _Server()
+    run = connector.run(graph(server), str(path), "ndjson", publish=True, state_path=state, replace=True,
+                        max_refused_rows="-1")
+    assert ("POST", f"{BASE}/imports/uploads/iu_0/complete",
+            {"reconcileMode": "replace", "maxRefusedRows": "-1", "autoPublish": "true"}) in server.calls
+    assert connector.succeeded(run)
+
+
+def test_a_replace_the_guard_refused_says_why_and_its_retry_sends_the_file_again(world):
+    """A replace the guard refused fails the run with the server's code. The retry, with
+    ``--allow-mass-delete`` into the same draft, is a new upload (an upload is imported once): it is
+    completed into that draft, and the connector publishes the draft, as autoPublish can't go with it."""
+    path, state, graph, _slept = world
+    logged = []
+    server = _Server(failure={"code": "mass_delete_blocked", "action": "allow_mass_delete"})
+    g = graph(server)
+    g.log = logged.append
+    refused = connector.run(g, str(path), "ndjson", publish=True, state_path=state, replace=True)
+    assert refused["job"]["status"] == "failed" and not connector.succeeded(refused)
+    assert any("mass_delete_blocked" in line for line in logged), logged
+
+    server.failure = None
+    retried = connector.run(graph(server), str(path), "ndjson", publish=True, state_path=state,
+                            replace=True, allow_mass_delete=True, branch="br_1")
+    assert len(server.uploads) == 2, "the retry is an upload of its own"
+    assert ("POST", f"{BASE}/imports/uploads/iu_1/complete",
+            {"reconcileMode": "replace", "allowMassDelete": "true", "branchId": "br_1"}) in server.calls
+    assert ("POST", f"{BASE}/branches/br_1/publish", {}) in server.calls
+    assert retried["publish"] == {"state": "completed", "commitId": "cmt_2", "revisionId": 8}
+    assert connector.succeeded(retried)

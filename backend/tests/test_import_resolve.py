@@ -42,7 +42,8 @@ def test_a_delete_of_what_is_already_gone_is_done():
     assert ops == []
     assert [(by_row[i]["resolved_op"], by_row[i]["reasons"]) for i in (0, 1)] == \
         [("unchanged", [_ALREADY_GONE])] * 2
-    assert by_row[2]["resolved_op"] == "invalid" and by_row[2]["reasons"] == ["edge endpoint not found"]
+    assert by_row[2]["resolved_op"] == "invalid" and by_row[2]["reasons"] == [
+        "its target urn:GONE names no node the graph holds or the file makes"]
 
 def _run() -> None:
     minted = iter(["ent_B", "ev_1"])
@@ -322,7 +323,8 @@ def test_endpoints_resolve_by_entity_id_then_urn_then_qualified_name():
     by_row = {r["_row_index"]: r for r in res}
     assert [(o["payload"]["sourceEntityId"], o["payload"]["targetEntityId"]) for o in ops] == \
         [("ent_A", "ent_B"), ("ent_A2", "ent_B")], ops
-    assert by_row[2]["resolved_op"] == "invalid" and by_row[2]["reasons"] == ["edge endpoint not found"]
+    assert by_row[2]["resolved_op"] == "invalid" and by_row[2]["reasons"] == [
+        "its source urn:NOPE names no node the graph holds or the file makes"]
 
 
 def test_an_edge_is_the_same_edge_whatever_the_case_of_its_type():
@@ -364,7 +366,7 @@ if __name__ == "__main__":
 
 import uuid as _uuid
 
-from backend.app.services.versioning.import_export.resolve import pointer_id
+from backend.app.services.versioning.import_export.resolve import KeyIndex, pointer_id
 
 _U = "urn:uuid:0192f5a4-7b3c-7d2e-8f1a-2b3c4d5e6f70"            # a free urn:uuid, lowercase
 _TAKEN = "urn:uuid:0192f5a4-7b3c-7d2e-8f1a-2b3c4d5e6f71"
@@ -384,24 +386,107 @@ def _node_row(i, **kw):
             "entityType": "Table", **kw}
 
 
-def test_a_new_node_takes_the_id_its_pointer_derives_and_not_the_pointer():
+def test_a_new_node_takes_the_id_its_urn_derives_and_keeps_the_urn_as_given():
     ops, res = _pointer_run([
         _node_row(0, urn="urn:li:x", displayName="x", properties={"asset_id": "A-1", "k": 1}),
         _node_row(1, displayName="y", properties={"asset_id": "A-2"}),
-        _node_row(2, entity_id="f1", displayName="z"),
-        {"_row_index": 3, "kind": "edge", "op": "upsert", "entity_id": "", "edgeType": "FLOWS",
-         "sourceUrn": "urn:li:x", "target_entity_id": "f1"},
+        {"_row_index": 2, "kind": "edge", "op": "upsert", "entity_id": "", "edgeType": "FLOWS",
+         "sourceUrn": "urn:li:x", "targetKeys": {"asset_id": "A-2"}},
     ])
-    x, y, z = (ops[i] for i in range(3))
-    assert x["entity_id"] == x["payload"]["urn"] == pointer_id("ds1", "urn:li:x")
+    x, y = ops[0], ops[1]
+    assert x["entity_id"] == pointer_id("ds1", "urn:li:x") and x["payload"]["urn"] == "urn:li:x"
     assert x["payload"]["properties"] == {"k": 1}, "the identifier value is a pointer: not stored"
-    assert y["entity_id"] == pointer_id("ds1", "A-2") and "minted" not in x and "minted" not in y
+    assert y["entity_id"] == y["payload"]["urn"] == pointer_id("ds1", "A-2"), "no urn: its id"
+    assert "minted" not in x and "minted" not in y
     assert _uuid.UUID(x["entity_id"][len("urn:uuid:"):]).version == 5
-    assert z.get("minted") and z["entity_id"] == z["payload"]["urn"], "no pointer: minted"
     assert pointer_id("ds1", "urn:li:x") == x["entity_id"] != pointer_id("ds2", "urn:li:x")
-    edge = ops[3]["payload"]
-    assert (edge["sourceEntityId"], edge["targetEntityId"]) == (x["entity_id"], z["entity_id"])
+    edge = ops[2]["payload"]
+    assert (edge["sourceEntityId"], edge["targetEntityId"]) == (x["entity_id"], y["entity_id"])
     assert all(r["resolved_op"] == "create" for r in res.values())
+
+
+def test_a_node_row_that_names_nothing_is_refused_and_so_is_an_edge_to_it():
+    """Named only by the file's own entity_id, a node would be created again by every import (and
+    a replace would delete the one before): refused, with the reason and its code."""
+    ops, res = _pointer_run([
+        _node_row(0, entity_id="f1", displayName="z"),
+        {"_row_index": 1, "kind": "edge", "op": "upsert", "entity_id": "", "edgeType": "FLOWS",
+         "source_entity_id": "f1", "targetUrn": "urn:li:y"},
+        _node_row(2, entity_id="f2", qualifiedName="db.t", displayName="q"),
+    ], urn_to_eid={"urn:li:y": "N2"}, node_eids={"N2"})
+    assert (res[0]["resolved_op"], res[0]["code"]) == ("invalid", "no_key"), res[0]
+    assert "give it a urn" in res[0]["reasons"][0]
+    assert (res[1]["resolved_op"], res[1]["code"]) == ("invalid", "end_not_found"), res[1]
+    # A qualifiedName finds its node again: such a row is still made.
+    assert res[2]["resolved_op"] == "create" and [o["entity_id"] for o in ops] == [
+        res[2]["matched_entity_id"]]
+
+
+def test_an_exports_urn_uuid_entity_id_no_entity_holds_is_the_new_nodes_id():
+    """From another environment: kept as the id, so an entity has one id everywhere. One another
+    entity holds is a link between the file's rows; so is any entity_id with identifier=urn."""
+    other = "urn:uuid:0192f5a4-7b3c-7d2e-8f1a-2b3c4d5e6f73"
+    ops, res = _pointer_run([
+        _node_row(0, entity_id=_U.upper(), urn="urn:li:x", displayName="x"),
+        _node_row(1, entity_id=_TAKEN, urn="urn:li:y", displayName="y"),
+        _node_row(2, entity_id=other, displayName="z"),
+    ], taken={_TAKEN})
+    assert (ops[0]["entity_id"], ops[0]["payload"]["urn"]) == (_U, "urn:li:x")
+    assert ops[1]["entity_id"] == pointer_id("ds1", "urn:li:y")
+    assert ops[2]["entity_id"] == ops[2]["payload"]["urn"] == other, "its id is its urn too"
+    v7s = iter(f"urn:uuid:0192f5a4-0000-7000-8000-00000000000{i}" for i in range(10))
+    _ops, by_urn = resolve_rows([_node_row(0, entity_id=_U, urn="urn:li:x", displayName="x"),
+                                 _node_row(1, entity_id=other, displayName="z")],
+                                {"urn_to_eid": {}, "node_eids": set()},
+                                mint_id=lambda: next(v7s), mint_urn=lambda _t: next(v7s),
+                                derive_urn=lambda seed: pointer_id("ds1", seed), identifier="urn")
+    assert _ops[0]["entity_id"] == pointer_id("ds1", "urn:li:x")
+    assert (by_urn[1]["resolved_op"], by_urn[1]["code"]) == ("invalid", "no_key")
+
+
+def test_by_urn_a_row_is_found_by_its_entity_id_or_its_urn_and_nothing_else():
+    keys = KeyIndex(match={"Table": ["sap_id"]})
+    keys.add("Table", {"sap_id": "S1"}, "N3")
+    base = {"urn_to_eid": {"urn:li:x": "N1", "A-9": "N4"}, "qname_to_eid": {"db.t": "N2"},
+            "node_eids": {"N1", "N2", "N3", "N4", "N5"}, "keys": keys, "edge_to_eid": {},
+            "current": {e: {"urn": f"urn:{e}", "entityType": "Table"} for e in
+                        ("N1", "N2", "N3", "N4", "N5")}}
+    v7s = iter(f"urn:uuid:0192f5a4-0000-7000-8000-00000000000{i}" for i in range(10))
+    ops, res = resolve_rows([
+        _node_row(0, urn="urn:li:x", displayName="by urn"),
+        _node_row(1, entity_id="N5", displayName="by id"),
+        _node_row(2, qualifiedName="db.t", displayName="q"),                  # not by these:
+        _node_row(3, properties={"sap_id": "S1"}, displayName="k"),
+        _node_row(4, properties={"asset_id": "A-9"}, displayName="i"),
+        {"_row_index": 5, "kind": "edge", "op": "upsert", "entity_id": "", "edgeType": "FLOWS",
+         "sourceUrn": "urn:li:x", "targetQualifiedName": "db.t"},
+        {"_row_index": 6, "kind": "edge", "op": "upsert", "entity_id": "", "edgeType": "FLOWS",
+         "sourceUrn": "urn:li:x", "target_entity_id": "N5"},
+    ], base, mint_id=lambda: next(v7s), mint_urn=lambda _t: next(v7s), identity_prop="asset_id",
+        derive_urn=lambda seed: pointer_id("ds1", seed), identifier="urn")
+    res = {r["_row_index"]: r for r in res}
+    assert [res[i]["matched_entity_id"] for i in (0, 1)] == ["N1", "N5"]
+    assert all((res[i]["resolved_op"], res[i]["code"]) == ("invalid", "no_key") for i in (2, 3, 4))
+    assert (res[5]["resolved_op"], res[5]["code"]) == ("invalid", "end_not_found")
+    edge = next(o for o in ops if o["entity_kind"] == "edge")["payload"]
+    assert (edge["sourceEntityId"], edge["targetEntityId"]) == ("N1", "N5")
+
+
+def test_a_new_edge_takes_the_id_its_ends_and_type_derive():
+    from backend.app.services.versioning.import_export.resolve import edge_pointer_id
+    derive = lambda s, t, ty: edge_pointer_id("ds1", s, t, ty)      # noqa: E731
+    rows = [{"_row_index": 0, "kind": "edge", "op": "upsert", "entity_id": "", "edgeType": "flows",
+             "source_entity_id": "N1", "target_entity_id": "N2"},
+            {"_row_index": 1, "kind": "edge", "op": "upsert", "entity_id": "", "edgeType": "FLOWS",
+             "source_entity_id": "N1", "target_entity_id": "N2", "properties": {"w": 1}}]
+    ops, res = resolve_rows(rows, {"node_eids": {"N1", "N2"}}, mint_id=lambda: "minted",
+                            derive_edge=derive)
+    assert ops[0]["entity_id"] == edge_pointer_id("ds1", "N1", "N2", "FLOWS") != "minted"
+    assert edge_pointer_id("ds1", "N1", "N2", "flows") == ops[0]["entity_id"], "type case-free"
+    assert edge_pointer_id("ds1", "N2", "N1", "FLOWS") != ops[0]["entity_id"], "ends are ordered"
+    assert edge_pointer_id("ds2", "N1", "N2", "FLOWS") != ops[0]["entity_id"]
+    # The second row names the same edge: one edge, the second row its update (or refused).
+    assert [r["matched_entity_id"] for r in res] == [ops[0]["entity_id"]] * 2
 
 
 def test_a_matched_row_keeps_its_nodes_urn_and_identifier():
@@ -587,3 +672,127 @@ def test_a_second_row_for_one_edge_is_refused_unless_it_says_the_same():
     assert [res[i]["resolved_op"] for i in range(3)] == ["create", "unchanged", "invalid"]
     assert "row 1 of this file already names this edge" in res[2]["reasons"][0]
     assert len(ops) == 1
+
+
+# ── By a matching property (identifier=prop.<name>) ─────────────────────────────────────────────
+import pytest  # noqa: E402
+
+from backend.app.services.versioning.import_export.resolve import key_pointer_id  # noqa: E402
+
+
+def _by_prop(rows, **indexes):
+    v7s = iter(f"urn:uuid:0192f5a4-0000-7000-8000-00000000000{i}" for i in range(10))
+    base = {"urn_to_eid": {}, "qname_to_eid": {"db.t": "N9"}, "edge_to_eid": {},
+            "node_eids": set(), "current": {}}
+    ops, res = resolve_rows(rows, {**base, **indexes}, mint_id=lambda: next(v7s),
+                            mint_urn=lambda _t: next(v7s), identity_prop="asset_id",
+                            derive_urn=lambda seed: pointer_id("ds1", seed),
+                            derive_key=lambda v: key_pointer_id("ds1", "ext", v),
+                            identifier="prop.ext")
+    return ops, {r["_row_index"]: r for r in res}
+
+
+def test_by_a_property_a_row_is_found_by_its_value_or_its_entity_id_and_nothing_else():
+    held = {"urn": "urn:N1", "entityType": "Table", "properties": {"ext": "E1"}}
+    ops, res = _by_prop([
+        _node_row(0, properties={"ext": "E1", "k": 2}),                      # by its value
+        _node_row(1, entity_id="N2", displayName="by id"),
+        _node_row(2, urn="urn:N1", qualifiedName="db.t", displayName="no"),  # urn, name: not keys
+        {"_row_index": 3, "kind": "edge", "op": "upsert", "entity_id": "", "edgeType": "FLOWS",
+         "sourceKeys": {"ext": "E1"}, "target_entity_id": "N2"},
+    ], urn_to_eid={"E1": "N1"}, node_eids={"N1", "N2"},
+        current={"N1": held, "N2": {"urn": "urn:N2", "entityType": "Table"}})
+    assert (res[0]["resolved_op"], res[0]["matched_entity_id"]) == ("update", "N1")
+    assert ops[0]["payload"] == {"properties": {"k": 2}}, ops[0]
+    assert (res[1]["resolved_op"], res[1]["matched_entity_id"]) == ("update", "N2")
+    assert (res[2]["resolved_op"], res[2]["code"]) == ("invalid", "no_key")
+    assert "give it one" in res[2]["reasons"][0] and "ext" in res[2]["reasons"][0]
+    edge = next(o for o in ops if o["entity_kind"] == "edge")["payload"]
+    assert (edge["sourceEntityId"], edge["targetEntityId"]) == ("N1", "N2")
+
+
+def test_by_a_property_a_value_two_nodes_hold_or_another_nodes_value_is_refused():
+    _ops, res = _by_prop([
+        _node_row(0, properties={"ext": "DUP"}),
+        _node_row(1, entity_id="N2", properties={"ext": "E1"}),               # N1's value
+        {"_row_index": 2, "kind": "edge", "op": "upsert", "entity_id": "", "edgeType": "FLOWS",
+         "sourceKeys": {"ext": "DUP"}, "target_entity_id": "N2"},
+    ], urn_to_eid={"E1": "N1"}, dupes={"DUP": ["N3", "N4"]}, node_eids={"N1", "N2"},
+        current={"N2": {"urn": "urn:N2", "entityType": "Table"}})
+    assert (res[0]["code"], "N3" in res[0]["reasons"][0]) == ("duplicate_value", True), res[0]
+    assert res[1]["code"] == "two_entities", res[1]
+    assert res[2]["code"] == "duplicate_value", res[2]
+
+
+def test_by_a_property_a_new_node_takes_the_id_its_value_derives_unless_a_node_holds_it():
+    ops, res = _by_prop([
+        _node_row(0, properties={"ext": "NEW"}, displayName="new"),
+        _node_row(1, properties={"ext": "MOVED"}, displayName="its id is taken"),
+        _node_row(2, properties={"ext": "GONE"}, urn="urn:li:gone", displayName="back"),
+    ], taken={key_pointer_id("ds1", "ext", "MOVED")}, restore={"GONE": "ent_D"})
+    new, moved, back = ops
+    assert new["entity_id"] == new["payload"]["urn"] == key_pointer_id("ds1", "ext", "NEW")
+    assert new["payload"]["properties"] == {"ext": "NEW"}, "the value is kept"
+    assert moved["entity_id"] != key_pointer_id("ds1", "ext", "MOVED"), "a fresh id, not the taken one"
+    assert (back["entity_id"], back["payload"]["urn"]) == ("ent_D", "urn:li:gone"), back
+    assert all(r["resolved_op"] == "create" for r in res.values())
+
+
+def test_by_a_property_values_compare_as_trimmed_text_and_case_counts():
+    _ops, res = _by_prop([
+        _node_row(0, properties={"ext": "  E1 "}),                 # trimmed: N1's
+        _node_row(1, properties={"ext": "e1"}, displayName="e1"),   # another case: another key
+        _node_row(2, properties={"ext": 12345}),                    # a number: as its text
+    ], urn_to_eid={"E1": "N1", "12345": "N5"}, node_eids={"N1", "N5"},
+        current={"N1": {"urn": "urn:N1", "entityType": "Table", "properties": {"ext": "E1"}},
+                 "N5": {"urn": "urn:N5", "entityType": "Table", "properties": {"ext": "12345"}}})
+    assert res[0]["matched_entity_id"] == "N1" and res[0]["resolved_op"] != "create", res[0]
+    assert res[1]["resolved_op"] == "create", res[1]
+    assert res[2]["matched_entity_id"] == "N5", res[2]
+
+
+@pytest.mark.parametrize("value", ["", "   ", PROP_DELETE, ["E1"], {"id": "E1"}, None])
+def test_by_a_property_a_blank_removed_or_structured_value_is_no_key(value):
+    _ops, res = _by_prop([_node_row(0, properties={"ext": value})], urn_to_eid={"E1": "N1"},
+                         node_eids={"N1"})
+    assert (res[0]["resolved_op"], res[0]["code"]) == ("invalid", "no_key"), res[0]
+
+
+def test_by_a_property_one_value_twice_in_a_file_names_one_node():
+    ops, res = _by_prop([
+        _node_row(0, properties={"ext": "NEW"}, displayName="new"),
+        _node_row(1, properties={"ext": "NEW"}, displayName="new"),          # the same again
+        _node_row(2, properties={"ext": "NEW"}, displayName="renamed"),      # and changing it
+    ])
+    assert [res[i]["resolved_op"] for i in range(3)] == ["create", "unchanged", "invalid"], res
+    assert res[2]["code"] == "named_already" and "row 1 of this file" in res[2]["reasons"][0]
+    assert len([o for o in ops if o["entity_kind"] == "node"]) == 1
+
+
+def test_by_a_property_an_edge_end_no_node_holds_the_value_of_is_refused():
+    ops, res = _by_prop([
+        {"_row_index": 0, "kind": "edge", "op": "upsert", "entity_id": "", "edgeType": "FLOWS",
+         "sourceKeys": {"ext": "NOPE"}, "target_entity_id": "N2"},
+    ], node_eids={"N2"}, current={"N2": {"urn": "urn:N2", "entityType": "Table"}})
+    assert (res[0]["resolved_op"], res[0]["code"]) == ("invalid", "end_not_found"), res[0]
+    assert ops == []
+
+
+def test_by_a_property_a_new_nodes_urn_another_node_holds_refuses_the_row():
+    """One urn, one node: a new node's urn that a live node holds, or a node an earlier row of the
+    file makes, refuses its row, naming that node — the projection keys nodes by their urn."""
+    ops, res = _by_prop([
+        _node_row(0, properties={"ext": "E2"}, urn="urn:li:orders", displayName="new value"),
+        _node_row(1, properties={"ext": "A"}, urn="urn:li:x", displayName="a"),
+        _node_row(2, properties={"ext": "B"}, urn="urn:li:x", displayName="b"),        # row 1's
+        _node_row(3, properties={"ext": "GONE"}, urn="urn:li:orders", displayName="back"),
+        _node_row(4, properties={"ext": "GONE"}, urn="urn:li:gone", displayName="back"),
+    ], urn_held={"urn:li:orders": "N1"}, restore={"GONE": "ent_D"})
+    assert (res[0]["resolved_op"], res[0]["code"]) == ("invalid", "two_entities"), res[0]
+    assert "N1" in res[0]["reasons"][0] and "entity_id" in res[0]["reasons"][0], res[0]
+    made = key_pointer_id("ds1", "ext", "A")
+    assert (res[1]["resolved_op"], res[1]["matched_entity_id"]) == ("create", made)
+    assert (res[2]["code"], made in res[2]["reasons"][0]) == ("two_entities", True), res[2]
+    assert res[3]["code"] == "two_entities", "a node brought back takes no other node's urn"
+    assert (res[4]["resolved_op"], res[4]["matched_entity_id"]) == ("create", "ent_D"), res[4]
+    assert [o["payload"]["urn"] for o in ops] == ["urn:li:x", "urn:li:gone"], ops

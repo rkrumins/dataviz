@@ -44,8 +44,10 @@ is a rebuildable read cache** of `main`, written by the **projector**. The canva
 
 - **`main`, projection fresh** → live **FalkorDB** provider (`falkordb_provider.py`) — the hot path,
   and the only place the **materialized aggregated-lineage rollups** exist.
-- **`main`, projection lagging** (e.g. just after a merge) → `VersionedBranchProvider` (Postgres
-  composition) so a just-committed change is visible immediately (read-your-writes).
+- **`main`, projection lagging** (e.g. just after a merge) → the live **FalkorDB** provider at the
+  version its key last published, complete with its rollups, while the newer one is written; the
+  view's sync chip says so, and the view refetches when it lands. Only a key with no version (a
+  first seed, a move, an eviction) reads main from `VersionedBranchProvider` (Postgres composition).
 - **A live draft** → **`DraftOverlayProvider`** (NEW — see §3.1), wrapping *whatever serves `main`*
   and overlaying the draft's bounded delta.
 - **As-of / historical reads** → `VersionedBranchProvider` with `as_of_seq` (read-only snapshot).

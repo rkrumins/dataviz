@@ -407,6 +407,9 @@ class ProjectorHealth:
     falkor_graph_pinned: bool
     status: Optional[str]
     checked_at: str
+    # The version the key holds whole (``projection_state.served_commit_seq``), which a rebuild
+    # in place keeps serving; NULL when it holds none, or on a row from before the column.
+    served_commit_seq: Optional[int] = None
 
     @property
     def commits_behind(self) -> int:
@@ -467,13 +470,24 @@ class ProjectorHealth:
     def stalled(self) -> bool:
         """Rolled-up connections are missing from the product RIGHT NOW.
 
-        Exactly ``behind``, because that is exactly what read routing consults:
-        ``fresh = projected >= committed`` (``versioning/service.py``,
-        ``projection_watermark``) looks at neither ``last_error`` nor
-        ``status``. Every consumer's copy asserts this consequence, so the
-        predicate has to be the consequence and nothing wider.
+        ``behind``, and read routing sent main to the version log: the key serves no version
+        (not :attr:`serving`). While it serves the version it last published, the connections are
+        on the canvas, of that version, and the sync chip says so. Like the routing rule, it looks
+        at no ``last_error``: every consumer's copy asserts this consequence, so the predicate has
+        to be the consequence and nothing wider.
         """
-        return self.behind
+        return self.behind and not self.serving
+
+    @property
+    def serving(self) -> bool:
+        """The key serves reads of main a version of it, rollups included (``serving_seq``,
+        ``versioning/service.py``): its head, or while it catches up or rebuilds in place, the
+        version it last published. Not while it is written from nothing, out of FalkorDB, or past
+        ``GRAPHVER_READ_MAX_LAG``."""
+        from backend.app.services.versioning.service import serving_seq
+
+        return serving_seq(self.projected_commit_seq or 0, self.main_head_commit_seq or 0,
+                           self.status, self.served_commit_seq) is not None
 
     @property
     def current(self) -> bool:
@@ -522,6 +536,7 @@ async def projector_health(
                     ProjectionStateORM.last_error,
                     ProjectionStateORM.falkor_graph_name,
                     ProjectionStateORM.status,
+                    ProjectionStateORM.served_commit_seq,
                 )
                 .outerjoin(
                     ProjectionStateORM,
@@ -542,10 +557,11 @@ async def projector_health(
                 falkor_graph_pinned=bool(falkor_name),
                 status=status,
                 checked_at=checked_at,
+                served_commit_seq=None if served is None else int(served),
             )
             for (
                 ds_id, graph_id, head, projected, last_error, falkor_name,
-                status,
+                status, served,
             ) in rows
             if ds_id
         }

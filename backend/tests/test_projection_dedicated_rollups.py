@@ -19,7 +19,9 @@ from backend.app.services.versioning import projection
 from backend.app.services.versioning.models import GraphORM, ProjectionStateORM
 from backend.app.services.versioning.projection import FalkorProjector
 from backend.tests import test_projection_foreign_key_guard as fk
-from backend.tests.test_versioning_rollup_canonical import _Session, _Svc
+from backend.tests.test_versioning_rollup_canonical import (
+    _Rows, _Session, _Svc, _deltas as _window_deltas, _projector,
+)
 
 _FLOWS = {"sourceEntityId": "a3", "targetEntityId": "b3", "edgeType": "FLOWS"}
 
@@ -51,11 +53,7 @@ class _Before(_Svc):
 
 
 def _deltas(rows, before=None, resolver=_dedicated):
-    p = FalkorProjector(graph_client_factory=lambda name, provider_id=None: None, batch_size=10,
-                        edge_types_resolver=resolver)
-    p._svc = _Before(before or {})
-    return asyncio.run(p._compute_rollup_deltas(_Session(rows), SimpleNamespace(id="g1"),
-                                                "main", 1, 2))
+    return _window_deltas(_projector(resolver, _Before(before or {})), rows)
 
 
 def test_a_window_that_changes_lineage_or_containment_is_stale():
@@ -66,29 +64,6 @@ def test_a_window_that_changes_lineage_or_containment_is_stale():
     # Regression guard (passes before the change): the same window in a source's own graph is
     # maintained in place, by pairs.
     assert isinstance(_deltas([("e1", "create", _FLOWS)], resolver=_in_source), dict)
-
-
-def test_a_window_past_the_inline_cap_goes_to_the_job_before_it_is_read(monkeypatch):
-    """A window with more edge rows than the inline cap — a publish of millions — is the job's
-    before a value is read: past the cap the projector never holds the window's payloads."""
-    monkeypatch.setattr(FalkorProjector, "_MOVE_EDGE_CAP", 2)
-    reads = []
-
-    class _Counted(_Before):
-        async def _values_at(self, s, gid, bid, ids, seq):
-            reads.append(list(ids))
-            return await super()._values_at(s, gid, bid, ids, seq)
-
-    p = FalkorProjector(graph_client_factory=lambda name, provider_id=None: None, batch_size=10,
-                        edge_types_resolver=_in_source)
-    p._svc = _Counted({})
-    rows = [(f"e{i}", "create", _FLOWS) for i in range(3)]
-    assert asyncio.run(p._compute_rollup_deltas(
-        _Session(rows), SimpleNamespace(id="g1"), "main", 1, 2)) == "stale"
-    assert reads == []
-    # At the cap, as before: maintained in place.
-    assert isinstance(asyncio.run(p._compute_rollup_deltas(
-        _Session(rows[:2]), SimpleNamespace(id="g1"), "main", 1, 2)), dict)
 
 
 def test_a_window_that_changes_neither_answers_nothing():
@@ -121,7 +96,9 @@ class _Graphver:
         return True if "pg_try_advisory_lock" in str(clause) else None   # not being enabled
 
     async def execute(self, clause):
-        return SimpleNamespace(all=lambda: list(self.rows))
+        if getattr(clause, "_limit", None):      # the window's edge ids, a page at a time
+            return await _Session(self.rows).execute(clause)
+        return _Rows(list(self.rows))
 
 
 def run_window(monkeypatch, rows, *, before=None, resolver=_dedicated, on_rollups_stale=None):
@@ -137,7 +114,9 @@ def run_window(monkeypatch, rows, *, before=None, resolver=_dedicated, on_rollup
                            session_factory=session, edge_types_resolver=resolver,
                            on_rollups_stale=on_rollups_stale)
     chains = _Before(before or {})
+    chains.window = {eid: (op, payload) for eid, op, payload in rows}
     proj._svc._values_at = chains._values_at
+    proj._svc._skeletons_at = chains._skeletons_at
     proj._svc._containment_parents_climb = chains._containment_parents_climb
 
     async def claim(graph_id, seen_epoch, from_seq):

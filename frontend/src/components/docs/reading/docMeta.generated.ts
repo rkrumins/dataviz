@@ -3,19 +3,19 @@
 export interface DocMeta { updated: string; path: string }
 export const docMeta: Record<string, DocMeta> = {
   "onboarding-a-source": {
-    "updated": "2026-10-25",
+    "updated": "2026-11-10",
     "path": "docs/ONBOARDING_A_SOURCE.md"
   },
   "contributing": {
-    "updated": "2026-10-11",
+    "updated": "2026-10-26",
     "path": "docs/CONTRIBUTING.md"
   },
   "architecture": {
-    "updated": "2026-10-12",
+    "updated": "2026-10-26",
     "path": "docs/ARCHITECTURE.md"
   },
   "data-architecture": {
-    "updated": "2026-10-24",
+    "updated": "2026-10-26",
     "path": "docs/DATA_ARCHITECTURE.md"
   },
   "decisions": {
@@ -23,259 +23,303 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/DECISIONS.md"
   },
   "changelog": {
-    "updated": "2026-10-28",
+    "updated": "2026-11-12",
     "path": "CHANGELOG.md"
   },
   "scaling-architecture": {
-    "updated": "2026-10-11",
+    "updated": "2026-10-26",
     "path": "docs/architecture-when-scaling.md"
   },
   "aggregation-pipeline": {
-    "updated": "2026-10-10",
+    "updated": "2026-10-26",
     "path": "docs/AGGREGATION_PIPELINE.md"
   },
   "property-storage": {
-    "updated": "2026-10-10",
+    "updated": "2026-10-26",
     "path": "docs/PROPERTY_STORAGE.md"
   },
   "domain-ownership": {
-    "updated": "2026-10-24",
+    "updated": "2026-10-26",
     "path": "backend/app/db/DOMAIN_OWNERSHIP.md"
   },
   "setup": {
-    "updated": "2026-10-11",
+    "updated": "2026-10-26",
     "path": "docs/SETUP.md"
   },
   "testing-and-ci": {
-    "updated": "2026-10-10",
+    "updated": "2026-11-04",
     "path": "docs/TESTING_AND_CI.md"
   },
   "feature-flags-lifecycle": {
-    "updated": "2026-10-10",
+    "updated": "2026-11-02",
     "path": "docs/features/feature-flags.md"
   },
   "integration-testing": {
-    "updated": "2026-10-11",
+    "updated": "2026-10-26",
     "path": "docs/local-integration-testing.md"
   },
   "integration-quickstart": {
-    "updated": "2026-10-26",
+    "updated": "2026-11-12",
     "path": "docs/INTEGRATION_QUICKSTART.md"
   },
   "api-guide": {
-    "updated": "2026-10-25",
+    "updated": "2026-11-12",
     "path": "docs/API_GUIDE.md"
   },
+  "connector-guide": {
+    "updated": "2026-11-12",
+    "path": "docs/CONNECTOR_GUIDE.md"
+  },
+  "import-from-your-service": {
+    "updated": "2026-11-12",
+    "path": "docs/IMPORT_FROM_YOUR_SERVICE.md"
+  },
+  "import-export-api": {
+    "updated": "2026-11-12",
+    "path": "docs/IMPORT_EXPORT_API.md"
+  },
   "key-management-api": {
-    "updated": "2026-10-26",
+    "updated": "2026-11-09",
     "path": "docs/KEY_MANAGEMENT_API.md"
   },
   "graph-metadata-api": {
-    "updated": "2026-10-25",
+    "updated": "2026-11-01",
     "path": "docs/GRAPH_METADATA_API.md"
   },
   "backend": {
-    "updated": "2026-10-25",
+    "updated": "2026-11-11",
     "path": "docs/BACKEND.md"
   },
   "frontend": {
-    "updated": "2026-10-11",
+    "updated": "2026-10-26",
     "path": "docs/FRONTEND.md"
   },
   "api-features": {
-    "updated": "2026-10-25",
+    "updated": "2026-11-11",
     "path": "docs/API_FEATURES.md"
   },
   "services-overview": {
-    "updated": "2026-10-18",
+    "updated": "2026-10-26",
     "path": "docs/services/OVERVIEW.md"
   },
   "services-insights": {
-    "updated": "2026-10-10",
+    "updated": "2026-10-26",
     "path": "docs/services/INSIGHTS.md"
   },
   "services-search": {
-    "updated": "2026-10-25",
+    "updated": "2026-10-29",
     "path": "docs/services/SEARCH.md"
   },
   "services-context-engine": {
-    "updated": "2026-10-18",
+    "updated": "2026-10-26",
     "path": "docs/services/CONTEXT_ENGINE.md"
   },
   "services-assignments": {
-    "updated": "2026-10-25",
+    "updated": "2026-10-26",
     "path": "docs/services/ASSIGNMENTS.md"
   },
   "feature-aggregation-reconciliation": {
-    "updated": "2026-09-17",
+    "updated": "2026-10-28",
     "path": "docs/features/aggregation-reconciliation.md"
   },
   "feature-external-change-notification": {
-    "updated": "2026-10-25",
+    "updated": "2026-10-28",
     "path": "docs/features/external-change-notification.md"
   },
   "feature-view-portability": {
-    "updated": "2026-10-11",
+    "updated": "2026-11-04",
     "path": "docs/features/view-portability.md"
   },
   "feature-search-and-rules-reference": {
-    "updated": "2026-10-28",
+    "updated": "2026-11-04",
     "path": "docs/features/search-and-rules-reference.md"
   },
   "top-level-nodes-performance": {
-    "updated": "2026-10-10",
+    "updated": "2026-10-26",
     "path": "docs/TOP_LEVEL_NODES_PERFORMANCE.md"
   },
   "versioning-overview": {
-    "updated": "2026-10-09",
+    "updated": "2026-11-12",
     "path": "docs/versioning/01-overview-and-architecture.md"
   },
   "versioning-data-model": {
-    "updated": "2026-10-25",
+    "updated": "2026-11-01",
     "path": "docs/versioning/02-data-model.md"
   },
   "versioning-branching-and-merge": {
-    "updated": "2026-10-25",
+    "updated": "2026-11-11",
     "path": "docs/versioning/03-branching-commits-merge.md"
   },
   "versioning-projection-and-cache": {
-    "updated": "2026-10-11",
+    "updated": "2026-11-12",
     "path": "docs/versioning/04-projection-and-cache.md"
   },
   "versioning-ontology-governance": {
-    "updated": "2026-09-13",
+    "updated": "2026-10-26",
     "path": "docs/versioning/05-ontology-governance.md"
   },
   "versioning-api-reference": {
-    "updated": "2026-10-25",
+    "updated": "2026-11-12",
     "path": "docs/versioning/06-api-reference.md"
   },
   "versioning-frontend-integration": {
-    "updated": "2026-09-13",
+    "updated": "2026-11-04",
     "path": "docs/versioning/07-frontend-integration.md"
   },
   "versioning-import-export": {
-    "updated": "2026-10-25",
+    "updated": "2026-11-12",
     "path": "docs/versioning/08-import-export.md"
   },
   "versioning-scale-and-roadmap": {
-    "updated": "2026-10-11",
+    "updated": "2026-11-12",
     "path": "docs/versioning/09-scale-limits-and-roadmap.md"
   },
   "versioning-authoritative-sources": {
-    "updated": "2026-10-25",
+    "updated": "2026-11-12",
     "path": "docs/versioning/10-authoritative-sources-datahub-openmetadata.md"
   },
   "versioning-resync-at-any-scale": {
-    "updated": "2026-10-09",
+    "updated": "2026-10-28",
     "path": "docs/versioning/11-resync-at-any-scale.md"
   },
+  "versioning-streaming-ingestion": {
+    "updated": "2026-10-24",
+    "path": "docs/versioning/12-streaming-ingestion.md"
+  },
+  "versioning-access-and-review": {
+    "updated": "2026-11-09",
+    "path": "docs/versioning/13-access-and-review.md"
+  },
+  "versioning-graph-lifecycle-v2": {
+    "updated": "2026-11-04",
+    "path": "docs/versioning/14-graph-lifecycle-v2.md"
+  },
+  "versioning-shared-contracts": {
+    "updated": "2026-11-09",
+    "path": "docs/versioning/15-shared-contracts.md"
+  },
+  "versioning-go-live-stages-1-2": {
+    "updated": "2026-11-09",
+    "path": "docs/versioning/16-go-live-stages-1-2.md"
+  },
+  "versioning-forks-and-residency": {
+    "updated": "2026-11-11",
+    "path": "docs/versioning/17-forks-and-residency.md"
+  },
+  "versioning-identity": {
+    "updated": "2026-11-12",
+    "path": "docs/versioning/18-identity.md"
+  },
+  "versioning-change-streams": {
+    "updated": "2026-11-09",
+    "path": "docs/versioning/19-change-streams.md"
+  },
   "versioning-e2e": {
-    "updated": "2026-10-09",
+    "updated": "2026-11-05",
     "path": "docs/VERSIONING_E2E.md"
   },
   "versioning-deep-dives": {
-    "updated": "2026-10-09",
+    "updated": "2026-10-26",
     "path": "docs/versioning/README-index.md"
   },
   "versioning-guide": {
-    "updated": "2026-10-25",
+    "updated": "2026-11-12",
     "path": "docs/versioning/README.md"
   },
   "versioning-drafts-and-merge": {
-    "updated": "2026-09-13",
+    "updated": "2026-11-12",
     "path": "docs/VERSIONING_DRAFTS_LINEAGE_AND_MERGE.md"
   },
   "security-overview": {
-    "updated": "2026-10-26",
+    "updated": "2026-11-11",
     "path": "docs/SECURITY_OVERVIEW.md"
   },
   "rbac": {
-    "updated": "2026-10-26",
+    "updated": "2026-11-09",
     "path": "docs/RBAC.md"
   },
   "native-queries": {
-    "updated": "2026-10-25",
+    "updated": "2026-11-12",
     "path": "docs/NATIVE_QUERIES.md"
   },
   "sso": {
-    "updated": "2026-10-14",
+    "updated": "2026-10-26",
     "path": "docs/SSO.md"
   },
   "sso-integration": {
-    "updated": "2026-10-13",
+    "updated": "2026-10-26",
     "path": "docs/SSO_INTEGRATION.md"
   },
   "multi-environment-sessions": {
-    "updated": "2026-10-13",
+    "updated": "2026-10-26",
     "path": "docs/MULTI_ENVIRONMENT_SESSIONS.md"
   },
   "signup-service": {
-    "updated": "2026-10-11",
+    "updated": "2026-10-26",
     "path": "docs/SIGNUP_USER_SERVICE_PLAN.md"
   },
   "sso-backchannel-contract": {
-    "updated": "2026-10-13",
+    "updated": "2026-10-26",
     "path": "docs/SSO_BACKCHANNEL_CONTRACT.md"
   },
   "deployment": {
-    "updated": "2026-10-13",
+    "updated": "2026-11-11",
     "path": "docs/DEPLOYMENT.md"
   },
   "kubernetes": {
-    "updated": "2026-10-11",
+    "updated": "2026-10-30",
     "path": "docs/KUBERNETES.md"
   },
   "kubernetes-cluster-overlay": {
-    "updated": "2026-10-10",
+    "updated": "2026-10-26",
     "path": "deploy/k8s/overlays/production-cluster/README.md"
   },
   "configuration": {
-    "updated": "2026-10-25",
+    "updated": "2026-11-12",
     "path": "docs/CONFIGURATION.md"
   },
   "observability": {
-    "updated": "2026-10-26",
+    "updated": "2026-11-12",
     "path": "docs/OBSERVABILITY.md"
   },
   "runbooks": {
-    "updated": "2026-10-10",
+    "updated": "2026-11-12",
     "path": "docs/RUNBOOKS.md"
   },
   "upgrade-2026-09-10": {
-    "updated": "2026-10-10",
+    "updated": "2026-10-26",
     "path": "docs/UPGRADE_2026-09-10_graph-availability.md"
   },
   "migrations": {
-    "updated": "2026-10-10",
+    "updated": "2026-10-26",
     "path": "docs/MIGRATIONS.md"
   },
   "falkordb-deployment": {
-    "updated": "2026-09-17",
+    "updated": "2026-10-29",
     "path": "docs/FALKORDB_DEPLOYMENT.md"
   },
   "concurrency-tuning": {
-    "updated": "2026-09-29",
+    "updated": "2026-11-11",
     "path": "docs/CONCURRENCY_TUNING.md"
   },
   "scaling-concurrent-users": {
-    "updated": "2026-10-19",
+    "updated": "2026-11-04",
     "path": "docs/SCALING_CONCURRENT_USERS.md"
   },
   "falkordb-dr": {
-    "updated": "2026-10-10",
+    "updated": "2026-10-24",
     "path": "docs/FALKORDB_DR_RUNBOOK.md"
   },
   "infra-launch-scale": {
-    "updated": "2026-10-11",
+    "updated": "2026-11-02",
     "path": "docs/INFRASTRUCTURE_LAUNCH_SCALE.md"
   },
   "infra-scaling-250m": {
-    "updated": "2026-10-11",
+    "updated": "2026-11-12",
     "path": "docs/INFRASTRUCTURE_SCALING_250M.md"
   },
   "read-path-performance": {
-    "updated": "2026-10-10",
+    "updated": "2026-10-26",
     "path": "docs/read-path-performance/README.md"
   }
 }
@@ -285,27 +329,27 @@ export const guideMeta: Record<string, DocMeta> = {
     "path": "docs/guide/WELCOME.md"
   },
   "key-concepts": {
-    "updated": "2026-10-27",
+    "updated": "2026-11-05",
     "path": "docs/guide/KEY_CONCEPTS.md"
   },
   "quick-start": {
-    "updated": "2026-10-19",
+    "updated": "2026-11-04",
     "path": "docs/guide/QUICK_START.md"
   },
   "browsing-views": {
-    "updated": "2026-10-14",
+    "updated": "2026-10-26",
     "path": "docs/guide/BROWSING_VIEWS.md"
   },
   "reading-lineage": {
-    "updated": "2026-10-10",
+    "updated": "2026-11-04",
     "path": "docs/guide/READING_LINEAGE.md"
   },
   "exploring-graph": {
-    "updated": "2026-10-10",
+    "updated": "2026-11-05",
     "path": "docs/guide/EXPLORING_GRAPH.md"
   },
   "advanced-search": {
-    "updated": "2026-10-28",
+    "updated": "2026-11-04",
     "path": "docs/guide/ADVANCED_SEARCH.md"
   },
   "finding-connections": {
@@ -313,111 +357,111 @@ export const guideMeta: Record<string, DocMeta> = {
     "path": "docs/guide/FINDING_CONNECTIONS.md"
   },
   "lineage-lens": {
-    "updated": "2026-10-10",
+    "updated": "2026-10-26",
     "path": "docs/guide/LINEAGE_LENS.md"
   },
   "navigating-layers": {
-    "updated": "2026-10-10",
+    "updated": "2026-11-04",
     "path": "docs/guide/NAVIGATING_LAYERS.md"
   },
   "requesting-access": {
-    "updated": "2026-10-25",
+    "updated": "2026-10-26",
     "path": "docs/guide/REQUESTING_ACCESS.md"
   },
   "creating-views": {
-    "updated": "2026-10-18",
+    "updated": "2026-11-03",
     "path": "docs/guide/CREATING_VIEWS.md"
   },
   "managing-views": {
-    "updated": "2026-10-24",
+    "updated": "2026-11-04",
     "path": "docs/guide/MANAGING_VIEWS.md"
   },
   "display-rules": {
-    "updated": "2026-10-28",
+    "updated": "2026-11-04",
     "path": "docs/guide/DISPLAY_RULES.md"
   },
   "semantic-layer": {
-    "updated": "2026-10-10",
+    "updated": "2026-10-26",
     "path": "docs/guide/SEMANTIC_LAYER.md"
   },
   "api-keys": {
-    "updated": "2026-10-25",
+    "updated": "2026-11-09",
     "path": "docs/guide/API_KEYS.md"
   },
   "versioning-change-control": {
-    "updated": "2026-10-11",
+    "updated": "2026-11-05",
     "path": "docs/guide/VERSIONING_CHANGE_CONTROL.md"
   },
   "editing-in-a-draft": {
-    "updated": "2026-10-10",
+    "updated": "2026-11-05",
     "path": "docs/guide/EDITING_IN_A_DRAFT.md"
   },
   "review-center": {
-    "updated": "2026-10-10",
+    "updated": "2026-11-04",
     "path": "docs/guide/REVIEW_CENTER.md"
   },
   "import-export": {
-    "updated": "2026-10-11",
+    "updated": "2026-11-12",
     "path": "docs/guide/IMPORT_EXPORT.md"
   },
   "admin-setup": {
-    "updated": "2026-10-11",
+    "updated": "2026-11-10",
     "path": "docs/guide/ADMIN_SETUP.md"
   },
   "workspace-admin": {
-    "updated": "2026-10-25",
+    "updated": "2026-11-09",
     "path": "docs/guide/WORKSPACE_ADMIN.md"
   },
   "users-access": {
-    "updated": "2026-10-25",
+    "updated": "2026-11-09",
     "path": "docs/guide/USERS_ACCESS.md"
   },
   "service-accounts": {
-    "updated": "2026-10-26",
+    "updated": "2026-11-09",
     "path": "docs/guide/SERVICE_ACCOUNTS.md"
   },
   "sso-setup": {
-    "updated": "2026-10-13",
+    "updated": "2026-10-26",
     "path": "docs/guide/SSO_SETUP.md"
   },
   "sso-operations": {
-    "updated": "2026-10-19",
+    "updated": "2026-10-26",
     "path": "docs/guide/SSO_OPERATIONS.md"
   },
   "governance-ops": {
-    "updated": "2026-10-24",
+    "updated": "2026-11-02",
     "path": "docs/guide/GOVERNANCE_OPS.md"
   },
   "feature-switches": {
-    "updated": "2026-10-25",
+    "updated": "2026-11-11",
     "path": "docs/guide/FEATURE_SWITCHES.md"
   },
   "data-freshness": {
-    "updated": "2026-10-10",
+    "updated": "2026-11-12",
     "path": "docs/guide/DATA_FRESHNESS.md"
   },
   "analytics": {
-    "updated": "2026-10-10",
+    "updated": "2026-10-26",
     "path": "docs/guide/ANALYTICS.md"
   },
   "graph-store-topology": {
-    "updated": "2026-10-10",
+    "updated": "2026-10-26",
     "path": "docs/guide/GRAPH_STORE_TOPOLOGY.md"
   },
   "rollup-capacity": {
-    "updated": "2026-10-10",
+    "updated": "2026-10-26",
     "path": "docs/guide/ROLLUP_CAPACITY.md"
   },
   "ways-of-working": {
-    "updated": "2026-10-10",
+    "updated": "2026-10-26",
     "path": "docs/guide/WAYS_OF_WORKING.md"
   },
   "glossary": {
-    "updated": "2026-10-27",
+    "updated": "2026-11-04",
     "path": "docs/guide/GLOSSARY.md"
   },
   "troubleshooting": {
-    "updated": "2026-10-25",
+    "updated": "2026-11-11",
     "path": "docs/guide/TROUBLESHOOTING.md"
   }
 }

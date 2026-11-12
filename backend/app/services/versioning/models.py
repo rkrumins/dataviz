@@ -328,6 +328,25 @@ class ProjectionStateORM(VersioningBase):
     # ``{at, nodes, edges, via}``, NULL when nothing. Cleared once it is gone or brought into
     # history (20261028_1000_gv_ps_unowned).
     external_drift = Column(JSONB, nullable=True)
+    # When the graph's quarantined entities (``projection_quarantine``) are next retried, NULL
+    # when it holds none: what a pass and the poll read, so a graph with nothing held costs no
+    # query of the quarantine (20261112_1000_gv_proj_quarantine).
+    quarantine_next_at = Column(Text, nullable=True)
+    # A lineage-summaries build the projector asked for and did not get: ``{pending, since,
+    # asked}``, where ``pending`` says why (``active``: a job was already running, which may have
+    # read the graph before the change that asked; ``refused``: a hold, or the service could not
+    # be reached). The liveness loop asks again, every GRAPHVER_ROLLUP_REASK_SECS, until one is
+    # queued. ``moved``: the summaries already count writes the next full seed brings (it cleared
+    # what was held, or a window that moved them escalated), so the full seed that publishes hands
+    # them to the job instead of moving them by its difference, and clears it. NULL when nothing
+    # is owed (20261112_1200_gv_ps_rollup_state): None is stored as SQL NULL, not JSON ``null``.
+    rollup_state = Column(JSONB(none_as_null=True), nullable=True)
+    # The version of main the key holds whole: the seq of the last window a pass published into
+    # it. A rebuild in place keeps it, as the key keeps that version until the rebuild publishes,
+    # so reads stay on the key while the projection catches up or rebuilds (``serving_seq``).
+    # NULL when the key holds no published version: never written, written from nothing (a move,
+    # an Adopt, a repin), lost, evicted or reset (20261112_1800_gv_ps_served).
+    served_commit_seq = Column(BigInteger, nullable=True)
     last_projected_at = Column(Text, nullable=True)
     last_error = Column(Text, nullable=True)
     # THE GUARDRAIL. A bootstrapped graph is PINNED to the customer's REAL FalkorDB graph — that
@@ -351,6 +370,10 @@ class ProjectionStateORM(VersioningBase):
     # Consecutive failed passes, and when the poll may retry (ISO-8601 UTC, like _now()).
     failed_attempts = Column(Integer, nullable=False, default=0, server_default=text("0"))
     next_retry_at = Column(Text, nullable=True)
+    # The passes in a row that failed on a timeout or memory refusal the statement ladder could not
+    # absorb, which the escalation counts (GRAPHVER_PROJECTION_ESCALATE_AFTER): a pass that ends any
+    # other way sets it back to 0 (20261112_1700_gv_ps_pressure).
+    pressure_failures = Column(Integer, nullable=False, default=0, server_default=text("0"))
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
     # Residency (20261030_1300_gv_ps_residency). The class a system admin set: ``always`` (never
     # evicted), ``standard`` (evicted when unread for the Standard idle time or under memory
@@ -398,6 +421,111 @@ JOB_TYPES = ("ingest", "projection", "rebuild", "export", "bootstrap", "publish"
              "package_inspect", "fork_update", "fork_merge")
 
 
+class ProjectionQuarantineORM(VersioningBase):
+    """A projector statement that still failed for one entity on its own, after its retries: held
+    here so the rest of its window lands and publishes, instead of the entity failing every pass
+    for the whole graph (a dead-letter queue, as a CDC sink keeps one). Each later pass retries the
+    graph's rows first, oldest first; a row that lands, or a newer write of the same entity that
+    lands, removes it. While a graph holds any, its passes publish unverified.
+
+    ``entity_key`` names the entity as the statement does: a node's urn, or an edge's id with its
+    type and ends (``<id>@<type>:<source urn>-><target urn>``). ``cypher`` and ``params`` are the
+    statement and its one row, as sent."""
+
+    __tablename__ = "projection_quarantine"
+
+    graph_id = Column(Text, nullable=False)
+    statement = Column(Text, nullable=False)          # the statement kind: node_merge, edge_delete…
+    entity_key = Column(Text, nullable=False)
+    entity_kind = Column(Text, nullable=False)        # node | edge
+    cypher = Column(Text, nullable=False)
+    params = Column(JSONB, nullable=False)
+    error = Column(Text, nullable=True)
+    attempts = Column(Integer, nullable=False, default=1)
+    first_at = Column(Text, nullable=False, default=_now)
+    last_at = Column(Text, nullable=False, default=_now)
+
+    __table_args__ = _plain(
+        PrimaryKeyConstraint("graph_id", "statement", "entity_key", name="pk_projection_quarantine"),
+        CheckConstraint("entity_kind IN ('node','edge')", name="ck_projection_quarantine_kind"),
+    )
+
+
+class RollupDeltaORM(VersioningBase):
+    """A projection window's net lineage-summary deltas, while it has more cells than it nets in
+    memory (``GRAPHVER_ROLLUP_NET_MAX_CELLS``): one row per ``:AGGREGATED`` cell the window moves,
+    keyed by its ends' urns, with ``dw`` (the cube regime's delta), ``dwc`` (the canonical one's;
+    NULL outside canonical mode), the raw types, and the stamps the cell is written with. Each part
+    of the window netted in memory adds to its cells here; the pass then applies them a page at a
+    time and deletes its rows. Rows a pass did not finish are deleted by the next one that nets
+    here, before it starts."""
+
+    __tablename__ = "rollup_deltas"
+
+    graph_id = Column(Text, nullable=False)
+    to_seq = Column(BigInteger, nullable=False)
+    s = Column(Text, nullable=False)
+    t = Column(Text, nullable=False)
+    dw = Column(BigInteger, nullable=False, default=0)
+    dwc = Column(BigInteger, nullable=True)
+    types = Column(JSONB, nullable=False, default=list)
+    sd = Column(Integer, nullable=True)
+    td = Column(Integer, nullable=True)
+    sl = Column(Integer, nullable=True)
+    tl = Column(Integer, nullable=True)
+    slb = Column(Text, nullable=True)
+    tlb = Column(Text, nullable=True)
+    dg = Column(Text, nullable=True)
+
+    __table_args__ = _plain(
+        PrimaryKeyConstraint("graph_id", "to_seq", "s", "t", name="pk_rollup_deltas"),
+    )
+
+
+class KeyIndexORM(VersioningBase):
+    """A property imports match nodes by (``identifier=prop.<name>``) and how far its index
+    (``entity_keys``) describes ``main``: ``seq``, a main commit. ``building`` until the first import
+    that named it has read every live node; ``ready`` after, and caught up from main's version log
+    before each import that uses it."""
+
+    __tablename__ = "key_index"
+
+    graph_id = Column(Text, nullable=False)
+    key_name = Column(Text, nullable=False)
+    status = Column(Text, nullable=False, default="building")
+    seq = Column(BigInteger, nullable=False, default=0)
+    # Part-way through the commit after ``seq``, one too large for a page: ``<seq>|<entity id>``, the
+    # last of its versions read.
+    cursor = Column(Text, nullable=True)
+    created_at = Column(Text, nullable=False, default=_now)
+    created_by_job = Column(Text, nullable=True)
+
+    __table_args__ = _plain(
+        PrimaryKeyConstraint("graph_id", "key_name", name="pk_key_index"),
+        CheckConstraint("status IN ('building','ready')", name="ck_key_index_status"),
+    )
+
+
+class EntityKeyORM(VersioningBase):
+    """A node of ``main`` holding ``key_value`` in the matching property ``key_name``: what an import
+    by ``identifier=prop.<name>`` finds it by. A deleted node keeps its last value, ``live`` false, so
+    a row naming it again brings it back under its id. The secondary index reads an entity's own
+    entries, which a version of it replaces."""
+
+    __tablename__ = "entity_keys"
+
+    graph_id = Column(Text, nullable=False)
+    key_name = Column(Text, nullable=False)
+    key_value = Column(Text, nullable=False)
+    entity_id = Column(Text, nullable=False)
+    live = Column(Boolean, nullable=False, default=True)
+
+    __table_args__ = _plain(
+        PrimaryKeyConstraint("graph_id", "key_name", "key_value", "entity_id", name="pk_entity_keys"),
+        Index("ix_entity_keys_entity", "graph_id", "key_name", "entity_id"),
+    )
+
+
 class JobORM(VersioningBase):
     """Crash-recoverable worker job (ingest / projection / rebuild).
 
@@ -438,6 +566,13 @@ class JobORM(VersioningBase):
     branch_id = Column(Text, nullable=True)               # the import's draft branch
     reconcile_mode = Column(Text, nullable=True)          # upsert | replace
     identity_strategy = Column(Text, nullable=True)       # auto | entity_id | urn
+    # A replace import sent with allowMassDelete: past the replace guard's limits, it deletes all the
+    # same (20261112_1400_gv_job_mass_delete).
+    allow_mass_delete = Column(Boolean, nullable=True)
+    # What an import runs under, as its data source and the platform set it when it was made
+    # (``services.import_settings``): where its identifier came from, and the replace guard's limits
+    # with where each came from. A resumed job keeps them (20261112_1600_import_settings).
+    import_settings = Column(JSONB, nullable=True)
     on_invalid = Column(Text, nullable=True)              # quarantine | auto_fix | reject_all
     import_format = Column(Text, nullable=True)           # ndjson|csv|tsv|xlsx|json|zip
     field_scope = Column(JSONB, nullable=True)            # E4: allow-list of columns to write
@@ -513,6 +648,9 @@ class ImportRowORM(VersioningBase):
     resolved_op = Column(Text, nullable=True)             # create|update|delete|unchanged|invalid
     status = Column(Text, nullable=True)                  # new|updated|unchanged|deleted|invalid|auto_fixed
     reasons = Column(JSONB, nullable=True)                # violations / suggestions
+    # Why the row was refused, as a stable code a client acts on (resolve.CODES); the reasons say
+    # it in words (20261112_1300_gv_import_row_code).
+    code = Column(Text, nullable=True)
     content_hash = Column(Text, nullable=True)            # of the normalized payload
     base_content_hash = Column(Text, nullable=True)       # echoed OCC token from the file
 
@@ -838,6 +976,20 @@ def _ensure_schema_upgrades(conn) -> None:
     # 20261017_1500_gv_ps_keys. Never strict here: a store holding two live pins on one key starts
     # without the index rather than not at all.
     _bounded_step(conn, "uq_ps_key was not built", lambda: ensure_ps_key_index(conn, strict=False))
+    _bounded_step(conn, "projection_state.quarantine_next_at was not added",
+                  lambda: ensure_ps_quarantine_column(conn), required=True)
+    _bounded_step(conn, "projection_state.rollup_state was not added",
+                  lambda: ensure_ps_rollup_state_column(conn), required=True)
+    _bounded_step(conn, "projection_state.pressure_failures was not added",
+                  lambda: ensure_ps_pressure_failures_column(conn), required=True)
+    _bounded_step(conn, "projection_state.served_commit_seq was not added",
+                  lambda: ensure_ps_served_column(conn), required=True)
+    _bounded_step(conn, "import_rows.code was not added",
+                  lambda: ensure_import_rows_code_column(conn), required=True)
+    _bounded_step(conn, "jobs.allow_mass_delete was not added",
+                  lambda: ensure_jobs_mass_delete_column(conn), required=True)
+    _bounded_step(conn, "jobs.import_settings was not added",
+                  lambda: ensure_jobs_import_settings_column(conn), required=True)
     # 20261017_1550_gv_ps_fencing.
     _bounded_step(conn, "the projection fencing columns were not added",
                   lambda: ensure_ps_fencing_columns(conn), required=True)
@@ -927,6 +1079,104 @@ def ensure_ps_fencing_columns(conn) -> None:
     conn.execute(text(
         f"ALTER TABLE {ps} ADD COLUMN IF NOT EXISTS failed_attempts INTEGER NOT NULL DEFAULT 0"))
     conn.execute(text(f"ALTER TABLE {ps} ADD COLUMN IF NOT EXISTS next_retry_at TEXT"))
+
+
+def ensure_ps_quarantine_column(conn) -> None:
+    """Add ``projection_state.quarantine_next_at``: when the graph's quarantined entities are next
+    retried, NULL (every existing graph) when it holds none. Nullable with no default, so nothing
+    is rewritten. A no-op without the table, and once it is there: an ALTER takes the table's
+    ACCESS EXCLUSIVE lock even when it adds nothing, and every worker start runs this. ``conn`` is
+    a synchronous connection (alembic's bind, or ``run_sync``'s)."""
+    inspector = sa_inspect(conn)
+    if not inspector.has_table("projection_state", schema=_SCHEMA):
+        return                            # create_schema_and_partitions builds it from the models
+    if "quarantine_next_at" in {c["name"] for c in inspector.get_columns("projection_state",
+                                                                         schema=_SCHEMA)}:
+        return
+    conn.execute(text(f'ALTER TABLE "{_SCHEMA}"."projection_state" '
+                      "ADD COLUMN IF NOT EXISTS quarantine_next_at TEXT"))
+
+
+def ensure_jobs_mass_delete_column(conn) -> None:
+    """Add ``jobs.allow_mass_delete``: a replace import that may delete past the replace guard's
+    limits, NULL (every job made before) when not. Nullable with no default, so nothing is
+    rewritten; a no-op without the table and once the column is there."""
+    inspector = sa_inspect(conn)
+    if not inspector.has_table("jobs", schema=_SCHEMA):
+        return
+    if "allow_mass_delete" in {c["name"] for c in inspector.get_columns("jobs", schema=_SCHEMA)}:
+        return
+    conn.execute(text(f'ALTER TABLE "{_SCHEMA}"."jobs" ADD COLUMN IF NOT EXISTS allow_mass_delete BOOLEAN'))
+
+
+def ensure_jobs_import_settings_column(conn) -> None:
+    """Add ``jobs.import_settings``: what an import runs under, as resolved when it was made; NULL
+    (every job made before) runs under the platform's. Nullable with no default, so nothing is
+    rewritten; a no-op without the table and once the column is there."""
+    inspector = sa_inspect(conn)
+    if not inspector.has_table("jobs", schema=_SCHEMA):
+        return
+    if "import_settings" in {c["name"] for c in inspector.get_columns("jobs", schema=_SCHEMA)}:
+        return
+    conn.execute(text(f'ALTER TABLE "{_SCHEMA}"."jobs" ADD COLUMN IF NOT EXISTS import_settings JSONB'))
+
+
+def ensure_import_rows_code_column(conn) -> None:
+    """Add ``import_rows.code``: why a staged row was refused, as a stable code, NULL for every row
+    staged before. Nullable with no default, so nothing is rewritten; a no-op without the table and
+    once the column is there."""
+    inspector = sa_inspect(conn)
+    if not inspector.has_table("import_rows", schema=_SCHEMA):
+        return
+    if "code" in {c["name"] for c in inspector.get_columns("import_rows", schema=_SCHEMA)}:
+        return
+    conn.execute(text(f'ALTER TABLE "{_SCHEMA}"."import_rows" ADD COLUMN IF NOT EXISTS code TEXT'))
+
+
+def ensure_ps_rollup_state_column(conn) -> None:
+    """Add ``projection_state.rollup_state``: a lineage-summaries build the projector asked for
+    and did not get, NULL (every existing graph) when nothing is owed. Nullable with no default,
+    so nothing is rewritten; a no-op without the table and once the column is there, like
+    :func:`ensure_ps_quarantine_column`."""
+    inspector = sa_inspect(conn)
+    if not inspector.has_table("projection_state", schema=_SCHEMA):
+        return
+    if "rollup_state" in {c["name"] for c in inspector.get_columns("projection_state",
+                                                                   schema=_SCHEMA)}:
+        return
+    conn.execute(text(f'ALTER TABLE "{_SCHEMA}"."projection_state" '
+                      "ADD COLUMN IF NOT EXISTS rollup_state JSONB"))
+
+
+def ensure_ps_pressure_failures_column(conn) -> None:
+    """Add ``projection_state.pressure_failures``: the passes in a row that failed under pressure,
+    0 for every existing graph. Its default is a constant, which Postgres keeps in the catalog, so
+    nothing is rewritten; a no-op without the table and once the column is there, like
+    :func:`ensure_ps_quarantine_column`."""
+    inspector = sa_inspect(conn)
+    if not inspector.has_table("projection_state", schema=_SCHEMA):
+        return
+    if "pressure_failures" in {c["name"] for c in inspector.get_columns("projection_state",
+                                                                        schema=_SCHEMA)}:
+        return
+    conn.execute(text(f'ALTER TABLE "{_SCHEMA}"."projection_state" '
+                      "ADD COLUMN IF NOT EXISTS pressure_failures INTEGER NOT NULL DEFAULT 0"))
+
+
+def ensure_ps_served_column(conn) -> None:
+    """Add ``projection_state.served_commit_seq``: the version of main a graph's key holds whole,
+    NULL (every existing graph) until its next pass publishes; until then a key behind its head
+    serves at its watermark, as ``serving_seq`` reads it. Nullable with no default, so nothing is
+    rewritten; a no-op without the table and once the column is there, like
+    :func:`ensure_ps_rollup_state_column`."""
+    inspector = sa_inspect(conn)
+    if not inspector.has_table("projection_state", schema=_SCHEMA):
+        return
+    if "served_commit_seq" in {c["name"] for c in inspector.get_columns("projection_state",
+                                                                        schema=_SCHEMA)}:
+        return
+    conn.execute(text(f'ALTER TABLE "{_SCHEMA}"."projection_state" '
+                      "ADD COLUMN IF NOT EXISTS served_commit_seq BIGINT"))
 
 
 def ensure_ps_reseeding_status(conn) -> None:

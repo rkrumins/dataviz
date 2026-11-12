@@ -1264,6 +1264,7 @@ class BootstrapRunner:
             ps = await s.get(ProjectionStateORM, graph_id)
             if ps is not None:
                 ps.projected_commit_seq = commit.commit_seq
+                ps.served_commit_seq = commit.commit_seq     # the source's own graph holds it
                 ps.target_commit_seq = commit.commit_seq
                 ps.status = "idle"
                 ps.last_projected_at = _now()

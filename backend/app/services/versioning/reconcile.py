@@ -65,6 +65,7 @@ _NOT_DERIVED = config.not_derived_clause("n")
 # Reuse the reader/projector's label sanitiser so the deep check compares against the SAME
 # label the projector wrote (``_sanitize_label(entityType)``), not the raw ontology type.
 from backend.app.providers.falkordb_provider import _sanitize_label
+from backend.common.derived_artifacts import DERIVED_LABELS
 
 logger = logging.getLogger(__name__)
 
@@ -247,23 +248,50 @@ async def falkor_counts(client, *, owned: bool = True) -> Tuple[int, int]:
     every verify. A graph the projector owns is counted as before: anything there that it did not
     write IS drift."""
     if not owned:
-        fn = await _bounded_query(
+        return await _paged_counts(client)
+    # Unfiltered counts, answered from FalkorDB's label and relation matrix counters
+    # (``reduce_count``: no scan operator, constant time — 1.3 ms against 514 ms on a 500k-node
+    # graph, see ``FalkorDBProvider.get_counts_fast``), less the derived labels' own counts and
+    # the rollups'. A WHERE on every node or relationship is what made this a whole-graph scan,
+    # which timed out on the large graphs it most needs to count.
+    nodes = await _count(client, "MATCH (n) RETURN count(n) AS c")
+    for label in DERIVED_LABELS:
+        nodes -= await _count(client, f"MATCH (n:`{label}`) RETURN count(n) AS c")
+    edges = await _count(client, "MATCH ()-[r]->() RETURN count(r) AS c")
+    edges -= await _count(client, "MATCH ()-[r:`AGGREGATED`]->() RETURN count(r) AS c")
+    return nodes, edges
+
+
+async def _count(client, cypher: str, params=None) -> int:
+    res = await _bounded_query(client, cypher, params)
+    rows = getattr(res, "result_set", None) or []
+    return int(rows[0][0] or 0) if rows and rows[0] else 0
+
+
+#: Internal node ids per statement of a customer key's counts (``_paged_counts``).
+_COUNT_PAGE = 20000
+
+
+async def _paged_counts(client) -> Tuple[int, int]:
+    """A customer key's counts, as :func:`falkor_counts` describes them, a window of internal node
+    ids at a time: ``id(n)`` ranges compile to a NodeByIdSeek, so each statement costs its window,
+    not the graph, and none runs past the read budget however large the key. Relationships are
+    windowed by their source, so a triple's parallel copies all fall in one window and
+    ``count(DISTINCT …)`` per window sums exactly."""
+    top = await _count(client, "MATCH (n) RETURN max(id(n)) AS c")
+    nodes = edges = 0
+    for lo in range(0, top + 1, _COUNT_PAGE):
+        window = {"lo": lo, "hi": lo + _COUNT_PAGE}
+        nodes += await _count(
             client,
-            f"MATCH (n) WHERE n.urn IS NOT NULL AND n.urn <> '' AND {_NOT_DERIVED} "
-            "RETURN count(n) AS c")
-        fe = await _bounded_query(
+            "MATCH (n) WHERE id(n) >= $lo AND id(n) < $hi AND n.urn IS NOT NULL AND n.urn <> '' "
+            f"AND {_NOT_DERIVED} RETURN count(n) AS c", window)
+        edges += await _count(
             client,
-            "MATCH (a)-[r]->(b) WHERE type(r) <> 'AGGREGATED' AND a.urn IS NOT NULL "
-            "AND a.urn <> '' AND b.urn IS NOT NULL AND b.urn <> '' "
-            "RETURN count(DISTINCT [a.urn, type(r), b.urn]) AS c")
-        return int(fn.result_set[0][0]), int(fe.result_set[0][0])
-    fn = await _bounded_query(
-        client,
-        f"MATCH (n) WHERE {_NOT_DERIVED} RETURN count(n) AS c")
-    fe = await _bounded_query(
-        client,
-        "MATCH ()-[r]->() WHERE type(r) <> 'AGGREGATED' RETURN count(r) AS c")
-    return int(fn.result_set[0][0]), int(fe.result_set[0][0])
+            "MATCH (a)-[r]->(b) WHERE id(a) >= $lo AND id(a) < $hi AND type(r) <> 'AGGREGATED' "
+            "AND a.urn IS NOT NULL AND a.urn <> '' AND b.urn IS NOT NULL AND b.urn <> '' "
+            "RETURN count(DISTINCT [a.urn, type(r), b.urn]) AS c", window)
+    return nodes, edges
 
 
 @dataclass

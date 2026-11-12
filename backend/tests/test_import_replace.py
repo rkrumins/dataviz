@@ -12,6 +12,7 @@ from backend.app.services.storage.object_store import LocalFsObjectStore
 from backend.app.services.versioning import db as ver_db
 from backend.app.services.versioning.import_export import import_worker
 from backend.app.services.versioning.import_export.import_worker import ImportWorker
+from backend.app.services.versioning.import_export.resolve import FIXES
 from backend.app.services.versioning.import_export.snapshot import Winner
 
 
@@ -124,14 +125,15 @@ def _replace(monkeypatch, summary):
 
 async def test_a_replace_with_an_invalid_row_deletes_nothing(monkeypatch):
     worker, svc, _ = _replace(monkeypatch, {"new": 9, "invalid": 1})
-    with pytest.raises(ValueError, match="Nothing was deleted: 1 row"):
+    with pytest.raises(import_worker.ReplaceRowsRefused, match="Nothing was deleted: 1 row") as exc:
         await worker._resolve_and_build("vjob_1", "g1", "br1", "u", "replace")
     assert svc.deletes == []
+    assert (exc.value.code, exc.value.action) == ("rows_refused", "fix_rows")
 
 
 async def test_a_replace_with_skipped_records_writes_nothing(monkeypatch):
     worker, svc, windows = _replace(monkeypatch, {"skipped": 1})
-    with pytest.raises(ValueError, match="Nothing was deleted: 1 record"):
+    with pytest.raises(import_worker.ReplaceRowsRefused, match="Nothing was deleted: 1 record"):
         await worker._resolve_and_build("vjob_1", "g1", "br1", "u", "replace")
     assert svc.deletes == [] and windows == [], "refused before the first window"
 
@@ -140,7 +142,8 @@ async def test_an_upsert_reports_skipped_records_and_applies_the_rest(monkeypatc
     worker, _svc, windows = _replace(monkeypatch, {"new": 2, "skipped": 1})
     summary = await worker._resolve_and_build("vjob_1", "g1", "br1", "u", "upsert")
     assert summary == {"new": 2, "updated": 0, "unchanged": 0, "deleted": 0, "invalid": 0,
-                       "skipped": 1}
+                       "skipped": 1, "refused": {"total": 1, "byCode": {"not_node_or_edge": 1}, "rows": [],
+                                                 "fixes": {"not_node_or_edge": FIXES["not_node_or_edge"]}}}
     assert len(windows) == 1
 
 

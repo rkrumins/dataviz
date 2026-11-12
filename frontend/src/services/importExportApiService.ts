@@ -32,6 +32,68 @@ export interface ImportSummary {
   deleted: number
   invalid: number
   auto_fixed?: number
+  /** A replace: the replace guard's verdict — what it would delete and made, and the limits. */
+  replaceGuard?: ReplaceGuardVerdict | null
+  /** A failed job: why (`code`) and what to do about it (`action`). */
+  failure?: { code: string; action?: string | null; reason?: string } | null
+  /** The rows the import refused: how many for each reason, and the first ones, with why. */
+  refused?: RefusedRows | null
+}
+
+/** An import's report of the rows it refused (`summary.refused`). */
+export interface RefusedRows {
+  total: number
+  /** How many for each reason: `no_key`, `invalid_type`, … */
+  byCode: Record<string, number>
+  /** The first rows refused, each with why. */
+  rows: RefusedRow[]
+  /** What to do about each reason it counts. */
+  fixes?: Record<string, string>
+}
+
+/** A row an import refused: where it is in the file, and why. */
+export interface RefusedRow {
+  /** The file's records counted from 0, whatever its format. */
+  rowIndex: number
+  kind: string
+  label: string
+  code: string
+  reason: string
+  /** Where it is, as its file shows it: a line (NDJSON, CSV, TSV), a sheet's row (Excel), an
+   *  item of the array (JSON). */
+  at?: RowAt | null
+}
+
+/** Where a row is in its file: lines and sheet rows count from 1, as editors and spreadsheets do;
+ *  a JSON array's items from 0. */
+export interface RowAt {
+  line?: number
+  sheet?: string
+  row?: number
+  item?: number
+}
+
+/** "line 12", "Edges row 7", "item 3" — or the row's place in the file, from 0. */
+export function whereText(r: Pick<RefusedRow, 'rowIndex' | 'at'>): string {
+  const at = r.at
+  if (at?.sheet && at.row) return `${at.sheet} row ${at.row}`
+  if (at?.line) return `line ${at.line}`
+  if (at?.item != null) return `item ${at.item}`
+  return `#${r.rowIndex}`
+}
+
+/** Where an import setting came from: the graph's own, or the platform's; `fork`: a fork matches
+ *  by Entity ID where its parent's default is a property, which a fork can't match by yet. */
+export type ImportSettingSource = 'data_source' | 'platform' | 'fork'
+
+/** The replace guard's verdict on a replace import, before it deletes anything. */
+export interface ReplaceGuardVerdict {
+  state: 'off' | 'passed' | 'overridden' | 'blocked'
+  live: number
+  deletes: number
+  creates: number
+  limits: { minLive: number; deleteFraction: number; createFraction: number }
+  sources: Record<'minLive' | 'deleteFraction' | 'createFraction', ImportSettingSource>
 }
 
 export interface ExportSummary {
@@ -72,6 +134,10 @@ export interface Job {
   attempt?: number | null
   /** Running, but its server stopped answering: another one is about to take it over. */
   stale?: boolean
+  /** An import: what its rows found their entities by (`entity_id`, `urn` or `prop.<name>`). */
+  identifier?: string | null
+  /** A replace sent to delete past the replace guard's limits. */
+  allowMassDelete?: boolean
 }
 
 /** "2 jobs ahead of it" for a job waiting its turn on the server's workers; null when it isn't. */
@@ -132,12 +198,20 @@ export interface ImportPreviewRow {
   matchedEntityId?: string | null
   label?: string
   reasons?: string[]
+  /** A refused row's reason, as a code (`no_key`, `end_not_found`, …). */
+  code?: string | null
+  /** A refused row: what to do about it. */
+  fix?: string | null
+  /** Where it is in its file. */
+  at?: RowAt | null
 }
 
 export interface ImportPreview {
   job: Job
   summary?: ImportSummary | null
   sample: ImportPreviewRow[]
+  /** Where the next page starts (a rowIndex), or null after the last. */
+  nextAfter?: number | null
   previewDownloadUrl?: string | null
   rejectedDownloadUrl?: string | null
 }
@@ -149,6 +223,14 @@ export interface CreateImportOptions {
   branchId?: string
   viewId?: string
   idempotencyKey?: string
+  /** What the rows find their entities by: `entity_id`, `urn` or `prop.<name>`; the graph's when
+   *  left out. */
+  identifier?: string
+  /** A replace: delete what the file leaves out even past the replace guard's limits. */
+  allowMassDelete?: boolean
+  /** How many refused rows the import may go on without: a count, a share (`0.5%`), or `-1`
+   *  (any). Left out, the platform's (none, by default). */
+  maxRefusedRows?: string
 }
 
 /** The statuses a job ends in. */
@@ -386,10 +468,64 @@ export async function importInParts(
   const params = new URLSearchParams({ reconcileMode: opts.reconcileMode ?? 'upsert' })
   if (opts.branchId) params.set('branchId', opts.branchId)
   if (opts.viewId) params.set('viewId', opts.viewId)
+  if (opts.identifier) params.set('identifier', opts.identifier)
+  if (opts.allowMassDelete) params.set('allowMassDelete', 'true')
+  if (opts.maxRefusedRows) params.set('maxRefusedRows', opts.maxRefusedRows)
   const created = await authFetch<CreateImportResult>(
     `${uploadsUrl(wsId, graphId)}/${upload.uploadId}/complete?${params.toString()}`, { method: 'POST' })
   remember(key, null)
   return created
+}
+
+export interface ImportSettingsValues {
+  /** What an import's rows find their entities by when it names nothing else. */
+  identifier: string
+  /** The replace guard judges a scope of at least this many entities… */
+  replaceMinLive: number
+  /** …and refuses a replace that deletes at least this share of it… */
+  replaceDeleteFraction: number
+  /** …and creates at least this share as many again. */
+  replaceCreateFraction: number
+  /** A replace whose first rows find fewer than this share of entities stops there. */
+  replaceMinMatchFraction: number
+}
+
+/** A property the graph's imports match by, and how far its index is caught up. */
+export interface MatchingProperty {
+  name: string
+  status: 'building' | 'ready'
+  seq: number
+  current: boolean
+  createdAt: string
+}
+
+/** What a graph's imports run under: its own settings over the platform's. */
+export interface ImportSettings {
+  dataSourceId: string | null
+  overrides: { [K in keyof ImportSettingsValues]: ImportSettingsValues[K] | null }
+  platform: ImportSettingsValues
+  effective: ImportSettingsValues & { sources: Record<keyof ImportSettingsValues, ImportSettingSource> }
+  /** The platform's switch: off, no replace is refused. */
+  replaceGuard: boolean
+  /** A fork's are its parent's: set them there. */
+  followsParent: boolean
+  matchingProperties: MatchingProperty[]
+  maxMatchingProperties: number
+}
+
+/** A change to a graph's own settings: `'inherit'` goes back to the platform's. */
+export type ImportSettingsChange = {
+  [K in keyof ImportSettingsValues]?: ImportSettingsValues[K] | 'inherit'
+}
+
+export function getImportSettings(wsId: string, graphId: string): Promise<ImportSettings> {
+  return authFetch<ImportSettings>(`${base(wsId)}/graphs/${graphId}/import-settings`)
+}
+
+export function setImportSettings(wsId: string, graphId: string, change: ImportSettingsChange): Promise<ImportSettings> {
+  return authFetch<ImportSettings>(`${base(wsId)}/graphs/${graphId}/import-settings`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(change),
+  })
 }
 
 export function getImport(wsId: string, graphId: string, jobId: string): Promise<Job> {
@@ -398,6 +534,34 @@ export function getImport(wsId: string, graphId: string, jobId: string): Promise
 
 export function getImportPreview(wsId: string, graphId: string, jobId: string): Promise<ImportPreview> {
   return authFetch<ImportPreview>(`${base(wsId)}/graphs/${graphId}/imports/${jobId}/preview`)
+}
+
+/** A page of the rows an import refused, in file order, each with why and what to do: the rows
+ *  after `after` (a rowIndex), or the first page. */
+export async function getRefusedRows(wsId: string, graphId: string, jobId: string,
+  after?: number | null): Promise<{ rows: RefusedRow[]; nextAfter: number | null }> {
+  const q = new URLSearchParams({ refused: 'true' })
+  if (after != null) q.set('after', String(after))
+  const page = await authFetch<ImportPreview>(`${base(wsId)}/graphs/${graphId}/imports/${jobId}/preview?${q}`)
+  return {
+    rows: page.sample.map((r) => ({ rowIndex: r.rowIndex, kind: r.kind, label: r.label ?? '',
+      code: r.code ?? 'invalid_row', reason: r.reasons?.[0] ?? '', at: r.at ?? null })),
+    nextAfter: page.nextAfter ?? null,
+  }
+}
+
+/** Refused rows as CSV, to fix in a spreadsheet: where each is, what it is, why, and what to do. */
+export function refusedRowsCsv(rows: RefusedRow[], fixes: Record<string, string> = {}): string {
+  const cell = (v: string | number) => {
+    const text = String(v)
+    return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text
+  }
+  const lines = [['where', 'rowIndex', 'kind', 'label', 'code', 'reason', 'fix'].join(',')]
+  for (const r of rows) {
+    lines.push([whereText(r), r.rowIndex, r.kind, r.label, r.code, r.reason, fixes[r.code] ?? '']
+      .map(cell).join(','))
+  }
+  return lines.join('\n') + '\n'
 }
 
 export function listImports(wsId: string, graphId: string): Promise<Job[]> {
@@ -468,9 +632,9 @@ export interface ExportPlan {
   /** Why this format can't hold the export (an Excel sheet stops at 1,048,575 rows), if it can't. */
   formatLimit: string | null
   /** A view-scoped export: how many entities the view places, how many were found, how many it
-   *  holds with their contents. `placements: 0` means the view places none, so the whole data
-   *  source is exported. */
-  view?: { viewId: string; placements: number; found: number; entities: number | null } | null
+   *  holds with their contents (`found` and `entities` are null when they take too long to find).
+   *  `placements: 0` means the view places none, so the whole data source is exported. */
+  view?: { viewId: string; placements: number; found: number | null; entities: number | null } | null
 }
 
 /** Which data an export reads. A version-controlled data source exports from its versioned graph

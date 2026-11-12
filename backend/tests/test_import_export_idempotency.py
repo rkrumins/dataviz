@@ -101,6 +101,8 @@ class _Jobs:
 class _CutOff:
     """A request whose body breaks off midway."""
 
+    headers: dict = {}
+
     async def stream(self):
         yield b"A\n"
         raise ConnectionResetError("the client went away")
@@ -133,6 +135,29 @@ async def test_an_import_sent_again_answers_with_the_job_it_started(test_client,
     assert again.json() == first.json()
     assert len(jobs.jobs) == 1 and jobs.started == [job_id], "no second job, and nothing started twice"
     assert await _stored(jobs, job_id) == b"A\n", "the file the job started with is kept"
+
+
+async def test_an_import_whose_body_doesnt_match_its_digest_is_never_queued(test_client, jobs):
+    """A file sent to ``…/imports`` with a Content-Digest is checked as it arrives: one that doesn't
+    match is refused once it is in, and its job failed there and then, never queued; the same key
+    with the file it meant takes the job back."""
+    import base64
+    import hashlib
+    digest = lambda data: f"sha-256=:{base64.b64encode(hashlib.sha256(data).digest()).decode()}:"
+    bad = await test_client.post(f"{URL}/imports", params={"idempotencyKey": "nightly-2"}, content=b"A\n",
+                                 headers={"Content-Digest": digest(b"B\n")})
+    assert bad.status_code == 422 and "Content-Digest" in bad.json()["detail"], bad.text
+    (job_id,) = jobs.jobs
+    assert jobs.started == [] and jobs.abandoned == [job_id]
+
+    good = await test_client.post(f"{URL}/imports", params={"idempotencyKey": "nightly-2"}, content=b"A\n",
+                                  headers={"Content-Digest": digest(b"A\n")})
+    assert good.status_code == 202 and good.json()["jobId"] == job_id, good.text
+    assert jobs.reclaimed == [job_id] and jobs.started == [job_id]
+    assert await _stored(jobs, job_id) == b"A\n"
+
+    unread = await test_client.post(f"{URL}/imports", content=b"A\n", headers={"Content-Digest": "md5=:abc=:"})
+    assert unread.status_code == 400 and len(jobs.jobs) == 1, "refused before any job is made"
 
 
 async def test_another_callers_job_is_never_found_by_the_same_key(test_client, jobs):

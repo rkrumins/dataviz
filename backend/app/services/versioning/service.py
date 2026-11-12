@@ -60,7 +60,7 @@ from .errors import (AccessDenied, AmbiguousSpelling, AmbiguousUrn, BranchNotOpe
                      ProjectionKeyInUse, ProjectionKeyInvalid, ProjectionNotAdopted,
                      ResolutionsWithoutConflict, ReviewRequired, SelfMerge, SelfReview,
                      VersionConflict)
-from .ids import new_entity_id, prefixed_id
+from .ids import derived_entity_id, new_entity_id, prefixed_id, uuid_urn
 from .merge import three_way_merge
 from .merkle import MerkleTree, content_hash
 from .merkle_store import MerkleStore
@@ -394,6 +394,8 @@ _COPY_EDGE_VERSIONS = _copy_versions_sql(
     EdgeVersionORM, "source_entity_id, target_entity_id, edge_type, confidence, discriminator")
 # SET LOCAL lock_timeout with a bound value (set_config's third argument, is_local).
 _SET_LOCK_TIMEOUT = text("SELECT set_config('lock_timeout', :ms, true)")
+# SET LOCAL plan_cache_mode, the same way.
+_PLAN_CACHE_MODE = text("SELECT set_config('plan_cache_mode', :mode, true)")
 
 
 class _StaleHead(Exception):
@@ -629,6 +631,33 @@ def serves_head(projected: int, committed: int, status: Optional[str]) -> bool:
     under way — a loaded key serves once its summaries are built too. Whatever the Graph residency
     switch says: only residency writes ``rehydrating``, and its load is finished either way."""
     return projected >= committed and status != "rehydrating"
+
+
+# A key in none of these states has nothing to serve: it is out of FalkorDB or being loaded into
+# it, or an operator reset it (doc 17; ``reseeding``).
+_SERVES_NOTHING = ("rehydrating", "evicted", "waiting_capacity", "reseeding")
+
+
+def serving_seq(projected: int, committed: int, status: Optional[str],
+                served: Optional[int]) -> Optional[int]:
+    """The version of main a projection's key serves reads of main at; None sends them to Postgres.
+
+    The head while the key holds it (:func:`serves_head`). Behind it, while the projection catches
+    up or rebuilds in place: the version the key last published (its watermark, or during a
+    rebuild, which resets that, ``served_commit_seq``) — complete with its lineage summaries, with
+    part of the next window or of the rebuild's repairs over it. ``GRAPHVER_READ_MAX_LAG`` caps how
+    many versions behind (0: the head only). None while the key is out of FalkorDB, being loaded
+    or reset, or holds no published version (a first seed, a move, an Adopt, a lost key). Seq 1 is
+    a graph's genesis, its empty first commit: a key at it holds nothing anyone published — a new
+    graph's key is empty, and an enabled source's own graph is not yet a version history holds."""
+    if serves_head(projected, committed, status):
+        return committed
+    if status in _SERVES_NOTHING:
+        return None
+    held = projected or served or 0
+    if held <= 1 or (config.READ_MAX_LAG >= 0 and committed - held > config.READ_MAX_LAG):
+        return None
+    return held
 
 
 def residency_state_of(status: str, projected: int, key: Optional[str],
@@ -2556,7 +2585,7 @@ class GraphVersioningService:
     async def rebase_draft(
         self, *, graph_id: str, branch_id: str, actor: str,
         resolutions: Optional[Mapping[str, Optional[dict]]] = None,
-        message: str = "pull latest from main",
+        message: str = "pull latest from main", publishing_ok: bool = False,
     ) -> Dict[str, object]:
         """Pull the latest ``main`` into a draft ("update branch"): re-base the draft's edits onto
         current main with the same field-level 3-way merge as publish, but writing the result back
@@ -2578,6 +2607,11 @@ class GraphVersioningService:
         rewrite to YOUR edits and ``incoming`` is what came in from main. They are different things:
         conflating them is why the UI could only ever report the former.
 
+        A draft past ``SQUASH_PAGED_ABOVE`` changes is pulled reading only its entities main
+        changed too, and what they meet at an edge (:meth:`_pull_paged`): the same merge, holding
+        O(what main changed) rather than the whole draft. ``publishing_ok``: the draft's own publish
+        job pulls the draft it holds (``publishing``), to publish it again.
+
         ``_retry_seq``-wrapped like every other commit-writing path. It has to be, now that a pull
         ALWAYS commits: two concurrent pulls on one draft would otherwise both allocate the same
         ``commit_seq`` and one would die on ``uq_commits_branch_seq``. (It escaped that before only
@@ -2588,14 +2622,14 @@ class GraphVersioningService:
             f"rebase {branch_id}",
             lambda: self._rebase_draft_once(
                 graph_id=graph_id, branch_id=branch_id, actor=actor,
-                resolutions=resolutions, message=message,
+                resolutions=resolutions, message=message, publishing_ok=publishing_ok,
             ),
         )
 
     async def _rebase_draft_once(
         self, *, graph_id: str, branch_id: str, actor: str,
         resolutions: Optional[Mapping[str, Optional[dict]]] = None,
-        message: str = "pull latest from main",
+        message: str = "pull latest from main", publishing_ok: bool = False,
     ) -> Dict[str, object]:
         """One attempt at :meth:`rebase_draft` — re-run wholesale by ``_retry_seq`` on a seq
         collision, so it must re-read all state from a fresh session (it does)."""
@@ -2607,7 +2641,7 @@ class GraphVersioningService:
             draft = await self._lock_branch(s, graph_id, branch_id)
             if draft.kind == "main":
                 raise MainWriteForbidden()
-            self._require_open(draft)
+            self._require_open(draft, publishing_ok=publishing_ok)
             await self._require_edit(s, draft, actor, ())
             graph = await s.get(GraphORM, graph_id)
             main_id = await self._main_branch_id(s, graph_id)
@@ -2618,11 +2652,21 @@ class GraphVersioningService:
                         "incoming": _EMPTY_INCOMING, "base_commit_seq": draft.base_commit_seq,
                         "already_up_to_date": True}
 
-            # The draft's own edits, read once: the merge and the rewrite below use the same read.
-            own = await self._branch_own_payloads(s, graph_id, draft.id)
+            # The draft's own edits, read once: the merge and the rewrite below use the same read. A
+            # draft past SQUASH_PAGED_ABOVE reads only those main changed too or a resolution names,
+            # and what they meet at an edge: nothing else it holds can merge to anything but itself
+            # (_pull_paged).
+            paged = await self._change_count(s, graph_id, draft.id) > config.SQUASH_PAGED_ABOVE
+            if paged:
+                own = await self._own_payloads_of(s, graph_id, draft.id, set(resolutions or ()) | (
+                    await self._changed_in_window(s, graph_id, main_id, from_seq, to_seq)))
+            else:
+                own = await self._branch_own_payloads(s, graph_id, draft.id)
             merged_state, conflicts, theirs = await self._compute_merge_bounded(
                 s, graph_id, graph, draft, main_id, dict(resolutions or {}), own=own
             )
+            if paged and not conflicts:
+                await self._pull_paged(s, graph_id, draft.id, own, merged_state)
             if conflicts:
                 # The draft's own value of each conflicting entity, to resolve from — just those.
                 seeds = await self._current_values(
@@ -4846,6 +4890,50 @@ class GraphVersioningService:
             await self._assert_branch_readable(s, await self._get_branch(s, graph_id, branch_id), viewer)
         return await self.materialize_state(graph_id=graph_id, branch_id=branch_id, as_of_seq=seq)
 
+    @staticmethod
+    async def _projection_quarantine(s, graph_id: str, sample: int = 20) -> Optional[Dict[str, object]]:
+        """The entities a projection pass could not write on their own, held so the rest of its
+        window published (``projection_quarantine``): how many, and the oldest ``sample`` with
+        why. None when there are none."""
+        from .models import ProjectionQuarantineORM as Q
+        count = (await s.execute(select(func.count()).select_from(Q)
+                                 .where(Q.graph_id == graph_id))).scalar_one()
+        if not count:
+            return None
+        rows = (await s.execute(select(Q).where(Q.graph_id == graph_id)
+                                .order_by(Q.first_at).limit(sample))).scalars().all()
+        return {"count": int(count), "entities": [
+            {"statement": r.statement, "entityKind": r.entity_kind, "entityKey": r.entity_key,
+             "error": r.error, "attempts": r.attempts, "firstAt": r.first_at, "lastAt": r.last_at}
+            for r in rows]}
+
+    async def note_rollup_ask(self, graph_id: str, outcome: Optional[str]) -> None:
+        """Record how an ask for a graph's lineage-summaries build went. ``active`` (a job was
+        already running, which may have read the graph before the change that asked) and
+        ``unreachable`` keep it owed, in ``projection_state.rollup_state``, for the liveness loop
+        to ask again; anything else (``queued``, ``refused``, None: nothing to ask for) clears it.
+        What a full seed owes the job (``moved``, which its publish hands over) stays either way.
+        Never raises: an ask that can't be recorded is made again by the next change that hands
+        the summaries over."""
+        try:
+            async with self._session() as s:
+                ps = await s.get(ProjectionStateORM, graph_id)
+                if ps is None:
+                    return
+                state = ps.rollup_state if isinstance(ps.rollup_state, dict) else {}
+                moved = state.get("moved")
+                kept = {"moved": moved} if moved else {}
+                if outcome not in ("active", "unreachable"):
+                    if ps.rollup_state != (kept or None):
+                        ps.rollup_state = kept or None
+                    return
+                now = _now()
+                ps.rollup_state = {"pending": outcome, "asked": now,
+                                   "since": state.get("since") or now, **kept}
+        except Exception:                                # pragma: no cover - infra
+            logger.warning("the rollup ask for %s (%s) was not recorded", graph_id, outcome,
+                           exc_info=True)
+
     async def projection_watermark(self, graph_id: str) -> Dict[str, object]:
         """Read freshness for a graph's FalkorDB projection — attached to reads so
         a client knows whether it's seeing the latest committed `main`.
@@ -4868,8 +4956,12 @@ class GraphVersioningService:
         if root is not None and root.id != graph_id:
             wm = await self.projection_watermark(root.id)
             reads_from = await self.fork_reads_from(graph_id)
-            if reads_from == "postgres":
-                wm["read_route"] = {**wm["read_route"], "main": "postgres"}
+            # A fork lays its patch set over its root's store at the root's head only
+            # (ContextEngine._fork_main_reader): behind it, the fork reads Postgres.
+            on_store = bool(wm["fresh"]) and reads_from != "postgres"
+            wm["served"] = wm["committed"] if on_store else None
+            wm["served_revision"] = wm["committed_revision"] if on_store else None
+            wm["read_route"] = {**wm["read_route"], "main": "falkordb" if on_store else "postgres"}
             return {**wm, "reads_through": root.id, "reads_from": reads_from,
                     "falkor_graph_name": None, "falkor_provider": None,
                     "owns_falkor_graph": False, "retired_keys": [], "external_drift": None,
@@ -4878,16 +4970,25 @@ class GraphVersioningService:
             graph = await s.get(GraphORM, graph_id)
             ps = await s.get(ProjectionStateORM, graph_id)
             committed = graph.main_head_commit_seq if graph else 0
+            # What a pass retries: an evicted, waiting or trashed graph's are not (a load's full
+            # seed clears them, or the purge).
+            quarantine = (await self._projection_quarantine(s, graph_id)
+                          if getattr(ps, "quarantine_next_at", None)
+                          and ps.status not in ("evicted", "waiting_capacity")
+                          and graph is not None and graph.deleted_at is None else None)
             projected = ps.projected_commit_seq if ps else 0
+            status = ps.status if ps else "idle"
+            fresh = serves_head(projected, committed, status)
+            served = serving_seq(projected, committed, status, ps.served_commit_seq if ps else None)
             # The revision each side is at — the main commit with that seq (one indexed read). The
             # sync indicators show it, so "version #12" can be matched to a commit in History.
             revisions: Dict[int, CommitORM] = {}
-            if graph and (committed or projected):
+            if graph and (committed or projected or served):
                 main_id = await self._main_branch_id(s, graph_id)
                 rows = (await s.execute(
                     select(CommitORM).where(
                         CommitORM.graph_id == graph_id, CommitORM.branch_id == main_id,
-                        CommitORM.commit_seq.in_({committed, projected}),
+                        CommitORM.commit_seq.in_({committed, projected, served or 0}),
                     )
                 )).scalars().all()
                 revisions = {int(c.commit_seq): c for c in rows}
@@ -4898,11 +4999,14 @@ class GraphVersioningService:
                     "commit_id": c.id, "created_at": c.created_at,
                     "actor": c.actor, "message": c.message,
                 }
-            status = ps.status if ps else "idle"
-            fresh = serves_head(projected, committed, status)
             return {
                 "committed_revision": _rev(committed),
                 "projected_revision": _rev(projected),
+                # The version reads of main are served at (``serving_seq``): the head, or, while
+                # the projection catches up or rebuilds, the version the key last published. None:
+                # reads of main go to Postgres.
+                "served": served,
+                "served_revision": None if served is None else _rev(served),
                 "committed": committed,
                 "projected": projected,
                 "target": ps.target_commit_seq if ps else 0,
@@ -4910,10 +5014,10 @@ class GraphVersioningService:
                 "falkor_graph_name": ps.falkor_graph_name if ps else None,
                 "falkor_provider": ps.falkor_provider if ps else None,
                 "fresh": fresh,
-                # Where reads go, by ContextEngine.for_workspace's rule: main from FalkorDB only
-                # while the projection holds the head, else Postgres; a draft always overlays
-                # whatever serves main.
-                "read_route": {"main": "falkordb" if fresh else "postgres",
+                # Where reads go, by ContextEngine.for_workspace's rule: main from FalkorDB while
+                # its key serves a version of it (``served``), else Postgres; a draft always
+                # overlays whatever serves main.
+                "read_route": {"main": "falkordb" if served is not None else "postgres",
                                "drafts": "overlay"},
                 # Failure reason + last success + live full-reseed progress — the Data
                 # health UI needs these to converge to an honest done/failed state.
@@ -4934,6 +5038,8 @@ class GraphVersioningService:
                 "retired_keys": list(ps.retired_keys or []) if ps else [],
                 # What a customer's key holds that history doesn't, kept and flagged.
                 "external_drift": ps.external_drift if ps else None,
+                # Entities a pass could not write on their own, held so the rest published.
+                "quarantine": quarantine,
                 # Residency (doc 17): the class a system admin set, whether the key is in
                 # FalkorDB (resident, evicted, rehydrating: being loaded, waiting_capacity: its
                 # master has no room for it yet), why it was evicted, its last read and its size.
@@ -5017,6 +5123,7 @@ class GraphVersioningService:
             old = ps.falkor_graph_name
             ps.falkor_graph_name = falkor_graph_name
             ps.projected_commit_seq = 0      # replay full main into the real graph on the next projection
+            ps.served_commit_seq = None      # which holds no version of it yet
             ps.epoch = ProjectionStateORM.epoch + 1     # a pass in flight must not write over it
             return old
 
@@ -5127,6 +5234,7 @@ class GraphVersioningService:
                          "afterSeq": graph.main_head_commit_seq, "movedBy": actor}
                 ps.falkor_graph_name, ps.falkor_provider, ps.owns_falkor_graph = key, provider, True
                 ps.projected_commit_seq = 0
+                ps.served_commit_seq = None        # the new key is written from nothing
                 ps.target_commit_seq = graph.main_head_commit_seq
                 out = ps.status in ("evicted", "waiting_capacity", "rehydrating")
                 if not out:
@@ -5218,6 +5326,7 @@ class GraphVersioningService:
                 drift = ps.external_drift
                 ps.falkor_graph_name, ps.owns_falkor_graph, ps.shard_map = key, True, shard_map
                 ps.projected_commit_seq = 0
+                ps.served_commit_seq = None        # the new key is written from nothing
                 ps.target_commit_seq = graph.main_head_commit_seq
                 ps.status = "reseeding"
                 ps.external_drift = None
@@ -5269,8 +5378,8 @@ class GraphVersioningService:
             ids = (await s.execute(
                 update(ps)
                 .where(*resettable, ~loading)
-                .values(projected_commit_seq=0, epoch=ps.epoch + 1, status="reseeding",
-                        last_error=None,
+                .values(projected_commit_seq=0, served_commit_seq=None, epoch=ps.epoch + 1,
+                        status="reseeding", last_error=None,
                         failed_attempts=0, next_retry_at=None, updated_at=_now())
                 .returning(ps.graph_id)
                 .execution_options(synchronize_session=False)
@@ -5278,8 +5387,8 @@ class GraphVersioningService:
             requeued = (await s.execute(
                 update(ps)
                 .where(*resettable, loading)
-                .values(projected_commit_seq=0, epoch=ps.epoch + 1, status="evicted",
-                        rehydrating_since=None, last_error=None,
+                .values(projected_commit_seq=0, served_commit_seq=None, epoch=ps.epoch + 1,
+                        status="evicted", rehydrating_since=None, last_error=None,
                         failed_attempts=0, next_retry_at=None, updated_at=_now())
                 .returning(ps.graph_id)
                 .execution_options(synchronize_session=False)
@@ -8817,6 +8926,54 @@ class GraphVersioningService:
             out[eid] = payload_by_vid.get(vid)
         return out
 
+    async def _own_payloads_of(self, s, graph_id: str, branch_id: str, ids) -> Dict[str, Optional[dict]]:
+        """:meth:`_branch_own_payloads` for ``ids`` only: the branch's own heads among them."""
+        out: Dict[str, Optional[dict]] = {}
+        refs, vid_of = [], {}
+        for chunk in _chunks(list(ids), _IN_LIST_MAX):
+            for h in (await s.execute(select(EntityHeadORM).where(
+                    EntityHeadORM.graph_id == graph_id, EntityHeadORM.branch_id == branch_id,
+                    EntityHeadORM.entity_id.in_(chunk)))).scalars():
+                if h.is_tombstone:
+                    out[h.entity_id] = None
+                else:
+                    vid_of[h.entity_id] = h.head_version_id
+                    refs.append((h.entity_kind, graph_id, h.head_version_id))
+        payloads = await self._payloads_by_version(s, refs)
+        out.update({eid: payloads.get(vid) for eid, vid in vid_of.items()})
+        return out
+
+    async def _pull_paged(self, s, graph_id: str, branch_id: str, own: Dict[str, Optional[dict]],
+                          merged: Dict[str, Optional[dict]]) -> None:
+        """Complete the merge of a pull that read only the draft's entities main changed too
+        (``own``, a large draft's): add the draft's own entities the rest of the pull reasons
+        about, each merging to itself. They are its live edges onto a node main deleted, which the
+        cascade then deletes, as a pull reading the whole draft would; and the draft's own value of
+        each end of a live edge in the merge, for the integrity check. So the pull rewrites the same
+        entities whichever way it read the draft, holding O(what main changed), never O(draft)."""
+        gone = [eid for eid, v in merged.items() if v is None]
+        extra: Dict[str, Optional[dict]] = {}
+        for chunk in _chunks(gone, _IN_LIST_MAX // 2):
+            rows = await s.execute(
+                select(EdgeVersionORM.entity_id, EdgeVersionORM.payload).join(EntityHeadORM, and_(
+                    EntityHeadORM.graph_id == EdgeVersionORM.graph_id,
+                    EntityHeadORM.branch_id == EdgeVersionORM.branch_id,
+                    EntityHeadORM.entity_id == EdgeVersionORM.entity_id,
+                    EntityHeadORM.head_version_id == EdgeVersionORM.id)).where(
+                    EdgeVersionORM.graph_id == graph_id, EdgeVersionORM.branch_id == branch_id,
+                    or_(EdgeVersionORM.source_entity_id.in_(chunk),
+                        EdgeVersionORM.target_entity_id.in_(chunk)),
+                    EntityHeadORM.is_tombstone.is_(False)))
+            extra.update({eid: p for eid, p in rows.all() if p and eid not in merged})
+        ends: set = set()
+        for p in (*merged.values(), *extra.values()):
+            if p:
+                ends.update(e for e in _edge_src_tgt(p) if e)
+        extra.update(await self._own_payloads_of(
+            s, graph_id, branch_id, [e for e in ends if e not in merged and e not in extra]))
+        own.update(extra)
+        merged.update(extra)
+
     async def _compute_merge(self, s, graph_id, graph, draft, main_id, resolutions, own=None):
         """3-way merge a draft onto current main.
 
@@ -9010,7 +9167,7 @@ class GraphVersioningService:
     async def bulk_ingest(
         self, *, graph_id: str, rows, actor: str,
         idempotency_key: Optional[str] = None, message: str = "bulk import",
-        session=None,
+        session=None, standard_ids: bool = False,
     ) -> Dict[str, object]:
         """Day-0 / large-delta import (plan §4, §10): validate rows, assign stable
         entity_ids (urn-keyed for idempotent re-sync), and write ONE ``import``
@@ -9025,20 +9182,25 @@ class GraphVersioningService:
 
         Without ``session`` (the API path) it runs under the graph lock, is retried, and seeds
         only an EMPTY graph: every row becomes a ``create`` with no prior, so on a graph that has
-        entities it would write versions that ignore what main holds. Updating one is a sync."""
+        entities it would write versions that ignore what main holds. Updating one is a sync.
+
+        ``standard_ids`` (the API route): a new entity's id is what an import gives it — a
+        ``urn:uuid`` the row brings, else one derived from its urn or its own id (an edge's, from
+        its ends and type). Otherwise (the bootstrap) a node is named by its id or urn as given."""
         rows = list(rows)        # every attempt reads it
+        scope = await self.identity_scope(graph_id) if standard_ids else None
 
         async def once():
             return await self._bulk_ingest_once(
                 graph_id=graph_id, rows=rows, actor=actor, idempotency_key=idempotency_key,
-                message=message, session=session)
+                message=message, session=session, scope=scope)
         if session is not None:  # seeding a graph made in this transaction: no one else sees it
             return await once()
         return await self._retry_seq(f"bulk import into {graph_id}", once)
 
     async def _bulk_ingest_once(
         self, *, graph_id: str, rows, actor: str, idempotency_key: Optional[str],
-        message: str, session,
+        message: str, session, scope: Optional[str] = None,
     ) -> Dict[str, object]:
         """One attempt at :meth:`bulk_ingest`."""
         async with self._session_scope(session) as s:
@@ -9081,8 +9243,12 @@ class GraphVersioningService:
                         rejected.append({"row": i, "reason": "node missing entityType"})
                         continue
                     # One identity: a node is named by its urn when it brings no id, and a node
-                    # that brings neither is given a urn:uuid that is its urn too.
-                    eid = row.get("entity_id") or row.get("id") or row.get("urn") or new_entity_id()
+                    # that brings neither is given a urn:uuid that is its urn too. Minting
+                    # (``scope``), it takes the id an import would give it.
+                    if scope is not None:
+                        eid = _derived_node_id(scope, row) or new_entity_id()
+                    else:
+                        eid = row.get("entity_id") or row.get("id") or row.get("urn") or new_entity_id()
                     if eid in node_eids:
                         rejected.append({"row": i, "reason": f"another node in this file is '{eid}'"})
                         continue
@@ -9094,7 +9260,9 @@ class GraphVersioningService:
                     node_deltas.append(Delta(eid, "create", payload, None, content_hash(payload)))
                     if row.get("urn"):
                         urn_to_eid[row["urn"]] = eid
-                    urn_to_eid.setdefault(row.get("id") or eid, eid)
+                    for own in (row.get("entity_id"), row.get("id")):     # the file's own names
+                        if own:
+                            urn_to_eid.setdefault(own, eid)
                     urn_to_eid[eid] = eid
                 elif kind == "edge":
                     edge_src.append((i, row))
@@ -9102,6 +9270,7 @@ class GraphVersioningService:
                     rejected.append({"row": i, "reason": f"unknown kind {kind!r}"})
 
             edge_deltas: List[Delta] = []
+            edge_eids: set = set()
             for i, row in edge_src:
                 et, src, tgt = row.get("edgeType"), row.get("source"), row.get("target")
                 if not (et and src and tgt):
@@ -9111,7 +9280,12 @@ class GraphVersioningService:
                 if not (seid and teid):
                     rejected.append({"row": i, "reason": "edge endpoint not found"})
                     continue
-                eid = row.get("entity_id") or row.get("id") or new_entity_id()
+                eid = (_derived_edge_id(scope, row, seid, teid, et) if scope is not None
+                       else row.get("entity_id") or row.get("id") or new_entity_id())
+                if eid in edge_eids:
+                    rejected.append({"row": i, "reason": f"another edge in this file is '{eid}'"})
+                    continue
+                edge_eids.add(eid)
                 payload = edge_payload_from_parts(edge_type=et, source_entity_id=seid,
                                                   target_entity_id=teid, row=row)
                 edge_deltas.append(Delta(eid, "create", payload, None, content_hash(payload)))
@@ -9382,7 +9556,7 @@ class GraphVersioningService:
         strategy: str = "merge", resolutions: Optional[Mapping[str, Optional[dict]]] = None,
         containment_edge_types: Optional[Sequence[str]] = None,
         allow_curation_risk: bool = False, allow_mass_delete: bool = False,
-        holds_main: bool = False, deletes: bool = True,
+        holds_main: bool = False, deletes: bool = True, standard_ids: bool = False,
     ) -> Dict[str, object]:
         """Re-sync an authoritative/external snapshot into ``main`` as a single ``sync``
         commit **without clobbering user edits** (plan §D5). 3-way merge: base = the
@@ -9406,9 +9580,20 @@ class GraphVersioningService:
         (``allow_mass_delete``). ``holds_main``: the snapshot is the graph's own published key
         (:meth:`bring_into_history`), which nothing people did is missing from, so
         :class:`CurationAtRisk` does not apply. ``deletes=False``: the snapshot may be partial,
-        so an entity it doesn't mention is left as it is."""
+        so an entity it doesn't mention is left as it is.
+
+        ``standard_ids`` (the API route): an entity the snapshot brings that main doesn't hold
+        takes the id an import would give it (``_derived_node_id``, ``_derived_edge_id``). One
+        that names an entity by an id it already has — whatever its format, from before, a
+        ``urn:uuid`` in any case — is that entity, so it is updated or deleted as ever; a row with
+        no urn that names one so is taken as it comes. A node a row with no urn makes carries its
+        id as its urn, and the row finds it by that id next time, whatever urn it carries by then.
+        One main deleted comes back under its id: a node by the urn it last had, an edge by the
+        ends and type it last joined. An edge names a node of the snapshot by its urn or its own
+        id."""
         await self._assert_syncable(graph_id)
         rows = list(rows)        # every attempt reads it; a spent iterator would delete everything
+        scope = await self.identity_scope(graph_id) if standard_ids else None
         return await self._retry_seq(
             f"sync {graph_id}",
             lambda: self._sync_ingest_once(
@@ -9416,7 +9601,7 @@ class GraphVersioningService:
                 idempotency_key=idempotency_key, message=message, strategy=strategy,
                 resolutions=resolutions, containment_edge_types=containment_edge_types,
                 allow_curation_risk=allow_curation_risk, allow_mass_delete=allow_mass_delete,
-                holds_main=holds_main, deletes=deletes))
+                holds_main=holds_main, deletes=deletes, scope=scope))
 
     async def _sync_ingest_once(
         self, *, graph_id: str, rows, actor: str, source: str,
@@ -9424,7 +9609,7 @@ class GraphVersioningService:
         resolutions: Optional[Mapping[str, Optional[dict]]],
         containment_edge_types: Optional[Sequence[str]],
         allow_curation_risk: bool, allow_mass_delete: bool, holds_main: bool = False,
-        deletes: bool = True,
+        deletes: bool = True, scope: Optional[str] = None,
     ) -> Dict[str, object]:
         """One attempt at :meth:`sync_ingest`, under the graph lock: the idempotent replay, the
         last sync and main's head are all read with main held still."""
@@ -9472,7 +9657,8 @@ class GraphVersioningService:
             # ABSENCE: an entity the snapshot no longer mentions must be deleted, and you cannot
             # see an absence by looking at what is there. So the external id SET is kept (strings
             # only) and the live head is streamed against it.
-            theirs, seen, rejected = await self._external_state_bounded(s, graph_id, main_id, rows)
+            theirs, seen, rejected = await self._external_state_bounded(s, graph_id, main_id, rows,
+                                                                        scope=scope)
             deletions = (await self._live_ids_absent_from(s, graph_id, main_id, seen)
                          if deletes else set())
             changed = set(theirs) | deletions | set(resolutions or {})
@@ -9586,8 +9772,10 @@ class GraphVersioningService:
                         # person's work is allowed; doing it silently is not.
                         "overridden": overridden[:200], "overrides": overrides}
 
-    async def _external_state_bounded(self, s, graph_id: str, main_id: str, rows):
-        """`_external_state`, without holding the graph.
+    async def _external_state_bounded(self, s, graph_id: str, main_id: str, rows,
+                                      scope: Optional[str] = None):
+        """`_external_state`, without holding the graph. ``scope``: what main doesn't hold takes
+        an id as an import mints it (:meth:`sync_ingest`'s ``standard_ids``).
 
         Returns ``(theirs, seen, rejected)`` where
 
@@ -9619,28 +9807,57 @@ class GraphVersioningService:
 
         # ── nodes ────────────────────────────────────────────────────────────
         node_rows = [(i, r) for i, r in enumerate(rows) if (r or {}).get("kind") == "node"]
-        urns = [r.get("urn") for _, r in node_rows if r.get("urn")]
-        known = await self._heads_by_urn(s, graph_id, main_id, urns)   # urn -> (eid, hash, tomb)
+        # The urn a row's node carries: its own, or — minting, for a row with none — the id it
+        # derives, which a node made from that row carries as its urn.
+        keys = {i: r.get("urn") or (_derived_node_id(scope, r) if scope is not None else None)
+                for i, r in node_rows}
+        known = await self._heads_by_urn(s, graph_id, main_id, keys.values())   # urn -> (eid, hash, tomb)
+        # Minting: the deleted nodes whose urn it last was, and which of the ids a row not found by
+        # its urn could be named by main holds — its own id (an entity made before, kept whatever
+        # its format) and the one it would mint (a urn:uuid it brings, in canonical form).
+        held: set = set()
+        gone: Dict[str, set] = {}
+        if scope is not None:
+            gone = await self._deleted_by(s, graph_id, main_id, NodeVersionORM, ("urn",),
+                                          {k for k in keys.values() if k and k not in known})
+            held = await self._heads_present(s, graph_id, main_id, {
+                v for i, r in node_rows if keys[i] not in known
+                for v in (r.get("entity_id"), r.get("id"), _derived_node_id(scope, r)) if v})
         urn_to_eid: Dict[str, str] = {}
         for i, row in node_rows:
             if not row.get("entityType"):
                 rejected.append({"row": i, "reason": "node missing entityType"})
                 continue
             urn = row.get("urn")
-            hit = known.get(urn) if urn else None
-            # A new node is named by its urn, as the bootstrap names every node; an earlier
-            # sync's ``sync:<urn>`` is found by its urn (``known``) and kept.
-            eid = (hit[0] if hit else None) or row.get("entity_id") or row.get("id") or urn
+            hit = known.get(keys[i]) if keys[i] else None
             payload = _sanitize_node_properties(
                 {k: v for k, v in row.items() if k not in ("kind", "id", "entity_id")})
+            given = row.get("entity_id") or row.get("id")
+            named = next((v for v in (given, uuid_urn(given)) if v and v in held), None)
+            if hit or scope is None:
+                # A new node is named by its urn, as the bootstrap names every node; an earlier
+                # sync's ``sync:<urn>`` is found by its urn (``known``) and kept.
+                eid = (hit[0] if hit else None) or given or urn
+            elif named:                        # an entity it names by the id it has
+                eid = named
+            elif not urn and keys[i] in held:  # the node it made, whatever urn it carries now
+                eid = keys[i]
+            else:
+                eid = _id_to_take(_derived_node_id(scope, row), gone.get(keys[i]) or set(), held)
+            # A node with no urn carries the id its row derives, which finds it next time; one the
+            # row names by an id from before is taken as the row comes, as it always was.
+            if scope is not None and not urn and (hit or not named):
+                payload["urn"] = keys[i] or eid
             if not eid:                        # neither a urn nor an id: a urn:uuid for both
                 eid = new_entity_id()
                 payload["urn"] = eid
             seen.add(eid)
             if urn:
                 urn_to_eid[urn] = eid
-            if row.get("id"):
-                urn_to_eid[row["id"]] = eid
+            for own in (row.get("entity_id"), row.get("id")):     # the row's own names, in any case
+                for name in (own, uuid_urn(own)):
+                    if name:
+                        urn_to_eid[name] = eid
             urn_to_eid[eid] = eid
             if hit and not hit[2] and hit[1] == _ch(payload):
                 continue                       # identical to what we hold → cannot produce a delta
@@ -9661,6 +9878,21 @@ class GraphVersioningService:
             if se and te and r.get("edgeType"):
                 triples.append((se, te, r["edgeType"]))
         by_triple = await self._heads_by_edge_triple(s, graph_id, main_id, triples)
+        held = set()
+        gone = {}
+        if scope is not None:
+            minted = {}                        # row → the id it would mint, if main lacks it
+            for i, r in edge_rows:
+                se, te, et = urn_to_eid.get(r.get("source")), urn_to_eid.get(r.get("target")), r.get("edgeType")
+                if se and te and et and (se, te, et) not in by_triple:
+                    minted[i] = _derived_edge_id(scope, r, se, te, et)
+            held = await self._heads_present(s, graph_id, main_id, {
+                v for i, r in edge_rows if i in minted
+                for v in (r.get("entity_id"), r.get("id"), minted[i]) if v})
+            # The deleted edges that last joined those ends with that type.
+            gone = await self._deleted_by(
+                s, graph_id, main_id, EdgeVersionORM, ("source_entity_id", "target_entity_id", "edge_type"),
+                {t for t in triples if t not in by_triple})
 
         for i, row in edge_rows:
             et, src, tgt = row.get("edgeType"), row.get("source"), row.get("target")
@@ -9672,8 +9904,15 @@ class GraphVersioningService:
                 rejected.append({"row": i, "reason": "edge endpoint not found"})
                 continue
             hit = by_triple.get((seid, teid, et))
-            eid = ((hit[0] if hit else None) or row.get("entity_id") or row.get("id")
-                   or f"sync:e:{seid}->{teid}:{et}")
+            given = row.get("entity_id") or row.get("id")
+            named = next((v for v in (given, uuid_urn(given)) if v and v in held), None)
+            if hit or scope is None:
+                eid = (hit[0] if hit else None) or given or f"sync:e:{seid}->{teid}:{et}"
+            elif named:                        # an edge it names by the id it has
+                eid = named
+            else:
+                eid = _id_to_take(_derived_edge_id(scope, row, seid, teid, et),
+                                  gone.get((seid, teid, et)) or set(), held)
             payload = edge_payload_from_parts(edge_type=et, source_entity_id=seid,
                                               target_entity_id=teid, row=row)
             seen.add(eid)
@@ -9682,6 +9921,71 @@ class GraphVersioningService:
             theirs[eid] = payload
 
         return theirs, seen, rejected
+
+    async def resolve_identities(self, *, graph_id: str, identifier: str,
+                                 values: Sequence[str]) -> List[Dict[str, object]]:
+        """What each of ``values`` names on ``main``, as an import naming ``identifier`` finds a
+        row's entity (doc 08 §3b), without importing anything: ``{value, status, entityId}`` with
+        ``status`` ``found``, ``none`` or ``duplicate`` (``entityIds``: the live nodes holding it).
+        ``entity_id``: a live entity of that id. ``urn``: the live nodes whose urn it is, else the
+        live node an import derived from it. On a fork both read its main as an import into it
+        does: its own rows, then its parent's at the fork point. ``prop.<name>``: the live nodes
+        holding it, by the property's index (:mod:`.import_export.keys`), caught up first;
+        ``NotIndexed`` before an import has built it, ``NotOnAFork`` on a fork. Values compare as
+        an import's keys do (trimmed text)."""
+        from .import_export import keys as matching
+        from .import_export.resolve import key_value, pointer_id, pointer_seed
+        asked = {v: key_value(v) for v in values}
+        wanted = sorted({k for k in asked.values() if k})
+        holders: Dict[str, set] = {}
+        async with self._session() as s:
+            main_id = await self._main_branch_id(s, graph_id)
+
+            # Main as a read composes it: on a fork, its own rows, then its parent's at the fork point.
+            async def live(ids):
+                state = await self._current_skeletons(s, graph_id, main_id, set(ids))
+                return {e for e, skeleton in state.items() if skeleton is not None}
+
+            if identifier == "entity_id":
+                found = await live(wanted)
+                holders = {v: {v} for v in wanted if v in found}
+            elif identifier == "urn":
+                carried = await self._holders_by_urn(s, graph_id, main_id, set(wanted))
+                state = await self._current_skeletons(
+                    s, graph_id, main_id, {e for ids in carried.values() for e in ids})
+                for urn, ids in carried.items():
+                    on = {e for e in ids if (state.get(e) or {}).get("urn") == urn}
+                    if on:
+                        holders[urn] = on
+                rest = [v for v in wanted if v not in holders]
+                if rest:
+                    scope = await self.identity_scope(graph_id)
+                    derived = {pointer_id(scope, pointer_seed(v)): v for v in rest}
+                    for eid in await live(derived):
+                        holders[derived[eid]] = {eid}
+            else:
+                name = identifier[len("prop."):]
+                await matching.ensure_ready(graph_id, name)
+                for v, held in (await matching.lookup(graph_id, name, wanted)).items():
+                    on = {e for e, is_live in held if is_live}
+                    if on:
+                        holders[v] = on
+        out: List[Dict[str, object]] = []
+        for v, k in asked.items():
+            ids = sorted(holders.get(k, ())) if k else []
+            status = "found" if len(ids) == 1 else "duplicate" if ids else "none"
+            out.append({"value": v, "status": status, "entityId": ids[0] if len(ids) == 1 else None,
+                        **({"entityIds": ids} if len(ids) > 1 else {})})
+        return out
+
+    async def _heads_present(self, s, graph_id: str, main_id: str, ids) -> set:
+        """Those of ``ids`` main holds a head of, live or deleted. O(ids), by primary key."""
+        out: set = set()
+        for chunk in _chunks([i for i in dict.fromkeys(ids) if i], 5000):
+            out.update((await s.execute(select(EntityHeadORM.entity_id).where(
+                EntityHeadORM.graph_id == graph_id, EntityHeadORM.branch_id == main_id,
+                EntityHeadORM.entity_id.in_(list(chunk))))).scalars())
+        return out
 
     async def _heads_by_urn(self, s, graph_id: str, main_id: str, urns):
         """urn → (entity_id, content_hash, is_tombstone) at main's head. O(urns), via ix_nv_urn."""
@@ -9725,6 +10029,52 @@ class GraphVersioningService:
             )).all()
             for se, te, et, eid, ch, tomb in rows:
                 out[(se, te, et)] = (eid, ch, bool(tomb))
+        return out
+
+    async def _deleted_by(self, s, graph_id: str, main_id: str, model, columns: Sequence[str],
+                          keys) -> Dict[Any, set]:
+        """key → the entities deleted on main whose last live version held it in ``columns`` (a
+        node's urn; an edge's ends and type, as a tuple). A delete's version holds none, so the
+        lookups through the head (:meth:`_heads_by_urn`, :meth:`_heads_by_edge_triple`) miss them.
+        O(keys): each step seeks by index, its keys bound as arrays — the entities whose rows held
+        a key (``ix_nv_urn``; an edge's by both ends, ``ix_ev_source`` and ``ix_ev_target``), those
+        of them deleted (by primary key), then their last live versions (``ix_*_entity_hist``) —
+        and is planned for its graph and keys each time. The generic plan a prepared statement
+        comes to after five runs takes ``graph_id = $1`` for a few rows, so it reads the whole
+        graph and tests each row against every key."""
+        cols = [getattr(model, c) for c in columns]
+        carriers = select(model.entity_id, *cols).where(
+            model.graph_id == graph_id, model.branch_id == main_id,
+            *(c == any_(bindparam(f"k{n}", type_=ARRAY(Text))) for n, c in enumerate(cols))).distinct()
+        last = (select(model.entity_id, *cols)
+                .where(model.graph_id == graph_id, model.branch_id == main_id,
+                       model.entity_id == any_(bindparam("ids", type_=ARRAY(Text))),
+                       model.op != "delete")
+                .order_by(model.entity_id, model.commit_seq.desc(), model.created_at.desc())
+                .distinct(model.entity_id))
+
+        def key_of(vals):
+            return vals[0] if len(vals) == 1 else tuple(vals)
+
+        out: Dict[Any, set] = {}
+        keys = list(dict.fromkeys(k for k in keys if k))
+        if not keys:
+            return out
+        was = await s.scalar(text("SELECT current_setting('plan_cache_mode')"))
+        await s.execute(_PLAN_CACHE_MODE, {"mode": "force_custom_plan"})     # put back below
+        for chunk in _chunks(keys, _IN_LIST_MAX):
+            wanted = set(chunk)
+            parts = zip(*chunk) if len(cols) > 1 else [chunk]
+            carried = {eid for eid, *vals in (await s.execute(
+                carriers, {f"k{n}": sorted(set(p)) for n, p in enumerate(parts)})).all()
+                if key_of(vals) in wanted}
+            deleted = [e for e, live in (await self._heads_live(s, graph_id, main_id, carried)).items()
+                       if not live]
+            for ids in _chunks(deleted, _IN_LIST_MAX):
+                for eid, *vals in (await s.execute(last, {"ids": list(ids)})).all():
+                    if key_of(vals) in wanted:
+                        out.setdefault(key_of(vals), set()).add(eid)
+        await s.execute(_PLAN_CACHE_MODE, {"mode": was})
         return out
 
     async def _live_ids_absent_from(self, s, graph_id: str, main_id: str, seen: set) -> set:
@@ -11797,6 +12147,42 @@ def _graphedge_dict(entity_id: str, payload: dict, urn_of: Mapping) -> dict:
 def _chunks(seq, n):
     for i in range(0, len(seq), max(1, n)):
         yield seq[i:i + max(1, n)]
+
+
+def _derived_node_id(scope: str, row: Mapping[str, Any]) -> Optional[str]:
+    """A new node's id as an import makes it (doc 18 §3): a ``urn:uuid`` the row brings — as its
+    ``entity_id``, ``id`` or ``urn`` — in canonical form; else one derived from its urn, as an
+    import by urn derives it, else from its own id. ``None`` for a row with neither."""
+    from .import_export.resolve import pointer_id, pointer_seed
+    for v in (row.get("entity_id"), row.get("id"), row.get("urn")):
+        if uuid_urn(v):
+            return uuid_urn(v)
+    seed = pointer_seed(row.get("urn")) or pointer_seed(row.get("entity_id"), row.get("id"))
+    return pointer_id(scope, seed) if seed else None
+
+
+def _derived_edge_id(scope: str, row: Mapping[str, Any], source: str, target: str,
+                     edge_type: str) -> str:
+    """A new edge's id as an import makes it: a ``urn:uuid`` the row brings, in canonical form;
+    else one derived from its own id, or — with none — from its ends and type."""
+    from .import_export.resolve import edge_pointer_id, key_value
+    for v in (row.get("entity_id"), row.get("id")):
+        if uuid_urn(v):
+            return uuid_urn(v)
+    own = key_value(row.get("entity_id")) or key_value(row.get("id"))
+    return (derived_entity_id("edge", f"{scope}/pointer:{own}") if own
+            else edge_pointer_id(scope, source, target, edge_type))
+
+
+def _id_to_take(derived: Optional[str], back: Set[str], held: Collection[str]) -> str:
+    """The id a synced entity main holds no live one of takes: a deleted one that last carried
+    what names it (``back``), brought back — the one it derives first; else the id it derives,
+    as an import mints it, unless another entity holds that; else a new v7."""
+    if derived in back:
+        return derived
+    if len(back) == 1:
+        return next(iter(back))
+    return derived if derived and derived not in held else new_entity_id()
 
 
 # Above this many edges the containment-loop pass runs in a thread, off the event loop.

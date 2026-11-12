@@ -10,6 +10,11 @@ same internal-auth HTTP route the insights purge uses.
 And in either placement of the summaries: a data source whose summaries live in a dedicated key,
 which the projector never writes, is marked stale after a publish that changes its lineage, and
 its rebuild is queued in that mode.
+
+An ask a running job turns away is not dropped: that job may have read the graph before the change
+that asked, so the hook records it owed (``note_rollup_ask``) for the liveness loop to make again.
+So is one the control plane could not take: out of reach, or answering a 5xx. Only a 4xx refusal is
+owed no more.
 """
 import asyncio
 import contextlib
@@ -26,6 +31,10 @@ class _Resp:
 
     def json(self):
         return {"id": "agg_1"}
+
+
+#: The asks the hook recorded, ``(graph_id, outcome)`` (``note_rollup_ask``).
+_NOTED: list = []
 
 
 class _Client:
@@ -53,11 +62,15 @@ def _patch(monkeypatch, mode="in_source"):
         async def projection_watermark(self, graph_id):
             return {"projected": 8}
 
+        async def note_rollup_ask(self, graph_id, outcome):
+            _NOTED.append((graph_id, outcome))
+
     async def _mode(_ds):
         return mode
 
     import httpx
     _Client.calls = []
+    _NOTED.clear()
     monkeypatch.setattr(pt, "GraphVersioningService", _Svc)
     monkeypatch.setattr(pt, "_projection_mode", _mode)
     monkeypatch.setattr(httpx, "AsyncClient", _Client)
@@ -173,3 +186,49 @@ def test_the_edge_types_mark_a_dedicated_source(monkeypatch, mode, types):
     monkeypatch.setattr(resolver, "resolve_ontology", _resolve)
     monkeypatch.setattr(ontology_levels, "derive_level_map", lambda resolved: {"Dataset": 1})
     assert asyncio.run(pt.resolve_aggregation_edge_types(_Svc(), "graph_1")) == types
+
+
+@pytest.mark.parametrize("status, mode, outcome, owed", [
+    (409, "in_source", "active", "active"),     # a job runs: it may have read the graph before
+    (202, "in_source", "queued", "queued"),
+    (403, "in_source", "refused", "refused"),
+    (422, "in_source", "refused", "refused"),   # no ontology: nothing to ask for again
+    (500, "in_source", "unreachable", "unreachable"),   # it failed: asked again
+    (503, "in_source", "unreachable", "unreachable"),   # still starting
+    (409, "dedicated", "active", None),         # its job queues the next itself when it ends
+])
+def test_the_control_planes_answer_says_what_is_owed(monkeypatch, status, mode, outcome, owed):
+    _patch(monkeypatch, mode=mode)
+    _marked(monkeypatch)
+    monkeypatch.setattr(_Resp, "status_code", status)
+    assert asyncio.run(pt.make_rollup_rebuild_hook(lambda: None)("graph_1")) == outcome
+    assert _NOTED == [("graph_1", owed)]
+
+
+def test_a_control_plane_out_of_reach_is_asked_again(monkeypatch):
+    _patch(monkeypatch)
+
+    async def unreachable(self, url, params=None, json=None):
+        raise ConnectionError("connection refused")
+
+    monkeypatch.setattr(_Client, "post", unreachable)
+    assert asyncio.run(pt.make_rollup_rebuild_hook(lambda: None)("graph_1")) == "unreachable"
+    assert _NOTED == [("graph_1", "unreachable")]
+
+
+def test_in_process_a_running_job_leaves_the_ask_owed(monkeypatch):
+    from backend.app.services.aggregation.service import ConflictError
+
+    _patch(monkeypatch)
+
+    class _Agg:
+        async def trigger(self, ds_id, request, trigger_source, session):
+            raise ConflictError("an aggregation job is already active for this data source")
+
+    @contextlib.asynccontextmanager
+    async def session():
+        yield None
+
+    monkeypatch.setattr(pt, "get_async_session", session)
+    assert asyncio.run(pt.make_rollup_rebuild_hook(lambda: _Agg())("graph_1")) == "active"
+    assert _NOTED == [("graph_1", "active")]

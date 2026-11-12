@@ -114,6 +114,7 @@ GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/exports/{job_id} resource
 GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/exports/{job_id}/download resource
 GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/graph/neighbors resource
 GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/history/months resource
+GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/import-settings resource
 GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/imports resource
 GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/imports/schema resource
 GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/imports/template resource
@@ -208,6 +209,7 @@ POST /api/v1/{ws_id}/versioning/graphs/{graph_id}/branches/{branch_id}/rebase re
 POST /api/v1/{ws_id}/versioning/graphs/{graph_id}/bulk-ingest resource
 POST /api/v1/{ws_id}/versioning/graphs/{graph_id}/exports resource reads-only
 POST /api/v1/{ws_id}/versioning/graphs/{graph_id}/exports/{job_id}/cancel resource
+POST /api/v1/{ws_id}/versioning/graphs/{graph_id}/identities/resolve resource reads-only
 POST /api/v1/{ws_id}/versioning/graphs/{graph_id}/imports resource
 POST /api/v1/{ws_id}/versioning/graphs/{graph_id}/imports/uploads resource
 POST /api/v1/{ws_id}/versioning/graphs/{graph_id}/imports/uploads/{upload_id}/complete resource

@@ -5,7 +5,8 @@ Proves that committed lineage-edge changes reach the FalkorDB rollup layer WITHO
 full aggregation run: a created lineage edge materialises weight-1 AGGREGATED cells — the
 canonical depth-bridged selection on an unstamped (boundary-regime) graph, exactly what the
 aggregation worker stores; a retried window doesn't double-count (gvSeq guard); deleting
-the edge removes the rollups; a containment MOVE re-points them.
+the edge removes the rollups; a containment MOVE re-points them; a window of more lineage
+changes than the old inline cap is still maintained in place.
 
 Run inside the dev backend container:
   PYTHONPATH=/app GRAPHVER_E2E=1 python backend/tests/integration/test_versioning_rollup_projection.py
@@ -145,17 +146,21 @@ async def _run() -> None:
         assert all(v[0] == 1 for v in got.values()), f"delete+recreate window drifted: {got}"
         assert stale_calls == [], stale_calls
 
-        # (7) BULK window over the cap hands off to the rebuild hook instead of inline math.
-        proj._MOVE_EDGE_CAP = 1                          # instance override for the test
+        # (7) A BULK window, past what used to be the inline cap, is maintained in place: the
+        #     summaries move by delta whatever the window's size, and nothing goes to the job.
         X1, X2 = A + ".x1", A + ".x2"
         await svc.apply_ops(graph_id=gid, actor="bot", containment_edge_types=CONT, ops=[
             _node(X1, "Column"), _node(X2, "Column"),
+            _edge("cX1_" + sfx, A, X1, "CONTAINS"), _edge("cX2_" + sfx, A, X2, "CONTAINS")])
+        await proj.project_graph(gid)
+        proj._MOVE_EDGE_CAP = 1                          # instance override for the test
+        await svc.apply_ops(graph_id=gid, actor="bot", containment_edge_types=CONT, ops=[
             _edge("bulk1_" + sfx, X1, Bc, "FLOWS_TO"), _edge("bulk2_" + sfx, X2, Bc, "FLOWS_TO")])
         await proj.project_graph(gid)
-        assert stale_calls == [gid], f"over-cap window must queue exactly one rebuild: {stale_calls}"
-        got = await _rollups(client)
-        assert all(v[0] == 1 for v in got.values()), f"over-cap window must not half-apply: {got}"
         del proj._MOVE_EDGE_CAP                          # restore class default
+        assert stale_calls == [], f"a bulk window is maintained in place: {stale_calls}"
+        got = await _rollups(client)
+        assert got == {(A, C): (3, ["FLOWS_TO"])}, f"each lineage edge must count once: {got}"
 
         # (8) GROWN retry window overlapping prior applications (crash-retry where new commits
         #     landed, or a concurrent projector): the graph-level marker detects that part of
@@ -166,10 +171,11 @@ async def _run() -> None:
         await svc.apply_ops(graph_id=gid, actor="bot", containment_edge_types=CONT,
                             ops=[_del("bulk2_" + sfx)])  # grow the window past the marker
         stale_calls.clear()
+        before = await _rollups(client)
         await proj.project_graph(gid)
         assert stale_calls == [gid], f"overlap must hand off to rebuild: {stale_calls}"
         got = await _rollups(client)
-        assert all(v[0] == 1 for v in got.values()), f"overlap must not half-apply: {got}"
+        assert got == before, f"overlap must not half-apply: {got}"
 
         print("ROLLUP-PROJECTION OK")
     finally:

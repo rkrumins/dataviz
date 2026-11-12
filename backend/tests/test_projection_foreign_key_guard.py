@@ -213,7 +213,7 @@ def test_owned_key_still_clears_unkeyed(monkeypatch):
 def _stub_sweep(monkeypatch, proj):
     swept = []
 
-    async def sweep(client, graph_id, main_id):
+    async def sweep(client, graph_id, main_id, to_seq):
         swept.append(graph_id)
 
     monkeypatch.setattr(proj, "_sweep_tombstoned", sweep)
@@ -424,7 +424,13 @@ def test_a_surplus_already_counted_is_not_swept_again(monkeypatch):
     assert err is None and outcome == {"surplus": (2, 1)} and swept == []
 
 
-def test_an_edge_of_the_pass_that_did_not_land_is_healed_whatever_the_surplus(monkeypatch):
+@pytest.mark.parametrize("escalate", [True, False])
+def test_an_edge_of_the_pass_that_did_not_land_is_healed_whatever_the_surplus(monkeypatch, escalate):
+    """Healed by a rebuild of its own (``GRAPHVER_PROJECTION_ESCALATE``, on): the window's pass
+    ends unpublished and asks for it. Off, inside the pass, as before."""
+    from backend.app.services.versioning import config
+
+    monkeypatch.setattr(config, "PROJECTION_ESCALATE", escalate)
     proj, _, client = _projector()
     healed_with = []
 
@@ -438,6 +444,10 @@ def test_an_edge_of_the_pass_that_did_not_land_is_healed_whatever_the_surplus(mo
     outcome = {}
     err, healed = asyncio.run(proj._verify_and_heal(
         client, "g1", "main1", 1, 2, owned=False, heal_outcome=outcome, dropped=1))
+    if escalate:
+        assert err and not healed and healed_with == [], (err, healed, healed_with)
+        assert outcome["escalate"] == "it holds less than history"
+        return
     assert (err, healed, healed_with) == (None, True, [False])
     assert outcome["surplus"] == (1, 1)
 

@@ -5,6 +5,7 @@
  * view keeps the button and the card behind it. The status hook is mocked.
  */
 import { fireEvent, render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SyncStatus } from '../syncStatusApi'
 
@@ -55,6 +56,19 @@ describe('SyncStatusChip in the Business view', () => {
     expect(screen.getByText('Updating…')).toBeInTheDocument()
   })
 
+  it('says an earlier version is showing while the newer one is written, and which on hover', async () => {
+    data = versioned({ projected: 9, fresh: false, status: 'projecting', served: 9 })
+    renderChip()
+    await userEvent.setup().hover(screen.getByText('Showing an earlier version · updating…'))
+    const tip = await screen.findByRole('tooltip')
+    expect(tip).toHaveTextContent('Showing an earlier version while the graph updates')
+    expect(tip).toHaveTextContent('Views show version #9')
+    expect(tip).toHaveTextContent('until version #11 is written to the graph, then refresh on their own')
+    for (const word of ['Postgres', 'FalkorDB', 'cmt_']) {
+      expect(document.body.textContent).not.toContain(word)
+    }
+  })
+
   it('says it may be out of date when the graph is behind', () => {
     data = versioned({ projected: 10, fresh: false })
     renderChip()
@@ -75,6 +89,16 @@ describe('SyncStatusChip in the Business view', () => {
 })
 
 describe('SyncStatusChip in the Technical view', () => {
+  it('says which earlier version views show and which is being written', () => {
+    data = versioned({ projected: 9, fresh: false, status: 'projecting', served: 9 })
+    renderChip()
+    const chip = screen.getByRole('button', { name: /^Sync status/ })
+    expect(chip).toHaveTextContent('Showing #9 · writing #11')
+    fireEvent.click(chip)
+    expect(screen.getByText('Showing an earlier version while the graph updates')).toBeInTheDocument()
+    expect(screen.getByText('Views show version #9 until version #11 is written, then refresh on their own')).toBeInTheDocument()
+  })
+
   it('is a button saying the version, opening the card that names the stores', () => {
     renderChip()
     const chip = screen.getByRole('button', { name: /^Sync status/ })

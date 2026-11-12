@@ -196,12 +196,13 @@ not to the projector.) See [04](04-projection-and-cache.md).
   graph's rows hash to **one partition**, so the busiest graph gets **zero** partition-pruning benefit.
   The key is **immutable-after-data** — decide before loading production data whether a composite key
   (e.g. `(graph_id, entity_id)`) is needed. See [02](02-data-model.md).
-- **Read-freshness is computed two ways.** `ContextEngine` uses strict `projected ≥ committed`; the
-  neighbors endpoint applies `READ_MAX_LAG`. They coincide at the default `READ_MAX_LAG=0`; a non-zero
-  lag would make the two surfaces disagree on when to serve FalkorDB vs Postgres.
-- **A large or overlapping projection window still rebuilds rollups in full.** A window over
-  `PROJECTION_ROLLUP_INLINE_CAP` (50,000) or an overlap punts to `"stale"` → full rebuild. See
-  [04](04-projection-and-cache.md).
+- **Reads while the graph updates show an earlier version.** Every read surface serves main from the
+  key at the version it last published while it catches up or rebuilds (`serving_seq`, doc 04 §5), so
+  a change shows once its pass publishes; the sync chip says so meanwhile. `GRAPHVER_READ_MAX_LAG=0`
+  reads it from Postgres at once instead, without the lineage summaries.
+- **A large restructure or an overlapping window still rebuilds rollups in full.** A window of any
+  size is maintained by delta, but a move of a subtree over `PROJECTION_ROLLUP_INLINE_CAP` (50,000)
+  or an overlap punts to `"stale"` → full rebuild. See [04](04-projection-and-cache.md) §8.
 - **`gv:<id>` urn fallback can mint phantoms.** A node that *should* carry a `urn` but doesn't projects
   under a synthetic `gv:<entity_id>` key with a WARN — an explicit "FalkorDB ⊄ Postgres" signal for
   reconciliation, not a handled case.
@@ -297,7 +298,7 @@ hashes/partitions) are marked ⚠. The table is the load-bearing subset.
 | ⚠ `GRAPHVER_HASH_ALGO` / `_DIGEST_SIZE` | `blake2b` / `32` | content + Merkle hash |
 | `GRAPHVER_PROJECTION_INPROCESS` | off | run the worker lanes inside viz-service, honoured only with `SYNODIC_ROLE=dev`; Compose, Kubernetes and Helm run the versioning worker lanes instead |
 | `GRAPHVER_PROJECTION_CONCURRENCY` | `8` | graphs projected per poll pass |
-| `GRAPHVER_READ_MAX_LAG` | `0` | staleness a read tolerates before Postgres fallback |
+| `GRAPHVER_READ_MAX_LAG` | `-1` | how many versions behind its head the key may serve main while it updates; `0`: the head only, Postgres meanwhile |
 | `GRAPHVER_PROJECTION_VERIFY` | on | post-projection count reconcile + bounded heal |
 | `GRAPHVER_REBUILD_TIMEOUT_SECS` | `900` | budget for an explicit operator rebuild |
 | `GRAPHVER_VERSIONED_WRITES` | on | write-through: every provider write → an audited commit, which the projector carries to FalkorDB. `0` opts out only data sources without version control; a versioned graph is always written through versioning |
@@ -312,7 +313,8 @@ hashes/partitions) are marked ⚠. The table is the load-bearing subset.
 | `GRAPHVER_SET_FIELDS` | `tags` | payload fields merged as unordered sets in 3-way merge |
 | `IMPORT_COMMIT_WINDOW` / `INLINE_IMPORT_MAX` | `10000` / `5000` | import windowing / inline-vs-async threshold |
 | `OBJECT_STORE_BACKEND` | `database` | where import/export artifacts live: `database`, `local` (a shared mount) or `s3` (opt-in) |
-| `GRAPHVER_PROJECTION_ROLLUP_INLINE_CAP` | `50000` | largest projection window whose rollups are maintained incrementally |
+| `GRAPHVER_PROJECTION_ROLLUP_INLINE_CAP` | `50000` | largest moved subtree whose rollups the projector maintains itself; a window's own lineage edges have no cap |
+| `GRAPHVER_ROLLUP_NET_MAX_CELLS` | `200000` | rollup cells a projection window nets in memory; past it, in `graphver.rollup_deltas` |
 | `GRAPHVER_RESYNC_MAX_ENTITIES` | `250000` | largest graph a re-sync may attempt; `0` disables the guard ([11](11-resync-at-any-scale.md)) |
 | `GRAPHVER_BOOTSTRAP_MERKLE_MAX` | `1000000` | above this, an enable-VC copy defers the Merkle root rather than building it in memory |
 | `GRAPHVER_PURGE_GRACE_DAYS` | `30` | undo window before a deleted data source's version history is purged |

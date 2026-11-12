@@ -47,8 +47,9 @@ import asyncio
 import contextlib
 import json
 import logging
+import re
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, NamedTuple, Optional, Tuple
+from typing import Any, Dict, List, Mapping, NamedTuple, Optional, Tuple
 
 from sqlalchemy import (BigInteger, Text, and_, bindparam, delete, exists, false, func, insert,
                         null, or_, select, text, tuple_)
@@ -57,13 +58,15 @@ from sqlalchemy.dialects.postgresql import ARRAY
 from backend.app.services.view_placement import NodeFacts, suggest_placement
 
 from .. import config, db
-from ..ids import new_entity_id
+from ..ids import new_entity_id, uuid_urn
 from ..job_lease import QUEUED, Lease, Superseded
 from ..models import BranchORM, EdgeVersionORM, ImportRowORM, JobORM, NodeVersionORM
 from ..service import OntologyViolation
-from .formats import get_adapter
-from .resolve import (KeyIndex, _canonical_map, key_value, pointer_id, pointer_seed, pointers,
-                      resolve_rows)
+from . import identifier as identifiers
+from . import keys as matching
+from .formats import AT, get_adapter
+from .resolve import (KeyIndex, _canonical_map, edge_pointer_id, key_pointer_id, key_value,
+                      pointer_id, pointer_seed, pointers, resolve_rows)
 from .rowmodel import PROP_DELETE, normalize
 from .snapshot import open_snapshot
 from .stream import view_entities
@@ -76,11 +79,13 @@ _PERSIST_BATCH = 5000
 # Record a batch of resolutions: each column one array parameter, so the statement never changes.
 _RESOLVE_ROWS = text(
     f"UPDATE {ImportRowORM.__table__.fullname} AS r SET matched_entity_id = v.eid, resolved_op = v.op, "
-    "status = v.status, reasons = v.reasons::jsonb "
-    "FROM unnest(:idx, :eids, :ops, :statuses, :reasons) AS v(row_index, eid, op, status, reasons) "
+    "status = v.status, reasons = v.reasons::jsonb, code = v.code "
+    "FROM unnest(:idx, :eids, :ops, :statuses, :reasons, :codes) "
+    "AS v(row_index, eid, op, status, reasons, code) "
     "WHERE r.job_id = :job_id AND r.row_index = v.row_index",
 ).bindparams(bindparam("idx", type_=ARRAY(BigInteger)),
-             *(bindparam(name, type_=ARRAY(Text)) for name in ("eids", "ops", "statuses", "reasons")))
+             *(bindparam(name, type_=ARRAY(Text))
+               for name in ("eids", "ops", "statuses", "reasons", "codes")))
 # A node row's resolutions that leave it naming a node later rows may point at.
 _LANDED = ("create", "update", "unchanged")
 # What an import's summary tallies, per row by its resolution (``deleted`` also counts what a
@@ -196,6 +201,181 @@ def _sniff_format(declared: str, head: bytes) -> str | None:
 def _chunks(seq: List[Any], size: int):
     for i in range(0, len(seq), size):
         yield seq[i:i + size]
+
+
+class ReplaceBlocked(Exception):
+    """A replace that would delete most of its scope and make most of it again, refused before it
+    deletes anything. The job's ``summary.replaceGuard`` says what it would have done, and the limits
+    in force."""
+    code, action = "mass_delete_blocked", "allow_mass_delete"
+
+
+class ReplaceRowsRefused(Exception):
+    """A replace whose file holds rows it couldn't apply (records neither a node nor an edge, or
+    refused rows), stopped before it deletes anything: what those rows name may be what the file
+    means to keep. Fix the rows and import the file again."""
+    code, action = "rows_refused", "fix_rows"
+
+
+#: The refused rows an import's report names one by one — the first it met — beside its counts.
+REFUSED_EXAMPLES = 20
+#: A refused row's reason, as the report quotes it.
+_REASON_CHARS = 300
+#: A record that is neither a node nor an edge, as the report counts it.
+NOT_A_RECORD = "not_node_or_edge"
+_BUDGET = re.compile(r"^(-1|\d+|\d+(\.\d+)?%)$")
+
+
+def refused_budget(value: Optional[str]) -> str:
+    """``maxRefusedRows`` as an import takes it, checked: how many of its file's rows may be refused
+    before the import holds — ``0``, none (the default); a count, ``100``; a share of the file's
+    rows, ``0.5%``; or ``-1``, any. Raises ``ValueError``, saying what it may be. ``None`` is the
+    platform's (``IMPORT_MAX_REFUSED_ROWS``); one that isn't a limit holds on any refused row,
+    rather than stop every import."""
+    if value is None:
+        try:
+            return _checked_budget(config.IMPORT_MAX_REFUSED_ROWS)
+        except ValueError:
+            logger.warning("IMPORT_MAX_REFUSED_ROWS=%r isn't a limit: imports hold on any refused row",
+                           config.IMPORT_MAX_REFUSED_ROWS)
+            return "0"
+    return _checked_budget(str(value))
+
+
+def _checked_budget(value: str) -> str:
+    budget = value.strip()
+    if not _BUDGET.match(budget) or (budget.endswith("%") and float(budget[:-1]) > 100):
+        raise ValueError(f"maxRefusedRows {budget!r} isn't a limit: send 0 (hold on any refused row), "
+                         "a count such as 100, a share of the file's rows such as 0.5%, or -1 (any)")
+    return budget
+
+
+def within_budget(budget: str, refused: int, rows: int) -> bool:
+    """Whether ``refused`` of a file's ``rows`` rows is within ``budget`` (:func:`refused_budget`)."""
+    if budget == "-1":
+        return True
+    if budget.endswith("%"):
+        return refused <= float(budget[:-1]) / 100 * max(rows, 0)
+    return refused <= int(budget)
+
+
+def tally_refused(report: Optional[Dict[str, Any]], resolutions, labels: Mapping[int, str],
+                  where: Optional[Mapping[int, Any]] = None) -> Optional[Dict[str, Any]]:
+    """The import's report of the rows it refused — how many in all (``total``), for each reason
+    (``byCode``), and the first :data:`REFUSED_EXAMPLES`, each with its ``rowIndex``, ``kind``,
+    ``label``, ``code`` and ``reason`` — with a window's refusals added. It is kept on the job's
+    summary and committed with the window, so a resumed import counts every row once, and nothing
+    reads the job's rows again to report them. ``labels``: what each row is called, by its index;
+    ``where``: where it is in its file (``formats.AT``: a line, a sheet's row, an array's item),
+    as ``at``."""
+    refused = [r for r in resolutions if r["status"] == "invalid"]
+    if not refused:
+        return report
+    out = {"total": 0, "byCode": {}, "rows": [], **(report or {})}
+    by_code, rows = dict(out["byCode"]), list(out["rows"])
+    for r in refused:
+        code = r.get("code") or "invalid_row"
+        by_code[code] = int(by_code.get(code) or 0) + 1
+        if len(rows) < REFUSED_EXAMPLES:
+            reason = next((str(x) for x in r.get("reasons") or () if x), "")
+            rows.append({"rowIndex": r["_row_index"], "kind": r.get("kind"),
+                         "label": labels.get(r["_row_index"]) or "", "code": code,
+                         "reason": reason[:_REASON_CHARS],
+                         **({"at": where[r["_row_index"]]} if where and r["_row_index"] in where else {})})
+    return {**out, "total": int(out["total"]) + len(refused), "byCode": by_code, "rows": rows,
+            "fixes": _fixes(by_code)}
+
+
+def with_not_a_record(report: Optional[Dict[str, Any]], skipped: int) -> Optional[Dict[str, Any]]:
+    """The report, counting the file's records that are neither a node nor an edge (counted over
+    the whole file as it is read, so none is named by its row)."""
+    if not skipped:
+        return report
+    out = {"total": 0, "byCode": {}, "rows": [], **(report or {})}
+    if NOT_A_RECORD in out["byCode"]:
+        return out
+    by_code = {**out["byCode"], NOT_A_RECORD: skipped}
+    return {**out, "total": int(out["total"]) + skipped, "byCode": by_code, "fixes": _fixes(by_code)}
+
+
+def _fixes(by_code: Mapping[str, int]) -> Dict[str, str]:
+    """What to do about each reason the report counts."""
+    from .resolve import FIXES
+    return {code: FIXES[code] for code in by_code if code in FIXES}
+
+
+def _label(row: Mapping[str, Any]) -> str:
+    """What a staged row is called: its name, else its key; an edge, by its type and ends."""
+    named = row.get("displayName") or row.get("qualifiedName") or row.get("urn") or row.get("entity_id")
+    if named or row.get("kind") != "edge":
+        return str(named or "")
+    ends = [row.get(k) for k in ("source", "target", "sourceUrn", "targetUrn",
+                                  "source_entity_id", "target_entity_id")]
+    ends = [str(e) for e in ends if e][:2]
+    return f"{row.get('edgeType') or 'edge'} {' → '.join(ends)}".strip()
+
+
+def where_text(row: Mapping[str, Any]) -> str:
+    """Where a refused row is, as its file shows it: ``line 12``, ``Edges row 7``, ``item 3`` — else
+    its ``rowIndex``."""
+    at = row.get("at") or {}
+    if at.get("sheet") and at.get("row"):
+        return f"{at['sheet']} row {at['row']}"
+    if at.get("line"):
+        return f"line {at['line']}"
+    if at.get("item") is not None:
+        return f"item {at['item']}"
+    return f"rowIndex {row['rowIndex']}"
+
+
+def refused_digest(report: Optional[Dict[str, Any]], examples: int = 3) -> str:
+    """The report in a sentence or two, for a message: its reasons by count, then its first rows."""
+    if not report:
+        return ""
+    ranked = sorted(report["byCode"].items(), key=lambda kv: -kv[1])
+    codes = ", ".join(f"{n} {code}" for code, n in ranked)
+    rows = "; ".join(
+        f"{where_text(r)}{' (' + r['label'] + ')' if r.get('label') else ''}: {r['code']}"
+        f"{' — ' + r['reason'] if r.get('reason') else ''}" for r in report["rows"][:examples])
+    fixes = report.get("fixes") or {}
+    fix = " ".join(f"To fix {code}: {fixes[code]}" for code, _n in ranked[:2] if code in fixes)
+    return f" Refused: {codes}." + (f" First: {rows}." if rows else "") + (f" {fix}" if fix else "")
+
+
+class IdentifierMatchedNothing(Exception):
+    """A replace whose first full node window found an entity for almost none of its rows: by its
+    identifier, the file very likely names its entities by another key. Stopped there."""
+    code, action = "identifier_matched_nothing", "identifier"
+
+
+def platform_limits() -> Dict[str, Any]:
+    """The replace guard's limits as the platform sets them (``IMPORT_REPLACE_*``): a job made
+    before its data source's were kept on it runs under these."""
+    limits = {"minLive": config.IMPORT_REPLACE_GUARD_MIN_LIVE,
+              "deleteFraction": config.IMPORT_REPLACE_GUARD_DELETE_FRACTION,
+              "createFraction": config.IMPORT_REPLACE_GUARD_CREATE_FRACTION,
+              "minMatchFraction": config.IMPORT_REPLACE_MIN_MATCH_FRACTION}
+    return {**limits, "sources": dict.fromkeys(limits, "platform")}
+
+
+def replace_verdict(live: int, deletes: int, creates: int, *, allowed: bool,
+                    limits: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """The replace guard (``IMPORT_REPLACE_GUARD``) on a scope of ``live`` entities, before the
+    import, from which a replace would delete ``deletes`` and into which it made ``creates``:
+    ``state`` ``off`` (the guard is off), ``passed``, ``overridden`` (past the limits, and sent with
+    allowMassDelete) or ``blocked``, with the counts, the limits in force (``limits``: the job's,
+    its data source's or the platform's, else the platform's) and where each came from."""
+    limits = limits or platform_limits()
+    names = ("minLive", "deleteFraction", "createFraction")
+    in_force = {name: limits[name] for name in names}
+    past = (live > 0 and live >= in_force["minLive"]
+            and deletes >= in_force["deleteFraction"] * live
+            and creates >= in_force["createFraction"] * live)
+    state = ("off" if not config.IMPORT_REPLACE_GUARD else "passed" if not past
+             else "overridden" if allowed else "blocked")
+    sources = limits.get("sources") or {}
+    return {"state": state, "live": live, "deletes": deletes, "creates": creates,
+            "limits": in_force, "sources": {name: sources.get(name, "platform") for name in names}}
 
 
 def _first_layer_id(layers: List[dict]) -> str:
@@ -367,6 +547,24 @@ class ImportWorker:
         self._keys: Optional[KeyIndex] = None
         self._canon: Dict[str, str] = _canonical_map((ontology or {}).get("node_types"))
         self._identity_read = False
+        # What the job's rows find their entities by (identifier.py): the job's, once it is read.
+        self._identifier: str = identifiers.platform_default()
+        # The job's reconcile mode, and whether a replace may delete past the replace guard.
+        self._reconcile_mode = "upsert"
+        self._allow_mass_delete = False
+        # How many of the file's rows may be refused before the import holds (refused_budget).
+        self._refused_budget = refused_budget(None)
+        # The replace guard's and fail-fast's limits: the job's (its data source's or the
+        # platform's, when it was made), with where each came from.
+        self._limits: Dict[str, Any] = platform_limits()
+        # identifier=prop.<name>: the property, and the nodes the draft holds a value of it for
+        # beyond what main's index says (its own changes, this job's windows, and the nodes main
+        # changed after the draft's base), both ways; and the main commit those last are read to
+        # (None on main, whose index is its view).
+        self._prop: Optional[str] = None
+        self._prop_of: Dict[str, Optional[str]] = {}
+        self._prop_holders: Dict[str, set] = {}
+        self._prop_seq: Optional[int] = None
         # Reconciling in memory: the file (read again for the edges), and per pass ("node",
         # "edge") what its rows have named — only for a pass this run started — whether it is still
         # deciding, and how many rows it decided and found unchanged.
@@ -382,16 +580,32 @@ class ImportWorker:
         self._lease = lease or await lease_job(job_id)
         job = await self._job(job_id)
         graph_id, branch_id = job["graph_id"], job["branch_id"]
+        self._identifier = job.get("identifier") or identifiers.platform_default()
+        self._reconcile_mode = job.get("reconcile_mode") or "upsert"
+        self._allow_mass_delete = bool(job.get("allow_mass_delete"))
+        self._limits = (job.get("import_settings") or {}).get("replaceLimits") or platform_limits()
+        self._refused_budget = refused_budget((job.get("import_settings") or {}).get("maxRefusedRows"))
         actor = await self._branch_owner(graph_id, branch_id)
         self._source = (job["source_uri"], job["import_format"])
 
         await self._lease.retry_transient(
             lambda: self._stage(job_id, job["source_uri"], job["import_format"], graph_id, branch_id))
-        summary = await self._resolve_and_build(
-            job_id, graph_id, branch_id, actor, job.get("reconcile_mode") or "upsert")
+        try:
+            summary = await self._resolve_and_build(
+                job_id, graph_id, branch_id, actor, job.get("reconcile_mode") or "upsert")
+        except ReplaceBlocked:
+            # Refused before it deleted anything, every row applied: what it made is on the draft
+            # for review, so it is placed in the draft's view as a completed run's is.
+            if self._facts:
+                await self._derive_facts(job_id, graph_id, branch_id)
+            raise
         if self._facts:
             await self._derive_facts(job_id, graph_id, branch_id)
-        if not await self._lease.finish("completed", summary=summary, progress=100):
+        # A replace keeps the replace guard's verdict beside its tallies.
+        guard = ((await self._position(job_id)).summary.get("replaceGuard")
+                 if self._reconcile_mode == "replace" else None)
+        if not await self._lease.finish("completed", progress=100,
+                                        summary={**summary, "replaceGuard": guard} if guard else summary):
             raise Superseded(f"import job {job_id} (epoch {self._lease.epoch}) was taken over "
                              "before it could finish")
         return summary
@@ -404,7 +618,9 @@ class ImportWorker:
                 raise ValueError(f"unknown import job {job_id}")
             return {"graph_id": row.graph_id, "branch_id": row.branch_id,
                     "source_uri": row.source_uri, "import_format": row.import_format,
-                    "reconcile_mode": row.reconcile_mode}
+                    "reconcile_mode": row.reconcile_mode, "identifier": row.identity_strategy,
+                    "allow_mass_delete": row.allow_mass_delete,
+                    "import_settings": row.import_settings}
 
     async def _position(self, job_id: str) -> _Position:
         """Where the job has got, read afresh by every unit of work: a unit retried after a fault
@@ -455,7 +671,7 @@ class ImportWorker:
             cursor = "mparse:0"
         if cursor is not None and cursor.startswith("mparse:"):
             snap = await open_snapshot(graph_id=graph_id, branch_id=branch_id)
-            await self._decide_state(graph_id, branch_id)
+            await self._decide_state(snap, graph_id, branch_id)
             await self._stage_pass(job_id, snap, "node", int(cursor.partition(":")[2]))
             return
         if cursor is not None and not cursor.startswith("parse:"):
@@ -528,7 +744,7 @@ class ImportWorker:
                 return True
         return False
 
-    async def _decide_state(self, graph_id: str, branch_id: str) -> None:
+    async def _decide_state(self, snap, graph_id: str, branch_id: str) -> None:
         """What a batch is resolved against in memory before any window (as
         :meth:`validation_state`, with no team keys): what the graph derives node ids in, and the
         data source's identifier property. The links earlier windows leave come later, read by the
@@ -537,6 +753,8 @@ class ImportWorker:
         self._graph_id, self._branch_id = graph_id, branch_id
         self._id_scope = await self._svc.identity_scope(graph_id)
         self._identity_prop = identity_property(self._node_identity)
+        self._settle_identifier()
+        await self._prop_state(snap, graph_id, branch_id, build=True)
 
     async def _stage_pass(self, job_id: str, snap, kind: str, resume: int) -> None:
         """Stage the file's ``kind`` rows from file row ``resume``, a batch at a time, each batch
@@ -618,11 +836,7 @@ class ImportWorker:
             return [], rows
         lookups = await (self._node_lookups if kind == "node" else self._edge_lookups)(snap, rows)
         lookups.update(created_from=self._created_from, keys=self._keys, earlier={})
-        scope = self._id_scope
-        _ops, resolutions = await asyncio.to_thread(
-            resolve_rows, rows, lookups, mint_id=new_entity_id, ontology=self._ontology,
-            identity_prop=self._identity_prop, mint_urn=lambda _etype: new_entity_id(),
-            derive_urn=lambda seed: pointer_id(scope, seed))
+        _ops, resolutions = await asyncio.to_thread(self.resolve, rows, lookups)
         by_index = {res["_row_index"]: res for res in resolutions}
         slim, whole = [], []
         for row in rows:
@@ -652,6 +866,8 @@ class ImportWorker:
             names += ["p:" + n for n in pointers(row.get("urn"), ident)]
             if row.get("qualifiedName"):
                 names.append("q:" + str(row["qualifiedName"]))
+            if self._prop and (v := key_value((row.get("properties") or {}).get(self._prop))):
+                names.append("v:" + v)
         if row.get("entity_id"):
             names.append("e:" + str(row["entity_id"]))
         if res.get("matched_entity_id"):
@@ -678,6 +894,8 @@ class ImportWorker:
                   "status": res["status"]}
         if res["reasons"]:
             staged["reasons"] = res["reasons"]
+        if res.get("code"):
+            staged["code"] = res["code"]
         return staged
 
     async def _stage_edges(self, job_id: str, snap, graph_id: str, branch_id: str, resume: int) -> None:
@@ -710,34 +928,51 @@ class ImportWorker:
         so memory stays flat whatever the size of the file or of the graph. Each window is retried
         through a transient fault (``retry_transient``) from the cursor; returns the tallies.
 
-        A replace deletes whatever no row matched, so it refuses to while the file has rows it
-        couldn't apply, which may name what it means to keep: records that are neither a node nor
-        an edge (before the first window, so nothing is written), and invalid rows (once every
-        window is in, before any delete)."""
-        skipped = int((await self._position(job_id)).summary.get("skipped") or 0)
-        if reconcile_mode == "replace" and skipped:
-            raise ValueError(
+        A replace deletes whatever no row matched, so it refuses to while the file has more rows it
+        couldn't apply than its ``maxRefusedRows`` allows (none, by default): they may name what it
+        means to keep. Records that are neither a node nor an edge are counted before the first
+        window, so nothing is written; refused rows once every window is in, before any delete. A
+        replace within its budget goes on: what a refused row still names is kept, as every entity
+        a row of the import matched is. Either way the job's ``summary.refused`` says which rows
+        were refused, and why."""
+        pos = await self._position(job_id)
+        skipped = int(pos.summary.get("skipped") or 0)
+        if (reconcile_mode == "replace" and skipped
+                and not within_budget(self._refused_budget, skipped, pos.total + skipped)):
+            raise ReplaceRowsRefused(
                 f"Nothing was deleted: {skipped} record(s) of the file are neither a node nor an "
                 "edge, and a replace deletes whatever the file leaves out — which could include "
                 "what those records name. Nothing was imported either. Fix those records and "
-                "import the file again.")
+                "import the file again, or send it with maxRefusedRows (a count, a share such as "
+                "1%, or -1 for any) to go on without them.")
         snap = await open_snapshot(graph_id=graph_id, branch_id=branch_id)
         more = True
         while more:
             more = await self._lease.retry_transient(
                 lambda: self._next_window(job_id, snap, graph_id, branch_id, actor))
         if reconcile_mode == "replace":        # delete-on-absence (not file rows; counted as it goes)
-            invalid = int((await self._position(job_id)).summary.get("invalid") or 0)
-            if invalid:
-                raise ValueError(
-                    f"Nothing was deleted: {invalid} row(s) of the file couldn't be applied, and a "
-                    "replace deletes whatever the file leaves out — which would include what those "
-                    "rows name. The file's other rows are on the draft. Fix those rows and import "
-                    "the file again.")
+            pos = await self._position(job_id)
+            invalid = int(pos.summary.get("invalid") or 0)
+            if invalid and not within_budget(self._refused_budget, invalid + skipped, pos.total + skipped):
+                raise ReplaceRowsRefused(
+                    f"Nothing was deleted: {invalid} row(s) of the file were refused, and a replace "
+                    "deletes whatever the file leaves out — which could include what those rows "
+                    f"name.{refused_digest(pos.summary.get('refused'))} The job's summary.refused "
+                    f"lists the first {REFUSED_EXAMPLES} with why, and GET …/imports/{job_id}/preview "
+                    "more. The file's other rows are on the draft. Fix those rows and import the file "
+                    "again, or send it with maxRefusedRows (a count, a share such as 1%, or -1 for "
+                    "any) to replace with the rows that applied: what a refused row still names is "
+                    "kept.")
+            if (await self._position(job_id)).cursor != "replace":       # not deleting yet
+                await self._lease.retry_transient(
+                    lambda: self._guard_replace(job_id, snap), never=(ReplaceBlocked,))
             await self._lease.retry_transient(
                 lambda: self._delete_absent(job_id, snap, graph_id, branch_id, actor))
         summary = (await self._position(job_id)).summary
         tallies = {k: int(summary.get(k) or 0) for k in _TALLIES}
+        report = with_not_a_record(summary.get("refused"), skipped)
+        if report:
+            tallies["refused"] = report
         return {**tallies, "skipped": skipped} if skipped else tallies
 
     async def _next_window(self, job_id, snap, graph_id, branch_id, actor) -> bool:
@@ -768,19 +1003,19 @@ class ImportWorker:
         lookups = await (self._node_lookups if kind == "node" else self._edge_lookups)(snap, rows)
         lookups.update(created_from=self._created_from, keys=self._keys,
                        earlier=await self._earlier(job_id, kind, rows[0]["_row_index"], lookups))
-        scope = self._id_scope
-        ops, resolutions = await asyncio.to_thread(       # a window of pure-Python matching
-            resolve_rows, rows, lookups, mint_id=new_entity_id,     # a urn:uuid (UUIDv7) each
-            ontology=self._ontology, identity_prop=self._identity_prop,
-            mint_urn=lambda _etype: new_entity_id(),
-            derive_urn=lambda seed: pointer_id(scope, seed))
+        ops, resolutions = await asyncio.to_thread(self.resolve, rows, lookups)  # pure Python
         processed = pos.processed + len(rows)
+        labels = {r["_row_index"]: _label(r) for r in rows}
+        where = {r["_row_index"]: r["_at"] for r in rows if r.get("_at")}
 
         async def on_commit(s) -> None:
             # Tallied at the commit, so a row quarantined on the way counts as what it ended as.
             summary = {**dict.fromkeys(_TALLIES, 0), **pos.summary}
             for res in resolutions:
                 summary[res["status"]] = int(summary.get(res["status"]) or 0) + 1
+            report = tally_refused(summary.get("refused"), resolutions, labels, where)
+            if report:
+                summary["refused"] = report
             await self._persist_resolutions(s, job_id, resolutions)
             await self._lease.checkpoint(
                 s, expect_cursor=pos.cursor, last_cursor=f"{step}:{rows[-1]['_row_index']}",
@@ -790,7 +1025,184 @@ class ImportWorker:
         await self._apply_window(graph_id, branch_id, actor, ops, resolutions, on_commit)
         if kind == "node":
             self._remember_created(rows, ops, resolutions)
+            if pos.cursor in ("node:-1", "mnode:-1") and len(rows) == config.IMPORT_COMMIT_WINDOW:
+                await self._fail_fast(job_id, snap)
         return True
+
+    async def _fail_fast(self, job_id: str, snap) -> None:
+        """After a replace's first full node window: stop (:class:`IdentifierMatchedNothing`) when
+        fewer than the job's ``minMatchFraction`` (``IMPORT_REPLACE_MIN_MATCH_FRACTION``, or its
+        data source's) of the rows decided so far found an entity, in a graph whose main as the
+        draft reads it (a fork's with its parent's) holds at least its ``minLive``, rather than read
+        the rest of the file and have the replace guard refuse it at the end. A replace of a view's
+        scope is left to the guard: its scope isn't the graph. One sent with allowMassDelete goes
+        on, as the guard lets it through."""
+        min_match = float(self._limits["minMatchFraction"])
+        if (self._reconcile_mode != "replace" or self._scope is not None or self._allow_mass_delete
+                or min_match <= 0):
+            return
+        tally = (await self._position(job_id)).summary
+        matched = sum(int(tally.get(k) or 0) for k in ("updated", "unchanged", "deleted"))
+        decided = matched + int(tally.get("new") or 0) + int(tally.get("invalid") or 0)
+        if not decided or matched >= min_match * decided:
+            return
+        live = await _live_count(snap.main_at_base())
+        if live < int(self._limits["minLive"]):
+            return
+        raise IdentifierMatchedNothing(
+            f"Stopped after the file's first {decided:,} rows: by identifier={self._identifier}, "
+            f"only {matched:,} of them found an entity, in a graph of {live:,}. The rest would very "
+            "likely make the graph again, and the replace delete it. Check what the file's rows name "
+            "their entities by: identifier=entity_id finds a row's entity id, then its urn, its "
+            "identifier value or a field its type matches imports by; identifier=urn, its entity id "
+            "or its urn. Nothing was deleted; the rows read so far are on the draft. If the file "
+            "really replaces the graph, import it again with allowMassDelete=true.")
+
+    async def _guard_replace(self, job_id: str, snap) -> None:
+        """Before a replace deletes anything: count what it would delete and what it made, record the
+        verdict on the job's summary (``replaceGuard``, :func:`replace_verdict`), and refuse
+        (:class:`ReplaceBlocked`) past the guard's limits unless the job allows it. Nothing is
+        deleted then, and the file's rows stay on the draft for review.
+
+        A replace is measured against the main its draft reads (a fork's with its parent's): its
+        scope as main holds it, and what the draft makes beyond main — so a file imported again into
+        the draft an earlier import made it in is judged on what the draft would publish, not only
+        on what this run added. A whole graph's scope is every entity main holds, and the draft makes
+        what it holds beyond them. A view's is those of the view's entities main holds, and the
+        draft makes every entity it holds that main doesn't: a file naming the view's entities by
+        another key makes them all again outside the view, where its placements don't reach."""
+        keep = (await view_entities(snap, self._scope))["keep"] if self._scope else None
+        main = snap.main_at_base()
+        live = absent = before = 0
+        for kind in ("edge", "node"):
+            async for page in _in_scope(snap, kind, keep):
+                live += len(page)
+                absent += len(await self._unmatched(job_id, page))
+                if keep is not None:
+                    before += len(await main.lookup_live(kind, page))
+        pos = await self._position(job_id)
+        made = int(pos.summary.get("new") or 0)
+        if keep is None:
+            before = await _live_count(main)
+            creates = max(live - before, made)
+        else:
+            creates = await _made_on_draft(snap, main)
+        verdict = replace_verdict(before, absent, creates, allowed=self._allow_mass_delete,
+                                  limits=self._limits)
+        async with db.graphver_session() as s:
+            await self._lease.checkpoint(s, summary={**pos.summary, "replaceGuard": verdict})
+        if verdict["state"] == "overridden":
+            logger.warning("import job %s deletes %d of %d entities and made %d, past the replace "
+                           "guard, as allowMassDelete asked", job_id, absent, verdict["live"], creates)
+        if verdict["state"] != "blocked":
+            return
+        limits = verdict["limits"]
+        whose = ("this data source's" if "data_source" in verdict["sources"].values()
+                 else "the platform's")
+        raise ReplaceBlocked(
+            f"Nothing was deleted: this replace would delete {absent:,} of the {verdict['live']:,} "
+            f"entities in its scope, and its draft makes {creates:,} new ones: past the replace "
+            f"guard, which by {whose} limits refuses one "
+            f"that deletes at least {limits['deleteFraction']:.0%} of a scope of "
+            f"{limits['minLive']:,} or more and creates at least {limits['createFraction']:.0%} as "
+            "many. That is what a file whose rows name their entities by another key looks like: "
+            f"check the import's identifier (identifier={self._identifier}). The file's rows are on "
+            "the draft for review. To delete what it leaves out all the same, import it again with "
+            "allowMassDelete=true.")
+
+    def resolve(self, rows, lookups) -> Tuple[List[dict], List[dict]]:
+        """:func:`resolve_rows` as this job resolves a batch: by its identifier, through its
+        ontology's gate, a new node's id derived from its key in the graph's identity scope (else a
+        urn:uuid minted, v7), a new edge's from its ends and type."""
+        scope = self._id_scope
+        return resolve_rows(
+            rows, lookups, mint_id=new_entity_id, ontology=self._ontology,
+            identity_prop=self._identity_prop, mint_urn=lambda _etype: new_entity_id(),
+            derive_urn=lambda seed: pointer_id(scope, seed),
+            derive_edge=lambda source, target, etype: edge_pointer_id(scope, source, target, etype),
+            identifier=self._identifier,
+            derive_key=(lambda value: key_pointer_id(scope, self._prop, value)) if self._prop else None)
+
+    def _settle_identifier(self) -> None:
+        """Once the data source's identifier property is known: ``prop.<it>`` is the urn, which that
+        property holds; any other ``prop.<name>`` is matched through the property's index."""
+        if self._identity_prop and self._identifier == f"prop.{self._identity_prop}":
+            self._identifier = identifiers.URN
+        self._prop = (self._identifier[len("prop."):] if self._identifier.startswith("prop.")
+                      else None)
+
+    async def _prop_state(self, snap, graph_id: str, branch_id: str, *, build: bool,
+                          job_id: Optional[str] = None) -> None:
+        """For ``identifier=prop.<name>``: the property's index caught up to main's head — built
+        first when no import named it (``build``) — and, on a draft, the values the draft itself
+        holds. On main (a dry run) the index is main's view, and nothing more is read."""
+        if not self._prop:
+            return
+        if build:
+            await matching.ensure(graph_id, self._prop, job_id=job_id)
+        else:
+            await matching.ensure_ready(graph_id, self._prop)
+        self._prop_of, self._prop_holders = {}, {}
+        self._prop_seq = snap.base_seq if snap.is_draft else None
+        if not snap.is_draft:
+            return
+        for eid, value in (await matching.draft_values(graph_id, branch_id, self._prop)).items():
+            self._note_prop(eid, value)
+
+    async def _prop_moved_on_main(self, snap) -> None:
+        """On a draft: the nodes main changed after its base (since the last call), noted as the
+        draft sees them — its own value, else main's at its base — since main's index says what
+        main's head holds. A node main deleted since is live in the draft; one main gave another
+        value keeps its old one there. As many as main's changes since the base, their payloads
+        read a chunk at a time and only their values kept; the commit they are read to moves once
+        every one is noted, so a window retried after a fault here reads the rest again."""
+        if self._prop_seq is None:
+            return
+        moved, seq = await matching.changed_on_main(self._graph_id, self._prop_seq)
+        for chunk in _chunks([e for e in moved if e not in self._prop_of], _PERSIST_BATCH):
+            live = await snap.lookup_live("node", chunk, payload=True)
+            held = dict(await asyncio.to_thread(matching._values_of, list(live.values()), self._prop))
+            for eid in chunk:
+                self._note_prop(eid, held.get(eid))
+        self._prop_seq = seq
+
+    def _note_prop(self, eid: str, value: Optional[str]) -> None:
+        """The draft holds ``value`` of the matching property for node ``eid`` (None: none, or it
+        is deleted there)."""
+        old = self._prop_of.get(eid)
+        if old is not None:
+            self._prop_holders.get(old, set()).discard(eid)
+        self._prop_of[eid] = value
+        if value is not None:
+            self._prop_holders.setdefault(value, set()).add(eid)
+
+    async def _prop_hits(self, snap, values) -> Tuple[Dict[str, str], Dict[str, List[str]], Dict[str, str]]:
+        """``(hits, dupes, restore)`` for values of the matching property: the one live node of the
+        draft holding each, the values several hold, and the values only a deleted node held (that
+        node). Main's index, for the nodes neither the draft nor main has changed since the draft's
+        base, where the draft's view holds them; the draft's view of the rest (main's changes read
+        after the index, so they cover whatever it says)."""
+        values = {v for v in values if v}
+        main = await matching.lookup(self._graph_id, self._prop, values)
+        await self._prop_moved_on_main(snap)
+        candidates = {e for v in values for e, live in main.get(v, ())
+                      if live and e not in self._prop_of}
+        visible = set(await snap.lookup_live("node", candidates)) if candidates else set()
+        hits: Dict[str, str] = {}
+        dupes: Dict[str, List[str]] = {}
+        restore: Dict[str, str] = {}
+        for v in values:
+            holders = {e for e, live in main.get(v, ()) if live and e in visible}
+            holders |= self._prop_holders.get(v, set())
+            if len(holders) == 1:
+                hits[v] = next(iter(holders))
+            elif holders:
+                dupes[v] = sorted(holders)
+            else:
+                gone = {e for e, live in main.get(v, ()) if not live and e not in self._prop_of}
+                if len(gone) == 1:
+                    restore[v] = next(iter(gone))
+        return hits, dupes, restore
 
     async def _identity_state(self, job_id: str, snap, graph_id: str, branch_id: str) -> None:
         """What every window resolves new nodes and named ends against, read once a run (a resumed
@@ -803,6 +1215,8 @@ class ImportWorker:
         self._graph_id, self._branch_id = graph_id, branch_id
         self._id_scope = await self._svc.identity_scope(graph_id)
         self._identity_prop = ident = identity_property(self._node_identity)
+        self._settle_identifier()
+        await self._prop_state(snap, graph_id, branch_id, build=True, job_id=job_id)
         self._created_from, self._aliases = {}, {}
         # Only the rows that leave a link: a file id that is not the node's own, or an identifier
         # value beside a urn — never a whole row, which a large job has millions of.
@@ -835,6 +1249,8 @@ class ImportWorker:
         self._graph_id, self._branch_id = graph_id, branch_id
         self._id_scope = await self._svc.identity_scope(graph_id)
         self._identity_prop = identity_property(self._node_identity)
+        self._settle_identifier()
+        await self._prop_state(snap, graph_id, branch_id, build=False)
         onto = self._ontology or {}
         keys = KeyIndex(onto.get("keys"), onto.get("unique"))
         self._keys = keys if keys else None
@@ -886,14 +1302,23 @@ class ImportWorker:
 
     def _remember_created(self, rows, ops, resolutions) -> None:
         """A committed node window's rows, for the windows after it: the node each matched or
-        created, by the file entity id and second name it came with; and a create's team key
-        values. Only what landed — a row the write gate turned away named nothing any later row
-        may point at."""
+        created, by the file entity id and second name it came with; a create's team key values;
+        and the matching property's value each node now holds, as its op wrote it (a stale row's
+        update keeps the node's newer value of a cell it left as exported). Only what landed — a
+        row the write gate turned away named nothing any later row may point at."""
         by_index = {r["_row_index"]: r for r in rows}
         urn_of = {o["entity_id"]: (o.get("payload") or {}).get("urn") for o in ops
                   if o.get("op") == "create"}
+        wrote = {o["entity_id"]: (o.get("payload") or {}).get("properties") or {} for o in ops
+                 if o.get("op") in ("create", "update")}
         for res in resolutions:
             eid = res.get("matched_entity_id")
+            if self._prop and eid and res.get("resolved_op") in ("create", "update", "delete"):
+                props = wrote.get(eid) or {}
+                if res["resolved_op"] == "delete":
+                    self._note_prop(eid, None)
+                elif self._prop in props or res["resolved_op"] == "create":
+                    self._note_prop(eid, key_value(props.get(self._prop)))
             if res.get("resolved_op") not in _LANDED or not eid:
                 continue
             row = by_index.get(res["_row_index"]) or {}
@@ -920,9 +1345,12 @@ class ImportWorker:
                     await on_commit(s)
                 return
             try:
+                # A row's _op=delete takes what the node contains, as a delete on the canvas does.
                 await self._svc.apply_ops(graph_id=graph_id, ops=ops, actor=actor,
                                           branch_id=branch_id, message="import", on_commit=on_commit,
-                                          node_identity=self._node_identity)
+                                          node_identity=self._node_identity,
+                                          containment_edge_types=(self._ontology or {}).get(
+                                              "containment") or None)
                 return
             except OntologyViolation as exc:
                 rest = _quarantine(ops, resolutions, exc.violations) if attempt < _QUARANTINE_ROUNDS else None
@@ -979,7 +1407,10 @@ class ImportWorker:
         """What ``resolve_rows`` needs to match these node rows: the live nodes they name by
         entity_id, urn (or the identifier property's value) or — a row without a urn —
         qualifiedName, each one's current payload; and, of the identities the rows that match
-        nothing would take, which are taken and which a deleted node held."""
+        nothing would take, which are taken and which a deleted node held. By a matching
+        property, the nodes they name by its value instead (:meth:`_prop_node_lookups`)."""
+        if self._prop:
+            return await self._prop_node_lookups(snap, rows)
         ident = self._identity_prop
         wanted = {n for r in rows for n in pointers(
             r.get("urn"), (r.get("properties") or {}).get(ident) if ident else None)}
@@ -994,17 +1425,64 @@ class ImportWorker:
             named |= {e for r in rows if (e := self._keys.node(
                 self._canon.get(str(r.get("entityType") or "").lower(), r.get("entityType")),
                 r.get("properties"))[0])}
+        # And a urn:uuid entity_id no live node holds, which a create may keep as its id.
+        own_ids = {u for r in rows if (u := uuid_urn(r.get("entity_id"))) and u not in by_id}
         taken, restore = await self._svc.identities_taken(
-            graph_id=self._graph_id, branch_id=self._branch_id, names=wanted - set(urn_to_eid))
+            graph_id=self._graph_id, branch_id=self._branch_id,
+            names=(wanted - set(urn_to_eid)) | own_ids)
         current, hash_of = await _heads(snap, "node", named)
         return {"urn_to_eid": urn_to_eid, "qname_to_eid": qname_to_eid, "node_eids": named,
                 "current": current, "hash_of": hash_of,
                 "bases": await _bases(snap, "node", rows, hash_of), "taken": taken, "restore": restore}
 
+    async def _prop_node_lookups(self, snap, rows) -> Dict[str, Any]:
+        """:meth:`_node_lookups` for ``identifier=prop.<name>``: the live nodes the rows name by
+        entity_id or by the property's value, with their current payloads; and of the ids the rows
+        that match nothing would take (derived from their values), those a live node holds, and of
+        their urns, the live node holding each."""
+        values = {v for r in rows if (v := key_value((r.get("properties") or {}).get(self._prop)))}
+        urns = {u for r in rows if (u := key_value(r.get("urn"))) and not uuid_urn(u)}
+        by_id = await snap.lookup_live("node", {r["entity_id"] for r in rows if r.get("entity_id")})
+        hits, dupes, restore = await self._prop_hits(snap, values)
+        named = set(by_id) | set(hits.values())
+        named |= {self._created_from[f] for r in rows if (f := r.get("entity_id")) in self._created_from}
+        derived = {key_pointer_id(self._id_scope, self._prop, v)
+                   for v in values - set(hits) - set(dupes) - set(restore)}
+        taken = set(await snap.lookup_live("node", derived)) if derived else set()
+        current, hash_of = await _heads(snap, "node", named)
+        return {"urn_to_eid": hits, "dupes": dupes, "restore": restore, "taken": taken,
+                "urn_held": await snap.nodes_by_urn(urns) if urns else {},
+                "qname_to_eid": {}, "node_eids": named, "current": current, "hash_of": hash_of,
+                "bases": await _bases(snap, "node", rows, hash_of)}
+
+    async def _prop_edge_lookups(self, snap, rows) -> Dict[str, Any]:
+        """:meth:`_edge_lookups` for ``identifier=prop.<name>``: ends named by entity_id (an
+        entity's, or the file's own id of a node the job made) or by ``source.<name>``."""
+        ends = {}
+        for end in ("source", "target"):
+            by_id = await snap.lookup_live("node", {r[f"{end}_entity_id"] for r in rows
+                                                    if r.get(f"{end}_entity_id")})
+            hits, dupes, _restore = await self._prop_hits(snap, {
+                key_value((r.get(f"{end}Keys") or {}).get(self._prop)) for r in rows})
+            more = {self._created_from.get(r.get(f"{end}_entity_id") or "") for r in rows}
+            ends[end] = (by_id, hits, dupes, {e for e in more if e})
+        (src_ids, src_hits, src_dupes, src_more), (tgt_ids, tgt_hits, tgt_dupes, tgt_more) = (
+            ends["source"], ends["target"])
+        edge_to_eid = await snap.edges_between(set(src_ids) | set(src_hits.values()) | src_more,
+                                               set(tgt_ids) | set(tgt_hits.values()) | tgt_more)
+        own = {r["entity_id"] for r in rows if r.get("entity_id")}
+        current, hash_of = await _heads(snap, "edge", set(edge_to_eid.values()) | own)
+        return {"urn_to_eid": {**src_hits, **tgt_hits}, "dupes": {**src_dupes, **tgt_dupes},
+                "qname_to_eid": {}, "node_eids": set(src_ids) | set(tgt_ids),
+                "edge_to_eid": edge_to_eid, "edge_eids": own & set(hash_of), "current": current,
+                "hash_of": hash_of, "bases": await _bases(snap, "edge", rows, hash_of)}
+
     async def _edge_lookups(self, snap, rows) -> Dict[str, Any]:
         """What ``resolve_rows`` needs for these edge rows: the live nodes their endpoints name (by
         entity_id, urn, or — an end without a urn — qualifiedName), the live edges between those
         nodes, and each such edge's current payload."""
+        if self._prop:
+            return await self._prop_edge_lookups(snap, rows)
         ends = {}
         ident = self._identity_prop
         for end in ("source", "target"):
@@ -1080,7 +1558,8 @@ class ImportWorker:
     async def _delete_absent(self, job_id, snap, graph_id, branch_id, actor) -> int:
         """Replace mode: the file is the authoritative snapshot for its scope, so every entity in
         scope that no row matched is deleted (reviewed on the draft before publish; ``apply_ops``
-        cascades containment and incident edges). Edges first, then nodes, a page at a time, each
+        cascades incident edges, and nothing a row named goes with an absent container: what it
+        contains is deleted only when it is absent too). Edges first, then nodes, a page at a time, each
         page's deletes committed with the job's checkpoint (cursor ``replace``) and their count. A
         view-scoped replace can delete only the view's own entities (its placements and their
         containment descendants, and the edges between them), never the rest of the data source.
@@ -1130,7 +1609,8 @@ class ImportWorker:
                 "job_id": job_id, "idx": [r["_row_index"] for r in chunk],
                 "eids": [r["matched_entity_id"] for r in chunk],
                 "ops": [r["resolved_op"] for r in chunk], "statuses": [r["status"] for r in chunk],
-                "reasons": [json.dumps(r["reasons"]) if r["reasons"] else None for r in chunk]})
+                "reasons": [json.dumps(r["reasons"]) if r["reasons"] else None for r in chunk],
+                "codes": [r.get("code") for r in chunk]})
 
 
 async def _analyze_graph(graph_id: str) -> None:
@@ -1179,11 +1659,11 @@ async def _record_pages(adapter, chunks):
     """The adapter's records a page at a time — decoded off the event loop where the adapter can
     (``parse_pages``), else gathered from its record stream."""
     if hasattr(adapter, "parse_pages"):
-        async for page in adapter.parse_pages(chunks, _PARSE_BATCH):
+        async for page in adapter.parse_pages(chunks, _PARSE_BATCH, at=True):
             yield page
         return
     page: List[Dict[str, Any]] = []
-    async for raw in adapter.parse(chunks):
+    async for raw in adapter.parse(chunks, at=True):
         page.append(raw)
         if len(page) >= _PARSE_BATCH:
             yield page
@@ -1207,7 +1687,7 @@ def _quarantine(ops: List[dict], resolutions: List[dict], violations) -> Optiona
         if eid in reasons and res["resolved_op"] in ("create", "update", "delete"):
             created = res["resolved_op"] == "create"       # a minted id names nothing now
             res.update(resolved_op="invalid", status="invalid", reasons=reasons[eid],
-                       matched_entity_id=None if created else eid)
+                       matched_entity_id=None if created else eid, code="write_refused")
     return [op for op in ops if op["entity_id"] not in reasons]
 
 
@@ -1220,12 +1700,18 @@ def _whole_row(job_id: str, kind: str, row: Dict[str, Any]) -> Dict[str, Any]:
 def _normalize_page(page: List[Dict[str, Any]], native: bool = False) -> Tuple[List[tuple], int]:
     """``(kind, normalized row)`` for each node or edge record (its ``kind`` in any case), and how
     many records are neither: those are skipped and counted — a malformed record never aborts the
-    parse. ``native``: a view package's lines."""
+    parse. ``native``: a view package's lines. Where a record is in its file (``formats.AT``, as
+    its reader found it) is taken off it before it is read as data, and kept on its row as ``_at``,
+    which no payload reads: a refused row says where to find it."""
     out, skipped = [], 0
     for raw in page:
         kind = str(raw.get("kind") or "").strip().lower() if isinstance(raw, dict) else ""
         if kind in ("node", "edge"):
-            out.append((kind, normalize(raw, kind, native=native)))
+            at = raw.pop(AT, None)
+            row = normalize(raw, kind, native=native)
+            if at:
+                row["_at"] = at
+            out.append((kind, row))
         else:
             skipped += 1
     return out, skipped
@@ -1259,6 +1745,33 @@ async def _bases(snap, kind: str, rows, hash_of: Dict[str, str]) -> Dict[tuple, 
                        tuple_(model.entity_id, model.content_hash).in_(chunk),
                        model.payload.is_not(None)))).all()})
     return out
+
+
+async def _live_count(snap) -> int:
+    """How many entities ``snap`` holds live: from main's head pointers, in one indexed count, when
+    it is a graph's own main at its head (:meth:`~.snapshot.Snapshot.head_counts`); else counted a
+    page at a time — a fork's main is its parent's and its own."""
+    counts = await snap.head_counts()
+    if counts is not None:
+        return sum(counts.values())
+    live = 0
+    for kind in ("node", "edge"):
+        async for page in snap.iter_live(kind):
+            live += len(page)
+    return live
+
+
+async def _made_on_draft(snap, main) -> int:
+    """How many entities the draft ``snap`` holds live that ``main``, the main it reads, doesn't:
+    what this import, an earlier one into the draft or a person made there. A page of the draft's
+    own heads at a time, each looked up in main."""
+    made = 0
+    for kind in ("node", "edge"):
+        async for page in snap.layers[-1].scan(kind, snap.page_size):
+            ids = [w.entity_id for w in page if w.live]
+            if ids:
+                made += len(ids) - len(await main.lookup_live(kind, ids))
+    return made
 
 
 async def _in_scope(snap, kind: str, keep):

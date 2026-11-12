@@ -194,7 +194,8 @@ class CacheManager:
                            # Liveness lowers it without the projection lock: the read's restore
                            # (_read_since) must never put a watermark back that it lowered.
                            ProjectionStateORM.projected_commit_seq == projected)
-                    .values(status="evicted", projected_commit_seq=0, updated_at=_now(),
+                    .values(status="evicted", projected_commit_seq=0, served_commit_seq=None,
+                            updated_at=_now(),
                             epoch=ProjectionStateORM.epoch + 1,
                             **({"evicted_reason": reason} if reason else {}))
                     .returning(ProjectionStateORM.falkor_graph_name,
@@ -243,7 +244,8 @@ class CacheManager:
                 update(ProjectionStateORM)
                 .where(ProjectionStateORM.graph_id == graph_id,
                        ProjectionStateORM.status == "evicted", ProjectionStateORM.epoch == epoch)
-                .values(status="idle", projected_commit_seq=projected, evicted_reason=None,
+                .values(status="idle", projected_commit_seq=projected,
+                        served_commit_seq=projected or None, evicted_reason=None,
                         epoch=ProjectionStateORM.epoch + 1, updated_at=_now())
                 .execution_options(synchronize_session=False))
         logger.info("not evicting graph %s: a read took its lease as it was being evicted",

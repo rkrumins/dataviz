@@ -11,21 +11,26 @@ give. Each step links to the page with the detail.
 1. **Integration Quickstart** — this page: a credential, a key, your first calls, every answer.
 2. [API Guide for Integrators](/docs/api-guide) — the conventions every endpoint shares, and
    recipes for the integrations people build most.
-3. [Key Management API](/docs/key-management-api) — the key routes: describe, make, rotate and
+3. [Send Data From Your Service](/docs/import-from-your-service) — send a file from your service
+   and publish it: how the flow works, your first import, then an upsert or a full replace from
+   curl, Python, Node.js, Go or Java.
+4. [Import & Export API](/docs/import-export-api) — export a graph, edit it offline and import it
+   back, walked through once for each way of matching rows.
+5. [Key Management API](/docs/key-management-api) — the key routes: describe, make, rotate and
    revoke keys, yours or a service account's, and every refusal.
-4. [Graph Metadata & History API](/docs/graph-metadata-api) — a workspace's graphs, external or
+6. [Graph Metadata & History API](/docs/graph-metadata-api) — a workspace's graphs, external or
    versioned, and each versioned graph's commit history, field by field.
-5. [Search & Display Rules: developer reference](/docs/feature-search-and-rules-reference) —
+7. [Search & Display Rules: developer reference](/docs/feature-search-and-rules-reference) —
    the query model and every search and view-library endpoint.
-6. [Versioning API reference](/docs/versioning-api-reference) — drafts, publishing, history,
+8. [Versioning API reference](/docs/versioning-api-reference) — drafts, publishing, history,
    imports and exports over HTTP.
-7. [Import / Export](/docs/versioning-import-export) — how a bulk file is read, matched and
+9. [Import / Export](/docs/versioning-import-export) — how a bulk file is read, matched and
    applied.
-8. [Building a Connector](/docs/connector-guide) — sending another system's catalog in: the
+10. [Building a Connector](/docs/connector-guide) — sending another system's catalog in: the
    record format and its schema, pointers, deltas and the dry run.
-9. [View portability](/docs/feature-view-portability) — the view file format and the checks an
+11. [View portability](/docs/feature-view-portability) — the view file format and the checks an
    import runs.
-10. [Feature Switches API](/docs/api-features) — which administrator switch turns which endpoint
+12. [Feature Switches API](/docs/api-features) — which administrator switch turns which endpoint
    off.
 
 ## 1. Choose the credential
@@ -244,6 +249,9 @@ the API explorer marks each one ([Find the endpoint you need](/docs/api-guide#fi
 
 ## Where to next
 
+- [Send Data From Your Service](/docs/import-from-your-service) — send a file from your service and
+  publish it: your first import in three requests, then an upsert or a full replace from curl,
+  Python, Node.js, Go or Java.
 - [API Guide for Integrators](/docs/api-guide) — conventions and recipes.
 - [Building a Connector](/docs/connector-guide) — send another system's catalog in, safely re-run.
 - [Key Management API](/docs/key-management-api) — every key route and refusal.

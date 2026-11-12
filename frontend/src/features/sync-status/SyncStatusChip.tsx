@@ -187,11 +187,15 @@ export function SyncStatusChip({ workspaceId, dataSourceId, viewId, className }:
   // words a reader acts on, with no card behind it — so no store names, no revision ids and no
   // account of how this kind of graph stays in sync.
   if (!technical) {
-    const words = verdict.tone === 'busy' ? 'Updating…'
+    // An earlier version on screen while the newer one is written is said as such, with which
+    // and until when on hover: the view is complete, only not the newest yet.
+    const words = verdict.showingOlder
+      ? verdict.tone === 'busy' ? 'Showing an earlier version · updating…' : 'Showing an earlier version'
+      : verdict.tone === 'busy' ? 'Updating…'
       : verdict.tone === 'ok' ? `Up to date · checked ${timeAgo(q.data!.checkedAt)}`
       : verdict.tone === 'idle' ? verdict.chip
       : 'May be out of date'
-    return (
+    const pill = (
       <span className={cn(
         'inline-flex items-center gap-1.5 h-5 px-2 rounded-full border text-[11px] font-medium leading-none whitespace-nowrap',
         t.pill,
@@ -201,6 +205,9 @@ export function SyncStatusChip({ workspaceId, dataSourceId, viewId, className }:
         <span>{words}</span>
       </span>
     )
+    return verdict.showingOlder
+      ? <HoverTip className="inline-flex" label={verdict.headline} detail={verdict.detail}>{pill}</HoverTip>
+      : pill
   }
 
   const lanes = verdict.lanes

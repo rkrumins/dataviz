@@ -61,12 +61,25 @@ through the projector automatically.
   `:965`, fork-aware) — so every endpoint lookup is a per-label URN **index seek** instead of the
   pre-2026-07 unlabeled full-node-scan-per-row; then sets `id`, `confidence`, and a JSON-stringified
   `properties`.
-- **Deletes** are label-anchored too: `_delete_nodes_cypher` (label + urn, `DETACH DELETE`,
-  `projection.py:105`), `_delete_edges_cypher` (typed + endpoint-anchored, `r.id` matched inside the
-  `(a)->(b)` adjacency, `:109`; ids whose before-state can't be resolved fall back to the legacy
-  per-id scan `_DELETE_EDGES_FALLBACK`, `:123`, WARN-logged), and a heal-only
-  `_delete_nodes_by_pair_cypher` that matches by (label, indexed `urn`) **and confirms `entityId`**
-  so a reused urn is never wrongly deleted (`:127`).
+- **Deletes** are label-anchored too, and none scans the graph:
+  - `_delete_nodes_cypher`: label + urn, `DETACH DELETE`.
+  - `_delete_edges_cypher`: typed + endpoint-anchored, with `r.id` matched inside the `(a)->(b)`
+    adjacency.
+    - A deleted edge is deleted at every position it may hold: where it was before the window, and
+      wherever the window put it (`_edge_positions`, version columns only). That covers an edge
+      created and deleted in one window after a failed attempt wrote it.
+    - An id with no position was never written, so nothing is deleted for it. The per-id scan of
+      every relationship (`MATCH ()-[r {id: i}]->()`) is gone.
+  - `_delete_nodes_by_pair_cypher`, heal only: matches by (label, indexed `urn`) **and confirms
+    `entityId`**, so a reused urn is never wrongly deleted.
+  - A rebuild deletes a relationship by its internal id from its source node, matched by urn
+    (`_reconcile_streamed`), not by scanning every relationship.
+- **A node whose urn changes is moved in place** (`_rekey_in_place`, `SET n.urn`) before the
+  window's merge. It keeps its internal id, its relationships and the rollup cells on it.
+  - A MERGE under the new urn used to create a second node and leave the old one behind, with
+    every edge.
+  - The verify then held every pass back for that extra node until a rebuild.
+  - A node FalkorDB already holds under the new urn is left as it is.
 - **Every projector query carries a server-side budget** via `_q` (`projection.py:69`):
   `PROJECTION_FALKOR_WRITE_TIMEOUT_S` (default 60, clamped under the fleet's `TIMEOUT_MAX`) /
   `PROJECTION_FALKOR_READ_TIMEOUT_S` (default 30), plus a client-side hang net. Without an explicit
@@ -132,11 +145,139 @@ A projection pass takes one of two paths:
   edge_upserts, node_deletes, edge_deletes)`; last op per entity wins; `delete` → a delete list,
   else an upsert.
 
-`_apply` (`projection.py:1217`) writes in a fixed order — nodes-in (grouped by label), edges-in
-(grouped by **(type, srcLabel, tgtLabel)** so the endpoint MATCH stays index-eligible), edges-out
-(typed + anchored via `_run_edge_deletes`, `:1258`), nodes-out (grouped by label) — each chunked by
-`PROJECTION_BATCH_SIZE` (default 5000, `config.py:110`), firing the optional progress callback per
-chunk.
+`_apply` writes in a fixed order: nodes-in (grouped by label), edges-in (grouped by **(type,
+srcLabel, tgtLabel)** so the endpoint MATCH stays index-eligible), edges-out (typed + anchored via
+`_run_edge_deletes`), nodes-out (grouped by label).
+
+**Every chunked statement fits its budget (the statement ladder, `_laddered`).** A FalkorDB write
+is clamped to a share of the cluster's failure detector (`clamp_write_budget`: 6 s at a 15 s
+`cluster-node-timeout`). One statement past it used to fail the pass, and the window was replayed
+whole every retry, growing as commits landed. Now every chunked projector statement goes through
+the ladder: node and edge merges, the removed-property read, deletes, relabels, fingerprint reads,
+rollup cells, the tombstone sweep, and the rebuild's deletes.
+- **Chunk width.** Rows go out at a width kept per graph and statement kind, starting at
+  `PROJECTION_BATCH_SIZE` (5000).
+- **On a timeout or memory refusal,** the chunk is split in half and the halves sent again. A
+  connection failure is raised at once, so the pass backs off.
+- **Sizing (AIMD).** A chunk that failed, or used more than half its budget, halves the width.
+  Eight quick chunks in a row grow it by a quarter, but not back to a size that failed until 64
+  quick chunks in a row. So a graph whose statements fit 700 rows settles just under 700.
+- **One row that still fails** is retried `GRAPHVER_PROJECTION_FLOOR_RETRIES` times (3), after 2 s,
+  4 s and 8 s plus jitter, then given up on, failing the pass. A node delete gets one more try
+  first: a hub, whose `DETACH DELETE` must drop every relationship at once, has its relationships
+  deleted 10,000 at a time (halved on a timeout), then the node. That holds wherever the delete
+  names the node: by label and urn in a window, and in a rebuild for every copy of a node the key
+  holds twice; by internal id in a rebuild (a node main no longer holds); by label, urn and entity
+  id in the tombstone sweep.
+- **Why sending again is safe.** FalkorDB rolls back a statement it aborts, and every projector
+  write is an idempotent `MERGE`, `SET` or `DELETE`. A rollup write sets the absolute weight it
+  computed.
+- **Reporting.** Each pass logs one line: its statements, rows, slowest statement, splits and
+  narrowest width. A pass that wrote returns them as `stats`. The same feed the
+  `graphver_projection_*` metrics ([Observability](../OBSERVABILITY.md)).
+
+**One entity that still fails is held back, not the graph (`projection_quarantine`).** A
+statement that still times out for a single row is held in `graphver.projection_quarantine`.
+This happens after its retries, and for a node delete after its hub path. The pass goes on.
+- **What it holds.** The table keeps the statement and its row, the error, the attempts and
+  when. A node is named by its urn; an edge by its id where the statement puts it, with its type
+  and ends (`<id>@<type>:<source urn>-><target urn>`).
+- **What is held.** Node and edge merges and deletes, relabels and re-keys. Reads, rollup cells
+  and deletes by internal id still fail the pass.
+- **Edges that wait for a held node.** An edge merge whose end node the pass holds, and the key
+  lacks under the label the edge matches (a new node whose merge is held, say), is held with it,
+  not sent: it would match no node, and be lost once the node lands. All of a chunk's are held in
+  one write. A node the key holds, whose own update is held, still matches, so its edges are
+  written.
+- **Retries.** Every later pass retries the graph's held statements first, oldest first, so its
+  own writes land after them. One that lands leaves the table, and so does any held statement for
+  an entity a later write lands: for an edge, a write at the same type and ends. A write of the
+  edge somewhere else supersedes nothing held where it was.
+  - An edge merge held for its end node is not tried while that node is still held after its own
+    retry, and stays held. Held after the node, it is retried after it.
+  - A graph that is caught up gets a pass of its own once its held statements are due
+    (`projection_state.quarantine_next_at`, every `GRAPHVER_PROJECTION_QUARANTINE_RETRY_SECS`,
+    300). The poll selects it, and the pass has an empty window.
+  - A full seed that starts over rewrites everything, so it clears the graph's rows first. A full
+    seed that resumes from its cursor (below) writes nothing again before where it stopped, so it
+    retries them instead, as a window does.
+  - The rollups moved with the held entities' window, which the key lacked, so moving them by the
+    reconcile's difference would count those entities twice. Clearing the rows therefore records,
+    in the same transaction, that the `:AGGREGATED` rollups are owed the aggregation job (§8):
+    `projection_state.rollup_state.moved`. Every full seed reads it, hands the rollups to the job
+    instead of moving them, and the one that publishes clears it, whatever passes failed first.
+- **While any are held,** the graph's passes publish `unverified`: its counts cannot match.
+- **Where it shows.** The watermark lists them (`quarantine: {count, entities}`), and so does the
+  **Data health** tab, while the graph is projected. An evicted graph, one waiting for room in
+  memory, or a trashed one is retried by nothing: its rows are cleared by its load's full seed, or
+  by the purge, and neither the watermark nor `graphver_projection_quarantined` counts them.
+- **Switch.** `GRAPHVER_PROJECTION_QUARANTINE=0` turns it off; a stuck entity then fails every
+  pass, as before.
+
+**Long passes stop at a page and resume (the pass cursor).** A window too large to hold is written
+a page at a time (`_apply_paged`), and so is a rebuild of a graph too large to hold
+(`_reconcile_streamed`).
+- **The cursor.** After each page lands, the pass writes where it is on the pass marker:
+  `_GVProjMeta.pFrom`, `pTo`, `pStep`, `pAfter`.
+  - A paged window's steps are `node` and `edge`, each positioned by version id. Its cursor also
+    carries what its pages so far did that the pass publishing the window must know:
+    `pStructural`, a retype, re-key or containment change, and `pDropped`, the writes that did not
+    land.
+  - A streamed rebuild's are `fk_node` and `fk_edge`, positioned by internal id, then `node` and
+    `edge`, by entity id.
+- **The time box.** Past `GRAPHVER_PROJECTION_PASS_MAX_SECS` (300) the pass stops at the next
+  page boundary. It publishes nothing, records no error and no backoff, and nudges itself. Other
+  graphs get their turn meanwhile. A rebuild that stops so stays `rebuilding` (a load
+  `rehydrating`), so the pass that resumes it is never taken for a first seed: with the Graph
+  residency switch on, that would queue the graph for a load into a fresh key and leave the
+  rebuild's pages behind. A pass after it that fails or is cancelled leaves the graph `idle` at
+  seq 0, as any failed pass does, so the first-seed check also reads the key's cursor (with
+  `GRAPH.RO_QUERY`, which creates no key): a key holding one the pass resumes is no first seed.
+- **Resuming.** A pass from the same watermark finishes the cursor's window (`pTo`) first, after
+  the last page that landed, then publishes it. The window after it is the next pass's. A resumed
+  paged window starts from what its cursor says the pages before it did, so the pass that
+  publishes it bumps the graph's generation for a retype an earlier pass made, and verifies a write
+  an earlier pass dropped.
+- **Where it lives.** The cursor is in the key, so a key that lost a page lost the cursor with it,
+  and is projected from the start. A pass that has gone through all its pages clears it, whether
+  its verify publishes the window or holds it back: the pass after one held back projects the
+  window from the start, rather than resume past its last page and write nothing. An operator's
+  rebuild (`POST …/projection/rebuild`) clears it too once it is accepted, after a rebuild that
+  stopped part-way and then failed, so it replays main from the start.
+- **A resumed streamed rebuild** does not know what earlier passes wrote, so it hands the rollups
+  to the batch job.
+- **At main's head,** a rebuild pages main's `entity_heads` by their primary key, each joined to
+  its version by the version's. A page costs its own size, not a `DISTINCT ON` over every version
+  of the graph. Main's head is read again after each such page: a commit moves the head and the
+  heads in one transaction, so once one has landed, that page and the rest are read as of the
+  rebuild's seq instead. The rebuild never writes what the commit made of an entity (a new type,
+  a new urn) as a second node beside the one it kept; the next window moves it in place. A
+  relationship's ends are keyed as of the rebuild's seq too, where it checks the relationships the
+  key holds and where it writes main's: keyed by what such a commit made of an end, one the key
+  holds would be deleted, and one it lacks written against a node the rebuild did not write,
+  matching nothing.
+- **Progress.** A paged window reports it too (`progress_done` / `progress_total`), in version
+  rows.
+
+**A graph that cannot be brought up to date rebuilds itself (`GRAPHVER_PROJECTION_ESCALATE`, on).**
+An incremental pass no longer heals inside itself. It ends unpublished, and makes the reset an
+operator's rebuild makes (`request_projection_rebuild`, fenced on its epoch), when either:
+- its verify finds FalkorDB short of committed main, or, on a key the platform minted, holding more
+  after the tombstone sweep;
+- the same window has failed `GRAPHVER_PROJECTION_ESCALATE_AFTER` passes in a row (3) on a timeout
+  or memory refusal the statement ladder and the quarantine could not absorb. They are counted in
+  `projection_state.pressure_failures`: a pass that ends any other way (published, held back, or
+  failed on something else, such as a connection error) starts the count again, and a cancel
+  leaves it. `failed_attempts`, which spaces out the retries, counts every failure.
+
+The next pass reconciles the key in place (streamed and resumable on a large graph) and publishes.
+Until then the graph's last error reads "rebuilding on its own: …". A window that moved the
+`:AGGREGATED` rollups before its verify, or owed them to the job, records that they are owed
+(`rollup_state.moved`, as above) in the same reset: they already count what the rebuild writes, so
+the rebuild hands them to the job, as the inline heal did, rather than moving them by its
+difference again.
+`graphver_projection_escalations_total{cause}` counts them. Off, a shortfall is healed inside the
+window's pass and a surplus holds the graph back until a rebuild, as before.
 
 > **Limitation (full-replay memory).** A full replay no longer composes the live state, but its diff
 > still holds whole-graph maps of small tuples **in memory**, `O(N + E)` — narrow ids, not payloads —
@@ -197,7 +338,7 @@ Key guards:
 |---|---|---|
 | `project_graph` | `projection.py:209` | Catch one graph up to target. |
 | `project_pending(limit, concurrency)` | `projection.py:395` | Catch up all lagging graphs, **stalest first**, `Semaphore(PROJECTION_CONCURRENCY=8)`, keyed by PK (no same-graph race), per-graph failures logged not fatal. |
-| `project_now(graph_id)` | `endpoints/versioning.py:163` | Interactive post-write catch-up; wraps `project_graph` in `asyncio.wait_for(_SYNC_PROJECTION_TIMEOUT_SECS=10.0)` (`versioning.py:115,176`) so a write endpoint stays snappy and defers a long seed to the worker. |
+| `project_now(graph_id)` | `endpoints/versioning.py` | Interactive post-write catch-up. It projects a window of at most `GRAPHVER_PROJECTION_INLINE_MAX_ROWS` (20,000) version rows itself, inside `asyncio.wait_for(_SYNC_PROJECTION_TIMEOUT_SECS=10.0)`; a larger one, or a first seed, it leaves to the worker with a nudge, rather than start a pass its budget would cancel mid-write. Like a nudge, it waits out a failed pass's backoff. |
 | `rebuild_now(graph_id)` | `endpoints/versioning.py:193` | Operator "Rebuild"; `_rebuild_inflight` guard (`:190`), a generous `REBUILD_SYNC_TIMEOUT_SECS=900` budget (`config.py:130`) because a full reseed is O(whole graph). |
 
 ---
@@ -227,17 +368,45 @@ stateDiagram-v2
 - **The projector advances `projected`** to `to_seq` after the apply lands (`projection.py:322`).
 - **Freshness** is `projection_watermark` (`service.py:1606`), which returns `committed`
   (`graph.main_head_commit_seq`), `projected`, `target`, `status`, plus **`fresh = projected >=
-  committed`** and the fields the Data-health UI polls (`last_error`, `progress_*`).
+  committed`**, **`served`** (below) and the fields the Data-health UI polls (`last_error`,
+  `progress_*`).
 - **Live rebuild progress** is written throttled — at most ~1/s, always on the final item — by
   `_progress_writer` (`projection.py:863-885`), so the progress bar moves without a DB write per
   chunk. Best-effort; a progress write can never fail the projection.
 
-> **Limitation (freshness is defined twice).** Two read paths decide "serve FalkorDB vs Postgres"
-> differently. The **ContextEngine** uses strict `fresh` — `projected >= committed`
-> (`context_engine.py:127`) — ignoring `READ_MAX_LAG`. The **neighbors endpoint** additionally allows
-> a tolerance: `projected >= committed - READ_MAX_LAG` (`versioning.py:1747`). With the default
-> `READ_MAX_LAG=0` (`config.py:119`) the two coincide, but a non-zero lag would make the surfaces
-> disagree on when the cache is trusted. Unify before relying on `READ_MAX_LAG` in production.
+### Serving while it updates
+
+Reads of main stay on the key while the projection catches up or rebuilds, at the version the key
+holds, and stay available and complete. One rule decides it for every read path (ContextEngine, the
+neighbors endpoint, native queries): `serving_seq(projected, committed, status, served_commit_seq)`
+in `service.py`, reported on the watermark as `served` (with its `served_revision`).
+
+| The key | Reads of main are served from | `served` |
+|---|---|---|
+| holds the head (`fresh`) | the key | `committed` |
+| catching up after a publish or an import (`projected < committed`) | the key, at the version it last published | `projected` |
+| rebuilt in place (a rebuild resets `projected` to 0, not what the key holds) | the key, at the version it held | `served_commit_seq` |
+| written from nothing (a first seed, a move, an Adopt, a repin), lost, evicted, being loaded or reset | Postgres (`VersionedBranchProvider`), slower and without the lineage summaries | `null` |
+
+- **`projection_state.served_commit_seq`** is the version the key holds whole: every pass that
+  publishes sets it to its `to_seq`; a rebuild keeps it; a move, an Adopt, a repin, an eviction, a
+  purge and an operator reset clear it; liveness lowers it with the watermark (to the marker's seq,
+  or `NULL` for a missing key). A full pass that finds its key gone clears it before writing
+  (`_forget_served`), so a lost key rebuilt before liveness saw it serves nothing meanwhile.
+- **What a reader sees while it updates.** The version the key last published, with part of the
+  next window or of the rebuild's repairs over it, until the pass publishes; then
+  `after_projection` bumps the read cache's generation and the view refetches (the frontend's
+  `useRefreshWhenGraphUpdated`, on the sync chip's poll). The view header's sync chip says an earlier
+  version is showing, which, and which is being written ("Showing #12 · writing #14"); the read-route
+  chip says the same in the Technical view.
+- **A draft** overlays whatever serves main, the key at its served version included: it shows main as
+  main's readers see it. Its cached reads are keyed by that version too, so none outlives the update.
+  **A past revision** (`?asOfSeq=K`) reads the key only while it holds K or later (the patch set
+  rewinds everything changed after K); else Postgres. **A fork** reads through its root's key only
+  while the root's key holds its head, as before: its patch set is over the root's head.
+- **`GRAPHVER_READ_MAX_LAG`** caps how many versions behind the key may serve: `-1` (default) any; `0`
+  the head only, as before this, so a read the key is behind for goes to Postgres
+  (read-your-writes for a person's own change, at the cost of the lineage summaries meanwhile).
 
 ---
 
@@ -255,9 +424,10 @@ repair it. So the projector (`projection.py:270-299`):
    MERGE will create it, `:295-297`); **any other drop error re-raises** (`:298-299`) so a MERGE never
    runs over a half-broken drop.
 
-> **Decision.** FalkorDB is rebuildable and reads fall back to Postgres while `projected < committed`,
-> so the brief empty window during a clean rebuild is never actually served — which is what makes a
-> drop-then-reseed safe as the default rebuild strategy.
+> **Decision.** A full replay reconciles the key in place and never drops it, so the key keeps the
+> version it last published until the rebuild publishes, and reads keep serving that version
+> (`served_commit_seq`, §5). Only a key written from nothing serves nothing until its first pass
+> publishes: reads of it go to Postgres meanwhile.
 
 ---
 
@@ -265,7 +435,9 @@ repair it. So the projector (`projection.py:270-299`):
 
 After an apply (when `PROJECTION_VERIFY_ENABLED`, default on), the projector reconciles **live
 node/edge counts** between Postgres and FalkorDB and bounded-heals a mismatch (`_verify_and_heal`).
-It is best-effort — any count failure skips the check.
+A count that fails does not hold the pass back. It is not taken as a clean verify either: the pass
+publishes, answers `unverified`, and the next pass verifies again rather than waiting out the
+interval.
 
 **How often.** A pass that applied only main's newest commits verifies at most every
 `PROJECTION_VERIFY_INTERVAL_SECS` per graph (default 300; `0` verifies every pass). Before, a graph
@@ -282,12 +454,22 @@ A delta dropped silently between verifies is caught by the next one
 - **PG counts** come from `entity_heads` via `reconcile.pg_live_counts` (the single source, shared
   with the reconciler), but **only for a main that is fully caught up** (`_pg_live_counts`); a
   lagging head verifies on catch-up. A fork is never projected (§4).
-- **FalkorDB counts** come from `reconcile.falkor_counts` (`projection.py:735-740`), which excludes
-  `:AGGREGATED` and meta nodes.
-- **FalkorDB has *more* than committed main** (`projection.py:773-794`): first `_sweep_tombstoned`
-  DETACH-DELETEs anything `main` has tombstoned that the incremental pass stranded (matched by
-  committed `urn` with `entityId` confirmed, bounded by delete count — `projection.py:818-861`), then
-  re-counts. Whatever extra remains carries no tombstone and is **not** deleted. In a key the platform
+- **FalkorDB counts** come from `reconcile.falkor_counts`, which excludes `:AGGREGATED` and the
+  meta nodes.
+  - **On a key the platform minted,** they are FalkorDB's constant-time counts: unfiltered
+    `count(n)` and `count(r)`, less each derived label's count and the `AGGREGATED` count, all
+    answered from the label and relation matrices. A `WHERE` on every node or relationship was a
+    scan, and timed out on the largest graphs.
+  - **On a customer's key,** where only urn-bearing nodes and distinct `(source, type, target)`
+    triples count, they are taken a window of 20,000 internal node ids at a time
+    (`id(n)` ranges seek, relationships windowed by their source), so no statement costs the
+    whole key.
+- **FalkorDB has *more* than committed main**: first `_sweep_tombstoned` DETACH-DELETEs anything
+  `main` has tombstoned that the incremental pass stranded, then re-counts. Nodes are matched by
+  committed `urn` with `entityId` confirmed; edges are typed and anchored on their last ends.
+  It reads only the deletes since the last sweep (`_GVProjMeta.sweptSeq`, version columns, no
+  payloads), not the graph's whole history.
+  A key that lost the marker is swept from the start. Whatever extra remains carries no tombstone and is **not** deleted. In a key the platform
   minted it holds the pass back, with an error that says Rebuild replaces it with what history
   holds: nothing else should write there, so there is nothing to bring into history. In a
   customer's own graph (`owns_falkor_graph` false) it is what the graph's other writers put there —
@@ -326,21 +508,34 @@ Coarse-grained lineage edges (column→table, etc.) are materialized in FalkorDB
 relationships. The projector maintains them **incrementally per committed window** so a publish's
 rollups are fresh without waiting for a full aggregation job.
 
-- **Compute deltas** — `_compute_rollup_deltas` (`projection.py:499-636`) nets rollup adjustments from
-  the window's edge rows. It compares each touched edge's value **before vs after the window** (via
-  `_values_at(from_seq)`) using a `(src, tgt, edgeType)` signature (`:534-561`) — robust to
-  create+update, delete+recreate, and endpoint/type rewrites that op-labels alone would mishandle.
-  Each lineage create contributes **+1** and each delete **−1** over the **Cartesian product of the
-  endpoints' containment-ancestor chains** (`contribute`, `projection.py:582-602`); moved containers
-  trigger a bounded recount of the subtree's lineage edges (`:604-619`). Complexity: O(window delta ×
-  chain depth²).
-- **Bounded, else stale** — if lineage creates+deletes or a moved subtree exceed `_MOVE_EDGE_CAP=1000`
-  (`projection.py:497,563,609,615`), it returns the sentinel `"stale"` — a bulk import/sync window is
-  the aggregation *job's* territory, not the projector's inline math.
-- **Apply idempotently** — `_apply_rollups` (`projection.py:638-699`) stamps a graph-level
-  `_GVRollupMeta.seq` high-water marker and a per-pair `gvSeq`. A retried window skips already-stamped
-  pairs (weights never double-count); a partial/foreign overlap returns `False` so the caller rebuilds
-  rather than guesses. The property shape (`weight`, `sourceEdgeTypes`, `aggKey`, `gvSeq`,
+- **Compute deltas, after the raw writes** — once a window's raw writes have landed,
+  `_compute_rollup_deltas` nets rollup adjustments from its edges. A pass that stops part-way (§3)
+  computes none; the pass that finishes the window does. It reads the window's distinct edge ids a
+  page at a time (`GRAPHVER_PROJECTION_PAGE`, a keyset on the id), and compares each edge's value
+  **before vs after the window** (`_skeletons_at(from_seq)` and `_skeletons_at(to_seq)`, from the
+  version rows' type and end columns, never a payload) using a `(src, tgt, edgeType)` signature —
+  robust to create+update, delete+recreate, and endpoint/type rewrites that op-labels alone would
+  mishandle. Each lineage create contributes **+1** and each delete **−1** over the **Cartesian
+  product of the endpoints' containment-ancestor chains** (`contribute`, one batched climb per page);
+  moved containers trigger a bounded recount of the subtree's lineage edges. Complexity: O(window
+  delta × chain depth²), in any size of window.
+- **Netted in bounded memory** — contributions net by cell (`_CellNet`) in memory up to
+  `GRAPHVER_ROLLUP_NET_MAX_CELLS` (200,000) cells. Past that, the cells are converted to what the
+  apply writes (urns, labels, level stamps) and added to `graphver.rollup_deltas`, one row per cell
+  keyed by its ends' urns, summed on conflict. A pass that stopped while netting there leaves rows
+  the next one deletes before it starts, so nothing is counted twice.
+- **Bounded only for restructures** — a window's own lineage edges have no cap: a publish of millions
+  is maintained by delta. A *move* is a node there before and after the window that gained or lost
+  a containment parent; a node the window created or deleted is none, since its lineage is the
+  window's own (a node's edges are created after it and deleted with it). So a large import of new,
+  contained nodes is no move. Moves whose nodes, subtree, or lineage under it exceed
+  `PROJECTION_ROLLUP_INLINE_CAP` (50,000) return the sentinel `"stale"`: a restructure is the
+  aggregation *job's* territory, not the projector's inline math.
+- **Apply idempotently** — `_apply_rollups` stamps a graph-level `_GVRollupMeta.seq` high-water marker
+  and a per-pair `gvSeq`. A retried window skips already-stamped pairs (weights never double-count); a
+  partial/foreign overlap returns `False` so the caller rebuilds rather than guesses. Cells netted in
+  `rollup_deltas` are applied a page at a time, the marker after the last, and their rows are deleted
+  however the apply ends. The property shape (`weight`, `sourceEdgeTypes`, `aggKey`, `gvSeq`,
   `latestUpdate`) **mirrors the aggregation worker**, so a later full rebuild MERGEs onto the same
   relationships.
 
@@ -371,9 +566,18 @@ writes, so every publish that changes its lineage or containment comes here: its
 stale (`source_changed`, cleared when the job completes) and the job is queued in dedicated mode.
 A change signal on such a source (the reconciliation sweep's, a loader's) marks and rebuilds it as
 any source's, rather than only refreshing reads as for a versioned source the projector maintains.
-A publish whose job is turned away because one is already running is not lost: a dedicated job is
-compared afterwards against the fingerprint it took before it ran (`worker._gate_fingerprint`), so
-the sweep sees what was written while it ran and queues another.
+A publish whose job is turned away because one is already running is not lost:
+- **In dedicated mode** the running job is compared afterwards against the fingerprint it took
+  before it ran (`worker._gate_fingerprint`), so the sweep sees what was written while it ran and
+  queues another.
+- **In the source's own graph** the hook records the ask as owed
+  (`projection_state.rollup_state`, `{pending, since, asked}`): the job running may have read the
+  graph before the change that asked. Recording it keeps a `moved` a full seed owes (§3). The
+  hook answers `queued`, `active`, `unreachable` or `refused`. An `active` or `unreachable` ask
+  stays owed, and the projection worker's liveness loop asks again, at most every
+  `GRAPHVER_ROLLUP_REASK_SECS` (300) per graph, until one is queued. A control plane that answers
+  a 5xx (it failed, or is still starting) is `unreachable`. A refusal (a 4xx: no ontology, a
+  misconfigured provider) is logged and owed no more.
 `resolve_aggregation_edge_types` (`projection_target.py:22-49`) answers such a source's types with
 `"dedicated"` after them, and `_compute_rollup_deltas` and `_reconcile_in_place` then answer `"stale"`
 for a window or reconcile that changes lineage or containment, writing no rollup.
@@ -383,11 +587,12 @@ for a window or reconcile that changes lineage or containment, writing no rollup
 > path (`backend/app/services/versioning/__main__.py:94`), so a full-seed wipe, a `"stale"` window
 > or a heal-reseed queues the rollup rebuild on every wiring.
 
-> **Limitation (large windows and forks).** Incremental rollups now carry level and depth stamps
-> (`sourceLevel`, `targetLevel`, `sourceDepth`, `targetDepth`, `levelDigest`), but a window over
-> `PROJECTION_ROLLUP_INLINE_CAP` (50,000) or an overlapping one still punts to `"stale"` → full
-> rebuild. A fork has no rollups of its own: it is never projected, and reads its root's with its own
-> changes over them ([17](17-forks-and-residency.md) §2).
+> **Limitation (restructures, overlaps and forks).** Incremental rollups carry level and depth stamps
+> (`sourceLevel`, `targetLevel`, `sourceDepth`, `targetDepth`, `levelDigest`), and a window of any
+> size is maintained by delta, but a move of a subtree over `PROJECTION_ROLLUP_INLINE_CAP` (50,000)
+> or an overlapping window still punts to `"stale"` → full rebuild. A fork has no rollups of its own:
+> it is never projected, and reads its root's with its own changes over them
+> ([17](17-forks-and-residency.md) §2).
 
 ---
 
@@ -456,10 +661,10 @@ provider per request:
 
 | Situation | Provider | Anchor |
 |---|---|---|
-| `main`, projection **fresh** | live **FalkorDB** provider (hot path; the only place materialized rollups live) | `context_engine.py:142` (`base = provider`) |
-| `main`, projection **lagging** (just after a merge) | `VersionedBranchProvider` (Postgres composition — read-your-writes) | `context_engine.py:147-151` |
+| `main`, the key serves a version of it (fresh, catching up, or rebuilt in place, §5) | live **FalkorDB** provider at that version (hot path; the only place materialized rollups live) | `context_engine.py` (`main_served`) |
+| `main`, the key holds no version (written from nothing, out of FalkorDB, or `GRAPHVER_READ_MAX_LAG` past) | `VersionedBranchProvider` (Postgres composition) | `context_engine.py` (`not main_served`) |
 | a live **draft** | `DraftOverlayProvider` wrapping whatever serves main | `context_engine.py:130-146` |
-| `main` **at a past revision** (`?asOfSeq=K`, the revision history viewer) | `DraftOverlayProvider(as_of_seq=K)` wrapping whatever serves main, with the patch set of everything main changed since K put back; read-only | `context_engine.py` (`revision`) |
+| `main` **at a past revision** (`?asOfSeq=K`, the revision history viewer) | `DraftOverlayProvider(as_of_seq=K)` over the key while it holds K or later, else over the Postgres reader, with the patch set of everything main changed since K put back; read-only | `context_engine.py` (`revision`) |
 | **as-of / historical** (versioning routes) | `VersionedBranchProvider(as_of_seq=…)` (read-only snapshot) — routed through the versioning service, not constructed here | `versioned_branch_provider.py:50` |
 
 - **`DraftOverlayProvider`** (`draft_overlay_provider.py:97`) serves a draft as **main ⊕ sparse
@@ -493,7 +698,8 @@ provider per request:
   lifecycle delegate transparently via `__getattr__` (`:86`), but **a write lands only as an
   audited commit** on main in Postgres and never reaches the inner provider; `_record` (`:141`)
   then nudges the projector, the one writer of the graph's FalkorDB data, to carry it there.
-  Until it does, ContextEngine serves main from Postgres (read-your-writes). A data source with
+  Until it does, reads of main show the version the key last published, and the view's sync chip
+  says so (§5). A data source with
   no versioned graph refuses the write (`VersioningNotEnabled`, 409; `_graph_id`, `:119`).
   `set_containment_edge_types`/`set_ontology_rules` are intercepted (`:99-117`) so every recorded
   commit enforces containment/ontology rules. ContextEngine always wraps a versioned graph's
@@ -593,10 +799,19 @@ boot via `XAUTOCLAIM`. `_project_one` (`worker.py:65`) serializes per-graph via 
 
 | Knob | Default | Meaning |
 |---|---|---|
-| `GRAPHVER_PROJECTION_BATCH_SIZE` | 5000 | Rows per MERGE/DELETE chunk (`config.py:110`). |
+| `GRAPHVER_PROJECTION_BATCH_SIZE` | 5000 | Rows per MERGE/DELETE chunk at most; the statement ladder narrows it per graph and statement kind (§3). |
+| `GRAPHVER_PROJECTION_FLOOR_RETRIES` | 3 | Retries of a one-row statement that still times out, backing off 2 s, 4 s, 8 s (§3). |
+| `GRAPHVER_PROJECTION_INLINE_MAX_ROWS` | 20000 | The largest window `project_now` projects inside the request; larger ones go to the worker. |
+| `GRAPHVER_PROJECTION_QUARANTINE` | on | Hold back one entity's statement that still fails on its own, so the rest of the window publishes (§3). |
+| `GRAPHVER_PROJECTION_QUARANTINE_RETRY_SECS` | 300 | How often a caught-up graph retries what it holds back. |
+| `GRAPHVER_PROJECTION_PASS_MAX_SECS` | 300 | A paged window or streamed rebuild stops at the next page past this, and the next pass resumes (§3); `0`: no limit. |
+| `GRAPHVER_PROJECTION_ESCALATE` / `_ESCALATE_AFTER` | on / 3 | Rebuild a graph on its own on drift, or after this many pressure failures in a row of one window (§3). |
+| `GRAPHVER_ROLLUP_NET_MAX_CELLS` | 200000 | Rollup cells a window nets in memory; past it, in `graphver.rollup_deltas` (§8). |
+| `GRAPHVER_PROJECTION_ROLLUP_INLINE_CAP` | 50000 | The largest moved subtree whose rollups the projector moves itself; a larger move goes to the aggregation job (§8). |
+| `GRAPHVER_ROLLUP_REASK_SECS` | 300 | How often, per graph, liveness asks again for a summaries build a running job turned away (§8); `0`: never. |
 | `GRAPHVER_PROJECTION_POLL_SECS` | 5 | Reconciling poll cadence (`config.py:115`). |
 | `GRAPHVER_PROJECTION_CONCURRENCY` | 8 | Max graphs projected per pass (`config.py:118`). |
-| `GRAPHVER_READ_MAX_LAG` | 0 | Neighbors-endpoint staleness tolerance (`config.py:119`; see §5 callout). |
+| `GRAPHVER_READ_MAX_LAG` | -1 | How many versions behind its head a key may serve reads of main while it updates (§5): `-1` any, `0` the head only (reads go to Postgres while it catches up). |
 | `GRAPHVER_PROJECTION_VERIFY` | on | Post-apply count reconcile + heal (`config.py:124`). |
 | `GRAPHVER_PROJECTION_VERIFY_INTERVAL_SECS` | 300 | Per graph, how often an incremental pass runs that verify (§7); `0` = every pass. |
 | `GRAPHVER_PROJECTION_INPROCESS` | off | Run the worker lanes in the web process, only with `SYNODIC_ROLE=dev` (`config.py:158`). |
@@ -611,12 +826,14 @@ boot via `XAUTOCLAIM`. `_project_one` (`worker.py:65`) serializes per-graph via 
 
 Consolidated here and expanded in [09 · Scale & Limits](09-scale-limits-and-roadmap.md):
 
-1. **Read-freshness defined twice** (ContextEngine strict vs neighbors `READ_MAX_LAG`) (§5).
+1. **Reads while the graph updates show an earlier version** (§5): a change, a person's own
+   included, shows once the pass that carries it publishes; the sync chip says so meanwhile.
+   `GRAPHVER_READ_MAX_LAG=0` reads it from Postgres at once instead, without the lineage summaries.
 2. **A full re-projection holds `O(N + E)` ids in memory** — it reconciles in place from narrow
    heads, but is not keyset-streamed (§3).
 3. **No eviction budget is set anywhere** (default 0 = unlimited; the loop runs and skips) and the
    **ephemeral time-travel pool is config-only** with no call sites (§11).
-4. **Large or overlapping windows rebuild rollups in full** (§8).
+4. **Overlapping windows, and moves of more than 50,000 entities, rebuild rollups in full** (§8).
 5. **Reconcile sorted-merge assumes ASCII collation** (§12).
 6. **`gv:<id>` urn fallback can mint phantom nodes** — a reconciliation signal, not a handled case
    (§2).

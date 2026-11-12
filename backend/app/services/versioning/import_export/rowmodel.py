@@ -113,11 +113,22 @@ def normalize(raw: Dict[str, Any], kind: str, *, native: bool = False) -> Dict[s
         _expand_payload(out, raw, kind)
         return out
 
+    core = _NODE_CORE + ("tags",) if kind == "node" else _EDGE_CORE
+    # A removal token removes a property (a prop.<name> cell). A node's or an edge's own field
+    # can only be replaced, so a token there would be stored as the text itself: the row is
+    # refused, saying what to do, instead.
+    cleared = [f for f in core if isinstance(raw.get(f), str) and raw[f].strip() in _DELETE_TOKENS]
+    if cleared and out["op"] == "upsert":
+        out["op"] = "invalid"
+        out["op_error"] = (
+            f"{', '.join(cleared)}: \\N removes a property (a prop.<name> cell); a {kind}'s own "
+            "field can't be removed by an import. Leave the cell blank to keep its value, or give "
+            "the new one")
     for field in (_NODE_CORE if kind == "node" else _EDGE_CORE):
-        if not _blank(raw.get(field)):
+        if not _blank(raw.get(field)) and field not in cleared:
             out[field] = _clean(raw[field])
 
-    if kind == "node" and not _blank(raw.get("tags")):
+    if kind == "node" and not _blank(raw.get("tags")) and "tags" not in cleared:
         tags = raw["tags"]
         out["tags"] = tags if isinstance(tags, list) else [
             s.strip() for s in str(tags).split(",") if s.strip()

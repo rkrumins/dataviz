@@ -86,21 +86,20 @@ def test_node_deletes_are_label_anchored():
     assert deletes and all("MATCH (n:Table {urn: u})" in c for c in deletes)
 
 
-def test_edge_deletes_are_typed_and_anchored_with_fallback():
+def test_edge_deletes_are_typed_and_anchored_and_never_scan():
     client = _CaptureClient()
     p = _projector()
     resolved = {
         "eid": "E1", "src": "urn:a", "tgt": "urn:b",
         "rel": "FLOWS", "slb": "Table", "tlb": "Dataset",
     }
-    _run(p._apply(client, [], [], [], [resolved, "E-unresolved"]))
+    _run(p._apply(client, [], [], [], [resolved]))
     typed = [c for c in client.cyphers()
              if "-[r:FLOWS]->" in c and "WHERE r.id IN [item.eid, item.pid] DELETE r" in c]
     assert typed, f"no typed anchored edge delete: {client.cyphers()}"
     assert all("(a:Table {urn: item.src})" in c for c in typed)
-    # The unresolvable eid still gets deleted via the legacy full form.
-    fallback = [c for c in client.cyphers() if "[r {id: i}]" in c]
-    assert fallback, "unresolved edge ids must fall back to the legacy delete"
+    # No delete matches every relationship by id: one with no known position was never written.
+    assert not [c for c in client.cyphers() if "[r {id: i}]" in c or "()-[r]->()" in c]
 
 
 def test_every_apply_query_carries_a_timeout():
@@ -270,7 +269,8 @@ def test_an_edge_delete_also_finds_the_id_the_graph_knows_it_by():
         {"eid": "edge:X", "src": "urn:a", "tgt": "urn:b",
          "rel": "FLOWS", "slb": "Table", "tlb": "Dataset"}]))
     (params,) = [p for c, p, _t in client.calls if "DELETE r" in c]
-    assert params["batch"] == [{"eid": "edge:X", "pid": "X", "src": "urn:a", "tgt": "urn:b"}]
+    assert params["batch"] == [{"eid": "edge:X", "pid": "X", "src": "urn:a", "tgt": "urn:b",
+                                "rel": "FLOWS"}]
 
 
 def test_a_customer_graph_keeps_the_id_its_relationship_has():

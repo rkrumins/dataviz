@@ -190,7 +190,7 @@ def primary(monkeypatch):
         return None
 
     async def _fresh(self, graph_id):
-        return {"fresh": True, "committed": 1, "projected": 1}
+        return {"fresh": True, "committed": 1, "projected": 1, "served": 1}
     monkeypatch.setattr(data_source_repo, "get_primary_data_source", _primary)
     monkeypatch.setattr(data_source_repo, "get_data_source_orm", _no_ds)
     monkeypatch.setattr(ContextEngine, "_resolve_ontology", _noop)

@@ -26,6 +26,7 @@ transaction instead.
 from __future__ import annotations
 
 import contextlib
+import itertools
 import os
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -34,6 +35,8 @@ from typing import AsyncIterator, Dict, Iterable, List, Optional, Sequence, Set,
 from sqlalchemy import Text, any_, bindparam, cast, func, select, text
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.compiler import compiles
+from sqlalchemy.sql.expression import ClauseElement, Executable
 
 from .. import db
 from ..models import BranchORM, EdgeVersionORM, EntityHeadORM, GraphORM, NodeVersionORM
@@ -46,6 +49,11 @@ _LOOKUP_CHUNK = 5000
 #: A lookup's ids (or urns), as one array (``= ANY``): an IN list of thousands is compiled one bind at
 #: a time, and each length is a statement of its own to prepare and plan.
 _ANY = any_(bindparam("ids", type_=ARRAY(Text)))
+_TARGETS = any_(bindparam("tids", type_=ARRAY(Text)))
+#: Up to this many targets (an import window's), ``edges_between`` seeks both ends in SQL; past it
+#: (a view's every node), the sources alone, the targets checked here: so many chunks of both would
+#: multiply into too many statements.
+_BOTH_ENDS_MAX = 4 * _LOOKUP_CHUNK
 
 #: The session every read here goes through while :func:`pinned_reads` is open.
 _PINNED: ContextVar[Optional[AsyncSession]] = ContextVar("snapshot_pinned_reads", default=None)
@@ -129,6 +137,24 @@ def _chunks(items: Sequence[str], n: int) -> Iterable[Sequence[str]]:
         yield items[i:i + n]
 
 
+class _DeclareCursor(Executable, ClauseElement):
+    """``DECLARE <name> NO SCROLL CURSOR FOR <query>``, the query's values sent as parameters."""
+
+    inherit_cache = False
+
+    def __init__(self, name: str, query) -> None:
+        self.name, self.query = name, query
+
+
+@compiles(_DeclareCursor)
+def _compile_declare(element: _DeclareCursor, compiler, **kw) -> str:
+    return f"DECLARE {element.name} NO SCROLL CURSOR FOR {compiler.process(element.query, **kw)}"
+
+
+#: Names the cursors :func:`_stream` declares: unique in any transaction, a pinned one included.
+_CURSORS = itertools.count()
+
+
 async def _stream(stmt, size: int) -> AsyncIterator[Sequence]:
     """``stmt``'s rows, ``size`` at a time, from ONE execution read through a server-side cursor.
 
@@ -139,14 +165,26 @@ async def _stream(stmt, size: int) -> AsyncIterator[Sequence]:
     500 entities a second on 2M nodes, hours for a large graph. Read once, the rows are sorted (or
     walked in index order) once, whatever the plan. The cursor's transaction stays open while the
     rows are read: the pinned one inside :func:`pinned_reads`, else a pooled session's, held for
-    the read."""
+    the read.
+
+    The cursor is declared in SQL, which Postgres plans to start fast, not the wire protocol's
+    (``yield_per``), which it plans for the whole result. Planned for the whole result, a layer read
+    as of an earlier commit (a past revision, a draft behind main, a fork's parent) and any layer
+    whose statement's plan Postgres had cached generic scanned every version row and sorted it
+    before the first page: 2 s for 1.2M versions, spilled to disk, and growing with the history."""
+    name = f"gv_snapshot_{next(_CURSORS)}"
     async with _session() as s:
-        result = await s.stream(stmt.execution_options(yield_per=size))
+        await s.execute(_DeclareCursor(name, stmt))
         try:
-            async for rows in result.partitions():
-                yield rows
+            while True:
+                rows = (await s.execute(text(f"FETCH FORWARD {int(size)} FROM {name}"))).all()
+                if rows:
+                    yield rows
+                if len(rows) < size:
+                    return
         finally:
-            await result.close()
+            with contextlib.suppress(Exception):        # a transaction that failed has closed it
+                await s.execute(text(f"CLOSE {name}"))
 
 
 @dataclass(frozen=True)
@@ -247,18 +285,30 @@ class Snapshot:
     """One pinned view of a versioned graph's state, readable a page at a time."""
 
     def __init__(self, layers: List[Layer], *, graph_id: str, branch_id: str, main_branch_id: str,
-                 as_of_seq: Optional[int], page_size: int = PAGE_SIZE) -> None:
+                 as_of_seq: Optional[int], page_size: int = PAGE_SIZE,
+                 base_seq: Optional[int] = None) -> None:
         self.layers = layers
         self.graph_id = graph_id
         self.branch_id = branch_id
         self.main_branch_id = main_branch_id
         #: The commit ``main`` is pinned to (the seq an export reports and a re-read repeats).
         self.as_of_seq = as_of_seq
+        #: A draft's base: the commit of ``main`` it reads main at (None on main).
+        self.base_seq = base_seq
         self.page_size = page_size
 
     @property
     def is_draft(self) -> bool:
         return self.branch_id != self.main_branch_id
+
+    def main_at_base(self) -> "Snapshot":
+        """The ``main`` a draft reads: its layers below its own, at its base (a fork's with its
+        parent's under them). A snapshot of main is that already."""
+        if not self.is_draft:
+            return self
+        return Snapshot(self.layers[:-1], graph_id=self.graph_id, branch_id=self.main_branch_id,
+                        main_branch_id=self.main_branch_id, as_of_seq=self.base_seq,
+                        page_size=self.page_size)
 
     async def iter_live(self, kind: str, payload: bool = False,
                         limit: Optional[int] = None) -> AsyncIterator[List[Winner]]:
@@ -332,17 +382,22 @@ class Snapshot:
 
     async def edges_between(self, sources: Iterable[str], targets: Iterable[str]) -> Dict[tuple, str]:
         """``(source, target, edgeType) -> entity_id`` for the live edges from one of ``sources``
-        to one of ``targets``."""
+        to one of ``targets``. Up to ``_BOTH_ENDS_MAX`` targets, both ends are sought in SQL
+        (``ix_ev_source``, ``ix_ev_target``), so a hub's edges to anything else are never read."""
         sources, targets = set(sources), set(targets)
+        both = len(targets) <= _BOTH_ENDS_MAX
         candidates: Set[str] = set()
         for graph_id, branches in self._branches().items():
             stmt = select(EdgeVersionORM.entity_id, EdgeVersionORM.target_entity_id).where(
                 EdgeVersionORM.graph_id == graph_id, EdgeVersionORM.branch_id.in_(branches),
-                EdgeVersionORM.source_entity_id == _ANY).distinct()
+                EdgeVersionORM.source_entity_id == _ANY,
+                *([EdgeVersionORM.target_entity_id == _TARGETS] if both else [])).distinct()
             for chunk in _chunks(list(sources), _LOOKUP_CHUNK):
-                async with _session() as s:
-                    rows = (await s.execute(stmt, {"ids": list(chunk)})).all()
-                candidates.update(eid for eid, target in rows if target in targets)
+                for ends in (_chunks(list(targets), _LOOKUP_CHUNK) if both else [None]):
+                    async with _session() as s:
+                        rows = (await s.execute(stmt, {"ids": list(chunk), **(
+                            {"tids": list(ends)} if both else {})})).all()
+                    candidates.update(eid for eid, target in rows if target in targets)
         live = await self.lookup_live("edge", candidates)
         return {(w.source_id, w.target_id, w.edge_type): eid for eid, w in live.items()
                 if w.source_id in sources and w.target_id in targets}
@@ -429,7 +484,8 @@ async def open_snapshot(*, graph_id: str, branch_id: Optional[str] = None, as_of
             # A draft as it stands now: main where it branched, then its own (staged) changes.
             layers = await _main_layers(s, graph_id, base_seq) + [HeadsLayer(graph_id, branch_id)]
         else:
-            layers = (await _main_layers(s, graph_id, min(as_of_seq, base_seq))
+            base_seq = min(as_of_seq, base_seq)
+            layers = (await _main_layers(s, graph_id, base_seq)
                       + [VersionLayer(graph_id, branch_id, as_of_seq)])
         return Snapshot(layers, graph_id=graph_id, branch_id=branch_id, main_branch_id=main_id,
-                        as_of_seq=as_of_seq, page_size=page_size)
+                        as_of_seq=as_of_seq, page_size=page_size, base_seq=base_seq)

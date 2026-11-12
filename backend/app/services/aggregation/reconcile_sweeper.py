@@ -208,6 +208,7 @@ def _projection_ctx(health) -> Dict:
         "projection_last_error": health.last_error,
         "projection_checked_at": health.checked_at,
         "projection_in_progress": health.in_progress,
+        "projection_serving": health.serving,
     }
 
 

@@ -63,7 +63,7 @@ logger = logging.getLogger(__name__)
 
 PURGE_JOB_TYPE = "purge"
 
-PHASES = ("count", "edges", "nodes", "heads", "merkle", "working", "commits", "preflight",
+PHASES = ("count", "edges", "nodes", "heads", "merkle", "working", "commits", "preflight", "keys",
           "falkor", "meta", "finalize")
 
 # The bulk tables, in delete order, with the PK column list that makes each window an Index Scan
@@ -79,15 +79,18 @@ _BULK: Tuple[Tuple[str, str], ...] = (
     ("working_changes", "graph_id, id"),
     ("commits", "graph_id, id"),
     ("bootstrap_nodes", "graph_id, falkor_id"),
+    # The values of the properties imports match nodes by: one row per node per such property.
+    ("entity_keys", "graph_id, key_name, key_value, entity_id"),
 )
 _PHASE_TABLE = {
     "edges": _BULK[0], "nodes": _BULK[1], "heads": _BULK[2],
     "merkle": _BULK[3], "working": _BULK[4], "commits": _BULK[5], "preflight": _BULK[6],
+    "keys": _BULK[7],
 }
 
 # Progress floors, so the bar moves through the phases instead of sitting at 0 then jumping.
 _PHASE_FLOOR = {"count": 0, "edges": 1, "nodes": 25, "heads": 50, "merkle": 70,
-                "working": 80, "commits": 82, "preflight": 90, "falkor": 92, "meta": 95,
+                "working": 80, "commits": 82, "preflight": 90, "keys": 91, "falkor": 92, "meta": 95,
                 "finalize": 99}
 
 
@@ -466,6 +469,9 @@ class PurgeRunner:
                 f'DELETE FROM "{sch}"."merge_requests" WHERE graph_id = :g',
                 f'DELETE FROM "{sch}"."branches" WHERE graph_id = :g',
                 f'DELETE FROM "{sch}"."projection_state" WHERE graph_id = :g',
+                f'DELETE FROM "{sch}"."projection_quarantine" WHERE graph_id = :g',
+                f'DELETE FROM "{sch}"."rollup_deltas" WHERE graph_id = :g',
+                f'DELETE FROM "{sch}"."key_index" WHERE graph_id = :g',
                 # Every job for this graph EXCEPT this one. The purge's own row survives as the
                 # receipt: what was deleted, when, by whom, and what we refused to touch.
                 f'DELETE FROM "{sch}"."jobs" WHERE graph_id = :g AND id <> :j',
@@ -1124,7 +1130,8 @@ class Reaper:
                         .where(ProjectionStateORM.graph_id == gid,
                                ProjectionStateORM.falkor_graph_name == name)
                         .values(falkor_graph_name=None, falkor_provider=None,
-                                owns_falkor_graph=False, projected_commit_seq=0, status="idle",
+                                owns_falkor_graph=False, projected_commit_seq=0,
+                                served_commit_seq=None, status="idle",
                                 epoch=ProjectionStateORM.epoch + 1, updated_at=_now())
                         .execution_options(synchronize_session=False))
                 dropped += 1

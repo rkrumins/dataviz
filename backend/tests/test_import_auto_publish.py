@@ -6,7 +6,12 @@ job's ``summary.publish`` and never failing the import:
 * a draft with every row applied goes to a publish job, as its owner, marked to check publish again;
 * a file with rows that weren't imported leaves the draft for review;
 * one that changed nothing closes its empty draft;
-* a draft its publish refuses (it fell behind main, it closed) is kept, with the reason;
+* a draft that fell behind main pulls it and is queued once it pulls clean (up to three pulls);
+  one that pulls with conflicts is kept, with the reason;
+* its publish job, finding main moved while it waited its turn, pulls the draft it holds and
+  publishes it again, so the job ends published, or refused saying why (conflicts, or main moving
+  on through three pulls), the import following along;
+* a draft its publish refuses otherwise (it closed) is kept, with the reason;
 * without ``autoPublish`` none of it happens.
 
 Then the routes: asking for it needs publish (an API key: its owner's), a data source whose policy
@@ -35,13 +40,15 @@ from backend.app.services.versioning.service import NotUpToDate
 _DONE = {"new": 2, "updated": 1, "unchanged": 5, "deleted": 0, "invalid": 0}
 
 
-def _world(monkeypatch, summary, *, auto_publish=True):
+def _world(monkeypatch, summary, *, auto_publish=True, settings=None):
     """A completed import (``auto_publish``) on draft br1, owned by alice, whose worker reports
-    ``summary``. Returns the service, the job's row, and what the step did."""
+    ``summary``, made with import ``settings``. Returns the service, the job's row, and what the
+    step did."""
     row = SimpleNamespace(workspace_id="ws", data_source_id="ds", scope_view_id=None,
                           reconcile_mode="upsert", branch_id="br1", graph_id="g1",
-                          auto_publish=auto_publish, summary=dict(summary), updated_at=None)
-    branch = SimpleNamespace(owner="alice")
+                          auto_publish=auto_publish, summary=dict(summary), updated_at=None,
+                          import_settings=settings)
+    branch = SimpleNamespace(owner="alice", visibility="private")
 
     @contextlib.asynccontextmanager
     async def session():
@@ -59,11 +66,15 @@ def _world(monkeypatch, summary, *, auto_publish=True):
 
     monkeypatch.setattr(ver_db, "graphver_session", session)
     monkeypatch.setattr(service_mod, "ImportWorker", _Worker)
-    did = SimpleNamespace(published=[], abandoned=[])
+    did = SimpleNamespace(published=[], abandoned=[], pulled=[], pull={"clean": True})
 
     class _Versioning:
         async def abandon_draft(self, **kwargs):
             did.abandoned.append(kwargs)
+
+        async def rebase_draft(self, **kwargs):
+            did.pulled.append(kwargs)
+            return did.pull
 
     svc = ImportExportService(versioning=_Versioning(), store=object())
 
@@ -85,13 +96,34 @@ async def test_a_complete_import_hands_its_draft_to_a_publish_job_as_its_owner(m
     assert row.summary["publish"] == {"state": "queued", "jobId": "pjob_1"}
 
 
-@pytest.mark.parametrize("tally", [{"invalid": 3}, {"skipped": 2}])
+_REFUSED = {"total": 3, "byCode": {"no_key": 3}, "rows": [
+    {"rowIndex": 4, "kind": "node", "label": "orders", "code": "no_key", "reason": "give it a urn"}]}
+
+
+@pytest.mark.parametrize("tally", [{"invalid": 3, "refused": _REFUSED}, {"skipped": 2}])
 async def test_rows_that_werent_imported_leave_the_draft_for_review(monkeypatch, tally):
     svc, row, did = _world(monkeypatch, {**_DONE, **tally})
     await svc.run_import("job1")
     assert did.published == [] and did.abandoned == []
     note = row.summary["publish"]
     assert (note["state"], note["reason"]["type"]) == ("skipped", "rows_refused")
+    assert "maxRefusedRows" in note["reason"]["message"], "it says how to go on"
+    if "refused" in tally:
+        assert "3 no_key" in note["reason"]["message"] and "rowIndex 4 (orders)" in note["reason"]["message"]
+
+
+@pytest.mark.parametrize("budget, publishes", [("-1", True), ("3", True), ("50%", True), ("2", False),
+                                               ("0", False)])
+async def test_an_import_within_its_refused_rows_budget_publishes_without_them(monkeypatch, budget, publishes):
+    svc, row, did = _world(monkeypatch, {**_DONE, "invalid": 3, "refused": _REFUSED},
+                           settings={"maxRefusedRows": budget})
+    await svc.run_import("job1")
+    note = row.summary["publish"]
+    if publishes:
+        assert len(did.published) == 1
+        assert note == {"state": "queued", "jobId": "pjob_1", "refusedRows": 3}
+    else:
+        assert did.published == [] and note["state"] == "skipped"
 
 
 async def test_an_import_that_changed_nothing_closes_its_empty_draft(monkeypatch):
@@ -103,11 +135,11 @@ async def test_an_import_that_changed_nothing_closes_its_empty_draft(monkeypatch
     assert row.summary["publish"] == {"state": "unchanged"}
 
 
-@pytest.mark.parametrize("refusal, kind", [
-    (NotUpToDate("br1", 3, 5), "not_up_to_date"),          # main moved while the file was imported
-    (BranchNotOpen("br1", "abandoned"), "branch_closed"),  # someone closed the draft meanwhile
+@pytest.mark.parametrize("refusal, kind, pulls", [
+    (NotUpToDate("br1", 3, 5), "not_up_to_date", 3),       # main kept moving through three pulls
+    (BranchNotOpen("br1", "abandoned"), "branch_closed", 0),  # someone closed the draft meanwhile
 ])
-async def test_a_draft_its_publish_refuses_is_kept_with_the_reason(monkeypatch, refusal, kind):
+async def test_a_draft_its_publish_refuses_is_kept_with_the_reason(monkeypatch, refusal, kind, pulls):
     svc, row, did = _world(monkeypatch, _DONE)
 
     async def refuse(**_kwargs):
@@ -117,8 +149,157 @@ async def test_a_draft_its_publish_refuses_is_kept_with_the_reason(monkeypatch, 
     assert await svc.run_import("job1") == _DONE                 # complete, whatever the publish
     note = row.summary["publish"]
     assert (note["state"], note["reason"]["type"]) == ("skipped", kind)
+    assert len(did.pulled) == pulls
     if kind == "not_up_to_date":
         assert note["reason"]["behindBy"] == 2
+
+
+async def test_a_draft_main_moved_under_pulls_it_and_is_published(monkeypatch):
+    svc, row, did = _world(monkeypatch, _DONE)
+    behind = [NotUpToDate("br1", 3, 5)]
+
+    async def create_publish_job(**kwargs):
+        if behind:
+            raise behind.pop()
+        did.published.append(kwargs)
+        return {"job_id": "pjob_2"}
+
+    svc.create_publish_job = create_publish_job
+    await svc.run_import("job1")
+    assert [(p["branch_id"], p["actor"]) for p in did.pulled] == [("br1", "alice")]
+    assert row.summary["publish"] == {"state": "queued", "jobId": "pjob_2", "pulls": 1}
+    assert (did.published[0]["import_job_id"], did.published[0]["pulls"]) == ("job1", 1)
+
+
+async def test_a_draft_that_pulls_with_conflicts_waits_for_review(monkeypatch):
+    svc, row, did = _world(monkeypatch, _DONE)
+    did.pull = {"clean": False, "conflicts": [{"entity_id": "n1"}, {"entity_id": "n2"}]}
+
+    async def behind(**_kwargs):
+        raise NotUpToDate("br1", 3, 5)
+
+    svc.create_publish_job = behind
+    await svc.run_import("job1")
+    note = row.summary["publish"]
+    assert (note["state"], note["reason"]["type"], note["reason"]["conflicts"], note["pulls"]) == (
+        "skipped", "conflicts", 2, 1)
+
+
+def _publish_world(monkeypatch, answers, *, pull=None, pulls=0, import_job="job1"):
+    """Publish job pjob_1 of import ``import_job``'s draft br1 (owned by alice), its draft already
+    pulled ``pulls`` times; the publish answers ``answers`` in turn. Returns the service, the
+    import's row, and what the job did."""
+    job = SimpleNamespace(field_scope={"actor": "alice", "message": "m", "autoPublish": True,
+                                       **({"importJobId": import_job, "pulls": pulls} if import_job else {})},
+                          graph_id="g1", branch_id="br1", workspace_id="ws", data_source_id="ds")
+    imported = SimpleNamespace(summary={"publish": {"state": "queued", "jobId": "pjob_1"}}, updated_at=None)
+    did = SimpleNamespace(pulled=[], released=0, published=0, finished=None, counted=[], merged=None)
+
+    @contextlib.asynccontextmanager
+    async def session():
+        class _Session:
+            async def get(self, _orm, key):
+                return job if key == "pjob_1" else imported
+        yield _Session()
+
+    class _Versioning:
+        async def merged_commit_id(self, **_kwargs):
+            return did.merged
+
+        async def rebase_draft(self, **kwargs):
+            did.pulled.append(kwargs)
+            if isinstance(pull, Exception):
+                raise pull
+            return pull(did) if callable(pull) else pull or {"clean": True}
+
+        async def release_publishing(self, **_kwargs):
+            did.released += 1
+
+    class _Lease:
+        epoch = 0
+
+        def check(self):
+            pass
+
+        async def checkpoint(self, _s, **values):
+            did.counted.append(values["field_scope"]["pulls"])
+
+        async def finish(self, status="completed", **values):
+            did.finished = {"status": status, **values}
+            return True
+
+    async def hook(job):
+        did.published += 1
+        return {"commitId": job["mergedCommitId"]} if "mergedCommitId" in job else answers.pop(0)
+
+    monkeypatch.setattr(ver_db, "graphver_session", session)
+    svc = ImportExportService(versioning=_Versioning(), store=object(), publish_hook=hook)
+    return svc, imported, did, _Lease()
+
+
+_BEHIND = {"error": {"status": 409, "detail": {"type": "not_up_to_date", "behindBy": 1}}}
+
+
+async def test_its_publish_job_finding_main_moved_pulls_the_draft_it_holds_and_publishes_it(monkeypatch):
+    svc, imported, did, lease = _publish_world(monkeypatch, [_BEHIND, {"commitId": "c9"}])
+    assert await svc.run_publish("pjob_1", lease) == {"commitId": "c9"}
+    assert [(p["branch_id"], p["actor"], p["publishing_ok"]) for p in did.pulled] == [("br1", "alice", True)]
+    assert did.finished["status"] == "completed" and did.released == 0
+    assert did.counted == [1], "each pull counted on the job, for an attempt that takes it over"
+    assert imported.summary["publish"] == {"state": "queued", "jobId": "pjob_1", "pulls": 1}
+
+
+async def test_its_publish_job_ends_refused_with_the_conflicts_a_pull_found(monkeypatch):
+    svc, imported, did, lease = _publish_world(
+        monkeypatch, [_BEHIND], pull={"clean": False, "conflicts": [{"entity_id": "n1"}]})
+    result = await svc.run_publish("pjob_1", lease)
+    assert (result["error"]["detail"]["type"], result["error"]["detail"]["conflicts"]) == ("conflicts", 1)
+    assert did.finished["status"] == "failed" and did.released == 1      # the draft, open again
+    note = imported.summary["publish"]
+    assert (note["state"], note["jobId"], note["pulls"], note["reason"]["type"]) == (
+        "skipped", "pjob_1", 1, "conflicts")
+
+
+async def test_its_publish_job_pulls_no_more_than_three_times_counting_the_imports(monkeypatch):
+    svc, imported, did, lease = _publish_world(monkeypatch, [_BEHIND, _BEHIND, _BEHIND], pulls=1)
+    result = await svc.run_publish("pjob_1", lease)
+    assert result["error"]["detail"]["type"] == "not_up_to_date"
+    assert len(did.pulled) == 2 and did.published == 3 and did.finished["status"] == "failed"
+    assert (imported.summary["publish"]["state"], imported.summary["publish"]["pulls"]) == ("skipped", 3)
+
+
+async def test_its_publish_job_ends_published_when_an_earlier_attempt_published_the_draft(monkeypatch):
+    # The draft merges while this attempt pulls (a worker that took the job over published it):
+    # whether the pull lands first or is refused for it, that publish is this job's.
+    def merges_meanwhile(did):
+        did.merged = "c7"
+        return {"clean": True}
+
+    def refused_for_it(did):
+        did.merged = "c7"
+        raise BranchNotOpen("br1", "merged")
+
+    for pull in (merges_meanwhile, refused_for_it):
+        svc, imported, did, lease = _publish_world(monkeypatch, [_BEHIND], pull=pull)
+        assert await svc.run_publish("pjob_1", lease) == {"commitId": "c7"}, pull.__name__
+        assert did.finished["status"] == "completed" and did.released == 0
+
+
+async def test_its_publish_job_ends_refused_saying_what_refused_its_pull(monkeypatch):
+    from backend.app.services.versioning.errors import GraphNotWritable
+    svc, imported, did, lease = _publish_world(
+        monkeypatch, [_BEHIND], pull=GraphNotWritable("frozen"))
+    result = await svc.run_publish("pjob_1", lease)
+    assert result["error"]["detail"]["type"] == "graph_not_writable", result
+    assert did.finished["status"] == "failed" and did.released == 1
+    assert (imported.summary["publish"]["state"], imported.summary["publish"]["reason"]["type"]) == (
+        "skipped", "graph_not_writable")
+
+
+async def test_a_persons_publish_job_main_moved_under_is_refused_as_before(monkeypatch):
+    svc, imported, did, lease = _publish_world(monkeypatch, [_BEHIND], import_job=None)
+    assert (await svc.run_publish("pjob_1", lease))["error"]["detail"]["type"] == "not_up_to_date"
+    assert did.pulled == [] and did.finished["status"] == "failed"
 
 
 async def test_without_auto_publish_nothing_is_published(monkeypatch):

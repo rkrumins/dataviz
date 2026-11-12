@@ -123,11 +123,11 @@ connector written against it keeps working.
 | Columns | What they say |
 |---|---|
 | `kind` | `node` or `edge` |
-| `urn`, `entity_id` | Which node a row is, as a pointer ([§3](#3-identity-point-at-nodes-dont-name-them)) |
+| `urn`, `entity_id` | Which node a row is ([§3](#3-identity-point-at-nodes-dont-name-them)) |
 | `entityType` | A node's type, one the data source's ontology names. Needed to create a node |
 | `displayName`, `description`, `sourceSystem`, `layerAssignment` | A node's own fields |
 | `qualifiedName` | A node's qualified name. Where no `urn` matches, an import finds a node by it |
-| `tags` | A node's tags: a JSON list, or a `;`-separated cell. Tags a row adds are added to the node's tags; a stale exported row's removals apply too |
+| `tags` | A node's tags: a JSON list, or a comma-separated cell. Tags a row adds are added to the node's tags; a stale exported row's removals apply too |
 | `edgeType`, `confidence` | An edge's type (one the ontology names), and an optional confidence from 0 to 1 |
 | `sourceUrn`, `targetUrn`, `source_entity_id`, `target_entity_id`, `sourceQualifiedName`, `targetQualifiedName` | How each end of an edge is found |
 | `source.<field>`, `target.<field>` | An edge's end, found by a field of its node: the data source's identifier, or a field marked "Match imports by this" |
@@ -140,7 +140,8 @@ connector written against it keeps working.
 
 - **A blank cell, or a property left out, keeps what the graph holds.** Send only what you know.
 - **`\N` removes a property** (`null` in `properties_json`). `\NULL` and `\n` mean the same. A
-  node's own fields (`description`, …) can't be cleared by an import: set them to a new value.
+  node's own fields (`description`, …) can't be cleared by an import: set them to a new value. A row
+  with `\N` in one of them is refused (`invalid_row`), not stored as the text.
 - **`_op=delete` deletes the node** a row points at, and the edges on it, and what it contains
   (its containment subtree, as the ontology says). An edge row with `_op=delete` deletes that edge.
 - **A delete of something that isn't there is done already.** Whether it was deleted by an earlier
@@ -176,21 +177,34 @@ api GET "/api/v1/$WS/versioning/graphs/$GID/imports/schema" > import-record.json
 
 ## 3. Identity: point at nodes, don't name them
 
-The platform names every node itself (a `urn:uuid:`), so ids stay stable and opaque. A file's ids
-are **pointers**:
+The platform names every node itself (a `urn:uuid:`), so ids stay stable and opaque, and never
+change. A file's keys find those ids:
 
 - **`urn` is your system's name for the thing.** Use one that never changes, such as
-  `urn:acme:table:sales.orders`. The first import creates the node with an id derived from that
-  urn. Every later import finds it by the same urn, so re-running a file updates instead of
-  duplicating — whichever draft it goes to, in a fork, or after the graph is made again. The urn
-  is not stored on the node.
-- **The data source's identifier property** (`prop.<identifier>`) is a pointer too, for a source
-  identified by it. It is reserved: the node's identifier holds its platform urn.
-- **A `urn:uuid:` your system already gave the entity** is kept as its id. Use that when the same
-  entity must have the same id in several environments.
-- **`entity_id` is file-local.** It links rows of one file — an edge to a node row — and nothing
-  more, unless it is a node's real id, as in an export. A row that points by nothing else is
-  created again on every import.
+  `urn:acme:table:sales.orders`. The first import creates the node, keeping that urn, under an id
+  derived from it. Every later import finds it by the same urn, so re-running a file updates
+  instead of duplicating — whichever draft it goes to, in a fork, or after the graph is made again.
+- **Say what your rows are found by** with `identifier`: `identifier=entity_id` (the default)
+  tries an entity id of the graph, then the urn, the identifier property, a field its type matches
+  imports by, and a unique qualifiedName; `identifier=urn` takes the entity id or the urn and
+  nothing else, as a DataHub-style connector wants. A row the identifier can't find is created.
+  Or have a workspace admin set the graph's default on its data source's Versioning tab, and leave
+  `identifier` out; `GET …/graphs/{gid}/import-settings` says which holds, and the replace guard's
+  limits.
+- **Or key your rows by your system's own id** in a property: `prop.external_id` on each row, and
+  `identifier=prop.external_id`; an edge names its ends `source.external_id` / `target.external_id`.
+  No urn is needed. The first import that names the property indexes it (it reads every node
+  once); every later one finds rows by it, including nodes people made or edited in the app since.
+  A value two nodes hold refuses its rows (`duplicate_value`): keep it unique to one. A partial
+  file — `prop.external_id` and the one field that changed — updates only that field. To write
+  through the entity-id APIs instead, map your ids first: `POST …/identities/resolve`.
+- **The data source's identifier property** (`prop.<identifier>`) finds a node too, for a source
+  identified by it. It is reserved: the node's identifier holds its urn.
+- **A `urn:uuid:` your system already gave the entity** is kept as its id, given as its `urn` or
+  as its `entity_id`. Use that when the same entity must have the same id in several environments.
+- **`entity_id` is file-local** unless it is a node's real id, as in an export: it links rows of one
+  file — an edge to a node row — and nothing more. A node row that gives nothing else a later import
+  could find it by is refused (code `no_key`), rather than created again on every import.
 - **Keep your own key as a property** if people should see or search it: `prop.sap_id`. Mark the
   field "Match imports by this" in the ontology to match rows by it, and "Must be unique" to keep it
   unique.
@@ -198,6 +212,8 @@ are **pointers**:
   `target.<field>`, or `source_entity_id` / `target_entity_id` (another row's file id). An edge
   itself is its two ends and its type, so sending it again changes nothing. To re-point an edge,
   delete its row and add a new one.
+
+Each identifier, walked through with its requests and answers: [Export, edit offline, import back](/docs/import-export-api).
 
 ## 4. Full snapshots and deltas
 
@@ -210,6 +226,13 @@ are **pointers**:
   run nightly writes only that day's changes.
 - **A replace deletes nothing while any row is refused,** since the refused row might name what it
   means to keep. The job fails, and the file's other rows stay on its draft.
+- **A replace that would delete most of the graph and make most of it again is refused** before it
+  deletes anything: that is what a file whose rows name their entities by another key looks like.
+  The job fails with `summary.failure.code` `mass_delete_blocked`, and `summary.replaceGuard` says
+  how many it would delete and create and the limits in force (the operator's). Check
+  `identifier`; send `allowMassDelete=true` only when the file really replaces the graph. A
+  replace whose first rows find almost nothing stops early, with `identifier_matched_nothing`,
+  unless it was sent with `allowMassDelete=true`.
 - **A row without `baseVersion` sets what it carries.** A connector's own rows are the source's
   truth: if two runs write one field, the later wins.
 - **A row an export wrote carries `baseVersion`,** and is merged with what changed since: only the
@@ -232,7 +255,14 @@ first.
 |---|---|
 | Up to 10 GiB (NDJSON, CSV or TSV), in parts | The resumable upload, below. Use it for anything over a few MB: a dropped connection costs one part |
 | Up to 10 GiB, as one body | The resumable upload with the whole file sent to part 0 (step 2): it is cut into parts as it arrives, and a dropped connection keeps every whole part |
-| Up to 10 GiB, as one body, no resuming | `POST …/imports?format=ndjson&idempotencyKey=…`, with the file as the body. A dropped connection starts it over. JSON and Excel files: 100 MB |
+| Up to 10 GiB, as one body, no resuming | `POST …/imports?format=ndjson&idempotencyKey=…`, with the file as the body, sized or streamed. A dropped connection starts it over. JSON and Excel files: 100 MB |
+| Up to 10 GiB, as one body, stored as an upload | `POST …/imports/uploads?fileName=…&format=ndjson`, with the file as the body in place of the description: stored as its parts as it arrives, then complete it (step 4). A dropped connection starts it over |
+
+Every way, the body is the file's bytes (`application/octet-stream`), never a form (`415`). Send
+`Content-Digest: sha-256=:<base64>:` (RFC 9530) with it to have the server check what arrived: a
+body that doesn't match is refused (`422`) and none of it is kept. The same requests in curl,
+Python, Node.js, Go and Java, for an upsert and a full replace: [Send Data From Your
+Service](/docs/import-from-your-service).
 
 **The resumable upload, step by step:**
 
@@ -320,7 +350,7 @@ When the import completes, `summary.publish` on its job says what happened:
 
 | `summary.publish.state` | What happened | What to do |
 |---|---|---|
-| `queued`, with `jobId` | The draft is being published, as a large publish is: a job | Follow `GET …/publish-jobs/{jobId}` to `completed` (with `commitId` and `revisionId`) or `failed` (with `error`) |
+| `queued`, with `jobId` | The draft is being published, as a large publish is: a job. `pulls` says how often its draft pulled main (below) | Follow `GET …/publish-jobs/{jobId}` to `completed` (with `commitId` and `revisionId`) or `failed` (with `error`, whose `detail.type` is one of the reasons below) |
 | `unchanged` | The file changed nothing. Its empty draft was closed | Nothing |
 | `skipped`, with `reason` | It wasn't published, and the draft is kept for review | Read `reason.type` (below) |
 | missing, a minute after `completed` | The worker stopped between the two steps | Publish the draft yourself: `POST …/branches/{branchId}/publish` |
@@ -328,13 +358,26 @@ When the import completes, `summary.publish` on its job says what happened:
 Why a publish is skipped (`reason.type`):
 - **`rows_refused`:** some rows weren't imported (refused or unreadable). Look at the import's
   preview, fix the file, and send it again; or fix the draft and publish it.
-- **`not_up_to_date`, with `behindBy`:** someone published to the same data source while the file
-  was imported, so the draft is behind `main`.
-  - A small draft can be updated from main (`POST …/branches/{branchId}/rebase`) and published.
-  - A draft of millions of changes can't: updating it reads every change at once. Import the file
-    again instead, and keep other publishing to that data source out of the import's window.
+- **`conflicts`, with `conflicts` (a count):** someone published to the same data source while the
+  file was imported, and changed some of the same entities' same fields differently. The draft
+  waits for a person to resolve them (the draft's **Pull latest**) and publish it.
+- **`not_up_to_date`:** main kept moving through every pull it made (three).
+  Update the draft from main (`POST …/branches/{branchId}/rebase`) and publish it, or import again.
 - **Others:** the refusal the publish route would give: the draft closed meanwhile
   (`branch_closed`), the policy changed (`review_required`), …
+
+**Main moved while the file was imported** — another connector or a person published to the same
+data source — and the draft can't land past what came in: then the draft **pulls main first**,
+with the field-level merge a person's "Pull latest" runs, as a merge queue rebases, and is
+published once it pulls clean. That holds when the publish is queued, and again inside the publish
+job when it runs: the job you follow pulls and publishes again itself, so it ends `completed`, or
+`failed` with the reason. Several connectors can import into one data source at once, each into a
+draft of its own: entities two of them made alike (the same urn or matching value, so the same
+derived id) merge as one, and an update one made merges with the other's updates of other fields.
+What main gained meanwhile stays, even in a field the file carries unchanged. Only a field both
+changed differently waits for a person (`conflicts`). A draft of any size pulls: past
+`GRAPHVER_SQUASH_PAGED_ABOVE` (200,000) changes it reads only the entities main changed too. Up to
+three pulls, counted on the import.
 
 The publish job checks again, when it runs, that the import's owner may still publish. The review
 policy as it is then holds too.
@@ -387,9 +430,15 @@ Errors come back as `{"detail": …}`: a sentence, or an object with a `type`, `
 | `409` | parts missing (a sentence) | The upload isn't complete | Send the missing parts |
 | `413` | | Too large: for the request (use the upload), the format (split the file), or the dry run (8 MiB) | No |
 | `422` | | A file that can't be read, or a part of the wrong size | No: fix it |
+| `422` | `invalid_max_refused_rows` | `maxRefusedRows` isn't `0`, a count, a share such as `0.5%`, or `-1` | No: fix it |
 | `429` | `rate_limited`, `PROVIDER_BUSY` | Too many requests: a key has 1,200 a minute | Yes, after `Retry-After` |
 | `503` | `lock_busy`, `DB_UNAVAILABLE`, `api_keys_unavailable` | Busy or out of reach for a moment | Yes, after `Retry-After`, else a few seconds |
 | `504` | `REQUEST_TIMEOUT` | The request ran out of time, which may have been after it did its work | Read the state before you write again |
+
+A job that **ends with refused rows** says which, where each is in the file, why, and what to do
+(`summary.refused`); by default they hold a replace and an import's own publish. Send the file with
+`maxRefusedRows` (the reference connector's `--max-refused-rows`) to go on without them: [When rows
+are refused](/docs/import-from-your-service#when-rows-are-refused).
 
 Every call an import connector makes does no harm sent twice:
 - a part replaces itself;
@@ -498,7 +547,16 @@ pip install httpx
 export SYNODIC_URL=https://synodic.example.com SYNODIC_TOKEN=nxsat_…
 python docs/examples/connector/connector.py --file catalog.ndjson --workspace "$WS" --graph "$GID" --check
 python docs/examples/connector/connector.py --file catalog.ndjson --workspace "$WS" --graph "$GID" --publish
+# A full snapshot, which deletes what the source no longer has:
+python docs/examples/connector/connector.py --file catalog.ndjson --workspace "$WS" --graph "$GID" \
+    --replace --identifier urn --publish
 ```
+
+`--replace` sends `reconcileMode=replace`, `--identifier` the `identifier`, `--allow-mass-delete`
+`allowMassDelete=true`, and `--branch br_…` imports into that open draft, which the connector then
+publishes itself with `--publish`. A replace the guard refused fails with its code
+(`mass_delete_blocked`); send it again with `--allow-mass-delete --branch <its branchId>` if the
+deletes are meant.
 
 What the connector does:
 - **Sending:** 4 parts at a time from disk, each retried after `Retry-After` on `429`/`503`, or
@@ -525,7 +583,8 @@ record contract, and its calls to the routes a key may call.
 | The job failed: "Line N … has no line break within 16 MB" | CR-only line endings, or no line breaks | Save the file with LF or CRLF line endings |
 | The job failed: "… opens a quoted cell that doesn't close" | A CSV quote left open | Close the quote, or escape it as `""` |
 | `summary.invalid` > 0, and `publish.state: skipped` | Rows refused: unknown types, missing ends, … | Read the preview's reasons, fix the file, send it again |
-| `publish.reason.type: not_up_to_date` | Something was published to the data source mid-import | Update a small draft from main and publish it; import a large file again |
+| `publish.reason.type: conflicts` | Someone changed the same fields differently mid-import | Pull latest on the draft, resolve, publish |
+| `publish.reason.type: not_up_to_date` | Main kept moving through three pulls | Update the draft from main and publish it, or import again |
 | `403 publish_required` with `autoPublish` | The key's account isn't a Publisher | Give the account Publisher, or import without `autoPublish` and have a person publish |
 | `403 publish_required` though the account "can manage data" | Its role holds `manage` but not publish: Workspace member, or a custom role made before publish existed | Give it Workspace publisher. An admin sees such roles under Permissions → Roles, and can add publish to one |
 | `403 not_draft_owner` publishing a draft | The draft is someone else's | Merge its merge request (§6) |

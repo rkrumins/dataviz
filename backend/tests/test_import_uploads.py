@@ -233,6 +233,48 @@ async def test_a_file_too_large_for_its_format_is_refused_before_it_is_sent(tmp_
                                          fmt="ndjson"))
 
 
+def _digest(data: bytes, alg: str = "sha-256") -> str:
+    """``data``'s RFC 9530 Content-Digest."""
+    import base64
+    import hashlib
+    return f"{alg}=:{base64.b64encode(hashlib.new(alg.replace('-', ''), data).digest()).decode()}:"
+
+
+def test_a_content_digest_is_read_or_refused():
+    import hashlib
+    assert uploads.content_digest(None) is None and uploads.content_digest("  ") is None
+    assert uploads.content_digest(_digest(DATA)) == ("sha-256", hashlib.sha256(DATA).digest())
+    both = f"{_digest(DATA)}, {_digest(DATA, 'sha-512')}"
+    assert uploads.content_digest(both) == ("sha-512", hashlib.sha512(DATA).digest()), "the strongest named"
+    for header, says in (("md5=:abc=:", "checks sha-256 and sha-512"), ("sha-256=abc", "can't be read"),
+                         ("sha-256=:not base64!:", "can't be read")):
+        with pytest.raises(UploadError) as refused:
+            uploads.content_digest(header)
+        assert refused.value.status == 400 and says in str(refused.value), str(refused.value)
+
+
+async def test_a_body_that_doesnt_match_its_digest_keeps_none_of_itself(tmp_path, small_parts):
+    """Checked as it arrives, refused once it is in: a run of parts, the whole file to part 0, or the
+    file that starts an upload, none of it is kept — its last part included, which was whole."""
+    store = LocalFsObjectStore(tmp_path)
+    record = await _upload(store)
+    wrong = uploads.content_digest(_digest(DATA[::-1]))
+    with pytest.raises(UploadError) as refused:
+        await uploads.put_part(store, record, 0, _chunked(DATA), digest=wrong)
+    assert refused.value.status == 422 and "Content-Digest" in str(refused.value)
+    assert await uploads.received(store, record) == []
+    assert await uploads.put_part(store, record, 0, _chunked(DATA), digest=uploads.content_digest(_digest(DATA))) \
+        == len(DATA)
+    assert await uploads.received(store, record) == [0, 1, 2, 3]
+
+    with pytest.raises(UploadError) as refused:
+        await uploads.create_from_body(store, _chunked(DATA), **_where(owner="u1", file_name="f.ndjson",
+                                                                       fmt="ndjson"), digest=wrong)
+    assert refused.value.status == 422
+    assert sorted(p.name for p in tmp_path.rglob("part-*")) == [f"part-0000{n}" for n in range(4)], \
+        "only the upload sent whole above"
+
+
 async def test_an_upload_is_its_owners_only(tmp_path):
     store = LocalFsObjectStore(tmp_path)
     record = await _upload(store)
@@ -367,6 +409,127 @@ async def test_a_client_may_send_the_whole_file_to_part_0(test_client, api):
     assert (await test_client.post(f"{url}/complete")).status_code == 202
     (job,) = api.created
     assert b"".join([c async for c in uploads.open_source(api.store, job["source_uri"])]) == DATA
+
+
+async def test_the_file_itself_may_be_the_body_that_starts_an_upload(test_client, api, part_bounds):
+    """A client that puts the file's contents in the body, rather than its name and size, gets an
+    upload with every part in — the file cut into its parts as it arrived — and completes it as any
+    other. The name, format and part size are query parameters."""
+    r = await test_client.post(BASE, params={"fileName": "big.ndjson", "format": "ndjson"}, content=DATA,
+                               headers={"Content-Type": "application/octet-stream"})
+    assert r.status_code == 201, r.text
+    up = r.json()
+    assert (up["fileName"], up["size"], up["format"], up["parts"], up["received"]) == \
+        ("big.ndjson", len(DATA), "ndjson", 4, [0, 1, 2, 3])
+    url = f"{BASE}/{up['uploadId']}"
+    assert (await test_client.get(url)).json()["received"] == [0, 1, 2, 3]
+    done = await test_client.post(f"{url}/complete", params={"reconcileMode": "replace"})
+    assert done.status_code == 202, done.text
+    (job,) = api.created
+    assert (job["import_format"], job["reconcile_mode"]) == ("ndjson", "replace")
+    assert b"".join([c async for c in uploads.open_source(api.store, job["source_uri"])]) == DATA
+
+    # Any type but JSON is the file; unnamed, it is named for its format.
+    r = await test_client.post(BASE, params={"format": "csv", "partBytes": 100}, content=DATA,
+                               headers={"Content-Type": "text/csv"})
+    assert r.status_code == 201, r.text
+    assert (r.json()["fileName"], r.json()["parts"], r.json()["received"]) == ("upload.csv", 3, [0, 1, 2])
+
+
+async def test_a_streamed_file_may_start_an_upload_and_exists_once_all_of_it_is_in(test_client, api):
+    """A body streamed without a Content-Length — a client piping a file, or making it as it goes —
+    is stored a part at a time as it arrives, and the upload is written once all of it is in, with
+    the size that arrived."""
+    r = await test_client.post(BASE, params={"fileName": "piped.ndjson"}, content=_chunked(DATA),
+                               headers={"Content-Type": "application/octet-stream"})
+    assert r.status_code == 201, r.text
+    up = r.json()
+    assert (up["size"], up["parts"], up["received"]) == (len(DATA), 4, [0, 1, 2, 3])
+    assert (await test_client.post(f"{BASE}/{up['uploadId']}/complete")).status_code == 202
+    (job,) = api.created
+    assert b"".join([c async for c in uploads.open_source(api.store, job["source_uri"])]) == DATA
+
+
+async def test_a_file_that_starts_an_upload_and_cant_be_imported_keeps_none_of_itself(test_client, api, monkeypatch):
+    """Told why, and how to send it: one too large for its format — refused before any of it is read
+    when it says its size, as soon as it passes the limit when streamed — an empty one, and one sent
+    as a form; and a JSON body is the upload's description."""
+    read = []
+
+    async def unread():
+        read.append(True)
+        yield DATA
+
+    monkeypatch.setattr(uploads, "WHOLE_FILE_MAX_BYTES", 100)
+    large = await test_client.post(BASE, params={"format": "json"}, content=DATA,
+                                   headers={"Content-Type": "application/octet-stream"})
+    assert large.status_code == 413 and "A JSON file is read whole" in large.json()["detail"], large.text
+    streamed = await test_client.post(BASE, params={"format": "json"}, content=_chunked(DATA),
+                                      headers={"Content-Type": "application/octet-stream"})
+    assert streamed.status_code == 413 and "A JSON file is read whole" in streamed.json()["detail"]
+    empty = await test_client.post(BASE, content=b"", headers={"Content-Type": "application/octet-stream"})
+    assert empty.status_code == 422 and "empty" in empty.json()["detail"], empty.text
+    form = await test_client.post(BASE, files={"file": ("big.ndjson", unread())})
+    assert form.status_code == 415 and "not as a form" in form.json()["detail"], form.text
+    assert read == []
+    assert list(api.store._root.rglob("part-*")) == [], "a refused body keeps none of itself"
+
+    described = await test_client.post(BASE, json={"fileName": "big.ndjson", "size": 0})
+    assert described.status_code == 422, described.text
+    assert described.json()["detail"][0]["loc"] == ["body", "size"]
+
+
+async def test_a_file_that_says_its_digest_is_checked_wherever_a_file_goes(test_client, api):
+    """A part, or the file that starts an upload, whose Content-Digest doesn't match what arrived is
+    refused (422) and not kept; one that can't be read or checked is refused (400) before any of it
+    is read."""
+    up = (await test_client.post(BASE, json={"fileName": "big.ndjson", "size": len(DATA), "format": "ndjson"})).json()
+    url = f"{BASE}/{up['uploadId']}"
+    bad = await test_client.put(f"{url}/parts/0", content=DATA, headers={"Content-Digest": _digest(b"other")})
+    assert bad.status_code == 422 and "Content-Digest" in bad.json()["detail"], bad.text
+    assert (await test_client.get(url)).json()["received"] == []
+    good = await test_client.put(f"{url}/parts/0", content=DATA, headers={"Content-Digest": _digest(DATA)})
+    assert good.status_code == 200 and good.json()["lastPart"] == 3, good.text
+
+    started = await test_client.post(BASE, content=DATA, headers={"Content-Type": "application/octet-stream",
+                                                                    "Content-Digest": _digest(DATA, "sha-512")})
+    assert started.status_code == 201 and started.json()["received"] == [0, 1, 2, 3], started.text
+    refused = await test_client.post(BASE, content=DATA, headers={"Content-Type": "application/octet-stream",
+                                                                    "Content-Digest": _digest(b"other")})
+    assert refused.status_code == 422, refused.text
+    for header in ("md5=:abc=:", "sha-256=abc"):
+        unread = await test_client.post(BASE, content=DATA, headers={"Content-Type": "application/octet-stream",
+                                                                       "Content-Digest": header})
+        assert unread.status_code == 400, unread.text
+
+
+async def test_a_file_sent_as_a_form_is_refused_wherever_a_file_goes(test_client, api):
+    """A form wraps the file in lines of its own, which would be read as the file's first and last
+    rows: an import, or a part, sent as one is told to send the file's bytes as the body."""
+    up = (await test_client.post(BASE, json={"fileName": "big.ndjson", "size": len(DATA), "format": "ndjson"})).json()
+    for url in ("/api/v1/ws1/versioning/graphs/g1/imports", f"{BASE}/{up['uploadId']}/parts/0"):
+        send = test_client.put if "/parts/" in url else test_client.post
+        r = await send(url, files={"file": ("big.ndjson", DATA)})
+        assert r.status_code == 415 and "--data-binary" in r.json()["detail"], (url, r.text)
+    assert api.created == [] and (await test_client.get(f"{BASE}/{up['uploadId']}")).json()["received"] == []
+
+
+async def test_an_import_keeps_how_many_refused_rows_it_may_go_on_without(test_client, api, monkeypatch):
+    """``maxRefusedRows`` is kept on the job as it was asked — or, left out, as the platform's — so a
+    resumed job holds as the first run did; one that isn't a limit says what it may be."""
+    from backend.app.services.versioning import config as gv_config
+
+    monkeypatch.setattr(gv_config, "IMPORT_MAX_REFUSED_ROWS", "25")
+    for asked, kept in ((None, "25"), ("-1", "-1"), ("0.5%", "0.5%")):
+        up = (await test_client.post(BASE, json={"fileName": "f.ndjson", "size": len(DATA), "format": "ndjson"})).json()
+        await test_client.put(f"{BASE}/{up['uploadId']}/parts/0", content=DATA)
+        params = {"reconcileMode": "replace", **({"maxRefusedRows": asked} if asked else {})}
+        done = await test_client.post(f"{BASE}/{up['uploadId']}/complete", params=params)
+        assert done.status_code == 202, done.text
+        assert api.created[-1]["import_settings"]["maxRefusedRows"] == kept
+    bad = await test_client.post(f"{BASE}/{up['uploadId']}/complete", params={"maxRefusedRows": "lots"})
+    assert bad.status_code == 422 and bad.json()["detail"]["type"] == "invalid_max_refused_rows", bad.text
+    assert "-1 (any)" in bad.json()["detail"]["message"]
 
 
 async def test_a_client_that_splits_files_its_own_way_says_so(test_client, api, part_bounds):

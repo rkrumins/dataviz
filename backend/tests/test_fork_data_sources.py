@@ -46,7 +46,9 @@ def test_a_fork_row_takes_its_parents_governing_settings():
         id="ds_parent", workspace_id="ws_1", provider_id="prov_1", label=None, graph_name="sales",
         ontology_id="ont_1", is_restricted=True, access_level="admin", identity_property="id",
         name_property="title", draft_default_visibility="private", draft_levels="any",
-        review_self_approval=False, review_self_merge=True)
+        review_self_approval=False, review_self_merge=True, import_identifier="prop.sap_id",
+        import_replace_min_live=10, import_replace_delete_fraction=0.9,
+        import_replace_create_fraction=None, import_replace_min_match_fraction=None)
     row = fork_sources.fork_row(parent, ds_id="dsfork_abc", name="Plan", parent_graph_id="g_1",
                                 actor="u_1")
     assert (row.id, row.workspace_id, row.provider_id) == ("dsfork_abc", "ws_1", "prov_1")

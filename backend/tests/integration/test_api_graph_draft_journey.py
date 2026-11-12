@@ -141,6 +141,12 @@ async def _run() -> None:
             r = await c.post(f"{V1}/graphs/{gid}/bulk-ingest", content=_IMPORT_NDJSON)
             assert r.status_code == 200, r.text
             assert r.json()["ingested"] == 3, r.text          # 2 nodes + 1 edge
+            # Its nodes took urn:uuid ids, as an import mints them: found by their urns.
+            r = await c.post(f"{V1}/graphs/{gid}/identities/resolve",
+                             json={"identifier": "urn", "values": ["urn:t:root", "urn:t:child"]})
+            assert r.status_code == 200, r.text
+            ROOT, CHILD = (x["entityId"] for x in r.json()["results"])
+            assert ROOT.startswith("urn:uuid:") and CHILD.startswith("urn:uuid:"), r.json()
 
             # 3. open a draft
             draft = (await c.post(f"{V1}/graphs/{gid}/branches", json={})).json()["branchId"]
@@ -185,8 +191,8 @@ async def _run() -> None:
             assert r.json()["assigned"].get("tmp1") == "urn:t:batch", r.json()
             st_b = (await c.get(f"{V1}/graphs/{gid}/branches/{draft}/state")).json()["nodes"]
             assert "urn:t:batch" in st_b, list(st_b)
-            assert st_b["urn:t:child"]["displayName"] == "Child v2", st_b["urn:t:child"]
-            assert st_b["urn:t:child"]["entityType"] == "Table", st_b["urn:t:child"]  # merge kept it
+            assert st_b[CHILD]["displayName"] == "Child v2", st_b[CHILD]
+            assert st_b[CHILD]["entityType"] == "Table", st_b[CHILD]  # merge kept it
 
             # 6. routing isolation: the same read on MAIN (no branchId) never sees the draft. No
             #    projector runs here, so main is stale and served from Postgres: the import only.
@@ -195,7 +201,7 @@ async def _run() -> None:
 
             # 7. store isolation: versioning main state has the import but NOT the draft node yet
             st = (await c.get(f"{V1}/graphs/{gid}/branches/{main_id}/state")).json()
-            assert "urn:t:root" in st["nodes"] and new_urn not in st["nodes"]
+            assert ROOT in st["nodes"] and new_urn not in st["nodes"]
 
             # 8. unknown branch on a versioned graph → 404
             bad = await c.post(f"{GP}/nodes/query",
@@ -208,7 +214,7 @@ async def _run() -> None:
 
             # 10. main now carries the imported graph + the draft edit
             st2 = (await c.get(f"{V1}/graphs/{gid}/branches/{main_id}/state")).json()
-            assert {"urn:t:root", "urn:t:child", new_urn} <= set(st2["nodes"])
+            assert {ROOT, CHILD, new_urn} <= set(st2["nodes"])
 
             # 11. a save to the published draft, or to main by name, is refused with 409
             late = {"ops": [{"op": "update", "kind": "node", "id": "urn:t:child",

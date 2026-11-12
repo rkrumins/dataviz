@@ -27,6 +27,11 @@ export interface SyncVersioned {
   progressTotal?: number | null
   committedRevision?: SyncRevision | null
   projectedRevision?: SyncRevision | null
+  /** The version views show: `committed` while in sync; while the graph is updated, the version
+   *  it last finished, shown complete until the new one is in; null when views read the system of
+   *  record (nothing written yet, or out of the graph). Absent from a server that predates it. */
+  served?: number | null
+  servedRevision?: SyncRevision | null
 }
 
 export interface SyncSummaries {

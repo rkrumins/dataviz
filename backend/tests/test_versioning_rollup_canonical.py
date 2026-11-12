@@ -22,13 +22,23 @@ class _Rows:
     def all(self):
         return self._rows
 
+    def scalars(self):                       # the window's distinct edge ids
+        return _Rows([r[0] for r in self._rows])
+
 
 class _Session:
+    """The window's edge versions ``rows`` (``(id, op, payload)``), read as the delta reads them:
+    a page of distinct edge ids after its keyset, in id order. ``pages`` records each page."""
+
     def __init__(self, rows):
         self.rows = rows
+        self.pages = []
 
     async def execute(self, stmt):
-        return _Rows(self.rows)
+        after = stmt.compile().params.get("entity_id_1", "")
+        page = sorted({r[0] for r in self.rows if r[0] > after})[:stmt._limit]
+        self.pages.append(page)
+        return _Rows([(i,) for i in page])
 
 
 class _Svc:
@@ -43,11 +53,22 @@ class _Svc:
                 if i:
                     self.parent[f"{c}{i}"] = f"{c}{i - 1}"
 
+    #: The window's edge rows, ``{id: (op, payload)}``, as at its end (seq 2).
+    window: dict = {}
+
     async def _values_at(self, s, gid, bid, ids, seq):
         return {
             i: {"urn": f"urn:{i}", "entityType": self.types[i]}
             for i in ids if i in self.types
         }
+
+    async def _skeletons_at(self, s, gid, bid, ids, seq):
+        out = await self._values_at(s, gid, bid, ids, seq)
+        for i in ids:
+            if i in self.window and seq >= 2:
+                op, payload = self.window[i]
+                out[i] = None if op == "delete" else payload
+        return out
 
     async def _containment_ancestors(self, s, gid, bid, node_ids, cset, as_of):
         seen = set(node_ids)
@@ -67,14 +88,21 @@ class _Svc:
     _containment_parents_climb = _containment_ancestors
 
 
-def _projector(resolver):
+def _projector(resolver, svc=None):
     p = FalkorProjector(
         graph_client_factory=lambda name, provider_id=None: None,
         batch_size=10,
         edge_types_resolver=resolver,
     )
-    p._svc = _Svc()
+    p._svc = svc or _Svc()
     return p
+
+
+def _deltas(p, rows):
+    """The projector's deltas for a window ``(1, 2]`` holding ``rows`` (``(id, op, payload)``)."""
+    p._svc.window = {eid: (op, payload) for eid, op, payload in rows}
+    return asyncio.run(p._compute_rollup_deltas(_Session(rows), SimpleNamespace(id="g1"),
+                                                "main", 1, 2))
 
 
 _CREATE = {"sourceEntityId": "a3", "targetEntityId": "b3", "edgeType": "FLOWS"}
@@ -87,10 +115,7 @@ def test_projector_emits_canonical_pairs_with_level_stamps():
         return (["CONTAINS"], ["FLOWS"], levels)
 
     p = _projector(resolver)
-    s = _Session([("e1", "create", _CREATE)])
-    pairs = asyncio.run(
-        p._compute_rollup_deltas(s, SimpleNamespace(id="g1"), "main", 1, 2)
-    )
+    pairs = _deltas(p, [("e1", "create", _CREATE)])
 
     # Full cube deltas (every ancestor combination minus the raw
     # mirror), with the canonical diagonal flagged via dwc — the apply
@@ -125,10 +150,7 @@ def test_projector_structural_canonical_without_level_map():
         return (["CONTAINS"], ["FLOWS"])
 
     p = _projector(resolver)
-    s = _Session([("e1", "create", _CREATE)])
-    pairs = asyncio.run(
-        p._compute_rollup_deltas(s, SimpleNamespace(id="g1"), "main", 1, 2)
-    )
+    pairs = _deltas(p, [("e1", "create", _CREATE)])
 
     canonical = {k for k, v in pairs.items() if v.get("dwc")}
     assert canonical == {
@@ -150,12 +172,8 @@ def test_projector_delete_emits_negative_canonical_deltas():
                 out["e1"] = dict(_CREATE)   # edge existed before the window
             return out
 
-    p = _projector(resolver)
-    p._svc = _SvcWithBefore()
-    s = _Session([("e1", "delete", None)])
-    pairs = asyncio.run(
-        p._compute_rollup_deltas(s, SimpleNamespace(id="g1"), "main", 1, 2)
-    )
+    p = _projector(resolver, _SvcWithBefore())
+    pairs = _deltas(p, [("e1", "delete", None)])
 
     canonical = {k for k, v in pairs.items() if v.get("dwc")}
     assert canonical == {
@@ -186,14 +204,9 @@ def test_projector_self_nesting_type_emits_every_depth():
                 "b1": "Roots", "b2": "Node", "b3": "Node",
             }
 
-    p = _projector(resolver)
-    p._svc = _SelfNestSvc()
-    s = _Session([("e1", "create",
-                   {"sourceEntityId": "a3", "targetEntityId": "b3",
-                    "edgeType": "FLOWS"})])
-    pairs = asyncio.run(
-        p._compute_rollup_deltas(s, SimpleNamespace(id="g1"), "main", 1, 2)
-    )
+    p = _projector(resolver, _SelfNestSvc())
+    pairs = _deltas(p, [("e1", "create",
+                         {"sourceEntityId": "a3", "targetEntityId": "b3", "edgeType": "FLOWS"})])
 
     canonical = {k for k, v in pairs.items() if v.get("dwc")}
     assert canonical == {

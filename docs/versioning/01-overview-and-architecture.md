@@ -140,22 +140,23 @@ graph TB
 ```mermaid
 flowchart TD
     R{"branch_id?"} -->|"draft"| D["DraftOverlayProvider<br/>= base ⊕ delta"]
-    R -->|"main / none"| F{"projection fresh?<br/>projected ≥ committed"}
+    R -->|"main / none"| F{"key serves a version?<br/>head, or the one it last published"}
     R -->|"as-of seq"| P0["VersionedBranchProvider<br/>(Postgres snapshot, read-only)"]
     F -->|"yes"| L["live FalkorDB<br/>(hot path + rollups)"]
-    F -->|"no (just merged)"| P1["VersionedBranchProvider<br/>(Postgres compose — read-your-writes)"]
+    F -->|"no (written from nothing, evicted)"| P1["VersionedBranchProvider<br/>(Postgres compose)"]
     D -->|"base = "| F
 ```
 
 - **`main`, fresh** → live FalkorDB (the only place materialized rollups exist).
-- **`main`, lagging** (e.g. seconds after a merge) → Postgres composition, so a just-committed change
-  is visible immediately.
+- **`main`, behind** (just after a merge or an import, or while the key is rebuilt in place) → live
+  FalkorDB at the version the key last published, complete; the view's sync chip says an earlier
+  version is showing until the newer one is in, then the view refetches.
+- **`main`, no version in the key** (a first seed, a move, an evicted graph) → Postgres composition.
 - **draft** → `DraftOverlayProvider`, whose *base* is whichever of the above serves `main`.
 - **as-of / historical** → a read-only Postgres snapshot at a `commit_seq`.
 
-> **Limitation.** Two read surfaces compute "fresh" slightly differently (the neighbors endpoint
-> honors `READ_MAX_LAG`; ContextEngine uses strict `projected ≥ committed`). They coincide at the
-> default `READ_MAX_LAG=0`. See [09](09-scale-limits-and-roadmap.md).
+> One rule decides it for every read surface (`serving_seq`, reported as the watermark's `served`);
+> `GRAPHVER_READ_MAX_LAG=0` serves the head only. See [04](04-projection-and-cache.md) §5.
 
 ## 6. Write paths — two ways in, one system of record
 

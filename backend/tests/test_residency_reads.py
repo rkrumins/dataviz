@@ -262,7 +262,7 @@ async def test_a_native_query_holds_its_graph_before_it_reads_the_watermark(monk
 
         async def projection_watermark(self, gid):
             order.append("watermark")
-            return {"fresh": True, "status": "idle", "falkor_provider": None,
+            return {"fresh": True, "status": "idle", "served": 1, "falkor_provider": None,
                     "falkor_graph_name": "k"}
 
     async def versioned(**kw):

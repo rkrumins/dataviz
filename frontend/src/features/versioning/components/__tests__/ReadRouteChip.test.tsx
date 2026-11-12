@@ -42,6 +42,15 @@ describe('ReadRouteChip', () => {
     expect(screen.getByText('Serving from Postgres (catching up)')).toBeInTheDocument()
   })
 
+  it('says which earlier version FalkorDB serves while the newer one is written', async () => {
+    wm = { ...WM, projected: 10, fresh: false, status: 'projecting', served: 10 }
+    render(<ReadRouteChip workspaceId="ws1" graphId="g1" isDraft={false} />)
+    const chip = screen.getByText('Serving #10 from FalkorDB · #12 being written')
+    await userEvent.setup().hover(chip)
+    expect(await screen.findByRole('tooltip')).toHaveTextContent(
+      'Published is read from the fast read layer at the version it last finished, while the newer one is written')
+  })
+
   it('says an unloaded graph is served from Postgres, not that it is catching up', () => {
     wm = { ...WM, projected: 0, fresh: false, status: 'evicted', readRoute: { main: 'postgres', drafts: 'overlay' } }
     render(<ReadRouteChip workspaceId="ws1" graphId="g1" isDraft={false} />)
@@ -100,6 +109,12 @@ describe('ReadRouteChip in the Business view', () => {
     await userEvent.setup().hover(chip)
     expect(await screen.findByRole('tooltip')).toHaveTextContent('Reads stay correct while it catches up')
     expect(document.body.textContent).not.toMatch(/Postgres|FalkorDB/)
+  })
+
+  it('says nothing while FalkorDB serves an earlier version: the sync chip in the header says it', () => {
+    wm = { ...WM, projected: 10, fresh: false, status: 'projecting', served: 10 }
+    const { container } = render(<ReadRouteChip workspaceId="ws1" graphId="g1" isDraft={false} />)
+    expect(container).toBeEmptyDOMElement()
   })
 
   it('says nothing under a draft while FalkorDB serves published', () => {

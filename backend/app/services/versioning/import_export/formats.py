@@ -16,9 +16,17 @@ import asyncio
 import csv
 import io
 import json
-from typing import Any, AsyncIterator, Dict, List, Protocol, Sequence
+from typing import Any, AsyncIterator, Dict, List, Optional, Protocol, Sequence, Tuple
 
 from .rowmodel import cell_text, parse_list_cells
+
+
+#: Where a record is in its file, when its reader is asked (``at=True``): ``{"line": n}`` for an
+#: NDJSON line, or the line a CSV/TSV record starts on; ``{"item": i}`` for an element of a JSON
+#: array, from 0; ``{"sheet": name, "row": n}`` for an Excel row. Lines and rows count from 1, as
+#: an editor and a spreadsheet show them. The import takes it off a record before reading it as
+#: data (``import_worker._normalize_page``), so a refused row says where to find it.
+AT = "@at"
 
 
 class FormatAdapter(Protocol):
@@ -103,11 +111,12 @@ async def _lines(chunks: AsyncIterator[bytes]) -> AsyncIterator[str]:
         yield _decode_line(rest, first=not seen)
 
 
-async def _csv_records(lines: AsyncIterator[str], delim: str) -> AsyncIterator[str]:
-    """Group physical lines into logical CSV records: a quoted cell may contain newlines, so lines
-    are joined while one is left open. Same rule as the csv reader: a quote opens a quoted cell
-    only at the start of a cell (anywhere else it is literal, e.g. ``5" screen``), and inside one
-    ``""`` is an escaped quote. A line with no quote costs one ``find``."""
+async def _csv_records(lines: AsyncIterator[str], delim: str) -> AsyncIterator[Tuple[int, str]]:
+    """Group physical lines into logical CSV records, each with the line it starts on: a quoted
+    cell may contain newlines, so lines are joined while one is left open. Same rule as the csv
+    reader: a quote opens a quoted cell only at the start of a cell (anywhere else it is literal,
+    e.g. ``5" screen``), and inside one ``""`` is an escaped quote. A line with no quote costs one
+    ``find``."""
     record: List[str] = []
     size = 0                                  # characters of the record so far
     quoted = False
@@ -131,34 +140,43 @@ async def _csv_records(lines: AsyncIterator[str], delim: str) -> AsyncIterator[s
                 quoted = True                     # a quote opening a cell
             i = line.find('"', i + 1)
         if not quoted:
-            yield "\n".join(record)
+            yield number - len(record) + 1, "\n".join(record)
             record, size = [], 0
     if record:
-        yield "\n".join(record)   # a quoted cell still open at EOF: the csv reader closes it
+        yield number - len(record) + 1, "\n".join(record)   # a quoted cell still open at EOF
 
 
 class NdjsonAdapter:
     fmt = "ndjson"
 
-    async def parse(self, chunks: AsyncIterator[bytes]) -> AsyncIterator[Dict[str, Any]]:
+    async def parse(self, chunks: AsyncIterator[bytes], *, at: bool = False) -> AsyncIterator[Dict[str, Any]]:
+        number = 0
         async for line in _lines(chunks):
+            number += 1
             line = line.strip()
             if line:
-                yield json.loads(line)
+                rec = json.loads(line)
+                if at and isinstance(rec, dict):
+                    rec[AT] = {"line": number}
+                yield rec
 
-    async def parse_pages(self, chunks: AsyncIterator[bytes],
-                          size: int = 2000) -> AsyncIterator[List[Dict[str, Any]]]:
+    async def parse_pages(self, chunks: AsyncIterator[bytes], size: int = 2000, *,
+                          at: bool = False) -> AsyncIterator[List[Dict[str, Any]]]:
         """:meth:`parse`, a page of records at a time, each page decoded off the event loop."""
         page: List[str] = []
+        numbers: List[int] = []
+        number = 0
         async for line in _lines(chunks):
+            number += 1
             line = line.strip()
             if line:
                 page.append(line)
+                numbers.append(number)
                 if len(page) >= size:
-                    yield await asyncio.to_thread(_decode_lines, page)
-                    page = []
+                    yield await asyncio.to_thread(_decode_lines, page, numbers if at else None)
+                    page, numbers = [], []
         if page:
-            yield await asyncio.to_thread(_decode_lines, page)
+            yield await asyncio.to_thread(_decode_lines, page, numbers if at else None)
 
     async def write(
         self, records: AsyncIterator[Dict[str, Any]], *, columns: Sequence[str] = ()
@@ -173,8 +191,13 @@ class NdjsonAdapter:
             yield await asyncio.to_thread(_ndjson_lines, page)
 
 
-def _decode_lines(lines: List[str]) -> List[Dict[str, Any]]:
-    return [json.loads(line) for line in lines]
+def _decode_lines(lines: List[str], numbers: Optional[List[int]] = None) -> List[Dict[str, Any]]:
+    records = [json.loads(line) for line in lines]
+    if numbers is not None:
+        for rec, number in zip(records, numbers):
+            if isinstance(rec, dict):
+                rec[AT] = {"line": number}
+    return records
 
 
 class DelimitedAdapter:
@@ -184,16 +207,19 @@ class DelimitedAdapter:
         self.fmt = fmt
         self._delim = delimiter
 
-    async def parse(self, chunks: AsyncIterator[bytes]) -> AsyncIterator[Dict[str, Any]]:
+    async def parse(self, chunks: AsyncIterator[bytes], *, at: bool = False) -> AsyncIterator[Dict[str, Any]]:
         header: List[str] | None = None
-        async for record in _csv_records(_lines(chunks), self._delim):
+        async for number, record in _csv_records(_lines(chunks), self._delim):
             row = next(csv.reader([record], delimiter=self._delim))
             if not any(c.strip() for c in row):
                 continue                      # a blank row (",,,,"), as the xlsx adapter skips
             if header is None:
                 header = row
                 continue
-            yield parse_list_cells({header[i]: row[i] for i in range(min(len(header), len(row)))})
+            rec = parse_list_cells({header[i]: row[i] for i in range(min(len(header), len(row)))})
+            if at:
+                rec[AT] = {"line": number}
+            yield rec
 
     async def write(
         self, records: AsyncIterator[Dict[str, Any]], *, columns: Sequence[str]
@@ -221,7 +247,7 @@ class JsonAdapter:
 
     fmt = "json"
 
-    async def parse(self, chunks: AsyncIterator[bytes]) -> AsyncIterator[Dict[str, Any]]:
+    async def parse(self, chunks: AsyncIterator[bytes], *, at: bool = False) -> AsyncIterator[Dict[str, Any]]:
         buf = bytearray()   # amortized appends; `bytes +=` re-copied the whole buffer per chunk
         async for chunk in chunks:
             buf += chunk
@@ -231,8 +257,10 @@ class JsonAdapter:
         data = json.loads(text)
         if isinstance(data, dict):                       # {"records": [...]} or a single object
             data = data.get("records") or data.get("rows") or [data]
-        for rec in data:
+        for item, rec in enumerate(data):
             if isinstance(rec, dict):
+                if at:
+                    rec[AT] = {"item": item}
                 yield rec
 
     async def write(

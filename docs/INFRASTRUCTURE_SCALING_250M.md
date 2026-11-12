@@ -302,7 +302,7 @@ Sizing rationale: `maxmemory 90gb` ≈ 70% of the 128 GB node — the remainder 
 | `AGGREGATION_MAX_PAIRS_PER_PAGE` | `200000` (default) | Bounds high-fan-in hub pages |
 | `GRAPHVER_FALKOR_MAX_RESIDENT` / `GRAPHVER_FALKOR_BUDGETS` | — | No longer acted on. Turn on **Graph residency** (Admin → Features) and give every shard a `maxmemory`, so FalkorDB keeps the working set, not the full 250M corpus ([17 §16](versioning/17-forks-and-residency.md#16-turning-residency-on)) |
 | `GRAPHVER_PROJECTION_CONCURRENCY` | `8` (default; raise with worker CPU) | Keeps hundreds of graphs' projections caught up |
-| `GRAPHVER_READ_MAX_LAG` | `0` (strict) — consider small >0 during bulk imports | Governs FalkorDB-vs-Postgres read freshness fallback |
+| `GRAPHVER_READ_MAX_LAG` | `-1` (default: the key serves the version it last published while it catches up or rebuilds) — `0` for strict head-only reads | Governs FalkorDB-vs-Postgres read freshness fallback |
 
 ### 4.6 Failure behavior (delta vs FALKORDB_DEPLOYMENT §5)
 
@@ -372,7 +372,7 @@ App node pool: `n4-standard-8`, autoscaled 6–16 nodes across 3 zones.
 | | `cluster_state`, per-shard master count | anything ≠ ok / ≠ 1 |
 | | replication offset lag per replica | > 60 s |
 | | slowlog / query timeouts, `MAX_QUEUED_QUERIES` rejections | sustained |
-| Projection | `projection_state` watermark lag (projected vs committed `commit_seq`) | > `GRAPHVER_READ_MAX_LAG` + margin — this is the user-facing freshness SLO |
+| Projection | `projection_state` watermark lag (projected vs committed `commit_seq`) | `graphver_projection_lag_seconds_max` > 5 min — this is the user-facing freshness SLO (reads show an earlier version meanwhile) |
 | Aggregation | `aggregation.jobs` stream lag (`XLEN` vs consumer last-id) | growing for > 10 min |
 | GKE | pod restarts in falkordb pool, PDB violations, PV utilization | any |
 
@@ -412,7 +412,7 @@ Phased, each gate verifiable before the next:
 | `GRAPHVER_POOL_SIZE` / `GRAPHVER_POOL_MAX_OVERFLOW` | per tier | 10 / 5 (defaults) |
 | `GRAPHVER_INGEST_BATCH_SIZE` / `GRAPHVER_PROJECTION_BATCH_SIZE` | ingest/projection tiers | 10000 |
 | `GRAPHVER_PROJECTION_CONCURRENCY` | projection worker | 8 |
-| `GRAPHVER_READ_MAX_LAG` | web tiers | 0 (strict) |
+| `GRAPHVER_READ_MAX_LAG` | web tiers | -1 (serve the last published version while updating) |
 | `GRAPHVER_FALKOR_MAX_RESIDENT` / `GRAPHVER_FALKOR_BUDGETS` | projection worker | ≈ shard `maxmemory` × 0.8 per provider |
 | `FALKORDB_MODE` | every tier that reads or writes FalkorDB (web, workers, projection) | `cluster` |
 | `FALKORDB_CLUSTER_NODES` | same | three shard-0 pod DNS names |

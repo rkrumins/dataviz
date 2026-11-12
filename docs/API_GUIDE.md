@@ -751,6 +751,8 @@ A saved filter's `query` is the Explorer's address query, such as `sourceKind=ve
 An import never writes to the published graph: it lands in a draft, which you review and
 publish.
 
+The whole round trip, once for each identifier, with every request and answer: [Export, edit offline, import back](/docs/import-export-api).
+
 1. Find the data source's versioned graph:
 
    ```bash
@@ -784,12 +786,27 @@ publish.
    ```
 
    `-T` streams the file from disk. `--data-binary @lineage.ndjson` would read all of it into
-   memory first.
+   memory first. The same from Python, Node.js, Go or Java, for an upsert and a full replace:
+   [Send Data From Your Service](/docs/import-from-your-service).
 
    `format` is `ndjson`, `csv`, `tsv`, `json` or `xlsx`. `reconcileMode=replace` also deletes
    everything in scope that the file doesn't mention. `viewId=` places what the import creates
    in that view's layout, so it needs edit access to the view too — with a key, **Views: read &
    write**.
+
+   `identifier=` says what the file's rows find their entities by: `entity_id` (the default),
+   `urn`, which takes a row's entity id or its urn and nothing else, or `prop.<name>`, a property
+   of your own such as `prop.external_id`. A row it finds is updated with
+   only the fields it carries; one it doesn't is created, keeping its urn, under an id derived from
+   it; an entity's id never changes. A refused row says why with a `code` (`no_key`: give it a urn).
+   Leave `identifier` out and the graph's default applies, which a workspace admin sets on the data
+   source's Versioning tab: `GET …/graphs/{gid}/import-settings` says what it is, where it comes
+   from, the replace guard's limits in force, and the properties its imports match by.
+
+   To write by entity id (`POST /graph/changes`) when you know items by your own system's ids,
+   look them up first: `POST …/graphs/{gid}/identities/resolve` with `{"identifier":
+   "prop.external_id", "values": ["E-1", "E-2"]}` answers each value's `entityId` as an import would
+   find it (`found`, `none`, or `duplicate` with both ids), up to 10,000 values a call.
 
    An `idempotencyKey` makes the request safe to send again: the same key from you answers with
    the import it started, with no second draft or job. If the first request broke off before its
@@ -815,6 +832,10 @@ publish.
 
    If the loop stops, `GET …/imports/uploads/$ID` lists the parts already `received`; send
    the others and complete. An upload has a day to finish.
+
+   Or send the file itself as the body that starts the upload, in place of the description
+   (`POST …/imports/uploads?fileName=lineage.ndjson&format=ndjson`, `-T lineage.ndjson`): it is
+   stored as its parts as it arrives, and the answer has every part `received`. Then complete it.
 
    Or send the whole file to part `0` in one request: it is cut into its parts as it arrives. If
    it breaks off, the parts it brought whole are kept; send the rest of the file to the first part
@@ -864,7 +885,10 @@ api GET "/api/v1/$WS/versioning/graphs/$GID/exports/$JOB/download" -C - -o linea
 ```
 
 `-C -` makes curl send a `Range` for what it already has, so an interrupted download carries
-on where it stopped. A finished export is kept for a day. For a data source without version
+on where it stopped. A finished export is kept for a day. To check first what an export would
+hold, as the Export dialog does, `GET …/graphs/$GID/exports/plan?format=ndjson` (with the same
+`viewId`, `branchId` or `asOfSeq`) answers within 5 s however large the graph: counts it can't
+finish by then are `null`, not waited for. For a data source without version
 control, stream it instead: `GET /api/v1/$WS/graph/export/stream?dataSourceId=$DS&format=ndjson`
 (this one doesn't resume). The formats, columns and limits are in
 [Import / Export](/docs/versioning-import-export).

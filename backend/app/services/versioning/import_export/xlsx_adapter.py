@@ -31,7 +31,7 @@ _COLUMNS = "Columns"                 # a template's guide to its columns (never 
 class XlsxAdapter:
     fmt = "xlsx"
 
-    async def parse(self, chunks: AsyncIterator[bytes]) -> AsyncIterator[Dict[str, Any]]:
+    async def parse(self, chunks: AsyncIterator[bytes], *, at: bool = False) -> AsyncIterator[Dict[str, Any]]:
         import openpyxl  # lazy — only when xlsx is actually used
 
         buf = bytearray()   # amortized appends; `bytes +=` re-copied the whole buffer per chunk
@@ -44,7 +44,7 @@ class XlsxAdapter:
                 ws = _find_sheet(wb, sheet_name)
                 if ws is None:
                     continue
-                for rec in _read_sheet(ws):
+                for rec in _read_sheet(ws, at=at):
                     rec["kind"] = kind          # kind is the SHEET, not a column
                     yield rec
         finally:
@@ -110,15 +110,19 @@ def _find_sheet(wb, name: str):
     return None
 
 
-def _read_sheet(ws) -> List[Dict[str, Any]]:
+def _read_sheet(ws, *, at: bool = False) -> List[Dict[str, Any]]:
+    """The sheet's records, read under its first row's column names. ``at``: each with the sheet
+    row it is on (``formats.AT``), counting as the spreadsheet does."""
+    from .formats import AT
     rows = ws.iter_rows(values_only=True)
     try:
         header_row = next(rows)
     except StopIteration:
         return []
     header = [str(h).strip() if h is not None else "" for h in header_row]
+    first = getattr(ws, "min_row", None) or 1          # the header's row: data starts below it
     out: List[Dict[str, Any]] = []
-    for row in rows:
+    for number, row in enumerate(rows, start=first + 1):
         if row is None or all(c is None or str(c).strip() == "" for c in row):
             continue                             # blank row
         rec: Dict[str, Any] = {}
@@ -126,7 +130,10 @@ def _read_sheet(ws) -> List[Dict[str, Any]]:
             if i < len(header) and header[i] and val is not None and str(val).strip() != "":
                 rec[header[i]] = val             # empty cells dropped (PATCH semantics)
         if rec:
-            out.append(parse_list_cells(rec))
+            parsed = parse_list_cells(rec)
+            if at:
+                parsed[AT] = {"sheet": ws.title, "row": number}
+            out.append(parsed)
     return out
 
 

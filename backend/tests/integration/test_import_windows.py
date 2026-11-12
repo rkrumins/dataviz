@@ -112,7 +112,10 @@ async def _windows(svc, ie, store) -> None:
     branch_id, summary = await _import(ie, store, gid, lines)
     # new: D, E, d->E (both its ends made by later rows), a->d; updated: A; unchanged: B, A->B;
     # invalid: the edge from a node nowhere to be found.
-    assert summary == {"new": 4, "updated": 1, "unchanged": 2, "deleted": 0, "invalid": 1}, summary
+    assert _tallies(summary) == {"new": 4, "updated": 1, "unchanged": 2, "deleted": 0, "invalid": 1}, summary
+    (refused,) = summary["refused"]["rows"]
+    assert (refused["code"], refused["at"]) == ("end_not_found", {"line": 8}), refused
+    assert refused["reason"] == "its source urn:X names no node the graph holds or the file makes"
     nodes, edges = await _state(svc, gid, branch_id)
     assert nodes == {"urn:A": "A2", "urn:B": "B", "urn:D": "D", "urn:E": "E"}, nodes
     assert edges == {("urn:A", "urn:B", "LINEAGE"), ("urn:D", "urn:E", "LINEAGE"),
@@ -120,7 +123,7 @@ async def _windows(svc, ie, store) -> None:
 
     # The same file again, onto the same draft: every row is now unchanged, nothing is duplicated.
     _, again = await _import(ie, store, gid, lines, branch_id=branch_id)
-    assert again == {"new": 0, "updated": 0, "unchanged": 7, "deleted": 0, "invalid": 1}, again
+    assert _tallies(again) == {"new": 0, "updated": 0, "unchanged": 7, "deleted": 0, "invalid": 1}, again
     assert await _state(svc, gid, branch_id) == (nodes, edges)
 
 
@@ -264,10 +267,18 @@ _RESUME_LINES = [
 ]
 
 
+_TALLY_KEYS = ("new", "updated", "unchanged", "deleted", "invalid")
+
+
+def _tallies(summary: dict) -> dict:
+    """A summary's tallies, without the report of its refused rows (``refused``)."""
+    return {k: summary[k] for k in _TALLY_KEYS}
+
+
 async def _resume(svc, ie, store) -> None:
     gid = await _graph(svc, [_node("ent_A", "urn:A", "a", "A")])
     ref_branch, ref = await _import(ie, store, gid, _RESUME_LINES)
-    assert ref == {"new": 11, "updated": 1, "unchanged": 0, "deleted": 0, "invalid": 2}, ref
+    assert _tallies(ref) == {"new": 11, "updated": 1, "unchanged": 0, "deleted": 0, "invalid": 2}, ref
     ref_job = (await ie.list_jobs(graph_id=gid, job_type="ingest", limit=1))[0]["jobId"]
     want = await _state(svc, gid, ref_branch)
     want_counts = {k: len(v) for k, v in (await svc.materialize_state(graph_id=gid, branch_id=ref_branch)).items()}
@@ -377,7 +388,8 @@ async def _gate_quarantine(svc, ie, store) -> None:
     job = await _import_job(ie, store, gid, lines)
     # windows of two: each holds a row the strict gate refuses next to one it takes
     summary = await ImportWorker(svc, store).run(job["job_id"])
-    assert summary == {"new": 3, "updated": 1, "unchanged": 0, "deleted": 0, "invalid": 4}, summary
+    assert _tallies(summary) == {"new": 3, "updated": 1, "unchanged": 0, "deleted": 0, "invalid": 4}, summary
+    assert summary["refused"]["total"] == 4 and summary["refused"]["byCode"]["end_not_found"] == 1
     nodes, edges = await _state(svc, gid, job["branch_id"])
     assert nodes == {"urn:A": "A renamed", "urn:Q1": "q1", "urn:Q4": "q4"}, nodes
     assert edges == {("urn:Q1", "urn:Q4", "LINEAGE")}, edges
@@ -385,7 +397,8 @@ async def _gate_quarantine(svc, ie, store) -> None:
     assert set(quarantined) == {("urn:Q2", "node"), ("urn:Q3", "node"), ("urn:Q4", "edge"), ("urn:Q2", "edge")}
     for key in (("urn:Q2", "node"), ("urn:Q3", "node"), ("urn:Q4", "edge")):
         assert "not allowed by ontology" in quarantined[key][0], (key, quarantined[key])
-    assert quarantined[("urn:Q2", "edge")] == ["edge endpoint not found"], "its end was quarantined"
+    assert quarantined[("urn:Q2", "edge")] == [
+        "its source urn:Q2 names no node the graph holds or the file makes"], "its end was quarantined"
     async with db.graphver_session() as s:
         assert not (await s.execute(select(ImportRowORM.matched_entity_id).where(
             ImportRowORM.job_id == job["job_id"], ImportRowORM.status == "invalid",

@@ -220,31 +220,79 @@ whole-state importer (~4.4 KB per entity) reached 1.4 GB.
 Each window goes through `resolve_rows` (`resolve.py`) — a **pure, deterministic** function (the id
 minter is injected) that returns `(ops, resolutions)`:
 
-- **Nodes** match an existing entity by **`entity_id` → its pointers → a field the type matches
-  imports by → `qualifiedName`** (rows that point by nothing; `_named`). A row's **pointers** are its
-  `urn` and its value of the data source's identifier property (`prop.<identifier>`), each also in
-  canonical form when it is a `urn:uuid:` (`pointers`). They are not stored: a pointer finds the node
-  that carries it as its urn, the node an earlier import derived its id from it (`pointer_id`), or,
-  for an identifier value given beside a different urn, the node a row of this job gave it to. Two
-  pointers that name two entities refuse the row, and so does a value several live entities carry.
-  No match ⇒ a **new node with one identity, the server's to decide**:
+- **What a row may name its entity by** is the import's **`identifier`** (`?identifier=` on
+  `POST …/imports`, `…/imports/uploads/{id}/complete` and `…/imports/validate`; kept on the job as
+  `jobs.identity_strategy`, and so by a resumed job; `identifier.py`). Unnamed, it is the graph's
+  default, which a workspace admin sets on the data source's Versioning tab (see [Import
+  settings](#import-settings)), else the platform's `GRAPHVER_IMPORT_IDENTIFIER`, `entity_id` by
+  default. Whichever it is, an entity's id never changes: the identifier only says how a row finds
+  it.
+
+  | `identifier` | A node row finds its entity by | An edge's end, by |
+  |---|---|---|
+  | `entity_id` (default) | its `entity_id` (this graph's) → its pointers → a field its type matches imports by → `qualifiedName` (a row with no urn) | `source_entity_id` → `sourceUrn` and `source.<identifier>` → `source.<key>` → `sourceQualifiedName` |
+  | `urn` | its `entity_id` (this graph's) → its `urn`; nothing else | `source_entity_id` → `sourceUrn` |
+  | `prop.<name>` | its `entity_id` (this graph's) → its value of the property `<name>`, such as `prop.external_id`; nothing else | `source_entity_id` → `source.<name>` |
+
+  Any other `entity_id` is the file's own: it links the file's rows (an edge to a node) and nothing
+  more. A 422 (`invalid_identifier`) says what a request may name. `prop.<the data source's
+  identifier property>` is `urn`, which that property holds.
+- **A matching property's index** (`keys.py`; `graphver.entity_keys`, `graphver.key_index`) finds
+  rows by `prop.<name>`, as Dataverse's alternate keys and Salesforce's external ids do:
+  - **Built** by the first import that names the property, from main's live nodes a page at a time,
+    before its first window: minutes at a million nodes. Every later import reads only main's
+    version log since the index's watermark first, so a node made or edited on the canvas is found
+    by its value, never made again. No write path changes.
+  - **One value, one node.** A value two live nodes hold refuses the rows naming it
+    (`duplicate_value`, naming them), and never guesses. A row matched by its `entity_id` whose
+    value is another node's is refused (`two_entities`).
+  - **A changed value is a new key**: a row with the old value creates a node. To keep the node, send
+    its `entity_id` with the new value once.
+  - **A deleted node keeps its last value**, so a row naming it again brings it back under its id.
+  - A new node's id is `urn:uuid:` v5 of the identity scope, the property and its value
+    (`key_pointer_id`), or a v7 when a live node holds that id; it keeps the value, and its row's
+    urn. A urn a live node holds, or a node an earlier row of the file makes, refuses the row
+    (`two_entities`, naming that node): one urn is never two nodes', and to change that node's
+    value its row sends its `entity_id`.
+  - What main's index says is read through the draft: a node the draft changed is read from the
+    draft, and one the draft's view doesn't hold isn't matched. A node main changed after the
+    draft's base — read from main's version log since the base, as many as main's changes — is
+    read as the draft sees it, main at its base: one main deleted since is still the draft's, and
+    one main gave another value keeps its old one. A dry run against main reads main's index alone.
+  - At most `GRAPHVER_MAX_MATCHING_PROPERTIES` (10) a graph (`too_many_matching_properties`). Not on
+    a fork yet (`matching_property_on_fork`): its main is its parent's and its own, and a property
+    default it takes from its parent is `entity_id` there, all but `prop.<identifier>`, which is
+    `urn` ([Import settings](#import-settings)).
+    A dry run never builds an index: by a property no import has matched by yet, it answers
+    `409 identifier_not_indexed`.
+- **Nodes** match an existing entity by that order (`_named`). A row's **pointers** are its `urn`
+  and its value of the data source's identifier property (`prop.<identifier>`), each also in
+  canonical form when it is a `urn:uuid:` (`pointers`). A pointer finds the node that carries it as
+  its urn, the node an earlier import derived its id from it (`pointer_id`), or, for an identifier
+  value given beside a different urn, the node a row of this job gave it to. Two pointers that name
+  two entities refuse the row, and so does a value several live entities carry.
+  No match ⇒ a **new node, its id the server's to decide**:
   1. the deleted node its pointer names, brought back;
-  2. else a free `urn:uuid:` the row brings, kept;
+  2. else a free `urn:uuid:` the row brings as its urn, or (by `entity_id`) as its `entity_id`, kept
+     as its id — an export's, from another environment, so an entity keeps one id everywhere;
   3. else `urn:uuid:` v5 of the graph's identity scope (the data source at the root of its fork
      lineage, `identity_scope`) and its first pointer, which a re-import derives again;
-  4. else (it points by nothing) a new `urn:uuid:` (a UUIDv7).
+  4. else, a row a later import still finds (by a `qualifiedName`, or a field its type matches
+     imports by), a new `urn:uuid:` (a UUIDv7).
 
-  That one value is the node's `entity_id`, its `urn` and (bound at the write) its identifier
-  property alike, as a canvas create's are ([18 · Identity](18-identity.md)). A matched row never
-  writes its pointers over the node's own urn or identifier. The row joins the window's indexes, and
-  — once its window commits — the job's, by the file's `entity_id` it came with and any second name,
-  whether it matched or made its node, so a later window's rows and edges (and those of the same
-  file imported again) find it.
-- **Edges** resolve each endpoint the same way (`entity_id` — an entity's, or the file's own id of a
-  node the job matched or created — → the pointers `urn` and `source.<identifier>` → `source.<key>`
-  → `qualifiedName`,
-  `_resolve_endpoint`) and key on the `(source_eid, target_eid, edge_type)` triple — the same keying
-  `sync_ingest` uses.
+  A row that names nothing a later import could find it by — only the file's own `entity_id`, or
+  only a unique field's value — is **refused** (`no_key`), rather than created again by every
+  import (and deleted by every replace). The new node **keeps the urn its row gives**; one that gives
+  none, or gives a `urn:uuid:` another entity holds (an id is never a second entity's urn), has its
+  id as its urn. Its identifier property holds the urn, bound at the write
+  ([18 · Identity](18-identity.md)). A matched row never writes over the node's own urn or
+  identifier. The row joins the window's indexes, and — once its window commits — the job's, by
+  the file's `entity_id` it came with and any second name, whether it matched or made its node, so a
+  later window's rows and edges (and those of the same file imported again) find it.
+- **Edges** resolve each endpoint as the table says (`_resolve_endpoint`) and key on the
+  `(source_eid, target_eid, edge_type)` triple — the same keying `sync_ingest` uses. A new edge's id
+  is `urn:uuid:` v5 of the identity scope, its ends' ids and its type (`edge_pointer_id`), so the
+  same edge sent again, from any file or draft, is the same edge.
 - **Team keys and unique fields** are flags on an entity type's fields in the ontology ("Match
   imports by this", "Must be unique"). The worker reads the values the file uses once a run and
   finds their holders in one pass over the draft's live nodes of those types (`KeyIndex`), so memory
@@ -256,8 +304,41 @@ The lookups by `qualifiedName`, and replace's check of which entities some row m
 indexes (migration `20260927_1000_import_indexes`).
 
 > **Invariant — partial acceptance.** An unresolvable or ontology-invalid row is **quarantined**
-> (`resolved_op = "invalid"` + a human reason), never aborting the batch (`resolve.py:14, 154-164`).
-> The tally lands on `job.summary` and the reasons on the `import_rows` row.
+> (`resolved_op = "invalid"` + a human reason), never aborting the batch. The tally lands on
+> `job.summary`, and the reasons and a stable **`code`** on the `import_rows` row; the preview and
+> the dry run return both.
+>
+> | `code` | The row was refused because |
+> |---|---|
+> | `no_key` | it names nothing a later import could find it by again |
+> | `two_entities` | the keys it gives name two different entities |
+> | `duplicate_value` | a value it is matched by, or must keep unique, is held by another entity |
+> | `named_already` | an earlier row of the file names the same entity, and says otherwise |
+> | `changed_since_export` | its entity changed since the file was exported, in the same field |
+> | `invalid_type` / `missing_type` | its type isn't one the ontology defines / a new one has none |
+> | `end_not_found` | an end of the edge names no node |
+> | `edge_moved` | its ends or type differ from the edge its `entity_id` names |
+> | `write_refused` | the graph's write gate refused it |
+> | `invalid_row` | the record can't be read as a node or an edge |
+>
+> `already_gone` marks a delete of what the graph doesn't hold: it changes nothing and is not
+> refused. `resolve.FIXES` says what to do about each code (and about `not_node_or_edge`, a record
+> that is neither): the report, the preview and a held import's message carry it.
+>
+> **The report.** Each window adds its refusals to `job.summary.refused` in the transaction that
+> checkpoints it (`import_worker.tally_refused`): how many for each code, the first 20 rows, and
+> the fixes. A resumed import counts every row once, and nothing reads the job's rows again to
+> report them. Where a row is in its file comes from its reader (`formats.AT`, asked for by
+> `_record_pages`): a line for NDJSON and for where a CSV/TSV record starts, a sheet and row for
+> Excel, an item for a JSON array. `_normalize_page` takes it off the record before it is read as
+> data and keeps it on the staged row as `_at`, which no payload reads.
+>
+> **Hold or go on.** A replace with refused rows deletes nothing, and an `autoPublish` import with
+> them leaves its draft for review, unless the job's `maxRefusedRows` (`import_worker.refused_budget`;
+> the request's, else `IMPORT_MAX_REFUSED_ROWS`, kept on `jobs.import_settings`) allows them: a
+> count, a share of the file's rows, or `-1`. Within it, a replace deletes what no row matched —
+> a refused row that found its entity still matched it, so what it names is kept — and the publish
+> goes ahead, noting `refusedRows`.
 
 ### 3c. Apply
 
@@ -290,7 +371,11 @@ two parts is whole again when it is parsed.
 1. `POST …/imports/uploads` `{fileName, size, format, partBytes?}` → `{uploadId, partBytes, parts,
    expiresAt}`: 16 MiB parts, or the `partBytes` a client asks for, to send parts of its own size
    (5 MiB to 100 MiB). A file too large for its format is refused here (413), before any of it is
-   sent.
+   sent. Or the body is the file itself, sent as anything but JSON (`?fileName&format&partBytes`),
+   with a `Content-Length` or streamed without one (`create_from_body`): it is written as the
+   upload's parts as it arrives, one chunk held at a time, and the record last, with the size that
+   arrived, so a body that breaks off leaves no upload, only parts nothing names, which the
+   store's sweep takes. A JSON body is read no further than a description can be (64 KB).
 2. `PUT …/imports/uploads/{uploadId}/parts/{n}`, the part as the body: several at once, in any order.
    Each is its own write-once object in the store (a bucket mount never appends or renames), and
    must hold exactly its share of the file (422 otherwise, saying how the file is split; a
@@ -301,6 +386,14 @@ two parts is whole again when it is parsed.
    eight at a time, so `received` and completing an upload of thousands of parts answer in
    seconds, not minutes.
 3. `GET …/imports/uploads/{uploadId}` → `received`: what a resumed upload doesn't send again.
+
+   Every body a file's bytes come in on — `POST …/imports`, the upload's start, a part — may say
+   what it hashes to (`Content-Digest`, RFC 9530, `sha-256` or `sha-512`). It is hashed as it
+   arrives (`uploads.checked`), and one that doesn't match is refused (422) once it is in: an
+   upload's parts are dropped, the last included (each part's key is noted before it is written),
+   an upload started with it is never written, and an import's job is failed unqueued. A form
+   (`multipart/form-data`) is refused on all three (415): its own lines would be read as the
+   file's.
 4. `POST …/imports/uploads/{uploadId}/complete?reconcileMode&branchId&viewId&autoPublish` → 202, the
    import job (409 while a part is missing). It reads the parts in order as one file. An upload is
    imported once: its job's idempotency key is `upload:{uploadId}`, so asking again — after a lost
@@ -480,8 +573,8 @@ Two mechanisms deliver it.
   *field*, not an identity, so a rename doesn't fork the entity. A matched node keeps its own urn.
   Since a new node's id is derived from its pointer, re-importing the same file — or an export,
   whose rows carry the nodes' own ids — updates the nodes it created instead of adding them again.
-  A row that points by nothing but the file's own `entity_id` is created again. (Glossary:
-  `entity_id` in [`README.md`](README.md).)
+  A row that points by nothing but the file's own `entity_id` is refused (`no_key`) rather than
+  created again. (Glossary: `entity_id` in [`README.md`](README.md).)
 - **Type-tolerant, field-level diff.** `_changed_fields` / `_changed_props` (`resolve.py:41-84`)
   compare each provided field against the current stored value with `_scalar_eq`
   (`resolve.py:31-38`), which treats `5 == "5"` and `True == "True"` — essential because CSV
@@ -513,9 +606,9 @@ with its reason; none is applied or dropped in silence.
   Tags merge as a set. A stale `_op=delete` is refused. A row with no `baseVersion` (a script's)
   sets what it carries, as before; so does one whose version the graph doesn't hold (another
   graph's export).
-- **A pointer is never stored.** A matched row whose `urn` or identifier value names nothing gets a
-  note, *"urn '…' isn't stored: an import never changes a node's urn"*, and its other edits apply.
-  One that names another entity refuses the row.
+- **An import never re-keys a node.** A matched row whose `urn` or identifier value names nothing
+  gets a note, *"urn '…' isn't stored: an import never changes a node's urn"*, and its other edits
+  apply. One that names another entity refuses the row (`two_entities`).
 - **An exported edge keeps its ends.** An edge row whose `entity_id` is a live edge, but whose ends
   or type resolve to another triple, is refused rather than added as a second edge. To re-point an
   edge, delete its row and add a new one. A row whose ends match updates that edge, even beside a
@@ -553,7 +646,9 @@ dropped** (a blank means "leave unchanged" — PATCH semantics, `rowmodel.py:90-
 column-shift hint rather than silently swallowed as an upsert (`rowmodel.py:89-98`) — the fix for
 the classic "a property value slid into the `_op` slot and my edit vanished" bug.
 
-**Deleting a property** is explicit (an empty cell never deletes). A `\N` / `\NULL` token in a
+**Deleting a property** is explicit (an empty cell never deletes). A token in a node's or an edge's
+own field (`description`, `edgeType`, `tags`, …) refuses the row (`invalid_row`, naming the field):
+those fields are replaced, never removed, and the token would be stored as text. A `\N` / `\NULL` token in a
 `prop.<name>` cell, or a `null` in `properties_json`, becomes the **`PROP_DELETE` sentinel**
 (`"__nx_prop_delete__"`, `rowmodel.py:60-80`) which flows through the update patch to
 `service._patch_payload`, removing the key. The sentinel uses a plain ASCII marker (not a NUL byte,
@@ -583,6 +678,85 @@ aren't file rows, so they're counted separately into `summary["deleted"]`.
 
 Replace is always **reviewed on the draft before publish** — the delete-on-absence set is visible in
 the diff, so a mistaken scope is caught before it touches `main`.
+
+**The replace guard.** A file whose rows name their entities by another key than the import's
+`identifier` matches nothing, so a replace of it would delete its scope and make it again, every id
+and its history with it. Before it deletes anything, a replace counts what it would delete and what
+its draft makes (`_guard_replace`), measured against the main its draft reads (a fork's with its
+parent's), so a file imported again into the draft an earlier run made it in is judged on what the
+draft would publish. A whole graph's scope is every entity main holds. A view's is those of the
+view's entities main holds, and its draft makes every entity the draft holds that main doesn't: a
+file naming the view's entities by another key makes them again outside the view, where its
+placements don't reach, so it is refused like a whole graph's, and so is the same file sent again
+into its draft. In a scope of at least `IMPORT_REPLACE_GUARD_MIN_LIVE` (1,000) entities, one that
+would delete at least `IMPORT_REPLACE_GUARD_DELETE_FRACTION` (0.5) of them **and** create at least
+`IMPORT_REPLACE_GUARD_CREATE_FRACTION` (0.5) as many is refused. A scope that really shrank creates
+little, and a file that really dropped rows deletes little, so neither is refused.
+
+- **Refused:** nothing is deleted, and the file's rows stay on the draft for review. The job fails
+  with `summary.failure = {code: "mass_delete_blocked", action: "allow_mass_delete"}`, and
+  `summary.replaceGuard` holds `{state, live, deletes, creates, limits, sources}`: what it would have
+  done, the limits in force, and whose each one is (`data_source` or `platform`). The message says
+  what to check (the identifier) and how to proceed; the import dialog offers **Replace anyway**,
+  which imports the file again into the same draft with `allowMassDelete=true`. A view's replace
+  places what it made in the draft's copy of the view first, as a completed one does
+  (`summary.viewAssignments`): the run again into that draft makes nothing, and finds what the
+  first made in the view's scope, so once published the view shows it.
+- **Overridden:** `allowMassDelete=true` on the import (anyone who may run it) deletes all the same;
+  the job keeps the allowance (`jobs.allow_mass_delete`, `allowMassDelete` on the job), its
+  `replaceGuard.state` is `overridden`, and the worker logs it. It never stops early (below).
+- **Earlier, fail fast:** a whole graph's replace whose first full node window finds an entity for
+  fewer than `IMPORT_REPLACE_MIN_MATCH_FRACTION` (0.05) of the rows decided so far, in a graph whose
+  main (a fork's with its parent's) holds at least `IMPORT_REPLACE_GUARD_MIN_LIVE`, stops there
+  (`identifier_matched_nothing`, action `identifier`), naming its identifier, rather than read the
+  rest of the file first. Nothing is deleted; the rows read so far are on the draft. One sent with
+  `allowMassDelete=true` reads the whole file, as the guard would let it through.
+
+The limits are the operator's (env, or Helm `config.imports`), and a workspace admin may set a data
+source's own over them (below); `IMPORT_REPLACE_GUARD=0` turns the guard off everywhere and a
+minimum match fraction of 0 the early stop.
+
+### Import settings
+
+A graph's imports run under its data source's own settings, field by field, over the platform's
+(`services/import_settings.py`; `workspace_data_sources.import_*`, NULL where it sets none):
+
+| Setting (API field) | Platform's | What it does |
+|---|---|---|
+| `identifier` | `GRAPHVER_IMPORT_IDENTIFIER` (`entity_id`) | What an import's rows find their entities by when the import names none |
+| `replaceMinLive` | `IMPORT_REPLACE_GUARD_MIN_LIVE` (1,000) | The replace guard judges a scope of at least this many |
+| `replaceDeleteFraction` | `IMPORT_REPLACE_GUARD_DELETE_FRACTION` (0.5) | …refusing a replace that deletes at least this share of it |
+| `replaceCreateFraction` | `IMPORT_REPLACE_GUARD_CREATE_FRACTION` (0.5) | …and creates at least this share as many |
+| `replaceMinMatchFraction` | `IMPORT_REPLACE_MIN_MATCH_FRACTION` (0.05) | A replace whose first node window matches less stops there |
+
+- **Read:** `GET …/graphs/{gid}/import-settings` (anyone who reads the graph, an API key too)
+  answers `overrides` (the graph's own; null where it sets none), `platform`, `effective` (what
+  holds, with `sources`: `data_source`, `platform`, or `fork`, below), `replaceGuard` (the
+  platform's switch), `followsParent`, and `matchingProperties` — each property its imports match
+  by, with its index's `status` (`building`, `ready`), the main commit it describes (`seq`) and
+  whether that is main's head (`current`) — out of `maxMatchingProperties`.
+- **Set:** `PUT` the same path (workspace admins), field by field; `"inherit"` goes back to the
+  platform's, and a field left out stays. A real change is recorded once in the activity log
+  (`workspace.versioning.import_settings_updated`, with what it was and became). An identifier
+  follows the request grammar (422 `invalid_identifier`); a fraction is between 0 and 1. A fork's
+  settings are its parent's (409 `fork_settings_follow_parent`): set there, they follow to its
+  forks. But a fork can't match by a property yet, so where its parent's default identifier (or
+  the platform's) is a `prop.<name>`, a fork's imports match by `entity_id`: its
+  `effective.identifier` says so, from `fork`, and so does an import's `identifierSource`. An
+  import that names the property is refused there (`matching_property_on_fork`). Neither holds for
+  `prop.<identifier>`, the data source's identifier property (as `node_identity` resolves it: the
+  data source's, its provider's, its workspace's or the platform's): it is `urn`, on a fork too,
+  whether it is the default or the import names it.
+- **Kept on the job.** An import resolves them once, when it is made — its identifier (the
+  request's, else the graph's, else the platform's) and the guard's limits — and keeps them
+  (`jobs.import_settings`: `{identifierSource, replaceLimits: {minLive, deleteFraction,
+  createFraction, minMatchFraction, sources}}`, `importSettings` on the job), so a resumed job runs
+  under what it started with, and a change made meanwhile applies from the next import. A dry run
+  says where its identifier came from (`identifierSource`).
+- **In the app:** the data source's Versioning tab shows them under **Imports**, and the import
+  dialog's **Match existing items by** starts at the graph's default, marked, and says when a
+  property no import has matched by yet is indexed first. On a fork whose parent's default is a
+  property other than its identifier property, both say its imports match by Entity ID.
 
 ---
 
@@ -621,8 +795,11 @@ layers — `main` at a commit (a fork's `main` sits on its parent's at the fork 
 at a commit or as it stands now (its `entity_heads`). A layer at a commit never changes, so it is
 read by one query, streamed a page at a time. Paged by keyset instead, each page was planned on its
 own: without statistics for the partitioned table, Postgres expected 200 winners and sorted every
-remaining version row for every page, about 500 entities a second on a 2M-node graph. A draft's
-current state is keyset-paged on `entity_id`. Each page drops the entities a higher layer decides,
+remaining version row for every page, about 500 entities a second on a 2M-node graph. The query is
+read through a cursor declared in SQL, which Postgres plans to start fast. Through the wire
+protocol's cursor it was planned for its whole result, so a layer at an earlier commit (a past
+revision, a draft behind main, a fork's parent) sorted every version row before its first page.
+A draft's current state is keyset-paged on `entity_id`. Each page drops the entities a higher layer decides,
 found with one indexed point lookup per layer, so every live entity comes out once, a page at a
 time, with no map of the whole state in memory. `main` is pinned to its head commit when the export
 starts, so a long export is one consistent snapshot. `import_export/stream.py` turns each page into
@@ -637,7 +814,12 @@ Three ways out, one pipeline:
 
 - **`GET /exports/plan`, then `POST /exports`** — what the Export dialog does for a data source with
   version control. The plan says what the export would hold (counts, emptiness, whether Excel can
-  hold it); then the job (`ExportWorker.run`, queued for the workers as §2 describes) writes the
+  hold it), within `GRAPH_EXPORT_PLAN_BUDGET_SECS` (5 s) whatever the graph: a published `main`
+  is counted from its head pointers, anything else (a draft, a fork, a past revision, a view, a
+  selection) page by page, and finding a view's entities and counting share the budget, the read
+  under way included. What isn't known by then comes back `null` (unknown), never waited for: a
+  plan that waited outlasted the gateway in front of the app on a large graph, and was a 504. Then
+  the job (`ExportWorker.run`, queued for the workers as §2 describes) writes the
   file to the `result_uri` artifact, up to `GRAPH_EXPORT_MAX_BYTES` (50 GiB). While it runs, it
   records its progress in `summary` at most every 5 s, as each page of records comes and each chunk
   of the file goes, so a spreadsheet's column pass reports too: this pass's `nodes` and `edges`, the
@@ -946,12 +1128,16 @@ tests/integration/test_s3_store_minio.py tests/test_object_store.py`.
   Presigned URLs serve package uploads and stored downloads, but not yet a data source's own import
   uploads (`…/imports/uploads`), whose parts still go through the API.
 - **Row-scoped export is API-only** — the UI sends only `props` (`importExportApiService.ts:135-151`).
-- **An import that publishes itself (`autoPublish`) needs `main` not to move while it runs.** Its
-  publish needs the draft up to date with `main`; one that fell behind is kept for review
-  (`summary.publish.reason.type: not_up_to_date`). Bringing a draft of millions of changes up to
-  date (`rebase_draft`) reads them all at once, so for a large import the answer is to import the
-  file again. A worker that stops between an import's finish and its publish job leaves
-  `summary.publish` missing: publish the draft then. A custom draft `name` exists on
+- **An import that publishes itself (`autoPublish`) pulls main when main moved under it**:
+  when its publish is queued (`_publish_own_draft`), a draft behind main is brought up to date
+  (`rebase_draft`, the field-level three-way merge) and queued once it pulls clean; when the queued
+  job runs and finds main moved again, the job pulls the draft it holds and publishes it again
+  itself (`_pull_and_publish`), so the job a client follows ends published or refused with the
+  reason. Up to three pulls; a same-field conflict waits for review (`conflicts`, on the job's
+  error and `summary.publish.reason`). A draft past `SQUASH_PAGED_ABOVE` (200,000) changes pulls
+  reading only its entities main changed too, and what they meet at an edge (`_pull_paged`). A worker that stops
+  between an import's finish and its publish job leaves `summary.publish` missing: publish the
+  draft then. A custom draft `name` exists on
   `create_import_job` but no route exposes it (the draft is named "Import").
 - **`INLINE_IMPORT_MAX` (5,000) two-tier threshold** exists in config as the intended
   "stage small imports client-side, run large ones async" split, but the endpoint currently always
@@ -971,3 +1157,4 @@ tests/integration/test_s3_store_minio.py tests/test_object_store.py`.
   committed-changes review handoff.
 - [09 — Scale, Limits & Roadmap](09-scale-limits-and-roadmap.md) — the async-dispatcher, streaming,
   and retention roadmap.
+- [Export, edit offline, import back](../IMPORT_EXPORT_API.md) — the round trip a script makes, once per identifier, with every request and answer.

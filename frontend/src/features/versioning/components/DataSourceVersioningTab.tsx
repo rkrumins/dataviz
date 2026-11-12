@@ -8,7 +8,7 @@
  */
 import { useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { GitBranch, GitCommitHorizontal, History, Loader2, Sparkles, GitMerge, User, GitPullRequestArrow, ChevronRight, RefreshCw, GitFork, Trash2, RotateCcw, Pause, Play, ShieldCheck, ArrowUpRight } from 'lucide-react'
+import { GitBranch, GitCommitHorizontal, History, Loader2, Sparkles, GitMerge, User, GitPullRequestArrow, ChevronRight, RefreshCw, GitFork, Trash2, RotateCcw, Pause, Play, ShieldCheck, ArrowUpRight, UploadCloud } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/Button'
 import { DateTime } from '@/components/ui/DateTime'
@@ -23,6 +23,8 @@ import { useBootstrapWatch } from '../model/useBootstrapWatch'
 import { deleteFork, restoreFork, PullRequestExistsError, type Branch, type BranchStatusFilter, type ForkSummary } from '@/services/versioningApiService'
 import { PrListRow } from '@/features/reviews/components/PrListRow'
 import { PrDetailDrawer } from '@/features/reviews/components/PrDetailDrawer'
+import { ImportSettingsFields } from '@/features/import-export/ImportSettingsFields'
+import { useImportSettings, useSetImportSettings } from '@/features/import-export/useImportSettings'
 import { BootstrapProgress } from './BootstrapProgress'
 import { DraftsPolicyFields } from './DraftsPolicyFields'
 import { EnableVersioningFlow } from './EnableVersioningFlow'
@@ -84,6 +86,8 @@ export function DataSourceVersioningTab({ wsId, dataSourceId, itemCount }: {
   const forksQ = useForks(wsId, graphId)
   const policyQ = useDataSourceDraftsPolicy(wsId, graphId ? dataSourceId : null)
   const setPolicy = useSetDataSourceDraftsPolicy(wsId, dataSourceId)
+  const importsQ = useImportSettings(wsId, graphId)
+  const setImports = useSetImportSettings(wsId, graphId ?? '')
   const [openPrId, setOpenPrId] = useState<string | null>(null)
   const [showEnable, setShowEnable] = useState(false)
   // Only a FalkorDB graph can be copied into version history (the server refuses the rest). A
@@ -322,6 +326,18 @@ export function DataSourceVersioningTab({ wsId, dataSourceId, itemCount }: {
             canEdit={isAdmin}
             onSave={(change) => setPolicy.mutateAsync(change)}
           />
+        </section>
+      )}
+
+      {/* Imports — what this graph's imports match rows by, and the replace guard's limits, over the
+          platform's; a failed read hides it */}
+      {importsQ.data && (
+        <section>
+          <h4 className="flex items-center gap-1.5 text-[11px] font-semibold text-ink-muted uppercase tracking-wider mb-2">
+            <UploadCloud className="w-3.5 h-3.5" /> Imports
+          </h4>
+          <ImportSettingsFields settings={importsQ.data} canEdit={isAdmin}
+            onSave={(change) => setImports.mutateAsync(change)} />
         </section>
       )}
 

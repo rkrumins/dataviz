@@ -19,6 +19,8 @@
  * Its Drafts and reviews section shows each setting as the workspace's, naming its value, or this
  * data source's own; a workspace admin overrides one or goes back to the workspace's, and only
  * those are sent. Anyone else reads it.
+ * Its Imports section shows the graph's import settings (ImportSettingsFields has its own spec), and
+ * a workspace admin's change is saved for this graph.
  * The data hooks are stubbed; the card itself has its own spec.
  */
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
@@ -48,6 +50,9 @@ let freezeError: Error | null
 let commitLog: { commits: Array<Record<string, unknown>>; userNames?: Record<string, string>; apiKeyNames?: Record<string, string> }
 let dsPolicy: Record<string, unknown> | undefined
 const policyPut = vi.fn()
+let importSettings: Record<string, unknown> | undefined
+const importsPut = vi.fn()
+const useSetImportSettings = vi.fn((..._args: unknown[]) => ({ mutateAsync: importsPut, isPending: false }))
 
 vi.mock('@/store/auth', () => ({
   usePermission: (p: string) => (p === 'workspace:admin' ? isAdmin : p.endsWith(':publish') ? canPublish : canManage),
@@ -86,6 +91,10 @@ vi.mock('../../hooks/useVersioning', () => ({
   useSetGraphFrozen: () => ({ mutate: freezeMutate, isPending: false, error: freezeError }),
   useDataSourceDraftsPolicy: () => ({ data: dsPolicy }),
   useSetDataSourceDraftsPolicy: () => ({ mutateAsync: policyPut, isPending: false }),
+}))
+vi.mock('@/features/import-export/useImportSettings', () => ({
+  useImportSettings: () => ({ data: importSettings }),
+  useSetImportSettings: (...args: unknown[]) => useSetImportSettings(...args),
 }))
 vi.mock('@/services/versioningApiService', async (importOriginal) => ({
   ...await importOriginal<typeof import('@/services/versioningApiService')>(),
@@ -148,6 +157,9 @@ beforeEach(() => {
   commitLog = { commits: [] }
   dsPolicy = undefined
   policyPut.mockReset().mockResolvedValue({})
+  importSettings = undefined
+  importsPut.mockReset().mockResolvedValue({})
+  useSetImportSettings.mockClear()
 })
 
 describe('DataSourceVersioningTab — projection health', () => {
@@ -489,6 +501,31 @@ describe('DataSourceVersioningTab — drafts and reviews', () => {
     expect(screen.getByLabelText('Drafts may be')).toBeDisabled()
     expect(screen.getByLabelText('New drafts start')).toBeDisabled()
     expect(screen.queryByRole('button', { name: 'Save' })).toBeNull()
+  })
+})
+
+describe('DataSourceVersioningTab — imports', () => {
+  const values = { identifier: 'entity_id', replaceMinLive: 1000, replaceDeleteFraction: 0.5,
+    replaceCreateFraction: 0.5, replaceMinMatchFraction: 0.05 }
+
+  it('shows the graph’s import settings and saves an admin’s change for this graph', async () => {
+    importSettings = {
+      dataSourceId: 'ds1', overrides: { identifier: null, replaceMinLive: null, replaceDeleteFraction: null,
+        replaceCreateFraction: null, replaceMinMatchFraction: null },
+      platform: values, effective: { ...values, sources: {} }, replaceGuard: true, followsParent: false,
+      matchingProperties: [], maxMatchingProperties: 10,
+    }
+    renderTab()
+    expect(screen.getByText('Imports')).toBeInTheDocument()
+    expect(useSetImportSettings).toHaveBeenCalledWith('ws1', 'g1')
+    fireEvent.change(screen.getByLabelText('Match existing items by'), { target: { value: 'urn' } })
+    fireEvent.click(screen.getAllByRole('button', { name: 'Save' }).at(-1)!)
+    await waitFor(() => expect(importsPut).toHaveBeenCalledWith({ identifier: 'urn' }))
+  })
+
+  it('is hidden when the settings can’t be read', () => {
+    renderTab()
+    expect(screen.queryByText('Imports')).toBeNull()
   })
 })
 

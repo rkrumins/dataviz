@@ -1,12 +1,14 @@
-"""The ids a file carries are pointers, and importing a file again changes nothing — Postgres.
+"""The keys a file carries find its entities, and importing a file again changes nothing — Postgres.
 
 A row's urn, and its value of the data source's identifier property, point at its node: a node
-that carries one as its urn, or one an earlier import made from it. A new node's id is derived
-from its first pointer (a ``urn:uuid:`` v5 of the graph's identity scope, its data source, and the
-pointer), so the same file imported again finds every node it made; the pointer itself is not
-stored. A file's own ``entity_id`` links its rows (an edge to a node) and nothing more. A free
-``urn:uuid:`` is kept as the id. Properties are set by value, kept by a blank cell and removed by
-``\\N``; a row is deleted by its pointer. Windows of two rows make every rule cross a window.
+that carries one as its urn, or one an earlier import made from it. A new node keeps the urn its
+row gives, under an id derived from its first key (a ``urn:uuid:`` v5 of the graph's identity
+scope, its data source, and the key), so the same file imported again finds every node it made;
+the identifier property holds the urn, and an identifier value is a key, not stored. A file's own
+``entity_id`` links its rows (an edge to a node) and nothing more, so a row named by nothing else
+is refused (``no_key``) rather than made again by every import. A free ``urn:uuid:`` is kept as
+the id. Properties are set by value, kept by a blank cell and removed by ``\\N``; a row is deleted
+by its key. Windows of two rows make every rule cross a window.
 """
 import asyncio
 import json
@@ -19,8 +21,11 @@ import pytest
 
 from backend.app.services.node_identity import ResolvedNodeIdentity
 from backend.app.services.storage.object_store import LocalFsObjectStore, storage_key
+from sqlalchemy import select
+
 from backend.app.services.versioning import config, db, models
 from backend.app.services.versioning.import_export.import_worker import ImportWorker
+from backend.app.services.versioning.models import ImportRowORM
 from backend.app.services.versioning.import_export.resolve import pointer_id
 from backend.app.services.versioning.import_export.service import ImportExportService
 from backend.app.services.versioning.service import GraphVersioningService
@@ -66,6 +71,13 @@ async def _import(ie, store, gid, lines, branch_id=None):
     return job, summary
 
 
+async def _refused(job_id):
+    """``{row: code}`` of the rows an import refused."""
+    async with db.graphver_session() as s:
+        return dict((await s.execute(select(ImportRowORM.row_index, ImportRowORM.code).where(
+            ImportRowORM.job_id == job_id, ImportRowORM.resolved_op == "invalid"))).all())
+
+
 async def _state(svc, gid, draft):
     async with svc._session() as s:
         heads = await svc._head_index(s, gid, draft)
@@ -86,34 +98,38 @@ async def _run(svc, root) -> None:
 
     job, summary = await _import(ie, store, gid, FILE)
     draft = job["branch_id"]
-    assert summary["invalid"] == 0 and summary["new"] == 7, summary
+    # t3 is named only by the file's own id, and so is the edge from it: refused, rather than made
+    # again by every import (and deleted by every replace).
+    assert (summary["new"], summary["invalid"]) == (5, 2), summary
+    assert await _refused(job["job_id"]) == {2: "no_key", 5: "end_not_found"}
     nodes, edges = await _state(svc, gid, draft)
-    (t3,) = [e for e, v in nodes.items() if v["displayName"] == "t3"]
-    assert uuid.UUID(t3[len("urn:uuid:"):]).version == 7, "points by nothing: a new id"
-    for eid in (t1, t2, t3, FREE):                        # one identity: id, urn, identifier
+    assert set(nodes) == {t1, t2, FREE}, nodes
+    # t1 keeps its urn, and the identifier property holds it; a node with no urn of its own (t2,
+    # named by its identifier value; a free urn:uuid) has its id as its urn.
+    assert (nodes[t1]["urn"], nodes[t1]["properties"]["asset_id"]) == ("urn:li:t1", "urn:li:t1")
+    for eid in (t2, FREE):
         assert nodes[eid]["urn"] == eid and nodes[eid]["properties"]["asset_id"] == eid, nodes[eid]
     assert uuid.UUID(t1[len("urn:uuid:"):]).version == 5
-    assert not any(v["urn"] in ("urn:li:t1", "A-1", "A-2") for v in nodes.values()), \
-        "a pointer is not stored"
+    assert not any({"A-1", "A-2"} & {v["urn"], v["properties"].get("asset_id")}
+                   for v in nodes.values()), "an identifier value is a key: not stored"
     assert nodes[t1]["properties"]["owner"] == "a"
-    assert edges == {(t1, t2), (t3, t1), (t1, FREE)}, edges
+    assert edges == {(t1, t2), (t1, FREE)}, edges
 
-    # The identity state a resumed run reads again: the file's own id and the second name.
+    # The identity state a resumed run reads again: the second name a row gave its node.
     worker = ImportWorker(svc, store, ontology=ONTOLOGY, node_identity=IDENTITY)
     await worker._identity_state(job["job_id"], None, gid, draft)   # no team keys: no pass
-    assert worker._created_from == {"f3": t3} and worker._aliases == {"A-1": t1}, (
+    assert worker._created_from == {} and worker._aliases == {"A-1": t1}, (
         worker._created_from, worker._aliases)
     # Placements key each created node by the urn it was stored with.
     await worker._derive_facts(job["job_id"], gid, draft)
     assert {f["eid"]: f["urn"] for f in worker.created_node_facts} == {
-        e: e for e in (t1, t2, t3, FREE)}
+        t1: "urn:li:t1", t2: t2, FREE: FREE}
 
-    # The same file again: only its file-local row, and the edge from it, are made again.
-    _job, again = await _import(ie, store, gid, FILE, branch_id=draft)
-    assert (again["new"], again["invalid"]) == (2, 0), again
-    nodes2, edges2 = await _state(svc, gid, draft)
-    assert set(nodes2) - set(nodes) and len(nodes2) == len(nodes) + 1
-    assert edges <= edges2 and len(edges2) == len(edges) + 1
+    # The same file again changes nothing: every node and edge is found, the same rows refused.
+    again_job, again = await _import(ie, store, gid, FILE, branch_id=draft)
+    assert (again["new"], again["updated"], again["invalid"]) == (0, 0, 2), again
+    assert await _refused(again_job["job_id"]) == {2: "no_key", 5: "end_not_found"}
+    assert await _state(svc, gid, draft) == (nodes, edges)
 
     # Properties: set by value, kept by a blank, removed by \N; a delete and a create by pointer.
     _job, props = await _import(ie, store, gid, [
@@ -135,8 +151,8 @@ async def _run(svc, root) -> None:
 
     # An export's rows name each node by its own id: edited and imported again, it updates.
     _job, edited = await _import(ie, store, gid, [
-        {"kind": "node", "entity_id": t1, "urn": t1, "entityType": "Table", "displayName": "T1",
-         "prop.asset_id": t1}], branch_id=draft)
+        {"kind": "node", "entity_id": t1, "urn": "urn:li:t1", "entityType": "Table",
+         "displayName": "T1", "prop.asset_id": "urn:li:t1"}], branch_id=draft)
     nodes5, _ = await _state(svc, gid, draft)
     assert edited["updated"] == 1 and nodes5[t1]["displayName"] == "T1"
 

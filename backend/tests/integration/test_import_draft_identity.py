@@ -1,12 +1,12 @@
 """An import gives each new node one identity and finds what it names — needs Postgres.
 
 The server decides a new node's identity: the deleted node its row's urn names brought back, else
-an id derived from the row's urn (or its value of the data source's identifier property), else —
-a row that points by neither — a urn it mints; and that one value is the node's id, its urn and
-its identifier property alike, as a canvas create's is. A row and an edge's end name an existing
-node by its id, its urn, its identifier value or a field its type matches imports by (a team's
-own key); a unique field's value is never taken twice. Re-importing the same file updates what it
-created.
+an id derived from the row's urn (or its value of the data source's identifier property). The node
+keeps the urn its row gives — its id when it gives none — and its identifier property holds the
+urn. A row that gives nothing a later import could find it by (only the file's own entity_id, or
+only a unique field's value) is refused rather than made again by every import. A row and an
+edge's end name an existing node by its id, its urn, its identifier value or a field its type
+matches imports by (a team's own key). Re-importing the same file updates what it created.
 """
 import asyncio
 import json
@@ -19,9 +19,11 @@ import pytest
 
 from backend.app.services.node_identity import ResolvedNodeIdentity
 from backend.app.services.storage.object_store import LocalFsObjectStore, storage_key
+from sqlalchemy import select
+
 from backend.app.services.versioning import db, models
-from backend.app.services.versioning.ids import uuid_urn
 from backend.app.services.versioning.import_export.resolve import pointer_id
+from backend.app.services.versioning.models import ImportRowORM
 from backend.app.services.versioning.import_export.service import ImportExportService
 from backend.app.services.versioning.service import GraphVersioningService
 
@@ -97,7 +99,13 @@ async def _run() -> None:
                                  identity_resolver=_identity)
         job, summary, got = await _import(ie, store, gid, FILE)
         draft = job["branch_id"]
-        assert summary["invalid"] == 1, (summary, got.get("summary"))
+        async with db.graphver_session() as s:
+            refused = dict((await s.execute(select(ImportRowORM.row_index, ImportRowORM.code).where(
+                ImportRowORM.job_id == job["job_id"], ImportRowORM.resolved_op == "invalid"))).all())
+        # file-1 is named only by the file's own id, U1 and U2 only by a unique field: neither
+        # finds its node again, so neither is made; nor is the edge to file-1.
+        assert refused == {2: "no_key", 6: "no_key", 7: "no_key", 8: "end_not_found"}, (
+            refused, got.get("summary"))
         scope = await svc.identity_scope(gid)
         c, a9, x = (pointer_id(scope, p) for p in ("urn:C", "A-9", "urn:X"))
 
@@ -109,30 +117,24 @@ async def _run() -> None:
             async with svc._session() as s:
                 return (await svc._current_values(s, gid, draft, [eid])).get(eid)
 
-        # A urn, an identifier value, both (urn:X beside asset_id Y), nothing at all: one identity
-        # each — id, urn, asset_id — derived from the pointer, which is not stored.
-        for eid in (c, a9, x):
+        # A urn, an identifier value, both (urn:X beside asset_id Y): an id derived from the first;
+        # the urn kept, or the id when there is none; the identifier property holding the urn.
+        for eid, urn in ((c, "urn:C"), (a9, a9), (x, "urn:X")):
             v = await value(eid)
-            assert v["urn"] == eid and v["properties"]["asset_id"] == eid, v
-        f1, = [e for e, h in live.items() if h.name == "F1"]
-        assert uuid_urn(f1) == f1 and uuid.UUID(f1[len("urn:uuid:"):]).version == 7, f1
-        v = await value(f1)
-        assert v["urn"] == f1 and v["properties"]["asset_id"] == f1, v
+            assert v["urn"] == urn and v["properties"]["asset_id"] == urn, v
+            assert uuid.UUID(eid[len("urn:uuid:"):]).version == 5
         # The urn only a deleted node held brings that node back — never a second urn:D.
         assert (await value("ent_D"))["urn"] == "urn:D" and "urn:D" not in live
         # A team key named the canvas node: renamed, its identity its own.
         k = await value("urn:K")
         assert k["displayName"] == "K renamed" and k["urn"] == "urn:K"
-        assert not any(h.name == "U2" for h in live.values()), "a refused row wrote"
-        u1, = [e for e, h in live.items() if h.name == "U1"]
+        assert not any(h.name in ("F1", "U1", "U2") for h in live.values()), "a refused row wrote"
 
         edges = {(h.src, h.tgt, h.type) for h in heads.values() if h.kind == "edge" and h.live}
-        assert ("ent_P", f1, "CONTAINS") in edges, edges          # by the file's own id
         assert ("urn:K", "ent_L", "LINEAGE") in edges, edges      # by a team key
         assert (a9, c, "LINEAGE") in edges, edges                 # by the identifier value
 
-        reasons = got["summary"]
-        assert reasons["invalid"] == 1, reasons
+        assert got["summary"]["invalid"] == summary["invalid"] == 4, got["summary"]
 
         # The same rows again (those that carry an identity): updated, never doubled.
         again = [line for line in FILE if line.get("urn") or line.get("prop.asset_id")
@@ -142,7 +144,6 @@ async def _run() -> None:
         async with svc._session() as s:
             heads2 = await svc._head_index(s, gid, draft)
         assert sum(1 for h in heads2.values() if h.live and h.kind == "node") == len(live)
-        assert u1 in heads2
     finally:
         shutil.rmtree(root, ignore_errors=True)
         await db.dispose_engine()

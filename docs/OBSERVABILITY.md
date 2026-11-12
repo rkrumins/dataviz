@@ -84,7 +84,8 @@ token; a wrong or missing token gets `401`.
 | `viz-service` | `:8000/api/v1/metrics` | Also reachable through the web tier at `https://<host>/api/v1/metrics` |
 | `aggregation-controlplane` | `:8091/metrics` | |
 | `aggregation-worker` | `:9100/metrics` | Its own small server, started only when metrics are on; port `METRICS_PORT` |
-| `stats-service`, `versioning-worker` | — | No scrape endpoint |
+| `versioning-worker` | `:9100/metrics` | The same: its own small server, started only when metrics are on; port `METRICS_PORT`. The projection's metrics are here |
+| `stats-service` | — | No scrape endpoint |
 
 1. Generate a token: `openssl rand -hex 32`.
 2. Give `METRICS_ENABLED=true` and `METRICS_TOKEN` to the three processes above.
@@ -237,6 +238,12 @@ their series are complete: alert on those.
 | `graph_request_waits_total`, `graph_requests_waiting` | counter, gauge | API | Requests that waited on another's work — a scan, a cache answer — holding no graph admission and no database connection while they did. The gauge is how many wait right now |
 | `graph_cache_unreachable_total{endpoint,outcome}` | counter | API | The cache's Redis couldn't answer: `computed` (this process worked it out), `shared` (another request's compute answered it). Any rise means Redis is down or slow |
 | `live_view_refresh_total{outcome,trigger}` | counter | API | A list view brought up to date: `applied`, `unchanged`, `current` (opened and already up to date), `held`, `over_cap`, `deferred`, `busy`, `too_soon`; `trigger` is `open` or `manual` |
+| `graphver_projection_passes_total{outcome}` | counter | versioning worker; API (a pass right after a publish) | How each projection pass ended: `published`, `unverified` (published, but not counted: a count failed, or entities are held back), `partial` (a long pass stopped at a page, to be resumed), `held_back` (its verify found a difference), `superseded`, `failed`, `cancelled`. `failed` rising means the graph store keeps refusing passes |
+| `graphver_projection_escalations_total{cause}` | counter | versioning worker; API | A graph rebuilt in place on its own: `drift` (its verify found FalkorDB short of history, or holding more after the sweep) or `failures` (the same window failed 3 passes in a row under pressure). A few are expected; a steady rise means something keeps writing outside version control, or the store keeps losing writes |
+| `graphver_projection_statement_seconds_count` / `_sum{kind}` | counter | versioning worker; API | Every projector statement by kind (`node_merge`, `edge_merge`, `node_delete`, `edge_delete`, `rollup_write` and others): the average is `_sum / _count` |
+| `graphver_projection_splits_total{kind,cause}` | counter | versioning worker; API | A statement split in half because the graph store refused it: `cause` is `timeout` or `memory`. A steady rise is the statement ladder sizing itself; it should level off |
+| `graphver_projection_lagging_graphs`, `graphver_projection_lag_commits_max`, `graphver_projection_lag_seconds_max` | gauge | versioning worker | On every poll: how many graphs are projected below their head, the most commits one is behind, and the longest since one of them last published |
+| `graphver_projection_quarantined` | gauge | versioning worker | Changes held back across the graphs being projected: a statement that still failed for one entity on its own, or an edge held with its end node. A graph evicted, waiting for room in memory or trashed is not counted, since nothing retries its rows until it is loaded again. Each graph's are listed on its **Data health** tab |
 
 ### Alerts worth having
 
@@ -247,6 +254,9 @@ their series are complete: alert on those.
 | Cache Redis unreachable | `increase(graph_cache_unreachable_total[5m]) > 0` | Every process computes for itself; shared caching, the election and fair share are off until it's back |
 | Label scans per request | `rate(search_raw_labels_total{answer="read"}[5m])` well above the rate of data changes | The scan of every node is no longer shared: check the cache Redis |
 | Lists held | `increase(live_view_refresh_total{outcome="held"}[1h]) > 0` | An auto-updating view would lose half its members: an editor must look |
+| Projection behind | `graphver_projection_lag_seconds_max > 300` for 10 minutes | Published changes aren't in the fast read layer; reads show the version it last finished. See [Projection behind or holding changes back](/docs/runbooks#projection-behind-or-holding-changes-back) |
+| Changes held back | `graphver_projection_quarantined > 0` for 30 minutes | Something can't be written to the graph store even on its own. Same runbook |
+| Passes failing | `increase(graphver_projection_passes_total{outcome="failed"}[15m]) > 0` for 30 minutes | Every pass of some graph fails: usually the graph store is unreachable or out of memory |
 
 How to act on the rebuild signals is in
 [Concurrency and Timeout Tuning](/docs/concurrency-tuning#what-to-watch-and-the-one-number-that-means-stop).

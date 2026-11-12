@@ -182,6 +182,23 @@ export function ProjectionHealthCard({ wsId, graphId, showActions = false, dataS
             </dd>
           </>
         )}
+        {wm.quarantine && wm.quarantine.count > 0 && (
+          <>
+            <dt className="text-ink-muted">Held back</dt>
+            <dd className="min-w-0 text-amber-700 dark:text-amber-400">
+              {plural(wm.quarantine.count, 'change', 'changes')} couldn't be written to the fast read
+              layer, even on {wm.quarantine.count === 1 ? 'its' : 'their'} own. Everything else is
+              published; {wm.quarantine.count === 1 ? 'it is' : 'they are'} retried every few minutes.
+              <ul className="mt-1 space-y-0.5 font-mono text-[11px]">
+                {wm.quarantine.entities.slice(0, 5).map((e) => (
+                  <li key={`${e.statement}:${e.entityKey}`} className="break-all">
+                    {e.entityKey}{e.error ? ` · ${e.error}` : ''}
+                  </li>
+                ))}
+              </ul>
+            </dd>
+          </>
+        )}
       </dl>
 
       <div className="mt-3">

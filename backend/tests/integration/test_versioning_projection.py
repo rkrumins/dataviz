@@ -17,10 +17,7 @@ import pytest
 
 from backend.app.services.versioning import db, models
 from backend.app.services.versioning.models import ProjectionStateORM
-from backend.app.services.versioning.projection import (
-    FalkorProjector,
-    _DELETE_EDGES_FALLBACK,
-)
+from backend.app.services.versioning.projection import FalkorProjector
 from backend.app.services.versioning.reconcile import (
     _SCAN_EDGES,
     _SCAN_NODES,
@@ -46,6 +43,8 @@ class FakeGraph:
         self._next_id = 0
         self._rel_ids: dict = {}   # relationship id -> internal id (FalkorDB's id(r)), never reused
         self.proj_meta: dict = {}  # the pass marker (_GVProjMeta) — kept apart, never counted
+        self.swept_seq = None      # the tombstone sweep's watermark on that marker
+        self.cursor = None         # a long pass's resume point on that marker
 
     async def query(self, cypher: str, params: dict = None):
         params = params or {}
@@ -92,6 +91,31 @@ class FakeGraph:
                 )
             return _Result([[sum(1 for e in self.edges.values()
                                  if e.get("type") not in excluded)]])
+        # The constant-time counts (``reconcile.falkor_counts`` on a key the projector owns): one
+        # label's nodes, one type's relationships, and the internal-id high-water mark.
+        m = re.fullmatch(r"MATCH \(n:`([^`]+)`\) RETURN count\(n\) AS c", cypher.strip())
+        if m:
+            # (The pass marker is kept apart from ``nodes``, so neither count sees it.)
+            return _Result([[sum(1 for n in self.nodes.values() if n.get("_label") == m.group(1))]])
+        m = re.fullmatch(r"MATCH \(\)-\[r:`([^`]+)`\]->\(\) RETURN count\(r\) AS c", cypher.strip())
+        if m:
+            return _Result([[sum(1 for e in self.edges.values() if e.get("type") == m.group(1))]])
+        if cypher == "MATCH (n) RETURN max(id(n)) AS c":
+            ids = [self._id_of(u) for u in self.nodes]
+            return _Result([[max(ids) if ids else None]])
+        # A customer key's counts, a window of internal node ids at a time (``_paged_counts``).
+        if cypher.startswith("MATCH (n) WHERE id(n) >= $lo AND id(n) < $hi AND n.urn IS NOT NULL") \
+                and cypher.endswith("RETURN count(n) AS c"):
+            excluded = set(re.findall(r"NOT '([^']+)' IN labels\(n\)", cypher))
+            return _Result([[sum(1 for u, n in self.nodes.items()
+                                 if params["lo"] <= self._id_of(u) < params["hi"]
+                                 and n.get("_label") not in excluded and u)]])
+        if cypher.startswith("MATCH (a)-[r]->(b) WHERE id(a) >= $lo AND id(a) < $hi AND type(r) <>") \
+                and cypher.endswith("RETURN count(DISTINCT [a.urn, type(r), b.urn]) AS c"):
+            excluded = set(re.findall(r"type\(r\) <> '([^']+)'", cypher))
+            return _Result([[len({(e["src"], e["type"], e["tgt"]) for e in self.edges.values()
+                                  if e.get("type") not in excluded and e["src"] in self.nodes
+                                  and params["lo"] <= self._id_of(e["src"]) < params["hi"]})]])
         # The same count for a graph the projector does not own (``owned=False``): DISTINCT
         # (source urn, type, target urn) triples between urn-bearing endpoints. Every node here
         # carries a urn (it is keyed by one), so only the type exclusions are evaluated.
@@ -154,6 +178,14 @@ class FakeGraph:
         if cypher == "UNWIND $ids AS i MATCH ()-[r]->() WHERE id(r) = i DELETE r":
             for eid in [k for k in self.edges if self._rel_id(k) in params["ids"]]:
                 self.edges.pop(eid, None)
+            return None
+        # The same, matched from the source by urn (``_reconcile_streamed``).
+        if cypher.startswith("UNWIND $batch AS it MATCH (a:") and cypher.endswith(
+                "WHERE id(r) = it.rid DELETE r"):
+            for it in params["batch"]:
+                for eid in [k for k, e in self.edges.items() if self._rel_id(k) == it["rid"]
+                            and e["src"] == it["src"] and e["tgt"] == it["tgt"]]:
+                    self.edges.pop(eid, None)
             return None
         if cypher == "UNWIND $ids AS i MATCH (n) WHERE id(n) = i DETACH DELETE n":
             for u in [u for u in self.nodes if self._id_of(u) in params["ids"]]:
@@ -235,11 +267,6 @@ class FakeGraph:
             for it in params["batch"]:
                 self.edges.pop(it["eid"], None)
             return None
-        # Legacy fallback edge delete: UNWIND $ids AS i MATCH ()-[r {id: i}]->() DELETE r
-        if cypher == _DELETE_EDGES_FALLBACK:
-            for i in params["ids"]:
-                self.edges.pop(i, None)
-            return None
         # Node delete by (label, urn): UNWIND $urns AS u MATCH (n:{label} {urn: u}) DETACH DELETE n
         if cypher.startswith("UNWIND $urns AS u MATCH (n:") and "DETACH DELETE n" in cypher:
             for u in params["urns"]:
@@ -256,6 +283,37 @@ class FakeGraph:
         # The pass marker every publishing pass writes last (``projection._write_marker``).
         if cypher == "MERGE (m:_GVProjMeta {id: 'meta'}) SET m.seq = $seq, m.epoch = $epoch":
             self.proj_meta = dict(params)
+            return None
+        if cypher == ("MATCH (m:_GVProjMeta) RETURN m.pFrom, m.pTo, m.pStep, m.pAfter, "
+                      "m.pStructural, m.pDropped"):
+            c = self.cursor
+            return _Result([[c["from"], c["to"], c["step"], c["after"], c["structural"],
+                             c["dropped"]]] if c else [])
+        if cypher.startswith("MERGE (m:_GVProjMeta {id: 'meta'}) SET m.pFrom = $from"):
+            self.cursor = dict(params)
+            return None
+        if cypher == ("MATCH (m:_GVProjMeta) REMOVE m.pFrom, m.pTo, m.pStep, m.pAfter, "
+                      "m.pStructural, m.pDropped"):
+            self.cursor = None
+            return None
+        if cypher == "MATCH (m:_GVProjMeta) RETURN m.sweptSeq":
+            return _Result([[self.swept_seq]] if self.swept_seq is not None else [])
+        if cypher == "MERGE (m:_GVProjMeta {id: 'meta'}) SET m.sweptSeq = $seq":
+            self.swept_seq = params["seq"]
+            return None
+        # A node whose urn changed, moved to the new urn in place (``_rekey_in_place``).
+        if cypher.startswith("UNWIND $batch AS it MATCH (n:") and cypher.endswith(
+                "WITH n, it, m WHERE m IS NULL SET n.urn = it.new"):
+            label = cypher.split("MATCH (n:", 1)[1].split(" {urn:", 1)[0]
+            for it in params["batch"]:
+                n = self.nodes.get(it["old"])
+                if n is None or n.get("_label") != label or it["new"] in self.nodes:
+                    continue
+                self.nodes[it["new"]] = {**self.nodes.pop(it["old"]), "urn": it["new"]}
+                self._ids[it["new"]] = self._ids.pop(it["old"])
+                for e in self.edges.values():
+                    e["src"] = it["new"] if e["src"] == it["old"] else e["src"]
+                    e["tgt"] = it["new"] if e["tgt"] == it["old"] else e["tgt"]
             return None
         raise AssertionError(f"unexpected cypher emitted: {cypher!r}")
 
@@ -284,6 +342,8 @@ class FakeGraph:
         self.edges.clear()
         self._ids.clear()
         self.proj_meta = {}
+        self.swept_seq = None
+        self.cursor = None
 
     def entity_ids(self) -> set:
         return {n["entityId"] for n in self.nodes.values()}

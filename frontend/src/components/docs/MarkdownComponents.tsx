@@ -52,6 +52,8 @@ export const filenameMap: Record<string, string> = {
   'INTEGRATION_QUICKSTART.md': 'integration-quickstart',
   'API_GUIDE.md': 'api-guide',
   'CONNECTOR_GUIDE.md': 'connector-guide',
+  'IMPORT_EXPORT_API.md': 'import-export-api',
+  'IMPORT_FROM_YOUR_SERVICE.md': 'import-from-your-service',
   'KEY_MANAGEMENT_API.md': 'key-management-api',
   'GRAPH_METADATA_API.md': 'graph-metadata-api',
   'ONBOARDING_A_SOURCE.md': 'onboarding-a-source',

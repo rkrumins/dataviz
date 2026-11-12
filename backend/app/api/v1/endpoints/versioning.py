@@ -253,8 +253,10 @@ async def project_now(graph_id: str) -> None:
         await nudge_projection(graph_id)
         return
     try:
-        await asyncio.wait_for(proj.project_graph(graph_id), _SYNC_PROJECTION_TIMEOUT_SECS)
-        if orphan:                                       # the old gv_* copy is now unused — reclaim its RAM
+        # The old gv_* copy is unused once the pin moved off it — reclaim its RAM now, whether
+        # the pass runs here or in the worker: the repair hands it back only once, and the
+        # worker's own repair finds the pin already moved.
+        if orphan:
             try:
                 # Route the GRAPH.DELETE to the graph's PINNED instance. Without the
                 # provider_id the factory falls back to the env-default instance —
@@ -264,6 +266,12 @@ async def project_now(graph_id: str) -> None:
                 await proj.drop_graph(orphan, wm.get("falkor_provider"))
             except Exception as exc:
                 logger.warning("could not drop orphan projection graph %s: %s", orphan, exc)
+        if not await proj.fits_inline(graph_id):
+            # Too large to finish inside the request: the worker projects it.
+            await nudge_projection(graph_id)
+            return
+        await asyncio.wait_for(proj.project_graph(graph_id, respect_backoff=True),
+                               _SYNC_PROJECTION_TIMEOUT_SECS)
     except Exception as exc:
         logger.warning("synchronous projection for %s failed; deferring to async worker: %s", graph_id, exc)
         await nudge_projection(graph_id)
@@ -988,6 +996,12 @@ class WatermarkModel(_ApiModel):
     committed: int       # main_head_commit_seq
     projected: int       # projection_state.projected_commit_seq
     fresh: bool          # projected >= committed
+    # The version reads of main show: `committed` while fresh; while the graph catches up or
+    # rebuilds, the version it last finished writing, served complete until the new one is in;
+    # null when reads go to Postgres (nothing written yet, or out of FalkorDB). Set on GET
+    # …/watermark and on neighbors reads.
+    served: Optional[int] = None
+    served_revision: Optional[RevisionModel] = Field(default=None, alias="servedRevision")
     # Set on GET …/watermark (and the rebuild response); the slim watermark on state and
     # neighbors reads leaves it null — those carry their own `source`.
     read_route: Optional[ReadRouteModel] = Field(default=None, alias="readRoute")
@@ -1024,6 +1038,11 @@ class WatermarkModel(_ApiModel):
     # `verify`, or a change notification), null when there is none. Bring it into history with
     # POST /graph/resync.
     external_drift: Optional[Dict[str, Any]] = Field(default=None, alias="externalDrift")
+    # Entities a projection pass could not write on their own, even one at a time after its
+    # retries, held so the rest of the window published: `{count, entities: [{statement,
+    # entityKind, entityKey, error, attempts, firstAt, lastAt}]}` (the oldest 20). Each later pass
+    # retries them first; while any are held the graph publishes unverified. Null when none.
+    quarantine: Optional[Dict[str, Any]] = None
     # A fork has no projection: the root graph whose store it reads through, whose watermark this
     # is (no key of its own). Null for a graph that is no fork.
     reads_through: Optional[str] = Field(default=None, alias="readsThrough")
@@ -2649,6 +2668,8 @@ async def _watermark_model(session: AsyncSession, wm: dict) -> WatermarkModel:
                 if wm.get("falkor_provider") else None)
     return WatermarkModel(committed=wm["committed"], projected=wm["projected"],
                           fresh=wm["fresh"], status=wm["status"],
+                          served=wm.get("served"),
+                          served_revision=_revision_model(wm.get("served_revision")),
                           read_route=ReadRouteModel(**wm["read_route"]),
                           target=wm.get("target", 0),
                           last_error=wm.get("last_error"),
@@ -2666,6 +2687,7 @@ async def _watermark_model(session: AsyncSession, wm: dict) -> WatermarkModel:
                           next_retry_at=wm.get("next_retry_at"),
                           liveness_error=wm.get("liveness_error"),
                           external_drift=wm.get("external_drift"),
+                          quarantine=wm.get("quarantine"),
                           reads_through=wm.get("reads_through"),
                           reads_from=wm.get("reads_from"),
                           residency=wm.get("residency", "standard"),
@@ -2696,10 +2718,12 @@ async def rebuild_projection(
     cache — the "rebuild the cache" operator action. Pins an unpinned graph to its data source's
     real graph first; 409 if there is still no FalkorDB target (nothing to rebuild). Idempotent: a
     projection/rebuild already in flight returns ``started=false``/``alreadyRunning=true`` untouched.
-    The catch-up runs in-process as a background task (same path publish/merge use) and is scheduled
-    ALWAYS — even when ``started=false`` — so a stranded 'projecting'/'rebuilding' status on a
-    worker-less deployment self-heals (``project_now`` is an idempotent catch-up, a no-op when the
-    cache is already fresh)."""
+    A rebuild it starts replays main from the start: it clears the pass cursor a rebuild that
+    stopped part-way and then failed left in the key (best effort, when this process reaches
+    FalkorDB). The catch-up runs in-process as a background task (same path publish/merge use)
+    and is scheduled ALWAYS — even when ``started=false`` — so a stranded 'projecting'/'rebuilding'
+    status on a worker-less deployment self-heals (``project_now`` is an idempotent catch-up, a
+    no-op when the cache is already fresh)."""
     await _repair_projection_target(graph_id)            # self-heal: pin an unpinned graph when possible
     try:
         wm = await svc.projection_watermark(graph_id)
@@ -2714,6 +2738,11 @@ async def rebuild_projection(
         started = await svc.request_projection_rebuild(graph_id)
     except ConcurrencyError as exc:            # enabling version control hasn't finished
         raise HTTPException(status_code=409, detail={"type": "bootstrapping", "message": str(exc)})
+    proj = _get_projector() if started else None
+    if proj is not None:
+        # The rebuild replays main from the start: a pass that stopped part-way and then failed
+        # left its cursor in the key, which the rebuild's first pass would otherwise resume.
+        await proj.forget_cursor(graph_id)
     # Schedule the catch-up unconditionally: even on the already-in-flight (started=False) path,
     # rebuild_now is an idempotent catch-up (and self-deduplicates per graph), so a status
     # stranded by a lost worker self-heals. Unlike project_now's 10s interactive ceiling, the
@@ -3392,16 +3421,16 @@ async def graph_neighbors(
 async def _serve_neighbors(svc, read_factory, graph_id, *, urn, depth, direction,
                            edge_types, limit, branch_id=None, as_of_seq=None, fork=False):
     wm = await svc.projection_watermark(graph_id)
-    wm_out = {"committed": wm["committed"], "projected": wm["projected"], "fresh": wm["fresh"]}
+    wm_out = {"committed": wm["committed"], "projected": wm["projected"], "fresh": wm["fresh"],
+              "served": wm["served"]}
     # FalkorDB projection is main@head only; drafts / as-of reads must use Postgres, and so does a
     # fork, which has no projection of its own (it reads through its parent's, with its changes).
     is_head_main = as_of_seq is None and not fork and (
         branch_id is None or branch_id == await svc.main_branch_id(graph_id))
+    # The key serves main at the version it holds (serving_seq): the head, or the version it last
+    # published while it catches up or rebuilds. At 0 it holds nothing to read.
     can_falkor = bool(
-        is_head_main and read_factory is not None and wm["falkor_graph_name"]
-        and wm["status"] not in ("evicted", "rehydrating")  # a load serves once it is ready
-        and wm["projected"] >= wm["committed"] - vconfig.READ_MAX_LAG
-        and wm["projected"] > 0       # at 0 the key is empty or mid-reconcile (moved, reseeding)
+        is_head_main and read_factory is not None and wm["falkor_graph_name"] and wm["served"]
     )
     if can_falkor:
         await acquire_lease(graph_id)            # pin so an eviction sweep can't drop it mid-read
@@ -3506,7 +3535,8 @@ async def bulk_ingest(
 ):
     """Day-0 / large-delta import: POST an ndjson body (one node/edge per line) →
     one ``import`` commit. Invalid lines are reported, not fatal. Idempotent on
-    ``idempotencyKey``. (Raw body streams; the object-store upload-URL flow for
+    ``idempotencyKey``. New entities take ids as an import mints them: a ``urn:uuid`` the row
+    brings, else one derived from its urn or its own id. (Raw body streams; the object-store upload-URL flow for
     very large loads plugs in here.) It writes main, so it needs publish: a key, its owner's."""
     require_publish_for_main(claims, ws_id)
     rows: List[dict] = []
@@ -3522,6 +3552,7 @@ async def bulk_ingest(
     with _domain_errors():
         report = await svc.bulk_ingest(
             graph_id=graph_id, rows=rows, actor=user.id, idempotency_key=idempotency_key,
+            standard_ids=True,
         )
     if report.get("commit_id"):
         background.add_task(nudge_projection, graph_id)
@@ -3567,6 +3598,7 @@ async def sync_ingest(
             graph_id=graph_id, rows=rows, actor=user.id, source=source,
             idempotency_key=idempotency_key, strategy=strategy, containment_edge_types=cset,
             allow_curation_risk=overrides.force, allow_mass_delete=overrides.allow_mass_delete,
+            standard_ids=True,
         )
     if report.get("commit_id"):
         background.add_task(nudge_projection, graph_id)
@@ -3666,6 +3698,8 @@ async def _resolve_ontology_types(workspace_id, data_source_id):
                          "target": list(getattr(d, "target_types", None) or [])}
                      for t, d in rels.items()}
         return {"node_types": node_types, "edge_types": edge_types,
+                # What a row's _op=delete takes with it: the node's containment subtree.
+                "containment": list(getattr(resolved, "containment_edge_types", []) or []),
                 "keys": {t: fs for t, fs in flagged("reconciliation_key").items() if fs},
                 "unique": {t: fs for t, fs in flagged("unique").items() if fs},
                 "fields": {t: fs for t, fs in fields.items() if fs}, "edge_ends": edge_ends}
@@ -3676,15 +3710,17 @@ async def _resolve_ontology_types(workspace_id, data_source_id):
 
 async def _resolve_node_identity_for_import(workspace_id, data_source_id):
     """The data source's resolved node-identity mapping for an import's writes (see
-    :func:`_node_identity_for_meta`). Runs in the worker's background context, so it opens its own
-    session; ``None`` — nothing bound — when it can't be read."""
+    :func:`_node_identity_for_meta`); ``None`` when it defines none. Runs in the worker's background
+    context, so it opens its own session. A mapping that can't be read raises, never reads as none:
+    an import that matched by urn alone because its identifier property was unknown would create
+    the nodes it should have found."""
+    from backend.app.db.engine import get_async_session
     try:
-        from backend.app.db.engine import get_async_session
         async with get_async_session() as session:
             return await _node_identity_for_meta(session, {"data_source_id": data_source_id})
     except Exception:
-        logger.exception("node-identity resolution failed for an import: nothing is bound")
-        return None
+        logger.exception("node-identity resolution failed for an import (ds=%s)", data_source_id)
+        raise
 
 
 async def _write_view_import_assignments(ws, ds, view_id, branch_id, created_nodes, batch_edges):
@@ -3824,6 +3860,71 @@ class CreateImportResponse(_ApiModel):
     status: str
 
 
+_IDENTIFIER = Query(None, description=(
+    "What the file's rows find their entities by: entity_id (the default: an entity id of the "
+    "graph, else the urn, the identifier property, a field its type matches imports by, then a "
+    "unique qualifiedName), urn (an entity id, else the urn only) or prop.<name> (an entity id, "
+    "else the value of the property <name>, such as prop.external_id). An entity's id never "
+    "changes, whichever it is"))
+
+
+_ALLOW_MASS_DELETE = Query(False, alias="allowMassDelete", description=(
+    "A replace: delete what the file leaves out even past the replace guard, which refuses a "
+    "replace that would delete most of a scope and create most of it again (a file whose rows name "
+    "their entities by another key), and read the whole file even when its first rows find almost "
+    "nothing"))
+
+
+_MAX_REFUSED_ROWS = Query(None, alias="maxRefusedRows", max_length=16, description=(
+    "How many of the file's rows may be refused before the import holds: 0 (none: the default, "
+    "unless the platform's IMPORT_MAX_REFUSED_ROWS says otherwise), a count such as 100, a share "
+    "of the file's rows such as 0.5%, or -1 (any). Past it, a replace deletes nothing and fails "
+    "(rows_refused), and autoPublish leaves the draft for review. Within it, the import goes on "
+    "without them, and a replace keeps what a refused row still names. Every import reports its "
+    "refused rows, with why, in summary.refused"))
+
+
+def _with_refused_budget(settings: dict, requested: Optional[str]) -> dict:
+    """The job's settings, with how many refused rows it allows (``maxRefusedRows``): the request's,
+    checked (422, saying what it may be), else the platform's. A job keeps it, resumed or not."""
+    from backend.app.services.versioning.import_export.import_worker import refused_budget
+    try:      # called directly, an unsent parameter is its Query: the platform's, as unsent
+        return {**settings, "maxRefusedRows": refused_budget(requested if isinstance(requested, str) else None)}
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail={"type": "invalid_max_refused_rows",
+                                                     "message": str(exc)})
+
+
+async def _identity_property_of(session: AsyncSession, row) -> Optional[str]:
+    """The property data source ``row`` identifies its nodes by, kept equal to the urn
+    (``node_identity.identity_property``), as an import's worker reads it: ``prop.<it>`` is matched
+    as the urn. None for none."""
+    from backend.app.services.node_identity import identity_property
+    if row is None:
+        return None
+    return identity_property(await _node_identity_for_meta(session, {"data_source_id": row.id}))
+
+
+async def _import_settings_for(session: AsyncSession, data_source_id: Optional[str],
+                               requested: Optional[str], *, fork: bool = False) -> tuple:
+    """``(identifier, settings)``: what an import into the data source's graph (``fork``: a fork's)
+    runs under (``services.import_settings``) — the request's identifier, checked (422 with the
+    grammar), else the data source's, else the platform's, a property default ``entity_id`` on a
+    fork but for its identifier property; and what its job keeps: where the identifier came from,
+    and the replace guard's limits with where each came from."""
+    from backend.app.db.models import WorkspaceDataSourceORM
+    from backend.app.services import import_settings
+    from backend.app.services.versioning.import_export import identifier as identifiers
+    row = (await session.get(WorkspaceDataSourceORM, data_source_id)
+           if data_source_id and session is not None else None)     # a direct caller may hold none
+    identity = await _identity_property_of(session, row) if fork else None
+    try:
+        return import_settings.for_import(row, requested, fork=fork, identity_property=identity)
+    except identifiers.IdentifierError as exc:
+        raise HTTPException(status_code=422, detail={"type": "invalid_identifier",
+                                                     "message": str(exc)})
+
+
 @router.post("/graphs/{graph_id}/imports", response_model=CreateImportResponse, status_code=202)
 async def create_import(
     ws_id: str, graph_id: str,
@@ -3836,6 +3937,9 @@ async def create_import(
         "Makes the request safe to send again: the same key, from the same caller, answers "
         "with the job it started")),
     auto_publish: bool = _AUTO_PUBLISH,
+    identifier: Optional[str] = _IDENTIFIER,
+    allow_mass_delete: bool = _ALLOW_MASS_DELETE,
+    max_refused_rows: Optional[str] = _MAX_REFUSED_ROWS,
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
     claims: PermissionClaims = Depends(get_permission_claims),
     meta: dict = Depends(graph_in_workspace),
@@ -3849,10 +3953,15 @@ async def create_import(
     writes to ``main`` — unless ``autoPublish`` asks it to publish its draft once it has finished.
     ``branchId`` stacks onto an existing draft (repeat imports, like manual edits)."""
     from backend.app.services.versioning.import_export.formats import get_adapter
+    _refuse_a_form(request)
+    digest = _body_digest(request)
     try:
         get_adapter(format)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
+    identifier, settings = await _import_settings_for(session, meta.get("data_source_id"), identifier,
+                                                      fork=bool(meta.get("fork_parent_graph_id")))
+    settings = _with_refused_budget(settings, max_refused_rows)
     await _check_import_view(session, ws_id, view_id, user, claims)
     if auto_publish:
         await _may_auto_publish(session, claims, ws_id, meta, branch_id)
@@ -3865,7 +3974,9 @@ async def create_import(
                     workspace_id=ws_id, data_source_id=meta.get("data_source_id"), graph_id=graph_id,
                     actor=user.id, import_format=format, provider_id=meta.get("provider_id"),
                     branch_id=branch_id, reconcile_mode=reconcile_mode, scope_view_id=view_id,
-                    idempotency_key=key, auto_publish=auto_publish, draft_visibility=(
+                    idempotency_key=key, auto_publish=auto_publish, identifier=identifier,
+                    allow_mass_delete=allow_mass_delete is True, import_settings=settings,
+                    draft_visibility=(
                         await draft_level(session, meta.get("data_source_id")) if branch_id is None else None))
         except IntegrityError:
             # A request with the same key got there first: answer with its job.
@@ -3874,7 +3985,7 @@ async def create_import(
                 raise
         else:
             return await _store_and_start(ie, session, request, created["job_id"], created["branch_id"],
-                                          created["source_uri"], format)
+                                          created["source_uri"], format, digest)
     if _never_arrived(job):
         # Its request broke off before storing the file: this one's file is taken, once the job is
         # taken back under the rules a new import meets (the view it places into included).
@@ -3882,7 +3993,7 @@ async def create_import(
         with _domain_errors():
             if await ie.reclaim_import(job["jobId"], actor=user.id, workspace_id=ws_id):
                 return await _store_and_start(ie, session, request, job["jobId"], job["branchId"],
-                                              job["sourceUri"], format)
+                                              job["sourceUri"], format, digest)
         job = await ie.find_job(graph_id=graph_id, idempotency_key=key)     # another request took it back
     # Still storing its file, queued, running or finished: answered as it is.
     return {"jobId": job["jobId"], "branchId": job["branchId"], "sourceUri": job["sourceUri"],
@@ -3890,11 +4001,12 @@ async def create_import(
 
 
 async def _store_and_start(ie, session: AsyncSession, request: Request, job_id: str, branch_id: str,
-                           source_uri: str, fmt: str) -> dict:
+                           source_uri: str, fmt: str, digest: Optional[tuple] = None) -> dict:
     """Store the request's body as import ``job_id``'s file and queue it. A request that breaks off
     first fails the job there and then (:func:`_abandon_unqueued`): its draft takes the next import
     now, and the same key sent again takes the job back. A body past what one import of ``fmt`` can
-    be is refused (413) as soon as it passes it.
+    be is refused (413) as soon as it passes it, and one that doesn't hash to its ``digest`` (422)
+    once it is in: neither is queued.
 
     The file can take minutes to arrive, so the request's checks end their transaction first (they
     only read): its connection goes back to the pool rather than being held for as long as the
@@ -3905,7 +4017,8 @@ async def _store_and_start(ie, session: AsyncSession, request: Request, job_id: 
             await session.commit()
         async with _IMPORT_BODIES.slot():
             with _upload_errors():
-                await ie.store.put_stream(source_uri, uploads.within_limit(request.stream(), fmt))
+                await ie.store.put_stream(source_uri,
+                                          uploads.checked(uploads.within_limit(request.stream(), fmt), digest))
         status = await ie.start_import(job_id)
     except BaseException:
         await _abandon_unqueued(ie, job_id)
@@ -3967,28 +4080,92 @@ async def _load_upload(ie, ws_id: str, graph_id: str, meta: dict, upload_id: str
                                   graph_id=graph_id, upload_id=upload_id, owner=user.id)
 
 
-@router.post("/graphs/{graph_id}/imports/uploads", status_code=201)
+def _refuse_a_form(request: Request) -> None:
+    """A file sent as a form would be read with the form's own lines in it: say how to send it."""
+    from backend.app.services.versioning.import_export import uploads
+    if uploads.is_form(request.headers.get("content-type")):
+        raise HTTPException(status_code=415, detail=uploads.FORM_REFUSED)
+
+
+def _body_digest(request: Request) -> Optional[tuple]:
+    """What the request's ``Content-Digest`` (RFC 9530) says its body hashes to, checked as it
+    arrives; one that can't be read or checked is refused before anything is made."""
+    from backend.app.services.versioning.import_export import uploads
+    with _upload_errors():
+        return uploads.content_digest(request.headers.get("content-digest"))
+
+
+async def _upload_description(request: Request) -> CreateUploadRequest:
+    """The JSON body that starts an upload, read no further than a description can be."""
+    from fastapi.exceptions import RequestValidationError
+    from pydantic import ValidationError
+
+    from backend.app.services.versioning.import_export import uploads
+    raw = b""
+    async for chunk in request.stream():
+        raw += chunk
+        if len(raw) > uploads.DESCRIPTION_MAX_BYTES:
+            raise HTTPException(status_code=413, detail=uploads.DESCRIPTION_TOO_LARGE)
+    try:
+        return CreateUploadRequest.model_validate_json(raw)
+    except ValidationError as exc:
+        raise RequestValidationError([{**e, "loc": ("body", *e["loc"])} for e in exc.errors(include_url=False)])
+
+
+@router.post("/graphs/{graph_id}/imports/uploads", status_code=201, openapi_extra={"requestBody": {
+    "required": True, "content": {
+        "application/json": {"schema": CreateUploadRequest.model_json_schema()},
+        "application/octet-stream": {"schema": {"type": "string", "format": "binary"}}}}})
 async def create_import_upload(
-    ws_id: str, graph_id: str, body: CreateUploadRequest,
+    ws_id: str, graph_id: str, request: Request,
+    file_name: Optional[str] = Query(None, alias="fileName", max_length=500,
+                                     description="With the file as the body: its name"),
+    fmt: str = Query("ndjson", alias="format", max_length=16,
+                     description="With the file as the body: its format, as POST …/imports takes it"),
+    part_bytes: Optional[int] = Query(None, alias="partBytes",
+                                      description="With the file as the body: the size of its parts"),
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
     meta: dict = Depends(graph_in_workspace),
     ie=Depends(get_import_export_service),
 ):
-    """Start a resumable upload of a file to import: how it is to be split, and where its parts go.
-    A client that splits files its own way says its part size (``partBytes``). A file too large for
-    its format is refused here, before any of it is sent (413)."""
+    """Start a resumable upload of a file to import. The body is either:
+
+    * **the upload's description**, as JSON (``{"fileName", "size", "format", "partBytes"}``): how
+      the file is to be split, and the parts follow (``PUT …/parts/{n}``, up to the whole file to
+      part 0). A client that splits files its own way says its part size (``partBytes``).
+    * **the file itself**, sent as anything but JSON (``application/octet-stream``, ``text/csv``…),
+      with its Content-Length or streamed without one, and ``fileName``, ``format`` and
+      ``partBytes`` as query parameters. It is stored as the upload's parts as it arrives, one chunk
+      held at a time, and the answer has every part received. The upload exists once the whole
+      body is in: one that breaks off leaves none.
+
+    Either way ``…/complete`` imports it. A file too large for its format is refused (413): one that
+    says its size, before any of it is read; a streamed one, as soon as it passes the limit."""
     from backend.app.services.versioning.import_export import uploads
     from backend.app.services.versioning.import_export.formats import get_adapter
+    as_file = not uploads.sent_as_json(request.headers.get("content-type"))
+    if as_file:
+        _refuse_a_form(request)
+        digest = _body_digest(request)
+        name = file_name or f"upload.{fmt.lower()}"
+    else:
+        body = await _upload_description(request)
+        name, size, fmt, part_bytes = body.fileName, body.size, body.format, body.partBytes
     try:
-        get_adapter(body.format)
+        get_adapter(fmt)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
+    where = {"workspace_id": ws_id, "data_source_id": meta.get("data_source_id"), "graph_id": graph_id,
+             "owner": user.id, "file_name": name, "fmt": fmt.lower(), "part_bytes": part_bytes}
     with _upload_errors():
-        record = await uploads.create(
-            ie.store, workspace_id=ws_id, data_source_id=meta.get("data_source_id"), graph_id=graph_id,
-            owner=user.id, file_name=body.fileName, size=body.size, fmt=body.format.lower(),
-            part_bytes=body.partBytes)
-    return _upload_view(record, [])
+        if not as_file:
+            return _upload_view(await uploads.create(ie.store, size=size, **where), [])
+        declared = request.headers.get("content-length")
+        async with _IMPORT_BODIES.slot():
+            record = await uploads.create_from_body(
+                ie.store, request.stream(), declared=int(declared) if declared and declared.isdigit() else None,
+                digest=digest, **where)
+    return _upload_view(record, list(range(record["parts"])))
 
 
 @router.get("/graphs/{graph_id}/imports/uploads/{upload_id}")
@@ -4016,13 +4193,15 @@ async def put_import_upload_part(
     again replaces it — until the upload is completed: what is imported is what was there then. A
     body whose Content-Length doesn't end where a part does is refused before any of it is read."""
     from backend.app.services.versioning.import_export import uploads
+    _refuse_a_form(request)
+    digest = _body_digest(request)
     record = await _load_upload(ie, ws_id, graph_id, meta, upload_id, user)
     if record.get("jobId"):
         raise HTTPException(status_code=409, detail="This upload is complete. Upload the file again to change it.")
     declared = request.headers.get("content-length")
     with _upload_errors():
         async with _IMPORT_BODIES.slot():
-            size = await uploads.put_part(ie.store, record, part, request.stream(),
+            size = await uploads.put_part(ie.store, record, part, request.stream(), digest=digest,
                                           declared=int(declared) if declared and declared.isdigit() else None)
     return {"part": part, "size": size, "lastPart": (part * record["partBytes"] + size - 1) // record["partBytes"]}
 
@@ -4035,6 +4214,9 @@ async def complete_import_upload(
     branch_id: Optional[str] = Query(None, alias="branchId"),
     view_id: Optional[str] = Query(None, alias="viewId"),
     auto_publish: bool = _AUTO_PUBLISH,
+    identifier: Optional[str] = _IDENTIFIER,
+    allow_mass_delete: bool = _ALLOW_MASS_DELETE,
+    max_refused_rows: Optional[str] = _MAX_REFUSED_ROWS,
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
     claims: PermissionClaims = Depends(get_permission_claims),
     meta: dict = Depends(graph_in_workspace),
@@ -4046,6 +4228,9 @@ async def complete_import_upload(
     time, or after an answer that was lost — answers with that import, and one whose completion
     broke off before it was queued is queued now."""
     from backend.app.services.versioning.import_export import uploads
+    identifier, settings = await _import_settings_for(session, meta.get("data_source_id"), identifier,
+                                                      fork=bool(meta.get("fork_parent_graph_id")))
+    settings = _with_refused_budget(settings, max_refused_rows)
     record = await _load_upload(ie, ws_id, graph_id, meta, upload_id, user)
     await _check_import_view(session, ws_id, view_id, user, claims)
     if auto_publish:
@@ -4064,7 +4249,8 @@ async def complete_import_upload(
                     actor=user.id, import_format=record["format"], provider_id=meta.get("provider_id"),
                     source_uri=uploads.record_key(record), branch_id=branch_id, reconcile_mode=reconcile_mode,
                     scope_view_id=view_id, idempotency_key=key, auto_publish=auto_publish,
-                    draft_visibility=(
+                    identifier=identifier, allow_mass_delete=allow_mass_delete is True,
+                    import_settings=settings, draft_visibility=(
                         await draft_level(session, meta.get("data_source_id")) if branch_id is None else None))
         except IntegrityError:
             # A completion sent at the same time got there first: answer with its import.
@@ -4199,11 +4385,13 @@ async def validate_import(
     ws_id: str, graph_id: str, request: Request,
     format: str = Query("ndjson"),
     branch_id: Optional[str] = Query(None, alias="branchId"),
+    identifier: Optional[str] = _IDENTIFIER,
     _user: User = Depends(requires(_READ, workspace="ws_id")),
     viewer: Viewer = Depends(viewer_ctx),
     meta: dict = Depends(graph_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
     ie=Depends(get_import_export_service),
+    session: AsyncSession = Depends(get_db_session),
 ):
     """Check a file as an import would read it, without importing it: every row parsed and
     resolved against ``main`` (or the draft ``branchId``) — what it would create, update, leave
@@ -4212,11 +4400,16 @@ async def validate_import(
     ``IMPORT_COMMIT_WINDOW`` rows; **413** past either). **422** when the file can't be read. A
     strict graph's write gate, which runs at commit, can still refuse a row that passes here."""
     from backend.app.services.versioning.import_export.formats import get_adapter
-    from backend.app.services.versioning.import_export.service import DryRunTooLarge
+    from backend.app.services.versioning.import_export import keys as matching
+    from backend.app.services.versioning.import_export.service import (
+        DryRunTooLarge, IdentityUnavailable,
+    )
     try:
         get_adapter(format)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
+    identifier, settings = await _import_settings_for(session, meta.get("data_source_id"), identifier,
+                                                      fork=bool(meta.get("fork_parent_graph_id")))
     body = bytearray()
     async for chunk in request.stream():
         body += chunk
@@ -4228,13 +4421,173 @@ async def validate_import(
         with _domain_errors():
             await svc.assert_branch_readable(graph_id=graph_id, branch_id=branch_id, viewer=viewer)
     try:                                       # the draft is checked above: what is left is the file
-        return await ie.validate_import(
+        checked = await ie.validate_import(
             graph_id=graph_id, workspace_id=ws_id, data_source_id=meta.get("data_source_id"),
-            branch_id=branch_id, data=bytes(body), import_format=format.lower())
+            branch_id=branch_id, data=bytes(body), import_format=format.lower(),
+            identifier=identifier)
+        return {**checked, "identifierSource": settings["identifierSource"]}
     except DryRunTooLarge as exc:
         raise HTTPException(status_code=413, detail={"type": "too_large", "message": str(exc)})
+    except IdentityUnavailable as exc:
+        raise HTTPException(status_code=503, headers={"Retry-After": "15"},
+                            detail={"type": "identity_unavailable", "message": str(exc)})
+    except matching.NotIndexed as exc:
+        raise HTTPException(status_code=409, detail={"type": "identifier_not_indexed",
+                                                     "message": str(exc)})
+    except matching.NotOnAFork as exc:
+        raise HTTPException(status_code=422, detail={"type": exc.code, "message": str(exc)})
     except ValueError as exc:
         raise HTTPException(status_code=422, detail={"type": "invalid_file", "message": str(exc)})
+
+
+# --------------------------------------------------------------------------- #
+# Import settings                                                              #
+# --------------------------------------------------------------------------- #
+_Fraction = Union[Annotated[float, Field(ge=0, le=1)], Literal["inherit"]]
+
+
+class ImportSettingsChange(_ApiModel):
+    """A graph's own import settings, on a write (``services.import_settings``): a field left out
+    stays as it is, and ``"inherit"`` clears it, so the platform's holds."""
+    identifier: Optional[str] = Field(default=None, description=(
+        "What its imports' rows find their entities by when an import names no identifier: "
+        "entity_id, urn or prop.<name>"))
+    replace_min_live: Optional[Union[Annotated[int, Field(ge=0)], Literal["inherit"]]] = Field(
+        default=None, alias="replaceMinLive")
+    replace_delete_fraction: Optional[_Fraction] = Field(default=None, alias="replaceDeleteFraction")
+    replace_create_fraction: Optional[_Fraction] = Field(default=None, alias="replaceCreateFraction")
+    replace_min_match_fraction: Optional[_Fraction] = Field(default=None, alias="replaceMinMatchFraction")
+
+
+class ImportSettingsResponse(_ApiModel):
+    data_source_id: Optional[str] = Field(alias="dataSourceId")
+    overrides: Dict[str, Any]
+    platform: Dict[str, Any]
+    effective: Dict[str, Any]
+    replace_guard: bool = Field(alias="replaceGuard")
+    follows_parent: bool = Field(alias="followsParent")
+    matching_properties: List[Dict[str, Any]] = Field(alias="matchingProperties")
+    max_matching_properties: int = Field(alias="maxMatchingProperties")
+
+
+async def _settings_row(session: AsyncSession, meta: dict):
+    from backend.app.db.models import WorkspaceDataSourceORM
+    ds_id = meta.get("data_source_id")
+    return await session.get(WorkspaceDataSourceORM, ds_id) if ds_id else None
+
+
+async def _import_settings_view(session: AsyncSession, row, graph_id: str, *,
+                                fork: bool = False) -> dict:
+    from backend.app.services import import_settings
+    from backend.app.services.versioning import config as gv_config
+    from backend.app.services.versioning.import_export import keys as matching
+    identity = await _identity_property_of(session, row) if fork else None
+    return {"dataSourceId": row.id if row is not None else None,
+            "overrides": import_settings.settings_of(row), "platform": import_settings.platform(),
+            "effective": import_settings.resolve(row, fork=fork, identity_property=identity),
+            "replaceGuard": gv_config.IMPORT_REPLACE_GUARD,
+            "followsParent": bool(row is not None and row.fork_of_data_source_id),
+            "matchingProperties": await matching.listed(graph_id),
+            "maxMatchingProperties": gv_config.MAX_MATCHING_PROPERTIES}
+
+
+@router.get("/graphs/{graph_id}/import-settings", response_model=ImportSettingsResponse)
+async def get_import_settings(
+    ws_id: str, graph_id: str,
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    meta: dict = Depends(graph_in_workspace),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """What this graph's imports run under when they name nothing else: what their rows find their
+    entities by (``identifier``) and the replace guard's limits — the graph's own (``overrides``;
+    null where it sets none), the platform's, and what holds (``effective``, with where each came
+    from; on a fork, ``entity_id`` from ``fork`` for a property default it can't match by) — and the
+    properties its imports match by, with how far each one's index is caught up."""
+    return await _import_settings_view(session, await _settings_row(session, meta), graph_id,
+                                       fork=bool(meta.get("fork_parent_graph_id")))
+
+
+@router.put("/graphs/{graph_id}/import-settings", response_model=ImportSettingsResponse)
+async def put_import_settings(
+    ws_id: str, graph_id: str, body: ImportSettingsChange,
+    _user: User = Depends(requires("workspace:admin", workspace="ws_id")),
+    meta: dict = Depends(graph_in_workspace),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Set this graph's import settings (workspace admins), field by field; ``"inherit"`` goes back
+    to the platform's. An import that names its own identifier still uses it, and one already made
+    keeps the settings it was made with. A fork's are its parent's (409
+    ``fork_settings_follow_parent``). A change is recorded in the activity log."""
+    from backend.app.services import fork_sources, import_settings
+    from backend.app.services.activity import recorder
+    from backend.app.services.versioning.import_export import identifier as identifiers
+    row = await _settings_row(session, meta)
+    if row is None:
+        raise HTTPException(status_code=409, detail={
+            "type": "no_data_source", "message": "This graph has no data source to keep its import "
+            "settings on: its imports run under the platform's."})
+    changes = import_settings.changes_from(body)
+    if changes.get("identifier", "inherit") != "inherit":
+        try:
+            changes["identifier"] = identifiers.parse(changes["identifier"])
+        except identifiers.IdentifierError as exc:
+            raise HTTPException(status_code=422, detail={"type": "invalid_identifier",
+                                                         "message": str(exc)})
+        if changes["identifier"] is None:
+            raise HTTPException(status_code=422, detail={
+                "type": "invalid_identifier",
+                "message": "identifier is entity_id, urn or prop.<name>, or inherit"})
+    governing = fork_sources.governing(row)
+    before, after = import_settings.apply(row, changes)
+    await fork_sources.follow_parent(session, row, governing)
+    if after:
+        await recorder.record_for_request(
+            session, "workspace.versioning.import_settings_updated", **recorder.data_source_target(row),
+            details={"from": before, "to": after})
+    return await _import_settings_view(session, row, graph_id,
+                                       fork=bool(meta.get("fork_parent_graph_id")))
+
+
+class ResolveIdentitiesRequest(_ApiModel):
+    identifier: str = Field(description="entity_id, urn or prop.<name>, as on an import")
+    values: List[str] = Field(max_length=10000, description="Up to 10,000 values to look up")
+
+
+@router.post("/graphs/{graph_id}/identities/resolve")
+async def resolve_identities(
+    ws_id: str, graph_id: str, body: ResolveIdentitiesRequest,
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    meta: dict = Depends(graph_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """What each value names on the published graph, as an import naming ``identifier`` finds a
+    row's entity — without importing anything: ``{identifier, results: [{value, status,
+    entityId, entityIds?}]}``, ``status`` ``found``, ``none`` or ``duplicate`` (two live nodes hold
+    it: ``entityIds``). For clients of the writes that name entities by id (``POST
+    /graph/changes``, a draft's changes) that know them by an id of their own system. **422** for
+    an identifier it may not name; **409 ``identifier_not_indexed``** for ``prop.<name>`` before an
+    import has built that property's index."""
+    from backend.app.services.versioning.import_export import identifier as identifiers
+    from backend.app.services.versioning.import_export import keys as matching
+    try:
+        identifier = identifiers.parse(body.identifier)
+    except identifiers.IdentifierError as exc:
+        raise HTTPException(status_code=422, detail={"type": "invalid_identifier", "message": str(exc)})
+    if identifier is None:
+        raise HTTPException(status_code=422, detail={
+            "type": "invalid_identifier", "message": "identifier is entity_id, urn or prop.<name>"})
+    identity = await _node_identity_for_meta(session, meta)
+    if identity is not None and identifier == f"prop.{identity.identity_property}":
+        identifier = "urn"                       # that property holds the urn, as on an import
+    try:
+        results = await svc.resolve_identities(graph_id=graph_id, identifier=identifier,
+                                               values=body.values)
+    except matching.NotIndexed as exc:
+        raise HTTPException(status_code=409, detail={"type": "identifier_not_indexed", "message": str(exc)})
+    except matching.NotOnAFork as exc:
+        raise HTTPException(status_code=422, detail={"type": exc.code, "message": str(exc)})
+    return {"identifier": identifier, "results": results}
 
 
 @router.get("/graphs/{graph_id}/imports/{job_id}")
@@ -4255,6 +4608,10 @@ async def get_import(
 @router.get("/graphs/{graph_id}/imports/{job_id}/preview")
 async def get_import_preview(
     ws_id: str, graph_id: str, job_id: str,
+    refused: bool = Query(False, description=(
+        "Only the rows the import refused, each with its code, reason and what to do (fix)")),
+    after: Optional[int] = Query(None, ge=-1, description=(
+        "A rowIndex: the rows after it, to page on (the answer's nextAfter)")),
     _user: User = Depends(requires(_READ, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
     viewer: Viewer = Depends(viewer_ctx),
@@ -4262,8 +4619,9 @@ async def get_import_preview(
     ie=Depends(get_import_export_service),
 ):
     """Summary counts + a bounded sample of resolved rows. The full field-level diff is the
-    draft-vs-main diff served by the existing versioning endpoints."""
-    preview = await ie.get_preview(job_id)
+    draft-vs-main diff served by the existing versioning endpoints. ``refused=true`` lists only the
+    rows the import refused, each with why and what to do, a page at a time (``after``)."""
+    preview = await ie.get_preview(job_id, refused=refused, after=after)
     if (preview is None or preview["job"].get("graphId") != graph_id
             or not await _import_visible(svc, graph_id, preview["job"], viewer)):
         raise HTTPException(status_code=404, detail="import job not found")
@@ -4375,8 +4733,11 @@ async def _export_selection(
     ws_id: str, graph_id: str, meta: dict, *, branch_id: Optional[str], as_of_seq: Optional[int],
     view_id: Optional[str], ids: Optional[str], types: Optional[str], viewer: Viewer, user: User,
     claims: PermissionClaims, session: AsyncSession, svc: GraphVersioningService,
+    budget_s: Optional[float] = None,
 ):
-    """The snapshot an export reads and the selection it keeps, with what the view contributed."""
+    """The snapshot an export reads and the selection it keeps, with what the view contributed.
+    Given ``budget_s`` (a plan's), a view whose entities take longer than that to find leaves the
+    selection ``None``, and what the view holds unknown."""
     from backend.app.services.versioning.import_export import stream
     from backend.app.services.versioning.import_export.snapshot import open_snapshot
 
@@ -4391,7 +4752,10 @@ async def _export_selection(
         scope = await _view_export_scope(ws_id, meta.get("data_source_id"), view_id, branch_id)
         view = {"viewId": view_id, "placements": 0, "found": 0, "entities": None}
         if scope:
-            found = await stream.view_entities(snap, scope)
+            found = await stream.view_entities(snap, scope, budget_s=budget_s)
+            if found is None:
+                view.update(placements=len(set(scope["assigned_urns"])), found=None)
+                return snap, None, view
             keep = found["keep"]
             view.update(placements=found["placed"], found=found["found"], entities=len(keep))
     selection = stream.Selection.of(keep=keep, ids=_split_list(ids), types=_split_list(types))
@@ -4416,14 +4780,21 @@ async def plan_export(
 ):
     """What an export would hold, before anything is downloaded: node and edge counts (``None``
     when too large to count quickly), whether it is empty, what the view contributed, and whether
-    the format can hold it (an Excel sheet stops at 1,048,575 rows)."""
+    the format can hold it (an Excel sheet stops at 1,048,575 rows). Answered within
+    ``GRAPH_EXPORT_PLAN_BUDGET_SECS`` whatever the graph's size, history or shape (a fork, a draft,
+    a past revision, a view): finding the view's entities and counting share it, and what isn't
+    known by then is ``None``."""
     from backend.app.api.v1.endpoints.graph_export import excel_limit, export_format
     from backend.app.services.versioning.import_export import stream
     fmt = export_format(format)
+    clock = asyncio.get_running_loop().time
+    until = clock() + stream.PLAN_BUDGET_S
     snap, selection, view = await _export_selection(
         ws_id, graph_id, meta, branch_id=branch_id, as_of_seq=as_of_seq, view_id=view_id, ids=ids,
-        types=types, viewer=viewer, user=user, claims=claims, session=session, svc=svc)
-    counts = await stream.count(snap, selection)
+        types=types, viewer=viewer, user=user, claims=claims, session=session, svc=svc,
+        budget_s=stream.PLAN_BUDGET_S)
+    counts = ({"nodes": None, "edges": None, "exact": False, "seen": 0} if selection is None
+              else await stream.count(snap, selection, budget_s=until - clock()))
     if counts["exact"]:
         empty = counts["nodes"] + counts["edges"] == 0
     else:

@@ -105,6 +105,7 @@ tests/test_exception_handlers.py
 tests/test_export_cancel.py
 tests/test_export_downloads.py
 tests/test_export_native_lines.py
+tests/test_export_plan_budget.py
 tests/test_export_view_scope.py
 tests/test_falkor_indexes.py
 tests/test_falkordb_edges_pair_binding.py
@@ -144,11 +145,13 @@ tests/test_import_formats.py
 tests/test_import_in_memory_unit.py
 tests/test_import_job_liveness.py
 tests/test_import_record_schema.py
+tests/test_import_refused_rows.py
 tests/test_import_replace.py
 tests/test_import_replace_scope.py
 tests/test_import_resolve.py
 tests/test_import_resume.py
 tests/test_import_rowmodel.py
+tests/test_import_settings.py
 tests/test_import_template.py
 tests/test_import_uploads.py
 tests/test_import_view_assignments.py
@@ -206,9 +209,12 @@ tests/test_projection_derived_labels.py
 tests/test_projection_fencing_unit.py
 tests/test_projection_foreign_key_guard.py
 tests/test_projection_labeled_writes.py
+tests/test_projection_ladder.py
 tests/test_projection_liveness_unit.py
 tests/test_projection_property_removal_unit.py
+tests/test_projection_quarantine_unit.py
 tests/test_projection_reconcile_unit.py
+tests/test_projection_serving.py
 tests/test_projection_single_flight.py
 tests/test_projection_stalled_reconcile.py
 tests/test_projection_verify_unit.py

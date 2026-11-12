@@ -77,6 +77,8 @@ editing dozens of nodes on the canvas.
    format** is detected for you.
 6. Under **How should it reconcile?**, choose **Add & update** or **Replace
    (authoritative)** — see [Choosing a reconcile mode](#choosing-a-reconcile-mode).
+   Under **Match existing items by**, check how the file's rows find the items
+   already there — see [Matching rows to existing items](#matching-rows-to-existing-items).
 7. Choose **Import**. A CSV, TSV or NDJSON file can be up to 10 GB; a JSON or
    Excel file, which is read whole, up to 100 MB. The dialog shows how much of
    the file is up. If the upload stops (a dropped connection, a closed tab),
@@ -107,27 +109,149 @@ there are and opens **Changes**, which lists every one.
 
 ### Editing an export offline
 
-An export you edit in Excel can be imported days later. If someone changed the
-same items in the meantime, only the cells you changed are applied, so their
-changes stay. If you both changed the same cell, that row isn't imported: the
-preview names the field, and you can export again and redo that edit. Two rows
-for one item, or an edge whose ends you changed, are refused the same way. To
-point an edge somewhere else, delete its row (set `_op` to `delete`) and add a
-new one.
+To change what's already there, export it and edit the export: each of its rows
+carries its item's id, so the import finds every one again. It can be imported
+days later.
 
-A `urn` you give a new item finds it again on the next import, but isn't kept
-on the item. To see your own id on it, put the id in a property too.
+For example, a View holds three tables: `orders`, `customers` and
+`orders_2019`. Export it as **Excel**, then:
+
+1. On the **Nodes** sheet, change `orders`' `prop.owner` from `alice` to
+   `dana`, and type `\N` in its `prop.tier` cell to remove that property. A
+   cell you leave as it is, or empty, keeps its value.
+2. Add a `prop.domain` column and fill it in for `orders` — or choose **Add new
+   property columns** when you export.
+3. Set `_op` to `delete` on the row of `orders_2019`, and delete the rows of its
+   edges on the **Edges** sheet. To delete what a table contains too, set `_op`
+   to `delete` on those rows as well.
+4. Add a row for a new table, `refunds`: its `entityType` (`Table`), a `urn`
+   that won't change (`urn:acme:table:sales.refunds`), its name and its owner.
+   Leave `entity_id` empty.
+5. On the **Edges** sheet, add its edge: `edgeType` `FLOWS_TO`, `sourceUrn`
+   `urn:acme:table:sales.orders` and `targetUrn` `urn:acme:table:sales.refunds`.
+
+Leave the greyed columns of the rows that were there as they are: `entity_id`,
+`urn` and `baseVersion` are how the import finds each row's item, and what it
+compares your edits with. Then import the workbook with **Match existing items
+by** on **Entity ID**. The preview shows `orders` updated, `orders_2019`
+deleted, and `refunds` and its edge new. Import the same workbook again and
+nothing changes.
+
+If someone changed the same items in the meantime, only the cells you changed
+are applied, so their changes stay. If you both changed the same cell, that row
+isn't imported: the preview names the field — *changed since you exported it:
+description*. Export again and redo that edit; or, to keep yours, empty that
+row's `baseVersion` and import the row again. Two rows for one item, or an edge
+whose ends you changed, are refused the same way. To point an edge somewhere
+else, delete its row (set `_op` to `delete`) and add a new one.
+
+A `urn` you give a new item is kept on it, and finds it again on the next
+import. A new row needs one: a row with only an `entity_id` you made up for the
+file is refused, because the next import couldn't find what it made and would
+make it again.
+
+### Matching rows to existing items
+
+Every item keeps one id for life, whatever matched it, so its history carries
+on through every import. **Match existing items by** says how a row finds the
+item it describes. Scripting it? [Export, edit offline, import back](/docs/import-export-api)
+walks through each choice over the API, with every request and answer, and
+[Send Data From Your Service](/docs/import-from-your-service) sends a service's
+file from any language.
+
+| Choice | A row finds its item by | Use it when |
+| --- | --- | --- |
+| **Entity ID** | its `entity_id`, else its `urn`, else a field its type matches imports by, else a unique qualified name | The file is an export of this data, edited (the default) |
+| **URN** | its `urn` alone (or an `entity_id` of this graph) | Another system names its items by urn, as DataHub does |
+| **A property** | its value of a property you name, such as `external_id` | Another system gives each item an id of its own, kept in a property |
+
+**Entity ID — an export, edited.** The example above. Each exported row's
+`entity_id` finds its item, and a new row is found by its `urn`.
+
+**URN — a system that names its items by urn.** A catalog such as DataHub names
+every table by a urn, and sends you its tables each night:
+
+| kind | urn | entityType | displayName | prop.owner |
+| --- | --- | --- | --- | --- |
+| node | `urn:li:dataset:shop.orders` | Table | orders | alice |
+| node | `urn:li:dataset:shop.customers` | Table | customers | dana |
+| node | | Table | invoices | carol |
+
+Its edges name their ends by urn too, in `sourceUrn` and `targetUrn`. Choose
+**URN**. The first import makes each table and keeps its urn; every later one
+finds it by the same urn and changes only what changed. The `invoices` row has
+no urn, so it is refused — *it has no urn, and with identifier=urn a row is
+found by its urn* — and a qualified name doesn't stand in for one. Give it its
+urn. With **Add & update** the other rows import meanwhile; **Replace** deletes
+nothing while a row is refused.
+
+**A property — a system with ids of its own.** An ERP keeps an id of its own for
+each table, and no urn:
+
+| kind | prop.external_id | entityType | displayName | prop.owner |
+| --- | --- | --- | --- | --- |
+| node | E-1001 | Table | orders | alice |
+| node | E-1002 | Table | customers | bob |
+
+Its edges name their ends by the same id, in `source.external_id` and
+`target.external_id`. Choose **A property** and type `external_id`. The first
+import by it indexes the property, as the dialog says. After that, a file of
+just `prop.external_id` and the column that changed — `E-1001` with a new
+`prop.owner` — changes that column and nothing else, and a table someone added
+in the app with its own `external_id` is found by it, not made twice.
+
+The choice marked **default** is the data source's. A workspace admin sets it on
+the data source's **Versioning** tab, under **Imports**. A fork can't match by a
+property yet, so where its parent's default is a property, a fork's is
+**Entity ID**, and the dialog says so. The property the data source identifies
+its items by is the exception: it holds their urn, so a fork matches by it as
+its parent does.
+
+- **A row nothing matches** becomes a new item. Its id is made from the key that
+  should have found it, so importing the file again finds it rather than making
+  it twice.
+- **A row with no key at all** (no urn, and no value of the property) is refused,
+  saying so: give it one.
+- **Only the columns a row carries change.** A file of `external_id` and one
+  changed column updates that column on those items and leaves everything else
+  as it is. A row that changes nothing writes nothing.
+- **Matching by a property for the first time** reads every item once, to index
+  the property: minutes on a large graph. The dialog says when an import does
+  this. Later imports only catch the index up, and find items people made or
+  edited on the canvas since.
+- **A value two items hold** refuses the rows that name it, naming both items.
+  Values compare as text, with spaces at either end ignored; `ABC` and `abc` are
+  different values.
 
 ### Choosing a reconcile mode
 
 | Mode | What it does | Use it when |
 | --- | --- | --- |
 | **Add & update** | Creates new items and updates the ones that match. Never deletes anything. | The safe default — you're adding or correcting data. |
-| **Replace (authoritative)** | Treats the file as the *complete* picture of the View you're importing from: its entities missing from the file are deleted. The rest of the data source is untouched. | You're re-uploading a full, canonical export of the View and want it to match exactly. |
+| **Replace (authoritative)** | Treats the file as the *complete* picture of the View you're importing from: its entities missing from the file are deleted. The rest of the data source is untouched. A replace that would delete most of what it covers and create most of it again (a file whose rows don't match the graph's items) is stopped before it deletes anything. | You're re-uploading a full, canonical export of the View and want it to match exactly. |
 
 > **Warning:** Replace mode can delete data. {brand} always shows you the exact
 > count before you publish, but double-check your file is complete before
 > choosing it.
+
+When the replace guard stops an import, nothing is deleted and the file's rows
+wait on your draft, the items they made placed in the draft's copy of the View.
+Most often the file names its items another way: try again with another **Match
+existing items by**. If the file really replaces most of what's there, choose
+**Replace anyway**: the file is imported again into the same draft, its
+deletions included, for you to review before you publish. The
+data source's **Versioning** tab shows the limits the guard uses, and a workspace
+admin can change them there.
+
+### Working beside other drafts
+
+Several people, and several connectors, can change one data source at once,
+each in a draft of their own. When one publishes, the others' drafts are behind
+the published graph: **Pull latest** brings its changes into yours, merging them
+field by field, and asks you to choose only where you both changed the same
+field. A connector whose import publishes itself does the same on its own: it
+pulls the latest and publishes, and waits for a person only on such a conflict.
+What others published meanwhile is kept, however large the import.
 
 Because an import lands on a draft, nothing is final until you publish or it's
 merged through review — you can inspect, adjust, or abandon it like any other

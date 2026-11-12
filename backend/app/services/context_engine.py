@@ -189,12 +189,14 @@ class ContextEngine:
         repo = SQLAlchemyOntologyRepository(session)
         ontology_service = LocalOntologyService(repo)
 
-        # Branch-aware reads. A resolved draft swaps in the read-only Postgres reader. For main
-        # (named, opaque id, or omitted) we honour read-your-writes: when the FalkorDB projection
-        # lags the committed head (e.g. right after a merge, which commits to Postgres + nudges an
-        # async projection but does not write through to FalkorDB), serve main from the Postgres
-        # reader so the change shows immediately; once the projection catches up, use the live
-        # FalkorDB provider (hot path). A non-versioned data source ignores branch_id (live provider).
+        # Branch-aware reads. A resolved draft overlays its changes on whatever serves main. Main
+        # (named, opaque id, or omitted) is read from the live FalkorDB provider (hot path) while the
+        # projection's key serves a version of it: the head, or, while the projection catches up
+        # after a merge or an import (which commit to Postgres and nudge an async projection) or
+        # rebuilds in place, the version the key last published — reads stay available and
+        # complete, and the view says a newer version is on its way. Only a key that holds no
+        # version (a first seed, a move, out of FalkorDB) sends main to the Postgres reader. A
+        # non-versioned data source ignores branch_id (live provider).
         norm = (branch_id or "").strip()
         graph = None
         if data_source_id:
@@ -223,20 +225,27 @@ class ContextEngine:
                     raise RevisionUnsupported(
                         "draft", "A past revision is of the published graph: leave the draft out")
                 main_reader = None
+                # The version of main the live provider serves; None: Postgres serves main.
+                served: Optional[int] = None
                 if fork:
                     # A fork's main is its root's store with the fork's patch set over it, and a
                     # draft on it overlays that.
-                    main_fresh = False
                     main_reader = await cls._fork_main_reader(
                         registry, session, workspace_id, svc, gid, main_id, actor, viewer)
                 else:
                     wm = await svc.projection_watermark(gid)
                     if viewer is not None:
                         await residency.mark(graph, wm)
-                    # Main is served from FalkorDB only from the key the projection publishes.
-                    main_fresh = wm["fresh"] and serves_pin(
-                        getattr(provider, "manager_cache_key", None), wm.get("falkor_provider"),
-                        wm.get("falkor_graph_name"), gid)
+                    # Main is served from FalkorDB only from the key the projection publishes, at
+                    # the version it holds (``served``, serving_seq): the head, or, while the
+                    # projection catches up or rebuilds in place, the version it last published,
+                    # complete with its lineage summaries. Reads stay available while it updates,
+                    # and the view says it shows an earlier version until the new one is in.
+                    if wm["served"] is not None and serves_pin(
+                            getattr(provider, "manager_cache_key", None), wm.get("falkor_provider"),
+                            wm.get("falkor_graph_name"), gid):
+                        served = wm["served"]
+                main_served = served is not None
                 read_provider = None
                 read_branch: Optional[str] = None
                 revision: Optional[int] = None
@@ -254,18 +263,21 @@ class ContextEngine:
                     if as_of_seq < plan["head"]:
                         revision = as_of_seq
                 if revision is not None:
-                    # main as it was at a revision: main's store at the head, with the patch set of
-                    # everything changed since over it, read-only.
+                    # main as it was at a revision: main's store, with the patch set of everything
+                    # changed since over it, read-only. The patch set rewinds every entity changed
+                    # after the revision, so a store at the revision or later reads it right: one
+                    # still catching up from an earlier version reads it from Postgres.
                     from ..providers.versioned_branch_provider import VersionedBranchProvider
                     from ..providers.draft_overlay_provider import DraftOverlayProvider
-                    base = provider if main_fresh else VersionedBranchProvider(
+                    base = provider if main_served and served >= revision else VersionedBranchProvider(
                         svc, graph_id=gid, branch_id=main_id, actor=actor)
                     # Keyed by the store's version it reads against, as a fork's is, so nothing
                     # read while the store was out or catching up outlives that.
                     read_provider = DraftOverlayProvider(
                         base, svc=svc, graph_id=gid, branch_id=main_id, actor=actor,
                         as_of_seq=revision, version=("rev", revision, plan["head"]),
-                        read_ns=f"rev{revision}@{wm['committed']}:{wm['projected']}:{wm['status']}")
+                        read_ns=(f"rev{revision}@{wm['committed']}:{wm['projected']}:{wm['status']}"
+                                 f":{served}"))
                     # Its own answer cache, and never the published top level's.
                     read_branch = f"{main_id}@{revision}"
                 elif is_draft:
@@ -276,25 +288,30 @@ class ContextEngine:
                         except (ValueError, AccessDenied) as exc:
                             raise KeyError(f"branch_not_found: {norm}") from exc
                     # Draft = main ⊕ sparse delta: overlay the draft's bounded patch set on WHATEVER
-                    # serves main — the live FalkorDB provider when fresh (so the materialized
-                    # aggregated lineage is reused, not re-derived), else the Postgres main reader.
+                    # serves main — the live FalkorDB provider while it serves a version of main
+                    # (so the materialized aggregated lineage is reused, not re-derived), else the
+                    # Postgres main reader. A draft over a key still catching up shows main as that
+                    # key does, as main's own readers see it.
                     # A no-change draft has an empty delta → pure pass-through → identical to main.
                     from ..providers.versioned_branch_provider import VersionedBranchProvider
                     from ..providers.draft_overlay_provider import DraftOverlayProvider
-                    base = provider if main_fresh else main_reader or VersionedBranchProvider(
+                    base = provider if main_served else main_reader or VersionedBranchProvider(
                         svc, graph_id=gid, branch_id=main_id, actor=actor)
                     # The draft's version (its head, branch point, main's head, status) keys every
                     # cached read of it (``read_ns`` → ``graph_ns``): a commit to the draft from
                     # anywhere — an import window, another tab, the API — moves it, so no reader is
                     # served what the draft held before. The overlay reads it first thing anyway.
+                    # So does the version of main its base serves: nothing read over a key catching
+                    # up outlives its catching up.
                     version = await svc.overlay_version(graph_id=gid, branch_id=norm)
                     read_provider = DraftOverlayProvider(
                         base, svc=svc, graph_id=gid, branch_id=norm, actor=actor, version=version,
-                        read_ns="draft@" + ":".join(str(v) for v in version))
+                        read_ns="draft@" + ":".join(str(v) for v in version) + f"@{served}")
                     read_branch = norm
-                elif not main_fresh:
-                    # Stale main (e.g. right after a merge): serve from Postgres so the change shows
-                    # immediately; once the projection catches up, the fresh-FalkorDB hot path is used.
+                elif not main_served:
+                    # No version of main in FalkorDB to serve (a first seed, a move, a key out of
+                    # FalkorDB, or GRAPHVER_READ_MAX_LAG past): serve it from Postgres; once the key
+                    # holds one, the FalkorDB hot path is used.
                     from ..providers.versioned_branch_provider import VersionedBranchProvider
                     read_provider = main_reader or VersionedBranchProvider(
                         svc, graph_id=gid, branch_id=main_id, actor=actor)

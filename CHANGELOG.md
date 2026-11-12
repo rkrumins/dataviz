@@ -53,8 +53,54 @@ integration's many small changes as a few commits.
     ends off a part's end, or runs past the file, is refused and none of it is kept.
   - `POST …/imports` takes a file of up to 10 GiB as its body, where it took 100 MB. It resumes
     nothing; a chunked body is counted, and refused (`413`) as soon as it passes the limit.
+  - **Or as the body that starts an upload**: `POST …/imports/uploads?fileName=…&format=…` with
+    the file's contents as the body, in place of its name and size. Any type but JSON is the file
+    (`application/octet-stream`, `text/csv`…), sent with its `Content-Length` or streamed without
+    one. It is stored as the upload's parts as it arrives, one chunk held at a time, and answers
+    `201` with every part `received`; complete it as any upload. The upload exists once the whole
+    body is in: one that breaks off leaves none. A JSON body there is still the upload's
+    description.
   - Measured with a 4 GiB NDJSON file sent whole: stored as its 257 parts in about 20 s with the
     API process's memory up 1–2 MiB, and every record read back equal to the original.
+- **An import's file is checked against the digest its client sends.** `POST …/imports`, the body
+  that starts an upload and `PUT …/parts/{n}` take a `Content-Digest` header (RFC 9530):
+  `sha-256=:<base64>:` or `sha-512=:…:`, of that request's body. It is checked as the body
+  arrives; one that doesn't match is refused (`422`) once it is in, and none of it is kept or
+  imported (a part sent again with the right bytes takes its place; an import's job is failed
+  unqueued, and the same `idempotencyKey` takes it back). A header that can't be read, or names
+  only other algorithms, is `400` before any of the body is read. Without the header, nothing
+  changes.
+- **An import says which rows it refused, where they are in the file, why, and what to do — and
+  can go on without them.** A replace with a few bad rows failed with "Nothing was deleted: 10 row(s)
+  of the file couldn't be applied", naming neither the rows nor why, and nothing could turn the hold
+  off.
+  - Every import's `summary.refused` counts its refused rows for each reason (`byCode`). It names
+    the first 20, each with where it is in the file (`at`: the line in NDJSON, CSV or TSV, the
+    sheet and row in Excel, the item in a JSON array), its kind, label, code and reason. It says
+    what to do about each reason (`fixes`).
+  - It is built a window at a time as the import runs, so it costs nothing at any size and counts
+    every row once across a resume.
+  - A held import's message names the reasons, the first rows and the fix.
+  - `GET …/imports/{jobId}/preview?refused=true` lists every refused row in file order, a page at a
+    time (`after`, `nextAfter`).
+  - An edge refused for a missing end now says which end, by what key: "its target
+    urn:svc:ledger_v2 names no node the graph holds or the file makes".
+  - `maxRefusedRows` on `POST …/imports` and an upload's `complete` lets an import go on without
+    its refused rows: a count (`100`), a share of the file's rows (`0.5%`), or `-1` for any.
+    Within it, a replace deletes what the file leaves out but keeps what a refused row still names,
+    and `autoPublish` publishes, noting `publish.refusedRows`.
+  - `0`, the default, holds as before. `IMPORT_MAX_REFUSED_ROWS` (Helm
+    `config.imports.maxRefusedRows`) sets the platform's default.
+  - The import dialog shows the refused rows grouped by reason, each reason with its fix. You can
+    filter by reason, load every refused row on demand, and download them as CSV to fix in a
+    spreadsheet. A replace held for its rows offers **Import the rest anyway**.
+  - The reference connector takes `--max-refused-rows`.
+- **Docs: Send Data From Your Service**, a new page for developers whose service sends data in. It
+  explains how the flow fits together, with a diagram and the words it uses. It walks a first
+  import in three requests, then upsert or full replace and the three ways to send a file. It
+  gives the whole flow in curl, Python, Node.js, Go and Java (each run as written against the API),
+  plus large files, resuming, and the common mistakes with their fixes. The Import & Export API page
+  keeps the export → edit → import round trip, and opens with which page to read for what.
 - **Reconcile imports in memory** (Admin → Features, `importInMemoryReconcile`, off by default). An
   import compares its file with the graph a batch at a time before it stages anything: a row that
   changes nothing is staged slim, already resolved, so a full snapshot sent again writes about what
@@ -87,9 +133,147 @@ integration's many small changes as a few commits.
   waits up to 30 s for a slot, then is answered `429` with `Retry-After: 15`, before any of it is
   read, so a burst of large files can't take the object store's (or the database's) bandwidth from
   everything else. The Import dialog and the reference connector retry it.
+- **One change that can't be written to the fast read layer no longer holds back the graph.**
+  - A projector statement that still times out for a single entity, after its retries, is held
+    back (`projection_quarantine`), and the rest of the publish lands. An edge to a node held back
+    that the fast read layer does not have yet is held with it, and written once the node is; an
+    edge to a node it has, whose own update is held, is written.
+  - Later passes retry it first, and a caught-up graph retries it every 5 minutes. A held delete of
+    an edge where it was stays held when the edge is written where it now is. A rebuild that
+    resumes from where its last pass stopped retries what that pass held.
+  - A rebuild while anything is held rebuilds the lineage summaries too. So does a rebuild a
+    graph starts on its own after a publish that moved them, as the heal it replaced did. Each is
+    recorded (`projection_state.rollup_state.moved`) until a rebuild publishes, so a rebuild that
+    fails first does not lose it.
+  - **Data health** lists what is held back and why ("Held back"); the watermark carries it as
+    `quarantine`, for a graph being projected. A graph unloaded, waiting for memory or trashed is
+    retried by nothing, so neither lists it, and `graphver_projection_quarantined` leaves it out.
+  - While any change is held, passes publish `unverified`.
+  - `GRAPHVER_PROJECTION_QUARANTINE=0` restores the old behaviour.
+- **An import says what its rows find their entities by: `identifier`.** On `POST …/imports`,
+  `…/imports/uploads/{id}/complete` and `…/imports/validate`:
+  - `identifier=entity_id`, the default (`GRAPHVER_IMPORT_IDENTIFIER`): an entity id of the graph,
+    else the urn, the identifier property, a field the type matches imports by, then a unique
+    qualifiedName, as before;
+  - `identifier=urn`: an entity id of the graph, else the urn, and nothing else;
+  - `identifier=prop.<name>`: an entity id of the graph, else the row's value of a property of your
+    own, such as `prop.external_id`, as Salesforce's external ids and Dataverse's alternate keys
+    do. An edge names its ends `source.<name>` / `target.<name>`. The first import naming the
+    property indexes it, reading every node once; each later one reads only the version log since,
+    so a node made or edited in the app is found by its value, never made again. A value two nodes
+    hold refuses its rows (`duplicate_value`), and so does a new node's urn that another node holds
+    (`two_entities`: send that node's entity id to change its value); a deleted node named again by
+    its last value comes back under its id. A draft behind main matches by the values it holds: a
+    node main changed or deleted after the draft's base keeps its value there. At most
+    `GRAPHVER_MAX_MATCHING_PROPERTIES` (10) a graph; not on a fork yet.
+
+  The job keeps it (`identifier` on the job), and a resumed job keeps it too. Anything else is
+  `422 invalid_identifier`, saying what it may be. Whichever it is, an entity's id never changes.
+- **A replace import that would delete the graph and make it again is refused** before it deletes
+  anything. That is what a file whose rows name their entities by another key looks like: its rows
+  match nothing, so the run deletes the scope and makes it anew, every id and its history with it.
+  - In a scope of at least 1,000 entities, a replace that would delete at least half of them and
+    create at least half as many fails with `mass_delete_blocked`; its rows stay on the draft.
+    The scope is counted on the main its draft reads (a fork's with its parent's), and what the
+    draft makes is all it holds beyond that main, so a view's replace by other keys is refused
+    too, and so is the same file sent again into its draft.
+  - The job's `summary.replaceGuard` says what it would have done and the limits in force; the
+    message says to check the identifier, or to send `allowMassDelete=true`, which deletes all the
+    same (anyone who may run the import may send it).
+  - A whole-graph replace whose first full window finds an entity for fewer than 5% of its rows stops
+    there, with `identifier_matched_nothing`, instead of reading the rest of the file first, unless
+    it was sent with `allowMassDelete=true`.
+  - The operator sets the limits: `IMPORT_REPLACE_GUARD` (on), `IMPORT_REPLACE_GUARD_MIN_LIVE`
+    (1000), `IMPORT_REPLACE_GUARD_DELETE_FRACTION` and `IMPORT_REPLACE_GUARD_CREATE_FRACTION` (0.5),
+    `IMPORT_REPLACE_MIN_MATCH_FRACTION` (0.05); Helm `config.imports`. A workspace admin may set a
+    data source's own over them (below).
+  - In the import dialog, **Replace anyway** imports the file again into the same draft with
+    `allowMassDelete`, so its deletions are staged for review. A view's refused replace places what
+    it made in the draft's copy of the view first, as a completed one does, so once published the
+    view shows the file's entities.
+- **Look up what your own ids name, without importing:** `POST …/graphs/{gid}/identities/resolve`
+  `{identifier, values}` answers each value's entity id on the published graph as an import naming
+  that identifier would find it (`found`, `none`, or `duplicate` with both ids), up to 10,000 a
+  call; on a fork, what it inherits from its parent included. Clients of the entity-id writes
+  (`POST /graph/changes`) map their system's ids first. An API key may call it.
+- **`/bulk-ingest` and `/sync` give new entities the import's ids.** A new node or edge takes a
+  `urn:uuid:`: one the row brings, kept; else derived from its urn (as an import by urn derives
+  it) or its own id, an edge's from its ends and type. Every path that adds entities to a
+  versioned graph now gives the same kind of id, and the same row sent through any of them names
+  the same entity: a sync of the rows a bulk ingest or an earlier sync took changes nothing, a row
+  with no urn included, whatever urn its node has been given since. Entities made before keep their
+  ids (a provider urn, `ent_…`, `sync:e:…`): a sync still finds them by their urn, their ends, or the
+  id they have, and updates and deletes them. A row with no urn that names a node by an id from
+  before is taken as it comes, as it always was: a node an earlier `/bulk-ingest` gave its id as its
+  urn loses that urn on its first sync, as it did then. One a sync deleted that a later sync sends
+  again comes back under its id. Enabling version control still keeps a provider's urns as ids.
+- **Imports that publish themselves pull main when it moved under them.** Several connectors (and
+  people) can work on one data source at once, each in a draft of its own. When main moved while
+  an import ran, its draft now pulls main — the field-level merge of "Pull latest" — and publishes
+  once it pulls clean, when its publish is queued and again inside the publish job when it runs, so
+  the job a connector follows ends published or refused with the reason (up to three pulls):
+  - entities two imports made alike (same urn or matching value, so the same derived id) merge as
+    one; updates of different fields merge;
+  - a field both sides changed differently waits for review (`summary.publish.reason.type:
+    conflicts`);
+  - what main gained meanwhile stays, even in a field the file carries unchanged;
+  - a draft of any size pulls: past 200,000 changes ("Pull latest" too), reading only the
+    entities main changed as well, never the whole draft.
+  Before, any import whose data source was published to meanwhile stopped at `not_up_to_date`.
+- **A graph's own import settings.** A workspace admin sets, on the data source's Versioning tab
+  (**Imports**), what its imports' rows are matched by when an import names no `identifier`, and the
+  replace guard's limits, each over the platform's:
+  - `GET …/graphs/{gid}/import-settings` (an API key may read it) says what holds and where each
+    comes from, and lists the properties its imports match by, with how far each index is caught
+    up; `PUT` sets them (`"inherit"` goes back to the platform's), recorded in the activity log.
+  - An import resolves them when it is made and keeps them (`importSettings` on the job), so a
+    resumed job runs under what it started with. A fork's are its parent's, but a fork can't
+    match by a property yet: where the default is a `prop.<name>`, a fork's imports match by
+    `entity_id`, from `fork` (`effective.sources.identifier`, `identifierSource`), and its import
+    dialog says so. The data source's identifier property stays: it holds the urn, and a fork's
+    imports match it as `urn`, as its parent's do.
+  - The import dialog's **Match existing items by** (Entity ID, URN, or a property) starts at the
+    graph's default, and says when a property is indexed first.
+- **Every refused import row carries a code** beside its reasons, in the preview and the dry run:
+  `no_key`, `two_entities`, `duplicate_value`, `changed_since_export`, `named_already`,
+  `invalid_type`, `missing_type`, `end_not_found`, `edge_moved`, `write_refused`, `invalid_row`
+  (and `already_gone` for a delete with nothing to delete). A client acts on the code instead of
+  parsing the words.
+- **Projection metrics** on the versioning worker's scrape endpoint (`:9100/metrics`):
+  - `graphver_projection_passes_total{outcome}`;
+  - per-statement durations and splits;
+  - the fleet's lagging graphs, the worst lag in commits and in seconds;
+  - what is held back.
+  Three alerts and a runbook ("Projection behind or holding changes back") come with them.
 
 ### Changed
 
+- **A graph being updated keeps showing the version it last finished, complete, and says so.**
+  After a publish or an import, or while its fast read layer was rebuilt, a versioned graph's reads
+  went to Postgres, which composes the graph without its lineage summaries: the canvas drew the
+  items and almost none of the connections between them, and nothing said why.
+  - Reads now stay on FalkorDB at the version it last published until the newer one is written,
+    for the canvas, a draft over it, the neighbors read and native queries alike. A rebuild in
+    place keeps serving the version the key held.
+  - The view header's sync chip says an earlier version is showing, which, and what is being
+    written: "Showing an earlier version · updating…" (Business view), "Showing #12 · writing #14"
+    or "Showing #12 · rebuilding 45%" (Technical view), with which and until when on hover. The
+    canvas bar's read-route chip says the same in the Technical view.
+  - When the newer version is in, the view refetches it by itself, for every viewer and canvas.
+  - Postgres serves main only while FalkorDB holds no version of it: a graph just enabled, moved to
+    another key, or unloaded.
+  - The watermark and sync status report `served` and `servedRevision`: the version reads show.
+- **An imported node keeps the urn its file gives it.** It was stored under the id derived from
+  the urn, which became its urn too, so exports and search showed a `urn:uuid` instead of the
+  source's name. Its id is still derived from the urn, so a re-import finds it the same way. A node
+  given no urn, or a `urn:uuid` another entity holds, has its id as its urn, as before.
+- **A node row that names nothing a later import could find it by is refused** (`no_key`): only
+  the file's own `entity_id`, or only a unique field's value. It was created again by every import,
+  and a replace then deleted the one before it, so the node's history began again each run.
+- **An export's `urn:uuid` entity id is kept** as the new node's id when no entity of the graph
+  holds it, so an entity keeps one id from one environment to the next.
+- **A new imported edge's id is derived from its ends and type** (v5), where it was minted (v7): the
+  same edge sent again, from another file or draft, or after a delete, is the same edge.
 - **People publish past automation.** A draft behind Published publishes and merges without a pull
   when only automation moved Published (a service account, the platform, or any API key) and none
   of it touched what the draft changes, or met it at an edge.
@@ -120,6 +304,32 @@ integration's many small changes as a few commits.
 
 ### Fixed
 
+- **An export's plan answers within 5 s, whatever the graph.** On a large graph, the Export
+  dialog's first request (`GET …/exports/plan`) could outlast the gateway in front of the app and
+  come back 504 each time it was asked. Only a whole published graph was counted at once, from its
+  head pointers. A draft, a fork, a past revision, a view or a selection was counted page by page
+  for up to 20 s, with the clock checked only between pages. A view's entities were found first, with
+  no limit at all: 43 s for a view that inherits a 1M-node graph. The budget
+  (`GRAPH_EXPORT_PLAN_BUDGET_SECS`, now 5 s, was 20) covers every read, including the one under
+  way. Whatever isn't known by then comes back `null`. The export still starts, and its job counts
+  what it writes.
+- **A graph read at an earlier commit streams from its first page.** A past revision, a draft
+  behind main and every fork read `main` as of an earlier commit. Postgres planned that read for
+  its whole result, scanning and sorting every version row before the first page: 2 s for 1.2M
+  versions, spilled to disk, and longer with every commit. A layer whose statement Postgres had
+  cached with a generic plan did the same. The read now goes through a cursor declared in SQL, which
+  Postgres plans to start fast, so its first page comes in about 0.04 s. This holds for the plan,
+  the streamed download, the export job and a view package's data.
+- **An imported delete takes what the node contains.** A row's `_op=delete` deleted the node and its
+  edges but left its containment subtree, though the connector guide promised it. A replace still
+  deletes only what its file leaves out: a child a row names stays.
+- **A replace stopped by rows it couldn't apply says so.** Its job failed with
+  `summary.failure.code: "internal"`, like a server fault; it now fails with `rows_refused`
+  (action `fix_rows`), as the replace guard's refusals carry their own codes.
+- **A removal token in a row's own field refuses the row.** `\N` in `description`, `displayName`,
+  `edgeType`, `tags` and the rest was stored as the text `\N`; those fields are only replaced, so
+  the row is refused (`invalid_row`), naming the field. In a `prop.<name>` cell it still removes
+  the property.
 - **A merged review's Files changed lists what the merge changed.** It merged the draft again
   against a published graph that already held it, so it was always empty. It now reads the merge's
   commit.
@@ -127,6 +337,13 @@ integration's many small changes as a few commits.
   never had.
 - **"What changed" on the behind-Published strip counts changes.** It read node and edge counts that
   commits never had.
+- **A file sent as a form was imported with the form's own lines in it.** `curl -F`, Postman's
+  form-data and `requests.post(files=…)` wrap a file in a multipart form, and `POST …/imports`
+  read the wrapping as the file's first and last rows. An import, an upload's start or a part sent
+  as a form is now `415`, saying how to send the file's bytes as the body.
+- **A file sent to `POST …/imports/uploads` was told only a byte limit or a validation error.** It
+  is now taken as the upload's file (above); a JSON body too large to be a description (over
+  64 KB) is told how to send the file instead.
 - **An upload part of the wrong size says how the file is split.** A client that split a large file
   at another size, or sent it whole, had part 0 refused with only "This part is larger than the
   16777216 bytes it should hold." The `422` now names the size the part should be, the upload's
@@ -138,9 +355,129 @@ integration's many small changes as a few commits.
 - **`POST …/imports` no longer holds a database connection while its file arrives.** Its checks
   (the draft policy, the view) left their transaction open until the response, so every large
   file sent whole would have held one of the pool's connections for as long as it took to arrive.
+- **A projection no longer stays "projecting" because FalkorDB timed out.** One statement past
+  FalkorDB's write budget (6 s on a cluster with a 15 s node timeout) failed the whole pass. The
+  window was replayed whole on every retry, and grew as commits landed, so a publish or import into
+  a large graph could leave reads on Postgres until someone rebuilt the fast read layer.
+  - Every chunked projector statement now splits in half on a timeout or memory refusal and sends
+    the halves again, down to one row.
+  - The width that worked is kept for the graph, and grows back slowly.
+  - A hub node is deleted after its relationships, 10,000 at a time: in a publish, in the tombstone
+    sweep, and in a rebuild, where a stale hub otherwise failed every pass, and a hub the key held
+    twice kept the rebuild from publishing.
+  - Each pass logs what its statements took.
+- **No projector delete scans every relationship in the graph.**
+  - An edge deleted in a publish is deleted, anchored on its ends, at every position it held:
+    before the window, and wherever the window put it. That includes an edge created and deleted
+    in one window after an earlier attempt wrote it.
+  - The old fallback, which matched every relationship by id, is gone. A rebuild's deletes start
+    from the relationship's source node.
+- **A node whose urn changes is moved in place in the fast read layer,** with its edges and rollup
+  cells. A second node was created under the new urn and the old one left behind, so the verify
+  held every pass of the graph back until someone rebuilt it.
+- **The tombstone sweep reads only the deletes since the last one,** with no payloads, instead of
+  every delete in the graph's history.
+- **A large publish or rebuild no longer has to finish in one pass.** A window too large to hold,
+  and a rebuild of a graph too large to hold, record where they are after each page. A pass past
+  5 minutes (`GRAPHVER_PROJECTION_PASS_MAX_SECS`) stops at a page and the next resumes there, so a
+  crash or a restart loses one page, not the whole job, and other graphs get their turn. A rebuild
+  pages the graph's heads by primary key instead of reading every version of it again for each
+  page.
+  - A window resumed so still tells readers to drop what they cached for nodes an earlier pass
+    retyped or re-keyed, and verifies a write an earlier pass could not land.
+  - A rebuild stopped so stays a rebuild: with Graph residency on, it is resumed, not loaded again
+    into a fresh key as a first seed, also after a pass that failed or was cancelled after it.
+  - A pass that went through its pages leaves nothing to resume, whatever its verify found, so a
+    rebuild held back by its verify runs again from the start. An operator's rebuild, once
+    accepted, also starts from the beginning, not from where a failed one stopped.
+  - A rebuild reads the graph as of its own revision once a commit lands while it runs, so it no
+    longer writes a second node for an entity that commit retyped or re-keyed, nor deletes or
+    leaves out that entity's relationships.
+- **A graph that cannot be brought up to date rebuilds itself.** The cases:
+  - its verify finds the fast read layer short of history;
+  - on a key the platform minted, it holds more than history after the sweep;
+  - the same window has failed 3 passes in a row under pressure, with no other outcome between them
+    (`projection_state.pressure_failures`): a connection failure or a held-back pass starts the
+    count again.
+  Such a graph is rebuilt in place on its own, instead of being healed inside the window's pass or
+  held back until someone rebuilds it (`GRAPHVER_PROJECTION_ESCALATE`).
+- **A projection's verify counts no longer scan the graph, and a failed count is not a pass.**
+  - On a key the platform owns, the counts are FalkorDB's constant-time ones, less the derived
+    labels and rollups.
+  - On a customer's key, they are taken 20,000 node ids at a time.
+  - A count that fails, which used to be recorded as a clean verify, now publishes as
+    `unverified`, and the next pass verifies again.
+- **An import never matches by urn alone because the data source's identifier couldn't be read.**
+  A failure to read it read as "no identifier property", so rows that relied on it were created
+  again. The job now waits it out and fails, resumably, and a dry run answers `503
+  identity_unavailable` with `Retry-After`.
+- **A failed projection waits out its backoff before it is tried again.** A nudge from a publish,
+  and `project_now`, used to retry at once and replay the whole window against a store that had
+  just failed it; a rebuild still runs at once. `project_now` projects a window of up to 20,000
+  version rows inside the request (`GRAPHVER_PROJECTION_INLINE_MAX_ROWS`) and hands a larger one to
+  the worker, rather than starting a pass its 10 s budget would cancel mid-write.
+- **A large publish no longer rebuilds the lineage summaries of the whole graph.** A publish of
+  more than 50,000 edge changes handed its summaries (`:AGGREGATED`) to the aggregation job, which
+  reads every node and edge of the graph. That included any publish large enough to be projected
+  a page at a time. Now a publish of any size moves them by delta, as a small one did:
+  - its edges are read a page at a time, from the version rows' ends and types, never a payload;
+  - what they change nets by summary cell in memory up to 200,000 cells
+    (`GRAPHVER_ROLLUP_NET_MAX_CELLS`), and past that in `graphver.rollup_deltas`, so the
+    projector's memory stays flat;
+  - the cells are written a page at a time, after the publish's own writes have landed. A pass
+    that stops part-way computes none;
+  - new nodes inside containers are no longer counted as moved containers, so a large import of
+    them no longer passes the move limit.
+
+  Moving containers whose subtrees hold more than 50,000 entities still goes to the job
+  (`GRAPHVER_PROJECTION_ROLLUP_INLINE_CAP`), and so does a window that overlaps one already applied.
+- **A lineage-summaries rebuild the projector asks for is no longer dropped when a job is already
+  running.** That job may have read the graph before the change that asked, so the summaries could
+  stay wrong until something else asked. The ask is now kept (`projection_state.rollup_state`), and
+  the projection worker asks again every 5 minutes (`GRAPHVER_ROLLUP_REASK_SECS`) until a job is
+  queued; so does an ask that could not reach the aggregation service, or that its control plane
+  answered with a server error (5xx). A source whose summaries
+  live in a dedicated key already queued its own follow-up, and is unchanged.
 
 ### Upgrading
 
+- **Reads of a graph being updated show the version before the update until it is written.** A
+  client that reads its own change right after publishing it should poll
+  `GET …/graphs/{gid}/watermark` until `served` reaches the `revisionId` its publish returned.
+  `GRAPHVER_READ_MAX_LAG=0` restores the strict rule (the head only; reads go to Postgres while the
+  graph catches up). Migration `20261112_1800_gv_ps_served` adds `projection_state.served_commit_seq`
+  (nullable, no rewrite); a separate `GRAPHVER_DB_URL` gets it at start-up. Every graph starts with
+  none, and a graph behind its head serves its watermark until its next pass publishes.
+- **Two import changes an integration may notice:**
+  - A node row that gives only the file's own `entity_id` (no urn, identifier value, matching
+    field or qualifiedName) is refused with `no_key`, and so is an edge to it. Give such rows a urn.
+  - An imported node's urn is the one its file gave, not the derived id. A client that read a
+    node's urn as its id should read its `entity_id`.
+- **New ids from `/bulk-ingest` and `/sync` are `urn:uuid:`s.** A client that read a new node's
+  id as its urn should read its `urn` (it is stored as given) or its `entity_id`.
+- Migration `20261112_1700_gv_ps_pressure` adds `projection_state.pressure_failures` (integer,
+  default 0, no rewrite). A separate `GRAPHVER_DB_URL` gets it at start-up.
+- Migration `20261112_1600_import_settings` adds five nullable columns to `workspace_data_sources`
+  (`import_identifier`, `import_replace_*`) and `jobs.import_settings` (nullable JSONB); no rewrite.
+  Every data source starts with none set, so imports run under the platform's settings as before. A
+  separate `GRAPHVER_DB_URL` gets the jobs column at start-up.
+- Migration `20261112_1500_gv_entity_keys` adds the tables `graphver.key_index` and
+  `graphver.entity_keys` (empty). A separate `GRAPHVER_DB_URL` gets them at start-up. The first
+  import that names a property reads every node of its graph once to index it.
+- **The replace guard is on.** A recurring replace that deletes and re-creates most of its scope
+  each run now fails instead. Fix the file's keys (or `identifier`), or send `allowMassDelete=true`
+  for a run that really replaces everything. `IMPORT_REPLACE_GUARD=0` turns it off. Migration
+  `20261112_1400_gv_job_mass_delete` adds `jobs.allow_mass_delete` (nullable, no rewrite); a
+  separate `GRAPHVER_DB_URL` gets it at start-up.
+- Migration `20261112_1300_gv_import_row_code` adds `import_rows.code` (nullable text, no rewrite).
+  A separate `GRAPHVER_DB_URL` gets it at start-up.
+- Migration `20261112_1200_gv_ps_rollup_state` adds `projection_state.rollup_state` (nullable
+  JSONB, no rewrite). A separate `GRAPHVER_DB_URL` gets it at start-up.
+- Migration `20261112_1100_gv_rollup_deltas` adds the table `graphver.rollup_deltas` (empty). A
+  separate `GRAPHVER_DB_URL` gets it at start-up.
+- Migration `20261112_1000_gv_proj_quarantine` adds the table `graphver.projection_quarantine`
+  (empty) and `projection_state.quarantine_next_at` (nullable text, no rewrite). A separate
+  `GRAPHVER_DB_URL` gets both at start-up.
 - Migration `20261110_1000_gv_commit_prov` adds `commits.actor_kind`, `api_key_id` and
   `correlation_id` (nullable text), and `jobs.provenance` (JSONB). It adds no rows and rewrites
   none; an older commit is classed from its actor. A separate `GRAPHVER_DB_URL` gets the same
@@ -150,8 +487,12 @@ integration's many small changes as a few commits.
 - The Helm chart's ingress annotations change: `proxy-body-size` is `10g` (was `32m`) and
   `proxy-request-buffering` is `off`. A values file that sets its own annotations should take both.
   A proxy of your own in front needs the same on the import routes for a file sent in one request
-  (in nginx, `client_max_body_size 10g; proxy_request_buffering off;`); uploads in parts need
-  nothing.
+  (`…/imports`, `…/imports/uploads` and `…/imports/uploads/{id}/parts/{n}`; in nginx,
+  `client_max_body_size 10g; proxy_request_buffering off;`); uploads in parts need nothing.
+- An import with refused rows holds as before by default. To let imports go on without them, set
+  `IMPORT_MAX_REFUSED_ROWS` (Helm `config.imports.maxRefusedRows`), or send `maxRefusedRows` with
+  each import. An import's `summary` gains `refused`; preview rows gain `at` and, refused, `fix`;
+  the preview answers `nextAfter`.
 - The transfer workers' memory limit is 8 GiB (request 2 GiB), was 4 GiB (1 GiB): an import
   reconciled in memory holds a filter of what it has seen (about 250 MB for a 4 GB file). Make room
   on the nodes the transfer lane runs on (k8s `versioning-worker/transfer.yaml`, Helm

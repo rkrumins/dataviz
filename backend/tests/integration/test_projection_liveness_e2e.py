@@ -16,6 +16,8 @@ cache, with ``ro_query`` and a key that can go missing).
   and the projector only moves summaries by delta: liveness asks for the first build, once per
   commit, and never for a fork, a source whose summaries live in a dedicated key, or an ontology
   with no lineage.
+* A summaries build a running job turned away stays owed (``projection_state.rollup_state``):
+  liveness asks again once it is due, and stops once one is queued.
 
 Needs ``GRAPHVER_E2E=1`` and Postgres.
 """
@@ -378,3 +380,46 @@ async def _run_a_key_no_summaries_build_covered_gets_its_first() -> None:
 
 def test_a_key_no_summaries_build_covered_gets_its_first():
     asyncio.run(_run_a_key_no_summaries_build_covered_gets_its_first())
+
+
+async def _run_a_summaries_build_turned_away_is_asked_for_again() -> None:
+    svc, fake = GraphVersioningService(), _SummarisedFalkor()
+    gid, proj, _graph = await _seed(svc, fake)
+    answers, asked = ["active", "active", "queued"], []
+
+    async def hand_off(graph_id):                   # as make_rollup_rebuild_hook records it
+        asked.append(graph_id)
+        outcome = answers.pop(0)
+        await svc.note_rollup_ask(graph_id, outcome)
+        return outcome
+
+    async def make_due():
+        async with db.graphver_session() as s:
+            ps = await s.get(ProjectionStateORM, gid)
+            ps.rollup_state = {**ps.rollup_state, "asked": "2000-01-01T00:00:00+00:00"}
+
+    async def owed():
+        async with db.graphver_session() as s:
+            return (await s.get(ProjectionStateORM, gid)).rollup_state
+
+    proj._on_rollups_stale = hand_off
+    await hand_off(gid)                             # a publish's ask, while a job runs
+    first = await owed()
+    assert first["pending"] == "active" and first["since"] == first["asked"], first
+    await proj.check_liveness()
+    assert asked == [gid], "not asked again before it is due"
+
+    await make_due()
+    await proj.check_liveness()                     # turned away again: still owed, since then
+    again = await owed()
+    assert asked == [gid, gid] and again["since"] == first["since"] < again["asked"], again
+
+    await make_due()
+    await proj.check_liveness()                     # queued: owed no more
+    assert asked == [gid, gid, gid] and await owed() is None
+    await proj.check_liveness()
+    assert asked == [gid, gid, gid]
+
+
+def test_a_summaries_build_turned_away_is_asked_for_again():
+    asyncio.run(_run_a_summaries_build_turned_away_is_asked_for_again())

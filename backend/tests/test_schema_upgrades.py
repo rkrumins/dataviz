@@ -1552,3 +1552,466 @@ async def test_the_residency_migration_round_trips(store):
             await conn.run_sync(run("upgrade"))                     # idempotent
         finally:
             await trans.rollback()
+
+
+# ── projection_quarantine and projection_state.quarantine_next_at (20261112_1000_gv_proj_quarantine) ──
+_PS_QUARANTINE = _VERSIONS / "20261112_1000_gv_proj_quarantine.py"
+
+
+def test_the_quarantine_is_declared_and_migrated():
+    assert models.ProjectionStateORM.__table__.c.quarantine_next_at.nullable
+    assert {c.name for c in models.ProjectionQuarantineORM.__table__.primary_key} == {
+        "graph_id", "statement", "entity_key"}
+    migration = _migration(_PS_QUARANTINE)
+    assert migration.revision == _PS_QUARANTINE.stem and len(migration.revision) <= 32
+    assert migration.down_revision == "20261111_1000_gv_draft_prune"
+
+
+async def _has_quarantine_table(conn) -> bool:
+    return bool((await conn.execute(text(
+        "SELECT 1 FROM information_schema.tables "
+        "WHERE table_schema = :s AND table_name = 'projection_quarantine'"),
+        {"s": models._SCHEMA})).first())
+
+
+@e2e
+async def test_a_store_alembic_never_reached_gets_the_quarantine(store):
+    async with store.connect() as conn:
+        trans = await conn.begin()
+        try:
+            await conn.execute(text(
+                f'ALTER TABLE "{models._SCHEMA}".projection_state DROP COLUMN quarantine_next_at'))
+            await conn.run_sync(models._ensure_schema_upgrades)
+            assert "quarantine_next_at" in await _ps_columns(conn)
+            await conn.run_sync(models._ensure_schema_upgrades)        # and again: a no-op
+        finally:
+            await trans.rollback()
+
+
+@e2e
+async def test_the_quarantine_migration_round_trips(store):
+    migration = _migration(_PS_QUARANTINE)
+
+    def run(step):
+        def apply(sync_conn):
+            migration.op = SimpleNamespace(get_bind=lambda: sync_conn,
+                                           execute=lambda sql: sync_conn.execute(text(sql)))
+            getattr(migration, step)()
+        return apply
+
+    async with store.connect() as conn:
+        trans = await conn.begin()
+        try:
+            await conn.run_sync(run("downgrade"))
+            assert "quarantine_next_at" not in await _ps_columns(conn)
+            assert not await _has_quarantine_table(conn)
+            await conn.run_sync(run("upgrade"))
+            assert "quarantine_next_at" in await _ps_columns(conn)
+            assert await _has_quarantine_table(conn)
+            assert await _table_columns(conn, "projection_quarantine") == _model_columns(
+                models.ProjectionQuarantineORM)
+            await conn.run_sync(run("upgrade"))                     # idempotent
+        finally:
+            await trans.rollback()
+
+
+async def _table_columns(conn, table: str) -> list:
+    """``(name, type, nullable)`` per column of a graphver table, in order."""
+    return [tuple(r) for r in (await conn.execute(text(
+        "SELECT column_name, data_type, is_nullable = 'YES' FROM information_schema.columns "
+        "WHERE table_schema = :s AND table_name = :t ORDER BY ordinal_position"),
+        {"s": models._SCHEMA, "t": table})).all()]
+
+
+def _model_columns(orm) -> list:
+    """The same, as the model declares them: what a migration's own DDL must match."""
+    from sqlalchemy.dialects import postgresql
+    return [(c.name, c.type.compile(dialect=postgresql.dialect()).lower(), bool(c.nullable))
+            for c in orm.__table__.columns]
+
+
+# ── rollup_deltas (20261112_1100_gv_rollup_deltas) ──
+_ROLLUP_DELTAS = _VERSIONS / "20261112_1100_gv_rollup_deltas.py"
+
+
+def test_the_rollup_deltas_table_is_declared_and_migrated():
+    assert [c.name for c in models.RollupDeltaORM.__table__.primary_key] == [
+        "graph_id", "to_seq", "s", "t"]
+    migration = _migration(_ROLLUP_DELTAS)
+    assert migration.revision == _ROLLUP_DELTAS.stem and len(migration.revision) <= 32
+    assert migration.down_revision == "20261112_1000_gv_proj_quarantine"
+
+
+@e2e
+async def test_the_rollup_deltas_migration_round_trips_to_the_models_table(store):
+    migration = _migration(_ROLLUP_DELTAS)
+
+    def run(step):
+        def apply(sync_conn):
+            migration.op = SimpleNamespace(get_bind=lambda: sync_conn)
+            getattr(migration, step)()
+        return apply
+
+    async with store.connect() as conn:
+        trans = await conn.begin()
+        try:
+            await conn.run_sync(run("downgrade"))
+            assert await _table_columns(conn, "rollup_deltas") == []
+            await conn.run_sync(run("upgrade"))
+            assert await _table_columns(conn, "rollup_deltas") == _model_columns(
+                models.RollupDeltaORM)
+            await conn.run_sync(run("upgrade"))                     # idempotent
+        finally:
+            await trans.rollback()
+
+
+# ── projection_state.rollup_state (20261112_1200_gv_ps_rollup_state) ──
+_PS_ROLLUP_STATE = _VERSIONS / "20261112_1200_gv_ps_rollup_state.py"
+
+
+def test_the_rollup_state_is_declared_and_migrated():
+    assert models.ProjectionStateORM.__table__.c.rollup_state.nullable
+    migration = _migration(_PS_ROLLUP_STATE)
+    assert migration.revision == _PS_ROLLUP_STATE.stem and len(migration.revision) <= 32
+    assert migration.down_revision == "20261112_1100_gv_rollup_deltas"
+
+
+@e2e
+async def test_a_store_alembic_never_reached_gets_the_rollup_state(store):
+    async with store.connect() as conn:
+        trans = await conn.begin()
+        try:
+            await conn.execute(text(
+                f'ALTER TABLE "{models._SCHEMA}".projection_state DROP COLUMN rollup_state'))
+            await conn.run_sync(models._ensure_schema_upgrades)
+            assert "rollup_state" in await _ps_columns(conn)
+            await conn.run_sync(models._ensure_schema_upgrades)        # and again: a no-op
+        finally:
+            await trans.rollback()
+
+
+@e2e
+async def test_the_rollup_state_migration_round_trips(store):
+    migration = _migration(_PS_ROLLUP_STATE)
+
+    def run(step):
+        def apply(sync_conn):
+            migration.op = SimpleNamespace(get_bind=lambda: sync_conn,
+                                           execute=lambda sql: sync_conn.execute(text(sql)))
+            getattr(migration, step)()
+        return apply
+
+    async with store.connect() as conn:
+        trans = await conn.begin()
+        try:
+            await conn.run_sync(run("downgrade"))
+            assert "rollup_state" not in await _ps_columns(conn)
+            await conn.run_sync(run("upgrade"))
+            assert "rollup_state" in await _ps_columns(conn)
+            await conn.run_sync(run("upgrade"))                     # idempotent
+        finally:
+            await trans.rollback()
+
+
+# ── import_rows.code (20261112_1300_gv_import_row_code) ──
+_IMPORT_ROW_CODE = _VERSIONS / "20261112_1300_gv_import_row_code.py"
+
+
+def test_the_import_row_code_is_declared_and_migrated():
+    assert models.ImportRowORM.__table__.c.code.nullable
+    migration = _migration(_IMPORT_ROW_CODE)
+    assert migration.revision == _IMPORT_ROW_CODE.stem and len(migration.revision) <= 32
+    assert migration.down_revision == "20261112_1200_gv_ps_rollup_state"
+
+
+async def _import_row_columns(conn) -> set:
+    return {r[0] for r in (await conn.execute(text(
+        "SELECT column_name FROM information_schema.columns "
+        "WHERE table_schema = :s AND table_name = 'import_rows'"), {"s": models._SCHEMA})).all()}
+
+
+@e2e
+async def test_a_store_alembic_never_reached_gets_the_import_row_code(store):
+    async with store.connect() as conn:
+        trans = await conn.begin()
+        try:
+            await conn.execute(text(f'ALTER TABLE "{models._SCHEMA}".import_rows DROP COLUMN code'))
+            await conn.run_sync(models._ensure_schema_upgrades)
+            assert "code" in await _import_row_columns(conn)
+            await conn.run_sync(models._ensure_schema_upgrades)        # and again: a no-op
+        finally:
+            await trans.rollback()
+
+
+@e2e
+async def test_the_import_row_code_migration_round_trips(store):
+    migration = _migration(_IMPORT_ROW_CODE)
+
+    def run(step):
+        def apply(sync_conn):
+            migration.op = SimpleNamespace(get_bind=lambda: sync_conn,
+                                           execute=lambda sql: sync_conn.execute(text(sql)))
+            getattr(migration, step)()
+        return apply
+
+    async with store.connect() as conn:
+        trans = await conn.begin()
+        try:
+            await conn.run_sync(run("downgrade"))
+            assert "code" not in await _import_row_columns(conn)
+            await conn.run_sync(run("upgrade"))
+            assert "code" in await _import_row_columns(conn)
+            await conn.run_sync(run("upgrade"))                     # idempotent
+        finally:
+            await trans.rollback()
+
+
+# ── jobs.allow_mass_delete (20261112_1400_gv_job_mass_delete) ──
+_JOB_MASS_DELETE = _VERSIONS / "20261112_1400_gv_job_mass_delete.py"
+
+
+def test_a_jobs_mass_delete_allowance_is_declared_and_migrated():
+    assert models.JobORM.__table__.c.allow_mass_delete.nullable
+    migration = _migration(_JOB_MASS_DELETE)
+    assert migration.revision == _JOB_MASS_DELETE.stem and len(migration.revision) <= 32
+    assert migration.down_revision == "20261112_1300_gv_import_row_code"
+
+
+async def _job_columns(conn) -> set:
+    return {r[0] for r in (await conn.execute(text(
+        "SELECT column_name FROM information_schema.columns "
+        "WHERE table_schema = :s AND table_name = 'jobs'"), {"s": models._SCHEMA})).all()}
+
+
+@e2e
+async def test_a_store_alembic_never_reached_gets_the_mass_delete_allowance(store):
+    async with store.connect() as conn:
+        trans = await conn.begin()
+        try:
+            await conn.execute(text(
+                f'ALTER TABLE "{models._SCHEMA}".jobs DROP COLUMN allow_mass_delete'))
+            await conn.run_sync(models._ensure_schema_upgrades)
+            assert "allow_mass_delete" in await _job_columns(conn)
+            await conn.run_sync(models._ensure_schema_upgrades)        # and again: a no-op
+        finally:
+            await trans.rollback()
+
+
+@e2e
+async def test_the_mass_delete_allowance_migration_round_trips(store):
+    migration = _migration(_JOB_MASS_DELETE)
+
+    def run(step):
+        def apply(sync_conn):
+            migration.op = SimpleNamespace(get_bind=lambda: sync_conn,
+                                           execute=lambda sql: sync_conn.execute(text(sql)))
+            getattr(migration, step)()
+        return apply
+
+    async with store.connect() as conn:
+        trans = await conn.begin()
+        try:
+            await conn.run_sync(run("downgrade"))
+            assert "allow_mass_delete" not in await _job_columns(conn)
+            await conn.run_sync(run("upgrade"))
+            assert "allow_mass_delete" in await _job_columns(conn)
+            await conn.run_sync(run("upgrade"))                     # idempotent
+        finally:
+            await trans.rollback()
+
+
+# ── key_index and entity_keys (20261112_1500_gv_entity_keys) ──
+_ENTITY_KEYS = _VERSIONS / "20261112_1500_gv_entity_keys.py"
+
+
+def test_the_matching_property_index_is_declared_and_migrated():
+    assert [c.name for c in models.EntityKeyORM.__table__.primary_key] == [
+        "graph_id", "key_name", "key_value", "entity_id"]
+    assert [c.name for c in models.KeyIndexORM.__table__.primary_key] == ["graph_id", "key_name"]
+    migration = _migration(_ENTITY_KEYS)
+    assert migration.revision == _ENTITY_KEYS.stem and len(migration.revision) <= 32
+    assert migration.down_revision == "20261112_1400_gv_job_mass_delete"
+
+
+@e2e
+async def test_the_matching_property_migration_round_trips_to_the_models_tables(store):
+    migration = _migration(_ENTITY_KEYS)
+
+    def run(step):
+        def apply(sync_conn):
+            migration.op = SimpleNamespace(get_bind=lambda: sync_conn)
+            getattr(migration, step)()
+        return apply
+
+    async with store.connect() as conn:
+        trans = await conn.begin()
+        try:
+            await conn.run_sync(run("downgrade"))
+            assert await _table_columns(conn, "entity_keys") == []
+            assert await _table_columns(conn, "key_index") == []
+            await conn.run_sync(run("upgrade"))
+            assert await _table_columns(conn, "entity_keys") == _model_columns(models.EntityKeyORM)
+            assert await _table_columns(conn, "key_index") == _model_columns(models.KeyIndexORM)
+            await conn.run_sync(run("upgrade"))                     # idempotent
+        finally:
+            await trans.rollback()
+
+
+# ── import settings (20261112_1600_import_settings) ──
+_IMPORT_SETTINGS = _VERSIONS / "20261112_1600_import_settings.py"
+_DS_IMPORT_COLUMNS = ("import_identifier", "import_replace_min_live", "import_replace_delete_fraction",
+                      "import_replace_create_fraction", "import_replace_min_match_fraction")
+
+
+def test_import_settings_are_declared_and_migrated():
+    from backend.app.db.models import WorkspaceDataSourceORM
+    assert models.JobORM.__table__.c.import_settings.nullable
+    assert all(WorkspaceDataSourceORM.__table__.c[name].nullable for name in _DS_IMPORT_COLUMNS)
+    migration = _migration(_IMPORT_SETTINGS)
+    assert migration.revision == _IMPORT_SETTINGS.stem and len(migration.revision) <= 32
+    assert migration.down_revision == "20261112_1500_gv_entity_keys"
+    assert [name for name, _kind in migration._COLUMNS] == list(_DS_IMPORT_COLUMNS)
+
+
+@e2e
+async def test_a_store_alembic_never_reached_gets_the_jobs_import_settings(store):
+    async with store.connect() as conn:
+        trans = await conn.begin()
+        try:
+            await conn.execute(text(f'ALTER TABLE "{models._SCHEMA}".jobs DROP COLUMN import_settings'))
+            await conn.run_sync(models._ensure_schema_upgrades)
+            assert "import_settings" in await _job_columns(conn)
+            await conn.run_sync(models._ensure_schema_upgrades)        # and again: a no-op
+        finally:
+            await trans.rollback()
+
+
+async def _ds_columns(conn) -> set:
+    return {r[0] for r in (await conn.execute(text(
+        "SELECT column_name FROM information_schema.columns "
+        "WHERE table_schema = current_schema() AND table_name = 'workspace_data_sources'"))).all()}
+
+
+@e2e
+async def test_the_import_settings_migration_round_trips(store):
+    from alembic.migration import MigrationContext
+    from alembic.operations import Operations
+    migration = _migration(_IMPORT_SETTINGS)
+
+    def run(step):
+        def apply(sync_conn):
+            with Operations.context(MigrationContext.configure(sync_conn)):
+                getattr(migration, step)()
+        return apply
+
+    async with store.connect() as conn:
+        trans = await conn.begin()
+        try:
+            if not await _ds_columns(conn):
+                pytest.skip("no management tables in this database")
+            await conn.run_sync(run("downgrade"))
+            assert "import_settings" not in await _job_columns(conn)
+            assert not set(_DS_IMPORT_COLUMNS) & await _ds_columns(conn)
+            await conn.run_sync(run("upgrade"))
+            assert "import_settings" in await _job_columns(conn)
+            assert set(_DS_IMPORT_COLUMNS) <= await _ds_columns(conn)
+            await conn.run_sync(run("upgrade"))                     # idempotent
+        finally:
+            await trans.rollback()
+
+
+# ── projection_state.pressure_failures (20261112_1700_gv_ps_pressure) ──
+_PS_PRESSURE = _VERSIONS / "20261112_1700_gv_ps_pressure.py"
+
+
+def test_the_pressure_failures_are_declared_and_migrated():
+    column = models.ProjectionStateORM.__table__.c.pressure_failures
+    assert not column.nullable and str(column.server_default.arg) == "0"
+    migration = _migration(_PS_PRESSURE)
+    assert migration.revision == _PS_PRESSURE.stem and len(migration.revision) <= 32
+    assert migration.down_revision == "20261112_1600_import_settings"
+
+
+@e2e
+async def test_a_store_alembic_never_reached_gets_the_pressure_failures(store):
+    async with store.connect() as conn:
+        trans = await conn.begin()
+        try:
+            await conn.execute(text(
+                f'ALTER TABLE "{models._SCHEMA}".projection_state DROP COLUMN pressure_failures'))
+            await conn.run_sync(models._ensure_schema_upgrades)
+            assert "pressure_failures" in await _ps_columns(conn)
+            await conn.run_sync(models._ensure_schema_upgrades)        # and again: a no-op
+        finally:
+            await trans.rollback()
+
+
+@e2e
+async def test_the_pressure_failures_migration_round_trips(store):
+    migration = _migration(_PS_PRESSURE)
+
+    def run(step):
+        def apply(sync_conn):
+            migration.op = SimpleNamespace(get_bind=lambda: sync_conn,
+                                           execute=lambda sql: sync_conn.execute(text(sql)))
+            getattr(migration, step)()
+        return apply
+
+    async with store.connect() as conn:
+        trans = await conn.begin()
+        try:
+            await conn.run_sync(run("downgrade"))
+            assert "pressure_failures" not in await _ps_columns(conn)
+            await conn.run_sync(run("upgrade"))
+            assert "pressure_failures" in await _ps_columns(conn)
+            await conn.run_sync(run("upgrade"))                     # idempotent
+        finally:
+            await trans.rollback()
+
+
+# ── projection_state.served_commit_seq (20261112_1800_gv_ps_served) ──
+_PS_SERVED = _VERSIONS / "20261112_1800_gv_ps_served.py"
+
+
+def test_the_served_version_is_declared_and_migrated():
+    assert models.ProjectionStateORM.__table__.c.served_commit_seq.nullable
+    migration = _migration(_PS_SERVED)
+    assert migration.revision == _PS_SERVED.stem and len(migration.revision) <= 32
+    assert migration.down_revision == "20261112_1700_gv_ps_pressure"
+
+
+@e2e
+async def test_a_store_alembic_never_reached_gets_the_served_version(store):
+    async with store.connect() as conn:
+        trans = await conn.begin()
+        try:
+            await conn.execute(text(
+                f'ALTER TABLE "{models._SCHEMA}".projection_state DROP COLUMN served_commit_seq'))
+            await conn.run_sync(models._ensure_schema_upgrades)
+            assert "served_commit_seq" in await _ps_columns(conn)
+            await conn.run_sync(models._ensure_schema_upgrades)        # and again: a no-op
+        finally:
+            await trans.rollback()
+
+
+@e2e
+async def test_the_served_version_migration_round_trips(store):
+    migration = _migration(_PS_SERVED)
+
+    def run(step):
+        def apply(sync_conn):
+            migration.op = SimpleNamespace(get_bind=lambda: sync_conn,
+                                           execute=lambda sql: sync_conn.execute(text(sql)))
+            getattr(migration, step)()
+        return apply
+
+    async with store.connect() as conn:
+        trans = await conn.begin()
+        try:
+            await conn.run_sync(run("downgrade"))
+            assert "served_commit_seq" not in await _ps_columns(conn)
+            await conn.run_sync(run("upgrade"))
+            assert "served_commit_seq" in await _ps_columns(conn)
+            await conn.run_sync(run("upgrade"))                     # idempotent
+        finally:
+            await trans.rollback()

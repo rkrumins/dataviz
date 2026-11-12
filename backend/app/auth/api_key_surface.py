@@ -208,7 +208,7 @@ SURFACE: dict[tuple[str, str], Rule] = {
         "create_graph", "resolve_graph_open",
         "bulk_ingest", "sync_ingest", "publish", "get_publish_job",
         "list_imports", "import_template", "import_schema", "create_import",
-        "get_import",
+        "get_import", "get_import_settings",
         "get_import_preview", "create_import_upload", "get_import_upload",
         "put_import_upload_part", "complete_import_upload",
         "list_exports", "plan_export", "stream_export", "get_export",
@@ -224,8 +224,9 @@ SURFACE: dict[tuple[str, str], Rule] = {
         "list_data_source_pull_requests", "list_view_pull_requests",
         "count_view_pull_requests",
     ),
-    # A dry run checks a file against the graph and writes nothing.
-    **_entries("versioning", RESOURCE, "validate_import", "create_export", reads_only=True),
+    # A dry run checks a file against the graph and writes nothing; so does resolving identities.
+    **_entries("versioning", RESOURCE, "validate_import", "create_export", "resolve_identities",
+               reads_only=True),
 
     # ── Data sources: their state, their jobs, and change signals ────
     # Not here: anything on the Ingestion cockpit's any-workspace gate

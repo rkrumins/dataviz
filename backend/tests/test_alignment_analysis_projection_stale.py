@@ -40,7 +40,8 @@ async def graphver_schema(db_session):
         "main_head_commit_seq BIGINT)"))
     await db_session.execute(text(
         "CREATE TABLE graphver.projection_state (graph_id TEXT PRIMARY KEY, "
-        "projected_commit_seq BIGINT, falkor_graph_name TEXT, last_error TEXT)"))
+        "projected_commit_seq BIGINT, falkor_graph_name TEXT, last_error TEXT, "
+        "status TEXT, served_commit_seq BIGINT)"))
     yield
     await db_session.execute(text("DROP TABLE graphver.projection_state"))
     await db_session.execute(text("DROP TABLE graphver.graphs"))
@@ -48,7 +49,7 @@ async def graphver_schema(db_session):
 
 
 async def _seed(db_session, *, projected, head, falkor_name="gv_real", last_error=None,
-                agg_ready=False):
+                agg_ready=False, status="idle", served=None):
     db_session.add(_m.WorkspaceORM(id="ws_stale", name="Stale WS"))
     db_session.add(_m.ProviderORM(id="prov_stale", name="P", provider_type="falkordb"))
     db_session.add(_m.WorkspaceDataSourceORM(
@@ -71,8 +72,8 @@ async def _seed(db_session, *, projected, head, falkor_name="gv_real", last_erro
     await db_session.execute(text(
         "INSERT INTO graphver.graphs VALUES ('g_stale', 'ds_stale', :head)"), {"head": head})
     await db_session.execute(text(
-        "INSERT INTO graphver.projection_state VALUES ('g_stale', :p, :name, :err)"),
-        {"p": projected, "name": falkor_name, "err": last_error})
+        "INSERT INTO graphver.projection_state VALUES ('g_stale', :p, :name, :err, :st, :sv)"),
+        {"p": projected, "name": falkor_name, "err": last_error, "st": status, "sv": served})
     await db_session.commit()
 
 
@@ -84,16 +85,34 @@ async def _findings(client: AsyncClient) -> dict:
 
 async def test_a_lagging_projection_is_reported_with_both_sequence_numbers(
         test_client: AsyncClient, db_session, graphver_schema):
-    await _seed(db_session, projected=4, head=9, last_error="verify mismatch at seq 9")
+    # Behind, and its key holds no version to serve (rebuilt from nothing): reads come from
+    # the version log, with no rolled-up connections — the wedge.
+    await _seed(db_session, projected=0, head=9, last_error="verify mismatch at seq 9",
+                status="rebuilding")
 
     finding = (await _findings(test_client)).get("PROJECTION_STALE")
     assert finding is not None, (
-        "a data source whose graph is 5 commits behind reads as perfectly healthy — "
+        "a data source whose graph is 9 commits behind reads as perfectly healthy — "
         "this silence is what hid a wedged projection for 14 hours"
     )
     assert finding["severity"] == "critical", finding
     # An operator has to be able to see the gap, not just be told one exists.
-    assert "4" in finding["message"] and "9" in finding["message"], finding["message"]
+    assert "projected 0, published 9" in finding["message"], finding["message"]
+    assert "version log" in finding["message"], finding["message"]
+    assert "verify mismatch at seq 9" in finding["message"], finding["message"]
+
+
+async def test_a_lagging_projection_that_still_serves_its_last_version_is_a_warning(
+        test_client: AsyncClient, db_session, graphver_schema):
+    """Behind, but its key still serves the version it last published, rollups included:
+    reads are complete, only not the newest. Said, and not as the wedge."""
+    await _seed(db_session, projected=4, head=9, last_error="verify mismatch at seq 9")
+
+    finding = (await _findings(test_client)).get("PROJECTION_STALE")
+    assert finding is not None and finding["severity"] == "warning", finding
+    assert "projected 4, published 9" in finding["message"], finding["message"]
+    assert "reads show the version it last finished" in finding["message"], finding["message"]
+    assert "version log" not in finding["message"], finding["message"]
     assert "verify mismatch at seq 9" in finding["message"], finding["message"]
 
 
@@ -133,8 +152,8 @@ async def _aggregation_block(client: AsyncClient) -> dict:
 
 async def test_a_lagging_projection_is_not_reported_as_canonicalized(
         test_client: AsyncClient, db_session, graphver_schema):
-    await _seed(db_session, projected=4, head=9, last_error="verify mismatch",
-                agg_ready=True)
+    await _seed(db_session, projected=0, head=9, last_error="verify mismatch",
+                agg_ready=True, status="rebuilding")
 
     agg = await _aggregation_block(test_client)
     assert agg["status"] == "ready"
@@ -143,9 +162,30 @@ async def test_a_lagging_projection_is_not_reported_as_canonicalized(
         "graph while they were coming from the version log instead"
     )
     assert agg["projectorCurrent"] is False
-    assert agg["projectionCommitsBehind"] == 5
+    assert agg["projectionCommitsBehind"] == 9
     assert agg["projectionLastError"] == "verify mismatch"
     assert agg["projectionCheckedAt"] is not None
+
+
+async def test_a_lagging_projection_that_serves_its_last_version_stays_canonicalized(
+        test_client: AsyncClient, db_session, graphver_schema):
+    """Behind, reads still go through the graph at the version it last published (or, in
+    a rebuild in place, the version it held): the read path is the canonicalized one."""
+    for projected, status, served in ((4, "idle", 4), (0, "rebuilding", 4)):
+        await _seed(db_session, projected=projected, head=9, agg_ready=True, status=status,
+                    served=served)
+        agg = await _aggregation_block(test_client)
+        assert agg["canonicalized"] is True, (projected, status)
+        assert agg["projectorCurrent"] is False
+        await db_session.rollback()
+        await db_session.execute(text("DELETE FROM graphver.projection_state"))
+        await db_session.execute(text("DELETE FROM graphver.graphs"))
+        for model in (_m.DataSourceStatsORM, _m.WorkspaceDataSourceORM, _m.ProviderORM,
+                      _m.WorkspaceORM):
+            await db_session.execute(model.__table__.delete())
+        from backend.app.services.aggregation.models import AggregationDataSourceStateORM
+        await db_session.execute(AggregationDataSourceStateORM.__table__.delete())
+        await db_session.commit()
 
 
 async def test_a_caught_up_projection_reports_a_current_projector(

@@ -39,8 +39,10 @@ MAX_BYTES = int(os.getenv("GRAPH_EXPORT_MAX_BYTES", str(50 * 1024 ** 3)))
 #: about one CPU core busy). Another waits its turn for up to SLOT_WAIT_S, then fails.
 CONCURRENCY = int(os.getenv("GRAPH_EXPORT_CONCURRENCY", "2"))
 SLOT_WAIT_S = float(os.getenv("GRAPH_EXPORT_SLOT_WAIT_SECS", "900"))
-#: How long a plan may spend counting before it answers without exact counts.
-PLAN_BUDGET_S = float(os.getenv("GRAPH_EXPORT_PLAN_BUDGET_SECS", "20"))
+#: How long a plan may spend finding a view's entities and counting before it answers without exact
+#: counts: well inside the browser's 45 s and the timeout of a gateway in front of the app (often
+#: 15 to 60 s), which would otherwise answer 504 for it.
+PLAN_BUDGET_S = float(os.getenv("GRAPH_EXPORT_PLAN_BUDGET_SECS", "5"))
 
 SPREADSHEET_FORMATS = ("csv", "tsv", "xlsx")
 
@@ -120,16 +122,25 @@ async def resolve_placements(snap: Snapshot, keys: Iterable[str]) -> Dict[str, s
     return {**found, **{k: eid for k, eid in rest.items() if eid in live}}
 
 
-async def view_entities(snap: Snapshot, scope: Dict[str, Any]) -> Dict[str, Any]:
+async def view_entities(snap: Snapshot, scope: Dict[str, Any], *,
+                        budget_s: Optional[float] = None) -> Optional[Dict[str, Any]]:
     """A view's entities: every node it places, and the containment descendants of each placement
     that inherits its children. Returns ``{keep, placed, found}``: the entity ids, how many
-    placements the view has, and how many of them were found here."""
+    placements the view has, and how many of them were found here. Given ``budget_s`` (a plan's),
+    ``None`` when they take longer than that to find (a placement inheriting a large subtree)."""
     placed = list(dict.fromkeys(scope.get("assigned_urns") or []))
     inherit = set(scope.get("inherit_urns") or [])
     containment = {str(t).upper() for t in (scope.get("containment_types") or [])}
-    eid_of = await resolve_placements(snap, placed)
-    roots = {eid for key, eid in eid_of.items() if key in inherit}
-    keep = set(eid_of.values()) | await snap.containment_descendants(roots, containment)
+    deadline = asyncio.timeout(budget_s)
+    try:
+        async with deadline:
+            eid_of = await resolve_placements(snap, placed)
+            roots = {eid for key, eid in eid_of.items() if key in inherit}
+            keep = set(eid_of.values()) | await snap.containment_descendants(roots, containment)
+    except TimeoutError:
+        if not deadline.expired():
+            raise
+        return None
     return {"keep": keep, "placed": len(placed), "found": len(eid_of)}
 
 
@@ -402,27 +413,32 @@ async def write_export(pages: Callable[[], AsyncIterator[List[Dict[str, Any]]]],
 
 
 async def count(snap: Snapshot, sel: Selection, *, budget_s: float = PLAN_BUDGET_S) -> Dict[str, Any]:
-    """How many nodes and edges the export holds, without reading payloads. A whole published graph
-    is counted from its head pointers at once; anything else is counted page by page until
-    ``budget_s`` runs out, when the counts come back as ``None`` (unknown)."""
-    if sel.keep is None and not sel.selects:
-        heads = await snap.head_counts()
-        if heads is not None:
-            return {"nodes": heads["node"], "edges": heads["edge"], "exact": True}
-    deadline = time.monotonic() + budget_s
+    """How many nodes and edges the export holds, without reading payloads, in at most ``budget_s``
+    whatever the graph's size or shape. A whole published graph is counted from its head pointers at
+    once; anything else page by page. When the time runs out, the read under way then (the head
+    count, the first page of a large layer) is cancelled, and the counts come back as ``None``
+    (unknown), with how many were ``seen`` by then."""
     counts = {"node": 0, "edge": 0}
-    for kind in ("node", "edge"):
-        async with contextlib.aclosing(snap.iter_live(kind)) as pages:
-            async for page in pages:
-                if kind == "node":
-                    counts[kind] += sum(1 for w in page if sel.node_ok(w))
-                elif sel.selects:
-                    counts[kind] += len((await _edge_page(snap, sel, page))[0])
-                else:
-                    counts[kind] += sum(1 for w in page if sel.edge_ok(w, {}))
-                if time.monotonic() > deadline:
-                    seen = counts["node"] + counts["edge"]
-                    return {"nodes": None, "edges": None, "exact": False, "seen": seen}
+    deadline = asyncio.timeout(budget_s)
+    try:
+        async with deadline:
+            if sel.keep is None and not sel.selects:
+                heads = await snap.head_counts()
+                if heads is not None:
+                    return {"nodes": heads["node"], "edges": heads["edge"], "exact": True}
+            for kind in ("node", "edge"):
+                async with contextlib.aclosing(snap.iter_live(kind)) as pages:
+                    async for page in pages:
+                        if kind == "node":
+                            counts[kind] += sum(1 for w in page if sel.node_ok(w))
+                        elif sel.selects:
+                            counts[kind] += len((await _edge_page(snap, sel, page))[0])
+                        else:
+                            counts[kind] += sum(1 for w in page if sel.edge_ok(w, {}))
+    except TimeoutError:
+        if not deadline.expired():
+            raise
+        return {"nodes": None, "edges": None, "exact": False, "seen": counts["node"] + counts["edge"]}
     return {"nodes": counts["node"], "edges": counts["edge"], "exact": True}
 
 

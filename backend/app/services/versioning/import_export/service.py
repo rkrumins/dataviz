@@ -24,16 +24,20 @@ from sqlalchemy.exc import IntegrityError
 from backend.app.services.storage.object_store import get_object_store, storage_key
 
 from .. import config, db, provenance
-from ..errors import JobActive, MainWriteForbidden
+from ..errors import JobActive, MainWriteForbidden, _HttpMapped
 from ..job_lease import Draining, Lease, Superseded, friendly_infra_error, is_transient
 from ..models import BranchORM, GraphORM, ImportRowORM, JobORM, MergeRequestORM
-from ..service import AccessDenied, GraphVersioningService, NotUpToDate, Viewer
+from ..service import AccessDenied, ConcurrencyError, GraphVersioningService, NotUpToDate, Viewer
 from . import contract, stream
-from ..ids import new_entity_id, uuid_urn
+from . import identifier as identifiers
+from . import keys as matching
 from .export_worker import ExportWorker, example_template_records
 from .formats import get_adapter
-from .import_worker import ImportWorker, _normalize_page, _record_pages, lease_job
-from .resolve import _ALREADY_GONE, _STATUS, pointer_id, resolve_rows
+from .import_worker import (IdentifierMatchedNothing, ImportWorker, ReplaceBlocked, ReplaceRowsRefused,
+                            _normalize_page,
+                            _label as _row_label, _record_pages, lease_job, refused_budget,
+                            refused_digest, within_budget)
+from .resolve import _ALREADY_GONE, _STATUS
 from .rowmodel import column_order
 from .runner import INSPECT_TYPES, JOB_TYPES, QUEUED, JobReaper
 from .snapshot import open_snapshot
@@ -75,16 +79,32 @@ def _refusal(exc: Exception) -> Dict[str, Any]:
 #: How many changed rows a dry run lists (its summary counts them all).
 _VALIDATE_SAMPLE = 200
 
+#: How many times an import that publishes itself pulls main into its draft when main moved under
+#: it (``_publish_own_draft``), before it waits for someone to publish it.
+_AUTO_PULLS = 3
 
-def _named_by_pointer(row: Dict[str, Any], identity_prop: Optional[str]) -> bool:
-    """A node row named by a pointer that isn't kept: a urn, or identifier value, that isn't a
-    ``urn:uuid:`` (a free one is kept as the id)."""
-    held = (row.get("properties") or {}).get(identity_prop) if identity_prop else None
-    return any(v and not uuid_urn(str(v)) for v in (row.get("urn"), held))
+
+def _conflicts(pulled: Dict[str, Any]) -> Dict[str, Any]:
+    """Why an import's draft waits after pulling main: fields both changed differently."""
+    n = len(pulled.get("conflicts") or [])
+    return {"type": "conflicts", "conflicts": n,
+            "message": f"Main changed while the file was imported, and {n} of the draft's entities "
+                       "changed there too, in the same fields: the draft waits for someone to "
+                       "resolve them and publish it."}
+
+
+def _behind_main(result: Dict[str, Any]) -> bool:
+    """A publish job's answer: refused because its draft is behind main."""
+    detail = (result.get("error") or {}).get("detail")
+    return isinstance(detail, dict) and detail.get("type") == "not_up_to_date"
 
 
 class DryRunTooLarge(ValueError):
     """A file larger than a dry run checks: import it into a draft instead."""
+
+
+class IdentityUnavailable(RuntimeError):
+    """The data source's node identity can't be read, so a dry run can't match as an import would."""
 
 
 def _label(row: Dict[str, Any]) -> Optional[str]:
@@ -157,6 +177,9 @@ class ImportExportService:
         name: Optional[str] = None,
         originating_view_id: Optional[str] = None,
         draft_visibility: Optional[str] = None,
+        identifier: Optional[str] = None,
+        allow_mass_delete: bool = False,
+        import_settings: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, str]:
         """Open/append the working draft and create the import job.
 
@@ -183,6 +206,9 @@ class ImportExportService:
         """
         if branch_id == "main":
             raise MainWriteForbidden()
+        # What its rows find their entities by: the caller's (the request's, else its data
+        # source's: ``services.import_settings``, kept as ``import_settings``), else the platform's.
+        identifier = identifier or identifiers.platform_default()
 
         async def insert() -> Dict[str, str]:
             uri, draft_id = source_uri, branch_id
@@ -210,7 +236,9 @@ class ImportExportService:
                     reconcile_mode=reconcile_mode, import_format=import_format,
                     field_scope=field_scope, auto_publish=auto_publish,
                     source_uri=uri, idempotency_key=idempotency_key, status="pending",
-                    provenance=provenance.snapshot(),
+                    provenance=provenance.snapshot(), identity_strategy=identifier,
+                    allow_mass_delete=bool(allow_mass_delete) or None,
+                    import_settings=import_settings,
                 )
                 s.add(job)
                 await s.flush()
@@ -376,6 +404,12 @@ class ImportExportService:
                 logger.exception("releasing job %s failed", job_id)
             if isinstance(exc, asyncio.CancelledError):
                 raise
+        except (ReplaceBlocked, ReplaceRowsRefused, IdentifierMatchedNothing,
+                matching.MatchingPropertyLimit, matching.NotOnAFork) as exc:
+            # Refused by the replace's own checks: nothing deleted, the rows on the draft. The
+            # failure says why (``summary.failure.code``) and what to do (``action``).
+            logger.warning("import job %s stopped: %s", job_id, exc)
+            await lease.fail(str(exc), exc.code, exc.action)
         except Exception as exc:
             logger.exception("job %s failed", job_id)
             if is_transient(exc):          # an outage that outlasted the retry budget: resumable
@@ -383,9 +417,13 @@ class ImportExportService:
             else:
                 await lease.fail(str(exc), "internal")
 
-    async def get_preview(self, job_id: str, *, sample_limit: Optional[int] = None) -> Optional[Dict[str, Any]]:
+    async def get_preview(self, job_id: str, *, sample_limit: Optional[int] = None, refused: bool = False,
+                          after: Optional[int] = None) -> Optional[Dict[str, Any]]:
         """Job summary + a bounded sample of resolved rows (the inline preview; the full diff is
-        the draft-vs-main diff via the existing versioning endpoints)."""
+        the draft-vs-main diff via the existing versioning endpoints). ``refused``: only the rows
+        it refused, each with its reason and what to do (``fix``); ``after``, a row index, pages on
+        from it (``nextAfter`` says where the next page starts, ``None`` after the last)."""
+        from .resolve import FIXES
         limit = sample_limit or config.PREVIEW_SAMPLE_LIMIT
         job = await self.get_job(job_id)
         if job is None:
@@ -393,16 +431,19 @@ class ImportExportService:
         async with db.graphver_session() as s:
             # Surface the actual CHANGES (skip unchanged noise) with a human label, so the dialog can
             # show "T0 · updated", "orders · new", "row 13 · invalid: <reason>" — a real preview.
-            rows = (await s.execute(
-                select(ImportRowORM)
-                .where(ImportRowORM.job_id == job_id, ImportRowORM.status != "unchanged")
-                .order_by(ImportRowORM.row_index).limit(limit))).scalars().all()
+            shown = (ImportRowORM.status == "invalid") if refused else (ImportRowORM.status != "unchanged")
+            q = select(ImportRowORM).where(ImportRowORM.job_id == job_id, shown)
+            if after is not None:
+                q = q.where(ImportRowORM.row_index > after)
+            rows = (await s.execute(q.order_by(ImportRowORM.row_index).limit(limit))).scalars().all()
             sample = [{"rowIndex": r.row_index, "kind": r.kind, "op": r.resolved_op,
                        "status": r.status, "matchedEntityId": r.matched_entity_id,
-                       "label": (r.raw or {}).get("displayName") or (r.raw or {}).get("qualifiedName")
-                                or (r.raw or {}).get("urn") or "",
-                       "reasons": r.reasons or []} for r in rows]
+                       "label": _row_label({**(r.raw or {}), "kind": r.kind}),
+                       "reasons": r.reasons or [], "code": r.code, "at": (r.raw or {}).get("_at"),
+                       **({"fix": FIXES.get(r.code or "invalid_row")} if r.status == "invalid" else {})}
+                      for r in rows]
         return {"job": job, "summary": job.get("summary"), "sample": sample,
+                "nextAfter": rows[-1].row_index if len(rows) == limit else None,
                 "previewDownloadUrl": job.get("previewUri"),
                 "rejectedDownloadUrl": job.get("reportUri")}
 
@@ -434,9 +475,10 @@ class ImportExportService:
         scope, so absence-deletes stay confined to the view's own entities."""
         async with db.graphver_session() as s:
             row = await s.get(JobORM, job_id)
-            ws, ds, view_id, mode, branch_id, graph_id, auto_publish = (
+            ws, ds, view_id, mode, branch_id, graph_id, auto_publish, settings = (
                 (row.workspace_id, row.data_source_id, row.scope_view_id, row.reconcile_mode,
-                 row.branch_id, row.graph_id, row.auto_publish) if row else (None,) * 7)
+                 row.branch_id, row.graph_id, row.auto_publish, row.import_settings or {})
+                if row else (None,) * 7 + ({},))
         scope = None
         if mode == "replace" and view_id:
             if self._replace_scope_resolver is not None:
@@ -449,23 +491,36 @@ class ImportExportService:
             ontology = await self._ontology_resolver(ws, ds)
         node_identity = None
         if self._identity_resolver is not None:
-            node_identity = await self._identity_resolver(ws, ds)
+            # Read, never guessed: a fault is waited out, then fails the job, resumably.
+            node_identity = await (lease.retry_transient(lambda: self._identity_resolver(ws, ds))
+                                   if lease is not None else self._identity_resolver(ws, ds))
         worker = ImportWorker(self._svc, self._store, scope=scope, ontology=ontology,
                               facts=bool(view_id and self._layout_writer is not None),
                               node_identity=node_identity)
         # Called directly (tools, tests faking ImportWorker) there is no lease to pass on: the
         # worker takes the job itself.
-        summary = await (worker.run(job_id, lease=lease) if lease is not None
-                         else worker.run(job_id))
+        try:
+            summary = await (worker.run(job_id, lease=lease) if lease is not None
+                             else worker.run(job_id))
+        except ReplaceBlocked:
+            # A view's replace the guard refused leaves what it made on the draft for review: placed
+            # in the draft's view too, so the override — the file imported again into that draft
+            # with allowMassDelete, which makes nothing — finds it in the view's scope, and the
+            # view shows it once the draft is published.
+            if view_id and self._layout_writer is not None and worker.created_node_facts:
+                await self._apply_view_layout(job_id, ws, ds, view_id, branch_id, worker)
+            raise
         # Post-commit: a view-scoped import that created new top-level entities writes canonical layer
         # assignments so the curated view shows them right away. Best-effort — never fails the import.
         if view_id and self._layout_writer is not None and worker.created_node_facts:
             await self._apply_view_layout(job_id, ws, ds, view_id, branch_id, worker)
         if auto_publish:          # after the layout, so the placements are published with the data
-            await asyncio.shield(self._auto_publish(job_id, ws, ds, graph_id, branch_id, summary))
+            await asyncio.shield(self._auto_publish(job_id, ws, ds, graph_id, branch_id, summary,
+                                                    budget=refused_budget(settings.get("maxRefusedRows"))))
         return summary
 
-    async def _auto_publish(self, job_id, ws, ds, graph_id, branch_id, summary) -> None:
+    async def _auto_publish(self, job_id, ws, ds, graph_id, branch_id, summary, *,
+                            budget: str = "0") -> None:
         """Publish the draft a completed import opened, as it asked (``autoPublish``), and record
         how that went on its summary (``publish``), as :meth:`_apply_view_layout` records the
         layout:
@@ -473,17 +528,22 @@ class ImportExportService:
         * ``queued``, with ``jobId``: the draft's publish job, which runs as a large publish does —
           the review policy read again, the import's owner held to publish again;
         * ``unchanged``: the import changed nothing, so its draft, empty, is closed;
-        * ``skipped``, with ``reason``: rows weren't imported, or the draft can't be published
-          (it fell behind main while the file was imported, …). The draft waits for review.
+        * ``skipped``, with ``reason``: more rows were refused than the import's ``maxRefusedRows``
+          allows (none, by default), or the draft can't be published (it fell behind main while
+          the file was imported, …). The draft waits for review.
 
-        Never raised: the import is complete whatever happens here."""
+        Within the budget, the draft is published without its refused rows, and ``refusedRows``
+        says how many. Never raised: the import is complete whatever happens here."""
         refused = int(summary.get("invalid") or 0) + int(summary.get("skipped") or 0)
+        rows = sum(int(summary.get(k) or 0) for k in ("new", "updated", "unchanged", "deleted", "invalid"))
         try:
-            if refused:
+            if refused and not within_budget(budget, refused, rows + int(summary.get("skipped") or 0)):
                 note = {"state": "skipped", "reason": {
                     "type": "rows_refused", "rows": refused,
-                    "message": f"{refused} row(s) of the file weren't imported, so the draft "
-                               "waits for someone to review it."}}
+                    "message": f"{refused} row(s) of the file were refused, so the draft waits for "
+                               f"someone to review it.{refused_digest(summary.get('refused'))} Fix "
+                               "them and import the file again, or send it with maxRefusedRows (a "
+                               "count, a share such as 1%, or -1 for any) to publish without them."}}
             else:
                 async with db.graphver_session() as s:
                     owner = (await s.get(BranchORM, branch_id)).owner
@@ -491,28 +551,60 @@ class ImportExportService:
                     await self._svc.abandon_draft(graph_id=graph_id, branch_id=branch_id, actor=owner)
                     note = {"state": "unchanged"}
                 else:
-                    job = await self.create_publish_job(
-                        workspace_id=ws, data_source_id=ds, graph_id=graph_id, branch_id=branch_id,
-                        actor=owner, message=f"Import {job_id}", auto_publish=True)
-                    note = {"state": "queued", "jobId": job["job_id"]}
+                    note = await self._publish_own_draft(job_id, ws, ds, graph_id, branch_id, owner)
+                    if refused:          # within the budget: published without them
+                        note = {**note, "refusedRows": refused}
         except Exception as exc:  # noqa: BLE001 — a refusal, or an outage: the draft is kept
             logger.warning("import job %s did not publish itself: %s", job_id, exc)
             note = {"state": "skipped", "reason": _refusal(exc)}
+        await self._note_publish(job_id, note)
+
+    async def _note_publish(self, import_job_id: str, note: Dict[str, Any]) -> None:
+        """Record on the import job how its publish went (``summary.publish``). Never raised."""
         try:
             async with db.graphver_session() as s:
-                row = await s.get(JobORM, job_id)
+                row = await s.get(JobORM, import_job_id)
                 if row is not None:
                     row.summary = {**(row.summary or {}), "publish": note}
                     row.updated_at = _now()
         except Exception:  # pragma: no cover - defensive; must never fail the completed import
-            logger.exception("recording the publish of import job %s failed", job_id)
+            logger.exception("recording the publish of import job %s failed", import_job_id)
+
+    async def _publish_own_draft(self, import_job_id, ws, ds, graph_id, branch_id, owner) -> Dict[str, Any]:
+        """Queue the publish of the draft an import opened (``autoPublish``). Main may have moved
+        while the file was imported, so the draft can't land past what came in (a person
+        published, or another import changed what this one changes): then the draft pulls main
+        first, with the field-level merge a person's "Pull latest" runs, as a merge queue rebases,
+        and is queued once it pulls clean — up to ``_AUTO_PULLS`` pulls, counted on with the job's
+        own (:meth:`_pull_and_publish`). Two imports that made the same entity alike pull clean; a
+        field both changed differently is a conflict, and the draft waits for someone to resolve
+        it. A draft of any size pulls: past ``SQUASH_PAGED_ABOVE`` changes, reading only what main
+        changed too."""
+        pulls = 0
+        while True:
+            try:
+                job = await self.create_publish_job(
+                    workspace_id=ws, data_source_id=ds, graph_id=graph_id, branch_id=branch_id,
+                    actor=owner, message=f"Import {import_job_id}", auto_publish=True,
+                    import_job_id=import_job_id, pulls=pulls)
+                return {"state": "queued", "jobId": job["job_id"], **({"pulls": pulls} if pulls else {})}
+            except NotUpToDate:
+                if pulls >= _AUTO_PULLS:
+                    raise
+            pulled = await self._svc.rebase_draft(
+                graph_id=graph_id, branch_id=branch_id, actor=owner,
+                message="pull latest from main to publish the import")
+            pulls += 1
+            if not pulled.get("clean"):
+                return {"state": "skipped", "pulls": pulls, "reason": _conflicts(pulled)}
 
     async def _apply_view_layout(self, job_id, ws, ds, view_id, branch_id, worker) -> None:
         """Hand the import's newly-created top-level entities to the injected layout writer and record
         the outcome on ``job.summary`` (``viewAssignments: {added: N}`` or ``{error: ...}``). The
-        import is already committed and marked ``completed`` by the worker before this runs, so any
-        failure here is isolated: it is logged + noted, never raised (which would flip the job to
-        ``failed`` via ``run_import_safe``)."""
+        import is already committed — marked ``completed`` by the worker, or refused by the
+        replace guard with every row applied — before this runs, so any failure here is isolated:
+        it is logged + noted, never raised (which would flip a completed job to ``failed`` via
+        ``run_import_safe``)."""
         try:
             try:
                 result = await self._layout_writer(
@@ -647,6 +739,7 @@ class ImportExportService:
         self, *, workspace_id: str, data_source_id: Optional[str], graph_id: str, branch_id: str,
         actor: str, message: str, resolutions: Optional[Dict[str, Any]] = None,
         merge_request_id: Optional[str] = None, auto_publish: bool = False,
+        import_job_id: Optional[str] = None, pulls: int = 0,
     ) -> Dict[str, str]:
         """A publish of a draft too large to publish inside a request — or the merge of its review
         (``merge_request_id``), queued like an export. The request rides in ``field_scope``.
@@ -658,8 +751,9 @@ class ImportExportService:
         or a maintainer :class:`DraftRoleRequired`. A merge its reviewers have not approved is
         :class:`ApprovalRequired` here, before the draft is closed for it, and a draft behind ``main``
         :class:`NotUpToDate`, as a publish inside the request is; the job checks both again. The job
-        is stored already queued: it has no input to wait for. ``auto_publish``: an import publishes
-        its draft (:meth:`_auto_publish`), and the job holds its actor to publish again."""
+        is stored already queued: it has no input to wait for. ``auto_publish``: an import
+        (``import_job_id``) publishes its draft (:meth:`_auto_publish`), and the job holds its actor
+        to publish again; ``pulls``, how often its draft pulled main to get here."""
         fields: Dict[str, Any] = {"actor": actor, "message": message}
         if resolutions:
             fields["resolutions"] = resolutions
@@ -667,6 +761,8 @@ class ImportExportService:
             fields["mergeRequestId"] = merge_request_id
         if auto_publish:
             fields["autoPublish"] = True
+            if import_job_id:
+                fields.update(importJobId=import_job_id, pulls=pulls)
         async with db.graphver_session() as s:
             await self._svc._lock_lifecycle(s, graph_id, shared=True)
             await self._lock_in_workspace(s, graph_id, workspace_id)
@@ -705,7 +801,9 @@ class ImportExportService:
         the transfer lane's, which keeps a large squash alive while it says nothing until it lands;
         called without one, the job is taken here (:func:`.import_worker.lease_job`). The hook's
         answer is the job's summary, and a refusal fails the job; both through the fenced finish.
-        A refusal hands the draft back (``publishing`` → ``open``) once the job has failed.
+        A refusal hands the draft back (``publishing`` → ``open``) once the job has failed. An
+        import's own publish that finds main moved pulls and publishes again first
+        (:meth:`_pull_and_publish`).
 
         Safe to run again. An earlier attempt may have merged the draft and died (or been taken
         over) before it finished the job: a merged draft is not published twice — the hook is told
@@ -715,14 +813,12 @@ class ImportExportService:
         lease = lease or await lease_job(job_id)
         async with db.graphver_session() as s:
             row = await s.get(JobORM, job_id)
-            job = {**(row.field_scope or {}), "graphId": row.graph_id, "branchId": row.branch_id,
+            fields = dict(row.field_scope or {})
+            job = {**fields, "graphId": row.graph_id, "branchId": row.branch_id,
                    "workspaceId": row.workspace_id, "dataSourceId": row.data_source_id}
-        merged = await self._svc.merged_commit_id(graph_id=job["graphId"], branch_id=job["branchId"])
-        result = await self._publish_hook(job if merged is None else {**job, "mergedCommitId": merged})
-        if "error" in result:
-            merged = await self._svc.merged_commit_id(graph_id=job["graphId"], branch_id=job["branchId"])
-            if merged is not None:
-                result = await self._publish_hook({**job, "mergedCommitId": merged})
+        result = await self._publish_once(job)
+        if job.get("importJobId") and _behind_main(result):
+            result = await self._pull_and_publish(job_id, job, fields, lease, result)
         values: Dict[str, Any] = {"summary": result}
         if "error" in result:
             detail = result["error"].get("detail")
@@ -733,6 +829,56 @@ class ImportExportService:
                              "could finish")
         if "error" in result:
             await self._svc.release_publishing(graph_id=job["graphId"], branch_id=job["branchId"])
+        return result
+
+    async def _publish_once(self, job: Dict[str, Any]) -> Dict[str, Any]:
+        """The hook's answer to publishing ``job``'s draft. Refused because the draft merged under
+        it (an earlier attempt's squash landed first), it runs only what a publish sets off."""
+        merged = await self._svc.merged_commit_id(graph_id=job["graphId"], branch_id=job["branchId"])
+        result = await self._publish_hook(job if merged is None else {**job, "mergedCommitId": merged})
+        if "error" in result:
+            merged = await self._svc.merged_commit_id(graph_id=job["graphId"], branch_id=job["branchId"])
+            if merged is not None:
+                result = await self._publish_hook({**job, "mergedCommitId": merged})
+        return result
+
+    async def _pull_and_publish(self, job_id: str, job: Dict[str, Any], fields: Dict[str, Any],
+                                lease: Lease, result: Dict[str, Any]) -> Dict[str, Any]:
+        """An import's own publish (``job``) refused because main moved past its draft while it
+        waited its turn (``result``): the job pulls main into the draft it holds, with the merge of
+        "Pull latest", and publishes it again, up to ``_AUTO_PULLS`` pulls counted on from the
+        import's (``pulls``). So the job a client follows ends published, or refused saying why: a
+        field both changed differently (``conflicts``), which waits on the draft for someone to
+        resolve it, or main moving on every time (``not_up_to_date``), or what refused the pull
+        (the graph frozen meanwhile, …). Each pull is counted on the job (``field_scope.pulls``),
+        fenced, so an attempt that takes the job over counts on. The import's ``summary.publish``
+        follows along."""
+        pulls = int(job.get("pulls") or 0)
+        while _behind_main(result) and pulls < _AUTO_PULLS:
+            lease.check()
+            try:
+                pulled = await self._svc.rebase_draft(
+                    graph_id=job["graphId"], branch_id=job["branchId"], actor=job["actor"],
+                    message="pull latest from main to publish the import", publishing_ok=True)
+            except (_HttpMapped, ConcurrencyError) as exc:
+                # The draft merged under the pull (an earlier attempt published it): that publish
+                # is this job's. Anything else refused the pull, and says why.
+                if await self._svc.merged_commit_id(graph_id=job["graphId"], branch_id=job["branchId"]):
+                    result = await self._publish_once(job)
+                else:
+                    result = {"error": {"status": getattr(exc, "status_code", 409), "detail": _refusal(exc)}}
+                break
+            pulls += 1
+            async with db.graphver_session() as s:
+                await lease.checkpoint(s, field_scope={**fields, "pulls": pulls})
+            if not pulled.get("clean"):
+                result = {"error": {"status": 409, "detail": _conflicts(pulled)}}
+                break
+            await self._note_publish(job["importJobId"], {"state": "queued", "jobId": job_id, "pulls": pulls})
+            result = await self._publish_once(job)
+        if "error" in result:
+            await self._note_publish(job["importJobId"], {
+                "state": "skipped", "jobId": job_id, "pulls": pulls, "reason": result["error"].get("detail")})
         return result
 
     async def run_publish_safe(self, job_id: str, lease: Lease) -> None:
@@ -928,8 +1074,11 @@ class ImportExportService:
         from backend.app.services.node_identity import identity_property
         ontology = (await self._ontology_resolver(workspace_id, data_source_id)
                     if self._ontology_resolver is not None else None)
-        identity = (await self._identity_resolver(workspace_id, data_source_id)
-                    if self._identity_resolver is not None else None)
+        try:                        # a template or schema without it says less, and matches nothing
+            identity = (await self._identity_resolver(workspace_id, data_source_id)
+                        if self._identity_resolver is not None else None)
+        except Exception:
+            identity = None
         return ontology, identity_property(identity) if identity is not None else None
 
     async def build_template(self, *, export_format: str = "csv",
@@ -964,14 +1113,16 @@ class ImportExportService:
 
     async def validate_import(self, *, graph_id: str, workspace_id: str,
                               data_source_id: Optional[str], branch_id: Optional[str],
-                              data: bytes, import_format: str) -> Dict[str, Any]:
+                              data: bytes, import_format: str,
+                              identifier: Optional[str] = None) -> Dict[str, Any]:
         """A dry run of importing ``data``: parsed, normalized and resolved against ``main`` (or
         the draft ``branch_id``) as an import resolves a window — the same matching, the same new
         ids, the same reasons a row is refused — and nothing written: no draft opened, no job
         made. One window at most (``IMPORT_COMMIT_WINDOW`` rows; ``ValueError`` past it): a larger
         file is imported into a draft, which is itself a dry run until published. Not run here:
         the write gate a strict graph applies at commit, and the deletions a ``replace`` would
-        make — the import's preview shows those."""
+        make — the import's preview shows those. ``identifier``: what its rows find their entities
+        by, as an import naming it would (:mod:`.identifier`); the platform's when None."""
         adapter = get_adapter(import_format)
 
         async def _chunks():
@@ -990,28 +1141,30 @@ class ImportExportService:
                 raise DryRunTooLarge(f"a dry run checks up to {config.IMPORT_COMMIT_WINDOW:,} rows; "
                                      "import a larger file into a draft and read its preview")
         ontology, _identity = await self.contract_context(workspace_id, data_source_id)
-        node_identity = (await self._identity_resolver(workspace_id, data_source_id)
-                         if self._identity_resolver is not None else None)
+        try:
+            node_identity = (await self._identity_resolver(workspace_id, data_source_id)
+                             if self._identity_resolver is not None else None)
+        except Exception as exc:
+            raise IdentityUnavailable("the data source's node identity can't be read right now, "
+                                      "so rows can't be matched as an import would: try again "
+                                      "shortly") from exc
         branch = branch_id or await self._svc.main_branch_id(graph_id)
         snap = await open_snapshot(graph_id=graph_id, branch_id=branch_id)
         worker = ImportWorker(self._svc, self._store, ontology=ontology, node_identity=node_identity)
+        worker._identifier = identifier or identifiers.platform_default()
         await worker.validation_state(snap, graph_id, branch, rows)
         nodes = [r for r in rows if r["kind"] == "node"]
         edges = [r for r in rows if r["kind"] == "edge"]
         lookups: Dict[str, Any] = await worker._node_lookups(snap, nodes) if nodes else {}
         if edges:                                    # one call: an edge finds a node made above it
             more = await worker._edge_lookups(snap, edges)
-            for key in ("urn_to_eid", "qname_to_eid", "current", "hash_of", "bases"):
+            for key in ("urn_to_eid", "qname_to_eid", "current", "hash_of", "bases", "dupes"):
                 lookups[key] = {**more.get(key, {}), **lookups.get(key, {})}
             lookups["node_eids"] = set(lookups.get("node_eids") or ()) | more["node_eids"]
             lookups["edge_to_eid"] = more["edge_to_eid"]
             lookups["edge_eids"] = more["edge_eids"]
         lookups.update(created_from={}, keys=worker._keys)
-        scope = worker._id_scope
-        _ops, resolutions = await asyncio.to_thread(
-            resolve_rows, nodes + edges, lookups, mint_id=new_entity_id, ontology=ontology,
-            identity_prop=worker._identity_prop, mint_urn=lambda _etype: new_entity_id(),
-            derive_urn=lambda seed: pointer_id(scope, seed))
+        _ops, resolutions = await asyncio.to_thread(worker.resolve, nodes + edges, lookups)
         summary = {"new": 0, "updated": 0, "unchanged": 0, "deleted": 0, "invalid": 0,
                    "skipped": skipped}
         for res in resolutions:
@@ -1020,20 +1173,17 @@ class ImportExportService:
         changed = [res for res in resolutions if res["resolved_op"] != "unchanged"]
         sample = [{"rowIndex": res["_row_index"], "kind": by_index[res["_row_index"]]["kind"],
                    "op": res["resolved_op"], "matchedEntityId": res.get("matched_entity_id"),
-                   "label": _label(by_index[res["_row_index"]]), "reasons": res.get("reasons") or []}
+                   "label": _label(by_index[res["_row_index"]]), "reasons": res.get("reasons") or [],
+                   "code": res.get("code")}
                   for res in sorted(changed, key=lambda r: r["_row_index"])[:_VALIDATE_SAMPLE]]
-        named = sum(1 for res in resolutions if res["resolved_op"] == "create"
-                    and _named_by_pointer(by_index[res["_row_index"]], worker._identity_prop))
-        hints = [(f"{named} new {'node is' if named == 1 else 'nodes are'} named by a urn your file "
-                  "gives. A urn finds its node again on the next import but isn't stored, so "
-                  "exports and search show the node's urn:uuid; to see your own id, keep it in a "
-                  "property marked \"Match imports by this\".")] if named else []
+        hints: List[str] = []
         gone = sum(1 for res in resolutions if _ALREADY_GONE in (res.get("reasons") or ()))
         if gone:                             # unchanged, so not among the rows listed
             hints.append(f"{gone} delete {'row finds' if gone == 1 else 'rows find'} nothing to "
                          "delete: what they name isn't in the graph (deleted already, or never "
                          "there). They change nothing; check their names if you expected them to.")
         return {"format": import_format, "checkedAgainst": branch_id or "main",
+                "identifier": worker._identifier,
                 "schemaVersion": contract.FORMAT_VERSION, "summary": summary, "rows": sample,
                 "rowsTruncated": len(changed) > len(sample),
                 "unknownColumns": contract.unknown_columns(records), "hints": hints}
@@ -1062,6 +1212,13 @@ class ImportExportService:
                 "workspaceId": row.workspace_id, "dataSourceId": row.data_source_id,
                 "providerId": row.provider_id, "scopeViewId": row.scope_view_id,
                 "reconcileMode": row.reconcile_mode, "importFormat": row.import_format,
+                # What an import's rows find their entities by (identifier.py); None for others.
+                "identifier": row.identity_strategy if row.job_type == "ingest" else None,
+                # A replace sent with allowMassDelete: it deletes past the replace guard's limits.
+                "allowMassDelete": bool(row.allow_mass_delete),
+                # Where its identifier came from, and the replace guard's limits it runs under
+                # (``services.import_settings``); None for a job made before they were kept.
+                "importSettings": row.import_settings if row.job_type == "ingest" else None,
                 "sourceUri": row.source_uri, "previewUri": row.preview_uri,
                 "reportUri": row.report_uri, "resultUri": row.result_uri,
                 "summary": row.summary, "errorMessage": row.error_message,

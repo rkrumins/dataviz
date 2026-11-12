@@ -196,8 +196,17 @@ matches each incoming row to an existing `main` entity:
 
 - **Nodes** by `urn` (`service.py:3868-3869, 3881`).
 - **Edges** by the `(sourceEntityId, targetEntityId, edgeType)` triple (`service.py:3867, 3904`).
-- New external entities get a **stable synthesized id** (`sync:{urn}` for nodes,
-  `sync:e:{src}->{tgt}:{type}` for edges) so the *next* sync re-matches them (`service.py:3882, 3905`).
+- An entity the snapshot names by an id it already has — whatever its format, from before — is
+  that entity.
+- An entity a sync deleted that a later one sends again comes back under its id: a node by the urn
+  it last had, an edge by the ends and type it last joined.
+- New external entities get a **`urn:uuid:` derived from what names them**, as an import mints it:
+  from the node's urn, an edge's ends and type, or the row's own id; one the row brings is kept
+  ([18 §3](18-identity.md#3-where-each-id-comes-from)). The *next* sync re-matches them by their
+  urn and ends regardless; a node made from a row with no urn carries its id as its urn, and the
+  same row finds it by that id, whatever urn it has been given since. An edge names a node of the
+  same snapshot by its urn or the row's own id. Ids earlier syncs gave (`sync:{urn}`,
+  `sync:e:{src}->{tgt}:{type}`) are kept and still matched.
 - Rows missing required fields are **rejected**, not fatal (`service.py:3877-3878, 3896-3897`).
 
 > **Limitation.** Identity hinges on a **stable external `urn`** for nodes and stable endpoints for

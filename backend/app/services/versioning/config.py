@@ -121,6 +121,33 @@ POOL_TIMEOUT_SECS: int = int(os.getenv("GRAPHVER_POOL_TIMEOUT_SECS", "10"))
 # Bulk ingest / projection batch sizes (rows per COPY / UNWIND chunk).
 INGEST_BATCH_SIZE: int = int(os.getenv("GRAPHVER_INGEST_BATCH_SIZE", "5000"))
 PROJECTION_BATCH_SIZE: int = int(os.getenv("GRAPHVER_PROJECTION_BATCH_SIZE", "5000"))
+# A projector statement that times out (or meets the memory ceiling) is split in half and the halves
+# sent again, down to one row; this many retries at one row, backing off 2 s, 4 s, 8 s (plus jitter)
+# between them, before the row is given up on. The width that worked is kept per graph and statement
+# kind, and grows back by a quarter after eight quick statements, never past PROJECTION_BATCH_SIZE.
+PROJECTION_FLOOR_RETRIES: int = int(os.getenv("GRAPHVER_PROJECTION_FLOOR_RETRIES", "3"))
+# project_now (right after a publish or merge, inside the request) projects a window of at most this many
+# version rows itself; a larger one is left to the projection worker, which a nudge wakes. Its 10 s budget
+# would otherwise cancel the pass while FalkorDB still ran its last write.
+PROJECTION_INLINE_MAX_ROWS: int = int(os.getenv("GRAPHVER_PROJECTION_INLINE_MAX_ROWS", "20000"))
+# A projector statement that still fails for one entity on its own, after its retries, is held in
+# projection_quarantine and the rest of its window publishes; later passes retry it first. Off: such an
+# entity fails the pass, and every pass after it, as before.
+PROJECTION_QUARANTINE: bool = os.getenv("GRAPHVER_PROJECTION_QUARANTINE", "1").lower() not in ("0", "false", "no")
+# A caught-up graph holding quarantined entities is given a pass of its own to retry them once each try is
+# this old; a graph taking commits retries them first on every pass.
+PROJECTION_QUARANTINE_RETRY_SECS: int = int(os.getenv("GRAPHVER_PROJECTION_QUARANTINE_RETRY_SECS", "300"))
+# A pass over a window too large to hold (paged) or a rebuild too large to hold (streamed) stops at the
+# first page boundary past this many seconds: its cursor is on the pass marker, it publishes nothing,
+# records no error and no backoff, and nudges itself, so the next pass resumes after the last page. Other
+# graphs get their turn meanwhile. 0: no limit.
+PROJECTION_PASS_MAX_SECS: float = float(os.getenv("GRAPHVER_PROJECTION_PASS_MAX_SECS", "300"))
+# A graph that cannot be brought up to date by its windows is rebuilt in place on its own: when its verify
+# finds FalkorDB short of committed main, or (a key the platform minted) holding more after the tombstone
+# sweep, and when the same window has failed ESCALATE_AFTER passes in a row on a timeout or memory refusal
+# the statement ladder could not absorb. Off: the old inline heal, and a graph held back until a rebuild.
+PROJECTION_ESCALATE: bool = os.getenv("GRAPHVER_PROJECTION_ESCALATE", "1").lower() not in ("0", "false", "no")
+PROJECTION_ESCALATE_AFTER: int = int(os.getenv("GRAPHVER_PROJECTION_ESCALATE_AFTER", "3"))
 
 # Projection worker: poll cadence for the reconciling loop, read freshness
 # tolerance (a read serves from FalkorDB while projected >= committed - lag),
@@ -143,7 +170,12 @@ PROJECTION_WAIT_MS: int = int(os.getenv("GRAPHVER_PROJECTION_WAIT_MS", "2000"))
 # watermark to 0, a marker behind it to the marker's seq, and the poll reseeds. A key no summaries
 # build has stamped gets its first one asked for. 0 turns it off.
 LIVENESS_SECS: int = int(os.getenv("GRAPHVER_LIVENESS_SECS", "60"))
-READ_MAX_LAG: int = int(os.getenv("GRAPHVER_READ_MAX_LAG", "0"))
+# How many versions behind main's head a read of main may be served from the FalkorDB key while
+# the projection catches up or rebuilds in place (``serving_seq``): the version the key last
+# published, complete with its lineage summaries, and the view says the graph is being updated.
+# -1 (the default): however far behind. 0: the head only, as before, so a read the key is behind
+# for goes to Postgres, which composes the graph without its lineage summaries.
+READ_MAX_LAG: int = int(os.getenv("GRAPHVER_READ_MAX_LAG", "-1"))
 # After each projection, cheaply reconcile live node/edge COUNTS between Postgres
 # (the SoR) and FalkorDB (the cache); on a mismatch, bounded-heal by reseeding the
 # graph from Postgres once. Guards against a silently dropped delete leaving the
@@ -174,14 +206,24 @@ PROJECTION_VERIFY_DEEP: bool = os.getenv("GRAPHVER_PROJECTION_VERIFY_DEEP", "1")
 # is skipped on the automatic rebuild (count verify still runs); the on-demand reconcile ("Check sync")
 # can still deep-diff any size when an operator explicitly asks. 0 disables the ceiling.
 PROJECTION_VERIFY_DEEP_MAX_ENTITIES: int = int(os.getenv("GRAPHVER_PROJECTION_VERIFY_DEEP_MAX_ENTITIES", "500000"))
-# Largest rollup change the projector applies itself, by delta (a window's or a reconcile's
-# lineage-edge contributions; a moved container's subtree). Chains are resolved in one batched
-# climb per window and the pair math is in memory, so tens of thousands of edges stay inline;
-# past this the aggregation batch job — which also writes only the difference — takes over.
+# Largest restructure whose rollups the projector moves itself, by delta: a moved container's subtree
+# (and the lineage edges under it), and a reconcile's lineage-edge contributions. Past this the
+# aggregation batch job — which also writes only the difference — takes over. A publish window's own
+# lineage edges have no such cap (ROLLUP_NET_MAX_CELLS below).
 PROJECTION_ROLLUP_INLINE_CAP: int = int(os.getenv("GRAPHVER_PROJECTION_ROLLUP_INLINE_CAP", "50000"))
+# A window's lineage summaries are moved by delta whatever its size: its edges are read a page at a time
+# (PROJECTION_PAGE) and their contributions netted by cell, in memory up to this many cells and in
+# graphver.rollup_deltas past it, then applied a page at a time. (The inline cap above still bounds a
+# MOVED container's subtree: a move of more than that goes to the aggregation job.)
+ROLLUP_NET_MAX_CELLS: int = int(os.getenv("GRAPHVER_ROLLUP_NET_MAX_CELLS", "200000"))
+# A lineage-summaries build the projector asked for and did not get (a job already running, which may
+# have read the graph before the change that asked; a hold; the service out of reach) is asked for
+# again by the liveness loop, at most this often per graph, until one is queued
+# (projection_state.rollup_state). 0: never again.
+ROLLUP_REASK_SECS: int = int(os.getenv("GRAPHVER_ROLLUP_REASK_SECS", "300"))
 # A projection window of more version rows than this (a publish of millions) is written a page of
 # PROJECTION_PAGE rows at a time — all its nodes, then its edges — so the projector holds a page of
-# it, never all of it; and its rollups go to the aggregation job.
+# it, never all of it. Its rollups are moved by delta like any window's (ROLLUP_NET_MAX_CELLS).
 PROJECTION_PAGED_ABOVE: int = int(os.getenv("GRAPHVER_PROJECTION_PAGED_ABOVE", "200000"))
 PROJECTION_PAGE: int = int(os.getenv("GRAPHVER_PROJECTION_PAGE", "20000"))
 # A full reconcile (a first seed, a rebuild, a heal) holds both sides of a graph — what Postgres
@@ -408,6 +450,38 @@ def object_store_s3() -> dict:
 # window is also what a resumed import redoes at most, and what the job's lease waits out before a
 # stopping worker hands the job back — so a few seconds of work, not minutes.
 IMPORT_COMMIT_WINDOW: int = int(os.getenv("IMPORT_COMMIT_WINDOW", "10000"))
+# What an import's rows find their entities by when the request names nothing (``identifier``):
+# ``entity_id`` (an entity id of the graph, else the urn, the identifier property, a field a type
+# matches imports by, then a unique qualifiedName), or ``urn`` (an entity id, else the urn only).
+IMPORT_IDENTIFIER: str = os.getenv("GRAPHVER_IMPORT_IDENTIFIER", "entity_id")
+# A replace deletes whatever its file leaves out of its scope. One that would delete most of a scope
+# AND make most of it again is what a file whose rows name their entities by another key looks like:
+# its rows match nothing, so the run deletes the scope and makes it anew, every id and its history
+# with it. In a scope of at least IMPORT_REPLACE_GUARD_MIN_LIVE entities, a replace that would delete
+# at least IMPORT_REPLACE_GUARD_DELETE_FRACTION of them and create at least
+# IMPORT_REPLACE_GUARD_CREATE_FRACTION as many is refused before it deletes anything, unless it is
+# sent with allowMassDelete=true. Fractions of the scope's entities, nodes and edges (0.5 = half).
+IMPORT_REPLACE_GUARD: bool = os.getenv("IMPORT_REPLACE_GUARD", "1").lower() not in ("0", "false", "no")
+IMPORT_REPLACE_GUARD_MIN_LIVE: int = int(os.getenv("IMPORT_REPLACE_GUARD_MIN_LIVE", "1000"))
+IMPORT_REPLACE_GUARD_DELETE_FRACTION: float = float(
+    os.getenv("IMPORT_REPLACE_GUARD_DELETE_FRACTION", "0.5"))
+IMPORT_REPLACE_GUARD_CREATE_FRACTION: float = float(
+    os.getenv("IMPORT_REPLACE_GUARD_CREATE_FRACTION", "0.5"))
+# And earlier: a replace whose first full node window finds an entity for fewer than this fraction of
+# its rows, in a graph of at least IMPORT_REPLACE_GUARD_MIN_LIVE entities, stops there, naming its
+# identifier, rather than read the rest of the file first, unless it is sent with
+# allowMassDelete=true. 0 turns it off.
+IMPORT_REPLACE_MIN_MATCH_FRACTION: float = float(os.getenv("IMPORT_REPLACE_MIN_MATCH_FRACTION", "0.05"))
+# How many of an import's file's rows may be refused before it holds, when the import doesn't say
+# (maxRefusedRows): past it, a replace deletes nothing and fails (rows_refused), and an import that
+# would publish itself (autoPublish) leaves its draft for review instead. "0" holds on any refused
+# row; a count ("100") or a share of the file's rows ("0.5%") goes on within it; "-1" always goes
+# on. Going on, a replace keeps what a refused row still names. Every import reports its refused
+# rows, with why (summary.refused).
+IMPORT_MAX_REFUSED_ROWS: str = os.getenv("IMPORT_MAX_REFUSED_ROWS", "0")
+# Properties a graph's imports may match nodes by (identifier=prop.<name>), at most: each has an index
+# kept current from the version log, as Dataverse limits alternate keys and Salesforce external ids.
+MAX_MATCHING_PROPERTIES: int = int(os.getenv("GRAPHVER_MAX_MATCHING_PROPERTIES", "10"))
 # Rows returned inline in a preview before the full diff must be downloaded.
 PREVIEW_SAMPLE_LIMIT: int = int(os.getenv("IMPORT_PREVIEW_SAMPLE_LIMIT", "200"))
 # Two-tier threshold: imports at/below this stage client-side (existing Review & Save); above
