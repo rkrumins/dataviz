@@ -548,9 +548,9 @@ export interface ExportPlan {
   /** Why this format can't hold the export (an Excel sheet stops at 1,048,575 rows), if it can't. */
   formatLimit: string | null
   /** A view-scoped export: how many entities the view places, how many were found, how many it
-   *  holds with their contents. `placements: 0` means the view places none, so the whole data
-   *  source is exported. */
-  view?: { viewId: string; placements: number; found: number; entities: number | null } | null
+   *  holds with their contents (`found` and `entities` are null when they take too long to find).
+   *  `placements: 0` means the view places none, so the whole data source is exported. */
+  view?: { viewId: string; placements: number; found: number | null; entities: number | null } | null
 }
 
 /** Which data an export reads. A version-controlled data source exports from its versioned graph

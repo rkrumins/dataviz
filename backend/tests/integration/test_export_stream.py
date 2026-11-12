@@ -8,7 +8,8 @@ enough that every read spans many pages. Then that the view scope, a selection, 
 written from it agree with the materializing path, and that an empty export is still a valid file.
 A view package's format-2 lines (``stream.native_pages``) carry the same entities' payloads whole.
 A draft read as it stands now, inside ``pinned_reads``, reads one state while it is edited. And a
-layer pinned to a commit is read by one query, however many pages it spans.
+layer pinned to a commit is read by one query, however many pages it spans, through a cursor
+declared in SQL.
 """
 import asyncio
 import json
@@ -272,6 +273,10 @@ async def _run() -> None:
     assert len(pages) >= 4 and len(winners) == 2, (len(pages), winners)
     assert "LIMIT" not in winners[0] and "LIMIT" in winners[1]
     assert first == [w.entity_id for w in pages[0][:3]]
+    # Through a cursor declared in SQL, which Postgres plans to start fast: the wire protocol's is
+    # planned for the whole result, and a layer as of an earlier commit (a past revision, a draft
+    # behind main, a fork's parent) then sorted every version row before its first page.
+    assert all(w.lstrip().startswith("DECLARE ") for w in winners), winners
 
 
 @pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres")
