@@ -9471,8 +9471,11 @@ class GraphVersioningService:
 
         ``standard_ids`` (the API route): an entity the snapshot brings that main doesn't hold
         takes the id an import would give it (``_derived_node_id``, ``_derived_edge_id``). One
-        that names an entity by an id it already has — whatever its format, from before — is
-        that entity, so it is updated or deleted as ever."""
+        that names an entity by an id it already has — whatever its format, from before, a
+        ``urn:uuid`` in any case — is that entity, so it is updated or deleted as ever. A node
+        with no urn carries its id as its urn, and is found by it next time. One main deleted
+        comes back under its id: a node by the urn it last had, an edge by the ends and type it
+        last joined. An edge names a node of the snapshot by its urn or its own id."""
         await self._assert_syncable(graph_id)
         rows = list(rows)        # every attempt reads it; a spent iterator would delete everything
         scope = await self.identity_scope(graph_id) if standard_ids else None
@@ -9689,14 +9692,21 @@ class GraphVersioningService:
 
         # ── nodes ────────────────────────────────────────────────────────────
         node_rows = [(i, r) for i, r in enumerate(rows) if (r or {}).get("kind") == "node"]
-        urns = [r.get("urn") for _, r in node_rows if r.get("urn")]
-        known = await self._heads_by_urn(s, graph_id, main_id, urns)   # urn -> (eid, hash, tomb)
-        # Minting: which of the ids a row not found by its urn could be named by main holds —
-        # its own id (an entity made before, kept whatever its format) and the one it would mint.
+        # The urn a row's node carries: its own, or — minting, for a row with none — the id it
+        # derives, which a node made from that row carries as its urn.
+        keys = {i: r.get("urn") or (_derived_node_id(scope, r) if scope is not None else None)
+                for i, r in node_rows}
+        known = await self._heads_by_urn(s, graph_id, main_id, keys.values())   # urn -> (eid, hash, tomb)
+        # Minting: the deleted nodes whose urn it last was, and which of the ids a row not found by
+        # its urn could be named by main holds — its own id (an entity made before, kept whatever
+        # its format) and the one it would mint (a urn:uuid it brings, in canonical form).
         held: set = set()
+        gone: Dict[str, set] = {}
         if scope is not None:
+            gone = await self._deleted_by(s, graph_id, main_id, NodeVersionORM, ("urn",),
+                                          {k for k in keys.values() if k and k not in known})
             held = await self._heads_present(s, graph_id, main_id, {
-                v for _, r in node_rows if r.get("urn") not in known
+                v for i, r in node_rows if keys[i] not in known
                 for v in (r.get("entity_id"), r.get("id"), _derived_node_id(scope, r)) if v})
         urn_to_eid: Dict[str, str] = {}
         for i, row in node_rows:
@@ -9704,29 +9714,31 @@ class GraphVersioningService:
                 rejected.append({"row": i, "reason": "node missing entityType"})
                 continue
             urn = row.get("urn")
-            hit = known.get(urn) if urn else None
+            hit = known.get(keys[i]) if keys[i] else None
             payload = _sanitize_node_properties(
                 {k: v for k, v in row.items() if k not in ("kind", "id", "entity_id")})
             given = row.get("entity_id") or row.get("id")
+            named = next((v for v in (given, uuid_urn(given)) if v and v in held), None)
             if hit or scope is None:
                 # A new node is named by its urn, as the bootstrap names every node; an earlier
                 # sync's ``sync:<urn>`` is found by its urn (``known``) and kept.
                 eid = (hit[0] if hit else None) or given or urn
-            elif given and given in held:      # an entity it names by the id it has
-                eid = given
-            else:                              # a new one, as an import mints it
-                derived = _derived_node_id(scope, row)
-                eid = derived if derived and derived not in held else new_entity_id()
-                if not urn:
-                    payload["urn"] = eid
+            elif named:                        # an entity it names by the id it has
+                eid = named
+            else:
+                eid = _id_to_take(_derived_node_id(scope, row), gone.get(keys[i]) or set(), held)
+            if scope is not None and not urn:  # a node with no urn carries its id as its urn
+                payload["urn"] = eid
             if not eid:                        # neither a urn nor an id: a urn:uuid for both
                 eid = new_entity_id()
                 payload["urn"] = eid
             seen.add(eid)
             if urn:
                 urn_to_eid[urn] = eid
-            if row.get("id"):
-                urn_to_eid[row["id"]] = eid
+            for own in (row.get("entity_id"), row.get("id")):     # the row's own names, in any case
+                for name in (own, uuid_urn(own)):
+                    if name:
+                        urn_to_eid[name] = eid
             urn_to_eid[eid] = eid
             if hit and not hit[2] and hit[1] == _ch(payload):
                 continue                       # identical to what we hold → cannot produce a delta
@@ -9748,6 +9760,7 @@ class GraphVersioningService:
                 triples.append((se, te, r["edgeType"]))
         by_triple = await self._heads_by_edge_triple(s, graph_id, main_id, triples)
         held = set()
+        gone = {}
         if scope is not None:
             minted = {}                        # row → the id it would mint, if main lacks it
             for i, r in edge_rows:
@@ -9757,6 +9770,10 @@ class GraphVersioningService:
             held = await self._heads_present(s, graph_id, main_id, {
                 v for i, r in edge_rows if i in minted
                 for v in (r.get("entity_id"), r.get("id"), minted[i]) if v})
+            # The deleted edges that last joined those ends with that type.
+            gone = await self._deleted_by(
+                s, graph_id, main_id, EdgeVersionORM, ("source_entity_id", "target_entity_id", "edge_type"),
+                {t for t in triples if t not in by_triple})
 
         for i, row in edge_rows:
             et, src, tgt = row.get("edgeType"), row.get("source"), row.get("target")
@@ -9769,13 +9786,14 @@ class GraphVersioningService:
                 continue
             hit = by_triple.get((seid, teid, et))
             given = row.get("entity_id") or row.get("id")
+            named = next((v for v in (given, uuid_urn(given)) if v and v in held), None)
             if hit or scope is None:
                 eid = (hit[0] if hit else None) or given or f"sync:e:{seid}->{teid}:{et}"
-            elif given and given in held:      # an edge it names by the id it has
-                eid = given
-            else:                              # a new one, as an import mints it
-                derived = _derived_edge_id(scope, row, seid, teid, et)
-                eid = derived if derived not in held else new_entity_id()
+            elif named:                        # an edge it names by the id it has
+                eid = named
+            else:
+                eid = _id_to_take(_derived_edge_id(scope, row, seid, teid, et),
+                                  gone.get((seid, teid, et)) or set(), held)
             payload = edge_payload_from_parts(edge_type=et, source_entity_id=seid,
                                               target_entity_id=teid, row=row)
             seen.add(eid)
@@ -9791,9 +9809,11 @@ class GraphVersioningService:
         row's entity (doc 08 §3b), without importing anything: ``{value, status, entityId}`` with
         ``status`` ``found``, ``none`` or ``duplicate`` (``entityIds``: the live nodes holding it).
         ``entity_id``: a live entity of that id. ``urn``: the live nodes whose urn it is, else the
-        live node an import derived from it. ``prop.<name>``: the live nodes holding it, by the
-        property's index (:mod:`.import_export.keys`), caught up first; ``NotIndexed`` before an
-        import has built it. Values compare as an import's keys do (trimmed text)."""
+        live node an import derived from it. On a fork both read its main as an import into it
+        does: its own rows, then its parent's at the fork point. ``prop.<name>``: the live nodes
+        holding it, by the property's index (:mod:`.import_export.keys`), caught up first;
+        ``NotIndexed`` before an import has built it, ``NotOnAFork`` on a fork. Values compare as
+        an import's keys do (trimmed text)."""
         from .import_export import keys as matching
         from .import_export.resolve import key_value, pointer_id, pointer_seed
         asked = {v: key_value(v) for v in values}
@@ -9802,29 +9822,22 @@ class GraphVersioningService:
         async with self._session() as s:
             main_id = await self._main_branch_id(s, graph_id)
 
+            # Main as a read composes it: on a fork, its own rows, then its parent's at the fork point.
             async def live(ids):
-                out: set = set()
-                for chunk in _chunks(sorted(set(ids)), 5000):
-                    out.update((await s.execute(select(EntityHeadORM.entity_id).where(
-                        EntityHeadORM.graph_id == graph_id, EntityHeadORM.branch_id == main_id,
-                        EntityHeadORM.entity_id.in_(list(chunk)),
-                        EntityHeadORM.is_tombstone.is_(False)))).scalars())
-                return out
+                state = await self._current_skeletons(s, graph_id, main_id, set(ids))
+                return {e for e, skeleton in state.items() if skeleton is not None}
 
             if identifier == "entity_id":
                 found = await live(wanted)
                 holders = {v: {v} for v in wanted if v in found}
             elif identifier == "urn":
-                for chunk in _chunks(wanted, 5000):
-                    rows = (await s.execute(
-                        select(NodeVersionORM.urn, EntityHeadORM.entity_id)
-                        .join(NodeVersionORM, (NodeVersionORM.graph_id == EntityHeadORM.graph_id)
-                              & (NodeVersionORM.id == EntityHeadORM.head_version_id))
-                        .where(EntityHeadORM.graph_id == graph_id, EntityHeadORM.branch_id == main_id,
-                               EntityHeadORM.is_tombstone.is_(False),
-                               NodeVersionORM.urn.in_(list(chunk))))).all()
-                    for urn, eid in rows:
-                        holders.setdefault(urn, set()).add(eid)
+                carried = await self._holders_by_urn(s, graph_id, main_id, set(wanted))
+                state = await self._current_skeletons(
+                    s, graph_id, main_id, {e for ids in carried.values() for e in ids})
+                for urn, ids in carried.items():
+                    on = {e for e in ids if (state.get(e) or {}).get("urn") == urn}
+                    if on:
+                        holders[urn] = on
                 rest = [v for v in wanted if v not in holders]
                 if rest:
                     scope = await self.identity_scope(graph_id)
@@ -9897,6 +9910,35 @@ class GraphVersioningService:
             )).all()
             for se, te, et, eid, ch, tomb in rows:
                 out[(se, te, et)] = (eid, ch, bool(tomb))
+        return out
+
+    async def _deleted_by(self, s, graph_id: str, main_id: str, model, columns: Sequence[str],
+                          keys) -> Dict[Any, set]:
+        """key → the entities deleted on main whose last live version held it in ``columns`` (a
+        node's urn; an edge's ends and type, as a tuple). A delete's version holds none, so the
+        lookups through the head (:meth:`_heads_by_urn`, :meth:`_heads_by_edge_triple`) miss them.
+        O(keys), via ix_nv_urn and ix_ev_source."""
+        cols = [getattr(model, c) for c in columns]
+        key_of = cols[0] if len(cols) == 1 else tuple_(*cols)
+        out: Dict[Any, set] = {}
+        for chunk in _chunks(list(dict.fromkeys(k for k in keys if k)), 3000):
+            carried = select(model.entity_id).where(
+                model.graph_id == graph_id, model.branch_id == main_id, key_of.in_(list(chunk)))
+            rows = (await s.execute(
+                select(model.entity_id, *cols)
+                .join(EntityHeadORM, (EntityHeadORM.graph_id == model.graph_id)
+                      & (EntityHeadORM.branch_id == model.branch_id)
+                      & (EntityHeadORM.entity_id == model.entity_id))
+                .where(model.graph_id == graph_id, model.branch_id == main_id,
+                       model.entity_id.in_(carried), model.op != "delete",
+                       EntityHeadORM.is_tombstone.is_(True))
+                .order_by(model.entity_id, model.commit_seq.desc(), model.created_at.desc())
+                .distinct(model.entity_id))).all()
+            wanted = set(chunk)
+            for eid, *vals in rows:
+                key = vals[0] if len(vals) == 1 else tuple(vals)
+                if key in wanted:
+                    out.setdefault(key, set()).add(eid)
         return out
 
     async def _live_ids_absent_from(self, s, graph_id: str, main_id: str, seen: set) -> set:
@@ -11994,6 +12036,17 @@ def _derived_edge_id(scope: str, row: Mapping[str, Any], source: str, target: st
     own = key_value(row.get("entity_id")) or key_value(row.get("id"))
     return (derived_entity_id("edge", f"{scope}/pointer:{own}") if own
             else edge_pointer_id(scope, source, target, edge_type))
+
+
+def _id_to_take(derived: Optional[str], back: Set[str], held: Collection[str]) -> str:
+    """The id a synced entity main holds no live one of takes: a deleted one that last carried
+    what names it (``back``), brought back — the one it derives first; else the id it derives,
+    as an import mints it, unless another entity holds that; else a new v7."""
+    if derived in back:
+        return derived
+    if len(back) == 1:
+        return next(iter(back))
+    return derived if derived and derived not in held else new_entity_id()
 
 
 # Above this many edges the containment-loop pass runs in a thread, off the event loop.
