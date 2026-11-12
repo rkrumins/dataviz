@@ -611,7 +611,9 @@ dropped** (a blank means "leave unchanged" — PATCH semantics, `rowmodel.py:90-
 column-shift hint rather than silently swallowed as an upsert (`rowmodel.py:89-98`) — the fix for
 the classic "a property value slid into the `_op` slot and my edit vanished" bug.
 
-**Deleting a property** is explicit (an empty cell never deletes). A `\N` / `\NULL` token in a
+**Deleting a property** is explicit (an empty cell never deletes). A token in a node's or an edge's
+own field (`description`, `edgeType`, `tags`, …) refuses the row (`invalid_row`, naming the field):
+those fields are replaced, never removed, and the token would be stored as text. A `\N` / `\NULL` token in a
 `prop.<name>` cell, or a `null` in `properties_json`, becomes the **`PROP_DELETE` sentinel**
 (`"__nx_prop_delete__"`, `rowmodel.py:60-80`) which flows through the update patch to
 `service._patch_payload`, removing the key. The sentinel uses a plain ASCII marker (not a NUL byte,

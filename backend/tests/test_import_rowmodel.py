@@ -9,6 +9,8 @@ Pure — runs under the per-file runner.
 """
 import json
 
+from backend.common.property_patch import PROP_DELETE
+
 from backend.app.services.versioning.import_export.rowmodel import (
     denormalize_edge,
     denormalize_node,
@@ -95,6 +97,22 @@ def _run() -> None:
 
 def test_import_rowmodel():
     _run()
+
+
+def test_a_removal_token_in_a_rows_own_field_refuses_the_row():
+    """``\\N`` removes a property; in a node's or an edge's own field it can only be refused,
+    never stored as the text itself. A delete row with one is still a delete, and a ``prop.``
+    cell's token still removes its property."""
+    row = normalize({"urn": "urn:t:a", "entityType": "Table", "description": "\\N",
+                     "prop.owner": "\\N", "tags": "\\N"}, "node")
+    assert row["op"] == "invalid"
+    assert row["op_error"].startswith("description, tags: \\N removes a property")
+    assert "description" not in row and "tags" not in row
+    assert normalize({"urn": "urn:t:a", "displayName": "\\N", "_op": "delete"}, "node")["op"] == "delete"
+    edge = normalize({"edgeType": "\\N", "sourceUrn": "a", "targetUrn": "b"}, "edge")
+    assert edge["op"] == "invalid" and edge["op_error"].startswith("edgeType:")
+    kept = normalize({"urn": "urn:t:a", "entityType": "Table", "prop.owner": "\\N"}, "node")
+    assert kept["op"] == "upsert" and kept["properties"]["owner"] == PROP_DELETE
 
 
 if __name__ == "__main__":

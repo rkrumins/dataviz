@@ -140,7 +140,8 @@ connector written against it keeps working.
 
 - **A blank cell, or a property left out, keeps what the graph holds.** Send only what you know.
 - **`\N` removes a property** (`null` in `properties_json`). `\NULL` and `\n` mean the same. A
-  node's own fields (`description`, …) can't be cleared by an import: set them to a new value.
+  node's own fields (`description`, …) can't be cleared by an import: set them to a new value. A row
+  with `\N` in one of them is refused (`invalid_row`), not stored as the text.
 - **`_op=delete` deletes the node** a row points at, and the edges on it, and what it contains
   (its containment subtree, as the ontology says). An edge row with `_op=delete` deletes that edge.
 - **A delete of something that isn't there is done already.** Whether it was deleted by an earlier

@@ -228,7 +228,8 @@ file of every column with a worked row of each type.
   them too. An edge row left as it was is refused when the import runs, `end_not_found`: its end is
   gone by then. The dry run reads edges against the graph as it stands, so it doesn't catch this.
 - **A node's own fields can't be removed** by an import: `\N` removes a property only in a
-  `prop.<name>` cell. Give `description` and the other fields a new value instead.
+  `prop.<name>` cell. Give `description` and the other fields a new value instead. A row with `\N`
+  in one of them is refused (`invalid_row`, naming the field), so the text `\N` is never stored.
 - **Never edit these:**
   - `entity_id` on an exported row: it is the item.
   - `urn` on an existing node: an import never changes a node's urn. The row's other cells apply,
