@@ -243,7 +243,8 @@ describe('ImportDialog', () => {
   })
 
   it('says which rows a held replace refused and why, and imports the rest anyway into its draft', async () => {
-    const refused = { total: 10, byCode: { no_key: 7, invalid_type: 3 }, rows: [
+    const refused = { total: 10, byCode: { no_key: 7, invalid_type: 3 },
+      fixes: { no_key: 'Give the row a key its identifier finds it by.', invalid_type: 'Use a type the ontology defines.' }, rows: [
       { rowIndex: 4, kind: 'node', label: 'orders', code: 'no_key', reason: 'give it a urn' },
       { rowIndex: 9, kind: 'node', label: 'sales', code: 'invalid_type', reason: "Dashboard isn't a type here" }] }
     vi.mocked(importInParts).mockResolvedValue({ jobId: 'j1', branchId: 'br_9', sourceUri: 's', status: 'pending' })
@@ -255,8 +256,11 @@ describe('ImportDialog', () => {
     await userEvent.upload(open(), file('graph.csv', 2048))
     await userEvent.click(screen.getByText('Replace (authoritative)'))
     await userEvent.click(screen.getByRole('button', { name: /^Import$/ }))
-    expect(await screen.findByText(/10 rows refused: 7 no_key, 3 invalid_type/)).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: '10 rows refused' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /7 no_key/ })).toBeInTheDocument()
     expect(screen.getByText(/Dashboard isn't a type here/)).toBeInTheDocument()
+    expect(screen.getByText(/Give the row a key its identifier finds it by/)).toBeInTheDocument()
+    expect(screen.getByText(/Use a type the ontology defines/)).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /Replace anyway/ })).not.toBeInTheDocument()
     await userEvent.click(screen.getByRole('button', { name: /Import the rest anyway/ }))
     expect(vi.mocked(importInParts).mock.calls[1][3]).toMatchObject({
@@ -271,7 +275,7 @@ describe('ImportDialog', () => {
           { rowIndex: 2, kind: 'node', label: '', code: 'no_key', reason: 'give it a urn' }] } } } as unknown as Job)
     await userEvent.upload(open(), file('graph.csv', 2048))
     await userEvent.click(screen.getByRole('button', { name: /^Import$/ }))
-    expect(await screen.findByText(/1 row refused: 1 no_key/)).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: '1 row refused' })).toBeInTheDocument()
     expect(screen.getByText(/give it a urn/)).toBeInTheDocument()
   })
 

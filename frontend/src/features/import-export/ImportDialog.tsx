@@ -20,6 +20,7 @@ import {
   type RefusedRows,
 } from '@/services/importExportApiService'
 import { prettyBytes } from './format'
+import { RefusedRowsPanel } from './RefusedRowsPanel'
 import { formatIdentifier, identifierLabel, MATCH_KINDS, parseIdentifier, type Match } from './identifier'
 
 export interface ImportDialogProps {
@@ -208,8 +209,8 @@ export function ImportDialog({ wsId, graphId, branchId, viewId, onClose, onRevie
           )}
           {phase === 'running' && <RunningStep job={job} upload={upload} fileName={file?.name} />}
           {phase === 'done' && <DoneStep summary={(job?.summary as ImportSummary) ?? null} previewRows={previewRows}
-            identifier={job?.identifier ?? null} />}
-          {phase === 'failed' && <FailedStep error={error} job={job} />}
+            identifier={job?.identifier ?? null} wsId={wsId} graphId={graphId} jobId={job?.jobId ?? null} />}
+          {phase === 'failed' && <FailedStep error={error} job={job} wsId={wsId} graphId={graphId} />}
         </div>
 
         {/* Footer */}
@@ -539,11 +540,14 @@ function RunningStep({ job, upload, fileName }: {
 }
 
 // ── done ─────────────────────────────────────────────────────────────────────
-function DoneStep({ summary, previewRows, identifier }: {
+function DoneStep({ summary, previewRows, identifier, wsId, graphId, jobId }: {
   summary: ImportSummary | null
   previewRows: ImportPreviewRow[]
   /** What its rows found their items by. */
   identifier: string | null
+  wsId: string
+  graphId: string
+  jobId: string | null
 }) {
   const s = summary
   const changes = s ? s.new + s.updated + s.deleted : 0
@@ -575,7 +579,7 @@ function DoneStep({ summary, previewRows, identifier }: {
           <Stat n={s.invalid} label="Needs fixing" icon={<AlertTriangle className="w-4 h-4" />} tone="amber" />
         </div>
       )}
-      {s?.refused && <RefusedReport report={s.refused} />}
+      {s?.refused && <RefusedRowsPanel report={s.refused} wsId={wsId} graphId={graphId} jobId={jobId} />}
       {s && (s.unchanged ?? 0) > 0 && (
         <p className="mt-3 text-[11px] text-ink-muted">
           {s.unchanged} row{s.unchanged === 1 ? ' was' : 's were'} already up to date — only real changes are staged.
@@ -692,34 +696,12 @@ function heldForRows(job: Job | null): boolean {
   return (job?.summary as ImportSummary | null | undefined)?.failure?.code === 'rows_refused'
 }
 
-/** Which rows an import refused, and why: its reasons by count, then the first rows. */
-function RefusedReport({ report }: { report: RefusedRows }) {
-  const codes = Object.entries(report.byCode).sort((a, b) => b[1] - a[1])
-  return (
-    <div className="mt-4 rounded-xl border border-rose-200 dark:border-rose-900/50 bg-rose-50/60 dark:bg-rose-950/20 p-3">
-      <p className="text-xs font-semibold text-ink">
-        {report.total} row{report.total === 1 ? '' : 's'} refused:{' '}
-        {codes.map(([code, n]) => `${n} ${code}`).join(', ')}
-      </p>
-      <ul className="mt-2 space-y-1">
-        {report.rows.slice(0, 5).map((r) => (
-          <li key={r.rowIndex} className="text-[11px] text-ink-muted break-words">
-            <span className="font-mono text-ink">row {r.rowIndex}</span>
-            {r.label ? ` · ${r.label}` : ''} · <span className="font-mono">{r.code}</span>
-            {r.reason ? ` — ${r.reason}` : ''}
-          </li>
-        ))}
-      </ul>
-      {report.total > Math.min(report.rows.length, 5) && (
-        <p className="text-[11px] text-ink-muted mt-2">
-          The import's preview lists more, each with why.
-        </p>
-      )}
-    </div>
-  )
-}
-
-function FailedStep({ error, job }: { error: string | null; job: Job | null }) {
+function FailedStep({ error, job, wsId, graphId }: {
+  error: string | null
+  job: Job | null
+  wsId: string
+  graphId: string
+}) {
   return (
     <div className="px-8 py-10 max-w-2xl mx-auto flex items-start gap-4">
       <div className="w-11 h-11 rounded-xl bg-rose-50 dark:bg-rose-950/30 text-rose-500 flex items-center justify-center flex-shrink-0">
@@ -734,7 +716,7 @@ function FailedStep({ error, job }: { error: string | null; job: Job | null }) {
             file leaves out: the deletions are staged on your draft, to review before you publish.
           </p>
         )}
-        {refusedOf(job) && <RefusedReport report={refusedOf(job)!} />}
+        {refusedOf(job) && <RefusedRowsPanel report={refusedOf(job)!} wsId={wsId} graphId={graphId} jobId={job?.jobId} />}
         {heldForRows(job) && (
           <p className="text-[11px] text-ink-muted mt-3 leading-relaxed">
             Fix those rows and try again, or import the rest anyway: the replace goes on without them,

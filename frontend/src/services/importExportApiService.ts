@@ -46,7 +46,40 @@ export interface RefusedRows {
   /** How many for each reason: `no_key`, `invalid_type`, … */
   byCode: Record<string, number>
   /** The first rows refused, each with why. */
-  rows: { rowIndex: number; kind: string; label: string; code: string; reason: string }[]
+  rows: RefusedRow[]
+  /** What to do about each reason it counts. */
+  fixes?: Record<string, string>
+}
+
+/** A row an import refused: where it is in the file, and why. */
+export interface RefusedRow {
+  /** The file's records counted from 0, whatever its format. */
+  rowIndex: number
+  kind: string
+  label: string
+  code: string
+  reason: string
+  /** Where it is, as its file shows it: a line (NDJSON, CSV, TSV), a sheet's row (Excel), an
+   *  item of the array (JSON). */
+  at?: RowAt | null
+}
+
+/** Where a row is in its file: lines and sheet rows count from 1, as editors and spreadsheets do;
+ *  a JSON array's items from 0. */
+export interface RowAt {
+  line?: number
+  sheet?: string
+  row?: number
+  item?: number
+}
+
+/** "line 12", "Edges row 7", "item 3" — or the row's place in the file, from 0. */
+export function whereText(r: Pick<RefusedRow, 'rowIndex' | 'at'>): string {
+  const at = r.at
+  if (at?.sheet && at.row) return `${at.sheet} row ${at.row}`
+  if (at?.line) return `line ${at.line}`
+  if (at?.item != null) return `item ${at.item}`
+  return `#${r.rowIndex}`
 }
 
 /** Where an import setting came from: the graph's own, or the platform's; `fork`: a fork matches
@@ -165,12 +198,20 @@ export interface ImportPreviewRow {
   matchedEntityId?: string | null
   label?: string
   reasons?: string[]
+  /** A refused row's reason, as a code (`no_key`, `end_not_found`, …). */
+  code?: string | null
+  /** A refused row: what to do about it. */
+  fix?: string | null
+  /** Where it is in its file. */
+  at?: RowAt | null
 }
 
 export interface ImportPreview {
   job: Job
   summary?: ImportSummary | null
   sample: ImportPreviewRow[]
+  /** Where the next page starts (a rowIndex), or null after the last. */
+  nextAfter?: number | null
   previewDownloadUrl?: string | null
   rejectedDownloadUrl?: string | null
 }
@@ -493,6 +534,34 @@ export function getImport(wsId: string, graphId: string, jobId: string): Promise
 
 export function getImportPreview(wsId: string, graphId: string, jobId: string): Promise<ImportPreview> {
   return authFetch<ImportPreview>(`${base(wsId)}/graphs/${graphId}/imports/${jobId}/preview`)
+}
+
+/** A page of the rows an import refused, in file order, each with why and what to do: the rows
+ *  after `after` (a rowIndex), or the first page. */
+export async function getRefusedRows(wsId: string, graphId: string, jobId: string,
+  after?: number | null): Promise<{ rows: RefusedRow[]; nextAfter: number | null }> {
+  const q = new URLSearchParams({ refused: 'true' })
+  if (after != null) q.set('after', String(after))
+  const page = await authFetch<ImportPreview>(`${base(wsId)}/graphs/${graphId}/imports/${jobId}/preview?${q}`)
+  return {
+    rows: page.sample.map((r) => ({ rowIndex: r.rowIndex, kind: r.kind, label: r.label ?? '',
+      code: r.code ?? 'invalid_row', reason: r.reasons?.[0] ?? '', at: r.at ?? null })),
+    nextAfter: page.nextAfter ?? null,
+  }
+}
+
+/** Refused rows as CSV, to fix in a spreadsheet: where each is, what it is, why, and what to do. */
+export function refusedRowsCsv(rows: RefusedRow[], fixes: Record<string, string> = {}): string {
+  const cell = (v: string | number) => {
+    const text = String(v)
+    return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text
+  }
+  const lines = [['where', 'rowIndex', 'kind', 'label', 'code', 'reason', 'fix'].join(',')]
+  for (const r of rows) {
+    lines.push([whereText(r), r.rowIndex, r.kind, r.label, r.code, r.reason, fixes[r.code] ?? '']
+      .map(cell).join(','))
+  }
+  return lines.join('\n') + '\n'
 }
 
 export function listImports(wsId: string, graphId: string): Promise<Job[]> {
