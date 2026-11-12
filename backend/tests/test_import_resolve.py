@@ -42,7 +42,8 @@ def test_a_delete_of_what_is_already_gone_is_done():
     assert ops == []
     assert [(by_row[i]["resolved_op"], by_row[i]["reasons"]) for i in (0, 1)] == \
         [("unchanged", [_ALREADY_GONE])] * 2
-    assert by_row[2]["resolved_op"] == "invalid" and by_row[2]["reasons"] == ["edge endpoint not found"]
+    assert by_row[2]["resolved_op"] == "invalid" and by_row[2]["reasons"] == [
+        "its target urn:GONE names no node the graph holds or the file makes"]
 
 def _run() -> None:
     minted = iter(["ent_B", "ev_1"])
@@ -322,7 +323,8 @@ def test_endpoints_resolve_by_entity_id_then_urn_then_qualified_name():
     by_row = {r["_row_index"]: r for r in res}
     assert [(o["payload"]["sourceEntityId"], o["payload"]["targetEntityId"]) for o in ops] == \
         [("ent_A", "ent_B"), ("ent_A2", "ent_B")], ops
-    assert by_row[2]["resolved_op"] == "invalid" and by_row[2]["reasons"] == ["edge endpoint not found"]
+    assert by_row[2]["resolved_op"] == "invalid" and by_row[2]["reasons"] == [
+        "its source urn:NOPE names no node the graph holds or the file makes"]
 
 
 def test_an_edge_is_the_same_edge_whatever_the_case_of_its_type():

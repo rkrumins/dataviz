@@ -35,7 +35,8 @@ from .export_worker import ExportWorker, example_template_records
 from .formats import get_adapter
 from .import_worker import (IdentifierMatchedNothing, ImportWorker, ReplaceBlocked, ReplaceRowsRefused,
                             _normalize_page,
-                            _record_pages, lease_job, refused_budget, refused_digest, within_budget)
+                            _label as _row_label, _record_pages, lease_job, refused_budget,
+                            refused_digest, within_budget)
 from .resolve import _ALREADY_GONE, _STATUS
 from .rowmodel import column_order
 from .runner import INSPECT_TYPES, JOB_TYPES, QUEUED, JobReaper
@@ -416,9 +417,13 @@ class ImportExportService:
             else:
                 await lease.fail(str(exc), "internal")
 
-    async def get_preview(self, job_id: str, *, sample_limit: Optional[int] = None) -> Optional[Dict[str, Any]]:
+    async def get_preview(self, job_id: str, *, sample_limit: Optional[int] = None, refused: bool = False,
+                          after: Optional[int] = None) -> Optional[Dict[str, Any]]:
         """Job summary + a bounded sample of resolved rows (the inline preview; the full diff is
-        the draft-vs-main diff via the existing versioning endpoints)."""
+        the draft-vs-main diff via the existing versioning endpoints). ``refused``: only the rows
+        it refused, each with its reason and what to do (``fix``); ``after``, a row index, pages on
+        from it (``nextAfter`` says where the next page starts, ``None`` after the last)."""
+        from .resolve import FIXES
         limit = sample_limit or config.PREVIEW_SAMPLE_LIMIT
         job = await self.get_job(job_id)
         if job is None:
@@ -426,16 +431,19 @@ class ImportExportService:
         async with db.graphver_session() as s:
             # Surface the actual CHANGES (skip unchanged noise) with a human label, so the dialog can
             # show "T0 · updated", "orders · new", "row 13 · invalid: <reason>" — a real preview.
-            rows = (await s.execute(
-                select(ImportRowORM)
-                .where(ImportRowORM.job_id == job_id, ImportRowORM.status != "unchanged")
-                .order_by(ImportRowORM.row_index).limit(limit))).scalars().all()
+            shown = (ImportRowORM.status == "invalid") if refused else (ImportRowORM.status != "unchanged")
+            q = select(ImportRowORM).where(ImportRowORM.job_id == job_id, shown)
+            if after is not None:
+                q = q.where(ImportRowORM.row_index > after)
+            rows = (await s.execute(q.order_by(ImportRowORM.row_index).limit(limit))).scalars().all()
             sample = [{"rowIndex": r.row_index, "kind": r.kind, "op": r.resolved_op,
                        "status": r.status, "matchedEntityId": r.matched_entity_id,
-                       "label": (r.raw or {}).get("displayName") or (r.raw or {}).get("qualifiedName")
-                                or (r.raw or {}).get("urn") or "",
-                       "reasons": r.reasons or [], "code": r.code} for r in rows]
+                       "label": _row_label({**(r.raw or {}), "kind": r.kind}),
+                       "reasons": r.reasons or [], "code": r.code, "at": (r.raw or {}).get("_at"),
+                       **({"fix": FIXES.get(r.code or "invalid_row")} if r.status == "invalid" else {})}
+                      for r in rows]
         return {"job": job, "summary": job.get("summary"), "sample": sample,
+                "nextAfter": rows[-1].row_index if len(rows) == limit else None,
                 "previewDownloadUrl": job.get("previewUri"),
                 "rejectedDownloadUrl": job.get("reportUri")}
 

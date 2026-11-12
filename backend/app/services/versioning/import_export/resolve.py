@@ -209,6 +209,27 @@ def _edge_payload(row: Mapping[str, Any], seid: str, teid: str) -> Dict[str, Any
     return p
 
 
+def _end_named(row: Mapping[str, Any], end: str) -> str:
+    """How an edge row names one of its ends: the key it gives, as given."""
+    for field, label in ((f"{end}_entity_id", "entity_id"), (f"{end}Urn", None),
+                         (f"{end}QualifiedName", "qualifiedName")):
+        if row.get(field):
+            return f"{label} {row[field]}" if label else str(row[field])
+    keys = row.get(f"{end}Keys") or {}
+    if keys:
+        name, value = next(iter(keys.items()))
+        return f"{name} {value}"
+    return ""
+
+
+def _ends_not_found(row: Mapping[str, Any], seid: Optional[str], teid: Optional[str]) -> str:
+    """Why an edge has no end to stand on: which end, by what key, names no node — the graph holds
+    none, and the file makes none (a row of it for that node may have been refused)."""
+    ends = [f"its {end} {named}".rstrip() for end, eid in (("source", seid), ("target", teid))
+            if not eid for named in [_end_named(row, end)]]
+    return f"{' and '.join(ends)} {'names' if len(ends) == 1 else 'name'} no node the graph holds or the file makes"
+
+
 def _resolution(row: Mapping[str, Any], resolved_op: str, eid: str | None, *, reasons=None,
                 code: Optional[str] = None) -> Dict[str, Any]:
     """A row's resolution. ``code`` (:data:`CODES`) is a refused row's reason, for a client to act
@@ -239,6 +260,32 @@ CODES = {
     "edge_moved": "its ends or type differ from the edge its entity_id names",
     "write_refused": "the graph's write gate refused it",
     "already_gone": "a delete of what the graph doesn't hold",
+}
+
+#: What to do about a row refused for each reason (:data:`CODES`), and about a record that is
+#: neither a node nor an edge: what an import's report and preview say beside the reason.
+FIXES = {
+    "invalid_row": "Correct the row as its reason says: each record is a node or an edge, with the "
+                   "fields the import's schema has (GET …/imports/schema).",
+    "invalid_type": "Use a type the data source's ontology defines (the reason names them), or add "
+                    "the type to the ontology first.",
+    "missing_type": "Give the row its type: entityType for a node, edgeType for an edge.",
+    "no_key": "Give the row a key its identifier finds it by: a urn, the property that "
+              "identifier=prop.<name> names, or the entity_id of an item in this graph.",
+    "two_entities": "Keep one key, the one that names the item (its entity_id or its urn), or correct "
+                    "the key that names another item.",
+    "duplicate_value": "Make the value unique to one item, or name the row by its entity_id.",
+    "named_already": "Keep one row per item: merge the rows that name it.",
+    "changed_since_export": "Someone changed the same field since your export: export again and redo "
+                            "the change, or edit the item in the app.",
+    "end_not_found": "Name each end by a node the graph holds or the file makes: add a node row for a "
+                     "missing end (or fix its row, if that was refused too), or name the end by its "
+                     "urn (sourceUrn, targetUrn) or entity_id (source_entity_id, target_entity_id).",
+    "edge_moved": "Keep the ends and type its entity_id has, or leave its entity_id out to make a new "
+                  "edge.",
+    "write_refused": "Change the row to meet the rule its reason names.",
+    "already_gone": "Nothing to do: the item is already deleted. Leave the row out.",
+    "not_node_or_edge": "Give each record its kind (node or edge), or leave the record out.",
 }
 
 #: A node row that names nothing — no urn, nothing its identifier finds — under each identifier.
@@ -743,7 +790,7 @@ def resolve_rows(
                 continue
             code, reason = (("missing_type", "edge missing edgeType") if not row.get("edgeType")
                             else s_ambiguous or t_ambiguous
-                            or ("end_not_found", "edge endpoint not found"))
+                            or ("end_not_found", _ends_not_found(row, seid, teid)))
             resolutions.append(_resolution(row, "invalid", None, reasons=[reason], code=code))
             continue
         etype = _canon(row["edgeType"], edge_type_canon)   # declared casing for a new edge

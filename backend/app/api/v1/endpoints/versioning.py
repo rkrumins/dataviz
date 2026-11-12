@@ -3888,8 +3888,8 @@ def _with_refused_budget(settings: dict, requested: Optional[str]) -> dict:
     """The job's settings, with how many refused rows it allows (``maxRefusedRows``): the request's,
     checked (422, saying what it may be), else the platform's. A job keeps it, resumed or not."""
     from backend.app.services.versioning.import_export.import_worker import refused_budget
-    try:
-        return {**settings, "maxRefusedRows": refused_budget(requested)}
+    try:      # called directly, an unsent parameter is its Query: the platform's, as unsent
+        return {**settings, "maxRefusedRows": refused_budget(requested if isinstance(requested, str) else None)}
     except ValueError as exc:
         raise HTTPException(status_code=422, detail={"type": "invalid_max_refused_rows",
                                                      "message": str(exc)})
@@ -4608,6 +4608,10 @@ async def get_import(
 @router.get("/graphs/{graph_id}/imports/{job_id}/preview")
 async def get_import_preview(
     ws_id: str, graph_id: str, job_id: str,
+    refused: bool = Query(False, description=(
+        "Only the rows the import refused, each with its code, reason and what to do (fix)")),
+    after: Optional[int] = Query(None, ge=-1, description=(
+        "A rowIndex: the rows after it, to page on (the answer's nextAfter)")),
     _user: User = Depends(requires(_READ, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
     viewer: Viewer = Depends(viewer_ctx),
@@ -4615,8 +4619,9 @@ async def get_import_preview(
     ie=Depends(get_import_export_service),
 ):
     """Summary counts + a bounded sample of resolved rows. The full field-level diff is the
-    draft-vs-main diff served by the existing versioning endpoints."""
-    preview = await ie.get_preview(job_id)
+    draft-vs-main diff served by the existing versioning endpoints. ``refused=true`` lists only the
+    rows the import refused, each with why and what to do, a page at a time (``after``)."""
+    preview = await ie.get_preview(job_id, refused=refused, after=after)
     if (preview is None or preview["job"].get("graphId") != graph_id
             or not await _import_visible(svc, graph_id, preview["job"], viewer)):
         raise HTTPException(status_code=404, detail="import job not found")

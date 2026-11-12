@@ -202,6 +202,8 @@ async def _a_publish_never_waits_on_a_job_nothing_will_run(svc, ie):
 class _CutOff:
     """A request whose body breaks off midway."""
 
+    headers: dict = {}
+
     async def stream(self):
         yield b'{"kind": "node", "urn": "urn:a"}\n'
         raise ConnectionResetError("the client went away")
@@ -374,6 +376,8 @@ async def _a_finished_import_frees_the_draft(svc, ie):
 
 
 class _Body:
+    headers: dict = {}
+
     async def stream(self):
         yield b'{"kind": "node", "urn": "urn:a"}\n'
 

@@ -25,6 +25,7 @@ import pytest
 from backend.app.services.node_identity import ResolvedNodeIdentity
 from backend.app.services.storage.object_store import LocalFsObjectStore
 from backend.app.services.versioning import db as ver_db
+from backend.app.services.versioning.import_export.resolve import FIXES
 from backend.app.services.versioning.import_export import (
     export_worker,
     import_worker,
@@ -197,7 +198,11 @@ async def test_a_window_lands_its_ops_resolutions_and_checkpoint_in_one_transact
     assert params["statuses"] == ["new", "invalid"]
     assert _checkpoints(log) == [{
         "expect_cursor": "node:-1", "last_cursor": "node:2", "processed": 2, "progress": 50,
-        "current_phase": "nodes", "summary": {**_NO_TALLIES, "takeovers": 1, "new": 1, "invalid": 1}}]
+        "current_phase": "nodes", "summary": {**_NO_TALLIES, "takeovers": 1, "new": 1, "invalid": 1,
+                                              "refused": {
+            "total": 1, "byCode": {"missing_type": 1}, "fixes": {"missing_type": FIXES["missing_type"]},
+            "rows": [{"rowIndex": 2, "kind": "node", "label": "urn:b", "code": "missing_type",
+                      "reason": "node create requires entityType"}]}}}]
 
 
 async def test_a_window_is_written_with_the_sources_node_identity(monkeypatch):
@@ -234,7 +239,7 @@ async def test_run_import_resolves_the_mapping_for_its_worker(monkeypatch):
 
     row = SimpleNamespace(workspace_id="ws", data_source_id="ds", scope_view_id=None,
                           reconcile_mode="upsert", branch_id="br_1",
-                          graph_id="g1", auto_publish=False)
+                          graph_id="g1", auto_publish=False, import_settings=None)
     monkeypatch.setattr(ver_db, "graphver_session", _sessions([], row))
     monkeypatch.setattr(service_mod, "ImportWorker", _Worker)
     await ImportExportService(versioning=object(), store=object(),
@@ -262,7 +267,10 @@ async def test_a_window_with_nothing_to_apply_still_commits_its_checkpoint(monke
     assert svc.applied == [], "no ops: no commit onto the draft"
     assert [entry[0] for entry in log] == ["sql", "checkpoint"]
     assert _checkpoints(log)[0]["last_cursor"] == "edge:9"
-    assert _checkpoints(log)[0]["summary"] == {**_NO_TALLIES, "new": 5, "invalid": 1}
+    summary = _checkpoints(log)[0]["summary"]
+    assert {k: v for k, v in summary.items() if k != "refused"} == {**_NO_TALLIES, "new": 5, "invalid": 1}
+    assert (summary["refused"]["total"], summary["refused"]["rows"][0]["rowIndex"]) == (1, 9), \
+        "the window's refusal is reported in its own checkpoint"
     assert (_checkpoints(log)[0]["processed"], _checkpoints(log)[0]["progress"]) == (9, 90)
 
 

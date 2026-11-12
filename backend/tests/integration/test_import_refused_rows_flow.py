@@ -15,6 +15,7 @@ import tempfile
 import pytest
 
 from backend.app.services.versioning import db, models
+from backend.app.services.versioning.import_export.resolve import FIXES
 
 from .test_import_guide_examples import V1, _Guide, _app, _lane, _ok, _publisher
 
@@ -61,11 +62,18 @@ async def _run(monkeypatch):
             assert (refused["total"], refused["byCode"]) == (1, {"invalid_type": 1}), refused
             (row,) = refused["rows"]
             assert (row["rowIndex"], row["kind"], row["label"], row["code"]) == (1, "node", "b", "invalid_type")
+            assert row["at"] == {"line": 2}, "where it is in the file: its second line"
             assert "Dashboard" in row["reason"], row
+            assert refused["fixes"] == {"invalid_type": FIXES["invalid_type"]}
+            listed = _ok(await c.get(f"{V1}/graphs/{gid}/imports/{_job['jobId']}/preview",
+                                     params={"refused": "true"}))
+            assert [(r["rowIndex"], r["at"], r["code"], r["fix"]) for r in listed["sample"]] == [
+                (1, {"line": 2}, "invalid_type", FIXES["invalid_type"])], listed["sample"]
+            assert listed["nextAfter"] is None
             message = held["errorMessage"]
             assert message.startswith("Nothing was deleted: 1 row(s) of the file were refused"), message
-            assert "1 invalid_type" in message and "rowIndex 1 (b): invalid_type" in message
-            assert "maxRefusedRows" in message
+            assert "1 invalid_type" in message and "line 2 (b): invalid_type" in message
+            assert "maxRefusedRows" in message and "To fix invalid_type" in message
             assert set(ids) <= {p.get("urn") for p in (await g.main(gid)).values()}, "nothing deleted"
 
             # ── Sent on without it: replaced with the rows that applied ──────────────────────────

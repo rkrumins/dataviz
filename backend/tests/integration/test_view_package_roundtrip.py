@@ -175,13 +175,16 @@ async def _run(root: str, monkeypatch) -> None:
     assert len(again["nodes"]) == 121 and len(again["edges"]) == 120, "another target, the same upload"
 
     # ── A view checked against the draft finds what the package brought ─────────
-    # (The package's urns are pointers: what it made is named by the ids derived from them, and
-    # reconcile remaps a view's urns onto those — test_view_transfer_import covers that.)
+    # A node the package made keeps the urn it was imported with, under an id derived from it, so a
+    # view naming that urn finds it as it stands. (Reconcile remaps a urn the target doesn't hold
+    # onto its derived id, for nodes made when an import kept only the id —
+    # test_view_transfer_import covers that.)
     revenue = pointer_id(await svc.identity_scope(uat_gid), "urn:revenue")
+    assert in_draft["nodes"][revenue]["urn"] == "urn:revenue", "its id is derived from its urn"
     base = VersionedBranchProvider(svc, graph_id=uat_gid, branch_id=main_id, actor="bob")
     overlay = DraftOverlayProvider(base, svc=svc, graph_id=uat_gid, branch_id=draft, actor="bob")
-    found = await overlay.resolve_identities(["urn:t000", revenue, "urn:missing"])
-    assert found[revenue] is not None and found[revenue]["type"] == "Metric"
+    found = await overlay.resolve_identities(["urn:t000", "urn:revenue", "urn:missing"])
+    assert found["urn:revenue"] is not None and found["urn:revenue"]["type"] == "Metric"
     assert found["urn:t000"] is not None and found["urn:missing"] is None
 
     # ── Older packages: no typeStats (format 1), and format 2's native lines ─────

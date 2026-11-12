@@ -64,7 +64,7 @@ from ..models import BranchORM, EdgeVersionORM, ImportRowORM, JobORM, NodeVersio
 from ..service import OntologyViolation
 from . import identifier as identifiers
 from . import keys as matching
-from .formats import get_adapter
+from .formats import AT, get_adapter
 from .resolve import (KeyIndex, _canonical_map, edge_pointer_id, key_pointer_id, key_value,
                       pointer_id, pointer_seed, pointers, resolve_rows)
 from .rowmodel import PROP_DELETE, normalize
@@ -259,13 +259,15 @@ def within_budget(budget: str, refused: int, rows: int) -> bool:
     return refused <= int(budget)
 
 
-def tally_refused(report: Optional[Dict[str, Any]], resolutions, labels: Mapping[int, str]
-                  ) -> Optional[Dict[str, Any]]:
+def tally_refused(report: Optional[Dict[str, Any]], resolutions, labels: Mapping[int, str],
+                  where: Optional[Mapping[int, Any]] = None) -> Optional[Dict[str, Any]]:
     """The import's report of the rows it refused — how many in all (``total``), for each reason
     (``byCode``), and the first :data:`REFUSED_EXAMPLES`, each with its ``rowIndex``, ``kind``,
     ``label``, ``code`` and ``reason`` — with a window's refusals added. It is kept on the job's
     summary and committed with the window, so a resumed import counts every row once, and nothing
-    reads the job's rows again to report them. ``labels``: what each row is called, by its index."""
+    reads the job's rows again to report them. ``labels``: what each row is called, by its index;
+    ``where``: where it is in its file (``formats.AT``: a line, a sheet's row, an array's item),
+    as ``at``."""
     refused = [r for r in resolutions if r["status"] == "invalid"]
     if not refused:
         return report
@@ -278,8 +280,10 @@ def tally_refused(report: Optional[Dict[str, Any]], resolutions, labels: Mapping
             reason = next((str(x) for x in r.get("reasons") or () if x), "")
             rows.append({"rowIndex": r["_row_index"], "kind": r.get("kind"),
                          "label": labels.get(r["_row_index"]) or "", "code": code,
-                         "reason": reason[:_REASON_CHARS]})
-    return {**out, "total": int(out["total"]) + len(refused), "byCode": by_code, "rows": rows}
+                         "reason": reason[:_REASON_CHARS],
+                         **({"at": where[r["_row_index"]]} if where and r["_row_index"] in where else {})})
+    return {**out, "total": int(out["total"]) + len(refused), "byCode": by_code, "rows": rows,
+            "fixes": _fixes(by_code)}
 
 
 def with_not_a_record(report: Optional[Dict[str, Any]], skipped: int) -> Optional[Dict[str, Any]]:
@@ -290,7 +294,14 @@ def with_not_a_record(report: Optional[Dict[str, Any]], skipped: int) -> Optiona
     out = {"total": 0, "byCode": {}, "rows": [], **(report or {})}
     if NOT_A_RECORD in out["byCode"]:
         return out
-    return {**out, "total": int(out["total"]) + skipped, "byCode": {**out["byCode"], NOT_A_RECORD: skipped}}
+    by_code = {**out["byCode"], NOT_A_RECORD: skipped}
+    return {**out, "total": int(out["total"]) + skipped, "byCode": by_code, "fixes": _fixes(by_code)}
+
+
+def _fixes(by_code: Mapping[str, int]) -> Dict[str, str]:
+    """What to do about each reason the report counts."""
+    from .resolve import FIXES
+    return {code: FIXES[code] for code in by_code if code in FIXES}
 
 
 def _label(row: Mapping[str, Any]) -> str:
@@ -304,15 +315,31 @@ def _label(row: Mapping[str, Any]) -> str:
     return f"{row.get('edgeType') or 'edge'} {' → '.join(ends)}".strip()
 
 
+def where_text(row: Mapping[str, Any]) -> str:
+    """Where a refused row is, as its file shows it: ``line 12``, ``Edges row 7``, ``item 3`` — else
+    its ``rowIndex``."""
+    at = row.get("at") or {}
+    if at.get("sheet") and at.get("row"):
+        return f"{at['sheet']} row {at['row']}"
+    if at.get("line"):
+        return f"line {at['line']}"
+    if at.get("item") is not None:
+        return f"item {at['item']}"
+    return f"rowIndex {row['rowIndex']}"
+
+
 def refused_digest(report: Optional[Dict[str, Any]], examples: int = 3) -> str:
     """The report in a sentence or two, for a message: its reasons by count, then its first rows."""
     if not report:
         return ""
-    codes = ", ".join(f"{n} {code}" for code, n in sorted(report["byCode"].items(), key=lambda kv: -kv[1]))
+    ranked = sorted(report["byCode"].items(), key=lambda kv: -kv[1])
+    codes = ", ".join(f"{n} {code}" for code, n in ranked)
     rows = "; ".join(
-        f"rowIndex {r['rowIndex']}{' (' + r['label'] + ')' if r.get('label') else ''}: {r['code']}"
+        f"{where_text(r)}{' (' + r['label'] + ')' if r.get('label') else ''}: {r['code']}"
         f"{' — ' + r['reason'] if r.get('reason') else ''}" for r in report["rows"][:examples])
-    return f" Refused: {codes}." + (f" First: {rows}." if rows else "")
+    fixes = report.get("fixes") or {}
+    fix = " ".join(f"To fix {code}: {fixes[code]}" for code, _n in ranked[:2] if code in fixes)
+    return f" Refused: {codes}." + (f" First: {rows}." if rows else "") + (f" {fix}" if fix else "")
 
 
 class IdentifierMatchedNothing(Exception):
@@ -979,13 +1006,14 @@ class ImportWorker:
         ops, resolutions = await asyncio.to_thread(self.resolve, rows, lookups)  # pure Python
         processed = pos.processed + len(rows)
         labels = {r["_row_index"]: _label(r) for r in rows}
+        where = {r["_row_index"]: r["_at"] for r in rows if r.get("_at")}
 
         async def on_commit(s) -> None:
             # Tallied at the commit, so a row quarantined on the way counts as what it ended as.
             summary = {**dict.fromkeys(_TALLIES, 0), **pos.summary}
             for res in resolutions:
                 summary[res["status"]] = int(summary.get(res["status"]) or 0) + 1
-            report = tally_refused(summary.get("refused"), resolutions, labels)
+            report = tally_refused(summary.get("refused"), resolutions, labels, where)
             if report:
                 summary["refused"] = report
             await self._persist_resolutions(s, job_id, resolutions)
@@ -1631,11 +1659,11 @@ async def _record_pages(adapter, chunks):
     """The adapter's records a page at a time — decoded off the event loop where the adapter can
     (``parse_pages``), else gathered from its record stream."""
     if hasattr(adapter, "parse_pages"):
-        async for page in adapter.parse_pages(chunks, _PARSE_BATCH):
+        async for page in adapter.parse_pages(chunks, _PARSE_BATCH, at=True):
             yield page
         return
     page: List[Dict[str, Any]] = []
-    async for raw in adapter.parse(chunks):
+    async for raw in adapter.parse(chunks, at=True):
         page.append(raw)
         if len(page) >= _PARSE_BATCH:
             yield page
@@ -1672,12 +1700,18 @@ def _whole_row(job_id: str, kind: str, row: Dict[str, Any]) -> Dict[str, Any]:
 def _normalize_page(page: List[Dict[str, Any]], native: bool = False) -> Tuple[List[tuple], int]:
     """``(kind, normalized row)`` for each node or edge record (its ``kind`` in any case), and how
     many records are neither: those are skipped and counted — a malformed record never aborts the
-    parse. ``native``: a view package's lines."""
+    parse. ``native``: a view package's lines. Where a record is in its file (``formats.AT``, as
+    its reader found it) is taken off it before it is read as data, and kept on its row as ``_at``,
+    which no payload reads: a refused row says where to find it."""
     out, skipped = [], 0
     for raw in page:
         kind = str(raw.get("kind") or "").strip().lower() if isinstance(raw, dict) else ""
         if kind in ("node", "edge"):
-            out.append((kind, normalize(raw, kind, native=native)))
+            at = raw.pop(AT, None)
+            row = normalize(raw, kind, native=native)
+            if at:
+                row["_at"] = at
+            out.append((kind, row))
         else:
             skipped += 1
     return out, skipped
