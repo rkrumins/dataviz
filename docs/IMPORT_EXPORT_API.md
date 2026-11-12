@@ -1028,8 +1028,8 @@ dropped in silence. The reasons below are the ones the API gives.
 | Everything, every time | `replace` | The same, and every item in scope that no row matched is deleted. The scope is the whole graph, or with `viewId`, that view's entities |
 
 - **A replace deletes nothing while any row is refused,** since the refused row might name what the
-  file means to keep. The job fails, its `errorMessage` `"Nothing was deleted: …"`, and the file's
-  other rows stay on its draft. The preview names the refused rows: fix them and import again.
+  file means to keep. The job fails (`summary.failure.code` `rows_refused`, action `fix_rows`; its
+  `errorMessage` `"Nothing was deleted: …"`), and the file's other rows stay on its draft. The preview names the refused rows: fix them and import again.
 - **Deletes are in the draft, like everything else.** The draft's diff lists them before anything
   is published.
 
@@ -1108,7 +1108,7 @@ round trip meets:
 | `503` | `identity_unavailable` | dry run | The data source's identity settings can't be read: retry |
 
 A job that fails says why in `errorMessage` and `summary.failure.code`: `mass_delete_blocked`,
-`identifier_matched_nothing`, `too_many_matching_properties` (a graph already matches by 10
+`rows_refused` (a replace whose file has rows it couldn't apply: fix them), `identifier_matched_nothing`, `too_many_matching_properties` (a graph already matches by 10
 properties), `matching_property_on_fork`, `infrastructure` (an outage outlasted the retries:
 `action: "resume"`), or `internal`.
 

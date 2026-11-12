@@ -33,7 +33,8 @@ from . import identifier as identifiers
 from . import keys as matching
 from .export_worker import ExportWorker, example_template_records
 from .formats import get_adapter
-from .import_worker import (IdentifierMatchedNothing, ImportWorker, ReplaceBlocked, _normalize_page,
+from .import_worker import (IdentifierMatchedNothing, ImportWorker, ReplaceBlocked, ReplaceRowsRefused,
+                            _normalize_page,
                             _record_pages, lease_job)
 from .resolve import _ALREADY_GONE, _STATUS
 from .rowmodel import column_order
@@ -402,8 +403,8 @@ class ImportExportService:
                 logger.exception("releasing job %s failed", job_id)
             if isinstance(exc, asyncio.CancelledError):
                 raise
-        except (ReplaceBlocked, IdentifierMatchedNothing, matching.MatchingPropertyLimit,
-                matching.NotOnAFork) as exc:
+        except (ReplaceBlocked, ReplaceRowsRefused, IdentifierMatchedNothing,
+                matching.MatchingPropertyLimit, matching.NotOnAFork) as exc:
             # Refused by the replace's own checks: nothing deleted, the rows on the draft. The
             # failure says why (``summary.failure.code``) and what to do (``action``).
             logger.warning("import job %s stopped: %s", job_id, exc)

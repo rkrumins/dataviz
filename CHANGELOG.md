@@ -258,6 +258,9 @@ integration's many small changes as a few commits.
 - **An imported delete takes what the node contains.** A row's `_op=delete` deleted the node and its
   edges but left its containment subtree, though the connector guide promised it. A replace still
   deletes only what its file leaves out: a child a row names stays.
+- **A replace stopped by rows it couldn't apply says so.** Its job failed with
+  `summary.failure.code: "internal"`, like a server fault; it now fails with `rows_refused`
+  (action `fix_rows`), as the replace guard's refusals carry their own codes.
 - **A removal token in a row's own field refuses the row.** `\N` in `description`, `displayName`,
   `edgeType`, `tags` and the rest was stored as the text `\N`; those fields are only replaced, so
   the row is refused (`invalid_row`), naming the field. In a `prop.<name>` cell it still removes

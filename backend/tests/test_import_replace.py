@@ -124,14 +124,15 @@ def _replace(monkeypatch, summary):
 
 async def test_a_replace_with_an_invalid_row_deletes_nothing(monkeypatch):
     worker, svc, _ = _replace(monkeypatch, {"new": 9, "invalid": 1})
-    with pytest.raises(ValueError, match="Nothing was deleted: 1 row"):
+    with pytest.raises(import_worker.ReplaceRowsRefused, match="Nothing was deleted: 1 row") as exc:
         await worker._resolve_and_build("vjob_1", "g1", "br1", "u", "replace")
     assert svc.deletes == []
+    assert (exc.value.code, exc.value.action) == ("rows_refused", "fix_rows")
 
 
 async def test_a_replace_with_skipped_records_writes_nothing(monkeypatch):
     worker, svc, windows = _replace(monkeypatch, {"skipped": 1})
-    with pytest.raises(ValueError, match="Nothing was deleted: 1 record"):
+    with pytest.raises(import_worker.ReplaceRowsRefused, match="Nothing was deleted: 1 record"):
         await worker._resolve_and_build("vjob_1", "g1", "br1", "u", "replace")
     assert svc.deletes == [] and windows == [], "refused before the first window"
 

@@ -542,6 +542,8 @@ async def _edge_cases(g: _Guide, sales: dict, shop: dict, erp: dict) -> None:
     _job, failed = await g.imported(shop["gid"], _ndjson(*NIGHT_2), format="ndjson", identifier="urn",
                                     reconcileMode="replace")
     assert failed["status"] == "failed" and failed["errorMessage"].startswith("Nothing was deleted"), failed
+    failure = failed["summary"]["failure"]
+    assert (failure["code"], failure["action"]) == ("rows_refused", "fix_rows"), failed["summary"]
 
     # Requests refused before anything is made.
     bad = _ok(await g.c.post(f"{V1}/graphs/{gid}/imports", params={"format": "csv", "identifier": "external_id"},

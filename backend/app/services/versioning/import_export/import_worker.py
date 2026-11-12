@@ -209,6 +209,13 @@ class ReplaceBlocked(Exception):
     code, action = "mass_delete_blocked", "allow_mass_delete"
 
 
+class ReplaceRowsRefused(Exception):
+    """A replace whose file holds rows it couldn't apply (records neither a node nor an edge, or
+    refused rows), stopped before it deletes anything: what those rows name may be what the file
+    means to keep. Fix the rows and import the file again."""
+    code, action = "rows_refused", "fix_rows"
+
+
 class IdentifierMatchedNothing(Exception):
     """A replace whose first full node window found an entity for almost none of its rows: by its
     identifier, the file very likely names its entities by another key. Stopped there."""
@@ -791,7 +798,7 @@ class ImportWorker:
         window is in, before any delete)."""
         skipped = int((await self._position(job_id)).summary.get("skipped") or 0)
         if reconcile_mode == "replace" and skipped:
-            raise ValueError(
+            raise ReplaceRowsRefused(
                 f"Nothing was deleted: {skipped} record(s) of the file are neither a node nor an "
                 "edge, and a replace deletes whatever the file leaves out — which could include "
                 "what those records name. Nothing was imported either. Fix those records and "
@@ -804,7 +811,7 @@ class ImportWorker:
         if reconcile_mode == "replace":        # delete-on-absence (not file rows; counted as it goes)
             invalid = int((await self._position(job_id)).summary.get("invalid") or 0)
             if invalid:
-                raise ValueError(
+                raise ReplaceRowsRefused(
                     f"Nothing was deleted: {invalid} row(s) of the file couldn't be applied, and a "
                     "replace deletes whatever the file leaves out — which would include what those "
                     "rows name. The file's other rows are on the draft. Fix those rows and import "
