@@ -26,6 +26,7 @@ transaction instead.
 from __future__ import annotations
 
 import contextlib
+import itertools
 import os
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -34,6 +35,8 @@ from typing import AsyncIterator, Dict, Iterable, List, Optional, Sequence, Set,
 from sqlalchemy import Text, any_, bindparam, cast, func, select, text
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.compiler import compiles
+from sqlalchemy.sql.expression import ClauseElement, Executable
 
 from .. import db
 from ..models import BranchORM, EdgeVersionORM, EntityHeadORM, GraphORM, NodeVersionORM
@@ -134,6 +137,24 @@ def _chunks(items: Sequence[str], n: int) -> Iterable[Sequence[str]]:
         yield items[i:i + n]
 
 
+class _DeclareCursor(Executable, ClauseElement):
+    """``DECLARE <name> NO SCROLL CURSOR FOR <query>``, the query's values sent as parameters."""
+
+    inherit_cache = False
+
+    def __init__(self, name: str, query) -> None:
+        self.name, self.query = name, query
+
+
+@compiles(_DeclareCursor)
+def _compile_declare(element: _DeclareCursor, compiler, **kw) -> str:
+    return f"DECLARE {element.name} NO SCROLL CURSOR FOR {compiler.process(element.query, **kw)}"
+
+
+#: Names the cursors :func:`_stream` declares: unique in any transaction, a pinned one included.
+_CURSORS = itertools.count()
+
+
 async def _stream(stmt, size: int) -> AsyncIterator[Sequence]:
     """``stmt``'s rows, ``size`` at a time, from ONE execution read through a server-side cursor.
 
@@ -144,14 +165,26 @@ async def _stream(stmt, size: int) -> AsyncIterator[Sequence]:
     500 entities a second on 2M nodes, hours for a large graph. Read once, the rows are sorted (or
     walked in index order) once, whatever the plan. The cursor's transaction stays open while the
     rows are read: the pinned one inside :func:`pinned_reads`, else a pooled session's, held for
-    the read."""
+    the read.
+
+    The cursor is declared in SQL, which Postgres plans to start fast, not the wire protocol's
+    (``yield_per``), which it plans for the whole result. Planned for the whole result, a layer read
+    as of an earlier commit (a past revision, a draft behind main, a fork's parent) and any layer
+    whose statement's plan Postgres had cached generic scanned every version row and sorted it
+    before the first page: 2 s for 1.2M versions, spilled to disk, and growing with the history."""
+    name = f"gv_snapshot_{next(_CURSORS)}"
     async with _session() as s:
-        result = await s.stream(stmt.execution_options(yield_per=size))
+        await s.execute(_DeclareCursor(name, stmt))
         try:
-            async for rows in result.partitions():
-                yield rows
+            while True:
+                rows = (await s.execute(text(f"FETCH FORWARD {int(size)} FROM {name}"))).all()
+                if rows:
+                    yield rows
+                if len(rows) < size:
+                    return
         finally:
-            await result.close()
+            with contextlib.suppress(Exception):        # a transaction that failed has closed it
+                await s.execute(text(f"CLOSE {name}"))
 
 
 @dataclass(frozen=True)

@@ -878,7 +878,10 @@ api GET "/api/v1/$WS/versioning/graphs/$GID/exports/$JOB/download" -C - -o linea
 ```
 
 `-C -` makes curl send a `Range` for what it already has, so an interrupted download carries
-on where it stopped. A finished export is kept for a day. For a data source without version
+on where it stopped. A finished export is kept for a day. To check first what an export would
+hold, as the Export dialog does, `GET …/graphs/$GID/exports/plan?format=ndjson` (with the same
+`viewId`, `branchId` or `asOfSeq`) answers within 5 s however large the graph: counts it can't
+finish by then are `null`, not waited for. For a data source without version
 control, stream it instead: `GET /api/v1/$WS/graph/export/stream?dataSourceId=$DS&format=ndjson`
 (this one doesn't resume). The formats, columns and limits are in
 [Import / Export](/docs/versioning-import-export).

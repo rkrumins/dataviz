@@ -218,6 +218,22 @@ integration's many small changes as a few commits.
 
 ### Fixed
 
+- **An export's plan answers within 5 s, whatever the graph.** On a large graph, the Export
+  dialog's first request (`GET …/exports/plan`) could outlast the gateway in front of the app and
+  come back 504 each time it was asked. Only a whole published graph was counted at once, from its
+  head pointers. A draft, a fork, a past revision, a view or a selection was counted page by page
+  for up to 20 s, with the clock checked only between pages. A view's entities were found first, with
+  no limit at all: 43 s for a view that inherits a 1M-node graph. The budget
+  (`GRAPH_EXPORT_PLAN_BUDGET_SECS`, now 5 s, was 20) covers every read, including the one under
+  way. Whatever isn't known by then comes back `null`. The export still starts, and its job counts
+  what it writes.
+- **A graph read at an earlier commit streams from its first page.** A past revision, a draft
+  behind main and every fork read `main` as of an earlier commit. Postgres planned that read for
+  its whole result, scanning and sorting every version row before the first page: 2 s for 1.2M
+  versions, spilled to disk, and longer with every commit. A layer whose statement Postgres had
+  cached with a generic plan did the same. The read now goes through a cursor declared in SQL, which
+  Postgres plans to start fast, so its first page comes in about 0.04 s. This holds for the plan,
+  the streamed download, the export job and a view package's data.
 - **A merged review's Files changed lists what the merge changed.** It merged the draft again
   against a published graph that already held it, so it was always empty. It now reads the merge's
   commit.

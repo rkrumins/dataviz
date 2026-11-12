@@ -743,8 +743,11 @@ layers — `main` at a commit (a fork's `main` sits on its parent's at the fork 
 at a commit or as it stands now (its `entity_heads`). A layer at a commit never changes, so it is
 read by one query, streamed a page at a time. Paged by keyset instead, each page was planned on its
 own: without statistics for the partitioned table, Postgres expected 200 winners and sorted every
-remaining version row for every page, about 500 entities a second on a 2M-node graph. A draft's
-current state is keyset-paged on `entity_id`. Each page drops the entities a higher layer decides,
+remaining version row for every page, about 500 entities a second on a 2M-node graph. The query is
+read through a cursor declared in SQL, which Postgres plans to start fast. Through the wire
+protocol's cursor it was planned for its whole result, so a layer at an earlier commit (a past
+revision, a draft behind main, a fork's parent) sorted every version row before its first page.
+A draft's current state is keyset-paged on `entity_id`. Each page drops the entities a higher layer decides,
 found with one indexed point lookup per layer, so every live entity comes out once, a page at a
 time, with no map of the whole state in memory. `main` is pinned to its head commit when the export
 starts, so a long export is one consistent snapshot. `import_export/stream.py` turns each page into
@@ -759,7 +762,12 @@ Three ways out, one pipeline:
 
 - **`GET /exports/plan`, then `POST /exports`** — what the Export dialog does for a data source with
   version control. The plan says what the export would hold (counts, emptiness, whether Excel can
-  hold it); then the job (`ExportWorker.run`, queued for the workers as §2 describes) writes the
+  hold it), within `GRAPH_EXPORT_PLAN_BUDGET_SECS` (5 s) whatever the graph: a published `main`
+  is counted from its head pointers, anything else (a draft, a fork, a past revision, a view, a
+  selection) page by page, and finding a view's entities and counting share the budget, the read
+  under way included. What isn't known by then comes back `null` (unknown), never waited for: a
+  plan that waited outlasted the gateway in front of the app on a large graph, and was a 504. Then
+  the job (`ExportWorker.run`, queued for the workers as §2 describes) writes the
   file to the `result_uri` artifact, up to `GRAPH_EXPORT_MAX_BYTES` (50 GiB). While it runs, it
   records its progress in `summary` at most every 5 s, as each page of records comes and each chunk
   of the file goes, so a spreadsheet's column pass reports too: this pass's `nodes` and `edges`, the

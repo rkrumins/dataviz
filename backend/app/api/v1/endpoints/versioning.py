@@ -4592,8 +4592,11 @@ async def _export_selection(
     ws_id: str, graph_id: str, meta: dict, *, branch_id: Optional[str], as_of_seq: Optional[int],
     view_id: Optional[str], ids: Optional[str], types: Optional[str], viewer: Viewer, user: User,
     claims: PermissionClaims, session: AsyncSession, svc: GraphVersioningService,
+    budget_s: Optional[float] = None,
 ):
-    """The snapshot an export reads and the selection it keeps, with what the view contributed."""
+    """The snapshot an export reads and the selection it keeps, with what the view contributed.
+    Given ``budget_s`` (a plan's), a view whose entities take longer than that to find leaves the
+    selection ``None``, and what the view holds unknown."""
     from backend.app.services.versioning.import_export import stream
     from backend.app.services.versioning.import_export.snapshot import open_snapshot
 
@@ -4608,7 +4611,10 @@ async def _export_selection(
         scope = await _view_export_scope(ws_id, meta.get("data_source_id"), view_id, branch_id)
         view = {"viewId": view_id, "placements": 0, "found": 0, "entities": None}
         if scope:
-            found = await stream.view_entities(snap, scope)
+            found = await stream.view_entities(snap, scope, budget_s=budget_s)
+            if found is None:
+                view.update(placements=len(set(scope["assigned_urns"])), found=None)
+                return snap, None, view
             keep = found["keep"]
             view.update(placements=found["placed"], found=found["found"], entities=len(keep))
     selection = stream.Selection.of(keep=keep, ids=_split_list(ids), types=_split_list(types))
@@ -4633,14 +4639,21 @@ async def plan_export(
 ):
     """What an export would hold, before anything is downloaded: node and edge counts (``None``
     when too large to count quickly), whether it is empty, what the view contributed, and whether
-    the format can hold it (an Excel sheet stops at 1,048,575 rows)."""
+    the format can hold it (an Excel sheet stops at 1,048,575 rows). Answered within
+    ``GRAPH_EXPORT_PLAN_BUDGET_SECS`` whatever the graph's size, history or shape (a fork, a draft,
+    a past revision, a view): finding the view's entities and counting share it, and what isn't
+    known by then is ``None``."""
     from backend.app.api.v1.endpoints.graph_export import excel_limit, export_format
     from backend.app.services.versioning.import_export import stream
     fmt = export_format(format)
+    clock = asyncio.get_running_loop().time
+    until = clock() + stream.PLAN_BUDGET_S
     snap, selection, view = await _export_selection(
         ws_id, graph_id, meta, branch_id=branch_id, as_of_seq=as_of_seq, view_id=view_id, ids=ids,
-        types=types, viewer=viewer, user=user, claims=claims, session=session, svc=svc)
-    counts = await stream.count(snap, selection)
+        types=types, viewer=viewer, user=user, claims=claims, session=session, svc=svc,
+        budget_s=stream.PLAN_BUDGET_S)
+    counts = ({"nodes": None, "edges": None, "exact": False, "seen": 0} if selection is None
+              else await stream.count(snap, selection, budget_s=until - clock()))
     if counts["exact"]:
         empty = counts["nodes"] + counts["edges"] == 0
     else:
