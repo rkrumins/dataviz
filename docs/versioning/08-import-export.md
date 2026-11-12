@@ -322,7 +322,23 @@ indexes (migration `20260927_1000_import_indexes`).
 > | `invalid_row` | the record can't be read as a node or an edge |
 >
 > `already_gone` marks a delete of what the graph doesn't hold: it changes nothing and is not
-> refused.
+> refused. `resolve.FIXES` says what to do about each code (and about `not_node_or_edge`, a record
+> that is neither): the report, the preview and a held import's message carry it.
+>
+> **The report.** Each window adds its refusals to `job.summary.refused` in the transaction that
+> checkpoints it (`import_worker.tally_refused`): how many for each code, the first 20 rows, and
+> the fixes. A resumed import counts every row once, and nothing reads the job's rows again to
+> report them. Where a row is in its file comes from its reader (`formats.AT`, asked for by
+> `_record_pages`): a line for NDJSON and for where a CSV/TSV record starts, a sheet and row for
+> Excel, an item for a JSON array. `_normalize_page` takes it off the record before it is read as
+> data and keeps it on the staged row as `_at`, which no payload reads.
+>
+> **Hold or go on.** A replace with refused rows deletes nothing, and an `autoPublish` import with
+> them leaves its draft for review, unless the job's `maxRefusedRows` (`import_worker.refused_budget`;
+> the request's, else `IMPORT_MAX_REFUSED_ROWS`, kept on `jobs.import_settings`) allows them: a
+> count, a share of the file's rows, or `-1`. Within it, a replace deletes what no row matched —
+> a refused row that found its entity still matched it, so what it names is kept — and the publish
+> goes ahead, noting `refusedRows`.
 
 ### 3c. Apply
 

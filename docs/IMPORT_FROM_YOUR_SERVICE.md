@@ -174,7 +174,8 @@ keeps its id. A full replace has two safety nets, both on by default:
   before anything is deleted (`mass_delete_blocked`).
   [More, and how to proceed when you mean it](/docs/import-export-api#the-replace-guard).
 - **Nothing is deleted while any row is refused** (`rows_refused`): a refused row might be one the
-  file meant to keep. Fix it and send the file again.
+  file meant to keep. The job says which rows and why; fix them and send the file again, or let the
+  import go on without them ([When rows are refused](#when-rows-are-refused)).
 
 ## Choose how to send the file
 
@@ -237,12 +238,100 @@ leave `autoPublish` out, and publish it yourself ([step 6](/docs/import-export-a
 |---|---|---|
 | The import `completed`, `summary.publish.state: "queued"` | The draft is being published | Follow `GET …/publish-jobs/{jobId}` to `completed`: its `revisionId` is the published revision that holds your change |
 | `summary.publish.state: "unchanged"` | The file changed nothing | Nothing |
-| `summary.publish.state: "skipped"`, with `reason.type` | The draft waits for review: `rows_refused`, `conflicts` or `not_up_to_date` | Read `GET …/imports/{jobId}/preview`, fix the file and send it again, or resolve the draft and publish it |
+| `summary.publish.state: "skipped"`, with `reason.type` | The draft waits for review: `rows_refused`, `conflicts` or `not_up_to_date` | For refused rows, read `summary.refused` ([When rows are refused](#when-rows-are-refused)); otherwise resolve the draft and publish it |
 | The import `failed`, `summary.failure.code: "mass_delete_blocked"` | A replace that would delete most of what's there ([the replace guard](/docs/import-export-api#the-replace-guard)) | Check `identifier` first. If you meant it, import the file again with `allowMassDelete=true&branchId=<its branchId>`, then publish that draft (`POST …/branches/{branchId}/publish`) |
-| `failed`, `rows_refused` | A replace with rows it couldn't apply deletes nothing | Fix the rows the preview names, and send it again |
+| `failed`, `rows_refused` | A replace with rows it couldn't apply deletes nothing | Fix the rows `summary.refused` names and send it again, or send it with `maxRefusedRows` ([When rows are refused](#when-rows-are-refused)) |
 | `failed`, `identifier_matched_nothing` | The file's rows name their items by another key ([Fail fast](/docs/import-export-api#fail-fast)) | Send it again with the right `identifier` |
 | `429` or `503`, with `Retry-After` | The server is taking in as many files at once as it allows | Send it again after that many seconds: the samples do |
 | `413`; `415`; `422` | Too large for its format; a form; a parameter, or a body that doesn't match its digest | Read `detail`: it says how to send it |
+
+## When rows are refused
+
+A row the import can't apply is refused, and the rest of the file still imports. The job says
+which rows, where each is in your file, why, and what to do. Here is a nightly replace whose
+last edge points at a table that exists neither in the graph nor in the file:
+
+```bash
+curl -sS "$BASE/api/v1/$WS/versioning/graphs/$GID/imports/$JOB" -H "Authorization: Bearer $TOKEN" \
+  | jq '{status, summary: (.summary | {invalid, failure: (.failure | {code, phase, action}), refused})}'
+```
+
+```json
+{
+  "status": "failed",
+  "summary": {
+    "invalid": 1,
+    "failure": {
+      "code": "rows_refused",
+      "phase": "edges",
+      "action": "fix_rows"
+    },
+    "refused": {
+      "total": 1,
+      "byCode": {
+        "end_not_found": 1
+      },
+      "rows": [
+        {
+          "at": {
+            "line": 6
+          },
+          "code": "end_not_found",
+          "kind": "edge",
+          "label": "FLOWS_TO urn:svc:orders → urn:svc:ledger_v2",
+          "reason": "its target urn:svc:ledger_v2 names no node the graph holds or the file makes",
+          "rowIndex": 5
+        }
+      ],
+      "fixes": {
+        "end_not_found": "Name each end by a node the graph holds or the file makes: add a node row for a missing end (or fix its row, if that was refused too), or name the end by its urn (sourceUrn, targetUrn) or entity_id (source_entity_id, target_entity_id)."
+      }
+    }
+  }
+}
+```
+
+- **`summary.refused`** counts the refused rows for each reason (`byCode`), names the first 20
+  (`rows`), and says what to do about each reason (`fixes`). Every import reports it, an upsert or a
+  replace, completed or not.
+- **`at` says where the row is, as your file shows it:** `{"line": 6}` for NDJSON, CSV and TSV (a
+  CSV record by the line it starts on, so its header is line 1), `{"sheet": "Edges", "row": 7}` for
+  an Excel workbook, and `{"item": 5}` for a JSON array, counting from 0. `rowIndex` counts the
+  file's records from 0, whatever its format.
+- **Every refused row**, in file order, a page at a time, each with its `fix`:
+  `GET …/imports/{jobId}/preview?refused=true`, then `&after=<nextAfter>` until `nextAfter` is
+  `null`.
+- **In the app**, the import dialog lists them grouped by reason, with what to do about each, shows
+  them all on request, and downloads them as a CSV to fix in a spreadsheet.
+
+**Hold or go on.** By default a refused row holds the import: a full replace deletes nothing and
+fails with `rows_refused`, as above, and an `autoPublish` import leaves its draft for review. To go
+on without them, send the file again with `maxRefusedRows`:
+
+| `maxRefusedRows` | The import |
+|---|---|
+| `0` (the default) | Holds on any refused row |
+| A count, `100` | Goes on if at most 100 rows are refused |
+| A share of the file's rows, `0.5%` | Goes on if at most that share is refused |
+| `-1` | Always goes on |
+
+```bash
+curl -sS -X POST "$BASE/api/v1/$WS/versioning/graphs/$GID/imports?format=ndjson&identifier=urn&reconcileMode=replace&autoPublish=true&maxRefusedRows=-1" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/octet-stream' -T snapshot.ndjson
+```
+
+```json
+{"status": "completed",
+ "summary": {"new": 2, "updated": 0, "unchanged": 3, "deleted": 2, "invalid": 1,
+             "publish": {"jobId": "vjob_01M783E82NRJEDPF3JWH71998T", "state": "queued", "refusedRows": 1}}}
+```
+
+Going on, a replace deletes what the file leaves out but keeps anything a refused row still names:
+here it deleted the table the snapshot dropped and its edge, made the new one and its edge, and
+published without the refused edge (`refusedRows`). The job keeps the budget it was sent with
+(`importSettings.maxRefusedRows`), and your operator can set the default for every import
+(`IMPORT_MAX_REFUSED_ROWS`). In the import dialog, a replace held for its rows offers **Import the
+rest anyway**, which does the same into its draft.
 
 ## Samples in five languages
 
@@ -871,8 +960,10 @@ The same requests take files of up to 10 GiB (NDJSON, CSV or TSV; 100 MB for JSO
 | `422`: "The body's sha-256 is …, not the … its Content-Digest says" | The digest is of another file, or the body changed on the way | Compute the digest of the exact bytes you send, and send it again |
 | `403` with `"code": "publish_required"` | The key's account can't publish in this workspace | Give the account the **Publisher** role, or leave out `autoPublish` and have someone publish the draft |
 | `409 review_required` | The data source says a person reviews every change | Leave out `autoPublish`; open a merge request for the draft (`POST …/branches/{branchId}/merge-requests`) |
-| The import `completed`, but `summary.publish.state` is `skipped` | Some rows were refused, or someone changed the same fields meanwhile | Read `GET …/imports/{jobId}/preview`: each refused row says why, with a `code` |
+| The import `completed`, but `summary.publish.state` is `skipped` | Some rows were refused, or someone changed the same fields meanwhile | Read `summary.refused`: each refused row says where it is, why, and what to do; or send it with `maxRefusedRows` |
 | A row refused with `no_key` | The row has no key the identifier can use | Give it one: a `urn`, or the property `identifier=prop.<name>` names |
+| An edge refused with `end_not_found` | An end names a node the graph doesn't hold and the file doesn't make, or the node's own row was refused | Add a row for the node, fix its refused row, or name the end by a urn or `entity_id` the graph holds |
+| `422` `invalid_max_refused_rows` | `maxRefusedRows` isn't a limit | Send `0`, a count such as `100`, a share such as `0.5%`, or `-1` |
 | A replace `failed` with `mass_delete_blocked` | It would have deleted most of the graph: usually the wrong `identifier` | Check the identifier; [proceed only if you mean it](/docs/import-export-api#the-replace-guard) |
 | Your client runs out of memory on a large file | It read the file into memory (`--data-binary @file`, `read()`) | Stream it: every sample here does |
 | The canvas doesn't show the change yet | The graph people browse is catching up with the new revision | Wait, or poll `GET …/graphs/{gid}/watermark` until `served` reaches your `revisionId` ([when the graph shows it](/docs/import-export-api#after-publishing-when-the-graph-shows-it)) |

@@ -264,6 +264,17 @@ def test_a_full_replace_is_completed_as_one_and_publishes_itself(world):
     assert connector.succeeded(result)
 
 
+def test_a_run_may_go_on_without_its_refused_rows(world):
+    """``--max-refused-rows`` sends the budget with the import, as the server takes it."""
+    path, state, graph, _slept = world
+    server = _Server()
+    run = connector.run(graph(server), str(path), "ndjson", publish=True, state_path=state, replace=True,
+                        max_refused_rows="-1")
+    assert ("POST", f"{BASE}/imports/uploads/iu_0/complete",
+            {"reconcileMode": "replace", "maxRefusedRows": "-1", "autoPublish": "true"}) in server.calls
+    assert connector.succeeded(run)
+
+
 def test_a_replace_the_guard_refused_says_why_and_its_retry_sends_the_file_again(world):
     """A replace the guard refused fails the run with the server's code. The retry, with
     ``--allow-mass-delete`` into the same draft, is a new upload (an upload is imported once): it is

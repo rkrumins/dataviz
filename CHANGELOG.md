@@ -70,6 +70,31 @@ integration's many small changes as a few commits.
   unqueued, and the same `idempotencyKey` takes it back). A header that can't be read, or names
   only other algorithms, is `400` before any of the body is read. Without the header, nothing
   changes.
+- **An import says which rows it refused, where they are in the file, why, and what to do — and
+  can go on without them.** A replace with a few bad rows failed with "Nothing was deleted: 10 row(s)
+  of the file couldn't be applied", naming neither the rows nor why, and nothing could turn the hold
+  off.
+  - Every import's `summary.refused` counts its refused rows for each reason (`byCode`). It names
+    the first 20, each with where it is in the file (`at`: the line in NDJSON, CSV or TSV, the
+    sheet and row in Excel, the item in a JSON array), its kind, label, code and reason. It says
+    what to do about each reason (`fixes`).
+  - It is built a window at a time as the import runs, so it costs nothing at any size and counts
+    every row once across a resume.
+  - A held import's message names the reasons, the first rows and the fix.
+  - `GET …/imports/{jobId}/preview?refused=true` lists every refused row in file order, a page at a
+    time (`after`, `nextAfter`).
+  - An edge refused for a missing end now says which end, by what key: "its target
+    urn:svc:ledger_v2 names no node the graph holds or the file makes".
+  - `maxRefusedRows` on `POST …/imports` and an upload's `complete` lets an import go on without
+    its refused rows: a count (`100`), a share of the file's rows (`0.5%`), or `-1` for any.
+    Within it, a replace deletes what the file leaves out but keeps what a refused row still names,
+    and `autoPublish` publishes, noting `publish.refusedRows`.
+  - `0`, the default, holds as before. `IMPORT_MAX_REFUSED_ROWS` (Helm
+    `config.imports.maxRefusedRows`) sets the platform's default.
+  - The import dialog shows the refused rows grouped by reason, each reason with its fix. You can
+    filter by reason, load every refused row on demand, and download them as CSV to fix in a
+    spreadsheet. A replace held for its rows offers **Import the rest anyway**.
+  - The reference connector takes `--max-refused-rows`.
 - **Docs: Send Data From Your Service**, a new page for developers whose service sends data in. It
   explains how the flow fits together, with a diagram and the words it uses. It walks a first
   import in three requests, then upsert or full replace and the three ways to send a file. It
@@ -464,6 +489,10 @@ integration's many small changes as a few commits.
   A proxy of your own in front needs the same on the import routes for a file sent in one request
   (`…/imports`, `…/imports/uploads` and `…/imports/uploads/{id}/parts/{n}`; in nginx,
   `client_max_body_size 10g; proxy_request_buffering off;`); uploads in parts need nothing.
+- An import with refused rows holds as before by default. To let imports go on without them, set
+  `IMPORT_MAX_REFUSED_ROWS` (Helm `config.imports.maxRefusedRows`), or send `maxRefusedRows` with
+  each import. An import's `summary` gains `refused`; preview rows gain `at` and, refused, `fix`;
+  the preview answers `nextAfter`.
 - The transfer workers' memory limit is 8 GiB (request 2 GiB), was 4 GiB (1 GiB): an import
   reconciled in memory holds a filter of what it has seen (about 250 MB for a 4 GB file). Make room
   on the nodes the transfer lane runs on (k8s `versioning-worker/transfer.yaml`, Helm

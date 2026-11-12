@@ -304,6 +304,7 @@ service, the same in curl, Python, Node.js, Go or Java, for an upsert and a full
 | `viewId` | Place the nodes the import makes in that view's layout. Needs edit access to the view, and with a key, **Views: read & write** |
 | `autoPublish` | `true`: the draft publishes itself once every row is in ([step 6](#6-publish)). Not with `branchId` |
 | `allowMassDelete` | `true`: a replace may delete past the replace guard |
+| `maxRefusedRows` | How many refused rows the import may go on without: `0` (the default) holds on any, a count (`100`), a share of the file's rows (`0.5%`), or `-1` for any ([When rows are refused](/docs/import-from-your-service#when-rows-are-refused)) |
 | `idempotencyKey` | Makes the request safe to send again ([Sending again](#sending-again-idempotency-and-retries)) |
 
 **A large file, or a link that drops,** goes as a resumable upload: ask for one, send its parts,
@@ -337,12 +338,14 @@ loop, and [Building a Connector](/docs/connector-guide#5-sending-the-file) cover
 | `summary.replaceGuard` | A replace's verdict ([The replace guard](#the-replace-guard)) |
 | `summary.publish` | How an `autoPublish` import's publish went ([step 6](#6-publish)) |
 | `errorMessage`, `summary.failure` | Why a job failed: `{code, action, phase, reason}` |
+| `summary.refused` | The rows it refused: how many for each reason (`byCode`), the first 20 with where each is in the file (`at`: a line, a sheet's row, an item) and why (`rows`), and what to do about each reason (`fixes`) |
 | `queuedAhead`, `stale`, `attempt` | While queued, the jobs before it; a worker gone quiet (another takes the job over and resumes it: wait); which attempt this is |
 
 `GET …/imports/{jobId}/preview` lists up to 200 rows that changed something, each with its `op`,
-`status`, `matchedEntityId`, `label`, `reasons` and, refused, its `code`. A refused row doesn't
-stop the others: it is left out, and the rest import. The draft's diff is the whole change
-(step 6).
+`status`, `matchedEntityId`, `label`, `reasons`, where it is in the file (`at`) and, refused, its
+`code` and `fix`. `?refused=true` lists only the refused rows, in file order, and `&after=` the
+answer's `nextAfter` pages on through every one. A refused row doesn't stop the others: it is
+left out, and the rest import. The draft's diff is the whole change (step 6).
 
 ### 6. Publish
 
@@ -1047,8 +1050,11 @@ dropped in silence. The reasons below are the ones the API gives.
 | Everything, every time | `replace` | The same, and every item in scope that no row matched is deleted. The scope is the whole graph, or with `viewId`, that view's entities |
 
 - **A replace deletes nothing while any row is refused,** since the refused row might name what the
-  file means to keep. The job fails (`summary.failure.code` `rows_refused`, action `fix_rows`; its
-  `errorMessage` `"Nothing was deleted: …"`), and the file's other rows stay on its draft. The preview names the refused rows: fix them and import again.
+  file means to keep. The job fails (`summary.failure.code` `rows_refused`, action `fix_rows`), its
+  `errorMessage` naming the reasons and the first rows, and the file's other rows stay on its draft.
+  `summary.refused` says where each row is and what to do: fix them and import again, or send the
+  file with `maxRefusedRows` to replace with the rows that applied, keeping anything a refused row
+  still names ([When rows are refused](/docs/import-from-your-service#when-rows-are-refused)).
 - **Deletes are in the draft, like everything else.** The draft's diff lists them before anything
   is published.
 
@@ -1124,13 +1130,15 @@ round trip meets:
 | `422` | `invalid_identifier` | import, upload `complete`, dry run, `identities/resolve`, `import-settings` | Not `entity_id`, `urn` or `prop.<name>` |
 | `422` | `invalid_file` | dry run | The file can't be read as its format |
 | `422` | `auto_publish_needs_own_draft` | import, upload `complete` | `autoPublish` with `branchId` |
+| `422` | `invalid_max_refused_rows` | import, upload `complete` | `maxRefusedRows` isn't `0`, a count, a share such as `0.5%`, or `-1` |
 | `422` | *(a sentence)* | import, upload, part | The body doesn't hash to its `Content-Digest`: none of it was kept |
 | `422` | `matching_property_on_fork` | dry run, `identities/resolve` | A fork can't match by a property yet |
 | `429` | `busy`, `rate_limited` | import, upload parts, any | Too many at once: retry after `Retry-After` |
 | `503` | `identity_unavailable` | dry run | The data source's identity settings can't be read: retry |
 
 A job that fails says why in `errorMessage` and `summary.failure.code`: `mass_delete_blocked`,
-`rows_refused` (a replace whose file has rows it couldn't apply: fix them), `identifier_matched_nothing`, `too_many_matching_properties` (a graph already matches by 10
+`rows_refused` (a replace whose file has rows it couldn't apply: `summary.refused` says which and
+why; fix them, or send it with `maxRefusedRows`), `identifier_matched_nothing`, `too_many_matching_properties` (a graph already matches by 10
 properties), `matching_property_on_fork`, `infrastructure` (an outage outlasted the retries:
 `action: "resume"`), or `internal`.
 

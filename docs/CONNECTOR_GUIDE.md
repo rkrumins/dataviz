@@ -430,9 +430,15 @@ Errors come back as `{"detail": …}`: a sentence, or an object with a `type`, `
 | `409` | parts missing (a sentence) | The upload isn't complete | Send the missing parts |
 | `413` | | Too large: for the request (use the upload), the format (split the file), or the dry run (8 MiB) | No |
 | `422` | | A file that can't be read, or a part of the wrong size | No: fix it |
+| `422` | `invalid_max_refused_rows` | `maxRefusedRows` isn't `0`, a count, a share such as `0.5%`, or `-1` | No: fix it |
 | `429` | `rate_limited`, `PROVIDER_BUSY` | Too many requests: a key has 1,200 a minute | Yes, after `Retry-After` |
 | `503` | `lock_busy`, `DB_UNAVAILABLE`, `api_keys_unavailable` | Busy or out of reach for a moment | Yes, after `Retry-After`, else a few seconds |
 | `504` | `REQUEST_TIMEOUT` | The request ran out of time, which may have been after it did its work | Read the state before you write again |
+
+A job that **ends with refused rows** says which, where each is in the file, why, and what to do
+(`summary.refused`); by default they hold a replace and an import's own publish. Send the file with
+`maxRefusedRows` (the reference connector's `--max-refused-rows`) to go on without them: [When rows
+are refused](/docs/import-from-your-service#when-rows-are-refused).
 
 Every call an import connector makes does no harm sent twice:
 - a part replaces itself;

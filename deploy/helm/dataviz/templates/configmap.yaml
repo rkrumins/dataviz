@@ -77,6 +77,8 @@ data:
   IMPORT_REPLACE_GUARD_DELETE_FRACTION: {{ .Values.config.imports.replaceGuardDeleteFraction | quote }}
   IMPORT_REPLACE_GUARD_CREATE_FRACTION: {{ .Values.config.imports.replaceGuardCreateFraction | quote }}
   IMPORT_REPLACE_MIN_MATCH_FRACTION: {{ .Values.config.imports.replaceMinMatchFraction | quote }}
+  # How many refused rows an import goes on without, when it doesn't say (config.imports).
+  IMPORT_MAX_REFUSED_ROWS: {{ .Values.config.imports.maxRefusedRows | quote }}
 
   # Read by two roles on purpose: the controlplane warms on this cadence and
   # every web process snaps its analytics windows to the same grid. One

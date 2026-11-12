@@ -10,7 +10,9 @@ source's graph, through the documented HTTP API alone (docs/CONNECTOR_GUIDE.md).
 3. Import it into a draft (``…/complete``), matching rows by ``--identifier`` (the graph's default
    without it). With ``--replace``, the file is the whole of what the graph holds: what it leaves out
    is deleted, inside the replace guard (``--allow-mass-delete`` lets a replace the guard refused
-   through, best into the same draft, ``--branch``). With ``--publish``, the import publishes itself
+   through, best into the same draft, ``--branch``). A file with refused rows holds, unless
+   ``--max-refused-rows`` allows them (a count, a share such as ``1%``, or ``-1`` for any): then the
+   import goes on without them, saying which and why. With ``--publish``, the import publishes itself
    onto the published graph once every row is applied (``autoPublish``), or, into ``--branch``, the
    connector publishes the draft.
 4. Follow the import, then its publish, and report what they did: once published, the commit it
@@ -212,14 +214,17 @@ class Graph:
 
     def start(self, upload: dict[str, Any], *, publish: bool, replace: bool = False,
               identifier: str | None = None, allow_mass_delete: bool = False,
-              branch: str | None = None) -> dict[str, Any]:
+              branch: str | None = None, max_refused_rows: str | None = None) -> dict[str, Any]:
         """Import the uploaded file into a draft: a new one, or ``branch``. ``replace``: what the
-        file leaves out is deleted. Completing an upload again answers with its import."""
+        file leaves out is deleted. ``max_refused_rows``: how many refused rows it may go on
+        without. Completing an upload again answers with its import."""
         params = {"reconcileMode": "replace" if replace else "upsert"}
         if identifier:
             params["identifier"] = identifier
         if allow_mass_delete:
             params["allowMassDelete"] = "true"
+        if max_refused_rows:
+            params["maxRefusedRows"] = max_refused_rows
         if branch:
             params["branchId"] = branch
         elif publish:
@@ -334,14 +339,16 @@ def _write_state(path: str, state: dict[str, Any]) -> None:
 
 def run(graph: Graph, path: str, fmt: str, *, publish: bool, state_path: str, replace: bool = False,
         identifier: str | None = None, allow_mass_delete: bool = False,
-        branch: str | None = None) -> dict[str, Any]:
+        branch: str | None = None, max_refused_rows: str | None = None) -> dict[str, Any]:
     """Send the file, import it, and — with ``publish`` — see it published."""
     # Only what was asked for: a plain run resumes the uploads runs before these options made.
     options = {k: v for k, v in (("replace", replace), ("identifier", identifier),
-                                 ("allowMassDelete", allow_mass_delete), ("branch", branch)) if v}
+                                 ("allowMassDelete", allow_mass_delete), ("branch", branch),
+                                 ("maxRefusedRows", max_refused_rows)) if v}
     upload = graph.upload(path, fmt, state_path, options)
     started = graph.start(upload, publish=publish, replace=replace, identifier=identifier,
-                          allow_mass_delete=allow_mass_delete, branch=branch)
+                          allow_mass_delete=allow_mass_delete, branch=branch,
+                          max_refused_rows=max_refused_rows)
     job = graph.follow(f"{graph.base}/imports/{started['jobId']}", "import")
     result: dict[str, Any] = {"uploadId": upload["uploadId"], "job": {
         k: job.get(k) for k in ("jobId", "branchId", "status", "summary", "errorMessage")}}
@@ -380,6 +387,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--allow-mass-delete", action="store_true",
                         help="let a replace delete past the replace guard")
     parser.add_argument("--branch", help="import into this open draft (br_…) instead of a new one")
+    parser.add_argument("--max-refused-rows",
+                        help="how many refused rows to go on without: a count, a share such as 1%%, "
+                             "or -1 for any (default: none, the graph's import holds)")
     args = parser.parse_args(argv)
     if bool(args.source) == bool(args.file):
         parser.error("give a catalog to map, or --file to send")
@@ -401,7 +411,8 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         result = run(graph, path, fmt, publish=args.publish, state_path=args.state or path + ".upload.json",
                      replace=args.replace, identifier=args.identifier,
-                     allow_mass_delete=args.allow_mass_delete, branch=args.branch)
+                     allow_mass_delete=args.allow_mass_delete, branch=args.branch,
+                     max_refused_rows=args.max_refused_rows)
     print(json.dumps(result, indent=2))
     return 0 if succeeded(result) else 1
 
