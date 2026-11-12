@@ -3875,6 +3875,26 @@ _ALLOW_MASS_DELETE = Query(False, alias="allowMassDelete", description=(
     "nothing"))
 
 
+_MAX_REFUSED_ROWS = Query(None, alias="maxRefusedRows", max_length=16, description=(
+    "How many of the file's rows may be refused before the import holds: 0 (none: the default, "
+    "unless the platform's IMPORT_MAX_REFUSED_ROWS says otherwise), a count such as 100, a share "
+    "of the file's rows such as 0.5%, or -1 (any). Past it, a replace deletes nothing and fails "
+    "(rows_refused), and autoPublish leaves the draft for review. Within it, the import goes on "
+    "without them, and a replace keeps what a refused row still names. Every import reports its "
+    "refused rows, with why, in summary.refused"))
+
+
+def _with_refused_budget(settings: dict, requested: Optional[str]) -> dict:
+    """The job's settings, with how many refused rows it allows (``maxRefusedRows``): the request's,
+    checked (422, saying what it may be), else the platform's. A job keeps it, resumed or not."""
+    from backend.app.services.versioning.import_export.import_worker import refused_budget
+    try:
+        return {**settings, "maxRefusedRows": refused_budget(requested)}
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail={"type": "invalid_max_refused_rows",
+                                                     "message": str(exc)})
+
+
 async def _identity_property_of(session: AsyncSession, row) -> Optional[str]:
     """The property data source ``row`` identifies its nodes by, kept equal to the urn
     (``node_identity.identity_property``), as an import's worker reads it: ``prop.<it>`` is matched
@@ -3919,6 +3939,7 @@ async def create_import(
     auto_publish: bool = _AUTO_PUBLISH,
     identifier: Optional[str] = _IDENTIFIER,
     allow_mass_delete: bool = _ALLOW_MASS_DELETE,
+    max_refused_rows: Optional[str] = _MAX_REFUSED_ROWS,
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
     claims: PermissionClaims = Depends(get_permission_claims),
     meta: dict = Depends(graph_in_workspace),
@@ -3940,6 +3961,7 @@ async def create_import(
         raise HTTPException(status_code=422, detail=str(exc))
     identifier, settings = await _import_settings_for(session, meta.get("data_source_id"), identifier,
                                                       fork=bool(meta.get("fork_parent_graph_id")))
+    settings = _with_refused_budget(settings, max_refused_rows)
     await _check_import_view(session, ws_id, view_id, user, claims)
     if auto_publish:
         await _may_auto_publish(session, claims, ws_id, meta, branch_id)
@@ -4194,6 +4216,7 @@ async def complete_import_upload(
     auto_publish: bool = _AUTO_PUBLISH,
     identifier: Optional[str] = _IDENTIFIER,
     allow_mass_delete: bool = _ALLOW_MASS_DELETE,
+    max_refused_rows: Optional[str] = _MAX_REFUSED_ROWS,
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
     claims: PermissionClaims = Depends(get_permission_claims),
     meta: dict = Depends(graph_in_workspace),
@@ -4207,6 +4230,7 @@ async def complete_import_upload(
     from backend.app.services.versioning.import_export import uploads
     identifier, settings = await _import_settings_for(session, meta.get("data_source_id"), identifier,
                                                       fork=bool(meta.get("fork_parent_graph_id")))
+    settings = _with_refused_budget(settings, max_refused_rows)
     record = await _load_upload(ie, ws_id, graph_id, meta, upload_id, user)
     await _check_import_view(session, ws_id, view_id, user, claims)
     if auto_publish:

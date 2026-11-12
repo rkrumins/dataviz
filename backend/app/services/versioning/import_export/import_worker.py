@@ -47,8 +47,9 @@ import asyncio
 import contextlib
 import json
 import logging
+import re
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, NamedTuple, Optional, Tuple
+from typing import Any, Dict, List, Mapping, NamedTuple, Optional, Tuple
 
 from sqlalchemy import (BigInteger, Text, and_, bindparam, delete, exists, false, func, insert,
                         null, or_, select, text, tuple_)
@@ -214,6 +215,104 @@ class ReplaceRowsRefused(Exception):
     refused rows), stopped before it deletes anything: what those rows name may be what the file
     means to keep. Fix the rows and import the file again."""
     code, action = "rows_refused", "fix_rows"
+
+
+#: The refused rows an import's report names one by one — the first it met — beside its counts.
+REFUSED_EXAMPLES = 20
+#: A refused row's reason, as the report quotes it.
+_REASON_CHARS = 300
+#: A record that is neither a node nor an edge, as the report counts it.
+NOT_A_RECORD = "not_node_or_edge"
+_BUDGET = re.compile(r"^(-1|\d+|\d+(\.\d+)?%)$")
+
+
+def refused_budget(value: Optional[str]) -> str:
+    """``maxRefusedRows`` as an import takes it, checked: how many of its file's rows may be refused
+    before the import holds — ``0``, none (the default); a count, ``100``; a share of the file's
+    rows, ``0.5%``; or ``-1``, any. Raises ``ValueError``, saying what it may be. ``None`` is the
+    platform's (``IMPORT_MAX_REFUSED_ROWS``); one that isn't a limit holds on any refused row,
+    rather than stop every import."""
+    if value is None:
+        try:
+            return _checked_budget(config.IMPORT_MAX_REFUSED_ROWS)
+        except ValueError:
+            logger.warning("IMPORT_MAX_REFUSED_ROWS=%r isn't a limit: imports hold on any refused row",
+                           config.IMPORT_MAX_REFUSED_ROWS)
+            return "0"
+    return _checked_budget(str(value))
+
+
+def _checked_budget(value: str) -> str:
+    budget = value.strip()
+    if not _BUDGET.match(budget) or (budget.endswith("%") and float(budget[:-1]) > 100):
+        raise ValueError(f"maxRefusedRows {budget!r} isn't a limit: send 0 (hold on any refused row), "
+                         "a count such as 100, a share of the file's rows such as 0.5%, or -1 (any)")
+    return budget
+
+
+def within_budget(budget: str, refused: int, rows: int) -> bool:
+    """Whether ``refused`` of a file's ``rows`` rows is within ``budget`` (:func:`refused_budget`)."""
+    if budget == "-1":
+        return True
+    if budget.endswith("%"):
+        return refused <= float(budget[:-1]) / 100 * max(rows, 0)
+    return refused <= int(budget)
+
+
+def tally_refused(report: Optional[Dict[str, Any]], resolutions, labels: Mapping[int, str]
+                  ) -> Optional[Dict[str, Any]]:
+    """The import's report of the rows it refused — how many in all (``total``), for each reason
+    (``byCode``), and the first :data:`REFUSED_EXAMPLES`, each with its ``rowIndex``, ``kind``,
+    ``label``, ``code`` and ``reason`` — with a window's refusals added. It is kept on the job's
+    summary and committed with the window, so a resumed import counts every row once, and nothing
+    reads the job's rows again to report them. ``labels``: what each row is called, by its index."""
+    refused = [r for r in resolutions if r["status"] == "invalid"]
+    if not refused:
+        return report
+    out = {"total": 0, "byCode": {}, "rows": [], **(report or {})}
+    by_code, rows = dict(out["byCode"]), list(out["rows"])
+    for r in refused:
+        code = r.get("code") or "invalid_row"
+        by_code[code] = int(by_code.get(code) or 0) + 1
+        if len(rows) < REFUSED_EXAMPLES:
+            reason = next((str(x) for x in r.get("reasons") or () if x), "")
+            rows.append({"rowIndex": r["_row_index"], "kind": r.get("kind"),
+                         "label": labels.get(r["_row_index"]) or "", "code": code,
+                         "reason": reason[:_REASON_CHARS]})
+    return {**out, "total": int(out["total"]) + len(refused), "byCode": by_code, "rows": rows}
+
+
+def with_not_a_record(report: Optional[Dict[str, Any]], skipped: int) -> Optional[Dict[str, Any]]:
+    """The report, counting the file's records that are neither a node nor an edge (counted over
+    the whole file as it is read, so none is named by its row)."""
+    if not skipped:
+        return report
+    out = {"total": 0, "byCode": {}, "rows": [], **(report or {})}
+    if NOT_A_RECORD in out["byCode"]:
+        return out
+    return {**out, "total": int(out["total"]) + skipped, "byCode": {**out["byCode"], NOT_A_RECORD: skipped}}
+
+
+def _label(row: Mapping[str, Any]) -> str:
+    """What a staged row is called: its name, else its key; an edge, by its type and ends."""
+    named = row.get("displayName") or row.get("qualifiedName") or row.get("urn") or row.get("entity_id")
+    if named or row.get("kind") != "edge":
+        return str(named or "")
+    ends = [row.get(k) for k in ("source", "target", "sourceUrn", "targetUrn",
+                                  "source_entity_id", "target_entity_id")]
+    ends = [str(e) for e in ends if e][:2]
+    return f"{row.get('edgeType') or 'edge'} {' → '.join(ends)}".strip()
+
+
+def refused_digest(report: Optional[Dict[str, Any]], examples: int = 3) -> str:
+    """The report in a sentence or two, for a message: its reasons by count, then its first rows."""
+    if not report:
+        return ""
+    codes = ", ".join(f"{n} {code}" for code, n in sorted(report["byCode"].items(), key=lambda kv: -kv[1]))
+    rows = "; ".join(
+        f"rowIndex {r['rowIndex']}{' (' + r['label'] + ')' if r.get('label') else ''}: {r['code']}"
+        f"{' — ' + r['reason'] if r.get('reason') else ''}" for r in report["rows"][:examples])
+    return f" Refused: {codes}." + (f" First: {rows}." if rows else "")
 
 
 class IdentifierMatchedNothing(Exception):
@@ -426,6 +525,8 @@ class ImportWorker:
         # The job's reconcile mode, and whether a replace may delete past the replace guard.
         self._reconcile_mode = "upsert"
         self._allow_mass_delete = False
+        # How many of the file's rows may be refused before the import holds (refused_budget).
+        self._refused_budget = refused_budget(None)
         # The replace guard's and fail-fast's limits: the job's (its data source's or the
         # platform's, when it was made), with where each came from.
         self._limits: Dict[str, Any] = platform_limits()
@@ -456,6 +557,7 @@ class ImportWorker:
         self._reconcile_mode = job.get("reconcile_mode") or "upsert"
         self._allow_mass_delete = bool(job.get("allow_mass_delete"))
         self._limits = (job.get("import_settings") or {}).get("replaceLimits") or platform_limits()
+        self._refused_budget = refused_budget((job.get("import_settings") or {}).get("maxRefusedRows"))
         actor = await self._branch_owner(graph_id, branch_id)
         self._source = (job["source_uri"], job["import_format"])
 
@@ -799,30 +901,41 @@ class ImportWorker:
         so memory stays flat whatever the size of the file or of the graph. Each window is retried
         through a transient fault (``retry_transient``) from the cursor; returns the tallies.
 
-        A replace deletes whatever no row matched, so it refuses to while the file has rows it
-        couldn't apply, which may name what it means to keep: records that are neither a node nor
-        an edge (before the first window, so nothing is written), and invalid rows (once every
-        window is in, before any delete)."""
-        skipped = int((await self._position(job_id)).summary.get("skipped") or 0)
-        if reconcile_mode == "replace" and skipped:
+        A replace deletes whatever no row matched, so it refuses to while the file has more rows it
+        couldn't apply than its ``maxRefusedRows`` allows (none, by default): they may name what it
+        means to keep. Records that are neither a node nor an edge are counted before the first
+        window, so nothing is written; refused rows once every window is in, before any delete. A
+        replace within its budget goes on: what a refused row still names is kept, as every entity
+        a row of the import matched is. Either way the job's ``summary.refused`` says which rows
+        were refused, and why."""
+        pos = await self._position(job_id)
+        skipped = int(pos.summary.get("skipped") or 0)
+        if (reconcile_mode == "replace" and skipped
+                and not within_budget(self._refused_budget, skipped, pos.total + skipped)):
             raise ReplaceRowsRefused(
                 f"Nothing was deleted: {skipped} record(s) of the file are neither a node nor an "
                 "edge, and a replace deletes whatever the file leaves out — which could include "
                 "what those records name. Nothing was imported either. Fix those records and "
-                "import the file again.")
+                "import the file again, or send it with maxRefusedRows (a count, a share such as "
+                "1%, or -1 for any) to go on without them.")
         snap = await open_snapshot(graph_id=graph_id, branch_id=branch_id)
         more = True
         while more:
             more = await self._lease.retry_transient(
                 lambda: self._next_window(job_id, snap, graph_id, branch_id, actor))
         if reconcile_mode == "replace":        # delete-on-absence (not file rows; counted as it goes)
-            invalid = int((await self._position(job_id)).summary.get("invalid") or 0)
-            if invalid:
+            pos = await self._position(job_id)
+            invalid = int(pos.summary.get("invalid") or 0)
+            if invalid and not within_budget(self._refused_budget, invalid + skipped, pos.total + skipped):
                 raise ReplaceRowsRefused(
-                    f"Nothing was deleted: {invalid} row(s) of the file couldn't be applied, and a "
-                    "replace deletes whatever the file leaves out — which would include what those "
-                    "rows name. The file's other rows are on the draft. Fix those rows and import "
-                    "the file again.")
+                    f"Nothing was deleted: {invalid} row(s) of the file were refused, and a replace "
+                    "deletes whatever the file leaves out — which could include what those rows "
+                    f"name.{refused_digest(pos.summary.get('refused'))} The job's summary.refused "
+                    f"lists the first {REFUSED_EXAMPLES} with why, and GET …/imports/{job_id}/preview "
+                    "more. The file's other rows are on the draft. Fix those rows and import the file "
+                    "again, or send it with maxRefusedRows (a count, a share such as 1%, or -1 for "
+                    "any) to replace with the rows that applied: what a refused row still names is "
+                    "kept.")
             if (await self._position(job_id)).cursor != "replace":       # not deleting yet
                 await self._lease.retry_transient(
                     lambda: self._guard_replace(job_id, snap), never=(ReplaceBlocked,))
@@ -830,6 +943,9 @@ class ImportWorker:
                 lambda: self._delete_absent(job_id, snap, graph_id, branch_id, actor))
         summary = (await self._position(job_id)).summary
         tallies = {k: int(summary.get(k) or 0) for k in _TALLIES}
+        report = with_not_a_record(summary.get("refused"), skipped)
+        if report:
+            tallies["refused"] = report
         return {**tallies, "skipped": skipped} if skipped else tallies
 
     async def _next_window(self, job_id, snap, graph_id, branch_id, actor) -> bool:
@@ -862,12 +978,16 @@ class ImportWorker:
                        earlier=await self._earlier(job_id, kind, rows[0]["_row_index"], lookups))
         ops, resolutions = await asyncio.to_thread(self.resolve, rows, lookups)  # pure Python
         processed = pos.processed + len(rows)
+        labels = {r["_row_index"]: _label(r) for r in rows}
 
         async def on_commit(s) -> None:
             # Tallied at the commit, so a row quarantined on the way counts as what it ended as.
             summary = {**dict.fromkeys(_TALLIES, 0), **pos.summary}
             for res in resolutions:
                 summary[res["status"]] = int(summary.get(res["status"]) or 0) + 1
+            report = tally_refused(summary.get("refused"), resolutions, labels)
+            if report:
+                summary["refused"] = report
             await self._persist_resolutions(s, job_id, resolutions)
             await self._lease.checkpoint(
                 s, expect_cursor=pos.cursor, last_cursor=f"{step}:{rows[-1]['_row_index']}",

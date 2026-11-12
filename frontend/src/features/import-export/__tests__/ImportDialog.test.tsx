@@ -242,6 +242,39 @@ describe('ImportDialog', () => {
       reconcileMode: 'replace', branchId: 'br_9', allowMassDelete: true })
   })
 
+  it('says which rows a held replace refused and why, and imports the rest anyway into its draft', async () => {
+    const refused = { total: 10, byCode: { no_key: 7, invalid_type: 3 }, rows: [
+      { rowIndex: 4, kind: 'node', label: 'orders', code: 'no_key', reason: 'give it a urn' },
+      { rowIndex: 9, kind: 'node', label: 'sales', code: 'invalid_type', reason: "Dashboard isn't a type here" }] }
+    vi.mocked(importInParts).mockResolvedValue({ jobId: 'j1', branchId: 'br_9', sourceUri: 's', status: 'pending' })
+    vi.mocked(pollJob).mockResolvedValueOnce({ jobId: 'j1', jobType: 'ingest', graphId: 'g1', status: 'failed',
+      branchId: 'br_9', errorMessage: 'Nothing was deleted: 10 row(s) of the file were refused',
+      summary: { new: 3, updated: 0, unchanged: 90, deleted: 0, invalid: 10, refused,
+        failure: { code: 'rows_refused', action: 'fix_rows' } } } as Job)
+      .mockReturnValue(new Promise<Job>(() => {}))
+    await userEvent.upload(open(), file('graph.csv', 2048))
+    await userEvent.click(screen.getByText('Replace (authoritative)'))
+    await userEvent.click(screen.getByRole('button', { name: /^Import$/ }))
+    expect(await screen.findByText(/10 rows refused: 7 no_key, 3 invalid_type/)).toBeInTheDocument()
+    expect(screen.getByText(/Dashboard isn't a type here/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Replace anyway/ })).not.toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: /Import the rest anyway/ }))
+    expect(vi.mocked(importInParts).mock.calls[1][3]).toMatchObject({
+      reconcileMode: 'replace', branchId: 'br_9', maxRefusedRows: '-1', allowMassDelete: false })
+  })
+
+  it('says which rows a completed import refused, and why', async () => {
+    vi.mocked(importInParts).mockResolvedValue({ jobId: 'j1', branchId: 'br1', sourceUri: 's', status: 'pending' })
+    vi.mocked(pollJob).mockResolvedValue({ jobId: 'j1', jobType: 'ingest', graphId: 'g1', status: 'completed',
+      branchId: 'br1', summary: { new: 2, updated: 0, unchanged: 0, deleted: 0, invalid: 1, refused: {
+        total: 1, byCode: { no_key: 1 }, rows: [
+          { rowIndex: 2, kind: 'node', label: '', code: 'no_key', reason: 'give it a urn' }] } } } as unknown as Job)
+    await userEvent.upload(open(), file('graph.csv', 2048))
+    await userEvent.click(screen.getByRole('button', { name: /^Import$/ }))
+    expect(await screen.findByText(/1 row refused: 1 no_key/)).toBeInTheDocument()
+    expect(screen.getByText(/give it a urn/)).toBeInTheDocument()
+  })
+
   it('offers no way past a failure the replace guard didn’t make', async () => {
     vi.mocked(importInParts).mockResolvedValue({ jobId: 'j1', branchId: 'br1', sourceUri: 's', status: 'pending' })
     vi.mocked(pollJob).mockResolvedValue({ jobId: 'j1', jobType: 'ingest', graphId: 'g1', status: 'failed',

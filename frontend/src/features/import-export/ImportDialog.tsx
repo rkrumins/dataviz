@@ -17,6 +17,7 @@ import {
   detectFormat, getImport, getImportPreview, getImportSettings, importInParts, importLimit, jobProgressText,
   MAX_IMPORT_BYTES, pollJob, queuePosition, resumeNote, templateDownloadUrl, triggerBrowserDownload,
   type ImportFormat, type ImportPreviewRow, type ImportSettings, type ImportSummary, type Job, type ReconcileMode,
+  type RefusedRows,
 } from '@/services/importExportApiService'
 import { prettyBytes } from './format'
 import { formatIdentifier, identifierLabel, MATCH_KINDS, parseIdentifier, type Match } from './identifier'
@@ -123,8 +124,9 @@ export function ImportDialog({ wsId, graphId, branchId, viewId, onClose, onRevie
   const warning = file ? unsupportedReason(file.name) ?? tooLargeReason(file.size, format) : null
   const note = matchNote(match, settings)
 
-  /** ``past``: the replace the guard refused, sent again to delete all the same, into its draft. */
-  async function start(past?: { branchId: string }) {
+  /** ``past``: a replace that was held, sent again into its draft — past the replace guard, or
+   *  (``refused``) without the rows it refused. */
+  async function start(past?: { branchId: string; refused?: boolean }) {
     if (!file) return
     setPhase('running')
     setError(null)
@@ -136,7 +138,8 @@ export function ImportDialog({ wsId, graphId, branchId, viewId, onClose, onRevie
     try {
       const created = await importInParts(wsId, graphId, file, {
         format, reconcileMode, branchId: past?.branchId ?? branchId, viewId, signal: run.signal,
-        identifier: match ? formatIdentifier(match) : undefined, allowMassDelete: !!past,
+        identifier: match ? formatIdentifier(match) : undefined,
+        allowMassDelete: !!past && !past.refused, maxRefusedRows: past?.refused ? '-1' : undefined,
         onProgress: (sent, total) => setUpload({ sent, total }),
       })
       setResultBranch(created.branchId)
@@ -236,6 +239,12 @@ export function ImportDialog({ wsId, graphId, branchId, viewId, onClose, onRevie
               <button onClick={() => void start({ branchId: job.branchId! })}
                 className="flex items-center gap-2 px-4 py-2 rounded-xl border border-rose-300 dark:border-rose-800/60 text-rose-600 dark:text-rose-400 text-sm font-semibold hover:bg-rose-50 dark:hover:bg-rose-950/30 transition-colors">
                 <Trash2 className="w-4 h-4" /> Replace anyway
+              </button>
+            )}
+            {phase === 'failed' && heldForRows(job) && job?.branchId && (
+              <button onClick={() => void start({ branchId: job.branchId!, refused: true })}
+                className="flex items-center gap-2 px-4 py-2 rounded-xl border border-rose-300 dark:border-rose-800/60 text-rose-600 dark:text-rose-400 text-sm font-semibold hover:bg-rose-50 dark:hover:bg-rose-950/30 transition-colors">
+                <Trash2 className="w-4 h-4" /> Import the rest anyway
               </button>
             )}
             {phase === 'failed' && (
@@ -566,6 +575,7 @@ function DoneStep({ summary, previewRows, identifier }: {
           <Stat n={s.invalid} label="Needs fixing" icon={<AlertTriangle className="w-4 h-4" />} tone="amber" />
         </div>
       )}
+      {s?.refused && <RefusedReport report={s.refused} />}
       {s && (s.unchanged ?? 0) > 0 && (
         <p className="mt-3 text-[11px] text-ink-muted">
           {s.unchanged} row{s.unchanged === 1 ? ' was' : 's were'} already up to date — only real changes are staged.
@@ -672,6 +682,43 @@ function blocked(job: Job | null): boolean {
   return (job?.summary as ImportSummary | null | undefined)?.failure?.code === 'mass_delete_blocked'
 }
 
+/** The rows a job refused, as its summary reports them, if any were. */
+function refusedOf(job: Job | null): RefusedRows | null {
+  return (job?.summary as ImportSummary | null | undefined)?.refused ?? null
+}
+
+/** A replace held because rows of its file were refused: nothing deleted, its other rows on the draft. */
+function heldForRows(job: Job | null): boolean {
+  return (job?.summary as ImportSummary | null | undefined)?.failure?.code === 'rows_refused'
+}
+
+/** Which rows an import refused, and why: its reasons by count, then the first rows. */
+function RefusedReport({ report }: { report: RefusedRows }) {
+  const codes = Object.entries(report.byCode).sort((a, b) => b[1] - a[1])
+  return (
+    <div className="mt-4 rounded-xl border border-rose-200 dark:border-rose-900/50 bg-rose-50/60 dark:bg-rose-950/20 p-3">
+      <p className="text-xs font-semibold text-ink">
+        {report.total} row{report.total === 1 ? '' : 's'} refused:{' '}
+        {codes.map(([code, n]) => `${n} ${code}`).join(', ')}
+      </p>
+      <ul className="mt-2 space-y-1">
+        {report.rows.slice(0, 5).map((r) => (
+          <li key={r.rowIndex} className="text-[11px] text-ink-muted break-words">
+            <span className="font-mono text-ink">row {r.rowIndex}</span>
+            {r.label ? ` · ${r.label}` : ''} · <span className="font-mono">{r.code}</span>
+            {r.reason ? ` — ${r.reason}` : ''}
+          </li>
+        ))}
+      </ul>
+      {report.total > Math.min(report.rows.length, 5) && (
+        <p className="text-[11px] text-ink-muted mt-2">
+          The import's preview lists more, each with why.
+        </p>
+      )}
+    </div>
+  )
+}
+
 function FailedStep({ error, job }: { error: string | null; job: Job | null }) {
   return (
     <div className="px-8 py-10 max-w-2xl mx-auto flex items-start gap-4">
@@ -685,6 +732,14 @@ function FailedStep({ error, job }: { error: string | null; job: Job | null }) {
           <p className="text-[11px] text-ink-muted mt-3 leading-relaxed">
             Try again with another way to match existing items, or replace anyway to delete what the
             file leaves out: the deletions are staged on your draft, to review before you publish.
+          </p>
+        )}
+        {refusedOf(job) && <RefusedReport report={refusedOf(job)!} />}
+        {heldForRows(job) && (
+          <p className="text-[11px] text-ink-muted mt-3 leading-relaxed">
+            Fix those rows and try again, or import the rest anyway: the replace goes on without them,
+            keeping what a refused row still names, and the deletions are staged on your draft, to
+            review before you publish.
           </p>
         )}
       </div>

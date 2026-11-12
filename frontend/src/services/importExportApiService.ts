@@ -36,6 +36,17 @@ export interface ImportSummary {
   replaceGuard?: ReplaceGuardVerdict | null
   /** A failed job: why (`code`) and what to do about it (`action`). */
   failure?: { code: string; action?: string | null; reason?: string } | null
+  /** The rows the import refused: how many for each reason, and the first ones, with why. */
+  refused?: RefusedRows | null
+}
+
+/** An import's report of the rows it refused (`summary.refused`). */
+export interface RefusedRows {
+  total: number
+  /** How many for each reason: `no_key`, `invalid_type`, … */
+  byCode: Record<string, number>
+  /** The first rows refused, each with why. */
+  rows: { rowIndex: number; kind: string; label: string; code: string; reason: string }[]
 }
 
 /** Where an import setting came from: the graph's own, or the platform's; `fork`: a fork matches
@@ -176,6 +187,9 @@ export interface CreateImportOptions {
   identifier?: string
   /** A replace: delete what the file leaves out even past the replace guard's limits. */
   allowMassDelete?: boolean
+  /** How many refused rows the import may go on without: a count, a share (`0.5%`), or `-1`
+   *  (any). Left out, the platform's (none, by default). */
+  maxRefusedRows?: string
 }
 
 /** The statuses a job ends in. */
@@ -415,6 +429,7 @@ export async function importInParts(
   if (opts.viewId) params.set('viewId', opts.viewId)
   if (opts.identifier) params.set('identifier', opts.identifier)
   if (opts.allowMassDelete) params.set('allowMassDelete', 'true')
+  if (opts.maxRefusedRows) params.set('maxRefusedRows', opts.maxRefusedRows)
   const created = await authFetch<CreateImportResult>(
     `${uploadsUrl(wsId, graphId)}/${upload.uploadId}/complete?${params.toString()}`, { method: 'POST' })
   remember(key, null)

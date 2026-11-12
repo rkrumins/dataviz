@@ -40,12 +40,14 @@ from backend.app.services.versioning.service import NotUpToDate
 _DONE = {"new": 2, "updated": 1, "unchanged": 5, "deleted": 0, "invalid": 0}
 
 
-def _world(monkeypatch, summary, *, auto_publish=True):
+def _world(monkeypatch, summary, *, auto_publish=True, settings=None):
     """A completed import (``auto_publish``) on draft br1, owned by alice, whose worker reports
-    ``summary``. Returns the service, the job's row, and what the step did."""
+    ``summary``, made with import ``settings``. Returns the service, the job's row, and what the
+    step did."""
     row = SimpleNamespace(workspace_id="ws", data_source_id="ds", scope_view_id=None,
                           reconcile_mode="upsert", branch_id="br1", graph_id="g1",
-                          auto_publish=auto_publish, summary=dict(summary), updated_at=None)
+                          auto_publish=auto_publish, summary=dict(summary), updated_at=None,
+                          import_settings=settings)
     branch = SimpleNamespace(owner="alice", visibility="private")
 
     @contextlib.asynccontextmanager
@@ -94,13 +96,34 @@ async def test_a_complete_import_hands_its_draft_to_a_publish_job_as_its_owner(m
     assert row.summary["publish"] == {"state": "queued", "jobId": "pjob_1"}
 
 
-@pytest.mark.parametrize("tally", [{"invalid": 3}, {"skipped": 2}])
+_REFUSED = {"total": 3, "byCode": {"no_key": 3}, "rows": [
+    {"rowIndex": 4, "kind": "node", "label": "orders", "code": "no_key", "reason": "give it a urn"}]}
+
+
+@pytest.mark.parametrize("tally", [{"invalid": 3, "refused": _REFUSED}, {"skipped": 2}])
 async def test_rows_that_werent_imported_leave_the_draft_for_review(monkeypatch, tally):
     svc, row, did = _world(monkeypatch, {**_DONE, **tally})
     await svc.run_import("job1")
     assert did.published == [] and did.abandoned == []
     note = row.summary["publish"]
     assert (note["state"], note["reason"]["type"]) == ("skipped", "rows_refused")
+    assert "maxRefusedRows" in note["reason"]["message"], "it says how to go on"
+    if "refused" in tally:
+        assert "3 no_key" in note["reason"]["message"] and "rowIndex 4 (orders)" in note["reason"]["message"]
+
+
+@pytest.mark.parametrize("budget, publishes", [("-1", True), ("3", True), ("50%", True), ("2", False),
+                                               ("0", False)])
+async def test_an_import_within_its_refused_rows_budget_publishes_without_them(monkeypatch, budget, publishes):
+    svc, row, did = _world(monkeypatch, {**_DONE, "invalid": 3, "refused": _REFUSED},
+                           settings={"maxRefusedRows": budget})
+    await svc.run_import("job1")
+    note = row.summary["publish"]
+    if publishes:
+        assert len(did.published) == 1
+        assert note == {"state": "queued", "jobId": "pjob_1", "refusedRows": 3}
+    else:
+        assert did.published == [] and note["state"] == "skipped"
 
 
 async def test_an_import_that_changed_nothing_closes_its_empty_draft(monkeypatch):

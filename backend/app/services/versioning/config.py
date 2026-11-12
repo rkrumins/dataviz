@@ -472,6 +472,13 @@ IMPORT_REPLACE_GUARD_CREATE_FRACTION: float = float(
 # identifier, rather than read the rest of the file first, unless it is sent with
 # allowMassDelete=true. 0 turns it off.
 IMPORT_REPLACE_MIN_MATCH_FRACTION: float = float(os.getenv("IMPORT_REPLACE_MIN_MATCH_FRACTION", "0.05"))
+# How many of an import's file's rows may be refused before it holds, when the import doesn't say
+# (maxRefusedRows): past it, a replace deletes nothing and fails (rows_refused), and an import that
+# would publish itself (autoPublish) leaves its draft for review instead. "0" holds on any refused
+# row; a count ("100") or a share of the file's rows ("0.5%") goes on within it; "-1" always goes
+# on. Going on, a replace keeps what a refused row still names. Every import reports its refused
+# rows, with why (summary.refused).
+IMPORT_MAX_REFUSED_ROWS: str = os.getenv("IMPORT_MAX_REFUSED_ROWS", "0")
 # Properties a graph's imports may match nodes by (identifier=prop.<name>), at most: each has an index
 # kept current from the version log, as Dataverse limits alternate keys and Salesforce external ids.
 MAX_MATCHING_PROPERTIES: int = int(os.getenv("GRAPHVER_MAX_MATCHING_PROPERTIES", "10"))

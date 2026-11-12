@@ -145,6 +145,7 @@ tests/test_import_formats.py
 tests/test_import_in_memory_unit.py
 tests/test_import_job_liveness.py
 tests/test_import_record_schema.py
+tests/test_import_refused_rows.py
 tests/test_import_replace.py
 tests/test_import_replace_scope.py
 tests/test_import_resolve.py

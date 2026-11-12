@@ -514,6 +514,24 @@ async def test_a_file_sent_as_a_form_is_refused_wherever_a_file_goes(test_client
     assert api.created == [] and (await test_client.get(f"{BASE}/{up['uploadId']}")).json()["received"] == []
 
 
+async def test_an_import_keeps_how_many_refused_rows_it_may_go_on_without(test_client, api, monkeypatch):
+    """``maxRefusedRows`` is kept on the job as it was asked — or, left out, as the platform's — so a
+    resumed job holds as the first run did; one that isn't a limit says what it may be."""
+    from backend.app.services.versioning import config as gv_config
+
+    monkeypatch.setattr(gv_config, "IMPORT_MAX_REFUSED_ROWS", "25")
+    for asked, kept in ((None, "25"), ("-1", "-1"), ("0.5%", "0.5%")):
+        up = (await test_client.post(BASE, json={"fileName": "f.ndjson", "size": len(DATA), "format": "ndjson"})).json()
+        await test_client.put(f"{BASE}/{up['uploadId']}/parts/0", content=DATA)
+        params = {"reconcileMode": "replace", **({"maxRefusedRows": asked} if asked else {})}
+        done = await test_client.post(f"{BASE}/{up['uploadId']}/complete", params=params)
+        assert done.status_code == 202, done.text
+        assert api.created[-1]["import_settings"]["maxRefusedRows"] == kept
+    bad = await test_client.post(f"{BASE}/{up['uploadId']}/complete", params={"maxRefusedRows": "lots"})
+    assert bad.status_code == 422 and bad.json()["detail"]["type"] == "invalid_max_refused_rows", bad.text
+    assert "-1 (any)" in bad.json()["detail"]["message"]
+
+
 async def test_a_client_that_splits_files_its_own_way_says_so(test_client, api, part_bounds):
     r = await test_client.post(BASE, json={"fileName": "big.ndjson", "size": len(DATA), "format": "ndjson",
                                            "partBytes": 100})

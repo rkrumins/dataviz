@@ -35,7 +35,7 @@ from .export_worker import ExportWorker, example_template_records
 from .formats import get_adapter
 from .import_worker import (IdentifierMatchedNothing, ImportWorker, ReplaceBlocked, ReplaceRowsRefused,
                             _normalize_page,
-                            _record_pages, lease_job)
+                            _record_pages, lease_job, refused_budget, refused_digest, within_budget)
 from .resolve import _ALREADY_GONE, _STATUS
 from .rowmodel import column_order
 from .runner import INSPECT_TYPES, JOB_TYPES, QUEUED, JobReaper
@@ -467,9 +467,10 @@ class ImportExportService:
         scope, so absence-deletes stay confined to the view's own entities."""
         async with db.graphver_session() as s:
             row = await s.get(JobORM, job_id)
-            ws, ds, view_id, mode, branch_id, graph_id, auto_publish = (
+            ws, ds, view_id, mode, branch_id, graph_id, auto_publish, settings = (
                 (row.workspace_id, row.data_source_id, row.scope_view_id, row.reconcile_mode,
-                 row.branch_id, row.graph_id, row.auto_publish) if row else (None,) * 7)
+                 row.branch_id, row.graph_id, row.auto_publish, row.import_settings or {})
+                if row else (None,) * 7 + ({},))
         scope = None
         if mode == "replace" and view_id:
             if self._replace_scope_resolver is not None:
@@ -506,10 +507,12 @@ class ImportExportService:
         if view_id and self._layout_writer is not None and worker.created_node_facts:
             await self._apply_view_layout(job_id, ws, ds, view_id, branch_id, worker)
         if auto_publish:          # after the layout, so the placements are published with the data
-            await asyncio.shield(self._auto_publish(job_id, ws, ds, graph_id, branch_id, summary))
+            await asyncio.shield(self._auto_publish(job_id, ws, ds, graph_id, branch_id, summary,
+                                                    budget=refused_budget(settings.get("maxRefusedRows"))))
         return summary
 
-    async def _auto_publish(self, job_id, ws, ds, graph_id, branch_id, summary) -> None:
+    async def _auto_publish(self, job_id, ws, ds, graph_id, branch_id, summary, *,
+                            budget: str = "0") -> None:
         """Publish the draft a completed import opened, as it asked (``autoPublish``), and record
         how that went on its summary (``publish``), as :meth:`_apply_view_layout` records the
         layout:
@@ -517,17 +520,22 @@ class ImportExportService:
         * ``queued``, with ``jobId``: the draft's publish job, which runs as a large publish does —
           the review policy read again, the import's owner held to publish again;
         * ``unchanged``: the import changed nothing, so its draft, empty, is closed;
-        * ``skipped``, with ``reason``: rows weren't imported, or the draft can't be published
-          (it fell behind main while the file was imported, …). The draft waits for review.
+        * ``skipped``, with ``reason``: more rows were refused than the import's ``maxRefusedRows``
+          allows (none, by default), or the draft can't be published (it fell behind main while
+          the file was imported, …). The draft waits for review.
 
-        Never raised: the import is complete whatever happens here."""
+        Within the budget, the draft is published without its refused rows, and ``refusedRows``
+        says how many. Never raised: the import is complete whatever happens here."""
         refused = int(summary.get("invalid") or 0) + int(summary.get("skipped") or 0)
+        rows = sum(int(summary.get(k) or 0) for k in ("new", "updated", "unchanged", "deleted", "invalid"))
         try:
-            if refused:
+            if refused and not within_budget(budget, refused, rows + int(summary.get("skipped") or 0)):
                 note = {"state": "skipped", "reason": {
                     "type": "rows_refused", "rows": refused,
-                    "message": f"{refused} row(s) of the file weren't imported, so the draft "
-                               "waits for someone to review it."}}
+                    "message": f"{refused} row(s) of the file were refused, so the draft waits for "
+                               f"someone to review it.{refused_digest(summary.get('refused'))} Fix "
+                               "them and import the file again, or send it with maxRefusedRows (a "
+                               "count, a share such as 1%, or -1 for any) to publish without them."}}
             else:
                 async with db.graphver_session() as s:
                     owner = (await s.get(BranchORM, branch_id)).owner
@@ -536,6 +544,8 @@ class ImportExportService:
                     note = {"state": "unchanged"}
                 else:
                     note = await self._publish_own_draft(job_id, ws, ds, graph_id, branch_id, owner)
+                    if refused:          # within the budget: published without them
+                        note = {**note, "refusedRows": refused}
         except Exception as exc:  # noqa: BLE001 — a refusal, or an outage: the draft is kept
             logger.warning("import job %s did not publish itself: %s", job_id, exc)
             note = {"state": "skipped", "reason": _refusal(exc)}
