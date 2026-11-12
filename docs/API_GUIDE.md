@@ -751,6 +751,8 @@ A saved filter's `query` is the Explorer's address query, such as `sourceKind=ve
 An import never writes to the published graph: it lands in a draft, which you review and
 publish.
 
+The whole round trip, once for each identifier, with every request and answer: [Export, edit offline, import back](/docs/import-export-api).
+
 1. Find the data source's versioned graph:
 
    ```bash
