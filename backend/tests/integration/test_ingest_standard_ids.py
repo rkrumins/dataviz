@@ -6,18 +6,21 @@ Every id a versioned graph gains is a platform ``urn:uuid`` (doc 18 §3): the ro
 brings, else one derived from its urn (as an import by urn derives it) or its own id, an edge's
 from its ends and type. An entity made before, whatever its id (a provider urn, ``ent_…``, a sync's
 ``sync:e:…``), is found as ever — by its urn, by its edge's ends, or by the id it has — so it is
-updated and deleted, and keeps that id. A derived id another node holds is never reused; one the
-node a row made holds is that node, so the same rows sent again change nothing. A sync's edge
-names a new node by its urn or its own id, as given or canonical. An entity a sync deleted that a
-later one sends again comes back under its id: a node by the urn it last had, an edge by the ends
-and type it last joined. A fork's ``resolve_identities`` answers from its main as an import into
-it reads it, what it inherits included. Without ``standard_ids`` (the bootstrap) a node is named by
-its id or urn as given, as before.
+updated and deleted, and keeps that id. The id a row's urn derives is never reused when another
+node holds it; the node holding the id a row with no urn derives is the one that row made,
+whatever urn it carries now, so the same rows sent again change nothing. A node with no urn an
+earlier sync named by its id is left as it is. A sync's edge names a new node by its urn or its
+own id, as given or canonical. An entity a sync deleted that a later one sends again comes back
+under its id: a node by the urn it last had, an edge by the ends and type it last joined, found by
+plans made for the graph each time. A fork's ``resolve_identities`` answers from its main as an
+import into it reads it, what it inherits included. Without ``standard_ids`` (the bootstrap) a
+node is named by its id or urn as given, as before.
 """
 import asyncio
 import os
 
 import pytest
+from sqlalchemy import TextClause, text
 
 from backend.app.services.versioning import db, models
 from backend.app.services.versioning.ids import uuid_urn
@@ -141,6 +144,54 @@ async def _the_same_rows_again_change_nothing(svc):
         assert (set(st["nodes"]), set(st["edges"])) == (set(made["nodes"]), set(made["edges"]))
 
 
+async def _a_urn_less_rows_node_keeps_its_id_whatever_urn_it_has_now(svc):
+    # The node a row with no urn made holds the id that row derives, whatever urn it has by now:
+    # one a later row named by its id with a urn of its own, or one a person gave a urn.
+    first = [_node(id="file-1"), _node("urn:li:b"), _edge("file-1", "urn:li:b")]
+    gid = await _graph(svc)
+    f1 = pointer_id(await svc.identity_scope(gid), "file-1")
+    await svc.sync_ingest(graph_id=gid, actor="ext", standard_ids=True, rows=first)
+    made = await _state(svc, gid)
+    await svc.sync_ingest(graph_id=gid, actor="ext", standard_ids=True, rows=[
+        _node("urn:li:f", entity_id=f1), _node("urn:li:b"), _edge("urn:li:f", "urn:li:b")])
+    assert (await _state(svc, gid))["nodes"][f1]["urn"] == "urn:li:f"
+    back = await svc.sync_ingest(graph_id=gid, actor="ext", standard_ids=True, rows=first)
+    assert back["applied"] == 1 and not back["rejected"], back             # its urn: its id again
+    again = await svc.sync_ingest(graph_id=gid, actor="ext", standard_ids=True, rows=first)
+    assert not again["applied"], again
+    st = await _state(svc, gid)
+    assert (set(st["nodes"]), set(st["edges"])) == (set(made["nodes"]), set(made["edges"]))
+    assert st["nodes"][f1]["urn"] == f1
+
+    gid = await _graph(svc)
+    f1 = pointer_id(await svc.identity_scope(gid), "file-1")
+    await svc.sync_ingest(graph_id=gid, actor="ext", standard_ids=True, rows=first)
+    made = await _state(svc, gid)
+    await svc.apply_ops(graph_id=gid, actor="alice", message="names it", ops=[
+        {"op": "update", "entity_kind": "node", "entity_id": f1, "payload": {"urn": "urn:li:p"}}])
+    for _ in range(2):
+        r = await svc.sync_ingest(graph_id=gid, actor="ext", standard_ids=True,
+                                  strategy="external_wins", rows=first)
+        assert not r["applied"] and not r["rejected"], r
+    st = await _state(svc, gid)
+    assert (set(st["nodes"]), set(st["edges"])) == (set(made["nodes"]), set(made["edges"]))
+    assert st["nodes"][f1]["urn"] == "urn:li:p", "the person's urn stays"
+
+
+async def _what_an_earlier_sync_named_by_its_id_changes_nothing(svc):
+    # A sync without standard ids (before them) named a node with no urn by its id and gave it
+    # none: a sync with them finds it by that id and leaves it as it is.
+    gid = await _graph(svc)
+    rows = [_node(id="file-1", displayName="f"), _node("urn:li:b"), _edge("file-1", "urn:li:b")]
+    await svc.sync_ingest(graph_id=gid, actor="ext", rows=rows)
+    made = await _state(svc, gid)
+    assert "urn" not in made["nodes"]["file-1"], made["nodes"]["file-1"]
+    for _ in range(2):
+        r = await svc.sync_ingest(graph_id=gid, actor="ext", standard_ids=True, rows=rows)
+        assert not r["applied"] and not r["rejected"], r
+    assert await _state(svc, gid) == made
+
+
 async def _a_sync_edge_names_a_new_node_by_its_own_id(svc):
     gid = await _graph(svc)
     scope = await svc.identity_scope(gid)
@@ -191,6 +242,41 @@ async def _a_deleted_entity_sent_again_comes_back_under_its_id(svc):
         "each comes back under the id it had"
 
 
+async def _what_a_sync_deleted_is_found_by_plans_made_for_its_graph(svc):
+    # A prepared statement comes to a generic plan after five runs. That plan takes `graph_id = $1`
+    # for a few rows, so it read the whole graph and tested each row against every key: seconds a
+    # chunk on a graph of 50,000 versions. The lookup is planned for its graph and keys each time.
+    gid = await _graph(svc)
+    scope = await svc.identity_scope(gid)
+    a, b, c = (pointer_id(scope, u) for u in ("urn:li:a", "urn:li:b", "urn:li:c"))
+    await svc.sync_ingest(graph_id=gid, actor="ext", standard_ids=True, rows=[
+        _node("urn:li:a"), _node("urn:li:b"), _node("urn:li:c"), _edge("urn:li:a", "urn:li:b")])
+    await svc.sync_ingest(graph_id=gid, actor="ext", standard_ids=True, rows=[
+        _node("urn:li:a"), _node("urn:li:b"), _node("urn:li:c2", entity_id=c),     # c's urn moves
+        _edge("urn:li:a", "urn:li:b")])
+    await svc.sync_ingest(graph_id=gid, actor="ext", standard_ids=True, rows=[_node("urn:li:b")])
+    async with svc._session() as s:
+        main_id = await svc._main_branch_id(s, gid)
+        await s.execute(text("SELECT set_config('plan_cache_mode', 'force_generic_plan', true)"))
+        planned, execute = set(), s.execute
+
+        async def noting(stmt, *args, **kwargs):
+            if not isinstance(stmt, TextClause):
+                planned.add((await execute(text("SHOW plan_cache_mode"))).scalar())
+            return await execute(stmt, *args, **kwargs)
+        s.execute = noting
+        nodes = await svc._deleted_by(s, gid, main_id, models.NodeVersionORM, ("urn",),
+                                      ["urn:li:a", "urn:li:b", "urn:li:c", "urn:li:c2", "urn:li:no"])
+        edges = await svc._deleted_by(s, gid, main_id, models.EdgeVersionORM,
+                                      ("source_entity_id", "target_entity_id", "edge_type"),
+                                      [(a, b, "FLOWS_TO"), (b, a, "FLOWS_TO")])
+        s.execute = execute
+        after = (await s.execute(text("SHOW plan_cache_mode"))).scalar()
+    assert nodes == {"urn:li:a": {a}, "urn:li:c2": {c}}, nodes        # by the urn each last had
+    assert edges == {(a, b, "FLOWS_TO"): {edge_pointer_id(scope, a, b, "FLOWS_TO")}}, edges
+    assert planned == {"force_custom_plan"} and after == "force_generic_plan", (planned, after)
+
+
 async def _a_fork_resolves_what_it_inherits(svc):
     gid = await _graph(svc)
     scope = await svc.identity_scope(gid)
@@ -223,8 +309,11 @@ def test_the_ingest_routes_mint_new_ids_as_imports_do_and_find_what_they_named_b
             await _bulk_mints_as_an_import_does(svc)
             await _sync_finds_what_was_made_before(svc)
             await _the_same_rows_again_change_nothing(svc)
+            await _a_urn_less_rows_node_keeps_its_id_whatever_urn_it_has_now(svc)
+            await _what_an_earlier_sync_named_by_its_id_changes_nothing(svc)
             await _a_sync_edge_names_a_new_node_by_its_own_id(svc)
             await _a_deleted_entity_sent_again_comes_back_under_its_id(svc)
+            await _what_a_sync_deleted_is_found_by_plans_made_for_its_graph(svc)
             await _a_fork_resolves_what_it_inherits(svc)
         finally:
             await db.dispose_engine()

@@ -137,11 +137,13 @@ integration's many small changes as a few commits.
   `urn:uuid:`: one the row brings, kept; else derived from its urn (as an import by urn derives
   it) or its own id, an edge's from its ends and type. Every path that adds entities to a
   versioned graph now gives the same kind of id, and the same row sent through any of them names
-  the same entity: a sync of the rows a bulk ingest or an earlier sync took changes nothing, a node
-  with no urn included. Entities made before keep their ids (a provider urn, `ent_…`, `sync:e:…`):
-  a sync still finds them by their urn, their ends, or the id they have, and updates and deletes
-  them. One a sync deleted that a later sync sends again comes back under its id. Enabling version
-  control still keeps a provider's urns as ids.
+  the same entity: a sync of the rows a bulk ingest or an earlier sync took changes nothing, a row
+  with no urn included, whatever urn its node has been given since. Entities made before keep their
+  ids (a provider urn, `ent_…`, `sync:e:…`): a sync still finds them by their urn, their ends, or the
+  id they have, and updates and deletes them. A row with no urn that names a node by an id from
+  before is taken as it comes, as it always was: a node an earlier `/bulk-ingest` gave its id as its
+  urn loses that urn on its first sync, as it did then. One a sync deleted that a later sync sends
+  again comes back under its id. Enabling version control still keeps a provider's urns as ids.
 - **Imports that publish themselves pull main when it moved under them.** Several connectors (and
   people) can work on one data source at once, each in a draft of its own. When main moved while
   an import ran, its draft now pulls main — the field-level merge of "Pull latest" — and publishes

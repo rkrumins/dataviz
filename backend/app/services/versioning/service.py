@@ -394,6 +394,8 @@ _COPY_EDGE_VERSIONS = _copy_versions_sql(
     EdgeVersionORM, "source_entity_id, target_entity_id, edge_type, confidence, discriminator")
 # SET LOCAL lock_timeout with a bound value (set_config's third argument, is_local).
 _SET_LOCK_TIMEOUT = text("SELECT set_config('lock_timeout', :ms, true)")
+# SET LOCAL plan_cache_mode, the same way.
+_PLAN_CACHE_MODE = text("SELECT set_config('plan_cache_mode', :mode, true)")
 
 
 class _StaleHead(Exception):
@@ -9472,10 +9474,12 @@ class GraphVersioningService:
         ``standard_ids`` (the API route): an entity the snapshot brings that main doesn't hold
         takes the id an import would give it (``_derived_node_id``, ``_derived_edge_id``). One
         that names an entity by an id it already has — whatever its format, from before, a
-        ``urn:uuid`` in any case — is that entity, so it is updated or deleted as ever. A node
-        with no urn carries its id as its urn, and is found by it next time. One main deleted
-        comes back under its id: a node by the urn it last had, an edge by the ends and type it
-        last joined. An edge names a node of the snapshot by its urn or its own id."""
+        ``urn:uuid`` in any case — is that entity, so it is updated or deleted as ever; a row with
+        no urn that names one so is taken as it comes. A node a row with no urn makes carries its
+        id as its urn, and the row finds it by that id next time, whatever urn it carries by then.
+        One main deleted comes back under its id: a node by the urn it last had, an edge by the
+        ends and type it last joined. An edge names a node of the snapshot by its urn or its own
+        id."""
         await self._assert_syncable(graph_id)
         rows = list(rows)        # every attempt reads it; a spent iterator would delete everything
         scope = await self.identity_scope(graph_id) if standard_ids else None
@@ -9725,10 +9729,14 @@ class GraphVersioningService:
                 eid = (hit[0] if hit else None) or given or urn
             elif named:                        # an entity it names by the id it has
                 eid = named
+            elif not urn and keys[i] in held:  # the node it made, whatever urn it carries now
+                eid = keys[i]
             else:
                 eid = _id_to_take(_derived_node_id(scope, row), gone.get(keys[i]) or set(), held)
-            if scope is not None and not urn:  # a node with no urn carries its id as its urn
-                payload["urn"] = eid
+            # A node with no urn carries the id its row derives, which finds it next time; one the
+            # row names by an id from before is taken as the row comes, as it always was.
+            if scope is not None and not urn and (hit or not named):
+                payload["urn"] = keys[i] or eid
             if not eid:                        # neither a urn nor an id: a urn:uuid for both
                 eid = new_entity_id()
                 payload["urn"] = eid
@@ -9917,28 +9925,45 @@ class GraphVersioningService:
         """key → the entities deleted on main whose last live version held it in ``columns`` (a
         node's urn; an edge's ends and type, as a tuple). A delete's version holds none, so the
         lookups through the head (:meth:`_heads_by_urn`, :meth:`_heads_by_edge_triple`) miss them.
-        O(keys), via ix_nv_urn and ix_ev_source."""
+        O(keys): each step seeks by index, its keys bound as arrays — the entities whose rows held
+        a key (``ix_nv_urn``; an edge's by both ends, ``ix_ev_source`` and ``ix_ev_target``), those
+        of them deleted (by primary key), then their last live versions (``ix_*_entity_hist``) —
+        and is planned for its graph and keys each time. The generic plan a prepared statement
+        comes to after five runs takes ``graph_id = $1`` for a few rows, so it reads the whole
+        graph and tests each row against every key."""
         cols = [getattr(model, c) for c in columns]
-        key_of = cols[0] if len(cols) == 1 else tuple_(*cols)
-        out: Dict[Any, set] = {}
-        for chunk in _chunks(list(dict.fromkeys(k for k in keys if k)), 3000):
-            carried = select(model.entity_id).where(
-                model.graph_id == graph_id, model.branch_id == main_id, key_of.in_(list(chunk)))
-            rows = (await s.execute(
-                select(model.entity_id, *cols)
-                .join(EntityHeadORM, (EntityHeadORM.graph_id == model.graph_id)
-                      & (EntityHeadORM.branch_id == model.branch_id)
-                      & (EntityHeadORM.entity_id == model.entity_id))
+        carriers = select(model.entity_id, *cols).where(
+            model.graph_id == graph_id, model.branch_id == main_id,
+            *(c == any_(bindparam(f"k{n}", type_=ARRAY(Text))) for n, c in enumerate(cols))).distinct()
+        last = (select(model.entity_id, *cols)
                 .where(model.graph_id == graph_id, model.branch_id == main_id,
-                       model.entity_id.in_(carried), model.op != "delete",
-                       EntityHeadORM.is_tombstone.is_(True))
+                       model.entity_id == any_(bindparam("ids", type_=ARRAY(Text))),
+                       model.op != "delete")
                 .order_by(model.entity_id, model.commit_seq.desc(), model.created_at.desc())
-                .distinct(model.entity_id))).all()
+                .distinct(model.entity_id))
+
+        def key_of(vals):
+            return vals[0] if len(vals) == 1 else tuple(vals)
+
+        out: Dict[Any, set] = {}
+        keys = list(dict.fromkeys(k for k in keys if k))
+        if not keys:
+            return out
+        was = await s.scalar(text("SELECT current_setting('plan_cache_mode')"))
+        await s.execute(_PLAN_CACHE_MODE, {"mode": "force_custom_plan"})     # put back below
+        for chunk in _chunks(keys, _IN_LIST_MAX):
             wanted = set(chunk)
-            for eid, *vals in rows:
-                key = vals[0] if len(vals) == 1 else tuple(vals)
-                if key in wanted:
-                    out.setdefault(key, set()).add(eid)
+            parts = zip(*chunk) if len(cols) > 1 else [chunk]
+            carried = {eid for eid, *vals in (await s.execute(
+                carriers, {f"k{n}": sorted(set(p)) for n, p in enumerate(parts)})).all()
+                if key_of(vals) in wanted}
+            deleted = [e for e, live in (await self._heads_live(s, graph_id, main_id, carried)).items()
+                       if not live]
+            for ids in _chunks(deleted, _IN_LIST_MAX):
+                for eid, *vals in (await s.execute(last, {"ids": list(ids)})).all():
+                    if key_of(vals) in wanted:
+                        out.setdefault(key_of(vals), set()).add(eid)
+        await s.execute(_PLAN_CACHE_MODE, {"mode": was})
         return out
 
     async def _live_ids_absent_from(self, s, graph_id: str, main_id: str, seen: set) -> set:
