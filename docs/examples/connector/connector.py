@@ -7,8 +7,12 @@ source's graph, through the documented HTTP API alone (docs/CONNECTOR_GUIDE.md).
 2. Send the file in resumable parts (``POST …/imports/uploads``), several at once, read from disk.
    An answer the server says to ask again for is asked again. A run that stops is resumed by the
    next one, from a state file kept beside the file.
-3. Import it into a draft (``…/complete``). With ``--publish``, the import publishes itself onto the
-   published graph once every row is applied (``autoPublish``).
+3. Import it into a draft (``…/complete``), matching rows by ``--identifier`` (the graph's default
+   without it). With ``--replace``, the file is the whole of what the graph holds: what it leaves out
+   is deleted, inside the replace guard (``--allow-mass-delete`` lets a replace the guard refused
+   through, best into the same draft, ``--branch``). With ``--publish``, the import publishes itself
+   onto the published graph once every row is applied (``autoPublish``), or, into ``--branch``, the
+   connector publishes the draft.
 4. Follow the import, then its publish, and report what they did: once published, the commit it
    landed as, and the revision of the published graph that holds it (``revisionId``).
 
@@ -21,6 +25,8 @@ Usage::
     python connector.py source.json --workspace ws_… --graph graph_… --check     # a dry run only
     python connector.py source.json --workspace ws_… --graph graph_… --publish
     python connector.py --file export.csv --workspace ws_… --graph graph_… --publish
+    # a nightly full snapshot, matched by urn: what it leaves out is deleted
+    python connector.py --file nightly.ndjson --workspace ws_… --graph graph_… --replace --identifier urn --publish
 
 Needs only ``httpx``.
 """
@@ -163,13 +169,17 @@ class Graph:
         return self.api("POST", f"{self.base}/imports/validate", params={"format": fmt},
                         content=_head(path, fmt))
 
-    def upload(self, path: str, fmt: str, state_path: str) -> dict[str, Any]:
+    def upload(self, path: str, fmt: str, state_path: str,
+               options: dict[str, Any] | None = None) -> dict[str, Any]:
         """The file, sent in parts; returns the upload as the server holds it. The same file (by its
-        sha256) that an earlier run began to send is resumed: only the parts the server lacks are
-        sent, and none once it was completed. An upload that expired (24 h) is begun again."""
-        digest, upload = sha256_of(path), None
+        sha256) that an earlier run began to send, with the same import ``options``, is resumed:
+        only the parts the server lacks are sent, and none once it was completed. An upload is
+        imported once, so a run with other options (``--allow-mass-delete`` after a replace the
+        guard refused, say) sends the file again. An upload that expired (24 h) is begun again."""
+        digest, upload, options = sha256_of(path), None, options or {}
         state = _read_state(state_path)
-        if state.get("sha256") == digest and state.get("graph") == self.graph:
+        if (state.get("sha256") == digest and state.get("graph") == self.graph
+                and state.get("options", {}) == options):
             try:
                 upload = self.api("GET", f"{self.base}/imports/uploads/{state['uploadId']}")
             except ApiError as exc:
@@ -179,7 +189,7 @@ class Graph:
             upload = self.api("POST", f"{self.base}/imports/uploads", json={
                 "fileName": os.path.basename(path), "size": os.path.getsize(path), "format": fmt})
             _write_state(state_path, {"sha256": digest, "graph": self.graph,
-                                      "uploadId": upload["uploadId"]})
+                                      "uploadId": upload["uploadId"], "options": options})
         if not upload.get("jobId"):
             self._send(path, upload)
         return upload
@@ -200,10 +210,22 @@ class Graph:
                 if done % every == 0 or done == upload["parts"]:
                     self.log(f"sent {done} of {upload['parts']} parts")
 
-    def start(self, upload: dict[str, Any], *, publish: bool) -> dict[str, Any]:
-        """Import the uploaded file into a draft. Completing an upload again answers with its import."""
+    def start(self, upload: dict[str, Any], *, publish: bool, replace: bool = False,
+              identifier: str | None = None, allow_mass_delete: bool = False,
+              branch: str | None = None) -> dict[str, Any]:
+        """Import the uploaded file into a draft: a new one, or ``branch``. ``replace``: what the
+        file leaves out is deleted. Completing an upload again answers with its import."""
+        params = {"reconcileMode": "replace" if replace else "upsert"}
+        if identifier:
+            params["identifier"] = identifier
+        if allow_mass_delete:
+            params["allowMassDelete"] = "true"
+        if branch:
+            params["branchId"] = branch
+        elif publish:
+            params["autoPublish"] = "true"
         return self.api("POST", f"{self.base}/imports/uploads/{upload['uploadId']}/complete",
-                        params={"autoPublish": "true"} if publish else {})
+                        params=params)
 
     def follow(self, path: str, label: str, *, every: float = 2.0, most: float = 30.0) -> dict[str, Any]:
         """A job, polled until it finishes, saying where it has got whenever that changes. The
@@ -310,15 +332,25 @@ def _write_state(path: str, state: dict[str, Any]) -> None:
         json.dump(state, f)
 
 
-def run(graph: Graph, path: str, fmt: str, *, publish: bool, state_path: str) -> dict[str, Any]:
+def run(graph: Graph, path: str, fmt: str, *, publish: bool, state_path: str, replace: bool = False,
+        identifier: str | None = None, allow_mass_delete: bool = False,
+        branch: str | None = None) -> dict[str, Any]:
     """Send the file, import it, and — with ``publish`` — see it published."""
-    upload = graph.upload(path, fmt, state_path)
-    started = graph.start(upload, publish=publish)
+    # Only what was asked for: a plain run resumes the uploads runs before these options made.
+    options = {k: v for k, v in (("replace", replace), ("identifier", identifier),
+                                 ("allowMassDelete", allow_mass_delete), ("branch", branch)) if v}
+    upload = graph.upload(path, fmt, state_path, options)
+    started = graph.start(upload, publish=publish, replace=replace, identifier=identifier,
+                          allow_mass_delete=allow_mass_delete, branch=branch)
     job = graph.follow(f"{graph.base}/imports/{started['jobId']}", "import")
     result: dict[str, Any] = {"uploadId": upload["uploadId"], "job": {
         k: job.get(k) for k in ("jobId", "branchId", "status", "summary", "errorMessage")}}
+    failure = (job.get("summary") or {}).get("failure")
+    if job["status"] == "failed":
+        # Why, in the server's own code: mass_delete_blocked, rows_refused, identifier_matched_nothing…
+        graph.log(f"import failed ({(failure or {}).get('code')}): {job.get('errorMessage')}")
     if publish and job["status"] == "completed":
-        result["publish"] = graph.published(job)
+        result["publish"] = graph.publish_draft(job["branchId"]) if branch else graph.published(job)
     return result
 
 
@@ -341,6 +373,13 @@ def main(argv: list[str] | None = None) -> int:
                         help="publish the import once every row is applied")
     parser.add_argument("--check", action="store_true", help="dry-run the file's first rows, import nothing")
     parser.add_argument("--state", help="where to keep the upload's state (default: beside the file)")
+    parser.add_argument("--replace", action="store_true",
+                        help="the file is the whole graph: delete what it leaves out (reconcileMode=replace)")
+    parser.add_argument("--identifier", help="match rows by entity_id, urn or prop.<name> "
+                                             "(default: the graph's own)")
+    parser.add_argument("--allow-mass-delete", action="store_true",
+                        help="let a replace delete past the replace guard")
+    parser.add_argument("--branch", help="import into this open draft (br_…) instead of a new one")
     args = parser.parse_args(argv)
     if bool(args.source) == bool(args.file):
         parser.error("give a catalog to map, or --file to send")
@@ -360,7 +399,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.check:
             print(json.dumps(graph.check(path, fmt), indent=2))
             return 0
-        result = run(graph, path, fmt, publish=args.publish, state_path=args.state or path + ".upload.json")
+        result = run(graph, path, fmt, publish=args.publish, state_path=args.state or path + ".upload.json",
+                     replace=args.replace, identifier=args.identifier,
+                     allow_mass_delete=args.allow_mass_delete, branch=args.branch)
     print(json.dumps(result, indent=2))
     return 0 if succeeded(result) else 1
 

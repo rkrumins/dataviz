@@ -71,6 +71,7 @@ tests/integration/test_import_one_active.py
 tests/integration/test_import_pointers.py
 tests/integration/test_import_replace_guard_live.py
 tests/integration/test_import_resume_e2e.py
+tests/integration/test_import_upload_flow.py
 tests/integration/test_import_validate.py
 tests/integration/test_import_windows.py
 tests/integration/test_import_worker.py
