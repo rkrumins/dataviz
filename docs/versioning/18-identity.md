@@ -166,6 +166,8 @@ node made or edited in the app since the last import too.
 - A row an export wrote, imported after its entity changed, applies only the cells it changed; see
   [08 §4a](08-import-export.md#4a-offline-edits-are-reconciled-never-silently-lost).
 
+Each identifier, walked through over the API with its requests and answers: [Export, edit offline, import back](../IMPORT_EXPORT_API.md).
+
 ## 5. Adding, changing and removing properties
 
 **By import, including an edited export:**

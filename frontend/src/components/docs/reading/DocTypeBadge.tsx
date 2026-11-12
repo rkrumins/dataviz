@@ -96,6 +96,7 @@ export const DOC_TYPES: Record<string, DocType> = {
   'feature-flags-lifecycle': 'how-to',
   'api-guide': 'how-to',
   'connector-guide': 'how-to',
+  'import-export-api': 'how-to',
   kubernetes: 'how-to',
   'kubernetes-cluster-overlay': 'how-to',
   runbooks: 'how-to',

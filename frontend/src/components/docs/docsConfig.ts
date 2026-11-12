@@ -377,6 +377,13 @@ export const docEntries: DocEntry[] = [
     importFn: () => import('@docs/CONNECTOR_GUIDE.md?raw'),
   },
   {
+    slug: 'import-export-api',
+    section: 'reference',
+    title: 'Import & Export API',
+    description: 'Export a graph, edit it offline and import it back: matching rows by entity id, URN or a property, the dry run, publishing, and three walkthroughs with every request and answer',
+    importFn: () => import('@docs/IMPORT_EXPORT_API.md?raw'),
+  },
+  {
     slug: 'key-management-api',
     section: 'reference',
     title: 'Key Management API',

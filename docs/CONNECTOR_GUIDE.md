@@ -212,6 +212,8 @@ change. A file's keys find those ids:
   itself is its two ends and its type, so sending it again changes nothing. To re-point an edge,
   delete its row and add a new one.
 
+Each identifier, walked through with its requests and answers: [Export, edit offline, import back](/docs/import-export-api).
+
 ## 4. Full snapshots and deltas
 
 | You send | Use | What happens |
