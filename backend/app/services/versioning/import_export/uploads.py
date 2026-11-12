@@ -98,7 +98,7 @@ DESCRIPTION_TOO_LARGE = (
 FORM_REFUSED = (
     "Send the file's bytes as the request body, not as a form (multipart/form-data): with curl, "
     "--data-binary @file or -T file rather than -F; in Postman, Body → binary. Guide: "
-    "/docs/import-export-api#from-your-service-upsert-and-full-replace")
+    "/docs/import-from-your-service")
 
 
 #: The digests a request may say its body has (RFC 9530 ``Content-Digest``), checked as it arrives.

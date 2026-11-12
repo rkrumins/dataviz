@@ -155,7 +155,9 @@ make it again.
 Every item keeps one id for life, whatever matched it, so its history carries
 on through every import. **Match existing items by** says how a row finds the
 item it describes. Scripting it? [Export, edit offline, import back](/docs/import-export-api)
-walks through each choice over the API, with every request and answer.
+walks through each choice over the API, with every request and answer, and
+[Send Data From Your Service](/docs/import-from-your-service) sends a service's
+file from any language.
 
 | Choice | A row finds its item by | Use it when |
 | --- | --- | --- |

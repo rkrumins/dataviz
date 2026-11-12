@@ -148,7 +148,7 @@ export const docPersonas: DocPersona[] = [
       'Get a key, make your first calls and handle every answer, then follow the API’s conventions and automate the jobs people script most.',
     sectionId: 'reference',
     startSlug: 'integration-quickstart',
-    path: ['integration-quickstart', 'api-guide', 'key-management-api', 'graph-metadata-api', 'feature-search-and-rules-reference', 'versioning-api-reference', 'versioning-import-export', 'connector-guide', 'feature-view-portability', 'api-features'],
+    path: ['integration-quickstart', 'api-guide', 'import-from-your-service', 'import-export-api', 'key-management-api', 'graph-metadata-api', 'feature-search-and-rules-reference', 'versioning-api-reference', 'versioning-import-export', 'connector-guide', 'feature-view-portability', 'api-features'],
     accent: {
       gradient: 'from-violet-500 to-purple-600',
       text: 'text-violet-600 dark:text-violet-400',
@@ -375,6 +375,13 @@ export const docEntries: DocEntry[] = [
     title: 'Building a Connector',
     description: 'Send another system\'s catalog into a graph: the record format and schema, pointers, deltas, the dry run, and a reference connector',
     importFn: () => import('@docs/CONNECTOR_GUIDE.md?raw'),
+  },
+  {
+    slug: 'import-from-your-service',
+    section: 'reference',
+    title: 'Send Data From Your Service',
+    description: 'Send a file from your service and publish it: how the flow works, your first import in three requests, upsert or full replace, and the whole flow in curl, Python, Node.js, Go and Java',
+    importFn: () => import('@docs/IMPORT_FROM_YOUR_SERVICE.md?raw'),
   },
   {
     slug: 'import-export-api',

@@ -261,8 +261,8 @@ first.
 Every way, the body is the file's bytes (`application/octet-stream`), never a form (`415`). Send
 `Content-Digest: sha-256=:<base64>:` (RFC 9530) with it to have the server check what arrived: a
 body that doesn't match is refused (`422`) and none of it is kept. The same requests in curl,
-Python, Node.js, Go and Java, for an upsert and a full replace: [Export, edit offline, import back →
-From your service](/docs/import-export-api#from-your-service-upsert-and-full-replace).
+Python, Node.js, Go and Java, for an upsert and a full replace: [Send Data From Your
+Service](/docs/import-from-your-service).
 
 **The resumable upload, step by step:**
 

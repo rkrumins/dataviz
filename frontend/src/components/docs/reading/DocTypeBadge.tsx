@@ -97,6 +97,7 @@ export const DOC_TYPES: Record<string, DocType> = {
   'api-guide': 'how-to',
   'connector-guide': 'how-to',
   'import-export-api': 'how-to',
+  'import-from-your-service': 'tutorial',
   kubernetes: 'how-to',
   'kubernetes-cluster-overlay': 'how-to',
   runbooks: 'how-to',

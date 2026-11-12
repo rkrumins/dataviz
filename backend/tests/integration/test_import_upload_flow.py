@@ -1,8 +1,8 @@
 """A service's import, sent as the guide's "From your service" section sends it — Postgres.
 
-``docs/IMPORT_EXPORT_API.md`` shows a service how to send a file and import it, by upsert and by
-full replace, from curl, Python, Node.js and PowerShell. Each client makes the same requests, which
-this sends to the real routes, running each job as the transfer lane runs it:
+``docs/IMPORT_FROM_YOUR_SERVICE.md`` shows a service how to send a file and import it, by upsert
+and by full replace, from curl, Python, Node.js, Go and Java. Each client makes the same requests,
+which this sends to the real routes, running each job as the transfer lane runs it:
 
 * **Upsert in one request**: ``POST …/imports`` with the file as its body, matched by urn, which
   publishes itself.

@@ -59,7 +59,7 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/local-integration-testing.md"
   },
   "integration-quickstart": {
-    "updated": "2026-11-09",
+    "updated": "2026-11-12",
     "path": "docs/INTEGRATION_QUICKSTART.md"
   },
   "api-guide": {
@@ -69,6 +69,10 @@ export const docMeta: Record<string, DocMeta> = {
   "connector-guide": {
     "updated": "2026-11-12",
     "path": "docs/CONNECTOR_GUIDE.md"
+  },
+  "import-from-your-service": {
+    "updated": "2026-11-12",
+    "path": "docs/IMPORT_FROM_YOUR_SERVICE.md"
   },
   "import-export-api": {
     "updated": "2026-11-12",
@@ -135,7 +139,7 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/TOP_LEVEL_NODES_PERFORMANCE.md"
   },
   "versioning-overview": {
-    "updated": "2026-10-24",
+    "updated": "2026-11-12",
     "path": "docs/versioning/01-overview-and-architecture.md"
   },
   "versioning-data-model": {
@@ -147,7 +151,7 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/versioning/03-branching-commits-merge.md"
   },
   "versioning-projection-and-cache": {
-    "updated": "2026-11-11",
+    "updated": "2026-11-12",
     "path": "docs/versioning/04-projection-and-cache.md"
   },
   "versioning-ontology-governance": {
@@ -155,7 +159,7 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/versioning/05-ontology-governance.md"
   },
   "versioning-api-reference": {
-    "updated": "2026-11-11",
+    "updated": "2026-11-12",
     "path": "docs/versioning/06-api-reference.md"
   },
   "versioning-frontend-integration": {
@@ -167,11 +171,11 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/versioning/08-import-export.md"
   },
   "versioning-scale-and-roadmap": {
-    "updated": "2026-11-11",
+    "updated": "2026-11-12",
     "path": "docs/versioning/09-scale-limits-and-roadmap.md"
   },
   "versioning-authoritative-sources": {
-    "updated": "2026-11-11",
+    "updated": "2026-11-12",
     "path": "docs/versioning/10-authoritative-sources-datahub-openmetadata.md"
   },
   "versioning-resync-at-any-scale": {
@@ -219,11 +223,11 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/versioning/README-index.md"
   },
   "versioning-guide": {
-    "updated": "2026-11-09",
+    "updated": "2026-11-12",
     "path": "docs/versioning/README.md"
   },
   "versioning-drafts-and-merge": {
-    "updated": "2026-11-01",
+    "updated": "2026-11-12",
     "path": "docs/VERSIONING_DRAFTS_LINEAGE_AND_MERGE.md"
   },
   "security-overview": {
@@ -235,7 +239,7 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/RBAC.md"
   },
   "native-queries": {
-    "updated": "2026-11-01",
+    "updated": "2026-11-12",
     "path": "docs/NATIVE_QUERIES.md"
   },
   "sso": {
@@ -271,15 +275,15 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "deploy/k8s/overlays/production-cluster/README.md"
   },
   "configuration": {
-    "updated": "2026-11-11",
+    "updated": "2026-11-12",
     "path": "docs/CONFIGURATION.md"
   },
   "observability": {
-    "updated": "2026-11-11",
+    "updated": "2026-11-12",
     "path": "docs/OBSERVABILITY.md"
   },
   "runbooks": {
-    "updated": "2026-11-11",
+    "updated": "2026-11-12",
     "path": "docs/RUNBOOKS.md"
   },
   "upgrade-2026-09-10": {
@@ -311,7 +315,7 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/INFRASTRUCTURE_LAUNCH_SCALE.md"
   },
   "infra-scaling-250m": {
-    "updated": "2026-11-02",
+    "updated": "2026-11-12",
     "path": "docs/INFRASTRUCTURE_SCALING_250M.md"
   },
   "read-path-performance": {
@@ -433,7 +437,7 @@ export const guideMeta: Record<string, DocMeta> = {
     "path": "docs/guide/FEATURE_SWITCHES.md"
   },
   "data-freshness": {
-    "updated": "2026-10-26",
+    "updated": "2026-11-12",
     "path": "docs/guide/DATA_FRESHNESS.md"
   },
   "analytics": {

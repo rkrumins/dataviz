@@ -70,6 +70,12 @@ integration's many small changes as a few commits.
   unqueued, and the same `idempotencyKey` takes it back). A header that can't be read, or names
   only other algorithms, is `400` before any of the body is read. Without the header, nothing
   changes.
+- **Docs: Send Data From Your Service**, a new page for developers whose service sends data in. It
+  explains how the flow fits together, with a diagram and the words it uses. It walks a first
+  import in three requests, then upsert or full replace and the three ways to send a file. It
+  gives the whole flow in curl, Python, Node.js, Go and Java (each run as written against the API),
+  plus large files, resuming, and the common mistakes with their fixes. The Import & Export API page
+  keeps the export → edit → import round trip, and opens with which page to read for what.
 - **Reconcile imports in memory** (Admin → Features, `importInMemoryReconcile`, off by default). An
   import compares its file with the graph a batch at a time before it stages anything: a row that
   changes nothing is staged slim, already resolved, so a full snapshot sent again writes about what

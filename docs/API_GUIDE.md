@@ -787,7 +787,7 @@ The whole round trip, once for each identifier, with every request and answer: [
 
    `-T` streams the file from disk. `--data-binary @lineage.ndjson` would read all of it into
    memory first. The same from Python, Node.js, Go or Java, for an upsert and a full replace:
-   [From your service](/docs/import-export-api#from-your-service-upsert-and-full-replace).
+   [Send Data From Your Service](/docs/import-from-your-service).
 
    `format` is `ndjson`, `csv`, `tsv`, `json` or `xlsx`. `reconcileMode=replace` also deletes
    everything in scope that the file doesn't mention. `viewId=` places what the import creates
