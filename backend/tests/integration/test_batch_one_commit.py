@@ -128,6 +128,6 @@ def test_a_batch_from_postgres_is_one_commit(data_sources, no_flag_or_projector,
 
 def test_a_batch_through_the_projection_is_one_commit(data_sources, no_flag_or_projector, monkeypatch):
     async def _fresh(self, graph_id):
-        return {"fresh": True, "committed": 1, "projected": 1}
+        return {"fresh": True, "committed": 1, "projected": 1, "served": 1}
     monkeypatch.setattr(GraphVersioningService, "projection_watermark", _fresh)
     asyncio.run(_run("VersionedWriteProvider", monkeypatch, with_edges=False))

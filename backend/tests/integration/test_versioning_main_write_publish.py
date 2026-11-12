@@ -199,7 +199,7 @@ def test_main_writes_from_postgres_need_publish_for_a_person(data_sources, no_fl
 def test_main_writes_through_the_projection_need_publish_for_a_person(
         data_sources, no_flag_or_projector, monkeypatch):
     async def _fresh(self, graph_id):
-        return {"fresh": True, "committed": 1, "projected": 1}
+        return {"fresh": True, "committed": 1, "projected": 1, "served": 1}
     monkeypatch.setattr(GraphVersioningService, "projection_watermark", _fresh)
     asyncio.run(_run_graph_writes())
 
