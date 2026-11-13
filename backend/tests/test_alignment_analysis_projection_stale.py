@@ -41,7 +41,7 @@ async def graphver_schema(db_session):
     await db_session.execute(text(
         "CREATE TABLE graphver.projection_state (graph_id TEXT PRIMARY KEY, "
         "projected_commit_seq BIGINT, falkor_graph_name TEXT, last_error TEXT, "
-        "status TEXT, served_commit_seq BIGINT)"))
+        "status TEXT, served_commit_seq BIGINT, read_mode TEXT)"))
     yield
     await db_session.execute(text("DROP TABLE graphver.projection_state"))
     await db_session.execute(text("DROP TABLE graphver.graphs"))
@@ -72,7 +72,7 @@ async def _seed(db_session, *, projected, head, falkor_name="gv_real", last_erro
     await db_session.execute(text(
         "INSERT INTO graphver.graphs VALUES ('g_stale', 'ds_stale', :head)"), {"head": head})
     await db_session.execute(text(
-        "INSERT INTO graphver.projection_state VALUES ('g_stale', :p, :name, :err, :st, :sv)"),
+        "INSERT INTO graphver.projection_state VALUES ('g_stale', :p, :name, :err, :st, :sv, NULL)"),
         {"p": projected, "name": falkor_name, "err": last_error, "st": status, "sv": served})
     await db_session.commit()
 

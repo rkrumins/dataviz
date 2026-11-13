@@ -373,7 +373,9 @@ async def _by_a_property(svc, ie, store, monkeypatch) -> None:
 def test_a_snapshot_replaced_every_run_keeps_every_id_and_writes_only_what_changed(monkeypatch):
     async def run():
         await models.create_schema_and_partitions()
-        window, config.IMPORT_COMMIT_WINDOW = config.IMPORT_COMMIT_WINDOW, 7
+        # Through monkeypatch, as the cases below set it again: set directly, the case's own
+        # setting was put back at teardown to this 7, and every later test ran with windows of 7.
+        monkeypatch.setattr(config, "IMPORT_COMMIT_WINDOW", 7)
         root = tempfile.mkdtemp(prefix="import-identifier-")
         try:
             svc = GraphVersioningService()
@@ -385,7 +387,6 @@ def test_a_snapshot_replaced_every_run_keeps_every_id_and_writes_only_what_chang
             await _guard(svc, ie, ie.store, monkeypatch)
             await _by_a_property(svc, ie, ie.store, monkeypatch)
         finally:
-            config.IMPORT_COMMIT_WINDOW = window
             shutil.rmtree(root, ignore_errors=True)
             await db.dispose_engine()
     asyncio.run(run())

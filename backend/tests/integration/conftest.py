@@ -71,6 +71,8 @@ def _fresh_graphver_engine():
 
     gvdb._engine = None
     gvdb._session_factory = None
+    gvdb._route_engine = None
+    gvdb._route_session_factory = None
     mgmt_engine._engines.clear()
     mgmt_engine._session_factories.clear()
     messaging._client = None
