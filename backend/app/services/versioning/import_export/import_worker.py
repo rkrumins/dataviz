@@ -54,13 +54,14 @@ from typing import Any, Dict, List, Mapping, NamedTuple, Optional, Tuple
 from sqlalchemy import (BigInteger, Text, and_, bindparam, delete, exists, false, func, insert,
                         null, or_, select, text, tuple_)
 from sqlalchemy.dialects.postgresql import ARRAY
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from backend.app.services.view_placement import NodeFacts, suggest_placement
 
 from .. import config, db
 from ..ids import new_entity_id, uuid_urn
 from ..job_lease import QUEUED, Lease, Superseded
-from ..models import BranchORM, EdgeVersionORM, ImportRowORM, JobORM, NodeVersionORM
+from ..models import BranchORM, EdgeVersionORM, ImportMentionORM, ImportRowORM, JobORM, NodeVersionORM
 from ..service import OntologyViolation
 from . import identifier as identifiers
 from . import keys as matching
@@ -76,6 +77,8 @@ logger = logging.getLogger(__name__)
 
 _PARSE_BATCH = 2000
 _PERSIST_BATCH = 5000
+#: Keys of refused node rows a run keeps for the edges that name them (``end_refused``).
+_REFUSED_NAMES_MAX = 200_000
 # Record a batch of resolutions: each column one array parameter, so the statement never changes.
 _RESOLVE_ROWS = text(
     f"UPDATE {ImportRowORM.__table__.fullname} AS r SET matched_entity_id = v.eid, resolved_op = v.op, "
@@ -213,8 +216,13 @@ class ReplaceBlocked(Exception):
 class ReplaceRowsRefused(Exception):
     """A replace whose file holds rows it couldn't apply (records neither a node nor an edge, or
     refused rows), stopped before it deletes anything: what those rows name may be what the file
-    means to keep. Fix the rows and import the file again."""
+    means to keep. Fix the rows and import the file again. ``phase``: where the rows were refused —
+    ``nodes`` when any node row was, else ``edges`` (the job's own phase is where it stopped)."""
     code, action = "rows_refused", "fix_rows"
+
+    def __init__(self, message: str, phase: Optional[str] = None):
+        super().__init__(message)
+        self.phase = phase
 
 
 #: The refused rows an import's report names one by one — the first it met — beside its counts.
@@ -273,9 +281,15 @@ def tally_refused(report: Optional[Dict[str, Any]], resolutions, labels: Mapping
         return report
     out = {"total": 0, "byCode": {}, "rows": [], **(report or {})}
     by_code, rows = dict(out["byCode"]), list(out["rows"])
+    hints = dict(out.get("hints") or {})
+    by_kind = dict(out.get("byKind") or {})
     for r in refused:
         code = r.get("code") or "invalid_row"
         by_code[code] = int(by_code.get(code) or 0) + 1
+        kind = r.get("kind") or "node"
+        by_kind[kind] = int(by_kind.get(kind) or 0) + 1
+        if r.get("hint"):                          # e.g. by_urn: what one change would find
+            hints[r["hint"]] = int(hints.get(r["hint"]) or 0) + 1
         if len(rows) < REFUSED_EXAMPLES:
             reason = next((str(x) for x in r.get("reasons") or () if x), "")
             rows.append({"rowIndex": r["_row_index"], "kind": r.get("kind"),
@@ -283,7 +297,7 @@ def tally_refused(report: Optional[Dict[str, Any]], resolutions, labels: Mapping
                          "reason": reason[:_REASON_CHARS],
                          **({"at": where[r["_row_index"]]} if where and r["_row_index"] in where else {})})
     return {**out, "total": int(out["total"]) + len(refused), "byCode": by_code, "rows": rows,
-            "fixes": _fixes(by_code)}
+            "fixes": _fixes(by_code), "byKind": by_kind, **({"hints": hints} if hints else {})}
 
 
 def with_not_a_record(report: Optional[Dict[str, Any]], skipped: int) -> Optional[Dict[str, Any]]:
@@ -328,18 +342,49 @@ def where_text(row: Mapping[str, Any]) -> str:
     return f"rowIndex {row['rowIndex']}"
 
 
-def refused_digest(report: Optional[Dict[str, Any]], examples: int = 3) -> str:
-    """The report in a sentence or two, for a message: its reasons by count, then its first rows."""
+def refused_digest(report: Optional[Dict[str, Any]], examples: int = 3,
+                   prop: Optional[str] = None) -> str:
+    """The report in a sentence or two, for a message: its reasons by count, what one change of
+    the import's would fix (the root cause: rows that have a urn but not the property it matches
+    by), then its first rows."""
     if not report:
         return ""
     ranked = sorted(report["byCode"].items(), key=lambda kv: -kv[1])
     codes = ", ".join(f"{n} {code}" for code, n in ranked)
+    by_urn = int((report.get("hints") or {}).get(BY_URN) or 0)
+    cause = (f" identifier=prop.{prop},urn would find {by_urn} of them by their urn — rows without "
+             f"{prop}, and rows whose urn is an item's that has no {prop} yet (it then takes "
+             "theirs): send it so, and the edges refused for their ends find them too."
+             if by_urn and prop else "")
     rows = "; ".join(
         f"{where_text(r)}{' (' + r['label'] + ')' if r.get('label') else ''}: {r['code']}"
         f"{' — ' + r['reason'] if r.get('reason') else ''}" for r in report["rows"][:examples])
     fixes = report.get("fixes") or {}
     fix = " ".join(f"To fix {code}: {fixes[code]}" for code, _n in ranked[:2] if code in fixes)
-    return f" Refused: {codes}." + (f" First: {rows}." if rows else "") + (f" {fix}" if fix else "")
+    return (f" Refused: {codes}.{cause}" + (f" First: {rows}." if rows else "")
+            + (f" {fix}" if fix else ""))
+
+
+#: A node row refused, by a property alone, that ``identifier=prop.<name>,urn`` would find by its urn
+#: — one without the property but with a urn (``no_key``), or one whose urn is a node's that holds no
+#: value yet (``two_entities``): counted on the report (``hints``) so the failure names the one
+#: change that fixes them all.
+BY_URN = "by_urn"
+
+
+async def _persist_mentions(s, job_id: str, resolutions) -> None:
+    """Record, in ``s`` (the window's transaction), the live entities the rows name besides what
+    they matched (``mentions``: an edge's ends, what a refused row names by its keys) that no row
+    of this import matched: its replace keeps them (:meth:`ImportWorker._unmatched`). Those a row
+    matched are kept already, so a file that lists every node it links writes none."""
+    named = sorted({m for r in resolutions for m in r.get("mentions") or ()})
+    for chunk in _chunks(named, _PERSIST_BATCH):
+        matched = set((await s.execute(select(ImportRowORM.matched_entity_id).where(
+            ImportRowORM.job_id == job_id, ImportRowORM.matched_entity_id.in_(chunk)))).scalars())
+        rest = [m for m in chunk if m not in matched]
+        if rest:
+            await s.execute(pg_insert(ImportMentionORM.__table__).values(
+                [{"job_id": job_id, "entity_id": m} for m in rest]).on_conflict_do_nothing())
 
 
 class IdentifierMatchedNothing(Exception):
@@ -554,6 +599,9 @@ class ImportWorker:
         self._allow_mass_delete = False
         # How many of the file's rows may be refused before the import holds (refused_budget).
         self._refused_budget = refused_budget(None)
+        # What a replace may delete: "all" in its scope the file leaves out, or "keyed" — by a
+        # property, only the nodes that hold it, and the edges between two of them.
+        self._replace_scope = "all"
         # The replace guard's and fail-fast's limits: the job's (its data source's or the
         # platform's, when it was made), with where each came from.
         self._limits: Dict[str, Any] = platform_limits()
@@ -562,6 +610,13 @@ class ImportWorker:
         # changed after the draft's base), both ways; and the main commit those last are read to
         # (None on main, whose index is its view).
         self._prop: Optional[str] = None
+        # identifier=prop.<name>,urn: a row that doesn't carry the property is found by its urn.
+        self._urn_fallback = False
+        # The keys of the node rows this import refused (a urn, the file's entity_id, the matching
+        # property's value) -> (that row's index, its code): an edge end one of them was is refused
+        # as end_refused, naming the row to fix. Read again by a resumed run; at most
+        # _REFUSED_NAMES_MAX keys, past which an end is just end_not_found.
+        self._refused_names: Dict[str, Tuple[int, str]] = {}
         self._prop_of: Dict[str, Optional[str]] = {}
         self._prop_holders: Dict[str, set] = {}
         self._prop_seq: Optional[int] = None
@@ -585,6 +640,7 @@ class ImportWorker:
         self._allow_mass_delete = bool(job.get("allow_mass_delete"))
         self._limits = (job.get("import_settings") or {}).get("replaceLimits") or platform_limits()
         self._refused_budget = refused_budget((job.get("import_settings") or {}).get("maxRefusedRows"))
+        self._replace_scope = (job.get("import_settings") or {}).get("replaceScope") or "all"
         actor = await self._branch_owner(graph_id, branch_id)
         self._source = (job["source_uri"], job["import_format"])
 
@@ -593,9 +649,9 @@ class ImportWorker:
         try:
             summary = await self._resolve_and_build(
                 job_id, graph_id, branch_id, actor, job.get("reconcile_mode") or "upsert")
-        except ReplaceBlocked:
-            # Refused before it deleted anything, every row applied: what it made is on the draft
-            # for review, so it is placed in the draft's view as a completed run's is.
+        except (ReplaceBlocked, ReplaceRowsRefused):
+            # Refused before it deleted anything: what it made is on the draft for review, so it is
+            # placed in the draft's view as a completed run's is.
             if self._facts:
                 await self._derive_facts(job_id, graph_id, branch_id)
             raise
@@ -819,6 +875,7 @@ class ImportWorker:
             for group in shapes.values():
                 for chunk in _chunks(group, _PARSE_BATCH):
                     await s.execute(insert(ImportRowORM.__table__), chunk)
+            await _persist_mentions(s, job_id, [res for _row, res in slim])
             await self._lease.checkpoint(s, expect_cursor=self._cursor, last_cursor=cursor,
                                          processed=processed, summary=summary, **values)
         self._cursor = cursor
@@ -954,15 +1011,21 @@ class ImportWorker:
             pos = await self._position(job_id)
             invalid = int(pos.summary.get("invalid") or 0)
             if invalid and not within_budget(self._refused_budget, invalid + skipped, pos.total + skipped):
+                report = pos.summary.get("refused") or {}
+                kinds = report.get("byKind") or {}
+                which = " and ".join(f"{n} {kind} row(s)" for kind, n in              # nodes first:
+                                     sorted(kinds.items(), key=lambda kv: kv[0] != "node") if n)  # their edges follow
                 raise ReplaceRowsRefused(
-                    f"Nothing was deleted: {invalid} row(s) of the file were refused, and a replace "
-                    "deletes whatever the file leaves out — which could include what those rows "
-                    f"name.{refused_digest(pos.summary.get('refused'))} The job's summary.refused "
-                    f"lists the first {REFUSED_EXAMPLES} with why, and GET …/imports/{job_id}/preview "
-                    "more. The file's other rows are on the draft. Fix those rows and import the file "
-                    "again, or send it with maxRefusedRows (a count, a share such as 1%, or -1 for "
-                    "any) to replace with the rows that applied: what a refused row still names is "
-                    "kept.")
+                    f"Nothing was deleted: {which or f'{invalid} row(s)'} of the file were refused, "
+                    "and a replace deletes whatever the file leaves out — which could include what "
+                    f"those rows name.{refused_digest(report, prop=None if self._urn_fallback else self._prop)} "
+                    f"The job's summary.refused lists the first {REFUSED_EXAMPLES} with why, and "
+                    f"GET …/imports/{job_id}/preview?refused=true all of them. The file's other rows "
+                    "are on the draft. Fix those rows and import the file again, or send it with "
+                    "maxRefusedRows (a count, a share such as 1%, or -1 for any) to replace with the "
+                    "rows that applied: whatever a refused row names, by any key it carries, is kept, "
+                    "and so is every node an edge row names as an end.",
+                    phase="nodes" if kinds.get("node") or not kinds else "edges")
             if (await self._position(job_id)).cursor != "replace":       # not deleting yet
                 await self._lease.retry_transient(
                     lambda: self._guard_replace(job_id, snap), never=(ReplaceBlocked,))
@@ -970,6 +1033,8 @@ class ImportWorker:
                 lambda: self._delete_absent(job_id, snap, graph_id, branch_id, actor))
         summary = (await self._position(job_id)).summary
         tallies = {k: int(summary.get(k) or 0) for k in _TALLIES}
+        if summary.get("edgesCascaded"):             # the edges a replace's node deletes took
+            tallies["edgesCascaded"] = int(summary["edgesCascaded"])
         report = with_not_a_record(summary.get("refused"), skipped)
         if report:
             tallies["refused"] = report
@@ -1017,6 +1082,7 @@ class ImportWorker:
             if report:
                 summary["refused"] = report
             await self._persist_resolutions(s, job_id, resolutions)
+            await _persist_mentions(s, job_id, resolutions)
             await self._lease.checkpoint(
                 s, expect_cursor=pos.cursor, last_cursor=f"{step}:{rows[-1]['_row_index']}",
                 processed=processed, summary=summary, current_phase=f"{kind}s",
@@ -1025,7 +1091,11 @@ class ImportWorker:
         await self._apply_window(graph_id, branch_id, actor, ops, resolutions, on_commit)
         if kind == "node":
             self._remember_created(rows, ops, resolutions)
-            if pos.cursor in ("node:-1", "mnode:-1") and len(rows) == config.IMPORT_COMMIT_WINDOW:
+            self._remember_refused(rows, resolutions)
+            # After the first node window — the whole file's nodes, for a small one: a few rows by
+            # the wrong identifier would otherwise delete a large graph, the guard measuring what a
+            # small file makes against all of it.
+            if pos.cursor in ("node:-1", "mnode:-1"):
                 await self._fail_fast(job_id, snap)
         return True
 
@@ -1072,23 +1142,33 @@ class ImportWorker:
         draft makes every entity it holds that main doesn't: a file naming the view's entities by
         another key makes them all again outside the view, where its placements don't reach."""
         keep = (await view_entities(snap, self._scope))["keep"] if self._scope else None
+        keyed = self._keyed()
         main = snap.main_at_base()
         live = absent = before = 0
         for kind in ("edge", "node"):
-            async for page in _in_scope(snap, kind, keep):
+            async for page in self._scope_pages(snap, kind, keep):
                 live += len(page)
                 absent += len(await self._unmatched(job_id, page))
-                if keep is not None:
+                if keep is not None or keyed:
                     before += len(await main.lookup_live(kind, page))
         pos = await self._position(job_id)
         made = int(pos.summary.get("new") or 0)
         if keep is None:
-            before = await _live_count(main)
+            if not keyed:
+                before = await _live_count(main)
             creates = max(live - before, made)
         else:
             creates = await _made_on_draft(snap, main)
-        verdict = replace_verdict(before, absent, creates, allowed=self._allow_mass_delete,
+        # A refused row that matched nothing is a row the identifier found no entity for, as a
+        # create is: counted with them, a file whose rows can't be matched is refused whatever
+        # budget let its refused rows through, instead of deleting its scope and making nothing.
+        unmatched = await self._refused_unmatched(job_id)
+        verdict = replace_verdict(before, absent, creates + unmatched, allowed=self._allow_mass_delete,
                                   limits=self._limits)
+        if unmatched:
+            verdict["refusedUnmatched"] = unmatched
+        if keyed:
+            verdict["scope"] = "keyed"
         async with db.graphver_session() as s:
             await self._lease.checkpoint(s, summary={**pos.summary, "replaceGuard": verdict})
         if verdict["state"] == "overridden":
@@ -1101,7 +1181,9 @@ class ImportWorker:
                  else "the platform's")
         raise ReplaceBlocked(
             f"Nothing was deleted: this replace would delete {absent:,} of the {verdict['live']:,} "
-            f"entities in its scope, and its draft makes {creates:,} new ones: past the replace "
+            f"entities in its scope, and its draft makes {creates:,} new ones"
+            + (f" while {unmatched:,} of its rows matched nothing and were refused" if unmatched else "")
+            + ": past the replace "
             f"guard, which by {whose} limits refuses one "
             f"that deletes at least {limits['deleteFraction']:.0%} of a scope of "
             f"{limits['minLive']:,} or more and creates at least {limits['createFraction']:.0%} as "
@@ -1124,12 +1206,13 @@ class ImportWorker:
             derive_key=(lambda value: key_pointer_id(scope, self._prop, value)) if self._prop else None)
 
     def _settle_identifier(self) -> None:
-        """Once the data source's identifier property is known: ``prop.<it>`` is the urn, which that
-        property holds; any other ``prop.<name>`` is matched through the property's index."""
-        if self._identity_prop and self._identifier == f"prop.{self._identity_prop}":
+        """Once the data source's identifier property is known: ``prop.<it>`` (``,urn`` or not) is
+        the urn, which that property holds; any other ``prop.<name>`` is matched through the
+        property's index, and with ``,urn`` a row that doesn't carry it by its urn."""
+        if self._identity_prop and identifiers.property_of(self._identifier) == self._identity_prop:
             self._identifier = identifiers.URN
-        self._prop = (self._identifier[len("prop."):] if self._identifier.startswith("prop.")
-                      else None)
+        self._prop = identifiers.property_of(self._identifier)
+        self._urn_fallback = identifiers.falls_back(self._identifier)
 
     async def _prop_state(self, snap, graph_id: str, branch_id: str, *, build: bool,
                           job_id: Optional[str] = None) -> None:
@@ -1218,6 +1301,8 @@ class ImportWorker:
         self._settle_identifier()
         await self._prop_state(snap, graph_id, branch_id, build=True, job_id=job_id)
         self._created_from, self._aliases = {}, {}
+        self._refused_names = {}
+        await self._read_refused(job_id)
         # Only the rows that leave a link: a file id that is not the node's own, or an identifier
         # value beside a urn — never a whole row, which a large job has millions of.
         fid, urn = ImportRowORM.raw["entity_id"].astext, ImportRowORM.raw["urn"].astext
@@ -1299,6 +1384,33 @@ class ImportWorker:
         if ident and urn and pointer_seed(ident) != pointer_seed(urn):
             for name in pointers(ident):
                 self._aliases[name] = eid
+
+    def _remember_refused(self, rows, resolutions) -> None:
+        """A committed node window's refused rows, by the keys they carry, for :attr:`_refused_names`."""
+        by_index = {r["_row_index"]: r for r in rows}
+        for res in resolutions:
+            if res.get("status") != "invalid" or res.get("kind") != "node":
+                continue
+            self._note_refused(by_index.get(res["_row_index"]) or {}, res["_row_index"],
+                               res.get("code") or "invalid_row")
+
+    def _note_refused(self, row: Mapping[str, Any], index: int, code: str) -> None:
+        for key in (row.get("urn"), row.get("entity_id"),
+                    (row.get("properties") or {}).get(self._prop) if self._prop else None):
+            k = key_value(key)
+            if k and len(self._refused_names) < _REFUSED_NAMES_MAX:
+                self._refused_names.setdefault(k, (index, code))
+
+    async def _read_refused(self, job_id: str) -> None:
+        """A resumed run: the keys of the node rows earlier windows refused (:meth:`_note_refused`)."""
+        async with db.graphver_session() as s:
+            rows = (await s.execute(
+                select(ImportRowORM.row_index, ImportRowORM.code, ImportRowORM.raw)
+                .where(ImportRowORM.job_id == job_id, ImportRowORM.kind == "node",
+                       ImportRowORM.resolved_op == "invalid")
+                .order_by(ImportRowORM.row_index).limit(_REFUSED_NAMES_MAX))).all()
+        for index, code, raw in rows:
+            self._note_refused(raw or {}, index, code or "invalid_row")
 
     def _remember_created(self, rows, ops, resolutions) -> None:
         """A committed node window's rows, for the windows after it: the node each matched or
@@ -1391,12 +1503,13 @@ class ImportWorker:
                 .order_by(ImportRowORM.row_index).limit(config.IMPORT_COMMIT_WINDOW))).all()
         return [{**raw, "_row_index": idx} for idx, raw in rows]
 
-    async def _pointer_hits(self, snap, names) -> Dict[str, str]:
+    async def _pointer_hits(self, snap, names, by_urn: Optional[Dict[str, str]] = None) -> Dict[str, str]:
         """``{name: node id}`` for the names rows point at nodes by: the live node that carries the
-        name as its urn; else the live node whose id the name derives (one an import made from it);
-        else the node a row of this job gave it to as a second name."""
+        name as its urn (``by_urn``, when the caller read it already); else the live node whose id
+        the name derives (one an import made from it); else the node a row of this job gave it to
+        as a second name."""
         names = {n for n in names if n}
-        hits = dict(await snap.nodes_by_urn(names))
+        hits = dict(by_urn if by_urn is not None else await snap.nodes_by_urn(names))
         derived = {n: pointer_id(self._id_scope, pointer_seed(n)) for n in names - set(hits)}
         live = await snap.lookup_live("node", set(derived.values()))
         hits.update({n: d for n, d in derived.items() if d in live})
@@ -1439,21 +1552,35 @@ class ImportWorker:
         """:meth:`_node_lookups` for ``identifier=prop.<name>``: the live nodes the rows name by
         entity_id or by the property's value, with their current payloads; and of the ids the rows
         that match nothing would take (derived from their values), those a live node holds, and of
-        their urns, the live node holding each."""
+        their urns, the live node holding each. And the node each row's urn names as
+        ``identifier=urn`` finds it (``urn_hits``), with its payload: with ``,urn`` what a row without
+        the property is found by — and what a node found so would be made as, the ids its urn derives
+        that are taken and those a deleted node held — and either way what a refused row names, which
+        a replace keeps."""
         values = {v for r in rows if (v := key_value((r.get("properties") or {}).get(self._prop)))}
+        named_by_urn = {n for r in rows for n in pointers(r.get("urn"))}   # as given, and canonical
         urns = {u for r in rows if (u := key_value(r.get("urn"))) and not uuid_urn(u)}
         by_id = await snap.lookup_live("node", {r["entity_id"] for r in rows if r.get("entity_id")})
         hits, dupes, restore = await self._prop_hits(snap, values)
-        named = set(by_id) | set(hits.values())
+        held = await snap.nodes_by_urn(named_by_urn) if named_by_urn else {}
+        urn_hits = await self._pointer_hits(snap, named_by_urn, by_urn=held)
+        named = set(by_id) | set(hits.values()) | set(urn_hits.values())
         named |= {self._created_from[f] for r in rows if (f := r.get("entity_id")) in self._created_from}
         derived = {key_pointer_id(self._id_scope, self._prop, v)
                    for v in values - set(hits) - set(dupes) - set(restore)}
         taken = set(await snap.lookup_live("node", derived)) if derived else set()
         current, hash_of = await _heads(snap, "node", named)
-        return {"urn_to_eid": hits, "dupes": dupes, "restore": restore, "taken": taken,
-                "urn_held": await snap.nodes_by_urn(urns) if urns else {},
-                "qname_to_eid": {}, "node_eids": named, "current": current, "hash_of": hash_of,
-                "bases": await _bases(snap, "node", rows, hash_of)}
+        lookups = {"urn_to_eid": hits, "dupes": dupes, "restore": restore, "taken": taken,
+                   "urn_held": {u: e for u, e in held.items() if u in urns}, "urn_hits": urn_hits,
+                   "qname_to_eid": {}, "node_eids": named, "current": current, "hash_of": hash_of,
+                   "bases": await _bases(snap, "node", rows, hash_of)}
+        if self._urn_fallback:
+            by_its_urn = {n for r in rows
+                          if not key_value((r.get("properties") or {}).get(self._prop))
+                          for n in pointers(r.get("urn"))} - set(urn_hits)
+            lookups["urn_taken"], lookups["urn_restore"] = await self._svc.identities_taken(
+                graph_id=self._graph_id, branch_id=self._branch_id, names=by_its_urn)
+        return lookups
 
     async def _prop_edge_lookups(self, snap, rows) -> Dict[str, Any]:
         """:meth:`_edge_lookups` for ``identifier=prop.<name>``: ends named by entity_id (an
@@ -1465,14 +1592,18 @@ class ImportWorker:
             hits, dupes, _restore = await self._prop_hits(snap, {
                 key_value((r.get(f"{end}Keys") or {}).get(self._prop)) for r in rows})
             more = {self._created_from.get(r.get(f"{end}_entity_id") or "") for r in rows}
-            ends[end] = (by_id, hits, dupes, {e for e in more if e})
-        (src_ids, src_hits, src_dupes, src_more), (tgt_ids, tgt_hits, tgt_dupes, tgt_more) = (
-            ends["source"], ends["target"])
+            # An end by its sourceUrn, as identifier=urn finds it: with ,urn what it is found by;
+            # by the property alone what a refused row names, with the edge between, both kept.
+            by_urn = await self._pointer_hits(snap, {n for r in rows for n in pointers(r.get(f"{end}Urn"))})
+            ends[end] = (by_id, hits, dupes, {e for e in more if e} | set(by_urn.values()), by_urn)
+        (src_ids, src_hits, src_dupes, src_more, src_urns), (tgt_ids, tgt_hits, tgt_dupes, tgt_more,
+                                                             tgt_urns) = (ends["source"], ends["target"])
         edge_to_eid = await snap.edges_between(set(src_ids) | set(src_hits.values()) | src_more,
                                                set(tgt_ids) | set(tgt_hits.values()) | tgt_more)
         own = {r["entity_id"] for r in rows if r.get("entity_id")}
         current, hash_of = await _heads(snap, "edge", set(edge_to_eid.values()) | own)
         return {"urn_to_eid": {**src_hits, **tgt_hits}, "dupes": {**src_dupes, **tgt_dupes},
+                "urn_hits": {**src_urns, **tgt_urns},
                 "qname_to_eid": {}, "node_eids": set(src_ids) | set(tgt_ids),
                 "edge_to_eid": edge_to_eid, "edge_eids": own & set(hash_of), "current": current,
                 "hash_of": hash_of, "bases": await _bases(snap, "edge", rows, hash_of)}
@@ -1480,9 +1611,15 @@ class ImportWorker:
     async def _edge_lookups(self, snap, rows) -> Dict[str, Any]:
         """What ``resolve_rows`` needs for these edge rows: the live nodes their endpoints name (by
         entity_id, urn, or — an end without a urn — qualifiedName), the live edges between those
-        nodes, and each such edge's current payload."""
-        if self._prop:
-            return await self._prop_edge_lookups(snap, rows)
+        nodes, and each such edge's current payload; and the keys of the node rows this import
+        refused, so an end one of them was says so (``end_refused``)."""
+        lookups = await (self._prop_edge_lookups(snap, rows) if self._prop
+                         else self._plain_edge_lookups(snap, rows))
+        lookups["refused_names"] = self._refused_names
+        return lookups
+
+    async def _plain_edge_lookups(self, snap, rows) -> Dict[str, Any]:
+        """:meth:`_edge_lookups` by ``entity_id`` or ``urn``."""
         ends = {}
         ident = self._identity_prop
         for end in ("source", "target"):
@@ -1568,34 +1705,84 @@ class ImportWorker:
         deleted = 0
         keep = (await view_entities(snap, self._scope))["keep"] if self._scope else None
         for kind in ("edge", "node"):
-            async for page in _in_scope(snap, kind, keep):
+            async for page in self._scope_pages(snap, kind, keep):
                 absent = await self._unmatched(job_id, page)
                 if absent:
+                    # The edges that go with these nodes (``edgesCascaded``): after the edge pass,
+                    # only those reaching outside a view's scope — a node an edge row named is kept.
+                    cascaded = len(await snap.incident_edges(absent)) if kind == "node" else 0
                     await self._svc.apply_ops(
                         graph_id=graph_id, actor=actor, branch_id=branch_id, message="import",
                         ops=[{"op": "delete", "entity_kind": kind, "entity_id": eid, "payload": None}
                              for eid in absent],
-                        on_commit=self._count_deleted(job_id, len(absent)))
+                        on_commit=self._count_deleted(job_id, len(absent), cascaded))
                     deleted += len(absent)
         return deleted
 
-    def _count_deleted(self, job_id: str, n: int):
+    def _count_deleted(self, job_id: str, n: int, cascaded: int = 0):
         """The end of a replace page's transaction: the job's checkpoint, adding the page's ``n``
-        deletes to the tally the row holds."""
+        deletes to the tally the row holds, and the ``cascaded`` edges they took with them
+        (``edgesCascaded``)."""
         async def on_commit(s) -> None:
             summary = await s.scalar(select(JobORM.summary).where(JobORM.id == job_id))
             summary = dict(summary) if isinstance(summary, dict) else {}
             summary["deleted"] = int(summary.get("deleted") or 0) + n
+            if cascaded:
+                summary["edgesCascaded"] = int(summary.get("edgesCascaded") or 0) + cascaded
             await self._lease.checkpoint(s, last_cursor="replace", current_phase="replace",
                                          summary=summary)
         return on_commit
 
+    def _keyed(self) -> bool:
+        """Whether this replace deletes only what holds its identifier's property
+        (``replaceScope=keyed``): by the urn or an entity id, every node holds its key."""
+        return self._replace_scope == "keyed" and bool(self._prop)
+
+    async def _scope_pages(self, snap, kind: str, keep):
+        """:func:`_in_scope`'s pages, with ``replaceScope=keyed`` only what holds the property: a
+        node that does, and an edge whose two ends do. A node made in the UI or by another source,
+        which never had it, is left alone — and so are its edges."""
+        async for page in _in_scope(snap, kind, keep):
+            if self._keyed():
+                page = await self._holding_only(snap, kind, page)
+            if page:
+                yield page
+
+    async def _holding_only(self, snap, kind: str, page: List[str]) -> List[str]:
+        if kind == "node":
+            holding = await self._holding(page)
+            return [e for e in page if e in holding]
+        edges = await snap.lookup_live("edge", page)
+        holding = await self._holding({e for w in edges.values() for e in (w.source_id, w.target_id)})
+        return [e for e in page
+                if (w := edges.get(e)) is not None and w.source_id in holding and w.target_id in holding]
+
+    async def _holding(self, nodes) -> set:
+        """Those of ``nodes`` that hold the matching property, as the draft holds them: its own
+        values (and this job's, and main's since its base) first, else main's index."""
+        nodes = set(nodes)
+        held = {e for e in nodes if self._prop_of.get(e)}
+        rest = nodes - set(self._prop_of)
+        return held | (await matching.holders_among(self._graph_id, self._prop, rest) if rest else set())
+
+    async def _refused_unmatched(self, job_id: str) -> int:
+        """How many of the import's rows were refused naming no entity it matched."""
+        async with db.graphver_session() as s:
+            return int(await s.scalar(select(func.count()).select_from(ImportRowORM).where(
+                ImportRowORM.job_id == job_id, ImportRowORM.matched_entity_id.is_(None),
+                ImportRowORM.resolved_op == "invalid")) or 0)
+
     async def _unmatched(self, job_id: str, eids: List[str]) -> List[str]:
-        """Those of ``eids`` no row of this import matched."""
+        """Those of ``eids`` no row of this import matched, nor names (:class:`ImportMentionORM`:
+        an edge row's ends, what a refused row names by a key it carries): what a replace deletes."""
         async with db.graphver_session() as s:
             matched = set((await s.execute(
                 select(ImportRowORM.matched_entity_id).where(
                     ImportRowORM.job_id == job_id, ImportRowORM.matched_entity_id.in_(eids))
+            )).scalars())
+            matched |= set((await s.execute(
+                select(ImportMentionORM.entity_id).where(
+                    ImportMentionORM.job_id == job_id, ImportMentionORM.entity_id.in_(eids))
             )).scalars())
         return [eid for eid in eids if eid not in matched]
 
@@ -1649,6 +1836,8 @@ async def sweep_staged_rows(*, older_than_days: float, batch: int = 50_000) -> i
                 first = select(ImportRowORM.row_index).where(ImportRowORM.job_id == job_id).limit(batch)
                 gone = (await s.execute(delete(ImportRowORM).where(
                     ImportRowORM.job_id == job_id, ImportRowORM.row_index.in_(first)))).rowcount
+                if gone < batch:                   # its last rows: what they named goes with them
+                    await s.execute(delete(ImportMentionORM).where(ImportMentionORM.job_id == job_id))
             removed += gone
             if gone < batch:
                 break

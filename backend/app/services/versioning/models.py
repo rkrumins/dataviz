@@ -665,6 +665,24 @@ class ImportRowORM(VersioningBase):
     )
 
 
+class ImportMentionORM(VersioningBase):
+    """An entity an import's rows name though no node row of it matched the entity — an edge's end,
+    or what a refused row names by a key it carries (its urn, its entity_id, a value of the matching
+    property): its replace keeps it, as it keeps what a row matched (``import_worker._unmatched``),
+    so a refused row never makes a replace delete what it names, nor an edge row its ends. A file
+    that lists every node it links writes none. Transient, by job, like ``import_rows``, and
+    deleted with them (20261113_0900_gv_import_mentions)."""
+
+    __tablename__ = "import_mentions"
+
+    job_id = Column(Text, nullable=False)
+    entity_id = Column(Text, nullable=False)
+
+    __table_args__ = _plain(
+        PrimaryKeyConstraint("job_id", "entity_id", name="pk_import_mentions"),
+    )
+
+
 class BootstrapNodeORM(VersioningBase):
     """One source node seen by an "enable version control" pre-flight (``bootstrap_worker``).
 

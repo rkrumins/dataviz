@@ -26,7 +26,7 @@ from backend.app.services.storage.object_store import get_object_store, storage_
 from .. import config, db, provenance
 from ..errors import JobActive, MainWriteForbidden, _HttpMapped
 from ..job_lease import Draining, Lease, Superseded, friendly_infra_error, is_transient
-from ..models import BranchORM, GraphORM, ImportRowORM, JobORM, MergeRequestORM
+from ..models import BranchORM, GraphORM, ImportMentionORM, ImportRowORM, JobORM, MergeRequestORM
 from ..service import AccessDenied, ConcurrencyError, GraphVersioningService, NotUpToDate, Viewer
 from . import contract, stream
 from . import identifier as identifiers
@@ -436,7 +436,7 @@ class ImportExportService:
             # Refused by the replace's own checks: nothing deleted, the rows on the draft. The
             # failure says why (``summary.failure.code``) and what to do (``action``).
             logger.warning("import job %s stopped: %s", job_id, exc)
-            await lease.fail(str(exc), exc.code, exc.action)
+            await lease.fail(str(exc), exc.code, exc.action, phase=getattr(exc, "phase", None))
         except Exception as exc:
             logger.exception("job %s failed", job_id)
             if is_transient(exc):          # an outage that outlasted the retry budget: resumable
@@ -529,8 +529,8 @@ class ImportExportService:
         try:
             summary = await (worker.run(job_id, lease=lease) if lease is not None
                              else worker.run(job_id))
-        except ReplaceBlocked:
-            # A view's replace the guard refused leaves what it made on the draft for review: placed
+        except (ReplaceBlocked, ReplaceRowsRefused):
+            # A view's replace the guard (or its refused rows) stopped leaves what it made on the draft for review: placed
             # in the draft's view too, so the override — the file imported again into that draft
             # with allowMassDelete, which makes nothing — finds it in the view's scope, and the
             # view shows it once the draft is published.
@@ -542,12 +542,15 @@ class ImportExportService:
         if view_id and self._layout_writer is not None and worker.created_node_facts:
             await self._apply_view_layout(job_id, ws, ds, view_id, branch_id, worker)
         if auto_publish:          # after the layout, so the placements are published with the data
+            # By a property alone, the refused rows that have a urn are named, with the fix.
+            prop = None if getattr(worker, "_urn_fallback", False) else getattr(worker, "_prop", None)
             await asyncio.shield(self._auto_publish(job_id, ws, ds, graph_id, branch_id, summary,
-                                                    budget=refused_budget(settings.get("maxRefusedRows"))))
+                                                    budget=refused_budget(settings.get("maxRefusedRows")),
+                                                    prop=prop))
         return summary
 
     async def _auto_publish(self, job_id, ws, ds, graph_id, branch_id, summary, *,
-                            budget: str = "0") -> None:
+                            budget: str = "0", prop: Optional[str] = None) -> None:
         """Publish the draft a completed import opened, as it asked (``autoPublish``), and record
         how that went on its summary (``publish``), as :meth:`_apply_view_layout` records the
         layout:
@@ -571,7 +574,7 @@ class ImportExportService:
                 note = {"state": "skipped", "reason": {
                     "type": "rows_refused", "rows": refused,
                     "message": f"{refused} row(s) of the file were refused, so the draft waits for "
-                               f"someone to review it.{refused_digest(summary.get('refused'))} Fix "
+                               f"someone to review it.{refused_digest(summary.get('refused'), prop=prop)} Fix "
                                "them and import the file again, or send it with maxRefusedRows (a "
                                "count, a share such as 1%, or -1 for any) to publish without them."}}
             else:
@@ -1070,6 +1073,7 @@ class ImportExportService:
                                                 f"{active}). Retry this one once it has finished.")
                 if row.last_cursor is None:
                     await s.execute(delete(ImportRowORM).where(ImportRowORM.job_id == job_id))
+                    await s.execute(delete(ImportMentionORM).where(ImportMentionORM.job_id == job_id))
                 summary = row.summary if isinstance(row.summary, dict) else {}
                 row.summary = {k: v for k, v in summary.items() if k not in ("takeovers", "failure")} or None
                 row.status, row.current_phase = "pending", QUEUED
@@ -1198,7 +1202,7 @@ class ImportExportService:
         lookups: Dict[str, Any] = await worker._node_lookups(snap, nodes) if nodes else {}
         if edges:                                    # one call: an edge finds a node made above it
             more = await worker._edge_lookups(snap, edges)
-            for key in ("urn_to_eid", "qname_to_eid", "current", "hash_of", "bases", "dupes"):
+            for key in ("urn_to_eid", "qname_to_eid", "current", "hash_of", "bases", "dupes", "urn_hits"):
                 lookups[key] = {**more.get(key, {}), **lookups.get(key, {})}
             lookups["node_eids"] = set(lookups.get("node_eids") or ()) | more["node_eids"]
             lookups["edge_to_eid"] = more["edge_to_eid"]

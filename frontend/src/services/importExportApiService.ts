@@ -38,6 +38,8 @@ export interface ImportSummary {
   failure?: { code: string; action?: string | null; reason?: string } | null
   /** The rows the import refused: how many for each reason, and the first ones, with why. */
   refused?: RefusedRows | null
+  /** A replace: the edges its node deletes took with them (an edge never outlives its ends). */
+  edgesCascaded?: number
 }
 
 /** An import's report of the rows it refused (`summary.refused`). */
@@ -49,6 +51,11 @@ export interface RefusedRows {
   rows: RefusedRow[]
   /** What to do about each reason it counts. */
   fixes?: Record<string, string>
+  /** How many of them were node rows, and how many edge rows. */
+  byKind?: Record<string, number>
+  /** What one change of the import's would fix: `by_urn`, rows `identifier=prop.<name>,urn` would
+   *  find by their urn (without the property, or whose urn is an item's that has none yet). */
+  hints?: Record<string, number>
 }
 
 /** A row an import refused: where it is in the file, and why. */
@@ -231,6 +238,9 @@ export interface CreateImportOptions {
   /** How many refused rows the import may go on without: a count, a share (`0.5%`), or `-1`
    *  (any). Left out, the platform's (none, by default). */
   maxRefusedRows?: string
+  /** A replace by a property: `keyed` deletes only the items that hold it (and edges between two
+   *  of them) the file leaves out; `all`, the default, anything it leaves out. */
+  replaceScope?: 'all' | 'keyed'
 }
 
 /** The statuses a job ends in. */
@@ -471,6 +481,7 @@ export async function importInParts(
   if (opts.identifier) params.set('identifier', opts.identifier)
   if (opts.allowMassDelete) params.set('allowMassDelete', 'true')
   if (opts.maxRefusedRows) params.set('maxRefusedRows', opts.maxRefusedRows)
+  if (opts.replaceScope === 'keyed') params.set('replaceScope', 'keyed')
   const created = await authFetch<CreateImportResult>(
     `${uploadsUrl(wsId, graphId)}/${upload.uploadId}/complete?${params.toString()}`, { method: 'POST' })
   remember(key, null)

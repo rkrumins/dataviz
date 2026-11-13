@@ -97,6 +97,8 @@ export function ImportDialog({ wsId, graphId, branchId, viewId, onClose, onRevie
   const [upload, setUpload] = useState<{ sent: number; total: number } | null>(null)
   // What its rows find their items by: null takes the graph's default, which the server applies.
   const [match, setMatch] = useState<Match | null>(null)
+  // A replace by a property: delete only the items that hold it (replaceScope=keyed).
+  const [keyedOnly, setKeyedOnly] = useState(false)
   const [settings, setSettings] = useState<ImportSettings | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
   useEffect(() => {
@@ -126,8 +128,8 @@ export function ImportDialog({ wsId, graphId, branchId, viewId, onClose, onRevie
   const note = matchNote(match, settings)
 
   /** ``past``: a replace that was held, sent again into its draft — past the replace guard, or
-   *  (``refused``) without the rows it refused. */
-  async function start(past?: { branchId: string; refused?: boolean }) {
+   *  (``refused``) without the rows it refused, or (``identifier``) matching by another key. */
+  async function start(past?: { branchId: string; refused?: boolean; identifier?: string }) {
     if (!file) return
     setPhase('running')
     setError(null)
@@ -139,8 +141,10 @@ export function ImportDialog({ wsId, graphId, branchId, viewId, onClose, onRevie
     try {
       const created = await importInParts(wsId, graphId, file, {
         format, reconcileMode, branchId: past?.branchId ?? branchId, viewId, signal: run.signal,
-        identifier: match ? formatIdentifier(match) : undefined,
-        allowMassDelete: !!past && !past.refused, maxRefusedRows: past?.refused ? '-1' : undefined,
+        identifier: past?.identifier ?? (match ? formatIdentifier(match) : undefined),
+        allowMassDelete: !!past && !past.refused && !past.identifier,
+        maxRefusedRows: past?.refused ? '-1' : undefined,
+        replaceScope: reconcileMode === 'replace' && keyedOnly ? 'keyed' : undefined,
         onProgress: (sent, total) => setUpload({ sent, total }),
       })
       setResultBranch(created.branchId)
@@ -204,6 +208,7 @@ export function ImportDialog({ wsId, graphId, branchId, viewId, onClose, onRevie
               format={format} setFormat={(f) => { setFormat(f); setAutoDetected(false) }} autoDetected={autoDetected}
               warning={warning} viewScoped={!!viewId}
               match={match} setMatch={setMatch} graphDefault={settings?.effective.identifier ?? null} note={note}
+              keyedOnly={keyedOnly} setKeyedOnly={setKeyedOnly}
               onDownloadTemplate={(fmt) => triggerBrowserDownload(templateDownloadUrl(wsId, graphId, fmt), `import-template.${fmt}`)}
             />
           )}
@@ -240,6 +245,16 @@ export function ImportDialog({ wsId, graphId, branchId, viewId, onClose, onRevie
               <button onClick={() => void start({ branchId: job.branchId! })}
                 className="flex items-center gap-2 px-4 py-2 rounded-xl border border-rose-300 dark:border-rose-800/60 text-rose-600 dark:text-rose-400 text-sm font-semibold hover:bg-rose-50 dark:hover:bg-rose-950/30 transition-colors">
                 <Trash2 className="w-4 h-4" /> Replace anyway
+              </button>
+            )}
+            {phase === 'failed' && byUrnFix(job) && job?.branchId && (
+              <button onClick={() => {
+                const fix = byUrnFix(job)!
+                setMatch(parseIdentifier(fix))
+                void start({ branchId: job.branchId!, identifier: fix })
+              }}
+                className="flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-500 text-white text-sm font-semibold hover:bg-indigo-600 transition-colors shadow-sm">
+                <Sparkles className="w-4 h-4" /> Find them by their urn
               </button>
             )}
             {phase === 'failed' && heldForRows(job) && job?.branchId && (
@@ -283,10 +298,13 @@ function ChooseStep(props: {
   /** The graph's default identifier; null while it isn't known (the server applies it). */
   graphDefault: string | null
   note: { block: boolean; text: string } | null
+  keyedOnly: boolean
+  setKeyedOnly: (v: boolean) => void
 }) {
   const {
     file, setFile, dragging, setDragging, onDrop, inputRef, reconcileMode, setReconcileMode,
     format, setFormat, autoDetected, warning, viewScoped, match, setMatch, graphDefault, note,
+    keyedOnly, setKeyedOnly,
   } = props
   const fallback = graphDefault ? parseIdentifier(graphDefault) : null
   const shown = match ?? fallback
@@ -438,9 +456,31 @@ function ChooseStep(props: {
             ))}
           </div>
           {shown?.kind === 'prop' && (
-            <input aria-label="Property name" placeholder="external_id" value={shown.name}
-              onChange={(e) => setMatch({ kind: 'prop', name: e.target.value })}
-              className="mt-2 w-full px-2.5 py-1.5 rounded-lg bg-canvas-elevated border border-glass-border text-[12px] font-mono text-ink focus:outline-none focus:border-indigo-500/50" />
+            <>
+              <input aria-label="Property name" placeholder="external_id" value={shown.name}
+                onChange={(e) => setMatch({ ...shown, kind: 'prop', name: e.target.value })}
+                className="mt-2 w-full px-2.5 py-1.5 rounded-lg bg-canvas-elevated border border-glass-border text-[12px] font-mono text-ink focus:outline-none focus:border-indigo-500/50" />
+              <label className="mt-2 flex items-start gap-2 text-[11px] text-ink-muted leading-relaxed cursor-pointer">
+                <input type="checkbox" checked={!!shown.orUrn}
+                  onChange={(e) => setMatch({ ...shown, kind: 'prop', orUrn: e.target.checked })}
+                  className="mt-0.5 accent-indigo-500" />
+                <span>
+                  <span className="font-medium text-ink-secondary">Rows without it: find them by their urn.</span>{' '}
+                  For an item your source has no id for, such as a top-level container. An item found
+                  by its urn takes the property, so the next import finds it by the property.
+                </span>
+              </label>
+              {reconcileMode === 'replace' && (
+                <label className="mt-1.5 flex items-start gap-2 text-[11px] text-ink-muted leading-relaxed cursor-pointer">
+                  <input type="checkbox" checked={keyedOnly} onChange={(e) => setKeyedOnly(e.target.checked)}
+                    className="mt-0.5 accent-amber-500" />
+                  <span>
+                    <span className="font-medium text-ink-secondary">Delete only items that have this property.</span>{' '}
+                    Items made in the app or by another source, which never had it, are left alone.
+                  </span>
+                </label>
+              )}
+            </>
           )}
           <p className="text-[11px] text-ink-muted mt-1.5 leading-relaxed">
             {shown ? MATCH_KINDS.find((m) => m.kind === shown.kind)!.help
@@ -603,6 +643,10 @@ function DoneStep({ summary, previewRows, identifier, wsId, graphId, jobId }: {
             <p className="text-[11px] text-ink-muted mt-0.5">
               Replace removes items not in your file. They're only staged for now — review every deletion
               in the Changes tab before you publish; nothing is removed until then.
+              {!!s.edgesCascaded && <>
+                {' '}{s.edgesCascaded.toLocaleString()} {s.edgesCascaded === 1 ? 'edge goes' : 'edges go'} with
+                them, to items outside what the file replaces: an edge never outlives its ends.
+              </>}
             </p>
           </div>
         </div>
@@ -696,6 +740,16 @@ function heldForRows(job: Job | null): boolean {
   return (job?.summary as ImportSummary | null | undefined)?.failure?.code === 'rows_refused'
 }
 
+/** For a job matched by a property alone whose refused rows have a urn but not the property: the
+ *  identifier that finds them by their urn (`prop.<name>,urn`); else null. */
+function byUrnFix(job: Job | null): string | null {
+  const ident = job?.identifier
+  const hasUrn = refusedOf(job)?.hints?.by_urn ?? 0
+  if (!ident || !hasUrn) return null
+  const m = parseIdentifier(ident)
+  return m.kind === 'prop' && !m.orUrn ? formatIdentifier({ ...m, orUrn: true }) : null
+}
+
 function FailedStep({ error, job, wsId, graphId }: {
   error: string | null
   job: Job | null
@@ -714,6 +768,15 @@ function FailedStep({ error, job, wsId, graphId }: {
           <p className="text-[11px] text-ink-muted mt-3 leading-relaxed">
             Try again with another way to match existing items, or replace anyway to delete what the
             file leaves out: the deletions are staged on your draft, to review before you publish.
+          </p>
+        )}
+        {byUrnFix(job) && (
+          <p className="text-[11px] text-ink mt-3 leading-relaxed rounded-lg bg-indigo-50/70 dark:bg-indigo-950/25 border border-indigo-200/70 dark:border-indigo-800/40 px-3 py-2">
+            <span className="font-semibold">{(refusedOf(job)?.hints?.by_urn ?? 0).toLocaleString()} of these rows
+            would be found by their urn</span>: rows without {parseIdentifier(job!.identifier!).name}, such as a
+            top-level container, or items first loaded by urn. <span className="font-semibold">Find them by their
+            urn</span> to import them too: they keep their ids, and take the property, so the next import finds
+            them by it.
           </p>
         )}
         {refusedOf(job) && <RefusedRowsPanel report={refusedOf(job)!} wsId={wsId} graphId={graphId} jobId={job?.jobId} />}

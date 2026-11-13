@@ -402,6 +402,22 @@ class Snapshot:
         return {(w.source_id, w.target_id, w.edge_type): eid for eid, w in live.items()
                 if w.source_id in sources and w.target_id in targets}
 
+    async def incident_edges(self, nodes: Iterable[str]) -> Set[str]:
+        """The live edges with an end among ``nodes`` (either end, any type): what deleting them
+        deletes with them. Both ends are sought in SQL (``ix_ev_source``, ``ix_ev_target``)."""
+        nodes = {n for n in nodes if n}
+        candidates: Set[str] = set()
+        for graph_id, branches in self._branches().items():
+            for column in (EdgeVersionORM.source_entity_id, EdgeVersionORM.target_entity_id):
+                stmt = select(EdgeVersionORM.entity_id).where(
+                    EdgeVersionORM.graph_id == graph_id, EdgeVersionORM.branch_id.in_(branches),
+                    column == _ANY).distinct()
+                for chunk in _chunks(list(nodes), _LOOKUP_CHUNK):
+                    async with _session() as s:
+                        candidates.update(r[0] for r in (await s.execute(stmt, {"ids": list(chunk)})).all())
+        live = await self.lookup_live("edge", candidates)
+        return {eid for eid, w in live.items() if w.source_id in nodes or w.target_id in nodes}
+
     async def containment_descendants(self, roots: Iterable[str], containment_types: Set[str]) -> Set[str]:
         """Every node reachable from ``roots`` down live containment edges (the roots excluded)."""
         found: Set[str] = set()

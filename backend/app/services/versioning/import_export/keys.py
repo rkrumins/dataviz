@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 from sqlalchemy import Text, bindparam, func, select, text, update
 from sqlalchemy.dialects.postgresql import ARRAY, insert as pg_insert
@@ -258,6 +258,21 @@ async def lookup(graph_id: str, name: str, values: Iterable[str]) -> Dict[str, L
         for i in range(0, len(wanted), 2000):
             for v, e, live in (await s.execute(stmt, {"vals": wanted[i:i + 2000]})).all():
                 out.setdefault(v, []).append((e, bool(live)))
+    return out
+
+
+async def holders_among(graph_id: str, name: str, entity_ids: Iterable[str]) -> Set[str]:
+    """Those of ``entity_ids`` main's index has holding a value of ``name``, live: what a replace
+    by that property with ``replaceScope=keyed`` may delete. By the entity index, a chunk at a time."""
+    ids = sorted({e for e in entity_ids if e})
+    out: Set[str] = set()
+    stmt = (select(EntityKeyORM.entity_id)
+            .where(EntityKeyORM.graph_id == graph_id, EntityKeyORM.key_name == name,
+                   EntityKeyORM.live.is_(True), EntityKeyORM.entity_id == func.any(_IDS))
+            .distinct())
+    async with db.graphver_session() as s:
+        for i in range(0, len(ids), 2000):
+            out.update((await s.execute(stmt, {"ids": ids[i:i + 2000]})).scalars())
     return out
 
 

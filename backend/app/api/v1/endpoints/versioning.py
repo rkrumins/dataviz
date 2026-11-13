@@ -3919,6 +3919,19 @@ _MAX_REFUSED_ROWS = Query(None, alias="maxRefusedRows", max_length=16, descripti
     "refused rows, with why, in summary.refused"))
 
 
+_REPLACE_SCOPE = Query(None, alias="replaceScope", pattern="^(all|keyed)$", description=(
+    "A replace: what it may delete. all (the default): anything in its scope the file leaves out. "
+    "keyed: by identifier=prop.<name> (or prop.<name>,urn), only the nodes that hold that property, "
+    "and the edges between two of them, that the file leaves out — a node made in the app or by "
+    "another source, which never had the property, is left alone, with its edges. By the urn or an "
+    "entity id every node holds its key, so keyed is all"))
+
+
+def _with_replace_scope(settings: dict, requested: Optional[str]) -> dict:
+    """The job's settings, with what its replace may delete (``replaceScope``) when it is keyed."""
+    return {**settings, "replaceScope": "keyed"} if requested == "keyed" else settings
+
+
 def _with_refused_budget(settings: dict, requested: Optional[str]) -> dict:
     """The job's settings, with how many refused rows it allows (``maxRefusedRows``): the request's,
     checked (422, saying what it may be), else the platform's. A job keeps it, resumed or not."""
@@ -3975,6 +3988,7 @@ async def create_import(
     identifier: Optional[str] = _IDENTIFIER,
     allow_mass_delete: bool = _ALLOW_MASS_DELETE,
     max_refused_rows: Optional[str] = _MAX_REFUSED_ROWS,
+    replace_scope: Optional[str] = _REPLACE_SCOPE,
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
     claims: PermissionClaims = Depends(get_permission_claims),
     meta: dict = Depends(graph_in_workspace),
@@ -3996,7 +4010,7 @@ async def create_import(
         raise HTTPException(status_code=422, detail=str(exc))
     identifier, settings = await _import_settings_for(session, meta.get("data_source_id"), identifier,
                                                       fork=bool(meta.get("fork_parent_graph_id")))
-    settings = _with_refused_budget(settings, max_refused_rows)
+    settings = _with_replace_scope(_with_refused_budget(settings, max_refused_rows), replace_scope)
     await _check_import_view(session, ws_id, view_id, user, claims)
     if auto_publish:
         await _may_auto_publish(session, claims, ws_id, meta, branch_id)
@@ -4252,6 +4266,7 @@ async def complete_import_upload(
     identifier: Optional[str] = _IDENTIFIER,
     allow_mass_delete: bool = _ALLOW_MASS_DELETE,
     max_refused_rows: Optional[str] = _MAX_REFUSED_ROWS,
+    replace_scope: Optional[str] = _REPLACE_SCOPE,
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
     claims: PermissionClaims = Depends(get_permission_claims),
     meta: dict = Depends(graph_in_workspace),
@@ -4265,7 +4280,7 @@ async def complete_import_upload(
     from backend.app.services.versioning.import_export import uploads
     identifier, settings = await _import_settings_for(session, meta.get("data_source_id"), identifier,
                                                       fork=bool(meta.get("fork_parent_graph_id")))
-    settings = _with_refused_budget(settings, max_refused_rows)
+    settings = _with_replace_scope(_with_refused_budget(settings, max_refused_rows), replace_scope)
     record = await _load_upload(ie, ws_id, graph_id, meta, upload_id, user)
     await _check_import_view(session, ws_id, view_id, user, claims)
     if auto_publish:

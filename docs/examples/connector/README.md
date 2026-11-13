@@ -44,7 +44,8 @@ python connector.py --file nightly.ndjson --workspace ws_… --graph graph_… -
 | Option | Sends | Does |
 |---|---|---|
 | `--replace` | `reconcileMode=replace` | Deletes what the file leaves out; without it, an upsert writes only what the file names |
-| `--identifier entity_id\|urn\|prop.<name>` | `identifier` | What the file's rows find their items by. Left out, the graph's default |
+| `--identifier entity_id\|urn\|prop.<name>\|prop.<name>,urn` | `identifier` | What the file's rows find their items by: `prop.<name>,urn` finds a row without the property by its urn. Left out, the graph's default |
+| `--replace-scope keyed` | `replaceScope` | With `--replace` and a property identifier: deletes only what holds the property, leaving what the app or other sources made |
 | `--allow-mass-delete` | `allowMassDelete=true` | Lets a replace delete past the replace guard |
 | `--branch br_…` | `branchId` | Imports into that open draft, beside what it holds. With `--publish`, the connector publishes the draft once the import is in (an import into a draft doesn't publish itself) |
 | `--max-refused-rows N` | `maxRefusedRows` | Goes on without up to N refused rows (a count, a share such as `1%`, or `-1` for any); without it, a refused row holds a replace and the import's own publish. The run's output names each refused row, where it is, and why |

@@ -56,7 +56,8 @@ def test_the_report_counts_each_reason_and_names_the_first_rows_across_windows()
     assert first == {"total": 2, "byCode": {"no_key": 1, "invalid_type": 1}, "rows": [
         {"rowIndex": 3, "kind": "node", "label": "orders", "code": "no_key", "reason": "give it a urn"},
         {"rowIndex": 7, "kind": "node", "label": "refunds", "code": "invalid_type", "reason": "x" * 300}],
-        "fixes": {"no_key": FIXES["no_key"], "invalid_type": FIXES["invalid_type"]}}
+        "fixes": {"no_key": FIXES["no_key"], "invalid_type": FIXES["invalid_type"]},
+        "byKind": {"node": 2}}
     assert tally_refused(first, [{"_row_index": 9, "status": "updated"}], {}) is first, "no refusals"
     many = tally_refused(first, [_refusal(10 + i, "no_key") for i in range(40)], {})
     assert (many["total"], many["byCode"]["no_key"]) == (42, 41)
@@ -132,7 +133,7 @@ async def test_a_replace_past_its_budget_deletes_nothing_and_says_which_rows_and
     with pytest.raises(import_worker.ReplaceRowsRefused) as refused:
         await worker._resolve_and_build("vjob_1", "g1", "br1", "u", "replace")
     message = str(refused.value)
-    assert message.startswith("Nothing was deleted: 2 row(s) of the file were refused")
+    assert message.startswith("Nothing was deleted: 2 node row(s) of the file were refused"), message
     assert "1 invalid_type, 1 no_key" in message and "rowIndex 4 (sales): invalid_type" in message
     assert "maxRefusedRows" in message and "GET …/imports/vjob_1/preview" in message
     assert len(message) < 2000, "the job's errorMessage keeps all of it"

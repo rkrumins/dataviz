@@ -24,7 +24,9 @@ def test_an_import_takes_the_identifier_it_names_or_the_platforms(given, expect)
 
 
 @pytest.mark.parametrize("given, says", [
-    ("sap_id", "identifier is entity_id, urn or prop.<name>"),
+    ("sap_id", "identifier is entity_id, urn, prop.<name>, or prop.<name>,urn"),
+    ("urn,urn", "only a property falls back to the urn"),
+    ("prop.,urn", "needs the property's name"),
     ("prop.", "needs the property's name"),
     ("prop.urn", "use identifier=urn"),
     ("prop.entity_id", "use identifier=entity_id"),
@@ -36,6 +38,11 @@ async def test_what_an_import_may_not_name_is_a_422_that_says_what_it_may(given,
     assert caught.value.status_code == 422
     assert caught.value.detail["type"] == "invalid_identifier"
     assert says in caught.value.detail["message"], caught.value.detail
+
+
+async def test_a_property_then_the_urn_is_an_identifier_an_import_may_name():
+    identifier, _settings = await endpoints._import_settings_for(None, None, " prop.MY_UNIQUE_ID , urn ")
+    assert identifier == "prop.MY_UNIQUE_ID,urn"
 
 
 async def test_the_platforms_default_is_the_operators_when_it_is_one(monkeypatch):

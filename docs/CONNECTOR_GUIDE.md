@@ -198,6 +198,18 @@ change. A file's keys find those ids:
   A value two nodes hold refuses its rows (`duplicate_value`): keep it unique to one. A partial
   file — `prop.external_id` and the one field that changed — updates only that field. To write
   through the entity-id APIs instead, map your ids first: `POST …/identities/resolve`.
+- **Some rows without your id?** A top-level container your system has no id for, or a graph first
+  loaded by urn (or made in the app), whose nodes never had the property: send
+  `identifier=prop.external_id,urn`. A row with the property is found by it; one without, by its
+  urn; one whose value no node holds yet, by its urn too, and that node takes the value, so the next
+  run finds it by it. Edge ends the same: `source.external_id`, else `sourceUrn`. By
+  `prop.external_id` alone those rows are refused (`no_key`, `two_entities`), and a replace holds,
+  saying so. Set it once as the graph's default.
+- **Sharing a graph with other writers?** A replace deletes what its file leaves out, including
+  what the app or another connector made. With a property identifier, `replaceScope=keyed` deletes
+  only the nodes holding the property (and the edges between two of them). A node a replace
+  deletes always takes its edges with it (`summary.edgesCascaded`), and a replace never deletes a
+  node a row of the file names, refused or not, nor one an edge row names as an end.
 - **The data source's identifier property** (`prop.<identifier>`) finds a node too, for a source
   identified by it. It is reserved: the node's identifier holds its urn.
 - **A `urn:uuid:` your system already gave the entity** is kept as its id, given as its `urn` or

@@ -299,6 +299,20 @@ def test_a_run_may_go_on_without_its_refused_rows(world):
     assert connector.succeeded(run)
 
 
+def test_a_replace_by_a_property_then_the_urn_may_delete_only_what_holds_it(world):
+    """``--identifier prop.<name>,urn --replace-scope keyed`` go with the import as the server takes
+    them: rows without the property are found by their urn, and the replace deletes only what holds
+    the property."""
+    path, state, graph, _slept = world
+    server = _Server()
+    run = connector.run(graph(server), str(path), "ndjson", publish=True, state_path=state, replace=True,
+                        identifier="prop.uid,urn", replace_scope="keyed")
+    assert ("POST", f"{BASE}/imports/uploads/iu_0/complete",
+            {"reconcileMode": "replace", "identifier": "prop.uid,urn", "replaceScope": "keyed",
+             "autoPublish": "true"}) in server.calls
+    assert connector.succeeded(run)
+
+
 def test_a_replace_the_guard_refused_says_why_and_its_retry_sends_the_file_again(world):
     """A replace the guard refused fails the run with the server's code. The retry, with
     ``--allow-mass-delete`` into the same draft, is a new upload (an upload is imported once): it is

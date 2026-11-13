@@ -226,6 +226,20 @@ describe('ImportDialog', () => {
     expect(vi.mocked(importInParts).mock.calls[0][3]).toMatchObject({ identifier: 'prop.external_id' })
   })
 
+  it('finds rows without the property by their urn, and replaces only what holds it, when asked', async () => {
+    vi.mocked(importInParts).mockResolvedValue({ jobId: 'j1', branchId: 'br1', sourceUri: 's', status: 'pending' })
+    vi.mocked(pollJob).mockReturnValue(new Promise<Job>(() => {}))
+    await userEvent.upload(open(), file('graph.csv', 2048))
+    await userEvent.click(await screen.findByRole('button', { name: /Replace \(authoritative\)/ }))
+    await userEvent.click(screen.getByRole('radio', { name: /A property/ }))
+    await userEvent.type(screen.getByLabelText('Property name'), 'external_id')
+    await userEvent.click(screen.getByRole('checkbox', { name: /Rows without it: find them by their urn/ }))
+    await userEvent.click(screen.getByRole('checkbox', { name: /Delete only items that have this property/ }))
+    await userEvent.click(screen.getByRole('button', { name: /^Import$/ }))
+    expect(vi.mocked(importInParts).mock.calls[0][3]).toMatchObject({
+      identifier: 'prop.external_id,urn', reconcileMode: 'replace', replaceScope: 'keyed' })
+  })
+
   it('replaces anyway, into the draft its rows are on, once the replace guard refused it', async () => {
     vi.mocked(importInParts).mockResolvedValue({ jobId: 'j1', branchId: 'br_9', sourceUri: 's', status: 'pending' })
     vi.mocked(pollJob).mockResolvedValueOnce({ jobId: 'j1', jobType: 'ingest', graphId: 'g1', status: 'failed',
@@ -240,6 +254,24 @@ describe('ImportDialog', () => {
     await userEvent.click(screen.getByRole('button', { name: /Replace anyway/ }))
     expect(vi.mocked(importInParts).mock.calls[1][3]).toMatchObject({
       reconcileMode: 'replace', branchId: 'br_9', allowMassDelete: true })
+  })
+
+  it('offers to find the rows a property alone refused by their urn, and imports again into its draft', async () => {
+    const refused = { total: 3, byCode: { no_key: 1, two_entities: 2 }, hints: { by_urn: 3 }, fixes: {}, rows: [] }
+    vi.mocked(importInParts).mockResolvedValue({ jobId: 'j1', branchId: 'br_9', sourceUri: 's', status: 'pending' })
+    vi.mocked(pollJob).mockResolvedValueOnce({ jobId: 'j1', jobType: 'ingest', graphId: 'g1', status: 'failed',
+      branchId: 'br_9', identifier: 'prop.MY_UNIQUE_ID', errorMessage: 'Nothing was deleted: 3 node row(s) of the file were refused',
+      summary: { new: 1, updated: 0, unchanged: 0, deleted: 0, invalid: 3, refused,
+        failure: { code: 'rows_refused', action: 'fix_rows' } } } as unknown as Job)
+      .mockReturnValue(new Promise<Job>(() => {}))
+    await userEvent.upload(open(), file('graph.csv', 2048))
+    await userEvent.click(screen.getByText('Replace (authoritative)'))
+    await userEvent.click(screen.getByRole('button', { name: /^Import$/ }))
+    expect(await screen.findByText(/3 of these rows\s+would be found by their urn/)).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: /Find them by their urn/ }))
+    expect(vi.mocked(importInParts).mock.calls[1][3]).toMatchObject({
+      reconcileMode: 'replace', branchId: 'br_9', identifier: 'prop.MY_UNIQUE_ID,urn', allowMassDelete: false })
+    expect(vi.mocked(importInParts).mock.calls[1][3]?.maxRefusedRows).toBeUndefined()
   })
 
   it('says which rows a held replace refused and why, and imports the rest anyway into its draft', async () => {

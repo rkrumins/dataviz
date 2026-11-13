@@ -9942,8 +9942,9 @@ class GraphVersioningService:
         live node an import derived from it. On a fork both read its main as an import into it
         does: its own rows, then its parent's at the fork point. ``prop.<name>``: the live nodes
         holding it, by the property's index (:mod:`.import_export.keys`), caught up first;
-        ``NotIndexed`` before an import has built it, ``NotOnAFork`` on a fork. Values compare as
-        an import's keys do (trimmed text)."""
+        ``NotIndexed`` before an import has built it, ``NotOnAFork`` on a fork.
+        ``prop.<name>,urn``: by the property, then — a value no node holds as it — as a urn. Values
+        compare as an import's keys do (trimmed text)."""
         from .import_export import keys as matching
         from .import_export.resolve import key_value, pointer_id, pointer_seed
         asked = {v: key_value(v) for v in values}
@@ -9957,30 +9958,36 @@ class GraphVersioningService:
                 state = await self._current_skeletons(s, graph_id, main_id, set(ids))
                 return {e for e, skeleton in state.items() if skeleton is not None}
 
-            if identifier == "entity_id":
-                found = await live(wanted)
-                holders = {v: {v} for v in wanted if v in found}
-            elif identifier == "urn":
-                carried = await self._holders_by_urn(s, graph_id, main_id, set(wanted))
+            async def by_urn(values):
+                carried = await self._holders_by_urn(s, graph_id, main_id, set(values))
                 state = await self._current_skeletons(
                     s, graph_id, main_id, {e for ids in carried.values() for e in ids})
                 for urn, ids in carried.items():
                     on = {e for e in ids if (state.get(e) or {}).get("urn") == urn}
                     if on:
                         holders[urn] = on
-                rest = [v for v in wanted if v not in holders]
+                rest = [v for v in values if v not in holders]
                 if rest:
                     scope = await self.identity_scope(graph_id)
                     derived = {pointer_id(scope, pointer_seed(v)): v for v in rest}
                     for eid in await live(derived):
                         holders[derived[eid]] = {eid}
+
+            if identifier == "entity_id":
+                found = await live(wanted)
+                holders = {v: {v} for v in wanted if v in found}
+            elif identifier == "urn":
+                await by_urn(wanted)
             else:
-                name = identifier[len("prop."):]
+                from .import_export import identifier as identifiers
+                name = identifiers.property_of(identifier)
                 await matching.ensure_ready(graph_id, name)
                 for v, held in (await matching.lookup(graph_id, name, wanted)).items():
                     on = {e for e, is_live in held if is_live}
                     if on:
                         holders[v] = on
+                if identifiers.falls_back(identifier):      # what no node holds as it, by its urn
+                    await by_urn([v for v in wanted if v not in holders])
         out: List[Dict[str, object]] = []
         for v, k in asked.items():
             ids = sorted(holders.get(k, ())) if k else []

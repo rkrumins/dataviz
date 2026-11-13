@@ -129,12 +129,14 @@ Choose the identifier by where the file comes from:
 | An export of this graph, edited, with rows added | `entity_id` (the default) | its `entity_id`; else its `urn`; else a field its type matches imports by ("Match imports by this"); else, with no urn, a `qualifiedName` exactly one item carries | an `entityType` and a `urn` (or a `qualifiedName`) |
 | From a system that names items by URN (DataHub, OpenMetadata, your own) | `urn` | its `urn` (or an `entity_id` of this graph), nothing else | an `entityType` and a `urn` |
 | From a system with ids of its own, kept in a property | `prop.<name>`, such as `prop.external_id` | its value of that property (or an `entity_id` of this graph), nothing else | an `entityType` and that property's value |
+| The same, where some rows have no such id (a top-level container), or the graph was first loaded by urn | `prop.<name>,urn`: the property, then the urn | its value of that property; a row without it, its `urn`, as `urn` finds it. A row whose value no item holds yet is found by its urn too, and that item takes the value, so the next import finds it by it | an `entityType`, and that property's value or a `urn` |
 
 Leave `identifier` out and the graph's default applies: a workspace admin sets it on the data
 source's **Versioning** tab, under **Imports**. Without one, the platform's applies, `entity_id`
 unless your operator set `GRAPHVER_IMPORT_IDENTIFIER`. `GET …/graphs/$GID/import-settings` says
 which holds and where it came from (walkthrough 3 reads it). In the app, the Import dialog's
-**Match existing items by** is the same choice: **Entity ID**, **URN** or **A property**.
+**Match existing items by** is the same choice: **Entity ID**, **URN** or **A property**, which
+**Rows without it: find them by their urn** makes `prop.<name>,urn`.
 
 Whichever identifier an import names:
 
@@ -142,7 +144,8 @@ Whichever identifier an import names:
 - **Keys that name two different items refuse the row** (`two_entities`), and a value several live
   items hold refuses the rows that name it (`duplicate_value`). An import never guesses.
 - **A node row with no key the identifier can use is refused** (`no_key`), rather than made again
-  by every import.
+  by every import. By `prop.<name>` alone, a row with only a urn is one: its reason says that
+  `prop.<name>,urn` would find it.
 - **Only the fields a row carries are written.** A blank cell keeps what the item holds; `\N` in a
   `prop.<name>` cell removes that property.
 - **A row an export wrote carries `baseVersion`**, and is merged three ways with what changed since
@@ -158,6 +161,7 @@ this order:
 | `entity_id` | `source_entity_id` / `target_entity_id` → `sourceUrn` / `targetUrn` (or the data source's identifier property, `source.<it>`) → `source.<field>` / `target.<field>` (a field its type matches imports by) → `sourceQualifiedName` / `targetQualifiedName` |
 | `urn` | `source_entity_id` / `target_entity_id` → `sourceUrn` / `targetUrn` |
 | `prop.<name>` | `source_entity_id` / `target_entity_id` → `source.<name>` / `target.<name>` |
+| `prop.<name>,urn` | `source_entity_id` / `target_entity_id` → `source.<name>` / `target.<name>`; an end without it, or whose value no node holds yet, `sourceUrn` / `targetUrn` |
 
 A `source_entity_id` is an entity id of this graph, or the file's own `entity_id` of a node row:
 that links an edge to a node the same file makes.
@@ -1058,13 +1062,34 @@ dropped in silence. The reasons below are the ones the API gives.
 | Everything, every time | `replace` | The same, and every item in scope that no row matched is deleted. The scope is the whole graph, or with `viewId`, that view's entities |
 
 - **A replace deletes nothing while any row is refused,** since the refused row might name what the
-  file means to keep. The job fails (`summary.failure.code` `rows_refused`, action `fix_rows`), its
-  `errorMessage` naming the reasons and the first rows, and the file's other rows stay on its draft.
-  `summary.refused` says where each row is and what to do: fix them and import again, or send the
-  file with `maxRefusedRows` to replace with the rows that applied, keeping anything a refused row
-  still names ([When rows are refused](/docs/import-from-your-service#when-rows-are-refused)).
+  file means to keep. The job fails (`summary.failure.code` `rows_refused`, action `fix_rows`;
+  `phase` `nodes` when any node row was refused, else `edges`), its `errorMessage` naming the
+  reasons, the one change that would fix most of them (rows with a urn but not the property:
+  `prop.<name>,urn`), and the first rows; the file's other rows stay on its draft. `summary.refused`
+  says where each row is and what to do (`byCode`, `byKind`): fix them and import again, or send
+  the file with `maxRefusedRows` to replace with the rows that applied
+  ([When rows are refused](/docs/import-from-your-service#when-rows-are-refused)).
+- **A replace never deletes what the file names.** It keeps every item a row matched, and also:
+  - every live item a refused row names by any key it carries: its `entity_id`, its `urn`, its
+    value of the identifier's property, its edge's own id and ends;
+  - every node an edge row names as an end, though the file has no row for that node.
+  So a refused row, sent on with `maxRefusedRows`, never makes the replace delete the item it was
+  about, nor an edge row its ends.
+- **An edge never outlives its ends.** A node a replace deletes takes every edge at either end with
+  it, in the same change. After the replace's own edge pass these are only the edges that reach
+  outside its scope (a view's, or `replaceScope=keyed`'s); `summary.edgesCascaded` counts them.
 - **Deletes are in the draft, like everything else.** The draft's diff lists them before anything
   is published.
+
+### What a replace may delete: `replaceScope`
+
+By default (`replaceScope=all`) a replace deletes anything in its scope the file leaves out. A
+graph more than one source writes holds items your file never had: nodes made in the app, or by
+another connector. With an identifier by a property, `replaceScope=keyed` deletes only the nodes
+that hold that property, and the edges whose two ends both do, that the file leaves out. Everything
+else stays, with its edges; an edge from one of them to a node the replace deletes goes with that
+node (`edgesCascaded`). `summary.replaceGuard.scope` says `keyed`, and the guard measures that
+scope. By `urn` or `entity_id` every node holds its key, so `keyed` is `all`.
 
 ### The replace guard
 
@@ -1087,11 +1112,15 @@ half as many again.
 
 ### Fail fast
 
-A whole graph's replace whose first full window of node rows (10,000) finds an item for fewer than
-5% of them, in a graph of at least 1,000 items, stops there rather than read the rest of the file:
-the job fails with `summary.failure.code` `identifier_matched_nothing` (`action: "identifier"`),
-naming the identifier it matched by. Nothing is deleted; the rows read so far are on the draft. A
-view's replace is left to the guard.
+A whole graph's replace whose first window of node rows (10,000, or all of a smaller file's) finds
+an item for fewer than 5% of them, in a graph of at least 1,000 items, stops there rather than go
+on: the job fails with `summary.failure.code` `identifier_matched_nothing` (`action:
+"identifier"`), naming the identifier it matched by. Nothing is deleted; the rows read so far are
+on the draft. A small file is checked too: the guard measures what a file makes against its whole
+scope, so a few hundred rows by the wrong key would otherwise delete a large graph. A view's replace
+is left to the guard. The guard also counts the rows a replace refused that matched nothing beside
+what it makes (`replaceGuard.refusedUnmatched`), so a file whose rows can't be matched is refused
+whatever `maxRefusedRows` lets through.
 
 ## Sending again: idempotency and retries
 

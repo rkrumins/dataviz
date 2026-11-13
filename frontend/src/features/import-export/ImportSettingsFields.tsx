@@ -46,6 +46,7 @@ export function ImportSettingsFields({ settings, canEdit, onSave }: {
   const identifier = change.identifier ?? own.identifier ?? 'inherit'
   const kind: MatchKind | 'inherit' = identifier === 'inherit' ? 'inherit' : parseIdentifier(identifier).kind
   const propName = kind === 'prop' ? parseIdentifier(identifier).name : ''
+  const orUrn = kind === 'prop' && !!parseIdentifier(identifier).orUrn
   const unnamed = kind === 'prop' && !propName.trim()
 
   const save = async () => {
@@ -76,7 +77,7 @@ export function ImportSettingsFields({ settings, canEdit, onSave }: {
             <select id={`${id}-identifier`} value={kind} disabled={!editable || saving} className={control}
               onChange={(e) => {
                 const to = e.target.value as MatchKind | 'inherit'
-                set('identifier', to === 'inherit' ? 'inherit' : formatIdentifier({ kind: to, name: propName }))
+                set('identifier', to === 'inherit' ? 'inherit' : formatIdentifier({ kind: to, name: propName, orUrn }))
               }}>
               <option value="inherit">Platform default ({identifierLabel(settings.platform.identifier)})</option>
               {MATCH_KINDS.map((m) => <option key={m.kind} value={m.kind}>{m.label}</option>)}
@@ -84,9 +85,21 @@ export function ImportSettingsFields({ settings, canEdit, onSave }: {
             {kind === 'prop' && (
               <input aria-label="Property name" placeholder="external_id" value={propName}
                 disabled={!editable || saving} className={`${control} w-32 font-mono`}
-                onChange={(e) => set('identifier', `prop.${e.target.value}`)} />
+                onChange={(e) => set('identifier', formatIdentifier({ kind: 'prop', name: e.target.value, orUrn }))} />
             )}
           </div>
+          {kind === 'prop' && (
+            <label className="basis-full flex items-start gap-2 text-[11px] text-ink-muted leading-snug cursor-pointer">
+              <input type="checkbox" checked={orUrn} disabled={!editable || saving}
+                onChange={(e) => set('identifier', formatIdentifier({ kind: 'prop', name: propName, orUrn: e.target.checked }))}
+                className="mt-0.5 accent-indigo-500" />
+              <span>
+                <span className="font-medium text-ink-secondary">Rows without it: find them by their urn</span>{' '}
+                (<span className="font-mono">prop.{propName.trim() || '<name>'},urn</span>) — for items the
+                source has no id for, such as a top-level container.
+              </span>
+            </label>
+          )}
         </div>
         {LIMITS.map((f) => {
           const value = change[f.key] ?? own[f.key]

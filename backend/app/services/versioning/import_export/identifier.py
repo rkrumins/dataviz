@@ -6,6 +6,10 @@
 * ``urn``: by an entity id of the graph, else by its urn, and nothing else.
 * ``prop.<name>``: by an entity id of the graph, else by its value of the property ``<name>``,
   through the property's index (:mod:`.keys`), which the first import naming it builds.
+* ``prop.<name>,urn``: the property, then the urn — a row that carries the property is found by
+  it, one that doesn't (a top-level container the source system has no id for) by its urn, as
+  ``urn`` finds it; and a node found by its urn takes the row's value, so the next import finds it
+  by the property. Any key a row carries must name the same entity as the one it is found by.
 
 Whichever it is, an entity's id never changes: the identifier only says how a row finds it. An
 import names one, else its data source's default holds, else the platform's
@@ -20,7 +24,9 @@ from .. import config
 
 ENTITY_ID, URN = "entity_id", "urn"
 _PROP = "prop."
-_GRAMMAR = "identifier is entity_id, urn or prop.<name>"
+#: What follows a property to fall back to the urn: ``prop.<name>,urn``.
+URN_FALLBACK = f",{URN}"
+_GRAMMAR = "identifier is entity_id, urn, prop.<name>, or prop.<name>,urn (the property, then the urn)"
 
 
 class IdentifierError(ValueError):
@@ -33,6 +39,16 @@ def parse(value: Optional[str]) -> Optional[str]:
     v = value.strip() if isinstance(value, str) else ""
     if not v:
         return None
+    head, comma, tail = v.rpartition(",")
+    if comma and tail.strip() == URN:
+        first = _one(head.strip())
+        if not first.startswith(_PROP):
+            raise IdentifierError(f"{_GRAMMAR}: only a property falls back to the urn, not {v!r}")
+        return first + URN_FALLBACK
+    return _one(v)
+
+
+def _one(v: str) -> str:
     if v in (ENTITY_ID, URN):
         return v
     if v.startswith(_PROP):
@@ -45,6 +61,20 @@ def parse(value: Optional[str]) -> Optional[str]:
             raise IdentifierError(f"{_GRAMMAR}: a property's name is one line of up to 200 characters")
         return f"{_PROP}{name}"
     raise IdentifierError(f"{_GRAMMAR}, not {v!r}")
+
+
+def property_of(identifier: Optional[str]) -> Optional[str]:
+    """The property an identifier matches by — ``<name>`` of ``prop.<name>`` or
+    ``prop.<name>,urn`` — or None for ``entity_id`` and ``urn``."""
+    if not identifier or not identifier.startswith(_PROP):
+        return None
+    name = identifier[len(_PROP):]
+    return name[:-len(URN_FALLBACK)] if name.endswith(URN_FALLBACK) else name
+
+
+def falls_back(identifier: Optional[str]) -> bool:
+    """Whether an identifier finds a row without its property by the urn (``prop.<name>,urn``)."""
+    return bool(identifier) and identifier.startswith(_PROP) and identifier.endswith(URN_FALLBACK)
 
 
 def platform_default() -> str:
