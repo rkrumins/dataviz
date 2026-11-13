@@ -13,6 +13,10 @@ Pins:
 - ``on_result`` sees every chunk that landed, halves included; ``progress`` counts them.
 - A rebuild deletes every copy of a node the key holds twice, in place or a page at a time, and a
   copy that is a hub has its relationships deleted a page at a time first, then the copies.
+- Reads come first: a write is cut off at New-version builds' ``writeCeilingSecs`` on every
+  FalkorDB mode; a chunk slower than ``statementTargetMs`` narrows the next, never below fifty rows
+  for being slow; each write is followed by a pause of ``pacingRatio`` times what it took,
+  ``readPressureRatio`` times while reads on its node starve, at most five seconds.
 """
 from __future__ import annotations
 
@@ -252,3 +256,122 @@ async def test_a_streamed_rebuild_deletes_a_node_held_twice_whose_copy_is_a_hub(
                            [("H", "v1", "c1", "urn:h", "Dataset", None)], {}, None, True, twice)
     assert (g.copies, g.pages, written) == (0, [10, 10, 5], ["urn:h"])
     assert twice == {("Dataset", "urn:h")}
+
+
+class _Timed(_Graph):
+    """Records the budget each statement was sent with."""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.budgets: list = []
+
+    async def query(self, cypher, params=None, timeout=None):
+        self.budgets.append(timeout)
+        return await super().query(cypher, params, timeout)
+
+
+async def test_a_write_is_cut_off_at_the_ceiling_on_every_mode_and_a_read_is_not():
+    g, p = _Timed(), _projector()
+    await p._laddered(g, "node_merge", "x", list(range(10)))                     # no cluster here
+    assert g.budgets == [1000 * config.PROJECTION_WRITE_CEILING_S]
+    g.budgets.clear()
+    await p._laddered(g, "node_read", "x", list(range(10)), read_only=True)
+    assert g.budgets == [projection._WRITE_TIMEOUT_MS]
+
+
+async def test_a_chunk_slower_than_the_target_narrows_the_next_never_below_fifty_rows(monkeypatch):
+    g, p = _Graph(), _projector(batch=400)
+    clock = iter(x * 0.6 for x in range(1000))                  # every statement takes 0.6 s
+    monkeypatch.setattr(projection, "_clock", lambda: next(clock))
+    await p._laddered(g, "node_merge", "x", list(range(1500)))
+    assert g.sizes[:5] == [400, 200, 100, 50, 50], g.sizes
+    assert set(g.sizes[3:]) == {50}
+
+
+async def test_each_write_is_followed_by_a_pause_and_a_longer_one_while_reads_starve(
+        monkeypatch, _fresh):
+    waits, starving = _fresh, {"now": False}
+    g, p = _Graph(), _projector(batch=10)
+    took = iter([0, 2.0, 2.0, 4.0, 4.0, 34.0, 34.0, 35.0])      # 2 s, 2 s, 30 s, then a read
+    monkeypatch.setattr(projection, "_clock", lambda: next(took))
+
+    async def reads_starving(client):
+        return starving["now"]
+
+    monkeypatch.setattr(projection, "_reads_starving", reads_starving)
+    await p._laddered(g, "node_merge", "x", list(range(10)))
+    starving["now"] = True
+    await p._laddered(g, "node_merge", "x", list(range(10)))
+    await p._laddered(g, "node_merge", "x", list(range(10)))
+    assert waits == [0.5, 4.0, projection._PACE_MAX_S]
+    waits.clear()
+    await p._laddered(g, "node_read", "x", list(range(10)), read_only=True)     # a read: none
+    assert waits == []
+
+
+def test_the_node_a_client_writes_is_named_as_the_web_tier_names_it():
+    from backend.app.providers.falkordb_connection import ResilientGraph
+
+    standalone = SimpleNamespace(mode="single", host="falkor-0", port=6379)
+    cluster = SimpleNamespace(mode="cluster", host="seed", port=7000)
+    assert projection._node_of(ResilientGraph(None, standalone, "k", None)) == "falkor-0:6379"
+    assert projection._node_of(ResilientGraph(None, cluster, "k", None, node=("10.0.0.3", 7001))) \
+        == "10.0.0.3:7001"
+    assert projection._node_of(ResilientGraph(None, cluster, "k", None)) is None
+    assert projection._node_of(_Graph()) is None
+
+
+async def test_reads_starving_is_asked_of_the_node_once_per_poll_and_fails_open(monkeypatch):
+    from backend.app.services.aggregation import redis_client
+    from backend.app.providers.falkordb_connection import ResilientGraph
+
+    asked = []
+
+    class _Redis:
+        async def get(self, key):
+            asked.append(key)
+            return "queue_full"
+
+    projection._PRESSURE_SEEN.clear()
+    monkeypatch.setattr(redis_client, "get_redis", lambda: _Redis())
+    client = ResilientGraph(None, SimpleNamespace(mode="single", host="h", port=1), "k", None)
+    assert await projection._reads_starving(client) is True
+    assert await projection._reads_starving(client) is True
+    assert asked == ["agg:readpressure:h:1"]
+
+    def down():
+        raise ConnectionError("no Redis")
+
+    projection._PRESSURE_SEEN.clear()
+    monkeypatch.setattr(redis_client, "get_redis", down)
+    assert await projection._reads_starving(client) is False
+    projection._PRESSURE_SEEN.clear()
+
+
+async def test_a_pass_holds_its_writing_lease_on_the_endpoint_renewed_not_per_statement(monkeypatch):
+    """While it writes, the projector holds ``gvproj:writing:<endpoint>`` (readers' deadline streaks
+    there are then answered busy, not as a failover), renewed at most every ten seconds; a read
+    holds none, nor does a client that names no endpoint."""
+    from backend.app.providers.falkordb_connection import ResilientGraph
+    from backend.app.services.aggregation import redis_client
+
+    leased = []
+
+    class _Redis:
+        async def set(self, key, value, ex=None):
+            leased.append((key, ex))
+
+    class _Writer(ResilientGraph):
+        def __init__(self):
+            super().__init__(None, SimpleNamespace(mode="single", host="falkor", port=6379), "g",
+                             _Graph())
+            self.name = "g"
+
+    projection._WRITING_RENEWED.clear()
+    monkeypatch.setattr(redis_client, "get_redis", lambda: _Redis())
+    p = _projector(batch=10)
+    await p._laddered(_Writer(), "node_merge", "x", list(range(30)))           # three statements
+    await p._laddered(_Writer(), "node_read", "x", list(range(30)), read_only=True)
+    await p._laddered(_Graph(), "node_merge", "x", list(range(30)))
+    assert leased == [("gvproj:writing:falkor:6379", projection._WRITING_TTL_S)]
+    projection._WRITING_RENEWED.clear()

@@ -354,7 +354,12 @@ class ProjectionWorker:
                 pass
 
     async def _poll_loop(self) -> None:
+        from . import build_policy
+
         while not self._stop.is_set():
+            # The projector's pacing reads New-version builds' settings per statement, as last
+            # resolved (build_policy.current): resolved here, each poll, never raising.
+            await build_policy.resolve()
             try:
                 await self.reconcile_once()
             except Exception:

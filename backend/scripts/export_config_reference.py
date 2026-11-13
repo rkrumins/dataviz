@@ -238,6 +238,13 @@ NOTES: dict[str, tuple[str, str | None]] = {
         "Reads from Postgres that run at once per process across graphs, so they never take the whole connection pool. A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds.",
         None,
     ),
+    "FALKORDB_STREAK_IGNORE_PROJECTOR_WRITES": (
+        "While the projector writes through a FalkorDB endpoint (it holds `gvproj:writing:<endpoint>` "
+        "in Redis), readers there whose deadlines run out in a row are told to retry (`429`, "
+        "`Retry-After: 2`) rather than that the node is failing over, which answers every read of "
+        "the graph from a memo for seconds. `0` treats such a streak as a failover, as before.",
+        None,
+    ),
     "GRAPHVER_ROUTE_POOL_SIZE": (
         "Connections kept, per process, in the small pool that routes every read of a versioned "
         "graph (its key, its watermark, its main branch). It is apart from `GRAPHVER_POOL_SIZE`, so "

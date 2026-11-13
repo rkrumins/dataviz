@@ -232,6 +232,7 @@ The FalkorDB graph store, the other graph providers, and the reads built on them
 | `FALKORDB_SENTINEL_MASTER` | — | sentinel: monitored master name | `backend/app/api/v1/endpoints/redis_config.py`, `backend/app/providers/falkordb_connection.py` |
 | `FALKORDB_SENTINEL_NODES` | — | sentinel endpoints | `backend/app/api/v1/endpoints/redis_config.py`, `backend/app/providers/falkordb_connection.py` |
 | `FALKORDB_SENTINEL_TLS_ENABLED` | — | Sentinel-daemon TLS: the daemons inherit the data-plane FALKORDB_TLS\_\* settings by default ("TLS everywhere" needs nothing extra). | `backend/app/api/v1/endpoints/redis_config.py`, `backend/app/providers/falkordb_connection.py` |
+| `FALKORDB_STREAK_IGNORE_PROJECTOR_WRITES` | `1` | While the projector writes through a FalkorDB endpoint (it holds `gvproj:writing:<endpoint>` in Redis), readers there whose deadlines run out in a row are told to retry (`429`, `Retry-After: 2`) rather than that the node is failing over, which answers every read of the graph from a memo for seconds. `0` treats such a streak as a failover, as before. | `backend/app/providers/falkordb_provider.py` |
 | `GRAPH_CACHE_AGGREGATED_TTL_S` | `3600` | Per-endpoint TTLs, seconds (1-86400). | `backend/app/services/graph_cache.py` |
 | `GRAPH_CACHE_CANVAS_BOOTSTRAP_TTL_S` | `3600` | Per-endpoint TTLs, seconds (1-86400). | `backend/app/services/graph_cache.py` |
 | `GRAPH_CACHE_CANVAS_EXPAND_TTL_S` | `3600` | Per-endpoint TTLs, seconds (1-86400). | `backend/app/services/graph_cache.py` |

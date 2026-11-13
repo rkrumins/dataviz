@@ -280,6 +280,13 @@ async def invalidate() -> None:
         logger.info("builds: the New-version build settings' generation could not be moved")
 
 
+def current() -> BuildPolicy:
+    """The settings :func:`resolve` last read, else the defaults: for a path that runs per statement
+    and can't wait on a read. Its caller resolves now and then (the projector, per pass section),
+    so a change reaches it within about as long as :func:`resolve` takes to see one."""
+    return _MEMO["policy"] or defaults()
+
+
 async def resolve(session=None) -> BuildPolicy:
     """The settings in force: memoized for up to 30 seconds, sooner when a save moves the
     generation, and never raising. When the row can't be read, the last policy read, or with none

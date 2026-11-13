@@ -33,7 +33,7 @@ from typing import Awaitable, Callable, Dict, Iterable, List, Optional, Sequence
 from sqlalchemy import Text, any_, bindparam, case, func, literal, null, or_, select, update
 from sqlalchemy.dialects.postgresql import ARRAY
 
-from . import config, db, residency_policy
+from . import build_policy, config, db, residency_policy
 from .errors import AmbiguousSpelling
 from .falkor_indexes import ensure_urn_indexes
 from .merkle import content_hash
@@ -67,6 +67,7 @@ from backend.common.derived_artifacts import is_derived_label
 # Reuse the existing reader's schema helpers verbatim so the projection is
 # byte-for-byte reader-compatible (a reader schema change flows through here too).
 from backend.app.providers.falkordb_provider import (  # noqa: E402
+    projector_writing_key,
     _RESERVED_NODE_KEYS,
     _admit_native_keys,
     _compute_searchable_text,
@@ -209,6 +210,14 @@ async def _q(client, cypher: str, params: Optional[dict] = None,
 # - the width that worked is kept per graph and statement kind (:class:`_Width`).
 # Sending again is safe: FalkorDB rolls back a statement it aborts, and every projector write is
 # an idempotent MERGE / SET / DELETE (a rollup write sets the absolute weight it computed).
+#
+# Reads come first (New-version builds' pacing, ``build_policy``): a write holds the graph's write
+# lock, and every read of the graph on that node, for as long as it runs. So a write is cut off at
+# ``writeCeilingSecs`` on every FalkorDB mode, not only under a cluster's failure detector; a chunk
+# that takes longer than ``statementTargetMs`` narrows the next (no narrower than ``_SLOW_FLOOR``
+# rows for being slow); and after each one the projector pauses ``pacingRatio`` times what it took —
+# ``readPressureRatio`` times, while the web tier says reads on the node are starving
+# (``agg:readpressure:<node>``, as the aggregation writers read it) — at most ``_PACE_MAX_S``.
 
 def _floor_backoff_s(attempt: int) -> float:
     """Before retry ``attempt`` (0-based) of a one-row statement: 2 s, 4 s, 8 s … capped at 60 s,
@@ -219,6 +228,103 @@ def _floor_backoff_s(attempt: int) -> float:
 #: What the ladder waits and times with (tests replace them).
 _sleep = asyncio.sleep
 _clock = time.monotonic
+
+#: A chunk slower than the statement target is halved no narrower than this: fifty rows that take
+#: the target are not split further for being slow, only for failing.
+_SLOW_FLOOR = 50
+#: The longest pause after one write statement, and the shortest worth taking.
+_PACE_MAX_S = 5.0
+_PACE_MIN_S = 0.005
+#: How long a node's read-pressure verdict is reused before Redis is asked again.
+_PRESSURE_POLL_S = 2.0
+_PRESSURE_SEEN: Dict[str, Tuple[float, bool]] = {}
+
+
+def _node_of(client) -> Optional[str]:
+    """``host:port`` of the node a graph client writes, as the web tier names it when it reports
+    reads starving there (``read_pressure.pressure_key``): on a cluster the key's owner (None when
+    the handle doesn't know it), else the connection's endpoint. None for a client that says
+    neither, a test fake."""
+    cfg = getattr(client, "_cfg", None)
+    if cfg is None:
+        return None
+    if getattr(cfg, "mode", None) == "cluster":
+        node = getattr(client, "_node", None)
+        return f"{node[0]}:{node[1]}" if node else None
+    host, port = getattr(cfg, "host", None), getattr(cfg, "port", None)
+    return f"{host}:{port}" if host and port else None
+
+
+async def _reads_starving(client) -> bool:
+    """Whether the web tier says reads are starving on the node ``client`` writes
+    (``agg:readpressure:<node>``, stamped with a short TTL). Asked at most every
+    ``_PRESSURE_POLL_S`` per node; False when it can't be told: no signal, no slowdown."""
+    node = _node_of(client)
+    if node is None:
+        return False
+    now = time.monotonic()
+    seen = _PRESSURE_SEEN.get(node)
+    if seen is not None and now - seen[0] < _PRESSURE_POLL_S:
+        return seen[1]
+    try:
+        from backend.app.services.aggregation.admission import read_pressure_key
+        from backend.app.services.aggregation.redis_client import get_redis
+
+        starving = bool(await asyncio.wait_for(get_redis().get(read_pressure_key(node)), 0.2))
+    except Exception:  # noqa: BLE001 — fail open
+        starving = False
+    _PRESSURE_SEEN[node] = (now, starving)
+    return starving
+
+
+#: The projector's writing lease on an endpoint (``_writing``): how long it lives, and how often a
+#: pass renews it.
+_WRITING_TTL_S = 30
+_WRITING_RENEW_S = 10.0
+_WRITING_RENEWED: Dict[str, float] = {}
+
+
+def _endpoint_of(client) -> Optional[str]:
+    """``host:port`` of the endpoint a graph client connects through, as a reader's provider names
+    it (``FalkorDBProvider._endpoint_label``); None for a client that doesn't say (a test fake)."""
+    cfg = getattr(client, "_cfg", None)
+    host, port = getattr(cfg, "host", None), getattr(cfg, "port", None)
+    return f"{host}:{port}" if host and port else None
+
+
+async def _writing(client) -> None:
+    """Hold the projector's writing lease on the endpoint ``client`` writes through
+    (``projector_writing_key``, ``_WRITING_TTL_S``), renewed at most every ``_WRITING_RENEW_S``:
+    while it lives, readers there missing their deadlines are held back by these writes, not by a
+    wedged node, and are answered busy rather than as a failover. Best effort."""
+    endpoint = _endpoint_of(client)
+    if endpoint is None:
+        return
+    now = time.monotonic()
+    if now - _WRITING_RENEWED.get(endpoint, float("-inf")) < _WRITING_RENEW_S:
+        return
+    _WRITING_RENEWED[endpoint] = now
+    try:
+        from backend.app.services.aggregation.redis_client import get_redis
+
+        await asyncio.wait_for(get_redis().set(projector_writing_key(endpoint), "1",
+                                               ex=_WRITING_TTL_S), 0.2)
+    except Exception:  # noqa: BLE001 — readers' streaks then count, as before
+        logger.debug("projection: could not hold the writing lease on %s", endpoint, exc_info=True)
+
+
+async def _pace(client, elapsed_s: float, policy) -> None:
+    """After a write statement that took ``elapsed_s``, give the node's reads their turn: a pause of
+    ``pacingRatio`` times it, ``readPressureRatio`` times while reads there are starving, at most
+    ``_PACE_MAX_S``; none shorter than ``_PACE_MIN_S``."""
+    ratio = float(policy["pacingRatio"])
+    if float(policy["readPressureRatio"]) > ratio and await _reads_starving(client):
+        ratio = float(policy["readPressureRatio"])
+        from backend.app.jobs.metrics import increment
+        increment("graphver_projection_yields_total")
+    pause = min(_PACE_MAX_S, elapsed_s * ratio)
+    if pause >= _PACE_MIN_S:
+        await _sleep(pause)
 
 
 class _Width:
@@ -240,15 +346,15 @@ class _Width:
         self.streak = 0
         self.failed: Optional[int] = None
 
-    def halve(self, size: int, *, failed: bool = True) -> None:
+    def halve(self, size: int, *, failed: bool = True, floor: int = 1) -> None:
         if failed:
             self.failed = size if self.failed is None else min(self.failed, size)
-        self.value = max(1, min(self.value, size // 2))
+        self.value = max(1, min(self.value, max(floor, size // 2)))
         self.streak = 0
 
-    def note(self, size: int, *, slow: bool) -> None:
-        if slow:
-            self.halve(size, failed=False)
+    def note(self, size: int, *, slow: bool, floor: int = 1) -> None:
+        if slow:                                # never below ``floor``, nor above where it is
+            self.halve(size, failed=False, floor=floor)
             return
         self.streak += 1
         if self.streak < 8 or self.value >= self.ceiling:
@@ -341,12 +447,14 @@ async def _write_marker(client, seq: int, epoch: int) -> Optional[str]:
     that cannot be told), else None."""
     want = config.PROJECTION_WAIT_REPLICAS
     write_and_wait = getattr(client, "write_and_wait", None) if want > 0 else None
+    ceiling_ms = 1000 * int(build_policy.current()["writeCeilingSecs"])
     if write_and_wait is None:                  # WAIT off, or a client without it (a test fake)
-        await _q(client, _MARKER_WRITE, {"seq": seq, "epoch": epoch})
+        await _q(client, _MARKER_WRITE, {"seq": seq, "epoch": epoch},
+                 timeout_ms=min(_WRITE_TIMEOUT_MS, ceiling_ms))
         return None
     from backend.app.providers.falkordb_provider import clamp_write_budget
 
-    budget_ms = int(1000 * clamp_write_budget(_WRITE_TIMEOUT_MS / 1000.0))
+    budget_ms = min(int(1000 * clamp_write_budget(_WRITE_TIMEOUT_MS / 1000.0)), ceiling_ms)
     acked = await asyncio.wait_for(
         write_and_wait(f"CYPHER seq={int(seq)} epoch={int(epoch)} {_MARKER_WRITE}",
                        timeout_ms=budget_ms, min_replicas=want,
@@ -1026,10 +1134,15 @@ class FalkorProjector:
         from backend.app.jobs.metrics import increment, observe
         width = self._width(client, kind)
         stats = _PASS_STATS.get() or _PassStats()
+        policy = build_policy.current()
         budget_s = timeout_ms / 1000.0
+        slow_s, floor = budget_s / 2, 1
         if not read_only:
             from backend.app.providers.falkordb_provider import clamp_write_budget
-            budget_s = clamp_write_budget(budget_s)
+            budget_s = min(clamp_write_budget(budget_s), float(policy["writeCeilingSecs"]))
+            timeout_ms = int(budget_s * 1000)
+            slow_s = min(budget_s / 2, policy["statementTargetMs"] / 1000.0)
+            floor = _SLOW_FLOOR
 
         async def send(chunk: list) -> None:
             attempt = 0
@@ -1072,7 +1185,7 @@ class FalkorProjector:
                         return
                     raise failure
                 elapsed = _clock() - started
-                width.note(len(chunk), slow=elapsed > budget_s / 2)
+                width.note(len(chunk), slow=elapsed > slow_s, floor=floor)
                 stats.note(len(chunk), elapsed)
                 observe("graphver_projection_statement_seconds", elapsed, kind=kind)
                 await self._release(kind, chunk)
@@ -1080,11 +1193,15 @@ class FalkorProjector:
                     on_result(chunk, res)
                 if progress:
                     await progress(len(chunk))
+                if not read_only:
+                    await _pace(client, elapsed, policy)
                 return
 
         at = 0
         while at < len(rows):
             chunk = rows[at:at + width.value]
+            if not read_only:
+                await _writing(client)
             await send(chunk)
             at += len(chunk)
 
