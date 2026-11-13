@@ -261,6 +261,20 @@ class ChangeListBusy(_HttpMapped, RuntimeError):
                          {"Retry-After": str(retry_after)})
 
 
+class GraphReadBusy(_HttpMapped, RuntimeError):
+    """A read of a graph from Postgres (while FalkorDB holds no version of it) ran past the
+    New-version builds' statement limit, and Postgres cancelled it: answered as a busy store the
+    reader may retry, so one large graph's reads never hold the connection pool from everyone's."""
+
+    status_code = 503
+
+    def __init__(self, retry_after: int = 2):
+        super().__init__("this graph is taking too long to read while it is being prepared; try "
+                         "again in a moment",
+                         {"type": "graph_read_busy", "retryable": True},
+                         {"Retry-After": str(retry_after)})
+
+
 class JobActive(_HttpMapped, RuntimeError):
     """Another job of the same kind is already running on this branch.
     Same shape as ``BootstrapConflict``'s ``job_active``."""
@@ -595,7 +609,7 @@ class DraftPruned(_HttpMapped, RuntimeError):
 
 HTTP_MAPPED = (BranchNotOpen, MainWriteForbidden, NotDraftOwner, DraftRoleRequired, SelfReview,
                PersonRequired, GroupsUnavailable, IneligibleMember, ServiceAccountMember, HeadMoved,
-               LockBusy, ChangeListBusy, RevisionUnsupported, RevisionTooFar, RevisionReadOnly,
+               LockBusy, ChangeListBusy, GraphReadBusy, RevisionUnsupported, RevisionTooFar, RevisionReadOnly,
                JobActive, CurationAtRisk, MassDeleteBlocked, ForkLimit, NotAFork, LiveForks,
                ForkNotRestorable, GraphMoved, ProjectionNotAdopted, ProjectionAlreadyAdopted,
                ProjectionPassInFlight, ProjectionKeyInUse,

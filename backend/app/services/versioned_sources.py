@@ -298,10 +298,11 @@ async def physical_key(ds_id: str, provider_id: str, graph_name: Optional[str]) 
     from sqlalchemy import select
 
     from backend.app.services.versioning.config import DEFAULT_FALKOR_PROVIDER
-    from backend.app.services.versioning.db import get_session_factory
+    from backend.app.services.versioning.db import graphver_route_session
     from backend.app.services.versioning.models import GraphORM, ProjectionStateORM
 
-    async with get_session_factory()() as session:
+    # On the route engine: a pool reads of graphs fill can't stop this lookup, nor every read with it.
+    async with graphver_route_session() as session:
         of_source = GraphORM.data_source_id == ds_id
         if ds_id.startswith("dsfork_"):
             # A fork has no key of its own to read: its root parent's pin, up a fork of a fork.

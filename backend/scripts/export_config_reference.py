@@ -238,6 +238,21 @@ NOTES: dict[str, tuple[str, str | None]] = {
         "Reads from Postgres that run at once per process across graphs, so they never take the whole connection pool. A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds.",
         None,
     ),
+    "GRAPHVER_ROUTE_POOL_SIZE": (
+        "Connections kept, per process, in the small pool that routes every read of a versioned "
+        "graph (its key, its watermark, its main branch). It is apart from `GRAPHVER_POOL_SIZE`, so "
+        "reads that fill that pool can't stop routing; each statement on it is cut off past two "
+        "seconds. Counts toward Postgres' `max_connections` with the main pool.",
+        None,
+    ),
+    "GRAPHVER_ROUTE_POOL_MAX_OVERFLOW": (
+        "Connections the routing pool may open past `GRAPHVER_ROUTE_POOL_SIZE` at a peak.",
+        None,
+    ),
+    "GRAPHVER_ROUTE_POOL_TIMEOUT_SECS": (
+        "Seconds a read waits for a routing connection before it fails, rather than queueing.",
+        None,
+    ),
     "MAX_IMPORT_BODY_BYTES": (
         "The body-size cap on the other routes that take large bodies (the rest of `/versioning/`, "
         "`/graph/save`, the view-file routes). An import's file is held to `IMPORT_MAX_BYTES` "

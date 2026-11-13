@@ -21,6 +21,7 @@ tests/integration/test_children_paging_exact_live.py
 tests/integration/test_children_sibling_lineage_live.py
 tests/integration/test_commit_provenance.py
 tests/integration/test_concurrent_imports.py
+tests/integration/test_context_engine_route_first.py
 tests/integration/test_draft_awareness.py
 tests/integration/test_draft_levels.py
 tests/integration/test_draft_narrowing.py

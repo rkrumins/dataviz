@@ -117,6 +117,12 @@ def empty_hash() -> str:
 POOL_SIZE: int = int(os.getenv("GRAPHVER_POOL_SIZE", "10"))
 POOL_MAX_OVERFLOW: int = int(os.getenv("GRAPHVER_POOL_MAX_OVERFLOW", "5"))
 POOL_TIMEOUT_SECS: int = int(os.getenv("GRAPHVER_POOL_TIMEOUT_SECS", "10"))
+# The small pool of its own that routes every read of a versioned graph (its pin, its watermark, its
+# main branch; ``db.get_route_engine``): apart from the pool above, so reads that fill that one
+# can't take routing down with them. Each statement on it is cut off past two seconds.
+ROUTE_POOL_SIZE: int = int(os.getenv("GRAPHVER_ROUTE_POOL_SIZE", "3"))
+ROUTE_POOL_MAX_OVERFLOW: int = int(os.getenv("GRAPHVER_ROUTE_POOL_MAX_OVERFLOW", "2"))
+ROUTE_POOL_TIMEOUT_SECS: int = int(os.getenv("GRAPHVER_ROUTE_POOL_TIMEOUT_SECS", "2"))
 
 # Bulk ingest / projection batch sizes (rows per COPY / UNWIND chunk).
 INGEST_BATCH_SIZE: int = int(os.getenv("GRAPHVER_INGEST_BATCH_SIZE", "5000"))

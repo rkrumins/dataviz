@@ -67,6 +67,7 @@ tests/test_bootstrap_worker_unit.py
 tests/test_branding_endpoint.py
 tests/test_branding_repo.py
 tests/test_bring_into_history.py
+tests/test_build_policy.py
 tests/test_bulkhead.py
 tests/test_cache_refresh_route.py
 tests/test_canvas_endpoints.py
@@ -194,6 +195,7 @@ tests/test_package_seed_rows.py
 tests/test_parse_cost.py
 tests/test_permission_implications.py
 tests/test_permission_service.py
+tests/test_pg_read_bounds.py
 tests/test_placement_conformance.py
 tests/test_placement_dry_run.py
 tests/test_placement_legacy_parity.py
