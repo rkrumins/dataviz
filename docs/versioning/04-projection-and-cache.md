@@ -419,9 +419,9 @@ in `service.py`, reported on the watermark as `served` (with its `served_revisio
   fork does and never shows a change its root made after the fork's base. A key part-way through a
   window would show some, so meanwhile the fork reads its root from Postgres
   ([17](17-forks-and-residency.md) §2).
-- **`GRAPHVER_READ_MAX_LAG`** caps how many versions behind the key may serve: `-1` (default) any; `0`
-  the head only, as before this, so a read the key is behind for goes to Postgres
-  (read-your-writes for a person's own change, at the cost of the lineage summaries meanwhile).
+- **`GRAPHVER_READ_MAX_LAG`** caps how many versions behind the key may serve, for a graph that reads
+  in place or beside: `-1` (default) any; `0` the head only. A graph's read mode (below) decides
+  first: Always the latest serves the key only at the head, whatever this says.
 - **A graph published before `served_commit_seq` existed** had it `NULL`: the migration
   `20261113_1000_gv_ps_served_fill` fills it from the watermark, and a pass, the first-seed gate or
   liveness that finds it still missing restores it from the key's marker (by compare-and-swap on the
@@ -444,6 +444,89 @@ in `service.py`, reported on the watermark as `served` (with its `served_revisio
   (`GRAPHVER_ROUTE_POOL_*`, two-second statements), so reads that fill the main pool can't stop
   routing. And `ContextEngine.for_workspace` reads the route before it needs FalkorDB: a FalkorDB
   that can't be reached fails only reads that need it, never a graph Postgres serves.
+
+### Read modes: availability against consistency
+
+What a graph's readers get while a newer version lands is a choice, made by a system administrator
+for the platform (Admin → Infrastructure → Versioned graphs → New-version builds, **Reads while a new
+version lands**; `GRAPHVER_READ_MODE`) and, if they like, for one graph (**Read mode…** on its row;
+`PUT /admin/versioning/graphs/{graph_id}/read-mode`, `projection_state.read_mode`). A fork follows its
+root's.
+
+| Mode | While version 6 lands | Reads from | Good for |
+|---|---|---|---|
+| `latest` — Always the latest (**the default**) | version 6 from the moment it is published | Postgres until the key holds it, then the key | small or critical graphs; how reads have always worked |
+| `in_place` — Keep serving, update in place | version 5, with parts of 6 as they are written | the key, paced | large graphs whose views must stay fast |
+| `beside` — Keep serving, switch when ready | exactly version 5, then version 6 at once | the key; 6 is built in a second key | large graphs where everyone sees one complete version |
+
+- **One rule applies it.** `serving_seq` takes the mode's lag cap: 0 for `latest`, so a graph behind
+  its head is read from Postgres (bounded, slower, without lineage summaries) until it catches up;
+  `GRAPHVER_READ_MAX_LAG` for the others. The watermark and the sync chip say which mode applies and
+  where it was set (`read_mode`, `read_mode_source`).
+- **`beside` needs a key the platform owns** (a customer's own key is never copied:
+  `422 read_mode_unavailable`) and **New-version builds** on (`candidateKeysEnabled`, Admin →
+  Features). With it off, a `beside` graph's changes are written in place.
+- **Imports land the same way in every mode**: in Postgres first, as one commit the history holds
+  whole; then the projector writes them into FalkorDB. The mode only decides what readers see while
+  it does.
+
+### Building beside the serving key (`beside`)
+
+A publish larger than **Build beside above** (`buildAboveRows`) in a graph that reads `beside` is
+built in a second key while the serving key keeps serving its version whole
+(`FalkorProjector._advance_candidate`, `candidates`). A smaller one is written in place, paced, and
+`project_now` never runs a build inline.
+
+```mermaid
+stateDiagram-v2
+    [*] --> queued: a large window, read mode beside
+    queued --> copying: room for a copy on the node
+    queued --> queued: no room (noRoomPolicy wait) — asks again in a minute
+    queued --> [*]: no room (noRoomPolicy in_place) — written in place
+    copying --> catching_up: GRAPH.COPY of the serving key
+    catching_up --> catching_up: the commits since, a window at a time
+    catching_up --> switching: holds the head
+    switching --> [*]: checked, then switched in one transaction
+```
+
+- **The build's key** is the serving key's name plus `#b<k>` (`keymigrate.build_key`): the same hash
+  tag, so it is in the same cluster slot, where `GRAPH.COPY` can copy into it. It is one of the
+  graph's own keys (`is_owned_key`).
+- **Copying.** Once the node has room for a copy (`residency.copy_room`: the graph's size times
+  **Room a copy needs**, `copyMarginPct`, under the node's start mark; a graph larger than **Largest
+  graph copied** is never copied) and no lineage-summaries job is rewriting the serving key's
+  summaries, `GRAPH.COPY` copies the serving key, summaries and indexes included. The serving key
+  must hold its version whole (its marker, `served_commit_seq` and the watermark agree), or there is
+  nothing exact to copy: the build is dropped and the change written in place.
+- **Catching up.** The commits since the copy are written into the build's key, in memory or a page
+  at a time with its cursor in that key (resumable within `GRAPHVER_PROJECTION_PASS_MAX_SECS`), and
+  its summaries move by the windows' deltas, fenced by its own summaries marker. Summaries a delta
+  cannot move are owed to the batch job once switched. Nothing is held back in quarantine: a row that
+  fails fails the attempt. Before writing, the key's marker is checked: a key lost (its node restarted
+  without it) is copied again; a marker ahead of what was recorded (a pass stopped after writing it,
+  last) is adopted.
+- **Switching.** Once it holds the head (checked against Postgres: node and edge counts) or is within
+  **Catch-up allowed in the switch** (`flipMaxLagRows`) of it, one transaction
+  (`switch_to_candidate`) makes the build's key the pin, serving its version; the old key joins
+  `retired_keys` and is dropped after **Keep the previous key for** (`retireGraceSecs`), so reads
+  under way finish on it. The publish tail follows: every reader's caches of the old key are dropped.
+  What main gained past the switch is written in place by the next pass.
+- **Nothing writes the serving key during a build**, which is why readers see exactly its version.
+  Eviction leaves the graph alone, `project_now` leaves it to the worker, and the watermark carries
+  the build (`candidate`: its step, attempts, error, why it waits), which the sync chip says ("Showing
+  #5 · building #6").
+- **Failures.** A step that fails counts an attempt and is tried again after a backoff, from a fresh
+  copy; past **Attempts before giving up** (`buildMaxAttempts`) the build is dropped with its key and
+  the change is written in place (the window is marked in flight, `window_rows`, so it is not built
+  again). A rebuild or a move drops a build. A purge drops its key.
+- **Restarts.** Every step is recorded in `projection_state` (`candidate_graph_name`,
+  `candidate_provider`, `candidate_seq`, `candidate_state`) and fenced on the build's id, and the build's
+  key says what it holds, so a pass on any worker takes it up where it was. `GRAPH.COPY` finishes
+  even if its client goes away; a key under the build's name is dropped before a copy.
+- **Metrics:** `graphver_builds_total{step=queued|copied|switched|dropped}`,
+  `graphver_build_copy_seconds`, `graphver_build_waiting_total{reason=room}`.
+- **Not yet:** seeding a build from Postgres when no node has room for a copy (`buildMode`
+  `reseed`), and builds for rebuilds, moves and loads; they wait or are written in place meanwhile.
 
 ---
 

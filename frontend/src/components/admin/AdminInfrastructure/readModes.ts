@@ -37,6 +37,25 @@ export interface ReadModeInfo {
 
 export const READ_MODES: ReadModeInfo[] = [
     {
+        mode: 'latest',
+        title: 'Always the latest',
+        short: 'Always the latest',
+        icon: Database,
+        promise: 'Readers see the newest published version the moment it is published, read from the database until the graph store has it.',
+        frames: [
+            { when: 'Before', shows: '5', from: 'graph store' },
+            { when: 'While version 6 lands', shows: '6', from: 'database', note: 'Newest version, read from the database: slower' },
+            { when: 'After', shows: '6', from: 'graph store' },
+        ],
+        example: 'An import changes 100,000 items in a graph of 10 million. Within seconds of the publish, canvases show version 6, '
+            + 'read from the database while the graph store catches up: large views load slower, lineage summaries are missing '
+            + 'until it has, and under heavy load a read may be asked to retry.',
+        goodFor: 'The default, as reads have always worked. Small or critical graphs where the newest data matters more than speed.',
+        pros: ['Always the newest version, even mid-update', 'Nothing extra to run or watch'],
+        cons: ['Reads during an update come from the database: slower on large graphs', 'Lineage summaries are missing until the graph store catches up'],
+        needs: 'Database capacity for reading whole graphs while they update.',
+    },
+    {
         mode: 'in_place',
         title: 'Keep serving, update in place',
         short: 'Update in place',
@@ -49,7 +68,7 @@ export const READ_MODES: ReadModeInfo[] = [
         ],
         example: 'An import changes 100,000 items in a graph of 10 million. Canvases stay fast and keep showing version 5; '
             + 'as version 6 is written, its changes appear a batch at a time; once it is all in, every view shows version 6.',
-        goodFor: 'Most graphs. The current behaviour.',
+        goodFor: 'Large graphs whose views must stay fast while big imports land, where a moment of a partly applied change is fine.',
         pros: ['Reads stay fast throughout', 'No extra memory'],
         cons: ['During a large update, readers can see some of the new version before the rest of it'],
         needs: 'Nothing extra.',
@@ -72,25 +91,6 @@ export const READ_MODES: ReadModeInfo[] = [
         pros: ['Readers always see one complete version', 'Reads stay fast; a failed update is never shown'],
         cons: ['The new version shows only once it is fully built, so later than in place', 'Takes room for a second copy while it is built'],
         needs: 'Free memory on a graph store node for a second copy of the graph, and New-version builds turned on.',
-    },
-    {
-        mode: 'latest',
-        title: 'Always the latest',
-        short: 'Always the latest',
-        icon: Database,
-        promise: 'Readers see the newest published version the moment it is published, read from the database until the graph store has it.',
-        frames: [
-            { when: 'Before', shows: '5', from: 'graph store' },
-            { when: 'While version 6 lands', shows: '6', from: 'database', note: 'Newest version, read from the database: slower' },
-            { when: 'After', shows: '6', from: 'graph store' },
-        ],
-        example: 'An import changes 100,000 items in a graph of 10 million. Within seconds of the publish, canvases show version 6, '
-            + 'read from the database while the graph store catches up: large views load slower, lineage summaries are missing '
-            + 'until it has, and under heavy load a read may be asked to retry.',
-        goodFor: 'Small or critical graphs where the newest data matters more than speed.',
-        pros: ['Always the newest version, even mid-update'],
-        cons: ['Reads during an update come from the database: slower on large graphs', 'Lineage summaries are missing until the graph store catches up'],
-        needs: 'Database capacity for reading whole graphs while they update.',
     },
 ]
 

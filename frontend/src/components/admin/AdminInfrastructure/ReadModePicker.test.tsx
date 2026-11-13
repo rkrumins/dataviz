@@ -16,7 +16,7 @@ describe('ReadModePicker', () => {
         render(<ReadModePicker value="in_place" defaultMode="in_place" onChange={() => {}} />)
         const group = screen.getByRole('radiogroup', { name: 'What readers get while a new version lands' })
         expect(within(group).getAllByRole('radio').map(r => r.getAttribute('aria-label'))).toEqual([
-            'Keep serving, update in place', 'Keep serving, switch when ready', 'Always the latest'])
+            'Always the latest', 'Keep serving, update in place', 'Keep serving, switch when ready'])
         const inPlace = radio('Keep serving, update in place')
         expect(inPlace).toHaveAttribute('aria-checked', 'true')
         expect(inPlace).toHaveTextContent('Default')

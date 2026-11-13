@@ -221,7 +221,7 @@ def test_past_the_ceiling_a_fork_reads_postgres(monkeypatch):
     _run(case)
 
 
-def test_a_fork_reads_its_roots_key_at_the_version_the_key_holds_whole():
+def test_a_fork_reads_its_roots_key_at_the_version_the_key_holds_whole(read_mode_in_place):
     """Behind its root's head, a fork reads the root's key at the version the key serves, while the
     key holds exactly that (idle since it published): its patch set is against the root there, so
     it reads as the fork does, at whatever base, and never shows a change its root made since. A
@@ -279,6 +279,14 @@ def test_a_fork_reads_its_roots_key_at_the_version_the_key_holds_whole():
         wm = await svc.projection_watermark(fork)
         assert (wm["served"], wm["read_route"]["main"]) == (2, "falkordb")
         assert (await svc.overlay_version(graph_id=fork, branch_id=fmain, root_at=2))[2] == 2
+
+        # A root read Always the latest serves its key at its head only: the root from Postgres.
+        assert await svc.set_read_mode(root, "latest") == (True, None)
+        reader = await _reader(svc, fork, fmain)
+        assert isinstance(reader._base, VersionedBranchProvider)
+        assert reader._root_at == {} and reader._version[2] == 4
+        assert (await svc.projection_watermark(fork))["read_route"]["main"] == "postgres"
+        assert await svc.set_read_mode(root, None) == (True, "latest")
 
         # A key part-way through a window holds no version whole: the root from Postgres, at 4.
         for dirty in ({"window_rows": 300_000}, {"last_error": "projection apply failed"},

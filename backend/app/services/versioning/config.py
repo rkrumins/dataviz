@@ -185,14 +185,15 @@ READ_MAX_LAG: int = int(os.getenv("GRAPHVER_READ_MAX_LAG", "-1"))
 # What reads of a versioned graph's main get while a newer version is being written into FalkorDB,
 # unless the graph says otherwise (``projection_state.read_mode``). A system administrator changes it
 # live under Admin → Infrastructure → Versioned graphs → New-version builds (``build_policy``).
-#   latest    always the newest published version: from Postgres until FalkorDB holds it;
+#   latest    always the newest published version: from Postgres until FalkorDB holds it. The
+#             default: reads of a graph behind its head have always gone to Postgres;
 #   in_place  the version FalkorDB last finished, while the next is written into the same key;
 #   beside    exactly that version, while the next is built in a second key, then one switch
 #             (with New-version builds off, ``candidateKeysEnabled``, it reads as in_place).
 READ_MODES = ("latest", "in_place", "beside")
-READ_MODE: str = os.getenv("GRAPHVER_READ_MODE", "in_place")
+READ_MODE: str = os.getenv("GRAPHVER_READ_MODE", "latest")
 if READ_MODE not in READ_MODES:
-    READ_MODE = "in_place"
+    READ_MODE = "latest"
 # After each projection, cheaply reconcile live node/edge COUNTS between Postgres
 # (the SoR) and FalkorDB (the cache); on a mismatch, bounded-heal by reseeding the
 # graph from Postgres once. Guards against a silently dropped delete leaving the

@@ -80,6 +80,20 @@ def _fresh_graphver_engine():
     yield
 
 
+@pytest.fixture
+def read_mode_in_place(monkeypatch):
+    """The platform's read mode set to Keep serving, update in place: for a test of what a graph
+    serves while its key catches up or rebuilds. The default, Always the latest, reads Postgres
+    meanwhile. The settings memo is cleared on both sides, so no other test sees it."""
+    from backend.app.services.versioning import build_policy
+    from backend.app.services.versioning import config as gv_config
+
+    monkeypatch.setattr(gv_config, "READ_MODE", "in_place")
+    build_policy._MEMO.update(policy=None, at=0.0, gen=None, gen_at=0.0, good=None)
+    yield
+    build_policy._MEMO.update(policy=None, at=0.0, gen=None, gen_at=0.0, good=None)
+
+
 @pytest.fixture(autouse=True)
 def _keep_revocation_service():
     """Some harnesses stub ``get_revocation_service`` in place (no Redis here) and never put it

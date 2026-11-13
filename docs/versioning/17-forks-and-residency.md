@@ -99,7 +99,10 @@ no fork — a fork of a fork reads the same one:
   the key the root's projection publishes holds a version of the root's `main` whole: its head, or
   behind it, the version it last published, while no pass has written into it since — idle, with
   no window in flight (`window_rows`) and no failed pass (`last_error`) that may have written part
-  of one (`fork_serving_seq`). The patch set is then against the root there (`root_at`, below);
+  of one (`fork_serving_seq`). Behind its head only as the root's read mode allows: a root that
+  reads Always the latest (the default) is served from its key only at its head
+  ([04](04-projection-and-cache.md) §5, Read modes). The patch set is then against the root there
+  (`root_at`, below);
 - otherwise the root's Postgres reader (`VersionedBranchProvider` on the root's `main`, at its head,
   bounded as every read from Postgres is: [04](04-projection-and-cache.md) §5): a root whose key is
   part-way through a window or a rebuild, evicted, being loaded or in the trash, or whose provider

@@ -1082,7 +1082,7 @@ class WatermarkModel(_ApiModel):
     # while the next is written into it) or beside (exactly that version, while the next is built
     # in a second key, then one switch); and whether the graph set it ("graph") or it is the
     # platform's ("platform"). A fork's are its root's.
-    read_mode: str = Field(default="in_place", alias="readMode")
+    read_mode: str = Field(default="latest", alias="readMode")
     read_mode_source: str = Field(default="platform", alias="readModeSource")
     # The version rows of a window written a page at a time, in flight: null when none is.
     window_rows: Optional[int] = Field(default=None, alias="windowRows")
@@ -2771,7 +2771,7 @@ async def _watermark_model(session: AsyncSession, wm: dict) -> WatermarkModel:
                           last_read_at=wm.get("last_read_at"),
                           size_bytes=wm.get("size_bytes"),
                           rehydrating_since=wm.get("rehydrating_since"),
-                          read_mode=wm.get("read_mode", "in_place"),
+                          read_mode=wm.get("read_mode", "latest"),
                           read_mode_source=wm.get("read_mode_source", "platform"),
                           window_rows=wm.get("window_rows"),
                           candidate=(BuildModel(**wm["candidate"]) if wm.get("candidate")

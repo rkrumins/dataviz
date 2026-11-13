@@ -21,6 +21,20 @@ integration's many small changes as a few commits.
 
 ### Added
 
+- **Read modes: what a graph's readers get while a new version lands.** A system administrator
+  chooses, for the platform and per graph, on guided cards (Admin → Infrastructure → Versioned
+  graphs → New-version builds, and **Read mode…** on a graph's row):
+  - **Always the latest** (the default, as reads have always worked): the newest published version
+    at once, read from Postgres until FalkorDB holds it.
+  - **Keep serving, update in place**: the version FalkorDB last finished, at full speed, while the
+    next is written into the same key, paced; readers may see part of it before the rest.
+  - **Keep serving, switch when ready**: exactly that version, while a large change is built in a
+    second key, checked, then switched to in one step. It needs a key the platform owns, room on its
+    node for a copy, and **New-version builds** on (Admin → Features).
+
+  The watermark, the sync chip and the admin inventory say which mode applies, where it was set, and
+  while a build is under way, its step ("Showing #5 · building #6"). Each change is recorded in the
+  activity log (`platform.versioning.read_mode_changed`).
 - **New-version builds settings, under Admin → Infrastructure → Versioned graphs.** A system
   administrator sets, live, how the projector paces its writes (the longest write statement, the
   target each aims at, the pause after each, and a longer one while reads wait) and the limits on
@@ -556,15 +570,22 @@ integration's many small changes as a few commits.
 
 ### Upgrading
 
-- **Migrations `20261113_1000_gv_ps_served_fill`, `20261113_1100_build_policy` and
-  `20261113_1200_gv_ps_window_rows`** fill `projection_state.served_commit_seq` where a graph's key
-  holds a published version, and add `platform_settings.gv_build_policy` and
-  `projection_state.window_rows` (nullable; start-up adds them to a separate `GRAPHVER_DB_URL`).
+- **Migrations `20261113_1000_gv_ps_served_fill`, `20261113_1100_build_policy`,
+  `20261113_1200_gv_ps_window_rows`, `20261113_1300_gv_ps_read_mode` and
+  `20261113_1400_gv_ps_candidate`** fill `projection_state.served_commit_seq` where a graph's key
+  holds a published version, and add `platform_settings.gv_build_policy` and `projection_state`'s
+  `window_rows`, `read_mode` and build columns (nullable; start-up adds them to a separate
+  `GRAPHVER_DB_URL`).
+- **The read mode defaults to Always the latest** (`GRAPHVER_READ_MODE=latest`): a graph behind
+  its head is read from Postgres until FalkorDB holds the newest version, as reads have always
+  worked. To keep serving the last finished version while a graph catches up, choose **Keep
+  serving, update in place** for the platform or for the graphs that need it.
 - **Each web process opens up to five more graphver connections**, for routing reads
   (`GRAPHVER_ROUTE_POOL_SIZE` 3, `GRAPHVER_ROUTE_POOL_MAX_OVERFLOW` 2): count them toward Postgres'
   `max_connections`.
-- **Keep `GRAPHVER_READ_MAX_LAG` at `-1`** (the default). At `0`, the launch guide's old
-  recommendation, every read of a graph whose projection is behind its head goes to Postgres.
+- **Keep `GRAPHVER_READ_MAX_LAG` at `-1`** (the default). It caps how far behind a graph that reads
+  in place or beside may be served; a graph that should always show the newest version chooses
+  Always the latest instead.
 - **Migration `20261113_0900_gv_import_mentions`** adds `graphver.import_mentions`, an empty table
   (`create_schema_and_partitions` makes it for a separate `GRAPHVER_DB_URL`). Without it, a replace
   keeps only what its rows matched, as before.

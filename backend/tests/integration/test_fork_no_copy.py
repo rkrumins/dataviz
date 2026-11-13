@@ -43,7 +43,7 @@ async def _root(svc, key, **pin):
     return gid
 
 
-def test_a_fork_is_never_projected():
+def test_a_fork_is_never_projected(read_mode_in_place):
     from backend.app.services.versioning.cache_manager import CacheManager
     from backend.app.services.versioning.reconcile import ProjectionReconciler
 
@@ -81,6 +81,11 @@ def test_a_fork_is_never_projected():
         # Behind its head, the root's key holds its last version whole: the fork reads it there.
         assert wm["fresh"] is False and wm["read_route"]["main"] == "falkordb"
         assert wm["served"] == root_wm["committed"]
+        # Unless its root is read Always the latest: then the fork reads it from Postgres too.
+        assert await svc.set_read_mode(root, "latest") == (True, None)
+        wm = await svc.projection_watermark(fid)
+        assert wm["served"] is None and wm["read_route"]["main"] == "postgres"
+        assert await svc.set_read_mode(root, None) == (True, "latest")
         # Part-way through a window it holds none whole: the fork reads its root from Postgres.
         await _pin(root, window_rows=300_000)
         wm = await svc.projection_watermark(fid)

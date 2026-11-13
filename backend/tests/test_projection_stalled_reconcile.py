@@ -232,13 +232,16 @@ def test_a_key_behind_that_serves_its_last_version_is_not_stalled():
         _projection_ctx,
     )
 
-    for h in (_health(projected_commit_seq=380, main_head_commit_seq=400),
+    for h in (_health(projected_commit_seq=380, main_head_commit_seq=400, read_mode="in_place"),
               _health(projected_commit_seq=0, main_head_commit_seq=400,
-                      served_commit_seq=380)):
+                      served_commit_seq=380, read_mode="in_place")):
         assert h.behind is True and h.serving is True
         assert h.stalled is False and h.current is True
         v = evaluate(_versioned(**_projection_ctx(h)), POLICY)
         assert v.drift_state == "managed" and v.skip == "platform_mastered"
+    # Read Always the latest, main reads go to Postgres meanwhile, which holds no rollups.
+    h = _health(projected_commit_seq=380, main_head_commit_seq=400, read_mode="latest")
+    assert h.behind is True and h.serving is False and h.stalled is True
 
 
 def test_an_unpinned_graph_is_never_stalled():
@@ -370,7 +373,8 @@ async def test_readiness_while_the_key_serves_its_last_version_is_ready(
     included: the connections are on the canvas, of that version, and the sync
     chip says a newer one is being written. The gap stays on the wire as
     evidence; nothing says the connections are missing."""
-    stub_health["ds_v"] = _health(projected_commit_seq=95, last_error="boom")
+    stub_health["ds_v"] = _health(projected_commit_seq=95, last_error="boom",
+                                  read_mode="in_place")
 
     r = await _service().get_readiness("ds_v", agg_session)
 

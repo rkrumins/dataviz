@@ -63,7 +63,7 @@ async def _run_reads_keep_the_published_version_while_it_catches_up_and_rebuilds
     await db.dispose_engine()
 
 
-def test_reads_keep_the_published_version_while_it_catches_up_and_rebuilds():
+def test_reads_keep_the_published_version_while_it_catches_up_and_rebuilds(read_mode_in_place):
     asyncio.run(_run_reads_keep_the_published_version_while_it_catches_up_and_rebuilds())
 
 

@@ -2942,7 +2942,7 @@ class _SyncVersioned(BaseModel):
     # What its readers get while a newer version lands (latest | in_place | beside), and whether
     # the graph set it ("graph") or it is the platform's ("platform"), so a view can say why it
     # shows what it shows.
-    read_mode: str = Field("in_place", alias="readMode")
+    read_mode: str = Field("latest", alias="readMode")
     read_mode_source: str = Field("platform", alias="readModeSource")
     # A new version built beside the key views read (read mode beside), while one is: its step
     # (queued, copying, catching_up, switching), attempts, error and why it waits; null when none.
@@ -3131,7 +3131,7 @@ async def get_sync_status(
                 committed_revision=_rev(wm.get("committed_revision")),
                 projected_revision=_rev(wm.get("projected_revision")),
                 served=wm.get("served"), served_revision=_rev(wm.get("served_revision")),
-                read_mode=wm.get("read_mode", "in_place"),
+                read_mode=wm.get("read_mode", "latest"),
                 read_mode_source=wm.get("read_mode_source", "platform"),
                 candidate=wm.get("candidate"),
             ),

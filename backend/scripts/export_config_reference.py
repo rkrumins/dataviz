@@ -247,8 +247,9 @@ NOTES: dict[str, tuple[str, str | None]] = {
     ),
     "GRAPHVER_READ_MODE": (
         "What readers of a versioned graph get while its next version is written into FalkorDB, "
-        "for every graph that doesn't set its own: `latest` (always the newest published version: "
-        "from Postgres until FalkorDB holds it, slower on a large graph), `in_place` (the version "
+        "for every graph that doesn't set its own: `latest` (the default, as reads have always "
+        "worked: always the newest published version, from Postgres until FalkorDB holds it, "
+        "slower on a large graph), `in_place` (the version "
         "FalkorDB last finished, while the next is written into the same key; readers may see part "
         "of it) or `beside` (exactly that version, while the next is built in a second key, then "
         "one switch; needs New-version builds on, and room for a second copy). A system "

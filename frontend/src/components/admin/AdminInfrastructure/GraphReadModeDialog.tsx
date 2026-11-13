@@ -33,7 +33,7 @@ export function GraphReadModeDialog({ row, onClose, onSaved }: Props) {
     const [pending, setPending] = useState(false)
     const [error, setError] = useState<string | null>(null)
 
-    const platform = (policyQ.data?.values.readMode?.effective as ReadMode | undefined) ?? 'in_place'
+    const platform = (policyQ.data?.values.readMode?.effective as ReadMode | undefined) ?? 'latest'
     const switchOn = policyQ.data?.enabled ?? false
     const name = row.dataSourceLabel ?? row.dataSourceId
     const now = row.readModeEffective ? READ_MODE[row.readModeEffective].title : null
