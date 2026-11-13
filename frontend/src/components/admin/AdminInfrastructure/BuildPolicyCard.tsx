@@ -216,7 +216,7 @@ export function BuildPolicyCard() {
             </div>
 
             {policy.enabled
-                ? <p className="text-[11px] text-ink-muted">On</p>
+                ? <p className="text-[11px] text-ink-muted">New-version builds is on: large publishes, and rebuilds and moves of platform-owned keys, are built beside the key that serves them.</p>
                 : (
                     <p className="text-[11px] text-amber-700 dark:text-amber-400">
                         New-version builds is off — turn it on under{' '}

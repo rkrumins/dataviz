@@ -280,12 +280,12 @@ describe('BuildPolicyCard', () => {
         const link = await screen.findByRole('link', { name: 'Admin → Features' })
         expect(link).toHaveAttribute('href', '/admin/features')
         expect(link.closest('p')).toHaveTextContent('New-version builds is off — turn it on under Admin → Features')
-        expect(screen.queryByText('On')).not.toBeInTheDocument()
+        expect(screen.queryByText(/New-version builds is on/)).not.toBeInTheDocument()
     })
 
     it('says when New-version builds is on', async () => {
         renderCard()
-        expect(await screen.findByText('On')).toBeInTheDocument()
+        expect(await screen.findByText(/New-version builds is on/)).toBeInTheDocument()
         expect(screen.queryByText(/New-version builds is off/)).not.toBeInTheDocument()
         expect(screen.queryByRole('link', { name: 'Admin → Features' })).not.toBeInTheDocument()
     })
