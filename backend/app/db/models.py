@@ -9,7 +9,6 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     Column,
-    Float,
     ForeignKey,
     Index,
     Integer,
@@ -19,6 +18,7 @@ from sqlalchemy import (
     and_,
     text,
 )
+from sqlalchemy.dialects.postgresql import DOUBLE_PRECISION
 from sqlalchemy.orm import relationship
 
 from .engine import Base
@@ -827,9 +827,11 @@ class WorkspaceDataSourceORM(Base):
     # (``GRAPHVER_IMPORT_IDENTIFIER``, ``IMPORT_REPLACE_*``).
     import_identifier = Column(Text, nullable=True)
     import_replace_min_live = Column(Integer, nullable=True)
-    import_replace_delete_fraction = Column(Float, nullable=True)
-    import_replace_create_fraction = Column(Float, nullable=True)
-    import_replace_min_match_fraction = Column(Float, nullable=True)
+    # DOUBLE_PRECISION, not Float: Postgres stores ``FLOAT`` as double precision and reflection reads
+    # it back so, which ``upgrade verify-schema`` would call a type mismatch.
+    import_replace_delete_fraction = Column(DOUBLE_PRECISION, nullable=True)
+    import_replace_create_fraction = Column(DOUBLE_PRECISION, nullable=True)
+    import_replace_min_match_fraction = Column(DOUBLE_PRECISION, nullable=True)
     extra_config = Column(Text, nullable=True)  # JSON — per-data-source config (schema mapping overrides, etc.)
     # Node-identity property — the physical graph property that plays the role
     # the platform's canonical ``urn`` does (universal node identity). NULL means

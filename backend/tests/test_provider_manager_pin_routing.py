@@ -63,13 +63,14 @@ def routed(monkeypatch):
             raise state["versioned"]
         return frozenset(state["versioned"])
 
-    def _factory():
+    def _route_session():
         state["reads"] += 1
         return _Session(state["row"])
 
     monkeypatch.setattr(data_source_repo, "get_data_source_orm", _get_ds)
     monkeypatch.setattr(versioned_sources, "versioned_data_source_ids", _versioned)
-    monkeypatch.setattr(gv_db, "get_session_factory", lambda: _factory)
+    # The pin is read on the route engine (``graphver_route_session``), not the graph pool.
+    monkeypatch.setattr(gv_db, "graphver_route_session", _route_session)
     return state
 
 
