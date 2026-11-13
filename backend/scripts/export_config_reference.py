@@ -162,6 +162,82 @@ NOTES: dict[str, tuple[str, str | None]] = {
         "minutes on it, so a draft of millions of rows is removed over a few sweeps.",
         None,
     ),
+    "GRAPHVER_PROJECTION_CANDIDATE_ABOVE": (
+        "Changed rows above which a publish is built in a second FalkorDB key while the current one keeps serving, then switched to (New-version builds, when its switch is on); smaller ones are written in place, paced. Defaults to `GRAPHVER_PROJECTION_PAGED_ABOVE`. A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds.",
+        None,
+    ),
+    "GRAPHVER_PROJECTION_CANDIDATE_REBUILDS": (
+        "`1`: rebuilds, moves and loads of platform-owned keys are built beside too, so reads keep the current version meanwhile. A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds.",
+        None,
+    ),
+    "GRAPHVER_PROJECTION_CANDIDATE_MODE": (
+        "How a build makes its key: `auto` copies the serving key when its node has room, else seeds from Postgres on the node with most room; `copy` or `reseed` forces one way. A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds.",
+        None,
+    ),
+    "GRAPHVER_PROJECTION_COPY_MARGIN_PCT": (
+        "The free memory a copy needs on its node, as a share of the graph's size (`130` = ×1.3). A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds.",
+        None,
+    ),
+    "GRAPHVER_PROJECTION_COPY_MAX_BYTES": (
+        "The largest graph copied rather than seeded from Postgres; `0`: no limit. A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds.",
+        None,
+    ),
+    "GRAPHVER_PROJECTION_NO_ROOM_POLICY": (
+        "With no room for a build anywhere: `wait` (the current version keeps serving) or `in_place` (the change is written into the serving key, paced). A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds.",
+        None,
+    ),
+    "GRAPHVER_PROJECTION_NO_ROOM_ALERT_SECS": (
+        "Seconds a build may wait for room before it raises an alert. A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds.",
+        None,
+    ),
+    "GRAPHVER_PROJECTION_CANDIDATE_CONCURRENCY": (
+        "Builds each versioning worker runs at once, never more than `GRAPHVER_PROJECTION_CONCURRENCY`. A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds.",
+        None,
+    ),
+    "GRAPHVER_PROJECTION_CANDIDATE_MAX_ATTEMPTS": (
+        "Failures after which a build is dropped and the current version keeps serving. A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds.",
+        None,
+    ),
+    "GRAPHVER_PROJECTION_CANDIDATE_FLIP_MAX_LAG_ROWS": (
+        "The most rows a build may still have to catch up when it switches; the rest is applied inside the switch. Defaults to `GRAPHVER_PROJECTION_INLINE_MAX_ROWS`. A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds.",
+        None,
+    ),
+    "GRAPHVER_PROJECTION_CANDIDATE_WARM_SECS": (
+        "Seconds a build's key is read to warm it before readers switch to it. A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds.",
+        None,
+    ),
+    "GRAPHVER_RETIRE_GRACE_SECS": (
+        "Seconds a graph's previous FalkorDB key stays after a switch or a move, so reads under way finish on it. A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds.",
+        None,
+    ),
+    "GRAPHVER_PROJECTION_STATEMENT_TARGET_MS": (
+        "The time each projector write statement aims at; larger batches are split, so reads on the same node keep their turn. A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds.",
+        None,
+    ),
+    "GRAPHVER_PROJECTION_WRITE_CEILING_S": (
+        "The most one projector write statement may take, on any FalkorDB mode, before it is stopped and split. A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds.",
+        None,
+    ),
+    "GRAPHVER_PROJECTION_PACING_RATIO": (
+        "The pause after each projector write statement, as a share of the time it took. A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds.",
+        None,
+    ),
+    "GRAPHVER_PROJECTION_READ_PRESSURE_RATIO": (
+        "The pause after each projector write statement while reads on the node are waiting, as a share of the time it took. A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds.",
+        None,
+    ),
+    "GRAPHVER_READ_STATEMENT_TIMEOUT_MS": (
+        "The most one read of a versioned graph from Postgres may take (while FalkorDB holds no version of it); past it the read answers 503 and is retried. A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds.",
+        None,
+    ),
+    "GRAPHVER_PG_READS_PER_GRAPH": (
+        "Reads of one versioned graph from Postgres that run at once per process; more wait briefly, then answer 429. A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds.",
+        None,
+    ),
+    "GRAPHVER_PG_READS_PER_PROCESS": (
+        "Reads from Postgres that run at once per process across graphs, so they never take the whole connection pool. A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds.",
+        None,
+    ),
     "MAX_IMPORT_BODY_BYTES": (
         "The body-size cap on the other routes that take large bodies (the rest of `/versioning/`, "
         "`/graph/save`, the view-file routes). An import's file is held to `IMPORT_MAX_BYTES` "

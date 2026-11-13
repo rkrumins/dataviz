@@ -297,6 +297,31 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
         ),
         depends_on=("versioningEnabled",),
     ),
+    # Preview: building a graph's next version beside the key that serves it doubles its memory on
+    # its node while the build runs, so it ships OFF and a deployment opts in. It refuses no request:
+    # the versioning worker reads it from the feature store when it decides to start or switch a
+    # build (build_policy.switch_state), and reads never depend on it.
+    "candidateKeysEnabled": FeatureWiring(
+        key="candidateKeysEnabled",
+        posture="capability",
+        stage="experimental",
+        server_gates=(
+            "Building a large publish, a rebuild or a move of a platform-owned key in a second "
+            "FalkorDB key while the current one serves, then switching readers to it, in the "
+            "versioning worker's projection pass",
+        ),
+        ui_surfaces=(
+            "The New-version builds card and the builds list on Admin → Infrastructure → "
+            "Versioned graphs",
+            "Each graph's build progress in its Versioning tab, Data health and sync status",
+        ),
+        still_allowed=(
+            "Every change is written into the serving key, paced, as before",
+            "Changing the New-version build settings",
+            "Nothing is deleted — Postgres is the source of truth",
+        ),
+        depends_on=("versioningEnabled",),
+    ),
     # Preview: a hotfix for imports of full snapshots, OFF until a deployment opts in. It refuses
     # nothing: the import worker reads it when a job starts (import_worker._in_memory_switch) and
     # the job keeps the mode it started in. What an import does is the same either way.

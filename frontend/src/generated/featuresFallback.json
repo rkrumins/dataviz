@@ -654,6 +654,40 @@
       ]
     },
     {
+      "key": "candidateKeysEnabled",
+      "name": "New-version builds",
+      "description": "A large publish, rebuild or move builds the graph's next version in a second FalkorDB key while the current one keeps serving, then switches readers to it. Needs Version control.",
+      "category": "lineage",
+      "type": "boolean",
+      "default": false,
+      "options": null,
+      "helpUrl": "/docs/versioning-projection-and-cache",
+      "adminHint": "New-version builds needs Version control on. Check that FalkorDB has room for a second copy of your largest graphs, and set the threshold, room and pacing under Admin \u2192 Infrastructure \u2192 Versioned graphs \u2192 New-version builds. Each build's steps, switches and failures are recorded in the activity log.",
+      "impactWhenOff": "Every change is written into the key that serves reads, as before: during a large import, readers may see the graph partly updated. Builds that haven't started copying are cancelled and their changes are written in place; builds already copying finish.",
+      "impactWhenOn": "A publish that changes more rows than the threshold, and rebuilds and moves of platform-owned keys, are built in a second key: readers keep the current version, complete, until the new one is checked and switched to. A copy needs room on its node for a second copy of the graph; with no room the build waits, or is seeded from Postgres elsewhere. The settings are under Admin \u2192 Infrastructure \u2192 Versioned graphs \u2192 New-version builds.",
+      "sortOrder": 3,
+      "deprecated": false,
+      "stage": "experimental",
+      "implemented": true,
+      "enforcedServerSide": true,
+      "posture": "capability",
+      "serverGates": [
+        "Building a large publish, a rebuild or a move of a platform-owned key in a second FalkorDB key while the current one serves, then switching readers to it, in the versioning worker's projection pass"
+      ],
+      "uiSurfaces": [
+        "The New-version builds card and the builds list on Admin \u2192 Infrastructure \u2192 Versioned graphs",
+        "Each graph's build progress in its Versioning tab, Data health and sync status"
+      ],
+      "stillAllowed": [
+        "Every change is written into the serving key, paced, as before",
+        "Changing the New-version build settings",
+        "Nothing is deleted \u2014 Postgres is the source of truth"
+      ],
+      "dependsOn": [
+        "versioningEnabled"
+      ]
+    },
+    {
       "key": "traceEnabled",
       "name": "Lineage trace",
       "description": "Follow a node's lineage upstream and downstream across the graph, from the graph and context views.",
@@ -1470,6 +1504,7 @@
     "versioningEnabled": true,
     "forksEnabled": false,
     "residencyEnabled": false,
+    "candidateKeysEnabled": false,
     "traceEnabled": true,
     "graphExportEnabled": true,
     "nativeQueryEnabled": true,

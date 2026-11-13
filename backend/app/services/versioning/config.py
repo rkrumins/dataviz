@@ -261,8 +261,48 @@ FALKOR_MAX_RESIDENT: int = int(os.getenv("GRAPHVER_FALKOR_MAX_RESIDENT", "0"))
 FALKOR_BUDGETS: dict = json.loads(os.getenv("GRAPHVER_FALKOR_BUDGETS", "") or "{}")
 DEFAULT_FALKOR_PROVIDER: str = "default"
 # A moved graph's old platform key is dropped no sooner than this after the move, and only once the
-# new key has caught up (doc 14 §6) — until then a move back onto it reconciles in place.
-RETIRE_GRACE_SECS: int = 900
+# new key has caught up (doc 14 §6) — until then a move back onto it reconciles in place. The
+# default for New-version builds' retire grace (``build_policy``), which an administrator overrides.
+RETIRE_GRACE_SECS: int = int(os.getenv("GRAPHVER_RETIRE_GRACE_SECS", "900"))
+
+# New-version builds (doc 14 §6, ``build_policy``): a graph's next version built in a second key
+# while its current key keeps serving, then switched to. Each value below is a default that a system
+# administrator overrides live under Admin → Infrastructure → New-version builds; the switch itself
+# is the ``candidateKeysEnabled`` feature flag. Windows of more changed rows than this are built
+# beside the serving key, as are rebuilds, moves and loads of platform-owned keys when enabled.
+PROJECTION_CANDIDATE_ABOVE: int = int(os.getenv("GRAPHVER_PROJECTION_CANDIDATE_ABOVE",
+                                                str(PROJECTION_PAGED_ABOVE)))
+PROJECTION_CANDIDATE_REBUILDS: bool = os.getenv("GRAPHVER_PROJECTION_CANDIDATE_REBUILDS", "1") == "1"
+# How a build makes its key: ``auto`` copies the serving key (GRAPH.COPY) when its node has room,
+# else seeds it from Postgres on the node with most room; ``copy`` and ``reseed`` force one way.
+PROJECTION_CANDIDATE_MODE: str = os.getenv("GRAPHVER_PROJECTION_CANDIDATE_MODE", "auto")
+# The free memory a copy needs on its node, as a share of the graph's size (130 = ×1.3), and the
+# largest graph copied rather than reseeded (0: no limit).
+PROJECTION_COPY_MARGIN_PCT: int = int(os.getenv("GRAPHVER_PROJECTION_COPY_MARGIN_PCT", "130"))
+PROJECTION_COPY_MAX_BYTES: int = int(os.getenv("GRAPHVER_PROJECTION_COPY_MAX_BYTES", "0"))
+# With no room for a build anywhere: ``wait`` (the serving key keeps serving its version) or
+# ``in_place`` (the window is written into the serving key, paced). Alerted on past the second value.
+PROJECTION_NO_ROOM_POLICY: str = os.getenv("GRAPHVER_PROJECTION_NO_ROOM_POLICY", "wait")
+PROJECTION_NO_ROOM_ALERT_SECS: int = int(os.getenv("GRAPHVER_PROJECTION_NO_ROOM_ALERT_SECS", "1800"))
+PROJECTION_CANDIDATE_CONCURRENCY: int = int(os.getenv("GRAPHVER_PROJECTION_CANDIDATE_CONCURRENCY", "2"))
+PROJECTION_CANDIDATE_MAX_ATTEMPTS: int = int(os.getenv("GRAPHVER_PROJECTION_CANDIDATE_MAX_ATTEMPTS", "3"))
+# The most rows a build still has to catch up when it switches, applied inside the switch.
+PROJECTION_CANDIDATE_FLIP_MAX_LAG_ROWS: int = int(os.getenv(
+    "GRAPHVER_PROJECTION_CANDIDATE_FLIP_MAX_LAG_ROWS", str(PROJECTION_INLINE_MAX_ROWS)))
+PROJECTION_CANDIDATE_WARM_SECS: int = int(os.getenv("GRAPHVER_PROJECTION_CANDIDATE_WARM_SECS", "30"))
+# Pacing the projector's writes so reads of a graph being written keep their turn on its node: the
+# time a write statement aims at, the most one may take, and the pause after each, as a share of
+# its own time — and as a larger share while reads on the node are waiting.
+PROJECTION_STATEMENT_TARGET_MS: int = int(os.getenv("GRAPHVER_PROJECTION_STATEMENT_TARGET_MS", "500"))
+PROJECTION_WRITE_CEILING_S: int = int(os.getenv("GRAPHVER_PROJECTION_WRITE_CEILING_S", "10"))
+PROJECTION_PACING_RATIO: float = float(os.getenv("GRAPHVER_PROJECTION_PACING_RATIO", "0.25"))
+PROJECTION_READ_PRESSURE_RATIO: float = float(os.getenv("GRAPHVER_PROJECTION_READ_PRESSURE_RATIO",
+                                                        "2.0"))
+# Reads of main from Postgres, while FalkorDB holds no version of a graph: each statement's limit,
+# and how many run at once per graph and per process, so a large graph's reads can't take the pool.
+READ_STATEMENT_TIMEOUT_MS: int = int(os.getenv("GRAPHVER_READ_STATEMENT_TIMEOUT_MS", "15000"))
+PG_READS_PER_GRAPH: int = int(os.getenv("GRAPHVER_PG_READS_PER_GRAPH", "4"))
+PG_READS_PER_PROCESS: int = int(os.getenv("GRAPHVER_PG_READS_PER_PROCESS", "8"))
 EVICT_SECS: int = int(os.getenv("GRAPHVER_EVICT_SECS", "300"))
 
 # Residency (doc 17): each graph's class (Always / Standard / Coldline) and each cluster master's

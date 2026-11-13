@@ -321,6 +321,9 @@ class PlatformSettingsORM(Base):
     # removes them (``versioning.draft_retention``); 0 keeps them for good. NULL: the environment's
     # ``GRAPHVER_DRAFT_RETENTION_DAYS`` applies.
     gv_draft_retention_days = Column(Integer, nullable=True)
+    # New-version builds (``versioning.build_policy``): JSON ``{"values": {wire name: value},
+    # "updatedBy", "updatedAt"}``. A value not in it takes the environment's default.
+    gv_build_policy = Column(Text, nullable=True)
     updated_at = Column(Text, nullable=True, onupdate=_now)
     updated_by = Column(Text, nullable=True)
 
