@@ -297,7 +297,7 @@ curl -sS "$BASE/api/v1/$WS/versioning/graphs/$GID/imports/$JOB" -H "Authorizatio
         }
       ],
       "fixes": {
-        "end_not_found": "Name each end by a node the graph holds or the file makes: add a node row for a missing end (or fix its row, if that was refused too), or name the end by its urn (sourceUrn, targetUrn) or entity_id (source_entity_id, target_entity_id)."
+        "end_not_found": "Name each end by a node the graph holds or the file makes: add a node row for a missing end, or name the end by its entity_id, or what the identifier reads: its urn; by identifier=prop.<name>, its source.<name>/target.<name> (with prop.<name>,urn, an end without it by its urn)."
       }
     }
   }

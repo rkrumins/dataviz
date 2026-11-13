@@ -265,7 +265,7 @@ admin can change them there.
 
 **What a replace never deletes.** An item a row of the file names stays, even
 when that row is refused, and so does every item an edge row names as an end. A
-refused delete row is the exception: it meant to delete what it names. An item
+refused delete row keeps only the item it matched: it meant to delete what it names. An item
 the replace does delete takes its edges with it, in the same change.
 
 **Delete only items that have this property.** With **A property**, a replace

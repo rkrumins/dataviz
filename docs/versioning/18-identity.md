@@ -188,7 +188,7 @@ Each identifier, walked through over the API with its requests and answers: [Exp
   `unchanged`, and nothing is written for it.
 - **`reconcileMode=upsert`** (the default) touches only what the file names. `replace` also deletes
   what the file leaves out of its scope, but never what a row of the file names, refused or not (a
-  refused delete row excepted), nor a node an edge row names as an end. With a property identifier,
+  refused delete row keeps only what it matched), nor a node an edge row names as an end. With a property identifier,
   `replaceScope=keyed` deletes only what holds the property: nodes made in the app or by another
   source stay, with their edges, except an edge to a node the replace deletes, which goes with that
   node.

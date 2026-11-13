@@ -3926,8 +3926,8 @@ _MAX_REFUSED_ROWS = Query(None, alias="maxRefusedRows", max_length=16, descripti
     "unless the platform's IMPORT_MAX_REFUSED_ROWS says otherwise), a count such as 100, a share "
     "of the file's rows such as 0.5%, or -1 (any). Past it, a replace deletes nothing and fails "
     "(rows_refused), and autoPublish leaves the draft for review. Within it, the import goes on "
-    "without them, and a replace keeps what a refused row still names (but not what a refused "
-    "delete row names). Every import reports its refused rows, with why, in summary.refused"))
+    "without them, and a replace keeps what a refused row still names (a refused delete row, only "
+    "what it matched). Every import reports its refused rows, with why, in summary.refused"))
 
 
 _REPLACE_SCOPE = Query(None, alias="replaceScope", pattern="^(all|keyed)$", description=(

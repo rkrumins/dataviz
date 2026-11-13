@@ -215,7 +215,7 @@ change. A file's keys find those ids:
   what the app or another connector made. With a property identifier, `replaceScope=keyed` deletes
   only the nodes holding the property (and the edges between two of them). A node a replace
   deletes always takes its edges with it (`summary.edgesCascaded`), and a replace never deletes a
-  node a row of the file names, refused or not (a refused delete row excepted), nor one an edge row
+  node a row of the file names, refused or not (a refused delete row keeps only what it matched), nor one an edge row
   names as an end.
 - **The data source's identifier property** (`prop.<identifier>`) finds a node too, for a source
   identified by it. It is reserved: the node's identifier holds its urn.

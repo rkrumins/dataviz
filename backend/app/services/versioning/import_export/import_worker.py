@@ -1027,7 +1027,7 @@ class ImportWorker:
                     "are on the draft. Fix those rows and import the file again, or send it with "
                     "maxRefusedRows (a count, a share such as 1%, or -1 for any) to replace with the "
                     "rows that applied: whatever a refused row names, by any key it carries, is kept "
-                    "(but not what a refused delete row names), and so is every node an edge row "
+                    "(a refused delete row keeps only what it matched), and so is every node an edge row "
                     "names as an end.",
                     phase="nodes" if kinds.get("node") or not kinds else "edges")
             if (await self._position(job_id)).cursor != "replace":       # not deleting yet
