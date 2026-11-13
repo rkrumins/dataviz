@@ -165,7 +165,7 @@ export function CommitDialog({
           }
           if (viewChangeCount) void queryClient.invalidateQueries({ queryKey: ['views'] })
           // The receipt (not a notification) is the confirmation — the bar renders it until dismissed.
-          setReceipt({ commitId: res.commitId, graphId, counts: changeSet.counts, via: 'publish' })
+          setReceipt({ commitId: res.commitId, outcome: res.outcome, graphId, counts: changeSet.counts, via: 'publish' })
           switchToMain()
           onClose()
           onPublished?.()

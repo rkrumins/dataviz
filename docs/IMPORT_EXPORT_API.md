@@ -43,7 +43,7 @@ sequenceDiagram
     W->>W: match every row, write the draft
     S->>A: GET imports/{jobId} until completed
     S->>A: POST branches/{branchId}/publish
-    A-->>S: commitId, revisionId
+    A-->>S: outcome, commitId, revisionId
 ```
 
 ## Before you start
@@ -129,12 +129,14 @@ Choose the identifier by where the file comes from:
 | An export of this graph, edited, with rows added | `entity_id` (the default) | its `entity_id`; else its `urn`; else a field its type matches imports by ("Match imports by this"); else, with no urn, a `qualifiedName` exactly one item carries | an `entityType` and a `urn` (or a `qualifiedName`) |
 | From a system that names items by URN (DataHub, OpenMetadata, your own) | `urn` | its `urn` (or an `entity_id` of this graph), nothing else | an `entityType` and a `urn` |
 | From a system with ids of its own, kept in a property | `prop.<name>`, such as `prop.external_id` | its value of that property (or an `entity_id` of this graph), nothing else | an `entityType` and that property's value |
+| The same, where some rows have no such id (a top-level container), or the graph was first loaded by urn | `prop.<name>,urn`: the property, then the urn | its value of that property; a row without it, its `urn`, as `urn` finds it. A row whose value no item holds yet is found by its urn too, and that item takes the value, so the next import finds it by it | an `entityType`, and that property's value or a `urn` |
 
 Leave `identifier` out and the graph's default applies: a workspace admin sets it on the data
 source's **Versioning** tab, under **Imports**. Without one, the platform's applies, `entity_id`
 unless your operator set `GRAPHVER_IMPORT_IDENTIFIER`. `GET …/graphs/$GID/import-settings` says
 which holds and where it came from (walkthrough 3 reads it). In the app, the Import dialog's
-**Match existing items by** is the same choice: **Entity ID**, **URN** or **A property**.
+**Match existing items by** is the same choice: **Entity ID**, **URN** or **A property**, which
+**Rows without it: find them by their urn** makes `prop.<name>,urn`.
 
 Whichever identifier an import names:
 
@@ -142,7 +144,8 @@ Whichever identifier an import names:
 - **Keys that name two different items refuse the row** (`two_entities`), and a value several live
   items hold refuses the rows that name it (`duplicate_value`). An import never guesses.
 - **A node row with no key the identifier can use is refused** (`no_key`), rather than made again
-  by every import.
+  by every import. By `prop.<name>` alone, a row with only a urn is one: its reason says that
+  `prop.<name>,urn` would find it.
 - **Only the fields a row carries are written.** A blank cell keeps what the item holds; `\N` in a
   `prop.<name>` cell removes that property.
 - **A row an export wrote carries `baseVersion`**, and is merged three ways with what changed since
@@ -158,6 +161,7 @@ this order:
 | `entity_id` | `source_entity_id` / `target_entity_id` → `sourceUrn` / `targetUrn` (or the data source's identifier property, `source.<it>`) → `source.<field>` / `target.<field>` (a field its type matches imports by) → `sourceQualifiedName` / `targetQualifiedName` |
 | `urn` | `source_entity_id` / `target_entity_id` → `sourceUrn` / `targetUrn` |
 | `prop.<name>` | `source_entity_id` / `target_entity_id` → `source.<name>` / `target.<name>` |
+| `prop.<name>,urn` | `source_entity_id` / `target_entity_id` → `source.<name>` / `target.<name>`; an end without it, or whose value no node holds yet, `sourceUrn` / `targetUrn` |
 
 A `source_entity_id` is an entity id of this graph, or the file's own `entity_id` of a node row:
 that links an edge to a node the same file makes.
@@ -361,10 +365,18 @@ curl -sS -X POST "$BASE/api/v1/$WS/versioning/graphs/$GID/branches/$BRANCH/publi
 ```
 
 `GET …/diff/entries?branchId=$BRANCH` lists the changes a page at a time. A publish answers
-`{commitId, revisionId, status: "completed"}`: the commit the draft landed as, and the revision of
-the published graph that holds it. A draft of more than 20,000 changes publishes as a job: the
-answer is `202` with a `statusUrl` (`GET …/publish-jobs/{jobId}`) to poll until `completed`, with
-`commitId` and `revisionId`, or `failed`, with `error`. To have a person review it first, open a
+`{outcome, commitId, revisionId, status: "completed"}`:
+
+- `outcome: "published"`: the draft landed as `commitId`, and `revisionId` is the revision of the
+  published graph that holds it;
+- `outcome: "unchanged"`: the published graph had the draft's changes already (someone made the
+  same changes first), so **nothing was committed**. `commitId` and `revisionId` are the published
+  graph's head, the commit and revision that already hold them — not a commit this made, so check
+  `outcome` before you revert `commitId`.
+
+A draft of more than 20,000 changes publishes as a job: the answer is `202` with a `statusUrl`
+(`GET …/publish-jobs/{jobId}`) to poll until `completed`, with the same `outcome`, `commitId` and
+`revisionId`, or `failed`, with `error`. To have a person review it first, open a
 merge request instead: `POST …/branches/$BRANCH/merge-requests`.
 
 **Others published meanwhile?** A draft that started before someone else published is behind the
@@ -387,8 +399,9 @@ job's `summary.publish`:
 
 | `state` | What happened | What to do |
 |---|---|---|
-| `queued`, with `jobId` | The draft is being published, as a job. `pulls` says how often it pulled the published graph first | Follow `GET …/publish-jobs/{jobId}` to `completed` (`commitId`, `revisionId`) or `failed` (`error`) |
-| `unchanged` | The file changed nothing. Its empty draft was closed | Nothing |
+| `queued`, with `jobId` | The draft is being published, as a job. `pulls` says how often it pulled the published graph first | Follow `GET …/publish-jobs/{jobId}` to `completed` (`outcome`, `commitId`, `revisionId`) or `failed` (`error`), or read the import again: when the job ends, this note says how |
+| `published`, with `jobId`, `commitId`, `revisionId` | The draft landed as `commitId`; `revisionId` holds it | Nothing |
+| `unchanged`, with `commitId`, `revisionId` | Nothing to publish: the file changed nothing (its empty draft was closed), or the published graph had its changes already when its publish job ran. Nothing was committed; `commitId` and `revisionId` are the published graph's head, which holds the data | Nothing |
 | `skipped`, with `reason` | It wasn't published; the draft waits for review. `reason.type` says why: `rows_refused` (some rows were refused), `conflicts` (someone changed the same fields differently meanwhile), `not_up_to_date` (the published graph kept moving through three pulls), or the refusal a publish would give | Fix and import again, or resolve the draft and publish it |
 
 When the published graph moved while the file was imported, the draft pulls it first with the same
@@ -604,7 +617,7 @@ curl -sS -X POST "$BASE/api/v1/$WS/versioning/graphs/$GID/branches/$BRANCH/publi
 ```
 
 ```json
-{"commitId": "cmt_01M77NRXJ9H76KNP49GR7HGSTV", "revisionId": 4, "status": "completed"}
+{"commitId": "cmt_01M77NRXJ9H76KNP49GR7HGSTV", "revisionId": 4, "status": "completed", "outcome": "published"}
 ```
 
 **7. See what changed.** `orders` has three versions: the load, the colleague's and yours. Each
@@ -638,7 +651,7 @@ wait_for "imports/vjob_01M77NSA4QGA5SWNTG2NK7SX4C" | jq .summary
 ```
 
 ```json
-{"new": 0, "deleted": 0, "invalid": 0, "publish": {"state": "unchanged"}, "updated": 0, "unchanged": 6}
+{"new": 0, "deleted": 0, "invalid": 0, "publish": {"state": "unchanged", "commitId": "cmt_01M77NRXJ9H76KNP49GR7HGSTV", "revisionId": 4}, "updated": 0, "unchanged": 6}
 ```
 
 Its rows are older than the graph now, and each is merged with what changed since: every cell you
@@ -726,7 +739,7 @@ wait_for "publish-jobs/vjob_01M77NSB4A334W2Y2EW34VP6RQ"
 
 ```json
 {"jobId": "vjob_01M77NSB4A334W2Y2EW34VP6RQ", "graphId": "graph_01M77NSAEADB9QD69M3GVP0XZ8", "status": "completed",
- "commitId": "cmt_01M77NSB6JPQSJPH851DWT5708", "revisionId": 2, "error": null}
+ "commitId": "cmt_01M77NSB6JPQSJPH851DWT5708", "revisionId": 2, "error": null, "outcome": "published"}
 ```
 
 Each table keeps its urn, under an id derived from it: `urn:li:dataset:shop.customers` is
@@ -804,11 +817,11 @@ nothing new:
 ```
 
 ```bash
-wait_for "publish-jobs/vjob_01M77NSRMETWG7N9CADQAP9NGV" | jq '{status, commitId, revisionId}'
+wait_for "publish-jobs/vjob_01M77NSRMETWG7N9CADQAP9NGV" | jq '{status, outcome, commitId, revisionId}'
 ```
 
 ```json
-{"status": "completed", "commitId": "cmt_01M77NSRQ57HQTARQ585QGJNQE", "revisionId": 3}
+{"status": "completed", "outcome": "published", "commitId": "cmt_01M77NSRQ57HQTARQ585QGJNQE", "revisionId": 3}
 ```
 
 `customers` is the same node, `urn:uuid:1ed01762-…`, with its new owner. `refunds` is
@@ -823,7 +836,7 @@ wait_for "imports/vjob_01M77NT35EBRPA9FKVEQQGCD19" | jq '.summary | {new, update
 ```
 
 ```json
-{"new": 0, "updated": 0, "unchanged": 6, "deleted": 0, "invalid": 0, "publish": {"state": "unchanged"}}
+{"new": 0, "updated": 0, "unchanged": 6, "deleted": 0, "invalid": 0, "publish": {"state": "unchanged", "commitId": "cmt_01M77NSRQ57HQTARQ585QGJNQE", "revisionId": 3}}
 ```
 
 ## Walkthrough 3: by a property — an ERP's own ids
@@ -1050,13 +1063,34 @@ dropped in silence. The reasons below are the ones the API gives.
 | Everything, every time | `replace` | The same, and every item in scope that no row matched is deleted. The scope is the whole graph, or with `viewId`, that view's entities |
 
 - **A replace deletes nothing while any row is refused,** since the refused row might name what the
-  file means to keep. The job fails (`summary.failure.code` `rows_refused`, action `fix_rows`), its
-  `errorMessage` naming the reasons and the first rows, and the file's other rows stay on its draft.
-  `summary.refused` says where each row is and what to do: fix them and import again, or send the
-  file with `maxRefusedRows` to replace with the rows that applied, keeping anything a refused row
-  still names ([When rows are refused](/docs/import-from-your-service#when-rows-are-refused)).
+  file means to keep. The job fails (`summary.failure.code` `rows_refused`, action `fix_rows`;
+  `phase` `nodes` when any node row was refused, else `edges`), its `errorMessage` naming the
+  reasons, the one change that would fix most of them (rows with a urn but not the property:
+  `prop.<name>,urn`), and the first rows; the file's other rows stay on its draft. `summary.refused`
+  says where each row is and what to do (`byCode`, `byKind`): fix them and import again, or send
+  the file with `maxRefusedRows` to replace with the rows that applied
+  ([When rows are refused](/docs/import-from-your-service#when-rows-are-refused)).
+- **A replace never deletes what the file names.** It keeps every item a row matched, and also:
+  - every live item a refused row names by any key it carries: its `entity_id`, its `urn`, its
+    value of the identifier's property, its edge's own id and ends;
+  - every node an edge row names as an end, though the file has no row for that node.
+  So a refused row, sent on with `maxRefusedRows`, never makes the replace delete the item it was
+  about, nor an edge row its ends.
+- **An edge never outlives its ends.** A node a replace deletes takes every edge at either end with
+  it, in the same change. After the replace's own edge pass these are only the edges that reach
+  outside its scope (a view's, or `replaceScope=keyed`'s); `summary.edgesCascaded` counts them.
 - **Deletes are in the draft, like everything else.** The draft's diff lists them before anything
   is published.
+
+### What a replace may delete: `replaceScope`
+
+By default (`replaceScope=all`) a replace deletes anything in its scope the file leaves out. A
+graph more than one source writes holds items your file never had: nodes made in the app, or by
+another connector. With an identifier by a property, `replaceScope=keyed` deletes only the nodes
+that hold that property, and the edges whose two ends both do, that the file leaves out. Everything
+else stays, with its edges; an edge from one of them to a node the replace deletes goes with that
+node (`edgesCascaded`). `summary.replaceGuard.scope` says `keyed`, and the guard measures that
+scope. By `urn` or `entity_id` every node holds its key, so `keyed` is `all`.
 
 ### The replace guard
 
@@ -1079,11 +1113,15 @@ half as many again.
 
 ### Fail fast
 
-A whole graph's replace whose first full window of node rows (10,000) finds an item for fewer than
-5% of them, in a graph of at least 1,000 items, stops there rather than read the rest of the file:
-the job fails with `summary.failure.code` `identifier_matched_nothing` (`action: "identifier"`),
-naming the identifier it matched by. Nothing is deleted; the rows read so far are on the draft. A
-view's replace is left to the guard.
+A whole graph's replace whose first window of node rows (10,000, or all of a smaller file's) finds
+an item for fewer than 5% of them, in a graph of at least 1,000 items, stops there rather than go
+on: the job fails with `summary.failure.code` `identifier_matched_nothing` (`action:
+"identifier"`), naming the identifier it matched by. Nothing is deleted; the rows read so far are
+on the draft. A small file is checked too: the guard measures what a file makes against its whole
+scope, so a few hundred rows by the wrong key would otherwise delete a large graph. A view's replace
+is left to the guard. The guard also counts the rows a replace refused that matched nothing beside
+what it makes (`replaceGuard.refusedUnmatched`), so a file whose rows can't be matched is refused
+whatever `maxRefusedRows` lets through.
 
 ## Sending again: idempotency and retries
 

@@ -201,6 +201,7 @@ async def test_a_window_lands_its_ops_resolutions_and_checkpoint_in_one_transact
         "current_phase": "nodes", "summary": {**_NO_TALLIES, "takeovers": 1, "new": 1, "invalid": 1,
                                               "refused": {
             "total": 1, "byCode": {"missing_type": 1}, "fixes": {"missing_type": FIXES["missing_type"]},
+            "byKind": {"node": 1},
             "rows": [{"rowIndex": 2, "kind": "node", "label": "urn:b", "code": "missing_type",
                       "reason": "node create requires entityType"}]}}}]
 

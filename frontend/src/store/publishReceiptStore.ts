@@ -14,8 +14,11 @@ import { create } from 'zustand'
 import type { ChangeCounts } from '@/features/versioning/model/changeModel'
 
 export interface PublishReceipt {
-  /** The squash commit that landed on main — the drill-down target. */
-  commitId: string
+  /** The squash commit that landed on main — the drill-down target. Null when nothing was
+   *  committed: main held the changes already (`outcome` unchanged). */
+  commitId: string | null
+  /** What it did to main; `unchanged`: nothing new was published. */
+  outcome?: 'published' | 'unchanged'
   graphId: string
   counts: ChangeCounts
   /** How it got to main: straight publish, or merged through its review. */

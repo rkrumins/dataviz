@@ -101,7 +101,7 @@ async def _run(svc, root) -> None:
     # t3 is named only by the file's own id, and so is the edge from it: refused, rather than made
     # again by every import (and deleted by every replace).
     assert (summary["new"], summary["invalid"]) == (5, 2), summary
-    assert await _refused(job["job_id"]) == {2: "no_key", 5: "end_not_found"}
+    assert await _refused(job["job_id"]) == {2: "no_key", 5: "end_refused"}
     nodes, edges = await _state(svc, gid, draft)
     assert set(nodes) == {t1, t2, FREE}, nodes
     # t1 keeps its urn, and the identifier property holds it; a node with no urn of its own (t2,
@@ -128,7 +128,7 @@ async def _run(svc, root) -> None:
     # The same file again changes nothing: every node and edge is found, the same rows refused.
     again_job, again = await _import(ie, store, gid, FILE, branch_id=draft)
     assert (again["new"], again["updated"], again["invalid"]) == (0, 0, 2), again
-    assert await _refused(again_job["job_id"]) == {2: "no_key", 5: "end_not_found"}
+    assert await _refused(again_job["job_id"]) == {2: "no_key", 5: "end_refused"}
     assert await _state(svc, gid, draft) == (nodes, edges)
 
     # Properties: set by value, kept by a blank, removed by \N; a delete and a create by pointer.

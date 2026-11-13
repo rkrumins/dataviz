@@ -29,8 +29,9 @@ describe('publishing a large draft', () => {
     afterEach(() => { globalThis.fetch = realFetch; PUBLISH_JOB_POLL.patienceMs = 120_000 })
 
     it('publishes a small draft in the request, as before', async () => {
-        const calls = serve([[200, { commitId: 'cmt_1' }]])
-        await expect(publishBranch('ws1', 'g1', 'br_1', { message: 'm' })).resolves.toEqual({ commitId: 'cmt_1' })
+        const calls = serve([[200, { commitId: 'cmt_1', revisionId: 4, outcome: 'published' }]])
+        await expect(publishBranch('ws1', 'g1', 'br_1', { message: 'm' })).resolves.toEqual(
+            { commitId: 'cmt_1', revisionId: 4, outcome: 'published' })
         expect(calls()).toEqual(['POST /api/v1/ws1/versioning/graphs/g1/branches/br_1/publish'])
     })
 
@@ -38,12 +39,35 @@ describe('publishing a large draft', () => {
         const calls = serve([
             [202, { jobId: 'vjob_1', graphId: 'g1', status: 'pending' }],
             [200, { jobId: 'vjob_1', graphId: 'g1', status: 'running', commitId: null, error: null }],
-            [200, { jobId: 'vjob_1', graphId: 'g1', status: 'completed', commitId: 'cmt_2', error: null }],
+            [200, { jobId: 'vjob_1', graphId: 'g1', status: 'completed', commitId: 'cmt_2', revisionId: 5,
+                outcome: 'published', error: null }],
         ])
-        await expect(publishBranch('ws1', 'g1', 'br_1', { message: 'm' })).resolves.toEqual({ commitId: 'cmt_2' })
+        await expect(publishBranch('ws1', 'g1', 'br_1', { message: 'm' })).resolves.toEqual(
+            { commitId: 'cmt_2', revisionId: 5, outcome: 'published' })
         expect(calls()).toEqual([
             'POST /api/v1/ws1/versioning/graphs/g1/branches/br_1/publish', `GET ${JOB}`, `GET ${JOB}`,
         ])
+    })
+
+    it('ends a job that changed nothing as a success: unchanged, with the head of main that holds it', async () => {
+        serve([
+            [202, { jobId: 'vjob_1', graphId: 'g1', status: 'pending' }],
+            [200, { jobId: 'vjob_1', graphId: 'g1', status: 'completed', commitId: 'cmt_head', revisionId: 7,
+                outcome: 'unchanged', error: null }],
+        ])
+        await expect(publishBranch('ws1', 'g1', 'br_1', { message: 'm' })).resolves.toEqual(
+            { commitId: 'cmt_head', revisionId: 7, outcome: 'unchanged' })
+    })
+
+    it('reads an older server’s blank commit as unchanged, not as a failure', async () => {
+        serve([
+            [202, { jobId: 'vjob_1', graphId: 'g1', status: 'pending' }],
+            [200, { jobId: 'vjob_1', graphId: 'g1', status: 'completed', commitId: '', error: null }],
+        ])
+        await expect(publishBranch('ws1', 'g1', 'br_1', { message: 'm' })).resolves.toEqual(
+            { commitId: null, revisionId: null, outcome: 'unchanged' })
+        serve([[200, { commitId: '' }]])
+        await expect(publishBranch('ws1', 'g1', 'br_1', { message: 'm' })).resolves.toMatchObject({ outcome: 'unchanged' })
     })
 
     it('raises what the request would have when the job is refused', async () => {
@@ -74,7 +98,8 @@ describe('publishing a large draft', () => {
             [502, { detail: 'Bad Gateway' }],
             [200, { jobId: 'vjob_1', graphId: 'g1', status: 'completed', commitId: 'cmt_2', error: null }],
         ])
-        await expect(publishBranch('ws1', 'g1', 'br_1', { message: 'm' })).resolves.toEqual({ commitId: 'cmt_2' })
+        await expect(publishBranch('ws1', 'g1', 'br_1', { message: 'm' })).resolves.toEqual(
+            { commitId: 'cmt_2', revisionId: null, outcome: 'published' })
     })
 
     it('gives up once the job has gone unanswered too long', async () => {
@@ -91,7 +116,8 @@ describe('publishing a large draft', () => {
             [202, { jobId: 'vjob_1', graphId: 'g1', status: 'pending' }],
             [200, { jobId: 'vjob_1', graphId: 'g1', status: 'completed', commitId: 'cmt_3', error: null }],
         ])
-        await expect(mergeMergeRequest('ws1', 'mr_1', { message: 'ship' })).resolves.toEqual({ commitId: 'cmt_3' })
+        await expect(mergeMergeRequest('ws1', 'mr_1', { message: 'ship' })).resolves.toEqual(
+            { commitId: 'cmt_3', revisionId: null, outcome: 'published' })
         expect(calls()).toEqual(['POST /api/v1/ws1/versioning/merge-requests/mr_1/merge', `GET ${JOB}`])
     })
 })

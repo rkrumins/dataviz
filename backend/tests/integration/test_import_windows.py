@@ -389,7 +389,8 @@ async def _gate_quarantine(svc, ie, store) -> None:
     # windows of two: each holds a row the strict gate refuses next to one it takes
     summary = await ImportWorker(svc, store).run(job["job_id"])
     assert _tallies(summary) == {"new": 3, "updated": 1, "unchanged": 0, "deleted": 0, "invalid": 4}, summary
-    assert summary["refused"]["total"] == 4 and summary["refused"]["byCode"]["end_not_found"] == 1
+    # The edge from Q2, whose own row the gate refused, says so (end_refused).
+    assert summary["refused"]["total"] == 4 and summary["refused"]["byCode"]["end_refused"] == 1
     nodes, edges = await _state(svc, gid, job["branch_id"])
     assert nodes == {"urn:A": "A renamed", "urn:Q1": "q1", "urn:Q4": "q4"}, nodes
     assert edges == {("urn:Q1", "urn:Q4", "LINEAGE")}, edges
@@ -398,7 +399,8 @@ async def _gate_quarantine(svc, ie, store) -> None:
     for key in (("urn:Q2", "node"), ("urn:Q3", "node"), ("urn:Q4", "edge")):
         assert "not allowed by ontology" in quarantined[key][0], (key, quarantined[key])
     assert quarantined[("urn:Q2", "edge")] == [
-        "its source urn:Q2 names no node the graph holds or the file makes"], "its end was quarantined"
+        "its source urn:Q2 is the node of the file's rowIndex 1, which was refused (write_refused): "
+        "fix that row, and this edge finds it"], "its end was quarantined: the edge names that row"
     async with db.graphver_session() as s:
         assert not (await s.execute(select(ImportRowORM.matched_entity_id).where(
             ImportRowORM.job_id == job["job_id"], ImportRowORM.status == "invalid",

@@ -492,9 +492,9 @@ async def _import(svc):
         await ie.run_import_safe(job["job_id"], await lease_job(job["job_id"]))
         assert (await ie.get_job(job["job_id"]))["status"] == "completed"
         nodes = (await svc.materialize_state(graph_id=gid, branch_id=draft))["nodes"]
-        scope = await svc.identity_scope(gid)          # the file's urns are pointers
-        assert sorted(p["urn"] for p in nodes.values()) == sorted(
-            pointer_id(scope, u) for u in urns), "every row landed once"
+        scope = await svc.identity_scope(gid)          # each urn kept as given, under the id it derives
+        assert sorted((eid, p["urn"]) for eid, p in nodes.items()) == sorted(
+            (pointer_id(scope, u), u) for u in urns), "every row landed once"
     finally:
         shutil.rmtree(root, ignore_errors=True)
 

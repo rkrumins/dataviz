@@ -21,6 +21,31 @@ integration's many small changes as a few commits.
 
 ### Added
 
+- **Replaces keyed by your own id handle the rows that don't carry it.** A source that keys rows by
+  its own id (`identifier=prop.MY_UNIQUE_ID`) often has rows without it, such as a top-level
+  container. It also meets graphs first loaded by urn (or made in the app), whose nodes never had
+  the property. Those rows were refused (`no_key`, `two_entities`, and `end_refused` on their
+  edges), and a full replace held with `rows_refused`.
+  - **`identifier=prop.<name>,urn`: the property, then the urn.** A row with the property is found
+    by it, and a row without it by its urn, as `identifier=urn` finds it. A row whose value no node
+    holds yet is found by its urn too, and that node takes the value, so the next import finds it
+    by the property. Edge ends work the same way (`source.<name>`, else `sourceUrn`). Every id is
+    kept.
+  - **Where to set it.** Available on `POST …/imports`, an upload's `complete`, the dry run,
+    `…/identities/resolve`, a graph's default identifier, the reference connector
+    (`--identifier`), and the import dialog ("Rows without it: find them by their urn").
+  - **`replaceScope=keyed` deletes only what holds the property.** It applies to replaces with a
+    property identifier: the nodes holding it, and the edges whose two ends both hold it. Nodes
+    made in the app or by another source are left alone, with their edges. It is on
+    `POST …/imports`, an upload's `complete`, the connector (`--replace-scope keyed`), and the
+    import dialog ("Delete only items that have this property").
+  - **Refused rows say the one change that fixes them.** A held replace by a property alone counts
+    the rows `prop.<name>,urn` would find by their urn (`summary.refused.hints.by_urn`): rows without
+    the property, and rows whose urn is an item's that has none yet. Its message says to send it,
+    and the import dialog offers **Find them by their urn**. An edge refused because its end's own
+    row was refused says so, naming that row (`end_refused`). `summary.refused.byKind` counts node
+    and edge rows.
+
 - **Every commit records how it was made:**
   - `actorKind`: a person, a service account or the platform;
   - `apiKeyId`: the API key it came through;
@@ -248,6 +273,55 @@ integration's many small changes as a few commits.
 
 ### Changed
 
+- **A replace never deletes what its file names.**
+  - **Refused rows.** A refused row used to protect only the entity it had matched, so a replace
+    sent on with `maxRefusedRows` deleted the node a `no_key` row named by its urn, and edge rows
+    lost the ends their file had no node row for. A replace now keeps every live entity a row
+    names: by any key it carries (its `entity_id`, its urn, its value of the property, an edge
+    row's own id and ends), and every node an edge row names as an end. They are recorded per job
+    in `import_mentions`.
+  - **Cascaded edges are counted.** A node a replace deletes still takes its edges with it in the
+    same change, so no edge outlives its ends. Those it takes are now counted in
+    `summary.edgesCascaded`; after the edge pass, they are only the edges reaching outside the
+    replace's scope.
+  - **The guard counts refused rows that matched nothing** beside what the replace made
+    (`replaceGuard.refusedUnmatched`). A file whose rows can't be matched is refused whatever its
+    budget, rather than deleting its scope and making nothing.
+- **A replace's fail-fast checks small files too.** It ran only after a full first window of
+  10,000 node rows, so a few hundred rows by the wrong identifier, which the guard measures against
+  the whole graph, could delete a large one. It now runs after the first node window, whatever its
+  size.
+- **A `rows_refused` failure says where its rows were refused** (`phase: nodes` when any node row
+  was). It used to report the job's last phase, `edges` for any file with edge rows.
+- **A delete row that names nothing its identifier reads is refused (`no_key`).** It used to read as
+  "already gone", whatever the graph held.
+- **A refused edge row protects the edge it names.** Refused for its type or its ends, a row naming
+  a live edge by its own id keeps that edge and its ends. By a property alone, an edge row naming
+  its ends by urn keeps both ends and the edge between them.
+- **A view's replace held for its refused rows places what it made in the view,** as a guarded one
+  does.
+
+- **A publish, merge or import that changes nothing says `unchanged`, instead of a blank commit.**
+  Nothing is committed when nothing changed, and that was so before; but the answer named a
+  commit anyway: `""`, or the draft's own head, which isn't on main. Following an import never
+  gave its commit at all.
+  - Every publish and merge answer, inside the request or as a job (`POST …/branches/{bid}/publish`,
+    `…/merge-requests/{id}/merge`, `…/pulls/{id}/merge`, `GET …/publish-jobs/{jobId}`), now carries
+    `outcome`: `published`, with the `commitId` it landed as; or `unchanged`, with main's head as
+    `commitId`: the commit that already holds the content, not one this made. `revisionId` is that
+    commit's revision either way: the new commit's, or main's head, which doesn't move.
+  - A job recorded before this is read the same way: a commit that isn't on main is `unchanged`,
+    naming the commit at the revision the job recorded, else main's head.
+  - An import's `summary.publish` ends with its publish job, written in the same transaction as the
+    job's finish: `published` with `commitId` and `revisionId`, `unchanged`, or `skipped` with the
+    reason, keeping `jobId`, `pulls` and `refusedRows`. A refusal of any kind is noted, not only a
+    refused pull. An import that changed nothing notes `unchanged` with main's head as `commitId`
+    and `revisionId`. Reading the import alone now tells you how its publish went.
+  - A review merged with no change records no resulting commit (it recorded its draft's head).
+  - The app took a queued publish that changed nothing for a failure ("Publishing failed"); it is a
+    success now, and the receipt reads "Already live — the published graph had these changes", with
+    no version to open. The reference connector reports `published` or `unchanged`.
+
 - **A graph being updated keeps showing the version it last finished, complete, and says so.**
   After a publish or an import, or while its fast read layer was rebuilt, a versioned graph's reads
   went to Postgres, which composes the graph without its lineage summaries: the canvas drew the
@@ -303,6 +377,12 @@ integration's many small changes as a few commits.
   seed, a dropped write, or after a verify that healed or failed.
 
 ### Fixed
+
+- **An import's publish job that found its draft merged with no commit of its own completes.** When
+  the draft merged under the job's pull (an earlier attempt published it) and that publish
+  committed nothing, the job read the empty answer as "not merged" and failed with a refusal.
+- **An import's publish note keeps `refusedRows` through its pulls.** Each pull's progress note
+  replaced the note, dropping how many rows the import went on without.
 
 - **An export's plan answers within 5 s, whatever the graph.** On a large graph, the Export
   dialog's first request (`GET …/exports/plan`) could outlast the gateway in front of the app and
@@ -440,6 +520,23 @@ integration's many small changes as a few commits.
   live in a dedicated key already queued its own follow-up, and is unchanged.
 
 ### Upgrading
+
+- **Migration `20261113_0900_gv_import_mentions`** adds `graphver.import_mentions`, an empty table
+  (`create_schema_and_partitions` makes it for a separate `GRAPHVER_DB_URL`). Without it, a replace
+  keeps only what its rows matched, as before.
+- **Two import changes a client may notice:**
+  - a delete row with no key its identifier reads is refused (`no_key`) rather than "already gone";
+  - a replace's fail-fast now also stops a small file whose rows match almost nothing in a graph of
+    1,000 or more (`identifier_matched_nothing`). One sent with `allowMassDelete=true` goes on as
+    before.
+
+- **When a publish or merge changes nothing, `commitId` is main's head, not `""`; read `outcome`.**
+  It names the commit that already holds the content, not one this made, so a client that reverts
+  or diffs `commitId`, or takes any `commitId` for a new commit, checks `outcome == "published"`
+  first. One that compared it with `""`, or took a blank (or a draft's commit) for a failure,
+  checks `outcome == "unchanged"` instead. An import's `summary.publish.state` can now also read
+  `published` once its publish job ends (it stayed `queued`), so a client that followed the job
+  when it read `queued` keeps working, and one that reads the import later finds the end there.
 
 - **Reads of a graph being updated show the version before the update until it is written.** A
   client that reads its own change right after publishing it should poll

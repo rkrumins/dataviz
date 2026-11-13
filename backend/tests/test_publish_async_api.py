@@ -24,6 +24,7 @@ class _Versioning:
     def __init__(self):
         self.published = []
         self.opener = "someone"
+        self.answer = "cmt_1"               # what a publish returns: "" when it committed nothing
 
     async def get_graph(self, graph_id):
         return {"graph_id": graph_id, "workspace_id": "ws1", "data_source_id": "ds1", "provider_id": None}
@@ -33,10 +34,15 @@ class _Versioning:
 
     async def publish(self, **kw):
         self.published.append(kw)
-        return "cmt_1"
+        return self.answer
 
-    async def landed_revision(self, *, graph_id, commit_id):
-        return {"cmt_1": 41, "cmt_9": 7}.get(commit_id)
+    async def publish_outcome(self, *, graph_id, commit_id, at_revision=None):
+        on_main = {"cmt_1": 41, "cmt_9": 7, "cmt_8": 6, "cmt_40": 40, "cmt_39": 39}
+        if commit_id in on_main:
+            return {"outcome": "published", "commit_id": commit_id, "revision_id": on_main[commit_id]}
+        seq = 41 if at_revision is None else at_revision                   # main's head, or then
+        return {"outcome": "unchanged", "commit_id": {v: k for k, v in on_main.items()}[seq],
+                "revision_id": seq}
 
     async def get_pr(self, pr_id):
         # No source graph: a fork's review, as the store reads one, so the tests that merge it
@@ -53,6 +59,13 @@ class _Jobs:
                           "status": "completed", "summary": {"commitId": "cmt_9"}},
             "vjob_recorded": {"jobId": "vjob_recorded", "jobType": "publish", "graphId": "g1",
                               "status": "completed", "summary": {"commitId": "cmt_8", "revisionId": 6}},
+            "vjob_unchanged": {"jobId": "vjob_unchanged", "jobType": "publish", "graphId": "g1",
+                               "status": "completed",
+                               "summary": {"commitId": "cmt_40", "revisionId": 40, "outcome": "unchanged"}},
+            "vjob_blank": {"jobId": "vjob_blank", "jobType": "publish", "graphId": "g1",
+                           "status": "completed", "summary": {"commitId": "", "revisionId": 39}},
+            "vjob_draft_head": {"jobId": "vjob_draft_head", "jobType": "publish", "graphId": "g1",
+                                "status": "completed", "summary": {"commitId": "cmt_draft"}},
             "vjob_running": {"jobId": "vjob_running", "jobType": "publish", "graphId": "g1",
                              "status": "running", "summary": None},
             "vjob_refused": {"jobId": "vjob_refused", "jobType": "publish", "graphId": "g1",
@@ -92,8 +105,18 @@ async def test_a_small_draft_publishes_inside_the_request(test_client, services)
     svc, jobs = services
     r = await test_client.post(f"{BASE}/graphs/g1/branches/br_small/publish", json={"message": "m"})
     assert r.status_code == 200, r.text
-    assert r.json() == {"commitId": "cmt_1", "revisionId": 41, "status": "completed"}
+    assert r.json() == {"commitId": "cmt_1", "revisionId": 41, "status": "completed", "outcome": "published"}
     assert len(svc.published) == 1 and jobs.created == []
+
+
+async def test_a_publish_that_changed_nothing_says_unchanged_and_names_mains_head(test_client, services):
+    """Main held the draft's changes already: nothing is committed, and ``commitId`` and
+    ``revisionId`` are main's head, which holds them — not a blank, not the draft's own commit."""
+    svc, _jobs = services
+    svc.answer = ""
+    r = await test_client.post(f"{BASE}/graphs/g1/branches/br_small/publish", json={"message": "m"})
+    assert r.status_code == 200, r.text
+    assert r.json() == {"commitId": "cmt_1", "revisionId": 41, "status": "completed", "outcome": "unchanged"}
 
 
 async def test_a_publish_folds_staged_edits_with_the_sources_node_identity(test_client, services,
@@ -182,11 +205,12 @@ async def test_a_publish_job_says_what_the_request_would_have(test_client, servi
     done = await test_client.get(f"{BASE}/graphs/g1/publish-jobs/vjob_done")
     assert done.status_code == 200, done.text
     assert done.json() == {"jobId": "vjob_done", "graphId": "g1", "status": "completed",
-                           "commitId": "cmt_9", "revisionId": 7, "error": None}
+                           "commitId": "cmt_9", "revisionId": 7, "error": None, "outcome": "published"}
     recorded = (await test_client.get(f"{BASE}/graphs/g1/publish-jobs/vjob_recorded")).json()
     assert (recorded["commitId"], recorded["revisionId"]) == ("cmt_8", 6), "as the job recorded it"
     running = (await test_client.get(f"{BASE}/graphs/g1/publish-jobs/vjob_running")).json()
-    assert (running["status"], running["commitId"], running["revisionId"]) == ("running", None, None)
+    assert (running["status"], running["commitId"], running["revisionId"], running["outcome"]) == (
+        "running", None, None, None)
 
     refused = await test_client.get(f"{BASE}/graphs/g1/publish-jobs/vjob_refused")
     assert refused.json()["status"] == "failed"
@@ -194,6 +218,24 @@ async def test_a_publish_job_says_what_the_request_would_have(test_client, servi
 
     for other in ("vjob_export", "vjob_missing"):
         assert (await test_client.get(f"{BASE}/graphs/g1/publish-jobs/{other}")).status_code == 404
+
+
+async def test_a_publish_job_that_changed_nothing_says_unchanged_however_it_was_recorded(test_client,
+                                                                                         services):
+    """Nothing was committed: ``outcome`` unchanged, naming the commit and revision of main that
+    held it — as the job records it now, and for a job recorded before, whose ``commitId`` was
+    blank or its draft's own head (not on main): read from main, at the revision it recorded, else
+    main's head."""
+    answers = {}
+    for job in ("vjob_unchanged", "vjob_blank", "vjob_draft_head"):
+        r = await test_client.get(f"{BASE}/graphs/g1/publish-jobs/{job}")
+        assert r.status_code == 200, r.text
+        answers[job] = {k: r.json()[k] for k in ("status", "commitId", "revisionId", "outcome")}
+    assert answers == {
+        "vjob_unchanged": {"status": "completed", "commitId": "cmt_40", "revisionId": 40, "outcome": "unchanged"},
+        "vjob_blank": {"status": "completed", "commitId": "cmt_39", "revisionId": 39, "outcome": "unchanged"},
+        "vjob_draft_head": {"status": "completed", "commitId": "cmt_1", "revisionId": 41, "outcome": "unchanged"},
+    }
 
 
 async def test_a_refused_publish_job_keeps_a_bounded_refusal(monkeypatch):

@@ -34,7 +34,7 @@ sequenceDiagram
     S->>A: GET imports/{jobId} until completed
     W->>W: publish the draft (autoPublish)
     S->>A: GET publish-jobs/{jobId} until completed
-    A-->>S: commitId, revisionId
+    A-->>S: outcome, commitId, revisionId
 ```
 
 1. **You send the file** in a request: its bytes are the body. The API stores it as it arrives and
@@ -56,7 +56,7 @@ sequenceDiagram
 | **Published graph** (*main*) | What everyone sees, traces and exports. Only a publish changes it |
 | **Draft** (*branch*) | Changes kept apart from the published graph until they are published (`br_…`). An import always writes one |
 | **Import job** | The work of reading your file into a draft (`vjob_…`). You poll it until it ends |
-| **Publish job** | The work of landing a draft on the published graph. It ends with a `commitId` and a `revisionId` |
+| **Publish job** | The work of landing a draft on the published graph. It ends `published`, with the `commitId` it landed as and its `revisionId`, or `unchanged`: the published graph had the changes already, so nothing was committed, and its `commitId` and `revisionId` are the published graph's head, which holds them |
 | **Upsert** | `reconcileMode=upsert`, the default: write what the file names, and leave everything else as it is |
 | **Full replace** | `reconcileMode=replace`: the same, and also delete what the file leaves out |
 | **Identifier** | How each row finds the item it describes: `entity_id`, `urn`, or `prop.<name>`, a property of your own ([choosing one](/docs/import-export-api#the-model-in-one-minute)) |
@@ -136,24 +136,32 @@ publish to the revision that holds them:
 
 ```bash
 curl -sS "$BASE/api/v1/$WS/versioning/graphs/$GID/publish-jobs/vjob_01M77ZCFATXE3EW9H2KW477TRZ" \
-  -H "Authorization: Bearer $TOKEN" | jq '{status, commitId, revisionId}'
+  -H "Authorization: Bearer $TOKEN" | jq '{status, outcome, commitId, revisionId}'
 ```
 
 ```json
-{"status": "completed", "commitId": "cmt_01M77ZCFCS88FC2VA5X705A9SP", "revisionId": 2}
+{"status": "completed", "outcome": "published", "commitId": "cmt_01M78ZWGY1P478K6R37K2N6SFZ", "revisionId": 2}
 ```
 
 That's it: revision 2 of the published graph holds your three tables and their two edges, each
-with an id of its own that never changes.
+with an id of its own that never changes. The import says so too, once its publish has ended, so
+reading the import alone is enough:
+
+```json
+"publish": {"jobId": "vjob_01M78ZWGF1EH56N91DD2FXQR6F", "state": "published",
+            "commitId": "cmt_01M78ZWGY1P478K6R37K2N6SFZ", "revisionId": 2}
+```
 
 **Send the same file again** and nothing changes. Every row finds its item unchanged, so the
-import writes nothing, and its empty draft is closed instead of published:
+import writes nothing, and its empty draft is closed instead of published. Nothing is committed:
+`commitId` and `revisionId` are the published graph's head, the commit and revision that already
+hold the file's content (here, the first import's publish):
 
 ```json
 {
   "status": "completed",
   "summary": {"new": 0, "updated": 0, "unchanged": 5, "deleted": 0, "invalid": 0,
-              "publish": {"state": "unchanged"}}
+              "publish": {"state": "unchanged", "commitId": "cmt_01M78ZWGY1P478K6R37K2N6SFZ", "revisionId": 2}}
 }
 ```
 
@@ -175,7 +183,11 @@ keeps its id. A full replace has two safety nets, both on by default:
   [More, and how to proceed when you mean it](/docs/import-export-api#the-replace-guard).
 - **Nothing is deleted while any row is refused** (`rows_refused`): a refused row might be one the
   file meant to keep. The job says which rows and why; fix them and send the file again, or let the
-  import go on without them ([When rows are refused](#when-rows-are-refused)).
+  import go on without them ([When rows are refused](#when-rows-are-refused)). Going on, a replace
+  still keeps everything a refused row names.
+
+A replace by your own property can delete only what holds it (`replaceScope=keyed`), leaving what
+the app or other sources made alone ([Keyed by your own id](#keyed-by-your-own-id-where-some-rows-dont-have-it)).
 
 ## Choose how to send the file
 
@@ -236,8 +248,9 @@ leave `autoPublish` out, and publish it yourself ([step 6](/docs/import-export-a
 
 | You get | It means | Do |
 |---|---|---|
-| The import `completed`, `summary.publish.state: "queued"` | The draft is being published | Follow `GET …/publish-jobs/{jobId}` to `completed`: its `revisionId` is the published revision that holds your change |
-| `summary.publish.state: "unchanged"` | The file changed nothing | Nothing |
+| The import `completed`, `summary.publish.state: "queued"` | The draft is being published | Follow `GET …/publish-jobs/{jobId}` to `completed`, or read the import again: once the job ends, `summary.publish` says how |
+| `summary.publish.state: "published"` (or the publish job's `outcome: "published"`) | Your change is live: the draft landed as `commitId` | `revisionId` is the published revision that holds it |
+| `summary.publish.state: "unchanged"` (or `outcome: "unchanged"`) | Nothing to publish: the file changed nothing, or the published graph had its changes already (another run made them first). Nothing was committed: `commitId` is the published graph's head, not a commit this run made | Nothing: `commitId` and `revisionId` name what holds your data |
 | `summary.publish.state: "skipped"`, with `reason.type` | The draft waits for review: `rows_refused`, `conflicts` or `not_up_to_date` | For refused rows, read `summary.refused` ([When rows are refused](#when-rows-are-refused)); otherwise resolve the draft and publish it |
 | The import `failed`, `summary.failure.code: "mass_delete_blocked"` | A replace that would delete most of what's there ([the replace guard](/docs/import-export-api#the-replace-guard)) | Check `identifier` first. If you meant it, import the file again with `allowMassDelete=true&branchId=<its branchId>`, then publish that draft (`POST …/branches/{branchId}/publish`) |
 | `failed`, `rows_refused` | A replace with rows it couldn't apply deletes nothing | Fix the rows `summary.refused` names and send it again, or send it with `maxRefusedRows` ([When rows are refused](#when-rows-are-refused)) |
@@ -332,6 +345,115 @@ published without the refused edge (`refusedRows`). The job keeps the budget it 
 (`importSettings.maxRefusedRows`), and your operator can set the default for every import
 (`IMPORT_MAX_REFUSED_ROWS`). In the import dialog, a replace held for its rows offers **Import the
 rest anyway**, which does the same into its draft.
+
+Going on never deletes what the file names. A replace keeps every item a refused row names by any
+key it carries (its `entity_id`, its `urn`, its value of your property), and every node an edge row
+names as an end, though the file has no row for that node.
+
+### Keyed by your own id, where some rows don't have it
+
+A source system keys its rows by its own id, kept in a property: `identifier=prop.MY_UNIQUE_ID`.
+Two kinds of row often don't fit:
+
+- **A row without the property,** such as a top-level container the source has no id for. It is
+  refused with `no_key`.
+- **A row whose value the graph has never seen, while its urn is an item's that never had the
+  property.** This is the first replace of a graph loaded by urn, or one made in the app. It is
+  refused with `two_entities`.
+
+The edges that name those rows are refused too (`end_refused`). The replace then holds, deletes
+nothing, and its failure says where the rows were refused (`phase: "nodes"`) and what one change
+fixes them:
+
+Here the graph was first loaded by urn, and tonight's file keys its rows by `MY_UNIQUE_ID`, which
+the top-level `Sales` row doesn't have:
+
+```json
+{"kind": "node", "urn": "urn:svc:sales", "entityType": "Table", "displayName": "Sales"}
+{"kind": "node", "urn": "urn:svc:orders", "entityType": "Table", "displayName": "orders", "prop.MY_UNIQUE_ID": "ERP-1001"}
+{"kind": "node", "urn": "urn:svc:customers", "entityType": "Table", "displayName": "customers", "prop.MY_UNIQUE_ID": "ERP-1002"}
+{"kind": "node", "urn": "urn:svc:invoices", "entityType": "Table", "displayName": "invoices", "prop.MY_UNIQUE_ID": "ERP-1003"}
+{"kind": "edge", "edgeType": "FLOWS_TO", "sourceUrn": "urn:svc:sales", "target.MY_UNIQUE_ID": "ERP-1001"}
+{"kind": "edge", "edgeType": "FLOWS_TO", "source.MY_UNIQUE_ID": "ERP-1001", "target.MY_UNIQUE_ID": "ERP-1002"}
+{"kind": "edge", "edgeType": "FLOWS_TO", "source.MY_UNIQUE_ID": "ERP-1001", "target.MY_UNIQUE_ID": "ERP-1003"}
+```
+
+```bash
+curl -sS -X POST "$BASE/api/v1/$WS/versioning/graphs/$GID/imports?format=ndjson&identifier=prop.MY_UNIQUE_ID&reconcileMode=replace&autoPublish=true" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/octet-stream' -T nightly.ndjson
+curl -sS "$BASE/api/v1/$WS/versioning/graphs/$GID/imports/$JOB" -H "Authorization: Bearer $TOKEN" \
+  | jq '{status, summary: (.summary | {failure: (.failure | {code, phase, action}), refused: (.refused | {byCode, byKind, hints})})}'
+```
+
+```json
+{
+  "status": "failed",
+  "summary": {
+    "failure": {"code": "rows_refused", "phase": "nodes", "action": "fix_rows"},
+    "refused": {
+      "byCode": {"no_key": 1, "end_refused": 3, "two_entities": 2},
+      "byKind": {"edge": 3, "node": 3},
+      "hints": {"by_urn": 3}
+    }
+  }
+}
+```
+
+Its `errorMessage` begins with the counts and the fix:
+
+> Nothing was deleted: 3 node row(s) and 3 edge row(s) of the file were refused, and a replace
+> deletes whatever the file leaves out — which could include what those rows name. Refused: 3
+> end_refused, 2 two_entities, 1 no_key. identifier=prop.MY_UNIQUE_ID,urn would find 3 of them by
+> their urn — rows without MY_UNIQUE_ID, and rows whose urn is an item's that has no MY_UNIQUE_ID
+> yet (it then takes theirs): send it so, and the edges refused for their ends find them too. …
+
+`hints.by_urn` counts those rows. In the import dialog, a replace held this way offers **Find them
+by their urn**.
+
+**Send it with `identifier=prop.MY_UNIQUE_ID,urn`: the property, then the urn.**
+
+- A row that carries the property is found by it.
+- A row without it is found by its urn, as `identifier=urn` finds it.
+- A row whose value no item holds yet is found by its urn too. That item takes the value, so the
+  next import finds it by the property.
+
+Every item keeps its id:
+
+```bash
+curl -sS -X POST "$BASE/api/v1/$WS/versioning/graphs/$GID/imports?format=ndjson&identifier=prop.MY_UNIQUE_ID,urn&reconcileMode=replace&autoPublish=true" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/octet-stream' -T nightly.ndjson
+curl -sS "$BASE/api/v1/$WS/versioning/graphs/$GID/imports/$JOB" -H "Authorization: Bearer $TOKEN" \
+  | jq -c '{status, summary: (.summary | {new, updated, unchanged, deleted, invalid, publish})}'
+```
+
+```json
+{"status": "completed", "summary": {"new": 2, "updated": 2, "unchanged": 3, "deleted": 0, "invalid": 0,
+ "publish": {"jobId": "vjob_01M7949F25GABHPHPHCC4C59Y2", "state": "published", "commitId": "cmt_01M7949F4DEJZ6GZRRQZYT1JD5", "revisionId": 3}}}
+```
+
+`orders` and `customers`, found by their urns, took their `MY_UNIQUE_ID` (`updated: 2`) and kept
+their ids; `Sales` was found by its urn and changed nothing; `invoices` and its edge are new. Sent
+again, every row is found, by the property where it has one, and nothing changes:
+
+```json
+{"status": "completed", "summary": {"new": 0, "updated": 0, "unchanged": 7, "deleted": 0, "invalid": 0,
+ "publish": {"state": "unchanged", "commitId": "cmt_01M7949F4DEJZ6GZRRQZYT1JD5", "revisionId": 3}}}
+```
+
+`maxRefusedRows` is not the fix here. Within the budget, the refused rows keep what they name, so
+nothing they meant to keep is deleted, but their items aren't created or updated either: a new
+container is never made, and the items under it stay without a parent. Set the fallback once as
+the graph's default, on the data source's **Versioning** tab, and every import uses it.
+
+**A graph more than one source writes.** A replace deletes everything in its scope the file leaves
+out, including nodes made in the app or by another connector, which never had your property. Send
+`replaceScope=keyed` and the replace deletes only the nodes that hold the property, and the edges
+whose two ends both do. Everything else stays, with its edges.
+
+**Edges are cleaned up with their nodes.** A node a replace deletes takes every edge at either end
+with it, in the same change: no edge is left pointing at nothing. After the replace's own pass over
+edges, the only edges left to go this way are those reaching outside its scope (a view's, or a
+keyed replace's). `summary.edgesCascaded` counts them.
 
 ## Samples in five languages
 
@@ -493,7 +615,7 @@ def published(job):
         sys.exit(f"import {job['status']} ({failure.get('code')}): {job.get('errorMessage')}")
     counts = {k: summary.get(k) for k in ("new", "updated", "unchanged", "deleted", "invalid")}
     note = summary.get("publish") or {}
-    if note.get("state") != "queued":           # "unchanged", or "skipped" with its reason
+    if note.get("state") != "queued":           # ended: "published" or "unchanged", or "skipped" with its reason
         return {**counts, "publish": note}
     pub = follow(f"publish-jobs/{note['jobId']}")
     if pub["status"] != "completed":
@@ -596,7 +718,7 @@ async function published(job) {
   const { new: created, updated, unchanged, deleted, invalid } = summary
   const counts = { new: created, updated, unchanged, deleted, invalid }
   const note = summary.publish ?? {}
-  if (note.state !== 'queued') return { ...counts, publish: note } // "unchanged", or "skipped" with its reason
+  if (note.state !== 'queued') return { ...counts, publish: note } // ended: "published" or "unchanged", or "skipped" with its reason
   const pub = await follow(`publish-jobs/${note.jobId}`)
   if (pub.status !== 'completed') throw new Error(`publish ${pub.status}: ${pub.error}`)
   return { ...counts, revisionId: pub.revisionId }
@@ -735,7 +857,7 @@ func published(job map[string]any) map[string]any {
 		out[k] = summary[k]
 	}
 	note, _ := summary["publish"].(map[string]any)
-	if note["state"] != "queued" { // "unchanged", or "skipped" with its reason
+	if note["state"] != "queued" { // ended: "published" or "unchanged", or "skipped" with its reason
 		out["publish"] = note
 		return out
 	}
@@ -871,7 +993,7 @@ public class SendImport {
         Map<String, String> out = new LinkedHashMap<>();
         for (String k : new String[] {"new", "updated", "unchanged", "deleted", "invalid"}) out.put(k, field(job, k));
         String publish = job.substring(job.indexOf("\"publish\""));
-        if (!"queued".equals(field(publish, "state"))) {   // "unchanged", or "skipped" with its reason
+        if (!"queued".equals(field(publish, "state"))) {   // ended: "published" or "unchanged", or "skipped" with its reason
             out.put("publish", field(publish, "state"));
             return out;
         }
@@ -961,8 +1083,10 @@ The same requests take files of up to 10 GiB (NDJSON, CSV or TSV; 100 MB for JSO
 | `403` with `"code": "publish_required"` | The key's account can't publish in this workspace | Give the account the **Publisher** role, or leave out `autoPublish` and have someone publish the draft |
 | `409 review_required` | The data source says a person reviews every change | Leave out `autoPublish`; open a merge request for the draft (`POST …/branches/{branchId}/merge-requests`) |
 | The import `completed`, but `summary.publish.state` is `skipped` | Some rows were refused, or someone changed the same fields meanwhile | Read `summary.refused`: each refused row says where it is, why, and what to do; or send it with `maxRefusedRows` |
-| A row refused with `no_key` | The row has no key the identifier can use | Give it one: a `urn`, or the property `identifier=prop.<name>` names |
-| An edge refused with `end_not_found` | An end names a node the graph doesn't hold and the file doesn't make, or the node's own row was refused | Add a row for the node, fix its refused row, or name the end by a urn or `entity_id` the graph holds |
+| A row refused with `no_key` | The row has no key the identifier can use | Give it one: a `urn`, or the property `identifier=prop.<name>` names. A row with a urn but not the property is found by `identifier=prop.<name>,urn` |
+| A replace by `prop.<name>` held with `two_entities` on rows the graph already has | Their urns are items that never had the property: the graph was loaded by urn, or in the app | Send `identifier=prop.<name>,urn`: they are found by their urn, and take the property ([Keyed by your own id](#keyed-by-your-own-id-where-some-rows-dont-have-it)) |
+| An edge refused with `end_not_found` | An end names a node the graph doesn't hold and the file doesn't make | Add a row for the node, or name the end by a urn or `entity_id` the graph holds (by `prop.<name>`, a `sourceUrn` is read only with `prop.<name>,urn`) |
+| An edge refused with `end_refused` | The node at its end has a row in the file, and that row was refused | Fix the node's row (its `rowIndex` is in the reason): the edge then finds it |
 | `422` `invalid_max_refused_rows` | `maxRefusedRows` isn't a limit | Send `0`, a count such as `100`, a share such as `0.5%`, or `-1` |
 | A replace `failed` with `mass_delete_blocked` | It would have deleted most of the graph: usually the wrong `identifier` | Check the identifier; [proceed only if you mean it](/docs/import-export-api#the-replace-guard) |
 | Your client runs out of memory on a large file | It read the file into memory (`--data-binary @file`, `read()`) | Stream it: every sample here does |

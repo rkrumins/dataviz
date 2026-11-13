@@ -416,7 +416,8 @@ def test_a_node_row_that_names_nothing_is_refused_and_so_is_an_edge_to_it():
     ], urn_to_eid={"urn:li:y": "N2"}, node_eids={"N2"})
     assert (res[0]["resolved_op"], res[0]["code"]) == ("invalid", "no_key"), res[0]
     assert "give it a urn" in res[0]["reasons"][0]
-    assert (res[1]["resolved_op"], res[1]["code"]) == ("invalid", "end_not_found"), res[1]
+    assert (res[1]["resolved_op"], res[1]["code"]) == ("invalid", "end_refused"), res[1]
+    assert "rowIndex 0" in res[1]["reasons"][0], "it names the refused row to fix"
     # A qualifiedName finds its node again: such a row is still made.
     assert res[2]["resolved_op"] == "create" and [o["entity_id"] for o in ops] == [
         res[2]["matched_entity_id"]]
@@ -796,3 +797,144 @@ def test_by_a_property_a_new_nodes_urn_another_node_holds_refuses_the_row():
     assert res[3]["code"] == "two_entities", "a node brought back takes no other node's urn"
     assert (res[4]["resolved_op"], res[4]["matched_entity_id"]) == ("create", "ent_D"), res[4]
     assert [o["payload"]["urn"] for o in ops] == ["urn:li:x", "urn:li:gone"], ops
+
+
+# ---- identifier=prop.<name>,urn: the property, then the urn --------------------------------------
+
+def _by_prop_or_urn(rows, identifier="prop.ext,urn", **indexes):
+    v7s = iter(f"urn:uuid:0192f5a4-0000-7000-8000-00000000000{i}" for i in range(10))
+    base = {"urn_to_eid": {}, "qname_to_eid": {}, "edge_to_eid": {}, "node_eids": set(), "current": {}}
+    ops, res = resolve_rows(rows, {**base, **indexes}, mint_id=lambda: next(v7s),
+                            mint_urn=lambda _t: next(v7s), identity_prop="asset_id",
+                            derive_urn=lambda seed: pointer_id("ds1", seed),
+                            derive_edge=lambda s, t, e: f"edge:{s}>{t}:{e}",
+                            derive_key=lambda v: key_pointer_id("ds1", "ext", v),
+                            identifier=identifier)
+    return ops, {r["_row_index"]: r for r in res}
+
+
+def test_with_urn_a_row_without_the_property_is_found_by_its_urn_and_one_with_it_by_its_value():
+    """A top-level container the source has no id for is found by its urn, as identifier=urn finds
+    it; a row whose value no node holds yet, by its urn too — that node takes the value, and the
+    next import finds it by it. Nothing is refused."""
+    domain = {"urn": "urn:svc:domain", "entityType": "Table", "displayName": "Sales"}
+    orders = {"urn": "urn:svc:orders", "entityType": "Table", "displayName": "orders"}
+    ops, res = _by_prop_or_urn([
+        _node_row(0, urn="urn:svc:domain", displayName="Sales"),                          # no ext
+        _node_row(1, urn="urn:svc:orders", displayName="orders", properties={"ext": "E1"}),
+        _node_row(2, urn="urn:svc:new", displayName="new", properties={"ext": "E2"}),
+        _node_row(3, urn="urn:svc:root", displayName="root"),                              # no ext, new
+    ], urn_hits={"urn:svc:domain": "D1", "urn:svc:orders": "O1"}, node_eids={"D1", "O1"},
+        current={"D1": domain, "O1": orders})
+    assert (res[0]["resolved_op"], res[0]["matched_entity_id"]) == ("unchanged", "D1"), res[0]
+    assert (res[1]["resolved_op"], res[1]["matched_entity_id"]) == ("update", "O1"), res[1]
+    assert any("found by its urn: it takes ext 'E1'" in r for r in res[1]["reasons"]), res[1]
+    (adopt,) = [o for o in ops if o["entity_id"] == "O1"]
+    assert adopt["payload"]["properties"] == {"ext": "E1"}, "the value is written: found by it next"
+    assert (res[2]["resolved_op"], res[2]["matched_entity_id"]) == ("create", key_pointer_id("ds1", "ext", "E2"))
+    assert (res[3]["resolved_op"], res[3]["matched_entity_id"]) == ("create", pointer_id("ds1", "urn:svc:root")), (
+        "a new node without the property takes the id its urn derives, as identifier=urn makes it")
+    assert not any(r["status"] == "invalid" for r in res.values())
+
+
+def test_with_urn_a_value_and_a_urn_that_name_two_nodes_refuse_the_row_keeping_both():
+    ops, res = _by_prop_or_urn([
+        _node_row(0, urn="urn:svc:b", displayName="x", properties={"ext": "EA"}),     # EA is A's
+        _node_row(1, displayName="no keys at all"),
+    ], urn_to_eid={"EA": "A"}, urn_hits={"urn:svc:b": "B"}, node_eids={"A", "B"},
+        current={"A": {"urn": "urn:svc:a", "entityType": "Table", "properties": {"ext": "EA"}},
+                 "B": {"urn": "urn:svc:b", "entityType": "Table"}})
+    assert (res[0]["code"], res[0].get("mentions")) == ("two_entities", ["A", "B"]), res[0]
+    assert res[1]["code"] == "no_key" and "no ext and no urn" in res[1]["reasons"][0], res[1]
+    assert ops == []
+
+
+def test_with_urn_a_value_held_twice_is_settled_by_its_urn():
+    ops, res = _by_prop_or_urn([
+        _node_row(0, urn="urn:svc:b", displayName="b2", properties={"ext": "DUP"}),
+        _node_row(1, urn="urn:svc:c", displayName="c", properties={"ext": "DUP"}),
+    ], dupes={"DUP": ["A", "B"]}, urn_hits={"urn:svc:b": "B"}, node_eids={"A", "B"},
+        current={"B": {"urn": "urn:svc:b", "entityType": "Table", "properties": {"ext": "DUP"}}})
+    assert (res[0]["resolved_op"], res[0]["matched_entity_id"]) == ("update", "B"), res[0]
+    assert (res[1]["code"], res[1].get("mentions")) == ("duplicate_value", ["A", "B"]), res[1]
+
+
+def test_by_the_property_alone_a_row_with_only_a_urn_says_how_to_find_it_and_keeps_its_node():
+    """Strict prop.ext: the row is refused, its reason and hint say ,urn would find it, and the node
+    its urn names is kept by a replace (``mentions``) though the row matched nothing."""
+    _ops, res = _by_prop([_node_row(0, urn="urn:svc:domain", displayName="Sales")],
+                         urn_hits={"urn:svc:domain": "D1"})
+    row = res[0]
+    assert (row["code"], row.get("mentions"), row.get("hint")) == ("no_key", ["D1"], "by_urn"), row
+    assert "identifier=prop.ext,urn" in row["reasons"][0], row
+
+
+def test_by_the_property_alone_a_new_rows_urn_on_a_node_without_it_says_to_add_urn():
+    _ops, res = _by_prop([_node_row(0, urn="urn:svc:orders", displayName="o", properties={"ext": "E9"})],
+                         urn_held={"urn:svc:orders": "O1"}, urn_hits={"urn:svc:orders": "O1"},
+                         current={"O1": {"urn": "urn:svc:orders", "entityType": "Table"}})
+    row = res[0]
+    assert (row["code"], row.get("mentions"), row.get("hint")) == ("two_entities", ["O1"], "by_urn"), row
+    assert "holds no ext" in row["reasons"][0] and "prop.ext,urn" in row["reasons"][0], row
+
+
+def test_with_urn_an_edge_end_without_the_property_is_found_by_its_urn():
+    ops, res = _by_prop_or_urn([
+        _edge_row(0, sourceUrn="urn:svc:domain", targetKeys={"ext": "E1"}),
+        _edge_row(1, sourceUrn="urn:svc:domain", targetUrn="urn:svc:b", targetKeys={"ext": "E1"}),
+    ], urn_to_eid={"E1": "O1"}, urn_hits={"urn:svc:domain": "D1", "urn:svc:b": "B"},
+        node_eids={"D1", "O1", "B"})
+    assert (res[0]["resolved_op"], res[0].get("mentions")) == ("create", ["D1", "O1"]), res[0]
+    assert ops[0]["payload"]["sourceEntityId"] == "D1"
+    assert res[1]["code"] == "two_entities", "its target's value and urn name two nodes"
+
+
+def test_by_the_property_alone_an_edge_end_given_by_urn_says_how_to_find_it_and_keeps_both():
+    _ops, res = _by_prop([_edge_row(0, sourceUrn="urn:svc:domain", targetKeys={"ext": "E1"})],
+                         urn_to_eid={"E1": "O1"}, urn_hits={"urn:svc:domain": "D1"},
+                         node_eids={"O1", "D1"}, edge_to_eid={("D1", "O1", "FLOWS"): "EDGE1"})
+    row = res[0]
+    assert row["code"] == "end_not_found" and "identifier=prop.ext,urn" in row["reasons"][0], row
+    assert row.get("mentions") == ["D1", "EDGE1", "O1"], "its ends and the edge they name are kept"
+
+
+def test_an_edge_whose_end_was_a_refused_node_row_says_which_row_to_fix():
+    _ops, res = _by_prop([_edge_row(0, sourceKeys={"ext": "BAD"}, targetKeys={"ext": "E1"})],
+                         urn_to_eid={"E1": "O1"}, node_eids={"O1"},
+                         refused_names={"BAD": (7, "invalid_type")})
+    row = res[0]
+    assert row["code"] == "end_refused" and "rowIndex 7" in row["reasons"][0], row
+    assert "invalid_type" in row["reasons"][0] and row.get("mentions") == ["O1"], row
+
+
+def test_a_refused_edge_row_naming_a_live_edge_by_its_id_keeps_it():
+    """Refused for its type, an edge row that names a live edge by its own id keeps that edge and
+    its ends, which a replace would otherwise delete — the ends are read before the row's id."""
+    held = {"edgeType": "FLOWS", "sourceEntityId": "N1", "targetEntityId": "N2"}
+    _ops, res = resolve_rows(
+        [_edge_row(0, entity_id="E1", edgeType="NOT_A_TYPE", source_entity_id="N1", target_entity_id="N2")],
+        {"urn_to_eid": {}, "qname_to_eid": {}, "edge_to_eid": {}, "node_eids": {"N1", "N2"},
+         "edge_eids": {"E1"}, "current": {"E1": held}},
+        mint_id=lambda: "x", ontology={"node_types": ["Table"], "edge_types": ["FLOWS"]})
+    row = res[0]
+    assert row["code"] == "invalid_type" and row["matched_entity_id"] == "E1", row
+    assert row.get("mentions") == ["N1", "N2"], row
+
+
+def test_a_delete_row_with_no_key_its_identifier_reads_is_refused_not_already_gone():
+    _ops, res = _by_prop([{"_row_index": 0, "kind": "node", "op": "delete", "entity_id": "",
+                           "entityType": "Table", "urn": "urn:svc:x"}])
+    assert (res[0]["status"], res[0]["code"]) == ("invalid", "no_key"), res[0]
+    assert "mentions" not in res[0], "a refused delete keeps nothing its row meant to delete"
+
+
+def test_in_one_pass_an_edge_whose_node_row_was_refused_above_says_so():
+    """A dry run resolves nodes and edges together: an edge naming a node row refused in the same
+    pass is end_refused, naming that row, as across an import's windows."""
+    _ops, res = _by_prop([
+        _node_row(0, urn="urn:svc:domain", displayName="Sales"),                       # no ext
+        _node_row(1, urn="urn:svc:a", displayName="a", properties={"ext": "EA"}),
+        _edge_row(2, sourceUrn="urn:svc:domain", targetKeys={"ext": "EA"}),
+    ])
+    assert res[0]["code"] == "no_key"
+    assert res[2]["code"] == "end_refused" and "rowIndex 0" in res[2]["reasons"][0], res[2]

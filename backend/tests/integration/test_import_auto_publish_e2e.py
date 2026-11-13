@@ -3,8 +3,13 @@
 The import runs as the transfer lane runs it, through the service the API builds
 (``get_import_export_service``), so its publish goes through the hook every publish job takes.
 The file's nodes and edges land on main, and its draft is merged. The same file sent again changes
-nothing: nothing is published, and its empty draft is closed. A delta that deletes what an earlier
-run deleted, beside a real change, still publishes itself: the delete is done already, not refused.
+nothing: nothing is committed, and its empty draft is closed — the import says ``unchanged``, names
+no commit, and gives the revision of main that holds its content. Its publish, once the job ends,
+is noted on the import itself (``published``, with the commit and revision). The same snapshot
+imported into two drafts at once: the first publishes; the second, pulling main, finds it holds
+its changes, and ends ``unchanged`` — main's head and commits as they were. A delta that deletes
+what an earlier run deleted, beside a real change, still publishes itself: the delete is done
+already, not refused.
 """
 import asyncio
 import json
@@ -12,8 +17,11 @@ import os
 
 import pytest
 
+from sqlalchemy import func, select
+
 from backend.app.services.storage.object_store import storage_key
 from backend.app.services.versioning import db, models
+from backend.app.services.versioning.models import CommitORM, GraphORM
 
 pytestmark = [pytest.mark.integration, pytest.mark.skipif(
     not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")]
@@ -57,13 +65,29 @@ async def _run(monkeypatch) -> None:
                                          actor="alice", import_format="ndjson", source_uri=key,
                                          auto_publish=True)
         await ie.run_import(job["job_id"])
+        imported.last = job["job_id"]
         return job["branch_id"], (await ie.get_job(job["job_id"]))["summary"]
 
-    async def published(summary):
+    async def published(summary, job_id=None, outcome="published"):
+        """Run the import's publish job; the import then says how it ended, as the job does."""
         note = summary["publish"]
         assert note["state"] == "queued", summary
         result = await ie.run_publish(note["jobId"])
-        assert result.get("commitId"), result
+        assert result["outcome"] == outcome and result["commitId"], result   # the one it made, or main's head
+        ended = (await ie.get_job(job_id or imported.last))["summary"]["publish"]
+        assert {k: ended[k] for k in ("state", "jobId", "commitId", "revisionId")} == {
+            "state": outcome, "jobId": note["jobId"], "commitId": result["commitId"],
+            "revisionId": result["revisionId"]}, ended
+        return ended
+
+    async def main_now():
+        """Main's head and how many commits main holds: what a publish that commits would move. (A
+        draft's own commits — a pull onto an import's draft — aren't main's.)"""
+        async with db.graphver_session() as s:
+            head = (await s.get(GraphORM, gid)).main_head_commit_seq
+            commits = await s.scalar(select(func.count()).select_from(CommitORM).where(
+                CommitORM.graph_id == gid, CommitORM.branch_id == main))
+        return head, commits
 
     async def names():
         state = await svc.materialize_state(graph_id=gid, branch_id=main)
@@ -71,13 +95,30 @@ async def _run(monkeypatch) -> None:
 
     draft, summary = await imported(_FILE)
     assert (summary["new"], summary["invalid"]) == (4, 0), summary
-    await published(summary)
+    first_landed = await published(summary)
     assert await names() == (["legacy", "orders", "revenue"], 1)
     assert (await svc.branch_statuses([draft]))[draft] == "merged"
 
+    before = await main_now()
     again, summary = await imported(_FILE)
-    assert summary["publish"] == {"state": "unchanged"}, summary
+    assert summary["publish"] == {"state": "unchanged", "commitId": first_landed["commitId"],
+                                  "revisionId": before[0]}, "main's head, which holds it"
     assert (await svc.branch_statuses([again]))[again] == "abandoned"
+    assert await main_now() == before, "nothing committed: main's head and commits as they were"
+
+    # The same snapshot into two drafts at once: the first publishes; the second pulls main, finds
+    # it holds its changes, and commits nothing.
+    twin = [{"kind": "node", "urn": "urn:t:ledger", "entityType": "Table", "displayName": "ledger"}]
+    _first, first = await imported(twin)
+    first_job = imported.last
+    _second, second = await imported(twin)
+    second_job = imported.last
+    landed = await published(first, first_job)
+    before = await main_now()
+    ended = await published(second, second_job, outcome="unchanged")
+    assert (ended["commitId"], ended["revisionId"], ended["pulls"]) == (
+        landed["commitId"], landed["revisionId"], 1), "the first's commit, main's head, holds its changes"
+    assert await main_now() == before, "the second committed nothing"
 
     _draft, summary = await imported([_DELETE_LEGACY])
     await published(summary)
@@ -87,7 +128,7 @@ async def _run(monkeypatch) -> None:
     ])
     assert (summary["updated"], summary["unchanged"], summary["invalid"]) == (1, 1, 0), summary
     await published(summary)
-    assert await names() == (["orders v2", "revenue"], 1)
+    assert await names() == (["ledger", "orders v2", "revenue"], 1)
 
 
 def test_an_import_publishes_itself_onto_main(monkeypatch):

@@ -26,7 +26,7 @@ from backend.app.services.storage.object_store import get_object_store, storage_
 from .. import config, db, provenance
 from ..errors import JobActive, MainWriteForbidden, _HttpMapped
 from ..job_lease import Draining, Lease, Superseded, friendly_infra_error, is_transient
-from ..models import BranchORM, GraphORM, ImportRowORM, JobORM, MergeRequestORM
+from ..models import BranchORM, GraphORM, ImportMentionORM, ImportRowORM, JobORM, MergeRequestORM
 from ..service import AccessDenied, ConcurrencyError, GraphVersioningService, NotUpToDate, Viewer
 from . import contract, stream
 from . import identifier as identifiers
@@ -97,6 +97,34 @@ def _behind_main(result: Dict[str, Any]) -> bool:
     """A publish job's answer: refused because its draft is behind main."""
     detail = (result.get("error") or {}).get("detail")
     return isinstance(detail, dict) and detail.get("type") == "not_up_to_date"
+
+
+async def _note_publish_ended(s, import_job_id: str, job_id: str, result: Dict[str, Any]) -> None:
+    """Record on an import how the publish job it queued (``job_id``) ended — in ``s``, the job's
+    fenced finish, so the two never disagree. ``summary.publish`` becomes:
+
+    * ``published``, with ``commitId`` and ``revisionId``: the draft landed as that commit;
+    * ``unchanged``: main held the draft's changes already (another import, or a person, made them
+      first), so nothing was committed; ``commitId`` and ``revisionId`` are main's head, which
+      holds them;
+    * ``skipped``, with ``reason``: the publish was refused, and the draft waits for review.
+
+    ``jobId``, the import's ``refusedRows`` and the pulls the job made (``pulls``) are kept."""
+    row = await s.get(JobORM, import_job_id, with_for_update=True)
+    if row is None:
+        return
+    kept = {k: v for k, v in ((row.summary or {}).get("publish") or {}).items() if k == "refusedRows"}
+    pulls = int(((await s.get(JobORM, job_id)).field_scope or {}).get("pulls") or 0)
+    if pulls:
+        kept["pulls"] = pulls
+    if "error" in result:
+        note = {"state": "skipped", "jobId": job_id, "reason": result["error"].get("detail")}
+    else:
+        note = {"state": result.get("outcome") or ("published" if result.get("commitId") else "unchanged"),
+                "jobId": job_id, "commitId": result.get("commitId") or None,
+                "revisionId": result.get("revisionId")}
+    row.summary = {**(row.summary or {}), "publish": {**note, **kept}}
+    row.updated_at = _now()
 
 
 class DryRunTooLarge(ValueError):
@@ -409,7 +437,7 @@ class ImportExportService:
             # Refused by the replace's own checks: nothing deleted, the rows on the draft. The
             # failure says why (``summary.failure.code``) and what to do (``action``).
             logger.warning("import job %s stopped: %s", job_id, exc)
-            await lease.fail(str(exc), exc.code, exc.action)
+            await lease.fail(str(exc), exc.code, exc.action, phase=getattr(exc, "phase", None))
         except Exception as exc:
             logger.exception("job %s failed", job_id)
             if is_transient(exc):          # an outage that outlasted the retry budget: resumable
@@ -502,8 +530,8 @@ class ImportExportService:
         try:
             summary = await (worker.run(job_id, lease=lease) if lease is not None
                              else worker.run(job_id))
-        except ReplaceBlocked:
-            # A view's replace the guard refused leaves what it made on the draft for review: placed
+        except (ReplaceBlocked, ReplaceRowsRefused):
+            # A view's replace the guard (or its refused rows) stopped leaves what it made on the draft for review: placed
             # in the draft's view too, so the override — the file imported again into that draft
             # with allowMassDelete, which makes nothing — finds it in the view's scope, and the
             # view shows it once the draft is published.
@@ -515,19 +543,25 @@ class ImportExportService:
         if view_id and self._layout_writer is not None and worker.created_node_facts:
             await self._apply_view_layout(job_id, ws, ds, view_id, branch_id, worker)
         if auto_publish:          # after the layout, so the placements are published with the data
+            # By a property alone, the refused rows that have a urn are named, with the fix.
+            prop = None if getattr(worker, "_urn_fallback", False) else getattr(worker, "_prop", None)
             await asyncio.shield(self._auto_publish(job_id, ws, ds, graph_id, branch_id, summary,
-                                                    budget=refused_budget(settings.get("maxRefusedRows"))))
+                                                    budget=refused_budget(settings.get("maxRefusedRows")),
+                                                    prop=prop))
         return summary
 
     async def _auto_publish(self, job_id, ws, ds, graph_id, branch_id, summary, *,
-                            budget: str = "0") -> None:
+                            budget: str = "0", prop: Optional[str] = None) -> None:
         """Publish the draft a completed import opened, as it asked (``autoPublish``), and record
         how that went on its summary (``publish``), as :meth:`_apply_view_layout` records the
         layout:
 
         * ``queued``, with ``jobId``: the draft's publish job, which runs as a large publish does —
-          the review policy read again, the import's owner held to publish again;
-        * ``unchanged``: the import changed nothing, so its draft, empty, is closed;
+          the review policy read again, the import's owner held to publish again. When it ends, the
+          note says how (:func:`_note_publish_ended`): ``published``, ``unchanged`` or ``skipped``;
+        * ``unchanged``: the import changed nothing, so its draft, empty, is closed and nothing is
+          committed — ``commitId`` and ``revisionId`` are main's head, which holds the file's
+          content;
         * ``skipped``, with ``reason``: more rows were refused than the import's ``maxRefusedRows``
           allows (none, by default), or the draft can't be published (it fell behind main while
           the file was imported, …). The draft waits for review.
@@ -541,7 +575,7 @@ class ImportExportService:
                 note = {"state": "skipped", "reason": {
                     "type": "rows_refused", "rows": refused,
                     "message": f"{refused} row(s) of the file were refused, so the draft waits for "
-                               f"someone to review it.{refused_digest(summary.get('refused'))} Fix "
+                               f"someone to review it.{refused_digest(summary.get('refused'), prop=prop)} Fix "
                                "them and import the file again, or send it with maxRefusedRows (a "
                                "count, a share such as 1%, or -1 for any) to publish without them."}}
             else:
@@ -549,22 +583,28 @@ class ImportExportService:
                     owner = (await s.get(BranchORM, branch_id)).owner
                 if not any(summary.get(k) for k in ("new", "updated", "deleted")):
                     await self._svc.abandon_draft(graph_id=graph_id, branch_id=branch_id, actor=owner)
-                    note = {"state": "unchanged"}
+                    held = await self._svc.publish_outcome(graph_id=graph_id, commit_id=None)
+                    note = {"state": "unchanged", "commitId": (held or {}).get("commit_id"),
+                            "revisionId": (held or {}).get("revision_id")}
                 else:
                     note = await self._publish_own_draft(job_id, ws, ds, graph_id, branch_id, owner)
-                    if refused:          # within the budget: published without them
-                        note = {**note, "refusedRows": refused}
+                if refused:              # within the budget: went on without them
+                    note = {**note, "refusedRows": refused}
         except Exception as exc:  # noqa: BLE001 — a refusal, or an outage: the draft is kept
             logger.warning("import job %s did not publish itself: %s", job_id, exc)
             note = {"state": "skipped", "reason": _refusal(exc)}
         await self._note_publish(job_id, note)
 
-    async def _note_publish(self, import_job_id: str, note: Dict[str, Any]) -> None:
-        """Record on the import job how its publish went (``summary.publish``). Never raised."""
+    async def _note_publish(self, import_job_id: str, note: Dict[str, Any], *,
+                            keep: Tuple[str, ...] = ()) -> None:
+        """Record on the import job how its publish went (``summary.publish``), keeping the fields
+        ``keep`` names from the note it replaces. Never raised."""
         try:
             async with db.graphver_session() as s:
                 row = await s.get(JobORM, import_job_id)
                 if row is not None:
+                    before = (row.summary or {}).get("publish") or {}
+                    note = {**note, **{k: before[k] for k in keep if k in before}}
                     row.summary = {**(row.summary or {}), "publish": note}
                     row.updated_at = _now()
         except Exception:  # pragma: no cover - defensive; must never fail the completed import
@@ -824,6 +864,10 @@ class ImportExportService:
             detail = result["error"].get("detail")
             values.update(status="failed", error_message=str(
                 detail.get("message") or detail.get("type") if isinstance(detail, dict) else detail)[:2000])
+        if job.get("importJobId"):          # the import says how its publish ended, with the job's end
+            async def ended(s):
+                await _note_publish_ended(s, job["importJobId"], job_id, result)
+            values["then"] = ended
         if not await lease.finish(**values):
             raise Superseded(f"publish job {job_id} (epoch {lease.epoch}) was taken over before it "
                              "could finish")
@@ -862,8 +906,10 @@ class ImportExportService:
                     message="pull latest from main to publish the import", publishing_ok=True)
             except (_HttpMapped, ConcurrencyError) as exc:
                 # The draft merged under the pull (an earlier attempt published it): that publish
-                # is this job's. Anything else refused the pull, and says why.
-                if await self._svc.merged_commit_id(graph_id=job["graphId"], branch_id=job["branchId"]):
+                # is this job's — committed or, its changes on main already, not ("" then). Anything
+                # else refused the pull, and says why.
+                if await self._svc.merged_commit_id(
+                        graph_id=job["graphId"], branch_id=job["branchId"]) is not None:
                     result = await self._publish_once(job)
                 else:
                     result = {"error": {"status": getattr(exc, "status_code", 409), "detail": _refusal(exc)}}
@@ -874,12 +920,10 @@ class ImportExportService:
             if not pulled.get("clean"):
                 result = {"error": {"status": 409, "detail": _conflicts(pulled)}}
                 break
-            await self._note_publish(job["importJobId"], {"state": "queued", "jobId": job_id, "pulls": pulls})
+            await self._note_publish(job["importJobId"], {"state": "queued", "jobId": job_id, "pulls": pulls},
+                                     keep=("refusedRows",))
             result = await self._publish_once(job)
-        if "error" in result:
-            await self._note_publish(job["importJobId"], {
-                "state": "skipped", "jobId": job_id, "pulls": pulls, "reason": result["error"].get("detail")})
-        return result
+        return result     # how it ended is noted on the import with the job's finish (run_publish)
 
     async def run_publish_safe(self, job_id: str, lease: Lease) -> None:
         await self._run_safe(job_id, lease, self.run_publish)
@@ -1030,6 +1074,7 @@ class ImportExportService:
                                                 f"{active}). Retry this one once it has finished.")
                 if row.last_cursor is None:
                     await s.execute(delete(ImportRowORM).where(ImportRowORM.job_id == job_id))
+                    await s.execute(delete(ImportMentionORM).where(ImportMentionORM.job_id == job_id))
                 summary = row.summary if isinstance(row.summary, dict) else {}
                 row.summary = {k: v for k, v in summary.items() if k not in ("takeovers", "failure")} or None
                 row.status, row.current_phase = "pending", QUEUED
@@ -1158,7 +1203,7 @@ class ImportExportService:
         lookups: Dict[str, Any] = await worker._node_lookups(snap, nodes) if nodes else {}
         if edges:                                    # one call: an edge finds a node made above it
             more = await worker._edge_lookups(snap, edges)
-            for key in ("urn_to_eid", "qname_to_eid", "current", "hash_of", "bases", "dupes"):
+            for key in ("urn_to_eid", "qname_to_eid", "current", "hash_of", "bases", "dupes", "urn_hits"):
                 lookups[key] = {**more.get(key, {}), **lookups.get(key, {})}
             lookups["node_eids"] = set(lookups.get("node_eids") or ()) | more["node_eids"]
             lookups["edge_to_eid"] = more["edge_to_eid"]

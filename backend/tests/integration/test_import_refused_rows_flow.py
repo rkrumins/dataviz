@@ -71,7 +71,7 @@ async def _run(monkeypatch):
                 (1, {"line": 2}, "invalid_type", FIXES["invalid_type"])], listed["sample"]
             assert listed["nextAfter"] is None
             message = held["errorMessage"]
-            assert message.startswith("Nothing was deleted: 1 row(s) of the file were refused"), message
+            assert message.startswith("Nothing was deleted: 1 node row(s) of the file were refused"), message
             assert "1 invalid_type" in message and "line 2 (b): invalid_type" in message
             assert "maxRefusedRows" in message and "To fix invalid_type" in message
             assert set(ids) <= {p.get("urn") for p in (await g.main(gid)).values()}, "nothing deleted"

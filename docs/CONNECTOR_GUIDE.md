@@ -46,7 +46,7 @@ sequenceDiagram
     loop until finished
         C->>A: GET publish-jobs/{jobId}
     end
-    A-->>C: completed, commitId, revisionId: the file's deltas are on main
+    A-->>C: completed, outcome, commitId, revisionId: the file's deltas are on main
 ```
 
 ## 1. Before you start
@@ -198,6 +198,18 @@ change. A file's keys find those ids:
   A value two nodes hold refuses its rows (`duplicate_value`): keep it unique to one. A partial
   file — `prop.external_id` and the one field that changed — updates only that field. To write
   through the entity-id APIs instead, map your ids first: `POST …/identities/resolve`.
+- **Some rows without your id?** A top-level container your system has no id for, or a graph first
+  loaded by urn (or made in the app), whose nodes never had the property: send
+  `identifier=prop.external_id,urn`. A row with the property is found by it; one without, by its
+  urn; one whose value no node holds yet, by its urn too, and that node takes the value, so the next
+  run finds it by it. Edge ends the same: `source.external_id`, else `sourceUrn`. By
+  `prop.external_id` alone those rows are refused (`no_key`, `two_entities`), and a replace holds,
+  saying so. Set it once as the graph's default.
+- **Sharing a graph with other writers?** A replace deletes what its file leaves out, including
+  what the app or another connector made. With a property identifier, `replaceScope=keyed` deletes
+  only the nodes holding the property (and the edges between two of them). A node a replace
+  deletes always takes its edges with it (`summary.edgesCascaded`), and a replace never deletes a
+  node a row of the file names, refused or not, nor one an edge row names as an end.
 - **The data source's identifier property** (`prop.<identifier>`) finds a node too, for a source
   identified by it. It is reserved: the node's identifier holds its urn.
 - **A `urn:uuid:` your system already gave the entity** is kept as its id, given as its `urn` or
@@ -350,8 +362,9 @@ When the import completes, `summary.publish` on its job says what happened:
 
 | `summary.publish.state` | What happened | What to do |
 |---|---|---|
-| `queued`, with `jobId` | The draft is being published, as a large publish is: a job. `pulls` says how often its draft pulled main (below) | Follow `GET …/publish-jobs/{jobId}` to `completed` (with `commitId` and `revisionId`) or `failed` (with `error`, whose `detail.type` is one of the reasons below) |
-| `unchanged` | The file changed nothing. Its empty draft was closed | Nothing |
+| `queued`, with `jobId` | The draft is being published, as a large publish is: a job. `pulls` says how often its draft pulled main (below) | Follow `GET …/publish-jobs/{jobId}` to `completed` (with `outcome`, `commitId` and `revisionId`) or `failed` (with `error`, whose `detail.type` is one of the reasons below). Or read the import again: when the job ends, its note says how |
+| `published`, with `jobId`, `commitId`, `revisionId` | The publish job landed the draft as `commitId`; `revisionId` holds it | Nothing |
+| `unchanged`, with `commitId`, `revisionId` | Nothing to publish: the file changed nothing (its empty draft was closed), or main had its changes already when the publish ran (another run made them first). Nothing was committed; `commitId` and `revisionId` are main's head, which holds the data | Nothing: the run succeeded |
 | `skipped`, with `reason` | It wasn't published, and the draft is kept for review | Read `reason.type` (below) |
 | missing, a minute after `completed` | The worker stopped between the two steps | Publish the draft yourself: `POST …/branches/{branchId}/publish` |
 

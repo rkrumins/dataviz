@@ -233,6 +233,7 @@ minter is injected) that returns `(ops, resolutions)`:
   | `entity_id` (default) | its `entity_id` (this graph's) → its pointers → a field its type matches imports by → `qualifiedName` (a row with no urn) | `source_entity_id` → `sourceUrn` and `source.<identifier>` → `source.<key>` → `sourceQualifiedName` |
   | `urn` | its `entity_id` (this graph's) → its `urn`; nothing else | `source_entity_id` → `sourceUrn` |
   | `prop.<name>` | its `entity_id` (this graph's) → its value of the property `<name>`, such as `prop.external_id`; nothing else | `source_entity_id` → `source.<name>` |
+  | `prop.<name>,urn` | as `prop.<name>`; a row without the property → its urn, as `urn` finds it (its own urn, the id derived from it, a second name this job gave it; a new node takes the id its urn derives); a row whose value no node holds yet → its urn too, and the node takes the value, so the next import finds it by it. Its urn naming another node than its value refuses it (`two_entities`); a value several nodes hold is settled by its urn when the urn's node is one of them | `source_entity_id` → `source.<name>`, else (no value, or one no node holds) `sourceUrn` |
 
   Any other `entity_id` is the file's own: it links the file's rows (an edge to a node) and nothing
   more. A 422 (`invalid_identifier`) says what a request may name. `prop.<the data source's
@@ -666,8 +667,28 @@ which Postgres JSONB rejects) and is stripped from `create` payloads, where it i
 
 Replace deletes are computed after the file's rows are applied (`_delete_absent`): the draft is
 walked a page at a time, and every entity in scope that no row matched (`import_rows.matched_entity_id`)
-is deleted, edges first, then nodes (`apply_ops` cascades containment/incident edges). Derived deletes
-aren't file rows, so they're counted separately into `summary["deleted"]`.
+and no row mentions (`import_mentions`) is deleted, edges first, then nodes (`apply_ops` cascades
+containment/incident edges). Derived deletes aren't file rows, so they're counted separately into
+`summary["deleted"]`, and the edges a page's node deletes take with them into
+`summary["edgesCascaded"]` (after the edge pass, those reaching outside the scope; counted from the
+snapshot before the delete, `Snapshot.incident_edges`).
+
+**What the file names is kept.** A resolution carries ``mentions``: the live entities the row names
+besides what it matched — what a refused row names by any key it carries (its entity_id, its urn
+through the urn lookup, its value of the identifier's property, an edge row's own id and ends), and
+an edge row's resolved ends. Each window writes those no row of the job matched into
+`import_mentions(job_id, entity_id)` (`_persist_mentions`), in its transaction, so a file that lists
+every node it links writes none; the in-memory path writes the decided rows' with them. The
+absence check (`_unmatched`) excludes both. So a refused row sent on with `maxRefusedRows` never makes
+the replace delete what it was about, and an edge row never loses its ends. The table is transient
+by job and deleted with `import_rows` (the staged-rows sweep, a restart, a graph purge).
+
+**`replaceScope=keyed`.** With a property identifier, `_scope_pages` filters each page of the
+scope to what holds the property, as the draft holds it: a node that does (the draft's own values,
+then main's index, `keys.holders_among`), and an edge whose two ends both do. Nodes made in the app
+or by another source are left alone, with their edges; an edge from one to a deleted keyed node goes
+with that node. The guard measures that scope (`replaceGuard.scope: "keyed"`). By `urn` or
+`entity_id`, every node holds its key, so `keyed` is `all`.
 
 > **Invariant — scoped replace can't nuke the data source.** For a **view-scoped** replace, only the
 > view's own entities are walked: the same rule as export scope (`stream.view_entities`), each
@@ -705,12 +726,22 @@ little, and a file that really dropped rows deletes little, so neither is refuse
 - **Overridden:** `allowMassDelete=true` on the import (anyone who may run it) deletes all the same;
   the job keeps the allowance (`jobs.allow_mass_delete`, `allowMassDelete` on the job), its
   `replaceGuard.state` is `overridden`, and the worker logs it. It never stops early (below).
-- **Earlier, fail fast:** a whole graph's replace whose first full node window finds an entity for
-  fewer than `IMPORT_REPLACE_MIN_MATCH_FRACTION` (0.05) of the rows decided so far, in a graph whose
-  main (a fork's with its parent's) holds at least `IMPORT_REPLACE_GUARD_MIN_LIVE`, stops there
-  (`identifier_matched_nothing`, action `identifier`), naming its identifier, rather than read the
-  rest of the file first. Nothing is deleted; the rows read so far are on the draft. One sent with
-  `allowMassDelete=true` reads the whole file, as the guard would let it through.
+- **Earlier, fail fast:** a whole graph's replace whose first node window (full, or all of a
+  smaller file's node rows) finds an entity for fewer than `IMPORT_REPLACE_MIN_MATCH_FRACTION`
+  (0.05) of the rows decided so far, in a graph whose main (a fork's with its parent's) holds at
+  least `IMPORT_REPLACE_GUARD_MIN_LIVE`, stops there (`identifier_matched_nothing`, action
+  `identifier`), naming its identifier, rather than read the rest of the file first. A small file is
+  checked too: the guard measures what a file makes against its whole scope, so a few hundred rows
+  by the wrong key would pass it and delete a large graph. Nothing is deleted; the rows read so far
+  are on the draft. One sent with `allowMassDelete=true` reads the whole file, as the guard would
+  let it through.
+- **Refused rows count as unmatched.** The guard adds the job's refused rows that matched nothing
+  (`_refused_unmatched`, `replaceGuard.refusedUnmatched`) to what it made: a file whose rows can't be
+  matched is refused whatever `maxRefusedRows` let through, rather than delete its scope while making
+  nothing. A held replace (`rows_refused`) records the phase its rows were refused in (`nodes` when
+  any node row was, from `summary.refused.byKind`), and its message names the one change that would
+  fix most of them (`hints.by_urn`: rows `prop.<name>,urn` would find by their urn — without the
+  property, or whose urn is a node's that has none yet).
 
 The limits are the operator's (env, or Helm `config.imports`), and a workspace admin may set a data
 source's own over them (below); `IMPORT_REPLACE_GUARD=0` turns the guard off everywhere and a
@@ -1137,7 +1168,15 @@ tests/integration/test_s3_store_minio.py tests/test_object_store.py`.
   error and `summary.publish.reason`). A draft past `SQUASH_PAGED_ABOVE` (200,000) changes pulls
   reading only its entities main changed too, and what they meet at an edge (`_pull_paged`). A worker that stops
   between an import's finish and its publish job leaves `summary.publish` missing: publish the
-  draft then. A custom draft `name` exists on
+  draft then. When its publish job ends, the job writes the import's note in the same transaction
+  as its own fenced finish (`Lease.finish(then=…)`, `_note_publish_ended`): `published` with
+  `commitId` and `revisionId`, `unchanged` (main held the draft's changes already: nothing
+  committed, `commitId` and `revisionId` main's head), or `skipped` with the refusal as `reason`,
+  keeping `jobId`, `pulls` and `refusedRows`. An import that changed nothing notes `unchanged`
+  with main's head as `commitId` and `revisionId`. Every publish and merge answer, inside
+  the request or as a job, says `outcome` the same way (`publish_outcome`): a squash that changes
+  nothing writes no commit and answers `""` inside the service (`_merged_unchanged`), never the
+  draft's own head. A custom draft `name` exists on
   `create_import_job` but no route exposes it (the draft is named "Import").
 - **`INLINE_IMPORT_MAX` (5,000) two-tier threshold** exists in config as the intended
   "stage small imports client-side, run large ones async" split, but the endpoint currently always

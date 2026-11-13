@@ -45,6 +45,7 @@ class _Server:
     def __init__(self, *, note=None, busy=frozenset(), branch="open", failure=None):
         self.calls, self.uploads, self.polls = [], {}, 0
         self.note, self.busy, self.branch, self.failure = note, set(busy), branch, failure
+        self.landed = {"commitId": "cmt_1", "revisionId": 7, "outcome": "published"}   # the publish job's end
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         method, path = request.method, request.url.path
@@ -89,13 +90,13 @@ class _Server:
                                              "summary": summary})
         if tail.startswith("/publish-jobs/"):
             return httpx.Response(200, json={"jobId": tail.rsplit("/", 1)[1], "graphId": "g1",
-                                             "status": "completed", "commitId": "cmt_1", "revisionId": 7,
-                                             "error": None})
+                                             "status": "completed", **self.landed, "error": None})
         if tail == "/branches/br_1" and method == "GET":
             return httpx.Response(200, json={"branchId": "br_1", "kind": "draft", "status": self.branch})
         if tail == "/branches/br_1/publish":
             self.branch = "merged"
-            return httpx.Response(200, json={"commitId": "cmt_2", "revisionId": 8, "status": "completed"})
+            return httpx.Response(200, json={"commitId": "cmt_2", "revisionId": 8, "status": "completed",
+                                             "outcome": "published"})
         if tail == "/imports/validate":
             return httpx.Response(200, json={"summary": {"new": 1}, "rows": [], "unknownColumns": [],
                                              "hints": []})
@@ -149,13 +150,35 @@ def test_a_file_goes_up_in_parts_from_disk_and_publishes_itself(world):
     assert ("POST", f"{BASE}/imports/uploads/{upload_id}/complete",
             {"reconcileMode": "upsert", "autoPublish": "true"}) in server.calls
     assert ("GET", f"{BASE}/publish-jobs/pjob_1", {}) in server.calls
-    assert result["publish"] == {"state": "completed", "commitId": "cmt_1", "revisionId": 7, "error": None}
+    assert result["publish"] == {"state": "published", "commitId": "cmt_1", "revisionId": 7, "error": None}
     assert connector.succeeded(result)
+
+
+def test_a_publish_that_found_main_holding_the_changes_says_unchanged_and_succeeds(world):
+    """Main held the import's changes already (another run made them first): nothing was
+    committed, and the run succeeds, naming main's head, the commit and revision that hold them."""
+    path, state, graph, _slept = world
+    server = _Server(note={"state": "queued", "jobId": "pjob_1"})
+    server.landed = {"commitId": "cmt_head", "revisionId": 7, "outcome": "unchanged"}
+    result = connector.run(graph(server), str(path), "ndjson", publish=True, state_path=state)
+    assert result["publish"] == {"state": "unchanged", "commitId": "cmt_head", "revisionId": 7, "error": None}
+    assert connector.succeeded(result)
+
+
+def test_an_import_that_says_how_its_publish_ended_is_taken_at_its_word(world):
+    """Its publish job ended before the run looked: the import's own note says how, and nothing
+    more is followed."""
+    path, state, graph, _slept = world
+    ended = {"state": "published", "jobId": "pjob_1", "commitId": "cmt_1", "revisionId": 7}
+    server = _Server(note=ended)
+    result = connector.run(graph(server), str(path), "ndjson", publish=True, state_path=state)
+    assert result["publish"] == ended and connector.succeeded(result)
+    assert ("GET", f"{BASE}/publish-jobs/pjob_1", {}) not in server.calls
 
 
 def test_a_run_that_stopped_is_resumed_sending_only_the_missing_parts(world):
     path, state, graph, _slept = world
-    server = _Server(note={"state": "unchanged"})
+    server = _Server(note={"state": "unchanged", "commitId": "cmt_head", "revisionId": 7})
     first = graph(server)
     upload = first.api("POST", f"{BASE}/imports/uploads", json={
         "fileName": "source.ndjson", "size": path.stat().st_size, "format": "ndjson"})
@@ -170,7 +193,8 @@ def test_a_run_that_stopped_is_resumed_sending_only_the_missing_parts(world):
     puts = sorted(int(p.rsplit("/", 1)[1]) for m, p, _q in server.calls if m == "PUT")
     assert 0 not in puts and 2 not in puts and puts == [n for n in range(upload["parts"]) if n not in (0, 2)]
     assert len(server.uploads) == 1 and server.sent(upload["uploadId"]) == data
-    assert result["publish"] == {"state": "unchanged"} and connector.succeeded(result)
+    assert result["publish"] == {"state": "unchanged", "commitId": "cmt_head", "revisionId": 7}
+    assert connector.succeeded(result)
 
     server.calls.clear()                               # once complete, nothing is sent again
     connector.run(graph(server), str(path), "ndjson", publish=True, state_path=state)
@@ -201,7 +225,7 @@ def test_a_publish_the_import_never_wrote_is_done_by_the_connector(world):
     server = _Server(note=None)
     result = connector.run(graph(server), str(path), "ndjson", publish=True, state_path=state)
     assert ("POST", f"{BASE}/branches/br_1/publish", {}) in server.calls
-    assert result["publish"] == {"state": "completed", "commitId": "cmt_2", "revisionId": 8}
+    assert result["publish"] == {"state": "published", "commitId": "cmt_2", "revisionId": 8}
     assert connector.succeeded(result)
 
 
@@ -275,6 +299,20 @@ def test_a_run_may_go_on_without_its_refused_rows(world):
     assert connector.succeeded(run)
 
 
+def test_a_replace_by_a_property_then_the_urn_may_delete_only_what_holds_it(world):
+    """``--identifier prop.<name>,urn --replace-scope keyed`` go with the import as the server takes
+    them: rows without the property are found by their urn, and the replace deletes only what holds
+    the property."""
+    path, state, graph, _slept = world
+    server = _Server()
+    run = connector.run(graph(server), str(path), "ndjson", publish=True, state_path=state, replace=True,
+                        identifier="prop.uid,urn", replace_scope="keyed")
+    assert ("POST", f"{BASE}/imports/uploads/iu_0/complete",
+            {"reconcileMode": "replace", "identifier": "prop.uid,urn", "replaceScope": "keyed",
+             "autoPublish": "true"}) in server.calls
+    assert connector.succeeded(run)
+
+
 def test_a_replace_the_guard_refused_says_why_and_its_retry_sends_the_file_again(world):
     """A replace the guard refused fails the run with the server's code. The retry, with
     ``--allow-mass-delete`` into the same draft, is a new upload (an upload is imported once): it is
@@ -295,5 +333,5 @@ def test_a_replace_the_guard_refused_says_why_and_its_retry_sends_the_file_again
     assert ("POST", f"{BASE}/imports/uploads/iu_1/complete",
             {"reconcileMode": "replace", "allowMassDelete": "true", "branchId": "br_1"}) in server.calls
     assert ("POST", f"{BASE}/branches/br_1/publish", {}) in server.calls
-    assert retried["publish"] == {"state": "completed", "commitId": "cmt_2", "revisionId": 8}
+    assert retried["publish"] == {"state": "published", "commitId": "cmt_2", "revisionId": 8}
     assert connector.succeeded(retried)

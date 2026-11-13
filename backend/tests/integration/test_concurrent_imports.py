@@ -111,8 +111,11 @@ async def _run(monkeypatch) -> None:
     assert (await ie.run_publish(first["jobId"])).get("commitId")
     await projected()
     # Main moved under the second: its publish job pulls main into its draft and publishes it.
-    assert (await ie.run_publish(second["jobId"])).get("commitId")
-    assert await note(b) == {"state": "queued", "jobId": second["jobId"], "pulls": 1}
+    landed = await ie.run_publish(second["jobId"])
+    assert landed.get("commitId"), landed
+    # The import says how its publish ended, with the pull it made.
+    assert await note(b) == {"state": "published", "jobId": second["jobId"], "commitId": landed["commitId"],
+                             "revisionId": landed["revisionId"], "pulls": 1}
     await projected()
 
     # The person pulls what both feeds published, and publishes.

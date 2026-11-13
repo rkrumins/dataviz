@@ -103,8 +103,9 @@ async def _run() -> None:
             refused = dict((await s.execute(select(ImportRowORM.row_index, ImportRowORM.code).where(
                 ImportRowORM.job_id == job["job_id"], ImportRowORM.resolved_op == "invalid"))).all())
         # file-1 is named only by the file's own id, U1 and U2 only by a unique field: neither
-        # finds its node again, so neither is made; nor is the edge to file-1.
-        assert refused == {2: "no_key", 6: "no_key", 7: "no_key", 8: "end_not_found"}, (
+        # finds its node again, so neither is made; nor is the edge to file-1, which says that its
+        # end's own row was refused (end_refused).
+        assert refused == {2: "no_key", 6: "no_key", 7: "no_key", 8: "end_refused"}, (
             refused, got.get("summary"))
         scope = await svc.identity_scope(gid)
         c, a9, x = (pointer_id(scope, p) for p in ("urn:C", "A-9", "urn:X"))

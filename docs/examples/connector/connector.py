@@ -214,10 +214,12 @@ class Graph:
 
     def start(self, upload: dict[str, Any], *, publish: bool, replace: bool = False,
               identifier: str | None = None, allow_mass_delete: bool = False,
-              branch: str | None = None, max_refused_rows: str | None = None) -> dict[str, Any]:
+              branch: str | None = None, max_refused_rows: str | None = None,
+              replace_scope: str | None = None) -> dict[str, Any]:
         """Import the uploaded file into a draft: a new one, or ``branch``. ``replace``: what the
-        file leaves out is deleted. ``max_refused_rows``: how many refused rows it may go on
-        without. Completing an upload again answers with its import."""
+        file leaves out is deleted — with ``replace_scope="keyed"``, only what holds the
+        identifier's property. ``max_refused_rows``: how many refused rows it may go on without.
+        Completing an upload again answers with its import."""
         params = {"reconcileMode": "replace" if replace else "upsert"}
         if identifier:
             params["identifier"] = identifier
@@ -225,6 +227,8 @@ class Graph:
             params["allowMassDelete"] = "true"
         if max_refused_rows:
             params["maxRefusedRows"] = max_refused_rows
+        if replace and replace_scope == "keyed":
+            params["replaceScope"] = "keyed"
         if branch:
             params["branchId"] = branch
         elif publish:
@@ -270,7 +274,7 @@ class Graph:
         while True:
             branch = self.api("GET", f"{self.base}/branches/{branch_id}")
             if branch["status"] == "merged":
-                return {"state": "completed"}
+                return {"state": "published"}
             if branch["status"] != "publishing":
                 break
             self.sleep(10)
@@ -284,7 +288,7 @@ class Graph:
             raise
         if answer.get("jobId"):                            # a large draft publishes as a job
             return _outcome(self.follow(f"{self.base}/publish-jobs/{answer['jobId']}", "publish"))
-        return {"state": "completed", "commitId": answer.get("commitId"),
+        return {"state": answer.get("outcome") or "published", "commitId": answer.get("commitId") or None,
                 "revisionId": answer.get("revisionId")}
 
 
@@ -308,7 +312,11 @@ class _Part:
 
 
 def _outcome(job: dict[str, Any]) -> dict[str, Any]:
-    return {"state": job["status"], "commitId": job.get("commitId"),
+    """A publish job as the run reports it, in the words the import's own note uses: ``published``
+    with its commit; ``unchanged`` — main held the changes already, so nothing was committed, and
+    ``commitId`` and ``revisionId`` are main's head, which holds them; or ``failed``."""
+    state = (job.get("outcome") or "published") if job["status"] == "completed" else job["status"]
+    return {"state": state, "commitId": job.get("commitId") or None,
             "revisionId": job.get("revisionId"), "error": job.get("error")}
 
 
@@ -339,16 +347,18 @@ def _write_state(path: str, state: dict[str, Any]) -> None:
 
 def run(graph: Graph, path: str, fmt: str, *, publish: bool, state_path: str, replace: bool = False,
         identifier: str | None = None, allow_mass_delete: bool = False,
-        branch: str | None = None, max_refused_rows: str | None = None) -> dict[str, Any]:
+        branch: str | None = None, max_refused_rows: str | None = None,
+        replace_scope: str | None = None) -> dict[str, Any]:
     """Send the file, import it, and — with ``publish`` — see it published."""
     # Only what was asked for: a plain run resumes the uploads runs before these options made.
     options = {k: v for k, v in (("replace", replace), ("identifier", identifier),
                                  ("allowMassDelete", allow_mass_delete), ("branch", branch),
-                                 ("maxRefusedRows", max_refused_rows)) if v}
+                                 ("maxRefusedRows", max_refused_rows),
+                                 ("replaceScope", replace_scope)) if v}
     upload = graph.upload(path, fmt, state_path, options)
     started = graph.start(upload, publish=publish, replace=replace, identifier=identifier,
                           allow_mass_delete=allow_mass_delete, branch=branch,
-                          max_refused_rows=max_refused_rows)
+                          max_refused_rows=max_refused_rows, replace_scope=replace_scope)
     job = graph.follow(f"{graph.base}/imports/{started['jobId']}", "import")
     result: dict[str, Any] = {"uploadId": upload["uploadId"], "job": {
         k: job.get(k) for k in ("jobId", "branchId", "status", "summary", "errorMessage")}}
@@ -365,7 +375,7 @@ def succeeded(result: dict[str, Any]) -> bool:
     """Imported — and, when asked, published, or there was nothing to publish."""
     if result["job"]["status"] != "completed":
         return False
-    return "publish" not in result or result["publish"]["state"] in ("completed", "unchanged")
+    return "publish" not in result or result["publish"]["state"] in ("published", "unchanged")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -382,8 +392,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--state", help="where to keep the upload's state (default: beside the file)")
     parser.add_argument("--replace", action="store_true",
                         help="the file is the whole graph: delete what it leaves out (reconcileMode=replace)")
-    parser.add_argument("--identifier", help="match rows by entity_id, urn or prop.<name> "
+    parser.add_argument("--identifier", help="match rows by entity_id, urn, prop.<name>, or "
+                                             "prop.<name>,urn (the property, else the urn) "
                                              "(default: the graph's own)")
+    parser.add_argument("--replace-scope", choices=("all", "keyed"),
+                        help="with --replace and a property identifier: keyed deletes only what "
+                             "holds the property (default: all the file leaves out)")
     parser.add_argument("--allow-mass-delete", action="store_true",
                         help="let a replace delete past the replace guard")
     parser.add_argument("--branch", help="import into this open draft (br_…) instead of a new one")
@@ -412,7 +426,7 @@ def main(argv: list[str] | None = None) -> int:
         result = run(graph, path, fmt, publish=args.publish, state_path=args.state or path + ".upload.json",
                      replace=args.replace, identifier=args.identifier,
                      allow_mass_delete=args.allow_mass_delete, branch=args.branch,
-                     max_refused_rows=args.max_refused_rows)
+                     max_refused_rows=args.max_refused_rows, replace_scope=args.replace_scope)
     print(json.dumps(result, indent=2))
     return 0 if succeeded(result) else 1
 

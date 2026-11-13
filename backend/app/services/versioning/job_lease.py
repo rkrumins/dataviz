@@ -180,12 +180,17 @@ class Lease:
             raise Superseded(f"job {self.job_id} (epoch {self.epoch}) moved on: its row is no "
                              "longer running at this epoch and cursor")
 
-    async def finish(self, status: str = "completed", **values) -> bool:
+    async def finish(self, status: str = "completed", *,
+                     then: Optional[Callable[[Any], Awaitable[None]]] = None, **values) -> bool:
         """End the job (``status`` and job columns in ``values``), fenced, in a transaction of its
-        own. False when the job is no longer ours — a zombie's finish is a no-op."""
+        own. False when the job is no longer ours — a zombie's finish is a no-op. ``then(session)``
+        runs in that transaction once the fence held: what is written with the job's end or not at
+        all (an import's note of how its publish ended)."""
         async with self._sessions() as s:
             res = await s.execute(self._fenced().values(
                 status=status, completed_at=_now(), updated_at=_now(), **values))
+            if res.rowcount == 1 and then is not None:
+                await then(s)
             return res.rowcount == 1
 
     async def fail(self, message: str, code: str = "internal", action: Optional[str] = None,

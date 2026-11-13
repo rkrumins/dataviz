@@ -1856,13 +1856,16 @@ class GraphVersioningService:
         return await self._finish_squash(s, graph, draft, main_id, squash, deltas, actor, merged_via)
 
     async def _merged_unchanged(self, s, graph, draft, actor, merged_via: str) -> str:
-        """A squash that changes nothing on ``main``: the draft is merged all the same."""
+        """A squash that changes nothing on ``main``: the draft is merged all the same, and no commit
+        is written. ``""`` says so — a publish or merge that landed no commit of its own
+        (:meth:`publish_outcome` answers it ``unchanged``); never the draft's own head, which is
+        not on ``main``."""
         draft.status = "merged"
         draft.base_commit_seq = graph.main_head_commit_seq
         # Nothing reaches main, yet the branch is merged all the same (what it holds in views
         # goes live with it), so no review raised from it may be left live either.
         await self._resolve_live_prs(s, draft.id, None, actor, merged_via)
-        return draft.head_commit_id or ""
+        return ""
 
     async def _squash_commit(self, s, graph, draft, main_id, actor, message) -> "CommitORM":
         """The ``squash_publish`` commit a squash of ``draft`` writes onto ``main``, at the next seq."""
@@ -4663,7 +4666,7 @@ class GraphVersioningService:
                         ontology_rules=ontology_rules,
                     )
                 pr.status = "merged"
-                pr.resulting_commit_id = commit_id
+                pr.resulting_commit_id = commit_id or None   # a draft that changed nothing lands none
                 pr.merged_at = _now()
                 pr.merged_by = actor
                 pr.updated_at = _now()
@@ -4795,22 +4798,36 @@ class GraphVersioningService:
         async with self._session() as s:
             return await self._main_branch_id(s, graph_id)
 
-    async def landed_revision(self, *, graph_id: str, commit_id: Optional[str]) -> Optional[int]:
-        """The revision of ``main`` that holds a publish or merge which answered ``commit_id``: its
-        commit's sequence number on ``main`` — what ``asOfSeq`` reads ``main`` as of. A draft that
-        changed nothing lands no commit of its own (``commit_id`` is then its head, or empty): it is
-        held by ``main`` as it is, so its head. ``None`` for a graph that is gone."""
+    async def publish_outcome(self, *, graph_id: str, commit_id: Optional[str],
+                              at_revision: Optional[int] = None) -> Optional[Dict[str, Any]]:
+        """What a publish or merge which answered ``commit_id`` did to ``main``:
+
+        * ``published``: it landed as that commit (``commit_id``), and ``revision_id`` is the
+          commit's sequence number on ``main`` — what ``asOfSeq`` reads ``main`` as of;
+        * ``unchanged``: ``main`` held what it carried already, so it wrote no commit and ``main``
+          did not move. ``commit_id`` is ``main``'s head, the commit that already holds it (not
+          one this made), and ``revision_id`` that commit's sequence number. So too for a
+          ``commit_id`` that is not on ``main``, such as the draft's own head an older publish
+          answered. ``at_revision``, the revision an answer recorded when it ran, names the commit
+          at that revision instead of the head now.
+
+        ``None`` for a graph that is gone."""
         async with self._session() as s:
             graph = await s.get(GraphORM, graph_id)
             if graph is None:
                 return None
+            main_id = await self._main_branch_id(s, graph_id)
             if commit_id:
                 seq = await s.scalar(select(CommitORM.commit_seq).where(
                     CommitORM.graph_id == graph_id, CommitORM.id == commit_id,
-                    CommitORM.branch_id == await self._main_branch_id(s, graph_id)))
+                    CommitORM.branch_id == main_id))
                 if seq is not None:
-                    return int(seq)
-            return int(graph.main_head_commit_seq or 0)
+                    return {"outcome": "published", "commit_id": commit_id, "revision_id": int(seq)}
+            seq = int(graph.main_head_commit_seq or 0) if at_revision is None else int(at_revision)
+            held_by = await s.scalar(select(CommitORM.id).where(
+                CommitORM.graph_id == graph_id, CommitORM.branch_id == main_id,
+                CommitORM.commit_seq == seq))
+            return {"outcome": "unchanged", "commit_id": held_by, "revision_id": seq}
 
     async def materialize_state(
         self, *, graph_id: str, branch_id: str, as_of_seq: Optional[int] = None,
@@ -7256,7 +7273,7 @@ class GraphVersioningService:
         superseded) after the squash committed and before the job finished, and publishing again
         only fails on a merged draft. The squash commit names the draft (``source_branch_id``); a
         draft whose squash changed nothing is merged with no commit of its own, and then the answer
-        is what the publish returned, the draft's head (``""`` when it has none)."""
+        is what the publish returned: ``""``, no commit."""
         async with self._session() as s:
             draft = await s.get(BranchORM, branch_id)
             if draft is None or draft.graph_id != graph_id or draft.status != "merged":
@@ -7265,7 +7282,7 @@ class GraphVersioningService:
                 CommitORM.graph_id == graph_id, CommitORM.kind == "squash_publish",
                 CommitORM.source_branch_id == branch_id,
             ).order_by(CommitORM.commit_seq.desc()).limit(1))
-            return squash or draft.head_commit_id or ""
+            return squash or ""
 
     @staticmethod
     async def _change_count(s, graph_id: str, branch_id: str) -> int:
@@ -9931,8 +9948,9 @@ class GraphVersioningService:
         live node an import derived from it. On a fork both read its main as an import into it
         does: its own rows, then its parent's at the fork point. ``prop.<name>``: the live nodes
         holding it, by the property's index (:mod:`.import_export.keys`), caught up first;
-        ``NotIndexed`` before an import has built it, ``NotOnAFork`` on a fork. Values compare as
-        an import's keys do (trimmed text)."""
+        ``NotIndexed`` before an import has built it, ``NotOnAFork`` on a fork.
+        ``prop.<name>,urn``: by the property, then — a value no node holds as it — as a urn. Values
+        compare as an import's keys do (trimmed text)."""
         from .import_export import keys as matching
         from .import_export.resolve import key_value, pointer_id, pointer_seed
         asked = {v: key_value(v) for v in values}
@@ -9946,30 +9964,36 @@ class GraphVersioningService:
                 state = await self._current_skeletons(s, graph_id, main_id, set(ids))
                 return {e for e, skeleton in state.items() if skeleton is not None}
 
-            if identifier == "entity_id":
-                found = await live(wanted)
-                holders = {v: {v} for v in wanted if v in found}
-            elif identifier == "urn":
-                carried = await self._holders_by_urn(s, graph_id, main_id, set(wanted))
+            async def by_urn(values):
+                carried = await self._holders_by_urn(s, graph_id, main_id, set(values))
                 state = await self._current_skeletons(
                     s, graph_id, main_id, {e for ids in carried.values() for e in ids})
                 for urn, ids in carried.items():
                     on = {e for e in ids if (state.get(e) or {}).get("urn") == urn}
                     if on:
                         holders[urn] = on
-                rest = [v for v in wanted if v not in holders]
+                rest = [v for v in values if v not in holders]
                 if rest:
                     scope = await self.identity_scope(graph_id)
                     derived = {pointer_id(scope, pointer_seed(v)): v for v in rest}
                     for eid in await live(derived):
                         holders[derived[eid]] = {eid}
+
+            if identifier == "entity_id":
+                found = await live(wanted)
+                holders = {v: {v} for v in wanted if v in found}
+            elif identifier == "urn":
+                await by_urn(wanted)
             else:
-                name = identifier[len("prop."):]
+                from .import_export import identifier as identifiers
+                name = identifiers.property_of(identifier)
                 await matching.ensure_ready(graph_id, name)
                 for v, held in (await matching.lookup(graph_id, name, wanted)).items():
                     on = {e for e, is_live in held if is_live}
                     if on:
                         holders[v] = on
+                if identifiers.falls_back(identifier):      # what no node holds as it, by its urn
+                    await by_urn([v for v in wanted if v not in holders])
         out: List[Dict[str, object]] = []
         for v, k in asked.items():
             ids = sorted(holders.get(k, ())) if k else []

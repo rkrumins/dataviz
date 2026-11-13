@@ -75,6 +75,11 @@ async def _story(prov: str, key: str) -> None:
             gid, main_id = r.json()["graphId"], r.json()["mainBranchId"]
             r = await c.post(f"{V1}/graphs/{gid}/bulk-ingest", content=_IMPORT_NDJSON, headers=_as("pat"))
             assert r.status_code == 200 and r.json()["ingested"] == 3, r.text
+            # Its nodes took urn:uuid ids, as an import mints them: found by their urns.
+            r = await c.post(f"{V1}/graphs/{gid}/identities/resolve", headers=_as("pat"),
+                             json={"identifier": "urn", "values": ["urn:t:root", "urn:t:child"]})
+            assert r.status_code == 200, r.text
+            ROOT, CHILD = (x["entityId"] for x in r.json()["results"])
 
             # 2. Alice and Bob each open a private draft; Alice edits hers.
             drafts = {}
@@ -98,7 +103,7 @@ async def _story(prov: str, key: str) -> None:
                 r = await c.post(f"{GP}/nodes/query", params=qd, json={"query": {}}, headers=h)
                 assert r.status_code == 404, r.text
             st = (await c.get(f"{B}/state", headers=_as("alice"))).json()["nodes"]
-            assert st["urn:t:child"]["displayName"] == "Alice's child", st
+            assert st[CHILD]["displayName"] == "Alice's child", st
 
             # 3. Bob can't publish, so he may not write main directly.
             r = await c.post(f"{GP}/nodes/create", params={"dataSourceId": ds}, headers=_as("bob"),
@@ -133,15 +138,15 @@ async def _story(prov: str, key: str) -> None:
             assert r.status_code == 200 and r.json()["clean"] is False, r.text
             pulled = r.json()
             assert [(x["entity_id"], x["path"], x["ours"], x["theirs"]) for x in pulled["conflicts"]] == [
-                ("urn:t:child", ["displayName"], "Alice's child", "Pat's child"),
+                (CHILD, ["displayName"], "Alice's child", "Pat's child"),
                 # a rename carries the source's name property with it (#595), so it clashes too
-                ("urn:t:child", ["properties", "name"], "Alice's child", "Pat's child")], pulled
-            mine = pulled["seeds"]["urn:t:child"]
+                (CHILD, ["properties", "name"], "Alice's child", "Pat's child")], pulled
+            mine = pulled["seeds"][CHILD]
             assert mine["displayName"] == "Alice's child", mine
-            r = await c.post(f"{B}/rebase", json={"resolutions": {"urn:t:child": mine}}, headers=_as("alice"))
+            r = await c.post(f"{B}/rebase", json={"resolutions": {CHILD: mine}}, headers=_as("alice"))
             assert r.status_code == 200 and r.json()["clean"] is True, r.text
             st = (await c.get(f"{B}/state", headers=_as("alice"))).json()["nodes"]
-            assert (st["urn:t:child"]["displayName"], st["urn:t:root"]["displayName"]) == (
+            assert (st[CHILD]["displayName"], st[ROOT]["displayName"]) == (
                 "Alice's child", "Carol's root"), st
 
             # 6. Alice asks Rita to review. Carol's edit after Rita approved makes the approval stale:
@@ -173,14 +178,14 @@ async def _story(prov: str, key: str) -> None:
             assert r.status_code == 200, r.text
             merged = r.json()["commitId"]
             st = (await c.get(f"{V1}/graphs/{gid}/branches/{main_id}/state", headers=_as("bob"))).json()["nodes"]
-            assert (st["urn:t:child"]["displayName"], st["urn:t:root"]["displayName"]) == (
+            assert (st[CHILD]["displayName"], st[ROOT]["displayName"]) == (
                 "Alice's child", "Carol's root v2"), st
 
             # 7. Who changed it: Pat merged Alice's PR, Alice and Carol wrote it.
             pr_now = (await c.get(pr, headers=_as("pat"))).json()
             assert (pr_now["actor"], pr_now["mergedBy"], pr_now["mergedVia"], pr_now["resultingCommitId"]) == (
                 "alice", "pat", "review", merged), pr_now
-            r = await c.get(f"{V1}/graphs/{gid}/entities/urn:t:child/history", headers=_as("bob"))
+            r = await c.get(f"{V1}/graphs/{gid}/entities/{CHILD}/history", headers=_as("bob"))
             assert r.status_code == 200, r.text
             last = r.json()["versions"][0]
             assert (last["commit_id"], last["actor"], last["commit_message"]) == (merged, "pat", "ship it"), last

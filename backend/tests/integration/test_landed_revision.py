@@ -1,9 +1,11 @@
-"""A publish or merge says the revision of ``main`` that holds it (live Postgres).
+"""A publish or merge says what it did to ``main``, and the revision of ``main`` that holds it
+(live Postgres).
 
-Pins: it is the sequence number of the commit it landed as on ``main`` — what ``asOfSeq`` reads
-``main`` as of, and ``main`` as of it holds the draft's change; a draft that changed nothing lands
-no commit, and is held by ``main``'s head; an id ``main`` never had is answered with its head too;
-a graph that is gone, with nothing.
+Pins: ``published``, as the commit it landed as, at that commit's sequence number on ``main`` —
+what ``asOfSeq`` reads ``main`` as of, and ``main`` as of it holds the draft's change. A draft that
+changed nothing is ``unchanged``: it commits nothing (``main``'s head and its commits stay as they
+were), names no commit, and is held by ``main``'s head; an id ``main`` never had (a draft's own
+head, as an older publish answered) is answered the same. A graph that is gone, with nothing.
 """
 from __future__ import annotations
 
@@ -11,7 +13,7 @@ import asyncio
 import os
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from backend.app.services.versioning import db, models
 from backend.app.services.versioning.models import CommitORM, GraphORM
@@ -31,6 +33,11 @@ async def _head(gid):
         return (await s.get(GraphORM, gid)).main_head_commit_seq
 
 
+async def _commits(gid):
+    async with db.graphver_session() as s:
+        return await s.scalar(select(func.count()).select_from(CommitORM).where(CommitORM.graph_id == gid))
+
+
 async def _cases(svc):
     gid = (await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(),
                                   workspace_id="ws1", actor="u"))["graph_id"]
@@ -42,17 +49,29 @@ async def _cases(svc):
     commit_id = await svc.publish(graph_id=gid, branch_id=draft, actor="u", message="publish")
     async with db.graphver_session() as s:
         seq = await s.scalar(select(CommitORM.commit_seq).where(CommitORM.id == commit_id))
-    revision = await svc.landed_revision(graph_id=gid, commit_id=commit_id)
+    landed = await svc.publish_outcome(graph_id=gid, commit_id=commit_id)
+    revision = landed["revision_id"]
+    assert landed == {"outcome": "published", "commit_id": commit_id, "revision_id": seq}, landed
     assert revision == seq == await _head(gid), (revision, seq)
     state = await svc.materialize_state(graph_id=gid, branch_id=await svc.main_branch_id(gid),
                                         as_of_seq=revision)
     assert state["nodes"]["N"]["description"] == "new", "main as of the revision holds the change"
 
+    commits = await _commits(gid)
     idle = await svc.open_draft(graph_id=gid, owner="u")                 # changes nothing
     answered = await svc.publish(graph_id=gid, branch_id=idle, actor="u", message="nothing")
-    assert await svc.landed_revision(graph_id=gid, commit_id=answered) == await _head(gid) == revision
-    assert await svc.landed_revision(graph_id=gid, commit_id="cmt_never_on_main") == revision
-    assert await svc.landed_revision(graph_id="graph_" + os.urandom(4).hex(), commit_id=commit_id) is None
+    assert answered == "", "nothing committed, so no commit — not the draft's own"
+    unchanged = {"outcome": "unchanged", "commit_id": commit_id, "revision_id": revision}   # main's head
+    assert await svc.publish_outcome(graph_id=gid, commit_id=answered) == unchanged
+    assert (await _head(gid), await _commits(gid)) == (revision, commits), "main did not move"
+    assert await svc.publish_outcome(graph_id=gid, commit_id="cmt_never_on_main") == unchanged
+    async with db.graphver_session() as s:
+        seed = (await s.execute(select(CommitORM.id, CommitORM.commit_seq).where(
+            CommitORM.graph_id == gid, CommitORM.message == "seed"))).one()
+    assert await svc.publish_outcome(graph_id=gid, commit_id="", at_revision=seed[1]) == {
+        "outcome": "unchanged", "commit_id": seed[0], "revision_id": seed[1]}, (
+        "an answer recorded at an earlier revision names that revision's commit")
+    assert await svc.publish_outcome(graph_id="graph_" + os.urandom(4).hex(), commit_id=commit_id) is None
 
 
 def test_a_publish_says_the_revision_of_main_that_holds_it():

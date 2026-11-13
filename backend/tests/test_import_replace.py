@@ -34,6 +34,9 @@ class _Snap:
     async def edges_between(self, sources, targets):
         return {(s, t, "CONTAINS"): eid for eid, (s, t) in self._edges.items() if s in sources and t in targets}
 
+    async def incident_edges(self, nodes):
+        return {eid for eid, (s, t) in self._edges.items() if s in nodes or t in nodes}
+
 
 class _Versioning:
     def __init__(self):

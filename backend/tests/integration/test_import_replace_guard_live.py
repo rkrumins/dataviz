@@ -194,3 +194,32 @@ def test_allow_mass_delete_takes_a_replace_past_the_early_stop_too(monkeypatch):
         assert got["summary"]["deleted"] == 23
         assert await _urns(svc, gid, job["branch_id"]) == {_urn("o", i) for i in range(12)}
     _run(case, monkeypatch)
+
+
+def test_a_small_file_by_the_wrong_key_stops_before_it_deletes_a_graph(monkeypatch):
+    """Three rows whose urns name nothing, replacing a graph of 23: the guard measures what they make
+    against the whole graph (3 of 23) and would let them delete it all. The early stop checks the
+    first node window whatever its size, so the file stops there and nothing is deleted."""
+    async def case(svc, ie, store):
+        gid = await _graph(svc, ie, store, _chain("v", 12))
+        job, got = await _run_job(ie, store, gid, [_row("o", i) for i in range(3)])
+        assert got["status"] == "failed", got
+        assert got["summary"]["failure"]["code"] == "identifier_matched_nothing", got["summary"]
+        assert len(await _urns(svc, gid, job["branch_id"])) == 15, "nothing deleted (12 + the 3 it made)"
+    _run(case, monkeypatch)
+
+
+def test_refused_rows_that_match_nothing_count_with_what_a_replace_makes(monkeypatch):
+    """Rows with no key are refused, matching nothing: sent on with maxRefusedRows=-1 (the early stop
+    off), a replace of them would delete the whole graph while making nothing, under the guard's
+    "makes most of it again". Counted beside what it makes, they trip the guard: nothing deleted."""
+    async def case(svc, ie, store):
+        gid = await _graph(svc, ie, store, _chain("v", 12))
+        monkeypatch.setattr(config, "IMPORT_REPLACE_MIN_MATCH_FRACTION", 0)
+        keyless = [{"kind": "node", "entityType": "Table", "displayName": f"n{i}"} for i in range(12)]
+        job, got = await _run_job(ie, store, gid, keyless, import_settings={"maxRefusedRows": "-1"})
+        assert got["status"] == "failed", got
+        guard = got["summary"]["replaceGuard"]
+        assert (guard["state"], guard["refusedUnmatched"], guard["creates"]) == ("blocked", 12, 12), guard
+        assert len(await _urns(svc, gid, job["branch_id"])) == 12, "nothing deleted"
+    _run(case, monkeypatch)
