@@ -21,6 +21,15 @@ integration's many small changes as a few commits.
 
 ### Added
 
+- **New-version builds settings, under Admin → Infrastructure → Versioned graphs.** A system
+  administrator sets, live, how the projector paces its writes (the longest write statement, the
+  target each aims at, the pause after each, and a longer one while reads wait) and the limits on
+  reads from Postgres (a statement limit, and reads at once per graph and per process), with the
+  room and lifecycle values the coming builds of a graph's next version in a second key will use.
+  Each value shows what is saved, its default and what is in force; a bad one is refused naming
+  the field (`422 invalid_build_policy`), and each change is recorded in the activity log
+  (`platform.build_policy.updated`). The builds themselves are behind **New-version builds** (Admin
+  → Features, experimental, off).
 - **Replaces keyed by your own id handle the rows that don't carry it.** A source that keys rows by
   its own id (`identifier=prop.MY_UNIQUE_ID`) often has rows without it, such as a top-level
   container. It also meets graphs first loaded by urn (or made in the app), whose nodes never had
@@ -383,6 +392,27 @@ integration's many small changes as a few commits.
 
 ### Fixed
 
+- **Reads stay up while a large import lands.** A large import on a large graph could stop its
+  reads, and others', for as long as the graph store took to catch up:
+  - **Reads of a graph from Postgres can't take the platform down.** A graph the graph store held no
+    version of was read from Postgres, the whole graph per read, with no limit: a few such reads
+    held every database connection, and every versioned graph in the process answered 503. Each
+    read now holds a place among a bounded number per graph and per process (past them, `429`) and
+    is cut off past a statement limit (`503 graph_read_busy`, retryable); the lookups that route
+    reads run on a small pool of their own; and a FalkorDB that can't be reached fails only the
+    reads that need it.
+  - **A graph that serves a version keeps serving it.** A graph published before this release had
+    no record of the version its key holds, so its first rebuild sent its reads to Postgres for the
+    whole rebuild; the record is now filled, and restored from the key when missing. A replay that
+    would have reloaded such a graph into a fresh key reconciles it in place. Eviction leaves alone
+    a graph whose large window is half written, and keeps room for the rest of it. A fork reads its
+    root's key at the version the key holds whole, instead of from Postgres whenever the root had
+    published since.
+  - **The projector's writes yield to reads.** No projector write runs longer than 10 seconds on
+    any FalkorDB mode (a minute on a standalone or Sentinel one before); each aims at half a second;
+    and after each the projector pauses a quarter of what it took, twice what it took while reads on
+    that node are starving. Readers whose deadlines run out while it writes are told to retry, not
+    that the node is failing over.
 - **An import's publish job that found its draft merged with no commit of its own completes.** When
   the draft merged under the job's pull (an earlier attempt published it) and that publish
   committed nothing, the job read the empty answer as "not merged" and failed with a refusal.
@@ -526,6 +556,15 @@ integration's many small changes as a few commits.
 
 ### Upgrading
 
+- **Migrations `20261113_1000_gv_ps_served_fill`, `20261113_1100_build_policy` and
+  `20261113_1200_gv_ps_window_rows`** fill `projection_state.served_commit_seq` where a graph's key
+  holds a published version, and add `platform_settings.gv_build_policy` and
+  `projection_state.window_rows` (nullable; start-up adds them to a separate `GRAPHVER_DB_URL`).
+- **Each web process opens up to five more graphver connections**, for routing reads
+  (`GRAPHVER_ROUTE_POOL_SIZE` 3, `GRAPHVER_ROUTE_POOL_MAX_OVERFLOW` 2): count them toward Postgres'
+  `max_connections`.
+- **Keep `GRAPHVER_READ_MAX_LAG` at `-1`** (the default). At `0`, the launch guide's old
+  recommendation, every read of a graph whose projection is behind its head goes to Postgres.
 - **Migration `20261113_0900_gv_import_mentions`** adds `graphver.import_mentions`, an empty table
   (`create_schema_and_partitions` makes it for a separate `GRAPHVER_DB_URL`). Without it, a replace
   keeps only what its rows matched, as before.

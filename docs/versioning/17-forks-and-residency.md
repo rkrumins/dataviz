@@ -96,19 +96,26 @@ A fork's `main` is read as a draft is: through a store with a patch set laid ove
 no fork — a fork of a fork reads the same one:
 
 - the root's own FalkorDB provider, which `ContextEngine` builds from the root's data source, while
-  the root's projection holds its head in the key it publishes;
-- otherwise the root's Postgres reader (`VersionedBranchProvider` on the root's `main`): a root
-  still catching up, evicted or in the trash, or whose provider cannot be built. The reads are the
-  same, only slower.
+  the key the root's projection publishes holds a version of the root's `main` whole: its head, or
+  behind it, the version it last published, while no pass has written into it since — idle, with
+  no window in flight (`window_rows`) and no failed pass (`last_error`) that may have written part
+  of one (`fork_serving_seq`). The patch set is then against the root there (`root_at`, below);
+- otherwise the root's Postgres reader (`VersionedBranchProvider` on the root's `main`, at its head,
+  bounded as every read from Postgres is: [04](04-projection-and-cache.md) §5): a root whose key is
+  part-way through a window or a rebuild, evicted, being loaded or in the trash, or whose provider
+  cannot be built. The reads are the same, only slower. Main's readers take a key part-way through a
+  window as it is; a fork never shows a change its root made after the fork's base, and such a key
+  would show some.
 
 Ontology and node identity still come from the fork's own row (its parent's settings, §3), and who
 may read is the fork's to decide: the root's store is read on its behalf.
 
 **The patch set** (`branch_overlay_delta` on a fork's `main`) describes the fork's value at its
-head against the root's at the root's head, for every entity either side changed since they parted:
-the fork's own changes, each fork between it and the root up to the base the level below reads it
-at, and the root's changes since the outermost base (§5). It is bounded by those changes, never by
-the graph:
+head against the root's at the seq its store holds (`root_at`: the version the root's key serves,
+else the root's head), for every entity either side changed since they parted: the fork's own
+changes, each fork between it and the root up to the base the level below reads it at, and the
+root's changes between that seq and the outermost base, either way (§5). It is bounded by those
+changes, never by the graph:
 
 | The entity at the fork's head | In the patch set |
 |---|---|
@@ -699,8 +706,9 @@ the pass carries on down them until the stop mark is actually reached. A master 
 **Never evicted:** an Always graph (the evictor refuses one, whatever asks), a key the platform
 did not mint, a key another data source or a catalog entry reads, a graph whose data source has a
 rollup job pending or running (the job would write the dropped key back), a graph with a read lease
-or a pass in flight (any status but `idle`), one that is not evictable at all (in the trash, at
-genesis, or still having version control enabled), and anything on a master that cannot be read or
+or a pass in flight (any status but `idle`), one idle between the passes of a window written a page
+at a time (`window_rows`: dropped, its key would lose the pages written and the version it serves),
+one that is not evictable at all (in the trash, at genesis, or still having version control enabled), and anything on a master that cannot be read or
 is loading its dataset (the drop would fail). With automatic eviction off (`evictionEnabled`),
 nothing is evicted; loads and admission go on.
 
@@ -744,8 +752,9 @@ out of FalkorDB is queued again — once, keeping its place.
 **Admission.** Requests are taken per provider, in the order they were made. Each goes to the
 master of its provider with the most room free to take a load (§17) and starts when its estimate
 times the headroom (×1.3) fits under that master's start mark after what is held there — the
-aggregation write governor's reservations, and the estimate times the headroom of each load and full
-projection (a rebuild, a move's reseed, a first seed) in flight on it. Fitting under the start mark
+aggregation write governor's reservations, the estimate times the headroom of each load and full
+projection (a rebuild, a move's reseed, a first seed) in flight on it, and what each window in
+flight there may still add (its `window_rows` times the bytes per entity). Fitting under the start mark
 rather than under `maxmemory` is the hysteresis: a load never puts its master under pressure, so the
 next pass never evicts what it just loaded. One load per master at a time; none on a master that is
 forking for persistence, loading its dataset, or cannot be read. A request that does not fit

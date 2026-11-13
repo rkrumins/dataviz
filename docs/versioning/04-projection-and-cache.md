@@ -393,6 +393,16 @@ in `service.py`, reported on the watermark as `served` (with its `served_revisio
   purge and an operator reset clear it; liveness lowers it with the watermark (to the marker's seq,
   or `NULL` for a missing key). A full pass that finds its key gone clears it before writing
   (`_forget_served`), so a lost key rebuilt before liveness saw it serves nothing meanwhile.
+- **The projector's writes yield to reads.** A write holds the graph's write lock, and every read of
+  it on that node, while it runs. So every chunked projector write is cut off at New-version builds'
+  **Longest write statement** (10 s) on every FalkorDB mode, not only under a cluster's failure
+  detector; a chunk slower than the **Write statement target** (500 ms) narrows the next, no
+  narrower than 50 rows for being slow; and after each one the projector pauses the **Pause after
+  each write** share of what it took (0.25), the **Pause while reads wait** share (2.0) while the API
+  says reads on that node are starving (`agg:readpressure:<node>`; `graphver_projection_yields_total`),
+  at most 5 s. While it writes, it holds `gvproj:writing:<endpoint>`: readers there whose deadlines
+  run out in a row are then answered busy (retryable) rather than as a failover, which would answer
+  every read of the graph from a memo for seconds (`FALKORDB_STREAK_IGNORE_PROJECTOR_WRITES`).
 - **What a reader sees while it updates.** The version the key last published, with part of the
   next window or of the rebuild's repairs over it, until the pass publishes; then
   `after_projection` bumps the read cache's generation and the view refetches (the frontend's
@@ -402,11 +412,38 @@ in `service.py`, reported on the watermark as `served` (with its `served_revisio
 - **A draft** overlays whatever serves main, the key at its served version included: it shows main as
   main's readers see it. Its cached reads are keyed by that version too, so none outlives the update.
   **A past revision** (`?asOfSeq=K`) reads the key only while it holds K or later (the patch set
-  rewinds everything changed after K); else Postgres. **A fork** reads through its root's key only
-  while the root's key holds its head, as before: its patch set is over the root's head.
+  rewinds everything changed after K); else Postgres. **A fork** reads through its root's key at the
+  version the key serves while the key holds exactly that version: its head, or behind it, idle
+  since it published, with no window in flight and no failed pass that may have written part of one
+  (`fork_serving_seq`). Its patch set is then against the root there (`root_at`), so it reads as the
+  fork does and never shows a change its root made after the fork's base. A key part-way through a
+  window would show some, so meanwhile the fork reads its root from Postgres
+  ([17](17-forks-and-residency.md) §2).
 - **`GRAPHVER_READ_MAX_LAG`** caps how many versions behind the key may serve: `-1` (default) any; `0`
   the head only, as before this, so a read the key is behind for goes to Postgres
   (read-your-writes for a person's own change, at the cost of the lineage summaries meanwhile).
+- **A graph published before `served_commit_seq` existed** had it `NULL`: the migration
+  `20261113_1000_gv_ps_served_fill` fills it from the watermark, and a pass, the first-seed gate or
+  liveness that finds it still missing restores it from the key's marker (by compare-and-swap on the
+  epoch; `graphver_served_restored_total{via}`), so its first rebuild after the upgrade keeps serving.
+  A replay that would have reloaded such a graph into a fresh key reconciles it in place instead
+  (`graphver_projection_first_seed_avoided_total`).
+- **A window in flight keeps its key.** A window too large to hold is written a page at a time,
+  over passes of `GRAPHVER_PROJECTION_PASS_MAX_SECS`; the pass that stops part-way records the
+  window's version rows (`projection_state.window_rows`) and the pass that publishes clears it.
+  Meanwhile eviction leaves the graph alone and the capacity planner keeps room on its master for
+  the rest of the window ([17](17-forks-and-residency.md) §11): evicted there, the key would lose
+  the pages written and the version it serves.
+- **Reads from Postgres are bounded.** A graph the key holds no version of is read from Postgres,
+  each read composing the whole graph. Each read takes a place among the process's and the graph's
+  (New-version builds' **Reads per process**, **Reads of one graph**; past them `429`), and each
+  statement is cut off at its **Statement limit** (`503 graph_read_busy`, retryable), so one large
+  graph can't take the connections every other read needs (`db.bounded_read_sessions`,
+  `ProviderManager.pg_read_slot`). The lookups that route a read — the graph of a data source, its
+  main branch, its watermark, its key — run on a small pool of their own
+  (`GRAPHVER_ROUTE_POOL_*`, two-second statements), so reads that fill the main pool can't stop
+  routing. And `ContextEngine.for_workspace` reads the route before it needs FalkorDB: a FalkorDB
+  that can't be reached fails only reads that need it, never a graph Postgres serves.
 
 ---
 
