@@ -4,7 +4,9 @@ Verifies the reconciling poll backstop (project every lagging graph), per-graph
 serialization, and — when a broker Redis is reachable — the inline-nudge → Redis
 stream → project path with XACK. FalkorDB content correctness is covered by
 test_versioning_projection; here we assert the *watermark* advances (the worker's
-job), so a no-op graph client suffices.
+job). The graph client is that file's in-memory FakeFalkor, not a no-op: each pass verifies what
+it wrote, and a client that answers nothing reads as an empty graph, which is rebuilt rather than
+published.
 """
 import asyncio
 import os
@@ -24,19 +26,7 @@ from backend.app.services.versioning.models import ProjectionStateORM
 from backend.app.services.versioning.projection import FalkorProjector
 from backend.app.services.versioning.service import GraphVersioningService
 from backend.app.services.versioning.worker import ProjectionWorker
-
-
-class _NoopGraph:
-    async def query(self, cypher, params=None):
-        return None
-
-    async def delete(self):
-        # GRAPH.DELETE — a healthy instance answers the full-seed drop (no-op here).
-        return None
-
-
-def _factory(_name, _provider_id=None):
-    return _NoopGraph()
+from backend.tests.integration.test_versioning_projection import FakeFalkor
 
 
 async def _seed_graph(svc) -> str:
@@ -69,7 +59,7 @@ async def _redis_ok() -> bool:
 async def _run() -> None:
     await models.create_schema_and_partitions()
     svc = GraphVersioningService()
-    worker = ProjectionWorker(FalkorProjector(graph_client_factory=_factory), poll_secs=100)
+    worker = ProjectionWorker(FalkorProjector(graph_client_factory=FakeFalkor()), poll_secs=100)
 
     # ── poll backstop catches up every lagging graph ─────────────────────
     gids = [await _seed_graph(svc) for _ in range(2)]
