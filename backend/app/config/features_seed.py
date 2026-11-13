@@ -739,7 +739,7 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
             "Admin → Infrastructure → Versioned graphs → New-version builds. Each build's steps, "
             "switches and failures are recorded in the activity log."
         ),
-        "sort_order": 3,
+        "sort_order": 5,
         "deprecated": False,
     },
     {

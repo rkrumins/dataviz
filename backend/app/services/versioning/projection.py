@@ -1399,7 +1399,7 @@ class FalkorProjector:
     async def _finish(self, graph_id: str, mine: int, *, published: bool, to_seq: int,
                       error: Optional[str], attempts: Optional[int],
                       surplus: object = _UNCOUNTED, status: str = "idle",
-                      pressure: Optional[bool] = False) -> bool:
+                      pressure: Optional[bool] = False, window_rows: Optional[int] = None) -> bool:
         """End a pass while the row is still its own (epoch ``mine``): publish ``to_seq``, or
         record the error and, unless ``attempts`` is None (a cancel, or a pass that stopped at a
         page), back off. Never writes the target or the key, which belong to the publishers and
@@ -1412,6 +1412,10 @@ class FalkorProjector:
         resumes it is not taken for a first seed. ``pressure``: the pass failed on a timeout or a
         memory refusal, one more in a row (``pressure_failures``, which the escalation counts);
         False, any other end, starts the count again; None, a cancel, leaves it.
+
+        ``window_rows``: a window that stopped at a page is still in flight, this many version rows
+        (``projection_state.window_rows``: eviction leaves the graph alone until it lands). A pass
+        that publishes clears it; one that fails leaves it, as the next pass resumes the window.
 
         On a customer's key a published pass also says what it found there that history doesn't
         hold: ``surplus`` (nodes, edges) becomes ``external_drift``, and none clears the count it
@@ -1426,7 +1430,7 @@ class FalkorProjector:
             state = ProjectionStateORM.rollup_state
             handed = func.nullif(state.op("-")(literal("moved")), func.jsonb_build_object())
             # The key now holds main at to_seq whole: reads serve it there until the next publish.
-            values.update(projected_commit_seq=to_seq, served_commit_seq=to_seq,
+            values.update(projected_commit_seq=to_seq, served_commit_seq=to_seq, window_rows=None,
                           last_projected_at=_now(), failed_attempts=0, next_retry_at=None,
                           rollup_state=case((func.jsonb_typeof(state) == "object", handed),
                                             else_=null()))
@@ -1439,6 +1443,8 @@ class FalkorProjector:
                     if surplus else case((notified, drift), else_=null()))
         elif attempts is not None:
             values.update(failed_attempts=attempts + 1, next_retry_at=_retry_at(attempts + 1))
+        if window_rows is not None:
+            values["window_rows"] = window_rows
         async with self._session() as s:
             row = (await s.execute(
                 update(ProjectionStateORM)
@@ -1806,14 +1812,20 @@ class FalkorProjector:
             # nothing, records no error and no backoff, and asks for the next pass at once, which
             # resumes where it stopped. Other graphs get their turn meanwhile. A full replay stays
             # a rebuild: back at idle, the next pass would be queued as a first seed, for a load
-            # into a fresh key.
+            # into a fresh key. A window goes back to idle marked as in flight (``window_rows``),
+            # so eviction leaves it alone until it lands, and the planner keeps room for the rest.
             logger.info("projection of %s over (%d, %d] %s; the next pass resumes there",
                         graph_id, from_seq, to_seq, stop)
             from backend.app.jobs.metrics import increment
             increment("graphver_projection_passes_total", outcome="partial")
-            if not await asyncio.shield(self._finish(
-                    graph_id, mine, published=False, to_seq=to_seq, error=None, attempts=None,
-                    status="rebuilding" if from_seq <= 0 else "idle")):
+
+            async def finish_partial() -> bool:           # shielded whole, the count included
+                window = (await self._window_size(graph, main_id, from_seq, to_seq)
+                          if from_seq > 0 else None)
+                return await self._finish(graph_id, mine, published=False, to_seq=to_seq,
+                                          error=None, attempts=None, window_rows=window,
+                                          status="rebuilding" if from_seq <= 0 else "idle")
+            if not await asyncio.shield(finish_partial()):
                 await self._yield_superseded(graph_id, from_seq)
             await nudge_projection(graph_id)
             return {"projected": from_seq, "applied": stop.written, "noop": False,
@@ -2498,6 +2510,18 @@ class FalkorProjector:
                 if src and tgt and str(etype or "") != ROLLUP_EDGE_TYPE:
                     out.setdefault(eid, set()).add((str(etype or "REL"), src, tgt))
         return out
+
+    async def _window_size(self, graph, main_id, from_seq: int, to_seq: int) -> int:
+        """:meth:`_window_rows` of a window that stopped at a page, on a session of its own; when
+        they can't be counted, one more than ``PROJECTION_PAGED_ABOVE`` (a window written a page
+        at a time holds more), so the window is still marked in flight."""
+        try:
+            async with self._session() as s:
+                return await self._window_rows(s, graph, main_id, from_seq, to_seq)
+        except Exception:  # noqa: BLE001 — the mark matters more than its size
+            logger.warning("could not count the window (%d, %d] of %s; marking it in flight as "
+                           "large", from_seq, to_seq, graph.id, exc_info=True)
+            return config.PROJECTION_PAGED_ABOVE + 1
 
     async def _window_rows(self, s, graph, main_id, from_seq, to_seq) -> int:
         """How many version rows the window ``(from_seq, to_seq]`` holds, nodes and edges."""

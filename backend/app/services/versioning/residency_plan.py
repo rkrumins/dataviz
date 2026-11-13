@@ -9,12 +9,14 @@ Per cluster master:
 * **pressure eviction** — a master at or above the start mark evicts the idle-longest Coldline
   graphs, then Standard by oldest read, until its use once they are gone is at or under the stop
   mark;
-* never an Always graph, a key the platform did not mint, a graph with a read lease or a pass in
-  flight, or one that is not evictable at all (trashed, at genesis, still being enabled); with
-  automatic eviction off, nothing;
+* never an Always graph, a key the platform did not mint, a graph with a read lease, a pass in
+  flight or a window in flight (idle between the passes of a window written a page at a time), or
+  one that is not evictable at all (trashed, at genesis, still being enabled); with automatic
+  eviction off, nothing;
 * **admission** — a load starts when the master has room for its estimate times the headroom
   under the start mark, after what the aggregation write governor and the loads and full
-  projections already in flight on it hold; one at a time per master, none while it forks for
+  projections already in flight on it hold, and what the windows in flight there may still add
+  (their version rows times the bytes per entity); one at a time per master, none while it forks for
   persistence or cannot be read, in the order the loads were asked for. The rest wait;
 * **room for a load** — for the first load of a provider that does not fit on the master it would
   go to, nor by room alone on one that holds or takes a load now, room is made on the master it
@@ -72,6 +74,7 @@ class Graph:
     provider: str = "default"
     placed: bool = True               # its load goes onto a fresh key on the roomiest master;
                                       # False: back onto its key (a rollup graph is named from it)
+    window_rows: Optional[int] = None         # a window in flight: its version rows
 
     def bytes(self, policy: ResidencyPolicy) -> Optional[int]:
         """Its measured size, else its entities times the bytes per entity; None: unknown."""
@@ -107,7 +110,8 @@ class Wait:
 @dataclass
 class MasterPlan:
     master: Master
-    reserved: int                     # the governor's, and the loads and full projections in flight
+    reserved: int                     # the governor's, the loads and full projections in flight,
+                                      # and what the windows in flight may add
     used_after: Optional[int]         # its use once this pass's evictions are done
     seeding: bool = False             # a load or full projection is in flight on it
     to_free: int = 0                  # what pressure eviction must free to reach the stop mark
@@ -140,6 +144,12 @@ def need(graph: Graph, policy: ResidencyPolicy) -> Optional[int]:
     is unknown."""
     size = graph.bytes(policy)
     return None if size is None else -(-size * policy.load_margin_pct // 100)
+
+
+def growth(graph: Graph, policy: ResidencyPolicy) -> int:
+    """The room a window in flight may still take on its graph's master: its version rows times the
+    bytes per entity, as each row may make one; 0 with none in flight."""
+    return (graph.window_rows or 0) * policy.bytes_per_entity
 
 
 def admit(master: Master, needed: int, policy: ResidencyPolicy,
@@ -181,13 +191,14 @@ def roomiest(plans: Sequence[MasterPlan], policy: ResidencyPolicy) -> Optional[M
 def _candidates(graphs: Sequence[Graph]) -> List[Graph]:
     return [g for g in graphs
             if g.status == "idle" and g.owned and g.evictable and not g.leased
-            and g.residency in ("standard", "coldline")]
+            and not g.window_rows and g.residency in ("standard", "coldline")]
 
 
 def _plan_master(policy: ResidencyPolicy, master: Master, graphs: Sequence[Graph],
                  now: datetime, sized: bool) -> MasterPlan:
     seeding = [g for g in graphs if g.seeding]
-    reserved = master.reserved + sum(need(g, policy) or 0 for g in seeding)
+    reserved = (master.reserved + sum(need(g, policy) or 0 for g in seeding)
+                + sum(growth(g, policy) for g in graphs))
     out = MasterPlan(master=master, reserved=reserved, used_after=master.used,
                      seeding=bool(seeding))
     # A master that cannot be read, or is replaying its dataset, would fail the drop and keep the

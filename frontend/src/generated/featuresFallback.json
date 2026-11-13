@@ -665,7 +665,7 @@
       "adminHint": "New-version builds needs Version control on. Check that FalkorDB has room for a second copy of your largest graphs, and set the threshold, room and pacing under Admin \u2192 Infrastructure \u2192 Versioned graphs \u2192 New-version builds. Each build's steps, switches and failures are recorded in the activity log.",
       "impactWhenOff": "Every change is written into the key that serves reads, as before: during a large import, readers may see the graph partly updated. Builds that haven't started copying are cancelled and their changes are written in place; builds already copying finish.",
       "impactWhenOn": "A publish that changes more rows than the threshold, and rebuilds and moves of platform-owned keys, are built in a second key: readers keep the current version, complete, until the new one is checked and switched to. A copy needs room on its node for a second copy of the graph; with no room the build waits, or is seeded from Postgres elsewhere. The settings are under Admin \u2192 Infrastructure \u2192 Versioned graphs \u2192 New-version builds.",
-      "sortOrder": 3,
+      "sortOrder": 5,
       "deprecated": false,
       "stage": "experimental",
       "implemented": true,

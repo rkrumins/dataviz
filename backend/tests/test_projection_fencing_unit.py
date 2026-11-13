@@ -615,8 +615,11 @@ def test_a_full_replay_that_stops_at_a_page_stays_a_rebuild(monkeypatch):
     """Past its time box a pass stops at a page. A full replay stays ``rebuilding``: back at idle,
     with the Graph residency switch on, the pass that resumes it would be taken for a first seed
     and queued for a load into a fresh key, leaving its pages and its cursor behind. A window goes
-    back to idle, as it was."""
-    for projected, status in ((0, "rebuilding"), (3, "idle")):
+    back to idle, as it was, marked in flight with its version rows (``window_rows``), so eviction
+    leaves it alone until it lands; counted or not, it is marked."""
+    for projected, status, counted, window in ((0, "rebuilding", True, None),
+                                               (3, "idle", True, 250_000),
+                                               (3, "idle", False, config.PROJECTION_PAGED_ABOVE + 1)):
         ps = _PS(projected=projected, target=5)
         ps.status = "rebuilding" if projected == 0 else "idle"
         proj, ps, _client, seen = _projector(monkeypatch, ps=ps)
@@ -627,11 +630,19 @@ def test_a_full_replay_that_stops_at_a_page_stays_a_rebuild(monkeypatch):
         async def paged(*a):
             return None                                      # a window too large to hold
 
+        async def window_rows(s, graph, main_id, from_seq, to_seq, counted=counted):
+            if not counted:
+                raise ConnectionError("Postgres went away")
+            return 250_000
+
         monkeypatch.setattr(proj, "_compute_changes", paged)
         monkeypatch.setattr(proj, "_reconcile_in_place", stop)
         monkeypatch.setattr(proj, "_apply_paged", stop)
+        monkeypatch.setattr(proj, "_window_rows", window_rows)
         r = asyncio.run(proj.project_graph("g1"))
-        assert r["partial"] and seen["finish"][0][2]["status"] == status, (r, seen["finish"])
+        finished = seen["finish"][0][2]
+        assert r["partial"] and finished["status"] == status, (r, seen["finish"])
+        assert finished["window_rows"] == window, finished
 
 
 def test_with_residency_on_a_key_holding_a_stopped_rebuild_is_resumed_not_queued(monkeypatch):

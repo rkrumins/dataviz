@@ -547,7 +547,7 @@ async def gather(*, graph_ids: Optional[Collection[str]] = None,
         select(ps.graph_id, ps.falkor_graph_name, ps.falkor_provider, ps.owns_falkor_graph,
                ps.status, ps.residency, ps.last_read_at, ps.last_projected_at, ps.size_bytes,
                ps.size_measured_at, ps.rehydrating_since, ps.retired_keys, ps.epoch,
-               ps.projected_commit_seq, ps.target_commit_seq, head,
+               ps.projected_commit_seq, ps.target_commit_seq, ps.window_rows, head,
                GraphORM.data_source_id, GraphORM.workspace_id,
                (head > 1).label("past_genesis"),
                (~select(1).where(*bootstrap_unfinished(ps.graph_id)).correlate(ps).exists())
@@ -633,7 +633,9 @@ async def gather(*, graph_ids: Optional[Collection[str]] = None,
             size_bytes=r.size_bytes, entities=estimate.get(r.graph_id),
             seeding=_seeding(r, target),
             requested_at=asked.get(r.graph_id),
-            provider=r.falkor_provider or config.DEFAULT_FALKOR_PROVIDER, placed=placed))
+            provider=r.falkor_provider or config.DEFAULT_FALKOR_PROVIDER, placed=placed,
+            # A window in flight on the key it serves; one left on a key since lost is no growth.
+            window_rows=r.window_rows if r.status in ("idle", "projecting") else None))
     return snap
 
 

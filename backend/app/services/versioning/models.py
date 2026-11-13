@@ -347,6 +347,14 @@ class ProjectionStateORM(VersioningBase):
     # NULL when the key holds no published version: never written, written from nothing (a move,
     # an Adopt, a repin), lost, evicted or reset (20261112_1800_gv_ps_served).
     served_commit_seq = Column(BigInteger, nullable=True)
+    # The version rows of the window a pass stopped part-way through (its time ran out at a page),
+    # NULL while none is: set by that pass, cleared by the pass that publishes. Until then the graph
+    # sits idle between passes with the window half written, so eviction leaves it alone
+    # (``cache_manager._evictable``): dropped, the key would lose that work and the version it
+    # serves, and its reads would go to Postgres until a load reseeded it. The capacity planner
+    # keeps room on its master for what the rest of the window may add
+    # (20261113_1200_gv_ps_window_rows).
+    window_rows = Column(BigInteger, nullable=True)
     last_projected_at = Column(Text, nullable=True)
     last_error = Column(Text, nullable=True)
     # THE GUARDRAIL. A bootstrapped graph is PINNED to the customer's REAL FalkorDB graph — that
@@ -1005,6 +1013,8 @@ def _ensure_schema_upgrades(conn) -> None:
     # 20261113_1000_gv_ps_served_fill. Not required: the projector restores a row it missed.
     _bounded_step(conn, "projection_state.served_commit_seq was not filled",
                   lambda: backfill_ps_served(conn))
+    _bounded_step(conn, "projection_state.window_rows was not added",
+                  lambda: ensure_ps_window_rows_column(conn), required=True)
     _bounded_step(conn, "import_rows.code was not added",
                   lambda: ensure_import_rows_code_column(conn), required=True)
     _bounded_step(conn, "jobs.allow_mass_delete was not added",
@@ -1198,6 +1208,21 @@ def ensure_ps_served_column(conn) -> None:
         return
     conn.execute(text(f'ALTER TABLE "{_SCHEMA}"."projection_state" '
                       "ADD COLUMN IF NOT EXISTS served_commit_seq BIGINT"))
+
+
+def ensure_ps_window_rows_column(conn) -> None:
+    """Add ``projection_state.window_rows``: the version rows of the window a pass stopped part-way
+    through, NULL (every existing graph) while none is. Nullable with no default, so nothing is
+    rewritten; a no-op without the table and once the column is there, like
+    :func:`ensure_ps_served_column`."""
+    inspector = sa_inspect(conn)
+    if not inspector.has_table("projection_state", schema=_SCHEMA):
+        return
+    if "window_rows" in {c["name"] for c in inspector.get_columns("projection_state",
+                                                                  schema=_SCHEMA)}:
+        return
+    conn.execute(text(f'ALTER TABLE "{_SCHEMA}"."projection_state" '
+                      "ADD COLUMN IF NOT EXISTS window_rows BIGINT"))
 
 
 def backfill_ps_served(conn) -> None:
