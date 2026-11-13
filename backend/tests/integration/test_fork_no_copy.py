@@ -78,7 +78,14 @@ def test_a_fork_is_never_projected():
         assert wm["read_route"] == {"main": "falkordb", "drafts": "overlay"}
         await svc.apply_ops(graph_id=root, actor="alice", message="more", ops=[_n("C")])
         wm = await svc.projection_watermark(fid)
-        assert wm["fresh"] is False and wm["read_route"]["main"] == "postgres"
+        # Behind its head, the root's key holds its last version whole: the fork reads it there.
+        assert wm["fresh"] is False and wm["read_route"]["main"] == "falkordb"
+        assert wm["served"] == root_wm["committed"]
+        # Part-way through a window it holds none whole: the fork reads its root from Postgres.
+        await _pin(root, window_rows=300_000)
+        wm = await svc.projection_watermark(fid)
+        assert wm["served"] is None and wm["read_route"]["main"] == "postgres"
+        await _pin(root, window_rows=None)
 
         # Nor does the fleet's list show it catching up on a projection it does not have.
         from backend.app.services.system_status.probes import list_versioned_graphs

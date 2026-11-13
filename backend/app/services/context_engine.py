@@ -427,8 +427,11 @@ class ContextEngine:
     async def _fork_main_reader(registry, session, workspace_id: str, svc, gid: str, main_id: str,
                                 actor: Optional[str], viewer=None):
         """What reads a fork's ``main``: its root's store — the root's FalkorDB provider, built from
-        the root's data source, while its projection holds its head in the key it publishes; else
-        the root's Postgres reader — with the fork's patch set over it (``DraftOverlayProvider``).
+        the root's data source, while the key its projection publishes holds a version of the
+        root's main whole (the head, or behind it, the version it last published, while no pass
+        has written into it since: ``fork_serving_seq``; the fork's patch set is then against the
+        root there); else the root's Postgres reader, at its head — with the fork's patch set over
+        it (``DraftOverlayProvider``).
         Past ``GRAPHVER_FORK_REWIND_MAX`` entities to classify (``fork_reads_from``), the fork's
         own layered Postgres reads, which read nothing of its root's. Who may read is the fork's to
         decide, as it was decided: the root's source is read on its behalf. A person's read through
@@ -439,6 +442,7 @@ class ContextEngine:
         from ..providers.versioned_branch_provider import FORK_NO_DEEP_SEARCH
         from .versioned_sources import serves_pin
         from .versioning.residency import on_read
+        from .versioning.service import fork_serving_seq
 
         # One session reads the fork's version, its ceiling, its root and the root's store.
         try:
@@ -455,10 +459,13 @@ class ContextEngine:
                                     "data_source_id": plan["root_data_source_id"]},
                               viewer=viewer, state=plan)
         if store is not None:
-            plan.update({k: store[k] for k in ("projected", "status", "fresh", "falkor_provider",
+            plan.update({k: store[k] for k in ("projected", "status", "fresh", "serving",
+                                               "window_rows", "last_error", "falkor_provider",
                                                "falkor_graph_name")})
+        serving = fork_serving_seq(plan["serving"], plan["fresh"], plan["status"],
+                                   plan["window_rows"], plan["last_error"])
         base = None
-        if plan["fresh"] and not plan["root_trashed"]:
+        if serving is not None and not plan["root_trashed"]:
             try:
                 provider = await registry.get_provider_for_workspace(
                     workspace_id, session, plan["root_data_source_id"])
@@ -470,6 +477,9 @@ class ContextEngine:
                 if serves_pin(getattr(provider, "manager_cache_key", None), plan["falkor_provider"],
                               plan["falkor_graph_name"], root_id):
                     base = provider
+        # The root's seq the patch set is against: the version its key serves, else its head, which
+        # its Postgres reader reads.
+        root_at = serving if base is not None else plan["committed"]
         if base is None:
             base = _pg_reader(registry, svc, root_id, plan["root_main"], actor=actor)
         # Its cache keys carry the root store's version it reads against: the root's writes and
@@ -477,8 +487,9 @@ class ContextEngine:
         # store's status, so nothing read while the root was out or loading outlives that.
         return DraftOverlayProvider(
             base, svc=svc, graph_id=gid, branch_id=main_id, actor=actor, fork=True,
-            version=plan["version"],
-            read_ns=f"{root_id}@{plan['committed']}:{plan['projected']}:{plan['status']}")
+            version=(*plan["version"][:2], root_at, plan["version"][3]),
+            root_at=root_at if root_at != plan["committed"] else None,
+            read_ns=f"{root_id}@{plan['committed']}:{plan['projected']}:{plan['status']}:{root_at}")
 
     # ------------------------------------------------------------------ #
     # Connection-aware factory (legacy compat)                             #

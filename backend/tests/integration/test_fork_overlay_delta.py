@@ -219,3 +219,79 @@ def test_past_the_ceiling_a_fork_reads_postgres(monkeypatch):
                                                                                _u("B", "B2")])
         assert await svc.fork_reads_from(fork) == "postgres"
     _run(case)
+
+
+def test_a_fork_reads_its_roots_key_at_the_version_the_key_holds_whole():
+    """Behind its root's head, a fork reads the root's key at the version the key serves, while the
+    key holds exactly that (idle since it published): its patch set is against the root there, so
+    it reads as the fork does, at whatever base, and never shows a change its root made since. A
+    key a pass may have written part of a window into — a window in flight, a pass that failed,
+    one under way — holds no version whole: the fork reads its root from Postgres, at its head."""
+    from sqlalchemy import update
+
+    from backend.app.providers.draft_overlay_provider import DraftOverlayProvider
+    from backend.app.providers.versioned_branch_provider import VersionedBranchProvider
+    from backend.app.services.context_engine import ContextEngine
+    from backend.app.services.versioning.models import ProjectionStateORM
+
+    key = object()                                   # the root's FalkorDB provider
+
+    class _Registry:
+        async def get_provider_for_workspace(self, workspace_id, session, data_source_id):
+            return key
+
+    async def _root_key(root, **values):
+        async with db.graphver_session() as s:
+            await s.execute(update(ProjectionStateORM).where(ProjectionStateORM.graph_id == root)
+                            .values(**{"status": "idle", "window_rows": None, "last_error": None,
+                                       **values}))
+            await s.commit()
+
+    async def _reader(svc, fork, fmain):
+        reader = await ContextEngine._fork_main_reader(_Registry(), None, "ws1", svc, fork, fmain,
+                                                       "bob")
+        assert isinstance(reader, DraftOverlayProvider)
+        return reader
+
+    async def case(svc):
+        root = await _graph(svc, [_n("A"), _n("B"), _n("C")])                    # head 2
+        fork, fmain = await _fork(svc, root)                                     # base 2
+        await svc.apply_ops(graph_id=fork, actor="bob", message="fork's own", ops=[_u("A", "A fork")])
+        await svc.apply_ops(graph_id=root, actor="alice", message="root's since",
+                            ops=[_u("B", "B root")])                             # head 3
+        late, lmain = await _fork(svc, root)                                     # base 3
+        await svc.apply_ops(graph_id=root, actor="alice", message="more", ops=[_n("P")])  # head 4
+        await _root_key(root, projected_commit_seq=2, served_commit_seq=2)       # the key: root@2
+
+        # Over the key at 2: the fork's own change, and nothing of the root's since.
+        reader = await _reader(svc, fork, fmain)
+        assert reader._base is key and reader._root_at == {"root_at": 2}
+        assert reader._version[2] == 2
+        with _no_payload_read():
+            at_key = await svc.branch_overlay_delta(graph_id=fork, branch_id=fmain, root_at=2)
+            at_head = await svc.branch_overlay_delta(graph_id=fork, branch_id=fmain)
+        assert (_shape(at_key)["modified"], _shape(at_key)["removed"]) == ({"A"}, set())
+        assert (_shape(at_head)["modified"], _shape(at_head)["removed"]) == ({"A", "B"}, {"P"})
+        # A fork based after the key's version takes the root's changes in between: B as at 3.
+        with _no_payload_read():
+            late_key = await svc.branch_overlay_delta(graph_id=late, branch_id=lmain, root_at=2)
+        assert (_shape(late_key)["modified"], _shape(late_key)["removed"]) == ({"B"}, set())
+        wm = await svc.projection_watermark(fork)
+        assert (wm["served"], wm["read_route"]["main"]) == (2, "falkordb")
+        assert (await svc.overlay_version(graph_id=fork, branch_id=fmain, root_at=2))[2] == 2
+
+        # A key part-way through a window holds no version whole: the root from Postgres, at 4.
+        for dirty in ({"window_rows": 300_000}, {"last_error": "projection apply failed"},
+                      {"status": "projecting"}):
+            await _root_key(root, projected_commit_seq=2, served_commit_seq=2, **dirty)
+            reader = await _reader(svc, fork, fmain)
+            assert isinstance(reader._base, VersionedBranchProvider), dirty
+            assert reader._root_at == {} and reader._version[2] == 4, dirty
+            wm = await svc.projection_watermark(fork)
+            assert (wm["served"], wm["read_route"]["main"]) == (None, "postgres"), dirty
+
+        # At its head, the key serves the fork as before.
+        await _root_key(root, projected_commit_seq=4, served_commit_seq=4)
+        reader = await _reader(svc, fork, fmain)
+        assert reader._base is key and reader._root_at == {} and reader._version[2] == 4
+    _run(case)
