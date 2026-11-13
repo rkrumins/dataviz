@@ -211,6 +211,40 @@ export interface ResidencyPolicy {
 /** A partial change: ``-1`` clears a value back to its default. */
 export type ResidencyPolicyChange = Partial<Record<ResidencyPolicyField, number | boolean | string>>
 
+/** One New-version build setting: as saved (null: unset), its default, and the value in force. */
+export interface BuildPolicyValue {
+    saved: number | boolean | string | null
+    default: number | boolean | string
+    effective: number | boolean | string
+}
+
+/** How the card shows one New-version build setting, and the range the server accepts.
+ *  ``applies``: ``next`` (a build already under way keeps the value it started with), ``live``
+ *  (read at every window and statement) or ``switch`` (when a build switches, or a key is moved). */
+export interface BuildPolicyField {
+    wire: string
+    kind: 'bool' | 'int' | 'ratio' | 'choice'
+    section: 'when' | 'room' | 'lifecycle' | 'pacing' | 'postgres'
+    label: string
+    help: string
+    unit: 'rows' | 'pct' | 'bytes' | 'secs' | 'ms' | 'count' | 'ratio' | null
+    min: number | null
+    max: number | null
+    choices: string[] | null
+    applies: 'next' | 'live' | 'switch'
+}
+
+/** ``GET /api/v1/admin/versioning/build-policy``: each value by wire name, each setting in order
+ *  (``fields``), who changed the values last and when, and ``enabled``: the New-version builds
+ *  switch (Admin → Features). */
+export interface BuildPolicy {
+    values: Record<string, BuildPolicyValue>
+    fields: BuildPolicyField[]
+    updatedBy: string | null
+    updatedAt: string | null
+    enabled: boolean
+}
+
 /** ``GET /api/v1/admin/versioning/draft-retention``: how long a merged or abandoned draft keeps its
  *  changes before they are removed — ``days`` in force, as ``saved`` (null: the environment's
  *  ``default``), and the range a value may take. ``0`` keeps them for good. */
@@ -425,6 +459,15 @@ export const systemStatusService = {
         authFetch<ResidencyPolicy>('/api/v1/admin/versioning/residency-policy', {
             method: 'PUT',
             body: JSON.stringify(change),
+        }),
+    /** New-version builds: each setting as saved, its default and the value in force. */
+    buildPolicy: (): Promise<BuildPolicy> =>
+        authFetch<BuildPolicy>('/api/v1/admin/versioning/build-policy'),
+    /** Save settings by wire name; ``-1`` clears one. A 422 names the field (``detail.field``). */
+    saveBuildPolicy: (values: Record<string, number | boolean | string>): Promise<BuildPolicy> =>
+        authFetch<BuildPolicy>('/api/v1/admin/versioning/build-policy', {
+            method: 'PUT',
+            body: JSON.stringify(values),
         }),
     /** How long a merged or abandoned draft keeps its changes. */
     draftRetention: (): Promise<DraftRetention> =>
