@@ -411,6 +411,8 @@ class ProjectorHealth:
     # The version the key holds whole (``projection_state.served_commit_seq``), which a rebuild
     # in place keeps serving; NULL when it holds none, or on a row from before the column.
     served_commit_seq: Optional[int] = None
+    # The graph's own read mode (``projection_state.read_mode``); NULL takes the platform's.
+    read_mode: Optional[str] = None
 
     @property
     def commits_behind(self) -> int:
@@ -484,11 +486,14 @@ class ProjectorHealth:
         """The key serves reads of main a version of it, rollups included (``serving_seq``,
         ``versioning/service.py``): its head, or while it catches up or rebuilds in place, the
         version it last published. Not while it is written from nothing, out of FalkorDB, or past
-        ``GRAPHVER_READ_MAX_LAG``."""
+        ``GRAPHVER_READ_MAX_LAG`` — nor behind its head at all for a graph read ``latest``."""
+        from backend.app.services.versioning import build_policy
         from backend.app.services.versioning.service import serving_seq
 
+        mode = build_policy.read_mode_of(self.read_mode)
         return serving_seq(self.projected_commit_seq or 0, self.main_head_commit_seq or 0,
-                           self.status, self.served_commit_seq) is not None
+                           self.status, self.served_commit_seq,
+                           build_policy.max_lag_of(mode)) is not None
 
     @property
     def current(self) -> bool:
@@ -538,6 +543,7 @@ async def projector_health(
                     ProjectionStateORM.falkor_graph_name,
                     ProjectionStateORM.status,
                     ProjectionStateORM.served_commit_seq,
+                    ProjectionStateORM.read_mode,
                 )
                 .outerjoin(
                     ProjectionStateORM,
@@ -559,10 +565,11 @@ async def projector_health(
                 status=status,
                 checked_at=checked_at,
                 served_commit_seq=None if served is None else int(served),
+                read_mode=read_mode,
             )
             for (
                 ds_id, graph_id, head, projected, last_error, falkor_name,
-                status, served,
+                status, served, read_mode,
             ) in rows
             if ds_id
         }

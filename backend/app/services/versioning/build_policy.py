@@ -46,7 +46,7 @@ class Field:
     wire: str
     default: Callable[[], Any]
     kind: str                         # bool | int | ratio | choice
-    section: str                      # when | room | lifecycle | pacing | postgres
+    section: str                      # reads | when | room | lifecycle | pacing | postgres
     label: str
     help: str
     unit: str = ""                    # rows | pct | bytes | secs | ms | count | ratio
@@ -57,6 +57,14 @@ class Field:
 
 
 FIELDS: Tuple[Field, ...] = (
+    Field("readMode", lambda: config.READ_MODE, "choice", "reads",
+          "Reads while a new version lands",
+          "What readers of a graph get while its next version is written into FalkorDB. Always the "
+          "latest: the newest published version at once, from Postgres until FalkorDB holds it. "
+          "Keep serving, update in place: the version FalkorDB last finished, while the next is "
+          "written into it. Keep serving, switch when ready: exactly that version, while the next "
+          "is built in a second key, then one switch. A graph can set its own.",
+          choices=config.READ_MODES, applies="live"),
     Field("buildAboveRows", lambda: config.PROJECTION_CANDIDATE_ABOVE, "int", "when",
           "Build beside above",
           "A publish that changes more rows than this is built in a second key while the current "
@@ -278,6 +286,21 @@ async def invalidate() -> None:
         await asyncio.wait_for(get_redis().incr(_GEN_KEY), timeout=0.5)
     except Exception:  # noqa: BLE001 — the others then see it within the memo's 30 seconds
         logger.info("builds: the New-version build settings' generation could not be moved")
+
+
+def read_mode_of(override: Optional[str], policy: Optional["BuildPolicy"] = None) -> str:
+    """A graph's read mode: its own (``projection_state.read_mode``), else the platform's
+    (``readMode``, from ``policy``, else as last resolved)."""
+    if override in config.READ_MODES:
+        return override
+    return (policy or current())["readMode"]
+
+
+def max_lag_of(mode: str) -> Optional[int]:
+    """How far behind its head a key may serve a graph in ``mode`` (``serving_seq``): not at all
+    for ``latest``, so its reads go to Postgres until FalkorDB holds the newest version; else None,
+    the platform's ``GRAPHVER_READ_MAX_LAG``."""
+    return 0 if mode == "latest" else None
 
 
 def current() -> BuildPolicy:

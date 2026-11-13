@@ -83,6 +83,17 @@ def test_with_nothing_saved_every_value_is_its_environment_default():
     assert (d["pgReadsPerGraph"], d["pgReadsPerProcess"]) == (config.PG_READS_PER_GRAPH,
                                                               config.PG_READS_PER_PROCESS)
     assert set(d.values) == {f.wire for f in bp.FIELDS}
+    assert d["readMode"] == config.READ_MODE == "in_place"
+
+
+def test_a_graphs_own_read_mode_wins_over_the_platforms():
+    platform = bp.effective({"readMode": "beside"})
+    assert bp.read_mode_of(None, platform) == "beside"
+    assert bp.read_mode_of("latest", platform) == "latest"
+    assert bp.read_mode_of("sideways", platform) == "beside", "a value no mode names is ignored"
+    assert bp.effective({"readMode": "sideways"})["readMode"] == "in_place"
+    assert (bp.max_lag_of("latest"), bp.max_lag_of("in_place"), bp.max_lag_of("beside")) == (
+        0, None, None)
 
 
 def test_a_saved_value_out_of_range_is_clamped_and_ordered_never_refused(monkeypatch):
@@ -127,6 +138,7 @@ async def test_an_unreadable_row_keeps_the_last_good_policy_and_never_raises():
     ({"buildAboveRows": "200000"}, "buildAboveRows"),
     ({"buildForRebuilds": "yes"}, "buildForRebuilds"),
     ({"buildMode": "sideways"}, "buildMode"),
+    ({"readMode": "fastest"}, "readMode"),
     ({"pacingRatio": 9}, "pacingRatio"),
     ({"pacingRatio": True}, "pacingRatio"),
     ({"copyMaxBytes": -2}, "copyMaxBytes"),

@@ -42,7 +42,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import aliased
 
-from . import config, db, keymigrate
+from . import build_policy, config, db, keymigrate
 from .changeset import Delta, fold_batch_ops, materialize, net_delta, diff_states
 from backend.common.property_patch import apply_patch, compose_patches, strip_deletes
 from backend.common.service_accounts import is_service_account
@@ -639,14 +639,15 @@ _SERVES_NOTHING = ("rehydrating", "evicted", "waiting_capacity", "reseeding")
 
 
 def serving_seq(projected: int, committed: int, status: Optional[str],
-                served: Optional[int]) -> Optional[int]:
+                served: Optional[int], max_lag: Optional[int] = None) -> Optional[int]:
     """The version of main a projection's key serves reads of main at; None sends them to Postgres.
 
     The head while the key holds it (:func:`serves_head`). Behind it, while the projection catches
     up or rebuilds in place: the version the key last published (its watermark, or during a
     rebuild, which resets that, ``served_commit_seq``) — complete with its lineage summaries, with
-    part of the next window or of the rebuild's repairs over it. ``GRAPHVER_READ_MAX_LAG`` caps how
-    many versions behind (0: the head only). None while the key is out of FalkorDB, being loaded
+    part of the next window or of the rebuild's repairs over it. ``max_lag`` caps how many versions
+    behind (0: the head only, a graph read ``latest``: ``build_policy.max_lag_of``), else
+    ``GRAPHVER_READ_MAX_LAG``. None while the key is out of FalkorDB, being loaded
     or reset, or holds no published version (a first seed, a move, an Adopt, a lost key). Seq 1 is
     a graph's genesis, its empty first commit: a key at it holds nothing anyone published — a new
     graph's key is empty, and an enabled source's own graph is not yet a version history holds."""
@@ -655,7 +656,8 @@ def serving_seq(projected: int, committed: int, status: Optional[str],
     if status in _SERVES_NOTHING:
         return None
     held = projected or served or 0
-    if held <= 1 or (config.READ_MAX_LAG >= 0 and committed - held > config.READ_MAX_LAG):
+    lag = config.READ_MAX_LAG if max_lag is None else max_lag
+    if held <= 1 or (lag >= 0 and committed - held > lag):
         return None
     return held
 
@@ -5013,7 +5015,11 @@ class GraphVersioningService:
             projected = ps.projected_commit_seq if ps else 0
             status = ps.status if ps else "idle"
             fresh = serves_head(projected, committed, status)
-            served = serving_seq(projected, committed, status, ps.served_commit_seq if ps else None)
+            # The graph's read mode, else the platform's: ``latest`` serves the key only at the head.
+            own_mode = getattr(ps, "read_mode", None) if ps else None
+            read_mode = build_policy.read_mode_of(own_mode, await build_policy.resolve())
+            served = serving_seq(projected, committed, status, ps.served_commit_seq if ps else None,
+                                 build_policy.max_lag_of(read_mode))
             # The revision each side is at — the main commit with that seq (one indexed read). The
             # sync indicators show it, so "version #12" can be matched to a commit in History.
             revisions: Dict[int, CommitORM] = {}
@@ -5053,6 +5059,10 @@ class GraphVersioningService:
                 # overlays whatever serves main.
                 "read_route": {"main": "falkordb" if served is not None else "postgres",
                                "drafts": "overlay"},
+                # What its readers get while a newer version lands (``config.READ_MODES``), and
+                # whether the graph set it or it is the platform's.
+                "read_mode": read_mode,
+                "read_mode_source": "graph" if own_mode in config.READ_MODES else "platform",
                 # Failure reason + last success + live full-reseed progress — the Data
                 # health UI needs these to converge to an honest done/failed state.
                 "last_error": ps.last_error if ps else None,
@@ -5091,6 +5101,19 @@ class GraphVersioningService:
                                       else None),
             }
 
+    async def set_read_mode(self, graph_id: str, mode: Optional[str]) -> Tuple[bool, Optional[str]]:
+        """Set what a graph's readers get while a newer version lands (``config.READ_MODES``), or
+        None for the platform's: ``(found, the mode it had)``. Routing reads it per request, so
+        the next read goes by it."""
+        if mode is not None and mode not in config.READ_MODES:
+            raise ValueError(f"unknown read mode {mode!r}")
+        async with self._session() as s:
+            ps = await s.get(ProjectionStateORM, graph_id)
+            if ps is None:
+                return False, None
+            before, ps.read_mode = ps.read_mode, mode
+            return True, before
+
     async def residency_state(self, graph_id: str) -> Optional[Dict[str, object]]:
         """What a read needs to know of a graph's residency (doc 17), in one small read: its
         projection ``status``, its class (``residency``), its measured ``size_bytes``, the head it
@@ -5104,14 +5127,16 @@ class GraphVersioningService:
                        ProjectionStateORM.size_bytes, GraphORM.main_head_commit_seq,
                        ProjectionStateORM.projected_commit_seq, ProjectionStateORM.falkor_provider,
                        ProjectionStateORM.falkor_graph_name, ProjectionStateORM.served_commit_seq,
-                       ProjectionStateORM.window_rows, ProjectionStateORM.last_error)
+                       ProjectionStateORM.window_rows, ProjectionStateORM.last_error,
+                       ProjectionStateORM.read_mode)
                 .join(GraphORM, GraphORM.id == ProjectionStateORM.graph_id)
                 .where(ProjectionStateORM.graph_id == graph_id))).first()
         if row is None:
             return None
         return {"status": row[0], "residency": row[1], "size_bytes": row[2], "committed": row[3],
                 "projected": row[4], "fresh": serves_head(row[4], row[3], row[0]),
-                "serving": serving_seq(row[4], row[3], row[0], row[7]),
+                "serving": serving_seq(row[4], row[3], row[0], row[7], build_policy.max_lag_of(
+                    build_policy.read_mode_of(row[10], await build_policy.resolve()))),
                 "window_rows": row[8], "last_error": row[9],
                 "falkor_provider": row[5], "falkor_graph_name": row[6]}
 
@@ -7126,8 +7151,11 @@ class GraphVersioningService:
             committed = root.main_head_commit_seq
             projected = ps.projected_commit_seq if ps is not None else 0
             status = ps.status if ps is not None else "idle"
+            mode = build_policy.read_mode_of(getattr(ps, "read_mode", None) if ps is not None
+                                             else None, await build_policy.resolve())
             serving = serving_seq(projected, committed, status,
-                                  ps.served_commit_seq if ps is not None else None)
+                                  ps.served_commit_seq if ps is not None else None,
+                                  build_policy.max_lag_of(mode))
             window_rows = ps.window_rows if ps is not None else None
             last_error = ps.last_error if ps is not None else None
             on_key = fork_serving_seq(serving, serves_head(projected, committed, status), status,

@@ -355,6 +355,11 @@ class ProjectionStateORM(VersioningBase):
     # keeps room on its master for what the rest of the window may add
     # (20261113_1200_gv_ps_window_rows).
     window_rows = Column(BigInteger, nullable=True)
+    # What reads of this graph's main get while a newer version is written into FalkorDB, as a
+    # system administrator set it for this graph: ``latest``, ``in_place`` or ``beside``
+    # (``config.READ_MODES``). NULL takes the platform's (New-version builds' ``readMode``)
+    # (20261113_1300_gv_ps_read_mode).
+    read_mode = Column(Text, nullable=True)
     last_projected_at = Column(Text, nullable=True)
     last_error = Column(Text, nullable=True)
     # THE GUARDRAIL. A bootstrapped graph is PINNED to the customer's REAL FalkorDB graph — that
@@ -409,6 +414,8 @@ class ProjectionStateORM(VersioningBase):
             name="ck_proj_status",
         ),
         CheckConstraint("residency IN ('always','standard','coldline')", name="ck_ps_residency"),
+        CheckConstraint("read_mode IS NULL OR read_mode IN ('latest','in_place','beside')",
+                        name="ck_ps_read_mode"),
         CheckConstraint(
             "evicted_reason IS NULL OR "
             "evicted_reason IN ('idle_standard','idle_coldline','pressure','lost','admin',"
@@ -1015,6 +1022,8 @@ def _ensure_schema_upgrades(conn) -> None:
                   lambda: backfill_ps_served(conn))
     _bounded_step(conn, "projection_state.window_rows was not added",
                   lambda: ensure_ps_window_rows_column(conn), required=True)
+    _bounded_step(conn, "projection_state.read_mode was not added",
+                  lambda: ensure_ps_read_mode_column(conn), required=True)
     _bounded_step(conn, "import_rows.code was not added",
                   lambda: ensure_import_rows_code_column(conn), required=True)
     _bounded_step(conn, "jobs.allow_mass_delete was not added",
@@ -1223,6 +1232,27 @@ def ensure_ps_window_rows_column(conn) -> None:
         return
     conn.execute(text(f'ALTER TABLE "{_SCHEMA}"."projection_state" '
                       "ADD COLUMN IF NOT EXISTS window_rows BIGINT"))
+
+
+def ensure_ps_read_mode_column(conn) -> None:
+    """Add ``projection_state.read_mode``, a graph's own read mode, with its check
+    (``ck_ps_read_mode``): NULL (every existing graph) takes the platform's. Nullable with no
+    default, so nothing is rewritten; a no-op without the table and once both are there, like
+    :func:`ensure_ps_window_rows_column`."""
+    inspector = sa_inspect(conn)
+    if not inspector.has_table("projection_state", schema=_SCHEMA):
+        return
+    ps = f'"{_SCHEMA}"."projection_state"'
+    present = {c["name"] for c in inspector.get_columns("projection_state", schema=_SCHEMA)}
+    checked = conn.execute(text(
+        "SELECT 1 FROM pg_constraint WHERE conrelid = CAST(:ps AS regclass) "
+        "AND conname = 'ck_ps_read_mode'"), {"ps": ps}).first() is not None
+    if "read_mode" in present and checked:
+        return
+    conn.execute(text(f"ALTER TABLE {ps} ADD COLUMN IF NOT EXISTS read_mode TEXT"))
+    conn.execute(text(f"ALTER TABLE {ps} DROP CONSTRAINT IF EXISTS ck_ps_read_mode"))
+    conn.execute(text(f"ALTER TABLE {ps} ADD CONSTRAINT ck_ps_read_mode CHECK "
+                      "(read_mode IS NULL OR read_mode IN ('latest','in_place','beside'))"))
 
 
 def backfill_ps_served(conn) -> None:

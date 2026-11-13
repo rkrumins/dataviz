@@ -823,7 +823,8 @@ async def get_alignment_analysis(
                    GraphORM.main_head_commit_seq,
                    ProjectionStateORM.last_error,
                    ProjectionStateORM.status,
-                   ProjectionStateORM.served_commit_seq)
+                   ProjectionStateORM.served_commit_seq,
+                   ProjectionStateORM.read_mode)
             .join(GraphORM, GraphORM.id == ProjectionStateORM.graph_id)
             .where(GraphORM.data_source_id == ds_id,
                    ProjectionStateORM.falkor_graph_name.isnot(None))
@@ -833,9 +834,11 @@ async def get_alignment_analysis(
             proj_error = _proj_row[2] or None
             if _proj_row[0] is not None and _proj_row[1] is not None:
                 proj_behind = max(0, int(_proj_row[1]) - int(_proj_row[0]))
+                from backend.app.services.versioning import build_policy
                 from backend.app.services.versioning.service import serving_seq
+                _mode = build_policy.read_mode_of(_proj_row[5], await build_policy.resolve())
                 proj_serving = serving_seq(int(_proj_row[0]), int(_proj_row[1]), _proj_row[3],
-                                           _proj_row[4]) is not None
+                                           _proj_row[4], build_policy.max_lag_of(_mode)) is not None
     except Exception:  # versioning schema absent (test contexts) — never break Data health
         _proj_row = None
     # None means UNKNOWN (not versioned, unpinned, or the store could not be

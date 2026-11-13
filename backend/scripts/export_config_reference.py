@@ -245,6 +245,17 @@ NOTES: dict[str, tuple[str, str | None]] = {
         "the graph from a memo for seconds. `0` treats such a streak as a failover, as before.",
         None,
     ),
+    "GRAPHVER_READ_MODE": (
+        "What readers of a versioned graph get while its next version is written into FalkorDB, "
+        "for every graph that doesn't set its own: `latest` (always the newest published version: "
+        "from Postgres until FalkorDB holds it, slower on a large graph), `in_place` (the version "
+        "FalkorDB last finished, while the next is written into the same key; readers may see part "
+        "of it) or `beside` (exactly that version, while the next is built in a second key, then "
+        "one switch; needs New-version builds on, and room for a second copy). A system "
+        "administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version "
+        "builds, and per graph.",
+        None,
+    ),
     "GRAPHVER_ROUTE_POOL_SIZE": (
         "Connections kept, per process, in the small pool that routes every read of a versioned "
         "graph (its key, its watermark, its main branch). It is apart from `GRAPHVER_POOL_SIZE`, so "

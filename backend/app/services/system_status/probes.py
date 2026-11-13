@@ -1333,7 +1333,7 @@ def _projection_rows(forks: bool = False):
             ProjectionStateORM.updated_at, ProjectionStateORM.retired_keys,
             ProjectionStateORM.residency, ProjectionStateORM.evicted_reason,
             ProjectionStateORM.last_read_at, ProjectionStateORM.size_bytes,
-            ProjectionStateORM.rehydrating_since,
+            ProjectionStateORM.rehydrating_since, ProjectionStateORM.read_mode,
         )
         .select_from(GraphORM)
         .outerjoin(ProjectionStateORM, ProjectionStateORM.graph_id == GraphORM.id)
@@ -1486,6 +1486,9 @@ async def list_versioned_graphs(
 
     live = set(present_ids)
     directory = await _resolve_data_sources([r.data_source_id for r in page])
+    from backend.app.services.versioning import build_policy
+
+    policy = await build_policy.resolve()
 
     def residency_of(r) -> dict:
         """Residency (doc 17): its class, whether its key is in FalkorDB, why it was evicted, its
@@ -1517,6 +1520,11 @@ async def list_versioned_graphs(
                              "retireAfter": e["retireAfter"], "afterSeq": e["afterSeq"]}
                             for e in r.retired_keys or []],
             **residency_of(r),
+            # What its readers get while a newer version lands: its own mode (None: the
+            # platform's) and the one in force. A fork follows its root's.
+            "readMode": None if r.fork_parent_graph_id is not None else r.read_mode,
+            "readModeEffective": None if r.fork_parent_graph_id is not None
+            else build_policy.read_mode_of(r.read_mode, policy),
         } for r in page],
         "nextCursor": page[-1].id if more else None,
     }

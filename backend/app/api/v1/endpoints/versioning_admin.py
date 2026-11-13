@@ -596,6 +596,56 @@ async def _no_rollup_job(session: AsyncSession, data_source_id: str) -> None:
                              "finishes")
 
 
+class ReadModeRequest(BaseModel):
+    mode: Optional[Literal["latest", "in_place", "beside"]] = Field(
+        ..., description="latest, in_place or beside; null takes the platform's (New-version "
+                         "builds' readMode)")
+
+
+@router.put("/graphs/{graph_id}/read-mode",
+            summary="Set what a versioned graph's readers get while a new version lands")
+async def set_graph_read_mode(
+    graph_id: str,
+    body: ReadModeRequest,
+    user: User = Depends(requires("system:admin")),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict:
+    """Availability against consistency, for one graph: ``latest`` (always the newest published
+    version, from Postgres until FalkorDB holds it), ``in_place`` (the version FalkorDB last
+    finished, while the next is written into the same key) or ``beside`` (exactly that version,
+    while the next is built in a second key, then one switch); null takes the platform's. A fork
+    follows its root (409 ``not_for_forks``). ``beside`` needs a key the platform owns: a customer's
+    own key is never built beside (422 ``read_mode_unavailable``). The next read goes by it.
+    Recorded with the mode before and after."""
+    meta = await get_versioning_service().get_graph(graph_id)
+    if meta is None:
+        raise HTTPException(status_code=404, detail=f"unknown graph {graph_id}")
+    if meta.get("fork_parent_graph_id"):
+        raise HTTPException(status_code=409, detail={
+            "type": "not_for_forks",
+            "message": "a fork reads through its root's key: set the read mode on the root"})
+    svc = get_versioning_service()
+    if body.mode == "beside" and not (await svc.projection_watermark(graph_id)).get(
+            "owns_falkor_graph"):
+        raise HTTPException(status_code=422, detail={
+            "type": "read_mode_unavailable",
+            "message": "this graph is read from your own FalkorDB key, which is never copied or "
+                       "built beside: choose Always the latest, or Keep serving, update in place"})
+    found, before = await svc.set_read_mode(graph_id, body.mode)
+    if not found:
+        raise HTTPException(status_code=409, detail={
+            "type": "not_projected", "message": "this graph has no FalkorDB key yet"})
+    if before != body.mode:
+        await recorder.record_for_request(
+            session, "platform.versioning.read_mode_changed",
+            details={"graphId": graph_id, "workspaceId": meta["workspace_id"],
+                     "dataSourceId": meta["data_source_id"], "from": before, "to": body.mode},
+            best_effort=True,   # the mode is already set
+        )
+    wm = await svc.projection_watermark(graph_id)
+    return {"graphId": graph_id, "readMode": body.mode, "readModeEffective": wm["read_mode"]}
+
+
 class ResidencyClassRequest(BaseModel):
     residency_class: Literal["always", "standard", "coldline"] = Field(..., alias="class")
 
