@@ -1366,6 +1366,26 @@ class FalkorProjector:
             )).first()
         return tuple(row) if row is not None else None
 
+    async def _restore_served(self, graph_id: str, epoch: int, seq: int, *, via: str) -> bool:
+        """Record that the key holds version ``seq`` of main whole (its marker's), while the row is
+        still at ``epoch`` and records none: a key that last published before the column existed.
+        Reads of main then stay on the key, at that version, instead of going to Postgres. The
+        epoch isn't moved, so the pass's own claim still holds. True if it was recorded."""
+        async with self._session() as s:
+            row = (await s.execute(
+                update(ProjectionStateORM)
+                .where(ProjectionStateORM.graph_id == graph_id, ProjectionStateORM.epoch == epoch,
+                       ProjectionStateORM.served_commit_seq.is_(None))
+                .values(served_commit_seq=seq)
+                .returning(ProjectionStateORM.graph_id)
+                .execution_options(synchronize_session=False))).first()
+        if row is not None:
+            from backend.app.jobs.metrics import increment
+            increment("graphver_served_restored_total", via=via)
+            logger.info("projection of %s: served version %s restored from its key's marker (%s)",
+                        graph_id, seq, via)
+        return row is not None
+
     async def _forget_served(self, graph_id: str, mine: int) -> None:
         """The key holds no version of main (``served_commit_seq``), while the row is this pass's
         (epoch ``mine``): reads of main go to Postgres until a pass publishes into it."""
@@ -1491,6 +1511,8 @@ class FalkorProjector:
             from_seq = ps.projected_commit_seq
             to_seq = max(ps.target_commit_seq, graph.main_head_commit_seq)
             seen_epoch = ps.epoch
+            # The version of main the key holds whole: what reads of main see while it catches up.
+            served = getattr(ps, "served_commit_seq", None)
             # The passes before this one that failed in a row under pressure (the escalation's).
             pressure_failures = getattr(ps, "pressure_failures", 0)
             name = ps.falkor_graph_name or self.default_graph_name(graph_id)
@@ -1551,14 +1573,27 @@ class FalkorProjector:
             # the switch cannot be read: nothing is written unadmitted on a guess. A key holding the
             # cursor of a rebuild that stopped at a page is no first seed, also once a pass that
             # failed or was cancelled after it has left the graph idle: this pass resumes it in
-            # place.
+            # place. Nor is a key that holds a version of main (a rebuild, or a full replay a
+            # verify held back): it is reconciled in place while reads stay on it, at that version,
+            # rather than reloaded into a fresh key while they go to Postgres.
             try:
-                found = await _read_cursor(await self._graph_client(name, provider_id))
+                gate_client = await self._graph_client(name, provider_id)
+                found = await _read_cursor(gate_client)
+                exists, marker_seq = await read_projection_marker(gate_client)
             except Exception:                            # out of reach: nothing known to resume
-                found = None
-            if not _resumes(found, 0, to_seq) and await self._queue_first_seed(graph_id,
-                                                                              seen_epoch):
+                found, exists, marker_seq = None, None, None
+            if (exists is not False and served is None and marker_seq is not None
+                    and marker_seq > 1
+                    and await self._restore_served(graph_id, seen_epoch, marker_seq,
+                                                   via="first_seed_gate")):
+                served = marker_seq
+            holds = exists is not False and served is not None
+            if (not holds and not _resumes(found, 0, to_seq)
+                    and await self._queue_first_seed(graph_id, seen_epoch)):
                 return {"projected": 0, "applied": 0, "noop": True, "skipped": "waiting_capacity"}
+            if holds and not _resumes(found, 0, to_seq):
+                from backend.app.jobs.metrics import increment
+                increment("graphver_projection_first_seed_avoided_total")
 
         # Claim the row before touching FalkorDB. Losing the claim means something reset the
         # watermark since the read (an evict, a rebuild, a repin): leave the key alone and let the
@@ -1579,9 +1614,15 @@ class FalkorProjector:
             client = await self._graph_client(name, provider_id)
             # A full pass on a key that is gone (lost, and rebuilt before liveness saw it) writes
             # it from nothing: it holds no version to serve meanwhile, so reads go to Postgres.
-            # Read first, before any GRAPH.QUERY below makes the key again.
-            if from_seq <= 0 and (await read_projection_marker(client))[0] is False:
-                await self._forget_served(graph_id, mine)
+            # Read first, before any GRAPH.QUERY below makes the key again. A key that last
+            # published before served_commit_seq existed holds the version its marker names: the
+            # rebuild serves that meanwhile, not Postgres.
+            if from_seq <= 0:
+                exists, marker_seq = await read_projection_marker(client)
+                if exists is False:
+                    await self._forget_served(graph_id, mine)
+                elif served is None and marker_seq is not None and marker_seq > 1:
+                    await self._restore_served(graph_id, mine, marker_seq, via="full_pass")
             if unspelled:
                 await self._learn_spelling(client, graph_id)
             # What earlier passes quarantined goes first, so this pass's own writes land after it. A
@@ -1943,7 +1984,8 @@ class FalkorProjector:
             rows = (await s.execute(
                 select(ProjectionStateORM.graph_id, ProjectionStateORM.falkor_graph_name,
                        ProjectionStateORM.falkor_provider, ProjectionStateORM.projected_commit_seq,
-                       ProjectionStateORM.epoch, ProjectionStateORM.owns_falkor_graph)
+                       ProjectionStateORM.epoch, ProjectionStateORM.owns_falkor_graph,
+                       ProjectionStateORM.served_commit_seq)
                 .join(GraphORM, GraphORM.id == ProjectionStateORM.graph_id)
                 .where(
                     ProjectionStateORM.status == "idle",
@@ -1963,7 +2005,7 @@ class FalkorProjector:
         residency_on = await residency_policy.switch_state() is not False
 
         async def _one(gid, name, provider_id, projected, epoch,
-                       owned) -> Optional[Dict[str, object]]:
+                       owned, served) -> Optional[Dict[str, object]]:
             async with sem:
                 try:
                     client = await self._graph_client(name, provider_id)
@@ -1974,6 +2016,10 @@ class FalkorProjector:
                     return None
                 to_seq = liveness_reset_to(exists, seq, projected) if exists is not None else None
                 if exists and to_seq is None:
+                    if served is None and seq is not None:
+                        # Holds its watermark whole (its marker says so), and last published
+                        # before the column existed: recorded, so a rebuild keeps serving it.
+                        await self._restore_served(gid, epoch, projected, via="liveness")
                     await self._ask_for_first_summaries(gid, client, projected)
             if exists is None:
                 return None

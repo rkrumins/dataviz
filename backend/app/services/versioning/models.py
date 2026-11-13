@@ -1002,6 +1002,9 @@ def _ensure_schema_upgrades(conn) -> None:
                   lambda: ensure_ps_pressure_failures_column(conn), required=True)
     _bounded_step(conn, "projection_state.served_commit_seq was not added",
                   lambda: ensure_ps_served_column(conn), required=True)
+    # 20261113_1000_gv_ps_served_fill. Not required: the projector restores a row it missed.
+    _bounded_step(conn, "projection_state.served_commit_seq was not filled",
+                  lambda: backfill_ps_served(conn))
     _bounded_step(conn, "import_rows.code was not added",
                   lambda: ensure_import_rows_code_column(conn), required=True)
     _bounded_step(conn, "jobs.allow_mass_delete was not added",
@@ -1195,6 +1198,26 @@ def ensure_ps_served_column(conn) -> None:
         return
     conn.execute(text(f'ALTER TABLE "{_SCHEMA}"."projection_state" '
                       "ADD COLUMN IF NOT EXISTS served_commit_seq BIGINT"))
+
+
+def backfill_ps_served(conn) -> None:
+    """Fill ``projection_state.served_commit_seq`` for a graph whose key holds a published version
+    while the column, added after it last published, is still NULL: that version is its watermark.
+    Left NULL, a rebuild of the graph (the watermark at 0) sends its reads to Postgres for the whole
+    rebuild. A row already at 0 can't be filled from here: the projector restores it from the
+    key's marker. Only pinned keys whose status serves a version; a no-op once filled, and without
+    the table or the column."""
+    inspector = sa_inspect(conn)
+    if not inspector.has_table("projection_state", schema=_SCHEMA):
+        return
+    if "served_commit_seq" not in {c["name"] for c in inspector.get_columns("projection_state",
+                                                                            schema=_SCHEMA)}:
+        return
+    conn.execute(text(
+        f'UPDATE "{_SCHEMA}"."projection_state" SET served_commit_seq = projected_commit_seq '
+        "WHERE served_commit_seq IS NULL AND projected_commit_seq > 1 "
+        "AND status NOT IN ('evicted', 'waiting_capacity', 'rehydrating', 'reseeding') "
+        "AND falkor_graph_name IS NOT NULL AND falkor_graph_name <> 'gv_' || graph_id"))
 
 
 def ensure_ps_reseeding_status(conn) -> None:

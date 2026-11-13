@@ -131,3 +131,79 @@ async def _run_a_lost_key_rebuilt_before_liveness_saw_it_serves_nothing_while_re
 
 def test_a_lost_key_rebuilt_before_liveness_saw_it_serves_nothing_while_rewritten():
     asyncio.run(_run_a_lost_key_rebuilt_before_liveness_saw_it_serves_nothing_while_rewritten())
+
+
+async def _forget_column(gid: str, **values) -> None:
+    """The row as a graph that last published before served_commit_seq existed has it."""
+    from sqlalchemy import update
+    async with db.graphver_session() as s:
+        await s.execute(update(ProjectionStateORM).where(ProjectionStateORM.graph_id == gid)
+                        .values(served_commit_seq=None, **values))
+        await s.commit()
+
+
+async def _run_a_graph_published_before_the_column_keeps_serving() -> None:
+    from backend.app.services.versioning.models import backfill_ps_served
+    svc, fake = GraphVersioningService(), LiveFalkor()
+
+    # The upgrade fills an idle row from its watermark.
+    gid, proj, _graph = await _seed(svc, fake)
+    await _forget_column(gid)
+    assert await _serving(svc, gid) == (3, "falkordb", True), "served at its watermark meanwhile"
+    async with db.get_engine().begin() as conn:
+        await conn.run_sync(backfill_ps_served)
+    assert await _stored(gid) == 3
+
+    # A rebuild of a row the upgrade missed: the pass restores it from the key's marker before it
+    # writes anything, so reads stay on the key, not on Postgres.
+    gid, proj, graph = await _seed(svc, fake)
+    probed = _ProbedGraph()
+    probed.check = None
+    name = next(n for n, g in fake.graphs.items() if g is graph)
+    probed.nodes, probed.edges, probed._ids, probed.proj_meta = (graph.nodes, graph.edges,
+                                                                 graph._ids, graph.proj_meta)
+    fake.graphs[name] = probed
+    assert await svc.request_projection_rebuild(gid)
+    await _forget_column(gid)
+    assert await _serving(svc, gid) == (None, "postgres", False), "what the upgrade can't fill"
+
+    async def check():
+        return await _serving(svc, gid)
+    probed.check = check
+    assert (await proj.project_graph(gid))["projected"] == 3
+    assert probed.at_probe == [(3, "falkordb", False)], "restored from the marker first"
+    assert await _serving(svc, gid) == (3, "falkordb", True)
+
+    # Liveness fills an idle row whose key's marker says it holds its watermark.
+    gid, proj, _graph = await _seed(svc, fake)
+    await _forget_column(gid)
+    assert await _ours(proj, gid) == []
+    assert await _stored(gid) == 3
+    await db.dispose_engine()
+
+
+def test_a_graph_published_before_the_column_keeps_serving():
+    asyncio.run(_run_a_graph_published_before_the_column_keeps_serving())
+
+
+async def _run_a_held_back_full_replay_is_reconciled_in_place_not_reloaded(monkeypatch) -> None:
+    from backend.app.services.versioning import residency_policy
+    svc, fake = GraphVersioningService(), LiveFalkor()
+    gid, proj, _graph = await _seed(svc, fake)
+
+    async def on(session=None):
+        return True
+    monkeypatch.setattr(residency_policy, "switch_state", on)
+    # A full replay a verify held back left the row idle at 0, its cursor cleared: with residency
+    # on, the next pass used to queue it as a first seed, reloaded into a fresh key while reads
+    # went to Postgres. The key still holds seq 3, so it is reconciled in place, serving 3.
+    await _forget_column(gid, projected_commit_seq=0, status="idle")
+    res = await proj.project_graph(gid)
+    assert res.get("skipped") != "waiting_capacity", res
+    assert res["projected"] == 3, res
+    assert await _serving(svc, gid) == (3, "falkordb", True)
+    await db.dispose_engine()
+
+
+def test_a_held_back_full_replay_is_reconciled_in_place_not_reloaded(monkeypatch):
+    asyncio.run(_run_a_held_back_full_replay_is_reconciled_in_place_not_reloaded(monkeypatch))
