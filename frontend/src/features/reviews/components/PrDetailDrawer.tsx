@@ -176,6 +176,10 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
   const [reverting, setReverting] = useState(false)
   // A fork's review merges into its parent, the review's target graph (a draft's, into its own).
   const forkReview = !!pr && !isDraftMr(pr)
+  // The commit the merge landed on main as. A draft's review has one only when its merge landed on
+  // main (`resultingCommitSeq`): one that changed nothing, merged on an older server, recorded its
+  // draft's own head, which isn't on main.
+  const mergedAs = pr?.resultingCommitId && (forkReview || pr.resultingCommitSeq != null) ? pr.resultingCommitId : null
   const forksOn = useFeature('forksEnabled')
   const forksOff = forkReview && !forksOn
   // Merged by a job: nothing changes it until the job lands it or hands it back.
@@ -300,7 +304,7 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
       // ever seeing it. Say that, rather than presenting a bypassed review as a reviewed merge.
       const bypassed = pr.mergedVia === 'direct_publish'
       const who = ownerName(pr.mergedBy, pr.userNames)
-      const sha = pr.resultingCommitId ? ` · ${pr.resultingCommitId.slice(0, 8)}` : ''
+      const sha = mergedAs ? ` · ${mergedAs.slice(0, 8)}` : ''
       evs.push({
         Icon: bypassed ? ShieldAlert : GitMerge,
         text: bypassed
@@ -312,7 +316,7 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
     }
     if (pr.status === 'closed') evs.push({ Icon: XCircle, text: `Closed by ${ownerName(pr.closedBy, pr.userNames)}`, time: pr.closedAt ?? pr.updatedAt, tint: 'bg-ink-muted' })
     return evs
-  }, [pr])
+  }, [pr, mergedAs])
 
   return createPortal(
     <>
@@ -685,7 +689,7 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
         )}
 
         {/* Merged terminal state — the one action left is undoing the merge. */}
-        {pr && pr.status === 'merged' && canManage && canPublish && versioningEnabled && pr.resultingCommitId && (
+        {pr && pr.status === 'merged' && canManage && canPublish && versioningEnabled && mergedAs && (
           <div className="px-5 py-3.5 border-t border-glass-border/60 flex items-center justify-between gap-3">
             <p className="text-[12px] text-ink-muted leading-snug">
               Merged the wrong thing? Undo it as a new revision — history is kept.
@@ -698,11 +702,11 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
             </button>
           </div>
         )}
-        {pr && pr.resultingCommitId && (
+        {pr && mergedAs && (
           <RevertDialog
             open={reverting}
             commit={{
-              commit_id: pr.resultingCommitId,
+              commit_id: mergedAs,
               message: `Merge: ${derivePrTitle(pr)}`,
               kind: 'squash_publish',
               actor: pr.mergedBy ?? pr.actor,

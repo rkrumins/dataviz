@@ -2255,7 +2255,9 @@ export interface PublishResult {
 }
 
 /** An answer as `PublishResult` says it; one from a server that didn't say its outcome, read from
- *  its commit (none, or a blank one, committed nothing). */
+ *  its commit (none, or a blank one, committed nothing). Such an older server answered a publish
+ *  that changed nothing with its draft's own head, not on main, whenever the draft had one: this
+ *  reads that as published. */
 function asResult(a: { commitId?: string | null; revisionId?: number | null; outcome?: PublishOutcome | null }): PublishResult {
   const commitId = a.commitId || null
   return { commitId, revisionId: a.revisionId ?? null, outcome: a.outcome ?? (commitId ? 'published' : 'unchanged') }
