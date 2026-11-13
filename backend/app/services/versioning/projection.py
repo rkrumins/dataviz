@@ -566,6 +566,41 @@ def _owe_summaries():
                 else_=func.jsonb_build_object()).op("||")(func.jsonb_build_object("moved", _now()))
 
 
+#: How far before a graph's last publish a rollup job's end still counts as meeting its next window
+#: (:func:`_rollups_ran_since`): the jobs table is stamped by each pod's own clock.
+_ROLLUP_RACE_SKEW_SECS = 60
+
+
+async def _rollups_ran_since(data_source_id: Optional[str], since: Optional[str]) -> bool:
+    """Whether a lineage-summaries job for the data source may have met a window whose raw writes
+    began after ``since`` (the graph's last publish): one pending or running, or one that ended
+    since then. Such a job reads the raw graph and then writes every cell from what it read, so
+    it may write over the window's deltas, bring back cells they deleted, or count the window's
+    edges a second time on top of them. True when that cannot be read (fail closed): one more
+    job is the cost of a wrong True, summaries wrong until the next one that of a wrong False."""
+    if not data_source_id:
+        return False
+    from datetime import datetime, timedelta
+
+    from backend.app.db.engine import get_readonly_session
+    from backend.app.services.aggregation.models import AggregationJobORM
+
+    active = AggregationJobORM.status.in_(("pending", "running"))
+    try:
+        if since:
+            floor = (datetime.fromisoformat(since)
+                     - timedelta(seconds=_ROLLUP_RACE_SKEW_SECS)).isoformat()
+            active = or_(active, AggregationJobORM.completed_at >= floor)
+        async with get_readonly_session() as s:
+            return (await s.execute(select(AggregationJobORM.id).where(
+                AggregationJobORM.data_source_id == data_source_id, active).limit(1))
+            ).scalar_one_or_none() is not None
+    except Exception:  # noqa: BLE001
+        logger.warning("could not tell whether a rollup job met a window of %s", data_source_id,
+                       exc_info=True)
+        return True
+
+
 #: The tombstone sweep's own watermark on the pass marker (``_sweep_tombstoned``): every delete at or
 #: below it is already swept. A marker created by this write alone has no ``seq``, which liveness
 #: reads as "never marked" and leaves alone.
@@ -1634,6 +1669,9 @@ class FalkorProjector:
             from_seq = ps.projected_commit_seq
             to_seq = max(ps.target_commit_seq, graph.main_head_commit_seq)
             seen_epoch = ps.epoch
+            # Every raw write of this window came after the last publish: a rollup job that ended
+            # before it met none of them (``_rollups_ran_since``).
+            last_published = getattr(ps, "last_projected_at", None)
             # The version of main the key holds whole: what reads of main see while it catches up.
             served = getattr(ps, "served_commit_seq", None)
             # The passes before this one that failed in a row under pressure (the escalation's).
@@ -1821,6 +1859,11 @@ class FalkorProjector:
                     # what the reconcile has just written: moving them by its difference would
                     # count it twice. The job rebuilds them.
                     reconciled = {**reconciled, "rollups": "stale"}
+                elif (reconciled.get("rollups") == "applied"
+                      and await _rollups_ran_since(data_source_id, last_published)):
+                    # As for a window: a summaries job that met the reconcile may have written
+                    # over the cells it moved, or counted its writes as well.
+                    reconciled = {**reconciled, "rollups": "stale"}
             elif paged:
                 dropped, structural, paged_writes = await self._apply_paged(
                     client, graph_id, main_id, from_seq, to_seq, level_map=level_map,
@@ -1854,6 +1897,11 @@ class FalkorProjector:
                 try:
                     if not await self._apply_rollups(client, rollup_pairs, from_seq, to_seq):
                         rollup_pairs = "stale"           # window overlapped a prior application
+                    elif await _rollups_ran_since(data_source_id, last_published):
+                        # A summaries job met this window: it may have written over these deltas
+                        # or counted the window's edges as well. The batch job derives them again,
+                        # after it (an ask while it still runs stays owed until it ends).
+                        rollup_pairs = "stale"
                 except Exception:                       # pragma: no cover - infra
                     logger.exception("rollup apply failed for %s — queuing rebuild", graph_id)
                     rollup_pairs = "stale"
@@ -2842,9 +2890,16 @@ class FalkorProjector:
         try:
             sets = await self._edge_types_resolver(self._svc, graph.id)
         except Exception:                                # pragma: no cover - app-layer resolution
-            logger.warning("rollup maintenance skipped for %s: edge-type resolution failed",
-                           graph.id, exc_info=True)
-            return None
+            logger.warning("rollup maintenance handed to the batch job for %s: edge-type "
+                           "resolution failed", graph.id, exc_info=True)
+            return "stale"
+        if sets is UNRESOLVED:
+            # The ontology could not be read, so nothing can tell which of this window's edges are
+            # lineage: skipping its deltas would lose them for good, since the next window's
+            # apply moves the marker past it. The batch job derives them again instead.
+            logger.warning("rollup maintenance handed to the batch job for %s: the ontology "
+                           "could not be read", graph.id)
+            return "stale"
         if not sets:
             return None
         cont_types = {t.upper() for t in (sets[0] or [])}
@@ -3179,6 +3234,12 @@ class FalkorProjector:
             # storage-regime probe clean (a NULL sourceLevel row makes every reader fall back to
             # stored-only answers for up to 5 minutes). Each cell's weight is the absolute value
             # computed above, so a chunk sent again in halves writes the same.
+            landed = [0]
+
+            def written(_part, res) -> None:
+                rows = getattr(res, "result_set", None) or []
+                landed[0] += int(rows[0][0] or 0) if rows and rows[0] else 0
+
             await self._laddered(
                 client, "rollup_write",
                 f"UNWIND $batch AS item "
@@ -3190,8 +3251,16 @@ class FalkorProjector:
                 f"    r.sourceDepth = coalesce(item.sd, r.sourceDepth), "
                 f"    r.targetDepth = coalesce(item.td, r.targetDepth), "
                 f"    r.levelDigest = coalesce(item.dg, r.levelDigest), "
-                f"    r.gvSeq = item.seq, r.latestUpdate = timestamp()",
-                upserts)
+                f"    r.gvSeq = item.seq, r.latestUpdate = timestamp() "
+                f"RETURN count(r)",
+                upserts, on_result=written)
+            if landed[0] < len(upserts):
+                # A cell whose end is not in the key (held in quarantine, or under another label)
+                # matched nothing and was not written: moving the marker past it would lose it for
+                # good. The batch job derives the cells instead.
+                logger.warning("%d of %d rollup cells found no end in the key: handed to the "
+                               "batch job", len(upserts) - landed[0], len(upserts))
+                return False
             await self._laddered(
                 client, "rollup_delete",
                 f"UNWIND $batch AS item "
@@ -3568,7 +3637,10 @@ class FalkorProjector:
                 pairs[(su, tu)] = {**v, "slb": label_by_urn.get(su) or "Entity",
                                    "tlb": label_by_urn.get(tu) or "Entity",
                                    **({"dg": digest} if digest is not None else {})}
-            await self._write_rollup_deltas(client, pairs, to_seq, guard_from_seq=None)
+            if not await self._write_rollup_deltas(client, pairs, to_seq, guard_from_seq=None):
+                # A cell found no end in the key: the job derives them, and ``reconciling`` stays
+                # set, so the rollups read untrusted until it has.
+                rollups = "stale"
         if plan is not None and not plan.stale and rollups != "stale":
             # The rollups now describe main at to_seq: the next publish window continues
             # from here.

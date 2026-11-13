@@ -73,6 +73,7 @@ class _Store:
             rows = [[item["s"], item["t"], 10, [], 0] for item in batch]
         elif "MERGE (a)-[r:AGGREGATED]->(b)" in cypher:
             self.upserts.extend(batch)
+            rows = [[len(batch)]]                        # the key holds every end: each lands
         return type("R", (), {"result_set": rows})()
 
 

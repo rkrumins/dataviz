@@ -257,6 +257,7 @@ tests/test_revision_engine_routing.py
 tests/test_revision_gate.py
 tests/test_rollup_health.py
 tests/test_rollup_rebuild_hook_proxy.py
+tests/test_rollup_window_safety.py
 tests/test_run_step_ledger.py
 tests/test_s3_object_store.py
 tests/test_saved_view_filters.py

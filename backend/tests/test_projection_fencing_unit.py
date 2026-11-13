@@ -152,6 +152,9 @@ def _projector(monkeypatch, *, ps=None, bootstrap_status=None, claim=(5, 2), fin
     async def nudge(graph_id):
         seen["nudge"].append(graph_id)
 
+    async def no_summaries_job(data_source_id, since):
+        return False
+
     monkeypatch.setattr(proj, "_claim", _claim)
     monkeypatch.setattr(proj, "_finish", _finish)
     monkeypatch.setattr(proj, "_yield_superseded", _yield)
@@ -164,6 +167,7 @@ def _projector(monkeypatch, *, ps=None, bootstrap_status=None, claim=(5, 2), fin
     monkeypatch.setattr(proj, "_verify_and_heal", verify)
     monkeypatch.setattr(projection, "reconcile_interrupted", not_interrupted)
     monkeypatch.setattr(projection, "nudge_projection", nudge)
+    monkeypatch.setattr(projection, "_rollups_ran_since", no_summaries_job)
     return proj, ps, client, seen
 
 
