@@ -34,7 +34,7 @@ from sqlalchemy import Text, any_, bindparam, case, func, literal, null, or_, se
 from sqlalchemy.dialects.postgresql import ARRAY
 
 from . import build_policy, candidates, config, db, keymigrate, residency_policy
-from .errors import AmbiguousSpelling
+from .errors import AmbiguousSpelling, LockBusy
 from .falkor_indexes import ensure_urn_indexes
 from .merkle import content_hash
 from .reconcile import (
@@ -2261,10 +2261,10 @@ class FalkorProjector:
         building.add(graph_id)
         build_token, held_token = _PASS_BUILD.set(build_id), _PASS_HELD.set(None)
         try:
-            if step == "queued":
+            if step in ("queued", "copying"):
+                # Found copying: its pod stopped mid-copy, or a later step failed and it starts
+                # again from a fresh copy. Either way it asks for room again first.
                 return await self._build_queued(graph_id, ps, graph, state, policy, noop)
-            if step == "copying":
-                return await self._build_copy(graph_id, ps, graph, state, policy, noop)
             if step == "catching_up":
                 return await self._build_catch_up(graph_id, ps, graph, state, policy, noop)
             if step == "switching":
@@ -2281,6 +2281,12 @@ class FalkorProjector:
         except _BuildRefused as refused:
             await self._drop_build(graph_id, build_id, str(refused))
             return noop
+        except LockBusy as busy:
+            # A capacity pass holds the lock admission takes: not a failure, asked again shortly.
+            retry_at = (datetime.now(timezone.utc) + timedelta(seconds=15)).isoformat()
+            await self._svc.update_candidate(graph_id, build_id, waiting=str(busy)[:200],
+                                             retryAt=retry_at)
+            return {**noop, "skipped": "build_waiting", "retryAt": retry_at}
         except Exception as exc:
             attempts = int(state.get("attempts") or 0) + 1
             logger.warning("build %s of %s failed at %s (attempt %d): %s", build_id, graph_id,
@@ -2301,33 +2307,46 @@ class FalkorProjector:
             building.discard(graph_id)
 
     async def _build_queued(self, graph_id, ps, graph, state, policy, noop) -> Dict[str, object]:
-        """A queued build copies once the serving key's node has room for a copy
-        (``residency.copy_room``: ``copyMarginPct``, ``copyMaxBytes``) and no lineage-summaries
-        job is building the serving key's summaries, which a copy would take half-written.
-        Otherwise ``noRoomPolicy``: ``wait`` keeps serving and asks again shortly; ``in_place``
-        drops the build, and the change is written into the serving key, paced. Turned off
-        meanwhile, New-version builds drops a build that has not begun."""
+        """A queued build copies once the serving key's node has room for a copy, reserved for
+        it there until the copy lands (``residency.admit_build_copy``: ``copyMarginPct``,
+        ``copyMaxBytes``, under the capacity lock, so two builds never take the same room), and
+        no lineage-summaries job is building the serving key's summaries, which a copy would take
+        half-written. What an earlier attempt left under the build's name is dropped first, so it
+        does not count against the room. Otherwise ``noRoomPolicy``: ``wait`` keeps serving and
+        asks again shortly; ``in_place`` drops the build, and the change is written into the
+        serving key, paced. Turned off meanwhile, New-version builds drops a build that has not
+        begun."""
         from backend.app.jobs.metrics import increment
+        from backend.app.services.aggregation.admission import AggregationAdmission
+        from backend.app.services.aggregation.redis_client import get_redis
 
         from . import residency
         from .cache_manager import _rollups_running
 
         build_id = state["id"]
-        if await build_policy.switch_state() is False:
+        if state.get("step") == "queued" and await build_policy.switch_state() is False:
             raise _BuildRefused("New-version builds was turned off before the build began")
         no_room = True
         if policy["buildMode"] == "reseed":
             why = "builds that seed from Postgres come in a later release"
         else:
-            room = await residency.copy_room(
-                graph_id, ps.falkor_provider, ps.candidate_graph_name,
-                margin_pct=int(policy["copyMarginPct"]), max_bytes=int(policy["copyMaxBytes"]))
-            summarising = room.fits and await _rollups_running(graph.data_source_id)
-            if room.fits and not summarising:
-                await self._svc.update_candidate(graph_id, build_id, step="copying",
-                                                 waiting=None, retryAt=None)
-                return await self._build_copy(graph_id, ps, graph, {**state, "step": "copying"},
-                                              policy, noop)
+            name, provider = ps.candidate_graph_name, ps.falkor_provider
+            if (await read_projection_marker(await self._graph_client(name, provider)))[0]:
+                await self.drop_graph(name, provider)
+            room, held = await residency.admit_build_copy(
+                graph_id, provider, name, build_id, margin_pct=int(policy["copyMarginPct"]),
+                max_bytes=int(policy["copyMaxBytes"]))
+            try:
+                summarising = room.fits and await _rollups_running(graph.data_source_id)
+                if room.fits and not summarising:
+                    await self._svc.update_candidate(graph_id, build_id, step="copying",
+                                                     waiting=None, retryAt=None)
+                    return await self._build_copy(graph_id, ps, graph,
+                                                  {**state, "step": "copying"}, policy, noop)
+            finally:
+                # The copy landed (its node's memory now shows it), failed, or never began.
+                if held is not None:
+                    await AggregationAdmission(get_redis()).release(held)
             no_room = not room.fits
             why = (f"no room for a copy on its node ({room.why})" if no_room
                    else "a lineage-summaries job is building the serving key's summaries")
@@ -2338,7 +2357,9 @@ class FalkorProjector:
             increment("graphver_build_waiting_total", reason="room")
             logger.warning("build %s of %s has waited %ds: %s", build_id, graph_id, waited, why)
         retry_at = (datetime.now(timezone.utc) + timedelta(seconds=60)).isoformat()
-        await self._svc.update_candidate(graph_id, build_id, waiting=why[:200], retryAt=retry_at)
+        # Found copying, it is queued again: what it copied before is gone.
+        await self._svc.update_candidate(graph_id, build_id, step="queued", waiting=why[:200],
+                                         retryAt=retry_at)
         return {**noop, "skipped": "build_waiting", "retryAt": retry_at}
 
     async def _build_copy(self, graph_id, ps, graph, state, policy, noop) -> Dict[str, object]:

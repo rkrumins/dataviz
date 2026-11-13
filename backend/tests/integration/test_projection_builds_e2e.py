@@ -86,8 +86,13 @@ def _policy(**over):
 @pytest.fixture
 def builds_on(monkeypatch):
     """New-version builds on, a build for any window of more than one row, room for a copy, no
-    summaries job running. Returns a setter for the policy and the copy room."""
-    state = {"policy": _policy(), "room": Admitted(True, "node1", None, None), "switch": True}
+    summaries job running. Returns a setter for the policy and the copy room (an exception there
+    is raised by the admission), and what was reserved and given back: a copy's room is reserved
+    for its build when it fits (``("held", build id)``)."""
+    from backend.app.services.aggregation.admission import AggregationAdmission
+
+    state = {"policy": _policy(), "room": Admitted(True, "node1", None, None), "switch": True,
+             "reserved": [], "released": []}
 
     async def resolve(session=None):
         return state["policy"]
@@ -95,8 +100,16 @@ def builds_on(monkeypatch):
     async def switch(session=None):
         return state["switch"]
 
-    async def room(*a, **k):
-        return state["room"]
+    async def room(graph_id, provider, key, holder, **k):
+        if isinstance(state["room"], BaseException):
+            raise state["room"]
+        if not state["room"].fits:
+            return state["room"], None
+        state["reserved"].append(("held", holder))
+        return state["room"], ("held", holder)
+
+    async def release(self, held):
+        state["released"].append(held)
 
     async def no_job(_ds):
         return False
@@ -104,7 +117,8 @@ def builds_on(monkeypatch):
     monkeypatch.setattr(build_policy, "resolve", resolve)
     monkeypatch.setattr(build_policy, "current", lambda: state["policy"])
     monkeypatch.setattr(build_policy, "switch_state", switch)
-    monkeypatch.setattr(residency, "copy_room", room)
+    monkeypatch.setattr(residency, "admit_build_copy", room)
+    monkeypatch.setattr(AggregationAdmission, "release", release)
     monkeypatch.setattr(cache_manager, "_rollups_running", no_job)
     return state
 
@@ -320,3 +334,78 @@ async def _run_a_lost_build_key_is_copied_again_and_an_unrecorded_version_adopte
 
 def test_a_lost_build_key_is_copied_again_and_an_unrecorded_version_adopted(builds_on):
     asyncio.run(_run_a_lost_build_key_is_copied_again_and_an_unrecorded_version_adopted())
+
+
+async def _run_a_copys_room_is_held_while_it_copies_and_asked_for_again_after_a_restart(
+        state, monkeypatch) -> None:
+    from backend.app.services.versioning.errors import LockBusy
+
+    svc, fake = GraphVersioningService(), BuildFalkor()
+    gid, proj, serving = await _seed(svc, fake)
+    await _beside(svc, gid)
+    await _edit_publish(svc, gid, "a", _create("D", "E"), "a change")
+
+    # A capacity pass holds the lock admission takes: the build waits, no attempt counted.
+    state["room"] = LockBusy("a capacity pass is under way; try again shortly")
+    await proj.project_graph(gid)
+    ps = await _ps(gid)
+    build_id = ps.candidate_state["id"]
+    assert (ps.candidate_state["step"], ps.candidate_state["attempts"]) == ("queued", 0)
+    assert "capacity pass" in ps.candidate_state["waiting"] and ps.candidate_state["retryAt"]
+    assert serving.copies == 0 and state["reserved"] == []
+
+    # Room: reserved for the build while it copies, and given back once the copy has landed.
+    state["room"] = Admitted(True, "node1", None, None)
+    await _no_backoff(gid)
+    await proj.project_graph(gid)
+    ps = await _ps(gid)
+    assert ps.candidate_state["step"] == "catching_up" and serving.copies == 1
+    assert state["reserved"] == state["released"] == [("held", build_id)]
+
+    # Its pod stops mid-copy: the build is found copying, with what the copy left under its
+    # name. It asks for room again, and with none, waits, the leftover dropped meanwhile: no copy.
+    async with db.graphver_session() as s:
+        row = await s.get(ProjectionStateORM, gid)
+        row.candidate_state, row.candidate_seq = {**row.candidate_state, "step": "copying"}, None
+    state["room"] = Admitted(False, "node1", 1024, "capacity")
+    restarted = FalkorProjector(graph_client_factory=fake)
+    await restarted.project_graph(gid)
+    ps = await _ps(gid)
+    assert (ps.candidate_state["step"], ps.candidate_state["attempts"]) == ("queued", 0)
+    assert "no room" in ps.candidate_state["waiting"] and serving.copies == 1
+    assert not fake.graphs[ps.candidate_graph_name].exists, "the leftover is dropped"
+
+    # Room again: a fresh copy, its room held and given back, then on to the switch.
+    state["room"] = Admitted(True, "node1", None, None)
+    await _no_backoff(gid)
+    await restarted.project_graph(gid)
+    assert serving.copies == 2 and state["released"] == [("held", build_id)] * 2
+    await restarted.project_graph(gid)                  # caught up
+    await restarted.project_graph(gid)                  # switched
+    ps = await _ps(gid)
+    assert ps.candidate_state is None and ps.projected_commit_seq == 4
+    await _assert_matches_main(svc, fake, gid)
+
+    # A copy that fails gives its room back too.
+    async def broken(self, clone):
+        raise ConnectionError("the node went away mid-copy")
+
+    monkeypatch.setattr(CopyGraph, "copy", broken)
+    await _edit_publish(svc, gid, "a", _create("F", "G"), "another change")
+    await restarted.project_graph(gid)
+    ps = await _ps(gid)
+    second = ps.candidate_state["id"]
+    assert ps.candidate_state["attempts"] == 1 and "went away" in ps.candidate_state["error"]
+    assert state["released"][-1] == ("held", second) and len(state["reserved"]) == 3
+
+
+async def _no_backoff(gid: str) -> None:
+    async with db.graphver_session() as s:
+        row = await s.get(ProjectionStateORM, gid)
+        row.candidate_state = {**row.candidate_state, "retryAt": None}
+
+
+def test_a_copys_room_is_held_while_it_copies_and_asked_for_again_after_a_restart(
+        builds_on, monkeypatch):
+    asyncio.run(_run_a_copys_room_is_held_while_it_copies_and_asked_for_again_after_a_restart(
+        builds_on, monkeypatch))

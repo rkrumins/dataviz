@@ -102,3 +102,51 @@ def test_a_pass_with_no_build_and_a_small_window_never_asks_for_one(monkeypatch)
     monkeypatch.setattr(proj, "_queue_build", queue)
     asyncio.run(proj.project_graph("g1"))
     assert len(asked) == 1 and seen["claim"] == [("g1", 4, 3)]     # asked, then in place
+
+
+def test_a_copys_room_is_checked_and_reserved_in_one_step_under_the_capacity_lock(monkeypatch):
+    """Two builds never take the room one copy needs: the check and the reservation, in the
+    governor's ledger every admission counts, happen under the capacity lock; refused, nothing
+    is reserved."""
+    from contextlib import asynccontextmanager
+
+    from backend.app.services.aggregation import admission, redis_client
+    from backend.app.services.versioning import residency
+    from backend.app.services.versioning.residency import Admitted
+
+    events = []
+    answers = [(Admitted(True, "node1"), 1300), (Admitted(False, "node1", 5, "capacity"), 1300)]
+
+    @asynccontextmanager
+    async def admitting(wait_s=15.0):
+        events.append("lock")
+        yield
+        events.append("unlock")
+
+    async def copy_room(graph_id, provider, key, *, margin_pct, max_bytes):
+        events.append(("check", key, margin_pct, max_bytes))
+        return answers.pop(0)
+
+    class _Admission:
+        def __init__(self, redis):
+            pass
+
+        async def reserve(self, endpoint, holder, nbytes):
+            events.append(("reserve", endpoint, holder, nbytes))
+            return ("held", holder)
+
+    monkeypatch.setattr(residency, "admitting", admitting)
+    monkeypatch.setattr(residency, "_copy_room", copy_room)
+    monkeypatch.setattr(admission, "AggregationAdmission", _Admission)
+    monkeypatch.setattr(redis_client, "get_redis", lambda: None)
+
+    def admit():
+        return asyncio.run(residency.admit_build_copy("g1", None, "k#b1", "build_1",
+                                                      margin_pct=130, max_bytes=0))
+
+    assert admit() == (Admitted(True, "node1"), ("held", "build_1"))
+    assert events == ["lock", ("check", "k#b1", 130, 0), ("reserve", "node1", "build_1", 1300),
+                      "unlock"]
+    events.clear()
+    assert admit() == (Admitted(False, "node1", 5, "capacity"), None)
+    assert events == ["lock", ("check", "k#b1", 130, 0), "unlock"]

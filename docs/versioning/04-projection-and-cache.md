@@ -492,10 +492,14 @@ stateDiagram-v2
 - **The build's key** is the serving key's name plus `#b<k>` (`keymigrate.build_key`): the same hash
   tag, so it is in the same cluster slot, where `GRAPH.COPY` can copy into it. It is one of the
   graph's own keys (`is_owned_key`).
-- **Copying.** Once the node has room for a copy (`residency.copy_room`: the graph's size times
-  **Room a copy needs**, `copyMarginPct`, under the node's start mark; a graph larger than **Largest
-  graph copied** is never copied) and no lineage-summaries job is rewriting the serving key's
-  summaries, `GRAPH.COPY` copies the serving key, summaries and indexes included. The serving key
+- **Copying.** Once the node has room for a copy (`residency.admit_build_copy`: the graph's size
+  times **Room a copy needs**, `copyMarginPct`, under the node's start mark; a graph larger than
+  **Largest graph copied** is never copied) and no lineage-summaries job is rewriting the serving
+  key's summaries, `GRAPH.COPY` copies the serving key, summaries and indexes included. The room is
+  checked and reserved for the build in one step, under the capacity lock, in the ledger every
+  admission and capacity pass counts, and given back once the copy has landed or failed: two builds,
+  or a build and a load, never take the room one of them needs. A capacity pass holding the lock is
+  waited for, not counted as a failure. The serving key
   must hold its version whole (its marker, `served_commit_seq` and the watermark agree), or there is
   nothing exact to copy: the build is dropped and the change written in place.
 - **Catching up.** The commits since the copy are written into the build's key, in memory or a page
@@ -522,7 +526,9 @@ stateDiagram-v2
 - **Restarts.** Every step is recorded in `projection_state` (`candidate_graph_name`,
   `candidate_provider`, `candidate_seq`, `candidate_state`) and fenced on the build's id, and the build's
   key says what it holds, so a pass on any worker takes it up where it was. `GRAPH.COPY` finishes
-  even if its client goes away; a key under the build's name is dropped before a copy.
+  even if its client goes away. A build found copying (its pod stopped mid-copy, or a later step
+  failed) asks for room again; what an earlier attempt left under the build's name is dropped first,
+  so it neither counts against the room nor is taken for a copy.
 - **Metrics:** `graphver_builds_total{step=queued|copied|switched|dropped}`,
   `graphver_build_copy_seconds`, `graphver_build_waiting_total{reason=room}`.
 - **Not yet:** seeding a build from Postgres when no node has room for a copy (`buildMode`

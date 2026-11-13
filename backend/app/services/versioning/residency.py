@@ -764,31 +764,60 @@ async def copy_room(graph_id: str, provider: Optional[str], key: str, *, margin_
     after what is held there. Refused as admission refuses a load: an unsized graph or an
     unread master, one holding or taking a load; and a graph larger than ``max_bytes`` when it is
     set (``copyMaxBytes``, ``too_large``). No ``provider`` is the default one."""
+    return (await _copy_room(graph_id, provider, key, margin_pct=margin_pct,
+                             max_bytes=max_bytes))[0]
+
+
+async def _copy_room(graph_id: str, provider: Optional[str], key: str, *, margin_pct: int,
+                     max_bytes: int) -> Tuple[Admitted, int]:
+    """:func:`copy_room`'s answer, and the room the copy asks for (0 when refused unsized)."""
     provider = provider or config.DEFAULT_FALKOR_PROVIDER
     policy = await residency_policy.resolve()
     own = await gather(graph_ids=[graph_id])
     graph = next((g for g in own.graphs if g.graph_id == graph_id), None)
     if graph is None:
-        return Admitted(False, None, None, "unmeasured")
+        return Admitted(False, None, None, "unmeasured"), 0
     graph = await _sized(graph, own.rows.get(graph_id), policy)
     size = graph.bytes(policy)
     if size is None:
-        return Admitted(False, None, None, "unsized")
+        return Admitted(False, None, None, "unsized"), 0
+    needed = -(-size * max(margin_pct, 100) // 100)
     if max_bytes and size > max_bytes:
-        return Admitted(False, None, None, "too_large")
+        return Admitted(False, None, None, "too_large"), needed
     snap = await gather(providers=[provider])
     endpoint = _master_of(snap.slots, key) if snap.slots else None
     decided = plan(policy, snap.masters, snap.graphs, _clock(), sized=snap.sized)
     target = next((p for p in decided.masters if p.master.endpoint == endpoint), None)
     if target is None or target.master.used is None:
-        return Admitted(False, endpoint, None, "unmeasured")
+        return Admitted(False, endpoint, None, "unmeasured"), needed
     if target.master.hold:
-        return Admitted(False, endpoint, None, target.master.hold)
+        return Admitted(False, endpoint, None, target.master.hold), needed
     if target.seeding or target.claimed:
-        return Admitted(False, endpoint, None, "busy")
-    fits, shortfall = admit(target.master, -(-size * max(margin_pct, 100) // 100), policy,
-                            target.reserved)
-    return Admitted(fits, endpoint, shortfall, None if fits else "capacity")
+        return Admitted(False, endpoint, None, "busy"), needed
+    fits, shortfall = admit(target.master, needed, policy, target.reserved)
+    return Admitted(fits, endpoint, shortfall, None if fits else "capacity"), needed
+
+
+async def admit_build_copy(graph_id: str, provider: Optional[str], key: str, holder: str, *,
+                           margin_pct: int, max_bytes: int = 0
+                           ) -> Tuple[Admitted, Optional[Any]]:
+    """:func:`copy_room`, and — when the copy fits — the room it asks for reserved on that master
+    for ``holder`` (the build) in the aggregation write governor's ledger, which every admission
+    and capacity pass counts (:func:`_read_masters`): renewed while the holder runs, gone with a
+    dead one, until it is released (``AggregationAdmission.release``). Both under the capacity
+    lock, so no other build, load or full write is admitted between the check and the reservation:
+    two builds can never both take the room one copy needs. The reservation is None when the
+    ledger cannot be written (fail open, as the governor does)."""
+    from backend.app.services.aggregation.admission import AggregationAdmission
+    from backend.app.services.aggregation.redis_client import get_redis
+
+    async with admitting():
+        admitted, needed = await _copy_room(graph_id, provider, key, margin_pct=margin_pct,
+                                            max_bytes=max_bytes)
+        if not admitted.fits:
+            return admitted, None
+        return admitted, await AggregationAdmission(get_redis()).reserve(
+            admitted.master, holder, needed)
 
 
 async def admit_copy(graph_id: str, provider: str, key: str, holder: str
