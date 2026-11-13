@@ -18,7 +18,7 @@
  * success; and "what happens next" says only what the automation will actually do.
  */
 import { timeAgo } from '@/lib/timeAgo'
-import type { SyncRevision, SyncStatus, SyncSummaries } from './syncStatusApi'
+import type { SyncBuild, SyncRevision, SyncStatus, SyncSummaries } from './syncStatusApi'
 
 export type SyncTone = 'ok' | 'warn' | 'bad' | 'busy' | 'idle'
 
@@ -142,6 +142,12 @@ function summariesLane(s: SyncSummaries | null | undefined, doc: SyncStatus, now
   return { ...lane, tone: 'ok', short: 'up to date', status: 'Up to date', lines: [built], next }
 }
 
+/** A build's step as the graph lane says it: "Showing #5 · building #6". */
+const BUILD_STEP: Record<SyncBuild['step'], string> = {
+  queued: 'waiting to build', copying: 'copying to build', catching_up: 'building',
+  switching: 'switching to',
+}
+
 export function deriveSync(doc: SyncStatus | undefined, now: number = Date.now()): SyncVerdict {
   if (!doc) {
     return { kind: null, kindLabel: '', kindExplainer: '', tone: 'idle', chip: 'Checking sync…',
@@ -164,6 +170,9 @@ export function deriveSync(doc: SyncStatus | undefined, now: number = Date.now()
     // Always the latest: behind its head, views read the newest version from the system of record
     // by choice, not because anything is wrong — said as such.
     const latestFromRecord = v.readMode === 'latest' && !v.fresh && v.served === null
+    // Switch when ready: the new version is built beside the one views show, then switched to.
+    const build = v.readMode === 'beside' && v.candidate ? v.candidate : null
+    const buildFailed = !!build && (build.attempts ?? 0) > 0 && !!build.error
     const record: SyncLane = {
       key: 'record', title: 'System of record', tech: 'Postgres', version: v.committed,
       tone: v.committed > 0 ? 'ok' : 'idle',
@@ -174,7 +183,8 @@ export function deriveSync(doc: SyncStatus | undefined, now: number = Date.now()
         : [],
     }
     const graphTone: SyncTone = v.lastError && !v.fresh ? 'bad'
-      : active || latestFromRecord ? 'busy'
+      : buildFailed ? 'warn'
+      : active || latestFromRecord || build ? 'busy'
       : v.fresh ? 'ok'
       : behind <= 1 ? 'warn' : 'bad'
     // Views read the system of record only when the graph has no version to show (or, from a
@@ -186,6 +196,7 @@ export function deriveSync(doc: SyncStatus | undefined, now: number = Date.now()
       progress: v.status === 'rebuilding' ? pct : null,
       status: graphTone === 'ok' ? `Version #${v.projected} · in sync`
         : latestFromRecord ? `Latest #${v.committed} · read from the database`
+        : build ? `Showing #${shown} · ${build.waiting ? 'waiting to build' : BUILD_STEP[build.step]} #${v.committed}`
         : showingOlder ? (
           v.status === 'rebuilding' ? `Showing #${shown} · rebuilding${pct != null ? ` ${pct}%` : '…'}`
           : active ? `Showing #${shown} · writing #${v.committed}`
@@ -196,7 +207,11 @@ export function deriveSync(doc: SyncStatus | undefined, now: number = Date.now()
         : v.lastError ? `Refresh failed · ${versions(behind)} behind`
         : `${versions(behind)} behind`,
       lines: [
-        ...(showingOlder
+        ...(build
+          ? [`Views show exactly version #${shown} while version #${v.committed} is built beside it and checked, then all switch to it at once`,
+             ...(build.waiting ? [`Waiting: ${build.waiting}`] : []),
+             ...(buildFailed ? [`Attempt ${build.attempts} failed: ${build.error} · trying again`] : [])]
+          : showingOlder
           ? [`Views show version #${shown} until version #${v.committed} is written, then refresh on their own`]
           : []),
         ...(showingOlder && active && v.readMode !== 'beside'
@@ -225,6 +240,7 @@ export function deriveSync(doc: SyncStatus | undefined, now: number = Date.now()
     const headline = graph.tone === 'ok'
       ? summaries.tone === 'ok' || summaries.tone === 'idle' ? 'Everything is in sync' : 'The graph is in sync'
       : latestFromRecord ? 'Showing the newest version from the system of record while the graph updates'
+      : build ? 'Building the new version beside the one views show'
       : showingOlder ? 'Showing an earlier version while the graph updates'
       : graph.tone === 'busy' ? 'Catching up' : 'The graph is behind'
     const shownAt = showingOlder && v.servedRevision?.createdAt ? `, published ${ago(v.servedRevision.createdAt)},` : ''
@@ -232,6 +248,8 @@ export function deriveSync(doc: SyncStatus | undefined, now: number = Date.now()
       ? `Published version #${v.committed} is in the graph${summaries.tone === 'ok' || summaries.tone === 'idle' ? '' : ` · summaries: ${summaries.status.toLowerCase()}`}`
       : latestFromRecord
         ? `Views show version #${v.committed} straight from the system of record until it is written to the graph, then read the graph again`
+      : build
+        ? `Views show version #${shown}${shownAt} until version #${v.committed} is built and checked beside it, then switch to it at once`
       : showingOlder
         ? `Views show version #${shown}${shownAt} until version #${v.committed} is written to the graph, then refresh on their own`
         : `The system of record is at #${v.committed}; the graph holds #${v.projected}`

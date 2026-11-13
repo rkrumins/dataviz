@@ -38,6 +38,19 @@ export interface SyncVersioned {
    *  whether the graph chose it or it is the platform's. Absent from a server that predates them. */
   readMode?: 'latest' | 'in_place' | 'beside'
   readModeSource?: 'graph' | 'platform'
+  /** A new version built beside the key views read (`beside`), while one is; null when none. */
+  candidate?: SyncBuild | null
+}
+
+/** A new version built beside the key views read: `queued` (waiting for room for a copy),
+ *  `copying`, `catching_up` (the commits since written into it) or `switching`. */
+export interface SyncBuild {
+  step: 'queued' | 'copying' | 'catching_up' | 'switching'
+  seq?: number | null
+  attempts?: number
+  error?: string | null
+  waiting?: string | null
+  rows?: number | null
 }
 
 export interface SyncSummaries {

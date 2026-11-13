@@ -1086,6 +1086,32 @@ class WatermarkModel(_ApiModel):
     read_mode_source: str = Field(default="platform", alias="readModeSource")
     # The version rows of a window written a page at a time, in flight: null when none is.
     window_rows: Optional[int] = Field(default=None, alias="windowRows")
+    # A new version built beside the serving key (read mode beside), while one is: null when none
+    # is. The serving key keeps serving ``served`` whole meanwhile.
+    candidate: Optional["BuildModel"] = None
+
+
+class BuildModel(_ApiModel):
+    """A new version of a graph built beside the key that serves it (read mode beside)."""
+    id: Optional[str] = None
+    # queued (waiting for room for a copy), copying, catching_up or switching.
+    step: Optional[str] = None
+    # Why it was asked for: window, a publish larger than New-version builds' buildAboveRows.
+    reason: Optional[str] = None
+    # copy: the serving key copied, then the commits since written into the copy.
+    mode: Optional[str] = None
+    # The version the build's key holds whole: null until it is written.
+    seq: Optional[int] = None
+    attempts: int = 0
+    error: Optional[str] = None
+    # Why a queued build waits (room: no room for a copy yet), else null.
+    waiting: Optional[str] = None
+    since: Optional[str] = None
+    # The version rows of the change it builds.
+    rows: Optional[int] = None
+
+
+WatermarkModel.model_rebuild()
 
 
 class SavedSinceModel(_ApiModel):
@@ -2747,7 +2773,9 @@ async def _watermark_model(session: AsyncSession, wm: dict) -> WatermarkModel:
                           rehydrating_since=wm.get("rehydrating_since"),
                           read_mode=wm.get("read_mode", "in_place"),
                           read_mode_source=wm.get("read_mode_source", "platform"),
-                          window_rows=wm.get("window_rows"))
+                          window_rows=wm.get("window_rows"),
+                          candidate=(BuildModel(**wm["candidate"]) if wm.get("candidate")
+                                     else None))
 
 
 def _revision_model(rev: Optional[dict]) -> Optional[RevisionModel]:

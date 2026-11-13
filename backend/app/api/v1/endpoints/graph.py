@@ -2944,6 +2944,9 @@ class _SyncVersioned(BaseModel):
     # shows what it shows.
     read_mode: str = Field("in_place", alias="readMode")
     read_mode_source: str = Field("platform", alias="readModeSource")
+    # A new version built beside the key views read (read mode beside), while one is: its step
+    # (queued, copying, catching_up, switching), attempts, error and why it waits; null when none.
+    candidate: Optional[Dict[str, Any]] = None
 
     class Config:
         populate_by_name = True
@@ -3130,6 +3133,7 @@ async def get_sync_status(
                 served=wm.get("served"), served_revision=_rev(wm.get("served_revision")),
                 read_mode=wm.get("read_mode", "in_place"),
                 read_mode_source=wm.get("read_mode_source", "platform"),
+                candidate=wm.get("candidate"),
             ),
             summaries=summaries, counts=counts,
         )

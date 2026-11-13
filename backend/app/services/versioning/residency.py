@@ -756,6 +756,41 @@ async def _admission_on(graph_id: str, provider: str,
     return _admitted(target, graph, policy, endpoint), need(graph, policy)
 
 
+async def copy_room(graph_id: str, provider: Optional[str], key: str, *, margin_pct: int,
+                    max_bytes: int = 0) -> Admitted:
+    """Whether a ``GRAPH.COPY`` of ``graph_id``'s key into ``key`` fits now on the master ``key``
+    hashes to (a build beside the serving key, New-version builds): the graph's size, measured or
+    estimated as for a load, times ``margin_pct`` (``copyMarginPct``) under the master's start mark
+    after what is held there. Refused as admission refuses a load: an unsized graph or an
+    unread master, one holding or taking a load; and a graph larger than ``max_bytes`` when it is
+    set (``copyMaxBytes``, ``too_large``). No ``provider`` is the default one."""
+    provider = provider or config.DEFAULT_FALKOR_PROVIDER
+    policy = await residency_policy.resolve()
+    own = await gather(graph_ids=[graph_id])
+    graph = next((g for g in own.graphs if g.graph_id == graph_id), None)
+    if graph is None:
+        return Admitted(False, None, None, "unmeasured")
+    graph = await _sized(graph, own.rows.get(graph_id), policy)
+    size = graph.bytes(policy)
+    if size is None:
+        return Admitted(False, None, None, "unsized")
+    if max_bytes and size > max_bytes:
+        return Admitted(False, None, None, "too_large")
+    snap = await gather(providers=[provider])
+    endpoint = _master_of(snap.slots, key) if snap.slots else None
+    decided = plan(policy, snap.masters, snap.graphs, _clock(), sized=snap.sized)
+    target = next((p for p in decided.masters if p.master.endpoint == endpoint), None)
+    if target is None or target.master.used is None:
+        return Admitted(False, endpoint, None, "unmeasured")
+    if target.master.hold:
+        return Admitted(False, endpoint, None, target.master.hold)
+    if target.seeding or target.claimed:
+        return Admitted(False, endpoint, None, "busy")
+    fits, shortfall = admit(target.master, -(-size * max(margin_pct, 100) // 100), policy,
+                            target.reserved)
+    return Admitted(fits, endpoint, shortfall, None if fits else "capacity")
+
+
 async def admit_copy(graph_id: str, provider: str, key: str, holder: str
                      ) -> Tuple[Admitted, Optional[Any]]:
     """A full copy written outside the projector (a package seed) admitted as a load is, on the

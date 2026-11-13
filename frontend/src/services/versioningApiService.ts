@@ -247,6 +247,25 @@ export interface Watermark {
   readModeSource?: 'graph' | 'platform'
   /** The version rows of a window written a page at a time, still in flight; null when none is. */
   windowRows?: number | null
+  /** A new version built beside the serving key (read mode `beside`), while one is; null when
+   *  none is. The serving key keeps serving `served` whole meanwhile. */
+  candidate?: BuildState | null
+}
+
+/** A new version of a graph built beside the key that serves it. */
+export interface BuildState {
+  id?: string | null
+  /** queued (waiting for room for a copy), copying, catching_up or switching. */
+  step: 'queued' | 'copying' | 'catching_up' | 'switching'
+  reason?: string | null
+  mode?: string | null
+  /** The version the build's key holds whole; null until written. */
+  seq?: number | null
+  attempts?: number
+  error?: string | null
+  waiting?: string | null
+  since?: string | null
+  rows?: number | null
 }
 
 /** Changes in a graph that version history doesn't hold. `via`: `verify` counted them on the last

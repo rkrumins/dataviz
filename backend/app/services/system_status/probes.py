@@ -1334,6 +1334,7 @@ def _projection_rows(forks: bool = False):
             ProjectionStateORM.residency, ProjectionStateORM.evicted_reason,
             ProjectionStateORM.last_read_at, ProjectionStateORM.size_bytes,
             ProjectionStateORM.rehydrating_since, ProjectionStateORM.read_mode,
+            ProjectionStateORM.candidate_state, ProjectionStateORM.candidate_seq,
         )
         .select_from(GraphORM)
         .outerjoin(ProjectionStateORM, ProjectionStateORM.graph_id == GraphORM.id)
@@ -1486,7 +1487,7 @@ async def list_versioned_graphs(
 
     live = set(present_ids)
     directory = await _resolve_data_sources([r.data_source_id for r in page])
-    from backend.app.services.versioning import build_policy
+    from backend.app.services.versioning import build_policy, candidates
 
     policy = await build_policy.resolve()
 
@@ -1525,6 +1526,8 @@ async def list_versioned_graphs(
             "readMode": None if r.fork_parent_graph_id is not None else r.read_mode,
             "readModeEffective": None if r.fork_parent_graph_id is not None
             else build_policy.read_mode_of(r.read_mode, policy),
+            # A new version built beside its key (read mode beside), while one is.
+            "build": candidates.block(r),
         } for r in page],
         "nextCursor": page[-1].id if more else None,
     }

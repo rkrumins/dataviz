@@ -92,6 +92,7 @@ tests/integration/test_overlay_rollups.py
 tests/integration/test_package_seed_job.py
 tests/integration/test_private_draft_owner.py
 tests/integration/test_private_draft_read.py
+tests/integration/test_projection_builds_e2e.py
 tests/integration/test_projection_committed_rollups.py
 tests/integration/test_projection_converges.py
 tests/integration/test_projection_fencing_e2e.py

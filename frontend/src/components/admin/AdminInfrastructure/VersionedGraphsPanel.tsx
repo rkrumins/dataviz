@@ -67,6 +67,21 @@ const STATE_CHIP: Record<ResidencyState, { label: string; cls: string }> = {
 
 const CHIP_CLS = 'inline-flex px-1.5 py-px rounded-full border text-[9px] uppercase tracking-wide shrink-0'
 
+/** A build beside the serving key (read mode beside), by step: what its row says. */
+const BUILD_CHIP: Record<string, string> = {
+    queued: 'Build waiting', copying: 'Copying for a build', catching_up: 'Building new version',
+    switching: 'Switching to new version',
+}
+
+/** The build's chip's tooltip: what readers see meanwhile, and why it waits or failed. */
+function buildTitle(b: { step: string; waiting?: string | null; error?: string | null; attempts?: number }): string {
+    return [
+        'Readers keep exactly the version served now until the new one is built and checked, then switch at once.',
+        b.waiting ? `Waiting: ${b.waiting}.` : '',
+        b.error ? `Attempt ${b.attempts ?? 1} failed: ${b.error}.` : '',
+    ].filter(Boolean).join(' ')
+}
+
 type Refusal = { type?: string; reason?: string; message?: string }
 
 /** Why a key cannot be adopted, by the refusal's reason. */
@@ -338,6 +353,16 @@ export function VersionedGraphsPanel({ providers, onClose }: Props) {
                                                     >
                                                         Reads: {READ_MODE[row.readModeEffective].short}{row.readMode ? '' : ' · default'}
                                                     </span>
+                                                    {row.build && (
+                                                        <span
+                                                            className={cn(CHIP_CLS, 'ml-1', row.build.error
+                                                                ? 'border-amber-500/25 bg-amber-500/10 text-amber-700 dark:text-amber-400'
+                                                                : 'border-sky-500/25 bg-sky-500/10 text-sky-700 dark:text-sky-300')}
+                                                            title={buildTitle(row.build)}
+                                                        >
+                                                            {BUILD_CHIP[row.build.step] ?? row.build.step}
+                                                        </span>
+                                                    )}
                                                 </div>
                                             )}
                                             <span className="text-[10px] text-ink-muted">{row.workspaceName ?? row.workspaceId}</span>

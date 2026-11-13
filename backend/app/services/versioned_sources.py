@@ -238,8 +238,9 @@ class PinnedGraph:
 
 
 async def graphs_pinned_to(provider_id: str) -> list[PinnedGraph]:
-    """Every versioned graph projected into provider ``provider_id``, or with an old key there a
-    move left waiting to be dropped (``retired_keys``), by graph id.
+    """Every versioned graph projected into provider ``provider_id``, building a new version
+    there (``candidate_provider``), or with an old key there a move left waiting to be dropped
+    (``retired_keys``), by graph id.
 
     The provider guards ask this: deleting a provider strands these graphs, and moving it to
     another server leaves their watermarks describing keys that server does not hold. Trashed
@@ -261,6 +262,7 @@ async def graphs_pinned_to(provider_id: str) -> list[PinnedGraph]:
                    .correlate(GraphORM).exists())
             .join(ProjectionStateORM, ProjectionStateORM.graph_id == GraphORM.id)
             .where(or_(ProjectionStateORM.falkor_provider == provider_id,
+                       ProjectionStateORM.candidate_provider == provider_id,
                        ProjectionStateORM.retired_keys.contains([{"provider": provider_id}])))
             .order_by(GraphORM.id)
         )).all()

@@ -42,7 +42,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import aliased
 
-from . import build_policy, config, db, keymigrate
+from . import build_policy, candidates, config, db, keymigrate
 from .changeset import Delta, fold_batch_ops, materialize, net_delta, diff_states
 from backend.common.property_patch import apply_patch, compose_patches, strip_deletes
 from backend.common.service_accounts import is_service_account
@@ -752,6 +752,23 @@ async def _load_actor_groups(actor: str) -> Tuple[str, ...]:
             )).scalars().all())
     except Exception as exc:
         raise GroupsUnavailable() from exc
+
+
+def _forget_build(ps) -> None:
+    """Drop the build a graph has, if any, inside the caller's transaction: its key is retired at
+    once (the next retire run drops it) and the build columns are cleared. For a change that makes
+    a build pointless, a rebuild or a move: the serving key it was built beside no longer holds
+    what it is copied from."""
+    if not isinstance(getattr(ps, "candidate_state", None), dict):
+        return
+    if ps.candidate_graph_name:
+        ps.retired_keys = [*(ps.retired_keys or []), {
+            "name": ps.candidate_graph_name, "provider": ps.candidate_provider,
+            "retireAfter": datetime.now(timezone.utc).isoformat(), "afterSeq": 0,
+            "build": ps.candidate_state.get("id")}]
+    ps.candidate_graph_name = ps.candidate_provider = None
+    ps.candidate_seq = None
+    ps.candidate_state = None
 
 
 class GraphVersioningService:
@@ -5001,7 +5018,7 @@ class GraphVersioningService:
             return {**wm, "reads_through": root.id, "reads_from": reads_from,
                     "falkor_graph_name": None, "falkor_provider": None,
                     "owns_falkor_graph": False, "retired_keys": [], "external_drift": None,
-                    "residency": None}
+                    "residency": None, "candidate": None}
         async with self._session() as s:
             graph = await s.get(GraphORM, graph_id)
             ps = await s.get(ProjectionStateORM, graph_id)
@@ -5072,6 +5089,9 @@ class GraphVersioningService:
                 # The version rows of a window written a page at a time, in flight: eviction leaves
                 # the graph alone until it lands, and a fork reads its root from Postgres meanwhile.
                 "window_rows": ps.window_rows if ps else None,
+                # A new version built beside the serving key, while one is (``candidates.block``):
+                # the serving key keeps serving ``served`` whole meanwhile.
+                "candidate": candidates.block(ps) if ps else None,
                 # Whose key it is, the fencing epoch, and the poll's backoff — so a graph backing
                 # off can be told from a wedged one. A liveness reset records its reason in
                 # last_error with this prefix (FalkorProjector.check_liveness).
@@ -5231,6 +5251,7 @@ class GraphVersioningService:
                 return True
             if ps.status in ("projecting", "rebuilding") and ps.projected_commit_seq < ps.target_commit_seq:
                 return False
+            _forget_build(ps)          # the rebuild replays main into the serving key instead
             ps.projected_commit_seq = 0
             ps.target_commit_seq = graph.main_head_commit_seq
             ps.status = "rebuilding"
@@ -5315,12 +5336,120 @@ class GraphVersioningService:
                 ps.epoch = ProjectionStateORM.epoch + 1     # a pass in flight must not write over it
                 ps.retired_keys = [e for e in retired if e not in own] + [entry]
                 ps.shard_map = shard_map
+                _forget_build(ps)      # a build beside the old key has nothing to switch from
         except IntegrityError:
             raise ProjectionKeyInUse(provider, key) from None     # uq_ps_key: a concurrent claim won
         if out:
             from .residency import request_load
             await request_load(graph_id)
         return {"changed": True, "from": cur, "to": tgt, "retiring": entry}
+
+    # ── a new version built beside the serving key (read mode ``beside``; see ``candidates``) ──
+
+    async def record_candidate(self, graph_id: str, *, epoch: int, name: str,
+                               provider: Optional[str], state: Dict[str, object]) -> bool:
+        """Ask for a new version of ``graph_id`` to be built beside its serving key, in ``name`` on
+        ``provider`` (``candidates.new_state``). Fenced on the pass's ``epoch`` and on the graph
+        having no build yet, so two passes never record two: False, nothing written, when either
+        moved."""
+        async with self._session() as s:
+            row = (await s.execute(
+                update(ProjectionStateORM)
+                .where(ProjectionStateORM.graph_id == graph_id,
+                       ProjectionStateORM.epoch == epoch,
+                       ProjectionStateORM.candidate_state.is_(None))
+                .values(candidate_graph_name=name, candidate_provider=provider,
+                        candidate_seq=None, candidate_state=state)
+                .returning(ProjectionStateORM.graph_id)
+                .execution_options(synchronize_session=False))).first()
+        return row is not None
+
+    async def _locked_build(self, s, graph_id: str, build_id: str):
+        """``graph_id``'s projection row, locked, while build ``build_id`` is its build; else
+        None."""
+        ps = (await s.execute(
+            select(ProjectionStateORM).where(ProjectionStateORM.graph_id == graph_id)
+            .with_for_update().execution_options(populate_existing=True)
+        )).scalar_one_or_none()
+        state = getattr(ps, "candidate_state", None)
+        if ps is None or not isinstance(state, dict) or state.get("id") != build_id:
+            return None
+        return ps
+
+    async def update_candidate(self, graph_id: str, build_id: str, *,
+                               seq: Optional[int] = None, **changes: object) -> bool:
+        """Move build ``build_id`` of ``graph_id`` on: merge ``changes`` into its state (its step,
+        attempts, error, retryAt, waiting, progress) and, given ``seq``, record the version its
+        key now holds whole. Fenced on the build: False, nothing written, when it is no longer the
+        graph's."""
+        async with self._session() as s:
+            ps = await self._locked_build(s, graph_id, build_id)
+            if ps is None:
+                return False
+            ps.candidate_state = {**ps.candidate_state, **changes}
+            if seq is not None:
+                ps.candidate_seq = seq
+        return True
+
+    async def switch_to_candidate(self, graph_id: str, *, build_id: str, seq: int,
+                                  grace_secs: int) -> bool:
+        """Switch ``graph_id``'s readers to the key build ``build_id`` holds ``seq`` whole in, in
+        one transaction. The build's key becomes the pin, serving ``seq``: projected and served at
+        ``seq``, idle, and the epoch bumped so nothing in flight publishes over it. The key that
+        served until now joins ``retired_keys``, to be dropped once ``grace_secs`` have passed, so
+        reads already under way on it finish there. Whatever main gained past ``seq`` is written
+        into the new key by the next ordinary pass, in place.
+
+        Refused (False, nothing written) when the build is no longer the graph's, the graph is in
+        the trash or not idle (out of FalkorDB, or a pass that does not build has the row), or
+        another graph projects into the build's key."""
+        async with self._session() as s:
+            await self._lock_graph(s, graph_id)
+            graph = await s.get(GraphORM, graph_id)
+            ps = await self._locked_build(s, graph_id, build_id)
+            if graph is None or graph.deleted_at is not None or ps is None or ps.status != "idle":
+                return False
+            name, provider = ps.candidate_graph_name, ps.candidate_provider
+            try:
+                await self._claim_projection_key(s, name, provider, exclude_graph_id=graph_id)
+            except ConcurrencyError:
+                return False
+            now = datetime.now(timezone.utc)
+            entry = {"name": ps.falkor_graph_name, "provider": ps.falkor_provider,
+                     "retireAfter": (now + timedelta(seconds=max(grace_secs, 0))).isoformat(),
+                     "afterSeq": seq, "build": build_id}
+            ps.retired_keys = [*(ps.retired_keys or []), entry]
+            ps.falkor_graph_name, ps.falkor_provider = name, provider
+            ps.projected_commit_seq = ps.served_commit_seq = seq
+            ps.target_commit_seq = max(ps.target_commit_seq or 0, graph.main_head_commit_seq)
+            ps.status = "idle"
+            ps.last_error = None
+            ps.failed_attempts = ps.pressure_failures = 0
+            ps.next_retry_at = None
+            ps.window_rows = None
+            ps.progress_done = ps.progress_total = None
+            ps.last_projected_at = now.isoformat()
+            ps.candidate_graph_name = ps.candidate_provider = None
+            ps.candidate_seq = None
+            ps.candidate_state = None
+            ps.epoch = ProjectionStateORM.epoch + 1
+        return True
+
+    async def drop_candidate(self, graph_id: str, *, build_id: str) -> bool:
+        """Forget build ``build_id`` of ``graph_id``: its key joins ``retired_keys`` due at once
+        (the next retire run drops it), and the graph has no build again. A build of a window is
+        then written into the serving key, in place: the window is marked in flight
+        (``window_rows``), so the next pass writes it rather than ask for another build of it, and
+        its publish clears the mark. False, nothing written, when the build is no longer the
+        graph's."""
+        async with self._session() as s:
+            ps = await self._locked_build(s, graph_id, build_id)
+            if ps is None:
+                return False
+            if ps.candidate_state.get("reason") == "window":
+                ps.window_rows = int(ps.candidate_state.get("rows") or 1)
+            _forget_build(ps)
+        return True
 
     async def adopt_projection(self, *, graph_id: str, key: str, actor: str,
                                shard_map: dict) -> Dict[str, object]:

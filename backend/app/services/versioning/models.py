@@ -360,6 +360,16 @@ class ProjectionStateORM(VersioningBase):
     # (``config.READ_MODES``). NULL takes the platform's (New-version builds' ``readMode``)
     # (20261113_1300_gv_ps_read_mode).
     read_mode = Column(Text, nullable=True)
+    # A new version built beside the key that serves (read mode ``beside``): the build's key and
+    # provider, the version it holds whole (NULL until written), and where it is
+    # (``candidates.STEPS``: its id, why it was asked for, its step, attempts, error, when it may
+    # try again). All NULL while none is: the serving key is then the only key, and every pass
+    # behaves as before. While one is, nothing writes the serving key: it keeps serving its
+    # version whole until the switch (20261113_1400_gv_ps_candidate).
+    candidate_graph_name = Column(Text, nullable=True)
+    candidate_provider = Column(Text, nullable=True)
+    candidate_seq = Column(BigInteger, nullable=True)
+    candidate_state = Column(JSONB(none_as_null=True), nullable=True)
     last_projected_at = Column(Text, nullable=True)
     last_error = Column(Text, nullable=True)
     # THE GUARDRAIL. A bootstrapped graph is PINNED to the customer's REAL FalkorDB graph — that
@@ -1024,6 +1034,8 @@ def _ensure_schema_upgrades(conn) -> None:
                   lambda: ensure_ps_window_rows_column(conn), required=True)
     _bounded_step(conn, "projection_state.read_mode was not added",
                   lambda: ensure_ps_read_mode_column(conn), required=True)
+    _bounded_step(conn, "projection_state's build columns were not added",
+                  lambda: ensure_ps_candidate_columns(conn), required=True)
     _bounded_step(conn, "import_rows.code was not added",
                   lambda: ensure_import_rows_code_column(conn), required=True)
     _bounded_step(conn, "jobs.allow_mass_delete was not added",
@@ -1253,6 +1265,22 @@ def ensure_ps_read_mode_column(conn) -> None:
     conn.execute(text(f"ALTER TABLE {ps} DROP CONSTRAINT IF EXISTS ck_ps_read_mode"))
     conn.execute(text(f"ALTER TABLE {ps} ADD CONSTRAINT ck_ps_read_mode CHECK "
                       "(read_mode IS NULL OR read_mode IN ('latest','in_place','beside'))"))
+
+
+def ensure_ps_candidate_columns(conn) -> None:
+    """Add ``projection_state``'s build columns (``candidate_graph_name``, ``candidate_provider``,
+    ``candidate_seq``, ``candidate_state``): a new version built beside the serving key. All
+    nullable with no default, so nothing is rewritten and every graph has no build; a no-op without
+    the table and once they are there, like :func:`ensure_ps_read_mode_column`."""
+    inspector = sa_inspect(conn)
+    if not inspector.has_table("projection_state", schema=_SCHEMA):
+        return
+    ps = f'"{_SCHEMA}"."projection_state"'
+    present = {c["name"] for c in inspector.get_columns("projection_state", schema=_SCHEMA)}
+    for column, sql_type in (("candidate_graph_name", "TEXT"), ("candidate_provider", "TEXT"),
+                             ("candidate_seq", "BIGINT"), ("candidate_state", "JSONB")):
+        if column not in present:
+            conn.execute(text(f"ALTER TABLE {ps} ADD COLUMN IF NOT EXISTS {column} {sql_type}"))
 
 
 def backfill_ps_served(conn) -> None:
