@@ -15,8 +15,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const {
     versionedGraphs, moveProjection, rebuildProjection, reconcileProjection, deleteFork,
-    setGraphResidency, loadGraph, adoptGraph,
+    setGraphResidency, loadGraph, adoptGraph, buildPolicy, setGraphReadMode,
 } = vi.hoisted(() => ({
+    buildPolicy: vi.fn(),
+    setGraphReadMode: vi.fn(),
     versionedGraphs: vi.fn(),
     moveProjection: vi.fn(),
     rebuildProjection: vi.fn(),
@@ -33,6 +35,7 @@ vi.mock('@/services/systemStatusService', async () => {
         ...actual,
         systemStatusService: {
             ...actual.systemStatusService, versionedGraphs, moveProjection, setGraphResidency, loadGraph, adoptGraph,
+            buildPolicy, setGraphReadMode,
         },
     }
 })
@@ -54,7 +57,7 @@ function row(over: Partial<VersionedGraphRow>): VersionedGraphRow {
         lag: 0, status: 'idle', lastError: null, lastProjectedAt: null, progressDone: null, progressTotal: null,
         updatedAt: null, owned: false, forkParentGraphId: null, orphan: false, retiredKeys: [],
         residency: 'standard', residencyState: 'resident', evictedReason: null, lastReadAt: null,
-        sizeBytes: null, rehydratingSince: null,
+        sizeBytes: null, rehydratingSince: null, readMode: null, readModeEffective: 'in_place',
         ...over,
     }
 }
@@ -108,6 +111,28 @@ const PLATFORM = row({
 })
 
 describe('VersionedGraphsPanel', () => {
+    it("says what each graph's readers get while a new version lands, and changes it from its row", async () => {
+        const own = row({ graphId: 'graph_e', dataSourceId: 'ds5', dataSourceLabel: 'Payments', owned: true,
+            readMode: 'latest', readModeEffective: 'latest' })
+        versionedGraphs.mockResolvedValue({ graphs: [MAIN, own, FORK], nextCursor: null })
+        buildPolicy.mockResolvedValue({ values: { readMode: { saved: null, default: 'in_place', effective: 'in_place' } },
+            fields: [], updatedBy: null, updatedAt: null, enabled: true })
+        setGraphReadMode.mockResolvedValue({ graphId: 'graph_e', readMode: null, readModeEffective: 'in_place' })
+        renderPanel()
+
+        expect(await screen.findByText('Reads: Update in place · default')).toBeInTheDocument()
+        expect(screen.getByText('Reads: Always the latest')).toBeInTheDocument()
+        expect(screen.getAllByRole('button', { name: 'Read mode…' })).toHaveLength(2)   // not on the fork
+
+        const payments = screen.getByText('Payments').closest('tr')!
+        await userEvent.click(within(payments).getByRole('button', { name: 'Read mode…' }))
+        const dialog = await screen.findByRole('dialog', { name: 'What readers of Payments get while a new version lands' })
+        await userEvent.click(within(dialog).getByRole('radio', { name: /Use the platform default/ }))
+        await userEvent.click(within(dialog).getByRole('button', { name: 'Save' }))
+        expect(setGraphReadMode).toHaveBeenCalledWith('graph_e', null)
+        expect(await screen.findByText('Readers now get: Keep serving, update in place (the platform default)')).toBeInTheDocument()
+    })
+
     it('lists every graph with its key and marks forks, orphans and keys the platform owns', async () => {
         versionedGraphs.mockResolvedValue({ graphs: [MAIN, FORK, ORPHAN], nextCursor: null })
         renderPanel()

@@ -161,6 +161,9 @@ export function deriveSync(doc: SyncStatus | undefined, now: number = Date.now()
     const behind = Math.max(0, v.committed - shown)
     const active = v.status === 'projecting' || v.status === 'rebuilding'
     const pct = v.progressTotal ? Math.round(((v.progressDone ?? 0) / v.progressTotal) * 100) : null
+    // Always the latest: behind its head, views read the newest version from the system of record
+    // by choice, not because anything is wrong — said as such.
+    const latestFromRecord = v.readMode === 'latest' && !v.fresh && v.served === null
     const record: SyncLane = {
       key: 'record', title: 'System of record', tech: 'Postgres', version: v.committed,
       tone: v.committed > 0 ? 'ok' : 'idle',
@@ -171,7 +174,7 @@ export function deriveSync(doc: SyncStatus | undefined, now: number = Date.now()
         : [],
     }
     const graphTone: SyncTone = v.lastError && !v.fresh ? 'bad'
-      : active ? 'busy'
+      : active || latestFromRecord ? 'busy'
       : v.fresh ? 'ok'
       : behind <= 1 ? 'warn' : 'bad'
     // Views read the system of record only when the graph has no version to show (or, from a
@@ -182,6 +185,7 @@ export function deriveSync(doc: SyncStatus | undefined, now: number = Date.now()
       revision: showingOlder ? v.servedRevision : v.projectedRevision,
       progress: v.status === 'rebuilding' ? pct : null,
       status: graphTone === 'ok' ? `Version #${v.projected} · in sync`
+        : latestFromRecord ? `Latest #${v.committed} · read from the database`
         : showingOlder ? (
           v.status === 'rebuilding' ? `Showing #${shown} · rebuilding${pct != null ? ` ${pct}%` : '…'}`
           : active ? `Showing #${shown} · writing #${v.committed}`
@@ -195,9 +199,15 @@ export function deriveSync(doc: SyncStatus | undefined, now: number = Date.now()
         ...(showingOlder
           ? [`Views show version #${shown} until version #${v.committed} is written, then refresh on their own`]
           : []),
+        ...(showingOlder && active && v.readMode !== 'beside'
+          ? [`Parts of version #${v.committed} can show before the rest of it is written`]
+          : []),
+        ...(latestFromRecord
+          ? [`This graph always shows the newest version: until the graph holds #${v.committed}, views read it from the system of record, which is slower on a large graph, without lineage summaries`]
+          : []),
         v.lastProjectedAt ? `Written ${ago(v.lastProjectedAt)}` : 'Not written yet',
         ...(countLine ? [`${countLine}${counts?.readAt ? ` · counted ${ago(counts.readAt)}` : ''}`] : []),
-        ...(readsRecord ? ['Views read from the system of record until it catches up'] : []),
+        ...(readsRecord && !latestFromRecord ? ['Views read from the system of record until it catches up'] : []),
       ],
       next: graphTone === 'ok' ? 'Written automatically after every publish'
         : active ? undefined
@@ -214,11 +224,14 @@ export function deriveSync(doc: SyncStatus | undefined, now: number = Date.now()
       : graph.status
     const headline = graph.tone === 'ok'
       ? summaries.tone === 'ok' || summaries.tone === 'idle' ? 'Everything is in sync' : 'The graph is in sync'
+      : latestFromRecord ? 'Showing the newest version from the system of record while the graph updates'
       : showingOlder ? 'Showing an earlier version while the graph updates'
       : graph.tone === 'busy' ? 'Catching up' : 'The graph is behind'
     const shownAt = showingOlder && v.servedRevision?.createdAt ? `, published ${ago(v.servedRevision.createdAt)},` : ''
     const detail = graph.tone === 'ok'
       ? `Published version #${v.committed} is in the graph${summaries.tone === 'ok' || summaries.tone === 'idle' ? '' : ` · summaries: ${summaries.status.toLowerCase()}`}`
+      : latestFromRecord
+        ? `Views show version #${v.committed} straight from the system of record until it is written to the graph, then read the graph again`
       : showingOlder
         ? `Views show version #${shown}${shownAt} until version #${v.committed} is written to the graph, then refresh on their own`
         : `The system of record is at #${v.committed}; the graph holds #${v.projected}`

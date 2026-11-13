@@ -2939,6 +2939,11 @@ class _SyncVersioned(BaseModel):
     # record (nothing written yet, or out of the graph).
     served: Optional[int] = None
     served_revision: Optional[_SyncRevision] = Field(None, alias="servedRevision")
+    # What its readers get while a newer version lands (latest | in_place | beside), and whether
+    # the graph set it ("graph") or it is the platform's ("platform"), so a view can say why it
+    # shows what it shows.
+    read_mode: str = Field("in_place", alias="readMode")
+    read_mode_source: str = Field("platform", alias="readModeSource")
 
     class Config:
         populate_by_name = True
@@ -3123,6 +3128,8 @@ async def get_sync_status(
                 committed_revision=_rev(wm.get("committed_revision")),
                 projected_revision=_rev(wm.get("projected_revision")),
                 served=wm.get("served"), served_revision=_rev(wm.get("served_revision")),
+                read_mode=wm.get("read_mode", "in_place"),
+                read_mode_source=wm.get("read_mode_source", "platform"),
             ),
             summaries=summaries, counts=counts,
         )

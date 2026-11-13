@@ -115,3 +115,22 @@ it('shortens a revision id for display', () => {
   expect(shortRevision(rev.commitId)).toBe('cmt_01M3AH4A…')
   expect(shortRevision('cmt_1')).toBe('cmt_1')
 })
+
+describe('deriveSync — what readers get while a newer version lands', () => {
+  it('says a graph read "always the latest" shows the newest version from the system of record, by choice', () => {
+    const v = deriveSync(versioned({ projected: 9, fresh: false, status: 'projecting', served: null, readMode: 'latest' }), NOW)
+    expect(v).toMatchObject({ tone: 'busy', chip: 'Latest #11 · read from the database',
+      headline: 'Showing the newest version from the system of record while the graph updates' })
+    const graph = v.lanes[1]
+    expect(graph.lines.join(' ')).toMatch(/always shows the newest version/)
+    expect(graph.lines.join(' ')).not.toMatch(/until it catches up/)
+  })
+
+  it('says, updating in place, that parts of the new version can show before the rest', () => {
+    const v = deriveSync(versioned({ projected: 9, fresh: false, status: 'projecting', served: 9, readMode: 'in_place' }), NOW)
+    expect(v.chip).toBe('Showing #9 · writing #11')
+    expect(v.lanes[1].lines.join(' ')).toMatch(/Parts of version #11 can show before the rest of it is written/)
+    const beside = deriveSync(versioned({ projected: 9, fresh: false, status: 'projecting', served: 9, readMode: 'beside' }), NOW)
+    expect(beside.lanes[1].lines.join(' ')).not.toMatch(/Parts of version/)
+  })
+})

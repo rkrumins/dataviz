@@ -241,6 +241,12 @@ export interface Watermark {
   lastReadAt?: string | null
   sizeBytes?: number | null
   rehydratingSince?: string | null
+  /** What readers of main get while a newer version lands (latest | in_place | beside), and
+   *  whether the graph chose it or it is the platform's. A fork's are its root's. */
+  readMode?: 'latest' | 'in_place' | 'beside'
+  readModeSource?: 'graph' | 'platform'
+  /** The version rows of a window written a page at a time, still in flight; null when none is. */
+  windowRows?: number | null
 }
 
 /** Changes in a graph that version history doesn't hold. `via`: `verify` counted them on the last

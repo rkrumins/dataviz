@@ -32,6 +32,12 @@ export interface SyncVersioned {
    *  record (nothing written yet, or out of the graph). Absent from a server that predates it. */
   served?: number | null
   servedRevision?: SyncRevision | null
+  /** What readers get while a newer version lands: `latest` (the newest, from the system of record
+   *  until the graph has it), `in_place` (the last version, while the next is written into it) or
+   *  `beside` (exactly the last version, while the next is built alongside, then one switch); and
+   *  whether the graph chose it or it is the platform's. Absent from a server that predates them. */
+  readMode?: 'latest' | 'in_place' | 'beside'
+  readModeSource?: 'graph' | 'platform'
 }
 
 export interface SyncSummaries {

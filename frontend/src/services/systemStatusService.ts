@@ -148,6 +148,11 @@ export type ResidencyState = 'resident' | 'evicted' | 'rehydrating' | 'waiting_c
  *  a projection row, plus whether the platform owns the key, whether the
  *  graph is a fork or an orphan (not a fork, and its data source is gone),
  *  the old keys a move left behind, and its residency. */
+/** What a graph's readers get while a newer version lands: always the newest (from the database
+ *  until the graph store has it), the last version while the next is written in place, or exactly
+ *  the last version while the next is built beside it, then one switch. */
+export type ReadMode = 'latest' | 'in_place' | 'beside'
+
 export interface VersionedGraphRow extends ProjectionWorstRow {
     owned: boolean
     forkParentGraphId: string | null
@@ -162,6 +167,10 @@ export interface VersionedGraphRow extends ProjectionWorstRow {
     sizeBytes: number | null
     /** While it is being loaded: since when (a load has no timeout). */
     rehydratingSince: string | null
+    /** Its own read mode (null: the platform's), and the one in force. Null on a fork, which
+     *  follows its root. */
+    readMode: ReadMode | null
+    readModeEffective: ReadMode | null
 }
 
 /** One residency policy value: as saved (null: unset), its default, and the
@@ -224,7 +233,7 @@ export interface BuildPolicyValue {
 export interface BuildPolicyField {
     wire: string
     kind: 'bool' | 'int' | 'ratio' | 'choice'
-    section: 'when' | 'room' | 'lifecycle' | 'pacing' | 'postgres'
+    section: 'reads' | 'when' | 'room' | 'lifecycle' | 'pacing' | 'postgres'
     label: string
     help: string
     unit: 'rows' | 'pct' | 'bytes' | 'secs' | 'ms' | 'count' | 'ratio' | null
@@ -490,6 +499,12 @@ export const systemStatusService = {
         authFetch(`/api/v1/admin/versioning/graphs/${encodeURIComponent(graphId)}/residency`, {
             method: 'PUT',
             body: JSON.stringify({ class: cls }),
+        }),
+    /** A graph's own read mode, or null for the platform's. */
+    setGraphReadMode: (graphId: string, mode: ReadMode | null): Promise<{ graphId: string; readMode: ReadMode | null; readModeEffective: ReadMode }> =>
+        authFetch(`/api/v1/admin/versioning/graphs/${encodeURIComponent(graphId)}/read-mode`, {
+            method: 'PUT',
+            body: JSON.stringify({ mode }),
         }),
     /** Load now: ask for an evicted graph's load, which admission decides. */
     loadGraph: (graphId: string): Promise<{ graphId: string; state: ResidencyState; loadRequested: boolean }> =>

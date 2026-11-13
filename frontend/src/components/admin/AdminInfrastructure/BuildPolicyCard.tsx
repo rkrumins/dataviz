@@ -10,6 +10,10 @@
  * confirmation saves them; a value the server refuses is shown next to the field it names. The card
  * also says who changed the values last, and when, and whether the New-version builds switch
  * (Admin → Features) is on.
+ *
+ * Guided: the first section is the platform's read mode — what readers get while a new version
+ * lands — chosen on cards that explain each (ReadModePicker). Every section says in plain words
+ * what it governs, with a worked example computed from the values in force, or being edited.
  */
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
@@ -19,8 +23,10 @@ import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/primitives'
 import { DateTime } from '@/components/ui/DateTime'
 import { ToggleSwitch } from '@/components/admin/AdminFeatures/ToggleSwitch'
-import { systemStatusService, type BuildPolicyField } from '@/services/systemStatusService'
+import { systemStatusService, type BuildPolicyField, type ReadMode } from '@/services/systemStatusService'
 import { ConfirmDialog } from './ConfirmDialog'
+import { ReadModePicker } from './ReadModePicker'
+import { READ_MODE } from './readModes'
 
 const FIELD_CLS = 'w-24 px-2 py-1 rounded-lg border border-glass-border bg-canvas text-xs text-ink tabular-nums'
 const CHIP_CLS = 'inline-flex px-1.5 py-px rounded-full border text-[9px] uppercase tracking-wide shrink-0'
@@ -30,11 +36,24 @@ type Unit = NonNullable<BuildPolicyField['unit']>
 type Value = number | boolean | string
 
 const SECTIONS: Record<BuildPolicyField['section'], string> = {
+    reads: 'Reads while a new version lands',
     when: 'When to build beside',
     room: 'Room and copies',
     lifecycle: 'Lifecycle',
     pacing: 'Pacing projector writes',
     postgres: 'Reads from Postgres',
+}
+
+/** What each section governs, in plain words. */
+const INTRO: Record<BuildPolicyField['section'], string> = {
+    reads: 'What people see on canvases, searches and lineage while a newer version of a graph is written into '
+        + 'the graph store. A graph can choose its own with Read mode… in the list below.',
+    when: 'For graphs that switch when ready: which updates are built in a second copy. Smaller ones are written '
+        + 'in place, paced.',
+    room: 'How the second copy is made, how much room it needs, and what happens when a node has none.',
+    lifecycle: 'How builds are retried and switched, and how long the previous copy is kept.',
+    pacing: 'How the writer leaves room for readers on the same node, in every read mode.',
+    postgres: "Limits on reads answered from the database, so one large graph can't slow every other down.",
 }
 
 const CHOICE_LABEL: Record<string, string> = {
@@ -78,10 +97,66 @@ function formatBytes(n: number): string {
     return i === 0 ? `${v.toLocaleString()} bytes` : `${Number(v.toFixed(1)).toLocaleString()} ${units[i]}`
 }
 
+/** A section's worked example, from the values in force or being edited (``val``). */
+function example(section: BuildPolicyField['section'], val: (wire: string) => Value | undefined): string | null {
+    const num = (wire: string) => Number(val(wire))
+    switch (section) {
+        case 'when': {
+            const n = num('buildAboveRows')
+            if (!Number.isFinite(n)) return null
+            return `With ${plural(n, 'row')}: an import that changes ${plural(Math.round(n / 2), 'row')} is written in place; `
+                + `one that changes ${plural(Math.round(n * 1.5), 'row')} is built beside, and readers switch once it is ready.`
+                + (val('buildForRebuilds') ? ' Rebuilds and moves are built beside too.' : '')
+        }
+        case 'room': {
+            const margin = num('copyMarginPct')
+            const max = num('copyMaxBytes')
+            if (!Number.isFinite(margin)) return null
+            const free = Number((4 * margin / 100).toFixed(1))
+            return `A 4 GB graph needs ${free} GB free on its node to be copied`
+                + (max > 0 ? `; a graph over ${formatBytes(max)} is seeded from the database instead` : '')
+                + `. With no room, ${val('noRoomPolicy') === 'in_place'
+                    ? 'the update is written in place, paced'
+                    : 'readers keep the current version and the build waits for room'}.`
+        }
+        case 'lifecycle': {
+            const grace = num('retireGraceSecs')
+            const attempts = num('buildMaxAttempts')
+            if (!Number.isFinite(grace) || !Number.isFinite(attempts)) return null
+            return `After the switch, the previous copy stays ${formatSecs(grace)} for reads already under way, then it is removed. `
+                + `A build that fails ${plural(attempts, 'time')} in a row stops, and the update is written in place instead.`
+        }
+        case 'pacing': {
+            const target = num('statementTargetMs')
+            const ratio = num('pacingRatio')
+            const pressure = num('readPressureRatio')
+            const ceiling = num('writeCeilingSecs')
+            if (![target, ratio, pressure, ceiling].every(Number.isFinite)) return null
+            return `A write that takes ${target.toLocaleString()} ms is followed by a ${Math.round(target * ratio).toLocaleString()} ms pause, `
+                + `or ${Math.round(target * pressure).toLocaleString()} ms while readers on that node are waiting. `
+                + `No single write runs longer than ${formatSecs(ceiling)}.`
+        }
+        case 'postgres': {
+            const graph = num('pgReadsPerGraph')
+            const process = num('pgReadsPerProcess')
+            const limit = num('pgStatementTimeoutMs')
+            if (![graph, process, limit].every(Number.isFinite)) return null
+            return `On each server, at most ${plural(graph, 'read')} of one graph, and ${plural(process, 'read')} across all graphs, `
+                + `run against the database at once; each stops after ${formatSecs(Math.round(limit / 1000))} and asks the reader to retry.`
+        }
+        default:
+            return null
+    }
+}
+
 /** A value as people read it, in its unit. */
 function shown(f: BuildPolicyField, v: Value): string {
     if (f.kind === 'bool') return v ? 'On' : 'Off'
-    if (f.kind === 'choice') return CHOICE_LABEL[String(v)] ?? String(v)
+    if (f.kind === 'choice') {
+        // ``in_place`` is a read mode and a no-room choice: only the read mode reads as a mode.
+        if (f.wire === 'readMode') return READ_MODE[v as ReadMode]?.title ?? String(v)
+        return CHOICE_LABEL[String(v)] ?? String(v)
+    }
     const n = Number(v)
     switch (f.unit) {
         case 'bytes': return formatBytes(n)
@@ -201,6 +276,18 @@ export function BuildPolicyCard() {
 
     const dirty = Object.values(edits).some(t => t !== undefined)
 
+    /** A value as edited (when it parses), else the one in force: what the examples are worked from. */
+    const valueOf = (wire: string): Value | undefined => {
+        const f = policy.fields.find(x => x.wire === wire)
+        const v = policy.values[wire]
+        if (!f || !v) return undefined
+        const text = edits[wire]
+        if (text === undefined) return v.effective
+        if (text === RESET) return v.default
+        const p = parsed(f, text, units[wire] ?? scaleOf(f, Number(v.effective)))
+        return 'value' in p ? p.value : v.effective
+    }
+
     return (
         <section aria-label="New-version builds" className="mx-5 mb-4 rounded-xl border border-glass-border bg-canvas-elevated/40 p-4 space-y-4">
             <div className="flex items-center gap-2">
@@ -216,20 +303,59 @@ export function BuildPolicyCard() {
             </div>
 
             {policy.enabled
-                ? <p className="text-[11px] text-ink-muted">New-version builds is on: large publishes, and rebuilds and moves of platform-owned keys, are built beside the key that serves them.</p>
+                ? <p className="text-[11px] text-ink-muted">New-version builds is on: graphs read Keep serving, switch when ready have large publishes, rebuilds and moves built beside the key that serves them.</p>
                 : (
                     <p className="text-[11px] text-amber-700 dark:text-amber-400">
-                        New-version builds is off — turn it on under{' '}
-                        <Link to="/admin/features" className="font-semibold text-indigo-600 dark:text-indigo-400 hover:underline">Admin → Features</Link>
+                        New-version builds is off, so Keep serving, switch when ready updates in place for now. Turn it on under{' '}
+                        <Link to="/admin/features" className="font-semibold text-indigo-600 dark:text-indigo-400 hover:underline">Admin → Features</Link>.
                     </p>
                 )}
 
             {Object.entries(SECTIONS).map(([section, title]) => {
                 const fields = policy.fields.filter(f => f.section === section)
+                const worked = example(section as BuildPolicyField['section'], valueOf)
+                const readMode = section === 'reads' ? fields.find(f => f.wire === 'readMode') : undefined
                 return fields.length > 0 && (
                     <div key={section} role="group" aria-labelledby={`build-policy-${section}`} className="grid gap-2">
-                        <h4 id={`build-policy-${section}`} className="text-[11px] font-bold uppercase tracking-[0.13em] text-ink-muted">{title}</h4>
-                        {fields.map(f => {
+                        <div>
+                            <h4 id={`build-policy-${section}`} className="text-[11px] font-bold uppercase tracking-[0.13em] text-ink-muted">{title}</h4>
+                            <p className="mt-0.5 text-[11px] text-ink-secondary">{INTRO[section as BuildPolicyField['section']]}</p>
+                            {worked && (
+                                <p className="mt-1 rounded-lg bg-indigo-500/[0.05] border border-indigo-500/10 px-2.5 py-1.5 text-[11px] text-ink-secondary">
+                                    <span className="font-semibold text-indigo-600 dark:text-indigo-400">For example: </span>{worked}
+                                </p>
+                            )}
+                        </div>
+                        {readMode && (() => {
+                            const v = policy.values.readMode
+                            const text = edits.readMode
+                            const current = (text === RESET ? v.default : text ?? v.effective) as ReadMode
+                            const setHere = v.saved !== null && v.saved !== v.default
+                            return (
+                                <div className="space-y-1.5">
+                                    <ReadModePicker
+                                        value={current}
+                                        defaultMode={v.default as ReadMode}
+                                        onChange={mode => setEdits(prev => ({ ...prev, readMode: mode ?? undefined }))}
+                                        notes={policy.enabled ? {} : {
+                                            beside: <span className="text-amber-700 dark:text-amber-400">A preview: needs New-version builds on (Admin → Features). Until then, graphs update in place.</span>,
+                                        }}
+                                    />
+                                    <div className="flex items-center justify-end gap-2 text-[11px] text-ink-muted">
+                                        <span>{setHere ? `Set here · the environment's default is ${READ_MODE[v.default as ReadMode]?.title ?? v.default}` : 'The environment\'s default'}</span>
+                                        <button
+                                            type="button"
+                                            disabled={text === undefined ? v.saved === null : text === RESET}
+                                            onClick={() => setEdits(prev => ({ ...prev, readMode: v.saved === null ? undefined : RESET }))}
+                                            className="text-indigo-600 dark:text-indigo-400 hover:underline disabled:opacity-40 disabled:no-underline disabled:cursor-not-allowed"
+                                        >
+                                            Reset
+                                        </button>
+                                    </div>
+                                </div>
+                            )
+                        })()}
+                        {fields.filter(f => f !== readMode).map(f => {
                             const v = policy.values[f.wire]
                             const text = edits[f.wire]
                             const scale = units[f.wire] ?? scaleOf(f, Number(text === RESET ? v.default : v.effective))

@@ -279,8 +279,50 @@ describe('BuildPolicyCard', () => {
         renderCard()
         const link = await screen.findByRole('link', { name: 'Admin → Features' })
         expect(link).toHaveAttribute('href', '/admin/features')
-        expect(link.closest('p')).toHaveTextContent('New-version builds is off — turn it on under Admin → Features')
+        expect(link.closest('p')).toHaveTextContent(
+            'New-version builds is off, so Keep serving, switch when ready updates in place for now. Turn it on under Admin → Features.')
         expect(screen.queryByText(/New-version builds is on/)).not.toBeInTheDocument()
+    })
+
+    it("chooses the platform's read mode on cards that explain each, and saves it behind the confirmation", async () => {
+        const reads = setting('readMode', 'choice', 'reads', 'Reads while a new version lands',
+            { choices: ['latest', 'in_place', 'beside'], applies: 'live' })
+        buildPolicy.mockResolvedValue(policy({
+            fields: [reads, ...FIELDS], values: { ...policy().values, readMode: value('in_place') } }))
+        renderCard()
+        const group = await screen.findByRole('radiogroup', { name: 'What readers get while a new version lands' })
+        expect(within(group).getByRole('radio', { name: 'Keep serving, update in place' })).toHaveAttribute('aria-checked', 'true')
+        expect(screen.getByRole('group', { name: 'Reads while a new version lands' }))
+            .toHaveTextContent('A graph can choose its own with Read mode… in the list below.')
+
+        await userEvent.click(within(group).getByRole('radio', { name: 'Always the latest' }))
+        await userEvent.click(screen.getByRole('button', { name: 'Save' }))
+        const dialog = await screen.findByRole('dialog')
+        expect(within(dialog).getByRole('listitem'))
+            .toHaveTextContent('Reads while a new version lands: Keep serving, update in place → Always the latest')
+        await userEvent.click(within(dialog).getByRole('button', { name: 'Save' }))
+        expect(saveBuildPolicy).toHaveBeenCalledWith({ readMode: 'latest' })
+    })
+
+    it("works each section's example from the values in force, and from an edit as it is typed", async () => {
+        const pacing = [
+            setting('readPressureRatio', 'ratio', 'pacing', 'Pause while reads wait', { unit: 'ratio', min: 0, max: 10, applies: 'live' }),
+            setting('writeCeilingSecs', 'int', 'pacing', 'Longest write statement', { unit: 'secs', min: 1, max: 60, applies: 'live' }),
+        ]
+        buildPolicy.mockResolvedValue(policy({
+            fields: [...FIELDS, ...pacing],
+            values: { ...policy().values, readPressureRatio: value(2), writeCeilingSecs: value(10) } }))
+        renderCard()
+        const section = await screen.findByRole('group', { name: 'Pacing projector writes' })
+        expect(section).toHaveTextContent('For example: A write that takes 500 ms is followed by a 125 ms pause, '
+            + 'or 1,000 ms while readers on that node are waiting. No single write runs longer than 10 seconds.')
+        expect(screen.getByRole('group', { name: 'When to build beside' }))
+            .toHaveTextContent('With 200,000 rows: an import that changes 100,000 rows is written in place; '
+                + 'one that changes 300,000 rows is built beside')
+        expect(screen.getByRole('group', { name: 'Room and copies' }))
+            .toHaveTextContent('A 4 GB graph needs 6 GB free on its node to be copied')   // 150 % saved here
+        await edit('Write statement target', '400')
+        expect(section).toHaveTextContent('A write that takes 400 ms is followed by a 100 ms pause, or 800 ms')
     })
 
     it('says when New-version builds is on', async () => {

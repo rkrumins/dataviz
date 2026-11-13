@@ -18,6 +18,9 @@
  * that says what changes. "Residency & eviction" opens the policy card, "Draft retention" the
  * card that says how long a merged or abandoned draft keeps its changes, and "New-version builds"
  * the card of settings for building a graph's next version beside the key that serves it.
+ *
+ * Read mode: each graph shows what its readers get while a newer version lands — the platform's
+ * default or its own — and "Read mode…" opens the guided choice for that graph.
  */
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
@@ -39,6 +42,8 @@ import { ConfirmDialog } from './ConfirmDialog'
 import { ResidencyPolicyCard } from './ResidencyPolicyCard'
 import { DraftRetentionCard } from './DraftRetentionCard'
 import { BuildPolicyCard } from './BuildPolicyCard'
+import { GraphReadModeDialog } from './GraphReadModeDialog'
+import { READ_MODE } from './readModes'
 
 const STATUS_OPTIONS: { value: NonNullable<VersionedGraphsFilter['status']>; label: string }[] = [
     { value: 'fresh', label: 'In sync' },
@@ -116,6 +121,7 @@ export function VersionedGraphsPanel({ providers, onClose }: Props) {
     const [notes, setNotes] = useState<Record<string, RowNote>>({})
     const [moving, setMoving] = useState<VersionedGraphRow | null>(null)
     const [adopting, setAdopting] = useState<VersionedGraphRow | null>(null)
+    const [readModeFor, setReadModeFor] = useState<VersionedGraphRow | null>(null)
     const [showPolicy, setShowPolicy] = useState(false)
     const [showRetention, setShowRetention] = useState(false)
     const [showBuilds, setShowBuilds] = useState(false)
@@ -322,6 +328,18 @@ export function VersionedGraphsPanel({ providers, onClose }: Props) {
                                                     </span>
                                                 </div>
                                             )}
+                                            {!row.forkParentGraphId && row.readModeEffective && (
+                                                <div className="mt-1">
+                                                    <span
+                                                        className={cn(CHIP_CLS, row.readMode
+                                                            ? 'border-violet-500/20 bg-violet-500/10 text-violet-600 dark:text-violet-400'
+                                                            : 'border-glass-border bg-black/5 dark:bg-white/5 text-ink-muted')}
+                                                        title={READ_MODE[row.readModeEffective].promise}
+                                                    >
+                                                        Reads: {READ_MODE[row.readModeEffective].short}{row.readMode ? '' : ' · default'}
+                                                    </span>
+                                                </div>
+                                            )}
                                             <span className="text-[10px] text-ink-muted">{row.workspaceName ?? row.workspaceId}</span>
                                         </td>
                                         <td className="px-3 py-2.5">
@@ -367,6 +385,11 @@ export function VersionedGraphsPanel({ providers, onClose }: Props) {
                                                 >
                                                     Move…
                                                 </button>
+                                                {!row.forkParentGraphId && row.readModeEffective && (
+                                                    <button className={ACTION_CLS} disabled={busy !== null} onClick={() => setReadModeFor(row)}>
+                                                        Read mode…
+                                                    </button>
+                                                )}
                                                 {!row.forkParentGraphId && row.residency && (
                                                     <select
                                                         aria-label="Residency class"
@@ -435,6 +458,24 @@ export function VersionedGraphsPanel({ providers, onClose }: Props) {
                         <span className="font-mono"> :Table</span>) needs the ontology's from then.
                     </p>
                 </ConfirmDialog>
+            )}
+
+            {readModeFor && (
+                <GraphReadModeDialog
+                    row={readModeFor}
+                    onClose={() => setReadModeFor(null)}
+                    onSaved={res => {
+                        setReadModeFor(null)
+                        setNotes(prev => ({
+                            ...prev,
+                            [res.graphId]: {
+                                tone: 'ok',
+                                text: `Readers now get: ${READ_MODE[res.readModeEffective].title}${res.readMode ? '' : ' (the platform default)'}`,
+                            },
+                        }))
+                        void query.refetch()
+                    }}
+                />
             )}
 
             {moving && (
