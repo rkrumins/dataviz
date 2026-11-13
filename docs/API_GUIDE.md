@@ -790,15 +790,18 @@ The whole round trip, once for each identifier, with every request and answer: [
    [Send Data From Your Service](/docs/import-from-your-service).
 
    `format` is `ndjson`, `csv`, `tsv`, `json` or `xlsx`. `reconcileMode=replace` also deletes
-   everything in scope that the file doesn't mention. `viewId=` places what the import creates
-   in that view's layout, so it needs edit access to the view too — with a key, **Views: read &
-   write**.
+   everything in scope that the file doesn't mention. With a property identifier,
+   `replaceScope=keyed` deletes only the nodes that hold the property, and the edges between two of
+   them. What the app or another source made stays, with its edges, except an edge to a node the
+   replace deletes: that edge goes with the node. `viewId=` places what the import creates in that
+   view's layout, so it needs edit access to the view too — with a key, **Views: read & write**.
 
    `identifier=` says what the file's rows find their entities by: `entity_id` (the default),
-   `urn`, which takes a row's entity id or its urn and nothing else, or `prop.<name>`, a property
-   of your own such as `prop.external_id`. A row it finds is updated with
-   only the fields it carries; one it doesn't is created, keeping its urn, under an id derived from
-   it; an entity's id never changes. A refused row says why with a `code` (`no_key`: give it a urn).
+   `urn`, which takes a row's entity id or its urn and nothing else, `prop.<name>`, a property
+   of your own such as `prop.external_id`, or `prop.<name>,urn`, the property, else the urn. A row
+   it finds is updated with only the fields it carries; one it doesn't is created, keeping its urn,
+   under an id derived from it; an entity's id never changes. A refused row says why with a `code`
+   (`no_key`: give it a key the identifier reads).
    Leave `identifier` out and the graph's default applies, which a workspace admin sets on the data
    source's Versioning tab: `GET …/graphs/{gid}/import-settings` says what it is, where it comes
    from, the replace guard's limits in force, and the properties its imports match by.
@@ -861,13 +864,16 @@ The whole round trip, once for each identifier, with every request and answer: [
    api POST "/api/v1/$WS/versioning/graphs/$GID/branches/$BRANCH/publish" -d '{"message": "Nightly import"}'
    ```
 
-   The answer is `{"commitId": "cmt_…", "revisionId": 42, "status": "completed"}`: the commit
-   the draft landed as, and the revision of the published graph that holds it (what `asOfSeq=42`
-   reads the graph as of). A `409 not_up_to_date` means the published graph moved since the
-   draft began: pull the latest in with `POST …/branches/$BRANCH/rebase` (body `{}`), then publish
-   again. A draft that changes more than 20,000 entities publishes as a job: the answer is `202`
-   with `status` and a `statusUrl` (`GET …/graphs/$GID/publish-jobs/$JOB`) to poll until `status`
-   is `completed`, with `commitId` and `revisionId`, or `failed`, with `error`. An API key
+   The answer is `{"outcome": "published", "commitId": "cmt_…", "revisionId": 42, "status":
+   "completed"}`: the commit the draft landed as, and the revision of the published graph that
+   holds it (what `asOfSeq=42` reads the graph as of). `"outcome": "unchanged"` means the published
+   graph had the draft's changes already, so nothing was committed: `commitId` and `revisionId` are
+   its head, which holds them, not a commit this made. Check `outcome` before you revert or diff
+   `commitId`. A `409 not_up_to_date` means the published graph moved since the draft began: pull
+   the latest in with `POST …/branches/$BRANCH/rebase` (body `{}`), then publish again. A draft
+   that changes more than 20,000 entities publishes as a job: the answer is `202` with `status` and
+   a `statusUrl` (`GET …/graphs/$GID/publish-jobs/$JOB`) to poll until `status` is `completed`,
+   with `outcome`, `commitId` and `revisionId`, or `failed`, with `error`. An API key
    publishes where the person or service account it belongs to holds publish
    (`403 publish_required` elsewhere). Or raise a merge request
    (`POST …/branches/$BRANCH/merge-requests`) for a person to review.

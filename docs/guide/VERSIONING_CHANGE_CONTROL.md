@@ -22,8 +22,9 @@ guide.
   reviewers).
 - **Review before anything ships.** Raise a change for review, see exactly what
   moves, resolve conflicts, then merge.
-- **Full history, and a way back.** Every publish is a revision you can
-  inspect, undo on its own, or roll the whole graph back to.
+- **Full history, and a way back.** Every publish or merge that changes
+  Published is a revision you can inspect, undo on its own, or roll the whole
+  graph back to.
 
 Version control covers the graph's entities and relationships. It is not the
 same as the versioning of a [semantic layer](/guide/semantic-layer) (the
@@ -129,8 +130,8 @@ flowchart LR
    don't need a review.
 5. **Review Center** — a reviewer checks the changes, pulls in newer published
    work if needed, and **Merge**s it, or **Dismiss**es it.
-6. **History** — every merge or publish becomes a revision you can undo or roll
-   back to.
+6. **History** — every merge or publish that changes Published becomes a
+   revision you can undo or roll back to.
 
 ## Follow the track
 
@@ -174,8 +175,11 @@ More terms are in the [Glossary](/guide/glossary).
    from this View) or **Whole graph**. Select a revision to see its changes.
 
 After a merge or publish, the banner *Merged — your changes are now live* (or
-*Published — …*) offers **View in history** too. A data source's **Versioning**
-tab lists its recent commits, drafts and open merge requests.
+*Published — …*) offers **View in history** too. When Published already had the
+changes, the banner reads *Already live — the published graph had these
+changes*: no revision was added, so there is no **View in history**. A data
+source's **Versioning** tab lists its recent commits, drafts and open merge
+requests.
 
 The history is listed newest first, by month and day, and keeps loading older
 revisions as you scroll — all the way back to the first.

@@ -59,7 +59,7 @@ sequenceDiagram
 | **Publish job** | The work of landing a draft on the published graph. It ends `published`, with the `commitId` it landed as and its `revisionId`, or `unchanged`: the published graph had the changes already, so nothing was committed, and its `commitId` and `revisionId` are the published graph's head, which holds them |
 | **Upsert** | `reconcileMode=upsert`, the default: write what the file names, and leave everything else as it is |
 | **Full replace** | `reconcileMode=replace`: the same, and also delete what the file leaves out |
-| **Identifier** | How each row finds the item it describes: `entity_id`, `urn`, or `prop.<name>`, a property of your own ([choosing one](/docs/import-export-api#the-model-in-one-minute)) |
+| **Identifier** | How each row finds the item it describes: `entity_id`, `urn`, `prop.<name>` (a property of your own), or `prop.<name>,urn` (the property, else the urn) ([choosing one](/docs/import-export-api#the-model-in-one-minute)) |
 | **Upload** | A file stored in parts before it is imported (`iu_…`), for large files and links that drop |
 
 ## Before you start
@@ -238,7 +238,7 @@ curl -sS "$G/publish-jobs/$PUBLISH_JOB" -H "Authorization: Bearer $TOKEN"
 {"jobId": "vjob_01M77YHMA6CKQHNYJR73XT64SD", "branchId": "br_01M77YHMA2YRFZG13ERX4ZNARJ", "status": "pending"}
 {"status": "completed", "branchId": "br_01M77YHMA2YRFZG13ERX4ZNARJ",
  "summary": {"new": 2, "updated": 1, "unchanged": 2, "deleted": 0, "publish": {"jobId": "vjob_01M77YHN6WE5B8DFRYD0TSDJVM", "state": "queued"}}}
-{"status": "completed", "commitId": "cmt_01M77YHNA67Z1JZJGN3ER78C80", "revisionId": 12}
+{"status": "completed", "outcome": "published", "commitId": "cmt_01M77YHNA67Z1JZJGN3ER78C80", "revisionId": 12}
 ```
 
 `reconcileMode=replace` makes it a full replace. To review the draft before it is published,
@@ -251,10 +251,10 @@ leave `autoPublish` out, and publish it yourself ([step 6](/docs/import-export-a
 | The import `completed`, `summary.publish.state: "queued"` | The draft is being published | Follow `GET …/publish-jobs/{jobId}` to `completed`, or read the import again: once the job ends, `summary.publish` says how |
 | `summary.publish.state: "published"` (or the publish job's `outcome: "published"`) | Your change is live: the draft landed as `commitId` | `revisionId` is the published revision that holds it |
 | `summary.publish.state: "unchanged"` (or `outcome: "unchanged"`) | Nothing to publish: the file changed nothing, or the published graph had its changes already (another run made them first). Nothing was committed: `commitId` is the published graph's head, not a commit this run made | Nothing: `commitId` and `revisionId` name what holds your data |
-| `summary.publish.state: "skipped"`, with `reason.type` | The draft waits for review: `rows_refused`, `conflicts` or `not_up_to_date` | For refused rows, read `summary.refused` ([When rows are refused](#when-rows-are-refused)); otherwise resolve the draft and publish it |
+| `summary.publish.state: "skipped"`, with `reason.type` | The publish was refused, and the draft waits for review. Any refusal ends here: `rows_refused`, `conflicts`, `not_up_to_date`, `review_required`, `branch_closed`, `ontology_violation`… | For refused rows, read `summary.refused` ([When rows are refused](#when-rows-are-refused)); otherwise resolve the draft and publish it |
 | The import `failed`, `summary.failure.code: "mass_delete_blocked"` | A replace that would delete most of what's there ([the replace guard](/docs/import-export-api#the-replace-guard)) | Check `identifier` first. If you meant it, import the file again with `allowMassDelete=true&branchId=<its branchId>`, then publish that draft (`POST …/branches/{branchId}/publish`) |
 | `failed`, `rows_refused` | A replace with rows it couldn't apply deletes nothing | Fix the rows `summary.refused` names and send it again, or send it with `maxRefusedRows` ([When rows are refused](#when-rows-are-refused)) |
-| `failed`, `identifier_matched_nothing` | The file's rows name their items by another key ([Fail fast](/docs/import-export-api#fail-fast)) | Send it again with the right `identifier` |
+| `failed`, `identifier_matched_nothing` | A replace whose first node rows found almost no item, in a graph of 1,000 or more: the file's rows name their items by another key ([Fail fast](/docs/import-export-api#fail-fast)) | Send it again with the right `identifier`. By `prop.<name>` on a graph first loaded by urn, `summary.refused.hints.by_urn` counts the rows `identifier=prop.<name>,urn` would find: send that ([Keyed by your own id](#keyed-by-your-own-id-where-some-rows-dont-have-it)) |
 | `429` or `503`, with `Retry-After` | The server is taking in as many files at once as it allows | Send it again after that many seconds: the samples do |
 | `413`; `415`; `422` | Too large for its format; a form; a parameter, or a body that doesn't match its digest | Read `detail`: it says how to send it |
 
@@ -363,7 +363,12 @@ Two kinds of row often don't fit:
 
 The edges that name those rows are refused too (`end_refused`). The replace then holds, deletes
 nothing, and its failure says where the rows were refused (`phase: "nodes"`) and what one change
-fixes them:
+fixes them.
+
+In a graph of 1,000 items or more (`IMPORT_REPLACE_GUARD_MIN_LIVE`), the replace stops sooner. Its
+first node rows found almost no item, so it stops after its first node window with
+`identifier_matched_nothing` ([Fail fast](/docs/import-export-api#fail-fast)), before it gets to
+`rows_refused`. Nothing is deleted, and the fix is the same.
 
 Here the graph was first loaded by urn, and tonight's file keys its rows by `MY_UNIQUE_ID`, which
 the top-level `Sales` row doesn't have:
@@ -407,8 +412,9 @@ Its `errorMessage` begins with the counts and the fix:
 > their urn — rows without MY_UNIQUE_ID, and rows whose urn is an item's that has no MY_UNIQUE_ID
 > yet (it then takes theirs): send it so, and the edges refused for their ends find them too. …
 
-`hints.by_urn` counts those rows. In the import dialog, a replace held this way offers **Find them
-by their urn**.
+`hints.by_urn` counts those rows. A replace stopped early by the fail-fast counts them too, among
+the rows it read, though its message is the fail-fast's. In the import dialog, a replace held or
+stopped this way offers **Find them by their urn**.
 
 **Send it with `identifier=prop.MY_UNIQUE_ID,urn`: the property, then the urn.**
 
@@ -448,7 +454,8 @@ the graph's default, on the data source's **Versioning** tab, and every import u
 **A graph more than one source writes.** A replace deletes everything in its scope the file leaves
 out, including nodes made in the app or by another connector, which never had your property. Send
 `replaceScope=keyed` and the replace deletes only the nodes that hold the property, and the edges
-whose two ends both do. Everything else stays, with its edges.
+whose two ends both do. Everything else stays, with its edges, except an edge to a node the replace
+deletes, which goes with that node.
 
 **Edges are cleaned up with their nodes.** A node a replace deletes takes every edge at either end
 with it, in the same change: no edge is left pointing at nothing. After the replace's own pass over
@@ -518,7 +525,7 @@ published() {
   jq -c '.summary | {new, updated, unchanged, deleted, invalid}' <<<"$job"
   note=$(jq -c '.summary.publish' <<<"$job")
   if [ "$(jq -r .state <<<"$note")" != queued ]; then echo "publish: $note"; return; fi
-  follow "publish-jobs/$(jq -r .jobId <<<"$note")" | jq -c '{status, commitId, revisionId, error}'
+  follow "publish-jobs/$(jq -r .jobId <<<"$note")" | jq -c '{status, outcome, commitId, revisionId, error}'
 }
 
 case $1 in
@@ -536,10 +543,10 @@ esac
 ```console
 $ ./send_import.sh upsert changes.ndjson
 {"new":5,"updated":0,"unchanged":0,"deleted":0,"invalid":0}
-{"status":"completed","commitId":"cmt_01M77YKSFXA517SMF6BYTWXH9P","revisionId":2,"error":null}
+{"status":"completed","outcome":"published","commitId":"cmt_01M77YKSFXA517SMF6BYTWXH9P","revisionId":2,"error":null}
 $ ./send_import.sh replace nightly.ndjson
 {"new":2,"updated":1,"unchanged":2,"deleted":2,"invalid":0}
-{"status":"completed","commitId":"cmt_01M77YM8N83HVCG6FARNZ89S8K","revisionId":3,"error":null}
+{"status":"completed","outcome":"published","commitId":"cmt_01M77YM8N83HVCG6FARNZ89S8K","revisionId":3,"error":null}
 ```
 
 `changes.ndjson` made three tables and two edges. `nightly.ndjson` left a table and its edge out,

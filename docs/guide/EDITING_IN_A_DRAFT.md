@@ -358,6 +358,11 @@ the banner *Published — your changes are now live* confirms it. Use it only
 where your team doesn't expect a review — see
 [Ways of Working](/guide/ways-of-working).
 
+If Published already had your changes, because someone made the same ones
+first, the banner reads *Already live — the published graph had these changes*.
+Nothing new was published, so there is no new version, and no **View in
+history**.
+
 If the draft already has a review request, the dialog says **Already in
 review**: everything you've saved since is part of that request, so there's
 nothing to submit — choose **View review**. **Publish now** is still there,

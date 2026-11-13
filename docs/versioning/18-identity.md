@@ -148,8 +148,10 @@ graph, on any draft. The same key from someone else is always a new request.
 
 **Running an import again** starts a new job. What happens to each row depends on how it names its
 entity, which the import's `identifier` says ([08 §3b](08-import-export.md#3b-resolve-a-window-at-a-time)):
-`entity_id` (the default), `urn`, or `prop.<name>`: by a property, through its index, which finds a
-node made or edited in the app since the last import too.
+`entity_id` (the default), `urn`, `prop.<name>`, or `prop.<name>,urn`. By a property, rows are
+found through its index, which finds a node made or edited in the app since the last import too.
+With `,urn`, a row without the property, or whose value no node holds yet, is found by its urn, and
+that node takes the value.
 
 - A row that names an entity by its `entity_id` updates it. Every row of an export does.
 - A row's `urn`, or (by `entity_id`) its value of the identifier property, is a **pointer**. It finds
@@ -162,7 +164,9 @@ node made or edited in the app since the last import too.
   under `reconcileMode=replace` each run would delete the node the previous run made.
 - A row whose urn and identifier value point at two different entities is refused. So is a row,
   by `prop.<name>`, that would make a new node with a urn another node holds (`two_entities`):
-  to change that node's value, send its `entity_id` with the new one.
+  to change that node's value, send its `entity_id` with the new one. When that node holds no
+  value of the property yet (a graph first loaded by urn), send `prop.<name>,urn` instead: the row
+  finds the node by its urn, and the node takes the value.
 - A matched row's urn or identifier value that names nothing is reported on the row, not applied.
   An import never changes a node's urn.
 - A row an export wrote, imported after its entity changed, applies only the cells it changed; see
@@ -183,7 +187,11 @@ Each identifier, walked through over the API with its requests and answers: [Exp
   a spreadsheet re-imports as updates of exactly what changed. A row that changes nothing is counted
   `unchanged`, and nothing is written for it.
 - **`reconcileMode=upsert`** (the default) touches only what the file names. `replace` also deletes
-  what the file leaves out of its scope.
+  what the file leaves out of its scope, but never what a row of the file names, refused or not (a
+  refused delete row excepted), nor a node an edge row names as an end. With a property identifier,
+  `replaceScope=keyed` deletes only what holds the property: nodes made in the app or by another
+  source stay, with their edges, except an edge to a node the replace deletes, which goes with that
+  node.
 
 **By the API:**
 

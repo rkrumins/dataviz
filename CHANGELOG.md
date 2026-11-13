@@ -36,9 +36,10 @@ integration's many small changes as a few commits.
     (`--identifier`), and the import dialog ("Rows without it: find them by their urn").
   - **`replaceScope=keyed` deletes only what holds the property.** It applies to replaces with a
     property identifier: the nodes holding it, and the edges whose two ends both hold it. Nodes
-    made in the app or by another source are left alone, with their edges. It is on
-    `POST …/imports`, an upload's `complete`, the connector (`--replace-scope keyed`), and the
-    import dialog ("Delete only items that have this property").
+    made in the app or by another source are left alone, with their edges, except an edge to a node
+    the replace deletes, which goes with that node. It is on `POST …/imports`, an upload's
+    `complete`, the connector (`--replace-scope keyed`), and the import dialog ("Delete only items
+    that have this property").
   - **Refused rows say the one change that fixes them.** A held replace by a property alone counts
     the rows `prop.<name>,urn` would find by their urn (`summary.refused.hints.by_urn`): rows without
     the property, and rows whose urn is an item's that has none yet. Its message says to send it,
@@ -135,10 +136,13 @@ integration's many small changes as a few commits.
     staged rows instead of 330 MB, 206 MB of WAL instead of 513 MB; the same draft and tallies.
 - **A publish or merge says the revision of the published graph that holds it.**
   - `POST …/branches/{id}/publish`, `POST /merge-requests/{id}/merge` and `POST /pulls/{id}/merge`
-    answer `{commitId, revisionId, status: "completed"}`. `revisionId` is the `commitSeq` of the
-    commit on `main`, which `?asOfSeq` and `GET …/revisions/{seq}` read `main` as of.
+    answer `{outcome, commitId, revisionId, status: "completed"}`. `revisionId` is the `commitSeq`
+    of the commit on `main`, which `?asOfSeq` and `GET …/revisions/{seq}` read `main` as of.
+    `outcome` is `published`, or `unchanged` when nothing was committed: `commitId` and `revisionId`
+    are then `main`'s head (below, under Changed).
   - One large enough to run as a job answers `202` with a `statusUrl`. The job
-    (`GET …/publish-jobs/{jobId}`) has `commitId` and `revisionId` once it is `completed`.
+    (`GET …/publish-jobs/{jobId}`) has `outcome`, `commitId` and `revisionId` once it is
+    `completed`.
   - An import that publishes itself (`autoPublish`) gets the same from the job that
     `summary.publish.jobId` names. The reference connector reports it.
 - **Draft retention: a merged or abandoned draft's changes are removed after 30 days.**
@@ -205,9 +209,10 @@ integration's many small changes as a few commits.
   - The job's `summary.replaceGuard` says what it would have done and the limits in force; the
     message says to check the identifier, or to send `allowMassDelete=true`, which deletes all the
     same (anyone who may run the import may send it).
-  - A whole-graph replace whose first full window finds an entity for fewer than 5% of its rows stops
-    there, with `identifier_matched_nothing`, instead of reading the rest of the file first, unless
-    it was sent with `allowMassDelete=true`.
+  - A whole-graph replace whose first node window, whatever its size, finds an entity for fewer
+    than 5% of its rows, in a graph of at least 1,000 entities, stops there, with
+    `identifier_matched_nothing`, instead of reading the rest of the file first, unless it was sent
+    with `allowMassDelete=true`.
   - The operator sets the limits: `IMPORT_REPLACE_GUARD` (on), `IMPORT_REPLACE_GUARD_MIN_LIVE`
     (1000), `IMPORT_REPLACE_GUARD_DELETE_FRACTION` and `IMPORT_REPLACE_GUARD_CREATE_FRACTION` (0.5),
     `IMPORT_REPLACE_MIN_MATCH_FRACTION` (0.05); Helm `config.imports`. A workspace admin may set a
@@ -261,9 +266,9 @@ integration's many small changes as a few commits.
     graph's default, and says when a property is indexed first.
 - **Every refused import row carries a code** beside its reasons, in the preview and the dry run:
   `no_key`, `two_entities`, `duplicate_value`, `changed_since_export`, `named_already`,
-  `invalid_type`, `missing_type`, `end_not_found`, `edge_moved`, `write_refused`, `invalid_row`
-  (and `already_gone` for a delete with nothing to delete). A client acts on the code instead of
-  parsing the words.
+  `invalid_type`, `missing_type`, `end_not_found`, `end_refused`, `edge_moved`, `write_refused`,
+  `invalid_row` (and `already_gone` for a delete with nothing to delete). A client acts on the code
+  instead of parsing the words.
 - **Projection metrics** on the versioning worker's scrape endpoint (`:9100/metrics`):
   - `graphver_projection_passes_total{outcome}`;
   - per-statement durations and splits;

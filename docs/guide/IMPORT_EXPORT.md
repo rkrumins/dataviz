@@ -148,7 +148,8 @@ else, delete its row (set `_op` to `delete`) and add a new one.
 A `urn` you give a new item is kept on it, and finds it again on the next
 import. A new row needs one: a row with only an `entity_id` you made up for the
 file is refused, because the next import couldn't find what it made and would
-make it again.
+make it again. An edge to a new row that was refused is refused too, saying
+which row (`end_refused`): fix that row, and the edge imports with it.
 
 ### Matching rows to existing items
 
@@ -164,6 +165,7 @@ file from any language.
 | **Entity ID** | its `entity_id`, else its `urn`, else a field its type matches imports by, else a unique qualified name | The file is an export of this data, edited (the default) |
 | **URN** | its `urn` alone (or an `entity_id` of this graph) | Another system names its items by urn, as DataHub does |
 | **A property** | its value of a property you name, such as `external_id` | Another system gives each item an id of its own, kept in a property |
+| **A property**, with **Rows without it: find them by their urn** | its value of the property; a row without it, or whose value no item holds yet, by its `urn` | As above, but some rows have no such id (a top-level container), or the data was first loaded by urn |
 
 **Entity ID — an export, edited.** The example above. Each exported row's
 `entity_id` finds its item, and a new row is found by its `urn`.
@@ -200,6 +202,22 @@ just `prop.external_id` and the column that changed — `E-1001` with a new
 `prop.owner` — changes that column and nothing else, and a table someone added
 in the app with its own `external_id` is found by it, not made twice.
 
+**Rows without the property.** Some rows don't carry it. Here the ERP's file
+starts with the domain that holds its tables, which has a urn but no
+`external_id`:
+
+| kind | urn | prop.external_id | entityType | displayName |
+| --- | --- | --- | --- | --- |
+| node | `urn:erp:sales` | | Domain | Sales |
+| node | | E-1001 | Table | orders |
+
+By **A property** alone, the `Sales` row is refused, and so is every edge to it.
+Tick **Rows without it: find them by their urn**: `Sales` is then found by its
+urn, and `orders` by its `external_id`. The same goes for items first loaded by
+urn, or made in the app, which never had the property: a row whose value no item
+holds yet is found by its urn too. An item found by its urn keeps its id and
+takes the row's value, so the next import finds it by the property.
+
 The choice marked **default** is the data source's. A workspace admin sets it on
 the data source's **Versioning** tab, under **Imports**. A fork can't match by a
 property yet, so where its parent's default is a property, a fork's is
@@ -210,8 +228,10 @@ its parent does.
 - **A row nothing matches** becomes a new item. Its id is made from the key that
   should have found it, so importing the file again finds it rather than making
   it twice.
-- **A row with no key at all** (no urn, and no value of the property) is refused,
-  saying so: give it one.
+- **A row with no key the choice reads** is refused, saying so: by **URN**, a
+  row with no urn; by **A property**, a row with no value of it, even with a
+  urn. Tick **Rows without it: find them by their urn** to find those by their
+  urn instead.
 - **Only the columns a row carries change.** A file of `external_id` and one
   changed column updates that column on those items and leaves everything else
   as it is. A row that changes nothing writes nothing.
@@ -228,7 +248,7 @@ its parent does.
 | Mode | What it does | Use it when |
 | --- | --- | --- |
 | **Add & update** | Creates new items and updates the ones that match. Never deletes anything. | The safe default — you're adding or correcting data. |
-| **Replace (authoritative)** | Treats the file as the *complete* picture of the View you're importing from: its entities missing from the file are deleted. The rest of the data source is untouched. A replace that would delete most of what it covers and create most of it again (a file whose rows don't match the graph's items) is stopped before it deletes anything. | You're re-uploading a full, canonical export of the View and want it to match exactly. |
+| **Replace (authoritative)** | Treats the file as the *complete* picture of the View you're importing from: its entities missing from the file are deleted, with their edges. The rest of the data source is untouched. It never deletes what the file names. A replace that would delete most of what it covers and create most of it again (a file whose rows don't match the graph's items) is stopped before it deletes anything. | You're re-uploading a full, canonical export of the View and want it to match exactly. |
 
 > **Warning:** Replace mode can delete data. {brand} always shows you the exact
 > count before you publish, but double-check your file is complete before
@@ -243,6 +263,28 @@ deletions included, for you to review before you publish. The
 data source's **Versioning** tab shows the limits the guard uses, and a workspace
 admin can change them there.
 
+**What a replace never deletes.** An item a row of the file names stays, even
+when that row is refused, and so does every item an edge row names as an end. A
+refused delete row is the exception: it meant to delete what it names. An item
+the replace does delete takes its edges with it, in the same change.
+
+**Delete only items that have this property.** With **A property**, a replace
+deletes anything the file leaves out, including items made in the app or by
+another source, which never had the property. Tick **Delete only items that have
+this property** to delete only the items that hold it. The others stay, with
+their edges, except an edge to an item the replace deletes, which goes with that
+item.
+
+**When rows are refused,** a replace deletes nothing, and the file's other rows
+wait on your draft. The dialog lists the refused rows grouped by reason, each
+reason with what to do. Fix them and choose **Try again**, or choose **Import
+the rest anyway**: the replace goes on without them, and its deletions are
+staged on your draft. When the refused rows have a urn but not the property you
+match by, the dialog also offers **Find them by their urn**: the file is
+imported again into the same draft, with **Rows without it: find them by their
+urn** ticked. In a graph of 1,000 items or more, such a replace stops sooner,
+once its first rows find almost nothing, and offers the same button.
+
 ### Working beside other drafts
 
 Several people, and several connectors, can change one data source at once,
@@ -250,8 +292,12 @@ each in a draft of their own. When one publishes, the others' drafts are behind
 the published graph: **Pull latest** brings its changes into yours, merging them
 field by field, and asks you to choose only where you both changed the same
 field. A connector whose import publishes itself does the same on its own: it
-pulls the latest and publishes, and waits for a person only on such a conflict.
-What others published meanwhile is kept, however large the import.
+pulls the latest and publishes. Its draft waits for a person on such a conflict,
+on rows it refused (unless it was told to go on without them), when the
+published graph kept moving through three pulls, or on any other reason the
+publish was refused. An import that changed nothing has nothing to publish: it
+says *unchanged*, and that is a success. What others published meanwhile is
+kept, however large the import.
 
 Because an import lands on a draft, nothing is final until you publish or it's
 merged through review — you can inspect, adjust, or abandon it like any other
