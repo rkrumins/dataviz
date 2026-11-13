@@ -49,14 +49,14 @@ describe('publishing a large draft', () => {
         ])
     })
 
-    it('ends a job that changed nothing as a success: unchanged, no commit, the revision that holds it', async () => {
+    it('ends a job that changed nothing as a success: unchanged, with the head of main that holds it', async () => {
         serve([
             [202, { jobId: 'vjob_1', graphId: 'g1', status: 'pending' }],
-            [200, { jobId: 'vjob_1', graphId: 'g1', status: 'completed', commitId: null, revisionId: 7,
+            [200, { jobId: 'vjob_1', graphId: 'g1', status: 'completed', commitId: 'cmt_head', revisionId: 7,
                 outcome: 'unchanged', error: null }],
         ])
         await expect(publishBranch('ws1', 'g1', 'br_1', { message: 'm' })).resolves.toEqual(
-            { commitId: null, revisionId: 7, outcome: 'unchanged' })
+            { commitId: 'cmt_head', revisionId: 7, outcome: 'unchanged' })
     })
 
     it('reads an older server’s blank commit as unchanged, not as a failure', async () => {

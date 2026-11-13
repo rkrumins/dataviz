@@ -313,8 +313,8 @@ class _Part:
 
 def _outcome(job: dict[str, Any]) -> dict[str, Any]:
     """A publish job as the run reports it, in the words the import's own note uses: ``published``
-    with its commit; ``unchanged`` — main held the changes already, so nothing was committed
-    (``commitId`` null) and ``revisionId`` is the revision that holds them; or ``failed``."""
+    with its commit; ``unchanged`` — main held the changes already, so nothing was committed, and
+    ``commitId`` and ``revisionId`` are main's head, which holds them; or ``failed``."""
     state = (job.get("outcome") or "published") if job["status"] == "completed" else job["status"]
     return {"state": state, "commitId": job.get("commitId") or None,
             "revisionId": job.get("revisionId"), "error": job.get("error")}

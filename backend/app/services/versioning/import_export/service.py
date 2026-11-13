@@ -104,8 +104,9 @@ async def _note_publish_ended(s, import_job_id: str, job_id: str, result: Dict[s
     fenced finish, so the two never disagree. ``summary.publish`` becomes:
 
     * ``published``, with ``commitId`` and ``revisionId``: the draft landed as that commit;
-    * ``unchanged``, ``commitId`` null: main held the draft's changes already (another import, or a
-      person, made them first), so nothing was committed, and ``revisionId`` holds them;
+    * ``unchanged``: main held the draft's changes already (another import, or a person, made them
+      first), so nothing was committed; ``commitId`` and ``revisionId`` are main's head, which
+      holds them;
     * ``skipped``, with ``reason``: the publish was refused, and the draft waits for review.
 
     ``jobId``, the import's ``refusedRows`` and the pulls the job made (``pulls``) are kept."""
@@ -559,8 +560,8 @@ class ImportExportService:
           the review policy read again, the import's owner held to publish again. When it ends, the
           note says how (:func:`_note_publish_ended`): ``published``, ``unchanged`` or ``skipped``;
         * ``unchanged``: the import changed nothing, so its draft, empty, is closed and nothing is
-          committed — ``commitId`` null, and ``revisionId`` the revision of main that holds the
-          file's content;
+          committed — ``commitId`` and ``revisionId`` are main's head, which holds the file's
+          content;
         * ``skipped``, with ``reason``: more rows were refused than the import's ``maxRefusedRows``
           allows (none, by default), or the draft can't be published (it fell behind main while
           the file was imported, …). The draft waits for review.
@@ -583,7 +584,7 @@ class ImportExportService:
                 if not any(summary.get(k) for k in ("new", "updated", "deleted")):
                     await self._svc.abandon_draft(graph_id=graph_id, branch_id=branch_id, actor=owner)
                     held = await self._svc.publish_outcome(graph_id=graph_id, commit_id=None)
-                    note = {"state": "unchanged", "commitId": None,
+                    note = {"state": "unchanged", "commitId": (held or {}).get("commit_id"),
                             "revisionId": (held or {}).get("revision_id")}
                 else:
                     note = await self._publish_own_draft(job_id, ws, ds, graph_id, branch_id, owner)

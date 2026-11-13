@@ -58,17 +58,17 @@ class _Versioning:
         self.releases.append(kwargs)
         return [kwargs.get("branch_id")]
 
-    async def publish_outcome(self, *, graph_id, commit_id):
-        assert graph_id == "g1"
+    async def publish_outcome(self, *, graph_id, commit_id, at_revision=None):
+        assert graph_id == "g1" and at_revision is None
         if commit_id in _REVISION_OF:
             return {"outcome": "published", "commit_id": commit_id, "revision_id": _REVISION_OF[commit_id]}
-        return {"outcome": "unchanged", "commit_id": None, "revision_id": _HEAD}
+        return {"outcome": "unchanged", "commit_id": _HEAD_COMMIT, "revision_id": _HEAD}
 
 
 #: The revision of main each commit landed as: what a publish job records beside its commit.
 _REVISION_OF = {"cmt_new": 12, "cmt_landed": 11, "cmt_zombie": 13}
-#: Main's head: the revision that holds what a publish that changed nothing carried.
-_HEAD = 13
+#: Main's head: the commit and revision that hold what a publish that changed nothing carried.
+_HEAD_COMMIT, _HEAD = "cmt_zombie", 13
 
 
 class _Lease:
@@ -163,12 +163,12 @@ async def test_a_publish_job_publishes_and_sets_off_what_a_publish_does(monkeypa
     assert svc.releases == []
 
 
-async def test_a_publish_job_that_changed_nothing_says_so_and_names_no_commit(monkeypatch, set_off):
-    """Main held the draft's changes already: nothing is committed, so no commit is named — not a
-    blank, not the draft's own — and the revision is main's head, which holds them."""
+async def test_a_publish_job_that_changed_nothing_says_so_and_names_mains_head(monkeypatch, set_off):
+    """Main held the draft's changes already: nothing is committed, and the commit and revision
+    named are main's head, which holds them — not a blank, not the draft's own."""
     svc = _Versioning(merged=[None], publish="")
     lease = _Lease()
-    unchanged = {"commitId": None, "revisionId": _HEAD, "outcome": "unchanged"}
+    unchanged = {"commitId": _HEAD_COMMIT, "revisionId": _HEAD, "outcome": "unchanged"}
     assert await _service(monkeypatch, svc).run_publish("vjob_1", lease) == unchanged
     assert lease.finished == ("completed", {"summary": unchanged})
 

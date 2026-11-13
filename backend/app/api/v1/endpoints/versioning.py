@@ -953,9 +953,9 @@ class PublishResponse(CommitResponse):
 
     * ``published``: it landed as ``commitId``, and ``revisionId`` is the revision of ``main`` that
       holds it (what ``asOfSeq`` reads ``main`` as of);
-    * ``unchanged``: ``main`` held what it carried already, so nothing was committed —
-      ``commitId`` is null and ``main`` did not move — and ``revisionId`` is the revision of
-      ``main`` that holds it, its head.
+    * ``unchanged``: ``main`` held what it carried already, so nothing was committed and ``main``
+      did not move. ``commitId`` is ``main``'s head, the commit that already holds it (not one
+      this made: read ``outcome`` before reverting it), and ``revisionId`` its revision.
 
     One too large for a request answers 202 instead — ``{jobId, graphId, status, statusUrl}`` —
     and its job (``statusUrl``, :class:`PublishJobResponse`) says the same once ``completed``."""
@@ -980,8 +980,8 @@ class PublishJobResponse(_JobAnswer):
     """A large draft's publish (or review merge), or a fork review's merge, run as a job. Once
     ``completed``, what it did to ``main`` (``outcome``), as :class:`PublishResponse` says it:
     ``published`` as ``commitId``, held by revision ``revisionId``; or ``unchanged`` — nothing was
-    committed (``commitId`` null), and ``revisionId`` is the revision that holds it. ``outcome`` is
-    null until then."""
+    committed, and ``commitId`` and ``revisionId`` are ``main``'s head, which holds it already.
+    ``outcome`` is null until then."""
     outcome: Optional[str] = None
 
 
@@ -2401,13 +2401,14 @@ async def publish(
     return await _publish_answer(svc, graph_id, commit_id)
 
 
-async def _publish_answer(svc: GraphVersioningService, graph_id: str,
-                          commit_id: Optional[str]) -> Dict[str, Any]:
+async def _publish_answer(svc: GraphVersioningService, graph_id: str, commit_id: Optional[str],
+                          at_revision: Optional[int] = None) -> Dict[str, Any]:
     """What a publish or merge that answered ``commit_id`` did to ``main``, as every route and job
     says it (:class:`PublishResponse`): ``outcome`` ``published``, as ``commit_id``; or
-    ``unchanged``, ``commit_id`` None — nothing was committed — and, either way, the revision of
-    ``main`` that holds it. A graph gone meanwhile has no revision to say."""
-    return await svc.publish_outcome(graph_id=graph_id, commit_id=commit_id) or {
+    ``unchanged`` — nothing was committed — as ``main``'s head; and, either way, the revision of
+    ``main`` that holds it. ``at_revision``: the revision an answer recorded when it ran, for
+    one read later. A graph gone meanwhile has no commit or revision to say."""
+    return await svc.publish_outcome(graph_id=graph_id, commit_id=commit_id, at_revision=at_revision) or {
         "outcome": "published" if commit_id else "unchanged", "commit_id": commit_id or None,
         "revision_id": None}
 
@@ -2538,10 +2539,12 @@ async def get_publish_job(
     summary = answer.pop("summary")
     if answer["status"] == "completed":
         # Recorded when the job ended. A job that ended before it recorded its outcome is read from
-        # its commit — one that isn't on main (none, or its draft's own head) committed nothing —
-        # and keeps the revision it recorded.
+        # its commit — one that isn't on main (none, or its draft's own head) committed nothing,
+        # and names the commit at the revision it recorded, or main's head — and keeps the revision
+        # it recorded.
         if summary.get("outcome") is None:
-            answer.update(await _publish_answer(svc, graph_id, answer["commit_id"]))
+            answer.update(await _publish_answer(svc, graph_id, answer["commit_id"],
+                                                at_revision=summary.get("revisionId")))
         else:
             answer["outcome"], answer["commit_id"] = summary["outcome"], answer["commit_id"] or None
         if summary.get("revisionId") is not None:

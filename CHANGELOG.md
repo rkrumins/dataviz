@@ -307,15 +307,16 @@ integration's many small changes as a few commits.
   gave its commit at all.
   - Every publish and merge answer, inside the request or as a job (`POST …/branches/{bid}/publish`,
     `…/merge-requests/{id}/merge`, `…/pulls/{id}/merge`, `GET …/publish-jobs/{jobId}`), now carries
-    `outcome`: `published`, with the `commitId` it landed as; or `unchanged`, with `commitId: null`.
-    `revisionId` is the revision of main that holds the content either way: the new commit's, or
-    main's head, which doesn't move.
-  - A job recorded before this is read the same way: a commit that isn't on main is `unchanged`.
+    `outcome`: `published`, with the `commitId` it landed as; or `unchanged`, with main's head as
+    `commitId`: the commit that already holds the content, not one this made. `revisionId` is that
+    commit's revision either way: the new commit's, or main's head, which doesn't move.
+  - A job recorded before this is read the same way: a commit that isn't on main is `unchanged`,
+    naming the commit at the revision the job recorded, else main's head.
   - An import's `summary.publish` ends with its publish job, written in the same transaction as the
     job's finish: `published` with `commitId` and `revisionId`, `unchanged`, or `skipped` with the
     reason, keeping `jobId`, `pulls` and `refusedRows`. A refusal of any kind is noted, not only a
-    refused pull. An import that changed nothing notes `unchanged` with `commitId: null` and
-    `revisionId`. Reading the import alone now tells you how its publish went.
+    refused pull. An import that changed nothing notes `unchanged` with main's head as `commitId`
+    and `revisionId`. Reading the import alone now tells you how its publish went.
   - A review merged with no change records no resulting commit (it recorded its draft's head).
   - The app took a queued publish that changed nothing for a failure ("Publishing failed"); it is a
     success now, and the receipt reads "Already live — the published graph had these changes", with
@@ -529,10 +530,11 @@ integration's many small changes as a few commits.
     1,000 or more (`identifier_matched_nothing`). One sent with `allowMassDelete=true` goes on as
     before.
 
-- **`commitId` is `null`, not `""`, when a publish or merge changes nothing; read `outcome`.** A
-  client that tested `commitId` for truth keeps working. One that compared it with `""`, or took a
-  blank (or a draft's commit) for a failure, checks `outcome == "unchanged"` instead; the revision
-  that holds its data is `revisionId`. An import's `summary.publish.state` can now also read
+- **When a publish or merge changes nothing, `commitId` is main's head, not `""`; read `outcome`.**
+  It names the commit that already holds the content, not one this made, so a client that reverts
+  or diffs `commitId`, or takes any `commitId` for a new commit, checks `outcome == "published"`
+  first. One that compared it with `""`, or took a blank (or a draft's commit) for a failure,
+  checks `outcome == "unchanged"` instead. An import's `summary.publish.state` can now also read
   `published` once its publish job ends (it stayed `queued`), so a client that followed the job
   when it read `queued` keeps working, and one that reads the import later finds the end there.
 

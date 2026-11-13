@@ -36,11 +36,13 @@ class _Versioning:
         self.published.append(kw)
         return self.answer
 
-    async def publish_outcome(self, *, graph_id, commit_id):
-        on_main = {"cmt_1": 41, "cmt_9": 7, "cmt_8": 6}
+    async def publish_outcome(self, *, graph_id, commit_id, at_revision=None):
+        on_main = {"cmt_1": 41, "cmt_9": 7, "cmt_8": 6, "cmt_40": 40, "cmt_39": 39}
         if commit_id in on_main:
             return {"outcome": "published", "commit_id": commit_id, "revision_id": on_main[commit_id]}
-        return {"outcome": "unchanged", "commit_id": None, "revision_id": 41}    # main's head
+        seq = 41 if at_revision is None else at_revision                   # main's head, or then
+        return {"outcome": "unchanged", "commit_id": {v: k for k, v in on_main.items()}[seq],
+                "revision_id": seq}
 
     async def get_pr(self, pr_id):
         # No source graph: a fork's review, as the store reads one, so the tests that merge it
@@ -59,7 +61,7 @@ class _Jobs:
                               "status": "completed", "summary": {"commitId": "cmt_8", "revisionId": 6}},
             "vjob_unchanged": {"jobId": "vjob_unchanged", "jobType": "publish", "graphId": "g1",
                                "status": "completed",
-                               "summary": {"commitId": None, "revisionId": 40, "outcome": "unchanged"}},
+                               "summary": {"commitId": "cmt_40", "revisionId": 40, "outcome": "unchanged"}},
             "vjob_blank": {"jobId": "vjob_blank", "jobType": "publish", "graphId": "g1",
                            "status": "completed", "summary": {"commitId": "", "revisionId": 39}},
             "vjob_draft_head": {"jobId": "vjob_draft_head", "jobType": "publish", "graphId": "g1",
@@ -107,14 +109,14 @@ async def test_a_small_draft_publishes_inside_the_request(test_client, services)
     assert len(svc.published) == 1 and jobs.created == []
 
 
-async def test_a_publish_that_changed_nothing_says_unchanged_and_names_no_commit(test_client, services):
-    """Main held the draft's changes already: nothing is committed, so ``commitId`` is null — not
-    a blank, not the draft's own commit — and ``revisionId`` is main's head, which holds them."""
+async def test_a_publish_that_changed_nothing_says_unchanged_and_names_mains_head(test_client, services):
+    """Main held the draft's changes already: nothing is committed, and ``commitId`` and
+    ``revisionId`` are main's head, which holds them — not a blank, not the draft's own commit."""
     svc, _jobs = services
     svc.answer = ""
     r = await test_client.post(f"{BASE}/graphs/g1/branches/br_small/publish", json={"message": "m"})
     assert r.status_code == 200, r.text
-    assert r.json() == {"commitId": None, "revisionId": 41, "status": "completed", "outcome": "unchanged"}
+    assert r.json() == {"commitId": "cmt_1", "revisionId": 41, "status": "completed", "outcome": "unchanged"}
 
 
 async def test_a_publish_folds_staged_edits_with_the_sources_node_identity(test_client, services,
@@ -220,18 +222,19 @@ async def test_a_publish_job_says_what_the_request_would_have(test_client, servi
 
 async def test_a_publish_job_that_changed_nothing_says_unchanged_however_it_was_recorded(test_client,
                                                                                          services):
-    """Nothing was committed: ``commitId`` null and ``outcome`` unchanged, with the revision that
-    holds it — as the job records it now, and for a job recorded before, whose ``commitId`` was
-    blank or its draft's own head (not on main): read from main, keeping the revision it recorded."""
+    """Nothing was committed: ``outcome`` unchanged, naming the commit and revision of main that
+    held it — as the job records it now, and for a job recorded before, whose ``commitId`` was
+    blank or its draft's own head (not on main): read from main, at the revision it recorded, else
+    main's head."""
     answers = {}
     for job in ("vjob_unchanged", "vjob_blank", "vjob_draft_head"):
         r = await test_client.get(f"{BASE}/graphs/g1/publish-jobs/{job}")
         assert r.status_code == 200, r.text
         answers[job] = {k: r.json()[k] for k in ("status", "commitId", "revisionId", "outcome")}
     assert answers == {
-        "vjob_unchanged": {"status": "completed", "commitId": None, "revisionId": 40, "outcome": "unchanged"},
-        "vjob_blank": {"status": "completed", "commitId": None, "revisionId": 39, "outcome": "unchanged"},
-        "vjob_draft_head": {"status": "completed", "commitId": None, "revisionId": 41, "outcome": "unchanged"},
+        "vjob_unchanged": {"status": "completed", "commitId": "cmt_40", "revisionId": 40, "outcome": "unchanged"},
+        "vjob_blank": {"status": "completed", "commitId": "cmt_39", "revisionId": 39, "outcome": "unchanged"},
+        "vjob_draft_head": {"status": "completed", "commitId": "cmt_1", "revisionId": 41, "outcome": "unchanged"},
     }
 
 

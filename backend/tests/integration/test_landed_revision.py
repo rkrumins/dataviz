@@ -61,10 +61,16 @@ async def _cases(svc):
     idle = await svc.open_draft(graph_id=gid, owner="u")                 # changes nothing
     answered = await svc.publish(graph_id=gid, branch_id=idle, actor="u", message="nothing")
     assert answered == "", "nothing committed, so no commit — not the draft's own"
-    unchanged = {"outcome": "unchanged", "commit_id": None, "revision_id": revision}
+    unchanged = {"outcome": "unchanged", "commit_id": commit_id, "revision_id": revision}   # main's head
     assert await svc.publish_outcome(graph_id=gid, commit_id=answered) == unchanged
     assert (await _head(gid), await _commits(gid)) == (revision, commits), "main did not move"
     assert await svc.publish_outcome(graph_id=gid, commit_id="cmt_never_on_main") == unchanged
+    async with db.graphver_session() as s:
+        seed = (await s.execute(select(CommitORM.id, CommitORM.commit_seq).where(
+            CommitORM.graph_id == gid, CommitORM.message == "seed"))).one()
+    assert await svc.publish_outcome(graph_id=gid, commit_id="", at_revision=seed[1]) == {
+        "outcome": "unchanged", "commit_id": seed[0], "revision_id": seed[1]}, (
+        "an answer recorded at an earlier revision names that revision's commit")
     assert await svc.publish_outcome(graph_id="graph_" + os.urandom(4).hex(), commit_id=commit_id) is None
 
 

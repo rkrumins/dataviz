@@ -370,8 +370,9 @@ curl -sS -X POST "$BASE/api/v1/$WS/versioning/graphs/$GID/branches/$BRANCH/publi
 - `outcome: "published"`: the draft landed as `commitId`, and `revisionId` is the revision of the
   published graph that holds it;
 - `outcome: "unchanged"`: the published graph had the draft's changes already (someone made the
-  same changes first), so **nothing was committed**: `commitId` is `null` — never a blank, and never
-  another commit's id — and `revisionId` is the revision that already holds them.
+  same changes first), so **nothing was committed**. `commitId` and `revisionId` are the published
+  graph's head, the commit and revision that already hold them — not a commit this made, so check
+  `outcome` before you revert `commitId`.
 
 A draft of more than 20,000 changes publishes as a job: the answer is `202` with a `statusUrl`
 (`GET …/publish-jobs/{jobId}`) to poll until `completed`, with the same `outcome`, `commitId` and
@@ -400,7 +401,7 @@ job's `summary.publish`:
 |---|---|---|
 | `queued`, with `jobId` | The draft is being published, as a job. `pulls` says how often it pulled the published graph first | Follow `GET …/publish-jobs/{jobId}` to `completed` (`outcome`, `commitId`, `revisionId`) or `failed` (`error`), or read the import again: when the job ends, this note says how |
 | `published`, with `jobId`, `commitId`, `revisionId` | The draft landed as `commitId`; `revisionId` holds it | Nothing |
-| `unchanged`, with `commitId: null`, `revisionId` | Nothing to publish: the file changed nothing (its empty draft was closed), or the published graph had its changes already when its publish job ran. Nothing was committed; `revisionId` is the revision that holds the data | Nothing |
+| `unchanged`, with `commitId`, `revisionId` | Nothing to publish: the file changed nothing (its empty draft was closed), or the published graph had its changes already when its publish job ran. Nothing was committed; `commitId` and `revisionId` are the published graph's head, which holds the data | Nothing |
 | `skipped`, with `reason` | It wasn't published; the draft waits for review. `reason.type` says why: `rows_refused` (some rows were refused), `conflicts` (someone changed the same fields differently meanwhile), `not_up_to_date` (the published graph kept moving through three pulls), or the refusal a publish would give | Fix and import again, or resolve the draft and publish it |
 
 When the published graph moved while the file was imported, the draft pulls it first with the same
@@ -650,7 +651,7 @@ wait_for "imports/vjob_01M77NSA4QGA5SWNTG2NK7SX4C" | jq .summary
 ```
 
 ```json
-{"new": 0, "deleted": 0, "invalid": 0, "publish": {"state": "unchanged", "commitId": null, "revisionId": 4}, "updated": 0, "unchanged": 6}
+{"new": 0, "deleted": 0, "invalid": 0, "publish": {"state": "unchanged", "commitId": "cmt_01M77NRXJ9H76KNP49GR7HGSTV", "revisionId": 4}, "updated": 0, "unchanged": 6}
 ```
 
 Its rows are older than the graph now, and each is merged with what changed since: every cell you
@@ -835,7 +836,7 @@ wait_for "imports/vjob_01M77NT35EBRPA9FKVEQQGCD19" | jq '.summary | {new, update
 ```
 
 ```json
-{"new": 0, "updated": 0, "unchanged": 6, "deleted": 0, "invalid": 0, "publish": {"state": "unchanged", "commitId": null, "revisionId": 3}}
+{"new": 0, "updated": 0, "unchanged": 6, "deleted": 0, "invalid": 0, "publish": {"state": "unchanged", "commitId": "cmt_01M77NSRQ57HQTARQ585QGJNQE", "revisionId": 3}}
 ```
 
 ## Walkthrough 3: by a property — an ERP's own ids

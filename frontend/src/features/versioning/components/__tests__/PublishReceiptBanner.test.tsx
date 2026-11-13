@@ -27,7 +27,7 @@ describe('PublishReceiptBanner', () => {
   })
 
   it('says a publish that changed nothing was already live, with no version to look at', () => {
-    usePublishReceiptStore.getState().setReceipt(receipt({ commitId: null, outcome: 'unchanged' }))
+    usePublishReceiptStore.getState().setReceipt(receipt({ commitId: 'cmt_head', outcome: 'unchanged' }))
     render(<PublishReceiptBanner graphId="g1" onViewCommit={() => {}} />)
     expect(screen.getByText('Already live — the published graph had these changes')).toBeInTheDocument()
     expect(screen.getByText(/Nothing new was published/)).toBeInTheDocument()

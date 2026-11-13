@@ -2245,8 +2245,9 @@ interface PublishJob {
  *  main held its changes already, so nothing was committed. */
 export type PublishOutcome = 'published' | 'unchanged'
 
-/** A publish's (or review merge's) answer. `commitId` is the commit it landed as, null when
- *  `unchanged`: nothing was committed. `revisionId` is the revision of main that holds it. */
+/** A publish's (or review merge's) answer. `commitId` is the commit of main that holds it: the one
+ *  it landed as, or, when `unchanged` (nothing was committed), main's head — not one this made.
+ *  `revisionId` is that commit's revision. Null only from a server that answered a blank commit. */
 export interface PublishResult {
   commitId: string | null
   revisionId?: number | null
@@ -2264,7 +2265,7 @@ function asResult(a: { commitId?: string | null; revisionId?: number | null; out
 export const PUBLISH_JOB_POLL = { patienceMs: 120_000 }
 
 /** What a publish (or review merge) did — at once, or once the job it queued is done: a commit,
- *  or `unchanged` with none (main held its changes already), which is a success too. A refused
+ *  or `unchanged` (main held its changes already, at its head), which is a success too. A refused
  *  job raises the error the request would have raised. Followed like every job (`pollJob`): a
  *  failed poll (a network blip, a web pod restarting) doesn't stop the job, so it is asked again
  *  until it goes unanswered too long. */

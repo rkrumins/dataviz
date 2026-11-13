@@ -283,8 +283,8 @@ async def _by_entity_id(g: _Guide) -> dict:
                                          "invalid": 0}, again["summary"]
     assert await g.versions(gid) == before, "a row that changes nothing writes nothing"
     mark = _ok(await g.c.get(f"{V1}/graphs/{gid}/watermark"))
-    # Nothing committed, so no commit named; the revision of main that holds the file's content.
-    assert again["summary"]["publish"] == {"state": "unchanged", "commitId": None,
+    # Nothing committed: main's head, the commit and revision that hold the file's content.
+    assert again["summary"]["publish"] == {"state": "unchanged", "commitId": landed["commitId"],
                                            "revisionId": mark["committed"]}, again["summary"]
     assert mark["committed"] == landed["revisionId"], (mark, landed)
     return {"gid": gid, "ids": ids, "scope": scope, "edge": edge, "loaded": loaded}
@@ -378,7 +378,9 @@ async def _by_urn(g: _Guide) -> dict:
     assert _counts(night_3["summary"]) == {"new": 0, "updated": 0, "unchanged": 6, "deleted": 0,
                                            "invalid": 0}, night_3["summary"]
     note = night_3["summary"]["publish"]
-    assert (note["state"], note["commitId"], type(note["revisionId"])) == ("unchanged", None, int), note
+    head = _ok(await g.c.get(f"{V1}/graphs/{gid}/watermark"))
+    assert (note["state"], note["commitId"], note["revisionId"]) == (
+        "unchanged", head["committedRevision"]["commitId"], head["committed"]), note
     assert await g.versions(gid) == before
     return {"gid": gid, "ids": ids}
 

@@ -73,7 +73,7 @@ async def _run(monkeypatch) -> None:
         note = summary["publish"]
         assert note["state"] == "queued", summary
         result = await ie.run_publish(note["jobId"])
-        assert result["outcome"] == outcome and bool(result["commitId"]) == (outcome == "published"), result
+        assert result["outcome"] == outcome and result["commitId"], result   # the one it made, or main's head
         ended = (await ie.get_job(job_id or imported.last))["summary"]["publish"]
         assert {k: ended[k] for k in ("state", "jobId", "commitId", "revisionId")} == {
             "state": outcome, "jobId": note["jobId"], "commitId": result["commitId"],
@@ -95,13 +95,14 @@ async def _run(monkeypatch) -> None:
 
     draft, summary = await imported(_FILE)
     assert (summary["new"], summary["invalid"]) == (4, 0), summary
-    await published(summary)
+    first_landed = await published(summary)
     assert await names() == (["legacy", "orders", "revenue"], 1)
     assert (await svc.branch_statuses([draft]))[draft] == "merged"
 
     before = await main_now()
     again, summary = await imported(_FILE)
-    assert summary["publish"] == {"state": "unchanged", "commitId": None, "revisionId": before[0]}, summary
+    assert summary["publish"] == {"state": "unchanged", "commitId": first_landed["commitId"],
+                                  "revisionId": before[0]}, "main's head, which holds it"
     assert (await svc.branch_statuses([again]))[again] == "abandoned"
     assert await main_now() == before, "nothing committed: main's head and commits as they were"
 
@@ -115,7 +116,8 @@ async def _run(monkeypatch) -> None:
     landed = await published(first, first_job)
     before = await main_now()
     ended = await published(second, second_job, outcome="unchanged")
-    assert (ended["commitId"], ended["revisionId"], ended["pulls"]) == (None, landed["revisionId"], 1), ended
+    assert (ended["commitId"], ended["revisionId"], ended["pulls"]) == (
+        landed["commitId"], landed["revisionId"], 1), "the first's commit, main's head, holds its changes"
     assert await main_now() == before, "the second committed nothing"
 
     _draft, summary = await imported([_DELETE_LEGACY])

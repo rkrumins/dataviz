@@ -56,7 +56,7 @@ sequenceDiagram
 | **Published graph** (*main*) | What everyone sees, traces and exports. Only a publish changes it |
 | **Draft** (*branch*) | Changes kept apart from the published graph until they are published (`br_…`). An import always writes one |
 | **Import job** | The work of reading your file into a draft (`vjob_…`). You poll it until it ends |
-| **Publish job** | The work of landing a draft on the published graph. It ends `published`, with the `commitId` it landed as and its `revisionId`, or `unchanged`: the published graph had the changes already, so nothing was committed (`commitId` is null) |
+| **Publish job** | The work of landing a draft on the published graph. It ends `published`, with the `commitId` it landed as and its `revisionId`, or `unchanged`: the published graph had the changes already, so nothing was committed, and its `commitId` and `revisionId` are the published graph's head, which holds them |
 | **Upsert** | `reconcileMode=upsert`, the default: write what the file names, and leave everything else as it is |
 | **Full replace** | `reconcileMode=replace`: the same, and also delete what the file leaves out |
 | **Identifier** | How each row finds the item it describes: `entity_id`, `urn`, or `prop.<name>`, a property of your own ([choosing one](/docs/import-export-api#the-model-in-one-minute)) |
@@ -153,15 +153,15 @@ reading the import alone is enough:
 ```
 
 **Send the same file again** and nothing changes. Every row finds its item unchanged, so the
-import writes nothing, and its empty draft is closed instead of published. Nothing is committed,
-so no commit is named — `commitId` is `null`, not a blank — and `revisionId` is the revision of
-the published graph that already holds the file's content:
+import writes nothing, and its empty draft is closed instead of published. Nothing is committed:
+`commitId` and `revisionId` are the published graph's head, the commit and revision that already
+hold the file's content (here, the first import's publish):
 
 ```json
 {
   "status": "completed",
   "summary": {"new": 0, "updated": 0, "unchanged": 5, "deleted": 0, "invalid": 0,
-              "publish": {"state": "unchanged", "commitId": null, "revisionId": 2}}
+              "publish": {"state": "unchanged", "commitId": "cmt_01M78ZWGY1P478K6R37K2N6SFZ", "revisionId": 2}}
 }
 ```
 
@@ -250,7 +250,7 @@ leave `autoPublish` out, and publish it yourself ([step 6](/docs/import-export-a
 |---|---|---|
 | The import `completed`, `summary.publish.state: "queued"` | The draft is being published | Follow `GET …/publish-jobs/{jobId}` to `completed`, or read the import again: once the job ends, `summary.publish` says how |
 | `summary.publish.state: "published"` (or the publish job's `outcome: "published"`) | Your change is live: the draft landed as `commitId` | `revisionId` is the published revision that holds it |
-| `summary.publish.state: "unchanged"` (or `outcome: "unchanged"`) | Nothing to publish: the file changed nothing, or the published graph had its changes already (another run made them first). Nothing was committed, so `commitId` is `null` | Nothing: `revisionId` is the revision that holds your data |
+| `summary.publish.state: "unchanged"` (or `outcome: "unchanged"`) | Nothing to publish: the file changed nothing, or the published graph had its changes already (another run made them first). Nothing was committed: `commitId` is the published graph's head, not a commit this run made | Nothing: `commitId` and `revisionId` name what holds your data |
 | `summary.publish.state: "skipped"`, with `reason.type` | The draft waits for review: `rows_refused`, `conflicts` or `not_up_to_date` | For refused rows, read `summary.refused` ([When rows are refused](#when-rows-are-refused)); otherwise resolve the draft and publish it |
 | The import `failed`, `summary.failure.code: "mass_delete_blocked"` | A replace that would delete most of what's there ([the replace guard](/docs/import-export-api#the-replace-guard)) | Check `identifier` first. If you meant it, import the file again with `allowMassDelete=true&branchId=<its branchId>`, then publish that draft (`POST …/branches/{branchId}/publish`) |
 | `failed`, `rows_refused` | A replace with rows it couldn't apply deletes nothing | Fix the rows `summary.refused` names and send it again, or send it with `maxRefusedRows` ([When rows are refused](#when-rows-are-refused)) |
@@ -437,7 +437,7 @@ again, every row is found, by the property where it has one, and nothing changes
 
 ```json
 {"status": "completed", "summary": {"new": 0, "updated": 0, "unchanged": 7, "deleted": 0, "invalid": 0,
- "publish": {"state": "unchanged", "commitId": null, "revisionId": 3}}}
+ "publish": {"state": "unchanged", "commitId": "cmt_01M7949F4DEJZ6GZRRQZYT1JD5", "revisionId": 3}}}
 ```
 
 `maxRefusedRows` is not the fix here. Within the budget, the refused rows keep what they name, so

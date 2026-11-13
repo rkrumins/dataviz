@@ -75,7 +75,7 @@ def _world(monkeypatch, summary, *, auto_publish=True, settings=None):
 
         async def publish_outcome(self, *, graph_id, commit_id):       # main's head is revision 9
             assert (graph_id, commit_id) == ("g1", None)
-            return {"outcome": "unchanged", "commit_id": None, "revision_id": 9}
+            return {"outcome": "unchanged", "commit_id": "cmt_head", "revision_id": 9}
 
         async def rebase_draft(self, **kwargs):
             did.pulled.append(kwargs)
@@ -137,8 +137,8 @@ async def test_an_import_that_changed_nothing_closes_its_empty_draft(monkeypatch
     await svc.run_import("job1")
     assert did.published == []
     assert did.abandoned == [{"graph_id": "g1", "branch_id": "br1", "actor": "alice"}]
-    assert row.summary["publish"] == {"state": "unchanged", "commitId": None, "revisionId": 9}, (
-        "nothing committed, so no commit named; the revision of main that holds the file's content")
+    assert row.summary["publish"] == {"state": "unchanged", "commitId": "cmt_head", "revisionId": 9}, (
+        "nothing committed: main's head, the commit and revision that hold the file's content")
 
 
 @pytest.mark.parametrize("refusal, kind, pulls", [
@@ -242,7 +242,12 @@ def _publish_world(monkeypatch, answers, *, pull=None, pulls=0, import_job="job1
 
     async def hook(job):
         did.published += 1
-        return {"commitId": job["mergedCommitId"]} if "mergedCommitId" in job else answers.pop(0)
+        if "mergedCommitId" not in job:
+            return answers.pop(0)
+        # As the route answers a draft merged already: its commit, or, committing nothing, main's head.
+        merged = job["mergedCommitId"]
+        return ({"commitId": merged, "revisionId": 4, "outcome": "published"} if merged
+                else {"commitId": "cmt_head", "revisionId": 5, "outcome": "unchanged"})
 
     monkeypatch.setattr(ver_db, "graphver_session", session)
     svc = ImportExportService(versioning=_Versioning(), store=object(), publish_hook=hook)
@@ -295,7 +300,8 @@ async def test_its_publish_job_ends_published_when_an_earlier_attempt_published_
 
     for pull in (merges_meanwhile, refused_for_it):
         svc, imported, did, lease = _publish_world(monkeypatch, [_BEHIND], pull=pull)
-        assert await svc.run_publish("pjob_1", lease) == {"commitId": "c7"}, pull.__name__
+        assert await svc.run_publish("pjob_1", lease) == {
+            "commitId": "c7", "revisionId": 4, "outcome": "published"}, pull.__name__
         assert did.finished["status"] == "completed" and did.released == 0
 
 
@@ -312,13 +318,13 @@ async def test_its_publish_job_ends_refused_saying_what_refused_its_pull(monkeyp
 
 async def test_its_publish_job_that_finds_main_holding_its_changes_says_unchanged(monkeypatch):
     """Another import (or a person) made the same changes first: after its pull the draft changes
-    nothing, so nothing is committed. The import says unchanged, names no commit, and gives the
-    revision that holds its changes — keeping the rows it went on without."""
-    unchanged = {"commitId": None, "revisionId": 5, "outcome": "unchanged"}
+    nothing, so nothing is committed. The import says unchanged, naming main's head, the commit and
+    revision that hold its changes — keeping the rows it went on without."""
+    unchanged = {"commitId": "cmt_head", "revisionId": 5, "outcome": "unchanged"}
     svc, imported, did, lease = _publish_world(
         monkeypatch, [_BEHIND, unchanged], note={"state": "queued", "jobId": "pjob_1", "refusedRows": 2})
     assert await svc.run_publish("pjob_1", lease) == unchanged
-    assert imported.summary["publish"] == {"state": "unchanged", "jobId": "pjob_1", "commitId": None,
+    assert imported.summary["publish"] == {"state": "unchanged", "jobId": "pjob_1", "commitId": "cmt_head",
                                            "revisionId": 5, "pulls": 1, "refusedRows": 2}
 
 
@@ -330,9 +336,10 @@ async def test_its_publish_job_merged_with_no_commit_of_its_own_ends_unchanged(m
         raise BranchNotOpen("br1", "merged")
 
     svc, imported, did, lease = _publish_world(monkeypatch, [_BEHIND], pull=refused_for_it)
-    assert await svc.run_publish("pjob_1", lease) == {"commitId": ""}
+    assert await svc.run_publish("pjob_1", lease) == {"commitId": "cmt_head", "revisionId": 5, "outcome": "unchanged"}
     assert did.finished["status"] == "completed" and did.released == 0
-    assert (imported.summary["publish"]["state"], imported.summary["publish"]["commitId"]) == ("unchanged", None)
+    assert (imported.summary["publish"]["state"], imported.summary["publish"]["commitId"]) == (
+        "unchanged", "cmt_head")
 
 
 async def test_its_publish_job_refused_for_any_reason_says_skipped_and_why(monkeypatch):

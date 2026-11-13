@@ -1171,9 +1171,9 @@ tests/integration/test_s3_store_minio.py tests/test_object_store.py`.
   draft then. When its publish job ends, the job writes the import's note in the same transaction
   as its own fenced finish (`Lease.finish(then=…)`, `_note_publish_ended`): `published` with
   `commitId` and `revisionId`, `unchanged` (main held the draft's changes already: nothing
-  committed, `commitId` null, `revisionId` main's head), or `skipped` with the refusal as `reason`,
+  committed, `commitId` and `revisionId` main's head), or `skipped` with the refusal as `reason`,
   keeping `jobId`, `pulls` and `refusedRows`. An import that changed nothing notes `unchanged`
-  with `commitId` null and main's head as `revisionId`. Every publish and merge answer, inside
+  with main's head as `commitId` and `revisionId`. Every publish and merge answer, inside
   the request or as a job, says `outcome` the same way (`publish_outcome`): a squash that changes
   nothing writes no commit and answers `""` inside the service (`_merged_unchanged`), never the
   draft's own head. A custom draft `name` exists on

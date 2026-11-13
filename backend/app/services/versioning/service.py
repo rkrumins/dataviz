@@ -4798,30 +4798,36 @@ class GraphVersioningService:
         async with self._session() as s:
             return await self._main_branch_id(s, graph_id)
 
-    async def publish_outcome(self, *, graph_id: str,
-                              commit_id: Optional[str]) -> Optional[Dict[str, Any]]:
+    async def publish_outcome(self, *, graph_id: str, commit_id: Optional[str],
+                              at_revision: Optional[int] = None) -> Optional[Dict[str, Any]]:
         """What a publish or merge which answered ``commit_id`` did to ``main``:
 
         * ``published``: it landed as that commit (``commit_id``), and ``revision_id`` is the
           commit's sequence number on ``main`` — what ``asOfSeq`` reads ``main`` as of;
-        * ``unchanged``: ``main`` held what it carried already, so it wrote no commit
-          (``commit_id`` None) and ``main`` did not move. ``revision_id`` is ``main``'s head: the
-          revision that holds it. So too for a ``commit_id`` that is not on ``main``, such as the
-          draft's own head an older publish answered.
+        * ``unchanged``: ``main`` held what it carried already, so it wrote no commit and ``main``
+          did not move. ``commit_id`` is ``main``'s head, the commit that already holds it (not
+          one this made), and ``revision_id`` that commit's sequence number. So too for a
+          ``commit_id`` that is not on ``main``, such as the draft's own head an older publish
+          answered. ``at_revision``, the revision an answer recorded when it ran, names the commit
+          at that revision instead of the head now.
 
         ``None`` for a graph that is gone."""
         async with self._session() as s:
             graph = await s.get(GraphORM, graph_id)
             if graph is None:
                 return None
+            main_id = await self._main_branch_id(s, graph_id)
             if commit_id:
                 seq = await s.scalar(select(CommitORM.commit_seq).where(
                     CommitORM.graph_id == graph_id, CommitORM.id == commit_id,
-                    CommitORM.branch_id == await self._main_branch_id(s, graph_id)))
+                    CommitORM.branch_id == main_id))
                 if seq is not None:
                     return {"outcome": "published", "commit_id": commit_id, "revision_id": int(seq)}
-            return {"outcome": "unchanged", "commit_id": None,
-                    "revision_id": int(graph.main_head_commit_seq or 0)}
+            seq = int(graph.main_head_commit_seq or 0) if at_revision is None else int(at_revision)
+            held_by = await s.scalar(select(CommitORM.id).where(
+                CommitORM.graph_id == graph_id, CommitORM.branch_id == main_id,
+                CommitORM.commit_seq == seq))
+            return {"outcome": "unchanged", "commit_id": held_by, "revision_id": seq}
 
     async def materialize_state(
         self, *, graph_id: str, branch_id: str, as_of_seq: Optional[int] = None,

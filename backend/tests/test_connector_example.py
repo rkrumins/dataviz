@@ -156,12 +156,12 @@ def test_a_file_goes_up_in_parts_from_disk_and_publishes_itself(world):
 
 def test_a_publish_that_found_main_holding_the_changes_says_unchanged_and_succeeds(world):
     """Main held the import's changes already (another run made them first): nothing was
-    committed, so no commit is named, and the run succeeds, giving the revision that holds them."""
+    committed, and the run succeeds, naming main's head, the commit and revision that hold them."""
     path, state, graph, _slept = world
     server = _Server(note={"state": "queued", "jobId": "pjob_1"})
-    server.landed = {"commitId": None, "revisionId": 7, "outcome": "unchanged"}
+    server.landed = {"commitId": "cmt_head", "revisionId": 7, "outcome": "unchanged"}
     result = connector.run(graph(server), str(path), "ndjson", publish=True, state_path=state)
-    assert result["publish"] == {"state": "unchanged", "commitId": None, "revisionId": 7, "error": None}
+    assert result["publish"] == {"state": "unchanged", "commitId": "cmt_head", "revisionId": 7, "error": None}
     assert connector.succeeded(result)
 
 
@@ -178,7 +178,7 @@ def test_an_import_that_says_how_its_publish_ended_is_taken_at_its_word(world):
 
 def test_a_run_that_stopped_is_resumed_sending_only_the_missing_parts(world):
     path, state, graph, _slept = world
-    server = _Server(note={"state": "unchanged", "commitId": None, "revisionId": 7})
+    server = _Server(note={"state": "unchanged", "commitId": "cmt_head", "revisionId": 7})
     first = graph(server)
     upload = first.api("POST", f"{BASE}/imports/uploads", json={
         "fileName": "source.ndjson", "size": path.stat().st_size, "format": "ndjson"})
@@ -193,7 +193,7 @@ def test_a_run_that_stopped_is_resumed_sending_only_the_missing_parts(world):
     puts = sorted(int(p.rsplit("/", 1)[1]) for m, p, _q in server.calls if m == "PUT")
     assert 0 not in puts and 2 not in puts and puts == [n for n in range(upload["parts"]) if n not in (0, 2)]
     assert len(server.uploads) == 1 and server.sent(upload["uploadId"]) == data
-    assert result["publish"] == {"state": "unchanged", "commitId": None, "revisionId": 7}
+    assert result["publish"] == {"state": "unchanged", "commitId": "cmt_head", "revisionId": 7}
     assert connector.succeeded(result)
 
     server.calls.clear()                               # once complete, nothing is sent again
