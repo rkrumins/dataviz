@@ -1579,7 +1579,9 @@ class PrResponse(_ApiModel):
     title: Optional[str] = None
     description: Optional[str] = None
     conflicts: Optional[List[dict]] = None
-    resulting_commit_id: Optional[str] = Field(default=None, alias="resultingCommitId")
+    resulting_commit_id: Optional[str] = Field(default=None, alias="resultingCommitId", description=(
+        "The commit a merged review landed as on main; null for one merged with no change (its "
+        "merge answered outcome unchanged)"))
     # The single-PR read only: a merged draft review's commit on main, by seq. Its change list is
     # main between ``resultingCommitSeq - 1`` and it.
     resulting_commit_seq: Optional[int] = Field(default=None, alias="resultingCommitSeq")
@@ -3885,10 +3887,12 @@ _AUTO_PUBLISH_NEEDS = ("an import that publishes itself needs publish permission
 
 
 _AUTO_PUBLISH = Query(False, alias="autoPublish", description=(
-    "Publish the import's draft once it has finished with every row applied (see the job's "
-    "``summary.publish``). Needs publish (for an API key, its owner's) and a data source whose "
-    "policy lets you merge your own changes. The import opens a draft of its own, so not with "
-    "``branchId``."))
+    "Publish the import's draft once it has finished, with every row applied or no more refused "
+    "than maxRefusedRows allows. The job's ``summary.publish`` says how: queued (``jobId``); then "
+    "published (``commitId``, ``revisionId``), unchanged (nothing to commit; ``commitId`` and "
+    "``revisionId`` are main's head), or skipped (``reason``; the draft waits for review). Needs "
+    "publish (for an API key, its owner's) and a data source whose policy lets you merge your own "
+    "changes. The import opens a draft of its own, so not with ``branchId``."))
 
 
 class CreateImportResponse(_ApiModel):
@@ -3899,18 +3903,22 @@ class CreateImportResponse(_ApiModel):
 
 
 _IDENTIFIER = Query(None, description=(
-    "What the file's rows find their entities by: entity_id (the default: an entity id of the "
-    "graph, else the urn, the identifier property, a field its type matches imports by, then a "
-    "unique qualifiedName), urn (an entity id, else the urn only) or prop.<name> (an entity id, "
-    "else the value of the property <name>, such as prop.external_id). An entity's id never "
-    "changes, whichever it is"))
+    "What the file's rows find their entities by: entity_id (an entity id of the graph, else the "
+    "urn, the identifier property, a field its type matches imports by, then a unique "
+    "qualifiedName), urn (an entity id, else the urn only), prop.<name> (an entity id, else the "
+    "value of the property <name>, such as prop.external_id; an edge's ends by source.<name> and "
+    "target.<name>) or prop.<name>,urn (the property, then the urn: a row or an edge end without "
+    "it, or whose value no node holds yet, by its urn, and a node found so takes the value). Left "
+    "out, the graph's default applies (GET …/import-settings). An entity's id never changes, "
+    "whichever it is"))
 
 
 _ALLOW_MASS_DELETE = Query(False, alias="allowMassDelete", description=(
     "A replace: delete what the file leaves out even past the replace guard, which refuses a "
     "replace that would delete most of a scope and create most of it again (a file whose rows name "
-    "their entities by another key), and read the whole file even when its first rows find almost "
-    "nothing"))
+    "their entities by another key; what it creates counts the rows it refused that matched "
+    "nothing, summary.replaceGuard.refusedUnmatched), and read the whole file even when its first "
+    "node rows find almost nothing, past the early stop (identifier_matched_nothing)"))
 
 
 _MAX_REFUSED_ROWS = Query(None, alias="maxRefusedRows", max_length=16, description=(
@@ -3918,16 +3926,23 @@ _MAX_REFUSED_ROWS = Query(None, alias="maxRefusedRows", max_length=16, descripti
     "unless the platform's IMPORT_MAX_REFUSED_ROWS says otherwise), a count such as 100, a share "
     "of the file's rows such as 0.5%, or -1 (any). Past it, a replace deletes nothing and fails "
     "(rows_refused), and autoPublish leaves the draft for review. Within it, the import goes on "
-    "without them, and a replace keeps what a refused row still names. Every import reports its "
-    "refused rows, with why, in summary.refused"))
+    "without them, and a replace keeps what a refused row still names (but not what a refused "
+    "delete row names). Every import reports its refused rows, with why, in summary.refused"))
 
 
 _REPLACE_SCOPE = Query(None, alias="replaceScope", pattern="^(all|keyed)$", description=(
     "A replace: what it may delete. all (the default): anything in its scope the file leaves out. "
     "keyed: by identifier=prop.<name> (or prop.<name>,urn), only the nodes that hold that property, "
     "and the edges between two of them, that the file leaves out — a node made in the app or by "
-    "another source, which never had the property, is left alone, with its edges. By the urn or an "
-    "entity id every node holds its key, so keyed is all"))
+    "another source, which never had the property, is left alone, with its edges, but for an edge "
+    "to a node the replace deletes, which goes with that node (summary.edgesCascaded). By the urn "
+    "or an entity id every node holds its key, so keyed is all"))
+
+
+_RECONCILE_MODE = Query("upsert", alias="reconcileMode", pattern="^(upsert|replace)$", description=(
+    "upsert (the default) writes what the file names. replace also deletes what it leaves out of "
+    "its scope (the graph, or viewId's view; with replaceScope=keyed, only what holds the "
+    "property), held by the replace guard"))
 
 
 def _with_replace_scope(settings: dict, requested: Optional[str]) -> dict:
@@ -3981,7 +3996,7 @@ async def create_import(
     ws_id: str, graph_id: str,
     request: Request,
     format: str = Query("ndjson"),
-    reconcile_mode: str = Query("upsert", alias="reconcileMode", pattern="^(upsert|replace)$"),
+    reconcile_mode: str = _RECONCILE_MODE,
     branch_id: Optional[str] = Query(None, alias="branchId"),
     view_id: Optional[str] = Query(None, alias="viewId"),
     idempotency_key: Optional[str] = Query(None, alias="idempotencyKey", description=(
@@ -4262,7 +4277,7 @@ async def put_import_upload_part(
              status_code=202)
 async def complete_import_upload(
     ws_id: str, graph_id: str, upload_id: str,
-    reconcile_mode: str = Query("upsert", alias="reconcileMode", pattern="^(upsert|replace)$"),
+    reconcile_mode: str = _RECONCILE_MODE,
     branch_id: Optional[str] = Query(None, alias="branchId"),
     view_id: Optional[str] = Query(None, alias="viewId"),
     auto_publish: bool = _AUTO_PUBLISH,
@@ -4504,7 +4519,7 @@ class ImportSettingsChange(_ApiModel):
     stays as it is, and ``"inherit"`` clears it, so the platform's holds."""
     identifier: Optional[str] = Field(default=None, description=(
         "What its imports' rows find their entities by when an import names no identifier: "
-        "entity_id, urn or prop.<name>"))
+        "entity_id, urn, prop.<name> or prop.<name>,urn (the property, then the urn)"))
     replace_min_live: Optional[Union[Annotated[int, Field(ge=0)], Literal["inherit"]]] = Field(
         default=None, alias="replaceMinLive")
     replace_delete_fraction: Optional[_Fraction] = Field(default=None, alias="replaceDeleteFraction")
@@ -4588,8 +4603,7 @@ async def put_import_settings(
                                                          "message": str(exc)})
         if changes["identifier"] is None:
             raise HTTPException(status_code=422, detail={
-                "type": "invalid_identifier",
-                "message": "identifier is entity_id, urn or prop.<name>, or inherit"})
+                "type": "invalid_identifier", "message": f"{identifiers._GRAMMAR}, or inherit"})
     governing = fork_sources.governing(row)
     before, after = import_settings.apply(row, changes)
     await fork_sources.follow_parent(session, row, governing)
@@ -4602,7 +4616,9 @@ async def put_import_settings(
 
 
 class ResolveIdentitiesRequest(_ApiModel):
-    identifier: str = Field(description="entity_id, urn or prop.<name>, as on an import")
+    identifier: str = Field(description=(
+        "entity_id, urn, prop.<name> or prop.<name>,urn (the property, then the urn), as on an "
+        "import"))
     values: List[str] = Field(max_length=10000, description="Up to 10,000 values to look up")
 
 
@@ -4618,9 +4634,11 @@ async def resolve_identities(
     row's entity — without importing anything: ``{identifier, results: [{value, status,
     entityId, entityIds?}]}``, ``status`` ``found``, ``none`` or ``duplicate`` (two live nodes hold
     it: ``entityIds``). For clients of the writes that name entities by id (``POST
-    /graph/changes``, a draft's changes) that know them by an id of their own system. **422** for
-    an identifier it may not name; **409 ``identifier_not_indexed``** for ``prop.<name>`` before an
-    import has built that property's index."""
+    /graph/changes``, a draft's changes) that know them by an id of their own system. With
+    ``prop.<name>,urn``, a value no node holds as ``<name>`` is looked up as a urn. The data
+    source's identifier property (with ``,urn`` or not) holds the urn, and is looked up as ``urn``.
+    **422** for an identifier it may not name; **409 ``identifier_not_indexed``** for
+    ``prop.<name>`` or ``prop.<name>,urn`` before an import has built that property's index."""
     from backend.app.services.versioning.import_export import identifier as identifiers
     from backend.app.services.versioning.import_export import keys as matching
     try:
@@ -4629,9 +4647,9 @@ async def resolve_identities(
         raise HTTPException(status_code=422, detail={"type": "invalid_identifier", "message": str(exc)})
     if identifier is None:
         raise HTTPException(status_code=422, detail={
-            "type": "invalid_identifier", "message": "identifier is entity_id, urn or prop.<name>"})
+            "type": "invalid_identifier", "message": identifiers._GRAMMAR})
     identity = await _node_identity_for_meta(session, meta)
-    if identity is not None and identifier == f"prop.{identity.identity_property}":
+    if identity is not None and identifiers.property_of(identifier) == identity.identity_property:
         identifier = "urn"                       # that property holds the urn, as on an import
     try:
         results = await svc.resolve_identities(graph_id=graph_id, identifier=identifier,
@@ -4652,6 +4670,26 @@ async def get_import(
     svc: GraphVersioningService = Depends(get_versioning_service),
     ie=Depends(get_import_export_service),
 ):
+    """An import job: its ``status``, where it has got (``phase``, ``progress``,
+    ``processed``/``total``) and its ``summary``:
+
+    * the tallies: how many rows were ``new``, ``updated``, ``unchanged``, ``deleted`` (with what a
+      replace deleted because no row named it) or ``invalid`` (refused), and ``skipped``: records
+      that are neither a node nor an edge;
+    * ``refused``: ``{total, byCode, byKind, rows, fixes, hints}`` — the refused rows by reason and
+      by kind of row, the first 20 (``rows``: ``rowIndex``, ``at``, ``kind``, ``label``, ``code``,
+      ``reason``), what to do about each reason, and ``hints.by_urn``: how many of them
+      ``identifier=prop.<name>,urn`` would find by their urn;
+    * ``edgesCascaded``: the edges a replace's deleted nodes took with them;
+    * ``replaceGuard``: a replace's verdict — ``{state, live, deletes, creates, limits, sources}``,
+      with ``refusedUnmatched`` (refused rows that matched nothing, counted with what it creates)
+      and ``scope`` (``keyed``);
+    * ``publish``: how an ``autoPublish`` went — ``{state, jobId, commitId, revisionId, reason,
+      refusedRows, pulls}``: ``queued``, then ``published``, ``unchanged`` (``commitId`` and
+      ``revisionId`` are main's head) or ``skipped``;
+    * ``failure``: a failed job's ``{code, action, phase, reason}``.
+
+    404 for a job of another graph, or one the caller may not read."""
     job = await ie.get_job(job_id)
     if job is None or job.get("graphId") != graph_id or not await _import_visible(svc, graph_id, job, viewer):
         raise HTTPException(status_code=404, detail="import job not found")

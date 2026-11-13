@@ -822,9 +822,9 @@ class WorkspaceDataSourceORM(Base):
     review_self_approval = Column(Boolean, nullable=True)
     review_self_merge = Column(Boolean, nullable=True)
     # This source's import settings (``backend.app.services.import_settings``): what an import's rows
-    # find their entities by when it names no identifier (``entity_id``, ``urn`` or ``prop.<name>``),
-    # and the replace guard's limits. NULL = the platform's (``GRAPHVER_IMPORT_IDENTIFIER``,
-    # ``IMPORT_REPLACE_*``).
+    # find their entities by when it names no identifier (``entity_id``, ``urn``, ``prop.<name>`` or
+    # ``prop.<name>,urn``), and the replace guard's limits. NULL = the platform's
+    # (``GRAPHVER_IMPORT_IDENTIFIER``, ``IMPORT_REPLACE_*``).
     import_identifier = Column(Text, nullable=True)
     import_replace_min_live = Column(Integer, nullable=True)
     import_replace_delete_fraction = Column(Float, nullable=True)

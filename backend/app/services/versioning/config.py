@@ -496,34 +496,37 @@ def object_store_s3() -> dict:
 # window is also what a resumed import redoes at most, and what the job's lease waits out before a
 # stopping worker hands the job back — so a few seconds of work, not minutes.
 IMPORT_COMMIT_WINDOW: int = int(os.getenv("IMPORT_COMMIT_WINDOW", "10000"))
-# What an import's rows find their entities by when the request names nothing (``identifier``):
-# ``entity_id`` (an entity id of the graph, else the urn, the identifier property, a field a type
-# matches imports by, then a unique qualifiedName), or ``urn`` (an entity id, else the urn only).
+# What an import's rows find their entities by when neither the request nor its data source names
+# one (``identifier``): ``entity_id`` (an entity id of the graph, else the urn, the identifier
+# property, a field a type matches imports by, then a unique qualifiedName), ``urn`` (an entity id,
+# else the urn only), ``prop.<name>`` (an entity id, else the value of the property <name>), or
+# ``prop.<name>,urn`` (the property, then the urn; a node found by its urn takes the value).
 IMPORT_IDENTIFIER: str = os.getenv("GRAPHVER_IMPORT_IDENTIFIER", "entity_id")
 # A replace deletes whatever its file leaves out of its scope. One that would delete most of a scope
 # AND make most of it again is what a file whose rows name their entities by another key looks like:
 # its rows match nothing, so the run deletes the scope and makes it anew, every id and its history
 # with it. In a scope of at least IMPORT_REPLACE_GUARD_MIN_LIVE entities, a replace that would delete
 # at least IMPORT_REPLACE_GUARD_DELETE_FRACTION of them and create at least
-# IMPORT_REPLACE_GUARD_CREATE_FRACTION as many is refused before it deletes anything, unless it is
-# sent with allowMassDelete=true. Fractions of the scope's entities, nodes and edges (0.5 = half).
+# IMPORT_REPLACE_GUARD_CREATE_FRACTION as many (rows it refused that matched nothing count with what
+# it creates) is refused before it deletes anything, unless it is sent with allowMassDelete=true.
+# Fractions of the scope's entities, nodes and edges (0.5 = half).
 IMPORT_REPLACE_GUARD: bool = os.getenv("IMPORT_REPLACE_GUARD", "1").lower() not in ("0", "false", "no")
 IMPORT_REPLACE_GUARD_MIN_LIVE: int = int(os.getenv("IMPORT_REPLACE_GUARD_MIN_LIVE", "1000"))
 IMPORT_REPLACE_GUARD_DELETE_FRACTION: float = float(
     os.getenv("IMPORT_REPLACE_GUARD_DELETE_FRACTION", "0.5"))
 IMPORT_REPLACE_GUARD_CREATE_FRACTION: float = float(
     os.getenv("IMPORT_REPLACE_GUARD_CREATE_FRACTION", "0.5"))
-# And earlier: a replace whose first full node window finds an entity for fewer than this fraction of
-# its rows, in a graph of at least IMPORT_REPLACE_GUARD_MIN_LIVE entities, stops there, naming its
-# identifier, rather than read the rest of the file first, unless it is sent with
-# allowMassDelete=true. 0 turns it off.
+# And earlier: a replace whose first node window (IMPORT_COMMIT_WINDOW rows, or all of a smaller
+# file's node rows) finds an entity for fewer than this fraction of its rows, in a graph of at least
+# IMPORT_REPLACE_GUARD_MIN_LIVE entities, stops there, naming its identifier, rather than read the
+# rest of the file first, unless it is sent with allowMassDelete=true. 0 turns it off.
 IMPORT_REPLACE_MIN_MATCH_FRACTION: float = float(os.getenv("IMPORT_REPLACE_MIN_MATCH_FRACTION", "0.05"))
 # How many of an import's file's rows may be refused before it holds, when the import doesn't say
 # (maxRefusedRows): past it, a replace deletes nothing and fails (rows_refused), and an import that
 # would publish itself (autoPublish) leaves its draft for review instead. "0" holds on any refused
 # row; a count ("100") or a share of the file's rows ("0.5%") goes on within it; "-1" always goes
-# on. Going on, a replace keeps what a refused row still names. Every import reports its refused
-# rows, with why (summary.refused).
+# on. Going on, a replace keeps what a refused row still names (but not what a refused delete row
+# names). Every import reports its refused rows, with why (summary.refused).
 IMPORT_MAX_REFUSED_ROWS: str = os.getenv("IMPORT_MAX_REFUSED_ROWS", "0")
 # Properties a graph's imports may match nodes by (identifier=prop.<name>), at most: each has an index
 # kept current from the version log, as Dataverse limits alternate keys and Salesforce external ids.

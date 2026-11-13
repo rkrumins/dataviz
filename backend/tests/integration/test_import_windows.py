@@ -399,7 +399,7 @@ async def _gate_quarantine(svc, ie, store) -> None:
     for key in (("urn:Q2", "node"), ("urn:Q3", "node"), ("urn:Q4", "edge")):
         assert "not allowed by ontology" in quarantined[key][0], (key, quarantined[key])
     assert quarantined[("urn:Q2", "edge")] == [
-        "its source urn:Q2 is the node of the file's rowIndex 1, which was refused (write_refused): "
+        "its source urn:Q2 is the node of the file's line 2, which was refused (write_refused): "
         "fix that row, and this edge finds it"], "its end was quarantined: the edge names that row"
     async with db.graphver_session() as s:
         assert not (await s.execute(select(ImportRowORM.matched_entity_id).where(

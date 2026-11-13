@@ -33,10 +33,10 @@ from . import identifier as identifiers
 from . import keys as matching
 from .export_worker import ExportWorker, example_template_records
 from .formats import get_adapter
-from .import_worker import (IdentifierMatchedNothing, ImportWorker, ReplaceBlocked, ReplaceRowsRefused,
-                            _normalize_page,
-                            _label as _row_label, _record_pages, lease_job, refused_budget,
-                            refused_digest, within_budget)
+from .import_worker import (BY_URN, IdentifierMatchedNothing, ImportWorker, ReplaceBlocked,
+                            ReplaceRowsRefused, _normalize_page,
+                            _label as _row_label, _record_pages, by_urn_cause, lease_job,
+                            refused_budget, refused_digest, within_budget)
 from .resolve import _ALREADY_GONE, _STATUS
 from .rowmodel import column_order
 from .runner import INSPECT_TYPES, JOB_TYPES, QUEUED, JobReaper
@@ -173,10 +173,12 @@ class ImportExportService:
         # batch_edge_facts) -> {added: N}`` — writes canonical layer assignments for a view-scoped
         # import's newly-created top-level entities. Injected at the API layer (management-DB access).
         self._layout_writer = layout_writer
-        # Optional async ``(job) -> {"commitId": id} | {"error": {"status", "detail"}}`` — publishes
-        # a draft or merges its review, with what a publish sets off after it lands. Injected at the
-        # API layer, which resolves the ontology and owns those side effects; a refusal comes back
-        # as the HTTP answer the route gives when it publishes inside the request.
+        # Optional async ``(job) -> {"commitId", "revisionId", "outcome"} | {"error": {"status",
+        # "detail"}}`` — publishes a draft or merges its review, with what a publish sets off after it
+        # lands (``outcome`` ``unchanged``: nothing to commit, and ``commitId`` is main's head,
+        # which holds it). Injected at the API layer, which resolves the ontology and owns those side
+        # effects; a refusal comes back as the HTTP answer the route gives when it publishes inside
+        # the request.
         self._publish_hook = publish_hook
         # The same for a fork's jobs (``fork_update``, ``fork_merge``): ``(job) -> its answer |
         # {"error": …}``.
@@ -566,8 +568,9 @@ class ImportExportService:
           allows (none, by default), or the draft can't be published (it fell behind main while
           the file was imported, …). The draft waits for review.
 
-        Within the budget, the draft is published without its refused rows, and ``refusedRows``
-        says how many. Never raised: the import is complete whatever happens here."""
+        Within the budget, the draft is published without its refused rows, and ``refusedRows``, on
+        whichever note it gets, says how many. Never raised: the import is complete whatever happens
+        here."""
         refused = int(summary.get("invalid") or 0) + int(summary.get("skipped") or 0)
         rows = sum(int(summary.get(k) or 0) for k in ("new", "updated", "unchanged", "deleted", "invalid"))
         try:
@@ -642,7 +645,8 @@ class ImportExportService:
         """Hand the import's newly-created top-level entities to the injected layout writer and record
         the outcome on ``job.summary`` (``viewAssignments: {added: N}`` or ``{error: ...}``). The
         import is already committed — marked ``completed`` by the worker, or refused by the
-        replace guard with every row applied — before this runs, so any failure here is isolated:
+        replace guard with every row applied, or stopped for its refused rows (``rows_refused``)
+        with every other row applied — before this runs, so any failure here is isolated:
         it is logged + noted, never raised (which would flip a completed job to ``failed`` via
         ``run_import_safe``)."""
         try:
@@ -891,9 +895,10 @@ class ImportExportService:
         """An import's own publish (``job``) refused because main moved past its draft while it
         waited its turn (``result``): the job pulls main into the draft it holds, with the merge of
         "Pull latest", and publishes it again, up to ``_AUTO_PULLS`` pulls counted on from the
-        import's (``pulls``). So the job a client follows ends published, or refused saying why: a
-        field both changed differently (``conflicts``), which waits on the draft for someone to
-        resolve it, or main moving on every time (``not_up_to_date``), or what refused the pull
+        import's (``pulls``). So the job a client follows ends published (or unchanged: main held
+        its changes already), or refused saying why: a field both changed differently
+        (``conflicts``), which waits on the draft for someone to resolve it, or main moving on every
+        time (``not_up_to_date``), or what refused the pull
         (the graph frozen meanwhile, …). Each pull is counted on the job (``field_scope.pulls``),
         fenced, so an attempt that takes the job over counts on. The import's ``summary.publish``
         follows along."""
@@ -1227,6 +1232,14 @@ class ImportExportService:
             hints.append(f"{gone} delete {'row finds' if gone == 1 else 'rows find'} nothing to "
                          "delete: what they name isn't in the graph (deleted already, or never "
                          "there). They change nothing; check their names if you expected them to.")
+        # By a property alone, the refused rows a fallback to the urn would find, as an import's
+        # report counts them (hints.by_urn).
+        by_urn = sum(1 for res in resolutions if res.get("hint") == BY_URN)
+        prop = None if worker._urn_fallback else worker._prop
+        if by_urn and prop:
+            refused = summary["invalid"]
+            hints.append(f"{refused} {'row was' if refused == 1 else 'rows were'} refused:"
+                         + by_urn_cause(by_urn, prop))
         return {"format": import_format, "checkedAgainst": branch_id or "main",
                 "identifier": worker._identifier,
                 "schemaVersion": contract.FORMAT_VERSION, "summary": summary, "rows": sample,

@@ -8,8 +8,8 @@ Pins:
 - The replace guard: a replace whose file names its entities by another key — it would delete the
   graph and make it again — is refused before it deletes anything, its rows left on the draft,
   however often it is imported into that draft; ``allowMassDelete`` lets it through, and the job's
-  ``replaceGuard`` says which, with the counts and the limits. A replace whose first full window
-  finds (almost) nothing stops there (``identifier_matched_nothing``).
+  ``replaceGuard`` says which, with the counts and the limits. A replace whose first node window,
+  however many rows it holds, finds (almost) nothing stops there (``identifier_matched_nothing``).
 - By a property (``prop.my_unique_id``): the first import builds its index, and each later one
   catches it up from main's log, so a node made or edited on the canvas is found by its value, never
   made again; a changed value is a new key; a value two nodes hold refuses its rows, naming both; a

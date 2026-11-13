@@ -11,7 +11,9 @@ does:
 * with ``--publish`` the import publishes itself, and the connector follows that publish to its
   end;
 * an import that couldn't publish itself fails the run, with the reason;
-* one whose publish was never written is published by the connector.
+* one whose publish was never written is published by the connector, or, its draft found merged,
+  reported as it ended;
+* a dry run matches the rows by the identifier it is given.
 
 Every call it makes is one an API key may make (``api_key_surface``).
 """
@@ -46,6 +48,10 @@ class _Server:
         self.calls, self.uploads, self.polls = [], {}, 0
         self.note, self.busy, self.branch, self.failure = note, set(busy), branch, failure
         self.landed = {"commitId": "cmt_1", "revisionId": 7, "outcome": "published"}   # the publish job's end
+        # Main's log, newest first: its head, then the squash the draft br_1 landed as.
+        self.log = [{"commit_id": "cmt_9", "commit_seq": 9, "kind": "import", "source_branch_id": None},
+                    {"commit_id": "cmt_8", "commit_seq": 8, "kind": "squash_publish",
+                     "source_branch_id": "br_1"}]
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         method, path = request.method, request.url.path
@@ -92,7 +98,12 @@ class _Server:
             return httpx.Response(200, json={"jobId": tail.rsplit("/", 1)[1], "graphId": "g1",
                                              "status": "completed", **self.landed, "error": None})
         if tail == "/branches/br_1" and method == "GET":
-            return httpx.Response(200, json={"branchId": "br_1", "kind": "draft", "status": self.branch})
+            return httpx.Response(200, json={"branchId": "br_1", "kind": "draft", "status": self.branch,
+                                             "baseCommitSeq": 7})
+        if tail == "/commits" and method == "GET":
+            since = int(request.url.params.get("after") or 0)
+            commits = [c for c in self.log if c["commit_seq"] > since]
+            return httpx.Response(200, json={"commits": commits[:int(request.url.params.get("limit") or 100)]})
         if tail == "/branches/br_1/publish":
             self.branch = "merged"
             return httpx.Response(200, json={"commitId": "cmt_2", "revisionId": 8, "status": "completed",
@@ -229,6 +240,23 @@ def test_a_publish_the_import_never_wrote_is_done_by_the_connector(world):
     assert connector.succeeded(result)
 
 
+def test_a_draft_found_published_already_says_how_it_ended(world):
+    """The import never wrote how its publish went, and its draft is merged by the time the
+    connector looks: the run names the commit on main that landed it, and its revision — or, merged
+    with nothing to commit, main's head, which holds it — and publishes nothing again."""
+    path, state, graph, _slept = world
+    server = _Server(note=None, branch="merged")
+    result = connector.run(graph(server), str(path), "ndjson", publish=True, state_path=state)
+    assert result["publish"] == {"state": "published", "commitId": "cmt_8", "revisionId": 8}
+    assert ("GET", f"{BASE}/commits", {"after": "7", "limit": "500"}) in server.calls
+    assert not [c for c in server.calls if c[1].endswith("/publish")] and connector.succeeded(result)
+
+    server.log = server.log[:1]                        # it merged with nothing to commit
+    result = connector.run(graph(server), str(path), "ndjson", publish=True, state_path=state)
+    assert result["publish"] == {"state": "unchanged", "commitId": "cmt_9", "revisionId": 9}
+    assert connector.succeeded(result)
+
+
 def test_without_publish_the_draft_waits_for_review(world):
     path, state, graph, _slept = world
     server = _Server(note=None)
@@ -249,6 +277,20 @@ def test_the_dry_run_sends_no_more_than_a_dry_run_reads(world, monkeypatch):
     assert server.calls == [("POST", f"{BASE}/imports/validate", {"format": "ndjson"})]
 
 
+def test_check_matches_the_rows_by_the_identifier_it_is_given(world, monkeypatch):
+    """``--check --identifier prop.<name>,urn`` dry-runs the file as the import would match it."""
+    path, _state, _graph, _slept = world
+    server, client = _Server(), httpx.Client
+    monkeypatch.setattr(httpx, "Client", lambda **_kw: client(
+        base_url="http://test", transport=httpx.MockTransport(server)))
+    monkeypatch.setenv("SYNODIC_URL", "http://test")
+    monkeypatch.setenv("SYNODIC_TOKEN", "nxsat_test")
+    assert connector.main(["--file", str(path), "--workspace", "ws1", "--graph", "g1", "--check",
+                           "--identifier", "prop.uid,urn"]) == 0
+    assert server.calls == [("POST", f"{BASE}/imports/validate",
+                             {"format": "ndjson", "identifier": "prop.uid,urn"})]
+
+
 def test_an_answer_the_api_refuses_is_raised_with_its_detail():
     api = connector.Api(httpx.Client(base_url="http://test", transport=httpx.MockTransport(
         lambda _r: httpx.Response(413, json={"detail": "too large"}))), sleep=lambda _s: None)
@@ -266,7 +308,8 @@ def test_every_call_it_makes_is_one_an_api_key_may_make(world):
     path, state, graph, _slept = world
     routes = [(method, compile_path(route)[0]) for method, route, _rule in api_key_surface.eligible(app)]
     calls = set()
-    for n, server in enumerate((_Server(note={"state": "queued", "jobId": "pjob_1"}), _Server(note=None))):
+    for n, server in enumerate((_Server(note={"state": "queued", "jobId": "pjob_1"}), _Server(note=None),
+                                _Server(note=None, branch="merged"))):
         connector.run(graph(server), str(path), "ndjson", publish=True, state_path=f"{state}.{n}")
         graph(server).check(str(path), "ndjson")
         calls |= {(m, p) for m, p, _q in server.calls}

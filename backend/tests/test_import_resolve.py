@@ -417,7 +417,8 @@ def test_a_node_row_that_names_nothing_is_refused_and_so_is_an_edge_to_it():
     assert (res[0]["resolved_op"], res[0]["code"]) == ("invalid", "no_key"), res[0]
     assert "give it a urn" in res[0]["reasons"][0]
     assert (res[1]["resolved_op"], res[1]["code"]) == ("invalid", "end_refused"), res[1]
-    assert "rowIndex 0" in res[1]["reasons"][0], "it names the refused row to fix"
+    # Its reader said nothing of where the row is: it is named by its row, counted from 1.
+    assert "the file's row 1, which" in res[1]["reasons"][0], "it names the refused row to fix"
     # A qualifiedName finds its node again: such a row is still made.
     assert res[2]["resolved_op"] == "create" and [o["entity_id"] for o in ops] == [
         res[2]["matched_entity_id"]]
@@ -636,6 +637,8 @@ def test_an_exported_edge_with_a_new_end_is_refused_not_doubled():
                             node_eids={"N1", "N2", "N3"}, edge_eids={"E1"}, current={"E1": e},
                             edge_to_eid={("N1", "N2", "FLOWS"): "E9"})        # a parallel edge
     assert res[0]["resolved_op"] == "invalid" and "differ from edge E1" in res[0]["reasons"][0]
+    assert res[0]["code"] == "edge_moved" and res[0].get("mentions") == ["N1", "N2", "N3"], (
+        "the ends it names, and its edge's, are kept by a replace as any edge row's are")
     assert res[1]["resolved_op"] == "update" and res[1]["matched_entity_id"] == "E1"
     assert [o["entity_id"] for o in ops] == ["E1"]
 
@@ -901,9 +904,9 @@ def test_by_the_property_alone_an_edge_end_given_by_urn_says_how_to_find_it_and_
 def test_an_edge_whose_end_was_a_refused_node_row_says_which_row_to_fix():
     _ops, res = _by_prop([_edge_row(0, sourceKeys={"ext": "BAD"}, targetKeys={"ext": "E1"})],
                          urn_to_eid={"E1": "O1"}, node_eids={"O1"},
-                         refused_names={"BAD": (7, "invalid_type")})
+                         refused_names={"BAD": ("line 8", "invalid_type")})
     row = res[0]
-    assert row["code"] == "end_refused" and "rowIndex 7" in row["reasons"][0], row
+    assert row["code"] == "end_refused" and "the file's line 8, which" in row["reasons"][0], row
     assert "invalid_type" in row["reasons"][0] and row.get("mentions") == ["O1"], row
 
 
@@ -926,15 +929,39 @@ def test_a_delete_row_with_no_key_its_identifier_reads_is_refused_not_already_go
                            "entityType": "Table", "urn": "urn:svc:x"}])
     assert (res[0]["status"], res[0]["code"]) == ("invalid", "no_key"), res[0]
     assert "mentions" not in res[0], "a refused delete keeps nothing its row meant to delete"
+    # It says why as a delete, and — it has a urn — that ,urn would find it, counted as such.
+    assert res[0]["reasons"] == [
+        "it names nothing identifier=prop.ext finds a node by, so what it would delete can't be told: "
+        "give it the ext (or entity_id) of the node to delete. It has a urn: to find a row without "
+        "its ext by its urn, send identifier=prop.ext,urn"], res[0]
+    assert res[0].get("hint") == "by_urn"
+
+
+def test_a_delete_row_named_by_a_field_its_type_matches_by_that_finds_nothing_is_already_gone():
+    """A delete named only by a field its type matches imports by names what it would delete, as a
+    create named so is found again: one that finds nothing is done already, not refused. Named by
+    nothing its identifier reads, it is refused as a delete (no_key), with no hint: it has no urn."""
+    keys = KeyIndex(match={"Table": ["sap_id"]})
+    _ops, res = _pointer_run([
+        _node_row(0, op="delete", properties={"sap_id": "S-GONE"}),
+        _node_row(1, op="delete", properties={"other": "x"}),
+    ], keys=keys)
+    assert (res[0]["resolved_op"], res[0]["code"]) == ("unchanged", "already_gone"), res[0]
+    assert (res[1]["status"], res[1]["code"]) == ("invalid", "no_key"), res[1]
+    assert res[1]["reasons"] == [
+        "it names nothing identifier=entity_id finds a node by, so what it would delete can't be "
+        "told: give it the urn (or entity_id) of the node to delete"] and "hint" not in res[1]
 
 
 def test_in_one_pass_an_edge_whose_node_row_was_refused_above_says_so():
     """A dry run resolves nodes and edges together: an edge naming a node row refused in the same
-    pass is end_refused, naming that row, as across an import's windows."""
+    pass is end_refused, naming that row where its file has it, as across an import's windows."""
     _ops, res = _by_prop([
-        _node_row(0, urn="urn:svc:domain", displayName="Sales"),                       # no ext
+        _node_row(0, urn="urn:svc:domain", displayName="Sales", _at={"line": 1}),      # no ext
         _node_row(1, urn="urn:svc:a", displayName="a", properties={"ext": "EA"}),
         _edge_row(2, sourceUrn="urn:svc:domain", targetKeys={"ext": "EA"}),
     ])
     assert res[0]["code"] == "no_key"
-    assert res[2]["code"] == "end_refused" and "rowIndex 0" in res[2]["reasons"][0], res[2]
+    assert res[2]["code"] == "end_refused" and res[2]["reasons"] == [
+        "its source urn:svc:domain is the node of the file's line 1, which was refused (no_key): fix "
+        "that row, and this edge finds it"], res[2]

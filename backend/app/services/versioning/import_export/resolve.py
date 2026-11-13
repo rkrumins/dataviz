@@ -223,11 +223,30 @@ def _end_named(row: Mapping[str, Any], end: str) -> str:
     return ""
 
 
+def where_in_file(at: Optional[Mapping[str, Any]]) -> Optional[str]:
+    """Where a record is in its file, as the file shows it (``formats.AT``): ``line 12``,
+    ``Edges row 7``, ``item 3``; None when its reader didn't say."""
+    at = at or {}
+    if at.get("sheet") and at.get("row"):
+        return f"{at['sheet']} row {at['row']}"
+    if at.get("line"):
+        return f"line {at['line']}"
+    if at.get("item") is not None:
+        return f"item {at['item']}"
+    return None
+
+
+def refused_place(row: Mapping[str, Any], index: int) -> str:
+    """Where a refused node row is, for the edges that name it (``end_refused``): as its file shows
+    it (:func:`where_in_file`), else ``row <n>``, counted from 1."""
+    return where_in_file(row.get("_at")) or f"row {index + 1}"
+
+
 def _end_refused(row: Mapping[str, Any], seid: Optional[str], teid: Optional[str],
-                 refused: Mapping[str, Tuple[int, str]], prop: Optional[str]) -> Optional[str]:
+                 refused: Mapping[str, Tuple[str, str]], prop: Optional[str]) -> Optional[str]:
     """Why an edge's end names no node when the file's own row for that node was refused: which end,
-    by what key, and that row's index and reason — so fixing that one row fixes the edge too. None
-    when no refused row is the end."""
+    by what key, and where that row is in the file and why it was refused — so fixing that one row
+    fixes the edge too. None when no refused row is the end."""
     for end, eid in (("source", seid), ("target", teid)):
         if eid:
             continue
@@ -235,9 +254,9 @@ def _end_refused(row: Mapping[str, Any], seid: Optional[str], teid: Optional[str
                     (row.get(f"{end}Keys") or {}).get(prop) if prop else None):
             hit = refused.get(key_value(key)) if key_value(key) else None
             if hit:
-                index, code = hit
-                return (f"its {end} {_end_named(row, end)} is the node of the file's rowIndex "
-                        f"{index}, which was refused ({code}): fix that row, and this edge finds it")
+                place, code = hit
+                return (f"its {end} {_end_named(row, end)} is the node of the file's {place}, "
+                        f"which was refused ({code}): fix that row, and this edge finds it")
     return None
 
 
@@ -294,7 +313,8 @@ CODES = {
     "invalid_row": "the record can't be read as a node or an edge",
     "invalid_type": "its type isn't one the ontology defines",
     "missing_type": "a new node or edge needs its type",
-    "no_key": "it names nothing a later import could find it by again",
+    "no_key": ("it names nothing its identifier reads: a new node couldn't be found again, and a "
+               "delete can't tell what to delete"),
     "two_entities": "the keys it gives name two different entities",
     "duplicate_value": "a value it is matched by, or must keep unique, is held by another entity",
     "named_already": "an earlier row of the file names the same entity",
@@ -319,14 +339,18 @@ FIXES = {
               "have a urn but not the property (a top-level container) are found by their urn with "
               "identifier=prop.<name>,urn.",
     "two_entities": "Keep one key, the one that names the item (its entity_id or its urn), or correct "
-                    "the key that names another item.",
-    "duplicate_value": "Make the value unique to one item, or name the row by its entity_id.",
+                    "the key that names another item. A row whose urn is an item's that has no <name> "
+                    "yet is found by that urn with identifier=prop.<name>,urn, and the item takes its "
+                    "value (or send the item's entity_id with the value).",
+    "duplicate_value": "Make the value unique to one item, or name the row by its entity_id — or, by "
+                       "identifier=prop.<name>,urn, by the urn of the item it means.",
     "named_already": "Keep one row per item: merge the rows that name it.",
     "changed_since_export": "Someone changed the same field since your export: export again and redo "
                             "the change, or edit the item in the app.",
     "end_not_found": "Name each end by a node the graph holds or the file makes: add a node row for a "
-                     "missing end (or fix its row, if that was refused too), or name the end by its "
-                     "urn (sourceUrn, targetUrn) or entity_id (source_entity_id, target_entity_id).",
+                     "missing end, or name the end by its entity_id, or what the identifier reads: "
+                     "its urn; by identifier=prop.<name>, its source.<name>/target.<name> (with "
+                     "prop.<name>,urn, an end without it by its urn).",
     "end_refused": "Fix the end's own node row, refused for the reason it gives: once that row "
                    "applies, this edge finds its end.",
     "edge_moved": "Keep the ends and type its entity_id has, or leave its entity_id out to make a new "
@@ -349,18 +373,27 @@ _NO_KEY = {
                  "its {name}, else its urn (or the entity_id of a node in this graph): give it one"),
 }
 
+#: A delete row that names nothing its identifier reads: what it would delete can't be told.
+_NO_KEY_DELETE = ("it names nothing identifier={identifier} finds a node by, so what it would delete "
+                  "can't be told: give it the {key} (or entity_id) of the node to delete")
+
 #: Said of a row refused for having no {name} under identifier=prop.{name}, when it has a urn.
 _HAS_URN = (". It has a urn: to find a row without its {name} by its urn, send "
             "identifier=prop.{name},urn")
 
 
-def _no_key(identifier: str, prop: Optional[str], fallback: bool, urn: Optional[str]) -> str:
-    """Why a node row that names nothing its identifier reads is refused, and — by a property alone,
-    for a row that has a urn — how to find such rows by their urn."""
-    if not prop:
+def _no_key(identifier: str, prop: Optional[str], fallback: bool, urn: Optional[str],
+            delete: bool = False) -> str:
+    """Why a node row (``delete``: a delete row) that names nothing its identifier reads is refused,
+    and — by a property alone, for a row that has a urn — how to find such rows by their urn."""
+    if delete:
+        why = _NO_KEY_DELETE.format(identifier=identifier,
+                                    key=f"{prop} or urn" if fallback else prop or "urn")
+    elif not prop:
         return _NO_KEY.get(identifier, _NO_KEY["entity_id"])
-    why = _NO_KEY["prop_urn" if fallback else "prop"].format(name=prop)
-    return why + _HAS_URN.format(name=prop) if urn and not fallback else why
+    else:
+        why = _NO_KEY["prop_urn" if fallback else "prop"].format(name=prop)
+    return why + _HAS_URN.format(name=prop) if prop and urn and not fallback else why
 
 
 def _lc(values) -> Optional[set]:
@@ -576,10 +609,15 @@ def resolve_rows(
     of the above, and a ``urn:uuid`` entity_id no entity holds — an export's, from another
     environment — is the new node's id. ``urn``: an entity id of the graph, else its urn; nothing
     else. Either way a node row that names nothing a later import could find it by is refused
-    (``no_key``), rather than created again by every import. A new node keeps the urn its row
-    gives, under an id derived from it; one with no urn, or a ``urn:uuid`` (an id) another entity
-    holds, takes its id as its urn. ``derive_edge(source, target, type)``: a new edge's id, else
-    ``mint_id``. Each resolution's ``code`` says why a row was refused (:data:`CODES`).
+    (``no_key``), rather than created again by every import; so is a delete row that names nothing
+    its identifier reads, since what it would delete can't be told (by ``entity_id``, one named by a
+    qualifiedName or a field its type matches by, which finds nothing, is ``already_gone``). A new
+    node keeps the urn its row gives, under an id derived from it; one with no urn, or a
+    ``urn:uuid`` (an id) another entity holds, takes its id as its urn. ``derive_edge(source,
+    target, type)``: a new edge's id, else ``mint_id``. Each resolution's ``code`` says why a row
+    was refused (:data:`CODES`). An edge whose end is a node row of the file that was refused
+    (``indexes["refused_names"]``: that row's keys -> where it is in the file, and its code) is
+    refused as ``end_refused``, naming that row.
 
     ``prop.<name>``: an entity id of the graph, else the row's value of the property ``<name>``
     (``indexes["urn_to_eid"]`` then maps the values to the nodes holding them, ``indexes["dupes"]``
@@ -588,7 +626,10 @@ def resolve_rows(
     ``derive_key(value)``, else (one that is live: its value has changed since) a minted one; it
     keeps the value, and the urn its row gives — unless a live node (``indexes["urn_held"]``: urn
     -> that node) or a node an earlier row of the batch makes holds that urn, which refuses the
-    row (``two_entities``)."""
+    row (``two_entities``). ``prop.<name>,urn``: the property, then the urn — a row without the
+    property, or whose value no node holds yet, is found by its urn as ``urn`` finds it
+    (``indexes["urn_hits"]``), and a node found so takes the row's value; an edge end without
+    ``source.<name>`` is found by its ``sourceUrn``."""
     urn_to_eid: Dict[str, str] = dict(indexes.get("urn_to_eid") or {})
     qname_to_eid: Dict[str, Optional[str]] = dict(indexes.get("qname_to_eid") or {})   # None: several
     edge_to_eid: Dict[tuple, str] = {(s, t, _etype_key(et)): eid
@@ -629,9 +670,9 @@ def resolve_rows(
     urn_hits: Dict[str, str] = dict(indexes.get("urn_hits") or {})
     urn_taken: set = set(indexes.get("urn_taken") or ())
     urn_restore: Dict[str, str] = dict(indexes.get("urn_restore") or {})
-    # The keys of the file's node rows that were refused -> (that row's index, its code): an edge
-    # end they name says so (end_refused).
-    refused_names: Mapping[str, Tuple[int, str]] = indexes.get("refused_names") or {}
+    # The keys of the file's node rows that were refused -> (where that row is in the file, its
+    # code): an edge end they name says so (end_refused).
+    refused_names: Mapping[str, Tuple[str, str]] = indexes.get("refused_names") or {}
 
     ops: List[dict] = []
     resolutions: List[dict] = []
@@ -710,10 +751,13 @@ def resolve_rows(
                 resolutions.append(_resolution(row, "delete", matched_eid))
                 seen[matched_eid] = row.get("_row_index")
             elif (not names and not key_value(row.get("entity_id"))
-                  and (row_strict or row_prop or not row.get("qualifiedName"))):
+                  and (row_strict or row_prop or not (
+                      row.get("qualifiedName") or (keys and keys.matchable(etype, props))))):
                 # It names nothing its identifier reads, so what it would delete can't be told.
-                resolutions.append(_resolution(row, "invalid", None, code="no_key",
-                                               reasons=[_no_key(identifier, prop, fallback, row_urn)]))
+                resolutions.append(_resolution(row, "invalid", None, code="no_key", reasons=[
+                    _no_key(identifier, prop, fallback, row_urn, delete=True)]))
+                if prop and not fallback and row_urn:     # ,urn would find it: say so, once
+                    resolutions[-1]["hint"] = "by_urn"
             else:
                 resolutions.append(_resolution(row, "unchanged", None, reasons=[_ALREADY_GONE],
                                                code="already_gone"))
@@ -907,10 +951,11 @@ def resolve_rows(
             if res["status"] != "invalid" or res.get("kind") != "node":
                 continue
             row = by_index.get(res["_row_index"]) or {}
+            place = refused_place(row, res["_row_index"])
             for key in (row.get("urn"), row.get("entity_id"),
                         (row.get("properties") or {}).get(prop) if prop else None):
                 if key_value(key):
-                    refused_names.setdefault(key_value(key), (res["_row_index"], res.get("code") or "invalid_row"))
+                    refused_names.setdefault(key_value(key), (place, res.get("code") or "invalid_row"))
 
     # ---- pass 2: edges ----
     for row in edge_rows:
@@ -972,7 +1017,7 @@ def resolve_rows(
                     _etype_key(held.get("edgeType"))) != key:
                 resolutions.append(_resolution(row, "invalid", named, code="edge_moved", reasons=[(
                     f"its ends or type differ from edge {named}'s — to re-point an edge, mark its "
-                    "row _op=delete and add a new row without an entity_id")]))
+                    "row _op=delete and add a new row without an entity_id")], mentions=ends))
                 continue
             matched_eid = named                           # that edge, beside any parallel one
         first = earlier.get(matched_eid, seen.get(matched_eid)) if matched_eid else None

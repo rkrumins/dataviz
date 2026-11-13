@@ -16,7 +16,8 @@ source's graph, through the documented HTTP API alone (docs/CONNECTOR_GUIDE.md).
    onto the published graph once every row is applied (``autoPublish``), or, into ``--branch``, the
    connector publishes the draft.
 4. Follow the import, then its publish, and report what they did: once published, the commit it
-   landed as, and the revision of the published graph that holds it (``revisionId``).
+   landed as, and the revision of the published graph that holds it (``revisionId``); or
+   unchanged: main's head, which already holds it.
 
 Run it again on the same source and nothing changes: every row points at its node by the same urn,
 and the server derives the same ids from them. Change the source, and only what changed is written.
@@ -164,11 +165,12 @@ class Graph:
         self.api, self.graph, self.sleep, self.log = api, graph, sleep, log
         self.base = f"/api/v1/{workspace}/versioning/graphs/{graph}"
 
-    def check(self, path: str, fmt: str) -> dict[str, Any]:
-        """A dry run of the file's first rows, as many as a dry run takes: what they would do, and
-        why any would be refused. Advisory for a larger file: an edge whose end node comes later in
-        it reads as refused here."""
-        return self.api("POST", f"{self.base}/imports/validate", params={"format": fmt},
+    def check(self, path: str, fmt: str, identifier: str | None = None) -> dict[str, Any]:
+        """A dry run of the file's first rows, as many as a dry run takes, matched by ``identifier``
+        (the graph's default without it): what they would do, and why any would be refused.
+        Advisory for a larger file: an edge whose end node comes later in it reads as refused here."""
+        params = {"format": fmt, **({"identifier": identifier} if identifier else {})}
+        return self.api("POST", f"{self.base}/imports/validate", params=params,
                         content=_head(path, fmt))
 
     def upload(self, path: str, fmt: str, state_path: str,
@@ -274,7 +276,7 @@ class Graph:
         while True:
             branch = self.api("GET", f"{self.base}/branches/{branch_id}")
             if branch["status"] == "merged":
-                return {"state": "published"}
+                return self.ended(branch)
             if branch["status"] != "publishing":
                 break
             self.sleep(10)
@@ -290,6 +292,19 @@ class Graph:
             return _outcome(self.follow(f"{self.base}/publish-jobs/{answer['jobId']}", "publish"))
         return {"state": answer.get("outcome") or "published", "commitId": answer.get("commitId") or None,
                 "revisionId": answer.get("revisionId")}
+
+    def ended(self, branch: dict[str, Any]) -> dict[str, Any]:
+        """How a draft found published already ended, as a publish says it: ``published``, as the
+        commit on main that names it (among the newest since its base); else ``unchanged`` — it
+        merged with nothing to commit — as main's head, which holds it."""
+        since = self.api("GET", f"{self.base}/commits",
+                         params={"after": branch.get("baseCommitSeq") or 0, "limit": 500})["commits"]
+        landed = next((c for c in since if c.get("kind") == "squash_publish"
+                       and c.get("source_branch_id") == branch["branchId"]), None)
+        if landed:
+            return {"state": "published", "commitId": landed["commit_id"], "revisionId": landed["commit_seq"]}
+        head = (self.api("GET", f"{self.base}/commits", params={"limit": 1})["commits"] or [{}])[0]
+        return {"state": "unchanged", "commitId": head.get("commit_id"), "revisionId": head.get("commit_seq")}
 
 
 class _Part:
@@ -387,19 +402,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--workspace", required=True)
     parser.add_argument("--graph", required=True, help="the data source's versioned graph id (graph_…)")
     parser.add_argument("--publish", action="store_true",
-                        help="publish the import once every row is applied")
+                        help="publish the import once every row is applied, or within --max-refused-rows")
     parser.add_argument("--check", action="store_true", help="dry-run the file's first rows, import nothing")
     parser.add_argument("--state", help="where to keep the upload's state (default: beside the file)")
     parser.add_argument("--replace", action="store_true",
-                        help="the file is the whole graph: delete what it leaves out (reconcileMode=replace)")
+                        help="the file is the whole graph (with --replace-scope keyed, of what holds "
+                             "the property): delete what it leaves out (reconcileMode=replace)")
     parser.add_argument("--identifier", help="match rows by entity_id, urn, prop.<name>, or "
                                              "prop.<name>,urn (the property, else the urn) "
                                              "(default: the graph's own)")
     parser.add_argument("--replace-scope", choices=("all", "keyed"),
                         help="with --replace and a property identifier: keyed deletes only what "
-                             "holds the property (default: all the file leaves out)")
+                             "holds the property, and the edges between two holders; an edge to a "
+                             "deleted node goes with it (default: all the file leaves out)")
     parser.add_argument("--allow-mass-delete", action="store_true",
-                        help="let a replace delete past the replace guard")
+                        help="let a replace delete past the replace guard, and skip its early stop")
     parser.add_argument("--branch", help="import into this open draft (br_…) instead of a new one")
     parser.add_argument("--max-refused-rows",
                         help="how many refused rows to go on without: a count, a share such as 1%%, "
@@ -421,7 +438,7 @@ def main(argv: list[str] | None = None) -> int:
                       headers={"Authorization": f"Bearer {os.environ['SYNODIC_TOKEN']}"}) as http:
         graph = Graph(Api(http), args.workspace, args.graph)
         if args.check:
-            print(json.dumps(graph.check(path, fmt), indent=2))
+            print(json.dumps(graph.check(path, fmt, identifier=args.identifier), indent=2))
             return 0
         result = run(graph, path, fmt, publish=args.publish, state_path=args.state or path + ".upload.json",
                      replace=args.replace, identifier=args.identifier,
