@@ -256,6 +256,7 @@ tests/test_restore_preview_api.py
 tests/test_revision_api.py
 tests/test_revision_engine_routing.py
 tests/test_revision_gate.py
+tests/test_rollup_cells_parity.py
 tests/test_rollup_health.py
 tests/test_rollup_rebuild_hook_proxy.py
 tests/test_rollup_window_safety.py

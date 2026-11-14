@@ -410,6 +410,14 @@ integration's many small changes as a few commits.
 
 ### Fixed
 
+- **Lineage summaries the projector keeps between batch runs stay the job's cells.** A node whose urn
+  changed kept its summary cells keyed by the old urn, so the next summaries job made a second cell
+  beside each; a retyped node's cells kept their old level stamps; a key whose summaries regime
+  could not be read had a cube key's cells moved as if it were a boundary key's; a graph with
+  lineage but no containment types got a cell per lineage edge that the job never stores; and
+  lineage ending on a container (table to table) missed the job's cell at the container's own
+  level, landing one level up or not at all. Each now matches what the job makes, or hands the
+  window's cells to it.
 - **Reads stay up while a large import lands.** A large import on a large graph could stop its
   reads, and others', for as long as the graph store took to catch up:
   - **Reads of a graph from Postgres can't take the platform down.** A graph the graph store held no

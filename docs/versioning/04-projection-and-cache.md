@@ -713,6 +713,17 @@ rollups are fresh without waiting for a full aggregation job.
   however the apply ends. The property shape (`weight`, `sourceEdgeTypes`, `aggKey`, `gvSeq`,
   `latestUpdate`) **mirrors the aggregation worker**, so a later full rebuild MERGEs onto the same
   relationships.
+- **Keep the cells the job's** — a node whose urn changes keeps its cells, keyed by their ends' urns
+  again (`aggKey`; the job merges a cell by it, so a stale one became two); a retyped node's cells
+  take its new type's level as `sourceLevel`/`targetLevel`; a key whose regime cannot be read hands
+  the window's cells to the job rather than moving only the canonical subset of a cube key's; and a
+  flat ontology (lineage, no containment) gets no raw `(source, target)` mirror cell, which the job
+  never stores unless `AGGREGATION_MATERIALIZE_LEAF_PAIRS` is set — the window and the reconcile
+  follow the same setting. A lineage edge that ends on a container (table to table) lands on the
+  job's boundary cells: a node holding a containment child is one of its own reps, as the job's
+  ancestors-or-self of every containment parent has it, so the raw pair is a boundary cell when both
+  ends are containers (never a cube one); and a node whose first child arrives, or whose last goes,
+  has the lineage it ends recounted, as a move's is (`_MOVE_EDGE_CAP` bounds both).
 
 **When incremental maintenance can't keep up, it hands off to a rebuild:**
 

@@ -642,6 +642,24 @@ _SWEPT_WRITE = "MERGE (m:_GVProjMeta {id: 'meta'}) SET m.sweptSeq = $seq"
 _SUMMARIES_BUILT = "MATCH (m:_AggMeta {id: 'singleton'}) RETURN count(m)"
 
 
+def _aggkey_restamp(label: str) -> Tuple[str, str]:
+    """The statements that key the summary cells on nodes of ``label`` (``$urns``) by their ends'
+    urns again (``aggKey``): those it starts, those it ends."""
+    return (f"UNWIND $urns AS u MATCH (n:{label} {{urn: u}})-[r:AGGREGATED]->(b) "
+            "SET r.aggKey = n.urn + '|' + b.urn",
+            f"UNWIND $urns AS u MATCH (a)-[r:AGGREGATED]->(n:{label} {{urn: u}}) "
+            "SET r.aggKey = a.urn + '|' + n.urn")
+
+
+def _level_restamp(label: str) -> Tuple[str, str]:
+    """The statements that stamp the summary cells on nodes of ``label`` (``$urns``) with its
+    level (``$level``): ``sourceLevel`` on those it starts, ``targetLevel`` on those it ends."""
+    return (f"UNWIND $urns AS u MATCH (n:{label} {{urn: u}})-[r:AGGREGATED]->() "
+            "SET r.sourceLevel = $level",
+            f"UNWIND $urns AS u MATCH ()-[r:AGGREGATED]->(n:{label} {{urn: u}}) "
+            "SET r.targetLevel = $level")
+
+
 async def _seed_done(client, build_id: str) -> bool:
     """Whether a build's key holds build ``build_id``'s seed from Postgres whole (its marker node
     says so, ``_SEED_DONE_WRITE``): False for a key that is missing, lost since, or another's."""
@@ -1940,7 +1958,7 @@ class FalkorProjector:
                     provider_id=provider_id, owned=owned, cursor=cursor)
             else:
                 await self._rekey_in_place(client, rekeys)
-                await self._relabel_in_place(client, retypes)
+                await self._relabel_in_place(client, retypes, levels=level_map)
                 dropped = await self._apply(client, *changes, level_map=level_map,
                                             provider_id=provider_id, owned=owned,
                                             prior=prior) or 0
@@ -2702,7 +2720,7 @@ class FalkorProjector:
                                     provider_id=provider, owned=True, cursor=cursor)
         else:
             await self._rekey_in_place(client, rekeys)
-            await self._relabel_in_place(client, retypes)
+            await self._relabel_in_place(client, retypes, levels=level_map)
             await self._apply(client, *changes, level_map=level_map, provider_id=provider,
                               owned=True)
         stale = bool(state.get("rollupsStale"))
@@ -3581,6 +3599,27 @@ class FalkorProjector:
                 anc = {i} | set(local) | {pp for ps in local.values() for pp in ps}
                 anc_cache[(i, as_of)] = (list(anc), local)
 
+        kids: Dict[Tuple[str, Optional[int]], bool] = {}
+
+        async def prefetch_kids(ids, as_of: Optional[int]) -> None:
+            """Which of ``ids`` hold a live containment child at ``as_of``, in one batched read:
+            a container is one of its own reps, as the summaries job has it (its rep set is
+            every containment parent among the endpoint's ancestors-OR-self), so a lineage edge
+            ending on one lands on the cells the job's do."""
+            if not use_canonical:
+                return
+            need = {i for i in ids if i and (i, as_of) not in kids}
+            if not need:
+                return
+            cand = await self._svc._incident_edge_ids(s, graph.id, main_id, need,
+                                                      sides=("source",), edge_types=cont_types)
+            live = (await self._svc._skeletons_at(s, graph.id, main_id, list(cand), as_of)
+                    if cand else {})
+            holding = {_edge_endpoints(p)[0] for p in live.values()
+                       if p is not None and _etype(p) in cont_types}
+            for i in need:
+                kids[(i, as_of)] = i in holding
+
         async def chain(node_id: str, as_of: Optional[int]) -> Tuple[List[str], Dict[str, List[str]]]:
             """(ancestors-or-self ids, child→ALL-parents multimap) — the
             parent DAG the shared pair rules rank on. Multi-parent nodes
@@ -3600,6 +3639,8 @@ class FalkorProjector:
 
         conversion = _CellsOut(self._svc, graph, main_id, from_seq, to_seq, use_canonical, level_map)
         net = _CellNet(self._session, graph.id, to_seq, config.ROLLUP_NET_MAX_CELLS, conversion)
+        from backend.app.providers.falkordb_materialize import _materialize_leaf_pairs
+        mirror = _materialize_leaf_pairs()
 
         async def contribute(p: dict, sign: int, as_of: Optional[int]) -> None:
             """Net this raw edge's delta into BOTH pair sets via the shared ``pair_rules`` (the
@@ -3622,6 +3663,11 @@ class FalkorProjector:
                 t_cl = ancestor_closure(cp_t, tgt)
                 s_parents = {pp for ps in cp_s.values() for pp in ps}
                 t_parents = {pp for ps in cp_t.values() for pp in ps}
+                # An endpoint that is a container itself is one of its own reps.
+                if kids.get((src, as_of)):
+                    s_parents.add(src)
+                if kids.get((tgt, as_of)):
+                    t_parents.add(tgt)
                 canon = boundary_pairs(
                     {a: d for a, d in s_cl.items() if a in s_parents},
                     {a: d for a, d in t_cl.items() if a in t_parents},
@@ -3630,13 +3676,18 @@ class FalkorProjector:
                     s_cl, t_cl, include_leaf_mirror=False, s=src, t=tgt,
                 ))
                 depths = {**t_cl, **s_cl}
-                for sx, tx in cube:
-                    net.add(sx, tx, sign, sign if (sx, tx) in canon else 0,
+                # The canonical cells can hold the raw (src, tgt) pair, when both ends are
+                # containers; the cube never does: the job's boundary cells have it, its cube none.
+                for sx, tx in cube | canon:
+                    net.add(sx, tx, sign if (sx, tx) in cube else 0,
+                            sign if (sx, tx) in canon else 0,
                             et if sign > 0 and et else None, depths.get(sx), depths.get(tx))
                 return
             for sx in cs:
                 for tx in ct:
-                    if sx != tx:
+                    # Never the raw (src, tgt) mirror, unless the batch job stores it too
+                    # (AGGREGATION_MATERIALIZE_LEAF_PAIRS): a cell it never has is one too many.
+                    if sx != tx and (mirror or (sx, tx) != (src, tgt)):
                         net.add(sx, tx, sign, None, et if sign > 0 and et else None, None, None)
 
         # The window's edges a page of distinct ids at a time, each at its value BEFORE the window
@@ -3648,6 +3699,10 @@ class FalkorProjector:
                   EdgeVersionORM.commit_seq > from_seq, EdgeVersionORM.commit_seq <= to_seq)
         moved: set = set()
         changed = False
+        # The parents of the window's containment changes: one whose first child arrived, or
+        # whose last went, becomes or stops being one of its own reps, which moves the cells of
+        # the lineage it ends.
+        holders: set = set()
         after = ""
         while True:
             ids = list((await s.execute(
@@ -3671,12 +3726,14 @@ class FalkorProjector:
                         deletes[eid] = old
                     elif et in cont_types:
                         children.add(_edge_endpoints(old)[1])
+                        holders.add(_edge_endpoints(old)[0])
                 if new is not None:
                     et = _etype(new)
                     if et in lineage_types:
                         creates[eid] = new
                     elif et in cont_types:
                         children.add(_edge_endpoints(new)[1])
+                        holders.add(_edge_endpoints(new)[0])
             children.discard("")
             if "dedicated" in sets[3:] and (creates or deletes or children):
                 # The aggregation job builds these rollups in a key of their own: this key gets
@@ -3699,6 +3756,8 @@ class FalkorProjector:
             changed = changed or bool(creates or deletes)
             await prefetch({x for p in creates.values() for x in _edge_endpoints(p)}, to_seq)
             await prefetch({x for p in deletes.values() for x in _edge_endpoints(p)}, from_seq)
+            await prefetch_kids({x for p in creates.values() for x in _edge_endpoints(p)}, to_seq)
+            await prefetch_kids({x for p in deletes.values() for x in _edge_endpoints(p)}, from_seq)
             for p in creates.values():
                 await contribute(p, +1, to_seq)
             for p in deletes.values():
@@ -3706,24 +3765,39 @@ class FalkorProjector:
             await net.page_done(s)
             if len(anc_cache) > _CHAIN_CACHE_MAX:
                 anc_cache.clear()                        # bounded, whatever the window's size
+            if len(kids) > _CHAIN_CACHE_MAX:
+                kids.clear()
             if len(ids) < config.PROJECTION_PAGE:
                 break
             after = ids[-1]
-        if not changed and not moved:
+        flipped: set = set()
+        if use_canonical and holders:
+            holders.discard("")
+            await prefetch_kids(holders, from_seq)
+            await prefetch_kids(holders, to_seq)
+            flipped = {h for h in holders
+                       if kids.get((h, from_seq)) != kids.get((h, to_seq))}
+            if len(flipped) > self._MOVE_EDGE_CAP:
+                await net.clear()                        # a restructure: the aggregation job's
+                return "stale"
+        if not changed and not moved and not flipped:
             await net.clear()
             return None
 
-        if moved:
-            # Moved subtrees: every lineage edge under them changes rollup pairs. Remove the
-            # pre-window contribution, add the post-window one — bounded by _MOVE_EDGE_CAP: a
-            # bigger move is a restructure, which the aggregation job takes.
-            subtree = await self._svc._containment_descendants(
-                s, graph.id, main_id, set(moved), cont_types, to_seq, cap=self._MOVE_EDGE_CAP + 1)
+        if moved or flipped:
+            # Moved subtrees: every lineage edge under them changes rollup pairs; and a node that
+            # became, or stopped being, a container changes the cells of the lineage it ends.
+            # Remove the pre-window contribution, add the post-window one — bounded by
+            # _MOVE_EDGE_CAP: a bigger move is a restructure, which the aggregation job takes.
+            subtree = (await self._svc._containment_descendants(
+                s, graph.id, main_id, set(moved), cont_types, to_seq,
+                cap=self._MOVE_EDGE_CAP + 1) if moved else set())
             if len(subtree) > self._MOVE_EDGE_CAP:
                 await net.clear()
                 return "stale"
             # as-of to_seq (not head): a commit landing after this window must not leak in.
-            inc = await self._svc._incident_live_edges(s, graph.id, main_id, subtree, to_seq)
+            inc = await self._svc._incident_live_edges(s, graph.id, main_id,
+                                                       set(subtree) | flipped, to_seq)
             lineage = {eid: p for eid, p in inc.items() if _etype(p) in lineage_types}
             if len(lineage) > self._MOVE_EDGE_CAP:
                 await net.clear()
@@ -3734,6 +3808,8 @@ class FalkorProjector:
             ends = {x for p in moved_edges.values() for x in _edge_endpoints(p)}
             await prefetch(ends, from_seq)
             await prefetch(ends, to_seq)
+            await prefetch_kids(ends, from_seq)
+            await prefetch_kids(ends, to_seq)
             for eid, p in moved_edges.items():
                 await contribute(p, -1, from_seq)
                 await contribute(p, +1, to_seq)
@@ -3815,7 +3891,11 @@ class FalkorProjector:
             if rows and rows[0] and rows[0][0] in ("cube", "boundary"):
                 regime = str(rows[0][0])
         except Exception:
-            pass
+            # The regime could not be read: on a cube key the canonical subset would leave every
+            # other cell unmoved. The batch job derives the cells instead.
+            logger.warning("rollup regime unreadable: the window's cells go to the batch job",
+                           exc_info=True)
+            return False
 
         # Grouped by the endpoints' labels so every node match below is a
         # per-label URN index seek (an unlabeled ``(a {urn: …})`` scans all
@@ -4240,7 +4320,7 @@ class FalkorProjector:
         await self._delete_nodes_by_id(client, unkeyed)
         await self._delete_edges_by_key(client, list(parallel), progress)
 
-        await self._relabel_in_place(client, diff.relabels, progress)
+        await self._relabel_in_place(client, diff.relabels, progress, levels=level_map)
 
         # Phase two: payloads for exactly what is written — nothing else is ever read.
         node_keys = list(dict.fromkeys([*diff.node_upserts, *(k for k in nodes if k in duplicated)]))
@@ -4365,7 +4445,7 @@ class FalkorProjector:
                     else:
                         relabels.append((urn, old, new))
                         held.add(urn)                    # a second stale copy is then gone
-            await self._relabel_in_place(client, relabels)
+            await self._relabel_in_place(client, relabels, levels=level_map)
             done["writes"] += len(relabels)
             done["structural"] |= bool(relabels)
             doomed = [nid for nid, _l, _u in gone] + unkeyed
@@ -4697,20 +4777,35 @@ class FalkorProjector:
                                  f"OPTIONAL MATCH (m:{lbl} {{urn: it.new}}) "
                                  "WITH n, it, m WHERE m IS NULL SET n.urn = it.new",
                                  items, progress=progress)
+            # The summary cells on a moved node are keyed by their ends' urns (``aggKey``): the
+            # summaries job merges a cell by it, so one left on the old urn would become two.
+            moved = [it["new"] for it in items]
+            for cypher in _aggkey_restamp(lbl):
+                await self._laddered(client, "rekey_cells", cypher, moved, param="urns")
 
-    async def _relabel_in_place(self, client, relabels, progress=None) -> None:
+    async def _relabel_in_place(self, client, relabels, progress=None,
+                                levels: Optional[Dict[str, int]] = None) -> None:
         """Retype nodes IN PLACE (``SET n:new REMOVE n:old``): the node keeps its id, its
         edges and the rollup cells on it. A MERGE under the new label would create a second
-        node and leave the old one; a delete-and-recreate would take its edges and rollups."""
+        node and leave the old one; a delete-and-recreate would take its edges and rollups.
+        With the ontology's ``levels`` (entity type -> level), the cells on a retyped node take
+        its new type's level as their ``sourceLevel`` or ``targetLevel``, as the summaries job
+        stamps them; a type with no level leaves the stamps as they were."""
         by: Dict[Tuple[str, str], List[str]] = {}
         for urn, old, new in relabels:
             if old != new:
                 by.setdefault((old, new), []).append(urn)
+        level_of = {_sanitize_label(spelled_label(t)): lvl for t, lvl in (levels or {}).items()}
         for (old, new), urns in by.items():
             await self._laddered(client, "relabel",
                                  f"UNWIND $urns AS u MATCH (n:{_sanitize_label(old)} {{urn: u}}) "
                                  f"SET n:{_sanitize_label(new)} REMOVE n:{_sanitize_label(old)}",
                                  urns, param="urns", progress=progress)
+            level = level_of.get(_sanitize_label(new))
+            if level is not None:
+                for cypher in _level_restamp(_sanitize_label(new)):
+                    await self._laddered(client, "relabel_cells", cypher, urns, param="urns",
+                                         params={"level": level})
 
     async def _delete_edges_by_key(self, client, keys, progress=None) -> None:
         by: Dict[Tuple[str, str, str], list] = {}
@@ -5047,7 +5142,7 @@ class FalkorProjector:
                     prior = None if owned else await self._properties_before(
                         s, graph, main_id, from_seq, changes[0])
                     await self._rekey_in_place(client, rekeys)
-                    await self._relabel_in_place(client, retypes)
+                    await self._relabel_in_place(client, retypes, levels=level_map)
                     dropped += await self._apply(client, *changes, level_map=level_map,
                                                  provider_id=provider_id, owned=owned,
                                                  prior=prior) or 0
