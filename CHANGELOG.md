@@ -702,6 +702,16 @@ integration's many small changes as a few commits.
 - A review's `pullRequired` counts only people's commits. Whether automation touched the draft is
   found when it merges, and the refusal says so (`reason: overlap`). A draft's freshness checks this
   on every poll, for drafts of up to 10,000 changes.
+- **Versioned graphs are tested end to end up to 1,000,000 nodes and 1,000,000 edges.** At
+  5,000,000 of each, measured in CI, the import took 7.6 times as long as at 1M and its memory grew
+  to 1,335 MB. The publish took 23 times as long, and held the graph's publish lock for 3 h 22 min.
+  `docs/versioning/09-scale-limits-and-roadmap.md` §2 has the measurements. Its §10, "Further work
+  found by the scale runs", has the leads and what done looks like, for these and for:
+  - event-loop lag in the worker's jobs;
+  - a publish of up to 200,000 changes held whole;
+  - the read modes at 5M;
+  - hundreds of concurrent readers;
+  - the lineage-summary items left to the aggregation job.
 
 ---
 

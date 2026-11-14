@@ -5,11 +5,14 @@
 > gaps, and the prioritized roadmap. Nothing here is aspirational marketing; every limit traces to
 > code.
 
-**Re-checked against the code on 2026-10-09 (`42cae50`); §7, §9 and §10's Stage 1–2 subsections again on 2026-10-19 (`57444bd8`); §2–§4 and §8 on 2026-10-30, at millions of entities.**
+**Re-checked against the code on 2026-10-09 (`42cae50`); §7, §9 and §10's Stage 1–2 subsections again on 2026-10-19 (`57444bd8`); §2–§4 and §8 on 2026-10-30, at millions of entities; §2's 5M section and §10's further work on 2026-11-14, from the scale runs.**
 
 **TL;DR.** The Versioned Graph is **feature-complete and test-covered for the managed, single-node
 case**. Saves, pulls, previews, reviews and publishes are `O(change)`, not `O(graph)`, and a publish,
-its projection and a rebuild of millions hold a page at a time (§2). The remaining sharp edges are
+its projection and a rebuild of millions hold a page at a time (§2). It is tested end to end up to
+1,000,000 nodes and 1,000,000 edges. At 5,000,000 of each, the import and the publish take far
+longer than five times as long (§2), and §10 lists that and the other further work the scale runs
+found. The remaining sharp edges are
 deliberately-deferred scale items — export jobs that start over when interrupted (imports resume); no
 retention inside a live graph; and a partitioning key that doesn't help a single hot collaborative
 graph. Re-sync, separately, runs a bounded merge that has not been
@@ -66,21 +69,45 @@ What 1M + 1M left behind: 6.1 GB of graphver in Postgres (each entity's version 
 `main`, and both branches' heads) and 2.7 GB of the import's staged rows until they are swept
 ([08](08-import-export.md) §3c); 1.05 GB for the graph in FalkorDB (`GRAPH.MEMORY USAGE`).
 
-### At 10 million (derived)
+### At 5,000,000 nodes and 5,000,000 edges: where the write path stops scaling
 
-Not measured: the 1M + 1M run times five, for a graph of 5,000,000 nodes and 5,000,000 edges.
+This replaces an estimate that multiplied the 1M + 1M run by five. Measured by the
+`versioning-scale` workflow on 14 November 2026 (run 43577703970), on a 4-CPU, 16 GB runner with
+Postgres 16 at its default settings (128 MB of shared buffers). The run stopped at its 340-minute
+limit while it projected the publish. So this size has no figures for the projection, the rebuild,
+the export or the read modes.
 
-| Step | Time | Peak memory |
-|------|-----:|------------:|
-| Import into a draft | about 1 h | about 200 MB |
-| Publish | about 30 min, holding the graph's publish lock | about 400 MB |
-| Projection of that publish | 35–45 min | about 200 MB |
-| Rebuild from nothing | about 25 min | about 220 MB |
-| Export (NDJSON) | about 8 min | about 170 MB |
+| Step | 1M + 1M | 5M + 5M | For 5 times the entities |
+|------|--------:|--------:|-------------------------:|
+| Import into a draft | 1,009 s, 487 MB | 7,695 s, 1,335 MB | 7.6 times the time, 2.7 times the memory |
+| Publish | 526 s, 396 MB | 12,149 s, 395 MB | 23 times the time |
+| The graph's publish lock, held | 525 s | 12,149 s (3 h 22 min) | 23 times |
+| The runner's disk | +13 GB, every step | +47 GB, the import and the publish | |
 
-It takes about 30 GB of graphver in Postgres (plus about 13 GB of staged import rows until they are
-swept) and about 5 GB in FalkorDB. While the publish runs, other publishes and merges into that graph
-wait for its lock and answer 503 `lock_busy` past their wait; saves into drafts don't wait.
+- **The import grows faster than the graph.**
+  - Each edge window took longer than the one before. At 5M the median window took 9.0 s and the
+    slowest 22.7 s, and the last tenth of the windows took 168% longer than the first. At 1M the
+    edge windows grew by 167% too; node windows grew by 56% at 5M.
+  - Its slowest statements write and look up edge versions: `INSERT INTO graphver.edge_versions`
+    (4.3 s) and the existing-edge lookup, `SELECT DISTINCT edge_versions.entity_id,
+    target_entity_id` (3.9 s).
+  - Its memory grows with the graph, by 110 to 135 MB per million entities: 244 MB at 100k + 100k,
+    487 MB at 1M + 1M, and 1,335 MB at 5M + 5M. Its target is 600 MB.
+- **The publish grows worse.**
+  - Five times the changes took 23 times as long. That is close to 5 × 5, the growth of a step in
+    which each page costs in proportion to the table.
+  - Its slowest statement ran for about 17.7 s, repeatedly: a page's
+    `SELECT DISTINCT ON (graphver.node_versions.entity_id) …`. At 1M, no statement of that kind was
+    among the slowest; the slowest was an insert, at 1.15 s.
+  - The whole publish is one transaction under the graph's lock. For 3 h 22 min no other publish
+    or merge into that graph could land, and each answered 503 `lock_busy` after its wait. Saves
+    into drafts and reads don't wait for that lock.
+- **What it means today.**
+  - A first import of 10 million entities takes about 2 hours, and its publish another 3.4 hours.
+  - At that size the read modes don't fit in a 6-hour CI job.
+  - Tested end to end: up to 1,000,000 nodes and 1,000,000 edges.
+  - The causes, the leads and what done looks like are in §10, Further work found by the scale
+    runs, items 1 to 3.
 
 ### Measuring at your size
 
@@ -115,9 +142,11 @@ draft, published Postgres first and projected while `--readers` readers in a pro
 read a node and its connections by the route a read of main takes. Per mode it reports the time to
 land, read latency percentiles and errors while the change is imported, while it lands and after, the
 routes reads took and the versions they saw, FalkorDB's memory (start and peak), and whether FalkorDB
-holds what Postgres does after. The `versioning-scale` workflow runs it after the steps above; its
-Postgres keeps its data on the runner's large disk, so a graph of 5,000,000 nodes and edges fits
-(`timeout_minutes` up to 350).
+holds what Postgres does after. The `versioning-scale` workflow runs it after the steps above.
+Its Postgres keeps its data on the runner's large disk, which holds a graph of 5,000,000 nodes and
+edges (+47 GB). The job's time doesn't: at that size the import and the publish alone took 5.5
+hours, and the job allows at most 350 minutes (`timeout_minutes`). See "At 5,000,000 nodes and
+5,000,000 edges", above.
 
 ### What readers get while a change lands, measured
 
@@ -459,6 +488,133 @@ The item-by-item record, with commits, is the gap audit in the repository,
 - CONVERSION L2–L4 ([14](14-graph-lifecycle-v2.md)): blue/green KeyMigration, lossless convert, cutover
   and rollback, adopt, detach, history backup.
 - The items numbered 1–9 above.
+
+### Further work found by the scale runs (November 2026)
+
+The `versioning-scale` runs at 100k, 1M and 5M (§2) left these open. Each item gives what was
+measured, where to start, and what done looks like. The leads are leads, not findings: confirm each
+one before changing code.
+
+To re-measure, dispatch the workflow at any size (`nodes`, `edges`, `changes`, `modes`, `readers`,
+`reader_procs`), or run the harness against a staging database (§2, Measuring at your size). The
+harness prints each step's slowest statements, its window times by tenths, and its event-loop lag
+by phase. It also checks each step against the targets in `TARGETS` (`bench_versioning.py`), which
+are set for 100k + 100k. A missed target is reported but doesn't fail the run. The run fails when:
+- a step doesn't complete;
+- a step passes its memory ceiling;
+- a read fails;
+- FalkorDB and Postgres disagree;
+- a reader of Switch when ready sees parts of two versions.
+
+1. **The publish: each page costs in proportion to the table.**
+   - *Measured.* Five times the changes took 23 times as long (§2, At 5,000,000). A page's
+     `SELECT DISTINCT ON (graphver.node_versions.entity_id) …` took about 17.7 s at 5M, and
+     wasn't among the slowest statements at 1M. The publish ran 25,003 statements, in one
+     transaction under `_lock_graph`.
+   - *Where to start.*
+     - `_squash_paged` (`service.py`) walks the draft's heads `SQUASH_PAGE` (20,000) at a time, four
+       times over: the deletes, the nodes, the changed edges and the new edges.
+     - For each page it asks `main` for those ids as of the base: `_hashes_at` and `_skeletons_at`,
+       a `DISTINCT ON (entity_id)` with `entity_id = ANY(:ids)` and `commit_seq <= base`. The
+       gates ask more: `_enforce_written`, `_unique_violations` and
+       `_incident_live_edge_skeletons`.
+     - Capture `EXPLAIN (ANALYZE, BUFFERS)` of the slow statement at 1M and at 5M, then tell two
+       causes apart:
+       - a plan that reads or sorts the whole partition for each page, which an index or a
+         reshaped query fixes;
+       - an index that outgrew the cache. CI's Postgres has 128 MB of shared buffers; production
+         settings may hide this, but the work is still there.
+     - The squash writes `main`'s rows as it goes, so each later page searches a larger `main`.
+   - *The lock.* The publish holds the graph's lock for its whole length: 525 s at 1M, against
+     the harness's target of 60 s at 100k. A shorter hold needs a faster publish, or a squash that
+     prepares its pages outside the lock and only writes under it.
+   - *Done when* a page costs the same at the start and at the end, and a publish of 5M + 5M takes
+     about five times as long as one of 1M + 1M, its lock held for no longer.
+
+2. **The import: each window costs more than the last, and memory grows with the graph.**
+   - *Measured.* The last tenth of the edge windows took 168% longer than the first at 5M, 167%
+     at 1M and 27% at 100k. Peak memory: 244 MB at 100k, 487 MB at 1M, 1,335 MB at 5M.
+   - *Where to start.*
+     - The edge window's existing-edge lookup, `edges_between` (`import_export/snapshot.py`). It
+       matches `source_entity_id = ANY(…)` and `target_entity_id = ANY(…)` through `ix_ev_source`
+       and `ix_ev_target`, on every branch of the graph. Each window adds to what later windows
+       search.
+     - Endpoint resolution (`import_export/resolve.py`).
+     - The cost of keeping `edge_versions`' indexes up to date as the table grows.
+     - For the memory, find what the job keeps from one window to the next: compare
+       `tracemalloc` snapshots at the 100th window and the 400th.
+   - *Done when* each tenth of the windows takes within 20% of the first (the harness's target),
+     and peak memory is within 100 MB at 100k, 1M and 5M.
+
+3. **The read modes at 5,000,000: after items 1 and 2.**
+   - The 5M run spent 5.5 hours on the import and the publish, so it measured no read mode.
+   - Give the workflow a way to start the read modes from the imported graph, skipping the
+     projection, rebuild and export measurements, so they fit in one job.
+   - Switch when ready needs room in FalkorDB:
+     - A copy needs about 2.2 times the graph free (2.0 times at its peak, measured). A seed needs
+       about 1.2 times.
+     - A 5M + 5M graph takes about 6.3 GB, five times 1M + 1M's 1.26 GB. So a copy needs about
+       14 GB free and a seed about 7.5 GB, more than a 16 GB runner holds beside Postgres. Measure
+       the copy on a larger runner.
+   - A seed's time grew from 51 s at 100k to 522 s at 1M, so expect most of an hour at 5M.
+   - Re-run at 5M with `latest,in_place,beside_seed` first, and add `beside` on a larger runner.
+
+4. **Event-loop lag in every job.**
+   - *Measured* at 100k, the size the targets are set for: the loop-lag p99 was 95 to 205 ms in
+     every job, against a target of 50 ms:
+     - import 140 ms, publish 99 ms, export 95 ms;
+     - projection 205 ms, rebuild 180 ms, read modes 176 ms.
+   - The import's worst stall was 321 ms (target 250 ms). At 5M it was 3.1 s.
+   - These jobs run on the versioning worker, not on web pods, so requests don't wait on them. Other
+     work on the same worker loop does.
+   - *Where to start.* The harness names each run's worst phase. Move the CPU-bound step in that
+     phase off the loop (`asyncio.to_thread`), as the reconcile's diff already is.
+   - *Done when* the p99 is under 50 ms in every job at 100k.
+
+5. **A publish of up to 200,000 changes is held whole.**
+   - *Measured.* At 100k + 100k (200,000 changes) the publish peaked at 450 MB. That is under its
+     1 GB ceiling but over its 300 MB target.
+   - Below `SQUASH_PAGED_ABOVE` (200,000) the squash holds the whole draft. Above it the squash
+     pages and stays flat: 396 MB at 1M and 395 MB at 5M.
+   - The projector's thresholds came down to 100,000 for the same reason (§2).
+   - *Done when* the publish peaks under 300 MB at 100k + 100k without getting slower. A lower
+     threshold is the first thing to measure.
+
+6. **Hundreds of concurrent users.**
+   - *What protects the read path.*
+     - Each web process bounds its Postgres reads, per graph (`GRAPHVER_PG_READS_PER_GRAPH`, 4)
+       and in all (`GRAPHVER_PG_READS_PER_PROCESS`, 8). Past those bounds a read answers 429 with
+       `Retry-After`. A read past its statement timeout answers 503.
+     - The client retries twice and honours `Retry-After`, up to 5 s.
+     - The harness reads the way the web pods do: bounded, retried, from several processes
+       (`--readers`, `--reader-procs`). It reports shed reads and retries.
+   - *Measured so far:* 4 readers in one process, with no read failing (§2). Next: 50 readers in
+     each of 4 processes, at 1M nodes and 2M edges.
+   - *What to expect.* In Always the latest, reads go to Postgres while FalkorDB catches up. With
+     hundreds of readers on one graph, those bounds shed most of those reads, so readers wait for
+     their retries. Update in place and Switch when ready keep them on FalkorDB. The run above
+     will measure this.
+   - *Still open.*
+     - TESTS-4: a load test over HTTP, through several web pods, with saves, pulls and publishes
+       at the same time.
+     - FalkorDB's own queue under hundreds of readers. CI's FalkorDB sets `MAX_QUEUED_QUERIES` to
+       25.
+
+7. **Lineage summaries: what is still left to the aggregation job.**
+   - *Corrected by the job's next run.* Until then, a summary can differ from the job's in:
+     - depth stamps;
+     - `sourceEdgeTypes`, which a window only adds to;
+     - parallel edges on one (source, target, type) triple;
+     - the `reconciling` flag's clock.
+   - *Phase 3b of the summaries plan:*
+     - a watermark for the summaries, so readers can tell which version they reflect;
+     - a fence with the aggregation job, so that its extract (`rawSeq` on `_AggMeta`, adopted as
+       the watermark) can't overwrite summaries a newer window moved;
+     - a rebuild that fixes the raw edges and catches the summaries up from that watermark by
+       delta. Since the streamed threshold came down to 100,000 entities, a reconcile of 100,000
+       to 500,000 entities that changes anything hands its summaries to the job;
+     - a sampled check of the summaries against what the job would write.
+   - Each of these needs a live FalkorDB to verify.
 
 ---
 
