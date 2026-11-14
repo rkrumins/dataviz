@@ -42,7 +42,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import aliased
 
-from . import config, db, keymigrate
+from . import build_policy, candidates, config, db, keymigrate
 from .changeset import Delta, fold_batch_ops, materialize, net_delta, diff_states
 from backend.common.property_patch import apply_patch, compose_patches, strip_deletes
 from backend.common.service_accounts import is_service_account
@@ -639,14 +639,15 @@ _SERVES_NOTHING = ("rehydrating", "evicted", "waiting_capacity", "reseeding")
 
 
 def serving_seq(projected: int, committed: int, status: Optional[str],
-                served: Optional[int]) -> Optional[int]:
+                served: Optional[int], max_lag: Optional[int] = None) -> Optional[int]:
     """The version of main a projection's key serves reads of main at; None sends them to Postgres.
 
     The head while the key holds it (:func:`serves_head`). Behind it, while the projection catches
     up or rebuilds in place: the version the key last published (its watermark, or during a
     rebuild, which resets that, ``served_commit_seq``) — complete with its lineage summaries, with
-    part of the next window or of the rebuild's repairs over it. ``GRAPHVER_READ_MAX_LAG`` caps how
-    many versions behind (0: the head only). None while the key is out of FalkorDB, being loaded
+    part of the next window or of the rebuild's repairs over it. ``max_lag`` caps how many versions
+    behind (0: the head only, a graph read ``latest``: ``build_policy.max_lag_of``), else
+    ``GRAPHVER_READ_MAX_LAG``. None while the key is out of FalkorDB, being loaded
     or reset, or holds no published version (a first seed, a move, an Adopt, a lost key). Seq 1 is
     a graph's genesis, its empty first commit: a key at it holds nothing anyone published — a new
     graph's key is empty, and an enabled source's own graph is not yet a version history holds."""
@@ -655,9 +656,24 @@ def serving_seq(projected: int, committed: int, status: Optional[str],
     if status in _SERVES_NOTHING:
         return None
     held = projected or served or 0
-    if held <= 1 or (config.READ_MAX_LAG >= 0 and committed - held > config.READ_MAX_LAG):
+    lag = config.READ_MAX_LAG if max_lag is None else max_lag
+    if held <= 1 or (lag >= 0 and committed - held > lag):
         return None
     return held
+
+
+def fork_serving_seq(serving: Optional[int], fresh: bool, status: Optional[str],
+                     window_rows: Optional[int], last_error: Optional[str]) -> Optional[int]:
+    """The version of its root's main a fork lays its patch set over in the root's key: the one the
+    key serves main's readers (``serving``, :func:`serving_seq`) while the key holds exactly that —
+    its head, or behind it, idle since it published, with no window in flight (``window_rows``) and
+    no failed pass (``last_error``) that may have written part of one. Main's readers take a key
+    part-way through a window as it is; a fork never shows a change its root made after the fork's
+    base, and a key part-way through one would show some. None: the fork reads its root's main
+    from Postgres."""
+    if fresh or (status == "idle" and window_rows is None and not last_error):
+        return serving
+    return None
 
 
 def residency_state_of(status: str, projected: int, key: Optional[str],
@@ -736,6 +752,23 @@ async def _load_actor_groups(actor: str) -> Tuple[str, ...]:
             )).scalars().all())
     except Exception as exc:
         raise GroupsUnavailable() from exc
+
+
+def _forget_build(ps) -> None:
+    """Drop the build a graph has, if any, inside the caller's transaction: its key is retired at
+    once (the next retire run drops it) and the build columns are cleared. For a change that makes
+    a build pointless, a rebuild or a move: the serving key it was built beside no longer holds
+    what it is copied from."""
+    if not isinstance(getattr(ps, "candidate_state", None), dict):
+        return
+    if ps.candidate_graph_name:
+        ps.retired_keys = [*(ps.retired_keys or []), {
+            "name": ps.candidate_graph_name, "provider": ps.candidate_provider,
+            "retireAfter": datetime.now(timezone.utc).isoformat(), "afterSeq": 0,
+            "build": ps.candidate_state.get("id")}]
+    ps.candidate_graph_name = ps.candidate_provider = None
+    ps.candidate_seq = None
+    ps.candidate_state = None
 
 
 class GraphVersioningService:
@@ -4973,16 +5006,19 @@ class GraphVersioningService:
         if root is not None and root.id != graph_id:
             wm = await self.projection_watermark(root.id)
             reads_from = await self.fork_reads_from(graph_id)
-            # A fork lays its patch set over its root's store at the root's head only
-            # (ContextEngine._fork_main_reader): behind it, the fork reads Postgres.
-            on_store = bool(wm["fresh"]) and reads_from != "postgres"
-            wm["served"] = wm["committed"] if on_store else None
-            wm["served_revision"] = wm["committed_revision"] if on_store else None
+            # A fork lays its patch set over its root's store at the version the root's key serves,
+            # while the key holds exactly that (ContextEngine._fork_main_reader, fork_serving_seq);
+            # else the fork reads its root from Postgres.
+            on_store = reads_from != "postgres" and fork_serving_seq(
+                wm["served"], wm["fresh"], wm["status"], wm["window_rows"],
+                wm["last_error"]) is not None
+            if not on_store:
+                wm["served"] = wm["served_revision"] = None
             wm["read_route"] = {**wm["read_route"], "main": "falkordb" if on_store else "postgres"}
             return {**wm, "reads_through": root.id, "reads_from": reads_from,
                     "falkor_graph_name": None, "falkor_provider": None,
                     "owns_falkor_graph": False, "retired_keys": [], "external_drift": None,
-                    "residency": None}
+                    "residency": None, "candidate": None}
         async with self._session() as s:
             graph = await s.get(GraphORM, graph_id)
             ps = await s.get(ProjectionStateORM, graph_id)
@@ -4996,7 +5032,11 @@ class GraphVersioningService:
             projected = ps.projected_commit_seq if ps else 0
             status = ps.status if ps else "idle"
             fresh = serves_head(projected, committed, status)
-            served = serving_seq(projected, committed, status, ps.served_commit_seq if ps else None)
+            # The graph's read mode, else the platform's: ``latest`` serves the key only at the head.
+            own_mode = getattr(ps, "read_mode", None) if ps else None
+            read_mode = build_policy.read_mode_of(own_mode, await build_policy.resolve())
+            served = serving_seq(projected, committed, status, ps.served_commit_seq if ps else None,
+                                 build_policy.max_lag_of(read_mode))
             # The revision each side is at — the main commit with that seq (one indexed read). The
             # sync indicators show it, so "version #12" can be matched to a commit in History.
             revisions: Dict[int, CommitORM] = {}
@@ -5036,12 +5076,22 @@ class GraphVersioningService:
                 # overlays whatever serves main.
                 "read_route": {"main": "falkordb" if served is not None else "postgres",
                                "drafts": "overlay"},
+                # What its readers get while a newer version lands (``config.READ_MODES``), and
+                # whether the graph set it or it is the platform's.
+                "read_mode": read_mode,
+                "read_mode_source": "graph" if own_mode in config.READ_MODES else "platform",
                 # Failure reason + last success + live full-reseed progress — the Data
                 # health UI needs these to converge to an honest done/failed state.
                 "last_error": ps.last_error if ps else None,
                 "last_projected_at": ps.last_projected_at if ps else None,
                 "progress_done": ps.progress_done if ps else None,
                 "progress_total": ps.progress_total if ps else None,
+                # The version rows of a window written a page at a time, in flight: eviction leaves
+                # the graph alone until it lands, and a fork reads its root from Postgres meanwhile.
+                "window_rows": ps.window_rows if ps else None,
+                # A new version built beside the serving key, while one is (``candidates.block``):
+                # the serving key keeps serving ``served`` whole meanwhile.
+                "candidate": candidates.block(ps) if ps else None,
                 # Whose key it is, the fencing epoch, and the poll's backoff — so a graph backing
                 # off can be told from a wedged one. A liveness reset records its reason in
                 # last_error with this prefix (FalkorProjector.check_liveness).
@@ -5071,23 +5121,43 @@ class GraphVersioningService:
                                       else None),
             }
 
+    async def set_read_mode(self, graph_id: str, mode: Optional[str]) -> Tuple[bool, Optional[str]]:
+        """Set what a graph's readers get while a newer version lands (``config.READ_MODES``), or
+        None for the platform's: ``(found, the mode it had)``. Routing reads it per request, so
+        the next read goes by it."""
+        if mode is not None and mode not in config.READ_MODES:
+            raise ValueError(f"unknown read mode {mode!r}")
+        async with self._session() as s:
+            ps = await s.get(ProjectionStateORM, graph_id)
+            if ps is None:
+                return False, None
+            before, ps.read_mode = ps.read_mode, mode
+            return True, before
+
     async def residency_state(self, graph_id: str) -> Optional[Dict[str, object]]:
         """What a read needs to know of a graph's residency (doc 17), in one small read: its
         projection ``status``, its class (``residency``), its measured ``size_bytes``, the head it
-        is at (``committed``), and its store — ``projected``, ``fresh`` (:func:`serves_head`) and
+        is at (``committed``), and its store — ``projected``, ``fresh`` (:func:`serves_head`), the
+        version it serves reads of main at (``serving``, :func:`serving_seq`), whether a window is
+        in flight or a pass failed (``window_rows``, ``last_error``: :func:`fork_serving_seq`) and
         its pin. None for a graph with no projection row."""
         async with self._session() as s:
             row = (await s.execute(
                 select(ProjectionStateORM.status, ProjectionStateORM.residency,
                        ProjectionStateORM.size_bytes, GraphORM.main_head_commit_seq,
                        ProjectionStateORM.projected_commit_seq, ProjectionStateORM.falkor_provider,
-                       ProjectionStateORM.falkor_graph_name)
+                       ProjectionStateORM.falkor_graph_name, ProjectionStateORM.served_commit_seq,
+                       ProjectionStateORM.window_rows, ProjectionStateORM.last_error,
+                       ProjectionStateORM.read_mode)
                 .join(GraphORM, GraphORM.id == ProjectionStateORM.graph_id)
                 .where(ProjectionStateORM.graph_id == graph_id))).first()
         if row is None:
             return None
         return {"status": row[0], "residency": row[1], "size_bytes": row[2], "committed": row[3],
                 "projected": row[4], "fresh": serves_head(row[4], row[3], row[0]),
+                "serving": serving_seq(row[4], row[3], row[0], row[7], build_policy.max_lag_of(
+                    build_policy.read_mode_of(row[10], await build_policy.resolve()))),
+                "window_rows": row[8], "last_error": row[9],
                 "falkor_provider": row[5], "falkor_graph_name": row[6]}
 
     async def clear_external_changes(self, graph_id: str, seen_at: Optional[str] = None) -> None:
@@ -5181,6 +5251,7 @@ class GraphVersioningService:
                 return True
             if ps.status in ("projecting", "rebuilding") and ps.projected_commit_seq < ps.target_commit_seq:
                 return False
+            _forget_build(ps)          # the rebuild replays main into the serving key instead
             ps.projected_commit_seq = 0
             ps.target_commit_seq = graph.main_head_commit_seq
             ps.status = "rebuilding"
@@ -5265,12 +5336,124 @@ class GraphVersioningService:
                 ps.epoch = ProjectionStateORM.epoch + 1     # a pass in flight must not write over it
                 ps.retired_keys = [e for e in retired if e not in own] + [entry]
                 ps.shard_map = shard_map
+                _forget_build(ps)      # a build beside the old key has nothing to switch from
         except IntegrityError:
             raise ProjectionKeyInUse(provider, key) from None     # uq_ps_key: a concurrent claim won
         if out:
             from .residency import request_load
             await request_load(graph_id)
         return {"changed": True, "from": cur, "to": tgt, "retiring": entry}
+
+    # ── a new version built beside the serving key (read mode ``beside``; see ``candidates``) ──
+
+    async def record_candidate(self, graph_id: str, *, epoch: int, name: str,
+                               provider: Optional[str], state: Dict[str, object]) -> bool:
+        """Ask for a new version of ``graph_id`` to be built beside its serving key, in ``name`` on
+        ``provider`` (``candidates.new_state``). Fenced on the pass's ``epoch`` and on the graph
+        having no build yet, so two passes never record two: False, nothing written, when either
+        moved."""
+        async with self._session() as s:
+            row = (await s.execute(
+                update(ProjectionStateORM)
+                .where(ProjectionStateORM.graph_id == graph_id,
+                       ProjectionStateORM.epoch == epoch,
+                       ProjectionStateORM.candidate_state.is_(None))
+                .values(candidate_graph_name=name, candidate_provider=provider,
+                        candidate_seq=None, candidate_state=state)
+                .returning(ProjectionStateORM.graph_id)
+                .execution_options(synchronize_session=False))).first()
+        return row is not None
+
+    async def _locked_build(self, s, graph_id: str, build_id: str):
+        """``graph_id``'s projection row, locked, while build ``build_id`` is its build; else
+        None."""
+        ps = (await s.execute(
+            select(ProjectionStateORM).where(ProjectionStateORM.graph_id == graph_id)
+            .with_for_update().execution_options(populate_existing=True)
+        )).scalar_one_or_none()
+        state = getattr(ps, "candidate_state", None)
+        if ps is None or not isinstance(state, dict) or state.get("id") != build_id:
+            return None
+        return ps
+
+    async def update_candidate(self, graph_id: str, build_id: str, *,
+                               seq: Optional[int] = None, name: Optional[str] = None,
+                               **changes: object) -> bool:
+        """Move build ``build_id`` of ``graph_id`` on: merge ``changes`` into its state (its step,
+        attempts, error, retryAt, waiting, progress) and, given ``seq``, record the version its
+        key now holds whole; given ``name``, the key it is built in (one placed for a seed from
+        Postgres). Fenced on the build: False, nothing written, when it is no longer the
+        graph's."""
+        async with self._session() as s:
+            ps = await self._locked_build(s, graph_id, build_id)
+            if ps is None:
+                return False
+            ps.candidate_state = {**ps.candidate_state, **changes}
+            if seq is not None:
+                ps.candidate_seq = seq
+            if name is not None:
+                ps.candidate_graph_name = name
+        return True
+
+    async def switch_to_candidate(self, graph_id: str, *, build_id: str, seq: int,
+                                  grace_secs: int) -> bool:
+        """Switch ``graph_id``'s readers to the key build ``build_id`` holds ``seq`` whole in, in
+        one transaction. The build's key becomes the pin, serving ``seq``: projected and served at
+        ``seq``, idle, and the epoch bumped so nothing in flight publishes over it. The key that
+        served until now joins ``retired_keys``, to be dropped once ``grace_secs`` have passed, so
+        reads already under way on it finish there. Whatever main gained past ``seq`` is written
+        into the new key by the next ordinary pass, in place.
+
+        Refused (False, nothing written) when the build is no longer the graph's, the graph is in
+        the trash or not idle (out of FalkorDB, or a pass that does not build has the row), or
+        another graph projects into the build's key."""
+        async with self._session() as s:
+            await self._lock_graph(s, graph_id)
+            graph = await s.get(GraphORM, graph_id)
+            ps = await self._locked_build(s, graph_id, build_id)
+            if graph is None or graph.deleted_at is not None or ps is None or ps.status != "idle":
+                return False
+            name, provider = ps.candidate_graph_name, ps.candidate_provider
+            try:
+                await self._claim_projection_key(s, name, provider, exclude_graph_id=graph_id)
+            except ConcurrencyError:
+                return False
+            now = datetime.now(timezone.utc)
+            entry = {"name": ps.falkor_graph_name, "provider": ps.falkor_provider,
+                     "retireAfter": (now + timedelta(seconds=max(grace_secs, 0))).isoformat(),
+                     "afterSeq": seq, "build": build_id}
+            ps.retired_keys = [*(ps.retired_keys or []), entry]
+            ps.falkor_graph_name, ps.falkor_provider = name, provider
+            ps.projected_commit_seq = ps.served_commit_seq = seq
+            ps.target_commit_seq = max(ps.target_commit_seq or 0, graph.main_head_commit_seq)
+            ps.status = "idle"
+            ps.last_error = None
+            ps.failed_attempts = ps.pressure_failures = 0
+            ps.next_retry_at = None
+            ps.window_rows = None
+            ps.progress_done = ps.progress_total = None
+            ps.last_projected_at = now.isoformat()
+            ps.candidate_graph_name = ps.candidate_provider = None
+            ps.candidate_seq = None
+            ps.candidate_state = None
+            ps.epoch = ProjectionStateORM.epoch + 1
+        return True
+
+    async def drop_candidate(self, graph_id: str, *, build_id: str) -> bool:
+        """Forget build ``build_id`` of ``graph_id``: its key joins ``retired_keys`` due at once
+        (the next retire run drops it), and the graph has no build again. A build of a window is
+        then written into the serving key, in place: the window is marked in flight
+        (``window_rows``), so the next pass writes it rather than ask for another build of it, and
+        its publish clears the mark. False, nothing written, when the build is no longer the
+        graph's."""
+        async with self._session() as s:
+            ps = await self._locked_build(s, graph_id, build_id)
+            if ps is None:
+                return False
+            if ps.candidate_state.get("reason") == "window":
+                ps.window_rows = int(ps.candidate_state.get("rows") or 1)
+            _forget_build(ps)
+        return True
 
     async def adopt_projection(self, *, graph_id: str, key: str, actor: str,
                                shard_map: dict) -> Dict[str, object]:
@@ -6863,7 +7046,8 @@ class GraphVersioningService:
         }
 
     async def branch_overlay_delta(self, *, graph_id: str, branch_id: str,
-                                   extend: Optional[Mapping[str, object]] = None) -> Dict[str, object]:
+                                   extend: Optional[Mapping[str, object]] = None,
+                                   root_at: Optional[int] = None) -> Dict[str, object]:
         """The draft's patch set vs **main at the draft's fork point**, **reader-shaped** for a
         read-overlay (:class:`DraftOverlayProvider`): the draft's effective nodes/edges to upsert
         and the before-values of those it removed, PLUS a rewind of any change main took after the
@@ -6894,7 +7078,8 @@ class GraphVersioningService:
         reads no payload, whatever the draft's size or main's advance since it branched.
 
         A fork's ``main`` is read the same way over its root's store: its patch set is
-        :meth:`_fork_overlay_delta`'s, and ``extend`` is one an earlier call returned for it."""
+        :meth:`_fork_overlay_delta`'s, against the root at ``root_at`` (the version the root's key
+        serves; its head when None), and ``extend`` is one an earlier call returned for it."""
         empty = {"nodesUpsert": [], "nodesModified": [], "nodesRemove": [], "edgesUpsert": [],
                  "edgesRemove": [], "nodesNew": []}
         async with self._session() as s:
@@ -6902,7 +7087,7 @@ class GraphVersioningService:
             if branch.kind == "main":
                 graph = await s.get(GraphORM, graph_id)
                 if graph is not None and graph.fork_parent_graph_id:
-                    return await self._fork_overlay_delta(s, graph, branch, extend)
+                    return await self._fork_overlay_delta(s, graph, branch, extend, root_at)
             if getattr(branch, "status", None) == "merged":
                 # Everything the draft changed is IN main now: reading it as main ⊕ its edits
                 # applied them twice — each added child counted again in its parent's count (a
@@ -6962,7 +7147,8 @@ class GraphVersioningService:
                 "edgesUpsert": edges_upsert, "edgesRemove": edges_remove, "nodesNew": nodes_new}
 
     async def _fork_overlay_delta(self, s, fork: GraphORM, main: BranchORM,
-                                  extend: Optional[Mapping[str, object]]) -> Dict[str, object]:
+                                  extend: Optional[Mapping[str, object]],
+                                  root_at: Optional[int] = None) -> Dict[str, object]:
         """A fork's ``main`` as a patch set over its root's store (the graph up its
         ``fork_parent_graph_id`` that is no fork): the fork's value at its head against the root's
         at the root's head (:func:`_fork_patch`), for every entity the two may differ on — the
@@ -6972,12 +7158,17 @@ class GraphVersioningService:
         the fork's value of what it serves (:meth:`overlay_payloads`, through :meth:`_layers` —
         its own, or its parent's at the base).
 
+        ``root_at``: the root's seq its store holds, when not its head — the version the root's key
+        serves while its projection catches up or rebuilds. The patch set is then against the root
+        there, and holds the root's changes between it and the outermost base, either way.
+
         ``since`` says what it is of: the fork's head, the seq each of its layers reads, the root's
-        head. ``extend`` — one an earlier call returned, of the same fork head and bases — is
-        extended by the root's changes since its root head instead of built again."""
+        seq. ``extend`` — one an earlier call returned, of the same fork head and bases — is
+        extended by the root's changes since its root seq instead of built again."""
         layers = await self._layers(s, fork.id, main.id, fork.main_head_commit_seq)
         root_id, root_main, base = layers[-1]
-        root_head = (await s.get(GraphORM, root_id)).main_head_commit_seq
+        root_head = ((await s.get(GraphORM, root_id)).main_head_commit_seq if root_at is None
+                     else root_at)
         since = {"head": main.head_commit_id, "layers": [at for _g, _b, at in layers],
                  "rootHead": root_head}
         prev = (extend or {}).get("since")
@@ -6990,8 +7181,8 @@ class GraphVersioningService:
         ids = set(heads)
         for gid, bid, at in layers[1:-1]:              # each fork between: its own, to its base
             ids |= await self._own_changes(s, gid, bid, at)
-        if root_head > base:
-            ids |= await self._changed_in_window(s, root_id, root_main, base, root_head)
+        if root_head != base:                          # the root's, between its store and the base
+            ids |= await self._changed_in_window(s, root_id, root_main, *sorted((base, root_head)))
         return {**await self._fork_classified(s, layers, ids, root_head, heads), "since": since}
 
     async def _fork_classified(self, s, layers, ids, root_head: int,
@@ -7059,7 +7250,7 @@ class GraphVersioningService:
         total = int(await s.scalar(select(func.count()).select_from(own.subquery())) or 0)
         for gid, bid, at in layers[1:-1]:
             total += await self._own_change_count(s, gid, bid, -1, at, cap)
-        total += await self._own_change_count(s, root_id, root_main, base, root_head, cap)
+        total += await self._own_change_count(s, root_id, root_main, *sorted((base, root_head)), cap)
         _FORK_COUNTS[key] = total
         while len(_FORK_COUNTS) > _FORK_COUNTS_KEPT:
             _FORK_COUNTS.popitem(last=False)
@@ -7071,9 +7262,13 @@ class GraphVersioningService:
         compute it again); how it is read (``reads_from``, :meth:`fork_reads_from`'s answer from
         the count kept per version); its root (graph, ``main``, data source, in the trash or not);
         and the root's store as its ``projection_state`` row says it is now: its committed and
-        projected seqs, its status (``fresh`` by :func:`serves_head`), its pin, and its class and
-        size (what marks a read of it while it is out of FalkorDB, ``residency.mark``). That row is
-        read every time: an eviction moves the store without moving any seq the version holds.
+        projected seqs, its status (``fresh`` by :func:`serves_head`), the version of the root's
+        main its key serves (``serving``, :func:`serving_seq`), whether a window is in flight or a
+        pass failed (``window_rows``, ``last_error``), its pin, and its class and size (what marks
+        a read of it while it is out of FalkorDB, ``residency.mark``). The version and the count
+        are of the fork against its root at the version a fork reads in that key
+        (:func:`fork_serving_seq`), else at the root's head. That row is read every time: an
+        eviction moves the store without moving any seq the version holds.
         With residency on, a person's read holds the root's read lease after this, and its store as
         then read decides instead (``ContextEngine._fork_main_reader``)."""
         async with self._session() as s:
@@ -7085,21 +7280,32 @@ class GraphVersioningService:
             layers = await self._layers(s, graph_id, main_id, graph.main_head_commit_seq)
             root_id, root_main, _base = layers[-1]
             root = await s.get(GraphORM, root_id)
-            n = await self._fork_candidates(s, graph, main_id, config.FORK_REWIND_MAX,
-                                            layers=layers, root_head=root.main_head_commit_seq)
             ps = await s.get(ProjectionStateORM, root_id)
             committed = root.main_head_commit_seq
             projected = ps.projected_commit_seq if ps is not None else 0
             status = ps.status if ps is not None else "idle"
+            mode = build_policy.read_mode_of(getattr(ps, "read_mode", None) if ps is not None
+                                             else None, await build_policy.resolve())
+            serving = serving_seq(projected, committed, status,
+                                  ps.served_commit_seq if ps is not None else None,
+                                  build_policy.max_lag_of(mode))
+            window_rows = ps.window_rows if ps is not None else None
+            last_error = ps.last_error if ps is not None else None
+            on_key = fork_serving_seq(serving, serves_head(projected, committed, status), status,
+                                      window_rows, last_error)
+            root_at = committed if on_key is None else on_key
+            n = await self._fork_candidates(s, graph, main_id, config.FORK_REWIND_MAX,
+                                            layers=layers, root_head=root_at)
             return {
                 "main_id": main_id,
-                "version": (branch.head_commit_id, tuple(at for _g, _b, at in layers), committed,
+                "version": (branch.head_commit_id, tuple(at for _g, _b, at in layers), root_at,
                             getattr(branch, "status", None)),
                 "reads_from": "postgres" if n > config.FORK_REWIND_MAX else "overlay",
                 "root_id": root_id, "root_main": root_main,
                 "root_data_source_id": root.data_source_id, "root_trashed": root.deleted_at is not None,
                 "committed": committed, "projected": projected, "status": status,
-                "fresh": serves_head(projected, committed, status),
+                "fresh": serves_head(projected, committed, status), "serving": serving,
+                "window_rows": window_rows, "last_error": last_error,
                 "falkor_provider": ps.falkor_provider if ps is not None else None,
                 "falkor_graph_name": ps.falkor_graph_name if ps is not None else None,
                 "residency": ps.residency if ps is not None else None,
@@ -7192,11 +7398,13 @@ class GraphVersioningService:
                                               known=theirs)
         return await asyncio.to_thread(_fork_patch, ids, ours, theirs, our_urns, their_urns)
 
-    async def overlay_version(self, *, graph_id: str, branch_id: str) -> tuple:
+    async def overlay_version(self, *, graph_id: str, branch_id: str,
+                              root_at: Optional[int] = None) -> tuple:
         """What a draft's :meth:`branch_overlay_delta` depends on: the draft's head and branch point,
         main's head, and the draft's status. Equal versions give equal deltas, so a reader may
         reuse one across requests instead of recomputing it for each. A fork's ``main``'s: its
-        head, the seq each of its layers reads (its bases), its root's head and its status."""
+        head, the seq each of its layers reads (its bases), the root's seq its store is read at
+        (``root_at``: what the root's key serves; else the root's head) and its status."""
         async with self._session() as s:
             branch = await self._get_branch(s, graph_id, branch_id)
             graph = await s.get(GraphORM, graph_id)
@@ -7204,7 +7412,8 @@ class GraphVersioningService:
                 layers = await self._layers(s, graph_id, branch_id, graph.main_head_commit_seq)
                 root = await s.get(GraphORM, layers[-1][0])
                 return (branch.head_commit_id, tuple(at for _g, _b, at in layers),
-                        root.main_head_commit_seq, getattr(branch, "status", None))
+                        root.main_head_commit_seq if root_at is None else root_at,
+                        getattr(branch, "status", None))
             return (branch.head_commit_id, branch.base_commit_seq,
                     getattr(graph, "main_head_commit_seq", None), getattr(branch, "status", None))
 

@@ -315,6 +315,11 @@ class FakeGraph:
                     e["src"] = it["new"] if e["src"] == it["old"] else e["src"]
                     e["tgt"] = it["new"] if e["tgt"] == it["old"] else e["tgt"]
             return None
+        # The summary cells on a re-keyed or retyped node, keyed or stamped again
+        # (``_aggkey_restamp``, ``_level_restamp``): this fake holds no summary cells.
+        if (cypher.startswith("UNWIND $urns AS u MATCH (") and "[r:AGGREGATED]" in cypher
+                and any(f"SET r.{k} = " in cypher for k in ("aggKey", "sourceLevel", "targetLevel"))):
+            return None
         raise AssertionError(f"unexpected cypher emitted: {cypher!r}")
 
     def _rel_id(self, eid: str) -> int:

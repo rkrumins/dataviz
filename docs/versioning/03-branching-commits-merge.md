@@ -326,7 +326,8 @@ Notable behaviors inside `_apply_draft_squash`:
   > (§3.7) and a PR whose `behind` flag never cleared were such damaging bugs.
 
 - **PR resolution.** A squash of a branch **resolves every live PR raised from it** — status `merged`,
-  `resulting_commit_id` = the squash, and `merged_via` ∈ {`review`, `direct_publish`}. This lives in the
+  `resulting_commit_id` = the squash (none when the squash changed nothing on `main`, which writes
+  no commit: `_merged_unchanged`), and `merged_via` ∈ {`review`, `direct_publish`}. This lives in the
   shared squash body precisely so *both* entry points get it: a direct `publish` over an open review
   used to orphan that review, leaving a live PR pointing at a merged branch — unmergeable (it fails
   `_require_open`) yet still rendered as actionable, with an empty diff.

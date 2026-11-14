@@ -21,6 +21,35 @@ integration's many small changes as a few commits.
 
 ### Added
 
+- **Read modes: what a graph's readers get while a new version lands.** A system administrator
+  chooses, for the platform and per graph, on guided cards (Admin → Infrastructure → Versioned
+  graphs → New-version builds, and **Read mode…** on a graph's row):
+  - **Always the latest** (the default, as reads have always worked): the newest published version
+    at once, read from Postgres until FalkorDB holds it.
+  - **Keep serving, update in place**: the version FalkorDB last finished, at full speed, while the
+    next is written into the same key, paced; readers may see part of it before the rest.
+  - **Keep serving, switch when ready**: exactly that version, while a large change is built in a
+    second key, checked, then switched to in one step. The key is a copy of the serving one when its
+    node has room, else it is seeded from Postgres on the node with most room, the serving key's
+    lineage summaries carried over (**How a build makes its key**: auto, copy only, or seed from
+    Postgres). While it runs, a copy holds the new key and its own buffer, each about the graph's
+    size (**Room a copy needs**, ×2.2 by default); a seed holds about the graph once. A copy's or a
+    seed's room is reserved on its node while it is written, so builds and
+    loads never take the same room, and every step resumes after a restart. It needs a key the
+    platform owns and **New-version builds** on (Admin → Features).
+
+  The watermark, the sync chip and the admin inventory say which mode applies, where it was set, and
+  while a build is under way, its step ("Showing #5 · building #6"). Each change is recorded in the
+  activity log (`platform.versioning.read_mode_changed`).
+- **New-version builds settings, under Admin → Infrastructure → Versioned graphs.** A system
+  administrator sets, live, how the projector paces its writes (the longest write statement, the
+  target each aims at, the pause after each, and a longer one while reads wait) and the limits on
+  reads from Postgres (a statement limit, and reads at once per graph and per process), with the
+  room and lifecycle values the coming builds of a graph's next version in a second key will use.
+  Each value shows what is saved, its default and what is in force; a bad one is refused naming
+  the field (`422 invalid_build_policy`), and each change is recorded in the activity log
+  (`platform.build_policy.updated`). The builds themselves are behind **New-version builds** (Admin
+  → Features, experimental, off).
 - **Replaces keyed by your own id handle the rows that don't carry it.** A source that keys rows by
   its own id (`identifier=prop.MY_UNIQUE_ID`) often has rows without it, such as a top-level
   container. It also meets graphs first loaded by urn (or made in the app), whose nodes never had
@@ -36,9 +65,10 @@ integration's many small changes as a few commits.
     (`--identifier`), and the import dialog ("Rows without it: find them by their urn").
   - **`replaceScope=keyed` deletes only what holds the property.** It applies to replaces with a
     property identifier: the nodes holding it, and the edges whose two ends both hold it. Nodes
-    made in the app or by another source are left alone, with their edges. It is on
-    `POST …/imports`, an upload's `complete`, the connector (`--replace-scope keyed`), and the
-    import dialog ("Delete only items that have this property").
+    made in the app or by another source are left alone, with their edges, except an edge to a node
+    the replace deletes, which goes with that node. It is on `POST …/imports`, an upload's
+    `complete`, the connector (`--replace-scope keyed`), and the import dialog ("Delete only items
+    that have this property").
   - **Refused rows say the one change that fixes them.** A held replace by a property alone counts
     the rows `prop.<name>,urn` would find by their urn (`summary.refused.hints.by_urn`): rows without
     the property, and rows whose urn is an item's that has none yet. Its message says to send it,
@@ -135,10 +165,13 @@ integration's many small changes as a few commits.
     staged rows instead of 330 MB, 206 MB of WAL instead of 513 MB; the same draft and tallies.
 - **A publish or merge says the revision of the published graph that holds it.**
   - `POST …/branches/{id}/publish`, `POST /merge-requests/{id}/merge` and `POST /pulls/{id}/merge`
-    answer `{commitId, revisionId, status: "completed"}`. `revisionId` is the `commitSeq` of the
-    commit on `main`, which `?asOfSeq` and `GET …/revisions/{seq}` read `main` as of.
+    answer `{outcome, commitId, revisionId, status: "completed"}`. `revisionId` is the `commitSeq`
+    of the commit on `main`, which `?asOfSeq` and `GET …/revisions/{seq}` read `main` as of.
+    `outcome` is `published`, or `unchanged` when nothing was committed: `commitId` and `revisionId`
+    are then `main`'s head (below, under Changed).
   - One large enough to run as a job answers `202` with a `statusUrl`. The job
-    (`GET …/publish-jobs/{jobId}`) has `commitId` and `revisionId` once it is `completed`.
+    (`GET …/publish-jobs/{jobId}`) has `outcome`, `commitId` and `revisionId` once it is
+    `completed`.
   - An import that publishes itself (`autoPublish`) gets the same from the job that
     `summary.publish.jobId` names. The reference connector reports it.
 - **Draft retention: a merged or abandoned draft's changes are removed after 30 days.**
@@ -205,9 +238,10 @@ integration's many small changes as a few commits.
   - The job's `summary.replaceGuard` says what it would have done and the limits in force; the
     message says to check the identifier, or to send `allowMassDelete=true`, which deletes all the
     same (anyone who may run the import may send it).
-  - A whole-graph replace whose first full window finds an entity for fewer than 5% of its rows stops
-    there, with `identifier_matched_nothing`, instead of reading the rest of the file first, unless
-    it was sent with `allowMassDelete=true`.
+  - A whole-graph replace whose first node window, whatever its size, finds an entity for fewer
+    than 5% of its rows, in a graph of at least 1,000 entities, stops there, with
+    `identifier_matched_nothing`, instead of reading the rest of the file first, unless it was sent
+    with `allowMassDelete=true`.
   - The operator sets the limits: `IMPORT_REPLACE_GUARD` (on), `IMPORT_REPLACE_GUARD_MIN_LIVE`
     (1000), `IMPORT_REPLACE_GUARD_DELETE_FRACTION` and `IMPORT_REPLACE_GUARD_CREATE_FRACTION` (0.5),
     `IMPORT_REPLACE_MIN_MATCH_FRACTION` (0.05); Helm `config.imports`. A workspace admin may set a
@@ -261,9 +295,9 @@ integration's many small changes as a few commits.
     graph's default, and says when a property is indexed first.
 - **Every refused import row carries a code** beside its reasons, in the preview and the dry run:
   `no_key`, `two_entities`, `duplicate_value`, `changed_since_export`, `named_already`,
-  `invalid_type`, `missing_type`, `end_not_found`, `edge_moved`, `write_refused`, `invalid_row`
-  (and `already_gone` for a delete with nothing to delete). A client acts on the code instead of
-  parsing the words.
+  `invalid_type`, `missing_type`, `end_not_found`, `end_refused`, `edge_moved`, `write_refused`,
+  `invalid_row` (and `already_gone` for a delete with nothing to delete). A client acts on the code
+  instead of parsing the words.
 - **Projection metrics** on the versioning worker's scrape endpoint (`:9100/metrics`):
   - `graphver_projection_passes_total{outcome}`;
   - per-statement durations and splits;
@@ -273,6 +307,12 @@ integration's many small changes as a few commits.
 
 ### Changed
 
+- **The projector holds a page at a time from 100,000 rows or entities.** A publish window of more
+  than 100,000 version rows (was 200,000) is written a page at a time, and a full reconcile (a
+  first seed, a rebuild, a heal, a build's seed) of more than 100,000 live entities (was 500,000)
+  compares a page of each side at a time. Held whole, a rebuild of 100,000 nodes and 100,000 edges
+  peaked at 667 MB in the versioning-scale run, and a rebuild just under the old threshold would
+  have held about 1.4 GB; a page at a time holds about 230 MB at any size.
 - **A replace never deletes what its file names.**
   - **Refused rows.** A refused row used to protect only the entity it had matched, so a replace
     sent on with `maxRefusedRows` deleted the node a `no_key` row named by its urn, and edge rows
@@ -378,6 +418,35 @@ integration's many small changes as a few commits.
 
 ### Fixed
 
+- **Lineage summaries the projector keeps between batch runs stay the job's cells.** A node whose urn
+  changed kept its summary cells keyed by the old urn, so the next summaries job made a second cell
+  beside each; a retyped node's cells kept their old level stamps; a key whose summaries regime
+  could not be read had a cube key's cells moved as if it were a boundary key's; a graph with
+  lineage but no containment types got a cell per lineage edge that the job never stores; and
+  lineage ending on a container (table to table) missed the job's cell at the container's own
+  level, landing one level up or not at all. Each now matches what the job makes, or hands the
+  window's cells to it.
+- **Reads stay up while a large import lands.** A large import on a large graph could stop its
+  reads, and others', for as long as the graph store took to catch up:
+  - **Reads of a graph from Postgres can't take the platform down.** A graph the graph store held no
+    version of was read from Postgres, the whole graph per read, with no limit: a few such reads
+    held every database connection, and every versioned graph in the process answered 503. Each
+    read now holds a place among a bounded number per graph and per process (past them, `429`) and
+    is cut off past a statement limit (`503 graph_read_busy`, retryable); the lookups that route
+    reads run on a small pool of their own; and a FalkorDB that can't be reached fails only the
+    reads that need it.
+  - **A graph that serves a version keeps serving it.** A graph published before this release had
+    no record of the version its key holds, so its first rebuild sent its reads to Postgres for the
+    whole rebuild; the record is now filled, and restored from the key when missing. A replay that
+    would have reloaded such a graph into a fresh key reconciles it in place. Eviction leaves alone
+    a graph whose large window is half written, and keeps room for the rest of it. A fork reads its
+    root's key at the version the key holds whole, instead of from Postgres whenever the root had
+    published since.
+  - **The projector's writes yield to reads.** No projector write runs longer than 10 seconds on
+    any FalkorDB mode (a minute on a standalone or Sentinel one before); each aims at half a second;
+    and after each the projector pauses a quarter of what it took, twice what it took while reads on
+    that node are starving. Readers whose deadlines run out while it writes are told to retry, not
+    that the node is failing over.
 - **An import's publish job that found its draft merged with no commit of its own completes.** When
   the draft merged under the job's pull (an earlier attempt published it) and that publish
   committed nothing, the job read the empty answer as "not merged" and failed with a refusal.
@@ -521,6 +590,27 @@ integration's many small changes as a few commits.
 
 ### Upgrading
 
+- **Migrations `20261113_1000_gv_ps_served_fill`, `20261113_1100_build_policy`,
+  `20261113_1200_gv_ps_window_rows`, `20261113_1300_gv_ps_read_mode` and
+  `20261113_1400_gv_ps_candidate`** fill `projection_state.served_commit_seq` where a graph's key
+  holds a published version, and add `platform_settings.gv_build_policy` and `projection_state`'s
+  `window_rows`, `read_mode` and build columns (nullable; start-up adds them to a separate
+  `GRAPHVER_DB_URL`).
+- **The read mode defaults to Always the latest** (`GRAPHVER_READ_MODE=latest`): a graph behind
+  its head is read from Postgres until FalkorDB holds the newest version, as reads have always
+  worked. To keep serving the last finished version while a graph catches up, choose **Keep
+  serving, update in place** for the platform or for the graphs that need it.
+- **Each web process opens up to five more graphver connections**, for routing reads
+  (`GRAPHVER_ROUTE_POOL_SIZE` 3, `GRAPHVER_ROUTE_POOL_MAX_OVERFLOW` 2): count them toward Postgres'
+  `max_connections`.
+- **A reconcile of a graph of 100,000 to 500,000 live entities that changes anything hands its
+  lineage summaries to the aggregation job**, as larger graphs' always have, instead of moving them
+  itself. `GRAPHVER_PROJECTION_RECONCILE_STREAMED_ABOVE=500000` and
+  `GRAPHVER_PROJECTION_PAGED_ABOVE=200000` restore the old thresholds, at the memory above.
+  `GRAPHVER_PROJECTION_CANDIDATE_ABOVE` (New-version builds) keeps its default of 200,000.
+- **Keep `GRAPHVER_READ_MAX_LAG` at `-1`** (the default). It caps how far behind a graph that reads
+  in place or beside may be served; a graph that should always show the newest version chooses
+  Always the latest instead.
 - **Migration `20261113_0900_gv_import_mentions`** adds `graphver.import_mentions`, an empty table
   (`create_schema_and_partitions` makes it for a separate `GRAPHVER_DB_URL`). Without it, a replace
   keeps only what its rows matched, as before.
@@ -612,6 +702,16 @@ integration's many small changes as a few commits.
 - A review's `pullRequired` counts only people's commits. Whether automation touched the draft is
   found when it merges, and the refusal says so (`reason: overlap`). A draft's freshness checks this
   on every poll, for drafts of up to 10,000 changes.
+- **Versioned graphs are tested end to end up to 1,000,000 nodes and 1,000,000 edges.** At
+  5,000,000 of each, measured in CI, the import took 7.6 times as long as at 1M and its memory grew
+  to 1,335 MB. The publish took 23 times as long, and held the graph's publish lock for 3 h 22 min.
+  `docs/versioning/09-scale-limits-and-roadmap.md` §2 has the measurements. Its §10, "Further work
+  found by the scale runs", has the leads and what done looks like, for these and for:
+  - event-loop lag in the worker's jobs;
+  - a publish of up to 200,000 changes held whole;
+  - the read modes at 5M;
+  - hundreds of concurrent readers;
+  - the lineage-summary items left to the aggregation job.
 
 ---
 

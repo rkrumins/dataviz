@@ -118,6 +118,7 @@ def run_window(monkeypatch, rows, *, before=None, resolver=_dedicated, on_rollup
     proj._svc._values_at = chains._values_at
     proj._svc._skeletons_at = chains._skeletons_at
     proj._svc._containment_parents_climb = chains._containment_parents_climb
+    proj._svc._incident_edge_ids = chains._incident_edge_ids
 
     async def claim(graph_id, seen_epoch, from_seq):
         return seen_epoch + 1, 0
@@ -137,11 +138,15 @@ def run_window(monkeypatch, rows, *, before=None, resolver=_dedicated, on_rollup
     async def not_interrupted(client):
         return False
 
+    async def no_summaries_job(data_source_id, since):
+        return False
+
     proj._claim, proj._finish = claim, finish
     proj._svc._main_branch_id = main_branch_id
     monkeypatch.setattr(proj, "_compute_changes", no_changes)
     monkeypatch.setattr(proj, "_verify_and_heal", verified)
     monkeypatch.setattr(projection, "reconcile_interrupted", not_interrupted)
+    monkeypatch.setattr(projection, "_rollups_ran_since", no_summaries_job)
     out = asyncio.run(proj.project_graph("graph_1"))
     assert out["projected"] == 2, out
     return client.queries

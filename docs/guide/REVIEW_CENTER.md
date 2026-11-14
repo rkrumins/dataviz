@@ -41,7 +41,7 @@ stateDiagram-v2
 | **Ready to merge** | Nothing in it clashed with Published when it was submitted | Check it, then **Merge** |
 | **Conflicts** | Published changed some of the same things after the draft was started | **Merge**, and choose which values to keep |
 | **Approved** | Every reviewer named on the request has approved | **Merge** |
-| **Merged** | Its changes are in Published | Nothing — or **Revert this merge** if it was a mistake |
+| **Merged** | Its changes are in Published | Nothing — or **Revert this merge** if it was a mistake and the merge added a revision |
 | **Closed** | Dismissed without merging (the **Status** filter calls it *Dismissed / closed*) | Nothing. The draft is kept |
 
 ## Open the Review Center
@@ -159,7 +159,10 @@ change and choose **Save**.
    main** opens. Resolve the conflicts, then choose **Merge with resolutions**.
 5. The drawer closes. If the draft was started from a View, {brand} opens that
    View on Published, where a banner says *Merged — your changes are now
-   live*, with **View in history**.
+   live*, with **View in history**. If Published already had the draft's
+   changes, the banner reads *Already live — the published graph had these
+   changes* instead: nothing new was published, so there is no new version and
+   no **View in history**.
 
 > **If you see "This PR needs approval from its reviewers before it can be
 > merged":** the request names reviewers, and not all of them have approved
@@ -253,7 +256,7 @@ See [Editing in a Draft](/guide/editing-in-a-draft) for the editing itself.
 ## What merging does
 
 - The draft's changes land on Published as **one new revision** in the
-  history.
+  history, unless Published already had them: then no revision is added.
 - The draft closes as merged, so it no longer appears among the open drafts.
 - Views the draft created or changed go live with it.
 - The graph that Views read catches up within moments — see
@@ -261,7 +264,8 @@ See [Editing in a Draft](/guide/editing-in-a-draft) for the editing itself.
 
 Merged the wrong thing? Open the merged request and choose **Revert this
 merge**. It adds a new revision that undoes the merge, and the history is
-kept. See
+kept. A merge that added no revision has nothing to undo, so it doesn't offer
+**Revert this merge**. See
 [Undo vs. Restore](/guide/versioning-change-control#undo-vs-restore--the-distinction-that-matters).
 
 If someone sends the draft straight to Published with **Publish now** while its

@@ -1000,10 +1000,11 @@ export function usePublishBranch(wsId: string, graphId: string) {
   return useMutation({
     mutationFn: (v: { branchId: string; message: string; resolutions?: ResolutionMap }) =>
       api.publishBranch(wsId, graphId, v.branchId, { message: v.message, resolutions: v.resolutions }),
-    onSuccess: () => {
+    onSuccess: (res) => {
       // Version control is a headline feature with no usage signal until now:
-      // Analytics could see branches exist, never that anyone shipped one.
-      recordEvent('version.published')
+      // Analytics could see branches exist, never that anyone shipped one. A publish that changed
+      // nothing (`unchanged`: main held its changes already) shipped nothing.
+      if (res.outcome === 'published') recordEvent('version.published')
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.branches(wsId, graphId) })
       // Refresh ALL commit-log scopes by prefix — the new squash commit must show in History's
       // "This view" / "Whole graph" (viewCommits) and per-branch (commits) lists without a reload.

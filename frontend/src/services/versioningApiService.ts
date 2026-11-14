@@ -241,6 +241,35 @@ export interface Watermark {
   lastReadAt?: string | null
   sizeBytes?: number | null
   rehydratingSince?: string | null
+  /** What readers of main get while a newer version lands (latest | in_place | beside), and
+   *  whether the graph chose it or it is the platform's. A fork's are its root's. */
+  readMode?: 'latest' | 'in_place' | 'beside'
+  readModeSource?: 'graph' | 'platform'
+  /** The version rows of a window written a page at a time, still in flight; null when none is. */
+  windowRows?: number | null
+  /** A new version built beside the serving key (read mode `beside`), while one is; null when
+   *  none is. The serving key keeps serving `served` whole meanwhile. */
+  candidate?: BuildState | null
+}
+
+/** A new version of a graph built beside the key that serves it. */
+export interface BuildState {
+  id?: string | null
+  /** queued (waiting for room), copying, seeding (written from Postgres instead of copied),
+   *  catching_up or switching. */
+  step: 'queued' | 'copying' | 'seeding' | 'catching_up' | 'switching'
+  reason?: string | null
+  /** copy (the serving key copied) or reseed (written from Postgres on the node with most room). */
+  mode?: string | null
+  /** The version the build's key holds whole; null until written. */
+  seq?: number | null
+  attempts?: number
+  error?: string | null
+  waiting?: string | null
+  since?: string | null
+  rows?: number | null
+  /** How far a seed from Postgres has written, while it does. */
+  progress?: { done?: number; total?: number } | null
 }
 
 /** Changes in a graph that version history doesn't hold. `via`: `verify` counted them on the last
@@ -2255,7 +2284,9 @@ export interface PublishResult {
 }
 
 /** An answer as `PublishResult` says it; one from a server that didn't say its outcome, read from
- *  its commit (none, or a blank one, committed nothing). */
+ *  its commit (none, or a blank one, committed nothing). Such an older server answered a publish
+ *  that changed nothing with its draft's own head, not on main, whenever the draft had one: this
+ *  reads that as published. */
 function asResult(a: { commitId?: string | null; revisionId?: number | null; outcome?: PublishOutcome | null }): PublishResult {
   const commitId = a.commitId || null
   return { commitId, revisionId: a.revisionId ?? null, outcome: a.outcome ?? (commitId ? 'published' : 'unchanged') }

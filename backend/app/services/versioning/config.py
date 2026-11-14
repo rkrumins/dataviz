@@ -117,6 +117,12 @@ def empty_hash() -> str:
 POOL_SIZE: int = int(os.getenv("GRAPHVER_POOL_SIZE", "10"))
 POOL_MAX_OVERFLOW: int = int(os.getenv("GRAPHVER_POOL_MAX_OVERFLOW", "5"))
 POOL_TIMEOUT_SECS: int = int(os.getenv("GRAPHVER_POOL_TIMEOUT_SECS", "10"))
+# The small pool of its own that routes every read of a versioned graph (its pin, its watermark, its
+# main branch; ``db.get_route_engine``): apart from the pool above, so reads that fill that one
+# can't take routing down with them. Each statement on it is cut off past two seconds.
+ROUTE_POOL_SIZE: int = int(os.getenv("GRAPHVER_ROUTE_POOL_SIZE", "3"))
+ROUTE_POOL_MAX_OVERFLOW: int = int(os.getenv("GRAPHVER_ROUTE_POOL_MAX_OVERFLOW", "2"))
+ROUTE_POOL_TIMEOUT_SECS: int = int(os.getenv("GRAPHVER_ROUTE_POOL_TIMEOUT_SECS", "2"))
 
 # Bulk ingest / projection batch sizes (rows per COPY / UNWIND chunk).
 INGEST_BATCH_SIZE: int = int(os.getenv("GRAPHVER_INGEST_BATCH_SIZE", "5000"))
@@ -176,6 +182,18 @@ LIVENESS_SECS: int = int(os.getenv("GRAPHVER_LIVENESS_SECS", "60"))
 # -1 (the default): however far behind. 0: the head only, as before, so a read the key is behind
 # for goes to Postgres, which composes the graph without its lineage summaries.
 READ_MAX_LAG: int = int(os.getenv("GRAPHVER_READ_MAX_LAG", "-1"))
+# What reads of a versioned graph's main get while a newer version is being written into FalkorDB,
+# unless the graph says otherwise (``projection_state.read_mode``). A system administrator changes it
+# live under Admin → Infrastructure → Versioned graphs → New-version builds (``build_policy``).
+#   latest    always the newest published version: from Postgres until FalkorDB holds it. The
+#             default: reads of a graph behind its head have always gone to Postgres;
+#   in_place  the version FalkorDB last finished, while the next is written into the same key;
+#   beside    exactly that version, while the next is built in a second key, then one switch
+#             (with New-version builds off, ``candidateKeysEnabled``, it reads as in_place).
+READ_MODES = ("latest", "in_place", "beside")
+READ_MODE: str = os.getenv("GRAPHVER_READ_MODE", "latest")
+if READ_MODE not in READ_MODES:
+    READ_MODE = "latest"
 # After each projection, cheaply reconcile live node/edge COUNTS between Postgres
 # (the SoR) and FalkorDB (the cache); on a mismatch, bounded-heal by reseeding the
 # graph from Postgres once. Guards against a silently dropped delete leaving the
@@ -224,12 +242,16 @@ ROLLUP_REASK_SECS: int = int(os.getenv("GRAPHVER_ROLLUP_REASK_SECS", "300"))
 # A projection window of more version rows than this (a publish of millions) is written a page of
 # PROJECTION_PAGE rows at a time — all its nodes, then its edges — so the projector holds a page of
 # it, never all of it. Its rollups are moved by delta like any window's (ROLLUP_NET_MAX_CELLS).
-PROJECTION_PAGED_ABOVE: int = int(os.getenv("GRAPHVER_PROJECTION_PAGED_ABOVE", "200000"))
+# Held whole, a window costs about 1.8 KB a row (463 MB at 200,000 in the versioning-scale run);
+# paged, about 230 MB at any size.
+PROJECTION_PAGED_ABOVE: int = int(os.getenv("GRAPHVER_PROJECTION_PAGED_ABOVE", "100000"))
 PROJECTION_PAGE: int = int(os.getenv("GRAPHVER_PROJECTION_PAGE", "20000"))
 # A full reconcile (a first seed, a rebuild, a heal) holds both sides of a graph — what Postgres
-# says and what FalkorDB holds. Above this many live entities it compares them a page at a time.
+# says and what FalkorDB holds — about 2.8 KB a live entity (667 MB at 200,000 in the
+# versioning-scale run). Above this many live entities it compares them a page at a time, about
+# 230 MB at any size, and hands the lineage summaries to the aggregation job when anything changed.
 PROJECTION_RECONCILE_STREAMED_ABOVE: int = int(os.getenv("GRAPHVER_PROJECTION_RECONCILE_STREAMED_ABOVE",
-                                                         "500000"))
+                                                         "100000"))
 WORKER_HEALTH_PORT: int = int(os.getenv("GRAPHVER_WORKER_HEALTH_PORT", "8092"))
 PROJECTION_INPROCESS: bool = os.getenv("GRAPHVER_PROJECTION_INPROCESS", "").lower() in ("1", "true", "yes")
 # Ceiling for an EXPLICIT operator rebuild run in-process (Data health → "Rebuild"):
@@ -261,8 +283,49 @@ FALKOR_MAX_RESIDENT: int = int(os.getenv("GRAPHVER_FALKOR_MAX_RESIDENT", "0"))
 FALKOR_BUDGETS: dict = json.loads(os.getenv("GRAPHVER_FALKOR_BUDGETS", "") or "{}")
 DEFAULT_FALKOR_PROVIDER: str = "default"
 # A moved graph's old platform key is dropped no sooner than this after the move, and only once the
-# new key has caught up (doc 14 §6) — until then a move back onto it reconciles in place.
-RETIRE_GRACE_SECS: int = 900
+# new key has caught up (doc 14 §6) — until then a move back onto it reconciles in place. The
+# default for New-version builds' retire grace (``build_policy``), which an administrator overrides.
+RETIRE_GRACE_SECS: int = int(os.getenv("GRAPHVER_RETIRE_GRACE_SECS", "900"))
+
+# New-version builds (doc 14 §6, ``build_policy``): a graph's next version built in a second key
+# while its current key keeps serving, then switched to. Each value below is a default that a system
+# administrator overrides live under Admin → Infrastructure → New-version builds; the switch itself
+# is the ``candidateKeysEnabled`` feature flag. Windows of more changed rows than this are built
+# beside the serving key, as are rebuilds, moves and loads of platform-owned keys when enabled.
+PROJECTION_CANDIDATE_ABOVE: int = int(os.getenv("GRAPHVER_PROJECTION_CANDIDATE_ABOVE", "200000"))
+PROJECTION_CANDIDATE_REBUILDS: bool = os.getenv("GRAPHVER_PROJECTION_CANDIDATE_REBUILDS", "1") == "1"
+# How a build makes its key: ``auto`` copies the serving key (GRAPH.COPY) when its node has room,
+# else seeds it from Postgres on the node with most room; ``copy`` and ``reseed`` force one way.
+PROJECTION_CANDIDATE_MODE: str = os.getenv("GRAPHVER_PROJECTION_CANDIDATE_MODE", "auto")
+# The free memory a copy needs on its node, as a share of the graph's size (220 = ×2.2), and the
+# largest graph copied rather than reseeded (0: no limit). While GRAPH.COPY runs, the node holds
+# the new key and the copy's own buffer, each about the graph's size: the versioning-scale run saw
+# FalkorDB's memory rise by 2.0× the graph's at the copy's peak (1.3 GB to 3.9 GB at 1,000,000
+# nodes and edges), against 1.1× for a seed.
+PROJECTION_COPY_MARGIN_PCT: int = int(os.getenv("GRAPHVER_PROJECTION_COPY_MARGIN_PCT", "220"))
+PROJECTION_COPY_MAX_BYTES: int = int(os.getenv("GRAPHVER_PROJECTION_COPY_MAX_BYTES", "0"))
+# With no room for a build anywhere: ``wait`` (the serving key keeps serving its version) or
+# ``in_place`` (the window is written into the serving key, paced). Alerted on past the second value.
+PROJECTION_NO_ROOM_POLICY: str = os.getenv("GRAPHVER_PROJECTION_NO_ROOM_POLICY", "wait")
+PROJECTION_NO_ROOM_ALERT_SECS: int = int(os.getenv("GRAPHVER_PROJECTION_NO_ROOM_ALERT_SECS", "1800"))
+PROJECTION_CANDIDATE_CONCURRENCY: int = int(os.getenv("GRAPHVER_PROJECTION_CANDIDATE_CONCURRENCY", "2"))
+PROJECTION_CANDIDATE_MAX_ATTEMPTS: int = int(os.getenv("GRAPHVER_PROJECTION_CANDIDATE_MAX_ATTEMPTS", "3"))
+# The most rows a build still has to catch up when it switches, applied inside the switch.
+PROJECTION_CANDIDATE_FLIP_MAX_LAG_ROWS: int = int(os.getenv(
+    "GRAPHVER_PROJECTION_CANDIDATE_FLIP_MAX_LAG_ROWS", str(PROJECTION_INLINE_MAX_ROWS)))
+# Pacing the projector's writes so reads of a graph being written keep their turn on its node: the
+# time a write statement aims at, the most one may take, and the pause after each, as a share of
+# its own time — and as a larger share while reads on the node are waiting.
+PROJECTION_STATEMENT_TARGET_MS: int = int(os.getenv("GRAPHVER_PROJECTION_STATEMENT_TARGET_MS", "500"))
+PROJECTION_WRITE_CEILING_S: int = int(os.getenv("GRAPHVER_PROJECTION_WRITE_CEILING_S", "10"))
+PROJECTION_PACING_RATIO: float = float(os.getenv("GRAPHVER_PROJECTION_PACING_RATIO", "0.25"))
+PROJECTION_READ_PRESSURE_RATIO: float = float(os.getenv("GRAPHVER_PROJECTION_READ_PRESSURE_RATIO",
+                                                        "2.0"))
+# Reads of main from Postgres, while FalkorDB holds no version of a graph: each statement's limit,
+# and how many run at once per graph and per process, so a large graph's reads can't take the pool.
+READ_STATEMENT_TIMEOUT_MS: int = int(os.getenv("GRAPHVER_READ_STATEMENT_TIMEOUT_MS", "15000"))
+PG_READS_PER_GRAPH: int = int(os.getenv("GRAPHVER_PG_READS_PER_GRAPH", "4"))
+PG_READS_PER_PROCESS: int = int(os.getenv("GRAPHVER_PG_READS_PER_PROCESS", "8"))
 EVICT_SECS: int = int(os.getenv("GRAPHVER_EVICT_SECS", "300"))
 
 # Residency (doc 17): each graph's class (Always / Standard / Coldline) and each cluster master's
@@ -450,34 +513,37 @@ def object_store_s3() -> dict:
 # window is also what a resumed import redoes at most, and what the job's lease waits out before a
 # stopping worker hands the job back — so a few seconds of work, not minutes.
 IMPORT_COMMIT_WINDOW: int = int(os.getenv("IMPORT_COMMIT_WINDOW", "10000"))
-# What an import's rows find their entities by when the request names nothing (``identifier``):
-# ``entity_id`` (an entity id of the graph, else the urn, the identifier property, a field a type
-# matches imports by, then a unique qualifiedName), or ``urn`` (an entity id, else the urn only).
+# What an import's rows find their entities by when neither the request nor its data source names
+# one (``identifier``): ``entity_id`` (an entity id of the graph, else the urn, the identifier
+# property, a field a type matches imports by, then a unique qualifiedName), ``urn`` (an entity id,
+# else the urn only), ``prop.<name>`` (an entity id, else the value of the property <name>), or
+# ``prop.<name>,urn`` (the property, then the urn; a node found by its urn takes the value).
 IMPORT_IDENTIFIER: str = os.getenv("GRAPHVER_IMPORT_IDENTIFIER", "entity_id")
 # A replace deletes whatever its file leaves out of its scope. One that would delete most of a scope
 # AND make most of it again is what a file whose rows name their entities by another key looks like:
 # its rows match nothing, so the run deletes the scope and makes it anew, every id and its history
 # with it. In a scope of at least IMPORT_REPLACE_GUARD_MIN_LIVE entities, a replace that would delete
 # at least IMPORT_REPLACE_GUARD_DELETE_FRACTION of them and create at least
-# IMPORT_REPLACE_GUARD_CREATE_FRACTION as many is refused before it deletes anything, unless it is
-# sent with allowMassDelete=true. Fractions of the scope's entities, nodes and edges (0.5 = half).
+# IMPORT_REPLACE_GUARD_CREATE_FRACTION as many (rows it refused that matched nothing count with what
+# it creates) is refused before it deletes anything, unless it is sent with allowMassDelete=true.
+# Fractions of the scope's entities, nodes and edges (0.5 = half).
 IMPORT_REPLACE_GUARD: bool = os.getenv("IMPORT_REPLACE_GUARD", "1").lower() not in ("0", "false", "no")
 IMPORT_REPLACE_GUARD_MIN_LIVE: int = int(os.getenv("IMPORT_REPLACE_GUARD_MIN_LIVE", "1000"))
 IMPORT_REPLACE_GUARD_DELETE_FRACTION: float = float(
     os.getenv("IMPORT_REPLACE_GUARD_DELETE_FRACTION", "0.5"))
 IMPORT_REPLACE_GUARD_CREATE_FRACTION: float = float(
     os.getenv("IMPORT_REPLACE_GUARD_CREATE_FRACTION", "0.5"))
-# And earlier: a replace whose first full node window finds an entity for fewer than this fraction of
-# its rows, in a graph of at least IMPORT_REPLACE_GUARD_MIN_LIVE entities, stops there, naming its
-# identifier, rather than read the rest of the file first, unless it is sent with
-# allowMassDelete=true. 0 turns it off.
+# And earlier: a replace whose first node window (IMPORT_COMMIT_WINDOW rows, or all of a smaller
+# file's node rows) finds an entity for fewer than this fraction of its rows, in a graph of at least
+# IMPORT_REPLACE_GUARD_MIN_LIVE entities, stops there, naming its identifier, rather than read the
+# rest of the file first, unless it is sent with allowMassDelete=true. 0 turns it off.
 IMPORT_REPLACE_MIN_MATCH_FRACTION: float = float(os.getenv("IMPORT_REPLACE_MIN_MATCH_FRACTION", "0.05"))
 # How many of an import's file's rows may be refused before it holds, when the import doesn't say
 # (maxRefusedRows): past it, a replace deletes nothing and fails (rows_refused), and an import that
 # would publish itself (autoPublish) leaves its draft for review instead. "0" holds on any refused
 # row; a count ("100") or a share of the file's rows ("0.5%") goes on within it; "-1" always goes
-# on. Going on, a replace keeps what a refused row still names. Every import reports its refused
-# rows, with why (summary.refused).
+# on. Going on, a replace keeps what a refused row still names (a refused delete row, only what it
+# matched). Every import reports its refused rows, with why (summary.refused).
 IMPORT_MAX_REFUSED_ROWS: str = os.getenv("IMPORT_MAX_REFUSED_ROWS", "0")
 # Properties a graph's imports may match nodes by (identifier=prop.<name>), at most: each has an index
 # kept current from the version log, as Dataverse limits alternate keys and Salesforce external ids.

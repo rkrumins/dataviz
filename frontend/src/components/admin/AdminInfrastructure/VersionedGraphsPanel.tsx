@@ -15,13 +15,17 @@
  * chips; a system administrator sets the class (Always may be refused when its
  * master has no room, with the reason), asks for an evicted graph's load (Load
  * now), and adopts a customer's key onto a platform key after a confirmation
- * that says what changes. "Residency & eviction" opens the policy card, and "Draft retention" the
- * card that says how long a merged or abandoned draft keeps its changes.
+ * that says what changes. "Residency & eviction" opens the policy card, "Draft retention" the
+ * card that says how long a merged or abandoned draft keeps its changes, and "New-version builds"
+ * the card of settings for building a graph's next version beside the key that serves it.
+ *
+ * Read mode: each graph shows what its readers get while a newer version lands — the platform's
+ * default or its own — and "Read mode…" opens the guided choice for that graph.
  */
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useInfiniteQuery } from '@tanstack/react-query'
-import { Database, Gauge, Hourglass, Loader2, X } from 'lucide-react'
+import { Database, Gauge, Hourglass, Layers, Loader2, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import {
     systemStatusService,
@@ -37,6 +41,9 @@ import { MoveProjectionDialog } from './MoveProjectionDialog'
 import { ConfirmDialog } from './ConfirmDialog'
 import { ResidencyPolicyCard } from './ResidencyPolicyCard'
 import { DraftRetentionCard } from './DraftRetentionCard'
+import { BuildPolicyCard } from './BuildPolicyCard'
+import { GraphReadModeDialog } from './GraphReadModeDialog'
+import { READ_MODE } from './readModes'
 
 const STATUS_OPTIONS: { value: NonNullable<VersionedGraphsFilter['status']>; label: string }[] = [
     { value: 'fresh', label: 'In sync' },
@@ -59,6 +66,25 @@ const STATE_CHIP: Record<ResidencyState, { label: string; cls: string }> = {
 }
 
 const CHIP_CLS = 'inline-flex px-1.5 py-px rounded-full border text-[9px] uppercase tracking-wide shrink-0'
+
+/** A build beside the serving key (read mode beside), by step: what its row says. */
+const BUILD_CHIP: Record<string, string> = {
+    queued: 'Build waiting', copying: 'Copying for a build', seeding: 'Seeding a build',
+    catching_up: 'Building new version', switching: 'Switching to new version',
+}
+
+/** The build's chip's tooltip: what readers see meanwhile, and why it waits or failed. */
+function buildTitle(b: { step: string; waiting?: string | null; error?: string | null; attempts?: number;
+                         progress?: { done?: number; total?: number } | null }): string {
+    return [
+        'Readers keep exactly the version served now until the new one is built and checked, then switch at once.',
+        b.step === 'seeding' ? 'Its key is written from Postgres, as no copy fits or one is not wanted.' : '',
+        b.step === 'seeding' && b.progress?.total
+            ? `${Math.round(((b.progress.done ?? 0) / b.progress.total) * 100)}% written.` : '',
+        b.waiting ? `Waiting: ${b.waiting}.` : '',
+        b.error ? `Attempt ${b.attempts ?? 1} failed: ${b.error}.` : '',
+    ].filter(Boolean).join(' ')
+}
 
 type Refusal = { type?: string; reason?: string; message?: string }
 
@@ -114,8 +140,10 @@ export function VersionedGraphsPanel({ providers, onClose }: Props) {
     const [notes, setNotes] = useState<Record<string, RowNote>>({})
     const [moving, setMoving] = useState<VersionedGraphRow | null>(null)
     const [adopting, setAdopting] = useState<VersionedGraphRow | null>(null)
+    const [readModeFor, setReadModeFor] = useState<VersionedGraphRow | null>(null)
     const [showPolicy, setShowPolicy] = useState(false)
     const [showRetention, setShowRetention] = useState(false)
+    const [showBuilds, setShowBuilds] = useState(false)
     const providerName = new Map((providers ?? []).map(p => [p.id, p.name]))
 
     const query = useInfiniteQuery({
@@ -225,6 +253,13 @@ export function VersionedGraphsPanel({ providers, onClose }: Props) {
                     >
                         <Hourglass className="w-3.5 h-3.5" /> Draft retention
                     </button>
+                    <button
+                        onClick={() => setShowBuilds(open => !open)}
+                        aria-expanded={showBuilds}
+                        className="inline-flex items-center gap-1 text-[11px] font-medium text-indigo-600 dark:text-indigo-400 hover:underline"
+                    >
+                        <Layers className="w-3.5 h-3.5" /> New-version builds
+                    </button>
                     <button onClick={onClose} className="p-1 rounded-md text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5" aria-label="Close versioned graphs">
                         <X className="w-4 h-4" />
                     </button>
@@ -233,6 +268,7 @@ export function VersionedGraphsPanel({ providers, onClose }: Props) {
 
             {showPolicy && <ResidencyPolicyCard />}
             {showRetention && <DraftRetentionCard />}
+            {showBuilds && <BuildPolicyCard />}
 
             <div className="px-5 pb-3 flex flex-wrap items-center gap-2">
                 <select aria-label="Provider" className={SELECT_CLS} value={filter.provider ?? ''} onChange={e => setField('provider', e.target.value)}>
@@ -311,6 +347,28 @@ export function VersionedGraphsPanel({ providers, onClose }: Props) {
                                                     </span>
                                                 </div>
                                             )}
+                                            {!row.forkParentGraphId && row.readModeEffective && (
+                                                <div className="mt-1">
+                                                    <span
+                                                        className={cn(CHIP_CLS, row.readMode
+                                                            ? 'border-violet-500/20 bg-violet-500/10 text-violet-600 dark:text-violet-400'
+                                                            : 'border-glass-border bg-black/5 dark:bg-white/5 text-ink-muted')}
+                                                        title={READ_MODE[row.readModeEffective].promise}
+                                                    >
+                                                        Reads: {READ_MODE[row.readModeEffective].short}{row.readMode ? '' : ' · default'}
+                                                    </span>
+                                                    {row.build && (
+                                                        <span
+                                                            className={cn(CHIP_CLS, 'ml-1', row.build.error
+                                                                ? 'border-amber-500/25 bg-amber-500/10 text-amber-700 dark:text-amber-400'
+                                                                : 'border-sky-500/25 bg-sky-500/10 text-sky-700 dark:text-sky-300')}
+                                                            title={buildTitle(row.build)}
+                                                        >
+                                                            {BUILD_CHIP[row.build.step] ?? row.build.step}
+                                                        </span>
+                                                    )}
+                                                </div>
+                                            )}
                                             <span className="text-[10px] text-ink-muted">{row.workspaceName ?? row.workspaceId}</span>
                                         </td>
                                         <td className="px-3 py-2.5">
@@ -356,6 +414,11 @@ export function VersionedGraphsPanel({ providers, onClose }: Props) {
                                                 >
                                                     Move…
                                                 </button>
+                                                {!row.forkParentGraphId && row.readModeEffective && (
+                                                    <button className={ACTION_CLS} disabled={busy !== null} onClick={() => setReadModeFor(row)}>
+                                                        Read mode…
+                                                    </button>
+                                                )}
                                                 {!row.forkParentGraphId && row.residency && (
                                                     <select
                                                         aria-label="Residency class"
@@ -424,6 +487,24 @@ export function VersionedGraphsPanel({ providers, onClose }: Props) {
                         <span className="font-mono"> :Table</span>) needs the ontology's from then.
                     </p>
                 </ConfirmDialog>
+            )}
+
+            {readModeFor && (
+                <GraphReadModeDialog
+                    row={readModeFor}
+                    onClose={() => setReadModeFor(null)}
+                    onSaved={res => {
+                        setReadModeFor(null)
+                        setNotes(prev => ({
+                            ...prev,
+                            [res.graphId]: {
+                                tone: 'ok',
+                                text: `Readers now get: ${READ_MODE[res.readModeEffective].title}${res.readMode ? '' : ' (the platform default)'}`,
+                            },
+                        }))
+                        void query.refetch()
+                    }}
+                />
             )}
 
             {moving && (

@@ -41,7 +41,7 @@ async def graphver_schema(db_session):
     await db_session.execute(text(
         "CREATE TABLE graphver.projection_state (graph_id TEXT PRIMARY KEY, "
         "projected_commit_seq BIGINT, falkor_graph_name TEXT, last_error TEXT, "
-        "status TEXT, served_commit_seq BIGINT)"))
+        "status TEXT, served_commit_seq BIGINT, read_mode TEXT)"))
     yield
     await db_session.execute(text("DROP TABLE graphver.projection_state"))
     await db_session.execute(text("DROP TABLE graphver.graphs"))
@@ -49,7 +49,7 @@ async def graphver_schema(db_session):
 
 
 async def _seed(db_session, *, projected, head, falkor_name="gv_real", last_error=None,
-                agg_ready=False, status="idle", served=None):
+                agg_ready=False, status="idle", served=None, read_mode=None):
     db_session.add(_m.WorkspaceORM(id="ws_stale", name="Stale WS"))
     db_session.add(_m.ProviderORM(id="prov_stale", name="P", provider_type="falkordb"))
     db_session.add(_m.WorkspaceDataSourceORM(
@@ -72,8 +72,9 @@ async def _seed(db_session, *, projected, head, falkor_name="gv_real", last_erro
     await db_session.execute(text(
         "INSERT INTO graphver.graphs VALUES ('g_stale', 'ds_stale', :head)"), {"head": head})
     await db_session.execute(text(
-        "INSERT INTO graphver.projection_state VALUES ('g_stale', :p, :name, :err, :st, :sv)"),
-        {"p": projected, "name": falkor_name, "err": last_error, "st": status, "sv": served})
+        "INSERT INTO graphver.projection_state VALUES ('g_stale', :p, :name, :err, :st, :sv, :rm)"),
+        {"p": projected, "name": falkor_name, "err": last_error, "st": status, "sv": served,
+         "rm": read_mode})
     await db_session.commit()
 
 
@@ -106,7 +107,8 @@ async def test_a_lagging_projection_that_still_serves_its_last_version_is_a_warn
         test_client: AsyncClient, db_session, graphver_schema):
     """Behind, but its key still serves the version it last published, rollups included:
     reads are complete, only not the newest. Said, and not as the wedge."""
-    await _seed(db_session, projected=4, head=9, last_error="verify mismatch at seq 9")
+    await _seed(db_session, projected=4, head=9, last_error="verify mismatch at seq 9",
+                read_mode="in_place")
 
     finding = (await _findings(test_client)).get("PROJECTION_STALE")
     assert finding is not None and finding["severity"] == "warning", finding
@@ -114,6 +116,18 @@ async def test_a_lagging_projection_that_still_serves_its_last_version_is_a_warn
     assert "reads show the version it last finished" in finding["message"], finding["message"]
     assert "version log" not in finding["message"], finding["message"]
     assert "verify mismatch at seq 9" in finding["message"], finding["message"]
+
+
+async def test_a_lagging_projection_read_latest_reads_the_version_log(
+        test_client: AsyncClient, db_session, graphver_schema):
+    """Read Always the latest, main reads go to the version log while the key catches up,
+    whatever version it holds: said as such, with no rolled-up connections."""
+    await _seed(db_session, projected=4, head=9, last_error="verify mismatch at seq 9",
+                read_mode="latest")
+
+    finding = (await _findings(test_client)).get("PROJECTION_STALE")
+    assert finding is not None and finding["severity"] == "critical", finding
+    assert "version log" in finding["message"], finding["message"]
 
 
 async def test_a_caught_up_projection_raises_nothing(
@@ -173,7 +187,7 @@ async def test_a_lagging_projection_that_serves_its_last_version_stays_canonical
     a rebuild in place, the version it held): the read path is the canonicalized one."""
     for projected, status, served in ((4, "idle", 4), (0, "rebuilding", 4)):
         await _seed(db_session, projected=projected, head=9, agg_ready=True, status=status,
-                    served=served)
+                    served=served, read_mode="in_place")
         agg = await _aggregation_block(test_client)
         assert agg["canonicalized"] is True, (projected, status)
         assert agg["projectorCurrent"] is False

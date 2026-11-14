@@ -65,10 +65,18 @@ class _Svc:
     async def _skeletons_at(self, s, gid, bid, ids, seq):
         out = await self._values_at(s, gid, bid, ids, seq)
         for i in ids:
+            if i.startswith("ce_") and i[3:] in self.parent:         # a containment edge
+                out[i] = {"sourceEntityId": self.parent[i[3:]], "targetEntityId": i[3:],
+                          "edgeType": "CONTAINS"}
             if i in self.window and seq >= 2:
                 op, payload = self.window[i]
                 out[i] = None if op == "delete" else payload
         return out
+
+    async def _incident_edge_ids(self, s, gid, bid, node_ids, *, sides=("source", "target"),
+                                 edge_types=None):
+        """The containment edges out of ``node_ids`` (their children's), as the projector asks."""
+        return {f"ce_{c}" for c, par in self.parent.items() if par in set(node_ids)}
 
     async def _containment_ancestors(self, s, gid, bid, node_ids, cset, as_of):
         seen = set(node_ids)

@@ -27,6 +27,7 @@ each section links to the page with the full background.
 | [Fix slow or timed-out graphs](#fix-slow-or-timed-out-graphs) | Users report slow canvases, `429`s or timeouts |
 | [Subset views and Narrow under load](#subset-views-and-narrow-under-load) | Subset views say "so far" for long, answer `429`, or Narrow is slow |
 | [Projection behind or holding changes back](#projection-behind-or-holding-changes-back) | A graph stays "catching up", Data health shows changes held back, or the projection alerts fire |
+| [Reads of a graph answer 429 or 503 graph_read_busy](#reads-of-a-graph-answer-429-or-503-graph_read_busy) | A graph's canvas fails to load during or after a large import, or the Postgres-read alerts fire |
 
 ## Back up and restore
 
@@ -337,8 +338,38 @@ Postgres meanwhile, slower and without its lineage summaries.
      on its own. Its last error says "rebuilding on its own: …" until the rebuild publishes, and
      `graphver_projection_escalations_total` counts it. A large one is rebuilt a page at a
      time, across passes of at most 5 minutes each (`GRAPHVER_PROJECTION_PASS_MAX_SECS`).
-5. **Confirm:** Data health shows the graph caught up, with nothing held back, and
+5. **If a large import lands slowly** while reads are fine, that is the projector pacing itself:
+   after each write it pauses a share of the time the write took, longer while reads on the same
+   node are starving (`graphver_projection_yields_total`), and no write runs longer than New-version
+   builds' **Longest write statement** (10 seconds by default). To land imports faster at the
+   readers' expense, lower **Pause after each write** under Admin → Infrastructure → Versioned
+   graphs → New-version builds; it applies to the next statement.
+6. **Confirm:** Data health shows the graph caught up, with nothing held back, and
    `graphver_projection_lag_seconds_max` falls back to 0.
+
+## Reads of a graph answer 429 or 503 graph_read_busy
+
+While the graph store holds a version of a graph, its reads stay there, at the version it last
+finished, during an import or a rebuild. A graph it holds no version of — never loaded, written
+from nothing after a move, evicted — is read from Postgres, and every such read composes the
+whole graph. Those reads are bounded, so one large graph can't take the database connections
+every other read needs: past New-version builds' **Reads of one graph** or **Reads per process**
+at once, a read answers `429`; one that runs past the **Statement limit** answers
+`503 graph_read_busy`. Both carry `Retry-After`, and the app retries them.
+
+1. **See which graph:** the API logs `graph_read_busy` with the graph id, and the graph's
+   **Data health** tab shows why the store holds no version of it (evicted, loading, a move).
+2. **If it is evicted or waiting for room,** it loads on the next read when there is room
+   ([17 §16](/docs/versioning-forks-and-residency#16-turning-residency-on)): give its master more
+   memory, or set its class to **Always** so it stays loaded.
+3. **If it is loading,** wait for the load; its reads return to the graph store when it lands.
+4. **If many graphs are read from Postgres at once,** check `GRAPHVER_READ_MAX_LAG` is `-1` (the
+   default): at `0`, every graph whose projection is behind its head is read from Postgres.
+5. **Only if the database has room to spare,** raise **Reads per process** or the **Statement
+   limit** (Admin → Infrastructure → Versioned graphs → New-version builds); they apply to the
+   next read. Lowering them protects the rest of the platform at that graph's expense.
+6. **Confirm:** `graphver_pg_read_slots_shed_total` and `graphver_pg_read_timeouts_total` stop
+   rising.
 
 ## Where to next
 

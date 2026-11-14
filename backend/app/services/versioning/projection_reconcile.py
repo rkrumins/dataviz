@@ -244,18 +244,25 @@ def _contribute(
     *,
     canonical: bool,
     level_of: Callable[[str], Optional[int]],
+    holders: Optional[Set[str]] = None,
 ) -> None:
     """One raw lineage edge's contribution to both pair sets — the same rules
     as ``FalkorProjector._compute_rollup_deltas.contribute`` and the batch
     pipeline: ``dw`` over the full ancestor cross-product (cube regime),
-    ``dwc`` over the canonical depth-bridged subset (boundary regime)."""
+    ``dwc`` over the canonical depth-bridged subset (boundary regime).
+    ``holders``: the nodes that hold a containment child on this side — an
+    endpoint among them is one of its own reps, as the job has it."""
     src, rel, tgt = key
     et = rel.upper()
     cp_s, cp_t = _local_chain(parents, src), _local_chain(parents, tgt)
     if not canonical:
+        from backend.app.providers.falkordb_materialize import _materialize_leaf_pairs
+        mirror = _materialize_leaf_pairs()
         for sx in ancestor_closure(cp_s, src):
             for tx in ancestor_closure(cp_t, tgt):
-                if sx == tx:
+                # Never the raw (src, tgt) mirror, unless the batch job stores it too
+                # (AGGREGATION_MATERIALIZE_LEAF_PAIRS), as the window's deltas do.
+                if sx == tx or (not mirror and (sx, tx) == (src, tgt)):
                     continue
                 e = pairs.setdefault((sx, tx), {"dw": 0, "types": set()})
                 e["dw"] += sign
@@ -266,14 +273,21 @@ def _contribute(
     t_cl = ancestor_closure(cp_t, tgt)
     s_parents = {p for ps in cp_s.values() for p in ps}
     t_parents = {p for ps in cp_t.values() for p in ps}
+    if holders:
+        s_parents |= {src} & holders
+        t_parents |= {tgt} & holders
     canon = boundary_pairs(
         {a: d for a, d in s_cl.items() if a in s_parents},
         {a: d for a, d in t_cl.items() if a in t_parents},
     )
     depths = {**t_cl, **s_cl}
-    for sx, tx in cube_pairs(s_cl, t_cl, include_leaf_mirror=False, s=src, t=tgt):
+    cube = set(cube_pairs(s_cl, t_cl, include_leaf_mirror=False, s=src, t=tgt))
+    # The canonical cells can hold the raw (src, tgt) pair, when both ends are containers; the
+    # cube never does, as the job's.
+    for sx, tx in cube | canon:
         e = pairs.setdefault((sx, tx), {"dw": 0, "dwc": 0, "types": set()})
-        e["dw"] += sign
+        if (sx, tx) in cube:
+            e["dw"] += sign
         if (sx, tx) in canon:
             e["dwc"] += sign
         sl, tl = level_of(sx), level_of(tx)
@@ -328,10 +342,16 @@ def plan_rollup_deltas(
             n for n in {k[2] for k in cont_e ^ cont_a}
             if set(par_e.get(n, ())) != set(par_a.get(n, ()))
         }
-    if not (added or removed or moved):
+    # A node that holds a containment child on one side only became, or stopped being, one of
+    # its own reps: the lineage it ends is recounted, as a move's is.
+    holders_e = {p for ps in par_e.values() for p in ps}
+    holders_a = {p for ps in par_a.values() for p in ps}
+    flipped = (holders_e ^ holders_a) if canonical else set()
+    if not (added or removed or moved or flipped):
         return RollupPlan(pairs={}, stale=False, contributions=0)
     affected = moved | _descendants(_children_of(par_e), moved) | _descendants(_children_of(par_a), moved) \
         if moved else set()
+    affected = affected | flipped
     recount = {k for k in lin_e & lin_a if k[0] in affected or k[2] in affected}
 
     contributions = len(added) + len(removed) + 2 * len(recount)
@@ -340,8 +360,8 @@ def plan_rollup_deltas(
 
     pairs: Dict[Tuple[str, str], Dict[str, object]] = {}
     for k in removed | recount:
-        _contribute(pairs, k, -1, par_a, canonical=canonical, level_of=level_of)
+        _contribute(pairs, k, -1, par_a, canonical=canonical, level_of=level_of, holders=holders_a)
     for k in added | recount:
-        _contribute(pairs, k, +1, par_e, canonical=canonical, level_of=level_of)
+        _contribute(pairs, k, +1, par_e, canonical=canonical, level_of=level_of, holders=holders_e)
     pairs = {k: v for k, v in pairs.items() if v["dw"] != 0 or v.get("dwc", 0) != 0}
     return RollupPlan(pairs=pairs, stale=False, contributions=contributions)

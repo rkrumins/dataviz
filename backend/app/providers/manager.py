@@ -19,6 +19,7 @@ Design invariants:
 """
 
 import asyncio
+import contextlib
 import inspect
 import json
 import logging
@@ -390,6 +391,9 @@ class ProviderManager:
         # slots (default 8); on saturation, raises ProviderUnavailable
         # immediately rather than queueing.
         self._provider_semaphores: Dict[Tuple[str, str], asyncio.Semaphore] = {}
+        #: The size each semaphore above was made with, when it isn't the default: a size changed
+        #: live (New-version builds' Postgres read limits) makes a new one.
+        self._provider_semaphore_sizes: Dict[Tuple[str, str], int] = {}
         # Requests currently waiting for a slot, per cache_key — bounded by
         # _SLOT_MAX_WAITERS so a burst cannot pin the DB pool while queueing.
         self._slot_waiters: Dict[Tuple[str, str], int] = {}
@@ -1145,12 +1149,17 @@ class ProviderManager:
     # Per-provider semaphore — P1.9                                        #
     # ------------------------------------------------------------------ #
 
-    def _get_provider_semaphore(self, cache_key: Tuple[str, str]) -> asyncio.Semaphore:
-        """Lazy-create a per-cache-key semaphore. Idempotent."""
+    def _get_provider_semaphore(self, cache_key: Tuple[str, str],
+                                size: Optional[int] = None) -> asyncio.Semaphore:
+        """Lazy-create a per-cache-key semaphore. Idempotent. ``size`` (default
+        ``_MAX_PROVIDER_CONCURRENCY``) changed since it was made makes a new one; the old one's
+        holders release it as they finish."""
+        size = size or _MAX_PROVIDER_CONCURRENCY
         sem = self._provider_semaphores.get(cache_key)
-        if sem is None:
-            sem = asyncio.Semaphore(_MAX_PROVIDER_CONCURRENCY)
+        if sem is None or self._provider_semaphore_sizes.get(cache_key, _MAX_PROVIDER_CONCURRENCY) != size:
+            sem = asyncio.Semaphore(size)
             self._provider_semaphores[cache_key] = sem
+            self._provider_semaphore_sizes[cache_key] = size
         return sem
 
     def admit_graph_request(self, source_key: str) -> None:
@@ -1235,7 +1244,7 @@ class ProviderManager:
         self._graph_activity[source_key] = time.monotonic()
 
     async def acquire_provider_slot(
-        self, provider_id: str, graph_name: str = "",
+        self, provider_id: str, graph_name: str = "", *, size: Optional[int] = None,
     ) -> asyncio.Semaphore:
         """Acquire a concurrency slot for an outbound provider call.
 
@@ -1250,7 +1259,7 @@ class ProviderManager:
         latency.
         """
         cache_key = (provider_id, graph_name or "")
-        sem = self._get_provider_semaphore(cache_key)
+        sem = self._get_provider_semaphore(cache_key, size)
         waiting = self._slot_waiters.get(cache_key, 0)
         if sem.locked() and waiting >= _SLOT_MAX_WAITERS:
             # Every slot busy AND the queue already full: shed now rather
@@ -1281,6 +1290,33 @@ class ProviderManager:
         finally:
             self._slot_waiters[cache_key] = max(0, self._slot_waiters.get(cache_key, 1) - 1)
         return sem
+
+    @contextlib.asynccontextmanager
+    async def pg_read_slot(self, graph_id: str, *, per_process: int, per_graph: int):
+        """Hold one place among this process's reads from Postgres (``per_process`` at once) and
+        one among ``graph_id``'s (``per_graph``), for a read of a versioned graph from Postgres while
+        FalkorDB holds no version of it: a large graph's reads then wait their turn, and are shed
+        with ``ProviderBusy`` (429, ``Retry-After``) past the wait budget, instead of taking every
+        connection of the pool. The sizes are New-version builds' live settings."""
+        from backend.app.jobs.metrics import increment
+
+        try:
+            whole = await self.acquire_provider_slot("graphver-pg", "*", size=per_process)
+        except ProviderBusy:
+            increment("graphver_pg_read_slots_shed_total", scope="process")
+            raise
+        try:
+            one = await self.acquire_provider_slot("graphver-pg", graph_id, size=per_graph)
+        except BaseException as exc:
+            whole.release()
+            if isinstance(exc, ProviderBusy):
+                increment("graphver_pg_read_slots_shed_total", scope="graph")
+            raise
+        try:
+            yield
+        finally:
+            one.release()
+            whole.release()
 
     # ------------------------------------------------------------------ #
     # Fleet-wide compute admission                                         #

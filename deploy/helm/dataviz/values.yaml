@@ -139,11 +139,13 @@ config:
     stagingGcDays: "3"
   # Replace imports. A replace deletes whatever its file leaves out of its scope; one that would
   # delete at least replaceGuardDeleteFraction of a scope of replaceGuardMinLive entities or more
-  # AND create at least replaceGuardCreateFraction as many — a file whose rows name their entities
-  # by another key — is refused before it deletes anything, unless sent with allowMassDelete=true.
-  # A replace whose first full window finds an entity for fewer than replaceMinMatchFraction of its
-  # rows stops there, unless sent with allowMassDelete=true. Fractions of the scope's entities
-  # (0.5 = half); replaceGuard "0" turns the guard off, replaceMinMatchFraction "0" the early stop.
+  # AND create at least replaceGuardCreateFraction as many (rows it refused that matched nothing
+  # count with what it creates) — a file whose rows name their entities by another key — is refused
+  # before it deletes anything, unless sent with allowMassDelete=true. A replace whose first node
+  # window (IMPORT_COMMIT_WINDOW rows, or all of a smaller file's node rows) finds an entity for
+  # fewer than replaceMinMatchFraction of its rows stops there, unless sent with
+  # allowMassDelete=true. Fractions of the scope's entities (0.5 = half); replaceGuard "0" turns the
+  # guard off, replaceMinMatchFraction "0" the early stop.
   # maxRefusedRows: how many of a file's rows may be refused before its import holds, when the
   # import doesn't say (maxRefusedRows): "0" holds on any (a replace deletes nothing, autoPublish
   # leaves the draft for review); a count ("100"), a share ("0.5%"), or "-1" goes on without them.

@@ -248,7 +248,9 @@ minter is injected) that returns `(ops, resolutions)`:
     (`duplicate_value`, naming them), and never guesses. A row matched by its `entity_id` whose
     value is another node's is refused (`two_entities`).
   - **A changed value is a new key**: a row with the old value creates a node. To keep the node, send
-    its `entity_id` with the new value once.
+    its `entity_id` with the new value once. By `prop.<name>,urn`, a row whose value no node holds
+    yet, with a urn a node has, finds that node by its urn instead: the node keeps its id and takes
+    the value, so the next import finds it by the value.
   - **A deleted node keeps its last value**, so a row naming it again brings it back under its id.
   - A new node's id is `urn:uuid:` v5 of the identity scope, the property and its value
     (`key_pointer_id`), or a v7 when a live node holds that id; it keeps the value, and its row's
@@ -318,18 +320,25 @@ indexes (migration `20260927_1000_import_indexes`).
 > | `changed_since_export` | its entity changed since the file was exported, in the same field |
 > | `invalid_type` / `missing_type` | its type isn't one the ontology defines / a new one has none |
 > | `end_not_found` | an end of the edge names no node |
+> | `end_refused` | an end of the edge is a node whose own row was refused (fixing that row fixes the edge) |
 > | `edge_moved` | its ends or type differ from the edge its `entity_id` names |
 > | `write_refused` | the graph's write gate refused it |
 > | `invalid_row` | the record can't be read as a node or an edge |
 >
-> `already_gone` marks a delete of what the graph doesn't hold: it changes nothing and is not
-> refused. `resolve.FIXES` says what to do about each code (and about `not_node_or_edge`, a record
+> `already_gone` marks a delete of what the graph doesn't hold, named by a key the identifier
+> reads: it changes nothing and is not refused. A delete row that names nothing the identifier
+> reads (by `prop.<name>` alone, one with only a urn) is `no_key`: what it would delete can't be
+> told. `resolve.FIXES` says what to do about each code (and about `not_node_or_edge`, a record
 > that is neither): the report, the preview and a held import's message carry it.
 >
 > **The report.** Each window adds its refusals to `job.summary.refused` in the transaction that
-> checkpoints it (`import_worker.tally_refused`): how many for each code, the first 20 rows, and
-> the fixes. A resumed import counts every row once, and nothing reads the job's rows again to
-> report them. Where a row is in its file comes from its reader (`formats.AT`, asked for by
+> checkpoints it (`import_worker.tally_refused`): how many for each code (`byCode`) and of each
+> kind (`byKind`), the first 20 rows, the fixes, and `hints`. `hints.by_urn` counts the node rows,
+> refused by a property alone, that `prop.<name>,urn` would find by their urn: `no_key` rows with a
+> urn, and `two_entities` rows whose urn is a node's that holds no value yet. A held replace's
+> message names that fix (`refused_digest`). A resumed import counts every row once, and nothing
+> reads the job's rows again to report them. Where a row is in its file comes from its reader
+> (`formats.AT`, asked for by
 > `_record_pages`): a line for NDJSON and for where a CSV/TSV record starts, a sheet and row for
 > Excel, an item for a JSON array. `_normalize_page` takes it off the record before it is read as
 > data and keeps it on the staged row as `_at`, which no payload reads.
@@ -337,9 +346,10 @@ indexes (migration `20260927_1000_import_indexes`).
 > **Hold or go on.** A replace with refused rows deletes nothing, and an `autoPublish` import with
 > them leaves its draft for review, unless the job's `maxRefusedRows` (`import_worker.refused_budget`;
 > the request's, else `IMPORT_MAX_REFUSED_ROWS`, kept on `jobs.import_settings`) allows them: a
-> count, a share of the file's rows, or `-1`. Within it, a replace deletes what no row matched —
-> a refused row that found its entity still matched it, so what it names is kept — and the publish
-> goes ahead, noting `refusedRows`.
+> count, a share of the file's rows, or `-1`. Within it, a replace deletes what no row matched or
+> names: a refused row keeps every live entity it names by any key it carries (a refused delete row
+> keeps nothing so), and an edge row its ends (`import_mentions`, §6). The publish goes ahead,
+> noting `refusedRows`.
 
 ### 3c. Apply
 
@@ -395,11 +405,11 @@ two parts is whole again when it is parsed.
    an upload started with it is never written, and an import's job is failed unqueued. A form
    (`multipart/form-data`) is refused on all three (415): its own lines would be read as the
    file's.
-4. `POST …/imports/uploads/{uploadId}/complete?reconcileMode&branchId&viewId&autoPublish` → 202, the
-   import job (409 while a part is missing). It reads the parts in order as one file. An upload is
-   imported once: its job's idempotency key is `upload:{uploadId}`, so asking again — after a lost
-   answer, or two completions at once — answers with the same job, and a job whose completion broke
-   off before it was queued is taken back (`reclaim_import`) and queued then.
+4. `POST …/imports/uploads/{uploadId}/complete?reconcileMode&identifier&branchId&viewId&autoPublish&allowMassDelete&maxRefusedRows&replaceScope`
+   → 202, the import job (409 while a part is missing). It reads the parts in order as one file. An
+   upload is imported once: its job's idempotency key is `upload:{uploadId}`, so asking again —
+   after a lost answer, or two completions at once — answers with the same job, and a job whose
+   completion broke off before it was queued is taken back (`reclaim_import`) and queued then.
 
 The Import dialog sends three parts at a time, retries a part the server failed on (not one it
 refused), shows how much is up, and resumes: the same file chosen again (name, size and modification
@@ -663,7 +673,7 @@ which Postgres JSONB rejects) and is stripped from `create` payloads, where it i
 | Mode | Absent-entity behavior | Default? |
 |------|------------------------|----------|
 | **`upsert`** | Never deletes on absence — only creates/updates the rows in the file. | Yes (safe) |
-| **`replace`** | The file is the **authoritative snapshot for its scope**: every existing in-scope entity that no file row matched is **deleted**. | Opt-in |
+| **`replace`** | The file is the **authoritative snapshot for its scope**: every existing in-scope entity that no file row matched or names (with `replaceScope=keyed`, only what holds the property) is **deleted**. | Opt-in |
 
 Replace deletes are computed after the file's rows are applied (`_delete_absent`): the draft is
 walked a page at a time, and every entity in scope that no row matched (`import_rows.matched_entity_id`)
@@ -676,8 +686,9 @@ snapshot before the delete, `Snapshot.incident_edges`).
 **What the file names is kept.** A resolution carries ``mentions``: the live entities the row names
 besides what it matched — what a refused row names by any key it carries (its entity_id, its urn
 through the urn lookup, its value of the identifier's property, an edge row's own id and ends), and
-an edge row's resolved ends. Each window writes those no row of the job matched into
-`import_mentions(job_id, entity_id)` (`_persist_mentions`), in its transaction, so a file that lists
+an edge row's resolved ends. A refused delete row carries none: it meant to delete what it names.
+Each window writes those no row of the job matched into `import_mentions(job_id, entity_id)`
+(`_persist_mentions`), in its transaction, so a file that lists
 every node it links writes none; the in-memory path writes the decided rows' with them. The
 absence check (`_unmatched`) excludes both. So a refused row sent on with `maxRefusedRows` never makes
 the replace delete what it was about, and an edge row never loses its ends. The table is transient
@@ -781,13 +792,20 @@ A graph's imports run under its data source's own settings, field by field, over
 - **Kept on the job.** An import resolves them once, when it is made — its identifier (the
   request's, else the graph's, else the platform's) and the guard's limits — and keeps them
   (`jobs.import_settings`: `{identifierSource, replaceLimits: {minLive, deleteFraction,
-  createFraction, minMatchFraction, sources}}`, `importSettings` on the job), so a resumed job runs
-  under what it started with, and a change made meanwhile applies from the next import. A dry run
+  createFraction, minMatchFraction, sources}, maxRefusedRows, replaceScope?}`, `importSettings` on
+  the job; `replaceScope` only when `keyed`), so a resumed job runs under what it started with, and
+  a change made meanwhile applies from the next import. A dry run
   says where its identifier came from (`identifierSource`).
 - **In the app:** the data source's Versioning tab shows them under **Imports**, and the import
   dialog's **Match existing items by** starts at the graph's default, marked, and says when a
   property no import has matched by yet is indexed first. On a fork whose parent's default is a
-  property other than its identifier property, both say its imports match by Entity ID.
+  property other than its identifier property, both say its imports match by Entity ID. With
+  **A property**, both offer **Rows without it: find them by their urn** (`prop.<name>,urn`). The
+  dialog's replace adds **Delete only items that have this property** (`replaceScope=keyed`). A
+  failed import by the property alone whose refused rows the urn would find (`hints.by_urn`)
+  offers **Find them by their urn**, which imports the file again into its draft by
+  `prop.<name>,urn`; a replace held for its rows offers **Import the rest anyway**
+  (`maxRefusedRows=-1`).
 
 ---
 
@@ -1135,7 +1153,8 @@ tests/integration/test_s3_store_minio.py tests/test_object_store.py`.
   applied — or name something that was never there — finds nothing to delete: the row is
   `unchanged`, with the note "nothing to delete", and the dry run counts such rows in a hint. So a
   delta sent again is safe, and publishes itself; a mistyped name in a delete row only gets that
-  note.
+  note. That holds for a row named by a key the identifier reads: one that names nothing it reads
+  is refused (`no_key`).
 - **A taken-over export starts over.** An import resumes from its last window and a publish runs
   again safely, but an export rewrites its file from the start under a new key (§2). A job whose
   worker keeps dying fails once it has been taken over more than 3 times.

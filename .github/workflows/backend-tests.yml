@@ -164,6 +164,27 @@ jobs:
             tests/integration/test_search_layers_live.py \
             tests/integration/test_search_generic_ontology_live.py \
             tests/integration/test_search_edges_live.py -q
+      # A spike: what GRAPH.COPY on this engine does — whole, one version, the source serving
+      # meanwhile — and what it costs (time, memory, stalls, a node without room), for building a
+      # graph's next version beside its key (New-version builds). Last: it lowers maxmemory for a
+      # moment. Its report is the GRAPH_COPY_REPORT line in this step's log, and an artifact.
+      - name: GRAPH.COPY, what building a version beside its key can rely on
+        if: ${{ !cancelled() }}
+        working-directory: backend
+        env:
+          RUN_FALKOR_LIVE: "1"
+          FALKORDB_HOST: localhost
+          FALKORDB_PORT: "6379"
+          GRAPH_COPY_REPORT_PATH: graph-copy-report.json
+        run: |
+          python -m pytest tests/integration/test_graph_copy_live.py -q -s
+      - name: Keep the GRAPH.COPY report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: graph-copy-report
+          path: backend/graph-copy-report.json
+          if-no-files-found: ignore
 
   versioning-e2e:
     # The versioned graph against real Postgres, FalkorDB and Redis.

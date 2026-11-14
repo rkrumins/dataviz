@@ -38,6 +38,8 @@ class _CaptureClient:
 
     async def query(self, cypher, params=None, timeout=None):
         self.calls.append((cypher, params, timeout))
+        if "MERGE (a)-[r:AGGREGATED]->(b)" in cypher:     # a key holding every end: each lands
+            return SimpleNamespace(result_set=[[len((params or {}).get("batch") or [])]])
         return SimpleNamespace(result_set=list(self._rows))
 
     def cyphers(self):

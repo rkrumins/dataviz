@@ -162,6 +162,112 @@ NOTES: dict[str, tuple[str, str | None]] = {
         "minutes on it, so a draft of millions of rows is removed over a few sweeps.",
         None,
     ),
+    "GRAPHVER_PROJECTION_CANDIDATE_ABOVE": (
+        "Changed rows above which a publish is built in a second FalkorDB key while the current one keeps serving, then switched to (New-version builds, when its switch is on); smaller ones are written in place, paced. A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds.",
+        None,
+    ),
+    "GRAPHVER_PROJECTION_CANDIDATE_REBUILDS": (
+        "`1`: rebuilds, moves and loads of platform-owned keys are built beside too, so reads keep the current version meanwhile. A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds.",
+        None,
+    ),
+    "GRAPHVER_PROJECTION_CANDIDATE_MODE": (
+        "How a build makes its key: `auto` copies the serving key when its node has room, else seeds from Postgres on the node with most room; `copy` or `reseed` forces one way. A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds.",
+        None,
+    ),
+    "GRAPHVER_PROJECTION_COPY_MARGIN_PCT": (
+        "The free memory a copy needs on its node, as a share of the graph's size (`220` = ×2.2: while it runs, a copy holds the new key and its own buffer, each about the graph's size). A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds.",
+        None,
+    ),
+    "GRAPHVER_PROJECTION_COPY_MAX_BYTES": (
+        "The largest graph copied rather than seeded from Postgres; `0`: no limit. A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds.",
+        None,
+    ),
+    "GRAPHVER_PROJECTION_NO_ROOM_POLICY": (
+        "With no room for a build anywhere: `wait` (the current version keeps serving) or `in_place` (the change is written into the serving key, paced). A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds.",
+        None,
+    ),
+    "GRAPHVER_PROJECTION_NO_ROOM_ALERT_SECS": (
+        "Seconds a build may wait for room before it raises an alert. A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds.",
+        None,
+    ),
+    "GRAPHVER_PROJECTION_CANDIDATE_CONCURRENCY": (
+        "Builds each versioning worker runs at once, never more than `GRAPHVER_PROJECTION_CONCURRENCY`. A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds.",
+        None,
+    ),
+    "GRAPHVER_PROJECTION_CANDIDATE_MAX_ATTEMPTS": (
+        "Failures after which a build is dropped and the current version keeps serving. A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds.",
+        None,
+    ),
+    "GRAPHVER_PROJECTION_CANDIDATE_FLIP_MAX_LAG_ROWS": (
+        "The most rows a build may still have to catch up when it switches; the rest is applied inside the switch. Defaults to `GRAPHVER_PROJECTION_INLINE_MAX_ROWS`. A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds.",
+        None,
+    ),
+    "GRAPHVER_RETIRE_GRACE_SECS": (
+        "Seconds a graph's previous FalkorDB key stays after a switch or a move, so reads under way finish on it. A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds.",
+        None,
+    ),
+    "GRAPHVER_PROJECTION_STATEMENT_TARGET_MS": (
+        "The time each projector write statement aims at; larger batches are split, so reads on the same node keep their turn. A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds.",
+        None,
+    ),
+    "GRAPHVER_PROJECTION_WRITE_CEILING_S": (
+        "The most one projector write statement may take, on any FalkorDB mode, before it is stopped and split. A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds.",
+        None,
+    ),
+    "GRAPHVER_PROJECTION_PACING_RATIO": (
+        "The pause after each projector write statement, as a share of the time it took. A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds.",
+        None,
+    ),
+    "GRAPHVER_PROJECTION_READ_PRESSURE_RATIO": (
+        "The pause after each projector write statement while reads on the node are waiting, as a share of the time it took. A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds.",
+        None,
+    ),
+    "GRAPHVER_READ_STATEMENT_TIMEOUT_MS": (
+        "The most one read of a versioned graph from Postgres may take (while FalkorDB holds no version of it); past it the read answers 503 and is retried. A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds.",
+        None,
+    ),
+    "GRAPHVER_PG_READS_PER_GRAPH": (
+        "Reads of one versioned graph from Postgres that run at once per process; more wait briefly, then answer 429. A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds.",
+        None,
+    ),
+    "GRAPHVER_PG_READS_PER_PROCESS": (
+        "Reads from Postgres that run at once per process across graphs, so they never take the whole connection pool. A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds.",
+        None,
+    ),
+    "FALKORDB_STREAK_IGNORE_PROJECTOR_WRITES": (
+        "While the projector writes through a FalkorDB endpoint (it holds `gvproj:writing:<endpoint>` "
+        "in Redis), readers there whose deadlines run out in a row are told to retry (`429`, "
+        "`Retry-After: 2`) rather than that the node is failing over, which answers every read of "
+        "the graph from a memo for seconds. `0` treats such a streak as a failover, as before.",
+        None,
+    ),
+    "GRAPHVER_READ_MODE": (
+        "What readers of a versioned graph get while its next version is written into FalkorDB, "
+        "for every graph that doesn't set its own: `latest` (the default, as reads have always "
+        "worked: always the newest published version, from Postgres until FalkorDB holds it, "
+        "slower on a large graph), `in_place` (the version "
+        "FalkorDB last finished, while the next is written into the same key; readers may see part "
+        "of it) or `beside` (exactly that version, while the next is built in a second key, then "
+        "one switch; needs New-version builds on, and room for a second copy). A system "
+        "administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version "
+        "builds, and per graph.",
+        None,
+    ),
+    "GRAPHVER_ROUTE_POOL_SIZE": (
+        "Connections kept, per process, in the small pool that routes every read of a versioned "
+        "graph (its key, its watermark, its main branch). It is apart from `GRAPHVER_POOL_SIZE`, so "
+        "reads that fill that pool can't stop routing; each statement on it is cut off past two "
+        "seconds. Counts toward Postgres' `max_connections` with the main pool.",
+        None,
+    ),
+    "GRAPHVER_ROUTE_POOL_MAX_OVERFLOW": (
+        "Connections the routing pool may open past `GRAPHVER_ROUTE_POOL_SIZE` at a peak.",
+        None,
+    ),
+    "GRAPHVER_ROUTE_POOL_TIMEOUT_SECS": (
+        "Seconds a read waits for a routing connection before it fails, rather than queueing.",
+        None,
+    ),
     "MAX_IMPORT_BODY_BYTES": (
         "The body-size cap on the other routes that take large bodies (the rest of `/versioning/`, "
         "`/graph/save`, the view-file routes). An import's file is held to `IMPORT_MAX_BYTES` "

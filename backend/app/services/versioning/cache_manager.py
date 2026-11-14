@@ -67,9 +67,15 @@ def _evictable() -> tuple:
     is never dropped. Nor is a tombstoned graph's, nor one still at genesis (head ≤ 1: its version
     control is being enabled, is paused, failed, or is being seeded — its key is the data source's
     own graph or a half-built copy, and a reseed from genesis would empty it), nor one whose
-    bootstrap is unfinished. Both subqueries correlate to the projection row being tested."""
+    bootstrap is unfinished, nor one idle between the passes of a window in flight
+    (``window_rows``): dropped, its key would lose the pages written and the version it serves.
+    Nor one building a new version beside its key (``candidate_state``): its readers stay on the
+    serving key until the switch, and the build's key is copied from it. Both subqueries correlate
+    to the projection row being tested."""
     return (
         ProjectionStateORM.status == "idle",
+        ProjectionStateORM.window_rows.is_(None),
+        ProjectionStateORM.candidate_state.is_(None),
         ProjectionStateORM.owns_falkor_graph.is_(True),
         select(1).where(GraphORM.id == ProjectionStateORM.graph_id,
                         GraphORM.deleted_at.is_(None),

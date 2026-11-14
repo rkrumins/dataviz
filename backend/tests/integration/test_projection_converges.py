@@ -847,6 +847,20 @@ async def _a_summaries_state_that_is_no_object_owes_nothing(svc):
     await _assert_matches_main(svc, fake, gid)
 
 
+async def _window(gid):
+    """The graph's window in flight (``window_rows``), and whether eviction may take it."""
+    from sqlalchemy import select
+
+    from backend.app.services.versioning.cache_manager import _evictable
+    from backend.app.services.versioning.models import ProjectionStateORM
+
+    async with db.graphver_session() as s:
+        rows = (await s.get(ProjectionStateORM, gid)).window_rows
+        evictable = (await s.execute(select(ProjectionStateORM.graph_id).where(
+            ProjectionStateORM.graph_id == gid, *_evictable()))).first() is not None
+    return rows, evictable
+
+
 async def _resumable_and_self_healing(svc, monkeypatch):
     from sqlalchemy import update
 
@@ -870,15 +884,20 @@ async def _resumable_and_self_healing(svc, monkeypatch):
         *(_create(f"W{i}", f"w{i}") for i in range(60)),
         *(_link(f"WL{i}", f"W{i}", "A") for i in range(60))], "a paged window")
     before, passes = await _watermark(gid), []
+    assert await _window(gid) == (None, True)
     while True:
         r = await proj.project_graph(gid)
         passes.append(r)
         if not r.get("partial"):
             break
         assert await _watermark(gid) == before and g.cursor["from"] == before, (r, g.cursor)
+        # Idle between its passes, the window is marked in flight with its 120 version rows, and
+        # eviction leaves the graph alone: dropped, its key would lose the pages written so far.
+        assert await _window(gid) == (120, False), passes
         assert len(passes) < 20
     assert r["verify_error"] is None and len(passes) >= 4, passes
     assert g.cursor is None
+    assert await _window(gid) == (None, True), "published: no window in flight"
     await _assert_matches_main(svc, fake, gid)
 
     # A paged window that retypes nodes: the pass that publishes it resumes after its last page and

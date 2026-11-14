@@ -424,13 +424,17 @@ class PurgeRunner:
         """Drop the projected FalkorDB graph — if, and only if, it is ours to drop and nothing else
         reads it — and, by the same rule, each old key a move left waiting to be dropped
         (``retired_keys``) that holds the projector's pass marker or is one of the graph's own
-        platform keys."""
+        platform keys, and the key a new version was being built in beside it (``candidate_*``),
+        always one of them."""
         async with self._session() as s:
             ps = await s.get(ProjectionStateORM, graph_id)
             name = ps.falkor_graph_name if ps else None
             owned = bool(ps.owns_falkor_graph) if ps else False
             provider = ps.falkor_provider if ps else None
             retired = list(ps.retired_keys or []) if ps else []
+            if ps is not None and getattr(ps, "candidate_graph_name", None):
+                retired.append({"name": ps.candidate_graph_name,
+                                "provider": ps.candidate_provider})
             ds_id = getattr(await s.get(JobORM, lease.job_id), "data_source_id", None)
 
         async def verdict_for(name, provider, owned, *, marked: bool = False) -> str:

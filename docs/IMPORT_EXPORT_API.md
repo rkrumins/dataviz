@@ -114,8 +114,9 @@ wait_for() {
   It never changes, whatever matched it, and an id an item already has is kept. Every node and edge
   keeps its id, and so its history, through every import.
 - **A file's keys only find ids.** Each row finds the item it describes by the import's
-  `identifier`: `entity_id`, `urn`, or `prop.<name>` (a property of your own). The key a row
-  matched by is never written over the item's id or urn.
+  `identifier`: `entity_id`, `urn`, `prop.<name>` (a property of your own), or `prop.<name>,urn`
+  (the property, then the urn). The key a row matched by is never written over the item's id or
+  urn.
 - **A row that finds nothing makes a new item**, under an id derived from its key, its urn or its
   property's value (a UUIDv5). The same file imported again derives the same id, so it finds that
   item instead of making it twice.
@@ -302,12 +303,13 @@ service, the same in curl, Python, Node.js, Go or Java, for an upsert and a full
 | Parameter | What it does |
 |---|---|
 | `format` | `ndjson` (the default), `csv`, `tsv`, `json` or `xlsx` |
-| `identifier` | `entity_id`, `urn` or `prop.<name>`. Left out, the graph's default |
+| `identifier` | `entity_id`, `urn`, `prop.<name>` or `prop.<name>,urn` ([choosing one](#the-model-in-one-minute)). Left out, the graph's default |
 | `reconcileMode` | `upsert` (the default) writes what the file names; `replace` also deletes what it leaves out ([Upsert or replace](#upsert-or-replace)) |
 | `branchId` | Import into your open draft, beside what it holds. Without it, the import opens a draft of its own |
 | `viewId` | Place the nodes the import makes in that view's layout. Needs edit access to the view, and with a key, **Views: read & write** |
 | `autoPublish` | `true`: the draft publishes itself once every row is in ([step 6](#6-publish)). Not with `branchId` |
 | `allowMassDelete` | `true`: a replace may delete past the replace guard |
+| `replaceScope` | A replace by a property: `keyed` deletes only what holds it; `all` (the default) anything the file leaves out ([What a replace may delete](#what-a-replace-may-delete-replacescope)) |
 | `maxRefusedRows` | How many refused rows the import may go on without: `0` (the default) holds on any, a count (`100`), a share of the file's rows (`0.5%`), or `-1` for any ([When rows are refused](/docs/import-from-your-service#when-rows-are-refused)) |
 | `idempotencyKey` | Makes the request safe to send again ([Sending again](#sending-again-idempotency-and-retries)) |
 
@@ -326,8 +328,9 @@ loop, and [Building a Connector](/docs/connector-guide#5-sending-the-file) cover
    parts as it arrives.
 3. `GET …/imports/uploads/{uploadId}` lists the parts `received`. To resume, send the others.
 4. `POST …/imports/uploads/{uploadId}/complete`, with `identifier`, `reconcileMode`, `branchId`,
-   `viewId`, `autoPublish` and `allowMassDelete` as query parameters, answers `202` as
-   `POST …/imports` does. An upload is imported once: completing it again answers with that import.
+   `viewId`, `autoPublish`, `allowMassDelete`, `maxRefusedRows` and `replaceScope` as query
+   parameters, answers `202` as `POST …/imports` does. An upload is imported once: completing it
+   again answers with that import.
 
 ### 5. Follow the job
 
@@ -342,7 +345,8 @@ loop, and [Building a Connector](/docs/connector-guide#5-sending-the-file) cover
 | `summary.replaceGuard` | A replace's verdict ([The replace guard](#the-replace-guard)) |
 | `summary.publish` | How an `autoPublish` import's publish went ([step 6](#6-publish)) |
 | `errorMessage`, `summary.failure` | Why a job failed: `{code, action, phase, reason}` |
-| `summary.refused` | The rows it refused: how many for each reason (`byCode`), the first 20 with where each is in the file (`at`: a line, a sheet's row, an item) and why (`rows`), and what to do about each reason (`fixes`) |
+| `summary.refused` | The rows it refused: how many for each reason (`byCode`) and of each kind (`byKind`: `node`, `edge`), the first 20 with where each is in the file (`at`: a line, a sheet's row, an item) and why (`rows`), and what to do about each reason (`fixes`). By a property alone, `hints.by_urn` counts the rows `prop.<name>,urn` would find by their urn |
+| `summary.edgesCascaded` | A replace's: the edges that went with the nodes it deleted, beyond the edges it deleted itself. They are those reaching outside its scope (a view's, or a keyed replace's) |
 | `queuedAhead`, `stale`, `attempt` | While queued, the jobs before it; a worker gone quiet (another takes the job over and resumes it: wait); which attempt this is |
 
 `GET …/imports/{jobId}/preview` lists up to 200 rows that changed something, each with its `op`,
@@ -777,8 +781,8 @@ curl -sS -X POST "$BASE/api/v1/$WS/versioning/graphs/$GID/imports/validate?forma
 
 By `urn`, a qualified name finds nothing. Imported as it is, the replace would refuse to delete
 anything: a refused row might name what the file means to keep, so the job fails, `"Nothing was
-deleted: 1 row(s) of the file couldn't be applied, …"`. The dry run doesn't count a replace's
-deletions either: `deleted` is `0` above.
+deleted: 1 node row(s) of the file were refused, and a replace deletes whatever the file leaves
+out — …"`. The dry run doesn't count a replace's deletions either: `deleted` is `0` above.
 
 **Fix the row and import the night's file.** `invoices` gets its urn,
 `{"kind": "node", "urn": "urn:li:dataset:shop.invoices", "entityType": "Table", "displayName": "invoices", "prop.owner": "carol"}`.
@@ -990,7 +994,9 @@ curl -sS -X POST "$BASE/api/v1/$WS/versioning/graphs/$GID/identities/resolve" \
 ```
 
 A value two live nodes hold answers `duplicate`, with both in `entityIds`. Values compare as text
-with spaces at either end ignored: `ABC` and `abc` are different values.
+with spaces at either end ignored: `ABC` and `abc` are different values. With
+`"identifier": "prop.external_id,urn"`, a value no node holds as its `external_id` is looked up as a
+urn, as an import by that identifier finds a row without the value.
 
 **Make it the graph's default.** So the ERP's imports needn't name it, a workspace admin chooses
 **A property** under **Match existing items by** on the data source's **Versioning** tab, under
@@ -1021,12 +1027,15 @@ dropped in silence. The reasons below are the ones the API gives.
 | A type the data source's ontology doesn't define | Refused | `invalid_type`: *"'View' is not a valid entity type in this ontology"* |
 | Two rows for one item that say different things | The first applies; the second is refused. Two that say the same: the second is `unchanged` | `named_already`: *"row 4 of this file already names this node — give each node one row"* (rows counted from 1) |
 | An `entity_id` and a `urn` (or a property's value) that name two different items | Refused | `two_entities`: *"its entity_id and its urn name two different entities — give it one of them"* |
+| By `prop.external_id`, a new value whose `urn` is an item's that has no `external_id` (a graph first loaded by urn) | Refused. Send `identifier=prop.external_id,urn`: the row finds that item by its urn, and the item takes the value | `two_entities`: *"its urn '…' is node urn:uuid:…'s, which holds no external_id: send identifier=prop.external_id,urn to find it by its urn — it then takes this external_id"* |
 | A value two live items hold, by `prop.<name>` | The rows naming it are refused, naming both items | `duplicate_value`: *"external_id 'E-1002' is held by 2 nodes (urn:uuid:…, urn:uuid:…): make it unique to one, or give the row its entity_id"* |
 | A qualified name several items carry, a key field several hold, or a unique field's value another holds | Refused | `duplicate_value` |
 | The item changed since the export, in a cell you changed too | Refused; your other rows apply | `changed_since_export`: *"changed since you exported it: description — export again, or clear baseVersion to overwrite"* |
 | A delete row of an item changed since the export | Refused | `changed_since_export`: *"changed since you exported it — export again, or clear baseVersion to delete it anyway"* |
-| An edge end that names no node | Refused | `end_not_found`: *"edge endpoint not found"* |
-| An edge row kept in a file that deletes one of its nodes | Refused when the import runs. The dry run doesn't catch it | `end_not_found`: *"edge endpoint not found"* |
+| A delete row that names nothing the identifier reads: by `prop.external_id`, one with only a urn | Refused: what it would delete can't be told | `no_key` |
+| An edge end that names no node | Refused | `end_not_found`: *"its target urn:svc:ledger_v2 names no node the graph holds or the file makes"* |
+| An edge row kept in a file that deletes one of its nodes | Refused when the import runs. The dry run doesn't catch it | `end_not_found`, as above |
+| An edge whose end is a node of the file whose own row was refused | Refused. Fix that node row, and the edge finds its end | `end_refused`: the reason names the end, and the node row with its code |
 | An exported edge given other ends or another type | Refused, rather than made a second edge | `edge_moved`: *"its ends or type differ from edge urn:uuid:…'s — to re-point an edge, mark its row _op=delete and add a new row without an entity_id"* |
 | `_op` is anything but blank, `upsert` or `delete` | Refused: the columns are usually shifted | `invalid_row`: *"unexpected _op value 'remove' — the _op column only accepts blank or 'delete'; …"* |
 | A strict ontology's write gate refuses a row when the draft commits | Refused; the window's other rows apply | `write_refused` |
@@ -1036,12 +1045,13 @@ dropped in silence. The reasons below are the ones the API gives.
 | Situation | What happens |
 |---|---|
 | A row that changes nothing | `unchanged`: no version, no commit |
-| A delete of what isn't there (deleted already, or never there) | `unchanged`, with *"nothing to delete: it isn't in the graph (deleted already, or never there)"*. The dry run counts such rows in a hint. So a delta sent twice is safe |
+| A delete of what isn't there (deleted already, or never there), named by a key the identifier reads | `unchanged`, with *"nothing to delete: it isn't in the graph (deleted already, or never there)"*. The dry run counts such rows in a hint. So a delta sent twice is safe |
 | A matched row whose `urn` you edited | Its other cells apply; the urn stays, with *"urn '…' isn't stored: an import never changes a node's urn — keep your own id in another property"* |
 | By `entity_id`, a `urn:uuid:` entity id no item holds (an export from another environment) | A new node under that id, so an item keeps one id across environments |
 | Any other `entity_id` on a new row (`new-1`) | A link between the file's rows: an edge's `source_entity_id: new-1` finds that node. It still needs a urn to be found again later |
 | By `entity_id`, a new row found again only by its qualified name or a key field | Made under a new id (a UUIDv7); a later import finds it by that name or field |
 | By `prop.<name>`, a changed value | A new key: a row with the old value makes a new node. To keep the node, send its `entity_id` with the new value once |
+| By `prop.<name>,urn`, a value no item holds yet, in a row whose `urn` is an item's | That item is found by its urn, keeps its id and takes the value, so the next import finds it by the property: *"found by its urn: it takes external_id 'E-1001', and the next import finds it by its external_id"* |
 | A node deleted, then named again by its urn or its value | Brought back under its own id, with its history |
 | A record whose `kind` is neither `node` nor `edge` | Skipped and counted (`summary.skipped`). A replace with skipped records imports nothing |
 
@@ -1049,7 +1059,7 @@ dropped in silence. The reasons below are the ones the API gives.
 
 | Situation | Answer |
 |---|---|
-| `identifier=external_id` (no `prop.`) | `422` `invalid_identifier`: *"identifier is entity_id, urn or prop.<name>, not 'external_id'"* |
+| `identifier=external_id` (no `prop.`) | `422` `invalid_identifier`: *"identifier is entity_id, urn, prop.<name>, or prop.<name>,urn (the property, then the urn), not 'external_id'"* |
 | `autoPublish=true` with `branchId` | `422` `auto_publish_needs_own_draft` |
 | A dry run by a property no import has matched by | `409` `identifier_not_indexed` |
 | An `idempotencyKey` you used for an export, on an import | `409` `idempotency_key_reused`: *"This idempotencyKey started another kind of job on this graph. Send a new one."* |
@@ -1060,7 +1070,7 @@ dropped in silence. The reasons below are the ones the API gives.
 | You send | `reconcileMode` | What happens |
 |---|---|---|
 | What changed | `upsert` (the default) | Rows set what they name and leave the rest. Deletes are `_op=delete` rows |
-| Everything, every time | `replace` | The same, and every item in scope that no row matched is deleted. The scope is the whole graph, or with `viewId`, that view's entities |
+| Everything, every time | `replace` | The same, and every item in scope that no row matched or names is deleted (with `replaceScope=keyed`, only what holds the property). The scope is the whole graph, or with `viewId`, that view's entities |
 
 - **A replace deletes nothing while any row is refused,** since the refused row might name what the
   file means to keep. The job fails (`summary.failure.code` `rows_refused`, action `fix_rows`;
@@ -1072,7 +1082,8 @@ dropped in silence. The reasons below are the ones the API gives.
   ([When rows are refused](/docs/import-from-your-service#when-rows-are-refused)).
 - **A replace never deletes what the file names.** It keeps every item a row matched, and also:
   - every live item a refused row names by any key it carries: its `entity_id`, its `urn`, its
-    value of the identifier's property, its edge's own id and ends;
+    value of the identifier's property, its edge's own id and ends. A refused delete row keeps
+    nothing this way: it meant to delete what it names;
   - every node an edge row names as an end, though the file has no row for that node.
   So a refused row, sent on with `maxRefusedRows`, never makes the replace delete the item it was
   about, nor an edge row its ends.
@@ -1119,9 +1130,11 @@ on: the job fails with `summary.failure.code` `identifier_matched_nothing` (`act
 "identifier"`), naming the identifier it matched by. Nothing is deleted; the rows read so far are
 on the draft. A small file is checked too: the guard measures what a file makes against its whole
 scope, so a few hundred rows by the wrong key would otherwise delete a large graph. A view's replace
-is left to the guard. The guard also counts the rows a replace refused that matched nothing beside
-what it makes (`replaceGuard.refusedUnmatched`), so a file whose rows can't be matched is refused
-whatever `maxRefusedRows` lets through.
+is left to the guard. A replace by `prop.<name>` alone over a graph first loaded by urn stops here,
+before `rows_refused`: `summary.refused.hints.by_urn` counts the rows `prop.<name>,urn` would find
+by their urn, and sending that is the fix. The guard also counts the rows a replace refused that
+matched nothing beside what it makes (`replaceGuard.refusedUnmatched`), so a file whose rows can't
+be matched is refused whatever `maxRefusedRows` lets through.
 
 ## Sending again: idempotency and retries
 
@@ -1165,7 +1178,7 @@ round trip meets:
 | `413` | `too_large` | dry run | Over 8 MiB or 10,000 rows: import it into a draft instead |
 | `413` | | import, upload | Over 10 GiB, or over 100 MB as JSON or Excel; or a JSON body to `…/imports/uploads` over 64 KB: the description, not the file (send the file as `application/octet-stream`) |
 | `415` | *(a sentence)* | import, upload, part | The file was sent as a form (`multipart/form-data`): send its bytes as the body |
-| `422` | `invalid_identifier` | import, upload `complete`, dry run, `identities/resolve`, `import-settings` | Not `entity_id`, `urn` or `prop.<name>` |
+| `422` | `invalid_identifier` | import, upload `complete`, dry run, `identities/resolve`, `import-settings` | Not `entity_id`, `urn`, `prop.<name>` or `prop.<name>,urn` |
 | `422` | `invalid_file` | dry run | The file can't be read as its format |
 | `422` | `auto_publish_needs_own_draft` | import, upload `complete` | `autoPublish` with `branchId` |
 | `422` | `invalid_max_refused_rows` | import, upload `complete` | `maxRefusedRows` isn't `0`, a count, a share such as `0.5%`, or `-1` |

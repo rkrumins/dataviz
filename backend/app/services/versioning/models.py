@@ -347,6 +347,29 @@ class ProjectionStateORM(VersioningBase):
     # NULL when the key holds no published version: never written, written from nothing (a move,
     # an Adopt, a repin), lost, evicted or reset (20261112_1800_gv_ps_served).
     served_commit_seq = Column(BigInteger, nullable=True)
+    # The version rows of the window a pass stopped part-way through (its time ran out at a page),
+    # NULL while none is: set by that pass, cleared by the pass that publishes. Until then the graph
+    # sits idle between passes with the window half written, so eviction leaves it alone
+    # (``cache_manager._evictable``): dropped, the key would lose that work and the version it
+    # serves, and its reads would go to Postgres until a load reseeded it. The capacity planner
+    # keeps room on its master for what the rest of the window may add
+    # (20261113_1200_gv_ps_window_rows).
+    window_rows = Column(BigInteger, nullable=True)
+    # What reads of this graph's main get while a newer version is written into FalkorDB, as a
+    # system administrator set it for this graph: ``latest``, ``in_place`` or ``beside``
+    # (``config.READ_MODES``). NULL takes the platform's (New-version builds' ``readMode``)
+    # (20261113_1300_gv_ps_read_mode).
+    read_mode = Column(Text, nullable=True)
+    # A new version built beside the key that serves (read mode ``beside``): the build's key and
+    # provider, the version it holds whole (NULL until written), and where it is
+    # (``candidates.STEPS``: its id, why it was asked for, its step, attempts, error, when it may
+    # try again). All NULL while none is: the serving key is then the only key, and every pass
+    # behaves as before. While one is, nothing writes the serving key: it keeps serving its
+    # version whole until the switch (20261113_1400_gv_ps_candidate).
+    candidate_graph_name = Column(Text, nullable=True)
+    candidate_provider = Column(Text, nullable=True)
+    candidate_seq = Column(BigInteger, nullable=True)
+    candidate_state = Column(JSONB(none_as_null=True), nullable=True)
     last_projected_at = Column(Text, nullable=True)
     last_error = Column(Text, nullable=True)
     # THE GUARDRAIL. A bootstrapped graph is PINNED to the customer's REAL FalkorDB graph — that
@@ -401,6 +424,8 @@ class ProjectionStateORM(VersioningBase):
             name="ck_proj_status",
         ),
         CheckConstraint("residency IN ('always','standard','coldline')", name="ck_ps_residency"),
+        CheckConstraint("read_mode IS NULL OR read_mode IN ('latest','in_place','beside')",
+                        name="ck_ps_read_mode"),
         CheckConstraint(
             "evicted_reason IS NULL OR "
             "evicted_reason IN ('idle_standard','idle_coldline','pressure','lost','admin',"
@@ -1002,6 +1027,15 @@ def _ensure_schema_upgrades(conn) -> None:
                   lambda: ensure_ps_pressure_failures_column(conn), required=True)
     _bounded_step(conn, "projection_state.served_commit_seq was not added",
                   lambda: ensure_ps_served_column(conn), required=True)
+    # 20261113_1000_gv_ps_served_fill. Not required: the projector restores a row it missed.
+    _bounded_step(conn, "projection_state.served_commit_seq was not filled",
+                  lambda: backfill_ps_served(conn))
+    _bounded_step(conn, "projection_state.window_rows was not added",
+                  lambda: ensure_ps_window_rows_column(conn), required=True)
+    _bounded_step(conn, "projection_state.read_mode was not added",
+                  lambda: ensure_ps_read_mode_column(conn), required=True)
+    _bounded_step(conn, "projection_state's build columns were not added",
+                  lambda: ensure_ps_candidate_columns(conn), required=True)
     _bounded_step(conn, "import_rows.code was not added",
                   lambda: ensure_import_rows_code_column(conn), required=True)
     _bounded_step(conn, "jobs.allow_mass_delete was not added",
@@ -1195,6 +1229,78 @@ def ensure_ps_served_column(conn) -> None:
         return
     conn.execute(text(f'ALTER TABLE "{_SCHEMA}"."projection_state" '
                       "ADD COLUMN IF NOT EXISTS served_commit_seq BIGINT"))
+
+
+def ensure_ps_window_rows_column(conn) -> None:
+    """Add ``projection_state.window_rows``: the version rows of the window a pass stopped part-way
+    through, NULL (every existing graph) while none is. Nullable with no default, so nothing is
+    rewritten; a no-op without the table and once the column is there, like
+    :func:`ensure_ps_served_column`."""
+    inspector = sa_inspect(conn)
+    if not inspector.has_table("projection_state", schema=_SCHEMA):
+        return
+    if "window_rows" in {c["name"] for c in inspector.get_columns("projection_state",
+                                                                  schema=_SCHEMA)}:
+        return
+    conn.execute(text(f'ALTER TABLE "{_SCHEMA}"."projection_state" '
+                      "ADD COLUMN IF NOT EXISTS window_rows BIGINT"))
+
+
+def ensure_ps_read_mode_column(conn) -> None:
+    """Add ``projection_state.read_mode``, a graph's own read mode, with its check
+    (``ck_ps_read_mode``): NULL (every existing graph) takes the platform's. Nullable with no
+    default, so nothing is rewritten; a no-op without the table and once both are there, like
+    :func:`ensure_ps_window_rows_column`."""
+    inspector = sa_inspect(conn)
+    if not inspector.has_table("projection_state", schema=_SCHEMA):
+        return
+    ps = f'"{_SCHEMA}"."projection_state"'
+    present = {c["name"] for c in inspector.get_columns("projection_state", schema=_SCHEMA)}
+    checked = conn.execute(text(
+        "SELECT 1 FROM pg_constraint WHERE conrelid = CAST(:ps AS regclass) "
+        "AND conname = 'ck_ps_read_mode'"), {"ps": ps}).first() is not None
+    if "read_mode" in present and checked:
+        return
+    conn.execute(text(f"ALTER TABLE {ps} ADD COLUMN IF NOT EXISTS read_mode TEXT"))
+    conn.execute(text(f"ALTER TABLE {ps} DROP CONSTRAINT IF EXISTS ck_ps_read_mode"))
+    conn.execute(text(f"ALTER TABLE {ps} ADD CONSTRAINT ck_ps_read_mode CHECK "
+                      "(read_mode IS NULL OR read_mode IN ('latest','in_place','beside'))"))
+
+
+def ensure_ps_candidate_columns(conn) -> None:
+    """Add ``projection_state``'s build columns (``candidate_graph_name``, ``candidate_provider``,
+    ``candidate_seq``, ``candidate_state``): a new version built beside the serving key. All
+    nullable with no default, so nothing is rewritten and every graph has no build; a no-op without
+    the table and once they are there, like :func:`ensure_ps_read_mode_column`."""
+    inspector = sa_inspect(conn)
+    if not inspector.has_table("projection_state", schema=_SCHEMA):
+        return
+    ps = f'"{_SCHEMA}"."projection_state"'
+    present = {c["name"] for c in inspector.get_columns("projection_state", schema=_SCHEMA)}
+    for column, sql_type in (("candidate_graph_name", "TEXT"), ("candidate_provider", "TEXT"),
+                             ("candidate_seq", "BIGINT"), ("candidate_state", "JSONB")):
+        if column not in present:
+            conn.execute(text(f"ALTER TABLE {ps} ADD COLUMN IF NOT EXISTS {column} {sql_type}"))
+
+
+def backfill_ps_served(conn) -> None:
+    """Fill ``projection_state.served_commit_seq`` for a graph whose key holds a published version
+    while the column, added after it last published, is still NULL: that version is its watermark.
+    Left NULL, a rebuild of the graph (the watermark at 0) sends its reads to Postgres for the whole
+    rebuild. A row already at 0 can't be filled from here: the projector restores it from the
+    key's marker. Only pinned keys whose status serves a version; a no-op once filled, and without
+    the table or the column."""
+    inspector = sa_inspect(conn)
+    if not inspector.has_table("projection_state", schema=_SCHEMA):
+        return
+    if "served_commit_seq" not in {c["name"] for c in inspector.get_columns("projection_state",
+                                                                            schema=_SCHEMA)}:
+        return
+    conn.execute(text(
+        f'UPDATE "{_SCHEMA}"."projection_state" SET served_commit_seq = projected_commit_seq '
+        "WHERE served_commit_seq IS NULL AND projected_commit_seq > 1 "
+        "AND status NOT IN ('evicted', 'waiting_capacity', 'rehydrating', 'reseeding') "
+        "AND falkor_graph_name IS NOT NULL AND falkor_graph_name <> 'gv_' || graph_id"))
 
 
 def ensure_ps_reseeding_status(conn) -> None:

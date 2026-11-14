@@ -33,8 +33,8 @@ from typing import Awaitable, Callable, Dict, Iterable, List, Optional, Sequence
 from sqlalchemy import Text, any_, bindparam, case, func, literal, null, or_, select, update
 from sqlalchemy.dialects.postgresql import ARRAY
 
-from . import config, db, residency_policy
-from .errors import AmbiguousSpelling
+from . import build_policy, candidates, config, db, keymigrate, residency_policy
+from .errors import AmbiguousSpelling, LockBusy
 from .falkor_indexes import ensure_urn_indexes
 from .merkle import content_hash
 from .reconcile import (
@@ -67,6 +67,7 @@ from backend.common.derived_artifacts import is_derived_label
 # Reuse the existing reader's schema helpers verbatim so the projection is
 # byte-for-byte reader-compatible (a reader schema change flows through here too).
 from backend.app.providers.falkordb_provider import (  # noqa: E402
+    projector_writing_key,
     _RESERVED_NODE_KEYS,
     _admit_native_keys,
     _compute_searchable_text,
@@ -209,6 +210,14 @@ async def _q(client, cypher: str, params: Optional[dict] = None,
 # - the width that worked is kept per graph and statement kind (:class:`_Width`).
 # Sending again is safe: FalkorDB rolls back a statement it aborts, and every projector write is
 # an idempotent MERGE / SET / DELETE (a rollup write sets the absolute weight it computed).
+#
+# Reads come first (New-version builds' pacing, ``build_policy``): a write holds the graph's write
+# lock, and every read of the graph on that node, for as long as it runs. So a write is cut off at
+# ``writeCeilingSecs`` on every FalkorDB mode, not only under a cluster's failure detector; a chunk
+# that takes longer than ``statementTargetMs`` narrows the next (no narrower than ``_SLOW_FLOOR``
+# rows for being slow); and after each one the projector pauses ``pacingRatio`` times what it took —
+# ``readPressureRatio`` times, while the web tier says reads on the node are starving
+# (``agg:readpressure:<node>``, as the aggregation writers read it) — at most ``_PACE_MAX_S``.
 
 def _floor_backoff_s(attempt: int) -> float:
     """Before retry ``attempt`` (0-based) of a one-row statement: 2 s, 4 s, 8 s … capped at 60 s,
@@ -219,6 +228,103 @@ def _floor_backoff_s(attempt: int) -> float:
 #: What the ladder waits and times with (tests replace them).
 _sleep = asyncio.sleep
 _clock = time.monotonic
+
+#: A chunk slower than the statement target is halved no narrower than this: fifty rows that take
+#: the target are not split further for being slow, only for failing.
+_SLOW_FLOOR = 50
+#: The longest pause after one write statement, and the shortest worth taking.
+_PACE_MAX_S = 5.0
+_PACE_MIN_S = 0.005
+#: How long a node's read-pressure verdict is reused before Redis is asked again.
+_PRESSURE_POLL_S = 2.0
+_PRESSURE_SEEN: Dict[str, Tuple[float, bool]] = {}
+
+
+def _node_of(client) -> Optional[str]:
+    """``host:port`` of the node a graph client writes, as the web tier names it when it reports
+    reads starving there (``read_pressure.pressure_key``): on a cluster the key's owner (None when
+    the handle doesn't know it), else the connection's endpoint. None for a client that says
+    neither, a test fake."""
+    cfg = getattr(client, "_cfg", None)
+    if cfg is None:
+        return None
+    if getattr(cfg, "mode", None) == "cluster":
+        node = getattr(client, "_node", None)
+        return f"{node[0]}:{node[1]}" if node else None
+    host, port = getattr(cfg, "host", None), getattr(cfg, "port", None)
+    return f"{host}:{port}" if host and port else None
+
+
+async def _reads_starving(client) -> bool:
+    """Whether the web tier says reads are starving on the node ``client`` writes
+    (``agg:readpressure:<node>``, stamped with a short TTL). Asked at most every
+    ``_PRESSURE_POLL_S`` per node; False when it can't be told: no signal, no slowdown."""
+    node = _node_of(client)
+    if node is None:
+        return False
+    now = time.monotonic()
+    seen = _PRESSURE_SEEN.get(node)
+    if seen is not None and now - seen[0] < _PRESSURE_POLL_S:
+        return seen[1]
+    try:
+        from backend.app.services.aggregation.admission import read_pressure_key
+        from backend.app.services.aggregation.redis_client import get_redis
+
+        starving = bool(await asyncio.wait_for(get_redis().get(read_pressure_key(node)), 0.2))
+    except Exception:  # noqa: BLE001 — fail open
+        starving = False
+    _PRESSURE_SEEN[node] = (now, starving)
+    return starving
+
+
+#: The projector's writing lease on an endpoint (``_writing``): how long it lives, and how often a
+#: pass renews it.
+_WRITING_TTL_S = 30
+_WRITING_RENEW_S = 10.0
+_WRITING_RENEWED: Dict[str, float] = {}
+
+
+def _endpoint_of(client) -> Optional[str]:
+    """``host:port`` of the endpoint a graph client connects through, as a reader's provider names
+    it (``FalkorDBProvider._endpoint_label``); None for a client that doesn't say (a test fake)."""
+    cfg = getattr(client, "_cfg", None)
+    host, port = getattr(cfg, "host", None), getattr(cfg, "port", None)
+    return f"{host}:{port}" if host and port else None
+
+
+async def _writing(client) -> None:
+    """Hold the projector's writing lease on the endpoint ``client`` writes through
+    (``projector_writing_key``, ``_WRITING_TTL_S``), renewed at most every ``_WRITING_RENEW_S``:
+    while it lives, readers there missing their deadlines are held back by these writes, not by a
+    wedged node, and are answered busy rather than as a failover. Best effort."""
+    endpoint = _endpoint_of(client)
+    if endpoint is None:
+        return
+    now = time.monotonic()
+    if now - _WRITING_RENEWED.get(endpoint, float("-inf")) < _WRITING_RENEW_S:
+        return
+    _WRITING_RENEWED[endpoint] = now
+    try:
+        from backend.app.services.aggregation.redis_client import get_redis
+
+        await asyncio.wait_for(get_redis().set(projector_writing_key(endpoint), "1",
+                                               ex=_WRITING_TTL_S), 0.2)
+    except Exception:  # noqa: BLE001 — readers' streaks then count, as before
+        logger.debug("projection: could not hold the writing lease on %s", endpoint, exc_info=True)
+
+
+async def _pace(client, elapsed_s: float, policy) -> None:
+    """After a write statement that took ``elapsed_s``, give the node's reads their turn: a pause of
+    ``pacingRatio`` times it, ``readPressureRatio`` times while reads there are starving, at most
+    ``_PACE_MAX_S``; none shorter than ``_PACE_MIN_S``."""
+    ratio = float(policy["pacingRatio"])
+    if float(policy["readPressureRatio"]) > ratio and await _reads_starving(client):
+        ratio = float(policy["readPressureRatio"])
+        from backend.app.jobs.metrics import increment
+        increment("graphver_projection_yields_total")
+    pause = min(_PACE_MAX_S, elapsed_s * ratio)
+    if pause >= _PACE_MIN_S:
+        await _sleep(pause)
 
 
 class _Width:
@@ -240,15 +346,15 @@ class _Width:
         self.streak = 0
         self.failed: Optional[int] = None
 
-    def halve(self, size: int, *, failed: bool = True) -> None:
+    def halve(self, size: int, *, failed: bool = True, floor: int = 1) -> None:
         if failed:
             self.failed = size if self.failed is None else min(self.failed, size)
-        self.value = max(1, min(self.value, size // 2))
+        self.value = max(1, min(self.value, max(floor, size // 2)))
         self.streak = 0
 
-    def note(self, size: int, *, slow: bool) -> None:
-        if slow:
-            self.halve(size, failed=False)
+    def note(self, size: int, *, slow: bool, floor: int = 1) -> None:
+        if slow:                                # never below ``floor``, nor above where it is
+            self.halve(size, failed=False, floor=floor)
             return
         self.streak += 1
         if self.streak < 8 or self.value >= self.ceiling:
@@ -328,6 +434,10 @@ class _Held:
 
 _PASS_HELD: ContextVar[Optional[_Held]] = ContextVar("projection_pass_held", default=None)
 
+#: The build a pass writes for (``_advance_candidate``): its id, while it writes the build's key.
+#: Its progress then goes on the build, not on the serving row the build leaves alone.
+_PASS_BUILD: ContextVar[Optional[str]] = ContextVar("projection_pass_build", default=None)
+
 
 #: The pass marker, the last FalkorDB write of every publishing pass (``_write_marker``). Its
 #: label is derived, so no count, scan or search sees it. ``epoch`` changes with every claim, so
@@ -341,12 +451,14 @@ async def _write_marker(client, seq: int, epoch: int) -> Optional[str]:
     that cannot be told), else None."""
     want = config.PROJECTION_WAIT_REPLICAS
     write_and_wait = getattr(client, "write_and_wait", None) if want > 0 else None
+    ceiling_ms = 1000 * int(build_policy.current()["writeCeilingSecs"])
     if write_and_wait is None:                  # WAIT off, or a client without it (a test fake)
-        await _q(client, _MARKER_WRITE, {"seq": seq, "epoch": epoch})
+        await _q(client, _MARKER_WRITE, {"seq": seq, "epoch": epoch},
+                 timeout_ms=min(_WRITE_TIMEOUT_MS, ceiling_ms))
         return None
     from backend.app.providers.falkordb_provider import clamp_write_budget
 
-    budget_ms = int(1000 * clamp_write_budget(_WRITE_TIMEOUT_MS / 1000.0))
+    budget_ms = min(int(1000 * clamp_write_budget(_WRITE_TIMEOUT_MS / 1000.0)), ceiling_ms)
     acked = await asyncio.wait_for(
         write_and_wait(f"CYPHER seq={int(seq)} epoch={int(epoch)} {_MARKER_WRITE}",
                        timeout_ms=budget_ms, min_replicas=want,
@@ -375,6 +487,33 @@ _CURSOR_WRITE = ("MERGE (m:_GVProjMeta {id: 'meta'}) "
                  "m.pStructural = $structural, m.pDropped = $dropped")
 _CURSOR_CLEAR = ("MATCH (m:_GVProjMeta) "
                  "REMOVE m.pFrom, m.pTo, m.pStep, m.pAfter, m.pStructural, m.pDropped")
+
+#: A build seeded from Postgres carries the serving key's lineage summaries over
+#: (``FalkorProjector._copy_summaries``): the serving key's summary cells a page of source nodes at
+#: a time, by internal id, each written onto its ends in the build's key by label and urn; then the
+#: summaries' own markers as they are (label, id). A key's summaries go a page at a time.
+_SUMMARIES_PAGE = ("MATCH (a)-[r:AGGREGATED]->(b) WHERE id(a) >= $lo AND id(a) < $hi "
+                   "RETURN labels(a)[0], a.urn, labels(b)[0], b.urn, properties(r)")
+_SUMMARY_MARKERS = (("_AggMeta", "singleton"), ("_GVRollupMeta", "meta"))
+_SUMMARIES_CLEAR = "MATCH ()-[r:AGGREGATED]->() WITH r LIMIT $k DELETE r"
+_SUMMARIES_ANY = "MATCH ()-[r:AGGREGATED]->() RETURN 1 LIMIT 1"
+#: Which build's seed from Postgres a build's key holds whole, on its marker node: a key lost since,
+#: or made again empty by a later write (``GRAPH.QUERY`` makes a missing key), holds none.
+_SEED_DONE_WRITE = "MERGE (m:_GVProjMeta {id: 'meta'}) SET m.seedOf = $build"
+_SEED_DONE_READ = "MATCH (m:_GVProjMeta) RETURN m.seedOf"
+
+
+class _BuildRefused(Exception):
+    """A build that cannot go on, whatever is tried again (``_advance_candidate``): it is dropped,
+    and the change is written into the serving key in place."""
+
+
+def _secs_since(iso: Optional[str]) -> Optional[int]:
+    """Whole seconds since the ISO time ``iso``; None when it is missing or unreadable."""
+    try:
+        return int((datetime.now(timezone.utc) - datetime.fromisoformat(iso)).total_seconds())
+    except (TypeError, ValueError):
+        return None
 
 
 class _PassPartial(Exception):
@@ -458,6 +597,41 @@ def _owe_summaries():
                 else_=func.jsonb_build_object()).op("||")(func.jsonb_build_object("moved", _now()))
 
 
+#: How far before a graph's last publish a rollup job's end still counts as meeting its next window
+#: (:func:`_rollups_ran_since`): the jobs table is stamped by each pod's own clock.
+_ROLLUP_RACE_SKEW_SECS = 60
+
+
+async def _rollups_ran_since(data_source_id: Optional[str], since: Optional[str]) -> bool:
+    """Whether a lineage-summaries job for the data source may have met a window whose raw writes
+    began after ``since`` (the graph's last publish): one pending or running, or one that ended
+    since then. Such a job reads the raw graph and then writes every cell from what it read, so
+    it may write over the window's deltas, bring back cells they deleted, or count the window's
+    edges a second time on top of them. True when that cannot be read (fail closed): one more
+    job is the cost of a wrong True, summaries wrong until the next one that of a wrong False."""
+    if not data_source_id:
+        return False
+    from datetime import datetime, timedelta
+
+    from backend.app.db.engine import get_readonly_session
+    from backend.app.services.aggregation.models import AggregationJobORM
+
+    active = AggregationJobORM.status.in_(("pending", "running"))
+    try:
+        if since:
+            floor = (datetime.fromisoformat(since)
+                     - timedelta(seconds=_ROLLUP_RACE_SKEW_SECS)).isoformat()
+            active = or_(active, AggregationJobORM.completed_at >= floor)
+        async with get_readonly_session() as s:
+            return (await s.execute(select(AggregationJobORM.id).where(
+                AggregationJobORM.data_source_id == data_source_id, active).limit(1))
+            ).scalar_one_or_none() is not None
+    except Exception:  # noqa: BLE001
+        logger.warning("could not tell whether a rollup job met a window of %s", data_source_id,
+                       exc_info=True)
+        return True
+
+
 #: The tombstone sweep's own watermark on the pass marker (``_sweep_tombstoned``): every delete at or
 #: below it is already swept. A marker created by this write alone has no ``seq``, which liveness
 #: reads as "never marked" and leaves alone.
@@ -466,6 +640,38 @@ _SWEPT_WRITE = "MERGE (m:_GVProjMeta {id: 'meta'}) SET m.sweptSeq = $seq"
 #: Whether a summaries build stamped the key: the aggregation run's singleton, which readers need
 #: before they serve the ``:AGGREGATED`` layer as built.
 _SUMMARIES_BUILT = "MATCH (m:_AggMeta {id: 'singleton'}) RETURN count(m)"
+
+
+def _aggkey_restamp(label: str) -> Tuple[str, str]:
+    """The statements that key the summary cells on nodes of ``label`` (``$urns``) by their ends'
+    urns again (``aggKey``): those it starts, those it ends."""
+    return (f"UNWIND $urns AS u MATCH (n:{label} {{urn: u}})-[r:AGGREGATED]->(b) "
+            "SET r.aggKey = n.urn + '|' + b.urn",
+            f"UNWIND $urns AS u MATCH (a)-[r:AGGREGATED]->(n:{label} {{urn: u}}) "
+            "SET r.aggKey = a.urn + '|' + n.urn")
+
+
+def _level_restamp(label: str) -> Tuple[str, str]:
+    """The statements that stamp the summary cells on nodes of ``label`` (``$urns``) with its
+    level (``$level``): ``sourceLevel`` on those it starts, ``targetLevel`` on those it ends."""
+    return (f"UNWIND $urns AS u MATCH (n:{label} {{urn: u}})-[r:AGGREGATED]->() "
+            "SET r.sourceLevel = $level",
+            f"UNWIND $urns AS u MATCH ()-[r:AGGREGATED]->(n:{label} {{urn: u}}) "
+            "SET r.targetLevel = $level")
+
+
+async def _seed_done(client, build_id: str) -> bool:
+    """Whether a build's key holds build ``build_id``'s seed from Postgres whole (its marker node
+    says so, ``_SEED_DONE_WRITE``): False for a key that is missing, lost since, or another's."""
+    try:
+        res = await _q(client, _SEED_DONE_READ, read_only=True, missing="raise",
+                       timeout_ms=_READ_TIMEOUT_MS)
+    except Exception as exc:
+        if _is_missing_graph_error(exc):
+            return False
+        raise
+    rows = getattr(res, "result_set", None) or []
+    return bool(rows) and bool(rows[0]) and rows[0][0] == build_id
 
 
 async def read_projection_marker(client) -> Tuple[Optional[bool], Optional[int]]:
@@ -1026,10 +1232,15 @@ class FalkorProjector:
         from backend.app.jobs.metrics import increment, observe
         width = self._width(client, kind)
         stats = _PASS_STATS.get() or _PassStats()
+        policy = build_policy.current()
         budget_s = timeout_ms / 1000.0
+        slow_s, floor = budget_s / 2, 1
         if not read_only:
             from backend.app.providers.falkordb_provider import clamp_write_budget
-            budget_s = clamp_write_budget(budget_s)
+            budget_s = min(clamp_write_budget(budget_s), float(policy["writeCeilingSecs"]))
+            timeout_ms = int(budget_s * 1000)
+            slow_s = min(budget_s / 2, policy["statementTargetMs"] / 1000.0)
+            floor = _SLOW_FLOOR
 
         async def send(chunk: list) -> None:
             attempt = 0
@@ -1072,7 +1283,7 @@ class FalkorProjector:
                         return
                     raise failure
                 elapsed = _clock() - started
-                width.note(len(chunk), slow=elapsed > budget_s / 2)
+                width.note(len(chunk), slow=elapsed > slow_s, floor=floor)
                 stats.note(len(chunk), elapsed)
                 observe("graphver_projection_statement_seconds", elapsed, kind=kind)
                 await self._release(kind, chunk)
@@ -1080,11 +1291,15 @@ class FalkorProjector:
                     on_result(chunk, res)
                 if progress:
                     await progress(len(chunk))
+                if not read_only:
+                    await _pace(client, elapsed, policy)
                 return
 
         at = 0
         while at < len(rows):
             chunk = rows[at:at + width.value]
+            if not read_only:
+                await _writing(client)
             await send(chunk)
             at += len(chunk)
 
@@ -1292,14 +1507,21 @@ class FalkorProjector:
     async def fits_inline(self, graph_id: str, limit: Optional[int] = None) -> bool:
         """Whether the graph's next pass is small enough to run inside an interactive request
         (``project_now``): at most ``limit`` (``PROJECTION_INLINE_MAX_ROWS``) version rows to
-        project, counted no further than that. A first seed or a rebuild never is. A graph this
-        cannot read is left to the pass to judge."""
+        project, counted no further than that. A first seed or a rebuild never is, nor a graph
+        building a new version beside its key, nor a window its read mode builds beside
+        (``beside``, larger than ``buildAboveRows``): a build's copy and catch-up are the
+        worker's. A graph this cannot read is left to the pass to judge."""
         limit = config.PROJECTION_INLINE_MAX_ROWS if limit is None else limit
         async with self._session() as s:
             ps = await s.get(ProjectionStateORM, graph_id)
             graph = await s.get(GraphORM, graph_id)
             if ps is None or graph is None:
                 return True
+            if isinstance(getattr(ps, "candidate_state", None), dict):
+                return False
+            policy = build_policy.current()
+            if build_policy.read_mode_of(getattr(ps, "read_mode", None), policy) == "beside":
+                limit = min(limit, int(policy["buildAboveRows"]))
             from_seq = ps.projected_commit_seq
             to_seq = max(ps.target_commit_seq, graph.main_head_commit_seq)
             if from_seq >= to_seq:
@@ -1366,6 +1588,26 @@ class FalkorProjector:
             )).first()
         return tuple(row) if row is not None else None
 
+    async def _restore_served(self, graph_id: str, epoch: int, seq: int, *, via: str) -> bool:
+        """Record that the key holds version ``seq`` of main whole (its marker's), while the row is
+        still at ``epoch`` and records none: a key that last published before the column existed.
+        Reads of main then stay on the key, at that version, instead of going to Postgres. The
+        epoch isn't moved, so the pass's own claim still holds. True if it was recorded."""
+        async with self._session() as s:
+            row = (await s.execute(
+                update(ProjectionStateORM)
+                .where(ProjectionStateORM.graph_id == graph_id, ProjectionStateORM.epoch == epoch,
+                       ProjectionStateORM.served_commit_seq.is_(None))
+                .values(served_commit_seq=seq)
+                .returning(ProjectionStateORM.graph_id)
+                .execution_options(synchronize_session=False))).first()
+        if row is not None:
+            from backend.app.jobs.metrics import increment
+            increment("graphver_served_restored_total", via=via)
+            logger.info("projection of %s: served version %s restored from its key's marker (%s)",
+                        graph_id, seq, via)
+        return row is not None
+
     async def _forget_served(self, graph_id: str, mine: int) -> None:
         """The key holds no version of main (``served_commit_seq``), while the row is this pass's
         (epoch ``mine``): reads of main go to Postgres until a pass publishes into it."""
@@ -1379,7 +1621,7 @@ class FalkorProjector:
     async def _finish(self, graph_id: str, mine: int, *, published: bool, to_seq: int,
                       error: Optional[str], attempts: Optional[int],
                       surplus: object = _UNCOUNTED, status: str = "idle",
-                      pressure: Optional[bool] = False) -> bool:
+                      pressure: Optional[bool] = False, window_rows: Optional[int] = None) -> bool:
         """End a pass while the row is still its own (epoch ``mine``): publish ``to_seq``, or
         record the error and, unless ``attempts`` is None (a cancel, or a pass that stopped at a
         page), back off. Never writes the target or the key, which belong to the publishers and
@@ -1392,6 +1634,10 @@ class FalkorProjector:
         resumes it is not taken for a first seed. ``pressure``: the pass failed on a timeout or a
         memory refusal, one more in a row (``pressure_failures``, which the escalation counts);
         False, any other end, starts the count again; None, a cancel, leaves it.
+
+        ``window_rows``: a window that stopped at a page is still in flight, this many version rows
+        (``projection_state.window_rows``: eviction leaves the graph alone until it lands). A pass
+        that publishes clears it; one that fails leaves it, as the next pass resumes the window.
 
         On a customer's key a published pass also says what it found there that history doesn't
         hold: ``surplus`` (nodes, edges) becomes ``external_drift``, and none clears the count it
@@ -1406,7 +1652,7 @@ class FalkorProjector:
             state = ProjectionStateORM.rollup_state
             handed = func.nullif(state.op("-")(literal("moved")), func.jsonb_build_object())
             # The key now holds main at to_seq whole: reads serve it there until the next publish.
-            values.update(projected_commit_seq=to_seq, served_commit_seq=to_seq,
+            values.update(projected_commit_seq=to_seq, served_commit_seq=to_seq, window_rows=None,
                           last_projected_at=_now(), failed_attempts=0, next_retry_at=None,
                           rollup_state=case((func.jsonb_typeof(state) == "object", handed),
                                             else_=null()))
@@ -1419,6 +1665,8 @@ class FalkorProjector:
                     if surplus else case((notified, drift), else_=null()))
         elif attempts is not None:
             values.update(failed_attempts=attempts + 1, next_retry_at=_retry_at(attempts + 1))
+        if window_rows is not None:
+            values["window_rows"] = window_rows
         async with self._session() as s:
             row = (await s.execute(
                 update(ProjectionStateORM)
@@ -1491,6 +1739,11 @@ class FalkorProjector:
             from_seq = ps.projected_commit_seq
             to_seq = max(ps.target_commit_seq, graph.main_head_commit_seq)
             seen_epoch = ps.epoch
+            # Every raw write of this window came after the last publish: a rollup job that ended
+            # before it met none of them (``_rollups_ran_since``).
+            last_published = getattr(ps, "last_projected_at", None)
+            # The version of main the key holds whole: what reads of main see while it catches up.
+            served = getattr(ps, "served_commit_seq", None)
             # The passes before this one that failed in a row under pressure (the escalation's).
             pressure_failures = getattr(ps, "pressure_failures", 0)
             name = ps.falkor_graph_name or self.default_graph_name(graph_id)
@@ -1506,7 +1759,15 @@ class FalkorProjector:
                 # A fork has no FalkorDB copy: it reads through its root's store. A key an earlier
                 # release pinned for one is never written again (the reaper drops it, when asked).
                 return {"projected": from_seq, "applied": 0, "noop": True, "skipped": "fork"}
-            if ps.status in ("evicted", "waiting_capacity"):
+            # A new version built beside the serving key (read mode ``beside``, ``candidates``):
+            # nothing writes the serving key while one is. The build takes its next step instead,
+            # once this session is closed (``_advance_candidate``).
+            build = getattr(ps, "candidate_state", None)
+            build = build if isinstance(build, dict) else None
+            own_mode = getattr(ps, "read_mode", None)
+            window_in_flight = getattr(ps, "window_rows", None) is not None
+            idle = ps.status == "idle"
+            if build is None and ps.status in ("evicted", "waiting_capacity"):
                 # Residency (doc 17): an evicted graph stays evicted, its reads on Postgres, until
                 # the capacity loop admits its load — whatever the Graph residency switch says:
                 # off, the loop brings it back through admission, never a pass on its own. Fenced:
@@ -1519,10 +1780,11 @@ class FalkorProjector:
             # The lineage summaries already count what this full seed writes (``_owe_summaries``).
             rollup_state = getattr(ps, "rollup_state", None)
             summaries_moved = isinstance(rollup_state, dict) and bool(rollup_state.get("moved"))
-            if from_seq >= to_seq and not (from_seq > 0 and quarantine_next_at
-                                           and quarantine_next_at <= _now()):
+            if build is None and from_seq >= to_seq and not (
+                    from_seq > 0 and quarantine_next_at and quarantine_next_at <= _now()):
                 return {"projected": from_seq, "applied": 0, "noop": True}
-            if respect_backoff and ps.next_retry_at and ps.next_retry_at > _now():
+            if (build is None and respect_backoff and ps.next_retry_at
+                    and ps.next_retry_at > _now()):
                 return {"projected": from_seq, "applied": 0, "noop": True, "skipped": "backoff",
                         "retryAt": ps.next_retry_at}
             if name == self.default_graph_name(graph_id):
@@ -1543,6 +1805,15 @@ class FalkorProjector:
                 await self._svc._assert_not_bootstrapping(s, graph_id)
             except ConcurrencyError:
                 return {"projected": from_seq, "applied": 0, "noop": True, "skipped": "bootstrapping"}
+        if build is not None:
+            return await self._advance_candidate(graph_id)
+        # A large window of a graph that reads ``beside`` is built in a second key while this one
+        # keeps serving its version whole (``candidates.wanted``); a smaller one, or one already
+        # part-written in place, is written here as it always was.
+        if (from_seq > 0 and owned and idle and not window_in_flight
+                and await self._queue_build(graph_id, own_mode, seen_epoch, name, provider_id,
+                                            from_seq, to_seq)):
+            return await self._advance_candidate(graph_id)
         if (from_seq == 0 and to_seq > 1 and owned and ps.status == "idle"
                 and await residency_policy.switch_state() is not False):
             # Residency (doc 17): the first seed of a key the platform owns — a new graph's whole
@@ -1551,14 +1822,27 @@ class FalkorProjector:
             # the switch cannot be read: nothing is written unadmitted on a guess. A key holding the
             # cursor of a rebuild that stopped at a page is no first seed, also once a pass that
             # failed or was cancelled after it has left the graph idle: this pass resumes it in
-            # place.
+            # place. Nor is a key that holds a version of main (a rebuild, or a full replay a
+            # verify held back): it is reconciled in place while reads stay on it, at that version,
+            # rather than reloaded into a fresh key while they go to Postgres.
             try:
-                found = await _read_cursor(await self._graph_client(name, provider_id))
+                gate_client = await self._graph_client(name, provider_id)
+                found = await _read_cursor(gate_client)
+                exists, marker_seq = await read_projection_marker(gate_client)
             except Exception:                            # out of reach: nothing known to resume
-                found = None
-            if not _resumes(found, 0, to_seq) and await self._queue_first_seed(graph_id,
-                                                                              seen_epoch):
+                found, exists, marker_seq = None, None, None
+            if (exists is not False and served is None and marker_seq is not None
+                    and marker_seq > 1
+                    and await self._restore_served(graph_id, seen_epoch, marker_seq,
+                                                   via="first_seed_gate")):
+                served = marker_seq
+            holds = exists is not False and served is not None
+            if (not holds and not _resumes(found, 0, to_seq)
+                    and await self._queue_first_seed(graph_id, seen_epoch)):
                 return {"projected": 0, "applied": 0, "noop": True, "skipped": "waiting_capacity"}
+            if holds and not _resumes(found, 0, to_seq):
+                from backend.app.jobs.metrics import increment
+                increment("graphver_projection_first_seed_avoided_total")
 
         # Claim the row before touching FalkorDB. Losing the claim means something reset the
         # watermark since the read (an evict, a rebuild, a repin): leave the key alone and let the
@@ -1579,9 +1863,15 @@ class FalkorProjector:
             client = await self._graph_client(name, provider_id)
             # A full pass on a key that is gone (lost, and rebuilt before liveness saw it) writes
             # it from nothing: it holds no version to serve meanwhile, so reads go to Postgres.
-            # Read first, before any GRAPH.QUERY below makes the key again.
-            if from_seq <= 0 and (await read_projection_marker(client))[0] is False:
-                await self._forget_served(graph_id, mine)
+            # Read first, before any GRAPH.QUERY below makes the key again. A key that last
+            # published before served_commit_seq existed holds the version its marker names: the
+            # rebuild serves that meanwhile, not Postgres.
+            if from_seq <= 0:
+                exists, marker_seq = await read_projection_marker(client)
+                if exists is False:
+                    await self._forget_served(graph_id, mine)
+                elif served is None and marker_seq is not None and marker_seq > 1:
+                    await self._restore_served(graph_id, mine, marker_seq, via="full_pass")
             if unspelled:
                 await self._learn_spelling(client, graph_id)
             # What earlier passes quarantined goes first, so this pass's own writes land after it. A
@@ -1657,13 +1947,18 @@ class FalkorProjector:
                     # what the reconcile has just written: moving them by its difference would
                     # count it twice. The job rebuilds them.
                     reconciled = {**reconciled, "rollups": "stale"}
+                elif (reconciled.get("rollups") == "applied"
+                      and await _rollups_ran_since(data_source_id, last_published)):
+                    # As for a window: a summaries job that met the reconcile may have written
+                    # over the cells it moved, or counted its writes as well.
+                    reconciled = {**reconciled, "rollups": "stale"}
             elif paged:
                 dropped, structural, paged_writes = await self._apply_paged(
                     client, graph_id, main_id, from_seq, to_seq, level_map=level_map,
                     provider_id=provider_id, owned=owned, cursor=cursor)
             else:
                 await self._rekey_in_place(client, rekeys)
-                await self._relabel_in_place(client, retypes)
+                await self._relabel_in_place(client, retypes, levels=level_map)
                 dropped = await self._apply(client, *changes, level_map=level_map,
                                             provider_id=provider_id, owned=owned,
                                             prior=prior) or 0
@@ -1690,6 +1985,11 @@ class FalkorProjector:
                 try:
                     if not await self._apply_rollups(client, rollup_pairs, from_seq, to_seq):
                         rollup_pairs = "stale"           # window overlapped a prior application
+                    elif await _rollups_ran_since(data_source_id, last_published):
+                        # A summaries job met this window: it may have written over these deltas
+                        # or counted the window's edges as well. The batch job derives them again,
+                        # after it (an ask while it still runs stays owed until it ends).
+                        rollup_pairs = "stale"
                 except Exception:                       # pragma: no cover - infra
                     logger.exception("rollup apply failed for %s — queuing rebuild", graph_id)
                     rollup_pairs = "stale"
@@ -1765,14 +2065,20 @@ class FalkorProjector:
             # nothing, records no error and no backoff, and asks for the next pass at once, which
             # resumes where it stopped. Other graphs get their turn meanwhile. A full replay stays
             # a rebuild: back at idle, the next pass would be queued as a first seed, for a load
-            # into a fresh key.
+            # into a fresh key. A window goes back to idle marked as in flight (``window_rows``),
+            # so eviction leaves it alone until it lands, and the planner keeps room for the rest.
             logger.info("projection of %s over (%d, %d] %s; the next pass resumes there",
                         graph_id, from_seq, to_seq, stop)
             from backend.app.jobs.metrics import increment
             increment("graphver_projection_passes_total", outcome="partial")
-            if not await asyncio.shield(self._finish(
-                    graph_id, mine, published=False, to_seq=to_seq, error=None, attempts=None,
-                    status="rebuilding" if from_seq <= 0 else "idle")):
+
+            async def finish_partial() -> bool:           # shielded whole, the count included
+                window = (await self._window_size(graph, main_id, from_seq, to_seq)
+                          if from_seq > 0 else None)
+                return await self._finish(graph_id, mine, published=False, to_seq=to_seq,
+                                          error=None, attempts=None, window_rows=window,
+                                          status="rebuilding" if from_seq <= 0 else "idle")
+            if not await asyncio.shield(finish_partial()):
                 await self._yield_superseded(graph_id, from_seq)
             await nudge_projection(graph_id)
             return {"projected": from_seq, "applied": stop.written, "noop": False,
@@ -1929,6 +2235,571 @@ class FalkorProjector:
             result["skipped"] = "superseded"
         return result
 
+    # ── a new version built beside the serving key (read mode ``beside``; ``candidates``) ──────
+
+    async def _queue_build(self, graph_id: str, own_mode: Optional[str], epoch: int,
+                           serving: str, provider_id: Optional[str], from_seq: int,
+                           to_seq: int) -> bool:
+        """Ask for the window ``(from_seq, to_seq]`` to be built beside the serving key, when the
+        graph wants that (``candidates.wanted``: it reads ``beside``, New-version builds is on,
+        and the window holds more version rows than ``buildAboveRows``, counted no further).
+        True once recorded, fenced on the pass's ``epoch``; the build's key keeps the serving
+        key's hash tag (``keymigrate.build_key``)."""
+        policy = await build_policy.resolve()
+        read_mode = build_policy.read_mode_of(own_mode, policy)
+        if read_mode != "beside":
+            return False
+        switch_on = await build_policy.switch_state()
+        if switch_on is not True:
+            return False
+        above = int(policy["buildAboveRows"])
+        async with self._session() as s:
+            main_id = await self._svc._main_branch_id(s, graph_id)
+            rows = 0
+            for model in (NodeVersionORM, EdgeVersionORM):
+                rows += (await s.execute(select(func.count()).select_from(
+                    select(model.id).where(
+                        model.graph_id == graph_id, model.branch_id == main_id,
+                        model.commit_seq > from_seq, model.commit_seq <= to_seq)
+                    .limit(above + 1).subquery()))).scalar_one()
+            ps = await s.get(ProjectionStateORM, graph_id)
+            retired = (ps.retired_keys or []) if ps is not None else []
+        if not candidates.wanted(read_mode=read_mode, switch_on=switch_on, owned=True,
+                                 rows=rows, above=above):
+            return False
+        name = keymigrate.build_key(serving, {serving, *(e.get("name") for e in retired)})
+        state = candidates.new_state("window", now=_now(), rows=rows)
+        if not await self._svc.record_candidate(graph_id, epoch=epoch, name=name,
+                                                provider=provider_id, state=state):
+            return False
+        from backend.app.jobs.metrics import increment
+        increment("graphver_builds_total", step="queued")
+        logger.info("projection of %s: the window (%d, %d], more than %d rows, is built beside "
+                    "'%s' in '%s'", graph_id, from_seq, to_seq, above, serving, name)
+        return True
+
+    async def _advance_candidate(self, graph_id: str) -> Dict[str, object]:
+        """Take a graph's build one step on (``candidates``: queued, copying, catching_up,
+        switching), never writing its serving key, which keeps serving its version whole. A step
+        that fails counts an attempt and is tried again after a backoff, from a fresh copy; past
+        ``buildMaxAttempts`` the build is dropped with its key, and the change is written into the
+        serving key in place. Every write of a build is exact: nothing is held back
+        (``_PASS_HELD``), a row that fails fails the attempt. Each step is fenced on the build
+        (``update_candidate``): one dropped or replaced meanwhile records nothing more."""
+        async with self._session() as s:
+            ps = await s.get(ProjectionStateORM, graph_id)
+            graph = await s.get(GraphORM, graph_id)
+        state = getattr(ps, "candidate_state", None) if ps is not None else None
+        projected = getattr(ps, "projected_commit_seq", 0) if ps is not None else 0
+        if not isinstance(state, dict) or graph is None:
+            return {"projected": projected, "applied": 0, "noop": True}
+        build_id, step = state["id"], state.get("step")
+        noop = {"projected": projected, "applied": 0, "noop": True, "build": step}
+        if graph.deleted_at is not None or ps.status != "idle" or not ps.owns_falkor_graph:
+            await self._drop_build(graph_id, build_id, "the graph is no longer served from its key")
+            return noop
+        if state.get("retryAt") and state["retryAt"] > _now():
+            return {**noop, "skipped": "build_backoff", "retryAt": state["retryAt"]}
+        policy = await build_policy.resolve()
+        mode = build_policy.read_mode_of(getattr(ps, "read_mode", None), policy)
+        if mode != "beside":
+            # Its readers no longer switch when ready: the change is written in place, as the
+            # mode they read now says, rather than built on and switched to.
+            await self._drop_build(graph_id, build_id, f"the graph now reads {mode}")
+            return noop
+        building = self.__dict__.setdefault("_building", set())
+        if graph_id not in building and len(building) >= int(policy["buildConcurrency"]):
+            return {**noop, "skipped": "build_slots"}
+        building.add(graph_id)
+        build_token, held_token = _PASS_BUILD.set(build_id), _PASS_HELD.set(None)
+        try:
+            if step in ("queued", "copying"):
+                # Found copying: its pod stopped mid-copy, or a later step failed and it starts
+                # again from a fresh copy. Either way it asks for room again first.
+                return await self._build_queued(graph_id, ps, graph, state, policy, noop)
+            if step == "seeding":
+                return await self._build_seed(graph_id, ps, graph, state, policy, noop)
+            if step == "catching_up":
+                return await self._build_catch_up(graph_id, ps, graph, state, policy, noop)
+            if step == "switching":
+                return await self._build_switch(graph_id, ps, graph, state, policy, noop)
+            await self._drop_build(graph_id, build_id, f"unknown step {step!r}")
+            return noop
+        except _PassPartial as stop:
+            # Out of its time at a page boundary, its cursor written in the build's key: the next
+            # pass resumes the catch-up there. Not a failure.
+            await nudge_projection(graph_id)
+            return {**noop, "noop": False, "partial": True, "applied": stop.written}
+        except asyncio.CancelledError:
+            raise
+        except _BuildRefused as refused:
+            await self._drop_build(graph_id, build_id, str(refused))
+            return noop
+        except LockBusy as busy:
+            # A capacity pass holds the lock admission takes: not a failure, asked again shortly.
+            retry_at = (datetime.now(timezone.utc) + timedelta(seconds=15)).isoformat()
+            await self._svc.update_candidate(graph_id, build_id, waiting=str(busy)[:200],
+                                             retryAt=retry_at)
+            return {**noop, "skipped": "build_waiting", "retryAt": retry_at}
+        except Exception as exc:
+            attempts = int(state.get("attempts") or 0) + 1
+            logger.warning("build %s of %s failed at %s (attempt %d): %s", build_id, graph_id,
+                           step, attempts, exc, exc_info=True)
+            if attempts >= int(policy["buildMaxAttempts"]):
+                await self._drop_build(graph_id, build_id,
+                                       f"gave up after {attempts} attempt(s): {exc}")
+            else:
+                # Again from a fresh copy: what a failed write left in the build's key is gone. A
+                # build seeded from Postgres is seeded again instead, in the key it has: the
+                # reconcile writes only what differs from the version it starts from, and its
+                # summaries are carried over again, so a failed catch-up is undone, not repeated.
+                again = ("queued" if step == "queued" else
+                         "seeding" if state.get("mode") == "reseed" else "copying")
+                restart = ({"seedPhase": "raw", "summariesAt": 0}
+                           if again == "seeding" and step != "seeding" else {})
+                await self._svc.update_candidate(
+                    graph_id, build_id, step=again, attempts=attempts, error=str(exc)[:300],
+                    retryAt=_retry_at(attempts), waiting=None, **restart)
+            return {**noop, "noop": False, "build_error": str(exc)[:300]}
+        finally:
+            _PASS_HELD.reset(held_token)
+            _PASS_BUILD.reset(build_token)
+            building.discard(graph_id)
+
+    async def _build_queued(self, graph_id, ps, graph, state, policy, noop) -> Dict[str, object]:
+        """A queued build makes its key as New-version builds' ``buildMode`` says:
+
+        - ``copy``: ``GRAPH.COPY`` of the serving key once its node has room for a copy, reserved
+          for it there until the copy lands (``residency.admit_build_copy``: ``copyMarginPct``,
+          ``copyMaxBytes``, under the capacity lock, so two builds never take the same room), and
+          no lineage-summaries job is building the serving key's summaries, which a copy would
+          take half-written;
+        - ``reseed``: seeded from Postgres into a key on the master with the most room, admitted
+          and recorded there under the same lock (:meth:`_build_seed_admit`, :meth:`_build_seed`);
+        - ``auto``: a copy when it fits; with no room for one on the serving key's node, or a graph
+          larger than ``copyMaxBytes``, a seed.
+
+        What an earlier attempt left under the build's name is dropped first, so it does not count
+        against the room. With neither, ``noRoomPolicy``: ``wait`` keeps serving and asks again
+        shortly; ``in_place`` drops the build, and the change is written into the serving key,
+        paced. Turned off meanwhile, New-version builds drops a build that has not begun."""
+        from backend.app.jobs.metrics import increment
+        from backend.app.services.aggregation.admission import AggregationAdmission
+        from backend.app.services.aggregation.redis_client import get_redis
+
+        from . import residency
+        from .cache_manager import _rollups_running
+
+        build_id, mode = state["id"], policy["buildMode"]
+        if state.get("step") == "queued" and await build_policy.switch_state() is False:
+            raise _BuildRefused("New-version builds was turned off before the build began")
+        name, provider = ps.candidate_graph_name, ps.falkor_provider
+        if (await read_projection_marker(await self._graph_client(name, provider)))[0]:
+            await self.drop_graph(name, provider)
+        no_room, seedable, why = True, mode == "reseed", None
+        if mode != "reseed":
+            room, held = await residency.admit_build_copy(
+                graph_id, provider, name, build_id, margin_pct=int(policy["copyMarginPct"]),
+                max_bytes=int(policy["copyMaxBytes"]))
+            try:
+                summarising = room.fits and await _rollups_running(graph.data_source_id)
+                if room.fits and not summarising:
+                    await self._svc.update_candidate(graph_id, build_id, step="copying",
+                                                     waiting=None, retryAt=None)
+                    return await self._build_copy(graph_id, ps, graph,
+                                                  {**state, "step": "copying"}, policy, noop)
+            finally:
+                # The copy landed (its node's memory now shows it), failed, or never began.
+                if held is not None:
+                    await AggregationAdmission(get_redis()).release(held)
+            no_room = not room.fits
+            why = (f"no room for a copy on its node ({room.why})" if no_room
+                   else "a lineage-summaries job is building the serving key's summaries")
+            seedable = mode == "auto" and room.why in ("capacity", "too_large")
+        if seedable:
+            seeded, refused = await self._build_seed_admit(graph_id, ps, graph, state, policy,
+                                                           noop)
+            if seeded is not None:
+                return seeded
+            why = refused if why is None else f"{why}; {refused}"
+        if no_room and policy["noRoomPolicy"] == "in_place":
+            raise _BuildRefused(f"{why}: written in place (noRoomPolicy in_place)")
+        waited = _secs_since(state.get("since"))
+        if waited is not None and waited > int(policy["noRoomAlertSecs"]):
+            increment("graphver_build_waiting_total", reason="room")
+            logger.warning("build %s of %s has waited %ds: %s", build_id, graph_id, waited, why)
+        retry_at = (datetime.now(timezone.utc) + timedelta(seconds=60)).isoformat()
+        # Found copying, it is queued again: what it copied before is gone.
+        await self._svc.update_candidate(graph_id, build_id, step="queued", waiting=why[:200],
+                                         retryAt=retry_at)
+        return {**noop, "skipped": "build_waiting", "retryAt": retry_at}
+
+    async def _build_copy(self, graph_id, ps, graph, state, policy, noop) -> Dict[str, object]:
+        """``GRAPH.COPY`` of the serving key into the build's key, on the same node: the copy
+        holds exactly the version the serving key serves (its marker says so), its lineage
+        summaries and indexes included. A key under the build's name from an earlier attempt is
+        dropped first. A serving key that does not hold its version whole (lost, behind, part
+        way through a window) has nothing exact to copy: the build is dropped and the change
+        written in place."""
+        from backend.app.jobs.metrics import increment, observe
+
+        build_id, name, provider = state["id"], ps.candidate_graph_name, ps.falkor_provider
+        served = await self._serving_whole(ps)
+        source = await self._graph_client(ps.falkor_graph_name, provider)
+        if (await read_projection_marker(await self._graph_client(name, provider)))[0]:
+            await self.drop_graph(name, provider)
+        started = time.monotonic()
+        await source.copy(name)
+        took = time.monotonic() - started
+        exists, copied = await read_projection_marker(await self._graph_client(name, provider))
+        if exists is not True or copied != served:
+            raise RuntimeError(f"the copy into '{name}' holds version {copied}, not {served}")
+        if not await self._svc.update_candidate(graph_id, build_id, seq=served,
+                                                step="catching_up", copySecs=round(took, 3)):
+            return noop
+        increment("graphver_builds_total", step="copied")
+        observe("graphver_build_copy_seconds", took)
+        logger.info("build %s of %s: copied '%s' at version %d into '%s' in %.2fs", build_id,
+                    graph_id, ps.falkor_graph_name, served, name, took)
+        return {**noop, "noop": False}
+
+    async def _serving_whole(self, ps) -> int:
+        """The version the serving key holds whole, which a build starts from: its marker,
+        ``served_commit_seq`` and the watermark agree. A key that does not (lost, behind, part way
+        through a window) has nothing exact to start from: ``_BuildRefused``, and the change is
+        written in place."""
+        served = ps.served_commit_seq
+        source = await self._graph_client(ps.falkor_graph_name, ps.falkor_provider)
+        exists, marker = await read_projection_marker(source)
+        if (exists is not True or served is None or marker != served
+                or ps.projected_commit_seq != served):
+            raise _BuildRefused(f"the serving key does not hold its version whole "
+                                f"(marker {marker}, served {served}, projected "
+                                f"{ps.projected_commit_seq})")
+        return served
+
+    async def _build_seed_admit(self, graph_id, ps, graph, state, policy, noop
+                                ) -> Tuple[Optional[Dict[str, object]], Optional[str]]:
+        """Room for the build seeded from Postgres: a key of the graph's own on the master with the
+        most room, admitted there as a load is and recorded — step ``seeding``, that key, and the
+        version the serving key holds whole, which the seed writes (``seedSeq``) — under the
+        capacity lock (``residency.admit_build_seed``). ``(the seed's first pass, None)`` once
+        recorded; ``(None, why not)`` otherwise."""
+        from backend.app.jobs.metrics import increment
+        from backend.app.providers import falkor_graph_registry
+
+        from . import residency
+
+        build_id, provider = state["id"], ps.falkor_provider
+        seq = await self._serving_whole(ps)
+        keys = await falkor_graph_registry.list_graph_keys(provider)
+        if keys is None:                                 # cannot verify, never "free"
+            return None, "the graph store's keys could not be listed"
+        taken = (set(keys) | {e.get("name") for e in (ps.retired_keys or [])}
+                 | {ps.falkor_graph_name, ps.candidate_graph_name})
+
+        async def record(key: str, master: Optional[str]) -> bool:
+            return await self._svc.update_candidate(
+                graph_id, build_id, name=key, seq=0, mode="reseed", step="seeding",
+                seedSeq=seq, seedPhase="raw", summariesAt=0, master=master, waiting=None,
+                retryAt=None)
+
+        admitted, key = await residency.admit_build_seed(graph_id, provider, taken, record)
+        if key is None:
+            return None, (f"no room for a seed on any node ({admitted.why})"
+                          if not admitted.fits else "the build was replaced")
+        increment("graphver_builds_total", step="seeding")
+        logger.info("build %s of %s: seeding version %d from Postgres into '%s' (%s)", build_id,
+                    graph_id, seq, key, admitted.master)
+        async with self._session() as s:
+            ps = await s.get(ProjectionStateORM, graph_id)
+        state = getattr(ps, "candidate_state", None) if ps is not None else None
+        if not isinstance(state, dict) or state.get("id") != build_id:
+            return noop, None
+        return await self._build_seed(graph_id, ps, graph, state, policy, noop), None
+
+    async def _build_seed(self, graph_id, ps, graph, state, policy, noop) -> Dict[str, object]:
+        """Seed the build's key from Postgres with exactly the version the serving key holds
+        whole (``seedSeq``), then carry the serving key's lineage summaries over
+        (:meth:`_copy_summaries`), then mark it: from there it catches up and switches as a copy
+        does. Each phase resumes where an earlier pass stopped — the reconcile from its cursor in
+        the build's key, the summaries from the source page recorded on the build
+        (``summariesAt``) — within the pass's time (``GRAPHVER_PROJECTION_PASS_MAX_SECS``). The
+        reconcile writes only what differs from that version, so a key an earlier attempt left
+        is brought back to it rather than written again whole. A summaries job that met the copy
+        starts it again (three times, then the summaries are handed to the job once switched)."""
+        from backend.app.jobs.metrics import increment, observe
+
+        from .cache_manager import _rollups_running
+
+        build_id, seq = state["id"], int(state["seedSeq"])
+        name, provider = ps.candidate_graph_name, ps.candidate_provider
+        client = await self._graph_client(name, provider)
+        deadline = ((time.monotonic() + config.PROJECTION_PASS_MAX_SECS)
+                    if config.PROJECTION_PASS_MAX_SECS > 0 else None)
+        async with self._session() as s:
+            main_id = await self._svc._main_branch_id(s, graph_id)
+        if (state.get("seedPhase") or "raw") == "raw":
+            started = time.monotonic()
+            # A proof the node takes the writes below, which also makes a fresh key.
+            await _q(client, "RETURN 1", timeout_ms=_READ_TIMEOUT_MS)
+            found = await _read_cursor(client)
+            resume, before = None, (False, 0)
+            if _resumes(found, 0, seq):
+                resume, before = (found[2], found[3]), found[4:]
+            cursor = _Cursor(client, 0, seq, resume, deadline, structural=before[0],
+                             dropped=before[1])
+            await self._reconcile_in_place(
+                client, graph_id, main_id, seq, await self._resolve_level_map(graph_id),
+                track_progress=True, rollups_moved_this_pass=True, provider_id=provider,
+                owned=True, cursor=cursor)
+            if cursor.used or cursor.resume is not None:
+                await _q(client, _CURSOR_CLEAR)
+            await _q(client, _SEED_DONE_WRITE, params={"build": build_id})
+            if not await self._svc.update_candidate(graph_id, build_id, seedPhase="summaries",
+                                                    summariesAt=0, progress=None):
+                return noop
+            observe("graphver_build_seed_seconds", time.monotonic() - started)
+            state = {**state, "seedPhase": "summaries", "summariesAt": 0}
+            if deadline is not None and time.monotonic() > deadline:
+                raise _PassPartial(0)
+        if not await _seed_done(client, build_id):
+            # Lost since its seed was written (its node restarted without it): seeded again.
+            await self._svc.update_candidate(graph_id, build_id, seedPhase="raw", summariesAt=0)
+            return {**noop, "noop": False, "build": "seeding"}
+        if await _rollups_running(graph.data_source_id):
+            retry_at = (datetime.now(timezone.utc) + timedelta(seconds=60)).isoformat()
+            await self._svc.update_candidate(
+                graph_id, build_id, retryAt=retry_at,
+                waiting="a lineage-summaries job is building the serving key's summaries")
+            return {**noop, "skipped": "build_waiting", "retryAt": retry_at}
+        after = int(state.get("summariesAt") or 0)
+        since = state.get("summariesSince")
+        if not after or not since:
+            # From the start: what the key holds of summaries goes first (an earlier attempt's,
+            # or ones a failed catch-up moved), then the copy is timed for a job that meets it.
+            await self._clear_summaries(client)
+            after, since = 0, _now()
+            await self._svc.update_candidate(graph_id, build_id, summariesAt=0,
+                                             summariesSince=since, waiting=None)
+        await self._copy_summaries(graph_id, build_id, ps, client, after, deadline)
+        stale = bool(state.get("rollupsStale"))
+        if await _rollups_ran_since(graph.data_source_id, since):
+            # A summaries job met the copy: the serving key's summaries may have changed under it.
+            restarts = int(state.get("summaryRestarts") or 0) + 1
+            if restarts <= 3:
+                await self._svc.update_candidate(graph_id, build_id, summariesAt=0,
+                                                 summariesSince=None, summaryRestarts=restarts)
+                return {**noop, "noop": False, "build": "seeding"}
+            stale = True
+        unconfirmed = await _write_marker(client, seq, ps.epoch)
+        if unconfirmed:
+            raise RuntimeError(unconfirmed)
+        if not await self._svc.update_candidate(
+                graph_id, build_id, seq=seq, step="catching_up", seedPhase=None,
+                summariesAt=None, summariesSince=None, rollupsStale=stale or None,
+                progress=None, waiting=None):
+            return noop
+        increment("graphver_builds_total", step="seeded")
+        logger.info("build %s of %s: seeded '%s' at version %d from Postgres", build_id, graph_id,
+                    name, seq)
+        return {**noop, "noop": False, "build": "catching_up"}
+
+    async def _clear_summaries(self, client) -> None:
+        """A build's key without lineage summaries, before the serving key's are carried over:
+        its cells a page at a time, then their markers."""
+        while True:
+            await _q(client, _SUMMARIES_CLEAR, params={"k": _HUB_PAGE})
+            res = await _q(client, _SUMMARIES_ANY, timeout_ms=_READ_TIMEOUT_MS, read_only=True)
+            if not (getattr(res, "result_set", None) or []):
+                break
+        for label, _ident in _SUMMARY_MARKERS:
+            await _q(client, f"MATCH (m:{label}) DELETE m")
+
+    async def _copy_summaries(self, graph_id, build_id, ps, client, after: int,
+                              deadline: Optional[float]) -> int:
+        """Carry the serving key's lineage summaries over into the build's key: its cells a page
+        of source nodes at a time (``_SCAN_PAGE`` internal ids, from ``after``), each merged onto
+        its ends by label and urn with the properties it has — a page written twice writes the
+        same — then the summaries' own markers as they are. Where it is is recorded on the build
+        after each page (``summariesAt``), and it stops past ``deadline`` at a page boundary
+        (``_PassPartial``). A cell whose ends the build's key does not hold fails the attempt: the
+        two keys hold different versions. Returns the cells written."""
+        source = await self._graph_client(ps.falkor_graph_name, ps.falkor_provider)
+        res = await _q(source, "MATCH (n) RETURN max(id(n))", timeout_ms=_READ_TIMEOUT_MS,
+                       read_only=True)
+        rows = getattr(res, "result_set", None) or []
+        top = rows[0][0] if rows and rows[0] else None
+        written = 0
+        for lo in (range(after, int(top) + 1, self._SCAN_PAGE) if top is not None else ()):
+            res = await _q(source, _SUMMARIES_PAGE, params={"lo": lo, "hi": lo + self._SCAN_PAGE},
+                           timeout_ms=_READ_TIMEOUT_MS, read_only=True)
+            by_labels: Dict[Tuple[str, str], List[dict]] = {}
+            for la, sa, lb, sb, props in (getattr(res, "result_set", None) or []):
+                by_labels.setdefault((str(la), str(lb)), []).append(
+                    {"s": sa, "t": sb, "p": dict(props or {})})
+            for (la, lb), cells in by_labels.items():
+                landed = [0]
+
+                def counted(_part, result) -> None:
+                    found = getattr(result, "result_set", None) or []
+                    landed[0] += int(found[0][0] or 0) if found and found[0] else 0
+
+                await self._laddered(
+                    client, "summary_copy",
+                    f"UNWIND $batch AS row MATCH (a:{_sanitize_label(la)} {{urn: row.s}}) "
+                    f"MATCH (b:{_sanitize_label(lb)} {{urn: row.t}}) "
+                    f"MERGE (a)-[r:AGGREGATED]->(b) SET r += row.p RETURN count(r)",
+                    cells, on_result=counted)
+                if landed[0] < len(cells):
+                    raise RuntimeError(f"{len(cells) - landed[0]} of {len(cells)} summary cells "
+                                       f"found no end in the build's key")
+                written += len(cells)
+            await self._svc.update_candidate(graph_id, build_id,
+                                             summariesAt=lo + self._SCAN_PAGE)
+            if deadline is not None and time.monotonic() > deadline \
+                    and lo + self._SCAN_PAGE <= int(top):
+                raise _PassPartial(written)
+        for label, ident in _SUMMARY_MARKERS:
+            res = await _q(source, f"MATCH (m:{label}) RETURN properties(m)",
+                           timeout_ms=_READ_TIMEOUT_MS, read_only=True)
+            rows = getattr(res, "result_set", None) or []
+            if rows and rows[0] and rows[0][0]:
+                await _q(client, f"MERGE (m:{label} {{id: $id}}) SET m += $props",
+                         params={"id": ident, "props": dict(rows[0][0])})
+        return written
+
+    async def _build_catch_up(self, graph_id, ps, graph, state, policy,
+                              noop) -> Dict[str, object]:
+        """Write what main gained since the version the build's key holds, the window
+        ``(candidate_seq, head]``, into it: in memory, or a page at a time with its cursor in the
+        build's key when large (resumable, within the pass's time). Its lineage summaries move by
+        the window's deltas, fenced by the key's own summaries marker; ones a delta cannot move
+        are owed to the batch job once switched (``rollupsStale``). Then its marker, and the
+        version it holds. Caught up to the head, it goes on to the switch."""
+        build_id, seq = state["id"], ps.candidate_seq
+        head = graph.main_head_commit_seq
+        if seq is None:
+            raise RuntimeError("the build's key holds no version yet")
+        if seq >= head:
+            await self._svc.update_candidate(graph_id, build_id, step="switching")
+            return await self._build_switch(graph_id, ps, graph, {**state, "step": "switching"},
+                                            policy, noop)
+        provider = ps.candidate_provider
+        client = await self._graph_client(ps.candidate_graph_name, provider)
+        exists, marker = await read_projection_marker(client)
+        if exists is True and marker is not None and seq < marker <= head:
+            # A pass wrote a window and then its marker, last, and stopped before recording it:
+            # the key holds that version whole.
+            await self._svc.update_candidate(graph_id, build_id, seq=marker)
+            return {**noop, "noop": False, "build": "catching_up", "target": marker}
+        if exists is not True or marker != seq:
+            # Lost (its node restarted without the key) or behind what was recorded: writing on
+            # would make a partial key that only the switch's check would catch. A fresh copy.
+            raise RuntimeError(f"the build's key holds version {marker}, not {seq}"
+                               if exists else "the build's key is gone")
+        level_map = await self._resolve_level_map(graph_id)
+        started = time.monotonic()
+        cursor: Optional[_Cursor] = None
+        async with self._session() as s:
+            main_id = await self._svc._main_branch_id(s, graph_id)
+            changes = await self._compute_changes(s, graph, main_id, seq, head)
+            if changes is not None:
+                _structural, retypes, rekeys = await self._window_meta(s, graph, main_id, seq,
+                                                                       changes)
+        if changes is None:
+            found = await _read_cursor(client)
+            resume, before = None, (False, 0)
+            if _resumes(found, seq, head):
+                head, resume, before = found[1], (found[2], found[3]), found[4:]
+            cursor = _Cursor(client, seq, head, resume,
+                             (started + config.PROJECTION_PASS_MAX_SECS)
+                             if config.PROJECTION_PASS_MAX_SECS > 0 else None,
+                             structural=before[0], dropped=before[1])
+            await self._apply_paged(client, graph_id, main_id, seq, head, level_map=level_map,
+                                    provider_id=provider, owned=True, cursor=cursor)
+        else:
+            await self._rekey_in_place(client, rekeys)
+            await self._relabel_in_place(client, retypes, levels=level_map)
+            await self._apply(client, *changes, level_map=level_map, provider_id=provider,
+                              owned=True)
+        stale = bool(state.get("rollupsStale"))
+        if self._edge_types_resolver is not None:
+            async with self._session() as s:
+                pairs = await self._compute_rollup_deltas(s, graph, main_id, seq, head)
+            if pairs == "stale" or (pairs and not await self._apply_rollups(client, pairs, seq,
+                                                                            head)):
+                stale = True
+        if cursor is not None and (cursor.used or cursor.resume is not None):
+            await _q(client, _CURSOR_CLEAR)
+        unconfirmed = await _write_marker(client, head, ps.epoch)
+        if unconfirmed:
+            raise RuntimeError(unconfirmed)
+        await self._svc.update_candidate(graph_id, build_id, seq=head,
+                                         rollupsStale=stale or None, progress=None)
+        logger.info("build %s of %s: caught up (%d, %d] in %.2fs", build_id, graph_id, seq, head,
+                    time.monotonic() - started)
+        return {**noop, "noop": False, "build": "catching_up", "target": head}
+
+    async def _build_switch(self, graph_id, ps, graph, state, policy, noop) -> Dict[str, object]:
+        """Switch readers to the build: once it holds the head (checked against Postgres: its
+        node and edge counts), or is within ``flipMaxLagRows`` rows of it, the rest then written
+        into it in place right after, by the next pass. One transaction
+        (``switch_to_candidate``); the key that served until now is retired after
+        ``retireGraceSecs``. Then, as a publish's tail, every reader's caches of the old key
+        are dropped, and summaries a catch-up could not move are handed to the batch job."""
+        from backend.app.jobs.metrics import increment
+        from backend.app.providers.graph_generation import bump_graph_generation
+
+        build_id, seq = state["id"], ps.candidate_seq
+        head = graph.main_head_commit_seq
+        if seq is None:
+            raise RuntimeError("the build's key holds no version yet")
+        async with self._session() as s:
+            main_id = await self._svc._main_branch_id(s, graph_id)
+            if seq < head:
+                lag = await self._window_rows(s, graph, main_id, seq, head)
+                if lag > int(policy["flipMaxLagRows"]):
+                    await self._svc.update_candidate(graph_id, build_id, step="catching_up")
+                    return {**noop, "noop": False, "build": "catching_up"}
+        client = await self._graph_client(ps.candidate_graph_name, ps.candidate_provider)
+        expected = await self._pg_live_counts(graph_id, main_id, seq)
+        if expected is not None:
+            held = await self._falkor_counts(client, True)
+            if tuple(held) != tuple(expected):
+                raise RuntimeError(f"the build's key holds {tuple(held)} nodes and edges, main "
+                                   f"{tuple(expected)}")
+        old = ps.falkor_graph_name
+        if not await self._svc.switch_to_candidate(
+                graph_id, build_id=build_id, seq=seq, grace_secs=int(policy["retireGraceSecs"])):
+            raise RuntimeError("the switch was refused")
+        increment("graphver_builds_total", step="switched")
+        logger.info("build %s of %s: switched readers from '%s' to '%s' at version %d",
+                    build_id, graph_id, old, ps.candidate_graph_name, seq)
+
+        async def after_switch() -> None:
+            await self.run_publish_hooks(graph_id, full_seed=True,
+                                         rollups_stale=bool(state.get("rollupsStale")))
+            try:
+                await bump_graph_generation(old, reason="readers switched to a new build")
+            except Exception:                            # pragma: no cover - infra
+                logger.warning("graph-generation bump failed for %s", old, exc_info=True)
+
+        await asyncio.shield(after_switch())
+        if head > seq:
+            await nudge_projection(graph_id)
+        return {"projected": seq, "applied": 0, "noop": False, "switched": True}
+
+    async def _drop_build(self, graph_id: str, build_id: str, why: str) -> None:
+        """Drop a build: its key is retired at once, and the next pass writes what the graph owes
+        into its serving key, in place. Recorded as a projection event's reason."""
+        from backend.app.jobs.metrics import increment
+
+        if await self._svc.drop_candidate(graph_id, build_id=build_id):
+            increment("graphver_builds_total", step="dropped")
+            logger.warning("build %s of %s dropped: %s", build_id, graph_id, why)
+            await nudge_projection(graph_id)
+
     async def check_liveness(self) -> List[Dict[str, object]]:
         """Lower the watermark of every idle graph whose FalkorDB key lost what the watermark says
         it holds (:func:`liveness_reset_to`), so the poll reseeds it or re-applies the lost window
@@ -1943,7 +2814,8 @@ class FalkorProjector:
             rows = (await s.execute(
                 select(ProjectionStateORM.graph_id, ProjectionStateORM.falkor_graph_name,
                        ProjectionStateORM.falkor_provider, ProjectionStateORM.projected_commit_seq,
-                       ProjectionStateORM.epoch, ProjectionStateORM.owns_falkor_graph)
+                       ProjectionStateORM.epoch, ProjectionStateORM.owns_falkor_graph,
+                       ProjectionStateORM.served_commit_seq)
                 .join(GraphORM, GraphORM.id == ProjectionStateORM.graph_id)
                 .where(
                     ProjectionStateORM.status == "idle",
@@ -1963,7 +2835,7 @@ class FalkorProjector:
         residency_on = await residency_policy.switch_state() is not False
 
         async def _one(gid, name, provider_id, projected, epoch,
-                       owned) -> Optional[Dict[str, object]]:
+                       owned, served) -> Optional[Dict[str, object]]:
             async with sem:
                 try:
                     client = await self._graph_client(name, provider_id)
@@ -1974,6 +2846,10 @@ class FalkorProjector:
                     return None
                 to_seq = liveness_reset_to(exists, seq, projected) if exists is not None else None
                 if exists and to_seq is None:
+                    if served is None and seq is not None:
+                        # Holds its watermark whole (its marker says so), and last published
+                        # before the column existed: recorded, so a rebuild keeps serving it.
+                        await self._restore_served(gid, epoch, projected, via="liveness")
                     await self._ask_for_first_summaries(gid, client, projected)
             if exists is None:
                 return None
@@ -2453,6 +3329,18 @@ class FalkorProjector:
                     out.setdefault(eid, set()).add((str(etype or "REL"), src, tgt))
         return out
 
+    async def _window_size(self, graph, main_id, from_seq: int, to_seq: int) -> int:
+        """:meth:`_window_rows` of a window that stopped at a page, on a session of its own; when
+        they can't be counted, one more than ``PROJECTION_PAGED_ABOVE`` (a window written a page
+        at a time holds more), so the window is still marked in flight."""
+        try:
+            async with self._session() as s:
+                return await self._window_rows(s, graph, main_id, from_seq, to_seq)
+        except Exception:  # noqa: BLE001 — the mark matters more than its size
+            logger.warning("could not count the window (%d, %d] of %s; marking it in flight as "
+                           "large", from_seq, to_seq, graph.id, exc_info=True)
+            return config.PROJECTION_PAGED_ABOVE + 1
+
     async def _window_rows(self, s, graph, main_id, from_seq, to_seq) -> int:
         """How many version rows the window ``(from_seq, to_seq]`` holds, nodes and edges."""
         n = 0
@@ -2655,9 +3543,16 @@ class FalkorProjector:
         try:
             sets = await self._edge_types_resolver(self._svc, graph.id)
         except Exception:                                # pragma: no cover - app-layer resolution
-            logger.warning("rollup maintenance skipped for %s: edge-type resolution failed",
-                           graph.id, exc_info=True)
-            return None
+            logger.warning("rollup maintenance handed to the batch job for %s: edge-type "
+                           "resolution failed", graph.id, exc_info=True)
+            return "stale"
+        if sets is UNRESOLVED:
+            # The ontology could not be read, so nothing can tell which of this window's edges are
+            # lineage: skipping its deltas would lose them for good, since the next window's
+            # apply moves the marker past it. The batch job derives them again instead.
+            logger.warning("rollup maintenance handed to the batch job for %s: the ontology "
+                           "could not be read", graph.id)
+            return "stale"
         if not sets:
             return None
         cont_types = {t.upper() for t in (sets[0] or [])}
@@ -2704,6 +3599,27 @@ class FalkorProjector:
                 anc = {i} | set(local) | {pp for ps in local.values() for pp in ps}
                 anc_cache[(i, as_of)] = (list(anc), local)
 
+        kids: Dict[Tuple[str, Optional[int]], bool] = {}
+
+        async def prefetch_kids(ids, as_of: Optional[int]) -> None:
+            """Which of ``ids`` hold a live containment child at ``as_of``, in one batched read:
+            a container is one of its own reps, as the summaries job has it (its rep set is
+            every containment parent among the endpoint's ancestors-OR-self), so a lineage edge
+            ending on one lands on the cells the job's do."""
+            if not use_canonical:
+                return
+            need = {i for i in ids if i and (i, as_of) not in kids}
+            if not need:
+                return
+            cand = await self._svc._incident_edge_ids(s, graph.id, main_id, need,
+                                                      sides=("source",), edge_types=cont_types)
+            live = (await self._svc._skeletons_at(s, graph.id, main_id, list(cand), as_of)
+                    if cand else {})
+            holding = {_edge_endpoints(p)[0] for p in live.values()
+                       if p is not None and _etype(p) in cont_types}
+            for i in need:
+                kids[(i, as_of)] = i in holding
+
         async def chain(node_id: str, as_of: Optional[int]) -> Tuple[List[str], Dict[str, List[str]]]:
             """(ancestors-or-self ids, child→ALL-parents multimap) — the
             parent DAG the shared pair rules rank on. Multi-parent nodes
@@ -2723,6 +3639,8 @@ class FalkorProjector:
 
         conversion = _CellsOut(self._svc, graph, main_id, from_seq, to_seq, use_canonical, level_map)
         net = _CellNet(self._session, graph.id, to_seq, config.ROLLUP_NET_MAX_CELLS, conversion)
+        from backend.app.providers.falkordb_materialize import _materialize_leaf_pairs
+        mirror = _materialize_leaf_pairs()
 
         async def contribute(p: dict, sign: int, as_of: Optional[int]) -> None:
             """Net this raw edge's delta into BOTH pair sets via the shared ``pair_rules`` (the
@@ -2745,6 +3663,11 @@ class FalkorProjector:
                 t_cl = ancestor_closure(cp_t, tgt)
                 s_parents = {pp for ps in cp_s.values() for pp in ps}
                 t_parents = {pp for ps in cp_t.values() for pp in ps}
+                # An endpoint that is a container itself is one of its own reps.
+                if kids.get((src, as_of)):
+                    s_parents.add(src)
+                if kids.get((tgt, as_of)):
+                    t_parents.add(tgt)
                 canon = boundary_pairs(
                     {a: d for a, d in s_cl.items() if a in s_parents},
                     {a: d for a, d in t_cl.items() if a in t_parents},
@@ -2753,13 +3676,18 @@ class FalkorProjector:
                     s_cl, t_cl, include_leaf_mirror=False, s=src, t=tgt,
                 ))
                 depths = {**t_cl, **s_cl}
-                for sx, tx in cube:
-                    net.add(sx, tx, sign, sign if (sx, tx) in canon else 0,
+                # The canonical cells can hold the raw (src, tgt) pair, when both ends are
+                # containers; the cube never does: the job's boundary cells have it, its cube none.
+                for sx, tx in cube | canon:
+                    net.add(sx, tx, sign if (sx, tx) in cube else 0,
+                            sign if (sx, tx) in canon else 0,
                             et if sign > 0 and et else None, depths.get(sx), depths.get(tx))
                 return
             for sx in cs:
                 for tx in ct:
-                    if sx != tx:
+                    # Never the raw (src, tgt) mirror, unless the batch job stores it too
+                    # (AGGREGATION_MATERIALIZE_LEAF_PAIRS): a cell it never has is one too many.
+                    if sx != tx and (mirror or (sx, tx) != (src, tgt)):
                         net.add(sx, tx, sign, None, et if sign > 0 and et else None, None, None)
 
         # The window's edges a page of distinct ids at a time, each at its value BEFORE the window
@@ -2771,6 +3699,10 @@ class FalkorProjector:
                   EdgeVersionORM.commit_seq > from_seq, EdgeVersionORM.commit_seq <= to_seq)
         moved: set = set()
         changed = False
+        # The parents of the window's containment changes: one whose first child arrived, or
+        # whose last went, becomes or stops being one of its own reps, which moves the cells of
+        # the lineage it ends.
+        holders: set = set()
         after = ""
         while True:
             ids = list((await s.execute(
@@ -2794,12 +3726,14 @@ class FalkorProjector:
                         deletes[eid] = old
                     elif et in cont_types:
                         children.add(_edge_endpoints(old)[1])
+                        holders.add(_edge_endpoints(old)[0])
                 if new is not None:
                     et = _etype(new)
                     if et in lineage_types:
                         creates[eid] = new
                     elif et in cont_types:
                         children.add(_edge_endpoints(new)[1])
+                        holders.add(_edge_endpoints(new)[0])
             children.discard("")
             if "dedicated" in sets[3:] and (creates or deletes or children):
                 # The aggregation job builds these rollups in a key of their own: this key gets
@@ -2822,6 +3756,8 @@ class FalkorProjector:
             changed = changed or bool(creates or deletes)
             await prefetch({x for p in creates.values() for x in _edge_endpoints(p)}, to_seq)
             await prefetch({x for p in deletes.values() for x in _edge_endpoints(p)}, from_seq)
+            await prefetch_kids({x for p in creates.values() for x in _edge_endpoints(p)}, to_seq)
+            await prefetch_kids({x for p in deletes.values() for x in _edge_endpoints(p)}, from_seq)
             for p in creates.values():
                 await contribute(p, +1, to_seq)
             for p in deletes.values():
@@ -2829,24 +3765,39 @@ class FalkorProjector:
             await net.page_done(s)
             if len(anc_cache) > _CHAIN_CACHE_MAX:
                 anc_cache.clear()                        # bounded, whatever the window's size
+            if len(kids) > _CHAIN_CACHE_MAX:
+                kids.clear()
             if len(ids) < config.PROJECTION_PAGE:
                 break
             after = ids[-1]
-        if not changed and not moved:
+        flipped: set = set()
+        if use_canonical and holders:
+            holders.discard("")
+            await prefetch_kids(holders, from_seq)
+            await prefetch_kids(holders, to_seq)
+            flipped = {h for h in holders
+                       if kids.get((h, from_seq)) != kids.get((h, to_seq))}
+            if len(flipped) > self._MOVE_EDGE_CAP:
+                await net.clear()                        # a restructure: the aggregation job's
+                return "stale"
+        if not changed and not moved and not flipped:
             await net.clear()
             return None
 
-        if moved:
-            # Moved subtrees: every lineage edge under them changes rollup pairs. Remove the
-            # pre-window contribution, add the post-window one — bounded by _MOVE_EDGE_CAP: a
-            # bigger move is a restructure, which the aggregation job takes.
-            subtree = await self._svc._containment_descendants(
-                s, graph.id, main_id, set(moved), cont_types, to_seq, cap=self._MOVE_EDGE_CAP + 1)
+        if moved or flipped:
+            # Moved subtrees: every lineage edge under them changes rollup pairs; and a node that
+            # became, or stopped being, a container changes the cells of the lineage it ends.
+            # Remove the pre-window contribution, add the post-window one — bounded by
+            # _MOVE_EDGE_CAP: a bigger move is a restructure, which the aggregation job takes.
+            subtree = (await self._svc._containment_descendants(
+                s, graph.id, main_id, set(moved), cont_types, to_seq,
+                cap=self._MOVE_EDGE_CAP + 1) if moved else set())
             if len(subtree) > self._MOVE_EDGE_CAP:
                 await net.clear()
                 return "stale"
             # as-of to_seq (not head): a commit landing after this window must not leak in.
-            inc = await self._svc._incident_live_edges(s, graph.id, main_id, subtree, to_seq)
+            inc = await self._svc._incident_live_edges(s, graph.id, main_id,
+                                                       set(subtree) | flipped, to_seq)
             lineage = {eid: p for eid, p in inc.items() if _etype(p) in lineage_types}
             if len(lineage) > self._MOVE_EDGE_CAP:
                 await net.clear()
@@ -2857,6 +3808,8 @@ class FalkorProjector:
             ends = {x for p in moved_edges.values() for x in _edge_endpoints(p)}
             await prefetch(ends, from_seq)
             await prefetch(ends, to_seq)
+            await prefetch_kids(ends, from_seq)
+            await prefetch_kids(ends, to_seq)
             for eid, p in moved_edges.items():
                 await contribute(p, -1, from_seq)
                 await contribute(p, +1, to_seq)
@@ -2938,7 +3891,11 @@ class FalkorProjector:
             if rows and rows[0] and rows[0][0] in ("cube", "boundary"):
                 regime = str(rows[0][0])
         except Exception:
-            pass
+            # The regime could not be read: on a cube key the canonical subset would leave every
+            # other cell unmoved. The batch job derives the cells instead.
+            logger.warning("rollup regime unreadable: the window's cells go to the batch job",
+                           exc_info=True)
+            return False
 
         # Grouped by the endpoints' labels so every node match below is a
         # per-label URN index seek (an unlabeled ``(a {urn: …})`` scans all
@@ -2992,6 +3949,12 @@ class FalkorProjector:
             # storage-regime probe clean (a NULL sourceLevel row makes every reader fall back to
             # stored-only answers for up to 5 minutes). Each cell's weight is the absolute value
             # computed above, so a chunk sent again in halves writes the same.
+            landed = [0]
+
+            def written(_part, res) -> None:
+                rows = getattr(res, "result_set", None) or []
+                landed[0] += int(rows[0][0] or 0) if rows and rows[0] else 0
+
             await self._laddered(
                 client, "rollup_write",
                 f"UNWIND $batch AS item "
@@ -3003,8 +3966,16 @@ class FalkorProjector:
                 f"    r.sourceDepth = coalesce(item.sd, r.sourceDepth), "
                 f"    r.targetDepth = coalesce(item.td, r.targetDepth), "
                 f"    r.levelDigest = coalesce(item.dg, r.levelDigest), "
-                f"    r.gvSeq = item.seq, r.latestUpdate = timestamp()",
-                upserts)
+                f"    r.gvSeq = item.seq, r.latestUpdate = timestamp() "
+                f"RETURN count(r)",
+                upserts, on_result=written)
+            if landed[0] < len(upserts):
+                # A cell whose end is not in the key (held in quarantine, or under another label)
+                # matched nothing and was not written: moving the marker past it would lose it for
+                # good. The batch job derives the cells instead.
+                logger.warning("%d of %d rollup cells found no end in the key: handed to the "
+                               "batch job", len(upserts) - landed[0], len(upserts))
+                return False
             await self._laddered(
                 client, "rollup_delete",
                 f"UNWIND $batch AS item "
@@ -3349,7 +4320,7 @@ class FalkorProjector:
         await self._delete_nodes_by_id(client, unkeyed)
         await self._delete_edges_by_key(client, list(parallel), progress)
 
-        await self._relabel_in_place(client, diff.relabels, progress)
+        await self._relabel_in_place(client, diff.relabels, progress, levels=level_map)
 
         # Phase two: payloads for exactly what is written — nothing else is ever read.
         node_keys = list(dict.fromkeys([*diff.node_upserts, *(k for k in nodes if k in duplicated)]))
@@ -3381,7 +4352,10 @@ class FalkorProjector:
                 pairs[(su, tu)] = {**v, "slb": label_by_urn.get(su) or "Entity",
                                    "tlb": label_by_urn.get(tu) or "Entity",
                                    **({"dg": digest} if digest is not None else {})}
-            await self._write_rollup_deltas(client, pairs, to_seq, guard_from_seq=None)
+            if not await self._write_rollup_deltas(client, pairs, to_seq, guard_from_seq=None):
+                # A cell found no end in the key: the job derives them, and ``reconciling`` stays
+                # set, so the rollups read untrusted until it has.
+                rollups = "stale"
         if plan is not None and not plan.stale and rollups != "stale":
             # The rollups now describe main at to_seq: the next publish window continues
             # from here.
@@ -3471,7 +4445,7 @@ class FalkorProjector:
                     else:
                         relabels.append((urn, old, new))
                         held.add(urn)                    # a second stale copy is then gone
-            await self._relabel_in_place(client, relabels)
+            await self._relabel_in_place(client, relabels, levels=level_map)
             done["writes"] += len(relabels)
             done["structural"] |= bool(relabels)
             doomed = [nid for nid, _l, _u in gone] + unkeyed
@@ -3803,20 +4777,35 @@ class FalkorProjector:
                                  f"OPTIONAL MATCH (m:{lbl} {{urn: it.new}}) "
                                  "WITH n, it, m WHERE m IS NULL SET n.urn = it.new",
                                  items, progress=progress)
+            # The summary cells on a moved node are keyed by their ends' urns (``aggKey``): the
+            # summaries job merges a cell by it, so one left on the old urn would become two.
+            moved = [it["new"] for it in items]
+            for cypher in _aggkey_restamp(lbl):
+                await self._laddered(client, "rekey_cells", cypher, moved, param="urns")
 
-    async def _relabel_in_place(self, client, relabels, progress=None) -> None:
+    async def _relabel_in_place(self, client, relabels, progress=None,
+                                levels: Optional[Dict[str, int]] = None) -> None:
         """Retype nodes IN PLACE (``SET n:new REMOVE n:old``): the node keeps its id, its
         edges and the rollup cells on it. A MERGE under the new label would create a second
-        node and leave the old one; a delete-and-recreate would take its edges and rollups."""
+        node and leave the old one; a delete-and-recreate would take its edges and rollups.
+        With the ontology's ``levels`` (entity type -> level), the cells on a retyped node take
+        its new type's level as their ``sourceLevel`` or ``targetLevel``, as the summaries job
+        stamps them; a type with no level leaves the stamps as they were."""
         by: Dict[Tuple[str, str], List[str]] = {}
         for urn, old, new in relabels:
             if old != new:
                 by.setdefault((old, new), []).append(urn)
+        level_of = {_sanitize_label(spelled_label(t)): lvl for t, lvl in (levels or {}).items()}
         for (old, new), urns in by.items():
             await self._laddered(client, "relabel",
                                  f"UNWIND $urns AS u MATCH (n:{_sanitize_label(old)} {{urn: u}}) "
                                  f"SET n:{_sanitize_label(new)} REMOVE n:{_sanitize_label(old)}",
                                  urns, param="urns", progress=progress)
+            level = level_of.get(_sanitize_label(new))
+            if level is not None:
+                for cypher in _level_restamp(_sanitize_label(new)):
+                    await self._laddered(client, "relabel_cells", cypher, urns, param="urns",
+                                         params={"level": level})
 
     async def _delete_edges_by_key(self, client, keys, progress=None) -> None:
         by: Dict[Tuple[str, str, str], list] = {}
@@ -4102,6 +5091,11 @@ class FalkorProjector:
                 return
             state["last"] = now
             try:
+                build_id = _PASS_BUILD.get()
+                if build_id is not None:                 # a build's: on the build
+                    await self._svc.update_candidate(
+                        graph_id, build_id, progress={"done": state["done"], "total": total})
+                    return
                 async with self._session() as s:
                     ps = await s.get(ProjectionStateORM, graph_id)
                     if ps is not None:
@@ -4148,7 +5142,7 @@ class FalkorProjector:
                     prior = None if owned else await self._properties_before(
                         s, graph, main_id, from_seq, changes[0])
                     await self._rekey_in_place(client, rekeys)
-                    await self._relabel_in_place(client, retypes)
+                    await self._relabel_in_place(client, retypes, levels=level_map)
                     dropped += await self._apply(client, *changes, level_map=level_map,
                                                  provider_id=provider_id, owned=owned,
                                                  prior=prior) or 0

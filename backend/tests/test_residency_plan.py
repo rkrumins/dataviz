@@ -3,10 +3,11 @@ and holds, decided from what it read — pure, so the loop and the policy previe
 
 Per master, pressure eviction starts at the start mark and stops at the stop mark; idle eviction
 takes Standard unread past the Standard idle time and Coldline past the Coldline idle time. Never
-Always, never a key the platform did not mint, never a graph with a read lease or a pass in
-flight. A load starts only when the master has room for its estimate times the headroom under the
-start mark, after what others hold; one at a time per master, none while it forks for
-persistence, in the order the loads were asked for.
+Always, never a key the platform did not mint, never a graph with a read lease, a pass in flight
+or a window in flight. A load starts only when the master has room for its estimate times the
+headroom under the start mark, after what others hold (a window in flight keeps room for the rest
+of it); one at a time per master, none while it forks for persistence, in the order the loads were
+asked for.
 """
 from __future__ import annotations
 
@@ -67,6 +68,7 @@ def test_idle_graphs_go_by_their_class(residency, read, reason):
     {"status": "projecting"},                    # a pass in flight
     {"status": "rehydrating"},
     {"evictable": False},                        # at genesis, still being enabled, or trashed
+    {"window_rows": 300_000},                    # idle between the passes of a window in flight
 ])
 def test_what_is_never_evicted_however_idle_or_full(excluded):
     graphs = [_graph("g", "coldline", read=_ago(days=30), **excluded)]
@@ -585,6 +587,19 @@ def test_a_load_in_flight_on_the_master_holds_the_next_and_reserves_its_room():
                _graph("next", status="evicted", requested_at=1.0, size=10 * MB)]
     p = plan(POLICY, [_master(used_pct=50)], rebuild, NOW)
     assert p.masters[0].reserved == 260 * MB and p.waits[0].reason == "queued"
+
+
+def test_a_window_in_flight_keeps_room_for_the_rest_of_it():
+    """A graph idle between the passes of a window written a page at a time keeps its key until the
+    window lands (above), and its master keeps room for what the rest of it may add, its version
+    rows times the bytes per entity: a load that fits beside the graph otherwise waits for it."""
+    writing = _graph("writing", read=_ago(minutes=5), window_rows=100_000)
+    nxt = _graph("next", status="evicted", requested_at=1.0, size=200 * MB)   # needs 260 MB
+    alone = plan(POLICY, [_master(used_pct=50)], [_graph("writing", read=_ago(minutes=5)), nxt], NOW)
+    assert [x.graph_id for x in alone.loads] == ["next"]                       # 300 MB of room
+    p = plan(POLICY, [_master(used_pct=50)], [writing, nxt], NOW)
+    assert p.masters[0].reserved == 100_000 * POLICY.bytes_per_entity
+    assert p.loads == [] and [(w.graph_id, w.reason) for w in p.waits] == [("next", "capacity")]
 
 
 def test_no_load_starts_while_the_master_forks_for_persistence_or_cannot_be_read():

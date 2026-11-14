@@ -33,7 +33,7 @@ const ROW: VersionedGraphRow = {
     lag: 0, status: 'idle', lastError: null, lastProjectedAt: null, progressDone: null, progressTotal: null,
     updatedAt: null, owned: true, forkParentGraphId: null, orphan: false, retiredKeys: [],
     residency: 'standard', residencyState: 'resident', evictedReason: null, lastReadAt: null,
-    sizeBytes: null, rehydratingSince: null,
+    sizeBytes: null, rehydratingSince: null, readMode: null, readModeEffective: 'in_place',
 }
 
 const MOVED = {

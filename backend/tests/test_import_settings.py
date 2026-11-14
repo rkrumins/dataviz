@@ -103,6 +103,13 @@ def test_on_a_fork_a_default_of_its_identifier_property_stays_as_its_parents(mon
     # Any other property is entity_id there.
     other = _row(import_identifier="prop.external_id")
     assert import_settings.for_import(other, None, fork=True, identity_property="asset_id")[0] == "entity_id"
+    # With ,urn or not: the identifier property holds the urn, and any other property is entity_id.
+    with_urn = _row(import_identifier="prop.asset_id,urn")
+    identifier, kept = import_settings.for_import(with_urn, None, fork=True, identity_property="asset_id")
+    assert (identifier, kept["identifierSource"]) == ("prop.asset_id,urn", "data_source")
+    identifier, kept = import_settings.for_import(_row(import_identifier="prop.external_id,urn"), None,
+                                                  fork=True, identity_property="asset_id")
+    assert (identifier, kept["identifierSource"]) == ("entity_id", "fork")
     # The platform's default alike; and with no identifier property, a property is never the urn.
     monkeypatch.setattr(config, "IMPORT_IDENTIFIER", "prop.asset_id")
     identifier, kept = import_settings.for_import(None, None, fork=True, identity_property="asset_id")

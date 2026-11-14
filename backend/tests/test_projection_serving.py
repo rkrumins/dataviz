@@ -52,3 +52,17 @@ def test_read_max_lag_caps_how_far_behind(monkeypatch):
     monkeypatch.setattr(config, "READ_MAX_LAG", 3)
     assert serving_seq(9, 12, "projecting", 9) == 9
     assert serving_seq(0, 12, "rebuilding", 8) is None
+
+
+def test_a_graph_read_latest_serves_the_key_only_at_its_head():
+    """A graph read ``latest`` (always the newest published version) is served from its key only
+    while the key holds the head; behind it, whatever the platform's lag allows, its reads go to
+    Postgres. The other modes take the platform's lag."""
+    from backend.app.services.versioning import build_policy
+
+    latest = build_policy.max_lag_of("latest")
+    assert serving_seq(12, 12, "idle", 12, latest) == 12
+    assert serving_seq(9, 12, "projecting", 9, latest) is None
+    assert serving_seq(0, 12, "rebuilding", 9, latest) is None
+    for mode in ("in_place", "beside"):
+        assert serving_seq(9, 12, "projecting", 9, build_policy.max_lag_of(mode)) == 9, mode

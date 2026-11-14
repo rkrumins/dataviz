@@ -27,7 +27,8 @@ from backend.app.providers.shard_capacity import human_bytes
 from backend.app.services.graph_store.topology import key_slot
 from backend.app.services.system_status import probes
 from backend.app.services.versioning import config as vconfig
-from backend.app.services.versioning import draft_retention, keymigrate, residency, residency_policy
+from backend.app.services.versioning import (build_policy, draft_retention, keymigrate, residency,
+                                             residency_policy)
 from backend.app.services.versioning.errors import (JobActive, ProjectionAlreadyAdopted,
                                                     ProjectionKeyInUse, ProjectionKeyInvalid,
                                                     ProjectionNotAdopted)
@@ -287,6 +288,60 @@ def _validate(body: Dict[str, Any], saved: Dict[str, Any]) -> None:
             "type": "invalid_residency_policy", "field": exc.field, "message": str(exc)})
 
 
+@router.get("/build-policy",
+            summary="New-version builds: each setting as saved, its default and its effective value")
+async def get_build_policy(
+    _user: User = Depends(requires("system:admin")),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict:
+    """When and how a versioned graph's next version is built beside the key that serves it (doc 14
+    §6), the room a copy needs, the pacing of the projector's writes and the limits on reads from
+    Postgres: each value as saved, its default and its effective value, each setting's kind, range
+    and help (``fields``), and ``enabled``: whether a system administrator has turned New-version
+    builds on (Admin → Features)."""
+    return await _build_policy(await session.get(PlatformSettingsORM, 1))
+
+
+async def _build_policy(row) -> dict:
+    return {**build_policy.describe(row), "enabled": await build_policy.enabled()}
+
+
+@router.put("/build-policy", summary="Change New-version build settings")
+async def put_build_policy(
+    body: Dict[str, Any] = Body(..., examples=[{"copyMarginPct": 150, "noRoomPolicy": -1}]),
+    user: User = Depends(requires("system:admin")),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict:
+    """Partial: only the values named change, and ``-1`` clears one back to its default. A value
+    out of its range, of the wrong kind, or contradicting another (more Postgres reads at once per
+    graph than per process) is a 422 naming the field, and nothing is saved. Recorded with each
+    changed value's before and after. Every process reads the change on its next look, within two
+    seconds (within 30 without Redis); a build already under way keeps the trigger and room values
+    it started with."""
+    row = await session.get(PlatformSettingsORM, 1)
+    if row is None:
+        row = PlatformSettingsORM(id=1)
+        session.add(row)
+    before = build_policy.saved_values(row)
+    try:
+        build_policy.validate(body, before)
+    except build_policy.PolicyInvalid as exc:
+        raise HTTPException(status_code=422, detail={
+            "type": "invalid_build_policy", "field": exc.field, "message": str(exc)})
+    after = build_policy.merged(before, body)
+    changed = sorted(w for w in after if after[w] != before[w])
+    if changed:
+        build_policy.save(row, after, user.id)
+        row.updated_at = datetime.now(timezone.utc).isoformat()
+        row.updated_by = user.id
+        await recorder.record_for_request(
+            session, "platform.build_policy.updated",
+            details={"from": {w: before[w] for w in changed}, "to": {w: after[w] for w in changed}})
+    await session.commit()
+    await build_policy.invalidate()
+    return await _build_policy(await session.get(PlatformSettingsORM, 1))
+
+
 @router.get("/draft-retention",
             summary="How long a merged or abandoned draft keeps its changes")
 async def get_draft_retention(
@@ -539,6 +594,56 @@ async def _no_rollup_job(session: AsyncSession, data_source_id: str) -> None:
     if job is not None:
         raise JobActive(job, "a rollup rebuild is running for this graph; adopt it when it "
                              "finishes")
+
+
+class ReadModeRequest(BaseModel):
+    mode: Optional[Literal["latest", "in_place", "beside"]] = Field(
+        ..., description="latest, in_place or beside; null takes the platform's (New-version "
+                         "builds' readMode)")
+
+
+@router.put("/graphs/{graph_id}/read-mode",
+            summary="Set what a versioned graph's readers get while a new version lands")
+async def set_graph_read_mode(
+    graph_id: str,
+    body: ReadModeRequest,
+    user: User = Depends(requires("system:admin")),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict:
+    """Availability against consistency, for one graph: ``latest`` (always the newest published
+    version, from Postgres until FalkorDB holds it), ``in_place`` (the version FalkorDB last
+    finished, while the next is written into the same key) or ``beside`` (exactly that version,
+    while the next is built in a second key, then one switch); null takes the platform's. A fork
+    follows its root (409 ``not_for_forks``). ``beside`` needs a key the platform owns: a customer's
+    own key is never built beside (422 ``read_mode_unavailable``). The next read goes by it.
+    Recorded with the mode before and after."""
+    meta = await get_versioning_service().get_graph(graph_id)
+    if meta is None:
+        raise HTTPException(status_code=404, detail=f"unknown graph {graph_id}")
+    if meta.get("fork_parent_graph_id"):
+        raise HTTPException(status_code=409, detail={
+            "type": "not_for_forks",
+            "message": "a fork reads through its root's key: set the read mode on the root"})
+    svc = get_versioning_service()
+    if body.mode == "beside" and not (await svc.projection_watermark(graph_id)).get(
+            "owns_falkor_graph"):
+        raise HTTPException(status_code=422, detail={
+            "type": "read_mode_unavailable",
+            "message": "this graph is read from your own FalkorDB key, which is never copied or "
+                       "built beside: choose Always the latest, or Keep serving, update in place"})
+    found, before = await svc.set_read_mode(graph_id, body.mode)
+    if not found:
+        raise HTTPException(status_code=409, detail={
+            "type": "not_projected", "message": "this graph has no FalkorDB key yet"})
+    if before != body.mode:
+        await recorder.record_for_request(
+            session, "platform.versioning.read_mode_changed",
+            details={"graphId": graph_id, "workspaceId": meta["workspace_id"],
+                     "dataSourceId": meta["data_source_id"], "from": before, "to": body.mode},
+            best_effort=True,   # the mode is already set
+        )
+    wm = await svc.projection_watermark(graph_id)
+    return {"graphId": graph_id, "readMode": body.mode, "readModeEffective": wm["read_mode"]}
 
 
 class ResidencyClassRequest(BaseModel):

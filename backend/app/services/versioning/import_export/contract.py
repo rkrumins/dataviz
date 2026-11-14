@@ -35,7 +35,10 @@ _POINTER = ("A pointer, not stored: it finds the node that carries it as its urn
             "earlier import made from it — whose id is derived from it, so importing the same file "
             "again updates what it made. A `urn:uuid:` no node holds is kept as the new node's id. "
             "To see your own id on the node, keep it in a property marked \"Match imports by "
-            "this\" too.")
+            "this\" too. Whether it is read follows the import's identifier: by `prop.<name>` a "
+            "row is found by its `<name>` instead (an edge's end by `source.<name>` or "
+            "`target.<name>`), and by `prop.<name>,urn` by this when it has no `<name>`, or no node "
+            "holds its value yet.")
 
 
 class _Record(BaseModel):
@@ -86,9 +89,12 @@ class ImportNodeRecord(_Record):
 
 
 class ImportEdgeRecord(_Record):
-    """An edge row. Each end is found the way a node row is — by an entity id, a pointer
-    (``sourceUrn``, or ``source.<identifier property>``), a field matched by "Match imports by
-    this" (``source.<field>``), or a qualifiedName — and the edge by its two ends and its type."""
+    """An edge row. Each end is found the way a node row is, as the import's identifier says — by
+    ``entity_id``: an entity id, a pointer (``sourceUrn``, or ``source.<identifier property>``), a
+    field matched by "Match imports by this" (``source.<field>``), or a qualifiedName; by ``urn``:
+    an entity id or ``sourceUrn``; by ``prop.<name>``: an entity id or ``source.<name>``, and by
+    ``prop.<name>,urn`` an end without it, or whose value no node holds yet, by ``sourceUrn`` — and
+    the edge by its two ends and its type."""
     model_config = ConfigDict(json_schema_extra={
         "patternProperties": {_EDGE_EXTRA.pattern: _SCALAR}, "additionalProperties": False})
 

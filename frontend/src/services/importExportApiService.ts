@@ -34,12 +34,33 @@ export interface ImportSummary {
   auto_fixed?: number
   /** A replace: the replace guard's verdict — what it would delete and made, and the limits. */
   replaceGuard?: ReplaceGuardVerdict | null
-  /** A failed job: why (`code`) and what to do about it (`action`). */
-  failure?: { code: string; action?: string | null; reason?: string } | null
+  /** A failed job: why (`code`), what to do about it (`action`), and the step it stopped in
+   *  (`phase`: `nodes`, `edges`, `replace`, …). */
+  failure?: { code: string; action?: string | null; reason?: string; phase?: string | null } | null
   /** The rows the import refused: how many for each reason, and the first ones, with why. */
   refused?: RefusedRows | null
   /** A replace: the edges its node deletes took with them (an edge never outlives its ends). */
   edgesCascaded?: number
+  /** An import that publishes itself (`autoPublish`): how its publish went. */
+  publish?: ImportPublish | null
+}
+
+/** How an import's own publish went (`summary.publish`): `queued` while its publish job runs, then
+ *  `published` (`commitId` and `revisionId`: the commit it landed as), `unchanged` (main held its
+ *  changes already: `commitId` and `revisionId` are main's head, which holds them) or `skipped`
+ *  (`reason`: why the draft waits for review). */
+export interface ImportPublish {
+  state: 'queued' | 'published' | 'unchanged' | 'skipped'
+  /** The publish job, once one is queued. */
+  jobId?: string
+  commitId?: string | null
+  revisionId?: number | null
+  /** Why it was skipped, as the publish route would have refused it: `type`, `message`, … */
+  reason?: string | { type?: string; message?: string; [k: string]: unknown } | null
+  /** The refused rows it was published without (within `maxRefusedRows`). */
+  refusedRows?: number
+  /** How many times its draft pulled main to publish, when main moved while the file was imported. */
+  pulls?: number
 }
 
 /** An import's report of the rows it refused (`summary.refused`). */
@@ -101,6 +122,11 @@ export interface ReplaceGuardVerdict {
   creates: number
   limits: { minLive: number; deleteFraction: number; createFraction: number }
   sources: Record<'minLive' | 'deleteFraction' | 'createFraction', ImportSettingSource>
+  /** The refused rows that matched no entity, counted in `creates` as a row nothing found is. */
+  refusedUnmatched?: number
+  /** `keyed`: it deletes only what holds its property (`replaceScope=keyed`); absent, anything the
+   *  file leaves out. */
+  scope?: 'keyed'
 }
 
 export interface ExportSummary {
@@ -141,7 +167,8 @@ export interface Job {
   attempt?: number | null
   /** Running, but its server stopped answering: another one is about to take it over. */
   stale?: boolean
-  /** An import: what its rows found their entities by (`entity_id`, `urn` or `prop.<name>`). */
+  /** An import: what its rows found their entities by (`entity_id`, `urn`, `prop.<name>`, or
+   *  `prop.<name>,urn`: a row without the property, or whose value no entity holds yet, by its urn). */
   identifier?: string | null
   /** A replace sent to delete past the replace guard's limits. */
   allowMassDelete?: boolean
@@ -230,8 +257,8 @@ export interface CreateImportOptions {
   branchId?: string
   viewId?: string
   idempotencyKey?: string
-  /** What the rows find their entities by: `entity_id`, `urn` or `prop.<name>`; the graph's when
-   *  left out. */
+  /** What the rows find their entities by: `entity_id`, `urn`, `prop.<name>` or `prop.<name>,urn`
+   *  (the property, else the urn); the graph's when left out. */
   identifier?: string
   /** A replace: delete what the file leaves out even past the replace guard's limits. */
   allowMassDelete?: boolean

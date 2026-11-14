@@ -52,7 +52,8 @@ from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
-from typing import Any, AsyncIterator, Collection, Dict, List, Mapping, NamedTuple, Optional, Tuple
+from typing import (Any, AsyncIterator, Awaitable, Callable, Collection, Dict, List, Mapping,
+                    NamedTuple, Optional, Tuple)
 
 from sqlalchemy import func, literal, select, text, update
 
@@ -547,7 +548,8 @@ async def gather(*, graph_ids: Optional[Collection[str]] = None,
         select(ps.graph_id, ps.falkor_graph_name, ps.falkor_provider, ps.owns_falkor_graph,
                ps.status, ps.residency, ps.last_read_at, ps.last_projected_at, ps.size_bytes,
                ps.size_measured_at, ps.rehydrating_since, ps.retired_keys, ps.epoch,
-               ps.projected_commit_seq, ps.target_commit_seq, head,
+               ps.projected_commit_seq, ps.target_commit_seq, ps.window_rows, head,
+               ps.candidate_graph_name, ps.candidate_provider, ps.candidate_state,
                GraphORM.data_source_id, GraphORM.workspace_id,
                (head > 1).label("past_genesis"),
                (~select(1).where(*bootstrap_unfinished(ps.graph_id)).correlate(ps).exists())
@@ -578,7 +580,8 @@ async def gather(*, graph_ids: Optional[Collection[str]] = None,
     estimate: Dict[str, Optional[int]] = {}
     for r in found:              # only a load asked for, or one in flight, needs an estimate
         target = max(r.target_commit_seq, r.main_head_commit_seq)
-        if r.size_bytes is None and (r.graph_id in asked or _seeding(r, target)):
+        if r.size_bytes is None and (r.graph_id in asked or _seeding(r, target)
+                                     or _build_seeding(r)):
             try:
                 estimate[r.graph_id] = await _entity_count(r.graph_id, r.data_source_id,
                                                            r.main_head_commit_seq)
@@ -615,6 +618,10 @@ async def gather(*, graph_ids: Optional[Collection[str]] = None,
         for r in rows:
             endpoint_of[r.graph_id] = (_master_of(slots, r.falkor_graph_name) if slots
                                        else f"{provider}:unreachable")
+            if _build_seeding(r):
+                endpoint_of[f"{r.graph_id}#build"] = (
+                    _master_of(slots, r.candidate_graph_name) if slots
+                    else f"{provider}:unreachable")
 
     broker: Dict[str, bool] = {}            # the read leases' broker, as this pass found it
     for r in found:
@@ -633,8 +640,28 @@ async def gather(*, graph_ids: Optional[Collection[str]] = None,
             size_bytes=r.size_bytes, entities=estimate.get(r.graph_id),
             seeding=_seeding(r, target),
             requested_at=asked.get(r.graph_id),
-            provider=r.falkor_provider or config.DEFAULT_FALKOR_PROVIDER, placed=placed))
+            provider=r.falkor_provider or config.DEFAULT_FALKOR_PROVIDER, placed=placed,
+            # A window in flight on the key it serves; one left on a key since lost is no growth.
+            window_rows=r.window_rows if r.status in ("idle", "projecting") else None))
+        if _build_seeding(r):
+            # A build seeding the next version into a key of its own: a full write of the graph
+            # on that key's master, reserved there as a load's is, and that master takes no other
+            # load meanwhile. Never evicted, never loaded: it is not the graph's resident key.
+            snap.graphs.append(Graph(
+                graph_id=r.graph_id, endpoint=endpoint_of[f"{r.graph_id}#build"],
+                residency=r.residency, status="building", owned=True, evictable=False,
+                size_bytes=r.size_bytes, entities=estimate.get(r.graph_id), seeding=True,
+                provider=r.falkor_provider or config.DEFAULT_FALKOR_PROVIDER, placed=False,
+                build=True))
     return snap
+
+
+def _build_seeding(r) -> bool:
+    """Whether a build is seeding the graph's next version into a key of its own from Postgres
+    (New-version builds, ``candidates``): the room it is writing counts on that key's master."""
+    state = getattr(r, "candidate_state", None)
+    return (isinstance(state, dict) and state.get("step") == "seeding"
+            and bool(getattr(r, "candidate_graph_name", None)))
 
 
 async def _leased(graph_id: str, broker: Dict[str, bool]) -> bool:
@@ -752,6 +779,93 @@ async def _admission_on(graph_id: str, provider: str,
     decided = plan(policy, snap.masters, snap.graphs, _clock(), sized=snap.sized)
     target = next((p for p in decided.masters if p.master.endpoint == endpoint), None)
     return _admitted(target, graph, policy, endpoint), need(graph, policy)
+
+
+async def copy_room(graph_id: str, provider: Optional[str], key: str, *, margin_pct: int,
+                    max_bytes: int = 0) -> Admitted:
+    """Whether a ``GRAPH.COPY`` of ``graph_id``'s key into ``key`` fits now on the master ``key``
+    hashes to (a build beside the serving key, New-version builds): the graph's size, measured or
+    estimated as for a load, times ``margin_pct`` (``copyMarginPct``) under the master's start mark
+    after what is held there. Refused as admission refuses a load: an unsized graph or an
+    unread master, one holding or taking a load; and a graph larger than ``max_bytes`` when it is
+    set (``copyMaxBytes``, ``too_large``). No ``provider`` is the default one."""
+    return (await _copy_room(graph_id, provider, key, margin_pct=margin_pct,
+                             max_bytes=max_bytes))[0]
+
+
+async def _copy_room(graph_id: str, provider: Optional[str], key: str, *, margin_pct: int,
+                     max_bytes: int) -> Tuple[Admitted, int]:
+    """:func:`copy_room`'s answer, and the room the copy asks for (0 when refused unsized)."""
+    provider = provider or config.DEFAULT_FALKOR_PROVIDER
+    policy = await residency_policy.resolve()
+    own = await gather(graph_ids=[graph_id])
+    graph = next((g for g in own.graphs if g.graph_id == graph_id), None)
+    if graph is None:
+        return Admitted(False, None, None, "unmeasured"), 0
+    graph = await _sized(graph, own.rows.get(graph_id), policy)
+    size = graph.bytes(policy)
+    if size is None:
+        return Admitted(False, None, None, "unsized"), 0
+    needed = -(-size * max(margin_pct, 100) // 100)
+    if max_bytes and size > max_bytes:
+        return Admitted(False, None, None, "too_large"), needed
+    snap = await gather(providers=[provider])
+    endpoint = _master_of(snap.slots, key) if snap.slots else None
+    decided = plan(policy, snap.masters, snap.graphs, _clock(), sized=snap.sized)
+    target = next((p for p in decided.masters if p.master.endpoint == endpoint), None)
+    if target is None or target.master.used is None:
+        return Admitted(False, endpoint, None, "unmeasured"), needed
+    if target.master.hold:
+        return Admitted(False, endpoint, None, target.master.hold), needed
+    if target.seeding or target.claimed:
+        return Admitted(False, endpoint, None, "busy"), needed
+    fits, shortfall = admit(target.master, needed, policy, target.reserved)
+    return Admitted(fits, endpoint, shortfall, None if fits else "capacity"), needed
+
+
+async def admit_build_copy(graph_id: str, provider: Optional[str], key: str, holder: str, *,
+                           margin_pct: int, max_bytes: int = 0
+                           ) -> Tuple[Admitted, Optional[Any]]:
+    """:func:`copy_room`, and — when the copy fits — the room it asks for reserved on that master
+    for ``holder`` (the build) in the aggregation write governor's ledger, which every admission
+    and capacity pass counts (:func:`_read_masters`): renewed while the holder runs, gone with a
+    dead one, until it is released (``AggregationAdmission.release``). Both under the capacity
+    lock, so no other build, load or full write is admitted between the check and the reservation:
+    two builds can never both take the room one copy needs. The reservation is None when the
+    ledger cannot be written (fail open, as the governor does)."""
+    from backend.app.services.aggregation.admission import AggregationAdmission
+    from backend.app.services.aggregation.redis_client import get_redis
+
+    async with admitting():
+        admitted, needed = await _copy_room(graph_id, provider, key, margin_pct=margin_pct,
+                                            max_bytes=max_bytes)
+        if not admitted.fits:
+            return admitted, None
+        return admitted, await AggregationAdmission(get_redis()).reserve(
+            admitted.master, holder, needed)
+
+
+async def admit_build_seed(graph_id: str, provider: Optional[str], taken: Collection[str],
+                           record: Callable[[str, Optional[str]], Awaitable[bool]]
+                           ) -> Tuple[Admitted, Optional[str]]:
+    """Room for a build seeded from Postgres (New-version builds, when a copy does not fit or is
+    not wanted): a key of the graph's own, not ``taken``, on the master with the most room free to
+    take a load (:func:`place_key`), and the graph's full write admitted there as a load's is
+    (:func:`admission_on`). When it fits, ``record(key, master)`` writes the build's step and key
+    in ``projection_state`` before the capacity lock is let go, so the next admission counts the
+    seed (:func:`gather`): no two builds, or a build and a load, take the same room. ``(admitted,
+    key)``; the key is None when refused, or when ``record`` found the build gone (False). No
+    ``provider`` is the default one."""
+    provider = provider or config.DEFAULT_FALKOR_PROVIDER
+    async with admitting():
+        placed = await place_key(graph_id, provider, taken)
+        if placed is None:
+            return Admitted(False, None, None, "queued"), None
+        key, master = placed
+        admitted = await admission_on(graph_id, provider, key)
+        if not admitted.fits:
+            return admitted, None
+        return admitted, key if await record(key, master) else None
 
 
 async def admit_copy(graph_id: str, provider: str, key: str, holder: str
@@ -1112,6 +1226,8 @@ def _report(snap: Snapshot) -> None:
         metrics.gauge_set("versioning_residency_master_max_bytes", m.maxmemory, master=m.endpoint)
     counts: Dict[Tuple[str, str], int] = {}
     for g in snap.graphs:
+        if g.build:                     # the graph's next version, not a graph of its own
+            continue
         state = g.status if g.status in _OUT else "resident"
         counts[(g.residency, state)] = counts.get((g.residency, state), 0) + 1
     for cls in residency_policy.CLASSES:

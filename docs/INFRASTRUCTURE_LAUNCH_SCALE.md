@@ -40,7 +40,7 @@ This spec is a ground-up re-derivation for the *operating* scale, not the theore
 | Versioned views | ~3,000 (~500 actively-edited draft branches) |
 | Versioned rows in Cloud SQL | ~135M node/edge version rows + ~45M heads + ~150K commits (3× history amplification) |
 | Interactive read P99 | canvas bootstrap / neighbors < 400 ms; trace depth ≤ 5 < 1 s |
-| View freshness (projection lag) | projected `commit_seq` within `GRAPHVER_READ_MAX_LAG` of committed — the user-facing SLO |
+| View freshness (projection lag) | how far the version reads are served at (`served`) is behind committed `main`, and for how long — the user-facing SLO. Reads stay on FalkorDB at the last published version meanwhile (`GRAPHVER_READ_MAX_LAG=-1`) |
 | Availability | Zone loss: no read outage; Cloud SQL regional sync-HA; control plane + workers ≥ 2 across zones |
 | Utilization ceiling | ≤ 65% of provisioned CPU/RAM/connections at target — headroom is part of the spec |
 
@@ -360,7 +360,7 @@ PVC **250 Gi** per pod (`hyperdisk-balanced`) ≈ 8× `maxmemory` for AOF/RDB gr
 | `REDIS_CACHE_*` (legacy `CACHE_REDIS_URL`) | `synodic-redis-cache` (§6) | **Required** — the provider's ancestor/idempotency cache needs cross-slot SCAN/pipelines a cluster can't serve; without it the provider runs cache-disabled and (per ADR-020/ADR-022) refuses to co-locate on FalkorDB |
 | `GRAPHVER_FALKOR_BUDGETS` / `GRAPHVER_FALKOR_MAX_RESIDENT` | — | No longer acted on. Turn on **Graph residency** (Admin → Features) and give every shard a `maxmemory`, so FalkorDB keeps the ~40M working set, not the full 45M+growth corpus ([17 §16](versioning/17-forks-and-residency.md#16-turning-residency-on)) |
 | `AGGREGATION_SHARD_RESERVE_PCT` | `20` (default) | Share of a shard's `maxmemory` a rebuild must leave free: the write budget reads the owning shard's `used_memory` before storing rollups and refuses, naming the shortfall, rather than filling it |
-| `GRAPHVER_READ_MAX_LAG` | `0` (strict) — small `>0` acceptable during bulk imports | Governs FalkorDB-vs-Cloud-SQL read-freshness fallback |
+| `GRAPHVER_READ_MAX_LAG` | `-1` (the default) | How many versions behind its head a graph's FalkorDB key may still serve reads of `main`. `-1` keeps reads on the key at its last published version, complete, while a large import or rebuild lands, and the view says a newer version is coming. `0` sends every read the key is behind for to Cloud SQL, which composes the whole graph per read: during a large import, reads of that graph slow down, shed (`429`/`503 graph_read_busy`), and lose their lineage summaries |
 
 ### 7.4 Placement & rebuild
 
@@ -390,7 +390,7 @@ Graph → shard is `keyslot(graph_name)` (deterministic, not load-aware). Monito
 | | p99 query latency, `pg_stat_statements` top-N | SLO regression |
 | App | per-role pool saturation & wait time (`db_metrics.py`) | waiters > 0 sustained |
 | | **event-loop lag** (the WS1.4 wedge watchdog) | any CRITICAL sample |
-| **Projection** | watermark lag (projected vs committed `commit_seq`) | > `GRAPHVER_READ_MAX_LAG` + margin — **the user-facing freshness SLO** |
+| **Projection** | how far projections are behind committed `main` (`graphver_projection_lag_commits_max`, `graphver_projection_lag_seconds_max`), and reads of graphs FalkorDB holds no version of (`graphver_pg_read_*`) | lag growing for > 30 min, or any sustained Postgres read shedding — **the user-facing freshness SLO** |
 | Aggregation | `aggregation.jobs` / `aggregation.events.stream` lag (`XLEN` vs consumer last-id) | growing > 10 min |
 | FalkorDB | `used_memory`/`maxmemory` per shard | > 70% (page + rebalance) |
 | | `cluster_state`, per-shard master count, replica offset lag | ≠ ok / ≠ 1 / lag > 60 s |
@@ -461,5 +461,5 @@ Phased; each gate verifiable before the next.
 | `FALKORDB_MODE` / `FALKORDB_CLUSTER_NODES` | web + projection | `cluster` / 3 shard-0 DNS names |
 | `GRAPHVER_FALKOR_BUDGETS` / `_MAX_RESIDENT` | projection worker | ≈ shard `maxmemory` × 0.8 per provider |
 | `GRAPHVER_PROJECTION_CONCURRENCY` | projection worker | `8` |
-| `GRAPHVER_READ_MAX_LAG` | web tiers | `0` (strict) |
+| `GRAPHVER_READ_MAX_LAG` | web tiers | `-1` (the default: serve the last published version while the next lands) |
 | `IMPORT_COMMIT_WINDOW` | import worker | `10000` (default) |

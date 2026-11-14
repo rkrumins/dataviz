@@ -9,7 +9,6 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     Column,
-    Float,
     ForeignKey,
     Index,
     Integer,
@@ -19,6 +18,7 @@ from sqlalchemy import (
     and_,
     text,
 )
+from sqlalchemy.dialects.postgresql import DOUBLE_PRECISION
 from sqlalchemy.orm import relationship
 
 from .engine import Base
@@ -321,6 +321,9 @@ class PlatformSettingsORM(Base):
     # removes them (``versioning.draft_retention``); 0 keeps them for good. NULL: the environment's
     # ``GRAPHVER_DRAFT_RETENTION_DAYS`` applies.
     gv_draft_retention_days = Column(Integer, nullable=True)
+    # New-version builds (``versioning.build_policy``): JSON ``{"values": {wire name: value},
+    # "updatedBy", "updatedAt"}``. A value not in it takes the environment's default.
+    gv_build_policy = Column(Text, nullable=True)
     updated_at = Column(Text, nullable=True, onupdate=_now)
     updated_by = Column(Text, nullable=True)
 
@@ -819,14 +822,16 @@ class WorkspaceDataSourceORM(Base):
     review_self_approval = Column(Boolean, nullable=True)
     review_self_merge = Column(Boolean, nullable=True)
     # This source's import settings (``backend.app.services.import_settings``): what an import's rows
-    # find their entities by when it names no identifier (``entity_id``, ``urn`` or ``prop.<name>``),
-    # and the replace guard's limits. NULL = the platform's (``GRAPHVER_IMPORT_IDENTIFIER``,
-    # ``IMPORT_REPLACE_*``).
+    # find their entities by when it names no identifier (``entity_id``, ``urn``, ``prop.<name>`` or
+    # ``prop.<name>,urn``), and the replace guard's limits. NULL = the platform's
+    # (``GRAPHVER_IMPORT_IDENTIFIER``, ``IMPORT_REPLACE_*``).
     import_identifier = Column(Text, nullable=True)
     import_replace_min_live = Column(Integer, nullable=True)
-    import_replace_delete_fraction = Column(Float, nullable=True)
-    import_replace_create_fraction = Column(Float, nullable=True)
-    import_replace_min_match_fraction = Column(Float, nullable=True)
+    # DOUBLE_PRECISION, not Float: Postgres stores ``FLOAT`` as double precision and reflection reads
+    # it back so, which ``upgrade verify-schema`` would call a type mismatch.
+    import_replace_delete_fraction = Column(DOUBLE_PRECISION, nullable=True)
+    import_replace_create_fraction = Column(DOUBLE_PRECISION, nullable=True)
+    import_replace_min_match_fraction = Column(DOUBLE_PRECISION, nullable=True)
     extra_config = Column(Text, nullable=True)  # JSON — per-data-source config (schema mapping overrides, etc.)
     # Node-identity property — the physical graph property that plays the role
     # the platform's canonical ``urn`` does (universal node identity). NULL means

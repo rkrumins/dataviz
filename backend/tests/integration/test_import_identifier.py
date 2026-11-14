@@ -8,8 +8,8 @@ Pins:
 - The replace guard: a replace whose file names its entities by another key — it would delete the
   graph and make it again — is refused before it deletes anything, its rows left on the draft,
   however often it is imported into that draft; ``allowMassDelete`` lets it through, and the job's
-  ``replaceGuard`` says which, with the counts and the limits. A replace whose first full window
-  finds (almost) nothing stops there (``identifier_matched_nothing``).
+  ``replaceGuard`` says which, with the counts and the limits. A replace whose first node window,
+  however many rows it holds, finds (almost) nothing stops there (``identifier_matched_nothing``).
 - By a property (``prop.my_unique_id``): the first import builds its index, and each later one
   catches it up from main's log, so a node made or edited on the canvas is found by its value, never
   made again; a changed value is a new key; a value two nodes hold refuses its rows, naming both; a
@@ -373,7 +373,9 @@ async def _by_a_property(svc, ie, store, monkeypatch) -> None:
 def test_a_snapshot_replaced_every_run_keeps_every_id_and_writes_only_what_changed(monkeypatch):
     async def run():
         await models.create_schema_and_partitions()
-        window, config.IMPORT_COMMIT_WINDOW = config.IMPORT_COMMIT_WINDOW, 7
+        # Through monkeypatch, as the cases below set it again: set directly, the case's own
+        # setting was put back at teardown to this 7, and every later test ran with windows of 7.
+        monkeypatch.setattr(config, "IMPORT_COMMIT_WINDOW", 7)
         root = tempfile.mkdtemp(prefix="import-identifier-")
         try:
             svc = GraphVersioningService()
@@ -385,7 +387,6 @@ def test_a_snapshot_replaced_every_run_keeps_every_id_and_writes_only_what_chang
             await _guard(svc, ie, ie.store, monkeypatch)
             await _by_a_property(svc, ie, ie.store, monkeypatch)
         finally:
-            config.IMPORT_COMMIT_WINDOW = window
             shutil.rmtree(root, ignore_errors=True)
             await db.dispose_engine()
     asyncio.run(run())

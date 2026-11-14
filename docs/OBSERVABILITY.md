@@ -244,6 +244,11 @@ their series are complete: alert on those.
 | `graphver_projection_splits_total{kind,cause}` | counter | versioning worker; API | A statement split in half because the graph store refused it: `cause` is `timeout` or `memory`. A steady rise is the statement ladder sizing itself; it should level off |
 | `graphver_projection_lagging_graphs`, `graphver_projection_lag_commits_max`, `graphver_projection_lag_seconds_max` | gauge | versioning worker | On every poll: how many graphs are projected below their head, the most commits one is behind, and the longest since one of them last published |
 | `graphver_projection_quarantined` | gauge | versioning worker | Changes held back across the graphs being projected: a statement that still failed for one entity on its own, or an edge held with its end node. A graph evicted, waiting for room in memory or trashed is not counted, since nothing retries its rows until it is loaded again. Each graph's are listed on its **Data health** tab |
+| `graphver_projection_yields_total` | counter | versioning worker; API | A projector write followed by the longer pause, because the API said reads on that graph store node were starving (New-version builds' **Pause while reads wait**). Rising during a large import is reads being served first, as meant; it makes the import land later |
+| `graphver_served_restored_total{via}` | counter | versioning worker | A graph whose key held a published version without the record saying so had it recorded again (`full_pass`, `first_seed_gate`, `liveness`), so its reads stay on the graph store while it updates. It should stop rising after the first passes following an upgrade |
+| `graphver_projection_first_seed_avoided_total` | counter | versioning worker | A replay that would have reloaded a graph into a fresh key (reads going to Postgres for the whole load) found the key still holding a version, and reconciled it in place instead |
+| `graphver_pg_read_slots_shed_total{scope}` | counter | API | A read of a graph the graph store holds no version of was refused (`429`) because that many reads from Postgres already ran: `graph` (New-version builds' **Reads of one graph**) or `process` (**Reads per process**). Each such read costs the whole graph, so they are bounded rather than allowed to take every database connection |
+| `graphver_pg_read_timeouts_total` | counter | API | A read from Postgres cut off at New-version builds' **Statement limit**, answered `503 graph_read_busy` (retryable) |
 
 ### Alerts worth having
 
@@ -257,6 +262,7 @@ their series are complete: alert on those.
 | Projection behind | `graphver_projection_lag_seconds_max > 300` for 10 minutes | Published changes aren't in the fast read layer; reads show the version it last finished. See [Projection behind or holding changes back](/docs/runbooks#projection-behind-or-holding-changes-back) |
 | Changes held back | `graphver_projection_quarantined > 0` for 30 minutes | Something can't be written to the graph store even on its own. Same runbook |
 | Passes failing | `increase(graphver_projection_passes_total{outcome="failed"}[15m]) > 0` for 30 minutes | Every pass of some graph fails: usually the graph store is unreachable or out of memory |
+| Reads of a graph shed from Postgres | `rate(graphver_pg_read_slots_shed_total[5m]) > 0` or `rate(graphver_pg_read_timeouts_total[5m]) > 0` for 10 minutes | A graph is read from Postgres, its whole graph per read, and the reads are being refused or cut off. See [Reads of a graph answer 429 or 503 graph_read_busy](/docs/runbooks#reads-of-a-graph-answer-429-or-503-graph_read_busy) |
 
 How to act on the rebuild signals is in
 [Concurrency and Timeout Tuning](/docs/concurrency-tuning#what-to-watch-and-the-one-number-that-means-stop).

@@ -35,7 +35,9 @@ jobs:
   vitest:
     name: Frontend unit suite (required)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # The suite took 14 to 20 minutes here in November 2026 (19.8 on main at 6886150); at 20 a
+    # slower runner cancelled it part-way, as on PR #668's 04bb2da.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

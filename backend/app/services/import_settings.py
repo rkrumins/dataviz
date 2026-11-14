@@ -5,10 +5,11 @@ Each field resolves on its own: the data source's own (``WorkspaceDataSourceORM.
 the platform's (``GRAPHVER_IMPORT_IDENTIFIER``, ``IMPORT_REPLACE_*``). NULL at the data source means
 "not set here". They are read where an import is made and kept on its job (``jobs.import_settings``),
 so a job runs to the end under the settings it started with, resumed or not. A fork's are its
-parent's (``fork_sources.GOVERNING``), but for a ``prop.<name>`` identifier: a fork's rows can't be
-matched by a property yet (``keys.NotOnAFork``), so there that default is ``entity_id`` — unless
-the property is the data source's identifier property, which holds the urn and is matched as
-``urn``. The guard's on/off switch, ``IMPORT_REPLACE_GUARD``, is the platform's alone.
+parent's (``fork_sources.GOVERNING``), but for a ``prop.<name>`` identifier (with ``,urn`` or not):
+a fork's rows can't be matched by a property yet (``keys.NotOnAFork``), so there that default is
+``entity_id`` — unless the property is the data source's identifier property, which holds the urn
+and is matched as ``urn``. The guard's on/off switch, ``IMPORT_REPLACE_GUARD``, is the platform's
+alone.
 """
 from __future__ import annotations
 
@@ -51,16 +52,18 @@ def resolve(row: Any, *, fork: bool = False,
             identity_property: Optional[str] = None) -> Dict[str, Any]:
     """The settings a data source's imports run under (``row`` may be None), each with where it came
     from (``sources``: ``data_source`` or ``platform``). On a fork's graph (``fork``) a
-    ``prop.<name>`` identifier, which a fork can't match by yet, is ``entity_id``, from ``fork`` —
-    but ``prop.<identity_property>``, the data source's identifier property, which holds the urn:
-    an import matches it as ``urn``, on a fork too. Pure."""
+    ``prop.<name>`` identifier (with ``,urn`` or not), which a fork can't match by yet, is
+    ``entity_id``, from ``fork`` — but ``prop.<identity_property>`` (with ``,urn`` or not), the data
+    source's identifier property, which holds the urn: an import matches it as ``urn``, on a fork
+    too. Pure."""
     own, values, sources = settings_of(row), {}, {}
     for _column, api, default in FIELDS:
         if own[api] is not None:
             values[api], sources[api] = own[api], SOURCE_DATA_SOURCE
         else:
             values[api], sources[api] = default(), SOURCE_PLATFORM
-    held_by_urn = bool(identity_property) and values["identifier"] == f"prop.{identity_property}"
+    held_by_urn = (bool(identity_property)
+                   and identifiers.property_of(values["identifier"]) == identity_property)
     if fork and values["identifier"].startswith("prop.") and not held_by_urn:
         values["identifier"], sources["identifier"] = identifiers.ENTITY_ID, SOURCE_FORK
     return {**values, "sources": sources}

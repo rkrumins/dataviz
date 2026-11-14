@@ -442,6 +442,11 @@ def _summary_session_ended_upstream(p: dict) -> str:
     )
 
 
+#: The read modes as an administrator chose them (``platform.versioning.read_mode_changed``).
+_READ_MODE_LABEL = {"latest": "always the latest", "in_place": "keep serving, update in place",
+                    "beside": "keep serving, switch when ready"}
+
+
 _EVENT_META: dict[str, tuple[str, callable]] = {
     # ── critical: role / identity changes / forced revocation
     "user.role_changed": ("critical", _summary_role_changed),
@@ -884,9 +889,16 @@ _EVENT_META.update({
     "platform.draft_retention.updated": ("warning", lambda p: (
         "Changed how long merged and abandoned drafts keep their changes"
     )),
+    "platform.build_policy.updated": ("info", lambda p: (
+        "Changed how new versions of versioned graphs are built"
+    )),
     "platform.versioning.residency_changed": ("info", lambda p: (
         f"Set versioned graph {_detail(p, 'graphId') or '?'} to "
         f"{(_detail(p, 'to') or '?').capitalize()} residency"
+    )),
+    "platform.versioning.read_mode_changed": ("info", lambda p: (
+        f"Set what readers of versioned graph {_detail(p, 'graphId') or '?'} get while a new "
+        f"version lands: {_READ_MODE_LABEL.get(_detail(p, 'to'), 'the platform default')}"
     )),
     "platform.versioning.load_requested": ("info", lambda p: (
         f"Asked for versioned graph {_detail(p, 'graphId') or '?'} to be loaded into FalkorDB"
@@ -985,7 +997,9 @@ LABELS: dict[str, str] = {
     "platform.versioning.projection_moved": "Moved a versioned graph projection",
     "platform.residency_policy.updated": "Changed residency policy",
     "platform.draft_retention.updated": "Changed draft retention",
+    "platform.build_policy.updated": "Changed new-version build settings",
     "platform.versioning.residency_changed": "Changed a versioned graph's residency",
+    "platform.versioning.read_mode_changed": "Changed what a versioned graph's readers get while it updates",
     "platform.versioning.load_requested": "Asked for a versioned graph's load",
     "platform.versioning.projection_adopted": "Adopted a versioned graph's projection",
     "platform.residency.grace_started": "Graph residency turned on",

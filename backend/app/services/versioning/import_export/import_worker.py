@@ -12,8 +12,8 @@ Phases (all params on the ``JobORM`` row):
            (:func:`resolve_rows`);
   build    apply each window's ops via ``apply_ops(branch_id=draft)`` before the next is resolved.
 
-Invalid rows are quarantined (partial acceptance), not fatal — but a replace then deletes nothing;
-the tally lands on ``job.summary``.
+Invalid rows are quarantined (partial acceptance), not fatal — but a replace then deletes nothing,
+unless maxRefusedRows allows them; the tally lands on ``job.summary``.
 
 The job runs on its lease (:mod:`..job_lease`) and RESUMES: every unit of work commits together with
 the job's cursor (``last_cursor``) as one fenced transaction, so a worker that dies or is stopped
@@ -67,7 +67,8 @@ from . import identifier as identifiers
 from . import keys as matching
 from .formats import AT, get_adapter
 from .resolve import (KeyIndex, _canonical_map, edge_pointer_id, key_pointer_id, key_value,
-                      pointer_id, pointer_seed, pointers, resolve_rows)
+                      pointer_id, pointer_seed, pointers, refused_place, resolve_rows,
+                      where_in_file)
 from .rowmodel import PROP_DELETE, normalize
 from .snapshot import open_snapshot
 from .stream import view_entities
@@ -207,9 +208,9 @@ def _chunks(seq: List[Any], size: int):
 
 
 class ReplaceBlocked(Exception):
-    """A replace that would delete most of its scope and make most of it again, refused before it
-    deletes anything. The job's ``summary.replaceGuard`` says what it would have done, and the limits
-    in force."""
+    """A replace that would delete most of its scope and make most of it again (what it makes
+    counting its refused rows that matched nothing), refused before it deletes anything. The job's
+    ``summary.replaceGuard`` says what it would have done, and the limits in force."""
     code, action = "mass_delete_blocked", "allow_mass_delete"
 
 
@@ -270,12 +271,13 @@ def within_budget(budget: str, refused: int, rows: int) -> bool:
 def tally_refused(report: Optional[Dict[str, Any]], resolutions, labels: Mapping[int, str],
                   where: Optional[Mapping[int, Any]] = None) -> Optional[Dict[str, Any]]:
     """The import's report of the rows it refused — how many in all (``total``), for each reason
-    (``byCode``), and the first :data:`REFUSED_EXAMPLES`, each with its ``rowIndex``, ``kind``,
-    ``label``, ``code`` and ``reason`` — with a window's refusals added. It is kept on the job's
-    summary and committed with the window, so a resumed import counts every row once, and nothing
-    reads the job's rows again to report them. ``labels``: what each row is called, by its index;
-    ``where``: where it is in its file (``formats.AT``: a line, a sheet's row, an array's item),
-    as ``at``."""
+    (``byCode``) and each kind of row (``byKind``), what to do about each reason (``fixes``), what
+    one change of the import's would find (``hints``: ``by_urn``, :data:`BY_URN`), and the first
+    :data:`REFUSED_EXAMPLES`, each with its ``rowIndex``, ``kind``, ``label``, ``code`` and
+    ``reason`` — with a window's refusals added. It is kept on the job's summary and committed with
+    the window, so a resumed import counts every row once, and nothing reads the job's rows again to
+    report them. ``labels``: what each row is called, by its index; ``where``: where it is in its
+    file (``formats.AT``: a line, a sheet's row, an array's item), as ``at``."""
     refused = [r for r in resolutions if r["status"] == "invalid"]
     if not refused:
         return report
@@ -332,14 +334,17 @@ def _label(row: Mapping[str, Any]) -> str:
 def where_text(row: Mapping[str, Any]) -> str:
     """Where a refused row is, as its file shows it: ``line 12``, ``Edges row 7``, ``item 3`` — else
     its ``rowIndex``."""
-    at = row.get("at") or {}
-    if at.get("sheet") and at.get("row"):
-        return f"{at['sheet']} row {at['row']}"
-    if at.get("line"):
-        return f"line {at['line']}"
-    if at.get("item") is not None:
-        return f"item {at['item']}"
-    return f"rowIndex {row['rowIndex']}"
+    return where_in_file(row.get("at")) or f"rowIndex {row['rowIndex']}"
+
+
+def by_urn_cause(by_urn: int, prop: Optional[str]) -> str:
+    """By a property alone (``prop``), what ``identifier=prop.<name>,urn`` would find, by their urn,
+    of the rows a count before it names (``hints.by_urn``: ``by_urn`` of them), as the sentence
+    that follows that count, with its leading space; "" when it would find none."""
+    return (f" identifier=prop.{prop},urn would find {by_urn} of them by their urn — rows without "
+            f"{prop}, and rows whose urn is an item's that has no {prop} yet (it then takes "
+            "theirs): send it so, and the edges refused for their ends find them too."
+            if by_urn and prop else "")
 
 
 def refused_digest(report: Optional[Dict[str, Any]], examples: int = 3,
@@ -351,11 +356,7 @@ def refused_digest(report: Optional[Dict[str, Any]], examples: int = 3,
         return ""
     ranked = sorted(report["byCode"].items(), key=lambda kv: -kv[1])
     codes = ", ".join(f"{n} {code}" for code, n in ranked)
-    by_urn = int((report.get("hints") or {}).get(BY_URN) or 0)
-    cause = (f" identifier=prop.{prop},urn would find {by_urn} of them by their urn — rows without "
-             f"{prop}, and rows whose urn is an item's that has no {prop} yet (it then takes "
-             "theirs): send it so, and the edges refused for their ends find them too."
-             if by_urn and prop else "")
+    cause = by_urn_cause(int((report.get("hints") or {}).get(BY_URN) or 0), prop)
     rows = "; ".join(
         f"{where_text(r)}{' (' + r['label'] + ')' if r.get('label') else ''}: {r['code']}"
         f"{' — ' + r['reason'] if r.get('reason') else ''}" for r in report["rows"][:examples])
@@ -388,8 +389,9 @@ async def _persist_mentions(s, job_id: str, resolutions) -> None:
 
 
 class IdentifierMatchedNothing(Exception):
-    """A replace whose first full node window found an entity for almost none of its rows: by its
-    identifier, the file very likely names its entities by another key. Stopped there."""
+    """A replace whose first node window, however many rows it holds, found an entity for almost
+    none of them: by its identifier, the file very likely names its entities by another key.
+    Stopped there."""
     code, action = "identifier_matched_nothing", "identifier"
 
 
@@ -406,7 +408,8 @@ def platform_limits() -> Dict[str, Any]:
 def replace_verdict(live: int, deletes: int, creates: int, *, allowed: bool,
                     limits: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """The replace guard (``IMPORT_REPLACE_GUARD``) on a scope of ``live`` entities, before the
-    import, from which a replace would delete ``deletes`` and into which it made ``creates``:
+    import, from which a replace would delete ``deletes`` and into which it made ``creates`` (with
+    its refused rows that matched nothing, which the identifier found no entity for, as a create):
     ``state`` ``off`` (the guard is off), ``passed``, ``overridden`` (past the limits, and sent with
     allowMassDelete) or ``blocked``, with the counts, the limits in force (``limits``: the job's,
     its data source's or the platform's, else the platform's) and where each came from."""
@@ -613,10 +616,10 @@ class ImportWorker:
         # identifier=prop.<name>,urn: a row that doesn't carry the property is found by its urn.
         self._urn_fallback = False
         # The keys of the node rows this import refused (a urn, the file's entity_id, the matching
-        # property's value) -> (that row's index, its code): an edge end one of them was is refused
-        # as end_refused, naming the row to fix. Read again by a resumed run; at most
+        # property's value) -> (where that row is in the file, its code): an edge end one of them
+        # was is refused as end_refused, naming the row to fix. Read again by a resumed run; at most
         # _REFUSED_NAMES_MAX keys, past which an end is just end_not_found.
-        self._refused_names: Dict[str, Tuple[int, str]] = {}
+        self._refused_names: Dict[str, Tuple[str, str]] = {}
         self._prop_of: Dict[str, Optional[str]] = {}
         self._prop_holders: Dict[str, set] = {}
         self._prop_seq: Optional[int] = None
@@ -985,13 +988,13 @@ class ImportWorker:
         so memory stays flat whatever the size of the file or of the graph. Each window is retried
         through a transient fault (``retry_transient``) from the cursor; returns the tallies.
 
-        A replace deletes whatever no row matched, so it refuses to while the file has more rows it
-        couldn't apply than its ``maxRefusedRows`` allows (none, by default): they may name what it
-        means to keep. Records that are neither a node nor an edge are counted before the first
-        window, so nothing is written; refused rows once every window is in, before any delete. A
-        replace within its budget goes on: what a refused row still names is kept, as every entity
-        a row of the import matched is. Either way the job's ``summary.refused`` says which rows
-        were refused, and why."""
+        A replace deletes whatever no row matched nor names (``import_mentions``), so it refuses to
+        while the file has more rows it couldn't apply than its ``maxRefusedRows`` allows (none, by
+        default): they may name what it means to keep. Records that are neither a node nor an edge
+        are counted before the first window, so nothing is written; refused rows once every window
+        is in, before any delete. A replace within its budget goes on: what a refused row still
+        names is kept, as every entity a row of the import matched is. Either way the job's
+        ``summary.refused`` says which rows were refused, and why."""
         pos = await self._position(job_id)
         skipped = int(pos.summary.get("skipped") or 0)
         if (reconcile_mode == "replace" and skipped
@@ -1023,8 +1026,9 @@ class ImportWorker:
                     f"GET …/imports/{job_id}/preview?refused=true all of them. The file's other rows "
                     "are on the draft. Fix those rows and import the file again, or send it with "
                     "maxRefusedRows (a count, a share such as 1%, or -1 for any) to replace with the "
-                    "rows that applied: whatever a refused row names, by any key it carries, is kept, "
-                    "and so is every node an edge row names as an end.",
+                    "rows that applied: whatever a refused row names, by any key it carries, is kept "
+                    "(a refused delete row keeps only what it matched), and so is every node an edge row "
+                    "names as an end.",
                     phase="nodes" if kinds.get("node") or not kinds else "edges")
             if (await self._position(job_id)).cursor != "replace":       # not deleting yet
                 await self._lease.retry_transient(
@@ -1100,13 +1104,15 @@ class ImportWorker:
         return True
 
     async def _fail_fast(self, job_id: str, snap) -> None:
-        """After a replace's first full node window: stop (:class:`IdentifierMatchedNothing`) when
-        fewer than the job's ``minMatchFraction`` (``IMPORT_REPLACE_MIN_MATCH_FRACTION``, or its
-        data source's) of the rows decided so far found an entity, in a graph whose main as the
-        draft reads it (a fork's with its parent's) holds at least its ``minLive``, rather than read
-        the rest of the file and have the replace guard refuse it at the end. A replace of a view's
-        scope is left to the guard: its scope isn't the graph. One sent with allowMassDelete goes
-        on, as the guard lets it through."""
+        """After a replace's first node window, however many rows it holds: stop
+        (:class:`IdentifierMatchedNothing`) when fewer than the job's ``minMatchFraction``
+        (``IMPORT_REPLACE_MIN_MATCH_FRACTION``, or its data source's) of the rows decided so far
+        found an entity, in a graph whose main as the draft reads it (a fork's with its parent's)
+        holds at least its ``minLive``, rather than read the rest of the file and have the replace
+        guard refuse it at the end. By a property alone, the message says how many of the rows
+        ``identifier=prop.<name>,urn`` would find by their urn (``hints.by_urn``). A replace of a
+        view's scope is left to the guard: its scope isn't the graph. One sent with allowMassDelete
+        goes on, as the guard lets it through."""
         min_match = float(self._limits["minMatchFraction"])
         if (self._reconcile_mode != "replace" or self._scope is not None or self._allow_mass_delete
                 or min_match <= 0):
@@ -1119,14 +1125,19 @@ class ImportWorker:
         live = await _live_count(snap.main_at_base())
         if live < int(self._limits["minLive"]):
             return
+        by_urn = int(((tally.get("refused") or {}).get("hints") or {}).get(BY_URN) or 0)
         raise IdentifierMatchedNothing(
-            f"Stopped after the file's first {decided:,} rows: by identifier={self._identifier}, "
-            f"only {matched:,} of them found an entity, in a graph of {live:,}. The rest would very "
-            "likely make the graph again, and the replace delete it. Check what the file's rows name "
-            "their entities by: identifier=entity_id finds a row's entity id, then its urn, its "
-            "identifier value or a field its type matches imports by; identifier=urn, its entity id "
-            "or its urn. Nothing was deleted; the rows read so far are on the draft. If the file "
-            "really replaces the graph, import it again with allowMassDelete=true.")
+            f"Stopped after the file's first {decided:,} node rows: by "
+            f"identifier={self._identifier}, only {matched:,} of them found an entity, in a graph of "
+            f"{live:,}. Replaced by this file, the graph would very likely be deleted and made "
+            "again. Check what the file's rows name their entities by: identifier=entity_id finds a "
+            "row's entity id, then its urn, its identifier value or a field its type matches imports "
+            "by; identifier=urn, its entity id or its urn; identifier=prop.<name>, its entity id or "
+            "its value of <name>; identifier=prop.<name>,urn, that value, else its urn (a node found "
+            "by its urn takes the value)."
+            f"{by_urn_cause(by_urn, None if self._urn_fallback else self._prop)} Nothing was "
+            "deleted; the rows read so far are on the draft. If the file really replaces the graph, "
+            "import it again with allowMassDelete=true.")
 
     async def _guard_replace(self, job_id: str, snap) -> None:
         """Before a replace deletes anything: count what it would delete and what it made, record the
@@ -1179,18 +1190,25 @@ class ImportWorker:
         limits = verdict["limits"]
         whose = ("this data source's" if "data_source" in verdict["sources"].values()
                  else "the platform's")
+        prop = self._prop
         raise ReplaceBlocked(
             f"Nothing was deleted: this replace would delete {absent:,} of the {verdict['live']:,} "
-            f"entities in its scope, and its draft makes {creates:,} new ones"
+            "entities in its scope"
+            + (f" (the nodes that hold {prop}, and the edges between two of them)" if keyed else "")
+            + f", and its draft makes {creates:,} new ones"
             + (f" while {unmatched:,} of its rows matched nothing and were refused" if unmatched else "")
             + ": past the replace "
             f"guard, which by {whose} limits refuses one "
             f"that deletes at least {limits['deleteFraction']:.0%} of a scope of "
-            f"{limits['minLive']:,} or more and creates at least {limits['createFraction']:.0%} as "
-            "many. That is what a file whose rows name their entities by another key looks like: "
-            f"check the import's identifier (identifier={self._identifier}). The file's rows are on "
-            "the draft for review. To delete what it leaves out all the same, import it again with "
-            "allowMassDelete=true.")
+            f"{limits['minLive']:,} or more and creates (counting rows refused because they matched "
+            f"nothing) at least {limits['createFraction']:.0%} as many. That is what a file whose "
+            "rows name their entities by another key looks like: check the import's identifier "
+            f"(identifier={self._identifier})."
+            + (f" Rows without {prop}, or whose urn is an item's that has no {prop} yet, match "
+               f"nothing: identifier=prop.{prop},urn finds them by their urn."
+               if prop and not self._urn_fallback else "")
+            + " The file's rows are on the draft for review. To delete what it leaves out all the "
+            "same, import it again with allowMassDelete=true.")
 
     def resolve(self, rows, lookups) -> Tuple[List[dict], List[dict]]:
         """:func:`resolve_rows` as this job resolves a batch: by its identifier, through its
@@ -1395,11 +1413,12 @@ class ImportWorker:
                                res.get("code") or "invalid_row")
 
     def _note_refused(self, row: Mapping[str, Any], index: int, code: str) -> None:
+        place = refused_place(row, index)
         for key in (row.get("urn"), row.get("entity_id"),
                     (row.get("properties") or {}).get(self._prop) if self._prop else None):
             k = key_value(key)
             if k and len(self._refused_names) < _REFUSED_NAMES_MAX:
-                self._refused_names.setdefault(k, (index, code))
+                self._refused_names.setdefault(k, (place, code))
 
     async def _read_refused(self, job_id: str) -> None:
         """A resumed run: the keys of the node rows earlier windows refused (:meth:`_note_refused`)."""
@@ -1694,8 +1713,9 @@ class ImportWorker:
 
     async def _delete_absent(self, job_id, snap, graph_id, branch_id, actor) -> int:
         """Replace mode: the file is the authoritative snapshot for its scope, so every entity in
-        scope that no row matched is deleted (reviewed on the draft before publish; ``apply_ops``
-        cascades incident edges, and nothing a row named goes with an absent container: what it
+        scope that no row matched nor names (``import_mentions``) is deleted (reviewed on the draft
+        before publish; ``apply_ops`` cascades incident edges, and nothing a row named goes with an
+        absent container: what it
         contains is deleted only when it is absent too). Edges first, then nodes, a page at a time, each
         page's deletes committed with the job's checkpoint (cursor ``replace``) and their count. A
         view-scoped replace can delete only the view's own entities (its placements and their
@@ -1741,7 +1761,8 @@ class ImportWorker:
     async def _scope_pages(self, snap, kind: str, keep):
         """:func:`_in_scope`'s pages, with ``replaceScope=keyed`` only what holds the property: a
         node that does, and an edge whose two ends do. A node made in the UI or by another source,
-        which never had it, is left alone — and so are its edges."""
+        which never had it, is left alone — and so are its edges, but for one to a node the replace
+        deletes, which goes with that node (``edgesCascaded``)."""
         async for page in _in_scope(snap, kind, keep):
             if self._keyed():
                 page = await self._holding_only(snap, kind, page)

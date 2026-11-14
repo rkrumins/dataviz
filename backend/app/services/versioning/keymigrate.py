@@ -50,10 +50,29 @@ def placed_key(graph_id: str, slots: Optional[Sequence[Tuple[int, int]]],
     return None
 
 
+#: What a build's key adds to the key it is built beside (:func:`build_key`).
+BUILD_SUFFIX = "#b"
+
+
+def build_key(serving: str, taken: Collection[str]) -> str:
+    """The key a new version is built in beside ``serving`` (read mode ``beside``): its name with
+    the first free ``#b<k>`` after it, ``k`` from 1, that is not ``taken`` (the keys on its node,
+    retired ones and the pin). The hash tag is the serving key's, so the build lands in its
+    cluster slot, where ``GRAPH.COPY`` can copy it; a key built beside a build's key replaces its
+    suffix rather than adding one, so names never grow."""
+    base = serving.split(BUILD_SUFFIX, 1)[0]
+    k = 1
+    while f"{base}{BUILD_SUFFIX}{k}" in taken or f"{base}{BUILD_SUFFIX}{k}" == serving:
+        k += 1
+    return f"{base}{BUILD_SUFFIX}{k}"
+
+
 def is_owned_key(graph_id: str, name: str) -> bool:
     """True when ``name`` is one of ``graph_id``'s platform keys (doc 14's
-    ``^gvp_<gid>\\{[0-9a-z]{8}\\.\\d+\\}$``)."""
-    return re.fullmatch(rf"gvp_{re.escape(graph_id)}\{{[0-9a-z]{{8}}\.\d+\}}", name) is not None
+    ``^gvp_<gid>\\{[0-9a-z]{8}\\.\\d+\\}$``), or a key a new version of it was built in beside one
+    (``#b<k>`` after it: :func:`build_key`)."""
+    return re.fullmatch(rf"gvp_{re.escape(graph_id)}\{{[0-9a-z]{{8}}\.\d+\}}(?:#b\d+)?",
+                        name) is not None
 
 
 async def retire_moved_keys(
@@ -141,6 +160,12 @@ async def _retire(projector, graph_id: str, entry: dict, ds_id: Optional[str],
         ).limit(1))
     if pinned is not None:
         return f"PROTECTED: graph {pinned} projects into '{name}'"
+    async with projector._session() as s:
+        building = await s.scalar(select(ps.graph_id).where(
+            func.coalesce(func.nullif(ps.candidate_provider, ""), default) == (provider or default),
+            ps.candidate_graph_name == name).limit(1))
+    if building is not None:
+        return f"PROTECTED: graph {building} builds a new version in '{name}'"
     try:
         readers = await key_in_use(provider, name, ds_id)
     except Exception:                                   # noqa: BLE001 — fail closed

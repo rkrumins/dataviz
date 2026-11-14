@@ -214,7 +214,7 @@ export function ImportDialog({ wsId, graphId, branchId, viewId, onClose, onRevie
           )}
           {phase === 'running' && <RunningStep job={job} upload={upload} fileName={file?.name} />}
           {phase === 'done' && <DoneStep summary={(job?.summary as ImportSummary) ?? null} previewRows={previewRows}
-            identifier={job?.identifier ?? null} wsId={wsId} graphId={graphId} jobId={job?.jobId ?? null} />}
+            identifier={job?.identifier ?? null} wsId={wsId} graphId={graphId} jobId={job?.jobId ?? null} job={job} />}
           {phase === 'failed' && <FailedStep error={error} job={job} wsId={wsId} graphId={graphId} />}
         </div>
 
@@ -241,13 +241,13 @@ export function ImportDialog({ wsId, graphId, branchId, viewId, onClose, onRevie
                 Review changes <ArrowRight className="w-4 h-4" />
               </button>
             )}
-            {phase === 'failed' && blocked(job) && job?.branchId && (
+            {phase === 'failed' && (blocked(job) || matchedNothing(job)) && job?.branchId && (
               <button onClick={() => void start({ branchId: job.branchId! })}
                 className="flex items-center gap-2 px-4 py-2 rounded-xl border border-rose-300 dark:border-rose-800/60 text-rose-600 dark:text-rose-400 text-sm font-semibold hover:bg-rose-50 dark:hover:bg-rose-950/30 transition-colors">
                 <Trash2 className="w-4 h-4" /> Replace anyway
               </button>
             )}
-            {phase === 'failed' && byUrnFix(job) && job?.branchId && (
+            {(phase === 'failed' || phase === 'done') && byUrnFix(job) && job?.branchId && (
               <button onClick={() => {
                 const fix = byUrnFix(job)!
                 setMatch(parseIdentifier(fix))
@@ -308,6 +308,8 @@ function ChooseStep(props: {
   } = props
   const fallback = graphDefault ? parseIdentifier(graphDefault) : null
   const shown = match ?? fallback
+  // A replace that deletes only what holds the property: the property's name.
+  const keyed = keyedOnly && shown?.kind === 'prop' ? shown.name.trim() || 'this property' : null
   return (
     <div className="grid md:grid-cols-2">
       {/* Left — the guide (persistent context) */}
@@ -426,7 +428,9 @@ function ChooseStep(props: {
               desc="Creates new items and updates matching ones. Never deletes — safe default." />
             <ModeCard active={reconcileMode === 'replace'} onClick={() => setReconcileMode('replace')}
               icon={<ShieldAlert className="w-4 h-4" />} title="Replace (authoritative)" tone="amber"
-              desc={viewScoped
+              desc={keyed
+                ? `Removes ${viewScoped ? "this view's" : 'the'} items that have ${keyed} and aren't in your file; items without it are left alone.`
+                : viewScoped
                 ? "The file is the source of truth for this view — its items missing from the file are deleted."
                 : "The file becomes the source of truth — items missing from it are deleted."} />
           </div>
@@ -448,7 +452,7 @@ function ChooseStep(props: {
             className="flex items-center gap-1 rounded-xl bg-black/[0.03] dark:bg-white/[0.04] p-1">
             {MATCH_KINDS.map((m) => (
               <button key={m.kind} role="radio" aria-checked={shown?.kind === m.kind}
-                onClick={() => setMatch({ kind: m.kind, name: m.kind === 'prop' ? (shown?.name ?? '') : '' })}
+                onClick={() => shown?.kind !== m.kind && setMatch({ kind: m.kind, name: m.kind === 'prop' ? (shown?.name ?? '') : '' })}
                 className={cn('flex-1 px-2 py-1.5 rounded-lg text-[11px] font-semibold transition-colors',
                   shown?.kind === m.kind ? 'bg-white dark:bg-white/10 text-ink shadow-sm' : 'text-ink-muted hover:text-ink')}>
                 {m.label}{fallback?.kind === m.kind && <>{' '}<span className="font-normal text-ink-muted">· default</span></>}
@@ -580,7 +584,7 @@ function RunningStep({ job, upload, fileName }: {
 }
 
 // ── done ─────────────────────────────────────────────────────────────────────
-function DoneStep({ summary, previewRows, identifier, wsId, graphId, jobId }: {
+function DoneStep({ summary, previewRows, identifier, wsId, graphId, jobId, job }: {
   summary: ImportSummary | null
   previewRows: ImportPreviewRow[]
   /** What its rows found their items by. */
@@ -588,10 +592,13 @@ function DoneStep({ summary, previewRows, identifier, wsId, graphId, jobId }: {
   wsId: string
   graphId: string
   jobId: string | null
+  job: Job | null
 }) {
   const s = summary
   const changes = s ? s.new + s.updated + s.deleted : 0
   const nothing = s != null && changes === 0
+  // A replace that deleted only what holds its property (replaceScope=keyed): the property's name.
+  const keyed = s?.replaceGuard?.scope === 'keyed' && identifier ? parseIdentifier(identifier).name : null
   return (
     <div className="px-8 py-8 max-w-2xl mx-auto">
       <div className="flex items-start gap-4">
@@ -619,6 +626,7 @@ function DoneStep({ summary, previewRows, identifier, wsId, graphId, jobId }: {
           <Stat n={s.invalid} label="Needs fixing" icon={<AlertTriangle className="w-4 h-4" />} tone="amber" />
         </div>
       )}
+      <ByUrnNote job={job} />
       {s?.refused && <RefusedRowsPanel report={s.refused} wsId={wsId} graphId={graphId} jobId={jobId} />}
       {s && (s.unchanged ?? 0) > 0 && (
         <p className="mt-3 text-[11px] text-ink-muted">
@@ -641,7 +649,9 @@ function DoneStep({ summary, previewRows, identifier, wsId, graphId, jobId }: {
               {s.deleted} {s.deleted === 1 ? 'entity' : 'entities'} will be deleted when you publish
             </p>
             <p className="text-[11px] text-ink-muted mt-0.5">
-              Replace removes items not in your file. They're only staged for now — review every deletion
+              {keyed
+                ? `Replace removes the items that have ${keyed} and aren't in your file; items without it are left alone.`
+                : 'Replace removes items not in your file.'} They're only staged for now — review every deletion
               in the Changes tab before you publish; nothing is removed until then.
               {!!s.edgesCascaded && <>
                 {' '}{s.edgesCascaded.toLocaleString()} {s.edgesCascaded === 1 ? 'edge goes' : 'edges go'} with
@@ -740,6 +750,12 @@ function heldForRows(job: Job | null): boolean {
   return (job?.summary as ImportSummary | null | undefined)?.failure?.code === 'rows_refused'
 }
 
+/** A replace stopped after its first rows, which found almost nothing by its identifier: nothing
+ *  deleted, those rows on the draft. Sent with allowMassDelete, it goes on. */
+function matchedNothing(job: Job | null): boolean {
+  return (job?.summary as ImportSummary | null | undefined)?.failure?.code === 'identifier_matched_nothing'
+}
+
 /** For a job matched by a property alone whose refused rows have a urn but not the property: the
  *  identifier that finds them by their urn (`prop.<name>,urn`); else null. */
 function byUrnFix(job: Job | null): string | null {
@@ -748,6 +764,21 @@ function byUrnFix(job: Job | null): string | null {
   if (!ident || !hasUrn) return null
   const m = parseIdentifier(ident)
   return m.kind === 'prop' && !m.orUrn ? formatIdentifier({ ...m, orUrn: true }) : null
+}
+
+/** For a job `byUrnFix` finds a fix for: how many of its refused rows their urn would find, and what
+ *  "Find them by their urn" does. Nothing for any other job. */
+function ByUrnNote({ job }: { job: Job | null }) {
+  if (!byUrnFix(job)) return null
+  return (
+    <p className="text-[11px] text-ink mt-3 leading-relaxed rounded-lg bg-indigo-50/70 dark:bg-indigo-950/25 border border-indigo-200/70 dark:border-indigo-800/40 px-3 py-2">
+      <span className="font-semibold">{(refusedOf(job)?.hints?.by_urn ?? 0).toLocaleString()} of these rows
+      would be found by their urn</span>: rows without {parseIdentifier(job!.identifier!).name}, such as a
+      top-level container, or items first loaded by urn. <span className="font-semibold">Find them by their
+      urn</span> to import them too: they keep their ids, and take the property, so the next import finds
+      them by it.
+    </p>
+  )
 }
 
 function FailedStep({ error, job, wsId, graphId }: {
@@ -770,15 +801,14 @@ function FailedStep({ error, job, wsId, graphId }: {
             file leaves out: the deletions are staged on your draft, to review before you publish.
           </p>
         )}
-        {byUrnFix(job) && (
-          <p className="text-[11px] text-ink mt-3 leading-relaxed rounded-lg bg-indigo-50/70 dark:bg-indigo-950/25 border border-indigo-200/70 dark:border-indigo-800/40 px-3 py-2">
-            <span className="font-semibold">{(refusedOf(job)?.hints?.by_urn ?? 0).toLocaleString()} of these rows
-            would be found by their urn</span>: rows without {parseIdentifier(job!.identifier!).name}, such as a
-            top-level container, or items first loaded by urn. <span className="font-semibold">Find them by their
-            urn</span> to import them too: they keep their ids, and take the property, so the next import finds
-            them by it.
+        {matchedNothing(job) && (
+          <p className="text-[11px] text-ink-muted mt-3 leading-relaxed">
+            Its first rows found almost nothing{job?.identifier ? ` by ${identifierLabel(job.identifier)}` : ''}.
+            Try again with another “Match existing items by”, or replace anyway if the file really replaces
+            the graph: the deletions are staged on your draft, to review before you publish.
           </p>
         )}
+        <ByUrnNote job={job} />
         {refusedOf(job) && <RefusedRowsPanel report={refusedOf(job)!} wsId={wsId} graphId={graphId} jobId={job?.jobId} />}
         {heldForRows(job) && (
           <p className="text-[11px] text-ink-muted mt-3 leading-relaxed">
