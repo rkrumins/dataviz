@@ -196,6 +196,30 @@ describe('VersionedGraphsPanel', () => {
         expect(await screen.findByText('Out of sync: 2 missing, 1 extra')).toBeInTheDocument()
     })
 
+    it('says a rebuild is built in a new key, and what each build on a row is for', async () => {
+        const rebuilding = row({ graphId: 'graph_r', dataSourceId: 'ds6', dataSourceLabel: 'Ledger', owned: true,
+            readModeEffective: 'beside', build: { step: 'seeding', reason: 'rebuild', rebuild: 'operator' } })
+        const moving = row({ graphId: 'graph_m', dataSourceId: 'ds7', dataSourceLabel: 'Invoices', owned: true,
+            readModeEffective: 'beside',
+            build: { step: 'catching_up', reason: 'move', target: { providerId: 'falkor-eu', key: 'gvp_graph_m{raph_m.2}' } } })
+        const window = row({ graphId: 'graph_w', dataSourceId: 'ds8', dataSourceLabel: 'Shipments', owned: true,
+            readModeEffective: 'beside', build: { step: 'seeding', reason: 'window' } })
+        versionedGraphs.mockResolvedValue({ graphs: [rebuilding, moving, window], nextCursor: null })
+        rebuildProjection.mockResolvedValue({ started: true, alreadyRunning: false, beside: true, watermark: {} })
+        renderPanel()
+
+        const chip = await screen.findByText('Rebuilding beside')
+        expect(chip.getAttribute('title')).toMatch(/^The graph is rebuilt from Postgres in a new key\. Readers keep exactly/)
+        expect(chip.getAttribute('title')).not.toMatch(/as no copy fits/)
+        expect(screen.getByText('Moving to gvp_graph_m{raph_m.2}').getAttribute('title'))
+            .toMatch(/written from Postgres into gvp_graph_m\{raph_m\.2\}/)
+        expect(screen.getByText('Seeding a build').getAttribute('title')).toMatch(/as no copy fits/)
+
+        await userEvent.click(within(screen.getByText('Ledger').closest('tr')!).getByRole('button', { name: 'Rebuild' }))
+        expect(await screen.findByText(
+            'Rebuilding in a new key — readers keep the current version until it is checked and switched to')).toBeInTheDocument()
+    })
+
     it('says so when a check finds the cache in sync, and shows a refusal as given', async () => {
         versionedGraphs.mockResolvedValue({ graphs: [MAIN], nextCursor: null })
         reconcileProjection.mockResolvedValue({

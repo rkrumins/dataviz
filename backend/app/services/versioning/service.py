@@ -754,14 +754,17 @@ async def _load_actor_groups(actor: str) -> Tuple[str, ...]:
         raise GroupsUnavailable() from exc
 
 
-def _forget_build(ps) -> None:
+def _forget_build(ps, *, keep: Optional[Tuple[str, str]] = None) -> None:
     """Drop the build a graph has, if any, inside the caller's transaction: its key is retired at
     once (the next retire run drops it) and the build columns are cleared. For a change that makes
     a build pointless, a rebuild or a move: the serving key it was built beside no longer holds
-    what it is copied from."""
+    what it is copied from. ``keep`` (``(provider, key)``): the key the change goes on with, when
+    it is the build's — that one is not retired."""
     if not isinstance(getattr(ps, "candidate_state", None), dict):
         return
-    if ps.candidate_graph_name:
+    default = config.DEFAULT_FALKOR_PROVIDER
+    if ps.candidate_graph_name and (ps.candidate_provider or default,
+                                    ps.candidate_graph_name) != keep:
         ps.retired_keys = [*(ps.retired_keys or []), {
             "name": ps.candidate_graph_name, "provider": ps.candidate_provider,
             "retireAfter": datetime.now(timezone.utc).isoformat(), "afterSeq": 0,
@@ -769,6 +772,75 @@ def _forget_build(ps) -> None:
     ps.candidate_graph_name = ps.candidate_provider = None
     ps.candidate_seq = None
     ps.candidate_state = None
+
+
+def _beside_ok(ps, graph, *, reason: str) -> bool:
+    """Whether a graph's row lets a rebuild or a move (``reason``) be built beside its key, as
+    ``candidates.beside_wanted`` lets the policy: a live graph and no fork; a key the platform owns
+    and has pinned; idle (no pass in flight, no rebuild or reset in place, not out of FalkorDB);
+    and serving reads of main a version it published (``serving_seq``, within the platform's
+    ``GRAPHVER_READ_MAX_LAG``), past genesis — so its readers keep that version until the switch,
+    and a build only ever exists beside a key that serves. A move also needs the key to hold that
+    version whole as far as the row tells, with no window part-written into it: beside would keep
+    its readers on a key part way between versions, where a move in place sends them to Postgres,
+    which is exact. A rebuild takes the key as it is: in place would serve it partly written too.
+    Read under the graph's lock, with the row locked."""
+    if graph is None or graph.deleted_at is not None or graph.fork_parent_graph_id is not None:
+        return False
+    if not ps.owns_falkor_graph or ps.falkor_graph_name in (None, f"gv_{ps.graph_id}"):
+        return False
+    if ps.status != "idle" or (ps.projected_commit_seq or 0) <= 1:
+        return False
+    if serving_seq(ps.projected_commit_seq, graph.main_head_commit_seq, ps.status,
+                   ps.served_commit_seq, build_policy.max_lag_of("beside")) is None:
+        return False
+    if reason == "move":
+        return ps.served_commit_seq == ps.projected_commit_seq and ps.window_rows is None
+    return True
+
+
+#: :func:`_record_build`'s ``last_error`` when the build leaves it as it is.
+_KEEP = object()
+
+
+def _record_build(ps, *, state: Dict[str, object], name: Optional[str],
+                  provider: Optional[str], last_error: object = _KEEP) -> None:
+    """Ask for a build of ``ps``'s graph inside the caller's transaction, which holds the graph's
+    lock and the row: ``state`` (``candidates.new_state``) in key ``name`` on ``provider``, holding
+    no version yet. The poll's backoff is cleared, so it takes the build up at once, and the epoch
+    is bumped: a pass that read the row before this transaction loses its claim, writing nothing.
+    The serving key keeps everything it serves from: its watermark, its served version, its status,
+    a window in flight, its pin and shard map — and its last error, which describes it, not the
+    build (``last_error`` replaces it: a rebuild the projector started on its own says why)."""
+    ps.candidate_graph_name, ps.candidate_provider = name, provider
+    ps.candidate_seq = None
+    ps.candidate_state = state
+    ps.failed_attempts = 0
+    ps.next_retry_at = None
+    if last_error is not _KEEP:
+        ps.last_error = last_error
+    ps.epoch = ProjectionStateORM.epoch + 1
+
+
+def _rebuild_in_place(ps, head: int, *, cause: str, why: Optional[str] = None) -> None:
+    """A rebuild in place, inside the caller's transaction: the watermark goes to 0 and the target
+    to ``head``, so the next pass reconciles the serving key with committed main from Postgres,
+    and the epoch is bumped so a pass in flight cannot publish over it. An operator's rebuild
+    (``cause`` operator) clears the last error, as a request always has; one the projector started
+    on its own (``drift``, ``failures``) says why (``why``) until it publishes, and starts the
+    count of failures under pressure again (``FalkorProjector._escalate``)."""
+    ps.projected_commit_seq = 0
+    ps.target_commit_seq = head
+    ps.epoch = ProjectionStateORM.epoch + 1
+    ps.failed_attempts = 0
+    ps.next_retry_at = None
+    if cause == "operator":
+        ps.status = "rebuilding"
+        ps.last_error = None
+        return
+    ps.status = "rehydrating" if ps.status == "rehydrating" else "rebuilding"
+    ps.pressure_failures = 0
+    ps.last_error = f"rebuilding on its own: {why}"[:500]
 
 
 class GraphVersioningService:
@@ -5235,11 +5307,24 @@ class GraphVersioningService:
         An evicted graph (or one waiting for room) is left as it is and its load asked for instead,
         for the capacity loop to admit (``residency.request_load``) — whatever the Graph residency
         switch says: off, the loop brings such graphs back through admission too. A load in flight
-        is a rebuild already running."""
+        is a rebuild already running.
+
+        A graph that reads ``beside`` (New-version builds on, ``buildForRebuilds`` on) on a key the
+        platform owns, idle and serving a version (:func:`_beside_ok`), has its rebuild built beside
+        that key instead (``candidates``): a new key seeded from Postgres while its readers keep
+        exactly the version they have, then switched to; dropped, the rebuild is made in place, as
+        here (``drop_candidate``). A build in flight: a window's is replaced (its key retired at
+        once), a rebuild's is already running (False), and a move's rebuilds too, its raw layer
+        coming from Postgres anyway (False when it already does)."""
+        policy = await build_policy.resolve()
+        switch_on = await build_policy.switch_state()
         async with self._session() as s:
             await self._lock_graph(s, graph_id)
             await self._assert_not_bootstrapping(s, graph_id)
-            ps = await s.get(ProjectionStateORM, graph_id)
+            ps = (await s.execute(
+                select(ProjectionStateORM).where(ProjectionStateORM.graph_id == graph_id)
+                .with_for_update().execution_options(populate_existing=True)
+            )).scalar_one_or_none()
             graph = await s.get(GraphORM, graph_id)
             if ps is None or graph is None or graph.fork_parent_graph_id:
                 return False
@@ -5249,17 +5334,71 @@ class GraphVersioningService:
                 from .residency import request_load
                 await request_load(graph_id)
                 return True
+            build = ps.candidate_state if isinstance(ps.candidate_state, dict) else None
+            decided = candidates.on_request(build, reason="rebuild")
+            if decided == "keep":
+                return False
+            if decided == "upgrade":
+                ps.candidate_state = {**build, "rebuild": {"cause": "operator", "why": None},
+                                      "rollupsStale": True}
+                return True
             if ps.status in ("projecting", "rebuilding") and ps.projected_commit_seq < ps.target_commit_seq:
                 return False
-            _forget_build(ps)          # the rebuild replays main into the serving key instead
-            ps.projected_commit_seq = 0
-            ps.target_commit_seq = graph.main_head_commit_seq
-            ps.status = "rebuilding"
-            ps.last_error = None
-            ps.epoch = ProjectionStateORM.epoch + 1     # a pass in flight must not write over it
-            ps.failed_attempts = 0
-            ps.next_retry_at = None
-            return True
+            beside = candidates.beside_wanted(
+                read_mode=build_policy.read_mode_of(ps.read_mode, policy), switch_on=switch_on,
+                for_rebuilds=policy["buildForRebuilds"]) and _beside_ok(ps, graph,
+                                                                        reason="rebuild")
+            _forget_build(ps)          # a window's build: the rebuild supersedes it
+            if not beside:
+                _rebuild_in_place(ps, graph.main_head_commit_seq, cause="operator")
+                return True
+            serving = ps.falkor_graph_name
+            _record_build(
+                ps, state=candidates.new_state("rebuild", now=_now(),
+                                               rebuild={"cause": "operator"}),
+                name=keymigrate.build_key(serving, {serving, *(
+                    e.get("name") for e in ps.retired_keys or [])}),
+                provider=ps.falkor_provider)
+        from backend.app.jobs.metrics import increment
+        increment("graphver_builds_total", step="queued")
+        return True
+
+    async def record_rebuild(self, graph_id: str, *, epoch: int, policy, switch_on: Optional[bool],
+                             cause: str, why: str, summaries_moved: bool = False) -> bool:
+        """Build beside the serving key the rebuild the pass at ``epoch`` escalated to on its own
+        (``FalkorProjector._escalate``: ``cause`` drift or failures, ``why``), when the policy
+        (``candidates.beside_wanted``, from ``policy`` and ``switch_on``, read by the caller) and
+        the row (:func:`_beside_ok`) want it: readers keep the version the key serves, and forks
+        read their root from Postgres (the last error says why) until the switch. The summaries a
+        window that escalated moved are owed the batch job (``rollup_state.moved``), as the
+        rebuild in place would owe them, so that one keeps them if the build is dropped. False,
+        nothing written, when the epoch moved, a build exists, or either says in place."""
+        async with self._session() as s:
+            await self._lock_graph(s, graph_id)
+            graph = await s.get(GraphORM, graph_id)
+            ps = (await s.execute(
+                select(ProjectionStateORM).where(ProjectionStateORM.graph_id == graph_id)
+                .with_for_update().execution_options(populate_existing=True)
+            )).scalar_one_or_none()
+            if (ps is None or ps.epoch != epoch or ps.candidate_state is not None
+                    or not candidates.beside_wanted(
+                        read_mode=build_policy.read_mode_of(ps.read_mode, policy),
+                        switch_on=switch_on, for_rebuilds=policy["buildForRebuilds"])
+                    or not _beside_ok(ps, graph, reason="rebuild")):
+                return False
+            serving = ps.falkor_graph_name
+            _record_build(
+                ps, state=candidates.new_state("rebuild", now=_now(),
+                                               rebuild={"cause": cause, "why": why}),
+                name=keymigrate.build_key(serving, {serving, *(
+                    e.get("name") for e in ps.retired_keys or [])}),
+                provider=ps.falkor_provider,
+                last_error=f"rebuilding beside on its own: {why}"[:500])
+            ps.pressure_failures = 0
+            if summaries_moved:
+                state = ps.rollup_state if isinstance(ps.rollup_state, dict) else {}
+                ps.rollup_state = {**state, "moved": _now()}
+        return True
 
     async def move_projection(self, *, graph_id: str, provider: str, key: str, actor: str,
                               shard_map: dict) -> Dict[str, object]:
@@ -5457,21 +5596,55 @@ class GraphVersioningService:
             ps.epoch = ProjectionStateORM.epoch + 1
         return owed
 
-    async def drop_candidate(self, graph_id: str, *, build_id: str) -> bool:
-        """Forget build ``build_id`` of ``graph_id``: its key joins ``retired_keys`` due at once
-        (the next retire run drops it), and the graph has no build again. A build of a window is
-        then written into the serving key, in place: the window is marked in flight
-        (``window_rows``), so the next pass writes it rather than ask for another build of it, and
-        its publish clears the mark. False, nothing written, when the build is no longer the
-        graph's."""
+    async def drop_candidate(self, graph_id: str, *, build_id: str,
+                             grace_secs: int = config.RETIRE_GRACE_SECS) -> Optional[str]:
+        """Forget build ``build_id`` of ``graph_id``, and make what it was for in place, as the
+        graph would without builds: its key joins ``retired_keys`` due at once (the next retire run
+        drops it), and the graph has no build again. Returns what became of it:
+
+        * ``window`` — the window is written into the serving key, in place: it is marked in flight
+          (``window_rows``), so the next pass writes it rather than ask for another build of it, and
+          its publish clears the mark;
+        * ``rebuild`` — the rebuild is made in place, as its request or the escalation would have
+          made it (:func:`_rebuild_in_place`): the next pass reconciles the serving key from
+          Postgres;
+        * ``load`` — an operator's rebuild of a graph out of FalkorDB: its load is asked for, as
+          the request would have;
+        * ``dropped`` — nothing more to do: the graph is in the trash, where nothing may reseed it,
+          or its key is already being written from Postgres (a reset, a load), or out of FalkorDB
+          after a rebuild the projector started on its own (its next read loads it).
+
+        None, nothing written, when the build is no longer the graph's. Under the graph's lock, as
+        a rebuild's request takes it."""
+        load = False
         async with self._session() as s:
+            await self._lock_graph(s, graph_id)
             ps = await self._locked_build(s, graph_id, build_id)
             if ps is None:
-                return False
-            if ps.candidate_state.get("reason") == "window":
-                ps.window_rows = int(ps.candidate_state.get("rows") or 1)
+                return None
+            graph = await s.get(GraphORM, graph_id)
+            state = dict(ps.candidate_state)
+            if state.get("reason") == "window":
+                ps.window_rows = int(state.get("rows") or 1)
+                _forget_build(ps)
+                return "window"
             _forget_build(ps)
-        return True
+            if graph is None or graph.deleted_at is not None:
+                return "dropped"
+            rebuild = state.get("rebuild") or {}
+            if ps.status == "idle":
+                _rebuild_in_place(ps, graph.main_head_commit_seq,
+                                  cause=rebuild.get("cause") or "operator", why=rebuild.get("why"))
+                took = "rebuild"
+            elif (ps.status in ("evicted", "waiting_capacity")
+                  and rebuild.get("cause") == "operator"):
+                load, took = True, "load"
+            else:
+                took = "dropped"
+        if load:
+            from .residency import request_load
+            await request_load(graph_id)
+        return took
 
     async def adopt_projection(self, *, graph_id: str, key: str, actor: str,
                                shard_map: dict) -> Dict[str, object]:

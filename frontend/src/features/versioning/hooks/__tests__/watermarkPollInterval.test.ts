@@ -42,6 +42,18 @@ describe('watermarkPollInterval', () => {
     expect(watermarkPollInterval({ fresh: false, status: 'waiting_capacity' }, true, undefined, since + 180_000, since)).toBe(3_000)
   })
 
+  it('keeps reading a graph in sync while a new version is built beside its key', () => {
+    // A rebuild or a move built beside leaves the graph idle and in sync until it switches: the
+    // poll stopped on the first read and never saw the switch.
+    const building = { step: 'seeding' as const, reason: 'rebuild' as const }
+    expect(watermarkPollInterval({ fresh: true, status: 'idle', candidate: building }, false, undefined, 0)).toBe(15_000)
+    expect(watermarkPollInterval({ fresh: true, status: 'idle', candidate: null }, false, undefined, 0)).toBe(false)
+    // Behind as well: never slower than every 15 s, and as fast as catching up asks.
+    expect(watermarkPollInterval({ ...behindIdle, candidate: building }, false, undefined, 5_000)).toBe(15_000)
+    expect(watermarkPollInterval({ ...behindIdle, lastError: 'boom', candidate: building }, false, undefined, 5_000)).toBe(15_000)
+    expect(watermarkPollInterval({ ...behindIdle, candidate: building }, false, 1_000, 5_000)).toBe(3_000)
+  })
+
   it('polls while catching up, rebuilding or waiting for an operator\'s reseed, and always when forced', () => {
     expect(watermarkPollInterval({ fresh: false, status: 'projecting' }, false, undefined, 0)).toBe(3_000)
     expect(watermarkPollInterval({ fresh: false, status: 'rebuilding' }, false, undefined, 0)).toBe(3_000)

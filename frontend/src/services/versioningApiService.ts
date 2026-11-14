@@ -258,9 +258,16 @@ export interface BuildState {
   /** queued (waiting for room), copying, seeding (written from Postgres instead of copied),
    *  catching_up or switching. */
   step: 'queued' | 'copying' | 'seeding' | 'catching_up' | 'switching'
-  reason?: string | null
+  /** Why it was asked for: window (a large change), rebuild (a rebuild of the key) or move (a move
+   *  to another key or provider, `target`). */
+  reason?: 'window' | 'rebuild' | 'move' | null
   /** copy (the serving key copied) or reseed (written from Postgres on the node with most room). */
   mode?: string | null
+  /** A move's: the key and provider it goes to. */
+  target?: { providerId?: string | null; key?: string | null } | null
+  /** Who asked for the rebuild it makes: operator, or drift or failures (the projector on its
+   *  own); null when it makes none. A move asked or rebuilt during a rebuild makes one. */
+  rebuild?: 'operator' | 'drift' | 'failures' | null
   /** The version the build's key holds whole; null until written. */
   seq?: number | null
   attempts?: number
@@ -296,10 +303,13 @@ export interface ProjectionQuarantine {
 }
 
 /** Result of kicking a full rebuild of the fast read layer. `alreadyRunning` ⇒ a
- *  projection/rebuild was already in flight, so this was a no-op. */
+ *  projection/rebuild was already in flight, so this was a no-op. `beside` ⇒ it is built in a new
+ *  copy while readers keep the version they have, then switched to (read mode beside);
+ *  `watermark.candidate` follows it. */
 export interface RebuildResponse {
   started: boolean
   alreadyRunning: boolean
+  beside?: boolean
   watermark: Watermark
 }
 

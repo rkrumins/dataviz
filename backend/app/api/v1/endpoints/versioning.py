@@ -1158,6 +1158,9 @@ class BranchFreshnessModel(_ApiModel):
 class RebuildResponse(_ApiModel):
     started: bool                                        # a fresh full replay was requested
     already_running: bool = Field(alias="alreadyRunning")  # a projection/rebuild was in flight (no-op)
+    # Built beside the serving key (read mode beside): readers keep the version they have until
+    # the new key is checked and switched to; watermark.candidate follows it.
+    beside: bool = False
     watermark: WatermarkModel
 
 
@@ -2813,7 +2816,12 @@ async def rebuild_projection(
     FalkorDB). The catch-up runs in-process as a background task (same path publish/merge use)
     and is scheduled ALWAYS — even when ``started=false`` — so a stranded 'projecting'/'rebuilding'
     status on a worker-less deployment self-heals (``project_now`` is an idempotent catch-up, a
-    no-op when the cache is already fresh)."""
+    no-op when the cache is already fresh).
+
+    A graph that reads ``beside`` may have its rebuild built beside its key (``beside``: true): a
+    new key seeded from Postgres while its readers keep the version they have, then switched to.
+    The serving key, its cursor included, is left as it is, and the projection worker builds it
+    (nudged), within its own limit on builds at once."""
     await _repair_projection_target(graph_id)            # self-heal: pin an unpinned graph when possible
     try:
         wm = await svc.projection_watermark(graph_id)
@@ -2828,19 +2836,28 @@ async def rebuild_projection(
         started = await svc.request_projection_rebuild(graph_id)
     except ConcurrencyError as exc:            # enabling version control hasn't finished
         raise HTTPException(status_code=409, detail={"type": "bootstrapping", "message": str(exc)})
-    proj = _get_projector() if started else None
+    wm = await svc.projection_watermark(graph_id)
+    building = wm.get("candidate") or {}
+    # Built beside the serving key, or by a move that rebuilds too: nothing here touches the key
+    # that serves, and the worker takes the build on.
+    beside = building.get("reason") == "rebuild" or bool(building.get("rebuild"))
+    proj = _get_projector() if started and not beside else None
     if proj is not None:
         # The rebuild replays main from the start: a pass that stopped part-way and then failed
         # left its cursor in the key, which the rebuild's first pass would otherwise resume.
         await proj.forget_cursor(graph_id)
-    # Schedule the catch-up unconditionally: even on the already-in-flight (started=False) path,
-    # rebuild_now is an idempotent catch-up (and self-deduplicates per graph), so a status
-    # stranded by a lost worker self-heals. Unlike project_now's 10s interactive ceiling, the
-    # rebuild budget (REBUILD_SYNC_TIMEOUT_SECS) lets a real full reseed actually finish.
-    background.add_task(rebuild_now, graph_id)
-    return RebuildResponse(started=started, already_running=not started,
-                           watermark=await _watermark_model(
-                               session, await svc.projection_watermark(graph_id)))
+    if beside:
+        # A build's steps are the projection worker's (within buildConcurrency), never this
+        # process's: a nudge, and the poll takes it up whatever the nudge's fate.
+        background.add_task(nudge_projection, graph_id)
+    else:
+        # Schedule the catch-up unconditionally: even on the already-in-flight (started=False)
+        # path, rebuild_now is an idempotent catch-up (and self-deduplicates per graph), so a
+        # status stranded by a lost worker self-heals. Unlike project_now's 10s interactive
+        # ceiling, the rebuild budget (REBUILD_SYNC_TIMEOUT_SECS) lets a real full reseed finish.
+        background.add_task(rebuild_now, graph_id)
+    return RebuildResponse(started=started, already_running=not started, beside=beside,
+                           watermark=await _watermark_model(session, wm))
 
 
 # Per-graph in-process guard: a reconcile is a request-scoped full scan; a second concurrent one

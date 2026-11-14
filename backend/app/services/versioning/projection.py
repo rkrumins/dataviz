@@ -1686,8 +1686,29 @@ class FalkorProjector:
         resumable on a large graph) and publishes. Its last error says why, until then. False when
         something moved the row first. ``summaries_moved``: the escalating window moved the lineage
         summaries, or owed them to the batch job, so the rebuild hands them to the job
-        (:func:`_owe_summaries`), as the heal it replaces did."""
+        (:func:`_owe_summaries`), as the heal it replaces did.
+
+        A graph that reads ``beside`` (``buildForRebuilds`` on), on a key the platform owns and
+        serving, has the rebuild built beside its key instead (``record_rebuild``): its readers
+        keep the version they have, and its last error says why, until the switch. When it
+        cannot be asked for, the rebuild is made in place, as here."""
         from backend.app.jobs.metrics import increment
+        try:
+            beside = await self._svc.record_rebuild(
+                graph_id, epoch=mine, policy=await build_policy.resolve(),
+                switch_on=await build_policy.switch_state(), cause=cause, why=reason,
+                summaries_moved=summaries_moved)
+        except Exception:                                # pragma: no cover - infra
+            logger.warning("projection of %s: a rebuild beside its key could not be asked for; "
+                           "it is rebuilt in place", graph_id, exc_info=True)
+            beside = False
+        if beside:
+            increment("graphver_projection_escalations_total", cause=cause)
+            increment("graphver_builds_total", step="queued")
+            logger.warning("projection of %s is rebuilt beside its key on its own: %s", graph_id,
+                           reason)
+            await nudge_projection(graph_id)
+            return True
         head = select(GraphORM.main_head_commit_seq).where(GraphORM.id == graph_id).scalar_subquery()
         async with self._session() as s:
             row = (await s.execute(
@@ -2380,10 +2401,15 @@ class FalkorProjector:
         - ``auto``: a copy when it fits; with no room for one on the serving key's node, or a graph
           larger than ``copyMaxBytes``, a seed.
 
+        A rebuild or a move is always seeded: a rebuild does not trust the serving key, and a move's
+        key is elsewhere. A rebuild of a graph that must keep its key (:meth:`_keeps_its_key`) is
+        made in place instead.
+
         What an earlier attempt left under the build's name is dropped first, so it does not count
-        against the room. With neither, ``noRoomPolicy``: ``wait`` keeps serving and asks again
-        shortly; ``in_place`` drops the build, and the change is written into the serving key,
-        paced. Turned off meanwhile, New-version builds drops a build that has not begun."""
+        against the room — not a move's key, which may hold the version the move goes back to, for
+        its seed to reconcile. With neither, ``noRoomPolicy``: ``wait`` keeps serving and asks
+        again shortly; ``in_place`` drops the build, and the change is made in place, paced.
+        Turned off meanwhile, New-version builds drops a build that has not begun."""
         from backend.app.jobs.metrics import increment
         from backend.app.services.aggregation.admission import AggregationAdmission
         from backend.app.services.aggregation.redis_client import get_redis
@@ -2391,12 +2417,18 @@ class FalkorProjector:
         from . import residency
         from .cache_manager import _rollups_running
 
-        build_id, mode = state["id"], policy["buildMode"]
+        build_id, reason = state["id"], state.get("reason")
+        mode = "reseed" if reason in ("rebuild", "move") else policy["buildMode"]
         if state.get("step") == "queued" and await build_policy.switch_state() is False:
             raise _BuildRefused("New-version builds was turned off before the build began")
+        if reason == "rebuild":
+            kept = await self._keeps_its_key(ps, graph)
+            if kept:
+                raise _BuildRefused(f"{kept}: rebuilt in place")
         name, provider = ps.candidate_graph_name, ps.falkor_provider
-        if (await read_projection_marker(await self._graph_client(name, provider)))[0]:
-            await self.drop_graph(name, provider)
+        if reason != "move" and (await read_projection_marker(
+                await self._graph_client(name, ps.candidate_provider)))[0]:
+            await self.drop_graph(name, ps.candidate_provider)
         no_room, seedable, why = True, mode == "reseed", None
         if mode != "reseed":
             room, held = await residency.admit_build_copy(
@@ -2479,20 +2511,47 @@ class FalkorProjector:
                                 f"{ps.projected_commit_seq})")
         return served
 
+    async def _keeps_its_key(self, ps, graph) -> Optional[str]:
+        """Why a graph must keep the key it serves from, so a build that would switch its readers
+        to another key is not made; None when they may switch. Its lineage summaries live in a
+        graph named from its key (a data source whose summaries are dedicated, as residency keeps
+        its key on a load too), or other data sources or catalog entries read its key, and would go
+        on reading one nobody writes. What cannot be read keeps the key."""
+        from . import residency
+        from .purge_worker import graph_key_readers
+
+        dedicated = await residency._dedicated({graph.data_source_id})
+        if dedicated is None:
+            return "whether its summaries live in a graph of their own could not be read"
+        if graph.data_source_id in dedicated:
+            return "its summaries live in a graph named from its key"
+        try:
+            readers = await graph_key_readers(ps.falkor_provider, ps.falkor_graph_name,
+                                              graph.data_source_id)
+        except Exception:  # noqa: BLE001 — fail closed
+            logger.warning("who else reads the key of %s could not be read", graph.id,
+                           exc_info=True)
+            return "who else reads its key could not be read"
+        if readers:
+            return f"{len(readers)} other data source(s) or catalog entr(ies) read its key"
+        return None
+
     async def _build_seed_admit(self, graph_id, ps, graph, state, policy, noop
                                 ) -> Tuple[Optional[Dict[str, object]], Optional[str]]:
         """Room for the build seeded from Postgres: a key of the graph's own on the master with the
         most room, admitted there as a load is and recorded — step ``seeding``, that key, and the
-        version the serving key holds whole, which the seed writes (``seedSeq``) — under the
-        capacity lock (``residency.admit_build_seed``). ``(the seed's first pass, None)`` once
-        recorded; ``(None, why not)`` otherwise."""
+        version the seed writes (``seedSeq``): the one the serving key holds whole, or a rebuild's
+        head, as it does not trust the serving key — under the capacity lock
+        (``residency.admit_build_seed``). ``(the seed's first pass, None)`` once recorded;
+        ``(None, why not)`` otherwise."""
         from backend.app.jobs.metrics import increment
         from backend.app.providers import falkor_graph_registry
 
         from . import residency
 
         build_id, provider = state["id"], ps.falkor_provider
-        seq = await self._serving_whole(ps)
+        seq = (graph.main_head_commit_seq if state.get("rebuild")
+               else await self._serving_whole(ps))
         keys = await falkor_graph_registry.list_graph_keys(provider)
         if keys is None:                                 # cannot verify, never "free"
             return None, "the graph store's keys could not be listed"
@@ -2583,7 +2642,8 @@ class FalkorProjector:
             after, since = 0, _now()
             await self._svc.update_candidate(graph_id, build_id, summariesAt=0,
                                              summariesSince=since, waiting=None)
-        await self._copy_summaries(graph_id, build_id, ps, client, after, deadline)
+        await self._copy_summaries(graph_id, build_id, ps, client, after, deadline,
+                                   lenient=bool(state.get("rebuild")))
         stale = bool(state.get("rollupsStale"))
         if await _rollups_ran_since(graph.data_source_id, since):
             # A summaries job met the copy: the serving key's summaries may have changed under it.
@@ -2618,23 +2678,36 @@ class FalkorProjector:
             await _q(client, f"MATCH (m:{label}) DELETE m")
 
     async def _copy_summaries(self, graph_id, build_id, ps, client, after: int,
-                              deadline: Optional[float]) -> int:
+                              deadline: Optional[float], *, lenient: bool = False) -> int:
         """Carry the serving key's lineage summaries over into the build's key: its cells a page
         of source nodes at a time (``_SCAN_PAGE`` internal ids, from ``after``), each merged onto
         its ends by label and urn with the properties it has — a page written twice writes the
         same — then the summaries' own markers as they are. Where it is is recorded on the build
         after each page (``summariesAt``), and it stops past ``deadline`` at a page boundary
         (``_PassPartial``). A cell whose ends the build's key does not hold fails the attempt: the
-        two keys hold different versions. Returns the cells written."""
+        two keys hold different versions. Returns the cells written.
+
+        A rebuild's copy is ``lenient``: its seed holds the head, while the serving key it does not
+        trust holds an older version, perhaps drifted, so such a cell is left out rather than fail
+        it, and a serving key that is gone has nothing to carry (asked so as not to create it).
+        The switch hands the summaries to the batch job either way (``rollupsStale``)."""
         source = await self._graph_client(ps.falkor_graph_name, ps.falkor_provider)
-        res = await _q(source, "MATCH (n) RETURN max(id(n))", timeout_ms=_READ_TIMEOUT_MS,
-                       read_only=True)
+        missing = "raise" if lenient else "fallback"
+        try:
+            res = await _q(source, "MATCH (n) RETURN max(id(n))", timeout_ms=_READ_TIMEOUT_MS,
+                           read_only=True, missing=missing)
+        except Exception as exc:
+            if not (lenient and _is_missing_graph_error(exc)):
+                raise
+            logger.info("build %s of %s: the serving key is gone, no summaries to carry over",
+                        build_id, graph_id)
+            return 0
         rows = getattr(res, "result_set", None) or []
         top = rows[0][0] if rows and rows[0] else None
-        written = 0
+        written = skipped = 0
         for lo in (range(after, int(top) + 1, self._SCAN_PAGE) if top is not None else ()):
             res = await _q(source, _SUMMARIES_PAGE, params={"lo": lo, "hi": lo + self._SCAN_PAGE},
-                           timeout_ms=_READ_TIMEOUT_MS, read_only=True)
+                           timeout_ms=_READ_TIMEOUT_MS, read_only=True, missing=missing)
             by_labels: Dict[Tuple[str, str], List[dict]] = {}
             for la, sa, lb, sb, props in (getattr(res, "result_set", None) or []):
                 by_labels.setdefault((str(la), str(lb)), []).append(
@@ -2653,9 +2726,11 @@ class FalkorProjector:
                     f"MERGE (a)-[r:AGGREGATED]->(b) SET r += row.p RETURN count(r)",
                     cells, on_result=counted)
                 if landed[0] < len(cells):
-                    raise RuntimeError(f"{len(cells) - landed[0]} of {len(cells)} summary cells "
-                                       f"found no end in the build's key")
-                written += len(cells)
+                    if not lenient:
+                        raise RuntimeError(f"{len(cells) - landed[0]} of {len(cells)} summary "
+                                           f"cells found no end in the build's key")
+                    skipped += len(cells) - landed[0]
+                written += min(landed[0], len(cells))
             await self._svc.update_candidate(graph_id, build_id,
                                              summariesAt=lo + self._SCAN_PAGE)
             if deadline is not None and time.monotonic() > deadline \
@@ -2663,11 +2738,14 @@ class FalkorProjector:
                 raise _PassPartial(written)
         for label, ident in _SUMMARY_MARKERS:
             res = await _q(source, f"MATCH (m:{label}) RETURN properties(m)",
-                           timeout_ms=_READ_TIMEOUT_MS, read_only=True)
+                           timeout_ms=_READ_TIMEOUT_MS, read_only=True, missing=missing)
             rows = getattr(res, "result_set", None) or []
             if rows and rows[0] and rows[0][0]:
                 await _q(client, f"MERGE (m:{label} {{id: $id}}) SET m += $props",
                          params={"id": ident, "props": dict(rows[0][0])})
+        if skipped:
+            logger.info("build %s of %s: %d summary cell(s) of the serving key found no end in "
+                        "the build's key and were left out", build_id, graph_id, skipped)
         return written
 
     async def _build_catch_up(self, graph_id, ps, graph, state, policy,
@@ -2795,13 +2873,24 @@ class FalkorProjector:
         return {"projected": seq, "applied": 0, "noop": False, "switched": True}
 
     async def _drop_build(self, graph_id: str, build_id: str, why: str) -> None:
-        """Drop a build: its key is retired at once, and the next pass writes what the graph owes
-        into its serving key, in place. Recorded as a projection event's reason."""
+        """Drop a build: its key is retired at once, and what it was for is made in place
+        (``drop_candidate``): a window written into the serving key by the next pass, a rebuild or
+        a move made as it would be without builds. Recorded as a projection event's reason. A drop
+        that waits on the graph's lock too long (``LockBusy``) is left to a later pass, which
+        drops it again."""
         from backend.app.jobs.metrics import increment
 
-        if await self._svc.drop_candidate(graph_id, build_id=build_id):
+        policy = await build_policy.resolve()
+        try:
+            took = await self._svc.drop_candidate(graph_id, build_id=build_id,
+                                                  grace_secs=int(policy["retireGraceSecs"]))
+        except LockBusy:
+            logger.info("build %s of %s: dropped by a later pass, the graph is busy (%s)",
+                        build_id, graph_id, why)
+            return
+        if took:
             increment("graphver_builds_total", step="dropped")
-            logger.warning("build %s of %s dropped: %s", build_id, graph_id, why)
+            logger.warning("build %s of %s dropped (%s): %s", build_id, graph_id, took, why)
             await nudge_projection(graph_id)
 
     async def check_liveness(self) -> List[Dict[str, object]]:

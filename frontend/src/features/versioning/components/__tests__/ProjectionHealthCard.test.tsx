@@ -208,7 +208,17 @@ describe('ProjectionHealthCard', () => {
     expect(screen.getByText(/No data is lost/)).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Rebuild now' }))
     expect(rebuildMutate).toHaveBeenCalled()
-    expect(notify).toHaveBeenCalledWith('info', expect.stringMatching(/rebuild started/i))
+    expect(notify).toHaveBeenCalledWith('info', 'Rebuild started.')
+  })
+
+  it('says a rebuild built in a new copy keeps everyone on the current version until it switches', () => {
+    rebuildMutate.mockImplementation((_v: unknown, opts: { onSuccess: (r: unknown) => void }) =>
+      opts.onSuccess({ started: true, alreadyRunning: false, beside: true, watermark: WM }))
+    renderCard(true)
+    fireEvent.click(screen.getByRole('button', { name: 'Rebuild' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Rebuild now' }))
+    expect(notify).toHaveBeenCalledWith('info',
+      'Rebuild started in a new copy. Everyone keeps the current version until it is checked and switched to.')
   })
 
   it('says what a rebuild of the customer\'s own graph changes, and what it leaves', () => {

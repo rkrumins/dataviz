@@ -265,7 +265,9 @@ function ProjectionActions({ wsId, graphId, owned, bringIn }: {
     rebuild.mutate(undefined, {
       onSuccess: (res) => {
         setVerdict(null)
-        notify('info', res.alreadyRunning ? 'A rebuild is already in progress.' : 'Rebuild started.')
+        notify('info', res.alreadyRunning ? 'A rebuild is already in progress.'
+          : res.beside ? 'Rebuild started in a new copy. Everyone keeps the current version until it is checked and switched to.'
+            : 'Rebuild started.')
       },
       onError: (e) => notify('error', (e as Error).message),
     })

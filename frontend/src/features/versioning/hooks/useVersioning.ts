@@ -232,12 +232,21 @@ function expectCatchUp(wsId?: string, graphId?: string | null) {
  *  waits for room there); and, for a short window after main advanced, while merely behind — until the
  *  projection has had its chance to start. A recorded failure ends that window early, but keeps a
  *  slow poll while behind: the projector retries after its backoff, and only a fresh read shows
- *  the route back on FalkorDB. */
+ *  the route back on FalkorDB. While a new version is built beside the key that serves (a rebuild
+ *  or a move, which leave the graph in sync until they switch), at least every 15 s. */
 export function watermarkPollInterval(
-  d: Pick<Watermark, 'fresh' | 'status' | 'lastError'> | undefined, force: boolean, advancedAt: number | undefined, now: number,
-  outSince?: number,
+  d: Pick<Watermark, 'fresh' | 'status' | 'lastError' | 'candidate'> | undefined, force: boolean,
+  advancedAt: number | undefined, now: number, outSince?: number,
 ): number | false {
   if (force) return 3_000
+  const every = behindPollInterval(d, advancedAt, now, outSince)
+  return d?.candidate && (every === false || every > 15_000) ? 15_000 : every
+}
+
+function behindPollInterval(
+  d: Pick<Watermark, 'fresh' | 'status' | 'lastError'> | undefined, advancedAt: number | undefined, now: number,
+  outSince?: number,
+): number | false {
   if (!d || d.fresh !== false) return false
   // A load or a wait for room can go on for long: after a few minutes, once a minute.
   if ((d.status === 'rehydrating' || d.status === 'waiting_capacity') && outSince !== undefined

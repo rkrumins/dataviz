@@ -35,7 +35,7 @@ import {
     type VersionedGraphRow,
     type VersionedGraphsFilter,
 } from '@/services/systemStatusService'
-import { deleteFork, rebuildProjection, reconcileProjection } from '@/services/versioningApiService'
+import { deleteFork, rebuildProjection, reconcileProjection, type BuildState } from '@/services/versioningApiService'
 import { formatSince } from './meta'
 import { MoveProjectionDialog } from './MoveProjectionDialog'
 import { ConfirmDialog } from './ConfirmDialog'
@@ -73,12 +73,21 @@ const BUILD_CHIP: Record<string, string> = {
     catching_up: 'Building new version', switching: 'Switching to new version',
 }
 
-/** The build's chip's tooltip: what readers see meanwhile, and why it waits or failed. */
-function buildTitle(b: { step: string; waiting?: string | null; error?: string | null; attempts?: number;
-                         progress?: { done?: number; total?: number } | null }): string {
+/** The build's chip: a move's names its key, a rebuild says so, a large change says its step. */
+function buildChip(b: BuildState): string {
+    if (b.reason === 'move') return `Moving to ${b.target?.key ?? 'a new key'}`
+    if (b.reason === 'rebuild') return 'Rebuilding beside'
+    return BUILD_CHIP[b.step] ?? b.step
+}
+
+/** The build's chip's tooltip: what it does, what readers see meanwhile, and why it waits or failed. */
+function buildTitle(b: BuildState): string {
     return [
+        b.reason === 'rebuild' ? 'The graph is rebuilt from Postgres in a new key.' : '',
+        b.reason === 'move' ? `The graph is written from Postgres into ${b.target?.key ?? 'its new key'}.` : '',
         'Readers keep exactly the version served now until the new one is built and checked, then switch at once.',
-        b.step === 'seeding' ? 'Its key is written from Postgres, as no copy fits or one is not wanted.' : '',
+        b.step === 'seeding' && b.reason !== 'rebuild' && b.reason !== 'move'
+            ? 'Its key is written from Postgres, as no copy fits or one is not wanted.' : '',
         b.step === 'seeding' && b.progress?.total
             ? `${Math.round(((b.progress.done ?? 0) / b.progress.total) * 100)}% written.` : '',
         b.waiting ? `Waiting: ${b.waiting}.` : '',
@@ -173,7 +182,9 @@ export function VersionedGraphsPanel({ providers, onClose }: Props) {
                 const res = await rebuildProjection(row.workspaceId, row.graphId)
                 note = res.alreadyRunning
                     ? { tone: 'warn', text: 'A rebuild is already running' }
-                    : { tone: 'ok', text: 'Rebuild started' }
+                    : res.beside
+                        ? { tone: 'ok', text: 'Rebuilding in a new key — readers keep the current version until it is checked and switched to' }
+                        : { tone: 'ok', text: 'Rebuild started' }
             } else if (action === 'delete') {
                 await deleteFork(row.workspaceId, row.graphId)
                 note = { tone: 'ok', text: 'Moved to the trash; restorable for 30 days' }
@@ -364,7 +375,7 @@ export function VersionedGraphsPanel({ providers, onClose }: Props) {
                                                                 : 'border-sky-500/25 bg-sky-500/10 text-sky-700 dark:text-sky-300')}
                                                             title={buildTitle(row.build)}
                                                         >
-                                                            {BUILD_CHIP[row.build.step] ?? row.build.step}
+                                                            {buildChip(row.build)}
                                                         </span>
                                                     )}
                                                 </div>

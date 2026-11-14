@@ -17,6 +17,7 @@ import pytest
 from backend.app.services.graph_store.topology import key_slot
 from backend.app.services.versioning import candidates, keymigrate, models
 from backend.app.services.versioning.models import ProjectionStateORM
+from backend.app.services.versioning.projection import _CURSOR_CLEAR
 from backend.tests.test_projection_fencing_unit import _PS, _projector
 
 _REVISION = (Path(__file__).resolve().parents[1] / "alembic" / "versions"
@@ -298,6 +299,138 @@ def test_a_seeding_build_reserves_its_room_on_its_keys_master_and_is_no_graph_of
     by = {p.master.endpoint: p for p in decided.masters}
     assert by["node2"].seeding and by["node2"].reserved >= 200_000
     assert not by["node1"].seeding and not by["node2"].evictions
+
+
+def test_a_rebuild_or_a_move_is_built_beside_only_a_key_that_serves():
+    """The row's half (``service._beside_ok``): a live graph that is no fork, on a key the platform
+    owns and pinned, idle, serving a version it published past genesis within the read lag. A move
+    also needs the version whole, no window part-written."""
+    from backend.app.services.versioning import config as gv_config
+    from backend.app.services.versioning.service import _beside_ok
+
+    graph = SimpleNamespace(deleted_at=None, fork_parent_graph_id=None, main_head_commit_seq=5)
+
+    def ps(**over):
+        return SimpleNamespace(**{"graph_id": "g1", "owns_falkor_graph": True,
+                                  "falkor_graph_name": "gvp_g1{ab.1}", "status": "idle",
+                                  "projected_commit_seq": 4, "served_commit_seq": 4,
+                                  "window_rows": None, **over})
+
+    for reason in ("rebuild", "move"):
+        assert _beside_ok(ps(), graph, reason=reason), reason
+    refused = [({}, {"deleted_at": "t"}), ({}, {"fork_parent_graph_id": "g0"}),
+               ({"owns_falkor_graph": False}, {}), ({"falkor_graph_name": None}, {}),
+               ({"falkor_graph_name": "gv_g1"}, {}), ({"projected_commit_seq": 1}, {}),
+               ({"projected_commit_seq": 0, "served_commit_seq": 4}, {})]
+    refused += [({"status": s}, {}) for s in ("projecting", "rebuilding", "reseeding", "evicted",
+                                               "waiting_capacity", "rehydrating")]
+    for row, of_graph in refused:
+        for reason in ("rebuild", "move"):
+            assert not _beside_ok(ps(**row), SimpleNamespace(**{**vars(graph), **of_graph}),
+                                  reason=reason), (row, of_graph, reason)
+    # Only a move needs the key to hold its version whole, with no window in flight.
+    for row in ({"served_commit_seq": 3}, {"served_commit_seq": None}, {"window_rows": 900}):
+        assert _beside_ok(ps(**row), graph, reason="rebuild"), row
+        assert not _beside_ok(ps(**row), graph, reason="move"), row
+    # Further behind its head than GRAPHVER_READ_MAX_LAG, the key serves nothing.
+    old = gv_config.READ_MAX_LAG
+    try:
+        gv_config.READ_MAX_LAG = 0
+        assert not _beside_ok(ps(), graph, reason="rebuild")
+        assert _beside_ok(ps(projected_commit_seq=5, served_commit_seq=5), graph,
+                          reason="rebuild")
+    finally:
+        gv_config.READ_MAX_LAG = old
+
+
+def test_a_rebuild_built_beside_leaves_the_serving_key_alone_and_nudges_the_worker(monkeypatch):
+    """The rebuild route: a rebuild built beside (or a move that rebuilds too) clears no cursor in
+    the serving key and runs nothing in this process — the worker builds it, nudged — and says so
+    (``beside``). One in place clears the cursor and runs the catch-up, as before."""
+    from backend.app.api.v1.endpoints import versioning as ep
+
+    for building, beside in (({"reason": "rebuild", "rebuild": "operator"}, True),
+                             ({"reason": "move", "rebuild": "operator"}, True),
+                             ({"reason": "move", "rebuild": None}, False), (None, False)):
+        proj, _ps, client, _seen = _projector(monkeypatch)
+        tasks = []
+
+        async def repaired(graph_id):
+            return None
+
+        async def watermark(graph_id, building=building):
+            return {"falkor_graph_name": "real_pinned_graph", "candidate": building}
+
+        async def request(graph_id):
+            return True
+
+        async def model(session, wm):
+            return ep.WatermarkModel.model_construct()
+
+        svc = SimpleNamespace(projection_watermark=watermark, request_projection_rebuild=request)
+        monkeypatch.setattr(ep, "_repair_projection_target", repaired)
+        monkeypatch.setattr(ep, "_get_projector", lambda: proj)
+        monkeypatch.setattr(ep, "_watermark_model", model)
+        r = asyncio.run(ep.rebuild_projection(
+            "ws1", "g1", background=SimpleNamespace(add_task=lambda fn, *a: tasks.append((fn, a))),
+            _user=None, _meta={}, svc=svc, session=None))
+        assert (r.started, r.beside) == (True, beside), building
+        assert [c for c, _p in client.queries] == ([] if beside else [_CURSOR_CLEAR]), building
+        assert tasks == [(ep.nudge_projection if beside else ep.rebuild_now, ("g1",))], building
+
+
+def test_an_escalation_that_cannot_ask_for_a_build_is_rebuilt_in_place(monkeypatch):
+    """The projector's own rebuild goes beside the key when it can be asked for there
+    (``record_rebuild``), and is otherwise the fenced reset it always was — also when asking
+    fails, which leaves nothing half done."""
+    from contextlib import asynccontextmanager
+
+    from backend.app.services.versioning import build_policy, projection
+    from backend.app.services.versioning.projection import FalkorProjector
+
+    statements, nudged = [], []
+
+    class _Session:
+        async def execute(self, stmt):
+            statements.append(str(stmt))
+            return SimpleNamespace(first=lambda: ("g1",))
+
+    @asynccontextmanager
+    async def session():
+        yield _Session()
+
+    async def resolve(session=None):
+        return build_policy.defaults()
+
+    async def switch(session=None):
+        return True
+
+    async def nudge(graph_id):
+        nudged.append(graph_id)
+
+    monkeypatch.setattr(build_policy, "resolve", resolve)
+    monkeypatch.setattr(build_policy, "switch_state", switch)
+    monkeypatch.setattr(projection, "nudge_projection", nudge)
+    for asked, reset in ((True, False), (False, True), (ConnectionError("gone"), True)):
+        proj = FalkorProjector(graph_client_factory=lambda *a: None, session_factory=session)
+        seen = []
+
+        async def record(graph_id, *, asked=asked, **kw):
+            seen.append(kw)
+            if isinstance(asked, Exception):
+                raise asked
+            return asked
+
+        monkeypatch.setattr(proj._svc, "record_rebuild", record)
+        statements.clear()
+        nudged.clear()
+        assert asyncio.run(proj._escalate("g1", 7, "it drifted", "drift", summaries_moved=True))
+        (kw,) = seen
+        assert (kw["epoch"], kw["cause"], kw["why"], kw["summaries_moved"]) == (
+            7, "drift", "it drifted", True)
+        assert bool(statements) is reset and nudged == ["g1"], asked
+        if reset:
+            assert "UPDATE graphver.projection_state" in statements[0]
 
 
 def test_the_poll_takes_up_a_build_of_a_graph_that_is_caught_up_and_takes_builds_first(
