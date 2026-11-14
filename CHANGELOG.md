@@ -32,7 +32,9 @@ integration's many small changes as a few commits.
     second key, checked, then switched to in one step. The key is a copy of the serving one when its
     node has room, else it is seeded from Postgres on the node with most room, the serving key's
     lineage summaries carried over (**How a build makes its key**: auto, copy only, or seed from
-    Postgres). A copy's or a seed's room is reserved on its node while it is written, so builds and
+    Postgres). While it runs, a copy holds the new key and its own buffer, each about the graph's
+    size (**Room a copy needs**, ×2.2 by default); a seed holds about the graph once. A copy's or a
+    seed's room is reserved on its node while it is written, so builds and
     loads never take the same room, and every step resumes after a restart. It needs a key the
     platform owns and **New-version builds** on (Admin → Features).
 

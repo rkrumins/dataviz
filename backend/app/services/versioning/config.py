@@ -297,9 +297,12 @@ PROJECTION_CANDIDATE_REBUILDS: bool = os.getenv("GRAPHVER_PROJECTION_CANDIDATE_R
 # How a build makes its key: ``auto`` copies the serving key (GRAPH.COPY) when its node has room,
 # else seeds it from Postgres on the node with most room; ``copy`` and ``reseed`` force one way.
 PROJECTION_CANDIDATE_MODE: str = os.getenv("GRAPHVER_PROJECTION_CANDIDATE_MODE", "auto")
-# The free memory a copy needs on its node, as a share of the graph's size (130 = ×1.3), and the
-# largest graph copied rather than reseeded (0: no limit).
-PROJECTION_COPY_MARGIN_PCT: int = int(os.getenv("GRAPHVER_PROJECTION_COPY_MARGIN_PCT", "130"))
+# The free memory a copy needs on its node, as a share of the graph's size (220 = ×2.2), and the
+# largest graph copied rather than reseeded (0: no limit). While GRAPH.COPY runs, the node holds
+# the new key and the copy's own buffer, each about the graph's size: the versioning-scale run saw
+# FalkorDB's memory rise by 2.0× the graph's at the copy's peak (1.3 GB to 3.9 GB at 1,000,000
+# nodes and edges), against 1.1× for a seed.
+PROJECTION_COPY_MARGIN_PCT: int = int(os.getenv("GRAPHVER_PROJECTION_COPY_MARGIN_PCT", "220"))
 PROJECTION_COPY_MAX_BYTES: int = int(os.getenv("GRAPHVER_PROJECTION_COPY_MAX_BYTES", "0"))
 # With no room for a build anywhere: ``wait`` (the serving key keeps serving its version) or
 # ``in_place`` (the window is written into the serving key, paced). Alerted on past the second value.

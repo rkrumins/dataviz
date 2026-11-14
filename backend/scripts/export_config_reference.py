@@ -175,7 +175,7 @@ NOTES: dict[str, tuple[str, str | None]] = {
         None,
     ),
     "GRAPHVER_PROJECTION_COPY_MARGIN_PCT": (
-        "The free memory a copy needs on its node, as a share of the graph's size (`130` = ×1.3). A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds.",
+        "The free memory a copy needs on its node, as a share of the graph's size (`220` = ×2.2: while it runs, a copy holds the new key and its own buffer, each about the graph's size). A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds.",
         None,
     ),
     "GRAPHVER_PROJECTION_COPY_MAX_BYTES": (

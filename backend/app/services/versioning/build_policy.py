@@ -82,7 +82,8 @@ FIELDS: Tuple[Field, ...] = (
           choices=MODES),
     Field("copyMarginPct", lambda: config.PROJECTION_COPY_MARGIN_PCT, "int", "room",
           "Room a copy needs",
-          "The free memory a copy needs on its node, as a share of the graph's size.",
+          "The free memory a copy needs on its node, as a share of the graph's size. While it "
+          "runs, a copy holds the new key and its own buffer, each about the graph's size.",
           unit="pct", lo=100, hi=400),
     Field("copyMaxBytes", lambda: config.PROJECTION_COPY_MAX_BYTES, "int", "room",
           "Largest graph copied",

@@ -525,9 +525,11 @@ stateDiagram-v2
   copies when a copy fits, and seeds when the serving key's node has no room for one or the graph is
   larger than **Largest graph copied** (`copyMaxBytes`).
 - **Copying.** Once the node has room for a copy (`residency.admit_build_copy`: the graph's size
-  times **Room a copy needs**, `copyMarginPct`, under the node's start mark; a graph larger than
-  **Largest graph copied** is never copied) and no lineage-summaries job is rewriting the serving
-  key's summaries, `GRAPH.COPY` copies the serving key, summaries and indexes included. The room is
+  times **Room a copy needs**, `copyMarginPct`, ×2.2 by default, under the node's start mark: while
+  it runs, the node holds the new key and the copy's own buffer, each about the graph's size; a
+  graph larger than **Largest graph copied** is never copied) and no lineage-summaries job is
+  rewriting the serving key's summaries, `GRAPH.COPY` copies the serving key, summaries and
+  indexes included. The room is
   checked and reserved for the build in one step, under the capacity lock, in the ledger every
   admission and capacity pass counts, and given back once the copy has landed or failed: two builds,
   or a build and a load, never take the room one of them needs. A capacity pass holding the lock is
