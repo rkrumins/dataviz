@@ -42,15 +42,18 @@ export interface SyncVersioned {
   candidate?: SyncBuild | null
 }
 
-/** A new version built beside the key views read: `queued` (waiting for room for a copy),
- *  `copying`, `catching_up` (the commits since written into it) or `switching`. */
+/** A new version built beside the key views read: `queued` (waiting for room), `copying`,
+ *  `seeding` (written from the system of record instead of copied), `catching_up` (the commits
+ *  since written into it) or `switching`. */
 export interface SyncBuild {
-  step: 'queued' | 'copying' | 'catching_up' | 'switching'
+  step: 'queued' | 'copying' | 'seeding' | 'catching_up' | 'switching'
   seq?: number | null
   attempts?: number
   error?: string | null
   waiting?: string | null
   rows?: number | null
+  /** How far a seed has written, while it does. */
+  progress?: { done?: number; total?: number } | null
 }
 
 export interface SyncSummaries {

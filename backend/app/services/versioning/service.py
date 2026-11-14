@@ -5377,10 +5377,12 @@ class GraphVersioningService:
         return ps
 
     async def update_candidate(self, graph_id: str, build_id: str, *,
-                               seq: Optional[int] = None, **changes: object) -> bool:
+                               seq: Optional[int] = None, name: Optional[str] = None,
+                               **changes: object) -> bool:
         """Move build ``build_id`` of ``graph_id`` on: merge ``changes`` into its state (its step,
         attempts, error, retryAt, waiting, progress) and, given ``seq``, record the version its
-        key now holds whole. Fenced on the build: False, nothing written, when it is no longer the
+        key now holds whole; given ``name``, the key it is built in (one placed for a seed from
+        Postgres). Fenced on the build: False, nothing written, when it is no longer the
         graph's."""
         async with self._session() as s:
             ps = await self._locked_build(s, graph_id, build_id)
@@ -5389,6 +5391,8 @@ class GraphVersioningService:
             ps.candidate_state = {**ps.candidate_state, **changes}
             if seq is not None:
                 ps.candidate_seq = seq
+            if name is not None:
+                ps.candidate_graph_name = name
         return True
 
     async def switch_to_candidate(self, graph_id: str, *, build_id: str, seq: int,

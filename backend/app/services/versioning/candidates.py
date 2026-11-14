@@ -9,18 +9,22 @@ Nothing writes the serving key while a build exists.
 
 The steps, one a projection pass (``FalkorProjector._advance_candidate``):
 
-* ``queued`` — asked for; waits for room for a copy on the serving key's node (``noRoomPolicy``:
-  ``wait`` keeps serving and asks again; ``in_place`` drops the build, and the change is written
-  into the serving key, paced);
+* ``queued`` — asked for; waits for room as ``buildMode`` says: ``copy`` for a copy on the serving
+  key's node, ``reseed`` for a seed on the node with most room, ``auto`` for a copy, else a seed
+  (``noRoomPolicy``: ``wait`` keeps serving and asks again; ``in_place`` drops the build, and the
+  change is written into the serving key, paced);
 * ``copying`` — ``GRAPH.COPY`` of the serving key, its lineage summaries included, which holds
   exactly the version it serves (``candidate_seq``);
+* ``seeding`` — instead of a copy, the build's key written from Postgres at the version the
+  serving key serves, a page at a time when large, then the serving key's lineage summaries carried
+  over (mode ``reseed``);
 * ``catching_up`` — the commits since then written into the build's key, a window at a time, its
   summaries moved by the windows' deltas;
 * ``switching`` — the build holds the head: checked against Postgres, then switched to.
 
-A build that fails is tried again from its copy, up to ``buildMaxAttempts``, then dropped with its
-key, and the change is written in place, as the read mode's fallback. The serving key never
-stops serving meanwhile.
+A build that fails is tried again from a fresh copy (a seeded one: seeded again, in its key), up to
+``buildMaxAttempts``, then dropped with its key, and the change is written in place, as the read
+mode's fallback. The serving key never stops serving meanwhile.
 
 Its state lives in ``projection_state`` (``candidate_*``), so a pass on any worker, after a
 restart, takes the build up where it is: each step is idempotent, and the build key's own marker
@@ -31,7 +35,7 @@ from __future__ import annotations
 import uuid
 from typing import Any, Dict, Mapping, Optional
 
-STEPS = ("queued", "copying", "catching_up", "switching")
+STEPS = ("queued", "copying", "seeding", "catching_up", "switching")
 #: Why a build was asked for. A large publish window, in this release.
 REASONS = ("window",)
 
@@ -56,7 +60,8 @@ def wanted(*, read_mode: str, switch_on: Optional[bool], owned: bool, rows: int,
 
 def block(ps: Any) -> Optional[Dict[str, Any]]:
     """The build a graph has, for its watermark and its admin row: ``{id, step, reason, mode,
-    seq, attempts, error, waiting, since, rows}``, or None while it has none."""
+    seq, attempts, error, waiting, since, rows, progress}``, or None while it has none.
+    ``progress`` (``{done, total}``) is how far a seed or a catch-up has written, while it does."""
     state = getattr(ps, "candidate_state", None)
     if not isinstance(state, Mapping):
         return None
@@ -64,4 +69,4 @@ def block(ps: Any) -> Optional[Dict[str, Any]]:
             "mode": state.get("mode"), "seq": getattr(ps, "candidate_seq", None),
             "attempts": int(state.get("attempts") or 0), "error": state.get("error"),
             "waiting": state.get("waiting"), "since": state.get("since"),
-            "rows": state.get("rows")}
+            "rows": state.get("rows"), "progress": state.get("progress")}

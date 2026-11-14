@@ -1094,11 +1094,13 @@ class WatermarkModel(_ApiModel):
 class BuildModel(_ApiModel):
     """A new version of a graph built beside the key that serves it (read mode beside)."""
     id: Optional[str] = None
-    # queued (waiting for room for a copy), copying, catching_up or switching.
+    # queued (waiting for room), copying, seeding (written from Postgres instead of copied),
+    # catching_up or switching.
     step: Optional[str] = None
     # Why it was asked for: window, a publish larger than New-version builds' buildAboveRows.
     reason: Optional[str] = None
-    # copy: the serving key copied, then the commits since written into the copy.
+    # copy: the serving key copied, then the commits since written into the copy. reseed: its key
+    # written from Postgres on the node with most room, the serving key's summaries carried over.
     mode: Optional[str] = None
     # The version the build's key holds whole: null until it is written.
     seq: Optional[int] = None
@@ -1109,6 +1111,8 @@ class BuildModel(_ApiModel):
     since: Optional[str] = None
     # The version rows of the change it builds.
     rows: Optional[int] = None
+    # How far a seed or a catch-up has written ({done, total}), while it does.
+    progress: Optional[Dict[str, int]] = None
 
 
 WatermarkModel.model_rebuild()

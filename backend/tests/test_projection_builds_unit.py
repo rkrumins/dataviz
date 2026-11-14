@@ -37,7 +37,7 @@ def test_a_build_is_asked_for_queued_and_reads_as_its_block():
     assert candidates.block(ps) == {
         "id": state["id"], "step": "queued", "reason": "window", "mode": "copy", "seq": None,
         "attempts": 0, "error": None, "waiting": None,
-        "since": "2026-11-13T12:00:00+00:00", "rows": 250_001}
+        "since": "2026-11-13T12:00:00+00:00", "rows": 250_001, "progress": None}
     assert candidates.block(SimpleNamespace(candidate_state=None)) is None
 
 
@@ -150,3 +150,81 @@ def test_a_copys_room_is_checked_and_reserved_in_one_step_under_the_capacity_loc
     events.clear()
     assert admit() == (Admitted(False, "node1", 5, "capacity"), None)
     assert events == ["lock", ("check", "k#b1", 130, 0), "unlock"]
+
+
+def test_a_seed_is_placed_admitted_and_recorded_in_one_step_under_the_capacity_lock(monkeypatch):
+    """A build seeded from Postgres takes a key on the master with most room, its full write
+    admitted there as a load's is, and records it before the lock is let go, so the next admission
+    counts it; refused, or with no master free, nothing is recorded."""
+    from contextlib import asynccontextmanager
+
+    from backend.app.services.versioning import residency
+    from backend.app.services.versioning.residency import Admitted
+
+    events = []
+    placed = [("gvp_g1{ab.2}", "node2"), ("gvp_g1{ab.3}", "node2"), None]
+    answers = [Admitted(True, "node2"), Admitted(False, "node2", 9, "capacity")]
+
+    @asynccontextmanager
+    async def admitting(wait_s=15.0):
+        events.append("lock")
+        yield
+        events.append("unlock")
+
+    async def place_key(graph_id, provider, taken):
+        events.append(("place", provider, sorted(taken)))
+        return placed.pop(0)
+
+    async def admission_on(graph_id, provider, key):
+        events.append(("admit", key))
+        return answers.pop(0)
+
+    async def record(key, master):
+        events.append(("record", key, master))
+        return True
+
+    monkeypatch.setattr(residency, "admitting", admitting)
+    monkeypatch.setattr(residency, "place_key", place_key)
+    monkeypatch.setattr(residency, "admission_on", admission_on)
+
+    def seed():
+        return asyncio.run(residency.admit_build_seed("g1", "p1", {"k"}, record))
+
+    assert seed() == (Admitted(True, "node2"), "gvp_g1{ab.2}")
+    assert events == ["lock", ("place", "p1", ["k"]), ("admit", "gvp_g1{ab.2}"),
+                      ("record", "gvp_g1{ab.2}", "node2"), "unlock"]
+    events.clear()
+    assert seed() == (Admitted(False, "node2", 9, "capacity"), None)
+    assert ("record", "gvp_g1{ab.3}", "node2") not in events and events[-1] == "unlock"
+    events.clear()
+    assert seed() == (Admitted(False, None, None, "queued"), None)
+    assert [e for e in events if isinstance(e, tuple) and e[0] != "place"] == []
+
+
+def test_a_seeding_build_reserves_its_room_on_its_keys_master_and_is_no_graph_of_its_own():
+    """While a build seeds, its full write counts on the master its key hashes to, as a load's
+    does: that master takes no load meanwhile, never evicts the build, and the graphs gauges do not
+    count it."""
+    from datetime import datetime, timezone
+
+    from backend.app.services.versioning import residency_policy
+    from backend.app.services.versioning.residency import _build_seeding
+    from backend.app.services.versioning.residency_plan import Graph, Master, plan
+
+    seeding = SimpleNamespace(candidate_state={"step": "seeding"}, candidate_graph_name="k#b9")
+    assert _build_seeding(seeding)
+    for state, name in (({"step": "catching_up"}, "k#b9"), ({"step": "seeding"}, None),
+                        (None, "k#b9")):
+        assert not _build_seeding(SimpleNamespace(candidate_state=state,
+                                                  candidate_graph_name=name))
+    policy = residency_policy.defaults()
+    masters = [Master(endpoint=e, used=1_000, maxmemory=1_000_000, providers=("default",))
+               for e in ("node1", "node2")]
+    build = Graph(graph_id="g1", endpoint="node2", residency="standard", status="building",
+                  evictable=False, size_bytes=200_000, seeding=True, placed=False, build=True)
+    serving = Graph(graph_id="g1", endpoint="node1", residency="standard", status="idle",
+                    size_bytes=200_000)
+    decided = plan(policy, masters, [serving, build], datetime.now(timezone.utc))
+    by = {p.master.endpoint: p for p in decided.masters}
+    assert by["node2"].seeding and by["node2"].reserved >= 200_000
+    assert not by["node1"].seeding and not by["node2"].evictions

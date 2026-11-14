@@ -29,8 +29,12 @@ integration's many small changes as a few commits.
   - **Keep serving, update in place**: the version FalkorDB last finished, at full speed, while the
     next is written into the same key, paced; readers may see part of it before the rest.
   - **Keep serving, switch when ready**: exactly that version, while a large change is built in a
-    second key, checked, then switched to in one step. It needs a key the platform owns, room on its
-    node for a copy, and **New-version builds** on (Admin → Features).
+    second key, checked, then switched to in one step. The key is a copy of the serving one when its
+    node has room, else it is seeded from Postgres on the node with most room, the serving key's
+    lineage summaries carried over (**How a build makes its key**: auto, copy only, or seed from
+    Postgres). A copy's or a seed's room is reserved on its node while it is written, so builds and
+    loads never take the same room, and every step resumes after a restart. It needs a key the
+    platform owns and **New-version builds** on (Admin → Features).
 
   The watermark, the sync chip and the admin inventory say which mode applies, where it was set, and
   while a build is under way, its step ("Showing #5 · building #6"). Each change is recorded in the

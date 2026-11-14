@@ -480,18 +480,26 @@ built in a second key while the serving key keeps serving its version whole
 ```mermaid
 stateDiagram-v2
     [*] --> queued: a large window, read mode beside
-    queued --> copying: room for a copy on the node
+    queued --> copying: room for a copy on the serving key's node (copy, auto)
+    queued --> seeding: no copy fits, or one is not wanted (auto, reseed)
     queued --> queued: no room (noRoomPolicy wait) — asks again in a minute
     queued --> [*]: no room (noRoomPolicy in_place) — written in place
     copying --> catching_up: GRAPH.COPY of the serving key
+    seeding --> seeding: a page at a time, from Postgres; then the summaries carried over
+    seeding --> catching_up: holds the version served, whole
     catching_up --> catching_up: the commits since, a window at a time
     catching_up --> switching: holds the head
     switching --> [*]: checked, then switched in one transaction
 ```
 
 - **The build's key** is the serving key's name plus `#b<k>` (`keymigrate.build_key`): the same hash
-  tag, so it is in the same cluster slot, where `GRAPH.COPY` can copy into it. It is one of the
+  tag, so it is in the same cluster slot, where `GRAPH.COPY` can copy into it. A seeded build's key
+  is placed instead, on the master with most room (`residency.place_key`). Either is one of the
   graph's own keys (`is_owned_key`).
+- **How the key is made** is **How a build makes its key** (`buildMode`): `copy` copies, and waits
+  for room on the serving key's node; `reseed` always seeds from Postgres; `auto` (the default)
+  copies when a copy fits, and seeds when the serving key's node has no room for one or the graph is
+  larger than **Largest graph copied** (`copyMaxBytes`).
 - **Copying.** Once the node has room for a copy (`residency.admit_build_copy`: the graph's size
   times **Room a copy needs**, `copyMarginPct`, under the node's start mark; a graph larger than
   **Largest graph copied** is never copied) and no lineage-summaries job is rewriting the serving
@@ -502,6 +510,19 @@ stateDiagram-v2
   waited for, not counted as a failure. The serving key
   must hold its version whole (its marker, `served_commit_seq` and the watermark agree), or there is
   nothing exact to copy: the build is dropped and the change written in place.
+- **Seeding.** Instead of a copy, the build's key is written from Postgres with exactly the version
+  the serving key serves (`seedSeq`), by the reconcile a full seed uses: in memory, or above
+  `GRAPHVER_PROJECTION_RECONCILE_STREAMED_ABOVE` entities a page at a time with its cursor in the
+  build's key, resumable pass after pass. Its room is admitted on the master the key is placed on,
+  as a load's is, and recorded under the capacity lock before it is let go; while it seeds, the
+  capacity plan counts that write on that master, which takes no other load meanwhile
+  (`residency.admit_build_seed`, `gather`). Then the serving key's lineage summaries are carried
+  over: its `:AGGREGATED` cells a page of source nodes at a time, each merged onto its ends by label
+  and urn with the properties it has (a cell's `aggKey` is its ends' urns, never internal ids), and
+  their markers (`_AggMeta`, `_GVRollupMeta`) as they are — so the build holds what a copy would, and
+  catches up the same way. A summaries job that meets the copy starts it again (three times; then
+  the summaries are handed to the job once switched). The key's marker node records the finished
+  seed (`seedOf`): a key lost before its summaries are carried over is seeded again.
 - **Catching up.** The commits since the copy are written into the build's key, in memory or a page
   at a time with its cursor in that key (resumable within `GRAPHVER_PROJECTION_PASS_MAX_SECS`), and
   its summaries move by the windows' deltas, fenced by its own summaries marker. Summaries a delta
@@ -520,19 +541,23 @@ stateDiagram-v2
   the build (`candidate`: its step, attempts, error, why it waits), which the sync chip says ("Showing
   #5 · building #6").
 - **Failures.** A step that fails counts an attempt and is tried again after a backoff, from a fresh
-  copy; past **Attempts before giving up** (`buildMaxAttempts`) the build is dropped with its key and
-  the change is written in place (the window is marked in flight, `window_rows`, so it is not built
-  again). A rebuild or a move drops a build. A purge drops its key.
+  copy. A seeded build is seeded again instead, in the key it has: the reconcile writes only what
+  differs from the version it starts from, and its summaries are carried over again, so a failed
+  catch-up is undone rather than built on. Past **Attempts before giving up** (`buildMaxAttempts`)
+  the build is dropped with its key and the change is written in place (the window is marked in
+  flight, `window_rows`, so it is not built again). A rebuild or a move drops a build, and so does a
+  graph whose read mode changes away from `beside`: the change is written as the mode it reads now
+  says. A purge drops its key.
 - **Restarts.** Every step is recorded in `projection_state` (`candidate_graph_name`,
   `candidate_provider`, `candidate_seq`, `candidate_state`) and fenced on the build's id, and the build's
   key says what it holds, so a pass on any worker takes it up where it was. `GRAPH.COPY` finishes
   even if its client goes away. A build found copying (its pod stopped mid-copy, or a later step
   failed) asks for room again; what an earlier attempt left under the build's name is dropped first,
   so it neither counts against the room nor is taken for a copy.
-- **Metrics:** `graphver_builds_total{step=queued|copied|switched|dropped}`,
-  `graphver_build_copy_seconds`, `graphver_build_waiting_total{reason=room}`.
-- **Not yet:** seeding a build from Postgres when no node has room for a copy (`buildMode`
-  `reseed`), and builds for rebuilds, moves and loads; they wait or are written in place meanwhile.
+- **Metrics:** `graphver_builds_total{step=queued|copied|seeding|seeded|switched|dropped}`,
+  `graphver_build_copy_seconds`, `graphver_build_seed_seconds`,
+  `graphver_build_waiting_total{reason=room}`.
+- **Not yet:** builds for rebuilds, moves and loads; they are written in place meanwhile.
 
 ---
 

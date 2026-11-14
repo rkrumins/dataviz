@@ -488,6 +488,20 @@ _CURSOR_WRITE = ("MERGE (m:_GVProjMeta {id: 'meta'}) "
 _CURSOR_CLEAR = ("MATCH (m:_GVProjMeta) "
                  "REMOVE m.pFrom, m.pTo, m.pStep, m.pAfter, m.pStructural, m.pDropped")
 
+#: A build seeded from Postgres carries the serving key's lineage summaries over
+#: (``FalkorProjector._copy_summaries``): the serving key's summary cells a page of source nodes at
+#: a time, by internal id, each written onto its ends in the build's key by label and urn; then the
+#: summaries' own markers as they are (label, id). A key's summaries go a page at a time.
+_SUMMARIES_PAGE = ("MATCH (a)-[r:AGGREGATED]->(b) WHERE id(a) >= $lo AND id(a) < $hi "
+                   "RETURN labels(a)[0], a.urn, labels(b)[0], b.urn, properties(r)")
+_SUMMARY_MARKERS = (("_AggMeta", "singleton"), ("_GVRollupMeta", "meta"))
+_SUMMARIES_CLEAR = "MATCH ()-[r:AGGREGATED]->() WITH r LIMIT $k DELETE r"
+_SUMMARIES_ANY = "MATCH ()-[r:AGGREGATED]->() RETURN 1 LIMIT 1"
+#: Which build's seed from Postgres a build's key holds whole, on its marker node: a key lost since,
+#: or made again empty by a later write (``GRAPH.QUERY`` makes a missing key), holds none.
+_SEED_DONE_WRITE = "MERGE (m:_GVProjMeta {id: 'meta'}) SET m.seedOf = $build"
+_SEED_DONE_READ = "MATCH (m:_GVProjMeta) RETURN m.seedOf"
+
 
 class _BuildRefused(Exception):
     """A build that cannot go on, whatever is tried again (``_advance_candidate``): it is dropped,
@@ -626,6 +640,20 @@ _SWEPT_WRITE = "MERGE (m:_GVProjMeta {id: 'meta'}) SET m.sweptSeq = $seq"
 #: Whether a summaries build stamped the key: the aggregation run's singleton, which readers need
 #: before they serve the ``:AGGREGATED`` layer as built.
 _SUMMARIES_BUILT = "MATCH (m:_AggMeta {id: 'singleton'}) RETURN count(m)"
+
+
+async def _seed_done(client, build_id: str) -> bool:
+    """Whether a build's key holds build ``build_id``'s seed from Postgres whole (its marker node
+    says so, ``_SEED_DONE_WRITE``): False for a key that is missing, lost since, or another's."""
+    try:
+        res = await _q(client, _SEED_DONE_READ, read_only=True, missing="raise",
+                       timeout_ms=_READ_TIMEOUT_MS)
+    except Exception as exc:
+        if _is_missing_graph_error(exc):
+            return False
+        raise
+    rows = getattr(res, "result_set", None) or []
+    return bool(rows) and bool(rows[0]) and rows[0][0] == build_id
 
 
 async def read_projection_marker(client) -> Tuple[Optional[bool], Optional[int]]:
@@ -2255,6 +2283,12 @@ class FalkorProjector:
         if state.get("retryAt") and state["retryAt"] > _now():
             return {**noop, "skipped": "build_backoff", "retryAt": state["retryAt"]}
         policy = await build_policy.resolve()
+        mode = build_policy.read_mode_of(getattr(ps, "read_mode", None), policy)
+        if mode != "beside":
+            # Its readers no longer switch when ready: the change is written in place, as the
+            # mode they read now says, rather than built on and switched to.
+            await self._drop_build(graph_id, build_id, f"the graph now reads {mode}")
+            return noop
         building = self.__dict__.setdefault("_building", set())
         if graph_id not in building and len(building) >= int(policy["buildConcurrency"]):
             return {**noop, "skipped": "build_slots"}
@@ -2265,6 +2299,8 @@ class FalkorProjector:
                 # Found copying: its pod stopped mid-copy, or a later step failed and it starts
                 # again from a fresh copy. Either way it asks for room again first.
                 return await self._build_queued(graph_id, ps, graph, state, policy, noop)
+            if step == "seeding":
+                return await self._build_seed(graph_id, ps, graph, state, policy, noop)
             if step == "catching_up":
                 return await self._build_catch_up(graph_id, ps, graph, state, policy, noop)
             if step == "switching":
@@ -2295,11 +2331,17 @@ class FalkorProjector:
                 await self._drop_build(graph_id, build_id,
                                        f"gave up after {attempts} attempt(s): {exc}")
             else:
-                # Again from a fresh copy: what a failed write left in the build's key is gone.
+                # Again from a fresh copy: what a failed write left in the build's key is gone. A
+                # build seeded from Postgres is seeded again instead, in the key it has: the
+                # reconcile writes only what differs from the version it starts from, and its
+                # summaries are carried over again, so a failed catch-up is undone, not repeated.
+                again = ("queued" if step == "queued" else
+                         "seeding" if state.get("mode") == "reseed" else "copying")
+                restart = ({"seedPhase": "raw", "summariesAt": 0}
+                           if again == "seeding" and step != "seeding" else {})
                 await self._svc.update_candidate(
-                    graph_id, build_id, step="queued" if step == "queued" else "copying",
-                    attempts=attempts, error=str(exc)[:300], retryAt=_retry_at(attempts),
-                    waiting=None)
+                    graph_id, build_id, step=again, attempts=attempts, error=str(exc)[:300],
+                    retryAt=_retry_at(attempts), waiting=None, **restart)
             return {**noop, "noop": False, "build_error": str(exc)[:300]}
         finally:
             _PASS_HELD.reset(held_token)
@@ -2307,15 +2349,22 @@ class FalkorProjector:
             building.discard(graph_id)
 
     async def _build_queued(self, graph_id, ps, graph, state, policy, noop) -> Dict[str, object]:
-        """A queued build copies once the serving key's node has room for a copy, reserved for
-        it there until the copy lands (``residency.admit_build_copy``: ``copyMarginPct``,
-        ``copyMaxBytes``, under the capacity lock, so two builds never take the same room), and
-        no lineage-summaries job is building the serving key's summaries, which a copy would take
-        half-written. What an earlier attempt left under the build's name is dropped first, so it
-        does not count against the room. Otherwise ``noRoomPolicy``: ``wait`` keeps serving and
-        asks again shortly; ``in_place`` drops the build, and the change is written into the
-        serving key, paced. Turned off meanwhile, New-version builds drops a build that has not
-        begun."""
+        """A queued build makes its key as New-version builds' ``buildMode`` says:
+
+        - ``copy``: ``GRAPH.COPY`` of the serving key once its node has room for a copy, reserved
+          for it there until the copy lands (``residency.admit_build_copy``: ``copyMarginPct``,
+          ``copyMaxBytes``, under the capacity lock, so two builds never take the same room), and
+          no lineage-summaries job is building the serving key's summaries, which a copy would
+          take half-written;
+        - ``reseed``: seeded from Postgres into a key on the master with the most room, admitted
+          and recorded there under the same lock (:meth:`_build_seed_admit`, :meth:`_build_seed`);
+        - ``auto``: a copy when it fits; with no room for one on the serving key's node, or a graph
+          larger than ``copyMaxBytes``, a seed.
+
+        What an earlier attempt left under the build's name is dropped first, so it does not count
+        against the room. With neither, ``noRoomPolicy``: ``wait`` keeps serving and asks again
+        shortly; ``in_place`` drops the build, and the change is written into the serving key,
+        paced. Turned off meanwhile, New-version builds drops a build that has not begun."""
         from backend.app.jobs.metrics import increment
         from backend.app.services.aggregation.admission import AggregationAdmission
         from backend.app.services.aggregation.redis_client import get_redis
@@ -2323,16 +2372,14 @@ class FalkorProjector:
         from . import residency
         from .cache_manager import _rollups_running
 
-        build_id = state["id"]
+        build_id, mode = state["id"], policy["buildMode"]
         if state.get("step") == "queued" and await build_policy.switch_state() is False:
             raise _BuildRefused("New-version builds was turned off before the build began")
-        no_room = True
-        if policy["buildMode"] == "reseed":
-            why = "builds that seed from Postgres come in a later release"
-        else:
-            name, provider = ps.candidate_graph_name, ps.falkor_provider
-            if (await read_projection_marker(await self._graph_client(name, provider)))[0]:
-                await self.drop_graph(name, provider)
+        name, provider = ps.candidate_graph_name, ps.falkor_provider
+        if (await read_projection_marker(await self._graph_client(name, provider)))[0]:
+            await self.drop_graph(name, provider)
+        no_room, seedable, why = True, mode == "reseed", None
+        if mode != "reseed":
             room, held = await residency.admit_build_copy(
                 graph_id, provider, name, build_id, margin_pct=int(policy["copyMarginPct"]),
                 max_bytes=int(policy["copyMaxBytes"]))
@@ -2350,6 +2397,13 @@ class FalkorProjector:
             no_room = not room.fits
             why = (f"no room for a copy on its node ({room.why})" if no_room
                    else "a lineage-summaries job is building the serving key's summaries")
+            seedable = mode == "auto" and room.why in ("capacity", "too_large")
+        if seedable:
+            seeded, refused = await self._build_seed_admit(graph_id, ps, graph, state, policy,
+                                                           noop)
+            if seeded is not None:
+                return seeded
+            why = refused if why is None else f"{why}; {refused}"
         if no_room and policy["noRoomPolicy"] == "in_place":
             raise _BuildRefused(f"{why}: written in place (noRoomPolicy in_place)")
         waited = _secs_since(state.get("since"))
@@ -2372,14 +2426,8 @@ class FalkorProjector:
         from backend.app.jobs.metrics import increment, observe
 
         build_id, name, provider = state["id"], ps.candidate_graph_name, ps.falkor_provider
-        served = ps.served_commit_seq
+        served = await self._serving_whole(ps)
         source = await self._graph_client(ps.falkor_graph_name, provider)
-        exists, marker = await read_projection_marker(source)
-        if (exists is not True or served is None or marker != served
-                or ps.projected_commit_seq != served):
-            raise _BuildRefused(f"the serving key does not hold its version whole "
-                                f"(marker {marker}, served {served}, projected "
-                                f"{ps.projected_commit_seq})")
         if (await read_projection_marker(await self._graph_client(name, provider)))[0]:
             await self.drop_graph(name, provider)
         started = time.monotonic()
@@ -2396,6 +2444,212 @@ class FalkorProjector:
         logger.info("build %s of %s: copied '%s' at version %d into '%s' in %.2fs", build_id,
                     graph_id, ps.falkor_graph_name, served, name, took)
         return {**noop, "noop": False}
+
+    async def _serving_whole(self, ps) -> int:
+        """The version the serving key holds whole, which a build starts from: its marker,
+        ``served_commit_seq`` and the watermark agree. A key that does not (lost, behind, part way
+        through a window) has nothing exact to start from: ``_BuildRefused``, and the change is
+        written in place."""
+        served = ps.served_commit_seq
+        source = await self._graph_client(ps.falkor_graph_name, ps.falkor_provider)
+        exists, marker = await read_projection_marker(source)
+        if (exists is not True or served is None or marker != served
+                or ps.projected_commit_seq != served):
+            raise _BuildRefused(f"the serving key does not hold its version whole "
+                                f"(marker {marker}, served {served}, projected "
+                                f"{ps.projected_commit_seq})")
+        return served
+
+    async def _build_seed_admit(self, graph_id, ps, graph, state, policy, noop
+                                ) -> Tuple[Optional[Dict[str, object]], Optional[str]]:
+        """Room for the build seeded from Postgres: a key of the graph's own on the master with the
+        most room, admitted there as a load is and recorded — step ``seeding``, that key, and the
+        version the serving key holds whole, which the seed writes (``seedSeq``) — under the
+        capacity lock (``residency.admit_build_seed``). ``(the seed's first pass, None)`` once
+        recorded; ``(None, why not)`` otherwise."""
+        from backend.app.jobs.metrics import increment
+        from backend.app.providers import falkor_graph_registry
+
+        from . import residency
+
+        build_id, provider = state["id"], ps.falkor_provider
+        seq = await self._serving_whole(ps)
+        keys = await falkor_graph_registry.list_graph_keys(provider)
+        if keys is None:                                 # cannot verify, never "free"
+            return None, "the graph store's keys could not be listed"
+        taken = (set(keys) | {e.get("name") for e in (ps.retired_keys or [])}
+                 | {ps.falkor_graph_name, ps.candidate_graph_name})
+
+        async def record(key: str, master: Optional[str]) -> bool:
+            return await self._svc.update_candidate(
+                graph_id, build_id, name=key, seq=0, mode="reseed", step="seeding",
+                seedSeq=seq, seedPhase="raw", summariesAt=0, master=master, waiting=None,
+                retryAt=None)
+
+        admitted, key = await residency.admit_build_seed(graph_id, provider, taken, record)
+        if key is None:
+            return None, (f"no room for a seed on any node ({admitted.why})"
+                          if not admitted.fits else "the build was replaced")
+        increment("graphver_builds_total", step="seeding")
+        logger.info("build %s of %s: seeding version %d from Postgres into '%s' (%s)", build_id,
+                    graph_id, seq, key, admitted.master)
+        async with self._session() as s:
+            ps = await s.get(ProjectionStateORM, graph_id)
+        state = getattr(ps, "candidate_state", None) if ps is not None else None
+        if not isinstance(state, dict) or state.get("id") != build_id:
+            return noop, None
+        return await self._build_seed(graph_id, ps, graph, state, policy, noop), None
+
+    async def _build_seed(self, graph_id, ps, graph, state, policy, noop) -> Dict[str, object]:
+        """Seed the build's key from Postgres with exactly the version the serving key holds
+        whole (``seedSeq``), then carry the serving key's lineage summaries over
+        (:meth:`_copy_summaries`), then mark it: from there it catches up and switches as a copy
+        does. Each phase resumes where an earlier pass stopped — the reconcile from its cursor in
+        the build's key, the summaries from the source page recorded on the build
+        (``summariesAt``) — within the pass's time (``GRAPHVER_PROJECTION_PASS_MAX_SECS``). The
+        reconcile writes only what differs from that version, so a key an earlier attempt left
+        is brought back to it rather than written again whole. A summaries job that met the copy
+        starts it again (three times, then the summaries are handed to the job once switched)."""
+        from backend.app.jobs.metrics import increment, observe
+
+        from .cache_manager import _rollups_running
+
+        build_id, seq = state["id"], int(state["seedSeq"])
+        name, provider = ps.candidate_graph_name, ps.candidate_provider
+        client = await self._graph_client(name, provider)
+        deadline = ((time.monotonic() + config.PROJECTION_PASS_MAX_SECS)
+                    if config.PROJECTION_PASS_MAX_SECS > 0 else None)
+        async with self._session() as s:
+            main_id = await self._svc._main_branch_id(s, graph_id)
+        if (state.get("seedPhase") or "raw") == "raw":
+            started = time.monotonic()
+            # A proof the node takes the writes below, which also makes a fresh key.
+            await _q(client, "RETURN 1", timeout_ms=_READ_TIMEOUT_MS)
+            found = await _read_cursor(client)
+            resume, before = None, (False, 0)
+            if _resumes(found, 0, seq):
+                resume, before = (found[2], found[3]), found[4:]
+            cursor = _Cursor(client, 0, seq, resume, deadline, structural=before[0],
+                             dropped=before[1])
+            await self._reconcile_in_place(
+                client, graph_id, main_id, seq, await self._resolve_level_map(graph_id),
+                track_progress=True, rollups_moved_this_pass=True, provider_id=provider,
+                owned=True, cursor=cursor)
+            if cursor.used or cursor.resume is not None:
+                await _q(client, _CURSOR_CLEAR)
+            await _q(client, _SEED_DONE_WRITE, params={"build": build_id})
+            if not await self._svc.update_candidate(graph_id, build_id, seedPhase="summaries",
+                                                    summariesAt=0, progress=None):
+                return noop
+            observe("graphver_build_seed_seconds", time.monotonic() - started)
+            state = {**state, "seedPhase": "summaries", "summariesAt": 0}
+            if deadline is not None and time.monotonic() > deadline:
+                raise _PassPartial(0)
+        if not await _seed_done(client, build_id):
+            # Lost since its seed was written (its node restarted without it): seeded again.
+            await self._svc.update_candidate(graph_id, build_id, seedPhase="raw", summariesAt=0)
+            return {**noop, "noop": False, "build": "seeding"}
+        if await _rollups_running(graph.data_source_id):
+            retry_at = (datetime.now(timezone.utc) + timedelta(seconds=60)).isoformat()
+            await self._svc.update_candidate(
+                graph_id, build_id, retryAt=retry_at,
+                waiting="a lineage-summaries job is building the serving key's summaries")
+            return {**noop, "skipped": "build_waiting", "retryAt": retry_at}
+        after = int(state.get("summariesAt") or 0)
+        since = state.get("summariesSince")
+        if not after or not since:
+            # From the start: what the key holds of summaries goes first (an earlier attempt's,
+            # or ones a failed catch-up moved), then the copy is timed for a job that meets it.
+            await self._clear_summaries(client)
+            after, since = 0, _now()
+            await self._svc.update_candidate(graph_id, build_id, summariesAt=0,
+                                             summariesSince=since, waiting=None)
+        await self._copy_summaries(graph_id, build_id, ps, client, after, deadline)
+        stale = bool(state.get("rollupsStale"))
+        if await _rollups_ran_since(graph.data_source_id, since):
+            # A summaries job met the copy: the serving key's summaries may have changed under it.
+            restarts = int(state.get("summaryRestarts") or 0) + 1
+            if restarts <= 3:
+                await self._svc.update_candidate(graph_id, build_id, summariesAt=0,
+                                                 summariesSince=None, summaryRestarts=restarts)
+                return {**noop, "noop": False, "build": "seeding"}
+            stale = True
+        unconfirmed = await _write_marker(client, seq, ps.epoch)
+        if unconfirmed:
+            raise RuntimeError(unconfirmed)
+        if not await self._svc.update_candidate(
+                graph_id, build_id, seq=seq, step="catching_up", seedPhase=None,
+                summariesAt=None, summariesSince=None, rollupsStale=stale or None,
+                progress=None, waiting=None):
+            return noop
+        increment("graphver_builds_total", step="seeded")
+        logger.info("build %s of %s: seeded '%s' at version %d from Postgres", build_id, graph_id,
+                    name, seq)
+        return {**noop, "noop": False, "build": "catching_up"}
+
+    async def _clear_summaries(self, client) -> None:
+        """A build's key without lineage summaries, before the serving key's are carried over:
+        its cells a page at a time, then their markers."""
+        while True:
+            await _q(client, _SUMMARIES_CLEAR, params={"k": _HUB_PAGE})
+            res = await _q(client, _SUMMARIES_ANY, timeout_ms=_READ_TIMEOUT_MS, read_only=True)
+            if not (getattr(res, "result_set", None) or []):
+                break
+        for label, _ident in _SUMMARY_MARKERS:
+            await _q(client, f"MATCH (m:{label}) DELETE m")
+
+    async def _copy_summaries(self, graph_id, build_id, ps, client, after: int,
+                              deadline: Optional[float]) -> int:
+        """Carry the serving key's lineage summaries over into the build's key: its cells a page
+        of source nodes at a time (``_SCAN_PAGE`` internal ids, from ``after``), each merged onto
+        its ends by label and urn with the properties it has — a page written twice writes the
+        same — then the summaries' own markers as they are. Where it is is recorded on the build
+        after each page (``summariesAt``), and it stops past ``deadline`` at a page boundary
+        (``_PassPartial``). A cell whose ends the build's key does not hold fails the attempt: the
+        two keys hold different versions. Returns the cells written."""
+        source = await self._graph_client(ps.falkor_graph_name, ps.falkor_provider)
+        res = await _q(source, "MATCH (n) RETURN max(id(n))", timeout_ms=_READ_TIMEOUT_MS,
+                       read_only=True)
+        rows = getattr(res, "result_set", None) or []
+        top = rows[0][0] if rows and rows[0] else None
+        written = 0
+        for lo in (range(after, int(top) + 1, self._SCAN_PAGE) if top is not None else ()):
+            res = await _q(source, _SUMMARIES_PAGE, params={"lo": lo, "hi": lo + self._SCAN_PAGE},
+                           timeout_ms=_READ_TIMEOUT_MS, read_only=True)
+            by_labels: Dict[Tuple[str, str], List[dict]] = {}
+            for la, sa, lb, sb, props in (getattr(res, "result_set", None) or []):
+                by_labels.setdefault((str(la), str(lb)), []).append(
+                    {"s": sa, "t": sb, "p": dict(props or {})})
+            for (la, lb), cells in by_labels.items():
+                landed = [0]
+
+                def counted(_part, result) -> None:
+                    found = getattr(result, "result_set", None) or []
+                    landed[0] += int(found[0][0] or 0) if found and found[0] else 0
+
+                await self._laddered(
+                    client, "summary_copy",
+                    f"UNWIND $batch AS row MATCH (a:{_sanitize_label(la)} {{urn: row.s}}) "
+                    f"MATCH (b:{_sanitize_label(lb)} {{urn: row.t}}) "
+                    f"MERGE (a)-[r:AGGREGATED]->(b) SET r += row.p RETURN count(r)",
+                    cells, on_result=counted)
+                if landed[0] < len(cells):
+                    raise RuntimeError(f"{len(cells) - landed[0]} of {len(cells)} summary cells "
+                                       f"found no end in the build's key")
+                written += len(cells)
+            await self._svc.update_candidate(graph_id, build_id,
+                                             summariesAt=lo + self._SCAN_PAGE)
+            if deadline is not None and time.monotonic() > deadline \
+                    and lo + self._SCAN_PAGE <= int(top):
+                raise _PassPartial(written)
+        for label, ident in _SUMMARY_MARKERS:
+            res = await _q(source, f"MATCH (m:{label}) RETURN properties(m)",
+                           timeout_ms=_READ_TIMEOUT_MS, read_only=True)
+            rows = getattr(res, "result_set", None) or []
+            if rows and rows[0] and rows[0][0]:
+                await _q(client, f"MERGE (m:{label} {{id: $id}}) SET m += $props",
+                         params={"id": ident, "props": dict(rows[0][0])})
+        return written
 
     async def _build_catch_up(self, graph_id, ps, graph, state, policy,
                               noop) -> Dict[str, object]:

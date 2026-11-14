@@ -144,8 +144,8 @@ function summariesLane(s: SyncSummaries | null | undefined, doc: SyncStatus, now
 
 /** A build's step as the graph lane says it: "Showing #5 · building #6". */
 const BUILD_STEP: Record<SyncBuild['step'], string> = {
-  queued: 'waiting to build', copying: 'copying to build', catching_up: 'building',
-  switching: 'switching to',
+  queued: 'waiting to build', copying: 'copying to build', seeding: 'preparing to build',
+  catching_up: 'building', switching: 'switching to',
 }
 
 export function deriveSync(doc: SyncStatus | undefined, now: number = Date.now()): SyncVerdict {
@@ -193,7 +193,9 @@ export function deriveSync(doc: SyncStatus | undefined, now: number = Date.now()
     const graph: SyncLane = {
       key: 'graph', title: 'Graph', tech: 'FalkorDB', version: shown, tone: graphTone,
       revision: showingOlder ? v.servedRevision : v.projectedRevision,
-      progress: v.status === 'rebuilding' ? pct : null,
+      progress: v.status === 'rebuilding' ? pct
+        : build?.step === 'seeding' && build.progress?.total
+          ? Math.round(((build.progress.done ?? 0) / build.progress.total) * 100) : null,
       status: graphTone === 'ok' ? `Version #${v.projected} · in sync`
         : latestFromRecord ? `Latest #${v.committed} · read from the database`
         : build ? `Showing #${shown} · ${build.waiting ? 'waiting to build' : BUILD_STEP[build.step]} #${v.committed}`

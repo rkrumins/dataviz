@@ -69,14 +69,18 @@ const CHIP_CLS = 'inline-flex px-1.5 py-px rounded-full border text-[9px] upperc
 
 /** A build beside the serving key (read mode beside), by step: what its row says. */
 const BUILD_CHIP: Record<string, string> = {
-    queued: 'Build waiting', copying: 'Copying for a build', catching_up: 'Building new version',
-    switching: 'Switching to new version',
+    queued: 'Build waiting', copying: 'Copying for a build', seeding: 'Seeding a build',
+    catching_up: 'Building new version', switching: 'Switching to new version',
 }
 
 /** The build's chip's tooltip: what readers see meanwhile, and why it waits or failed. */
-function buildTitle(b: { step: string; waiting?: string | null; error?: string | null; attempts?: number }): string {
+function buildTitle(b: { step: string; waiting?: string | null; error?: string | null; attempts?: number;
+                         progress?: { done?: number; total?: number } | null }): string {
     return [
         'Readers keep exactly the version served now until the new one is built and checked, then switch at once.',
+        b.step === 'seeding' ? 'Its key is written from Postgres, as no copy fits or one is not wanted.' : '',
+        b.step === 'seeding' && b.progress?.total
+            ? `${Math.round(((b.progress.done ?? 0) / b.progress.total) * 100)}% written.` : '',
         b.waiting ? `Waiting: ${b.waiting}.` : '',
         b.error ? `Attempt ${b.attempts ?? 1} failed: ${b.error}.` : '',
     ].filter(Boolean).join(' ')

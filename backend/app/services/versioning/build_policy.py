@@ -86,7 +86,8 @@ FIELDS: Tuple[Field, ...] = (
           unit="pct", lo=100, hi=400),
     Field("copyMaxBytes", lambda: config.PROJECTION_COPY_MAX_BYTES, "int", "room",
           "Largest graph copied",
-          "A graph larger than this is seeded from Postgres rather than copied. 0: no limit.",
+          "A graph larger than this is never copied: Auto seeds it from Postgres instead, and "
+          "Copy only waits. 0: no limit.",
           unit="bytes", lo=0, hi=16 * 2 ** 40),
     Field("noRoomPolicy", lambda: config.PROJECTION_NO_ROOM_POLICY, "choice", "room",
           "With no room",

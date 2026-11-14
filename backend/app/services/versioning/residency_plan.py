@@ -75,6 +75,8 @@ class Graph:
     placed: bool = True               # its load goes onto a fresh key on the roomiest master;
                                       # False: back onto its key (a rollup graph is named from it)
     window_rows: Optional[int] = None         # a window in flight: its version rows
+    build: bool = False               # a build seeding the graph's next version into a key of
+                                      # its own (New-version builds), on that key's master
 
     def bytes(self, policy: ResidencyPolicy) -> Optional[int]:
         """Its measured size, else its entities times the bytes per entity; None: unknown."""

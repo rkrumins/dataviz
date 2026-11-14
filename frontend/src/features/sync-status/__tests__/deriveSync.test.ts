@@ -143,6 +143,11 @@ describe('deriveSync — what readers get while a newer version lands', () => {
     expect(v.lanes[1].lines.join(' ')).toMatch(/exactly version #9 while version #11 is built beside it and checked, then all switch to it at once/)
     expect(v.detail).toMatch(/until version #11 is built and checked beside it, then switch to it at once/)
     expect(building({ step: 'copying' }).chip).toBe('Showing #9 · copying to build #11')
+    // Seeded from the system of record instead of copied: said, with how far it has written.
+    const seeding = building({ step: 'seeding', seq: 0, progress: { done: 30, total: 120 } })
+    expect(seeding.chip).toBe('Showing #9 · preparing to build #11')
+    expect(seeding.lanes[1].progress).toBe(25)
+    expect(building({ step: 'catching_up', progress: { done: 1, total: 2 } }).lanes[1].progress).toBeNull()
     expect(building({ step: 'switching', seq: 11 }).chip).toBe('Showing #9 · switching to #11')
     const waiting = building({ step: 'queued', waiting: 'no room for a copy on its node (capacity)' })
     expect(waiting.chip).toBe('Showing #9 · waiting to build #11')

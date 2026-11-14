@@ -255,9 +255,11 @@ export interface Watermark {
 /** A new version of a graph built beside the key that serves it. */
 export interface BuildState {
   id?: string | null
-  /** queued (waiting for room for a copy), copying, catching_up or switching. */
-  step: 'queued' | 'copying' | 'catching_up' | 'switching'
+  /** queued (waiting for room), copying, seeding (written from Postgres instead of copied),
+   *  catching_up or switching. */
+  step: 'queued' | 'copying' | 'seeding' | 'catching_up' | 'switching'
   reason?: string | null
+  /** copy (the serving key copied) or reseed (written from Postgres on the node with most room). */
   mode?: string | null
   /** The version the build's key holds whole; null until written. */
   seq?: number | null
@@ -266,6 +268,8 @@ export interface BuildState {
   waiting?: string | null
   since?: string | null
   rows?: number | null
+  /** How far a seed from Postgres has written, while it does. */
+  progress?: { done?: number; total?: number } | null
 }
 
 /** Changes in a graph that version history doesn't hold. `via`: `verify` counted them on the last

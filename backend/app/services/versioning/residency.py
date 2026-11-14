@@ -52,7 +52,8 @@ from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
-from typing import Any, AsyncIterator, Collection, Dict, List, Mapping, NamedTuple, Optional, Tuple
+from typing import (Any, AsyncIterator, Awaitable, Callable, Collection, Dict, List, Mapping,
+                    NamedTuple, Optional, Tuple)
 
 from sqlalchemy import func, literal, select, text, update
 
@@ -548,6 +549,7 @@ async def gather(*, graph_ids: Optional[Collection[str]] = None,
                ps.status, ps.residency, ps.last_read_at, ps.last_projected_at, ps.size_bytes,
                ps.size_measured_at, ps.rehydrating_since, ps.retired_keys, ps.epoch,
                ps.projected_commit_seq, ps.target_commit_seq, ps.window_rows, head,
+               ps.candidate_graph_name, ps.candidate_provider, ps.candidate_state,
                GraphORM.data_source_id, GraphORM.workspace_id,
                (head > 1).label("past_genesis"),
                (~select(1).where(*bootstrap_unfinished(ps.graph_id)).correlate(ps).exists())
@@ -578,7 +580,8 @@ async def gather(*, graph_ids: Optional[Collection[str]] = None,
     estimate: Dict[str, Optional[int]] = {}
     for r in found:              # only a load asked for, or one in flight, needs an estimate
         target = max(r.target_commit_seq, r.main_head_commit_seq)
-        if r.size_bytes is None and (r.graph_id in asked or _seeding(r, target)):
+        if r.size_bytes is None and (r.graph_id in asked or _seeding(r, target)
+                                     or _build_seeding(r)):
             try:
                 estimate[r.graph_id] = await _entity_count(r.graph_id, r.data_source_id,
                                                            r.main_head_commit_seq)
@@ -615,6 +618,10 @@ async def gather(*, graph_ids: Optional[Collection[str]] = None,
         for r in rows:
             endpoint_of[r.graph_id] = (_master_of(slots, r.falkor_graph_name) if slots
                                        else f"{provider}:unreachable")
+            if _build_seeding(r):
+                endpoint_of[f"{r.graph_id}#build"] = (
+                    _master_of(slots, r.candidate_graph_name) if slots
+                    else f"{provider}:unreachable")
 
     broker: Dict[str, bool] = {}            # the read leases' broker, as this pass found it
     for r in found:
@@ -636,7 +643,25 @@ async def gather(*, graph_ids: Optional[Collection[str]] = None,
             provider=r.falkor_provider or config.DEFAULT_FALKOR_PROVIDER, placed=placed,
             # A window in flight on the key it serves; one left on a key since lost is no growth.
             window_rows=r.window_rows if r.status in ("idle", "projecting") else None))
+        if _build_seeding(r):
+            # A build seeding the next version into a key of its own: a full write of the graph
+            # on that key's master, reserved there as a load's is, and that master takes no other
+            # load meanwhile. Never evicted, never loaded: it is not the graph's resident key.
+            snap.graphs.append(Graph(
+                graph_id=r.graph_id, endpoint=endpoint_of[f"{r.graph_id}#build"],
+                residency=r.residency, status="building", owned=True, evictable=False,
+                size_bytes=r.size_bytes, entities=estimate.get(r.graph_id), seeding=True,
+                provider=r.falkor_provider or config.DEFAULT_FALKOR_PROVIDER, placed=False,
+                build=True))
     return snap
+
+
+def _build_seeding(r) -> bool:
+    """Whether a build is seeding the graph's next version into a key of its own from Postgres
+    (New-version builds, ``candidates``): the room it is writing counts on that key's master."""
+    state = getattr(r, "candidate_state", None)
+    return (isinstance(state, dict) and state.get("step") == "seeding"
+            and bool(getattr(r, "candidate_graph_name", None)))
 
 
 async def _leased(graph_id: str, broker: Dict[str, bool]) -> bool:
@@ -818,6 +843,29 @@ async def admit_build_copy(graph_id: str, provider: Optional[str], key: str, hol
             return admitted, None
         return admitted, await AggregationAdmission(get_redis()).reserve(
             admitted.master, holder, needed)
+
+
+async def admit_build_seed(graph_id: str, provider: Optional[str], taken: Collection[str],
+                           record: Callable[[str, Optional[str]], Awaitable[bool]]
+                           ) -> Tuple[Admitted, Optional[str]]:
+    """Room for a build seeded from Postgres (New-version builds, when a copy does not fit or is
+    not wanted): a key of the graph's own, not ``taken``, on the master with the most room free to
+    take a load (:func:`place_key`), and the graph's full write admitted there as a load's is
+    (:func:`admission_on`). When it fits, ``record(key, master)`` writes the build's step and key
+    in ``projection_state`` before the capacity lock is let go, so the next admission counts the
+    seed (:func:`gather`): no two builds, or a build and a load, take the same room. ``(admitted,
+    key)``; the key is None when refused, or when ``record`` found the build gone (False). No
+    ``provider`` is the default one."""
+    provider = provider or config.DEFAULT_FALKOR_PROVIDER
+    async with admitting():
+        placed = await place_key(graph_id, provider, taken)
+        if placed is None:
+            return Admitted(False, None, None, "queued"), None
+        key, master = placed
+        admitted = await admission_on(graph_id, provider, key)
+        if not admitted.fits:
+            return admitted, None
+        return admitted, key if await record(key, master) else None
 
 
 async def admit_copy(graph_id: str, provider: str, key: str, holder: str
@@ -1178,6 +1226,8 @@ def _report(snap: Snapshot) -> None:
         metrics.gauge_set("versioning_residency_master_max_bytes", m.maxmemory, master=m.endpoint)
     counts: Dict[Tuple[str, str], int] = {}
     for g in snap.graphs:
+        if g.build:                     # the graph's next version, not a graph of its own
+            continue
         state = g.status if g.status in _OUT else "resident"
         counts[(g.residency, state)] = counts.get((g.residency, state), 0) + 1
     for cls in residency_policy.CLASSES:
