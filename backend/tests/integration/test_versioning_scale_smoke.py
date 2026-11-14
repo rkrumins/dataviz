@@ -102,6 +102,27 @@ async def _package(tmp_path, store):
     return inspected["upload"]["key"]
 
 
+async def _quiet_master(keep: str) -> None:
+    """Earlier suites in this job leave graphs part way through a rebuild or a load, with no worker
+    to finish them. The capacity plan counts each as a full write under way on its master, and
+    takes one at a time there (residency), so a build's copy or seed on that master would wait for
+    good. A deployment's worker finishes them; here they go to the trash, as the residency suite
+    trashes its own graphs."""
+    from sqlalchemy import or_, select, update
+
+    from backend.app.services.versioning import models
+    from backend.app.services.versioning.models import GraphORM, ProjectionStateORM as PS
+
+    writing = select(PS.graph_id).where(
+        PS.graph_id != keep,
+        or_(PS.status.in_(("rebuilding", "reseeding", "rehydrating", "waiting_capacity")),
+            PS.candidate_state["step"].astext == "seeding"))
+    async with db.graphver_session() as s, s.begin():
+        await s.execute(update(GraphORM)
+                        .where(GraphORM.id.in_(writing), GraphORM.deleted_at.is_(None))
+                        .values(deleted_at=models._now()))
+
+
 def _within(result, **budgets):
     print(bench.markdown([result]))               # the 20k numbers, with ``pytest -s``
     for metric, limit in budgets.items():
@@ -164,6 +185,7 @@ async def test_every_read_mode_lands_a_change_while_readers_read(tmp_path, store
     published = await bench.run_publish(graph_id=draft["graphId"], branch_id=draft["branchId"],
                                         store=store)
     assert published["status"] == "completed", published
+    await _quiet_master(draft["graphId"])
 
     result = await bench.run_readmodes(graph_id=draft["graphId"], store=store, nodes=n, edges=n,
                                        modes=list(bench.READ_MODE_RUNS), changes=2_000, readers=2,

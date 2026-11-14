@@ -1399,7 +1399,11 @@ async def _land(graph_id: str, factory, timeout_s: float) -> Dict[str, Any]:
                     "key": ps.falkor_graph_name, "seq": head,
                     **({"build": build} if build["steps"] else {})}
         if time.monotonic() - started > timeout_s:
-            raise RuntimeError(f"not landed in {timeout_s:.0f} s: {out}")
+            # A build that waits says why (no room, a summaries job, ...), as its last error does.
+            why = {k: state[k] for k in ("step", "waiting", "attempts", "error")
+                   if state and state.get(k) is not None}
+            raise RuntimeError(f"not landed in {timeout_s:.0f} s: {out}"
+                               + (f"; build {why}" if why else ""))
         if out.get("skipped") in ("build_backoff", "build_waiting", "backoff") or out.get("noop"):
             await asyncio.sleep(1.0)
 
