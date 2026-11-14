@@ -53,8 +53,8 @@ projected and exported; "one pass" is the same step with the paging threshold ra
 |------|------------:|------------:|--------:|----------------------:|
 | Import into a draft (windowed) | 117 s, 192 MB | 214 s, 198 MB | 727 s, 197 MB | — |
 | Publish (paged above 200,000 changes) | 24 s, 436 MB (one batch) | 111 s, 369 MB | 367 s, 399 MB | ~1 GB, est. (1.7 KB a change) |
-| Projection of the published window (paged above 200,000 rows) | — | 112 s, 182 MB | 426 s, 206 MB | 92 s, 956 MB |
-| Rebuild from nothing (paged above 500,000 entities) | — | 84 s, 209 MB | 286 s, 216 MB | 77 s, 1,653 MB |
+| Projection of the published window (paged above 100,000 rows) | — | 112 s, 182 MB | 426 s, 206 MB | 92 s, 956 MB |
+| Rebuild from nothing (paged above 100,000 entities) | — | 84 s, 209 MB | 286 s, 216 MB | 77 s, 1,653 MB |
 | Export (NDJSON, streamed) | 12 s, 154 MB | 31 s, 150 MB | 101 s, 166 MB | — |
 
 A paged publish holds at most the Merkle fingerprint's list of changes besides its page — up to
@@ -183,8 +183,8 @@ own at 4 such flows, 5,280 at 40, before the chains were kept with the patch set
 
 A full replay reconciles FalkorDB in place (`_reconcile_in_place` in `projection.py`): it never
 drops the graph, and writes only the difference. Up to `GRAPHVER_PROJECTION_RECONCILE_STREAMED_ABOVE`
-(500,000) live entities it holds whole-graph maps of small tuples, `O(N + E)` (1,653 MB at 600,000),
-and moves the summaries by the difference. Above it, `_reconcile_streamed` compares a page of each
+(100,000) live entities it holds whole-graph maps of small tuples, `O(N + E)` (667 MB at 200,000 and
+1,653 MB at 600,000 when held whole), and moves the summaries by the difference. Above it, `_reconcile_streamed` compares a page of each
 side at a time — FalkorDB's in internal-id pages against Postgres lookups, then Postgres's heads in
 keyset pages against FalkorDB's urn indexes — and hands the summaries to the aggregation job (209 MB
 at 600,000). A fork is never projected ([17](17-forks-and-residency.md) §6). (The "`O(n²/batch)` —

@@ -610,7 +610,7 @@ Drafts and commits, projection into the graph store, and import and export.
 | `GRAPHVER_OVERLAY_CACHE_ENTRIES` | `400000` | Entries the overlay deltas of drafts' and forks' reads may hold together in each process; the least recently read go first, and the newest is kept whatever its size. An entry holds about 1.2 KB (0.74 KB a draft's, 0.87 KB a fork's, measured, before allocator slack and the chains a rollup read keeps), so the default, 400,000, holds under 512 MB in each web process. An evicted delta is built again on its next read: 2 to 6 s at 50,000 to 145,000 entries. | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_PG_READS_PER_GRAPH` | `4` | Reads of one versioned graph from Postgres that run at once per process; more wait briefly, then answer 429. A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds. | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_PG_READS_PER_PROCESS` | `8` | Reads from Postgres that run at once per process across graphs, so they never take the whole connection pool. A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds. | `backend/app/services/versioning/config.py` |
-| `GRAPHVER_PROJECTION_CANDIDATE_ABOVE` | computed | Changed rows above which a publish is built in a second FalkorDB key while the current one keeps serving, then switched to (New-version builds, when its switch is on); smaller ones are written in place, paced. Defaults to `GRAPHVER_PROJECTION_PAGED_ABOVE`. A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds. | `backend/app/services/versioning/config.py` |
+| `GRAPHVER_PROJECTION_CANDIDATE_ABOVE` | `200000` | Changed rows above which a publish is built in a second FalkorDB key while the current one keeps serving, then switched to (New-version builds, when its switch is on); smaller ones are written in place, paced. A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds. | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_PROJECTION_CANDIDATE_CONCURRENCY` | `2` | Builds each versioning worker runs at once, never more than `GRAPHVER_PROJECTION_CONCURRENCY`. A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds. | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_PROJECTION_CANDIDATE_FLIP_MAX_LAG_ROWS` | computed | The most rows a build may still have to catch up when it switches; the rest is applied inside the switch. Defaults to `GRAPHVER_PROJECTION_INLINE_MAX_ROWS`. A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds. | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_PROJECTION_CANDIDATE_MAX_ATTEMPTS` | `3` | Failures after which a build is dropped and the current version keeps serving. A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds. | `backend/app/services/versioning/config.py` |
@@ -706,12 +706,12 @@ Drafts and commits, projection into the graph store, and import and export.
 | `GRAPHVER_PROJECTION_FLOOR_RETRIES` | `3` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_PROJECTION_INLINE_MAX_ROWS` | `20000` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_PROJECTION_PAGE` | `20000` | `backend/app/services/versioning/config.py` |
-| `GRAPHVER_PROJECTION_PAGED_ABOVE` | `200000` | `backend/app/services/versioning/config.py` |
+| `GRAPHVER_PROJECTION_PAGED_ABOVE` | `100000` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_PROJECTION_PASS_MAX_SECS` | `300` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_PROJECTION_POLL_SECS` | `5` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_PROJECTION_QUARANTINE` | `1` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_PROJECTION_QUARANTINE_RETRY_SECS` | `300` | `backend/app/services/versioning/config.py` |
-| `GRAPHVER_PROJECTION_RECONCILE_STREAMED_ABOVE` | `500000` | `backend/app/services/versioning/config.py` |
+| `GRAPHVER_PROJECTION_RECONCILE_STREAMED_ABOVE` | `100000` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_PROJECTION_RETRY_BASE_SECS` | `5` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_PROJECTION_RETRY_MAX_SECS` | `900` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_PROJECTION_ROLLUP_INLINE_CAP` | `50000` | `backend/app/services/versioning/config.py` |
@@ -898,6 +898,7 @@ Read only by the maintenance and seed scripts in `backend/scripts`.
 | `NEO4J_PASSWORD` | — (secret, set your own) | `backend/scripts/seed_neo4j.py` |
 | `NEO4J_URI` | `bolt://localhost:7687` | `backend/scripts/seed_neo4j.py` |
 | `NEO4J_USERNAME` | `neo4j` | `backend/scripts/seed_neo4j.py` |
+| `PYTHONPATH` | — | `backend/scripts/bench_versioning.py` |
 | `REMAT_JOB_TIMEOUT_S` | `3600` | `backend/scripts/rematerialize_all_graphs.py` |
 | `RESILIENCE_VERIFY_BASE_URL` | `http://localhost:8000` | `backend/scripts/verify_resilience_slos.py` |
 | `RESILIENCE_VERIFY_COOKIE` | — | `backend/scripts/verify_resilience_slos.py` |

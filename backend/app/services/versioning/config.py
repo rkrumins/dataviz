@@ -242,12 +242,16 @@ ROLLUP_REASK_SECS: int = int(os.getenv("GRAPHVER_ROLLUP_REASK_SECS", "300"))
 # A projection window of more version rows than this (a publish of millions) is written a page of
 # PROJECTION_PAGE rows at a time — all its nodes, then its edges — so the projector holds a page of
 # it, never all of it. Its rollups are moved by delta like any window's (ROLLUP_NET_MAX_CELLS).
-PROJECTION_PAGED_ABOVE: int = int(os.getenv("GRAPHVER_PROJECTION_PAGED_ABOVE", "200000"))
+# Held whole, a window costs about 1.8 KB a row (463 MB at 200,000 in the versioning-scale run);
+# paged, about 230 MB at any size.
+PROJECTION_PAGED_ABOVE: int = int(os.getenv("GRAPHVER_PROJECTION_PAGED_ABOVE", "100000"))
 PROJECTION_PAGE: int = int(os.getenv("GRAPHVER_PROJECTION_PAGE", "20000"))
 # A full reconcile (a first seed, a rebuild, a heal) holds both sides of a graph — what Postgres
-# says and what FalkorDB holds. Above this many live entities it compares them a page at a time.
+# says and what FalkorDB holds — about 2.8 KB a live entity (667 MB at 200,000 in the
+# versioning-scale run). Above this many live entities it compares them a page at a time, about
+# 230 MB at any size, and hands the lineage summaries to the aggregation job when anything changed.
 PROJECTION_RECONCILE_STREAMED_ABOVE: int = int(os.getenv("GRAPHVER_PROJECTION_RECONCILE_STREAMED_ABOVE",
-                                                         "500000"))
+                                                         "100000"))
 WORKER_HEALTH_PORT: int = int(os.getenv("GRAPHVER_WORKER_HEALTH_PORT", "8092"))
 PROJECTION_INPROCESS: bool = os.getenv("GRAPHVER_PROJECTION_INPROCESS", "").lower() in ("1", "true", "yes")
 # Ceiling for an EXPLICIT operator rebuild run in-process (Data health → "Rebuild"):
@@ -288,8 +292,7 @@ RETIRE_GRACE_SECS: int = int(os.getenv("GRAPHVER_RETIRE_GRACE_SECS", "900"))
 # administrator overrides live under Admin → Infrastructure → New-version builds; the switch itself
 # is the ``candidateKeysEnabled`` feature flag. Windows of more changed rows than this are built
 # beside the serving key, as are rebuilds, moves and loads of platform-owned keys when enabled.
-PROJECTION_CANDIDATE_ABOVE: int = int(os.getenv("GRAPHVER_PROJECTION_CANDIDATE_ABOVE",
-                                                str(PROJECTION_PAGED_ABOVE)))
+PROJECTION_CANDIDATE_ABOVE: int = int(os.getenv("GRAPHVER_PROJECTION_CANDIDATE_ABOVE", "200000"))
 PROJECTION_CANDIDATE_REBUILDS: bool = os.getenv("GRAPHVER_PROJECTION_CANDIDATE_REBUILDS", "1") == "1"
 # How a build makes its key: ``auto`` copies the serving key (GRAPH.COPY) when its node has room,
 # else seeds it from Postgres on the node with most room; ``copy`` and ``reseed`` force one way.

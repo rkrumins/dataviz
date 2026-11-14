@@ -163,7 +163,7 @@ NOTES: dict[str, tuple[str, str | None]] = {
         None,
     ),
     "GRAPHVER_PROJECTION_CANDIDATE_ABOVE": (
-        "Changed rows above which a publish is built in a second FalkorDB key while the current one keeps serving, then switched to (New-version builds, when its switch is on); smaller ones are written in place, paced. Defaults to `GRAPHVER_PROJECTION_PAGED_ABOVE`. A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds.",
+        "Changed rows above which a publish is built in a second FalkorDB key while the current one keeps serving, then switched to (New-version builds, when its switch is on); smaller ones are written in place, paced. A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds.",
         None,
     ),
     "GRAPHVER_PROJECTION_CANDIDATE_REBUILDS": (

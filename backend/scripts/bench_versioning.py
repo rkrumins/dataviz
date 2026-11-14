@@ -1063,9 +1063,9 @@ async def run_seed(*, upload_key: str, store: CountingStore, keep: bool = False,
 
 async def run_project(*, graph_id: str, keep: bool = False, full: bool = False,
                       factory=None) -> Dict[str, Any]:
-    """The projector's pass over the graph's last commit — the window a publish leaves it — into a
+    """The projector's passes over the graph's last commit — the window a publish leaves it — into a
     new ``gvt_bench_*`` key (deleted after unless ``keep``): the graph is pinned there, owned and
-    projected up to the commit before, so the pass writes that one window and verifies it. With
+    projected up to the commit before, so the passes write that one window and verify it. With
     ``full``, projected from nothing instead: the full reconcile a first seed or a rebuild runs."""
     from backend.app.services.versioning import db, models
     from backend.app.services.versioning.models import GraphORM, ProjectionStateORM
@@ -1088,14 +1088,21 @@ async def run_project(*, graph_id: str, keep: bool = False, full: bool = False,
         await _write_marker(client, head - 1, 0)   # the key as the pass before left it
     try:
         async with probing() as probes:
-            out = await FalkorProjector(factory, on_rollups_stale=_noop).project_graph(graph_id)
+            projector, passes = FalkorProjector(factory, on_rollups_stale=_noop), 1
+            out = await projector.project_graph(graph_id)
+            # A pass past its time (GRAPHVER_PROJECTION_PASS_MAX_SECS) stops at a page with its
+            # cursor written, and the worker runs the next at once, resuming there: so does this.
+            while out.get("partial"):
+                out = await projector.project_graph(graph_id)
+                passes += 1
         pg, fc = await _counts(graph_id, client, owned=True)
     finally:
         if not keep:
             with contextlib.suppress(Exception):
                 await client.delete()
     done = out.get("projected") == head and not out.get("verify_error")
-    return _result("project", probes.summary(), {"falkor_eq_pg": pg == fc, "pg": list(pg), "falkor": list(fc)},
+    return _result("project", probes.summary(), {"falkor_eq_pg": pg == fc, "pg": list(pg), "falkor": list(fc),
+                                                 "passes": passes},
                    status="completed" if done else "failed", error=out.get("verify_error"),
                    projected={"graphId": graph_id, "seq": out.get("projected"),
                               "falkorGraph": name if keep else None})

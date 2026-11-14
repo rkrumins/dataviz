@@ -305,6 +305,12 @@ integration's many small changes as a few commits.
 
 ### Changed
 
+- **The projector holds a page at a time from 100,000 rows or entities.** A publish window of more
+  than 100,000 version rows (was 200,000) is written a page at a time, and a full reconcile (a
+  first seed, a rebuild, a heal, a build's seed) of more than 100,000 live entities (was 500,000)
+  compares a page of each side at a time. Held whole, a rebuild of 100,000 nodes and 100,000 edges
+  peaked at 667 MB in the versioning-scale run, and a rebuild just under the old threshold would
+  have held about 1.4 GB; a page at a time holds about 230 MB at any size.
 - **A replace never deletes what its file names.**
   - **Refused rows.** A refused row used to protect only the entity it had matched, so a replace
     sent on with `maxRefusedRows` deleted the node a `no_key` row named by its urn, and edge rows
@@ -595,6 +601,11 @@ integration's many small changes as a few commits.
 - **Each web process opens up to five more graphver connections**, for routing reads
   (`GRAPHVER_ROUTE_POOL_SIZE` 3, `GRAPHVER_ROUTE_POOL_MAX_OVERFLOW` 2): count them toward Postgres'
   `max_connections`.
+- **A reconcile of a graph of 100,000 to 500,000 live entities that changes anything hands its
+  lineage summaries to the aggregation job**, as larger graphs' always have, instead of moving them
+  itself. `GRAPHVER_PROJECTION_RECONCILE_STREAMED_ABOVE=500000` and
+  `GRAPHVER_PROJECTION_PAGED_ABOVE=200000` restore the old thresholds, at the memory above.
+  `GRAPHVER_PROJECTION_CANDIDATE_ABOVE` (New-version builds) keeps its default of 200,000.
 - **Keep `GRAPHVER_READ_MAX_LAG` at `-1`** (the default). It caps how far behind a graph that reads
   in place or beside may be served; a graph that should always show the newest version chooses
   Always the latest instead.
