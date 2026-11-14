@@ -1299,3 +1299,41 @@ async def _run_a_rebuild_survives_restarts_page_by_page(monkeypatch) -> None:
 
 def test_a_rebuild_survives_restarts_page_by_page(builds_on, monkeypatch):
     asyncio.run(_run_a_rebuild_survives_restarts_page_by_page(monkeypatch))
+
+
+async def _run_a_large_window_of_a_graph_that_must_keep_its_key_is_written_in_place(
+        state, monkeypatch) -> None:
+    """A window's build switches readers to another key too: a graph whose summaries live in a
+    graph named from its key (dedicated), whose key other data sources read, or for which either
+    can't be read, has a large window written in place, as before builds — no build asked for."""
+    from backend.app.services.versioning import purge_worker
+    from backend.app.services.versioning import residency as gv_residency
+
+    svc, fake = GraphVersioningService(), BuildFalkor()
+    for case in ("dedicated", "dedicated unread", "shared", "readers unread"):
+        gid, proj, serving = await _seed(svc, fake)
+        await _beside(svc, gid)
+        ds = (await svc.get_graph(gid))["data_source_id"]
+
+        async def dedicated(ids, case=case, ds=ds):
+            return None if case == "dedicated unread" else ({ds} if case == "dedicated" else set())
+
+        async def readers(provider, name, exclude, case=case):
+            if case == "readers unread":
+                raise ConnectionError("the management database went away")
+            return [{"kind": "catalogItem"}] if case == "shared" else []
+
+        monkeypatch.setattr(gv_residency, "_dedicated", dedicated)
+        monkeypatch.setattr(purge_worker, "graph_key_readers", readers)
+        await _edit_publish(svc, gid, "a", _create("D", "E"), "a large change")
+        await proj.project_graph(gid)
+        ps = await _ps(gid)
+        assert ps.candidate_state is None and ps.projected_commit_seq == 4, case
+        assert serving.copies == 0 and not ps.retired_keys, case
+        await _assert_matches_main(svc, fake, gid)
+
+
+def test_a_large_window_of_a_graph_that_must_keep_its_key_is_written_in_place(builds_on,
+                                                                              monkeypatch):
+    asyncio.run(_run_a_large_window_of_a_graph_that_must_keep_its_key_is_written_in_place(
+        builds_on, monkeypatch))

@@ -2266,7 +2266,9 @@ class FalkorProjector:
         graph wants that (``candidates.wanted``: it reads ``beside``, New-version builds is on,
         and the window holds more version rows than ``buildAboveRows``, counted no further).
         True once recorded, fenced on the pass's ``epoch``; the build's key keeps the serving
-        key's hash tag (``keymigrate.build_key``)."""
+        key's hash tag (``keymigrate.build_key``). A graph that must keep its key
+        (:meth:`_keeps_its_key`: the switch would leave its dedicated summaries, or other data
+        sources reading it, behind) has the window written in place instead."""
         policy = await build_policy.resolve()
         read_mode = build_policy.read_mode_of(own_mode, policy)
         if read_mode != "beside":
@@ -2285,9 +2287,15 @@ class FalkorProjector:
                         model.commit_seq > from_seq, model.commit_seq <= to_seq)
                     .limit(above + 1).subquery()))).scalar_one()
             ps = await s.get(ProjectionStateORM, graph_id)
+            graph = await s.get(GraphORM, graph_id)
             retired = (ps.retired_keys or []) if ps is not None else []
         if not candidates.wanted(read_mode=read_mode, switch_on=switch_on, owned=True,
                                  rows=rows, above=above):
+            return False
+        kept = await self._keeps_its_key(ps, graph)
+        if kept:
+            logger.info("projection of %s: the window (%d, %d] is written in place, as %s",
+                        graph_id, from_seq, to_seq, kept)
             return False
         name = keymigrate.build_key(serving, {serving, *(e.get("name") for e in retired)})
         state = candidates.new_state("window", now=_now(), rows=rows)
