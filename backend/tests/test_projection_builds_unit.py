@@ -12,6 +12,8 @@ import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from backend.app.services.graph_store.topology import key_slot
 from backend.app.services.versioning import candidates, keymigrate, models
 from backend.app.services.versioning.models import ProjectionStateORM
@@ -37,8 +39,76 @@ def test_a_build_is_asked_for_queued_and_reads_as_its_block():
     assert candidates.block(ps) == {
         "id": state["id"], "step": "queued", "reason": "window", "mode": "copy", "seq": None,
         "attempts": 0, "error": None, "waiting": None,
-        "since": "2026-11-13T12:00:00+00:00", "rows": 250_001, "progress": None}
+        "since": "2026-11-13T12:00:00+00:00", "rows": 250_001, "progress": None,
+        "target": None, "rebuild": None}
     assert candidates.block(SimpleNamespace(candidate_state=None)) is None
+
+
+def test_a_window_build_is_asked_for_exactly_as_before():
+    """A window's build keeps its shape: copied by default, no rebuild, no target."""
+    state = candidates.new_state("window", now="t0", rows=7)
+    assert {k: v for k, v in state.items() if k != "id"} == {
+        "reason": "window", "mode": "copy", "step": "queued", "attempts": 0, "error": None,
+        "retryAt": None, "since": "t0", "waiting": None, "rows": 7}
+
+
+def test_a_rebuild_or_a_move_is_seeded_from_postgres_and_says_what_it_makes():
+    rebuild = candidates.new_state("rebuild", now="t0",
+                                   rebuild={"cause": "drift", "why": "it holds less"})
+    assert (rebuild["mode"], rebuild["step"], rebuild["rollupsStale"]) == ("reseed", "queued", True)
+    assert rebuild["rebuild"] == {"cause": "drift", "why": "it holds less"}
+    assert "target" not in rebuild and "seedSeq" not in rebuild
+    target = {"providerId": "prov_b", "key": "gvp_g{ab.2}", "shardMap": {"slot": 7},
+              "movedBy": "usr_1"}
+    move = candidates.new_state("move", now="t0", target=target)
+    assert (move["mode"], move["step"], move["target"]) == ("reseed", "queued", target)
+    assert "rebuild" not in move and "rollupsStale" not in move
+    # A move whose seed the route admitted with it: its version and cursor are taken on its first
+    # pass; one asked during a rebuild carries the rebuild on.
+    admitted = candidates.new_state("move", now="t0", target=target, step="seeding",
+                                    rebuild={"cause": "operator"})
+    assert (admitted["step"], admitted["seedSeq"], admitted["seedPhase"],
+            admitted["summariesAt"]) == ("seeding", None, None, 0)
+    assert admitted["rebuild"] == {"cause": "operator", "why": None} and admitted["rollupsStale"]
+    seen = candidates.block(SimpleNamespace(candidate_state=admitted, candidate_seq=None))
+    assert {**seen, "id": None} == {
+        "id": None, "step": "seeding", "reason": "move", "mode": "reseed", "seq": None,
+        "attempts": 0, "error": None, "waiting": None, "since": "t0", "rows": None,
+        "progress": None, "target": {"providerId": "prov_b", "key": "gvp_g{ab.2}"},
+        "rebuild": "operator"}
+    with pytest.raises(ValueError):
+        candidates.new_state("load", now="t0")
+    with pytest.raises(ValueError):
+        candidates.new_state("rebuild", now="t0", rebuild={"cause": "bored"})
+
+
+def test_a_rebuild_or_a_move_is_built_beside_only_for_a_beside_graph_with_builds_and_rebuilds_on():
+    base = dict(read_mode="beside", switch_on=True, for_rebuilds=True)
+    assert candidates.beside_wanted(**base)
+    for change in ({"read_mode": "in_place"}, {"read_mode": "latest"}, {"switch_on": False},
+                   {"switch_on": None}, {"for_rebuilds": False}, {"for_rebuilds": None}):
+        assert not candidates.beside_wanted(**{**base, **change}), change
+
+
+def test_what_a_rebuild_or_a_move_does_to_the_build_in_flight():
+    pin, b, c = ({"providerId": "a", "key": "k"}, {"providerId": "b", "key": "k2"},
+                 {"providerId": "c", "key": "k3"})
+    window = {"reason": "window"}
+    rebuild = {"reason": "rebuild", "rebuild": {"cause": "operator"}}
+    move = {"reason": "move", "target": {**b, "shardMap": None, "movedBy": "u"}}
+    moving_rebuild = {**move, "rebuild": {"cause": "operator"}}
+    table = [
+        (None, "rebuild", None, "none"), (None, "move", b, "none"),
+        (window, "rebuild", None, "replace"), (window, "move", b, "replace"),
+        (window, "move", pin, "keep"),
+        (rebuild, "rebuild", None, "keep"), (rebuild, "move", b, "replace"),
+        (rebuild, "move", pin, "keep"),
+        (move, "rebuild", None, "upgrade"), (moving_rebuild, "rebuild", None, "keep"),
+        (move, "move", b, "keep"), (move, "move", c, "replace"), (move, "move", pin, "cancel"),
+    ]
+    for build, reason, target, expect in table:
+        got = candidates.on_request(build, reason=reason, target=target, pin=pin)
+        assert got == expect, (build, reason, target, got)
 
 
 def test_a_build_key_keeps_the_serving_keys_slot_and_never_grows():
@@ -228,3 +298,44 @@ def test_a_seeding_build_reserves_its_room_on_its_keys_master_and_is_no_graph_of
     by = {p.master.endpoint: p for p in decided.masters}
     assert by["node2"].seeding and by["node2"].reserved >= 200_000
     assert not by["node1"].seeding and not by["node2"].evictions
+
+
+def test_the_poll_takes_up_a_build_of_a_graph_that_is_caught_up_and_takes_builds_first(
+        monkeypatch):
+    """A rebuild or a move of a graph that is caught up is no lag: the poll selects a graph with a
+    build whatever its watermark (a nudge is never the only thing that moves one), and builds
+    before lagging graphs, so the limit never starves one."""
+    from contextlib import asynccontextmanager
+
+    from sqlalchemy.dialects import postgresql
+
+    from backend.app.services.versioning.projection import FalkorProjector
+
+    asked = []
+
+    class _Rows:
+        def scalars(self):
+            return self
+
+        def all(self):
+            return []
+
+    class _Session:
+        async def execute(self, stmt):
+            asked.append(str(stmt.compile(dialect=postgresql.dialect())))
+            return _Rows()
+
+    @asynccontextmanager
+    async def session():
+        yield _Session()
+
+    async def no_lag():
+        return None
+
+    proj = FalkorProjector(graph_client_factory=lambda *a: None, session_factory=session)
+    monkeypatch.setattr(proj, "_report_lag", no_lag)
+    assert asyncio.run(proj.project_pending()) == []
+    (sql,) = asked
+    where, order = sql.split(" ORDER BY ")
+    assert "projection_state.candidate_state IS NOT NULL" in where.split("WHERE", 1)[1]
+    assert order.startswith("graphver.projection_state.candidate_state IS NOT NULL DESC"), order

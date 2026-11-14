@@ -1097,11 +1097,17 @@ class BuildModel(_ApiModel):
     # queued (waiting for room), copying, seeding (written from Postgres instead of copied),
     # catching_up or switching.
     step: Optional[str] = None
-    # Why it was asked for: window, a publish larger than New-version builds' buildAboveRows.
+    # Why it was asked for: window, a publish larger than New-version builds' buildAboveRows;
+    # rebuild, a rebuild of the key; move, a move to another key or provider (target).
     reason: Optional[str] = None
     # copy: the serving key copied, then the commits since written into the copy. reseed: its key
     # written from Postgres on the node with most room, the serving key's summaries carried over.
     mode: Optional[str] = None
+    # A move's: the key and provider it goes to ({providerId, key}); null for any other build.
+    target: Optional[Dict[str, Optional[str]]] = None
+    # Who asked for the rebuild it makes (operator, or drift or failures: the projector on its
+    # own); null when it makes none. A move asked during a rebuild, or rebuilt during, makes one.
+    rebuild: Optional[str] = None
     # The version the build's key holds whole: null until it is written.
     seq: Optional[int] = None
     attempts: int = 0

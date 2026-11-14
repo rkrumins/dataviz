@@ -9,6 +9,7 @@ async projection path self-heals exactly the way the interactive ``project_now``
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 from typing import Optional
 
@@ -115,15 +116,18 @@ def make_rollup_rebuild_hook(get_aggregation_service):
             # Its {graph_name}_proj is behind the graph until the rebuild lands; reads say so.
             from backend.app.services.graph_cache import mark_source_stale
             await mark_source_stale(meta["workspace_id"], str(ds_id), "source_changed")
-        # One job per projected commit: evict/restore churn at the same commit collapses
-        # into it (the service's idempotent-replay window), while a later change is never
-        # swallowed by an earlier job that already ran — a key per GRAPH did exactly that
-        # for an hour.
+        # One job per projected commit of the key the graph is on: evict/restore churn at the
+        # same commit on a key that stays collapses into it (the service's idempotent-replay
+        # window; a load names its own asks), while a later change is never swallowed by an
+        # earlier job that already ran — a key per GRAPH did exactly that for an hour — nor is a
+        # new key (a switch to a build, a move) at the same commit answered with the job that
+        # wrote the old one. The key's name goes in hashed, within the service's 255 characters.
         try:
-            projected = (await svc.projection_watermark(graph_id) or {}).get("projected")
+            wm = await svc.projection_watermark(graph_id) or {}
         except Exception:                                # pragma: no cover - infra
-            projected = None
-        key = idempotency_key or f"gv-rollup-rebuild:{graph_id}:{projected}"
+            wm = {}
+        pin = hashlib.sha1(str(wm.get("falkor_graph_name") or "").encode()).hexdigest()[:12]
+        key = idempotency_key or f"gv-rollup-rebuild:{graph_id}:{wm.get('projected')}:{pin}"
         if agg is None:
             outcome = await _queue_on_control_plane(str(ds_id), key, mode)
         else:

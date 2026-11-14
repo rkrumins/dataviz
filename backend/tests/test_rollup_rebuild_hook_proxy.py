@@ -18,6 +18,7 @@ owed no more.
 """
 import asyncio
 import contextlib
+import hashlib
 from types import SimpleNamespace
 
 import pytest
@@ -35,6 +36,10 @@ class _Resp:
 
 #: The asks the hook recorded, ``(graph_id, outcome)`` (``note_rollup_ask``).
 _NOTED: list = []
+
+#: The key the graph is on, and the idempotency key a hand-off at its commit 8 is asked under.
+_PIN = {"name": "gvp_graph_1{aaaaaaaa.1}"}
+_KEY = f"gv-rollup-rebuild:graph_1:8:{hashlib.sha1(_PIN["name"].encode()).hexdigest()[:12]}"
 
 
 class _Client:
@@ -60,7 +65,7 @@ def _patch(monkeypatch, mode="in_source"):
             return {"data_source_id": "ds_1", "workspace_id": "ws_1"}
 
         async def projection_watermark(self, graph_id):
-            return {"projected": 8}
+            return {"projected": 8, "falkor_graph_name": _PIN["name"]}
 
         async def note_rollup_ask(self, graph_id, outcome):
             _NOTED.append((graph_id, outcome))
@@ -83,11 +88,29 @@ def test_proxy_mode_queues_the_job_on_the_control_plane(monkeypatch):
     posts = [c for c in _Client.calls if c[0] == "post"]
     assert posts == [(
         "post", "/aggregation/data-sources/ds_1/jobs", {"triggerSource": "api"},
-        {"projectionMode": "in_source", "idempotencyKey": "gv-rollup-rebuild:graph_1:8"},
+        {"projectionMode": "in_source", "idempotencyKey": _KEY},
     )]
     init = [c for c in _Client.calls if c[0] == "init"][0][1]
     assert init["base_url"] == "http://controlplane:8091"
     assert "headers" in init                              # internal service auth
+
+
+def test_a_new_key_at_the_same_commit_is_asked_for_under_its_own_key(monkeypatch):
+    """The aggregation service answers an idempotency key it saw within the hour with the job it
+    already ran. A graph switched to a new key (a build, a move) at the commit it was on hands that
+    key's summaries over under a key of their own, or the job that wrote the old key would answer
+    for it and the new key would never get its summaries. A second hand-off on the same key and
+    commit still collapses into the first; the key's name goes in hashed, so the idempotency key
+    stays short whatever the name."""
+    _patch(monkeypatch)
+    hook = pt.make_rollup_rebuild_hook(lambda: None)
+    asyncio.run(hook("graph_1"))
+    asyncio.run(hook("graph_1"))
+    monkeypatch.setitem(_PIN, "name", "gvp_graph_1{aaaaaaaa.1}#b1" + "x" * 300)
+    asyncio.run(hook("graph_1"))
+    keys = [c[3]["idempotencyKey"] for c in _Client.calls if c[0] == "post"]
+    assert keys[0] == keys[1] == _KEY and keys[2] != _KEY
+    assert keys[2].startswith("gv-rollup-rebuild:graph_1:8:") and len(keys[2]) == len(_KEY)
 
 
 def _marked(monkeypatch):
@@ -123,7 +146,7 @@ def test_a_dedicated_source_is_marked_stale_and_rebuilt_in_its_mode_after_lineag
     assert marked == [("ws_1", "ds_1", "source_changed")]
     assert [c for c in _Client.calls if c[0] == "post"] == [(
         "post", "/aggregation/data-sources/ds_1/jobs", {"triggerSource": "api"},
-        {"projectionMode": "dedicated", "idempotencyKey": "gv-rollup-rebuild:graph_1:8"},
+        {"projectionMode": "dedicated", "idempotencyKey": _KEY},
     )]
 
 
@@ -143,7 +166,7 @@ def test_in_process_the_rebuild_is_queued_in_the_sources_mode(monkeypatch, mode)
 
     monkeypatch.setattr(pt, "get_async_session", session)
     asyncio.run(pt.make_rollup_rebuild_hook(lambda: _Agg())("graph_1"))
-    assert queued == [("ds_1", mode, "gv-rollup-rebuild:graph_1:8", "api")]
+    assert queued == [("ds_1", mode, _KEY, "api")]
     # In the source's own graph the projector keeps the summaries current, and hands off only
     # what it cannot: no marker there.
     assert marked == ([("ws_1", "ds_1", "source_changed")] if mode == "dedicated" else [])

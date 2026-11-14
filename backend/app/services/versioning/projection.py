@@ -1160,8 +1160,9 @@ class FalkorProjector:
         # and merged main never surfaces. Injected (not imported) so this package stays decoupled from
         # the management DB. None ⇒ no repair (the app path repairs explicitly before projecting).
         self._target_resolver = target_resolver
-        # graph_id → the watermark liveness last read the key's summaries stamp at: once per commit.
-        self._summaries_checked: Dict[str, int] = {}
+        # graph_id → the key and watermark liveness last read the key's summaries stamp at: once
+        # per commit and key.
+        self._summaries_checked: Dict[str, object] = {}
 
     @staticmethod
     def default_graph_name(graph_id: str) -> str:
@@ -2770,16 +2771,19 @@ class FalkorProjector:
                 raise RuntimeError(f"the build's key holds {tuple(held)} nodes and edges, main "
                                    f"{tuple(expected)}")
         old = ps.falkor_graph_name
-        if not await self._svc.switch_to_candidate(
-                graph_id, build_id=build_id, seq=seq, grace_secs=int(policy["retireGraceSecs"])):
+        owed = await self._svc.switch_to_candidate(
+            graph_id, build_id=build_id, seq=seq, grace_secs=int(policy["retireGraceSecs"]),
+            rollups_stale=bool(state.get("rollupsStale")))
+        if owed is None:
             raise RuntimeError("the switch was refused")
         increment("graphver_builds_total", step="switched")
         logger.info("build %s of %s: switched readers from '%s' to '%s' at version %d",
                     build_id, graph_id, old, ps.candidate_graph_name, seq)
 
         async def after_switch() -> None:
-            await self.run_publish_hooks(graph_id, full_seed=True,
-                                         rollups_stale=bool(state.get("rollupsStale")))
+            # Owed summaries were recorded with the switch, so the liveness loop asks again should
+            # this hand-off never run (``switch_to_candidate``).
+            await self.run_publish_hooks(graph_id, full_seed=True, rollups_stale=owed)
             try:
                 await bump_graph_generation(old, reason="readers switched to a new build")
             except Exception:                            # pragma: no cover - infra
@@ -2850,7 +2854,7 @@ class FalkorProjector:
                         # Holds its watermark whole (its marker says so), and last published
                         # before the column existed: recorded, so a rebuild keeps serving it.
                         await self._restore_served(gid, epoch, projected, via="liveness")
-                    await self._ask_for_first_summaries(gid, client, projected)
+                    await self._ask_for_first_summaries(gid, client, projected, name)
             if exists is None:
                 return None
             if to_seq is None:
@@ -2917,7 +2921,8 @@ class FalkorProjector:
                 logger.warning("liveness: the summaries build of %s was not asked for again: %s",
                                gid, exc)
 
-    async def _ask_for_first_summaries(self, graph_id: str, client, projected: int) -> None:
+    async def _ask_for_first_summaries(self, graph_id: str, client, projected: int,
+                                       name: Optional[str] = None) -> None:
         """Hand the summaries of a key no summaries build ever stamped to the batch job
         (``on_rollups_stale``). Readers serve the ``:AGGREGATED`` layer only once a build has
         stamped it, so until then every canvas says its connections between collapsed items
@@ -2926,18 +2931,19 @@ class FalkorProjector:
         made where the web tier hands summaries to the control plane, a hand-off that failed.
         Not for a source whose summaries live in a dedicated key (this key never holds the stamp:
         publishes hand those over) or whose ontology has no lineage (readers need none). Once per
-        commit: a key read at this watermark is not read again until a later commit lands. Never
+        commit and key (``name``): a key read at this watermark is not read again until a later
+        commit lands, while one a switch or a move put the graph on at the same commit is. Never
         raises."""
         if self._on_rollups_stale is None or self._edge_types_resolver is None:
             return
-        if self._summaries_checked.get(graph_id) == projected:
+        if self._summaries_checked.get(graph_id) == (name, projected):
             return
         try:
             res = await _q(client, _SUMMARIES_BUILT, read_only=True, timeout_ms=5000)
         except Exception as exc:
             logger.warning("liveness: cannot read whether %s was summarised: %s", graph_id, exc)
             return
-        self._summaries_checked[graph_id] = projected
+        self._summaries_checked[graph_id] = (name, projected)
         rows = getattr(res, "result_set", None) or []
         if rows and rows[0] and int(rows[0][0] or 0) > 0:
             return
@@ -3070,11 +3076,12 @@ class FalkorProjector:
     async def project_pending(
         self, limit: int = 100, concurrency: Optional[int] = None
     ) -> List[Dict[str, object]]:
-        """Catch up every graph whose projection lags (`projected < target`), STALEST first,
-        with bounded concurrency so the reconciling loop keeps up across 100s of graphs
-        (the serial version made a full pass cost the SUM of per-graph times). The select is
-        keyed by ``graph_id`` (PK) so each id appears once per pass — no same-graph race; a
-        per-graph failure is logged and does not abort the batch."""
+        """Catch up every graph whose projection lags (`projected < target`), STALEST first, and
+        take every build beside a serving key its next step (builds first; a nudge is never the
+        only thing that moves one), with bounded concurrency so the reconciling loop keeps up
+        across 100s of graphs (the serial version made a full pass cost the SUM of per-graph
+        times). The select is keyed by ``graph_id`` (PK) so each id appears once per pass — no
+        same-graph race; a per-graph failure is logged and does not abort the batch."""
         await self._report_lag()
         async with self._session() as s:
             ids = (await s.execute(
@@ -3092,6 +3099,9 @@ class FalkorProjector:
                         ProjectionStateORM.projected_commit_seq < GraphORM.main_head_commit_seq,
                         # Caught up, but holding quarantined entities due another try.
                         ProjectionStateORM.quarantine_next_at <= _now(),
+                        # Building a new version beside its key (``candidates``): a rebuild or a
+                        # move of a graph that is caught up has nothing else to bring it here.
+                        ProjectionStateORM.candidate_state.isnot(None),
                     ),
                     # A pass that failed is retried after its backoff (`_retry_at`), so a
                     # genuinely unfixable graph retries visibly but without churning the loop.
@@ -3113,6 +3123,9 @@ class FalkorProjector:
                     # (project_graph's gate).
                     ProjectionStateORM.status.notin_(("evicted", "waiting_capacity")),
                 ).order_by(
+                    # Builds first, so the limit never starves one: buildConcurrency bounds them,
+                    # and one backing off answers after two reads.
+                    ProjectionStateORM.candidate_state.isnot(None).desc(),
                     (func.greatest(ProjectionStateORM.target_commit_seq,
                                    GraphORM.main_head_commit_seq)
                      - ProjectionStateORM.projected_commit_seq).desc()

@@ -5396,15 +5396,22 @@ class GraphVersioningService:
         return True
 
     async def switch_to_candidate(self, graph_id: str, *, build_id: str, seq: int,
-                                  grace_secs: int) -> bool:
+                                  grace_secs: int, rollups_stale: bool = False) -> Optional[bool]:
         """Switch ``graph_id``'s readers to the key build ``build_id`` holds ``seq`` whole in, in
         one transaction. The build's key becomes the pin, serving ``seq``: projected and served at
         ``seq``, idle, and the epoch bumped so nothing in flight publishes over it. The key that
         served until now joins ``retired_keys``, to be dropped once ``grace_secs`` have passed, so
         reads already under way on it finish there. Whatever main gained past ``seq`` is written
-        into the new key by the next ordinary pass, in place.
+        into the new key by the next ordinary pass, in place. A move's build (``target``) also
+        takes the move's ``shard_map``, and the retired key says who moved it.
 
-        Refused (False, nothing written) when the build is no longer the graph's, the graph is in
+        Returns whether the lineage summaries are owed the batch job: ``rollups_stale`` (the
+        build could not keep them exact), or a full seed owed them (``rollup_state.moved``, which
+        no later window publish would hand over once the key serves a version). Owed, the ask is
+        recorded in the same transaction (``rollup_state.pending``), so the liveness loop makes
+        it again should the caller's hand-off never run.
+
+        Refused (None, nothing written) when the build is no longer the graph's, the graph is in
         the trash or not idle (out of FalkorDB, or a pass that does not build has the row), or
         another graph projects into the build's key."""
         async with self._session() as s:
@@ -5412,17 +5419,28 @@ class GraphVersioningService:
             graph = await s.get(GraphORM, graph_id)
             ps = await self._locked_build(s, graph_id, build_id)
             if graph is None or graph.deleted_at is not None or ps is None or ps.status != "idle":
-                return False
+                return None
             name, provider = ps.candidate_graph_name, ps.candidate_provider
             try:
                 await self._claim_projection_key(s, name, provider, exclude_graph_id=graph_id)
             except ConcurrencyError:
-                return False
+                return None
             now = datetime.now(timezone.utc)
+            target = ps.candidate_state.get("target")
             entry = {"name": ps.falkor_graph_name, "provider": ps.falkor_provider,
                      "retireAfter": (now + timedelta(seconds=max(grace_secs, 0))).isoformat(),
-                     "afterSeq": seq, "build": build_id}
+                     "afterSeq": seq, "build": build_id,
+                     **({"movedBy": target.get("movedBy")} if target else {})}
             ps.retired_keys = [*(ps.retired_keys or []), entry]
+            if target:
+                ps.shard_map = target.get("shardMap")
+            state = dict(ps.rollup_state) if isinstance(ps.rollup_state, dict) else {}
+            moved = state.pop("moved", None)
+            owed = bool(rollups_stale or moved)
+            if owed:
+                state = {**state, "pending": "switched", "asked": now.isoformat(),
+                         "since": state.get("since") or now.isoformat()}
+            ps.rollup_state = state or None
             ps.falkor_graph_name, ps.falkor_provider = name, provider
             ps.projected_commit_seq = ps.served_commit_seq = seq
             ps.target_commit_seq = max(ps.target_commit_seq or 0, graph.main_head_commit_seq)
@@ -5437,7 +5455,7 @@ class GraphVersioningService:
             ps.candidate_seq = None
             ps.candidate_state = None
             ps.epoch = ProjectionStateORM.epoch + 1
-        return True
+        return owed
 
     async def drop_candidate(self, graph_id: str, *, build_id: str) -> bool:
         """Forget build ``build_id`` of ``graph_id``: its key joins ``retired_keys`` due at once

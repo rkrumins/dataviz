@@ -711,3 +711,78 @@ async def _run_a_graph_that_stops_reading_beside_drops_its_build(state) -> None:
 
 def test_a_graph_that_stops_reading_beside_drops_its_build(builds_on):
     asyncio.run(_run_a_graph_that_stops_reading_beside_drops_its_build(builds_on))
+
+
+async def _owe(gid: str, **state) -> None:
+    async with db.graphver_session() as s:
+        row = await s.get(ProjectionStateORM, gid)
+        for column, value in state.items():
+            setattr(row, column, value)
+
+
+async def _run_summaries_a_build_owes_are_recorded_with_its_switch(monkeypatch) -> None:
+    """A build's switch hands the lineage summaries it could not keep exact to the batch job, and
+    records the ask in the same transaction: should the hand-off never run (the pod stops right
+    after the switch), the liveness loop asks again. What a full seed owed (``moved``) goes with
+    the switch too, as no window published after it would hand it over."""
+    from backend.app.services.versioning import config as gv_config
+
+    svc, fake = GraphVersioningService(), BuildFalkor()
+    gid, proj, _serving = await _seed(svc, fake)
+    await _beside(svc, gid)
+    await _edit_publish(svc, gid, "a", _create("D", "E"), "a large change")
+    await proj.project_graph(gid)                       # copied
+    await proj.project_graph(gid)                       # caught up, a delta it could not move
+    build = (await _ps(gid)).candidate_state
+    await _owe(gid, candidate_state={**build, "rollupsStale": True},
+               rollup_state={"moved": "2026-11-14T00:00:00+00:00"})
+    real = FalkorProjector.run_publish_hooks
+
+    async def stopped(self, graph_id, **kw):
+        raise ConnectionError("the pod stopped")
+
+    monkeypatch.setattr(FalkorProjector, "run_publish_hooks", stopped)
+    await proj.project_graph(gid)                       # switched; the hand-off never ran
+    ps = await _ps(gid)
+    assert ps.candidate_state is None and ps.projected_commit_seq == 4
+    assert ps.rollup_state["pending"] == "switched" and ps.rollup_state["asked"], ps.rollup_state
+    assert "moved" not in ps.rollup_state, "a full seed's debt is handed over with the switch"
+    monkeypatch.setattr(FalkorProjector, "run_publish_hooks", real)
+
+    asked = []
+
+    async def hand_off(graph_id, idempotency_key=None):  # as make_rollup_rebuild_hook records it
+        asked.append(graph_id)
+        await svc.note_rollup_ask(graph_id, "queued")
+
+    monkeypatch.setattr(gv_config, "ROLLUP_REASK_SECS", 1)
+    await _owe(gid, rollup_state={**ps.rollup_state, "asked": "2000-01-01T00:00:00+00:00"})
+    await FalkorProjector(graph_client_factory=fake,
+                          on_rollups_stale=hand_off)._ask_again_for_summaries()
+    assert asked.count(gid) == 1 and (await _ps(gid)).rollup_state is None
+
+    # A full seed's debt: handed over with the next switch, never dropped by a window publish.
+    await _edit_publish(svc, gid, "a", _create("F", "G"), "another large change")
+    with_hook = FalkorProjector(graph_client_factory=fake, on_rollups_stale=hand_off)
+    await with_hook.project_graph(gid)                  # copied
+    await with_hook.project_graph(gid)                  # caught up
+    await _owe(gid, rollup_state={"moved": "2026-11-14T00:00:00+00:00"})
+    asked.clear()
+    await with_hook.project_graph(gid)                  # switched
+    ps = await _ps(gid)
+    assert ps.candidate_state is None and ps.projected_commit_seq == 5
+    assert asked == [gid] and ps.rollup_state is None
+    await _assert_matches_main(svc, fake, gid)
+
+    # Nothing owed: nothing asked for, nothing recorded.
+    await _edit_publish(svc, gid, "a", _create("H", "I"), "a third")
+    asked.clear()
+    for _ in range(3):
+        await with_hook.project_graph(gid)
+    ps = await _ps(gid)
+    assert ps.candidate_state is None and ps.projected_commit_seq == 6
+    assert asked == [] and ps.rollup_state is None
+
+
+def test_summaries_a_build_owes_are_recorded_with_its_switch(builds_on, monkeypatch):
+    asyncio.run(_run_summaries_a_build_owes_are_recorded_with_its_switch(monkeypatch))
