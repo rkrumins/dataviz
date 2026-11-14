@@ -1793,6 +1793,21 @@ def _upgrade_during(monkeypatch, svc, gid: str, owner, attr: str) -> list:
     return upgraded
 
 
+async def _trash(gids) -> None:
+    """``gids`` to the trash, their builds dropped: no later poll takes them."""
+    from sqlalchemy import update
+
+    from backend.app.services.versioning import models
+    from backend.app.services.versioning.models import GraphORM
+
+    async with db.graphver_session() as s, s.begin():
+        await s.execute(update(ProjectionStateORM).where(ProjectionStateORM.graph_id.in_(gids))
+                        .values(candidate_state=None, candidate_graph_name=None,
+                                candidate_provider=None, candidate_seq=None))
+        await s.execute(update(GraphORM).where(GraphORM.id.in_(gids))
+                        .values(deleted_at=models._now()))
+
+
 async def _until_switched(proj, gid: str, passes: int = 4) -> ProjectionStateORM:
     for _ in range(passes):
         if (await _ps(gid)).candidate_state is None:
@@ -2036,39 +2051,45 @@ async def _run_the_poll_skips_builds_backing_off_and_never_fills_with_builds(mon
     graphs = [await _seed(svc, fake) for _ in range(3)]
     (lagging, _p, _s), (waiting, _p2, _s2), (due, _p3, _s3) = graphs
     proj = graphs[0][1]
-    for gid in (waiting, due):
-        await _beside(svc, gid)
-        assert await svc.request_projection_rebuild(gid)
-    later = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
-    async with db.graphver_session() as s:
-        row = await s.get(ProjectionStateORM, waiting)
-        row.candidate_state = {**row.candidate_state, "retryAt": later}
-    await _edit_publish(svc, lagging, "a", _create("D"), "a change")
-    taken: list = []
-
-    async def recorded(gid, **_k):
-        taken.append(gid)
-        return {"graph_id": gid}
-
-    async def builds_among(ids) -> list:
+    try:
+        for gid in (waiting, due):
+            await _beside(svc, gid)
+            assert await svc.request_projection_rebuild(gid)
+        later = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
         async with db.graphver_session() as s:
-            rows = [await s.get(ProjectionStateORM, g) for g in ids]
-        return [r.graph_id for r in rows if r.candidate_state is not None]
+            row = await s.get(ProjectionStateORM, waiting)
+            row.candidate_state = {**row.candidate_state, "retryAt": later}
+        await _edit_publish(svc, lagging, "a", _create("D"), "a change")
+        taken: list = []
 
-    # Other tests' graphs share this database: the poll is asked for plenty, and judged on ours.
-    monkeypatch.setattr(proj, "project_graph", recorded)
-    await proj.project_pending(limit=1000)
-    assert waiting not in taken and {lagging, due} <= set(taken), taken
-    taken.clear()
-    await proj.project_pending(limit=2)
-    assert len(taken) == 2 and len(await builds_among(taken)) == 1, taken
+        async def recorded(gid, **_k):
+            taken.append(gid)
+            return {"graph_id": gid}
 
-    async with db.graphver_session() as s:
-        row = await s.get(ProjectionStateORM, due)
-        row.status = "evicted"
-    taken.clear()
-    await proj.project_pending(limit=1000)
-    assert due in taken, taken
+        async def builds_among(ids) -> list:
+            async with db.graphver_session() as s:
+                rows = [await s.get(ProjectionStateORM, g) for g in ids]
+            return [r.graph_id for r in rows if r.candidate_state is not None]
+
+        # Other tests' graphs share this database: the poll is asked for plenty, and judged on
+        # ours.
+        monkeypatch.setattr(proj, "project_graph", recorded)
+        await proj.project_pending(limit=1000)
+        assert waiting not in taken and {lagging, due} <= set(taken), taken
+        taken.clear()
+        await proj.project_pending(limit=2)
+        assert len(taken) == 2 and len(await builds_among(taken)) == 1, taken
+
+        async with db.graphver_session() as s:
+            row = await s.get(ProjectionStateORM, due)
+            row.status = "evicted"
+        taken.clear()
+        await proj.project_pending(limit=1000)
+        assert due in taken, taken
+    finally:
+        # Never projected, so they would lag and build for every later poll in this database's
+        # run: trashed with their builds, as the residency suite trashes its own.
+        await _trash([gid for gid, _p, _s in graphs])
 
 
 def test_the_poll_skips_builds_backing_off_and_never_fills_with_builds(builds_on, monkeypatch):
