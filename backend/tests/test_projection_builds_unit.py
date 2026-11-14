@@ -62,8 +62,13 @@ def test_a_rebuild_or_a_move_is_seeded_from_postgres_and_says_what_it_makes():
     target = {"providerId": "prov_b", "key": "gvp_g{ab.2}", "shardMap": {"slot": 7},
               "movedBy": "usr_1"}
     move = candidates.new_state("move", now="t0", target=target)
-    assert (move["mode"], move["step"], move["target"]) == ("reseed", "queued", target)
+    assert (move["mode"], move["step"], move["target"]) == (
+        "reseed", "queued", {**target, "retired": None})
     assert "rebuild" not in move and "rollupsStale" not in move
+    # A move back onto a key waiting out its grace keeps that key's entry, to give it back.
+    was = [{"name": "gvp_g{ab.2}", "provider": "prov_b", "retireAfter": "t9", "afterSeq": 3}]
+    back = candidates.new_state("move", now="t0", target={**target, "retired": was})
+    assert back["target"]["retired"] == was
     # A move whose seed the route admitted with it: its version and cursor are taken on its first
     # pass; one asked during a rebuild carries the rebuild on.
     admitted = candidates.new_state("move", now="t0", target=target, step="seeding",
@@ -470,11 +475,13 @@ def test_an_escalation_that_cannot_ask_for_a_build_is_rebuilt_in_place(monkeypat
             assert "UPDATE graphver.projection_state" in statements[0]
 
 
-def test_the_poll_takes_up_a_build_of_a_graph_that_is_caught_up_and_takes_builds_first(
+def test_the_poll_takes_builds_that_are_due_for_at_most_half_its_graphs_then_graphs_that_lag(
         monkeypatch):
     """A rebuild or a move of a graph that is caught up is no lag: the poll selects a graph with a
-    build whatever its watermark (a nudge is never the only thing that moves one), and builds
-    before lagging graphs, so the limit never starves one."""
+    build whatever its watermark (a nudge is never the only thing that moves one) — out of
+    FalkorDB too, so its build is dropped — once its build's backoff (``retryAt``) has passed,
+    oldest first, for at most half of its limit. Then graphs that lag, without a build, stalest
+    first, for the rest: builds waiting for room or a slot never crowd out graphs that lag."""
     from contextlib import asynccontextmanager
 
     from sqlalchemy.dialects import postgresql
@@ -484,16 +491,20 @@ def test_the_poll_takes_up_a_build_of_a_graph_that_is_caught_up_and_takes_builds
     asked = []
 
     class _Rows:
+        def __init__(self, ids):
+            self.ids = ids
+
         def scalars(self):
             return self
 
         def all(self):
-            return []
+            return self.ids
 
     class _Session:
         async def execute(self, stmt):
-            asked.append(str(stmt.compile(dialect=postgresql.dialect())))
-            return _Rows()
+            compiled = stmt.compile(dialect=postgresql.dialect())
+            asked.append((str(compiled), compiled.params))
+            return _Rows(["g_build"] if len(asked) == 1 else [])
 
     @asynccontextmanager
     async def session():
@@ -504,8 +515,23 @@ def test_the_poll_takes_up_a_build_of_a_graph_that_is_caught_up_and_takes_builds
 
     proj = FalkorProjector(graph_client_factory=lambda *a: None, session_factory=session)
     monkeypatch.setattr(proj, "_report_lag", no_lag)
-    assert asyncio.run(proj.project_pending()) == []
-    (sql,) = asked
-    where, order = sql.split(" ORDER BY ")
-    assert "projection_state.candidate_state IS NOT NULL" in where.split("WHERE", 1)[1]
-    assert order.startswith("graphver.projection_state.candidate_state IS NOT NULL DESC"), order
+    taken = []
+
+    async def project_graph(gid, **_k):
+        taken.append(gid)
+        return {"graph_id": gid}
+
+    monkeypatch.setattr(proj, "project_graph", project_graph)
+    asyncio.run(proj.project_pending(limit=10))
+    assert taken == ["g_build"]
+    (builds, builds_params), (lagging, lagging_params) = asked
+    where, order = builds.split("WHERE", 1)[1].split(" ORDER BY ")
+    assert "projection_state.candidate_state IS NOT NULL" in where
+    assert "->> " in where and "retryAt" in builds_params.values()
+    assert "projection_state.status" not in where           # out of FalkorDB too
+    assert order.startswith("graphver.projection_state.candidate_state ->> ")
+    assert "since" in builds_params.values() and 5 in builds_params.values()
+    where, order = lagging.split("WHERE", 1)[1].split(" ORDER BY ")
+    assert "projection_state.candidate_state IS NULL" in where
+    assert "projection_state.status NOT IN" in where
+    assert order.startswith("greatest(") and 9 in lagging_params.values()

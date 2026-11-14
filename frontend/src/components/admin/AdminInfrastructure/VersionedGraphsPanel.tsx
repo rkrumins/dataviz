@@ -527,7 +527,10 @@ export function VersionedGraphsPanel({ providers, onClose }: Props) {
                         setMoving(null)
                         setNotes(prev => ({
                             ...prev,
-                            [res.graphId]: res.cancelled ? { tone: 'ok', text: 'Move cancelled' }
+                            [res.graphId]: res.cancelled
+                                ? { tone: 'ok', text: res.beside
+                                    ? `Move cancelled — the rebuild it carried goes on beside ${res.from.key}`
+                                    : 'Move cancelled' }
                                 : res.beside && res.changed
                                     ? { tone: 'ok', text: `Building ${res.to.key} beside ${res.from.key} — readers stay on it until the new copy is checked and switched to` }
                                     : res.beside ? { tone: 'ok', text: `Already moving to ${res.to.key}` }

@@ -124,7 +124,8 @@ async def move_projection(
     is seeded from Postgres while readers keep the version they have, then switched to, and
     nothing retires until then (``retiring`` null). While such a move is under way, the same move
     again answers ``changed: false`` with the build, and a move to the provider or key the graph
-    is on cancels it (``cancelled``, the build's id)."""
+    is on cancels it (``cancelled``, the build's id); a rebuild the move carried goes on, built
+    beside (``beside``: true, ``building``) or in place."""
     svc = get_versioning_service()
     meta = await svc.get_graph(graph_id)
     if meta is None:
@@ -178,6 +179,9 @@ async def move_projection(
         async with residency.admitting() if on else contextlib.nullcontext():
             if on:
                 wm = await svc.projection_watermark(graph_id)
+                # A switch or a move that landed meanwhile changed the key the graph is on.
+                current = {"providerId": wm["falkor_provider"] or default,
+                           "key": wm["falkor_graph_name"]}
             moving = _moving(wm)
             key, master = await _target_key(graph_id, body, current, wm["retired_keys"],
                                             placed=on, moving=moving)
@@ -220,7 +224,8 @@ async def move_projection(
             session, "platform.versioning.projection_moved", details=details,
             best_effort=True,   # the move is already committed
         )
-    elif res.get("cancelled"):
+    if res.get("cancelled"):
+        # Whether or not a rebuild the move carried goes on beside, the cancel is recorded.
         await recorder.record_for_request(
             session, "platform.versioning.projection_move_cancelled",
             details={**details, "build": res["cancelled"], "to": moving and moving["target"]},

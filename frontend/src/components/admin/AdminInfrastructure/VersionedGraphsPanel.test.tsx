@@ -314,7 +314,7 @@ describe('VersionedGraphsPanel', () => {
         await waitFor(() => expect(versionedGraphs).toHaveBeenCalledTimes(2))
     })
 
-    it('says a move built beside the key keeps readers on it, and when it is already under way or cancelled', async () => {
+    it('says a move built beside the key keeps readers on it, and when it is already under way or cancelled, with the rebuild it carried', async () => {
         versionedGraphs.mockResolvedValue({ graphs: [FORK], nextCursor: null })
         const from = { providerId: 'falkor-eu', key: 'gv_fork_b' }
         const to = { providerId: 'falkor-eu', key: 'gvp_graph_b{graph_b.2}' }
@@ -326,6 +326,9 @@ describe('VersionedGraphsPanel', () => {
                 `Already moving to ${to.key}`],
             [{ graphId: 'graph_b', changed: false, from, to: from, retiring: null, beside: false, building: null, cancelled: 'build_1', watermark: {} },
                 'Move cancelled'],
+            [{ graphId: 'graph_b', changed: false, from, to: from, retiring: null, beside: true,
+                building: { id: 'build_2', step: 'queued' as const, reason: 'rebuild' as const }, cancelled: 'build_1', watermark: {} },
+                `Move cancelled — the rebuild it carried goes on beside ${from.key}`],
         ] as const
         renderPanel()
         for (const [answer, note] of answers) {

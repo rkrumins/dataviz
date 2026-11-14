@@ -64,7 +64,8 @@ def new_state(reason: str, *, now: str, rows: Optional[int] = None,
     whose seed was admitted with it (its version and cursor are taken on its first pass). A
     rebuild or a move is seeded from Postgres. ``rebuild`` (``{cause, why}``): the build replaces
     a rebuild, whose summaries are handed to the batch job once switched. ``target``
-    (``{providerId, key, shardMap, movedBy}``): the key a move goes to."""
+    (``{providerId, key, shardMap, movedBy, retired}``): the key a move goes to, and its entries
+    in ``retired_keys`` it took off them (a move back), put back should the move be dropped."""
     if reason not in REASONS:
         raise ValueError(f"unknown build reason {reason!r}")
     if rebuild is not None and rebuild.get("cause") not in CAUSES:
@@ -77,7 +78,8 @@ def new_state(reason: str, *, now: str, rows: Optional[int] = None,
         state["rebuild"] = {"cause": rebuild["cause"], "why": rebuild.get("why")}
         state["rollupsStale"] = True
     if target is not None:
-        state["target"] = {k: target.get(k) for k in ("providerId", "key", "shardMap", "movedBy")}
+        state["target"] = {k: target.get(k)
+                           for k in ("providerId", "key", "shardMap", "movedBy", "retired")}
     if step == "seeding":
         state.update(seedSeq=None, seedPhase=None, summariesAt=0)
     return state

@@ -116,7 +116,9 @@ FIELDS: Tuple[Field, ...] = (
           "Keep the previous key for",
           "How long a graph's previous key stays after a switch or a move, so reads already under "
           "way finish on it.",
-          unit="secs", lo=60, hi=86_400, applies="switch"),
+          # Past the versioned-graph set's cache (``versioned_sources.CACHE_TTL_SECS``, 600 s): a
+          # data source versioned within it still reads its own key, which must outlive it.
+          unit="secs", lo=660, hi=86_400, applies="switch"),
     Field("statementTargetMs", lambda: config.PROJECTION_STATEMENT_TARGET_MS, "int", "pacing",
           "Write statement target",
           "The time each projector write statement aims at; larger batches are split to stay under "

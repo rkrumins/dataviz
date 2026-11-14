@@ -759,16 +759,21 @@ def _forget_build(ps, *, keep: Optional[Tuple[str, str]] = None) -> None:
     once (the next retire run drops it) and the build columns are cleared. For a change that makes
     a build pointless, a rebuild or a move: the serving key it was built beside no longer holds
     what it is copied from. ``keep`` (``(provider, key)``): the key the change goes on with, when
-    it is the build's — that one is not retired."""
-    if not isinstance(getattr(ps, "candidate_state", None), dict):
+    it is the build's — that one is not retired. A move's build onto a key that was waiting out
+    its grace (``target.retired``) gives that key back its own entry, as it was: readers finishing
+    on it keep it, and a move back onto it stays cheap, until its grace ends."""
+    state = getattr(ps, "candidate_state", None)
+    if not isinstance(state, dict):
         return
     default = config.DEFAULT_FALKOR_PROVIDER
     if ps.candidate_graph_name and (ps.candidate_provider or default,
                                     ps.candidate_graph_name) != keep:
-        ps.retired_keys = [*(ps.retired_keys or []), {
+        target = state.get("target") if isinstance(state.get("target"), dict) else {}
+        was = [e for e in target.get("retired") or [] if isinstance(e, dict)]
+        ps.retired_keys = [*(ps.retired_keys or []), *(was or [{
             "name": ps.candidate_graph_name, "provider": ps.candidate_provider,
             "retireAfter": datetime.now(timezone.utc).isoformat(), "afterSeq": 0,
-            "build": ps.candidate_state.get("id")}]
+            "build": state.get("id")}])]
     ps.candidate_graph_name = ps.candidate_provider = None
     ps.candidate_seq = None
     ps.candidate_state = None
@@ -877,6 +882,35 @@ def _move_in_place(ps, graph, *, key: str, provider: str, actor: Optional[str],
     ps.retired_keys = [e for e in retired if e not in own] + [entry]
     ps.shard_map = shard_map
     return entry, out
+
+
+def _rebuild_after_move(ps, graph, rebuild: Dict[str, object], *, beside: bool) -> str:
+    """What becomes of the rebuild a cancelled move carried (``rebuild``: ``{cause, why}``), inside
+    the caller's transaction, which holds the graph's lock and the row: built beside the key the
+    graph is on when ``beside`` (the policy's and :func:`_beside_ok`'s answer), else made in place
+    as its request or the escalation would have made it (:func:`_rebuild_in_place`). Returns
+    ``beside``, ``in_place``, ``load`` (an operator's rebuild of a graph out of FalkorDB: its load
+    is the caller's to ask for, after the commit) or ``dropped`` (one the projector started, of a
+    graph out of FalkorDB: its next read loads it), as
+    :meth:`GraphVersioningService.drop_candidate` does for a rebuild's dropped build."""
+    cause, why = str(rebuild.get("cause") or "operator"), rebuild.get("why")
+    if beside:
+        serving = ps.falkor_graph_name
+        _record_build(
+            ps, state=candidates.new_state("rebuild", now=_now(),
+                                           rebuild={"cause": cause, "why": why}),
+            name=keymigrate.build_key(serving, {serving, *(
+                e.get("name") for e in ps.retired_keys or [])}),
+            provider=ps.falkor_provider,
+            **({} if cause == "operator" else
+               {"last_error": f"rebuilding beside on its own: {why}"[:500]}))
+        return "beside"
+    if ps.status == "idle":
+        _rebuild_in_place(ps, graph.main_head_commit_seq, cause=cause, why=why)
+        return "in_place"
+    if ps.status in ("evicted", "waiting_capacity") and cause == "operator":
+        return "load"
+    return "dropped"
 
 
 def _move_not_made(ps) -> None:
@@ -5417,7 +5451,16 @@ class GraphVersioningService:
         read their root from Postgres (the last error says why) until the switch. The summaries a
         window that escalated moved are owed the batch job (``rollup_state.moved``), as the
         rebuild in place would owe them, so that one keeps them if the build is dropped. False,
-        nothing written, when the epoch moved, a build exists, or either says in place."""
+        nothing written, when the epoch moved, a build exists, or either says in place. The policy
+        is asked first, without the graph's lock: a graph that does not read ``beside`` answers at
+        once, so its rebuild in place never waits on that lock."""
+        async with self._session() as s:
+            mode = (await s.execute(select(ProjectionStateORM.read_mode).where(
+                ProjectionStateORM.graph_id == graph_id))).scalar_one_or_none()
+        if not candidates.beside_wanted(read_mode=build_policy.read_mode_of(mode, policy),
+                                        switch_on=switch_on,
+                                        for_rebuilds=policy["buildForRebuilds"]):
+            return False
         async with self._session() as s:
             await self._lock_graph(s, graph_id)
             graph = await s.get(GraphORM, graph_id)
@@ -5474,13 +5517,17 @@ class GraphVersioningService:
         request, under the capacity lock, so the build starts seeding; otherwise it is admitted on
         its first step. Dropped, the move is made in place, as here (``drop_candidate``). A build
         in flight: the same move answers ``changed: False`` with it (``building``); a move back to
-        the pin cancels it (``cancelled``); any other move replaces it, its key retired at once (a
-        rebuild's carried on by the move that replaces it)."""
+        the pin cancels it (``cancelled``), and a rebuild the move carried goes on, built beside
+        (``building``) or made in place (:func:`_rebuild_after_move`); any other move replaces it,
+        its key retired at once (a rebuild's carried on by the move that replaces it). A move's
+        build onto a key waiting out its grace takes that key off ``retired_keys`` and keeps its
+        entry, which goes back as it was should the build be cancelled or replaced
+        (:func:`_forget_build`)."""
         policy = await build_policy.resolve()
         switch_on = await build_policy.switch_state()
         default = config.DEFAULT_FALKOR_PROVIDER
         out = False                      # not in FalkorDB under residency: its load is asked for
-        entry, building = None, None
+        entry, building, cancelled = None, None, None
         try:
             async with self._session() as s:
                 await self._lock_graph(s, graph_id)
@@ -5498,54 +5545,63 @@ class GraphVersioningService:
                 tgt = {"providerId": provider, "key": key}
                 build = ps.candidate_state if isinstance(ps.candidate_state, dict) else None
                 decided = candidates.on_request(build, reason="move", target=tgt, pin=cur)
-                if cur == tgt:
-                    cancelled = build["id"] if decided == "cancel" else None
-                    if cancelled:
-                        _forget_build(ps)      # its key is retired at once
-                    return {"changed": False, "from": cur, "to": tgt, "retiring": None,
-                            "beside": False, "building": None, "cancelled": cancelled}
-                if ps.falkor_graph_name in (None, f"gv_{graph_id}"):
-                    raise ProjectionNotAdopted(
-                        "unpinned", "this graph has no FalkorDB key yet; nothing to move")
-                if not ps.owns_falkor_graph:
-                    raise ProjectionNotAdopted(
-                        "customer_key", "this graph projects into the customer's own FalkorDB "
-                        "graph; only platform keys can be moved")
-                retired = list(ps.retired_keys or [])
-                own = [e for e in retired
-                       if ((e.get("provider") or default), e["name"]) == (provider, key)]
-                if not (own or keymigrate.is_owned_key(graph_id, key) or decided == "keep"):
-                    raise ProjectionKeyInvalid(key)
-                try:
-                    await self._claim_projection_key(s, key, provider, exclude_graph_id=graph_id)
-                except ConcurrencyError:
-                    raise ProjectionKeyInUse(provider, key) from None
-                if decided == "keep":          # this move is already under way
-                    return {"changed": False, "from": cur, "to": tgt, "retiring": None,
-                            "beside": True, "building": candidates.block(ps), "cancelled": None}
-                beside = candidates.beside_wanted(
-                    read_mode=build_policy.read_mode_of(ps.read_mode, policy),
-                    switch_on=switch_on, for_rebuilds=policy["buildForRebuilds"]
-                ) and _beside_ok(ps, graph, reason="move")
-                if beside:
-                    # A rebuild in flight: the move replacing it makes it too.
-                    rebuild = (build or {}).get("rebuild") if decided == "replace" else None
-                    _forget_build(ps, keep=(provider, key))
-                    if own:                    # a move back: the key is no longer to retire
-                        ps.retired_keys = [e for e in ps.retired_keys or [] if e not in own]
-                    _record_build(ps, state=candidates.new_state(
-                        "move", now=_now(), rebuild=rebuild,
-                        step="seeding" if admitted else "queued",
-                        target={"providerId": provider, "key": key, "shardMap": shard_map,
-                                "movedBy": actor}), name=key, provider=provider)
-                    building = candidates.block(ps)
-                else:
-                    entry, out = _move_in_place(ps, graph, key=key, provider=provider, actor=actor,
-                                                shard_map=shard_map,
-                                                grace_secs=int(policy["retireGraceSecs"]))
-                    # A build beside the old key has nothing to switch from: its key goes, unless
-                    # it is the one moved to.
-                    _forget_build(ps, keep=(provider, key))
+                if cur == tgt and decided == "cancel":
+                    cancelled = build["id"]
+                    _forget_build(ps)      # its key is retired at once, or as it was before
+                    if build.get("rebuild"):
+                        # The move goes; a rebuild it carried does not.
+                        kept = _rebuild_after_move(
+                            ps, graph, build["rebuild"], beside=candidates.beside_wanted(
+                                read_mode=build_policy.read_mode_of(ps.read_mode, policy),
+                                switch_on=switch_on, for_rebuilds=policy["buildForRebuilds"]
+                            ) and _beside_ok(ps, graph, reason="rebuild"))
+                        building = candidates.block(ps) if kept == "beside" else None
+                        out = kept == "load"
+                elif cur != tgt:
+                    if ps.falkor_graph_name in (None, f"gv_{graph_id}"):
+                        raise ProjectionNotAdopted(
+                            "unpinned", "this graph has no FalkorDB key yet; nothing to move")
+                    if not ps.owns_falkor_graph:
+                        raise ProjectionNotAdopted(
+                            "customer_key", "this graph projects into the customer's own FalkorDB "
+                            "graph; only platform keys can be moved")
+                    retired = list(ps.retired_keys or [])
+                    own = [e for e in retired
+                           if ((e.get("provider") or default), e["name"]) == (provider, key)]
+                    if not (own or keymigrate.is_owned_key(graph_id, key) or decided == "keep"):
+                        raise ProjectionKeyInvalid(key)
+                    try:
+                        await self._claim_projection_key(s, key, provider,
+                                                         exclude_graph_id=graph_id)
+                    except ConcurrencyError:
+                        raise ProjectionKeyInUse(provider, key) from None
+                    if decided == "keep":          # this move is already under way
+                        return {"changed": False, "from": cur, "to": tgt, "retiring": None,
+                                "beside": True, "building": candidates.block(ps), "cancelled": None}
+                    beside = candidates.beside_wanted(
+                        read_mode=build_policy.read_mode_of(ps.read_mode, policy),
+                        switch_on=switch_on, for_rebuilds=policy["buildForRebuilds"]
+                    ) and _beside_ok(ps, graph, reason="move")
+                    if beside:
+                        # A rebuild in flight: the move replacing it makes it too.
+                        rebuild = (build or {}).get("rebuild") if decided == "replace" else None
+                        _forget_build(ps, keep=(provider, key))
+                        if own:                    # a move back: the key is no longer to retire
+                            ps.retired_keys = [e for e in ps.retired_keys or [] if e not in own]
+                        _record_build(ps, state=candidates.new_state(
+                            "move", now=_now(), rebuild=rebuild,
+                            step="seeding" if admitted else "queued",
+                            target={"providerId": provider, "key": key, "shardMap": shard_map,
+                                    "movedBy": actor, "retired": own or None}),
+                            name=key, provider=provider)
+                        building = candidates.block(ps)
+                    else:
+                        entry, out = _move_in_place(
+                            ps, graph, key=key, provider=provider, actor=actor,
+                            shard_map=shard_map, grace_secs=int(policy["retireGraceSecs"]))
+                        # A build beside the old key has nothing to switch from: its key goes,
+                        # unless it is the one moved to.
+                        _forget_build(ps, keep=(provider, key))
         except IntegrityError:
             raise ProjectionKeyInUse(provider, key) from None     # uq_ps_key: a concurrent claim won
         if out:
@@ -5554,8 +5610,8 @@ class GraphVersioningService:
         if building is not None:
             from backend.app.jobs.metrics import increment
             increment("graphver_builds_total", step="queued")
-        return {"changed": True, "from": cur, "to": tgt, "retiring": entry,
-                "beside": building is not None, "building": building, "cancelled": None}
+        return {"changed": cur != tgt, "from": cur, "to": tgt, "retiring": entry,
+                "beside": building is not None, "building": building, "cancelled": cancelled}
 
     # ── a new version built beside the serving key (read mode ``beside``; see ``candidates``) ──
 
@@ -5619,10 +5675,12 @@ class GraphVersioningService:
         takes the move's ``shard_map``, and the retired key says who moved it.
 
         Returns whether the lineage summaries are owed the batch job: ``rollups_stale`` (the
-        build could not keep them exact), or a full seed owed them (``rollup_state.moved``, which
-        no later window publish would hand over once the key serves a version). Owed, the ask is
-        recorded in the same transaction (``rollup_state.pending``), so the liveness loop makes
-        it again should the caller's hand-off never run.
+        build could not keep them exact), the build's own state as locked here says so (a rebuild
+        asked while the switching pass ran: ``rollupsStale``, ``rebuild``), or a full seed owed
+        them (``rollup_state.moved``, which no later window publish would hand over once the key
+        serves a version). Owed, the ask is recorded in the same transaction
+        (``rollup_state.pending``), so the liveness loop makes it again should the caller's
+        hand-off never run.
 
         Refused (None, nothing written) when the build is no longer the graph's, the graph is in
         the trash or not idle (out of FalkorDB, or a pass that does not build has the row), or
@@ -5647,9 +5705,10 @@ class GraphVersioningService:
             ps.retired_keys = [*(ps.retired_keys or []), entry]
             if target:
                 ps.shard_map = target.get("shardMap")
+            build = ps.candidate_state
             state = dict(ps.rollup_state) if isinstance(ps.rollup_state, dict) else {}
             moved = state.pop("moved", None)
-            owed = bool(rollups_stale or moved)
+            owed = bool(rollups_stale or moved or build.get("rollupsStale") or build.get("rebuild"))
             if owed:
                 state = {**state, "pending": "switched", "asked": now.isoformat(),
                          "since": state.get("since") or now.isoformat()}

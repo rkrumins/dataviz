@@ -515,6 +515,66 @@ async def test_a_move_back_to_the_provider_the_graph_is_on_cancels_the_move_unde
 
 
 @pytest.mark.asyncio
+async def test_a_cancel_whose_move_carried_a_rebuild_is_recorded_and_the_rebuild_goes_on():
+    """A move that carried a rebuild, cancelled by a move back: the rebuild goes on beside the key
+    the graph is on (``beside``, ``building``), the worker is nudged for it, and the cancel is
+    recorded — not a move."""
+    pin = keymigrate.owned_key(GID, 1)
+    moving = keymigrate.owned_key(GID, 2)
+    svc = _BesideSvc(pin=pin, provider="prov_A", moving_to=("prov_B", moving))
+    rebuild = {"id": "build_3", "step": "queued", "reason": "rebuild", "rebuild": "operator"}
+
+    async def cancelled_carrying_a_rebuild(**kw):
+        svc.moves.append(kw)
+        cur = {"providerId": "prov_A", "key": pin}
+        return {"changed": False, "from": cur, "to": cur, "retiring": None, "beside": True,
+                "building": rebuild, "cancelled": "build_1"}
+
+    svc.move_projection = cancelled_carrying_a_rebuild
+    out, background, seen = await _move(svc, {"providerId": "prov_A"})
+    assert (out["changed"], out["cancelled"], out["beside"], out["building"]) == (
+        False, "build_1", True, rebuild)
+    assert [t.func for t in background.tasks] == [va.nudge_projection]
+    ((event_type, fields),) = seen["recorded"]
+    assert event_type == "platform.versioning.projection_move_cancelled"
+    assert fields["details"]["build"] == "build_1"
+
+
+@pytest.mark.asyncio
+async def test_with_residency_on_the_key_the_graph_is_on_is_read_again_under_the_capacity_lock(
+        monkeypatch, residency_on):
+    """A switch that lands between the first read and the capacity lock moves the graph's key: a
+    move back onto the key it left is then a real move, admitted under the lock, not taken for
+    the key the graph is on."""
+    left, now_on = keymigrate.owned_key(GID, 1), keymigrate.owned_key(GID, 2)
+    asked = []
+
+    @asynccontextmanager
+    async def admitting(**kw):
+        yield
+
+    async def admission_on(graph_id, provider, key):
+        asked.append((provider, key))
+        return va.residency.Admitted(True, "10.0.0.3:6379", 0, None)
+
+    monkeypatch.setattr(va.residency, "admitting", admitting)
+    monkeypatch.setattr(va.residency, "admission_on", admission_on)
+    svc = _Svc(pin=left, provider="prov_A")
+    reads = iter([{}, {"falkor_graph_name": now_on,
+                       "retired_keys": [{"name": left, "provider": "prov_A"}]}])
+    real = svc.projection_watermark
+
+    async def watermark(graph_id):
+        wm = await real(graph_id)
+        wm.update(next(reads, {}))
+        return wm
+
+    svc.projection_watermark = watermark
+    await _move(svc, {"providerId": "prov_A", "key": left}, keys={left, now_on})
+    assert asked == [("prov_A", left)] and svc.moves[0]["admitted"] is True
+
+
+@pytest.mark.asyncio
 async def test_with_residency_on_a_new_move_is_admitted_with_its_request_and_the_rest_are_not(
         monkeypatch, residency_on):
     """A fresh move of a graph in FalkorDB is admitted under the capacity lock and recorded

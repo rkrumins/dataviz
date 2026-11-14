@@ -608,23 +608,32 @@ one switch. Otherwise the rebuild or the move is made in place, as without build
   Postgres meanwhile) — does not trust the serving key. It seeds the head when its room is admitted,
   and carries over what it can of the serving key's lineage summaries: a cell whose ends the new key
   does not hold is left out, and a serving key that is gone has none to carry. Once switched, the
-  summaries are handed to the batch job. A rebuild asked while one is built is already running
-  (`started: false`); one asked during a move makes the move rebuild too. A graph whose summaries live
+  summaries are handed to the batch job, whichever pass of the build it was asked during. A rebuild
+  asked while one is built is already running (`started: false`); one asked during a move makes the
+  move rebuild too. One the projector starts on its own never waits for room: with none for its seed
+  it is made in place at once, whatever `noRoomPolicy` says, as waiting would keep the graph on a key
+  it distrusts, projecting nothing. An operator's waits as `noRoomPolicy` says. A graph whose summaries live
   in a graph named from its key (dedicated), or whose key other data sources read, is rebuilt in
   place, as is one where either can't be read: the switch would leave them behind. A large window of
   such a graph is written in place for the same reason.
 - **A move** seeds its new key on its new provider, admitted there (with the request, under residency;
   else on its first step), at the version the serving key holds whole, carrying its summaries over
-  exactly. The key must hold that version whole, with no window part-written, or the move is made in
+  exactly. A serving key that is gone by then has none to carry: it is not made again, and the
+  switch hands the summaries to the batch job. The key must hold that version whole, with no window part-written, or the move is made in
   place. Nothing retires until the switch, which takes the move's shard map; the old key is dropped
-  after **Keep the previous key for** (`retireGraceSecs`, a move in place's grace too). The same move
-  again answers with its build (`changed: false`), a move back to where the graph is cancels it
-  (`cancelled`), and another move replaces it. A move back onto a key the graph left clears that key's
-  pass cursor before the seed writes a page, so the seed never resumes past pages it did not write.
+  after **Keep the previous key for** (`retireGraceSecs`, a move in place's grace too: at least 11
+  minutes, past the 10 minutes a newly versioned data source may still read its own key). The same
+  move again answers with its build (`changed: false`), and another move replaces it. A move back to
+  where the graph is cancels it (`cancelled`); a rebuild the move carried goes on, beside the key the
+  graph is on (`beside`, `building`) or in place. A move back onto a key the graph left takes it off
+  the keys to retire and clears its pass cursor before the seed writes a page, so the seed never
+  resumes past pages it did not write; cancelled or replaced, that key goes back to retiring as it
+  was, its grace intact.
 - **Dropped** — its attempts used up, no room with `noRoomPolicy` in_place, New-version builds turned
   off before it began, the graph no longer reading `beside`, its serving key lost — a rebuild or a
   move is made in place, its row exactly as its request or the escalation writes it without builds
-  (`drop_candidate`). An operator's rebuild of a graph out of FalkorDB asks for its load; a move of
+  (`drop_candidate`). A build out of attempts whose drop waits on the graph's lock backs off, and a
+  later pass drops it without running its step again. An operator's rebuild of a graph out of FalkorDB asks for its load; a move of
   one is made in place and asks for its load; a move whose key another graph took by then is not
   made, and its last error says so. A dropped move's key becomes the pin: once the build wrote into
   it, its summaries are owed the batch job.
@@ -636,7 +645,10 @@ one switch. Otherwise the rebuild or the move is made in place, as without build
   wrote the old key at the same commit does not answer for the new one.
 - **The routes:** the rebuild route says `beside: true` and nudges the projection worker, which builds
   it within `buildConcurrency`; the move route says `beside`, `building` and `cancelled`, with
-  `retiring: null` until the switch. Data health follows a rebuild built beside to its switch, and
+  `retiring: null` until the switch. The poll takes builds oldest first, for at most half the graphs
+  it takes, and a build backing off only once its `retryAt` has passed, so builds waiting for room or
+  a slot never crowd out graphs that lag. A graph out of FalkorDB with a build is taken too: its
+  pass drops the build and gives its room back. Data health follows a rebuild built beside to its switch, and
   the inventory shows what each build is for ("Rebuilding beside", "Moving to `<key>`").
 
 ---

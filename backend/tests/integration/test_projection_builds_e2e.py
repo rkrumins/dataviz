@@ -20,6 +20,7 @@ import asyncio
 import copy
 import os
 import re
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -1770,3 +1771,361 @@ async def _run_a_moves_seed_counts_on_its_own_providers_master(monkeypatch) -> N
 
 def test_a_moves_seed_counts_on_its_own_providers_master(builds_on, monkeypatch):
     asyncio.run(_run_a_moves_seed_counts_on_its_own_providers_master(monkeypatch))
+
+
+# ── what an independent review of rebuilds and moves built beside found ───────────────────────
+
+
+def _upgrade_during(monkeypatch, svc, gid: str, owner, attr: str) -> list:
+    """Have ``owner.attr`` ask for an operator's rebuild right after its first call, as an operator
+    would while a pass of the graph's move is in flight (``upgrade``). Returns what the ask
+    answered."""
+    real = getattr(owner, attr)
+    upgraded: list = []
+
+    async def then_upgrade(*a, **k):
+        out = await real(*a, **k)
+        if not upgraded:
+            upgraded.append(await svc.request_projection_rebuild(gid))
+        return out
+
+    monkeypatch.setattr(owner, attr, then_upgrade)
+    return upgraded
+
+
+async def _until_switched(proj, gid: str, passes: int = 4) -> ProjectionStateORM:
+    for _ in range(passes):
+        if (await _ps(gid)).candidate_state is None:
+            break
+        await proj.project_graph(gid)
+    return await _ps(gid)
+
+
+async def _run_a_rebuild_asked_while_a_moves_pass_runs_is_kept(monkeypatch, where: str) -> None:
+    """A rebuild asked while a pass of a move's build is in flight, in its seed's summaries, its
+    catch-up or its switch: the move rebuilds too, and the pass, holding the build's state from
+    before the ask, never takes that back. The switch owes the summaries to the batch job, once."""
+    svc, fake = GraphVersioningService(), BuildFalkor()
+    gid, _proj, serving = await _seed(svc, fake)
+    await _beside(svc, gid)
+    _summaries_on(serving)
+    hand_off, asked = _hand_offs(svc)
+    proj = FalkorProjector(graph_client_factory=fake, on_rollups_stale=hand_off)
+    target = _target(fake, gid)
+    assert (await _move(svc, gid, target))["beside"]
+    if where == "seed":
+        upgraded = _upgrade_during(monkeypatch, svc, gid, FalkorProjector, "_copy_summaries")
+        await proj.project_graph(gid)                   # seeded, the rebuild asked meanwhile
+    else:
+        await proj.project_graph(gid)                   # seeded at 3: catching up
+        if where == "catch_up":
+            await _edit_publish(svc, gid, "a", _create("D"), "a change")
+            upgraded = _upgrade_during(monkeypatch, svc, gid, FalkorProjector, "_apply")
+        else:
+            upgraded = _upgrade_during(monkeypatch, svc, gid, proj, "_falkor_counts")
+        await proj.project_graph(gid)
+    assert upgraded == [True]
+    ps = await _until_switched(proj, gid)
+    assert ps.candidate_state is None and ps.falkor_graph_name == target
+    assert asked == [gid], "the rebuild's summaries go to the batch job"
+
+
+@pytest.mark.parametrize("where", ["seed", "catch_up", "switch"])
+def test_a_rebuild_asked_while_a_moves_pass_runs_is_kept(builds_on, monkeypatch, where):
+    asyncio.run(_run_a_rebuild_asked_while_a_moves_pass_runs_is_kept(monkeypatch, where))
+
+
+async def _run_a_move_back_to_its_key_keeps_the_rebuild_the_move_carries(state) -> None:
+    """A move carrying a rebuild (one asked during it) is cancelled by a move back to the key the
+    graph is on: the move goes, the rebuild does not. Built beside while beside applies, then
+    switched to; made in place once it no longer does (``buildForRebuilds`` turned off)."""
+    svc, fake = GraphVersioningService(), BuildFalkor()
+    gid, _proj, _serving = await _seed(svc, fake)
+    await _beside(svc, gid)
+    hand_off, asked = _hand_offs(svc)
+    proj = FalkorProjector(graph_client_factory=fake, on_rollups_stale=hand_off)
+    pin = (await _ps(gid)).falkor_graph_name
+    moved = await _move(svc, gid, _target(fake, gid))
+    assert await svc.request_projection_rebuild(gid)    # the move rebuilds too
+    back = await _move(svc, gid, pin, provider="default")
+    ps = await _ps(gid)
+    build = ps.candidate_state
+    assert back["cancelled"] == moved["building"]["id"] and back["changed"] is False
+    assert (build["reason"], build["rebuild"]["cause"]) == ("rebuild", "operator"), build
+    assert back["beside"] and back["building"]["id"] == build["id"]
+    assert ps.candidate_graph_name != moved["to"]["key"] and ps.falkor_graph_name == pin
+    ps = await _until_switched(proj, gid)
+    assert ps.candidate_state is None and ps.projected_commit_seq == 3
+    assert asked == [gid]
+    await _assert_matches_main(svc, fake, gid)
+
+    pin = ps.falkor_graph_name
+    await _move(svc, gid, _target(fake, gid, 2))
+    assert await svc.request_projection_rebuild(gid)
+    state["policy"] = _policy(buildForRebuilds=False)
+    before = await _ps(gid)
+    back = await _move(svc, gid, pin, provider="default")
+    ps = await _ps(gid)
+    assert back["cancelled"] and not back["beside"] and back["building"] is None
+    assert _in_place(ps) == {**_rebuilt_in_place(before, 3), "build": (None, None, None, None)}
+
+
+def test_a_move_back_to_its_key_keeps_the_rebuild_the_move_carries(builds_on):
+    asyncio.run(_run_a_move_back_to_its_key_keeps_the_rebuild_the_move_carries(builds_on))
+
+
+async def _run_a_move_back_keeps_the_rebuild_the_projector_started(state, monkeypatch) -> None:
+    """A rebuild the projector started on its own, built beside, replaced by a move that carries
+    it, then that move cancelled: the rebuild is built beside again, and its last error still
+    says why."""
+    state["policy"] = _policy(buildAboveRows=1000)       # the window itself is written in place
+    svc, fake = GraphVersioningService(), BuildFalkor()
+    gid, _proj, _serving = await _seed(svc, fake)
+    await _beside(svc, gid)
+    proj = FalkorProjector(graph_client_factory=fake, on_rollups_stale=_hand_offs(svc)[0])
+    pin = (await _ps(gid)).falkor_graph_name
+    healthy = _drifting(monkeypatch)
+    await _edit_publish(svc, gid, "a", _create("D"), "a change")
+    await proj.project_graph(gid)                       # escalated: rebuilt beside
+    healthy()
+    moved = await _move(svc, gid, _target(fake, gid))
+    assert (await _ps(gid)).candidate_state["rebuild"]["cause"] == "drift"
+    back = await _move(svc, gid, pin, provider="default")
+    ps = await _ps(gid)
+    assert back["cancelled"] == moved["building"]["id"]
+    assert (ps.candidate_state["reason"], ps.candidate_state["rebuild"]) == (
+        "rebuild", {"cause": "drift", "why": "it holds less than history"})
+    assert ps.last_error == "rebuilding beside on its own: it holds less than history"
+    ps = await _until_switched(proj, gid)
+    assert ps.candidate_state is None and (ps.projected_commit_seq, ps.last_error) == (4, None)
+    await _assert_matches_main(svc, fake, gid)
+
+
+def test_a_move_back_keeps_the_rebuild_the_projector_started(builds_on, monkeypatch):
+    asyncio.run(_run_a_move_back_keeps_the_rebuild_the_projector_started(builds_on, monkeypatch))
+
+
+async def _run_a_move_back_dropped_keeps_its_keys_grace() -> None:
+    """Moved away and switched, then moved back beside onto the old key while it waits out its
+    grace: cancelled, or replaced by a move elsewhere, the old key is retired as it was, its grace
+    and its version intact, not dropped at once."""
+    svc, fake = GraphVersioningService(), BuildFalkor()
+    gid, proj, _serving = await _seed(svc, fake)
+    await _beside(svc, gid)
+    home = (await _ps(gid)).falkor_graph_name
+    away = _target(fake, gid)
+    await _move(svc, gid, away)
+    ps = await _until_switched(proj, gid)
+    assert ps.falkor_graph_name == away
+    original = [e for e in ps.retired_keys if e["name"] == home]
+    assert len(original) == 1
+
+    async def nobody(*_a):
+        return []
+
+    soon = (datetime.now(timezone.utc) + timedelta(seconds=5)).isoformat()
+    for undo in ("cancel", "replace"):
+        back = await _move(svc, gid, home, provider="default")
+        assert back["beside"]
+        assert not [e for e in (await _ps(gid)).retired_keys or [] if e["name"] == home]
+        if undo == "cancel":
+            assert (await _move(svc, gid, away))["cancelled"] == back["building"]["id"]
+        else:
+            assert (await _move(svc, gid, _target(fake, gid, 2)))["beside"]
+        ps = await _ps(gid)
+        assert [e for e in ps.retired_keys if e["name"] == home] == original, undo
+        gone = await keymigrate.retire_moved_keys(proj, key_in_use=nobody, now=soon)
+        assert not [g for g in gone if g["graphId"] == gid and g["key"] == home], gone
+        if undo == "cancel":
+            assert (await _ps(gid)).candidate_state is None
+
+
+def test_a_move_back_dropped_keeps_its_keys_grace(builds_on):
+    asyncio.run(_run_a_move_back_dropped_keeps_its_keys_grace())
+
+
+async def _run_a_rebuild_the_projector_starts_never_waits_for_room(state, monkeypatch) -> None:
+    """With no room for its seed, a rebuild the projector started on its own is made in place at
+    once, whatever ``noRoomPolicy`` says: waiting would keep the graph on a key it distrusts,
+    projecting nothing, for as long as there is no room. An operator's rebuild waits, as
+    ``noRoomPolicy`` wait says."""
+    state["policy"] = _policy(buildAboveRows=1000)       # the window itself is written in place
+    state["seed_room"] = Admitted(False, None, 10 ** 9, "capacity")
+    svc, fake = GraphVersioningService(), BuildFalkor()
+    gid, _proj, _serving = await _seed(svc, fake)
+    await _beside(svc, gid)
+    proj = FalkorProjector(graph_client_factory=fake, on_rollups_stale=_hand_offs(svc)[0])
+    healthy = _drifting(monkeypatch)
+    await _edit_publish(svc, gid, "a", _create("D"), "a change")
+    await proj.project_graph(gid)                       # escalated: a rebuild beside asked for
+    healthy()
+    assert (await _ps(gid)).candidate_state["rebuild"]["cause"] == "drift"
+    await proj.project_graph(gid)                       # no room for its seed: made in place
+    ps = await _ps(gid)
+    assert ps.candidate_state is None and (ps.status, ps.projected_commit_seq) == ("rebuilding", 0)
+    assert ps.last_error == "rebuilding on its own: it holds less than history"
+    await proj.project_graph(gid)
+    assert (await _ps(gid)).projected_commit_seq == 4
+    await _assert_matches_main(svc, fake, gid)
+
+    assert await svc.request_projection_rebuild(gid)
+    await proj.project_graph(gid)
+    ps = await _ps(gid)
+    assert ps.candidate_state["step"] == "queued" and ps.candidate_state["waiting"]
+
+
+def test_a_rebuild_the_projector_starts_never_waits_for_room(builds_on, monkeypatch):
+    asyncio.run(_run_a_rebuild_the_projector_starts_never_waits_for_room(builds_on, monkeypatch))
+
+
+async def _run_a_build_out_of_attempts_is_not_run_again_while_its_drop_waits(state,
+                                                                            monkeypatch) -> None:
+    """A build that used its last attempt is dropped; while the graph's lock keeps that drop
+    waiting, the build is not run again: it waits out a backoff, then is dropped, its step not
+    retried."""
+    from backend.app.services.versioning.errors import LockBusy
+
+    state["policy"] = _policy(buildMaxAttempts=1)
+    svc, fake = GraphVersioningService(), BuildFalkor()
+    gid, proj, _serving = await _seed(svc, fake)
+    await _beside(svc, gid)
+    await _edit_publish(svc, gid, "a", _create("D", "E"), "a change")
+    copies: list = []
+
+    async def broken(self, clone):
+        copies.append(1)
+        raise ConnectionError("the node went away mid-copy")
+
+    real_drop = GraphVersioningService.drop_candidate
+    busy = [True]
+
+    async def drop(self, *a, **k):
+        if busy:
+            busy.pop()
+            raise LockBusy()
+        return await real_drop(self, *a, **k)
+
+    monkeypatch.setattr(CopyGraph, "copy", broken)
+    monkeypatch.setattr(GraphVersioningService, "drop_candidate", drop)
+    await proj.project_graph(gid)                       # failed, out of attempts, drop waited
+    ps = await _ps(gid)
+    assert copies == [1] and ps.candidate_state["attempts"] == 1
+    assert ps.candidate_state["retryAt"], "a backoff before the drop is tried again"
+    await proj.project_graph(gid)                       # still backing off: nothing runs
+    assert copies == [1] and (await _ps(gid)).candidate_state is not None
+    async with db.graphver_session() as s:
+        row = await s.get(ProjectionStateORM, gid)
+        row.candidate_state = {**row.candidate_state, "retryAt": None}
+    await proj.project_graph(gid)                       # dropped, the copy not tried again
+    assert copies == [1] and (await _ps(gid)).candidate_state is None
+    await proj.project_graph(gid)                       # and written in place
+    assert (await _ps(gid)).projected_commit_seq == 4
+    await _assert_matches_main(svc, fake, gid)
+
+
+def test_a_build_out_of_attempts_is_not_run_again_while_its_drop_waits(builds_on, monkeypatch):
+    asyncio.run(_run_a_build_out_of_attempts_is_not_run_again_while_its_drop_waits(
+        builds_on, monkeypatch))
+
+
+async def _run_the_poll_skips_builds_backing_off_and_never_fills_with_builds(monkeypatch) -> None:
+    """The poll leaves out a build backing off (its ``retryAt``) and takes builds for at most half
+    its graphs, so builds waiting for room or a slot never crowd out graphs that lag. A graph out
+    of FalkorDB with a build is taken, so its build is dropped and its room given back."""
+    svc, fake = GraphVersioningService(), BuildFalkor()
+    graphs = [await _seed(svc, fake) for _ in range(3)]
+    (lagging, _p, _s), (waiting, _p2, _s2), (due, _p3, _s3) = graphs
+    proj = graphs[0][1]
+    for gid in (waiting, due):
+        await _beside(svc, gid)
+        assert await svc.request_projection_rebuild(gid)
+    later = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
+    async with db.graphver_session() as s:
+        row = await s.get(ProjectionStateORM, waiting)
+        row.candidate_state = {**row.candidate_state, "retryAt": later}
+    await _edit_publish(svc, lagging, "a", _create("D"), "a change")
+    taken: list = []
+
+    async def recorded(gid, **_k):
+        taken.append(gid)
+        return {"graph_id": gid}
+
+    async def builds_among(ids) -> list:
+        async with db.graphver_session() as s:
+            rows = [await s.get(ProjectionStateORM, g) for g in ids]
+        return [r.graph_id for r in rows if r.candidate_state is not None]
+
+    # Other tests' graphs share this database: the poll is asked for plenty, and judged on ours.
+    monkeypatch.setattr(proj, "project_graph", recorded)
+    await proj.project_pending(limit=1000)
+    assert waiting not in taken and {lagging, due} <= set(taken), taken
+    taken.clear()
+    await proj.project_pending(limit=2)
+    assert len(taken) == 2 and len(await builds_among(taken)) == 1, taken
+
+    async with db.graphver_session() as s:
+        row = await s.get(ProjectionStateORM, due)
+        row.status = "evicted"
+    taken.clear()
+    await proj.project_pending(limit=1000)
+    assert due in taken, taken
+
+
+def test_the_poll_skips_builds_backing_off_and_never_fills_with_builds(builds_on, monkeypatch):
+    asyncio.run(_run_the_poll_skips_builds_backing_off_and_never_fills_with_builds(monkeypatch))
+
+
+async def _run_an_escalation_of_a_graph_that_reads_latest_takes_no_graph_lock(monkeypatch) -> None:
+    """Asking whether a rebuild the projector starts on its own is built beside reads the policy
+    before taking the graph's lock: a graph that does not read ``beside`` answers no at once, so
+    its rebuild in place never waits on that lock."""
+    svc, fake = GraphVersioningService(), BuildFalkor()
+    gid, _proj, _serving = await _seed(svc, fake)
+    locked: list = []
+
+    async def no_lock(self, s, graph_id, *a, **k):
+        locked.append(graph_id)
+        raise AssertionError("the graph's lock is not needed to say no")
+
+    monkeypatch.setattr(GraphVersioningService, "_lock_graph", no_lock)
+    epoch = (await _ps(gid)).epoch
+    assert not await svc.record_rebuild(gid, epoch=epoch, policy=build_policy.current(),
+                                        switch_on=True, cause="drift", why="drift")
+    assert locked == []
+
+
+def test_an_escalation_of_a_graph_that_reads_latest_takes_no_graph_lock(builds_on, monkeypatch):
+    asyncio.run(_run_an_escalation_of_a_graph_that_reads_latest_takes_no_graph_lock(monkeypatch))
+
+
+async def _run_a_move_whose_serving_key_is_gone_owes_its_summaries(monkeypatch) -> None:
+    """A move whose serving key is gone when its summaries are to be carried over (its node
+    restarted mid-seed): nothing is carried, the key the graph's readers are pinned to is not made
+    again (empty), and the switch hands the summaries to the batch job."""
+    svc, fake = GraphVersioningService(), BuildFalkor()
+    gid, _proj, serving = await _seed(svc, fake)
+    await _beside(svc, gid)
+    _summaries_on(serving)
+    hand_off, asked = _hand_offs(svc)
+    proj = FalkorProjector(graph_client_factory=fake, on_rollups_stale=hand_off)
+    target = _target(fake, gid)
+    assert (await _move(svc, gid, target))["beside"]
+    real_clear = FalkorProjector._clear_summaries
+
+    async def clear_then_lose_the_serving_key(self, client):
+        await real_clear(self, client)
+        serving.exists = False                          # its node restarted without it
+
+    monkeypatch.setattr(FalkorProjector, "_clear_summaries", clear_then_lose_the_serving_key)
+    await proj.project_graph(gid)                       # seeded, nothing to carry over
+    ps = await _ps(gid)
+    assert ps.candidate_state["step"] == "catching_up" and ps.candidate_state["rollupsStale"]
+    assert serving.exists is False, "the pinned key must not be made again, empty"
+    assert not fake.graphs[target].summaries
+    ps = await _until_switched(proj, gid)
+    assert ps.candidate_state is None and ps.falkor_graph_name == target
+    assert asked == [gid]
+
+
+def test_a_move_whose_serving_key_is_gone_owes_its_summaries(builds_on, monkeypatch):
+    asyncio.run(_run_a_move_whose_serving_key_is_gone_owes_its_summaries(monkeypatch))

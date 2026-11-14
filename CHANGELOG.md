@@ -61,11 +61,17 @@ integration's many small changes as a few commits.
   - **A move** seeds its new key on its new provider at the version served, its summaries carried
     over exactly, and nothing retires until the switch. The same move again answers with its build,
     and a move back to where the graph is cancels it (recorded as
-    `platform.versioning.projection_move_cancelled`).
+    `platform.versioning.projection_move_cancelled`). A rebuild the move carried goes on, and a key
+    the cancelled move went back to keeps retiring as it was.
   - A build that cannot finish, and a graph where it does not apply (another read mode, the setting
     or New-version builds off, a customer's key, a graph that serves no version yet, a move from a
-    key part way through a change), is rebuilt or moved in place exactly as before. The admin
+    key part way through a change), is rebuilt or moved in place exactly as before. So is a rebuild
+    the projector starts on its own when there is no room for its seed: it never waits. The admin
     inventory says what each build is for ("Rebuilding beside", "Moving to `<key>`").
+  - The poll takes builds for at most half the graphs it takes, and a build backing off only once
+    its backoff has passed, so builds waiting for room or a slot never hold up graphs that lag.
+  - **Keep the previous key for** (`retireGraceSecs`) is at least 11 minutes. A data source
+    versioned within the last 10 minutes may still read its own key, which must outlive that.
 - **Replaces keyed by your own id handle the rows that don't carry it.** A source that keys rows by
   its own id (`identifier=prop.MY_UNIQUE_ID`) often has rows without it, such as a top-level
   container. It also meets graphs first loaded by urn (or made in the app), whose nodes never had

@@ -2337,6 +2337,13 @@ class FalkorProjector:
             # mode they read now says, rather than built on and switched to.
             await self._drop_build(graph_id, build_id, f"the graph now reads {mode}")
             return noop
+        tried = int(state.get("attempts") or 0)
+        if tried >= int(policy["buildMaxAttempts"]):
+            # Out of attempts, its drop left to a later pass by a busy graph lock: dropped now,
+            # its step not run again.
+            await self._drop_build(graph_id, build_id,
+                                   f"gave up after {tried} attempt(s): {state.get('error')}")
+            return noop
         building = self.__dict__.setdefault("_building", set())
         if graph_id not in building and len(building) >= int(policy["buildConcurrency"]):
             return {**noop, "skipped": "build_slots"}
@@ -2376,6 +2383,11 @@ class FalkorProjector:
             logger.warning("build %s of %s failed at %s (attempt %d): %s", build_id, graph_id,
                            step, attempts, exc, exc_info=True)
             if attempts >= int(policy["buildMaxAttempts"]):
+                # Recorded first, with a backoff: a drop that the graph's lock keeps waiting is
+                # made by a later pass, which drops the build without running its step again.
+                await self._svc.update_candidate(
+                    graph_id, build_id, attempts=attempts, error=str(exc)[:300],
+                    retryAt=_retry_at(attempts), waiting=None)
                 await self._drop_build(graph_id, build_id,
                                        f"gave up after {attempts} attempt(s): {exc}")
             else:
@@ -2463,6 +2475,11 @@ class FalkorProjector:
             if seeded is not None:
                 return seeded
             why = refused if why is None else f"{why}; {refused}"
+        started_itself = (state.get("rebuild") or {}).get("cause") not in (None, "operator")
+        if no_room and reason == "rebuild" and started_itself:
+            # A rebuild the projector started on its own never waits for room: the graph would
+            # keep serving a key it distrusts, and project nothing, for as long as there is none.
+            raise _BuildRefused(f"{why}: rebuilt in place, as the projector started it")
         if no_room and policy["noRoomPolicy"] == "in_place":
             raise _BuildRefused(f"{why}: written in place (noRoomPolicy in_place)")
         waited = _secs_since(state.get("since"))
@@ -2672,9 +2689,9 @@ class FalkorProjector:
             after, since = 0, _now()
             await self._svc.update_candidate(graph_id, build_id, summariesAt=0,
                                              summariesSince=since, waiting=None)
-        await self._copy_summaries(graph_id, build_id, ps, client, after, deadline,
-                                   lenient=bool(state.get("rebuild")))
-        stale = bool(state.get("rollupsStale"))
+        carried = await self._copy_summaries(graph_id, build_id, ps, client, after, deadline,
+                                             lenient=bool(state.get("rebuild")))
+        stale = bool(state.get("rollupsStale")) or carried is None
         if await _rollups_ran_since(graph.data_source_id, since):
             # A summaries job met the copy: the serving key's summaries may have changed under it.
             restarts = int(state.get("summaryRestarts") or 0) + 1
@@ -2686,10 +2703,12 @@ class FalkorProjector:
         unconfirmed = await _write_marker(client, seq, ps.epoch)
         if unconfirmed:
             raise RuntimeError(unconfirmed)
+        # Owed summaries are only ever recorded, never cleared: a rebuild asked meanwhile
+        # (``upgrade``) owed them too, and this pass's copy of the state is from before it.
         if not await self._svc.update_candidate(
                 graph_id, build_id, seq=seq, step="catching_up", seedPhase=None,
                 summariesAt=None, summariesSince=None, summariesTakenAt=since,
-                rollupsStale=stale or None, progress=None, waiting=None):
+                progress=None, waiting=None, **({"rollupsStale": True} if stale else {})):
             return noop
         increment("graphver_builds_total", step="seeded")
         logger.info("build %s of %s: seeded '%s' at version %d from Postgres", build_id, graph_id,
@@ -2708,7 +2727,7 @@ class FalkorProjector:
             await _q(client, f"MATCH (m:{label}) DELETE m")
 
     async def _copy_summaries(self, graph_id, build_id, ps, client, after: int,
-                              deadline: Optional[float], *, lenient: bool = False) -> int:
+                              deadline: Optional[float], *, lenient: bool = False) -> Optional[int]:
         """Carry the serving key's lineage summaries over into the build's key: its cells a page
         of source nodes at a time (``_SCAN_PAGE`` internal ids, from ``after``), each merged onto
         its ends by label and urn with the properties it has — a page written twice writes the
@@ -2719,19 +2738,22 @@ class FalkorProjector:
 
         A rebuild's copy is ``lenient``: its seed holds the head, while the serving key it does not
         trust holds an older version, perhaps drifted, so such a cell is left out rather than fail
-        it, and a serving key that is gone has nothing to carry (asked so as not to create it).
-        The switch hands the summaries to the batch job either way (``rollupsStale``)."""
+        it. The switch hands a rebuild's summaries to the batch job either way (``rollupsStale``).
+
+        A serving key that is gone has nothing to carry: None, and the build owes the summaries to
+        the batch job. It is asked so as not to create it (``missing="raise"``): ``GRAPH.QUERY``
+        would make the key the graph's readers are pinned to again, empty."""
         source = await self._graph_client(ps.falkor_graph_name, ps.falkor_provider)
-        missing = "raise" if lenient else "fallback"
+        missing = "raise"
         try:
             res = await _q(source, "MATCH (n) RETURN max(id(n))", timeout_ms=_READ_TIMEOUT_MS,
                            read_only=True, missing=missing)
         except Exception as exc:
-            if not (lenient and _is_missing_graph_error(exc)):
+            if not _is_missing_graph_error(exc):
                 raise
-            logger.info("build %s of %s: the serving key is gone, no summaries to carry over",
-                        build_id, graph_id)
-            return 0
+            logger.info("build %s of %s: the serving key is gone, no summaries to carry over; "
+                        "the batch job makes them once switched", build_id, graph_id)
+            return None
         rows = getattr(res, "result_set", None) or []
         top = rows[0][0] if rows and rows[0] else None
         written = skipped = 0
@@ -2844,8 +2866,8 @@ class FalkorProjector:
         unconfirmed = await _write_marker(client, head, ps.epoch)
         if unconfirmed:
             raise RuntimeError(unconfirmed)
-        await self._svc.update_candidate(graph_id, build_id, seq=head,
-                                         rollupsStale=stale or None, progress=None)
+        await self._svc.update_candidate(graph_id, build_id, seq=head, progress=None,
+                                         **({"rollupsStale": True} if stale else {}))
         logger.info("build %s of %s: caught up (%d, %d] in %.2fs", build_id, graph_id, seq, head,
                     time.monotonic() - started)
         return {**noop, "noop": False, "build": "catching_up", "target": head}
@@ -3201,17 +3223,54 @@ class FalkorProjector:
         self, limit: int = 100, concurrency: Optional[int] = None
     ) -> List[Dict[str, object]]:
         """Catch up every graph whose projection lags (`projected < target`), STALEST first, and
-        take every build beside a serving key its next step (builds first; a nudge is never the
-        only thing that moves one), with bounded concurrency so the reconciling loop keeps up
-        across 100s of graphs (the serial version made a full pass cost the SUM of per-graph
-        times). The select is keyed by ``graph_id`` (PK) so each id appears once per pass — no
-        same-graph race; a per-graph failure is logged and does not abort the batch."""
+        take every build beside a serving key its next step (a nudge is never the only thing that
+        moves one), with bounded concurrency so the reconciling loop keeps up across 100s of
+        graphs (the serial version made a full pass cost the SUM of per-graph times). Builds are
+        taken oldest first, for at most half of ``limit``, and one backing off (its ``retryAt``)
+        only once that has passed: builds waiting for room or a slot never crowd out graphs that
+        lag, and graphs that lag never crowd out builds. The selects are keyed by ``graph_id``
+        (PK) so each id appears once per pass — no same-graph race; a per-graph failure is logged
+        and does not abort the batch."""
         await self._report_lag()
+        now = _now()
+        building = ProjectionStateORM.candidate_state.isnot(None)
+        retry_at = ProjectionStateORM.candidate_state["retryAt"].astext
+
+        def due(*where):
+            return select(ProjectionStateORM.graph_id).join(
+                GraphORM, GraphORM.id == ProjectionStateORM.graph_id,
+            ).where(
+                *where,
+                # A pass that failed is retried after its backoff (`_retry_at`), so a
+                # genuinely unfixable graph retries visibly but without churning the loop.
+                # A nudge (a publish) and project_now retry at once regardless.
+                or_(ProjectionStateORM.next_retry_at.is_(None),
+                    ProjectionStateORM.next_retry_at <= now),
+                # Unpinned graphs (no real FalkorDB target — falkor_graph_name NULL or the
+                # synthetic gv_<id> fallback) are never projected: nothing reads those keys.
+                # Filtered here in SQL so hundreds of test-created graphs can't crowd out
+                # (limit) or churn the poll loop; project_graph re-checks for direct nudges.
+                ProjectionStateORM.falkor_graph_name.isnot(None),
+                ProjectionStateORM.falkor_graph_name
+                != literal("gv_").concat(ProjectionStateORM.graph_id),
+                # A tombstoned graph keeps its pin for the undo window and must not reseed it.
+                GraphORM.deleted_at.is_(None),
+                # A fork has no FalkorDB copy (project_graph skips one whatever its row says).
+                GraphORM.fork_parent_graph_id.is_(None),
+            )
+
         async with self._session() as s:
-            ids = (await s.execute(
-                select(ProjectionStateORM.graph_id).join(
-                    GraphORM, GraphORM.id == ProjectionStateORM.graph_id,
-                ).where(
+            # Building a new version beside its key (``candidates``): a rebuild or a move of a
+            # graph that is caught up has nothing else to bring it here. A graph out of FalkorDB
+            # with one is taken too: its pass drops the build and gives its room back.
+            ids = list((await s.execute(
+                due(building, or_(retry_at.is_(None), retry_at <= now))
+                .order_by(ProjectionStateORM.candidate_state["since"].astext)
+                .limit(max(1, limit // 2))
+            )).scalars().all())
+            ids += (await s.execute(
+                due(
+                    ~building,
                     # LAG IS MEASURED AGAINST THE COMMITTED HEAD as well as `target`, and a
                     # pass projects up to `max(target, head)`. A graph left below `main_head`
                     # is otherwise never caught up, while the read path's freshness check
@@ -3222,38 +3281,16 @@ class FalkorProjector:
                         ProjectionStateORM.projected_commit_seq < ProjectionStateORM.target_commit_seq,
                         ProjectionStateORM.projected_commit_seq < GraphORM.main_head_commit_seq,
                         # Caught up, but holding quarantined entities due another try.
-                        ProjectionStateORM.quarantine_next_at <= _now(),
-                        # Building a new version beside its key (``candidates``): a rebuild or a
-                        # move of a graph that is caught up has nothing else to bring it here.
-                        ProjectionStateORM.candidate_state.isnot(None),
+                        ProjectionStateORM.quarantine_next_at <= now,
                     ),
-                    # A pass that failed is retried after its backoff (`_retry_at`), so a
-                    # genuinely unfixable graph retries visibly but without churning the loop.
-                    # A nudge (a publish) and project_now retry at once regardless.
-                    or_(ProjectionStateORM.next_retry_at.is_(None),
-                        ProjectionStateORM.next_retry_at <= _now()),
-                    # Unpinned graphs (no real FalkorDB target — falkor_graph_name NULL or the
-                    # synthetic gv_<id> fallback) are never projected: nothing reads those keys.
-                    # Filtered here in SQL so hundreds of test-created graphs can't crowd out
-                    # (limit) or churn the poll loop; project_graph re-checks for direct nudges.
-                    ProjectionStateORM.falkor_graph_name.isnot(None),
-                    ProjectionStateORM.falkor_graph_name
-                    != literal("gv_").concat(ProjectionStateORM.graph_id),
-                    # A tombstoned graph keeps its pin for the undo window and must not reseed it.
-                    GraphORM.deleted_at.is_(None),
-                    # A fork has no FalkorDB copy (project_graph skips one whatever its row says).
-                    GraphORM.fork_parent_graph_id.is_(None),
                     # An evicted graph waits for its load, whatever the switch says
                     # (project_graph's gate).
                     ProjectionStateORM.status.notin_(("evicted", "waiting_capacity")),
                 ).order_by(
-                    # Builds first, so the limit never starves one: buildConcurrency bounds them,
-                    # and one backing off answers after two reads.
-                    ProjectionStateORM.candidate_state.isnot(None).desc(),
                     (func.greatest(ProjectionStateORM.target_commit_seq,
                                    GraphORM.main_head_commit_seq)
                      - ProjectionStateORM.projected_commit_seq).desc()
-                ).limit(limit)
+                ).limit(max(limit - len(ids), 0))
             )).scalars().all()
         if not ids:
             return []

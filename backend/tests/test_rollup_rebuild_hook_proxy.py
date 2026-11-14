@@ -39,7 +39,7 @@ _NOTED: list = []
 
 #: The key the graph is on, and the idempotency key a hand-off at its commit 8 is asked under.
 _PIN = {"name": "gvp_graph_1{aaaaaaaa.1}"}
-_KEY = f"gv-rollup-rebuild:graph_1:8:{hashlib.sha1(_PIN["name"].encode()).hexdigest()[:12]}"
+_KEY = f"gv-rollup-rebuild:graph_1:8:{hashlib.sha1(_PIN['name'].encode()).hexdigest()[:12]}"
 
 
 class _Client:

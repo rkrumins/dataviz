@@ -205,6 +205,16 @@ async def test_get_describes_each_value_and_how_the_card_shows_it():
     assert fields["retireGraceSecs"]["applies"] == "switch"
 
 
+def test_a_previous_key_outlives_the_versioned_graph_sets_cache():
+    """A data source versioned since the versioned-graph set was cached still reads its own key
+    until that cache refreshes: the shortest grace a key can be given outlasts it."""
+    from backend.app.services.versioned_sources import CACHE_TTL_SECS
+
+    (grace,) = [f for f in bp.FIELDS if f.wire == "retireGraceSecs"]
+    assert grace.lo > CACHE_TTL_SECS
+    assert config.RETIRE_GRACE_SECS > CACHE_TTL_SECS
+
+
 async def test_put_saves_what_it_names_records_from_and_to_and_moves_the_generation():
     session, recorded = _Session(_row(flipMaxLagRows=40)), []
     out = await _put({"copyMarginPct": 150, "noRoomPolicy": "in_place", "flipMaxLagRows": -1},
