@@ -1634,7 +1634,7 @@ def _modes_table(r: Dict[str, Any]) -> str:
              f"{_fmt(g.get('edges'))} edges, changes of {_fmt(g.get('changes'))} rows, "
              f"{g.get('readers')} readers",
              "", "| mode | import s | publish s | landed in s (passes) | reads while landing | p50 / p95 / p99 ms "
-             "| errors | routes | versions seen | FalkorDB MB (start → peak) | FalkorDB == Postgres |",
+             + "| errors | routes | versions seen | FalkorDB MB (start → peak) | FalkorDB == Postgres |",
              "|---|---|---|---|---|---|---|---|---|---|---|"]
     for name, m in r["modes"].items():
         if m.get("error"):
