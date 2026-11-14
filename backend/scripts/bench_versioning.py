@@ -1193,52 +1193,75 @@ AFTER_SECS = 5.0
 READ_PHASES = ("import", "landing", "after")
 
 
+#: How many times the app's graph client tries a shed read again (``MAX_READ_RETRIES`` in
+#: frontend/src/services/graphRequestFailure.ts).
+_CLIENT_READ_RETRIES = 2
+
+
 async def _browse(args) -> int:
     """Readers in a process of their own, as a web pod's are: each reads a random node and its
     connections, again and again, by the route a read of main takes (``residency_state``: the key
     at the version it serves, else Postgres at the head through the bounded reader the context
-    engine uses), until ``--stop`` exists. One line per read in ``--out``: when, how long, the
-    route, the version it saw, and the error, if any."""
+    engine uses, holding a place among the process's and the graph's reads from Postgres as a web
+    pod's do), until ``--stop`` exists. A read the bounds shed (``ProviderBusy``, 429, or
+    ``GraphReadBusy``, 503) is tried again as the app's graph client does: twice more at most, after
+    the server's Retry-After capped at 5 s, else 0.5 s then 1.5 s, each with up to 0.25 s of jitter.
+    One line per read in ``--out``: when, how long (its waits included), the route, the version it
+    saw, how many times it was shed, and the error it ended on, if any."""
+    from backend.app.providers.manager import provider_manager
     from backend.app.services.context_engine import _pg_reader
     from backend.app.services.versioning import db
+    from backend.app.services.versioning.errors import GraphReadBusy
     from backend.app.services.versioning.service import GraphVersioningService
+    from backend.common.adapters.circuit import ProviderBusy
     from backend.common.models.graph import EdgeQuery
 
     with open(args.nodes_file) as f:
         pool = [tuple(x) for x in json.load(f)]
     svc = GraphVersioningService()
     main = await svc.main_branch_id(args.graph_id)
-    reader = _pg_reader(None, svc, args.graph_id, main)
+    reader = _pg_reader(provider_manager, svc, args.graph_id, main)
     factory = falkor_factory()
     clients: Dict[str, Any] = {}
     out = open(args.out, "a", buffering=1)
+
+    async def read(urn: str, label: str):
+        state = await svc.residency_state(args.graph_id) or {}
+        name = state.get("falkor_graph_name")
+        if state.get("serving") is not None and name:
+            client = clients.get(name) or await _client(factory, name)
+            clients[name] = client
+            res = await client.ro_query(f"MATCH (n:{label} {{urn: $u}}) OPTIONAL MATCH (n)-[r]-(m) "
+                                        "RETURN n.urn, count(m)", {"u": urn})
+            return "falkordb", state["serving"], bool(getattr(res, "result_set", None))
+        found = await reader.get_node(urn) is not None
+        await reader.get_edges(EdgeQuery(any_urns=[urn], limit=50))
+        return "postgres", state.get("committed"), found
 
     async def one(seed: int) -> None:
         rng = random.Random(seed)
         while not os.path.exists(args.stop):
             urn, label = rng.choice(pool)
-            started, route, version, error = time.perf_counter(), None, None, None
-            try:
-                state = await svc.residency_state(args.graph_id) or {}
-                name = state.get("falkor_graph_name")
-                if state.get("serving") is not None and name:
-                    client = clients.get(name) or await _client(factory, name)
-                    clients[name] = client
-                    res = await client.ro_query(f"MATCH (n:{label} {{urn: $u}}) OPTIONAL MATCH (n)-[r]-(m) "
-                                                "RETURN n.urn, count(m)", {"u": urn})
-                    route, version = "falkordb", state["serving"]
-                    found = bool(getattr(res, "result_set", None))
-                else:
-                    found = await reader.get_node(urn) is not None
-                    await reader.get_edges(EdgeQuery(any_urns=[urn], limit=50))
-                    route, version = "postgres", state.get("committed")
-                if not found:
+            started, route, version, error, shed = time.perf_counter(), None, None, None, 0
+            while True:
+                try:
+                    route, version, found = await read(urn, label)
                     # No change deletes a node readers read: one not found was not read at all.
-                    error = "NotFound"
-            except Exception as exc:  # noqa: BLE001 — every failure is what is measured
-                error = type(exc).__name__
+                    error = None if found else "NotFound"
+                except (ProviderBusy, GraphReadBusy) as exc:
+                    error = type(exc).__name__
+                    if shed < _CLIENT_READ_RETRIES:
+                        hinted = getattr(exc, "retry_after_seconds", None)
+                        wait = (min(5.0, float(hinted)) if hinted else (0.5, 1.5)[min(shed, 1)])
+                        shed += 1
+                        await asyncio.sleep(wait + rng.random() * 0.25)
+                        continue
+                except Exception as exc:  # noqa: BLE001 — every failure is what is measured
+                    error = type(exc).__name__
+                break
             out.write(json.dumps({"t": time.time(), "ms": round((time.perf_counter() - started) * 1000, 2),
-                                  "route": route, "version": version, "error": error}) + "\n")
+                                  "route": route, "version": version, "shed": shed,
+                                  "error": error}) + "\n")
 
     try:
         await asyncio.gather(*(one(k) for k in range(args.readers)))
@@ -1262,6 +1285,10 @@ def _read_summary(rows: List[Dict[str, Any]], bounds: Dict[str, Tuple[float, flo
             if r["error"]:
                 errors[r["error"]] = errors.get(r["error"], 0) + 1
         out[phase] = {"reads": len(mine), "errors": sum(errors.values()), "errorKinds": errors,
+                      # Reads the bounds shed at least once, and the retries they took: retried as
+                      # the client does, so only one that ended shed is an error.
+                      "shedReads": sum(1 for r in mine if r.get("shed")),
+                      "retries": sum(r.get("shed", 0) for r in mine),
                       "p50Ms": _pct(ok, 0.5), "p95Ms": _pct(ok, 0.95), "p99Ms": _pct(ok, 0.99),
                       "maxMs": max(ok, default=0.0), "routes": routes,
                       "versions": sorted({r["version"] for r in mine if r["version"] is not None})}
@@ -1410,14 +1437,16 @@ async def _land(graph_id: str, factory, timeout_s: float) -> Dict[str, Any]:
 
 async def run_readmodes(*, graph_id: str, store: CountingStore, nodes: int, edges: int,
                         modes: Sequence[str], changes: int, readers: int,
-                        timeout_s: float = 3600.0, factory=None) -> Dict[str, Any]:
+                        timeout_s: float = 3600.0, factory=None,
+                        reader_procs: int = 1) -> Dict[str, Any]:
     """What readers get while a large change lands, in each read mode: the published graph seeded
     whole into a fresh key of its own, then per mode a change of about ``changes`` version rows —
     new nodes and edges by an import job into a draft, updates and deletes of the graph's own in
     the same draft — published (Postgres first) and projected, with ``readers`` browsing all the
-    while from a process of their own (:func:`_browse`). Per mode: the reads of each phase (count,
-    errors, latency percentiles, routes, versions seen), the time to land, FalkorDB's memory high-
-    water mark, and whether FalkorDB holds what Postgres does after."""
+    while in each of ``reader_procs`` processes of their own, as web pods' are (:func:`_browse`).
+    Per mode: the reads of each phase (count, errors, reads shed and retried, latency percentiles,
+    routes, versions seen), the time to land, FalkorDB's memory high-water mark, and whether
+    FalkorDB holds what Postgres does after."""
     from backend.app.services.versioning import build_policy, db, models
     from backend.app.services.versioning.models import ProjectionStateORM
     from backend.app.services.versioning.reconcile import spelled_label
@@ -1451,7 +1480,8 @@ async def run_readmodes(*, graph_id: str, store: CountingStore, nodes: int, edge
     async with probing(store) as probes:
         seeded = await _land(graph_id, factory, timeout_s)
         await _modes(graph_id, svc, store, factory, modes, changes, readers, timeout_s, work,
-                     nodes_file, types, parents, keep, gone, rng, seeded, runs, keys, real)
+                     nodes_file, types, parents, keep, gone, rng, seeded, runs, keys, real,
+                     reader_procs=max(1, reader_procs))
     landed = [x for x in runs.values() if not x.get("error")]
     failed = next((f"{name}: {x['error']}" for name, x in runs.items() if x.get("error")), None)
     errors = sum(ph["errors"] for run in landed for ph in run["reads"].values())
@@ -1460,11 +1490,14 @@ async def run_readmodes(*, graph_id: str, store: CountingStore, nodes: int, edge
                    {"read_errors": errors, "falkor_eq_pg": all(x["falkor_eq_pg"] for x in landed),
                     "beside_exact": all(x["exactVersions"] for x in landed if x["mode"] == "beside")},
                    status="completed" if done else "failed", error=failed, seeded=seeded, modes=runs,
-                   graph={"nodes": nodes, "edges": edges, "changes": changes, "readers": readers})
+                   graph={"nodes": nodes, "edges": edges, "changes": changes,
+                          "readers": readers * max(1, reader_procs),
+                          "readerProcs": max(1, reader_procs)})
 
 
 async def _modes(graph_id, svc, store, factory, modes, changes, readers, timeout_s, work, nodes_file,
-                 types, parents, keep, gone, rng, seeded, runs, keys, real) -> None:
+                 types, parents, keep, gone, rng, seeded, runs, keys, real, *,
+                 reader_procs: int = 1) -> None:
     """Each read mode in turn (:func:`run_readmodes`), recorded in ``runs``; the keys it leaves in
     ``keys``, each dropped at the end."""
     from backend.app.services.versioning import build_policy
@@ -1486,13 +1519,14 @@ async def _modes(graph_id, svc, store, factory, modes, changes, readers, timeout
                 resolve, lambda _p=policy: _p, switch)
             await svc.set_read_mode(graph_id, mode)
 
-            out_file, stop_file = os.path.join(work, f"reads_{mode_run}.jsonl"), os.path.join(work, f"stop_{mode_run}")
+            stop_file = os.path.join(work, f"stop_{mode_run}")
+            out_files = [os.path.join(work, f"reads_{mode_run}_{k}.jsonl") for k in range(reader_procs)]
             root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
             path = os.pathsep.join(p for p in (root, os.environ.get("PYTHONPATH")) if p)
-            browsers = await asyncio.create_subprocess_exec(
+            browsers = [await asyncio.create_subprocess_exec(
                 sys.executable, "-m", "backend.scripts.bench_versioning", "browse", "--graph-id", graph_id,
                 "--nodes-file", nodes_file, "--out", out_file, "--stop", stop_file, "--readers", str(readers),
-                env={**os.environ, "PYTHONPATH": path})
+                env={**os.environ, "PYTHONPATH": path}) for out_file in out_files]
             mem_stop, mem = asyncio.Event(), {}
             sampler = asyncio.create_task(_memory_peak(mem_stop, mem))
             marks = {"import": time.time()}
@@ -1531,11 +1565,15 @@ async def _modes(graph_id, svc, store, factory, modes, changes, readers, timeout
                 break
             finally:
                 open(stop_file, "w").close()
-                await browsers.wait()
+                for browser in browsers:
+                    await browser.wait()
                 mem_stop.set()
                 await sampler
-            with open(out_file) as f:
-                rows = [json.loads(line) for line in f if line.strip()]
+            rows = []
+            for out_file in out_files:
+                if os.path.exists(out_file):
+                    with open(out_file) as f:
+                        rows += [json.loads(line) for line in f if line.strip()]
             bounds = {p: (marks[p], marks[q]) for p, q in zip(READ_PHASES, (*READ_PHASES[1:], "end"))
                       if p in marks and q in marks}
             reads = _read_summary(rows, bounds)
@@ -1642,11 +1680,13 @@ def _modes_table(r: Dict[str, Any]) -> str:
             continue
         landing = (m.get("reads") or {}).get("landing") or {}
         errors = sum(ph.get("errors", 0) for ph in (m.get("reads") or {}).values())
+        shed = sum(ph.get("shedReads", 0) for ph in (m.get("reads") or {}).values())
         mem = m.get("memoryMb") or {}
         lines.append(
             f"| {name} | {_fmt(m.get('importSecs'))} | {_fmt(m.get('publishSecs'))} "
             f"| {_fmt(m['landed']['secs'])} ({m['landed']['passes']}) | {_fmt(landing.get('reads'))} "
-            f"| {landing.get('p50Ms')} / {landing.get('p95Ms')} / {landing.get('p99Ms')} | {errors} "
+            f"| {landing.get('p50Ms')} / {landing.get('p95Ms')} / {landing.get('p99Ms')} "
+            f"| {errors}{f' ({shed} shed, retried)' if shed else ''} "
             f"| {', '.join(f'{k} {v}' for k, v in (landing.get('routes') or {}).items())} "
             f"| {', '.join(str(v) for v in landing.get('versions') or [])} "
             f"| {mem.get('start')} → {mem.get('peak')} | {'✅' if m.get('falkor_eq_pg') else '❌'} |")
@@ -1734,7 +1774,7 @@ async def _run(args) -> int:
             result = await run_readmodes(
                 graph_id=graph_id, store=store, nodes=args.nodes, edges=args.edges,
                 modes=[m for m in args.modes.split(",") if m], changes=args.changes,
-                readers=args.readers, timeout_s=args.timeout)
+                readers=args.readers, timeout_s=args.timeout, reader_procs=args.reader_procs)
         elif args.kind == "export":
             graph_id = args.graph_id or (state.get("published") or {}).get("graphId")
             if not graph_id:
@@ -1935,7 +1975,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                      help="readmodes: the runs, in order (" + ", ".join(READ_MODE_RUNS) + ")")
     run.add_argument("--changes", type=int, default=100_000,
                      help="readmodes: version rows in each run's change (creates, updates, deletes)")
-    run.add_argument("--readers", type=int, default=4, help="readmodes: readers browsing meanwhile")
+    run.add_argument("--readers", type=int, default=4,
+                     help="readmodes: readers browsing meanwhile, in each reader process")
+    run.add_argument("--reader-procs", type=int, default=1,
+                     help="readmodes: processes of readers, each as a web pod's (--readers each)")
     run.add_argument("--nodes", type=int, default=100_000, help="readmodes: the published graph's nodes")
     run.add_argument("--edges", type=int, default=100_000, help="readmodes: the published graph's edges")
     run.add_argument("--timeout", type=float, default=3600.0,

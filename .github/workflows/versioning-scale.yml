@@ -38,6 +38,12 @@ on:
       modes:
         description: The read-mode runs, in order (latest, in_place, beside, beside_seed)
         default: "latest,in_place,beside,beside_seed"
+      readers:
+        description: Readers browsing in each reader process while each change lands
+        default: "4"
+      reader_procs:
+        description: Reader processes, each as a web pod's (readers x reader_procs browse in all)
+        default: "1"
       timeout_minutes:
         description: The job's time limit (a graph of 5,000,000 needs several hours)
         default: "150"
@@ -92,6 +98,8 @@ jobs:
       EDGES: ${{ inputs.edges || '1000000' }}
       CHANGES: ${{ inputs.changes || '100000' }}
       MODES: ${{ inputs.modes || 'latest,in_place,beside,beside_seed' }}
+      READERS: ${{ inputs.readers || '4' }}
+      READER_PROCS: ${{ inputs.reader_procs || '1' }}
     steps:
       - uses: actions/checkout@v4
       - name: Start Postgres, its data on the large disk
@@ -145,7 +153,8 @@ jobs:
           step project project
           step rebuild project --full
           step export export
-          step readmodes readmodes --nodes "$NODES" --edges "$EDGES" --changes "$CHANGES" --modes "$MODES"
+          step readmodes readmodes --nodes "$NODES" --edges "$EDGES" --changes "$CHANGES" --modes "$MODES" \
+            --readers "$READERS" --reader-procs "$READER_PROCS"
       - name: What the run left on disk
         if: always()
         run: df -h / /mnt 2>/dev/null || df -h /
