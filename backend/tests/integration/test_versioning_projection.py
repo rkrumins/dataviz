@@ -199,7 +199,7 @@ class FakeGraph:
                 "RETURN it.src, it.tgt, r.gvHash"):
             slb = cypher.split("MATCH (a:", 1)[1].split(" {urn:", 1)[0]
             rel = cypher.split("-[r:", 1)[1].split("]->", 1)[0]
-            tlb = cypher.split("->(b:", 1)[1].split(" {urn:", 1)[0]
+            tlb = cypher.split("MATCH (b:", 1)[1].split(" {urn:", 1)[0]
             return _Result([[it["src"], it["tgt"], e.get("gvHash")] for it in params["batch"]
                             for e in self.edges.values()
                             if e["src"] == it["src"] and e["tgt"] == it["tgt"] and e["type"] == rel
@@ -252,8 +252,8 @@ class FakeGraph:
                                              "props": it.get("props"), "conf": it.get("conf"),
                                              "gvHash": it.get("gvHash")}
             return None
-        # Reconcile's edge delete by triple (no id): ...(a:{slb} {urn: item.src})-[r:{rel}]->
-        #   (b:{tlb} {urn: item.tgt}) DELETE r
+        # Reconcile's edge delete by triple (no id): MATCH (a:{slb} {urn: item.src})
+        #   MATCH (b:{tlb} {urn: item.tgt}) MATCH (a)-[r:{rel}]->(b) DELETE r
         if cypher.startswith("UNWIND $batch AS item MATCH (a:") and cypher.endswith("DELETE r") \
                 and "{id: item.eid}" not in cypher:
             rel = cypher.split("-[r:", 1)[1].split("]->", 1)[0]

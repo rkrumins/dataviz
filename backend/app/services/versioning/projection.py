@@ -787,10 +787,15 @@ def _edge_merge_cypher(rel_type: str, src_label: str, tgt_label: str, *,
 def _delete_edges_by_key_cypher(rel_type: str, src_label: str, tgt_label: str) -> str:
     """Remove the relationship(s) of one type between two nodes — the
     projector's own edge identity (it MERGEs one per triple), so it needs no
-    entity id and also clears legacy parallel copies."""
+    entity id and also clears legacy parallel copies. Both ends are found first
+    (their urn indexes), then what joins them: matched from one end alone, a
+    node with hundreds of thousands of relationships (a container's children)
+    would be walked whole for each row."""
     return (
         f"UNWIND $batch AS item "
-        f"MATCH (a:{src_label} {{urn: item.src}})-[r:{rel_type}]->(b:{tgt_label} {{urn: item.tgt}}) "
+        f"MATCH (a:{src_label} {{urn: item.src}}) "
+        f"MATCH (b:{tgt_label} {{urn: item.tgt}}) "
+        f"MATCH (a)-[r:{rel_type}]->(b) "
         f"DELETE r"
     )
 
@@ -800,14 +805,15 @@ def _delete_nodes_cypher(label: str) -> str:
 
 
 def _delete_edges_cypher(rel_type: str, src_label: str, tgt_label: str) -> str:
-    # Anchored + typed: both endpoints seek their per-label URN index and
-    # the relationship match is bounded by the (a)->(b) adjacency. ``item.pid`` is the id a
+    # Anchored + typed: both endpoints seek their per-label URN index first, then the
+    # relationship between them (one pattern from ``a`` would expand every relationship ``a``
+    # has, and a container can hold hundreds of thousands). ``item.pid`` is the id a
     # customer's graph knows an edge re-keyed ``edge:<id>`` by (``_edge_merge_cypher``).
     return (
         f"UNWIND $batch AS item "
-        f"MATCH (a:{src_label} {{urn: item.src}})"
-        f"-[r:{rel_type}]->"
-        f"(b:{tgt_label} {{urn: item.tgt}}) WHERE r.id IN [item.eid, item.pid] DELETE r"
+        f"MATCH (a:{src_label} {{urn: item.src}}) "
+        f"MATCH (b:{tgt_label} {{urn: item.tgt}}) "
+        f"MATCH (a)-[r:{rel_type}]->(b) WHERE r.id IN [item.eid, item.pid] DELETE r"
     )
 
 
@@ -4096,7 +4102,8 @@ class FalkorProjector:
             await self._laddered(
                 client, "rollup_read",
                 f"UNWIND $batch AS item "
-                f"MATCH (a:{slb} {{urn: item.s}})-[r:AGGREGATED]->(b:{tlb} {{urn: item.t}}) "
+                f"MATCH (a:{slb} {{urn: item.s}}) MATCH (b:{tlb} {{urn: item.t}}) "
+                f"MATCH (a)-[r:AGGREGATED]->(b) "
                 f"RETURN item.s, item.t, r.weight, r.sourceEdgeTypes, r.gvSeq",
                 items, timeout_ms=_READ_TIMEOUT_MS, read_only=True, on_result=held)
             upserts, deletes = [], []
@@ -4153,7 +4160,8 @@ class FalkorProjector:
             await self._laddered(
                 client, "rollup_delete",
                 f"UNWIND $batch AS item "
-                f"MATCH (a:{slb} {{urn: item.s}})-[r:AGGREGATED]->(b:{tlb} {{urn: item.t}}) "
+                f"MATCH (a:{slb} {{urn: item.s}}) MATCH (b:{tlb} {{urn: item.t}}) "
+                f"MATCH (a)-[r:AGGREGATED]->(b) "
                 f"DELETE r",
                 deletes)
         return True
@@ -4668,8 +4676,9 @@ class FalkorProjector:
                 for (la, rel, lb), items in anchored.items():
                     await self._laddered(
                         client, "edge_delete_id",
-                        f"UNWIND $batch AS it MATCH (a:{_sanitize_label(la)} {{urn: it.src}})"
-                        f"-[r:`{rel}`]->(b:{_sanitize_label(lb)} {{urn: it.tgt}}) "
+                        f"UNWIND $batch AS it MATCH (a:{_sanitize_label(la)} {{urn: it.src}}) "
+                        f"MATCH (b:{_sanitize_label(lb)} {{urn: it.tgt}}) "
+                        f"MATCH (a)-[r:`{rel}`]->(b) "
                         "WHERE id(r) = it.rid DELETE r", items)
                 await self._laddered(client, "edge_delete_id",
                                      "UNWIND $ids AS i MATCH ()-[r]->() WHERE id(r) = i DELETE r",
@@ -4867,10 +4876,14 @@ class FalkorProjector:
                 for su, tu, fp in (getattr(res, "result_set", None) or []):
                     out.setdefault((sl, str(su), rel, tl, str(tu)), []).append(fp)
 
+            # Both ends first, by their urn indexes, then what joins them: matched from one end
+            # alone, a node holding hundreds of thousands of relationships (a container's
+            # children) is walked whole for every row, at any batch size.
             await self._laddered(client, "edge_fingerprints",
                                  f"UNWIND $batch AS it MATCH (a:{_sanitize_label(sl or 'Entity')} "
-                                 f"{{urn: it.src}})-[r:{rel}]->"
-                                 f"(b:{_sanitize_label(tl or 'Entity')} {{urn: it.tgt}}) "
+                                 f"{{urn: it.src}}) "
+                                 f"MATCH (b:{_sanitize_label(tl or 'Entity')} {{urn: it.tgt}}) "
+                                 f"MATCH (a)-[r:{rel}]->(b) "
                                  "RETURN it.src, it.tgt, r.gvHash", items,
                                  timeout_ms=_READ_TIMEOUT_MS, read_only=True, on_result=edges)
         return out

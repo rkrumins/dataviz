@@ -164,7 +164,7 @@ def test_a_pass_writes_and_matches_the_graph_own_spelling_of_its_types():
     assert "MERGE (n:table {urn: item.urn})" in written
     assert "MATCH (a:table {urn: item.src})" in written and "MERGE (a)-[r:flows]->(b)" in written
     assert "MATCH (n:table {urn: u}) DETACH DELETE n" in written
-    assert "-[r:flows]->(b:Dataset {urn: item.tgt}) WHERE r.id IN" in written
+    assert "MATCH (b:Dataset {urn: item.tgt}) MATCH (a)-[r:flows]->(b) WHERE r.id IN" in written
     assert ":Dataset" in written
     assert ":Table" not in written and ":FLOWS" not in written, written
 

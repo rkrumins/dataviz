@@ -69,6 +69,37 @@ What 1M + 1M left behind: 6.1 GB of graphver in Postgres (each entity's version 
 `main`, and both branches' heads) and 2.7 GB of the import's staged rows until they are swept
 ([08](08-import-export.md) §3c); 1.05 GB for the graph in FalkorDB (`GRAPH.MEMORY USAGE`).
 
+### At 1,000,000 nodes and 2,000,000 edges: a defect found, and fixed
+
+Measured by the `versioning-scale` workflow on 14 November 2026 (run 43606161278), on the same
+runner:
+
+| Step | 1M + 1M | 1M + 2M |
+|------|--------:|--------:|
+| Import into a draft | 1,009 s, 487 MB | 1,508 s, 486 MB |
+| Publish (the graph's lock held throughout) | 526 s, 396 MB | 686 s, 399 MB |
+| Projection of the published window | 381 s, 276 MB (2 passes) | 467 s, 278 MB (2 passes) |
+| Rebuild from nothing | 295 s, 255 MB | did not finish |
+
+- **Memory stayed flat**, and the import and the publish grew about as the graph did: 1.5 and 1.3
+  times the time for 1.5 times the entities. The edge windows still grew within the import: the
+  last tenth took 336% longer than the first (§10, Further work, item 2).
+- **The rebuild found a defect in the projector.**
+  - This graph's containment puts nearly every node under one root, with about 333,000 children.
+    (At 1M + 1M there are 500,000 roots and no such node.)
+  - A rebuild compares every relationship FalkorDB holds with what Postgres says. It looked each
+    one up from its source: `(a {urn})-[r]->(b {urn})`. For each of the root's relationships,
+    FalkorDB walked all of the root's children.
+  - Every such lookup timed out (CI's FalkorDB stops a query after 1 s), at any batch size. The
+    step ran out the job's 300 minutes.
+  - The same lookups serve every seed from Postgres: a full seed, a reseed, and a build's seed. On
+    a graph with such a node, all of them would have stalled the same way.
+- **The fix.** Every lookup or delete of a relationship now finds both ends first, by their urn
+  indexes, then the relationship between them, whatever either end's degree. That covers the
+  fingerprint read, the deletes by key and by id, and the lineage summaries' read and delete.
+  `test_projection_hub_lookups.py` holds every statement to that shape.
+- The rebuild, the export and the read modes at this size are measured by the next run.
+
 ### At 5,000,000 nodes and 5,000,000 edges: where the write path stops scaling
 
 This replaces an estimate that multiplied the 1M + 1M run by five. Measured by the
@@ -615,6 +646,18 @@ are set for 100k + 100k. A missed target is reported but doesn't fail the run. T
        to 500,000 entities that changes anything hands its summaries to the job;
      - a sampled check of the summaries against what the job would write.
    - Each of these needs a live FalkorDB to verify.
+
+8. **A pass's time box stops at page boundaries, not within a page.**
+   - *Measured.* In the 1M + 2M run, one rebuild pass ran for more than four hours: every lookup
+     in its page timed out, and each was halved down to one row and retried with a backoff before
+     the next. The 300 s time box (`GRAPHVER_PROJECTION_PASS_MAX_SECS`) is checked between pages.
+     The cause there is fixed (§2, At 1,000,000 nodes and 2,000,000 edges), but nothing yet bounds
+     how long one page can take.
+   - *Where to start.* `_laddered` in `projection.py`: the halving, `PROJECTION_FLOOR_RETRIES` and
+     the backoff between them. Fail the pass, so it backs off and says why, once its time box has
+     passed while statements at one row still time out.
+   - *Done when* a pass whose every statement times out fails within about twice its time box,
+     with a last error naming the statement.
 
 ---
 

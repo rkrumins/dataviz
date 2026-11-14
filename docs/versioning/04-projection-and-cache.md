@@ -286,6 +286,15 @@ window's pass and a surplus holds the graph back until a rebuild, as before.
 > overall; the same pattern measured ~2000× slower on `save_custom_graph`'s bulk path). A
 > keyset-streaming reconcile is the documented upgrade path (see
 > [09 · Scale & Limits](09-scale-limits-and-roadmap.md)).
+>
+> **Relationships are found between their two ends.** Every statement that finds one relationship
+> by its ends finds both first, by their urn indexes, then the relationship between them:
+> `MATCH (a:L {urn: x}) MATCH (b:L {urn: y}) MATCH (a)-[r:T]->(b)`. This covers the edge write, the
+> reconcile's fingerprint read, the deletes, and the lineage summaries' read and delete. Matched
+> from one end, `(a {urn: x})-[r]->(b {urn: y})` expands every relationship of `a`. In the 1M nodes
+> + 2M edges run, a container with about 333,000 children made every such lookup time out
+> ([09](09-scale-limits-and-roadmap.md) §2). `test_projection_hub_lookups.py` holds every
+> statement to this shape.
 
 ---
 
