@@ -291,7 +291,8 @@ RETIRE_GRACE_SECS: int = int(os.getenv("GRAPHVER_RETIRE_GRACE_SECS", "900"))
 # while its current key keeps serving, then switched to. Each value below is a default that a system
 # administrator overrides live under Admin → Infrastructure → New-version builds; the switch itself
 # is the ``candidateKeysEnabled`` feature flag. Windows of more changed rows than this are built
-# beside the serving key, as are rebuilds, moves and loads of platform-owned keys when enabled.
+# beside the serving key, as are rebuilds and moves of platform-owned keys when the second is 1:
+# the new key seeded from Postgres while readers keep the current version, then switched to.
 PROJECTION_CANDIDATE_ABOVE: int = int(os.getenv("GRAPHVER_PROJECTION_CANDIDATE_ABOVE", "200000"))
 PROJECTION_CANDIDATE_REBUILDS: bool = os.getenv("GRAPHVER_PROJECTION_CANDIDATE_REBUILDS", "1") == "1"
 # How a build makes its key: ``auto`` copies the serving key (GRAPH.COPY) when its node has room,

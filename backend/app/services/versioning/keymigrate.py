@@ -4,8 +4,10 @@ platform owns.
 A platform key names its graph — ``gvp_<graphId>{<gid8>.<n>}``, the braces a cluster hash tag — so
 no data source can bind it and no other graph can claim it. The swap itself is
 ``GraphVersioningService.move_projection``; the old key waits in ``projection_state.retired_keys``
-until :func:`retire_moved_keys` drops it. Phase 1 is a reseed move: doc 14 L2 adds ``place``,
-``seed_stream``, ``catchup``, ``parity`` and ``swap`` (blue/green, with no Postgres-read window).
+until :func:`retire_moved_keys` drops it. Phase 1 is a reseed move. A graph that reads ``beside``
+(with New-version builds and ``buildForRebuilds`` on) has doc 14's L2 instead: its new key placed,
+seeded from Postgres and caught up while the old key keeps serving, checked, then swapped to in one
+transaction, with no Postgres-read window (``candidates``, reason ``move``).
 """
 from __future__ import annotations
 

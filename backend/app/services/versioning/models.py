@@ -316,7 +316,8 @@ class ProjectionStateORM(VersioningBase):
     shard_map = Column(JSONB, nullable=True)
     # A moved graph's old platform keys, waiting to be dropped once the new key has caught up:
     # ``[{name, provider, retireAfter, afterSeq, movedBy}]``, NULL when none
-    # (``move_projection``; 20261018_1100_gv_ps_retired).
+    # (``move_projection``; 20261018_1100_gv_ps_retired). A key a build switched away from, or a
+    # build's own key dropped with it, also names the build (``build``).
     retired_keys = Column(JSONB, nullable=True)
     # A customer graph's own spelling of its types, where it differs from the declared one:
     # ``{"nodes": {declared: physical}, "edges": {declared: physical}}``, recorded when the enable
@@ -362,10 +363,11 @@ class ProjectionStateORM(VersioningBase):
     read_mode = Column(Text, nullable=True)
     # A new version built beside the key that serves (read mode ``beside``): the build's key and
     # provider, the version it holds whole (NULL until written), and where it is
-    # (``candidates.STEPS``: its id, why it was asked for, its step, attempts, error, when it may
-    # try again). All NULL while none is: the serving key is then the only key, and every pass
-    # behaves as before. While one is, nothing writes the serving key: it keeps serving its
-    # version whole until the switch (20261113_1400_gv_ps_candidate).
+    # (``candidates.STEPS``: its id, why it was asked for — a large window, a rebuild or a move,
+    # whose key and provider these are — its step, attempts, error, when it may try again). All
+    # NULL while none is: the serving key is then the only key, and every pass behaves as before.
+    # While one is, nothing writes the serving key: it keeps serving its version whole until the
+    # switch (20261113_1400_gv_ps_candidate).
     candidate_graph_name = Column(Text, nullable=True)
     candidate_provider = Column(Text, nullable=True)
     candidate_seq = Column(BigInteger, nullable=True)

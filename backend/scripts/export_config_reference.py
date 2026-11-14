@@ -167,7 +167,7 @@ NOTES: dict[str, tuple[str, str | None]] = {
         None,
     ),
     "GRAPHVER_PROJECTION_CANDIDATE_REBUILDS": (
-        "`1`: rebuilds, moves and loads of platform-owned keys are built beside too, so reads keep the current version meanwhile. A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds.",
+        "`1`: rebuilds and moves of platform-owned keys are built beside too: the new key is seeded from Postgres while reads keep the current version, then they switch to it. A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds.",
         None,
     ),
     "GRAPHVER_PROJECTION_CANDIDATE_MODE": (

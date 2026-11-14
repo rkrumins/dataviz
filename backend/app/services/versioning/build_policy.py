@@ -72,8 +72,8 @@ FIELDS: Tuple[Field, ...] = (
           unit="rows", lo=1_000, hi=100_000_000),
     Field("buildForRebuilds", lambda: config.PROJECTION_CANDIDATE_REBUILDS, "bool", "when",
           "Rebuilds and moves too",
-          "Rebuilds, moves and loads of platform-owned keys are built beside too, so reads keep the "
-          "current version meanwhile."),
+          "Rebuilds and moves of keys the platform owns are built beside too: the new key is "
+          "seeded from Postgres while readers keep the current version, then they switch."),
     Field("buildMode", lambda: config.PROJECTION_CANDIDATE_MODE, "choice", "room",
           "How a build makes its key",
           "Auto copies the serving key when its node has room, else seeds the new key from "

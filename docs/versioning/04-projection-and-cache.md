@@ -507,15 +507,17 @@ with a change of 100,000 rows and readers browsing throughout, no read failed in
 A publish larger than **Build beside above** (`buildAboveRows`) in a graph that reads `beside` is
 built in a second key while the serving key keeps serving its version whole
 (`FalkorProjector._advance_candidate`, `candidates`). A smaller one is written in place, paced, and
-`project_now` never runs a build inline.
+`project_now` never runs a build inline. So are a rebuild and a move of such a graph, with
+**Rebuilds and moves too** on (below).
 
 ```mermaid
 stateDiagram-v2
-    [*] --> queued: a large window, read mode beside
+    [*] --> queued: a large window, a rebuild or a move, read mode beside
+    [*] --> seeding: a move admitted with its request (residency on)
     queued --> copying: room for a copy on the serving key's node (copy, auto)
-    queued --> seeding: no copy fits, or one is not wanted (auto, reseed)
+    queued --> seeding: no copy fits, or one is not wanted (auto, reseed; a rebuild, a move)
     queued --> queued: no room (noRoomPolicy wait) — asks again in a minute
-    queued --> [*]: no room (noRoomPolicy in_place) — written in place
+    queued --> [*]: no room (noRoomPolicy in_place) — made in place
     copying --> catching_up: GRAPH.COPY of the serving key
     seeding --> seeding: a page at a time, from Postgres; then the summaries carried over
     seeding --> catching_up: holds the version served, whole
@@ -579,9 +581,9 @@ stateDiagram-v2
   differs from the version it starts from, and its summaries are carried over again, so a failed
   catch-up is undone rather than built on. Past **Attempts before giving up** (`buildMaxAttempts`)
   the build is dropped with its key and the change is written in place (the window is marked in
-  flight, `window_rows`, so it is not built again). A rebuild or a move drops a build, and so does a
-  graph whose read mode changes away from `beside`: the change is written as the mode it reads now
-  says. A purge drops its key.
+  flight, `window_rows`, so it is not built again). A rebuild or a move replaces a window's build,
+  its key retired at once, and a graph whose read mode changes away from `beside` drops any build:
+  the change is made as the mode it reads now says. A purge drops its key.
 - **Restarts.** Every step is recorded in `projection_state` (`candidate_graph_name`,
   `candidate_provider`, `candidate_seq`, `candidate_state`) and fenced on the build's id, and the build's
   key says what it holds, so a pass on any worker takes it up where it was. `GRAPH.COPY` finishes
@@ -591,7 +593,51 @@ stateDiagram-v2
 - **Metrics:** `graphver_builds_total{step=queued|copied|seeding|seeded|switched|dropped}`,
   `graphver_build_copy_seconds`, `graphver_build_seed_seconds`,
   `graphver_build_waiting_total{reason=room}`.
-- **Not yet:** builds for rebuilds, moves and loads; they are written in place meanwhile.
+- **Loads are not built beside:** a graph out of FalkorDB has no key serving meanwhile.
+
+#### Rebuilds and moves built beside
+
+With **Rebuilds and moves too** (`buildForRebuilds`, on by default) and New-version builds on, a
+rebuild or a move of a graph that reads `beside` is built beside its key: on a key the platform owns,
+while the graph is idle and its key serves a version it published (`service._beside_ok`). The new key
+is always seeded from Postgres, never copied, while readers keep exactly the version they have; then
+one switch. Otherwise the rebuild or the move is made in place, as without builds.
+
+- **A rebuild** — an operator's, or one the projector starts on its own when its verify finds drift a
+  heal cannot fix or windows keep failing under pressure (its last error says why, so forks read
+  Postgres meanwhile) — does not trust the serving key. It seeds the head when its room is admitted,
+  and carries over what it can of the serving key's lineage summaries: a cell whose ends the new key
+  does not hold is left out, and a serving key that is gone has none to carry. Once switched, the
+  summaries are handed to the batch job. A rebuild asked while one is built is already running
+  (`started: false`); one asked during a move makes the move rebuild too. A graph whose summaries live
+  in a graph named from its key (dedicated), or whose key other data sources read, is rebuilt in
+  place, as is one where either can't be read: the switch would leave them behind. A large window of
+  such a graph is written in place for the same reason.
+- **A move** seeds its new key on its new provider, admitted there (with the request, under residency;
+  else on its first step), at the version the serving key holds whole, carrying its summaries over
+  exactly. The key must hold that version whole, with no window part-written, or the move is made in
+  place. Nothing retires until the switch, which takes the move's shard map; the old key is dropped
+  after **Keep the previous key for** (`retireGraceSecs`, a move in place's grace too). The same move
+  again answers with its build (`changed: false`), a move back to where the graph is cancels it
+  (`cancelled`), and another move replaces it. A move back onto a key the graph left clears that key's
+  pass cursor before the seed writes a page, so the seed never resumes past pages it did not write.
+- **Dropped** — its attempts used up, no room with `noRoomPolicy` in_place, New-version builds turned
+  off before it began, the graph no longer reading `beside`, its serving key lost — a rebuild or a
+  move is made in place, its row exactly as its request or the escalation writes it without builds
+  (`drop_candidate`). An operator's rebuild of a graph out of FalkorDB asks for its load; a move of
+  one is made in place and asks for its load; a move whose key another graph took by then is not
+  made, and its last error says so. A dropped move's key becomes the pin: once the build wrote into
+  it, its summaries are owed the batch job.
+- **The summaries hand-off.** A switch that owes the batch job the summaries — a rebuild's; a
+  catch-up that could not move them; a move's, when a summaries job wrote the serving key after they
+  were carried over; a full seed's debt (`rollup_state.moved`) — records the ask in its own
+  transaction (`rollup_state.pending`), so the liveness loop asks again should the hand-off never
+  run. It is asked under an idempotency key that names the key the graph is on, so the job that
+  wrote the old key at the same commit does not answer for the new one.
+- **The routes:** the rebuild route says `beside: true` and nudges the projection worker, which builds
+  it within `buildConcurrency`; the move route says `beside`, `building` and `cancelled`, with
+  `retiring: null` until the switch. Data health follows a rebuild built beside to its switch, and
+  the inventory shows what each build is for ("Rebuilding beside", "Moving to `<key>`").
 
 ---
 
@@ -840,9 +886,12 @@ reseed move). Only owned keys move; the customer's own graph, an unpinned graph 
 sources read answer 409 `projection_not_adopted`. The new key is the graph's `gvp_<graphId>{<tag>.<n>}`
 (the first free one when `key` is omitted). `move_projection` swaps the pin, bumps the epoch (a pass
 in flight is superseded), lowers the watermark to 0 (`reseeding`) and appends the old key to
-`retired_keys`; reads fall back to Postgres until the reseed catches up. The worker's retire loop
+`retired_keys`; reads fall back to Postgres until the reseed catches up. A graph that reads `beside`,
+with **Rebuilds and moves too** on, has its move built beside its key instead, with no Postgres-read
+window (§5, *Rebuilds and moves built beside*). The worker's retire loop
 (`keymigrate.retire_moved_keys`) drops the old key under `gvproj` once the new key has reached the
-head at the move and `RETIRE_GRACE_SECS` have passed, unless something still reads or pins it; purge
+head at the move and **Keep the previous key for** (`retireGraceSecs`) has passed, unless something
+still reads or pins it; purge
 drops pending retired keys too. A key without the projector's pass marker is dropped only when it is
 one of the graph's own `gvp_` keys, which a reseed cut short leaves unmarked; the retire loop keeps
 any other, with its `retired_keys` entry, so the inventory still shows it. Until then, a move back

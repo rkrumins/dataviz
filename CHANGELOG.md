@@ -50,6 +50,22 @@ integration's many small changes as a few commits.
   the field (`422 invalid_build_policy`), and each change is recorded in the activity log
   (`platform.build_policy.updated`). The builds themselves are behind **New-version builds** (Admin
   → Features, experimental, off).
+- **Rebuilds and moves built beside the key that serves, for graphs read Keep serving, switch when
+  ready.** With **Rebuilds and moves too** on (a New-version builds setting, on by default, which
+  nothing read until now), an operator's rebuild, a rebuild the projector starts on its own and an
+  administrator's move of such a graph are built in a new key seeded from Postgres, while readers
+  keep exactly the version they have, then switched to in one step:
+  - **A rebuild** seeds the newest version and carries over what it can of the lineage summaries,
+    which the batch job then rebuilds. The rebuild's answer says so (`beside`), and Data health
+    follows it to its switch.
+  - **A move** seeds its new key on its new provider at the version served, its summaries carried
+    over exactly, and nothing retires until the switch. The same move again answers with its build,
+    and a move back to where the graph is cancels it (recorded as
+    `platform.versioning.projection_move_cancelled`).
+  - A build that cannot finish, and a graph where it does not apply (another read mode, the setting
+    or New-version builds off, a customer's key, a graph that serves no version yet, a move from a
+    key part way through a change), is rebuilt or moved in place exactly as before. The admin
+    inventory says what each build is for ("Rebuilding beside", "Moving to `<key>`").
 - **Replaces keyed by your own id handle the rows that don't carry it.** A source that keys rows by
   its own id (`identifier=prop.MY_UNIQUE_ID`) often has rows without it, such as a top-level
   container. It also meets graphs first loaded by urn (or made in the app), whose nodes never had
@@ -307,6 +323,17 @@ integration's many small changes as a few commits.
 
 ### Changed
 
+- **A moved graph keeps its previous key for Keep the previous key for.** The New-version builds
+  setting (`retireGraceSecs`) said it applied to moves, but a move kept the key for
+  `GRAPHVER_RETIRE_GRACE_SECS`, the setting's default; a move now takes the setting in force, as a
+  build's switch does.
+- **A large change is written in place for a graph that must keep its key.** A build switches
+  readers to a new key: for a data source whose lineage summaries live in a graph named from its key
+  (dedicated mode), the summaries were left behind, and readers of the new key found none until a
+  rebuild; for a key other data sources read, they went on reading one nobody writes. Such a graph,
+  or one where that can't be read, now has a large change written in place, and is rebuilt in place.
+- **The projector's poll takes builds first**, and takes up a graph that is building whether or not it
+  is behind, so a rebuild or a move of a graph that is caught up moves on without a nudge.
 - **The projector holds a page at a time from 100,000 rows or entities.** A publish window of more
   than 100,000 version rows (was 200,000) is written a page at a time, and a full reconcile (a
   first seed, a rebuild, a heal, a build's seed) of more than 100,000 live entities (was 500,000)
@@ -418,6 +445,14 @@ integration's many small changes as a few commits.
 
 ### Fixed
 
+- **A graph switched to a new key gets its lineage summaries.** The summaries job asked for at the
+  same commit as an earlier one was answered with that job, which had written the old key, so the
+  new key never got them — after a build's switch, and after a move in place. The ask now names the
+  key. What a switch owes the job is recorded with the switch, so it is asked for again should the
+  pod stop right after.
+- **Residency no longer counts a building graph as room it can free.** The evictor leaves a graph
+  alone while it builds a new version beside its key, but the capacity plan counted its memory as
+  freeable.
 - **Lineage summaries the projector keeps between batch runs stay the job's cells.** A node whose urn
   changed kept its summary cells keyed by the old urn, so the next summaries job made a second cell
   beside each; a retyped node's cells kept their old level stamps; a key whose summaries regime

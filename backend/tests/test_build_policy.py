@@ -86,6 +86,14 @@ def test_with_nothing_saved_every_value_is_its_environment_default():
     assert d["readMode"] == config.READ_MODE == "latest"     # as reads have always worked
 
 
+def test_rebuilds_and_moves_too_says_what_is_built_beside_and_nothing_more():
+    """Rebuilds and moves are built beside; loads are not, so the setting no longer says so."""
+    field = bp.BY_WIRE["buildForRebuilds"]
+    assert (field.label, field.default()) == ("Rebuilds and moves too", True)
+    assert "Rebuilds and moves" in field.help and "load" not in field.help.lower()
+    assert "seeded from Postgres while readers keep the current version" in field.help
+
+
 def test_a_graphs_own_read_mode_wins_over_the_platforms():
     platform = bp.effective({"readMode": "beside"})
     assert bp.read_mode_of(None, platform) == "beside"
