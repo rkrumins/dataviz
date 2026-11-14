@@ -272,6 +272,43 @@ def test_a_seed_is_placed_admitted_and_recorded_in_one_step_under_the_capacity_l
     assert [e for e in events if isinstance(e, tuple) and e[0] != "place"] == []
 
 
+def test_a_moves_seed_is_admitted_on_its_own_key_under_the_capacity_lock(monkeypatch):
+    """A move's build has its key, on the provider it moves to: no key is placed, its full write is
+    admitted on the master that key hashes to and recorded there before the lock is let go."""
+    from contextlib import asynccontextmanager
+
+    from backend.app.services.versioning import residency
+    from backend.app.services.versioning.residency import Admitted
+
+    events = []
+
+    @asynccontextmanager
+    async def admitting(wait_s=15.0):
+        events.append("lock")
+        yield
+        events.append("unlock")
+
+    async def place_key(graph_id, provider, taken):
+        raise AssertionError("a move's key is never placed")
+
+    async def admission_on(graph_id, provider, key):
+        events.append(("admit", provider, key))
+        return Admitted(True, "node7")
+
+    async def record(key, master):
+        events.append(("record", key, master))
+        return True
+
+    monkeypatch.setattr(residency, "admitting", admitting)
+    monkeypatch.setattr(residency, "place_key", place_key)
+    monkeypatch.setattr(residency, "admission_on", admission_on)
+    assert asyncio.run(residency.admit_build_seed("g1", "prov_b", (), record,
+                                                  key="gvp_g1{ab.2}")) == (
+        Admitted(True, "node7"), "gvp_g1{ab.2}")
+    assert events == ["lock", ("admit", "prov_b", "gvp_g1{ab.2}"),
+                      ("record", "gvp_g1{ab.2}", "node7"), "unlock"]
+
+
 def test_a_seeding_build_reserves_its_room_on_its_keys_master_and_is_no_graph_of_its_own():
     """While a build seeds, its full write counts on the master its key hashes to, as a load's
     does: that master takes no load meanwhile, never evicts the build, and the graphs gauges do not

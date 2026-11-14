@@ -299,13 +299,20 @@ export interface ResidencyPreview {
 }
 
 /** What ``POST /api/v1/admin/versioning/graphs/{graphId}/projection/move``
- *  did: ``changed`` is false when the graph already was on the target. */
+ *  did: ``changed`` is false when the graph already was on the target. ``beside``: the move is
+ *  built beside the graph's key (read mode beside) — ``building`` is the build, readers keep the
+ *  current version until the switch, and nothing retires until then (``retiring`` null). With
+ *  ``changed`` false, ``beside`` means this move was already under way. ``cancelled``: a move back
+ *  to where the graph is cancelled the move under way (the build's id). */
 export interface ProjectionMoveResult {
     graphId: string
     changed: boolean
     from: { providerId: string; key: string }
     to: { providerId: string; key: string }
     retiring: RetiredProjectionKey | null
+    beside?: boolean
+    building?: BuildState | null
+    cancelled?: string | null
     watermark: Watermark
 }
 

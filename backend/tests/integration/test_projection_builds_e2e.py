@@ -188,13 +188,15 @@ def builds_on(monkeypatch):
     async def release(self, held):
         state["released"].append(held)
 
-    async def seed_room(graph_id, provider, taken, record):
+    async def seed_room(graph_id, provider, taken, record, key=None):
         """A seed placed on the node with most room: a key of the graph's own beside the serving
-        one (``#b9``, which this test's store answers for), recorded while admitted."""
+        one (``#b9``, which this test's store answers for), recorded while admitted. A move's is
+        admitted on its own key."""
         if not state["seed_room"].fits:
             return state["seed_room"], None
-        serving = min((n for n in taken if n and keymigrate.BUILD_SUFFIX not in n), key=len)
-        key = f"{serving}{keymigrate.BUILD_SUFFIX}9"
+        if key is None:
+            serving = min((n for n in taken if n and keymigrate.BUILD_SUFFIX not in n), key=len)
+            key = f"{serving}{keymigrate.BUILD_SUFFIX}9"
         state["seeded_on"].append(key)
         return state["seed_room"], key if await record(key, state["seed_room"].master) else None
 
@@ -1337,3 +1339,434 @@ def test_a_large_window_of_a_graph_that_must_keep_its_key_is_written_in_place(bu
                                                                               monkeypatch):
     asyncio.run(_run_a_large_window_of_a_graph_that_must_keep_its_key_is_written_in_place(
         builds_on, monkeypatch))
+
+
+# ── moves built beside the serving key (``buildForRebuilds``) ─────────────────────────────────
+
+
+def _target(fake, gid: str, n: int = 1) -> str:
+    """The graph's ``n``-th platform key, which this test's store answers for, not there yet."""
+    key = keymigrate.owned_key(gid, n)
+    fake.ours.add(key)
+    fake(key).exists = False
+    return key
+
+
+async def _move(svc, gid: str, key: str, provider: str = "prov_b", **kw) -> dict:
+    return await svc.move_projection(graph_id=gid, provider=provider, key=key, actor="usr_1",
+                                     shard_map={"tag": "t", "chosenBy": "usr_1"}, **kw)
+
+
+async def _run_a_move_is_built_beside_and_switched_to(state) -> None:
+    """A move of a graph that reads ``beside`` seeds its new key, on its new provider, from
+    Postgres at the version served, carrying the serving key's summaries over exactly, while
+    readers keep that version on the old key: nothing retires, the pin and shard map stay. A
+    publish meanwhile lands in the new key, never the old one. Then one switch: the new key is the
+    pin on its provider with the move's shard map, and the old key retires after the grace."""
+    svc, fake = GraphVersioningService(), BuildFalkor()
+    gid, proj, serving = await _seed(svc, fake)
+    await _beside(svc, gid)
+    _summaries_on(serving)
+    was = await _ps(gid)
+    old, target = was.falkor_graph_name, _target(fake, gid)
+
+    res = await _move(svc, gid, target)
+    assert (res["changed"], res["beside"], res["retiring"], res["cancelled"]) == (
+        True, True, None, None)
+    assert (res["building"]["reason"], res["building"]["step"], res["building"]["target"]) == (
+        "move", "queued", {"providerId": "prov_b", "key": target})
+    ps = await _ps(gid)
+    assert (ps.falkor_graph_name, ps.falkor_provider, ps.shard_map) == (old, None, was.shard_map)
+    assert (ps.projected_commit_seq, ps.served_commit_seq, ps.status) == (3, 3, "idle")
+    assert (ps.candidate_graph_name, ps.candidate_provider) == (target, "prov_b")
+    assert ps.epoch == was.epoch + 1 and not ps.retired_keys
+    before = copy.deepcopy((_snapshot(serving), serving.summaries, serving.markers))
+
+    await proj.project_graph(gid)                       # admitted on its key, seeded, carried
+    ps = await _ps(gid)
+    built = fake.graphs[target]
+    assert state["seeded_on"] == [target]
+    assert (ps.candidate_state["step"], ps.candidate_state["seedSeq"], ps.candidate_seq) == (
+        "catching_up", 3, 3)
+    assert built.summaries == serving.summaries and built.markers == serving.markers
+    await _edit_publish(svc, gid, "a", _create("D"), "a change while it moves")
+    await proj.project_graph(gid)                       # caught up into the new key
+    assert (await _ps(gid)).candidate_seq == 4
+    assert copy.deepcopy((_snapshot(serving), serving.summaries, serving.markers)) == before
+    assert (await svc.projection_watermark(gid))["served"] == 3
+    await proj.project_graph(gid)                       # switched
+    ps = await _ps(gid)
+    assert (ps.falkor_graph_name, ps.falkor_provider, ps.projected_commit_seq,
+            ps.served_commit_seq) == (target, "prov_b", 4, 4)
+    assert ps.shard_map == {"tag": "t", "chosenBy": "usr_1"} and ps.candidate_state is None
+    (entry,) = ps.retired_keys
+    assert (entry["name"], entry["provider"], entry["afterSeq"], entry["movedBy"]) == (
+        old, None, 4, "usr_1")
+    assert entry["build"] == res["building"]["id"] and ps.rollup_state is None
+    await _assert_matches_main(svc, fake, gid)
+
+    async def nobody(*a):
+        return []
+
+    gone = await keymigrate.retire_moved_keys(proj, key_in_use=nobody,
+                                              now="9999-01-01T00:00:00+00:00")
+    assert [(g["key"], g["verdict"]) for g in gone if g["graphId"] == gid] == [(old, "dropped")]
+    assert not fake.graphs[old].exists
+
+
+def test_a_move_is_built_beside_and_switched_to(builds_on):
+    asyncio.run(_run_a_move_is_built_beside_and_switched_to(builds_on))
+
+
+async def _run_the_same_move_again_another_move_or_a_move_back_while_it_is_built() -> None:
+    """While a move is built: the same move again changes nothing and answers its build; a move to
+    another key replaces it, the first key retired at once; a move back to the key the graph is
+    on cancels it, its key retired at once — and the graph never left its key."""
+    svc, fake = GraphVersioningService(), BuildFalkor()
+    gid, _proj, _serving = await _seed(svc, fake)
+    await _beside(svc, gid)
+    old = (await _ps(gid)).falkor_graph_name
+    first, second = _target(fake, gid, 1), _target(fake, gid, 2)
+    one = await _move(svc, gid, first)
+    again = await _move(svc, gid, first)
+    assert (again["changed"], again["beside"], again["building"]["id"]) == (
+        False, True, one["building"]["id"])
+    other = await _move(svc, gid, second)
+    assert other["changed"] and other["building"]["id"] != one["building"]["id"]
+    ps = await _ps(gid)
+    assert ps.candidate_graph_name == second
+    assert [(e["name"], e["afterSeq"], e["build"]) for e in ps.retired_keys] == [
+        (first, 0, one["building"]["id"])]
+    back = await _move(svc, gid, old, provider="default")
+    assert (back["changed"], back["cancelled"], back["beside"]) == (
+        False, other["building"]["id"], False)
+    ps = await _ps(gid)
+    assert ps.candidate_state is None and ps.falkor_graph_name == old
+    assert (ps.projected_commit_seq, ps.served_commit_seq, ps.status) == (3, 3, "idle")
+    assert [e["name"] for e in ps.retired_keys] == [first, second]
+
+
+def test_the_same_move_again_another_move_or_a_move_back_while_it_is_built(builds_on):
+    asyncio.run(_run_the_same_move_again_another_move_or_a_move_back_while_it_is_built())
+
+
+async def _run_a_rebuild_during_a_move_and_a_move_during_a_rebuild() -> None:
+    """A rebuild asked while a move is built makes the move rebuild too (same build: it seeds the
+    head, its summaries handed to the job); asked again, it is running. A move asked while a
+    rebuild is built replaces it, carrying the rebuild on."""
+    svc, fake = GraphVersioningService(), BuildFalkor()
+    gid, proj, _serving = await _seed(svc, fake)
+    await _beside(svc, gid)
+    hand_off, asked = _hand_offs(svc)
+    proj = FalkorProjector(graph_client_factory=fake, on_rollups_stale=hand_off)
+    target = _target(fake, gid)
+    res = await _move(svc, gid, target)
+    await _edit_publish(svc, gid, "a", _create("D"), "a change")   # head 4, served 3
+    assert await svc.request_projection_rebuild(gid)
+    ps = await _ps(gid)
+    assert ps.candidate_state["id"] == res["building"]["id"]
+    assert (ps.candidate_state["rebuild"], ps.candidate_state["rollupsStale"]) == (
+        {"cause": "operator", "why": None}, True)
+    assert not await svc.request_projection_rebuild(gid)
+    await proj.project_graph(gid)
+    ps = await _ps(gid)
+    assert (ps.candidate_state["seedSeq"], ps.candidate_seq) == (4, 4), ps.candidate_state
+    await proj.project_graph(gid)
+    ps = await _ps(gid)
+    assert ps.candidate_state is None and ps.falkor_graph_name == target and asked == [gid]
+    await _assert_matches_main(svc, fake, gid)
+
+    other, proj2, _s = await _seed(svc, fake)
+    await _beside(svc, other)
+    assert await svc.request_projection_rebuild(other)
+    rebuild = await _ps(other)
+    moved = await _move(svc, other, _target(fake, other))
+    ps = await _ps(other)
+    assert moved["changed"] and ps.candidate_state["reason"] == "move"
+    assert ps.candidate_state["rebuild"] == {"cause": "operator", "why": None}
+    assert (ps.retired_keys[-1]["name"], ps.retired_keys[-1]["afterSeq"]) == (
+        rebuild.candidate_graph_name, 0)
+
+
+def test_a_rebuild_during_a_move_and_a_move_during_a_rebuild(builds_on):
+    asyncio.run(_run_a_rebuild_during_a_move_and_a_move_during_a_rebuild())
+
+
+async def _run_a_move_replaces_a_windows_build() -> None:
+    svc, fake = GraphVersioningService(), BuildFalkor()
+    gid, proj, serving = await _seed(svc, fake)
+    await _beside(svc, gid)
+    await _edit_publish(svc, gid, "a", _create("D", "E"), "a large change")
+    await proj.project_graph(gid)                       # the window's build: copied
+    window = await _ps(gid)
+    target = _target(fake, gid)
+    assert (await _move(svc, gid, target))["beside"]
+    ps = await _ps(gid)
+    assert (ps.retired_keys[-1]["name"], ps.retired_keys[-1]["afterSeq"]) == (
+        window.candidate_graph_name, 0)
+    for _ in range(3):
+        await proj.project_graph(gid)
+    ps = await _ps(gid)
+    assert ps.candidate_state is None and ps.falkor_graph_name == target
+    assert ps.projected_commit_seq == 4 and serving.copies == 1
+    await _assert_matches_main(svc, fake, gid)
+
+
+def test_a_move_replaces_a_windows_build(builds_on):
+    asyncio.run(_run_a_move_replaces_a_windows_build())
+
+
+def _moved_in_place(before, head: int, *, provider) -> dict:
+    """The row a move in place leaves, from the row before it (``move_projection`` without
+    builds), in ``_in_place``'s terms; and the old key retired after the move's grace."""
+    out = before.status in ("evicted", "waiting_capacity", "rehydrating")
+    seen = _in_place(before)
+    return {**seen, "projected": 0, "served": None, "target": head,
+            "status": "evicted" if out else "reseeding", "last_error": None,
+            "failed_attempts": 0, "next_retry_at": None, "progress": (None, None), "owned": True,
+            "retired": [*seen["retired"], {"provider": before.falkor_provider, "afterSeq": head,
+                                           "movedBy": "usr_1"}]}
+
+
+async def _run_a_move_whose_build_is_dropped_is_made_in_place(state, monkeypatch) -> None:
+    """Whatever drops a move's build, the move is made in place to its key: field by field the row
+    a twin's move in place leaves, the key not retired, and the next pass reseeds it in place to
+    the head. Once the build wrote into the key, its summaries are owed the job as well."""
+    svc, fake = GraphVersioningService(), BuildFalkor()
+    real_seed = FalkorProjector._build_seed
+
+    async def failing_seed(self, *a, **k):
+        raise ConnectionError("the node went away mid-seed")
+
+    for case in ("switch_off", "left_beside", "no_room", "attempts"):
+        state.update(policy=_policy(), switch=True, seed_room=Admitted(True, "node2", None, None))
+        a, proj, _serving = await _seed(svc, fake)
+        b, _proj, _twin = await _seed(svc, fake)
+        for gid in (a, b):
+            await _beside(svc, gid)
+        state["policy"] = _policy(buildForRebuilds=False)
+        twin_before = await _ps(b)
+        assert (await _move(svc, b, _target(fake, b)))["retiring"]
+        state["policy"] = _policy()
+        before, target = await _ps(a), _target(fake, a)
+        assert (await _move(svc, a, target))["beside"]
+        if case == "switch_off":
+            state["switch"] = False
+        elif case == "left_beside":
+            await svc.set_read_mode(a, "in_place")
+        elif case == "no_room":
+            state["policy"] = _policy(noRoomPolicy="in_place")
+            state["seed_room"] = Admitted(False, "node2", 2048, "capacity")
+        else:
+            state["policy"] = _policy(buildMaxAttempts=1)
+            monkeypatch.setattr(FalkorProjector, "_build_seed", failing_seed)
+        await proj.project_graph(a)                     # dropped, and moved in place
+        monkeypatch.setattr(FalkorProjector, "_build_seed", real_seed)
+        ps, twin = await _ps(a), await _ps(b)
+        expect = _in_place(twin)
+        if case == "attempts":                          # it was admitted: seeding
+            expect["owes_summaries"] = True
+        assert _in_place(ps) == expect, case
+        assert _in_place(twin) == _moved_in_place(twin_before, 3, provider="prov_b"), case
+        assert (ps.falkor_graph_name, ps.falkor_provider) == (target, "prov_b"), case
+        assert ps.shard_map == twin.shard_map and target not in [e["name"] for e in
+                                                                 ps.retired_keys], case
+        state.update(policy=_policy(), switch=True)
+        await proj.project_graph(a)                     # reseeded in place, to the head
+        assert (await _ps(a)).projected_commit_seq == 3, case
+        await _assert_matches_main(svc, fake, a)
+        assert _in_place(before)["projected"] == 3
+
+
+def test_a_move_whose_build_is_dropped_is_made_in_place(builds_on, monkeypatch):
+    asyncio.run(_run_a_move_whose_build_is_dropped_is_made_in_place(builds_on, monkeypatch))
+
+
+async def _run_a_dropped_move_whose_key_another_graph_took_stays(state) -> None:
+    """Another graph projects into the move's key by the time its build is dropped: the move is not
+    made. The graph stays on its key, the move's key is retired at once (the retire run leaves
+    the other graph's pin), and the last error says so."""
+    svc, fake = GraphVersioningService(), BuildFalkor()
+    gid, proj, _serving = await _seed(svc, fake)
+    await _beside(svc, gid)
+    old, target = (await _ps(gid)).falkor_graph_name, _target(fake, gid)
+    await _move(svc, gid, target)
+    rival, _p, _s = await _seed(svc, fake)
+    await _owe(rival, falkor_graph_name=target, falkor_provider="prov_b")
+    try:
+        await svc.set_read_mode(gid, "in_place")
+        await proj.project_graph(gid)
+        ps = await _ps(gid)
+        assert ps.candidate_state is None and (ps.falkor_graph_name, ps.falkor_provider) == (
+            old, None)
+        assert ps.last_error == f"the move to '{target}' was not made: another graph projects into it"
+        assert (ps.retired_keys[-1]["name"], ps.retired_keys[-1]["afterSeq"]) == (target, 0)
+        assert (ps.projected_commit_seq, ps.served_commit_seq) == (3, 3)
+    finally:
+        await _owe(rival, falkor_graph_name=None)
+
+
+def test_a_dropped_move_whose_key_another_graph_took_stays(builds_on):
+    asyncio.run(_run_a_dropped_move_whose_key_another_graph_took_stays(builds_on))
+
+
+async def _run_a_move_whose_graph_leaves_falkordb_is_made_in_place_and_loaded(
+        monkeypatch) -> None:
+    """The serving key is lost while the move is built (evicted): the move is made in place, the
+    graph still out of FalkorDB, its new key's partial content retired at once (its load writes
+    the key it places), and its load asked for."""
+    from backend.app.services.versioning import residency as gv_residency
+
+    loads = []
+
+    async def load(graph_id):
+        loads.append(graph_id)
+
+    monkeypatch.setattr(gv_residency, "request_load", load)
+    svc, fake = GraphVersioningService(), BuildFalkor()
+    gid, proj, _serving = await _seed(svc, fake)
+    await _beside(svc, gid)
+    target = _target(fake, gid)
+    await _move(svc, gid, target)
+    await _owe(gid, status="evicted", projected_commit_seq=0, served_commit_seq=None)
+    await proj.project_graph(gid)
+    ps = await _ps(gid)
+    assert ps.candidate_state is None and loads == [gid]
+    assert (ps.falkor_graph_name, ps.falkor_provider, ps.status) == (target, "prov_b", "evicted")
+    assert (ps.retired_keys[-1]["name"], ps.retired_keys[-1]["afterSeq"]) == (target, 0)
+
+
+def test_a_move_whose_graph_leaves_falkordb_is_made_in_place_and_loaded(builds_on, monkeypatch):
+    asyncio.run(_run_a_move_whose_graph_leaves_falkordb_is_made_in_place_and_loaded(monkeypatch))
+
+
+async def _run_a_move_is_made_in_place_whenever_beside_does_not_apply(state) -> None:
+    """The guard on the rest: a move is made in place exactly as before builds — field by field,
+    no build asked for — when the graph does not read ``beside``, New-version builds is off or
+    can't be read, ``buildForRebuilds`` is off, a pass or a rebuild has the row, the graph serves
+    nothing yet (watermark 1), the key does not hold its version whole (nothing served, or a window
+    part-written), or the graph is out of FalkorDB. A customer's key is refused, as before."""
+    from backend.app.services.versioning.errors import ProjectionNotAdopted
+
+    svc, fake = GraphVersioningService(), BuildFalkor()
+    cases = [("latest mode", {}, {}), ("in place mode", {}, {}),
+             ("switch off", {"switch": False}, {}), ("switch unread", {"switch": None}, {}),
+             ("moves in place", {"policy": _policy(buildForRebuilds=False)}, {}),
+             ("pass in flight", {}, {"status": "projecting"}),
+             ("rebuilding", {}, {"status": "rebuilding", "projected_commit_seq": 0}),
+             ("at genesis", {}, {"projected_commit_seq": 1, "served_commit_seq": None}),
+             ("nothing served", {}, {"served_commit_seq": None}),
+             ("window in flight", {}, {"window_rows": 900}),
+             ("evicted", {}, {"status": "evicted", "projected_commit_seq": 0,
+                              "served_commit_seq": None})]
+    for case, policy, row in cases:
+        state.update({"policy": _policy(), "switch": True, **policy})
+        gid, _proj, _serving = await _seed(svc, fake)
+        await svc.set_read_mode(gid, {"latest mode": "latest",
+                                      "in place mode": "in_place"}.get(case, "beside"))
+        if row:
+            await _owe(gid, **row)
+        before, target = await _ps(gid), _target(fake, gid)
+        res = await _move(svc, gid, target)
+        after = await _ps(gid)
+        assert res["changed"] and not res["beside"] and res["retiring"]["afterSeq"] == 3, case
+        assert after.candidate_state is None, case
+        assert _in_place(after) == _moved_in_place(before, 3, provider="prov_b"), case
+        assert (after.falkor_graph_name, after.falkor_provider) == (target, "prov_b"), case
+    gid, _proj, _serving = await _seed(svc, fake)
+    await _beside(svc, gid)
+    await _owe(gid, owns_falkor_graph=False)
+    try:
+        await _move(svc, gid, _target(fake, gid))
+        raise AssertionError("a customer's key moved")
+    except ProjectionNotAdopted:
+        assert (await _ps(gid)).candidate_state is None
+
+
+def test_a_move_is_made_in_place_whenever_beside_does_not_apply(builds_on):
+    asyncio.run(_run_a_move_is_made_in_place_whenever_beside_does_not_apply(builds_on))
+
+
+async def _run_a_move_back_onto_a_key_with_a_stale_cursor_seeds_it_whole(state,
+                                                                       monkeypatch) -> None:
+    """A move back onto a key the graph left: the key still holds what it served then, and a cursor
+    an earlier pass left, which says its nodes are done. The move's first pass clears the cursor
+    before the seed writes a page, so the key is reconciled whole — not resumed past nodes it
+    never wrote, whose count can match main's while their content does not. Admitted with the
+    request, it starts seeding."""
+    from backend.app.services.versioning import config as gv_config
+
+    svc, fake = GraphVersioningService(), BuildFalkor()
+    gid, proj, serving = await _seed(svc, fake)
+    await _beside(svc, gid)
+    home = (await _ps(gid)).falkor_graph_name
+    away = _target(fake, gid)
+    await _move(svc, gid, away)
+    for _ in range(3):
+        await proj.project_graph(gid)
+    assert (await _ps(gid)).falkor_graph_name == away and serving.exists
+    # Main moves on: C goes, D comes; the key left behind still holds A, B, C — three nodes, as
+    # main does now — and a cursor that says its nodes were done.
+    c_id = next(n["entityId"] for n in serving.nodes.values() if n["displayName"] == "C")
+    await _edit_publish(svc, gid, "a", [{"op": "delete", "entity_kind": "node", "entity_id": c_id}]
+                        + _create("D"), "C out, D in")
+    state["policy"] = _policy(buildAboveRows=1000)          # written in place
+    await proj.project_graph(gid)
+    state["policy"] = _policy()
+    assert (await _ps(gid)).served_commit_seq == 4
+    serving.cursor = {"from": 0, "to": 4, "step": "edge", "after": "", "structural": False,
+                      "dropped": 0}
+    monkeypatch.setattr(gv_config, "PROJECTION_RECONCILE_STREAMED_ABOVE", 1)
+    res = await _move(svc, gid, home, provider="default", admitted=True)
+    assert (res["beside"], res["building"]["step"]) == (True, "seeding")
+    assert home not in [e["name"] for e in (await _ps(gid)).retired_keys]
+    for _ in range(3):
+        await proj.project_graph(gid)
+    ps = await _ps(gid)
+    assert ps.candidate_state is None and ps.falkor_graph_name == home, ps.candidate_state
+    assert serving.cursor is None
+    await _assert_matches_main(svc, fake, gid)
+
+
+def test_a_move_back_onto_a_key_with_a_stale_cursor_seeds_it_whole(builds_on, monkeypatch):
+    asyncio.run(_run_a_move_back_onto_a_key_with_a_stale_cursor_seeds_it_whole(builds_on,
+                                                                               monkeypatch))
+
+
+async def _run_a_moves_seed_counts_on_its_own_providers_master(monkeypatch) -> None:
+    """Residency's snapshot: a move seeding its key on another provider counts on that provider's
+    master (its slots, not the serving provider's), in a snapshot of that provider as a build
+    alone, and in none of the serving provider's."""
+    from backend.app.services.versioning.residency_plan import Master
+
+    svc, fake = GraphVersioningService(), BuildFalkor()
+    gid, _proj, _serving = await _seed(svc, fake)
+    await _beside(svc, gid)
+    target = _target(fake, gid)
+    await _move(svc, gid, target, admitted=True)
+
+    async def client_of(provider, key):
+        return provider, None
+
+    async def masters_of(provider, client, mode):
+        endpoint = {"default": "a1:6379", "prov_b": "b1:6379"}[provider]
+        return [Master(endpoint=endpoint, used=1, maxmemory=10 ** 9,
+                       providers=(provider,))], {endpoint: None}
+
+    monkeypatch.setattr(residency, "_provider_client", client_of)
+    monkeypatch.setattr(residency, "_read_masters", masters_of)
+    every = await residency.gather(graph_ids=[gid])
+    mine = [(g.endpoint, g.provider, g.build) for g in every.graphs if g.graph_id == gid]
+    assert mine == [("a1:6379", "default", False), ("b1:6379", "prov_b", True)], mine
+    there = await residency.gather(providers=["prov_b"])
+    assert [(g.endpoint, g.build) for g in there.graphs if g.graph_id == gid] == [
+        ("b1:6379", True)]
+    assert {m.endpoint for m in there.masters} == {"b1:6379"} and gid not in there.rows
+    here = await residency.gather(providers=["default"])
+    assert [(g.endpoint, g.build) for g in here.graphs if g.graph_id == gid] == [
+        ("a1:6379", False)]
+    assert "b1:6379" not in {m.endpoint for m in here.masters}
+
+
+def test_a_moves_seed_counts_on_its_own_providers_master(builds_on, monkeypatch):
+    asyncio.run(_run_a_moves_seed_counts_on_its_own_providers_master(monkeypatch))

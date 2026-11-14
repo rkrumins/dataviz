@@ -32,6 +32,7 @@ from backend.app.services.versioning import (build_policy, draft_retention, keym
 from backend.app.services.versioning.errors import (JobActive, ProjectionAlreadyAdopted,
                                                     ProjectionKeyInUse, ProjectionKeyInvalid,
                                                     ProjectionNotAdopted)
+from backend.app.services.versioning.messaging import nudge_projection
 from backend.app.services.versioning.service import ConcurrencyError
 from backend.auth_service.interface import User
 
@@ -116,7 +117,14 @@ async def move_projection(
     up. The old key is dropped once it has, after a grace period; until then a move back onto
     it is cheap. Only keys the platform owns move; the customer's own graph, and a key other
     data sources read, are refused. Without ``key`` the graph's first free platform key on the
-    provider is used, and a graph already on one there is left as it is (``changed: false``)."""
+    provider is used, and a graph already on one there is left as it is (``changed: false``).
+
+    A graph that reads ``beside`` (with New-version builds and ``buildForRebuilds`` on) may have
+    its move built beside its key instead (``beside``: true; ``building``, the build): the new key
+    is seeded from Postgres while readers keep the version they have, then switched to, and
+    nothing retires until then (``retiring`` null). While such a move is under way, the same move
+    again answers ``changed: false`` with the build, and a move to the provider or key the graph
+    is on cancels it (``cancelled``, the build's id)."""
     svc = get_versioning_service()
     meta = await svc.get_graph(graph_id)
     if meta is None:
@@ -155,9 +163,11 @@ async def move_projection(
 
     default = vconfig.DEFAULT_FALKOR_PROVIDER
     current = {"providerId": wm["falkor_provider"] or default, "key": pin}
+    moving = _moving(wm)
     if (body.key is None and current["providerId"] == body.provider_id
-            and keymigrate.is_owned_key(graph_id, pin)):
-        res = {"changed": False, "from": current, "to": current, "retiring": None}
+            and keymigrate.is_owned_key(graph_id, pin) and moving is None):
+        res = {"changed": False, "from": current, "to": current, "retiring": None,
+               "beside": False, "building": None, "cancelled": None}
     else:
         # Its new key is seeded while the old one stands: a full copy, admitted like a load, and
         # committed before anything else is admitted. A graph out of FalkorDB only changes its
@@ -168,9 +178,15 @@ async def move_projection(
         async with residency.admitting() if on else contextlib.nullcontext():
             if on:
                 wm = await svc.projection_watermark(graph_id)
-            copied = on and wm.get("status") not in ("evicted", "waiting_capacity", "rehydrating")
+            moving = _moving(wm)
             key, master = await _target_key(graph_id, body, current, wm["retired_keys"],
-                                            placed=on)
+                                            placed=on, moving=moving)
+            # A move to where the graph is (which cancels one under way), or the move already
+            # under way, copies nothing.
+            where = (body.provider_id, key)
+            copied = (on and wm.get("status") not in ("evicted", "waiting_capacity", "rehydrating")
+                      and where != (current["providerId"], current["key"])
+                      and where != (moving or {}).get("at"))
             if copied:
                 admitted = await residency.admission_on(graph_id, body.provider_id, key)
                 if not admitted.fits:
@@ -182,37 +198,72 @@ async def move_projection(
             with _domain_errors():
                 try:
                     res = await svc.move_projection(graph_id=graph_id, provider=body.provider_id,
-                                                    key=key, actor=user.id, shard_map=shard_map)
+                                                    key=key, actor=user.id, shard_map=shard_map,
+                                                    admitted=copied)
                 except ConcurrencyError as exc:     # enabling version control hasn't finished
                     raise HTTPException(status_code=409,
                                         detail={"type": "bootstrapping", "message": str(exc)})
-    if res["changed"]:
+    details = {"graphId": graph_id, "workspaceId": meta["workspace_id"],
+               "dataSourceId": meta["data_source_id"], "from": res["from"], "to": res["to"]}
+    if res.get("beside"):
+        # Built beside: the projection worker takes the build on (nudged), never this process.
+        background.add_task(nudge_projection, graph_id)
+        if res["changed"]:
+            await recorder.record_for_request(
+                session, "platform.versioning.projection_moved",
+                details={**details, "beside": True, "build": res["building"]["id"]},
+                best_effort=True,   # the move is already committed
+            )
+    elif res["changed"]:
         background.add_task(rebuild_now, graph_id)
         await recorder.record_for_request(
-            session, "platform.versioning.projection_moved",
-            details={"graphId": graph_id, "workspaceId": meta["workspace_id"],
-                     "dataSourceId": meta["data_source_id"], "from": res["from"],
-                     "to": res["to"]},
+            session, "platform.versioning.projection_moved", details=details,
             best_effort=True,   # the move is already committed
+        )
+    elif res.get("cancelled"):
+        await recorder.record_for_request(
+            session, "platform.versioning.projection_move_cancelled",
+            details={**details, "build": res["cancelled"], "to": moving and moving["target"]},
+            best_effort=True,   # the cancel is already committed
         )
     return {"graphId": graph_id, **res,
             "watermark": await _watermark_model(session, await svc.projection_watermark(graph_id))}
 
 
+def _moving(wm: dict) -> Optional[dict]:
+    """The move a graph's watermark says is under way, built beside its key: ``{target, at}``
+    (``at``: ``(provider, key)``), or None."""
+    building = wm.get("candidate") or {}
+    target = building.get("target") if building.get("reason") == "move" else None
+    if not target:
+        return None
+    return {"target": target, "at": (target.get("providerId"), target.get("key"))}
+
+
 async def _target_key(graph_id: str, body: ProjectionMoveRequest, current: dict,
-                      retired: list, *, placed: bool) -> Tuple[str, Optional[str]]:
+                      retired: list, *, placed: bool,
+                      moving: Optional[dict] = None) -> Tuple[str, Optional[str]]:
     """The key a move goes to, and the master it was placed on: ``body.key``, or a platform key
     of the graph's that neither exists on the provider nor is one of its retired keys — with
     residency on (``placed``), on the provider's master with the most room (doc 17), else the
     first.
     An explicit key must be this graph's platform key, one of its retired keys on that provider
-    or its current key, and must not exist there unless it is one of those."""
+    or its current key, and must not exist there unless it is one of those.
+    While a move is built beside the graph's key (``moving``), its key is the graph's too: without
+    ``key``, a move to its provider is that move again, and one to the provider the graph is on
+    goes back to the key the graph is on, which cancels it."""
     keys = await falkor_graph_registry.list_graph_keys(body.provider_id)
     if keys is None:        # cannot verify, never "free"
         raise HTTPException(status_code=503, detail={
             "type": "provider_unreachable", "retryable": True,
             "message": "the provider's FalkorDB graphs could not be listed; try again"})
     ours = {((e.get("provider") or vconfig.DEFAULT_FALKOR_PROVIDER), e["name"]) for e in retired}
+    if moving is not None:
+        ours.add(moving["at"])
+        if body.key is None and moving["at"][0] == body.provider_id:
+            return moving["at"][1], None
+        if body.key is None and current["providerId"] == body.provider_id:
+            return current["key"], None
     if body.key is None:
         taken = keys | {name for _p, name in ours}
         chosen = await residency.place_key(graph_id, body.provider_id, taken) if placed else None

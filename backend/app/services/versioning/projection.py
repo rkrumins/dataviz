@@ -2550,35 +2550,43 @@ class FalkorProjector:
         most room, admitted there as a load is and recorded — step ``seeding``, that key, and the
         version the seed writes (``seedSeq``): the one the serving key holds whole, or a rebuild's
         head, as it does not trust the serving key — under the capacity lock
-        (``residency.admit_build_seed``). ``(the seed's first pass, None)`` once recorded;
+        (``residency.admit_build_seed``). A move's key is its own, on the provider it moves to:
+        admitted there, its version taken on the seed's first pass, as for a move admitted with
+        its request (:meth:`_build_seed`). ``(the seed's first pass, None)`` once recorded;
         ``(None, why not)`` otherwise."""
         from backend.app.jobs.metrics import increment
         from backend.app.providers import falkor_graph_registry
 
         from . import residency
 
-        build_id, provider = state["id"], ps.falkor_provider
-        seq = (graph.main_head_commit_seq if state.get("rebuild")
-               else await self._serving_whole(ps))
-        keys = await falkor_graph_registry.list_graph_keys(provider)
-        if keys is None:                                 # cannot verify, never "free"
-            return None, "the graph store's keys could not be listed"
-        taken = (set(keys) | {e.get("name") for e in (ps.retired_keys or [])}
-                 | {ps.falkor_graph_name, ps.candidate_graph_name})
+        build_id, move = state["id"], state.get("reason") == "move"
+        provider = ps.candidate_provider if move else ps.falkor_provider
+        seq, taken = None, ()
+        if not move:
+            seq = (graph.main_head_commit_seq if state.get("rebuild")
+                   else await self._serving_whole(ps))
+            keys = await falkor_graph_registry.list_graph_keys(provider)
+            if keys is None:                             # cannot verify, never "free"
+                return None, "the graph store's keys could not be listed"
+            taken = (set(keys) | {e.get("name") for e in (ps.retired_keys or [])}
+                     | {ps.falkor_graph_name, ps.candidate_graph_name})
 
         async def record(key: str, master: Optional[str]) -> bool:
             return await self._svc.update_candidate(
                 graph_id, build_id, name=key, seq=0, mode="reseed", step="seeding",
-                seedSeq=seq, seedPhase="raw", summariesAt=0, master=master, waiting=None,
-                retryAt=None)
+                seedSeq=seq, seedPhase=None if move else "raw", summariesAt=0, master=master,
+                waiting=None, retryAt=None)
 
-        admitted, key = await residency.admit_build_seed(graph_id, provider, taken, record)
+        admitted, key = await residency.admit_build_seed(
+            graph_id, provider, taken, record, key=ps.candidate_graph_name if move else None)
         if key is None:
-            return None, (f"no room for a seed on any node ({admitted.why})"
+            where = "its key's node" if move else "any node"
+            return None, (f"no room for a seed on {where} ({admitted.why})"
                           if not admitted.fits else "the build was replaced")
         increment("graphver_builds_total", step="seeding")
-        logger.info("build %s of %s: seeding version %d from Postgres into '%s' (%s)", build_id,
-                    graph_id, seq, key, admitted.master)
+        logger.info("build %s of %s: seeding %s from Postgres into '%s' (%s)", build_id,
+                    graph_id, f"version {seq}" if seq is not None else "its move", key,
+                    admitted.master)
         async with self._session() as s:
             ps = await s.get(ProjectionStateORM, graph_id)
         state = getattr(ps, "candidate_state", None) if ps is not None else None
@@ -2595,14 +2603,28 @@ class FalkorProjector:
         (``summariesAt``) — within the pass's time (``GRAPHVER_PROJECTION_PASS_MAX_SECS``). The
         reconcile writes only what differs from that version, so a key an earlier attempt left
         is brought back to it rather than written again whole. A summaries job that met the copy
-        starts it again (three times, then the summaries are handed to the job once switched)."""
+        starts it again (three times, then the summaries are handed to the job once switched).
+
+        A move's first pass (no ``seedSeq`` yet) takes its version — the one the serving key holds
+        whole, or the head for a move that rebuilds too — and clears its key's cursor first: the
+        key may be one the graph was on before (a move back), with another pass's cursor in it,
+        which this seed must not resume past what it never wrote."""
         from backend.app.jobs.metrics import increment, observe
 
         from .cache_manager import _rollups_running
 
-        build_id, seq = state["id"], int(state["seedSeq"])
+        build_id = state["id"]
         name, provider = ps.candidate_graph_name, ps.candidate_provider
         client = await self._graph_client(name, provider)
+        if state.get("seedSeq") is None:
+            seq = (graph.main_head_commit_seq if state.get("rebuild")
+                   else await self._serving_whole(ps))
+            await _q(client, _CURSOR_CLEAR)
+            if not await self._svc.update_candidate(graph_id, build_id, seedSeq=seq,
+                                                    seedPhase="raw", summariesAt=0):
+                return noop
+            state = {**state, "seedSeq": seq, "seedPhase": "raw", "summariesAt": 0}
+        seq = int(state["seedSeq"])
         deadline = ((time.monotonic() + config.PROJECTION_PASS_MAX_SECS)
                     if config.PROJECTION_PASS_MAX_SECS > 0 else None)
         async with self._session() as s:
@@ -2666,8 +2688,8 @@ class FalkorProjector:
             raise RuntimeError(unconfirmed)
         if not await self._svc.update_candidate(
                 graph_id, build_id, seq=seq, step="catching_up", seedPhase=None,
-                summariesAt=None, summariesSince=None, rollupsStale=stale or None,
-                progress=None, waiting=None):
+                summariesAt=None, summariesSince=None, summariesTakenAt=since,
+                rollupsStale=stale or None, progress=None, waiting=None):
             return noop
         increment("graphver_builds_total", step="seeded")
         logger.info("build %s of %s: seeded '%s' at version %d from Postgres", build_id, graph_id,
@@ -2857,9 +2879,14 @@ class FalkorProjector:
                 raise RuntimeError(f"the build's key holds {tuple(held)} nodes and edges, main "
                                    f"{tuple(expected)}")
         old = ps.falkor_graph_name
+        stale = bool(state.get("rollupsStale"))
+        if not stale and state.get("reason") != "window" and state.get("summariesTakenAt"):
+            # A summaries job that wrote the serving key's summaries after they were carried over
+            # (a move's, at the version it serves) wrote what this key lacks.
+            stale = await _rollups_ran_since(graph.data_source_id, state["summariesTakenAt"])
         owed = await self._svc.switch_to_candidate(
             graph_id, build_id=build_id, seq=seq, grace_secs=int(policy["retireGraceSecs"]),
-            rollups_stale=bool(state.get("rollupsStale")))
+            rollups_stale=stale)
         if owed is None:
             raise RuntimeError("the switch was refused")
         increment("graphver_builds_total", step="switched")

@@ -843,6 +843,51 @@ def _rebuild_in_place(ps, head: int, *, cause: str, why: Optional[str] = None) -
     ps.last_error = f"rebuilding on its own: {why}"[:500]
 
 
+def _move_in_place(ps, graph, *, key: str, provider: str, actor: Optional[str],
+                   shard_map: Optional[dict], grace_secs: int) -> Tuple[Dict[str, object], bool]:
+    """A move in place, inside the caller's transaction (doc 14 §6 KeyMigration, phase 1: a reseed
+    move): the pin swaps to ``key`` on ``provider``, the platform owning it; the watermark goes to
+    0 (``reseeding``), so the next pass reconciles all of committed main into the new key while
+    reads fall back to Postgres; the epoch is bumped so a pass in flight cannot publish over it.
+    The old key joins ``retired_keys``, due once the new key has caught up and ``grace_secs`` have
+    passed, and ``key`` leaves them (a move back). A graph out of FalkorDB only changes its pin: a
+    load in flight is fenced off and the graph evicted again, to wait its turn. Returns the retired
+    entry, and whether the graph is out of FalkorDB (its load is the caller's to ask for)."""
+    default = config.DEFAULT_FALKOR_PROVIDER
+    retired = list(ps.retired_keys or [])
+    own = [e for e in retired if ((e.get("provider") or default), e["name"]) == (provider, key)]
+    entry = {"name": ps.falkor_graph_name, "provider": ps.falkor_provider,
+             "retireAfter": (datetime.now(timezone.utc)
+                             + timedelta(seconds=grace_secs)).isoformat(),
+             "afterSeq": graph.main_head_commit_seq, "movedBy": actor}
+    ps.falkor_graph_name, ps.falkor_provider, ps.owns_falkor_graph = key, provider, True
+    ps.projected_commit_seq = 0
+    ps.served_commit_seq = None        # the new key is written from nothing
+    ps.target_commit_seq = graph.main_head_commit_seq
+    out = ps.status in ("evicted", "waiting_capacity", "rehydrating")
+    if not out:
+        ps.status = "reseeding"
+    elif ps.status == "rehydrating":
+        ps.status, ps.rehydrating_since = "evicted", None
+    ps.last_error = None
+    ps.failed_attempts = 0
+    ps.next_retry_at = None
+    ps.progress_done = ps.progress_total = None
+    ps.epoch = ProjectionStateORM.epoch + 1     # a pass in flight must not write over it
+    ps.retired_keys = [e for e in retired if e not in own] + [entry]
+    ps.shard_map = shard_map
+    return entry, out
+
+
+def _move_not_made(ps) -> None:
+    """A move's build dropped without the move, inside the caller's transaction: another graph
+    projects into its key, so the graph stays on the key it serves from. The key is retired at
+    once (the retire run leaves another graph's pin alone), and the last error says why."""
+    key = ps.candidate_graph_name
+    _forget_build(ps)
+    ps.last_error = f"the move to '{key}' was not made: another graph projects into it"
+
+
 class GraphVersioningService:
     """Service over the ``graphver`` store.  Each public method is one
     transaction (via :func:`db.graphver_session`) unless a session is passed."""
@@ -5401,14 +5446,14 @@ class GraphVersioningService:
         return True
 
     async def move_projection(self, *, graph_id: str, provider: str, key: str, actor: str,
-                              shard_map: dict) -> Dict[str, object]:
+                              shard_map: dict, admitted: bool = False) -> Dict[str, object]:
         """Move a graph's projection to FalkorDB key ``key`` on ``provider`` (doc 14 §6
         KeyMigration, phase 1: a reseed move). Swaps the pin, bumps the epoch so a pass in flight
         cannot publish over it, and lowers the watermark to 0 (``reseeding``), so the next pass
         reconciles all of committed main into the new key while reads fall back to Postgres. The
         old key is appended to ``retired_keys``, to be dropped once the new key has caught up and
-        ``RETIRE_GRACE_SECS`` have passed; until then a move back onto it is allowed, and takes it
-        off that list.
+        ``retireGraceSecs`` (New-version builds) have passed; until then a move back onto it is
+        allowed, and takes it off that list.
 
         Only keys the platform owns move: an unpinned graph and a graph still projecting into the
         customer's own key are refused (:class:`ProjectionNotAdopted`), and nothing is written. The
@@ -5419,9 +5464,23 @@ class GraphVersioningService:
         No FalkorDB I/O: the caller checks the key is free there and schedules the reseed. A graph
         that is not in FalkorDB — whatever the Graph residency switch says — only changes its pin,
         and its load is asked for again (``residency.request_load``) to seed the new key once
-        admitted; a load in flight is fenced off and the graph is evicted again, to wait its turn."""
+        admitted; a load in flight is fenced off and the graph is evicted again, to wait its turn.
+
+        A graph that reads ``beside`` (New-version builds on, ``buildForRebuilds`` on), idle and
+        serving a version it holds whole with no window part-written (:func:`_beside_ok`), has the
+        move built beside instead (``candidates``, ``beside``): the new key is seeded from Postgres
+        while readers keep the version they have, then switched to; nothing retires until the
+        switch (``retiring`` None). ``admitted``: the caller admitted the seed's room with the
+        request, under the capacity lock, so the build starts seeding; otherwise it is admitted on
+        its first step. Dropped, the move is made in place, as here (``drop_candidate``). A build
+        in flight: the same move answers ``changed: False`` with it (``building``); a move back to
+        the pin cancels it (``cancelled``); any other move replaces it, its key retired at once (a
+        rebuild's carried on by the move that replaces it)."""
+        policy = await build_policy.resolve()
+        switch_on = await build_policy.switch_state()
         default = config.DEFAULT_FALKOR_PROVIDER
         out = False                      # not in FalkorDB under residency: its load is asked for
+        entry, building = None, None
         try:
             async with self._session() as s:
                 await self._lock_graph(s, graph_id)
@@ -5437,8 +5496,14 @@ class GraphVersioningService:
                     raise ValueError(f"unknown graph {graph_id}")
                 cur = {"providerId": ps.falkor_provider or default, "key": ps.falkor_graph_name}
                 tgt = {"providerId": provider, "key": key}
+                build = ps.candidate_state if isinstance(ps.candidate_state, dict) else None
+                decided = candidates.on_request(build, reason="move", target=tgt, pin=cur)
                 if cur == tgt:
-                    return {"changed": False, "from": cur, "to": tgt, "retiring": None}
+                    cancelled = build["id"] if decided == "cancel" else None
+                    if cancelled:
+                        _forget_build(ps)      # its key is retired at once
+                    return {"changed": False, "from": cur, "to": tgt, "retiring": None,
+                            "beside": False, "building": None, "cancelled": cancelled}
                 if ps.falkor_graph_name in (None, f"gv_{graph_id}"):
                     raise ProjectionNotAdopted(
                         "unpinned", "this graph has no FalkorDB key yet; nothing to move")
@@ -5449,39 +5514,48 @@ class GraphVersioningService:
                 retired = list(ps.retired_keys or [])
                 own = [e for e in retired
                        if ((e.get("provider") or default), e["name"]) == (provider, key)]
-                if not (own or keymigrate.is_owned_key(graph_id, key)):
+                if not (own or keymigrate.is_owned_key(graph_id, key) or decided == "keep"):
                     raise ProjectionKeyInvalid(key)
                 try:
                     await self._claim_projection_key(s, key, provider, exclude_graph_id=graph_id)
                 except ConcurrencyError:
                     raise ProjectionKeyInUse(provider, key) from None
-                entry = {"name": ps.falkor_graph_name, "provider": ps.falkor_provider,
-                         "retireAfter": (datetime.now(timezone.utc)
-                                         + timedelta(seconds=config.RETIRE_GRACE_SECS)).isoformat(),
-                         "afterSeq": graph.main_head_commit_seq, "movedBy": actor}
-                ps.falkor_graph_name, ps.falkor_provider, ps.owns_falkor_graph = key, provider, True
-                ps.projected_commit_seq = 0
-                ps.served_commit_seq = None        # the new key is written from nothing
-                ps.target_commit_seq = graph.main_head_commit_seq
-                out = ps.status in ("evicted", "waiting_capacity", "rehydrating")
-                if not out:
-                    ps.status = "reseeding"
-                elif ps.status == "rehydrating":
-                    ps.status, ps.rehydrating_since = "evicted", None
-                ps.last_error = None
-                ps.failed_attempts = 0
-                ps.next_retry_at = None
-                ps.progress_done = ps.progress_total = None
-                ps.epoch = ProjectionStateORM.epoch + 1     # a pass in flight must not write over it
-                ps.retired_keys = [e for e in retired if e not in own] + [entry]
-                ps.shard_map = shard_map
-                _forget_build(ps)      # a build beside the old key has nothing to switch from
+                if decided == "keep":          # this move is already under way
+                    return {"changed": False, "from": cur, "to": tgt, "retiring": None,
+                            "beside": True, "building": candidates.block(ps), "cancelled": None}
+                beside = candidates.beside_wanted(
+                    read_mode=build_policy.read_mode_of(ps.read_mode, policy),
+                    switch_on=switch_on, for_rebuilds=policy["buildForRebuilds"]
+                ) and _beside_ok(ps, graph, reason="move")
+                if beside:
+                    # A rebuild in flight: the move replacing it makes it too.
+                    rebuild = (build or {}).get("rebuild") if decided == "replace" else None
+                    _forget_build(ps, keep=(provider, key))
+                    if own:                    # a move back: the key is no longer to retire
+                        ps.retired_keys = [e for e in ps.retired_keys or [] if e not in own]
+                    _record_build(ps, state=candidates.new_state(
+                        "move", now=_now(), rebuild=rebuild,
+                        step="seeding" if admitted else "queued",
+                        target={"providerId": provider, "key": key, "shardMap": shard_map,
+                                "movedBy": actor}), name=key, provider=provider)
+                    building = candidates.block(ps)
+                else:
+                    entry, out = _move_in_place(ps, graph, key=key, provider=provider, actor=actor,
+                                                shard_map=shard_map,
+                                                grace_secs=int(policy["retireGraceSecs"]))
+                    # A build beside the old key has nothing to switch from: its key goes, unless
+                    # it is the one moved to.
+                    _forget_build(ps, keep=(provider, key))
         except IntegrityError:
             raise ProjectionKeyInUse(provider, key) from None     # uq_ps_key: a concurrent claim won
         if out:
             from .residency import request_load
             await request_load(graph_id)
-        return {"changed": True, "from": cur, "to": tgt, "retiring": entry}
+        if building is not None:
+            from backend.app.jobs.metrics import increment
+            increment("graphver_builds_total", step="queued")
+        return {"changed": True, "from": cur, "to": tgt, "retiring": entry,
+                "beside": building is not None, "building": building, "cancelled": None}
 
     # ── a new version built beside the serving key (read mode ``beside``; see ``candidates``) ──
 
@@ -5610,41 +5684,95 @@ class GraphVersioningService:
           Postgres;
         * ``load`` — an operator's rebuild of a graph out of FalkorDB: its load is asked for, as
           the request would have;
+        * ``move`` — the move is made in place to the key it was built in, which becomes the pin,
+          as the request would have made it (:func:`_move_in_place`, retiring the old key after
+          ``grace_secs``): the next pass reconciles it from Postgres, keeping what the build wrote
+          that is right. Its summaries are owed the batch job once the build wrote any there. A
+          graph out of FalkorDB has that key retired at once (the load writes its own) and its load
+          asked for;
+        * ``stayed`` — the move is not made: another graph projects into its key. The key is
+          retired at once (the retire run leaves another's pin), and the last error says so;
         * ``dropped`` — nothing more to do: the graph is in the trash, where nothing may reseed it,
           or its key is already being written from Postgres (a reset, a load), or out of FalkorDB
           after a rebuild the projector started on its own (its next read loads it).
 
         None, nothing written, when the build is no longer the graph's. Under the graph's lock, as
-        a rebuild's request takes it."""
-        load = False
-        async with self._session() as s:
-            await self._lock_graph(s, graph_id)
-            ps = await self._locked_build(s, graph_id, build_id)
-            if ps is None:
-                return None
-            graph = await s.get(GraphORM, graph_id)
-            state = dict(ps.candidate_state)
-            if state.get("reason") == "window":
-                ps.window_rows = int(state.get("rows") or 1)
-                _forget_build(ps)
-                return "window"
-            _forget_build(ps)
-            if graph is None or graph.deleted_at is not None:
-                return "dropped"
-            rebuild = state.get("rebuild") or {}
-            if ps.status == "idle":
-                _rebuild_in_place(ps, graph.main_head_commit_seq,
-                                  cause=rebuild.get("cause") or "operator", why=rebuild.get("why"))
-                took = "rebuild"
-            elif (ps.status in ("evicted", "waiting_capacity")
-                  and rebuild.get("cause") == "operator"):
-                load, took = True, "load"
-            else:
-                took = "dropped"
+        a rebuild's or a move's request takes it."""
+        load = moving = False
+        try:
+            async with self._session() as s:
+                await self._lock_graph(s, graph_id)
+                ps = await self._locked_build(s, graph_id, build_id)
+                if ps is None:
+                    return None
+                graph = await s.get(GraphORM, graph_id)
+                state = dict(ps.candidate_state)
+                if state.get("reason") == "window":
+                    ps.window_rows = int(state.get("rows") or 1)
+                    _forget_build(ps)
+                    return "window"
+                if graph is None or graph.deleted_at is not None:
+                    _forget_build(ps)
+                    return "dropped"
+                if state.get("reason") == "move":
+                    moving = True
+                    took, load = await self._move_after_build(s, ps, graph, state, grace_secs)
+                else:
+                    _forget_build(ps)
+                    rebuild = state.get("rebuild") or {}
+                    if ps.status == "idle":
+                        _rebuild_in_place(ps, graph.main_head_commit_seq,
+                                          cause=rebuild.get("cause") or "operator",
+                                          why=rebuild.get("why"))
+                        took = "rebuild"
+                    elif (ps.status in ("evicted", "waiting_capacity")
+                          and rebuild.get("cause") == "operator"):
+                        load, took = True, "load"
+                    else:
+                        took = "dropped"
+        except IntegrityError:
+            if not moving:
+                raise
+            # uq_ps_key: another graph took the move's key as the move committed.
+            async with self._session() as s:
+                await self._lock_graph(s, graph_id)
+                ps = await self._locked_build(s, graph_id, build_id)
+                if ps is None:
+                    return None
+                _move_not_made(ps)
+            return "stayed"
         if load:
             from .residency import request_load
             await request_load(graph_id)
         return took
+
+    async def _move_after_build(self, s, ps, graph, state: Dict[str, object],
+                                grace_secs: int) -> Tuple[str, bool]:
+        """:meth:`drop_candidate` for a move's build, in its transaction: ``("move", out of
+        FalkorDB)`` once made in place, or ``("stayed", False)``."""
+        key, provider = ps.candidate_graph_name, ps.candidate_provider
+        try:
+            await self._claim_projection_key(s, key, provider, exclude_graph_id=ps.graph_id)
+        except ConcurrencyError:
+            _move_not_made(ps)
+            return "stayed", False
+        target = state.get("target") or {}
+        _entry, out = _move_in_place(
+            ps, graph, key=key, provider=provider or config.DEFAULT_FALKOR_PROVIDER,
+            actor=target.get("movedBy"), shard_map=target.get("shardMap"), grace_secs=grace_secs)
+        ps.candidate_graph_name = ps.candidate_provider = None   # the key is the pin now
+        ps.candidate_seq = None
+        ps.candidate_state = None
+        if out:
+            ps.retired_keys = [*ps.retired_keys, {
+                "name": key, "provider": provider, "afterSeq": 0, "build": state.get("id"),
+                "retireAfter": datetime.now(timezone.utc).isoformat()}]
+        if state.get("rollupsStale") or state.get("step") != "queued":
+            # The build carried summaries over leniently or not at all yet, or wrote raw content
+            # its summaries were not moved by: the reseed in place hands them to the batch job.
+            rollup = ps.rollup_state if isinstance(ps.rollup_state, dict) else {}
+            ps.rollup_state = {**rollup, "moved": _now()}
+        return "move", out
 
     async def adopt_projection(self, *, graph_id: str, key: str, actor: str,
                                shard_map: dict) -> Dict[str, object]:

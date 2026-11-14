@@ -314,6 +314,29 @@ describe('VersionedGraphsPanel', () => {
         await waitFor(() => expect(versionedGraphs).toHaveBeenCalledTimes(2))
     })
 
+    it('says a move built beside the key keeps readers on it, and when it is already under way or cancelled', async () => {
+        versionedGraphs.mockResolvedValue({ graphs: [FORK], nextCursor: null })
+        const from = { providerId: 'falkor-eu', key: 'gv_fork_b' }
+        const to = { providerId: 'falkor-eu', key: 'gvp_graph_b{graph_b.2}' }
+        const building = { id: 'build_1', step: 'seeding' as const, reason: 'move' as const, target: to }
+        const answers = [
+            [{ graphId: 'graph_b', changed: true, from, to, retiring: null, beside: true, building, cancelled: null, watermark: {} },
+                `Building ${to.key} beside ${from.key} — readers stay on it until the new copy is checked and switched to`],
+            [{ graphId: 'graph_b', changed: false, from, to, retiring: null, beside: true, building, cancelled: null, watermark: {} },
+                `Already moving to ${to.key}`],
+            [{ graphId: 'graph_b', changed: false, from, to: from, retiring: null, beside: false, building: null, cancelled: 'build_1', watermark: {} },
+                'Move cancelled'],
+        ] as const
+        renderPanel()
+        for (const [answer, note] of answers) {
+            moveProjection.mockResolvedValue(answer)
+            await userEvent.click(await screen.findByRole('button', { name: 'Move…' }))
+            await userEvent.selectOptions(screen.getByLabelText('Target provider'), 'falkor-eu')
+            await userEvent.click(screen.getByRole('button', { name: 'Move' }))
+            expect(await screen.findByText(note)).toBeInTheDocument()
+        }
+    })
+
     it('says so when the graph already was there', async () => {
         versionedGraphs.mockResolvedValue({ graphs: [FORK], nextCursor: null })
         const here = { providerId: 'falkor-eu', key: 'gvp_graph_b{graph_b.1}' }

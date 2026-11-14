@@ -55,7 +55,7 @@ from datetime import datetime, timedelta, timezone
 from typing import (Any, AsyncIterator, Awaitable, Callable, Collection, Dict, List, Mapping,
                     NamedTuple, Optional, Tuple)
 
-from sqlalchemy import func, literal, select, text, update
+from sqlalchemy import and_, func, literal, or_, select, text, update
 
 from . import config, db, keymigrate, residency_policy
 from .messaging import get_broker_redis, nudge_projection
@@ -541,9 +541,14 @@ async def gather(*, graph_ids: Optional[Collection[str]] = None,
     master of each of their providers (and of ``providers``): its memory, its hold, what the
     aggregation write governor holds on it and its slots. Waiting graphs whose request the broker
     lost go to the end of the queue, and so does an Always graph that is not resident — and, with
-    ``reload_all`` (the switch off), every evicted graph."""
+    ``reload_all`` (the switch off), every evicted graph.
+
+    A build seeding a graph's next version counts on the master of its own key, by its own
+    provider's slots (a move's is the provider it moves to): in a snapshot of that provider
+    whichever provider serves the graph — there as a build alone — and in no other's."""
     ps, head = ProjectionStateORM, GraphORM.main_head_commit_seq
     provider_of = func.coalesce(func.nullif(ps.falkor_provider, ""), config.DEFAULT_FALKOR_PROVIDER)
+    build_of = func.coalesce(func.nullif(ps.candidate_provider, ""), config.DEFAULT_FALKOR_PROVIDER)
     query = (
         select(ps.graph_id, ps.falkor_graph_name, ps.falkor_provider, ps.owns_falkor_graph,
                ps.status, ps.residency, ps.last_read_at, ps.last_projected_at, ps.size_bytes,
@@ -561,9 +566,21 @@ async def gather(*, graph_ids: Optional[Collection[str]] = None,
     if graph_ids is not None:
         query = query.where(ps.graph_id.in_(list(graph_ids)))
     if providers is not None:
-        query = query.where(provider_of.in_(list(providers)))
+        query = query.where(or_(provider_of.in_(list(providers)),
+                                and_(ps.candidate_state.isnot(None),
+                                     build_of.in_(list(providers)))))
     async with db.graphver_session() as s:
         found = (await s.execute(query)).all()
+    default = config.DEFAULT_FALKOR_PROVIDER
+    # The graphs this snapshot holds as graphs: those it was asked about. A graph served elsewhere
+    # is here for its build alone.
+    served = [r for r in found
+              if providers is None or (r.falkor_provider or default) in providers]
+    served_ids = {r.graph_id for r in served}
+    # The builds seeding a key of one of its providers: a snapshot of some providers reads no
+    # other's masters, whose slots would answer for its keys.
+    building = [r for r in found if _build_seeding(r) and (
+        providers is None or (r.candidate_provider or default) in providers)]
 
     snap = Snapshot()
     try:
@@ -573,7 +590,7 @@ async def gather(*, graph_ids: Optional[Collection[str]] = None,
         asked = {}
     snap.queued = list(asked)
     now = time.time()
-    for r in found:
+    for r in served:
         if r.graph_id not in asked and (r.status == "waiting_capacity" or (
                 r.status == "evicted" and (reload_all or r.residency == "always"))):
             asked[r.graph_id] = snap.requeue[r.graph_id] = now
@@ -588,12 +605,15 @@ async def gather(*, graph_ids: Optional[Collection[str]] = None,
             except _Unread:
                 snap.sized = False
     dedicated = await _dedicated({r.data_source_id for r in found})
-    held = await _held([r for r in found
+    held = await _held([r for r in served
                         if r.owns_falkor_graph and r.status == "idle" and r.residency != "always"])
     by_provider: Dict[str, List[Any]] = {p: [] for p in providers or ()}
-    for r in found:
-        by_provider.setdefault(r.falkor_provider or config.DEFAULT_FALKOR_PROVIDER, []).append(r)
+    for r in served:
+        by_provider.setdefault(r.falkor_provider or default, []).append(r)
+    for r in building:
+        by_provider.setdefault(r.candidate_provider or default, [])
     endpoint_of: Dict[str, str] = {}
+    slots_of: Dict[str, Dict[str, Any]] = {}
     seen: Dict[str, int] = {}                 # a master two providers reach is read once
     for provider, rows in by_provider.items():
         try:
@@ -615,35 +635,43 @@ async def gather(*, graph_ids: Optional[Collection[str]] = None,
                 seen[m.endpoint] = len(snap.masters)
                 snap.masters.append(m)
         snap.slots.update(slots)
+        slots_of[provider] = slots
         for r in rows:
             endpoint_of[r.graph_id] = (_master_of(slots, r.falkor_graph_name) if slots
                                        else f"{provider}:unreachable")
-            if _build_seeding(r):
-                endpoint_of[f"{r.graph_id}#build"] = (
-                    _master_of(slots, r.candidate_graph_name) if slots
-                    else f"{provider}:unreachable")
+    for r in building:
+        # By its own provider's slots: a move's key is not on the provider that serves.
+        provider = r.candidate_provider or default
+        endpoint_of[f"{r.graph_id}#build"] = (
+            _master_of(slots_of[provider], r.candidate_graph_name)
+            if slots_of.get(provider) else f"{provider}:unreachable")
+    building_ids = {r.graph_id for r in building}
 
     broker: Dict[str, bool] = {}            # the read leases' broker, as this pass found it
     for r in found:
-        candidate = r.owns_falkor_graph and r.status == "idle" and r.residency != "always"
-        target = max(r.target_commit_seq, r.main_head_commit_seq)
-        placed = dedicated is not None and r.data_source_id not in dedicated
-        snap.rows[r.graph_id] = dict(r._mapping, key=r.falkor_graph_name,
-                                     provider=r.falkor_provider or config.DEFAULT_FALKOR_PROVIDER,
-                                     endpoint=endpoint_of[r.graph_id], placed=placed)
-        snap.graphs.append(Graph(
-            graph_id=r.graph_id, endpoint=endpoint_of[r.graph_id], residency=r.residency,
-            status=r.status, owned=bool(r.owns_falkor_graph),
-            evictable=bool(r.past_genesis and r.enable_finished) and r.graph_id not in held,
-            leased=candidate and await _leased(r.graph_id, broker),
-            last_read=_ts(r.last_read_at),       # none on record: its clock starts this pass
-            size_bytes=r.size_bytes, entities=estimate.get(r.graph_id),
-            seeding=_seeding(r, target),
-            requested_at=asked.get(r.graph_id),
-            provider=r.falkor_provider or config.DEFAULT_FALKOR_PROVIDER, placed=placed,
-            # A window in flight on the key it serves; one left on a key since lost is no growth.
-            window_rows=r.window_rows if r.status in ("idle", "projecting") else None))
-        if _build_seeding(r):
+        if r.graph_id in served_ids:
+            candidate = r.owns_falkor_graph and r.status == "idle" and r.residency != "always"
+            target = max(r.target_commit_seq, r.main_head_commit_seq)
+            placed = dedicated is not None and r.data_source_id not in dedicated
+            snap.rows[r.graph_id] = dict(r._mapping, key=r.falkor_graph_name,
+                                         provider=r.falkor_provider or default,
+                                         endpoint=endpoint_of[r.graph_id], placed=placed)
+            snap.graphs.append(Graph(
+                graph_id=r.graph_id, endpoint=endpoint_of[r.graph_id], residency=r.residency,
+                status=r.status, owned=bool(r.owns_falkor_graph),
+                # Not while it builds: the evictor leaves such a graph alone (_evictable).
+                evictable=(bool(r.past_genesis and r.enable_finished)
+                           and r.graph_id not in held and r.candidate_state is None),
+                leased=candidate and await _leased(r.graph_id, broker),
+                last_read=_ts(r.last_read_at),       # none on record: its clock starts this pass
+                size_bytes=r.size_bytes, entities=estimate.get(r.graph_id),
+                seeding=_seeding(r, target),
+                requested_at=asked.get(r.graph_id),
+                provider=r.falkor_provider or default, placed=placed,
+                # A window in flight on the key it serves; one left on a key since lost is no
+                # growth.
+                window_rows=r.window_rows if r.status in ("idle", "projecting") else None))
+        if r.graph_id in building_ids:
             # A build seeding the next version into a key of its own: a full write of the graph
             # on that key's master, reserved there as a load's is, and that master takes no other
             # load meanwhile. Never evicted, never loaded: it is not the graph's resident key.
@@ -651,8 +679,7 @@ async def gather(*, graph_ids: Optional[Collection[str]] = None,
                 graph_id=r.graph_id, endpoint=endpoint_of[f"{r.graph_id}#build"],
                 residency=r.residency, status="building", owned=True, evictable=False,
                 size_bytes=r.size_bytes, entities=estimate.get(r.graph_id), seeding=True,
-                provider=r.falkor_provider or config.DEFAULT_FALKOR_PROVIDER, placed=False,
-                build=True))
+                provider=r.candidate_provider or default, placed=False, build=True))
     return snap
 
 
@@ -846,8 +873,8 @@ async def admit_build_copy(graph_id: str, provider: Optional[str], key: str, hol
 
 
 async def admit_build_seed(graph_id: str, provider: Optional[str], taken: Collection[str],
-                           record: Callable[[str, Optional[str]], Awaitable[bool]]
-                           ) -> Tuple[Admitted, Optional[str]]:
+                           record: Callable[[str, Optional[str]], Awaitable[bool]], *,
+                           key: Optional[str] = None) -> Tuple[Admitted, Optional[str]]:
     """Room for a build seeded from Postgres (New-version builds, when a copy does not fit or is
     not wanted): a key of the graph's own, not ``taken``, on the master with the most room free to
     take a load (:func:`place_key`), and the graph's full write admitted there as a load's is
@@ -855,17 +882,20 @@ async def admit_build_seed(graph_id: str, provider: Optional[str], taken: Collec
     in ``projection_state`` before the capacity lock is let go, so the next admission counts the
     seed (:func:`gather`): no two builds, or a build and a load, take the same room. ``(admitted,
     key)``; the key is None when refused, or when ``record`` found the build gone (False). No
-    ``provider`` is the default one."""
+    ``provider`` is the default one. A move's build has its key already (``key``, on the provider it
+    moves to): its full write is admitted on the master that key hashes to, as a move's copy is."""
     provider = provider or config.DEFAULT_FALKOR_PROVIDER
     async with admitting():
-        placed = await place_key(graph_id, provider, taken)
-        if placed is None:
-            return Admitted(False, None, None, "queued"), None
-        key, master = placed
+        master = None
+        if key is None:
+            placed = await place_key(graph_id, provider, taken)
+            if placed is None:
+                return Admitted(False, None, None, "queued"), None
+            key, master = placed
         admitted = await admission_on(graph_id, provider, key)
         if not admitted.fits:
             return admitted, None
-        return admitted, key if await record(key, master) else None
+        return admitted, key if await record(key, master or admitted.master) else None
 
 
 async def admit_copy(graph_id: str, provider: str, key: str, holder: str

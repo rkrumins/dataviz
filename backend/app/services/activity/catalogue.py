@@ -883,6 +883,10 @@ _EVENT_META.update({
         f"Moved versioned graph {_detail(p, 'graphId') or '?'} to FalkorDB key "
         f"{(_detail(p, 'to') or {}).get('key', '?')}"
     )),
+    "platform.versioning.projection_move_cancelled": ("info", lambda p: (
+        f"Cancelled the move of versioned graph {_detail(p, 'graphId') or '?'} to FalkorDB key "
+        f"{(_detail(p, 'to') or {}).get('key', '?')}"
+    )),
     "platform.residency_policy.updated": ("info", lambda p: (
         "Changed the residency policy of versioned graphs"
     )),
@@ -995,6 +999,7 @@ LABELS: dict[str, str] = {
     "platform.node_identity.updated": "Changed node identity",
     "platform.versioning.watermarks_reset": "Reseeded versioned graphs",
     "platform.versioning.projection_moved": "Moved a versioned graph projection",
+    "platform.versioning.projection_move_cancelled": "Cancelled a versioned graph projection's move",
     "platform.residency_policy.updated": "Changed residency policy",
     "platform.draft_retention.updated": "Changed draft retention",
     "platform.build_policy.updated": "Changed new-version build settings",
