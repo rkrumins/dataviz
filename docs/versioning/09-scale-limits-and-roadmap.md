@@ -53,8 +53,8 @@ projected and exported; "one pass" is the same step with the paging threshold ra
 |------|------------:|------------:|--------:|----------------------:|
 | Import into a draft (windowed) | 117 s, 192 MB | 214 s, 198 MB | 727 s, 197 MB | — |
 | Publish (paged above 200,000 changes) | 24 s, 436 MB (one batch) | 111 s, 369 MB | 367 s, 399 MB | ~1 GB, est. (1.7 KB a change) |
-| Projection of the published window (paged above 100,000 rows) | — | 112 s, 182 MB | 426 s, 206 MB | 92 s, 956 MB |
-| Rebuild from nothing (paged above 100,000 entities) | — | 84 s, 209 MB | 286 s, 216 MB | 77 s, 1,653 MB |
+| Projection of the published window (paged above 100,000 rows) | 28 s, 198 MB (CI) | 112 s, 182 MB | 426 s, 206 MB | 92 s, 956 MB |
+| Rebuild from nothing (paged above 100,000 entities) | 37 s, 220 MB (CI) | 84 s, 209 MB | 286 s, 216 MB | 77 s, 1,653 MB |
 | Export (NDJSON, streamed) | 12 s, 154 MB | 31 s, 150 MB | 101 s, 166 MB | — |
 
 A paged publish holds at most the Merkle fingerprint's list of changes besides its page — up to
@@ -131,8 +131,8 @@ connections by the route a read of main takes:
 |---|--:|--:|--:|--:|---|---|--:|
 | Always the latest | 29 s, 1 pass | 39,213 | 4.4 / 41.7 / 66.4 ms | 0 | FalkorDB 95%, Postgres 5% | the old one, then the new one at once | 1,264 → 1,308 MB |
 | Update in place | 30 s, 1 pass | 68,469 | 4.4 / 6.6 / 9.0 ms | 0 | FalkorDB | the old one, with parts of the new one as written | 1,286 → 1,332 MB |
-| Switch when ready, copied | 56 s, 3 passes | 85,500 | 4.4 / 7.3 / 9.6 ms | 0 | FalkorDB | the old one only, whole, until the switch | 1,324 → 3,910 MB |
-| Switch when ready, seeded | 522 s, 4 passes | 463,765 | 4.4 / 6.7 / 9.7 ms | 0 | FalkorDB | the old one only, whole, until the switch | 1,337 → 2,735 MB |
+| Switch when ready, copied | 56 s, 3 passes | 85,500 | 4.4 / 7.3 / 9.6 ms | 0 | FalkorDB | one whole version at a time: the old, then the new | 1,324 → 3,910 MB |
+| Switch when ready, seeded | 522 s, 4 passes | 463,765 | 4.4 / 6.7 / 9.7 ms | 0 | FalkorDB | one whole version at a time: the old, then the new | 1,337 → 2,735 MB |
 
 After every mode FalkorDB held exactly what Postgres holds, and no read failed. What it shows:
 
@@ -151,6 +151,23 @@ After every mode FalkorDB held exactly what Postgres holds, and no read failed. 
 Steps at that size in the same run (each in a process of its own): import into a draft 1,009 s and
 487 MB; publish 526 s and 396 MB; projection of the published window 381 s and 276 MB (2 passes);
 rebuild from nothing 295 s and 255 MB; export 86 s and 164 MB.
+
+The same on a graph of 100,000 nodes and 100,000 edges, with changes of 20,000 rows:
+
+| Read mode | Landed in | Reads meanwhile | Latency p50 / p95 / p99 | Errors | Read from | FalkorDB memory |
+|---|--:|--:|--:|--:|---|--:|
+| Always the latest | 9.8 s, 1 pass | 7,626 | 4.7 / 56.5 / 69.4 ms | 0 | FalkorDB 92%, Postgres 8% | 131 → 150 MB |
+| Update in place | 9.9 s, 1 pass | 15,246 | 4.6 / 6.8 / 9.1 ms | 0 | FalkorDB | 137 → 145 MB |
+| Switch when ready, copied | 14.5 s, 3 passes | 18,863 | 4.6 / 7.4 / 9.6 ms | 0 | FalkorDB | 143 → 394 MB |
+| Switch when ready, seeded | 51.4 s, 3 passes | 48,159 | 4.6 / 7.1 / 9.6 ms | 0 | FalkorDB | 146 → 307 MB |
+
+The shape holds from 100,000 to 1,000,000: in place lands as fast as Always the latest with reads
+as fast as a key's; a copy adds about 1.9 to 2.0 times the graph's memory at its peak, a seed 1.1
+to 1.2 times; and a seed's time grows with the graph (51 s to 522 s) faster than a copy's (14 s to
+56 s). Steps at 100,000 in that run: import 90 s and 244 MB; publish 27 s and 450 MB; projection
+28 s and 198 MB; rebuild 37 s and 220 MB; export 8 s and 160 MB. Before the paging thresholds came
+down to 100,000, the projection held that window whole (463 MB) and the rebuild the whole graph
+(667 MB).
 
 ## 3. Complexity reference
 
