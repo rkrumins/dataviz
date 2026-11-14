@@ -107,29 +107,36 @@ def test_a_saved_value_out_of_range_is_clamped_and_ordered_never_refused(monkeyp
     assert (p["pgReadsPerGraph"], p["pgReadsPerProcess"]) == (6, 6)
 
 
+def test_a_value_saved_for_a_removed_setting_is_not_kept():
+    # warmSecs was a setting once; a row that still holds it is saved without it.
+    assert bp.merged({"warmSecs": 30, "copyMarginPct": 150}, {"noRoomPolicy": "in_place"}) \
+        == {"copyMarginPct": 150, "noRoomPolicy": "in_place"}
+    assert "warmSecs" not in bp.defaults().values
+
+
 async def test_a_saved_value_wins_and_an_unset_one_is_the_default():
     p = await bp.resolve(_Session(_row(copyMarginPct=150, noRoomPolicy="in_place")))
     assert (p["copyMarginPct"], p["noRoomPolicy"]) == (150, "in_place")
-    assert p["warmSecs"] == config.PROJECTION_CANDIDATE_WARM_SECS
+    assert p["flipMaxLagRows"] == config.PROJECTION_CANDIDATE_FLIP_MAX_LAG_ROWS
 
 
 async def test_the_memo_is_read_again_when_a_save_moves_the_generation(_fresh_memo):
-    session = _Session(_row(warmSecs=40))
-    assert (await bp.resolve(session))["warmSecs"] == 40
-    session.row = _row(warmSecs=50)
-    assert (await bp.resolve(session))["warmSecs"] == 40, "memoized"
+    session = _Session(_row(flipMaxLagRows=40))
+    assert (await bp.resolve(session))["flipMaxLagRows"] == 40
+    session.row = _row(flipMaxLagRows=50)
+    assert (await bp.resolve(session))["flipMaxLagRows"] == 40, "memoized"
     _fresh_memo["value"] = "2"                       # another process saved
     bp._MEMO["gen_at"] = 0.0                          # its next look at the generation
-    assert (await bp.resolve(session))["warmSecs"] == 50
+    assert (await bp.resolve(session))["flipMaxLagRows"] == 50
     assert session.reads == 2
 
 
 async def test_an_unreadable_row_keeps_the_last_good_policy_and_never_raises():
-    assert (await bp.resolve(_Session(fail=True)))["warmSecs"] == config.PROJECTION_CANDIDATE_WARM_SECS
+    assert (await bp.resolve(_Session(fail=True)))["flipMaxLagRows"] == config.PROJECTION_CANDIDATE_FLIP_MAX_LAG_ROWS
     bp._MEMO.update(policy=None, at=0.0)
-    await bp.resolve(_Session(_row(warmSecs=40)))
+    await bp.resolve(_Session(_row(flipMaxLagRows=40)))
     bp._MEMO.update(policy=None, at=0.0)
-    assert (await bp.resolve(_Session(fail=True)))["warmSecs"] == 40
+    assert (await bp.resolve(_Session(fail=True)))["flipMaxLagRows"] == 40
 
 
 @pytest.mark.parametrize("body, field", [
@@ -151,9 +158,9 @@ def test_a_bad_value_is_refused_naming_its_field(body, field):
 
 
 def test_minus_one_clears_and_none_leaves_a_value():
-    bp.validate({"copyMarginPct": -1, "pacingRatio": -1, "buildMode": -1, "warmSecs": None}, {})
-    assert bp.merged({"copyMarginPct": 150, "warmSecs": 40}, {"copyMarginPct": -1, "warmSecs": None}) \
-        == {"copyMarginPct": None, "warmSecs": 40}
+    bp.validate({"copyMarginPct": -1, "pacingRatio": -1, "buildMode": -1, "flipMaxLagRows": None}, {})
+    assert bp.merged({"copyMarginPct": 150, "flipMaxLagRows": 40}, {"copyMarginPct": -1, "flipMaxLagRows": None}) \
+        == {"copyMarginPct": None, "flipMaxLagRows": 40}
 
 
 # ── the routes ───────────────────────────────────────────────────────────────────────────────
@@ -191,23 +198,23 @@ async def test_get_describes_each_value_and_how_the_card_shows_it():
 
 
 async def test_put_saves_what_it_names_records_from_and_to_and_moves_the_generation():
-    session, recorded = _Session(_row(warmSecs=40)), []
-    out = await _put({"copyMarginPct": 150, "noRoomPolicy": "in_place", "warmSecs": -1},
+    session, recorded = _Session(_row(flipMaxLagRows=40)), []
+    out = await _put({"copyMarginPct": 150, "noRoomPolicy": "in_place", "flipMaxLagRows": -1},
                      session, recorded)
     saved = json.loads(session.row.gv_build_policy)
     assert saved["values"] == {"copyMarginPct": 150, "noRoomPolicy": "in_place"}
     assert saved["updatedBy"] == "usr_admin" and saved["updatedAt"]
     assert session.row.updated_by == "usr_admin" and session.commits == 1
     assert out["values"]["copyMarginPct"]["effective"] == 150
-    assert out["values"]["warmSecs"]["saved"] is None
+    assert out["values"]["flipMaxLagRows"]["saved"] is None
     assert recorded == [("platform.build_policy.updated", {"details": {
-        "from": {"copyMarginPct": None, "noRoomPolicy": None, "warmSecs": 40},
-        "to": {"copyMarginPct": 150, "noRoomPolicy": "in_place", "warmSecs": None}}})]
+        "from": {"copyMarginPct": None, "noRoomPolicy": None, "flipMaxLagRows": 40},
+        "to": {"copyMarginPct": 150, "noRoomPolicy": "in_place", "flipMaxLagRows": None}}})]
 
 
 async def test_a_save_that_changes_nothing_records_nothing():
-    session, recorded = _Session(_row(warmSecs=40)), []
-    await _put({"warmSecs": 40}, session, recorded)
+    session, recorded = _Session(_row(flipMaxLagRows=40)), []
+    await _put({"flipMaxLagRows": 40}, session, recorded)
     assert recorded == []
 
 

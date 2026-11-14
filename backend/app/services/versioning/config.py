@@ -313,7 +313,6 @@ PROJECTION_CANDIDATE_MAX_ATTEMPTS: int = int(os.getenv("GRAPHVER_PROJECTION_CAND
 # The most rows a build still has to catch up when it switches, applied inside the switch.
 PROJECTION_CANDIDATE_FLIP_MAX_LAG_ROWS: int = int(os.getenv(
     "GRAPHVER_PROJECTION_CANDIDATE_FLIP_MAX_LAG_ROWS", str(PROJECTION_INLINE_MAX_ROWS)))
-PROJECTION_CANDIDATE_WARM_SECS: int = int(os.getenv("GRAPHVER_PROJECTION_CANDIDATE_WARM_SECS", "30"))
 # Pacing the projector's writes so reads of a graph being written keep their turn on its node: the
 # time a write statement aims at, the most one may take, and the pause after each, as a share of
 # its own time — and as a larger share while reads on the node are waiting.

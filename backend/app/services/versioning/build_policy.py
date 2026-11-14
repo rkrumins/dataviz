@@ -112,10 +112,6 @@ FIELDS: Tuple[Field, ...] = (
           "lifecycle", "Catch-up allowed in the switch",
           "A build switches once it is this few rows behind; the rest is applied inside the switch.",
           unit="rows", lo=0, hi=1_000_000),
-    Field("warmSecs", lambda: config.PROJECTION_CANDIDATE_WARM_SECS, "int", "lifecycle",
-          "Warm-up before switching",
-          "How long a build's key is read to warm it before readers are switched to it.",
-          unit="secs", lo=0, hi=600),
     Field("retireGraceSecs", lambda: config.RETIRE_GRACE_SECS, "int", "lifecycle",
           "Keep the previous key for",
           "How long a graph's previous key stays after a switch or a move, so reads already under "
@@ -353,8 +349,9 @@ def _is_inherit(value: Any) -> bool:
 
 
 def merged(saved: Mapping[str, Any], values: Mapping[str, Any]) -> Dict[str, Any]:
-    """What would be saved once ``values`` (``-1`` clears one, None leaves it) are applied."""
-    out = dict(saved)
+    """What would be saved once ``values`` (``-1`` clears one, None leaves it) are applied. A value
+    saved for a setting a later release removed is not kept."""
+    out = {w: v for w, v in saved.items() if w in BY_WIRE}
     out.update({w: None if _is_inherit(v) else v for w, v in values.items() if v is not None})
     return out
 

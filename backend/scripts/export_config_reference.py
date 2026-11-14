@@ -202,10 +202,6 @@ NOTES: dict[str, tuple[str, str | None]] = {
         "The most rows a build may still have to catch up when it switches; the rest is applied inside the switch. Defaults to `GRAPHVER_PROJECTION_INLINE_MAX_ROWS`. A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds.",
         None,
     ),
-    "GRAPHVER_PROJECTION_CANDIDATE_WARM_SECS": (
-        "Seconds a build's key is read to warm it before readers switch to it. A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds.",
-        None,
-    ),
     "GRAPHVER_RETIRE_GRACE_SECS": (
         "Seconds a graph's previous FalkorDB key stays after a switch or a move, so reads under way finish on it. A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds.",
         None,
