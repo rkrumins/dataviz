@@ -492,7 +492,15 @@ always worked; choose the others for the graphs that need them, on the graph's o
 harness measures all three on one graph (`backend/scripts/bench_versioning.py run readmodes`; the
 `versioning-scale` workflow): per mode, the time a change takes to land, the latency and errors of
 reads meanwhile, the routes they took, the versions they saw, and FalkorDB's memory —
-[09](09-scale-limits-and-roadmap.md) §2 has the measured numbers.
+[09](09-scale-limits-and-roadmap.md) §2 has the measured numbers. At 1,000,000 nodes and edges,
+with a change of 100,000 rows and readers browsing throughout, no read failed in any mode:
+
+- **Always the latest** showed the new version at once; the reads it sent to Postgres meanwhile
+  were the slow tail (p99 66 ms, against 9 ms from FalkorDB).
+- **Update in place** landed it in 30 s, reads at p99 9 ms, with no extra memory.
+- **Switch when ready** landed it in 56 s by a copy, FalkorDB holding about three times the
+  graph's memory at the copy's peak, or in 522 s by a seed, about twice. Readers saw only the old
+  version, whole, until the switch.
 
 ### Building beside the serving key (`beside`)
 

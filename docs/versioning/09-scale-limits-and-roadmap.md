@@ -119,6 +119,39 @@ holds what Postgres does after. The `versioning-scale` workflow runs it after th
 Postgres keeps its data on the runner's large disk, so a graph of 5,000,000 nodes and edges fits
 (`timeout_minutes` up to 350).
 
+### What readers get while a change lands, measured
+
+The `versioning-scale` workflow, on a 4-CPU, 16 GB runner (Postgres 16 and FalkorDB 4.18, no memory
+limit on FalkorDB). On a graph of 1,000,000 nodes and 1,000,000 edges, each mode lands a change of
+100,000 version rows (a quarter new nodes, a quarter new edges, a quarter updates, a quarter
+deletes), published Postgres first, while 4 readers in a process of their own read nodes and their
+connections by the route a read of main takes:
+
+| Read mode | Landed in | Reads meanwhile | Latency p50 / p95 / p99 | Errors | Read from | Versions readers saw | FalkorDB memory |
+|---|--:|--:|--:|--:|---|---|--:|
+| Always the latest | 29 s, 1 pass | 39,213 | 4.4 / 41.7 / 66.4 ms | 0 | FalkorDB 95%, Postgres 5% | the old one, then the new one at once | 1,264 → 1,308 MB |
+| Update in place | 30 s, 1 pass | 68,469 | 4.4 / 6.6 / 9.0 ms | 0 | FalkorDB | the old one, with parts of the new one as written | 1,286 → 1,332 MB |
+| Switch when ready, copied | 56 s, 3 passes | 85,500 | 4.4 / 7.3 / 9.6 ms | 0 | FalkorDB | the old one only, whole, until the switch | 1,324 → 3,910 MB |
+| Switch when ready, seeded | 522 s, 4 passes | 463,765 | 4.4 / 6.7 / 9.7 ms | 0 | FalkorDB | the old one only, whole, until the switch | 1,337 → 2,735 MB |
+
+After every mode FalkorDB held exactly what Postgres holds, and no read failed. What it shows:
+
+- **Always the latest** shows the new version the moment it is published, at a cost in speed: the
+  reads that went to Postgres while FalkorDB caught up (5% here) are the slow tail (p95 42 ms, p99
+  66 ms against 7 to 10 ms), and they carry no lineage summaries.
+- **Update in place** lands as fast and reads as fast as anything here, with no extra memory: its
+  cost is that for those 30 s a reader can see part of the new version.
+- **Switch when ready** keeps reads as fast as in place and shows one whole version at a time. A
+  copy lands in about twice the time of in place, and while `GRAPH.COPY` runs FalkorDB holds the new
+  key and the copy's own buffer, each about the graph's size: 2.0× the graph at the peak, which is
+  why **Room a copy needs** asks for ×2.2. A seed from Postgres needs about half that (1.1×) but
+  lands much later (522 s here, against 56 s for a copy): it is what a build does when no copy fits
+  or the graph is too large to copy.
+
+Steps at that size in the same run (each in a process of its own): import into a draft 1,009 s and
+487 MB; publish 526 s and 396 MB; projection of the published window 381 s and 276 MB (2 passes);
+rebuild from nothing 295 s and 255 MB; export 86 s and 164 MB.
+
 ## 3. Complexity reference
 
 | Operation | Cost | Notes |
