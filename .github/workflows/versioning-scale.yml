@@ -9,8 +9,16 @@
 # docs/versioning/09-scale-limits-and-roadmap.md §2 has what this measured, and how to measure at
 # your own size.
 #
-# It took 35 minutes on a 4-CPU machine, so it runs weekly, on demand (at any size), and on a
-# pull request that changes the harness or this file.
+# Then, on the same graph, what readers get while a large change lands in each read mode
+# (docs/versioning/04, Read modes): Always the latest, Keep serving and update in place, and Keep
+# serving and switch when ready, its new key copied and seeded from Postgres. Each change, of
+# CHANGES version rows (creates by an import job, updates and deletes in the same draft), is
+# published Postgres first and projected while readers in a process of their own browse the graph;
+# the report has, per mode, the time to land, read latency, errors, routes and the versions readers
+# saw, and FalkorDB's memory.
+#
+# It took 35 minutes on a 4-CPU machine before the read modes, so it runs weekly, on demand (at any
+# size), and on a pull request that changes the harness or this file.
 name: versioning-scale
 
 on:
@@ -24,6 +32,15 @@ on:
       edges:
         description: Edges in the generated graph
         default: "1000000"
+      changes:
+        description: Version rows in each read mode's change
+        default: "100000"
+      modes:
+        description: The read-mode runs, in order (latest, in_place, beside, beside_seed)
+        default: "latest,in_place,beside,beside_seed"
+      timeout_minutes:
+        description: The job's time limit (a graph of 5,000,000 needs several hours)
+        default: "150"
   pull_request:
     paths:
       - backend/scripts/bench_versioning.py
@@ -40,21 +57,11 @@ jobs:
   scale:
     name: A versioned graph of millions, end to end
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: ${{ fromJSON(inputs.timeout_minutes || '150') }}
+    # Postgres is started by a step, not as a service: its data goes on the runner's large disk
+    # (/mnt) when there is one. A graph of 5,000,000 nodes and edges leaves about 30 GB of graphver
+    # in Postgres, more than the root disk holds.
     services:
-      postgres:
-        image: postgres:16.14-alpine
-        env:
-          POSTGRES_USER: synodic
-          POSTGRES_PASSWORD: synodic
-          POSTGRES_DB: synodic
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U synodic"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 20
       falkordb:
         image: falkordb/falkordb:v4.18.11
         env:
@@ -83,8 +90,27 @@ jobs:
       FALKORDB_PORT: "6379"
       NODES: ${{ inputs.nodes || '1000000' }}
       EDGES: ${{ inputs.edges || '1000000' }}
+      CHANGES: ${{ inputs.changes || '100000' }}
+      MODES: ${{ inputs.modes || 'latest,in_place,beside,beside_seed' }}
     steps:
       - uses: actions/checkout@v4
+      - name: Start Postgres, its data on the large disk
+        run: |
+          set -euo pipefail
+          df -h / /mnt 2>/dev/null || df -h /
+          data=/mnt/pgdata
+          if ! sudo mkdir -p "$data" 2>/dev/null; then data="$RUNNER_TEMP/pgdata"; mkdir -p "$data"; fi
+          sudo chmod 777 "$data"
+          docker run -d --name postgres -p 5432:5432 --shm-size=1g \
+            -e POSTGRES_USER=synodic -e POSTGRES_PASSWORD=synodic -e POSTGRES_DB=synodic \
+            -e PGDATA=/var/lib/postgresql/data/pgdata -v "$data":/var/lib/postgresql/data \
+            postgres:16.14-alpine
+          for _ in $(seq 1 60); do
+            docker exec postgres pg_isready -U synodic && exit 0
+            sleep 2
+          done
+          docker logs postgres
+          exit 1
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -94,6 +120,10 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r backend/requirements.txt
+      - name: No FalkorDB snapshots
+        # A background save of a graph of gigabytes forks the server's memory and writes it to the
+        # root disk, and nothing here reads it back.
+        run: python -c "import redis; redis.Redis(port=6379).config_set('save', '')"
       - name: Build the management and graphver schemas
         run: |
           python -m backend.scripts.upgrade upgrade
@@ -115,6 +145,10 @@ jobs:
           step project project
           step rebuild project --full
           step export export
+          step readmodes readmodes --nodes "$NODES" --edges "$EDGES" --changes "$CHANGES" --modes "$MODES"
+      - name: What the run left on disk
+        if: always()
+        run: df -h / /mnt 2>/dev/null || df -h /
       - name: Report
         if: always()
         run: python -m backend.scripts.bench_versioning report --state "$RUNNER_TEMP/state.json" --md "$GITHUB_STEP_SUMMARY"
@@ -134,6 +168,23 @@ jobs:
                   missed.append(f"{name} peaked at {m['rss_peak_mb']:.0f} MB, past {ceiling} MB")
               if m.get("falkor_eq_pg") is False:
                   missed.append(f"{name}: FalkorDB and Postgres disagree")
+          # The read modes: every mode's change landed, no read failed, FalkorDB holds what Postgres
+          # does after each, and switch when ready showed one whole version at a time.
+          r = json.loads((pathlib.Path(sys.argv[1]) / "readmodes.json").read_text())
+          m = r["metrics"]
+          print(f"readmodes: {r.get('status')}, {m.get('read_errors')} read errors")
+          if r.get("status") != "completed":
+              missed.append(f"readmodes did not complete: {r.get('error')}")
+          for metric, want in (("read_errors", 0), ("falkor_eq_pg", True), ("beside_exact", True)):
+              if m.get(metric) != want:
+                  missed.append(f"readmodes: {metric} is {m.get(metric)}, not {want}")
           if missed:
               sys.exit("\n".join(missed))
           EOF
+      - name: Keep the results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: versioning-scale-results
+          path: ${{ runner.temp }}/results
+          if-no-files-found: ignore

@@ -9,7 +9,11 @@ routes queue them and claimed on a lease — so CI exercises the harness as well
 * the same kind of package seeds a new data source: FalkorDB ends up holding what Postgres holds;
 * "enable version control" on a FalkorDB graph with 200 duplicated urns pauses before it copies
   anything, and once the collapse is decided completes with FalkorDB counted equal to Postgres
-  and a clean verify after the next publish.
+  and a clean verify after the next publish;
+* the read modes, small: in each, a change of creates, updates and deletes lands while readers in a
+  process of their own browse the graph — every change lands, no read fails, FalkorDB equals
+  Postgres after each, and switch when ready shows one whole version at a time, its new key copied
+  in one run and seeded from Postgres in the other.
 
 The budgets are sanity bounds — several times a local run — not the plan's targets, which are for
 100k + 100k (``bench_versioning run … --check``); later phases tighten them.
@@ -146,3 +150,30 @@ async def test_enable_versioning_with_200_duplicates_pauses_then_completes(falko
     assert enabled["metrics"]["falkor_eq_pg"] and enabled["metrics"]["verify_clean"], enabled["metrics"]
     assert not enabled["failedChecks"], enabled["failedChecks"]
     _within(enabled, pause_s=30, after_decision_s=120)
+
+
+@falkor_live
+async def test_every_read_mode_lands_a_change_while_readers_read(tmp_path, store, falkor):
+    n = 4_000
+    path = str(tmp_path / "modes.zip")
+    await bench.gen_package(path, nodes=n, edges=n)
+    inspected = await bench.run_inspect(package=path, store=store)
+    assert inspected["status"] == "completed", inspected
+    imported = await bench.run_import(upload_key=inspected["upload"]["key"], store=store)
+    draft = imported["draft"]
+    published = await bench.run_publish(graph_id=draft["graphId"], branch_id=draft["branchId"],
+                                        store=store)
+    assert published["status"] == "completed", published
+
+    result = await bench.run_readmodes(graph_id=draft["graphId"], store=store, nodes=n, edges=n,
+                                       modes=list(bench.READ_MODE_RUNS), changes=2_000, readers=2,
+                                       timeout_s=600, factory=falkor)
+    print(bench.markdown([result]))
+    assert result["status"] == "completed", result.get("error")
+    m = result["metrics"]
+    assert (m["read_errors"], m["falkor_eq_pg"], m["beside_exact"]) == (0, True, True), result["modes"]
+    modes = result["modes"]
+    assert modes["beside"]["landed"]["build"]["mode"] == "copy", modes["beside"]["landed"]
+    assert modes["beside_seed"]["landed"]["build"]["mode"] == "reseed", modes["beside_seed"]["landed"]
+    for name in ("latest", "in_place"):
+        assert "build" not in modes[name]["landed"], (name, modes[name]["landed"])

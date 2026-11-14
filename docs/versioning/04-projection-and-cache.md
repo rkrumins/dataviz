@@ -470,6 +470,30 @@ root's.
   whole; then the projector writes them into FalkorDB. The mode only decides what readers see while
   it does.
 
+#### Choosing one: what each costs and gives
+
+| | Always the latest | Keep serving, update in place | Keep serving, switch when ready |
+|---|---|---|---|
+| **Readers see, while a change lands** | the new version at once | the last finished version, with parts of the new one as they are written | exactly the last version, then the new one at once |
+| **Reads come from** | Postgres, bounded per graph and per process | the FalkorDB key | the FalkorDB key; the new version is built in a second one |
+| **Read speed meanwhile** | slower on a large graph; a read past the limits is refused (`429`, `503 graph_read_busy`) rather than queued | full speed, the projector's writes paced around reads | full speed; nothing writes the key readers use |
+| **Lineage summaries meanwhile** | none: Postgres holds none | yes, moved as each window is written | yes, exactly the last version's |
+| **Extra FalkorDB memory** | none | the window's growth only | a second copy of the graph until the switch (a copy, or a seed from Postgres on the node with most room) |
+| **The change is visible** | at once, from Postgres | as the projector writes it | once the build is written, caught up and checked: later than in place |
+| **If a pass fails meanwhile** | readers stay on Postgres | readers keep the key, partly updated, until the retry lands | readers keep the old key, whole; the build retries, then falls back to in place |
+| **Best for** | small graphs, and ones where the newest version must always show | large graphs read all day, where a view part way between versions is acceptable | large graphs where every reader must see one complete version |
+| **Needs** | nothing | nothing | a key the platform owns, New-version builds on, and room for a second copy |
+
+In short: **Always the latest** trades speed (and the summaries) for freshness while a graph
+catches up; **update in place** keeps speed and the summaries at the cost of a view that can show
+part of the next version; **switch when ready** keeps speed, the summaries and one exact version at
+the cost of memory for a second copy and a later switch. The default is Always the latest, how reads
+always worked; choose the others for the graphs that need them, on the graph's own row. The scale
+harness measures all three on one graph (`backend/scripts/bench_versioning.py run readmodes`; the
+`versioning-scale` workflow): per mode, the time a change takes to land, the latency and errors of
+reads meanwhile, the routes they took, the versions they saw, and FalkorDB's memory —
+[09](09-scale-limits-and-roadmap.md) §2 has the measured numbers.
+
 ### Building beside the serving key (`beside`)
 
 A publish larger than **Build beside above** (`buildAboveRows`) in a graph that reads `beside` is

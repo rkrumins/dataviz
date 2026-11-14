@@ -99,11 +99,25 @@ $B run publish --state s.json --label publish
 $B run project --state s.json --label project
 $B run project --full --state s.json --label rebuild
 $B run export --state s.json --label export
+$B run readmodes --nodes 5000000 --edges 5000000 --changes 100000 --state s.json --label readmodes
 $B report --state s.json --md report.md
 ```
 
 Watch each step's peak memory (flat in the graph's size), its time (linear), how long the publish
 held the graph's publish lock, and how much Postgres and FalkorDB grew.
+
+`run readmodes` measures what readers get while a change lands, in each read mode
+([04](04-projection-and-cache.md) §5, Read modes): the published graph seeded whole into a key of its
+own, then per mode (`--modes`: `latest`, `in_place`, `beside` — its new key copied — and
+`beside_seed`, seeded from Postgres) a change of `--changes` version rows, a quarter new nodes and a
+quarter new edges by an import job into a draft, a quarter updates and a quarter deletes in the same
+draft, published Postgres first and projected while `--readers` readers in a process of their own
+read a node and its connections by the route a read of main takes. Per mode it reports the time to
+land, read latency percentiles and errors while the change is imported, while it lands and after, the
+routes reads took and the versions they saw, FalkorDB's memory (start and peak), and whether FalkorDB
+holds what Postgres does after. The `versioning-scale` workflow runs it after the steps above; its
+Postgres keeps its data on the runner's large disk, so a graph of 5,000,000 nodes and edges fits
+(`timeout_minutes` up to 350).
 
 ## 3. Complexity reference
 

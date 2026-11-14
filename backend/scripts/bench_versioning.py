@@ -104,6 +104,9 @@ TARGETS: Dict[str, List[Tuple[str, str, Any, str]]] = {
              ("rss_peak_mb", "<", 300, "RSS <300 MB"),
              ("falkor_eq_pg", "==", True, "FalkorDB == Postgres"),
              ("loop_max_ms", "<=", 500, "job-loop max lag ≤500 ms")],
+    "readmodes": [("read_errors", "==", 0, "no read failed, in any mode"),
+                  ("falkor_eq_pg", "==", True, "FalkorDB == Postgres after every mode"),
+                  ("beside_exact", "==", True, "switch when ready: one whole version at a time")],
     "bootstrap": [("pause_s", "<=", 10, "pauses ≤10 s"),
                   ("version_rows_at_pause", "==", 0, "0 version rows at the pause"),
                   ("after_decision_s", "<=", 120, "≤2 min after the decision"),
@@ -1168,6 +1171,383 @@ async def _first_publish_verifies(graph_id: str, projector) -> bool:
 # ── State, output, CLI ────────────────────────────────────────────────────────
 
 
+# ── What readers get while a change lands (read modes) ─────────────────────────
+
+#: The read-mode runs: the platform's three read modes (docs/versioning/04, Read modes), and
+#: switch when ready in both its ways of making the new key: a copy of the serving key, and a seed
+#: from Postgres.
+READ_MODE_RUNS: Dict[str, Tuple[str, Optional[str]]] = {
+    "latest": ("latest", None), "in_place": ("in_place", None),
+    "beside": ("beside", "copy"), "beside_seed": ("beside", "reseed")}
+#: Readers go on this long once a change has landed, to read the version after it.
+AFTER_SECS = 5.0
+#: The phases a read falls in, by when it ran: while the change is imported into a draft (main does
+#: not move), from its publish until FalkorDB holds it, and after.
+READ_PHASES = ("import", "landing", "after")
+
+
+async def _browse(args) -> int:
+    """Readers in a process of their own, as a web pod's are: each reads a random node and its
+    connections, again and again, by the route a read of main takes (``residency_state``: the key
+    at the version it serves, else Postgres at the head through the bounded reader the context
+    engine uses), until ``--stop`` exists. One line per read in ``--out``: when, how long, the
+    route, the version it saw, and the error, if any."""
+    from backend.app.services.context_engine import _pg_reader
+    from backend.app.services.versioning import db
+    from backend.app.services.versioning.service import GraphVersioningService
+    from backend.common.models.graph import EdgeQuery
+
+    with open(args.nodes_file) as f:
+        pool = [tuple(x) for x in json.load(f)]
+    svc = GraphVersioningService()
+    main = await svc.main_branch_id(args.graph_id)
+    reader = _pg_reader(None, svc, args.graph_id, main)
+    factory = falkor_factory()
+    clients: Dict[str, Any] = {}
+    out = open(args.out, "a", buffering=1)
+
+    async def one(seed: int) -> None:
+        rng = random.Random(seed)
+        while not os.path.exists(args.stop):
+            urn, label = rng.choice(pool)
+            started, route, version, error = time.perf_counter(), None, None, None
+            try:
+                state = await svc.residency_state(args.graph_id) or {}
+                name = state.get("falkor_graph_name")
+                if state.get("serving") is not None and name:
+                    client = clients.get(name) or await _client(factory, name)
+                    clients[name] = client
+                    res = await client.ro_query(f"MATCH (n:{label} {{urn: $u}}) OPTIONAL MATCH (n)-[r]-(m) "
+                                                "RETURN n.urn, count(m)", {"u": urn})
+                    route, version = "falkordb", state["serving"]
+                    found = bool(getattr(res, "result_set", None))
+                else:
+                    found = await reader.get_node(urn) is not None
+                    await reader.get_edges(EdgeQuery(any_urns=[urn], limit=50))
+                    route, version = "postgres", state.get("committed")
+                if not found:
+                    # No change deletes a node readers read: one not found was not read at all.
+                    error = "NotFound"
+            except Exception as exc:  # noqa: BLE001 — every failure is what is measured
+                error = type(exc).__name__
+            out.write(json.dumps({"t": time.time(), "ms": round((time.perf_counter() - started) * 1000, 2),
+                                  "route": route, "version": version, "error": error}) + "\n")
+
+    try:
+        await asyncio.gather(*(one(k) for k in range(args.readers)))
+    finally:
+        out.close()
+        await db.dispose_engine()
+    return 0
+
+
+def _read_summary(rows: List[Dict[str, Any]], bounds: Dict[str, Tuple[float, float]]) -> Dict[str, Any]:
+    """The reads of each phase: how many, how many failed and why, latency percentiles (ms), the
+    routes they took and the versions they saw."""
+    out = {}
+    for phase, (lo, hi) in bounds.items():
+        mine = [r for r in rows if lo <= r["t"] < hi]
+        ok = [r["ms"] for r in mine if not r["error"]]
+        routes: Dict[str, int] = {}
+        errors: Dict[str, int] = {}
+        for r in mine:
+            routes[r["route"] or "none"] = routes.get(r["route"] or "none", 0) + 1
+            if r["error"]:
+                errors[r["error"]] = errors.get(r["error"], 0) + 1
+        out[phase] = {"reads": len(mine), "errors": sum(errors.values()), "errorKinds": errors,
+                      "p50Ms": _pct(ok, 0.5), "p95Ms": _pct(ok, 0.95), "p99Ms": _pct(ok, 0.99),
+                      "maxMs": max(ok, default=0.0), "routes": routes,
+                      "versions": sorted({r["version"] for r in mine if r["version"] is not None})}
+    return out
+
+
+async def _change_ops(svc, graph_id: str, r: int, n_updates: int, n_deletes: int,
+                      types: List[str], parents: List[int], keep: set, gone: Dict[str, set],
+                      rng: random.Random) -> List[dict]:
+    """Run ``r``'s updates and deletes of the published graph, by its entity ids on main (an import
+    derives them from the urns, so they are looked up): ``n_updates`` nodes rewritten (a new
+    description), and about ``n_deletes`` deletes — a few leaves outside ``keep`` with every edge
+    they have, then lineage edges of other leaves. Edges go before nodes. ``gone`` holds what
+    earlier runs deleted (``nodes``: indexes, ``edges``: ids), and takes this run's."""
+    def urn(i: int) -> str:
+        return f"urn:bench:{types[i]}:{i}"
+
+    async def ids_of(idx: List[int]) -> Dict[int, str]:
+        found: Dict[str, str] = {}
+        for lo in range(0, len(idx), 5_000):
+            rows = await svc.resolve_identities(graph_id=graph_id, identifier="urn",
+                                                values=[urn(i) for i in idx[lo:lo + 5_000]])
+            found.update({row["value"]: row["entityId"] for row in rows if row.get("entityId")})
+        return {i: found[urn(i)] for i in idx if urn(i) in found}
+
+    async def edges_of(idx: List[int], types_: Optional[List[str]] = None) -> List[str]:
+        out: List[str] = []
+        for lo in range(0, len(idx), 500):
+            rows = await svc.get_edges_from_state(graph_id=graph_id, any_urns=[urn(i) for i in idx[lo:lo + 500]],
+                                                  edge_types=types_, limit=1_000_000)
+            out += [row["id"] for row in rows]
+        return out
+
+    nodes = len(types)
+    live = [i for i in range(nodes) if i not in gone["nodes"]]
+    updated = rng.sample(live, min(n_updates, len(live)))
+    ops: List[dict] = []
+    for i, eid in (await ids_of(updated)).items():
+        payload = _node_payload(i, types[i], urn=True)
+        payload["description"] = f"{payload['description']} Revised by read-mode run {r}."
+        ops.append({"op": "update", "entity_kind": "node", "entity_id": eid, "payload": payload})
+    parent_of = {p for p in parents if p >= 0}
+    touched = set(updated)
+    leaves = [i for i in live if i not in keep and i not in parent_of and i not in touched]
+    rng.shuffle(leaves)
+    doomed = leaves[:max(1, n_deletes // 100)]
+    edges = [e for e in dict.fromkeys(await edges_of(doomed)) if e not in gone["edges"]]
+    want, at = max(0, n_deletes - len(doomed)), len(doomed)
+    seen = set(edges)
+    lineage: List[str] = []
+    while len(lineage) < want and at < len(leaves):
+        for e in await edges_of(leaves[at:at + 2_000], [LINEAGE]):
+            if e not in seen and e not in gone["edges"] and len(lineage) < want:
+                seen.add(e)
+                lineage.append(e)
+        at += 2_000
+    for e in edges + lineage:
+        gone["edges"].add(e)
+        ops.append({"op": "delete", "entity_kind": "edge", "entity_id": e, "payload": None})
+    for i, eid in (await ids_of(doomed)).items():
+        gone["nodes"].add(i)
+        ops.append({"op": "delete", "entity_kind": "node", "entity_id": eid, "payload": None})
+    return ops
+
+
+async def _drop_retired(graph_id: str, factory) -> int:
+    """The keys a switch left the graph (``retired_keys``), dropped now rather than after their
+    grace: the next run must not count them against FalkorDB's memory. Returns how many."""
+    from backend.app.services.versioning import db
+    from backend.app.services.versioning.models import ProjectionStateORM
+
+    async with db.graphver_session() as s, s.begin():
+        ps = await s.get(ProjectionStateORM, graph_id)
+        retired, ps.retired_keys = list(ps.retired_keys or []), []
+    for entry in retired:
+        with contextlib.suppress(Exception):
+            await (await _client(factory, entry["name"])).delete()
+    return len(retired)
+
+
+async def _memory_peak(stop: asyncio.Event, seen: Dict[str, int]) -> None:
+    """FalkorDB's ``used_memory`` high-water mark while ``stop`` is unset (a second key, a copy)."""
+    from falkordb.asyncio import FalkorDB
+    from redis.asyncio import ConnectionPool
+
+    pool = ConnectionPool(host=os.getenv("FALKORDB_HOST", "localhost"),
+                          port=int(os.getenv("FALKORDB_PORT", "6379")), max_connections=2)
+    try:
+        conn = FalkorDB(connection_pool=pool).connection
+    except Exception:  # noqa: BLE001 — no reading is no run lost
+        with contextlib.suppress(Exception):
+            await pool.disconnect()
+        return
+    try:
+        while not stop.is_set():
+            with contextlib.suppress(Exception):
+                used = int((await conn.info("memory")).get("used_memory") or 0)
+                seen["peak"] = max(seen.get("peak", 0), used)
+                seen.setdefault("start", used)
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(stop.wait(), 0.5)
+    finally:
+        with contextlib.suppress(Exception):
+            await pool.disconnect()
+
+
+async def _land(graph_id: str, factory, timeout_s: float) -> Dict[str, Any]:
+    """The projector's passes, one after another as the worker runs them, until FalkorDB serves
+    main's head and no build is left: how long, and how many passes."""
+    from backend.app.services.versioning import db
+    from backend.app.services.versioning.models import GraphORM, ProjectionStateORM
+    from backend.app.services.versioning.projection import FalkorProjector
+
+    started, passes, held = time.monotonic(), 0, 0
+    build: Dict[str, Any] = {"steps": []}
+    while True:
+        out = await FalkorProjector(factory, on_rollups_stale=_noop).project_graph(graph_id)
+        passes += 1
+        # Held back by its verify, pass after pass: FalkorDB does not hold what Postgres does, and
+        # no wait mends that. Said now, not after the timeout.
+        held = held + 1 if out.get("verify_error") else 0
+        if held >= 5:
+            raise RuntimeError(f"held back by its verify {held} passes in a row: {out.get('verify_error')}")
+        async with db.graphver_session() as s:
+            head = (await s.get(GraphORM, graph_id)).main_head_commit_seq
+            ps = await s.get(ProjectionStateORM, graph_id)
+        state = ps.candidate_state if isinstance(ps.candidate_state, dict) else None
+        if state:                                       # a build's steps, as each pass left it
+            if not build["steps"] or build["steps"][-1] != state.get("step"):
+                build["steps"].append(state.get("step"))
+            build.update({k: state[k] for k in ("mode", "copySecs") if state.get(k) is not None})
+        if (ps.projected_commit_seq >= head and ps.candidate_state is None and ps.status == "idle"
+                and ps.served_commit_seq == head):
+            return {"secs": round(time.monotonic() - started, 2), "passes": passes,
+                    "key": ps.falkor_graph_name, "seq": head,
+                    **({"build": build} if build["steps"] else {})}
+        if time.monotonic() - started > timeout_s:
+            raise RuntimeError(f"not landed in {timeout_s:.0f} s: {out}")
+        if out.get("skipped") in ("build_backoff", "build_waiting", "backoff") or out.get("noop"):
+            await asyncio.sleep(1.0)
+
+
+async def run_readmodes(*, graph_id: str, store: CountingStore, nodes: int, edges: int,
+                        modes: Sequence[str], changes: int, readers: int,
+                        timeout_s: float = 3600.0, factory=None) -> Dict[str, Any]:
+    """What readers get while a large change lands, in each read mode: the published graph seeded
+    whole into a fresh key of its own, then per mode a change of about ``changes`` version rows —
+    new nodes and edges by an import job into a draft, updates and deletes of the graph's own in
+    the same draft — published (Postgres first) and projected, with ``readers`` browsing all the
+    while from a process of their own (:func:`_browse`). Per mode: the reads of each phase (count,
+    errors, latency percentiles, routes, versions seen), the time to land, FalkorDB's memory high-
+    water mark, and whether FalkorDB holds what Postgres does after."""
+    from backend.app.services.versioning import build_policy, db, models
+    from backend.app.services.versioning.models import ProjectionStateORM
+    from backend.app.services.versioning.reconcile import spelled_label
+    from backend.app.services.versioning.service import GraphVersioningService
+    from backend.app.providers.falkordb_provider import _sanitize_label
+
+    await models.create_schema_and_partitions()
+    factory = factory or falkor_factory()
+    svc = GraphVersioningService()
+    work = tempfile.mkdtemp(prefix="bench_readmodes_")
+    rng = random.Random(11)
+    types, parents, _pairs = plan_graph(nodes, edges)
+    keep = set(rng.sample(range(nodes), min(nodes // 2, 20_000)))     # what readers read
+    nodes_file = os.path.join(work, "nodes.json")
+    with open(nodes_file, "w") as f:
+        json.dump([[f"urn:bench:{types[i]}:{i}", _sanitize_label(spelled_label(types[i]))]
+                   for i in sorted(keep)], f)
+
+    # The graph whole in a fresh key of its own, as its first seed writes it.
+    name = _new_id("gvt_bench_modes")
+    async with db.graphver_session() as s, s.begin():
+        ps = await s.get(ProjectionStateORM, graph_id)
+        if ps is None:
+            ps = ProjectionStateORM(graph_id=graph_id)
+            s.add(ps)
+        ps.falkor_graph_name, ps.falkor_provider, ps.owns_falkor_graph = name, None, True
+        ps.projected_commit_seq, ps.served_commit_seq, ps.status = 0, None, "idle"
+        ps.last_error, ps.failed_attempts, ps.next_retry_at, ps.read_mode = None, 0, None, None
+    real = (build_policy.resolve, build_policy.current, build_policy.switch_state)
+    runs, gone, keys = {}, {"nodes": set(), "edges": set()}, {name}
+    async with probing(store) as probes:
+        seeded = await _land(graph_id, factory, timeout_s)
+        await _modes(graph_id, svc, store, factory, modes, changes, readers, timeout_s, work,
+                     nodes_file, types, parents, keep, gone, rng, seeded, runs, keys, real)
+    landed = [x for x in runs.values() if not x.get("error")]
+    failed = next((f"{name}: {x['error']}" for name, x in runs.items() if x.get("error")), None)
+    errors = sum(ph["errors"] for run in landed for ph in run["reads"].values())
+    done = len(landed) == len(modes)
+    return _result("readmodes", probes.summary(),
+                   {"read_errors": errors, "falkor_eq_pg": all(x["falkor_eq_pg"] for x in landed),
+                    "beside_exact": all(x["exactVersions"] for x in landed if x["mode"] == "beside")},
+                   status="completed" if done else "failed", error=failed, seeded=seeded, modes=runs,
+                   graph={"nodes": nodes, "edges": edges, "changes": changes, "readers": readers})
+
+
+async def _modes(graph_id, svc, store, factory, modes, changes, readers, timeout_s, work, nodes_file,
+                 types, parents, keep, gone, rng, seeded, runs, keys, real) -> None:
+    """Each read mode in turn (:func:`run_readmodes`), recorded in ``runs``; the keys it leaves in
+    ``keys``, each dropped at the end."""
+    from backend.app.services.versioning import build_policy
+
+    try:
+        for r, mode_run in enumerate(modes):
+            mode, build_mode = READ_MODE_RUNS[mode_run]
+            # Every run's change is built beside in the beside runs: well under its rows.
+            policy = build_policy.BuildPolicy({**build_policy.defaults().values,
+                                               "buildAboveRows": max(1, min(1_000, changes // 10)),
+                                               **({"buildMode": build_mode} if build_mode else {})})
+
+            async def resolve(session=None, _p=policy):
+                return _p
+
+            async def switch(session=None):
+                return True
+            build_policy.resolve, build_policy.current, build_policy.switch_state = (
+                resolve, lambda _p=policy: _p, switch)
+            await svc.set_read_mode(graph_id, mode)
+
+            out_file, stop_file = os.path.join(work, f"reads_{mode_run}.jsonl"), os.path.join(work, f"stop_{mode_run}")
+            root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            path = os.pathsep.join(p for p in (root, os.environ.get("PYTHONPATH")) if p)
+            browsers = await asyncio.create_subprocess_exec(
+                sys.executable, "-m", "backend.scripts.bench_versioning", "browse", "--graph-id", graph_id,
+                "--nodes-file", nodes_file, "--out", out_file, "--stop", stop_file, "--readers", str(readers),
+                env={**os.environ, "PYTHONPATH": path})
+            mem_stop, mem = asyncio.Event(), {}
+            sampler = asyncio.create_task(_memory_peak(mem_stop, mem))
+            marks = {"import": time.time()}
+            ops: List[dict] = []
+            try:
+                await asyncio.sleep(1.0)               # the readers under way first
+                package = os.path.join(work, f"change_{mode_run}.zip")
+                await gen_package(package, nodes=changes // 4, edges=changes // 4,
+                                  offset=(r + 1) * 100_000_000, seed=7 + r)
+                inspected = await run_inspect(package=package, store=store)
+                if inspected["status"] != "completed":
+                    raise RuntimeError(f"the change did not inspect: {inspected.get('error')}")
+                imported = await run_import(upload_key=inspected["upload"]["key"], store=store,
+                                            graph_id=graph_id)
+                if imported["status"] != "completed":
+                    raise RuntimeError(f"the change did not import: {imported.get('error')}")
+                draft = imported["draft"]["branchId"]
+                ops = await _change_ops(svc, graph_id, r, changes // 4, changes // 4, types, parents,
+                                        keep, gone, rng)
+                for lo in range(0, len(ops), 5_000):
+                    await svc.apply_ops(graph_id=graph_id, branch_id=draft, actor=ACTOR,
+                                        message=f"read-mode run {mode_run}", ops=ops[lo:lo + 5_000])
+                marks["landing"] = time.time()
+                published = await run_publish(graph_id=graph_id, branch_id=draft, store=store)
+                if published["status"] != "completed":
+                    raise RuntimeError(f"the change did not publish: {published.get('error')}")
+                landed = await _land(graph_id, factory, timeout_s)
+                marks["after"] = time.time()
+                keys.add(landed["key"])
+                await asyncio.sleep(AFTER_SECS)
+                marks["end"] = time.time()
+                landed["retiredDropped"] = await _drop_retired(graph_id, factory)
+            except Exception as exc:  # noqa: BLE001 — recorded; the runs after it would start wrong
+                runs[mode_run] = {"mode": mode, "buildMode": build_mode,
+                                  "error": f"{type(exc).__name__}: {exc}"[:500]}
+                break
+            finally:
+                open(stop_file, "w").close()
+                await browsers.wait()
+                mem_stop.set()
+                await sampler
+            with open(out_file) as f:
+                rows = [json.loads(line) for line in f if line.strip()]
+            bounds = {p: (marks[p], marks[q]) for p, q in zip(READ_PHASES, (*READ_PHASES[1:], "end"))
+                      if p in marks and q in marks}
+            reads = _read_summary(rows, bounds)
+            pg, fc = await _counts(graph_id, await _client(factory, landed["key"]), owned=True)
+            before = seeded["seq"] if r == 0 else runs[modes[r - 1]]["landed"]["seq"]
+            landing = reads.get("landing", {})
+            runs[mode_run] = {
+                "mode": mode, "buildMode": build_mode, "changeOps": len(ops) + changes // 2,
+                "landed": landed, "publishSecs": published["metrics"]["total_s"],
+                "importSecs": imported["metrics"]["total_s"], "reads": reads,
+                "memoryMb": {k: round(v / 2 ** 20, 1) for k, v in mem.items()},
+                "falkor_eq_pg": pg == fc, "pg": list(pg), "falkor": list(fc),
+                # Switch when ready: while it lands, readers see the version before, whole, and
+                # then the new one; never a version in between.
+                "exactVersions": set(landing.get("versions", [])) <= {before, landed["seq"]},
+            }
+    finally:
+        build_policy.resolve, build_policy.current, build_policy.switch_state = real
+        for key in keys:
+            with contextlib.suppress(Exception):
+                await (await _client(factory, key)).delete()
+
+
 def _load_state(path: str) -> Dict[str, Any]:
     try:
         with open(path) as f:
@@ -1200,6 +1580,9 @@ def markdown(results: List[Dict[str, Any]]) -> str:
             lines.append(f"| {name} | {c['label']} ({c['metric']} {c['target']}) | {_fmt(c['actual'])} "
                          f"| {'✅' if c['ok'] else '❌'} |")
     for r in results:
+        if r.get("modes"):
+            lines += ["", _modes_table(r)]
+    for r in results:
         p, m = r["probes"], r["metrics"]
         lines += ["", f"### {r.get('label') or r['run']} — {r.get('status')} in {_fmt(m['total_s'])} s"]
         if r.get("error"):
@@ -1230,6 +1613,33 @@ def markdown(results: List[Dict[str, Any]]) -> str:
         shown = {k: v for k, v in m.items() if k not in ("total_s",)}
         lines.append("- metrics: " + ", ".join(f"{k} {_fmt(v)}" for k, v in shown.items()))
     return "\n".join(lines) + "\n"
+
+
+def _modes_table(r: Dict[str, Any]) -> str:
+    """A read-mode run as one table: per mode, how long its change took to land and what readers
+    saw meanwhile."""
+    g = r.get("graph") or {}
+    lines = [f"### What readers get while a change lands — {_fmt(g.get('nodes'))} nodes, "
+             f"{_fmt(g.get('edges'))} edges, changes of {_fmt(g.get('changes'))} rows, "
+             f"{g.get('readers')} readers",
+             "", "| mode | import s | publish s | landed in s (passes) | reads while landing | p50 / p95 / p99 ms "
+             "| errors | routes | versions seen | FalkorDB MB (start → peak) | FalkorDB == Postgres |",
+             "|---|---|---|---|---|---|---|---|---|---|---|"]
+    for name, m in r["modes"].items():
+        if m.get("error"):
+            lines.append(f"| {name} | failed: {m['error']} |  |  |  |  |  |  |  |  |  |")
+            continue
+        landing = (m.get("reads") or {}).get("landing") or {}
+        errors = sum(ph.get("errors", 0) for ph in (m.get("reads") or {}).values())
+        mem = m.get("memoryMb") or {}
+        lines.append(
+            f"| {name} | {_fmt(m.get('importSecs'))} | {_fmt(m.get('publishSecs'))} "
+            f"| {_fmt(m['landed']['secs'])} ({m['landed']['passes']}) | {_fmt(landing.get('reads'))} "
+            f"| {landing.get('p50Ms')} / {landing.get('p95Ms')} / {landing.get('p99Ms')} | {errors} "
+            f"| {', '.join(f'{k} {v}' for k, v in (landing.get('routes') or {}).items())} "
+            f"| {', '.join(str(v) for v in landing.get('versions') or [])} "
+            f"| {mem.get('start')} → {mem.get('peak')} | {'✅' if m.get('falkor_eq_pg') else '❌'} |")
+    return "\n".join(lines)
 
 
 def _emit(result: Dict[str, Any], args, state: Dict[str, Any]) -> int:
@@ -1303,6 +1713,17 @@ async def _run(args) -> int:
             if not graph_id:
                 raise SystemExit("run project needs a published graph: run publish first, or pass --graph-id")
             result = await run_project(graph_id=graph_id, keep=args.keep, full=args.full)
+        elif args.kind == "readmodes":
+            graph_id = args.graph_id or (state.get("published") or {}).get("graphId")
+            if not graph_id:
+                raise SystemExit("run readmodes needs a published graph: run publish first, or pass --graph-id")
+            unknown = [m for m in args.modes.split(",") if m and m not in READ_MODE_RUNS]
+            if unknown:
+                raise SystemExit(f"unknown read-mode runs {unknown}: choose from {sorted(READ_MODE_RUNS)}")
+            result = await run_readmodes(
+                graph_id=graph_id, store=store, nodes=args.nodes, edges=args.edges,
+                modes=[m for m in args.modes.split(",") if m], changes=args.changes,
+                readers=args.readers, timeout_s=args.timeout)
         elif args.kind == "export":
             graph_id = args.graph_id or (state.get("published") or {}).get("graphId")
             if not graph_id:
@@ -1484,7 +1905,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         parser.add_argument("--state", default=DEFAULT_STATE)
         parser.add_argument("--json", help="also write the result(s) as JSON here")
         parser.add_argument("--md", help="also write the Markdown here (run: appended)")
-    run.add_argument("kind", choices=("export", "inspect", "import", "project", "publish", "seed", "bootstrap"))
+    run.add_argument("kind", choices=("export", "inspect", "import", "project", "publish", "seed", "bootstrap",
+                                     "readmodes"))
     run.add_argument("--package", help="a package to upload (and inspect) first")
     run.add_argument("--upload", help="an inspected upload's record key (default: the state's)")
     run.add_argument("--target", default="empty",
@@ -1498,8 +1920,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     run.add_argument("--full", action="store_true",
                      help="project: from nothing (a first seed's or a rebuild's full reconcile)")
     run.add_argument("--out", help="export: save the package here")
+    run.add_argument("--modes", default=",".join(READ_MODE_RUNS),
+                     help="readmodes: the runs, in order (" + ", ".join(READ_MODE_RUNS) + ")")
+    run.add_argument("--changes", type=int, default=100_000,
+                     help="readmodes: version rows in each run's change (creates, updates, deletes)")
+    run.add_argument("--readers", type=int, default=4, help="readmodes: readers browsing meanwhile")
+    run.add_argument("--nodes", type=int, default=100_000, help="readmodes: the published graph's nodes")
+    run.add_argument("--edges", type=int, default=100_000, help="readmodes: the published graph's edges")
+    run.add_argument("--timeout", type=float, default=3600.0,
+                     help="readmodes: seconds a change may take to land before the run fails")
     run.add_argument("--label", help="the result's name in reports")
     run.add_argument("--check", action="store_true", help="exit 1 when a target is missed")
+
+    browse = sub.add_parser("browse", help=argparse.SUPPRESS)      # readmodes' readers
+    browse.add_argument("--graph-id", required=True)
+    browse.add_argument("--nodes-file", required=True)
+    browse.add_argument("--out", required=True)
+    browse.add_argument("--stop", required=True)
+    browse.add_argument("--readers", type=int, default=4)
 
     e2e = sub.add_parser("e2e", help="the new-source flow over HTTP against a running stack")
     e2e.add_argument("--base", required=True)
@@ -1526,6 +1964,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return _report(args)
     if args.cmd == "e2e":
         return _e2e(args)
+    if args.cmd == "browse":
+        return asyncio.run(_browse(args))
     return asyncio.run(_run(args))
 
 
