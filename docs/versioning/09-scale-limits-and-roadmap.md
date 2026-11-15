@@ -204,8 +204,9 @@ held the graph's publish lock, and how much Postgres and FalkorDB grew.
 own, then per mode (`--modes`: `latest`, `in_place`, `beside` — its new key copied — and
 `beside_seed`, seeded from Postgres) a change of `--changes` version rows, a quarter new nodes and a
 quarter new edges by an import job into a draft, a quarter updates and a quarter deletes in the same
-draft, published Postgres first and projected while `--readers` readers in a process of their own
-read a node and its connections by the route a read of main takes. Per mode it reports the time to
+draft, published Postgres first and projected while `--readers` readers in each of `--reader-procs`
+processes of their own read a node and its connections by the route a read of main takes, admitted
+as a web pod's reads are. Per mode it reports the time to
 land, read latency percentiles and errors while the change is imported, while it lands and after, the
 routes reads took and the versions they saw, FalkorDB's memory (start and peak), and whether FalkorDB
 holds what Postgres does after. The `versioning-scale` workflow runs it after the steps above.
@@ -247,6 +248,15 @@ Steps at that size in the same run (each in a process of its own): import into a
 487 MB; publish 526 s and 396 MB; projection of the published window 381 s and 276 MB (2 passes);
 rebuild from nothing 295 s and 255 MB; export 86 s and 164 MB.
 
+Run 43729410624, on `2fbd409` with the route cache, measured 1M + 1M again with 4 readers:
+- No read failed, and FalkorDB held what Postgres holds after every mode.
+- The p50 was 2.3 ms in every mode, against 4.4 ms above: a read no longer asks Postgres for its
+  route.
+- The readers read about 1.5 times as often, and the change landed later: Always the latest in 37 s,
+  in place in 39 s, a copy in 74 s and a seed in 715 s. On one 4-CPU runner, readers and the change
+  share the CPUs. Runs vary as well: on `fbf1bfe` (run 43644225938) the same modes landed in 22 to
+  404 s.
+
 The same on a graph of 1,000,000 nodes and 2,000,000 edges (run 43690420051), with changes of
 100,000 rows and 4 readers:
 
@@ -267,6 +277,63 @@ The read-modes step runs every mode's import, publish, projection and build in i
 peaked at 1,162 MB (901 MB on the 1M + 1M run on `fbf1bfe`). Its longest event-loop stall was 2.1 s,
 in the change's edge windows (1.6 s at 1M + 1M; §10, item 4). The memory ceilings above hold each
 step in a process of its own.
+
+**With 200 readers on the same graph** (run 43728972056, on `a7e7eea`), the readers ran as 10
+processes of 20. Each process read as a web pod does: by the route it keeps, within its bounds on
+reads from FalkorDB and from Postgres, retrying as the app's client does.
+
+| Read mode | Landed in | Reads meanwhile | Latency p50 / p95 / p99 | Errors | Read from | Versions readers saw | FalkorDB memory |
+|---|--:|--:|--:|--:|---|---|--:|
+| Always the latest | 144 s, 1 pass | 282,108 | 77 / 171 / 3,308 ms | 0 (171 shed, then read on a retry) | FalkorDB 96%, Postgres 4% | the old one, then the new one at once | 1,408 → 1,436 MB |
+| Update in place | 149 s, 1 pass | 660,475 | 76 / 147 / 198 ms | 0 | FalkorDB | the old one, with parts of the new one as written | 1,426 → 1,501 MB |
+| Switch when ready, copied | 421 s, 16 passes, **written in place** | 1,333,975 | 77 / 150 / 202 ms | 0 (4 shed, then read on a retry) | FalkorDB | the old one, with parts of the new one as written | 1,463 → 4,450 MB |
+| Switch when ready, seeded | not landed in the harness's hour | | | | | | |
+
+What it shows:
+- **No read failed.** There were 2.28 million reads in the three modes that landed, and FalkorDB
+  held what Postgres holds after each.
+- **The latency is queueing.**
+  - The 200 readers got about 2,500 reads a second in all, on one 4-CPU runner shared by Postgres,
+    FalkorDB, the change and the 10 reader processes. 200 readers sharing 2,500 reads a second
+    wait about 80 ms each: the p50. With 4 readers the same read took 3.7 ms.
+  - The change's import, publish and landing took 3 to 5 times as long as with 4 readers (run
+    43690420051, above), for the same reason.
+  - In Always the latest, the 4% of reads that went to Postgres while FalkorDB caught up make its
+    p99 of 3.3 s.
+- **A build beside the serving key didn't land under this load** (§10, item 6):
+  - *The copy.*
+    - `GRAPH.COPY` took 76 to 88 s on the server, against about 19 s at 1M + 1M with 4 readers.
+      FalkorDB's log shows 29 to 37 s to dump the graph and 43 to 45 s to load it.
+    - The projector's socket gives up after 75 s, so the first and third attempts failed, though
+      the server went on to finish each copy. The second found the first's copy already there.
+    - After 3 attempts the build was dropped and the change written in place, so readers saw it
+      land as Update in place shows it.
+    - The harness's check of one whole version at a time passed anyway: it compares only the
+      version numbers readers saw.
+  - *The seed.* Its seed from Postgres took most of the hour, against 642 s with 4 readers. Then
+    its check for lineage summaries left in its key ran past its 30 s budget twice, and the
+    harness's hour ran out.
+
+The first run at 200 readers failed (43699487982, before the route cache, with 50 readers in each
+of 4 processes):
+- In Always the latest, 23,106 of 89,432 reads failed (26%), at p50 177 ms and p99 3.8 s.
+- The next mode stopped when Postgres ran out of connections.
+- Each read had asked Postgres for its route: five checkouts of the route pool and about eight
+  statements.
+
+What changed since:
+- **The route cache.** Each process keeps a graph's route and reads it again, in one query, only
+  once a write has moved it ([04](04-projection-and-cache.md) §9).
+- **CI sized for 10 reader processes.**
+  - Postgres allows 500 connections. Each reader process can open 35: 15 to the store, 5 to the
+    route pool and 15 read-only.
+  - FalkorDB queues 150 queries (`MAX_QUEUED_QUERIES`, the production cluster's value, where CI's
+    was 25).
+- **Readers admitted as a web pod's are.**
+  - A process runs 8 reads of a key at once (`PROVIDER_MAX_CONCURRENCY`) and keeps 16 more
+    waiting. So it admits 24 reads of one graph at a time and sheds the 25th.
+  - Hence 20 readers to a process: 50 in one process is more than a web pod admits for one graph.
+    Hundreds of users reach a graph through several pods.
 
 The same on a graph of 100,000 nodes and 100,000 edges, with changes of 20,000 rows:
 
@@ -669,23 +736,75 @@ are set for 100k + 100k. A missed target is reported but doesn't fail the run. T
 
 6. **Hundreds of concurrent users.**
    - *What protects the read path.*
-     - Each web process bounds its Postgres reads, per graph (`GRAPHVER_PG_READS_PER_GRAPH`, 4)
-       and in all (`GRAPHVER_PG_READS_PER_PROCESS`, 8). Past those bounds a read answers 429 with
-       `Retry-After`. A read past its statement timeout answers 503.
+     - Each process keeps a graph's route (`route_cache.py`). It reads the route from Postgres again
+       only once a write has moved it, which the write says in Redis as its commit returns. A read
+       checks that in one Redis round trip, so Postgres' load no longer grows with readers.
+     - Each web process bounds its reads:
+       - from Postgres, per graph (`GRAPHVER_PG_READS_PER_GRAPH`, 4) and in all
+         (`GRAPHVER_PG_READS_PER_PROCESS`, 8);
+       - from FalkorDB, per key (`PROVIDER_MAX_CONCURRENCY`, 8, with 16 more waiting).
+     - Past those bounds a read answers 429 with `Retry-After`. A read past its statement timeout
+       answers 503.
      - The client retries twice and honours `Retry-After`, up to 5 s.
-     - The harness reads the way the web pods do: bounded, retried, from several processes
-       (`--readers`, `--reader-procs`). It reports shed reads and retries.
-   - *Measured so far:* 4 readers in one process, with no read failing, at 1M + 1M and at 1M + 2M
-     (§2). Next: 50 readers in each of 4 processes, at 1M nodes and 2M edges.
-   - *What to expect.* In Always the latest, reads go to Postgres while FalkorDB catches up. With
-     hundreds of readers on one graph, those bounds shed most of those reads, so readers wait for
-     their retries. Update in place and Switch when ready keep them on FalkorDB. The run above
-     will measure this.
+     - The harness reads the way the web pods do: by the route each process keeps, bounded,
+       retried, from several processes (`--readers`, `--reader-procs`). It reports shed reads and
+       retries.
+   - *Measured.*
+     - 200 readers, as 10 processes of 20, at 1M nodes and 2M edges (§2): no read failed in Always
+       the latest, Update in place or Switch when ready, over 2.28 million reads.
+     - Their p50 of 77 ms was queueing on one 4-CPU runner.
+     - Before the route cache, 26% of reads failed.
    - *Still open.*
+     - **A copy under load.**
+       - *Measured.* Under 200 readers, `GRAPH.COPY` of 1M + 2M took 76 to 88 s.
+         - The client gave up after 75 s, the projector's socket timeout
+           (`projection_socket_timeout()`, `falkordb_connection.py`), which is
+           `PROJECTION_FALKOR_WRITE_TIMEOUT_S` (60) plus `PROJECTION_SOCKET_TIMEOUT_MARGIN_S` (15).
+         - The server finished the copy anyway, so the next attempt found "destination key
+           already exists". The third copied again and timed out again.
+         - After 3 attempts the build was dropped and the change written in place.
+         - Any copy that takes longer than 75 s fails the same way, under load or for a larger
+           graph.
+       - *Where to start.* `_build_copy` (`projection.py`).
+         - Give the copy a socket that waits as long as a copy can take.
+         - Have a retry after a timeout use the copy the server made: if the build's key holds the
+           serving key's version (its marker), go on from it rather than fail. If a copy is still
+           running, wait for it.
+       - *Done when* a copy of 1M + 2M under 200 readers lands by a switch, and a retry after a
+         timed-out copy goes on from the copy the server made.
+     - **A seed under load.**
+       - *Measured.* Under 200 readers, the seed of 1M + 2M from Postgres took most of an hour,
+         against 642 s with 4 readers. Then `_clear_summaries` (`projection.py`) failed two
+         attempts: its check that no summaries are left,
+         `MATCH ()-[r:AGGREGATED]->() RETURN 1 LIMIT 1`, ran past its 30 s budget
+         (`PROJECTION_FALKOR_READ_TIMEOUT_S`).
+       - *Where to start.*
+         - When no summary is left, that check likely visits every node of the key to find none,
+           so its cost grows with the graph. The clear could stop once a page deletes fewer than it
+           asked for, which needs no check.
+         - Then measure what slows the seed itself under readers: its writes share FalkorDB's
+           threads with them.
+       - *Done when* a seed of 1M + 2M under 200 readers lands within the harness's hour.
+     - **The harness's check of Switch when ready.** It compares only the version numbers readers
+       saw, so a build dropped and written in place passes (§2). Have `run_readmodes`
+       (`bench_versioning.py`) fail a mode that switches when ready unless its change landed on a
+       new key (`landed["key"]`).
+     - **The management database.** A graph request may read the data source's row up to three
+       times: in the access check, in `get_provider` (`providers/manager.py`) and in
+       `for_workspace` (`context_engine.py`). Passing the row down would read it once.
+     - **Watermark reads outside the route cache.** The versioning API's own routes ask Postgres
+       for the watermark on each request (`projection_watermark`, in
+       `api/v1/endpoints/versioning.py`). These are `…/watermark`, which the "refreshing" badge
+       polls, and the state reads. With hundreds of users, that is load the route cache could
+       take.
+     - **The fleet's slot.** Web pods also hold a slot among the whole fleet's reads of a key
+       (`fleet_slot`, `providers/manager.py`). The harness's readers don't, so the run didn't
+       measure that bound.
+     - **FalkorDB's own queue.** CI's FalkorDB now queues 150 queries, the production cluster's
+       value. The readers, 10 processes of 8 reads at once, sent it at most 80 at a time, so the
+       run didn't fill that queue.
      - TESTS-4: a load test over HTTP, through several web pods, with saves, pulls and publishes
        at the same time.
-     - FalkorDB's own queue under hundreds of readers. CI's FalkorDB sets `MAX_QUEUED_QUERIES` to
-       25.
 
 7. **Lineage summaries: what is still left to the aggregation job.**
    - *Corrected by the job's next run.* Until then, a summary can differ from the job's in:

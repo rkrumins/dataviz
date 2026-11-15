@@ -340,6 +340,8 @@ integration's many small changes as a few commits.
     `GRAPHVER_ROUTE_CACHE_SECS` (5 s). `0` turns the cache off.
   - A reader that can't reach Redis routes from Postgres, as before.
   - An eviction drops its key only once readers have been told. Otherwise the graph stays as it was.
+  - Measured with it in CI: 200 readers of that graph, as 10 processes of 20, read 2.28 million
+    times with no read failing, in every read mode that landed.
   - Watch `graphver_route_cache_total{outcome}` and `graphver_route_announce_failed_total`.
   - `docs/SCALING_CONCURRENT_USERS.md` §4.9 has the cost per read, and §4.1 now counts the route
     pool (3 + 2 per process) against `max_connections`.
@@ -788,8 +790,16 @@ integration's many small changes as a few commits.
   - event-loop lag in the worker's jobs;
   - a publish of up to 200,000 changes held whole;
   - the read modes at 5M;
-  - hundreds of concurrent readers;
+  - hundreds of concurrent users: the builds below, and a load test over HTTP;
   - the lineage-summary items left to the aggregation job.
+- **A build beside the serving key didn't land under 200 concurrent readers**, measured in CI on a
+  1M + 2M graph:
+  - The copy took 76 to 88 s, and the projector's socket gives up after 75 s. The build was dropped
+    and the change written in place, so readers saw it land part by part, as Update in place shows
+    it.
+  - A seed from Postgres didn't land within an hour.
+  - No read failed. Any copy longer than 75 s fails the same way, under load or for a larger graph.
+  - `docs/versioning/09-scale-limits-and-roadmap.md` §10, item 6, has where to start.
 
 ---
 
