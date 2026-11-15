@@ -7045,8 +7045,12 @@ class FalkorDBProvider(GraphDataProvider):
     ) -> Optional[List[GraphEdge]]:
         """Edges from ``source_urns`` to ``target_urns``, both ends seeked by
         their label's URN index, then expanded between (an Expand Into, not a
-        scan of either end's edges). One sub-query per (source label, target
-        label) bucket pair; the buckets are disjoint, so the rows merge as-is.
+        scan of either end's edges). The ``WITH`` binds the ends first: without
+        it FalkorDB plans the three MATCH clauses as one pattern and walks every
+        relationship of ``a``, about 61 ms a call from a node with 200,000
+        children against 0.27 ms with it (``test_hub_lookups_live.py``). One
+        sub-query per (source label, target label) bucket pair; the buckets are
+        disjoint, so the rows merge as-is.
 
         ``None`` when an end's label is unknown: an unlabeled ``urn IN`` anchor
         is a full scan, so the caller's one-sided path is the better plan."""
@@ -7064,7 +7068,7 @@ class FalkorDBProvider(GraphDataProvider):
                 res = await self._ro_query(
                     f"MATCH (a:{src_label}) WHERE a.urn IN $sourceUrns "
                     f"MATCH (b:{tgt_label}) WHERE b.urn IN $targetUrns "
-                    f"MATCH (a)-{rel_pattern}->(b){where} "
+                    f"WITH a, b MATCH (a)-{rel_pattern}->(b){where} "
                     "RETURN a.urn AS src, b.urn AS tgt, type(r) AS relType, "
                     "properties(r) AS rprops LIMIT $limit",
                     params={**params, "sourceUrns": srcs, "targetUrns": tgts, "limit": limit},

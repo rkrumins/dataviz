@@ -72,7 +72,8 @@ def test_one_pair_binds_both_ends_by_index_and_expands_between():
     cypher, params = calls[0]
     assert "MATCH (a:Warehouse) WHERE a.urn IN $sourceUrns" in cypher
     assert "MATCH (b:Table) WHERE b.urn IN $targetUrns" in cypher
-    assert "MATCH (a)-[r:FLOWS_TO]->(b)" in cypher
+    # Bound before the relationship is matched: one query part would walk ``a``'s every edge.
+    assert "$targetUrns WITH a, b MATCH (a)-[r:FLOWS_TO]->(b)" in cypher
     assert params["sourceUrns"] == ["urn:wh"] and params["targetUrns"] == ["urn:t1"]
 
 

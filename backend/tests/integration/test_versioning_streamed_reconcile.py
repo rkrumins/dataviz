@@ -7,8 +7,10 @@ A first seed, a rebuild and a heal reconcile FalkorDB against committed main. Pa
 relationship lost, a stray node, a node with no urn, a node's content stale, a node held twice, a
 relationship held twice, an extra relationship — while main moves on (a retype, a node added, one
 deleted); one key is rebuilt in one pass, the other a page at a time, and both must end holding the
-same nodes and relationships. On a key the platform does not own, nothing it holds is deleted,
-either way.
+same nodes and relationships. The paged one reads the relationships of a page of source nodes one
+at a time (``_EDGE_SLICE``), as it reads a hub's a slice at a time, so the two copies of the
+relationship held twice are never in one slice. On a key the platform does not own, nothing it
+holds is deleted, either way.
 """
 import asyncio
 import os
@@ -96,7 +98,8 @@ async def _rebuilt(svc, factory, *, streamed, owned):
         saved = (config.PROJECTION_RECONCILE_STREAMED_ABOVE, config.PROJECTION_PAGE)
         if streamed:
             config.PROJECTION_RECONCILE_STREAMED_ABOVE, config.PROJECTION_PAGE = 0, 2
-            proj._SCAN_PAGE = 3
+            # One relationship a slice: the copies of one held twice are read apart.
+            proj._SCAN_PAGE, proj._EDGE_SLICE = 3, 1
         else:
             config.PROJECTION_RECONCILE_STREAMED_ABOVE = 10 ** 9
         try:

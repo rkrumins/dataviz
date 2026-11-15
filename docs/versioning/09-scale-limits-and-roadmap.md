@@ -104,10 +104,27 @@ Measured by the `versioning-scale` workflow on 14 November 2026, twice on the sa
     FalkorDB's time.
 - **The fix.** A `WITH` now comes between finding the two ends and matching the relationship
   (`_between` in `projection.py`). It covers the fingerprint read, the deletes by key, by id and by
-  internal id, and the lineage summaries' read and delete.
+  internal id, and the lineage summaries' read and delete. Measured on FalkorDB 4.18.11 against a
+  node with 200,000 children (`test_hub_lookups_live.py`, CI's live FalkorDB job):
+
+  | Shape | FalkorDB's plan | A row from the hub | A row from a leaf |
+  |-------|-----------------|-------------------:|------------------:|
+  | `(a {urn})-[r]->(b {urn})`, one pattern | an index scan of `a`, then Conditional Traverse | 70.5 ms | 0.011 ms |
+  | each end in a MATCH clause of its own (`c602d81`) | the same | 71.1 ms | 0.011 ms |
+  | both ends, then `WITH`, then the relationship | two index scans, then Expand Into | 0.009 ms | 0.009 ms |
+
+  - Every statement the projector sends this way costs 0.009 to 0.011 ms a row from the hub, and
+    finds exactly what it should. The live test fails if a row from the hub costs over ten times
+    one from a leaf (2 ms at least).
   - `test_projection_hub_lookups.py` holds every statement to that shape.
-  - `test_hub_lookups_live.py`, in CI's live FalkorDB job, measures each shape against a node with
-    200,000 children, and fails if a row costs more there than on a node with one.
+  - The web tier's read of the relationships between a few known entities
+    (`_edges_between_pairs`, the relationship drawer's) had the same flaw: 61 ms a call from the
+    hub. It binds its ends the same way now: 0.27 ms.
+- **A hub's page of relationships.** Before it compares what main holds, a rebuild reads what
+  FalkorDB holds, 20,000 source nodes at a time. The root's page held about 520,000
+  relationships, read in one statement: 353 MB in Python for the rows and their keys alone, before
+  their lookup in Postgres, against the rebuild's ceiling of 512 MB. Each page is now read 50,000
+  relationships at a time, in internal id order (`_EDGE_SLICE`).
 - The rebuild, the export and the read modes at this size are measured by the next run.
 
 ### At 5,000,000 nodes and 5,000,000 edges: where the write path stops scaling

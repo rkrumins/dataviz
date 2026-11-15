@@ -72,8 +72,10 @@ through the projector automatically.
       every relationship (`MATCH ()-[r {id: i}]->()`) is gone.
   - `_delete_nodes_by_pair_cypher`, heal only: matches by (label, indexed `urn`) **and confirms
     `entityId`**, so a reused urn is never wrongly deleted.
-  - A rebuild deletes a relationship by its internal id from its source node, matched by urn
-    (`_reconcile_streamed`), not by scanning every relationship.
+  - A rebuild deletes a relationship by its internal id, found between its two ends by urn
+    (`_reconcile_streamed`), not by scanning every relationship. It reads the key's relationships
+    a page of 20,000 source nodes at a time (`_SCAN_PAGE`), and each page 50,000 relationships
+    at a time in internal id order (`_EDGE_SLICE`), so a hub's page is never held whole.
 - **A node whose urn changes is moved in place** (`_rekey_in_place`, `SET n.urn`) before the
   window's merge. It keeps its internal id, its relationships and the rollup cells on it.
   - A MERGE under the new urn used to create a second node and leave the old one behind, with
@@ -296,9 +298,10 @@ window's pass and a surplus holds the graph back until a rebuild, as before.
 > `WITH`, FalkorDB walks every relationship of `a` for each row, whether the ends are written in
 > one pattern or as MATCH clauses of their own. In the 1M nodes + 2M edges run, a root with
 > 500,000 children made those lookups run out of their budget for hours
-> ([09](09-scale-limits-and-roadmap.md) §2). `test_projection_hub_lookups.py` holds every
-> statement to this shape. `test_hub_lookups_live.py` measures them against a hub on the real
-> engine.
+> ([09](09-scale-limits-and-roadmap.md) §2). On FalkorDB 4.18.11, from a node with 200,000
+> children, a row costs about 71 ms walked and 0.009 ms with the `WITH`, as from a node with one
+> relationship. `test_projection_hub_lookups.py` holds every statement to this shape.
+> `test_hub_lookups_live.py` measures each against a hub in CI's live FalkorDB job.
 
 ---
 

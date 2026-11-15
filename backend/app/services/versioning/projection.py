@@ -4298,6 +4298,9 @@ class FalkorProjector:
     # Internal-id page for the reconcile's scan: ``id(n)`` ranges compile to a
     # NodeByIdSeek, so each page costs its own size, never a full scan.
     _SCAN_PAGE = 20000
+    # Relationships a streamed reconcile reads at a time from one page of source nodes. A page
+    # holding a hub (a container of 500,000 children) is read a slice at a time, by internal id.
+    _EDGE_SLICE = 50000
 
     async def _scan_projection(self, client):
         """What FalkorDB holds, as the reconcile compares it: projected nodes by (label, urn)
@@ -4665,48 +4668,25 @@ class FalkorProjector:
                 await cursor.page_done("fk_node", lo + self._SCAN_PAGE, done["writes"])
 
         # ── What FalkorDB holds that main does not: relationships (an owned key's alone) ──
+        # A page of source nodes a slice of ``_EDGE_SLICE`` relationships at a time, in internal
+        # id order from after the last one read: a slice's deletes never move a later id.
         if owned and top is not None:
             for lo in range(begin("fk_edge", end), end, self._SCAN_PAGE):
-                res = await _q(client,
-                               "MATCH (a)-[r]->(b) WHERE id(a) >= $lo AND id(a) < $hi "
-                               f"AND type(r) <> '{ROLLUP_EDGE_TYPE}' "
-                               "RETURN id(r), labels(a), a.urn, type(r), labels(b), b.urn, r.id",
-                               params={"lo": lo, "hi": lo + self._SCAN_PAGE},
-                               timeout_ms=_READ_TIMEOUT_MS, read_only=True)
-                held: Dict[EdgeKey, List[Tuple[int, Optional[str]]]] = {}
-                for rid, la, su, rel, lb, tu, eid in (getattr(res, "result_set", None) or []):
-                    la, lb = [str(x) for x in (la or [])], [str(x) for x in (lb or [])]
-                    if not su or not tu or any(is_derived_label(x) for x in la + lb):
-                        continue
-                    key = (la[0] if la else "", str(su), str(rel), lb[0] if lb else "", str(tu))
-                    held.setdefault(key, []).append((int(rid), eid))
-                async with self._session() as s:
-                    graph = await s.get(GraphORM, graph_id)
-                    want = await self._edge_keys_at(
-                        s, graph, main_id, to_seq,
-                        [str(e) for rels in held.values() for _r, e in rels if e])
-                doomed = [(key, rid) for key, rels in held.items() for rid, eid in rels
-                          if len(rels) > 1 or want.get(str(eid)) != key]
-                # Each found between its ends by urn (``_between``), instead of scanning every
-                # relationship for an id.
-                anchored: Dict[Tuple[str, str, str], list] = {}
-                loose: List[int] = []
-                for (la, su, rel, lb, tu), rid in doomed:
-                    if la and lb:
-                        anchored.setdefault((la, rel, lb), []).append(
-                            {"src": su, "tgt": tu, "rid": rid})
-                    else:
-                        loose.append(rid)
-                for (la, rel, lb), items in anchored.items():
-                    await self._laddered(
-                        client, "edge_delete_id",
-                        _delete_edge_ids_cypher(f"`{rel}`", _sanitize_label(la),
-                                                _sanitize_label(lb)), items)
-                await self._laddered(client, "edge_delete_id",
-                                     "UNWIND $ids AS i MATCH ()-[r]->() WHERE id(r) = i DELETE r",
-                                     loose, param="ids")
-                done["writes"] += len(doomed)
-                done["structural"] |= bool(doomed)
+                after = -1
+                while True:
+                    res = await _q(client,
+                                   "MATCH (a)-[r]->(b) WHERE id(a) >= $lo AND id(a) < $hi "
+                                   f"AND type(r) <> '{ROLLUP_EDGE_TYPE}' AND id(r) > $after "
+                                   "RETURN id(r), labels(a), a.urn, type(r), labels(b), b.urn, r.id "
+                                   "ORDER BY id(r) LIMIT $k",
+                                   params={"lo": lo, "hi": lo + self._SCAN_PAGE, "after": after,
+                                           "k": self._EDGE_SLICE},
+                                   timeout_ms=_READ_TIMEOUT_MS, read_only=True)
+                    rows = getattr(res, "result_set", None) or []
+                    await self._drop_stale_edges(client, graph_id, main_id, to_seq, rows, done)
+                    if len(rows) < self._EDGE_SLICE:
+                        break
+                    after = int(rows[-1][0])
                 if cursor is not None:
                     await cursor.page_done("fk_edge", lo + self._SCAN_PAGE, done["writes"])
 
@@ -4734,6 +4714,46 @@ class FalkorProjector:
                     done["writes"])
         return {"writes": done["writes"], "structural": done["structural"],
                 "rollups": "stale" if done["writes"] or done["kept"] or resumed else "none"}
+
+    async def _drop_stale_edges(self, client, graph_id, main_id, to_seq, rows, done) -> None:
+        """Of a slice of the key's relationships (``_reconcile_streamed``), delete each one main no
+        longer has under its key, and every copy of one held several times on a key. ``rows``:
+        ``(id(r), labels(a), a.urn, type(r), labels(b), b.urn, r.id)``. A copy in another slice is
+        not seen here: the pass's relationship pages find a key held twice, and write it again."""
+        held: Dict[EdgeKey, List[Tuple[int, Optional[str]]]] = {}
+        for rid, la, su, rel, lb, tu, eid in rows:
+            la, lb = [str(x) for x in (la or [])], [str(x) for x in (lb or [])]
+            if not su or not tu or any(is_derived_label(x) for x in la + lb):
+                continue
+            key = (la[0] if la else "", str(su), str(rel), lb[0] if lb else "", str(tu))
+            held.setdefault(key, []).append((int(rid), eid))
+        async with self._session() as s:
+            graph = await s.get(GraphORM, graph_id)
+            want = await self._edge_keys_at(
+                s, graph, main_id, to_seq,
+                [str(e) for rels in held.values() for _r, e in rels if e])
+        doomed = [(key, rid) for key, rels in held.items() for rid, eid in rels
+                  if len(rels) > 1 or want.get(str(eid)) != key]
+        # Each found between its ends by urn (``_between``), instead of scanning every
+        # relationship for an id.
+        anchored: Dict[Tuple[str, str, str], list] = {}
+        loose: List[int] = []
+        for (la, su, rel, lb, tu), rid in doomed:
+            if la and lb:
+                anchored.setdefault((la, rel, lb), []).append(
+                    {"src": su, "tgt": tu, "rid": rid})
+            else:
+                loose.append(rid)
+        for (la, rel, lb), items in anchored.items():
+            await self._laddered(
+                client, "edge_delete_id",
+                _delete_edge_ids_cypher(f"`{rel}`", _sanitize_label(la),
+                                        _sanitize_label(lb)), items)
+        await self._laddered(client, "edge_delete_id",
+                             "UNWIND $ids AS i MATCH ()-[r]->() WHERE id(r) = i DELETE r",
+                             loose, param="ids")
+        done["writes"] += len(doomed)
+        done["structural"] |= bool(doomed)
 
     async def _delete_nodes_by_id(self, client, ids) -> None:
         """Delete nodes by the internal ids this pass read from a key the platform owns; a hub

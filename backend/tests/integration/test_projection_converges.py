@@ -934,6 +934,7 @@ async def _resumable_and_self_healing(svc, monkeypatch):
     monkeypatch.setattr(residency_policy, "switch_state", residency_on)
     monkeypatch.setattr(config, "PROJECTION_RECONCILE_STREAMED_ABOVE", 5)
     monkeypatch.setattr(FalkorProjector, "_SCAN_PAGE", 25)
+    monkeypatch.setattr(FalkorProjector, "_EDGE_SLICE", 3)  # a page's relationships in slices
     for k in [k for k in g.nodes if k.startswith("urn:t:W")][:5]:
         g._drop_node(k)                                  # some of it lost
     assert await svc.request_projection_rebuild(gid)

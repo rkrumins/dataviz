@@ -458,7 +458,16 @@ integration's many small changes as a few commits.
   the ends were written in one pattern or each in a MATCH clause of its own. Every lookup or delete
   of a relationship now finds both ends first, and a `WITH` binds them before the relationship is
   matched between them. This covers rebuilds, reseeds, builds' seeds, window deletes, and the
-  lineage summaries' reads and deletes.
+  lineage summaries' reads and deletes. Measured on FalkorDB 4.18.11, from a node with 200,000
+  children, a row now costs 0.009 ms where it cost 71 ms, as from a node with one relationship.
+- **A rebuild never holds a hub's relationships whole.** It read what FalkorDB holds 20,000
+  source nodes at a time, so a page holding a node with 500,000 children came back as one result,
+  about 353 MB in the projector before its lookup in Postgres. Each page is now read 50,000
+  relationships at a time.
+- **The relationship drawer reads a hub's relationship directly.** Reading the relationships
+  between a few known entities bound both ends, but in the same query part, so FalkorDB still
+  walked every relationship of the source: 61 ms a call from a node with 200,000 children. A
+  `WITH` now binds the ends first: 0.27 ms.
 - **A graph switched to a new key gets its lineage summaries.** The summaries job asked for at the
   same commit as an earlier one was answered with that job, which had written the old key, so the
   new key never got them — after a build's switch, and after a move in place. The ask now names the

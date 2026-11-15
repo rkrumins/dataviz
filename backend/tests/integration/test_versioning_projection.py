@@ -169,12 +169,15 @@ class FakeGraph:
         # of relationships with their own ids, deletes by internal id, and lookups by key.
         if cypher.startswith("MATCH (a)-[r]->(b) WHERE id(a) >= $lo AND id(a) < $hi") \
                 and "RETURN id(r), labels(a)" in cypher:
-            return _Result([[self._rel_id(eid), [self.nodes[e["src"]].get("_label")], e["src"],
-                             e["type"], [self.nodes[e["tgt"]].get("_label")], e["tgt"], eid]
-                            for eid, e in self.edges.items()
-                            if e["src"] in self.nodes and e["tgt"] in self.nodes
-                            and e["type"] != "AGGREGATED"
-                            and params["lo"] <= self._id_of(e["src"]) < params["hi"]])
+            # A slice of a page: in internal id order, after ``$after``, at most ``$k``.
+            rows = sorted([[self._rel_id(eid), [self.nodes[e["src"]].get("_label")], e["src"],
+                            e["type"], [self.nodes[e["tgt"]].get("_label")], e["tgt"], eid]
+                           for eid, e in self.edges.items()
+                           if e["src"] in self.nodes and e["tgt"] in self.nodes
+                           and e["type"] != "AGGREGATED"
+                           and params["lo"] <= self._id_of(e["src"]) < params["hi"]
+                           and self._rel_id(eid) > params.get("after", -1)])
+            return _Result(rows[:params["k"]] if "k" in params else rows)
         if cypher == "UNWIND $ids AS i MATCH ()-[r]->() WHERE id(r) = i DELETE r":
             for eid in [k for k in self.edges if self._rel_id(k) in params["ids"]]:
                 self.edges.pop(eid, None)
