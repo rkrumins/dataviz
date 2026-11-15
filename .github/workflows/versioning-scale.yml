@@ -42,7 +42,7 @@ on:
         description: Readers browsing in each reader process while each change lands
         default: "4"
       reader_procs:
-        description: Reader processes, each as a web pod's (readers x reader_procs browse in all)
+        description: Reader processes, each as a web pod (up to 10; each sheds past 20 readers of one graph)
         default: "1"
       timeout_minutes:
         description: The job's time limit (a graph of 5,000,000 needs several hours)
@@ -71,8 +71,10 @@ jobs:
       falkordb:
         image: falkordb/falkordb:v4.18.11
         env:
-          # As in backend-tests.yml's versioning-e2e: unlimited replies, as every deploy runs it.
-          FALKORDB_ARGS: MAX_QUEUED_QUERIES 25 TIMEOUT 1000 RESULTSET_SIZE -1
+          # Unlimited replies, as every deploy runs it. Its queue as the production cluster overlay
+          # gives it (150): each reader process is admitted as a web pod is
+          # (PROVIDER_MAX_CONCURRENCY, 8 at once per key), so ten of them ask for at most 80.
+          FALKORDB_ARGS: MAX_QUEUED_QUERIES 150 TIMEOUT 1000 RESULTSET_SIZE -1
         ports:
           - 6379:6379
         options: >-
@@ -109,10 +111,14 @@ jobs:
           data=/mnt/pgdata
           if ! sudo mkdir -p "$data" 2>/dev/null; then data="$RUNNER_TEMP/pgdata"; mkdir -p "$data"; fi
           sudo chmod 777 "$data"
+          # Connections for every process the run starts, as for a deployment's pods
+          # (docs/SCALING_CONCURRENT_USERS.md §4): a reader process, as a web pod, opens at most
+          # graphver's two pools (10+5, and the route pool's 3+2) and the management READONLY pool
+          # (10+5), 35; ten of them and the harness's own come to about 430.
           docker run -d --name postgres -p 5432:5432 --shm-size=1g \
             -e POSTGRES_USER=synodic -e POSTGRES_PASSWORD=synodic -e POSTGRES_DB=synodic \
             -e PGDATA=/var/lib/postgresql/data/pgdata -v "$data":/var/lib/postgresql/data \
-            postgres:16.14-alpine
+            postgres:16.14-alpine -c max_connections=500
           for _ in $(seq 1 60); do
             docker exec postgres pg_isready -U synodic && exit 0
             sleep 2

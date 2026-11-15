@@ -8,6 +8,7 @@ read exactly as before. ``serves_pin`` is the fence ContextEngine adds on top: m
 only while the provider it holds serves the published pin.
 
 No real DB or provider: the data-source lookup, the versioned set and the graphver read are stubbed.
+The route cache is off, so each lookup reads the stubbed row as it is then.
 """
 from __future__ import annotations
 
@@ -19,6 +20,7 @@ import pytest
 from backend.app.providers.manager import ProviderManager
 from backend.app.services import versioned_sources
 from backend.app.services.versioned_sources import physical_key, serves_pin
+from backend.app.services.versioning import config as gv_config
 from backend.app.services.versioning import db as gv_db
 from backend.common.adapters import ProviderUnavailable
 
@@ -42,7 +44,23 @@ class _Session:
     async def execute(self, stmt):
         if isinstance(self._row, Exception):
             raise self._row
-        return SimpleNamespace(first=lambda: self._row)
+        return SimpleNamespace(first=lambda: _route_row(self._row))
+
+    async def scalar(self, stmt):
+        """The graph id behind the data source (the route cache asks it first)."""
+        if isinstance(self._row, Exception):
+            raise self._row
+        return self._row[0] if self._row else None
+
+
+def _route_row(row):
+    """A pin row ``(graph id, provider, key)`` as the route cache's one query reads the graph: not a
+    fork, live, its projection state at its head."""
+    if row is None:
+        return None
+    graph_id, provider, name = row
+    return (graph_id, "ds_1", None, False, 3, "br_main", True, 3, 3, "idle", None, name, provider,
+            None, None, "standard", None)
 
 
 @pytest.fixture
@@ -52,6 +70,7 @@ def routed(monkeypatch):
     from backend.app.db.repositories import data_source_repo
 
     monkeypatch.setattr(versioned_sources, "physical_key", physical_key)
+    monkeypatch.setattr(gv_config, "ROUTE_CACHE_SECS", 0)
     state = {"ds": _DataSource(), "versioned": {"ds_1"}, "row": None, "reads": 0, "asked": []}
 
     async def _get_ds(_session, _ds_id):

@@ -123,6 +123,11 @@ POOL_TIMEOUT_SECS: int = int(os.getenv("GRAPHVER_POOL_TIMEOUT_SECS", "10"))
 ROUTE_POOL_SIZE: int = int(os.getenv("GRAPHVER_ROUTE_POOL_SIZE", "3"))
 ROUTE_POOL_MAX_OVERFLOW: int = int(os.getenv("GRAPHVER_ROUTE_POOL_MAX_OVERFLOW", "2"))
 ROUTE_POOL_TIMEOUT_SECS: int = int(os.getenv("GRAPHVER_ROUTE_POOL_TIMEOUT_SECS", "2"))
+# Each process keeps a graph's route and reads it again from that pool only when a write moves the
+# graph's route token in Redis (``route_cache``), or when it is this many seconds old, whatever its
+# token says: the bound on what a write that could not move its token leaves stale. 0: no cache,
+# every read is routed from Postgres.
+ROUTE_CACHE_SECS: float = float(os.getenv("GRAPHVER_ROUTE_CACHE_SECS", "5"))
 
 # Bulk ingest / projection batch sizes (rows per COPY / UNWIND chunk).
 INGEST_BATCH_SIZE: int = int(os.getenv("GRAPHVER_INGEST_BATCH_SIZE", "5000"))

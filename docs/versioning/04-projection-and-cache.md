@@ -928,6 +928,23 @@ one of the graph's own `gvp_` keys, which a reseed cut short leaves unmarked; th
 any other, with its `retired_keys` entry, so the inventory still shows it. Until then, a move back
 onto the retired key reconciles it in place.
 
+**Each process keeps a graph's route.** The pin `physical_key` reads and the watermark ContextEngine
+routes main by are one route: the graph, its main branch, its pin and the projection's state. Each
+process keeps it per graph (`route_cache.py`) and reads it again, in one query on the route pool,
+only once a write has moved the graph's route token in Redis (`gvroute:g:<graph id>`). A lookup
+reads the token, one round trip. Every graphver session notes the writes it makes to a route's
+columns of `graphs` and `projection_state`, through the unit of work or as an ORM statement, and
+announces them as its commit returns. So a read that starts after a publish, a pass, a read-mode
+change, an eviction, a load, a move or a switch has returned routes by it, in any pod. A statement
+that names no graph, in its `WHERE` or what it returns, moves every graph's token (`gvroute:all`).
+A data source with no live graph is kept against `gvroute:set`, which a graph created, trashed,
+restored or deleted moves. A route is read again once it is `GRAPHVER_ROUTE_CACHE_SECS` (5 s) old
+whatever its token, which bounds what an unannounced write leaves stale (a raw SQL statement, a
+writer that couldn't reach Redis). A reader that can't reach Redis routes from Postgres for each
+lookup, as before. Eviction drops a key only once its readers have been told, and puts the graph
+back when they can't be (§11). The cost per read is in
+[Scaling for concurrent users](../SCALING_CONCURRENT_USERS.md) §4.9.
+
 ---
 
 ## 10. The read providers
@@ -1000,7 +1017,10 @@ provider per request:
 - **Evict** — `evict` (`cache_manager.py:87`) **skips a pinned graph**, and a key another data source
   or catalog entry reads, or whose readers can't be asked (`purge_worker.graph_key_readers`); marks `status=evicted` +
   `projected_commit_seq=0` (so the poll loop rebuilds it), and drops the FalkorDB key on the graph's
-  pinned provider. Reads of an evicted graph serve the bounded Postgres fallback meanwhile.
+  pinned provider. Reads of an evicted graph serve the bounded Postgres fallback meanwhile. The key
+  is dropped only once every process has been told that the graph's route moved (its route token,
+  §9): one that couldn't be told would read the key it kept routing to, so the graph is put back as
+  it was instead, and the next capacity pass tries again.
 - **Per-provider RAM budget** (no longer run: see the note below) — `ProjectionWorker.evict_once`
   (`worker.py:86`) evicts the coldest
   resident graphs per provider (`lru_candidates` by `last_projected_at`, `cache_manager.py:159`) down

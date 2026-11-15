@@ -26,7 +26,7 @@ from typing import Awaitable, Callable, List, Optional
 
 from sqlalchemy import select, func, update
 
-from . import config, db, residency_policy
+from . import config, db, residency_policy, route_cache
 from .messaging import get_broker_redis
 from .models import GraphORM, ProjectionStateORM, _now
 from .service import bootstrap_unfinished
@@ -211,6 +211,12 @@ class CacheManager:
             if row is None:
                 return False
             name, provider_id, epoch = row
+            # Each process routes reads by the graph's route as it last read it until the graph's
+            # token moves (route_cache): the key goes only once they have been told.
+            if not await route_cache.announce([graph_id]):
+                await self._put_back(graph_id, epoch, projected)
+                logger.info("not evicting graph %s: its readers could not be told", graph_id)
+                return False
             if reason and await self._read_since(graph_id, epoch, projected):
                 return False
             if name:
@@ -245,6 +251,14 @@ class CacheManager:
             leased = True
         if not leased:
             return False
+        await self._put_back(graph_id, epoch, projected)
+        logger.info("not evicting graph %s: a read took its lease as it was being evicted",
+                    graph_id)
+        return True
+
+    async def _put_back(self, graph_id: str, epoch: int, projected: int) -> None:
+        """Undo an eviction whose key is still there: the graph as it was, while the row is still
+        the eviction's (``epoch``)."""
         async with self._session() as s:
             await s.execute(
                 update(ProjectionStateORM)
@@ -254,9 +268,6 @@ class CacheManager:
                         served_commit_seq=projected or None, evicted_reason=None,
                         epoch=ProjectionStateORM.epoch + 1, updated_at=_now())
                 .execution_options(synchronize_session=False))
-        logger.info("not evicting graph %s: a read took its lease as it was being evicted",
-                    graph_id)
-        return True
 
     async def _retire_later(self, graph_id: str, name: str, provider_id: Optional[str]) -> None:
         """Put a key whose drop failed in the graph's ``retired_keys``, due now, for the retire

@@ -1335,22 +1335,32 @@ async def test_a_key_the_master_lost_is_evicted_not_reseeded_outside_admission(
 @live
 async def test_a_read_holds_its_graph_before_the_engine_reads_the_watermark(
         store, falkor, mine, plain_engine, residency_on, monkeypatch):
-    from backend.app.services.versioning import cache_manager
-    from backend.app.services.versioning.service import GraphVersioningService, Viewer
+    from backend.app.services.versioning import cache_manager, route_cache
+    from backend.app.services.versioning.service import Viewer
 
     svc, proj = store, FalkorProjector(graph_client_factory=make_falkor_graph_factory())
     (gid,) = await _live_graphs(svc, proj, mine, 1)
     ds = (await svc.get_graph(gid))["data_source_id"]
     await get_broker_redis().delete(cache_manager._lease_key(gid))
     getattr(residency, "_HELD", {}).clear()
-    held_then = []
-    real = GraphVersioningService.projection_watermark
+    # The route the read is served by (its state, as the watermark said) was read while the lease
+    # was held: checked against its token after the lease, so an eviction committed before it is
+    # seen (cache_manager.evict).
+    held_then, checked = [], []
+    real_route, real_state = route_cache.route_of_graph, route_cache.RouteSnapshot.state
 
-    async def watermark(self, graph_id):
-        held_then.append(await cache_manager.is_pinned(graph_id))
-        return await real(self, graph_id)
+    async def route_of_graph(graph_id):
+        pinned = await cache_manager.is_pinned(graph_id)
+        route = await real_route(graph_id)
+        checked.append((pinned, route))
+        return route
 
-    monkeypatch.setattr(GraphVersioningService, "projection_watermark", watermark)
+    async def state(self):
+        held_then.append(any(pinned and route is self for pinned, route in checked))
+        return await real_state(self)
+
+    monkeypatch.setattr(route_cache, "route_of_graph", route_of_graph)
+    monkeypatch.setattr(route_cache.RouteSnapshot, "state", state)
     assert await _served_by(plain_engine, ds, Viewer(actor="usr_1", can_read=True)) == "falkordb"
     assert held_then and all(held_then)
 

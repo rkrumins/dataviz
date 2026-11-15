@@ -286,7 +286,9 @@ async def physical_key(ds_id: str, provider_id: str, graph_name: Optional[str]) 
     to a key a move may have dropped. A graph versioned since the set was cached reads its own
     key until the next refresh, which comes before a move can drop that key
     (``RETIRE_GRACE_SECS`` > ``CACHE_TTL_SECS``). With no set at all (graphver down and nothing
-    cached) the source reads its own key. The pin read is uncached, and a failure raises."""
+    cached) the source reads its own key. The pin is the graph's route as of now
+    (``route_cache``: read from Postgres again once a write has moved it), and a failure to read
+    it raises."""
     try:
         # A fork's ``dsfork_…`` source is versioned from its first moment: never waits for the set.
         versioned = (ds_id.startswith("dsfork_")
@@ -297,33 +299,21 @@ async def physical_key(ds_id: str, provider_id: str, graph_name: Optional[str]) 
     if not versioned:
         return provider_id, graph_name
 
-    from sqlalchemy import select
-
+    from backend.app.services.versioning import route_cache
     from backend.app.services.versioning.config import DEFAULT_FALKOR_PROVIDER
-    from backend.app.services.versioning.db import graphver_route_session
-    from backend.app.services.versioning.models import GraphORM, ProjectionStateORM
 
-    # On the route engine: a pool reads of graphs fill can't stop this lookup, nor every read with it.
-    async with graphver_route_session() as session:
-        of_source = GraphORM.data_source_id == ds_id
-        if ds_id.startswith("dsfork_"):
-            # A fork has no key of its own to read: its root parent's pin, up a fork of a fork.
-            root, parent = None, await session.scalar(select(GraphORM.fork_parent_graph_id).where(
-                of_source, GraphORM.deleted_at.is_(None)))
-            while parent:
-                root, parent = parent, await session.scalar(
-                    select(GraphORM.fork_parent_graph_id).where(GraphORM.id == parent))
-            of_source = GraphORM.id == root
-        row = (await session.execute(
-            select(GraphORM.id, ProjectionStateORM.falkor_provider,
-                   ProjectionStateORM.falkor_graph_name)
-            .join(ProjectionStateORM, ProjectionStateORM.graph_id == GraphORM.id)
-            .where(of_source, GraphORM.deleted_at.is_(None))
-        )).first()
-    if row is None or row[2] in (None, f"gv_{row[0]}"):
+    # Read from Postgres on the route engine, when it is read at all: reads that fill the graph pool
+    # can't stop this lookup, nor every read with it.
+    route = await route_cache.route_of_source(ds_id)
+    if ds_id.startswith("dsfork_"):
+        # A fork has no key of its own to read: its root parent's pin, up a fork of a fork.
+        route = await route_cache.route_of_graph(route.root_id) if route and route.root_id else None
+    if (route is None or route.deleted
+            or route.falkor_graph_name in (None, f"gv_{route.graph_id}")):
         return provider_id, graph_name
-    pin_provider = row[1] if row[1] not in (None, "", DEFAULT_FALKOR_PROVIDER) else provider_id
-    return pin_provider, row[2]
+    pin_provider = (route.falkor_provider if route.falkor_provider not in
+                    (None, "", DEFAULT_FALKOR_PROVIDER) else provider_id)
+    return pin_provider, route.falkor_graph_name
 
 
 def serves_pin(served, pin_provider: Optional[str], pin_name: Optional[str],

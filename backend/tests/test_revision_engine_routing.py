@@ -11,8 +11,8 @@ from types import SimpleNamespace
 import pytest
 
 from backend.app.services.context_engine import ContextEngine
+from backend.app.services.versioning import route_cache
 from backend.app.services.versioning.errors import RevisionUnsupported
-from backend.app.services.versioning.service import GraphVersioningService
 
 
 class _Registry:
@@ -41,9 +41,9 @@ def _refused(ds, *, session=None, branch_id=None):
 
 @pytest.fixture()
 def never_reads_the_projection(monkeypatch):
-    async def watermark(self, gid):
+    async def state(self):
         raise AssertionError("a refused revision read the projection")
-    monkeypatch.setattr(GraphVersioningService, "projection_watermark", watermark)
+    monkeypatch.setattr(route_cache.RouteSnapshot, "state", state)
 
 
 def test_a_forks_past_is_refused(never_reads_the_projection):
@@ -52,18 +52,19 @@ def test_a_forks_past_is_refused(never_reads_the_projection):
 
 
 def test_a_data_source_without_version_control_has_no_past(monkeypatch, never_reads_the_projection):
-    async def no_graph(self, ds):
+    async def no_graph(ds):
         return None
-    monkeypatch.setattr(GraphVersioningService, "get_graph_by_data_source", no_graph)
+    monkeypatch.setattr(route_cache, "route_of_source", no_graph)
     assert _refused("ds_plain") == "unversioned"
 
 
 def test_a_drafts_past_is_refused(monkeypatch, never_reads_the_projection):
-    async def graph(self, ds):
-        return {"graph_id": "g1"}
-
-    async def main(self, gid):
-        return "br_main"
-    monkeypatch.setattr(GraphVersioningService, "get_graph_by_data_source", graph)
-    monkeypatch.setattr(GraphVersioningService, "main_branch_id", main)
+    async def graph(ds):
+        return route_cache.RouteSnapshot(
+            graph_id="g1", data_source_id=ds, fork_parent_graph_id=None, root_id=None,
+            deleted=False, main_branch_id="br_main", committed=3, projected=3,
+            served_commit_seq=3, status="idle", read_mode=None, falkor_graph_name="K1",
+            falkor_provider=None, window_rows=None, last_error=None, residency="standard",
+            size_bytes=None)
+    monkeypatch.setattr(route_cache, "route_of_source", graph)
     assert _refused("ds_1", branch_id="br_draft") == "draft"

@@ -329,6 +329,20 @@ integration's many small changes as a few commits.
 
 ### Changed
 
+- **Reads of a versioned graph no longer ask Postgres where to go.** Each read looked up its
+  graph, main branch, pin and watermark: five checkouts of the route pool and about eight
+  statements, so Postgres' load grew with every reader. With 200 readers of a graph of 1M nodes and
+  2M edges, CI's Postgres ran out of connections. Each process now keeps a graph's route and reads
+  it again, in one query, only once a write has moved it, which a write says in Redis as its commit
+  returns. A read checks that in one round trip. "Always the latest" stays exact: a read that starts
+  after a publish has returned reads the new version, in any pod.
+  - A write that couldn't tell Redis (or one made outside the app) is seen within
+    `GRAPHVER_ROUTE_CACHE_SECS` (5 s). `0` turns the cache off.
+  - A reader that can't reach Redis routes from Postgres, as before.
+  - An eviction drops its key only once readers have been told. Otherwise the graph stays as it was.
+  - Watch `graphver_route_cache_total{outcome}` and `graphver_route_announce_failed_total`.
+  - `docs/SCALING_CONCURRENT_USERS.md` §4.9 has the cost per read, and §4.1 now counts the route
+    pool (3 + 2 per process) against `max_connections`.
 - **A moved graph keeps its previous key for Keep the previous key for.** The New-version builds
   setting (`retireGraceSecs`) said it applied to moves, but a move kept the key for
   `GRAPHVER_RETIRE_GRACE_SECS`, the setting's default; a move now takes the setting in force, as a

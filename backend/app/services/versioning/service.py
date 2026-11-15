@@ -1165,11 +1165,14 @@ class GraphVersioningService:
                ProjectionStateORM.falkor_graph_name == name]
         if exclude_graph_id is not None:
             key.append(ProjectionStateORM.graph_id != exclude_graph_id)
+        # Returning the graphs it clears names them to every process's route cache, which would
+        # otherwise read every graph's route again (route_cache).
         await s.execute(update(ProjectionStateORM).where(
             *key, ProjectionStateORM.owns_falkor_graph.is_(False),
             ProjectionStateORM.graph_id.in_(
                 select(GraphORM.id).where(GraphORM.deleted_at.isnot(None))),
-        ).values(falkor_graph_name=None).execution_options(synchronize_session=False))
+        ).values(falkor_graph_name=None).returning(ProjectionStateORM.graph_id)
+            .execution_options(synchronize_session=False))
         if data_source_id is not None:
             key.append(ProjectionStateORM.graph_id.not_in(
                 select(GraphORM.id).where(GraphORM.data_source_id == data_source_id)))

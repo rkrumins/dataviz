@@ -66,9 +66,12 @@ def get_engine() -> AsyncEngine:
 def get_session_factory() -> async_sessionmaker[AsyncSession]:
     global _session_factory
     if _session_factory is None:
+        # Its sessions announce the route changes they commit, to every process's route cache.
+        from .route_cache import GraphverSession
+
         _session_factory = async_sessionmaker(
             bind=get_engine(),
-            class_=AsyncSession,
+            class_=GraphverSession,
             expire_on_commit=False,
             autoflush=False,
             autocommit=False,

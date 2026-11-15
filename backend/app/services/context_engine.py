@@ -232,10 +232,13 @@ class ContextEngine:
             from .versioned_sources import serves_pin
             svc = GraphVersioningService()
             # The lookups that route the read run on the route engine: reads that fill the main
-            # pool can't stop them (db.get_route_engine).
+            # pool can't stop them (db.get_route_engine). Each process reads a graph's route there
+            # once per change to it, not once per read (route_cache).
             from .versioning import db as gv_db
+            from .versioning import route_cache
             route = GraphVersioningService(gv_db.graphver_route_session)
-            graph = await route.get_graph_by_data_source(data_source_id)
+            snap = await route_cache.route_of_source(data_source_id)
+            graph = snap.graph() if snap is not None else None
             if graph is None and provider_error is not None:
                 raise provider_error
             if graph is None and fork:
@@ -250,9 +253,10 @@ class ContextEngine:
                 # out of FalkorDB and asks for its load. A fork's read does both for its root, once
                 # its plan says it reads through the root's store.
                 from .versioning import residency
+                held = None
                 if not fork and viewer is not None:
-                    await residency.hold(svc, graph)
-                main_id = await route.main_branch_id(gid)
+                    held = await residency.hold(svc, graph)
+                main_id = snap.main_branch_id or await route.main_branch_id(gid)
                 is_draft = norm not in ("", "main", main_id)
                 if is_draft and as_of_seq is not None:
                     from .versioning.errors import RevisionUnsupported
@@ -267,7 +271,11 @@ class ContextEngine:
                     main_reader = await cls._fork_main_reader(
                         registry, session, workspace_id, svc, gid, main_id, actor, viewer)
                 else:
-                    wm = await route.projection_watermark(gid)
+                    if held is not None:
+                        # The lease came after the route was read: as it is now, so an eviction
+                        # committed before the lease is seen (cache_manager.evict).
+                        snap = await route_cache.route_of_graph(gid) or snap
+                    wm = await snap.state()
                     if viewer is not None:
                         await residency.mark(graph, wm)
                     if wm["served"] is not None and provider_error is not None:

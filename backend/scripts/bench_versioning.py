@@ -1200,17 +1200,20 @@ _CLIENT_READ_RETRIES = 2
 
 async def _browse(args) -> int:
     """Readers in a process of their own, as a web pod's are: each reads a random node and its
-    connections, again and again, by the route a read of main takes (``residency_state``: the key
-    at the version it serves, else Postgres at the head through the bounded reader the context
-    engine uses, holding a place among the process's and the graph's reads from Postgres as a web
-    pod's do), until ``--stop`` exists. A read the bounds shed (``ProviderBusy``, 429, or
+    connections, again and again, by the route a read of main takes, as the process keeps it
+    (``route_cache``, as the context engine reads it: the key at the version it serves, else
+    Postgres at the head through the bounded reader the context engine uses, holding a place among
+    the process's and the graph's reads from Postgres as a web pod's do, and admitted to FalkorDB
+    as a web pod's are: ``PROVIDER_MAX_CONCURRENCY`` at once per key, a few more waiting, the rest
+    shed), until ``--stop`` exists. A read the bounds shed (``ProviderBusy``, 429, or
     ``GraphReadBusy``, 503) is tried again as the app's graph client does: twice more at most, after
     the server's Retry-After capped at 5 s, else 0.5 s then 1.5 s, each with up to 0.25 s of jitter.
     One line per read in ``--out``: when, how long (its waits included), the route, the version it
-    saw, how many times it was shed, and the error it ended on, if any."""
+    saw, how many times it was shed, and the error it ended on, if any; and in ``--out``
+    ``.routes.json`` the process's route lookups by outcome (``route_cache.counts``)."""
     from backend.app.providers.manager import provider_manager
     from backend.app.services.context_engine import _pg_reader
-    from backend.app.services.versioning import db
+    from backend.app.services.versioning import db, route_cache
     from backend.app.services.versioning.errors import GraphReadBusy
     from backend.app.services.versioning.service import GraphVersioningService
     from backend.common.adapters.circuit import ProviderBusy
@@ -1226,14 +1229,20 @@ async def _browse(args) -> int:
     out = open(args.out, "a", buffering=1)
 
     async def read(urn: str, label: str):
-        state = await svc.residency_state(args.graph_id) or {}
+        route = await route_cache.route_of_graph(args.graph_id)
+        state = await route.state() if route is not None else {}
         name = state.get("falkor_graph_name")
-        if state.get("serving") is not None and name:
+        if state.get("served") is not None and name:
             client = clients.get(name) or await _client(factory, name)
             clients[name] = client
-            res = await client.ro_query(f"MATCH (n:{label} {{urn: $u}}) OPTIONAL MATCH (n)-[r]-(m) "
-                                        "RETURN n.urn, count(m)", {"u": urn})
-            return "falkordb", state["serving"], bool(getattr(res, "result_set", None))
+            slot = await provider_manager.acquire_provider_slot(state.get("falkor_provider") or "",
+                                                                name)
+            try:
+                res = await client.ro_query(f"MATCH (n:{label} {{urn: $u}}) OPTIONAL MATCH "
+                                            "(n)-[r]-(m) RETURN n.urn, count(m)", {"u": urn})
+            finally:
+                slot.release()
+            return "falkordb", state["served"], bool(getattr(res, "result_set", None))
         found = await reader.get_node(urn) is not None
         await reader.get_edges(EdgeQuery(any_urns=[urn], limit=50))
         return "postgres", state.get("committed"), found
@@ -1267,6 +1276,8 @@ async def _browse(args) -> int:
         await asyncio.gather(*(one(k) for k in range(args.readers)))
     finally:
         out.close()
+        with open(args.out + ".routes.json", "w") as f:
+            json.dump(route_cache.counts(), f)
         await db.dispose_engine()
     return 0
 
@@ -1569,11 +1580,15 @@ async def _modes(graph_id, svc, store, factory, modes, changes, readers, timeout
                     await browser.wait()
                 mem_stop.set()
                 await sampler
-            rows = []
+            rows, lookups = [], {}
             for out_file in out_files:
                 if os.path.exists(out_file):
                     with open(out_file) as f:
                         rows += [json.loads(line) for line in f if line.strip()]
+                if os.path.exists(out_file + ".routes.json"):
+                    with open(out_file + ".routes.json") as f:
+                        for outcome, n in json.load(f).items():
+                            lookups[outcome] = lookups.get(outcome, 0) + n
             bounds = {p: (marks[p], marks[q]) for p, q in zip(READ_PHASES, (*READ_PHASES[1:], "end"))
                       if p in marks and q in marks}
             reads = _read_summary(rows, bounds)
@@ -1584,6 +1599,9 @@ async def _modes(graph_id, svc, store, factory, modes, changes, readers, timeout
                 "mode": mode, "buildMode": build_mode, "changeOps": len(ops) + changes // 2,
                 "landed": landed, "publishSecs": published["metrics"]["total_s"],
                 "importSecs": imported["metrics"]["total_s"], "reads": reads,
+                # The readers' route lookups by outcome: Postgres is read for a route only when a
+                # write has moved it (route_cache).
+                "routeLookups": lookups,
                 "memoryMb": {k: round(v / 2 ** 20, 1) for k, v in mem.items()},
                 "falkor_eq_pg": pg == fc, "pg": list(pg), "falkor": list(fc),
                 # Switch when ready: while it lands, readers see the version before, whole, and

@@ -39,7 +39,7 @@ This page links to its companions rather than repeating them:
 5. **Put a transaction-mode pooler in front of Postgres beyond two web pods** and set
    `DB_POOLER_MODE=transaction`. Without one, 400 connections carry about two viz pods,
    and only with the trimmed pools of §10.1 *(derived)*. With the pools as shipped, one pod
-   can open 384 (§4.4).
+   can open 404 (§4.4).
 6. **Treat `maxReplicas` as a connection-safety limit**, not only a cost limit (§3).
 7. **Keep Redis on `volatile-lru` while streams and cache share one instance**; split them
    as you grow. Redis Cluster is not supported for either role (§6).
@@ -203,6 +203,10 @@ plus a separate engine for the versioned store.
 | `ADMIN` | 2 + 0 = 2 | `DB_ADMIN_POOL_SIZE`, `DB_ADMIN_POOL_MAX_OVERFLOW` | Migrations, startup |
 | **Per process** | **85** | | |
 | `GRAPHVER` (separate engine) | 10 + 5 = 15 | `GRAPHVER_POOL_SIZE`, `GRAPHVER_POOL_MAX_OVERFLOW` | The versioned store: `GRAPHVER_DB_URL`, else `MANAGEMENT_DB_URL` |
+| `GRAPHVER_ROUTE` (separate engine) | 3 + 2 = 5 | `GRAPHVER_ROUTE_POOL_SIZE`, `GRAPHVER_ROUTE_POOL_MAX_OVERFLOW` | Routing reads of versioned graphs (§4.9), on the same database as `GRAPHVER`. Each statement on it is cut off past 2 s |
+
+The worksheets in §10 count `GRAPHVER` but not `GRAPHVER_ROUTE`: add 5 (3 steady) to each viz
+process there.
 
 A versioning lane process sizes `GRAPHVER` for its lane when `GRAPHVER_POOL_SIZE` is unset
 (`config.lane_pool_size`): 13 for projection (2 + `GRAPHVER_PROJECTION_CONCURRENCY` 8 + 3),
@@ -227,7 +231,7 @@ Two properties decide the arithmetic:
   line appears per role, when that role is first used. `kubectl logs <pod> | grep 'Engine\['`
   is the authoritative list for your worksheet. The line is logged at `INFO`, and the
   production overlay runs at `WARNING`, so read it in staging or lower `LOG_LEVEL` briefly.
-  The `GRAPHVER` engine logs no such line, so count it for any process that might touch the
+  The `GRAPHVER` engines log no such line, so count them for any process that might touch the
   versioned store.
 
 ### 4.2 The formula
@@ -235,8 +239,8 @@ Two properties decide the arithmetic:
 *Derived* from the pool sizes above:
 
 ```
-ceiling per process = Σ over the roles it opens of (pool_size + max_overflow)   (+ GRAPHVER)
-steady per process  = Σ over the roles it opens of  pool_size                   (+ GRAPHVER)
+ceiling per process = Σ over the roles it opens of (pool_size + max_overflow)   (+ GRAPHVER + GRAPHVER_ROUTE)
+steady per process  = Σ over the roles it opens of  pool_size                   (+ GRAPHVER + GRAPHVER_ROUTE)
 service total       = replicas at HPA maxReplicas × processes per pod × per-process value
                       processes per pod = GUNICORN_WORKERS for viz-service, 1 for everything else
 fleet total         = Σ over services
@@ -272,20 +276,20 @@ client limit, and keep the steady total well under it.
 `viz-config` and every other role at its default:
 
 ```
-ceiling per process = 30 + 12 + 15 + 6 + 16 + 2 = 81, + GRAPHVER 15 = 96
-steady per process  = 20 +  8 + 10 + 4 +  8 + 2 = 52, + GRAPHVER 10 = 62
-per pod (4 workers) = 384 ceiling, 248 steady
-HPA minimum, 2 pods = 768 ceiling        HPA maximum, 8 pods = 3,072 ceiling
+ceiling per process = 30 + 12 + 15 + 6 + 16 + 2 = 81, + GRAPHVER 15 + GRAPHVER_ROUTE 5 = 101
+steady per process  = 20 +  8 + 10 + 4 +  8 + 2 = 52, + GRAPHVER 10 + GRAPHVER_ROUTE 3 = 65
+per pod (4 workers) = 404 ceiling, 260 steady
+HPA minimum, 2 pods = 808 ceiling        HPA maximum, 8 pods = 3,232 ceiling
 ```
 
 Against the in-cluster `max_connections=400`, the web tier alone is over budget at its
 *minimum* replica count. It works at low load only because pools fill lazily, so the first
 busy hour is when it stops working.
 
-**B. The production overlay, pools as shipped** *(derived)*. 12 viz pods × 4 workers × 96 =
-**4,608** client connections for the web tier alone. That is fine for a pooler's client side
+**B. The production overlay, pools as shipped** *(derived)*. 12 viz pods × 4 workers × 101 =
+**4,848** client connections for the web tier alone. That is fine for a pooler's client side
 and impossible direct. ([INFRASTRUCTURE_LAUNCH_SCALE.md](INFRASTRUCTURE_LAUNCH_SCALE.md)
-§5.4 arrives at 4,080 because it counts 85 per process and leaves out `GRAPHVER`.)
+§5.4 arrives at 4,080 because it counts 85 per process and leaves out the `GRAPHVER` engines.)
 
 **C, D and E** are the three profiles in §10, each with its own filled-in worksheet.
 
@@ -362,6 +366,35 @@ deployments the trade is right, but it is a trade.
   prepared statements can collide (`prepared statement "__asyncpg_stmt_N__" already exists`).
   Test the versioned paths behind your pooler. If they fail, route `GRAPHVER_DB_URL` directly
   or through a session-mode pool, and count its pools against `max_connections`.
+
+### 4.9 What routing a read of a versioned graph costs
+
+A read of a versioned graph's main goes where the graph's route says: its key, at the version it
+serves, else Postgres. The route is the graph, its main branch, its pin and its watermark. Each
+process keeps a graph's route and reads it again from `GRAPHVER_ROUTE` only once a write has
+changed it (`backend/app/services/versioning/route_cache.py`):
+
+| When | Postgres | Redis (`STREAMS`) |
+|---|---|---|
+| A read, the route unchanged | Nothing | One `MGET` per lookup: two per read of main, three with Graph residency on |
+| A process's first read of a graph | Two queries | The same, and a `SET NX` for a token nobody has set |
+| After a publish, a projection pass, a read-mode change, an eviction, a load, a move or a switch | One query per process that reads the graph, on its next read | The writer's `SET` of the graph's token, as its commit returns |
+| Redis out of the reader's reach | One query per lookup, two per read of main; lookups waiting on the same graph share one | Nothing for 2 s, then one try |
+
+Before, each read made five checkouts of the route pool and about eight statements, so
+Postgres' load grew with every reader: 200 readers of one graph ran CI's Postgres out of
+connections ([09-scale-limits-and-roadmap.md](versioning/09-scale-limits-and-roadmap.md) §2).
+
+- **Exact while Redis is up.** A write announces the change before its commit returns, so a read
+  that starts after a write has returned routes by it, in any pod.
+- **Bounded while it isn't.** A write that can't announce its change (Redis out of the writer's
+  reach, a raw SQL statement, a change made outside the app) is seen once the route is
+  `GRAPHVER_ROUTE_CACHE_SECS` old (5 s). `0` turns the cache off; each read then routes from
+  Postgres as before.
+- **Eviction fails closed.** It drops a key only once readers have been told, and puts the
+  graph back as it was when they can't be.
+- **Watch it:** `graphver_route_cache_total{outcome}` (`hit`, `shared`, `read`, `unchecked`,
+  `off`) and `graphver_route_announce_failed_total` (§8).
 
 ---
 
@@ -466,13 +499,14 @@ where every value came from.
 | Aggregation bus (also fleet slots and fair share) | `STREAMS` | 20 |
 | Token revocation | `STREAMS` | 20 (the role default) |
 | Versioning messaging | `STREAMS` | 10 |
+| Versioned-graph route tokens (§4.9) | `STREAMS` | 16 |
 | Rate-limit storage | `STREAMS` | The `limits` library's own pool |
 | Graph-cache payloads | `CACHE` | 20 |
 | Provider cache, **one client per provider instance** | `CACHE` | 20 each (workers `WORKER_CONCURRENCY × 3 + 8`, the control plane 4) |
 
-`REDIS_STREAMS_MAX_CONNECTIONS` overrides the first three pools, and `REDIS_CACHE_MAX_CONNECTIONS`
-the last two. The ceiling per viz process is about 50 on `STREAMS`, plus 20 + 20 × active data
-sources on `CACHE` *(derived)*. At 48 viz processes and 5 active sources, that is 2,400 and
+`REDIS_STREAMS_MAX_CONNECTIONS` overrides the first four pools, and `REDIS_CACHE_MAX_CONNECTIONS`
+the last two. The ceiling per viz process is about 66 on `STREAMS`, plus 20 + 20 × active data
+sources on `CACHE` *(derived)*. At 48 viz processes and 5 active sources, that is 3,168 and
 5,760 *(derived)*: under a self-managed server's default `maxclients` of 10,000 when split,
 and close to it when shared. A managed Redis enforces its own per-tier client limit, so check
 it. Watch `connected_clients` in `INFO clients`.

@@ -12,14 +12,15 @@ KeyError (which the dependency maps to HTTP 404); and a branchId against a NON-v
 is ignored (lenient). A fresh projection serves main only through a provider that reads the pinned
 key (``serves_pin``): one resolved to another key falls back to Postgres. No FalkorDB — the live provider is a stub since only the *selection* is under
 test; ontology resolution and the projection watermark are stubbed so the test is independent of DB
-ontology and any running projector.
+ontology and any running projector (the route's state, as ContextEngine reads it from the route
+cache, for the stubbed watermarks).
 """
 import asyncio
 import os
 
 import pytest
 
-from backend.app.services.versioning import db, models
+from backend.app.services.versioning import db, models, route_cache
 from backend.app.services.versioning import config as vconfig
 from backend.app.services.versioning.projection import FalkorProjector
 from backend.app.services.versioning.service import GraphVersioningService
@@ -70,7 +71,7 @@ async def _run() -> None:
     # (no FalkorDB / projector running here).
     prev_writes = vconfig.VERSIONED_WRITES_ENABLED
     prev_resolve = ContextEngine._resolve_ontology
-    prev_wm = GraphVersioningService.projection_watermark
+    prev_wm = route_cache.RouteSnapshot.state
     prev_ds = data_source_repo.get_data_source_orm
     vconfig.VERSIONED_WRITES_ENABLED = False
 
@@ -138,9 +139,9 @@ async def _run() -> None:
 
         # 'main' (explicit alias), the opaque main id, and omission, projection FRESH → live
         # provider, wrapped so a write commits to versioning even with GRAPHVER_VERSIONED_WRITES=0
-        async def _fresh(self, graph_id):
+        async def _fresh(self):
             return {"fresh": True, "committed": 1, "projected": 1, "served": 1}
-        GraphVersioningService.projection_watermark = _fresh
+        route_cache.RouteSnapshot.state = _fresh
         for b in ("main", main, None):
             e = await _for_workspace(ds, b)
             assert isinstance(e.provider, VersionedWriteProvider)
@@ -154,9 +155,9 @@ async def _run() -> None:
 
         # same reads, but the projection LAGS the committed head → its key still serves the version
         # it last published, complete, until the newer one is in: the live provider, main and draft
-        async def _behind(self, graph_id):
+        async def _behind(self):
             return {"fresh": False, "committed": 2, "projected": 1, "served": 1}
-        GraphVersioningService.projection_watermark = _behind
+        route_cache.RouteSnapshot.state = _behind
         for b in ("main", main, None):
             e = await _for_workspace(ds, b)
             assert isinstance(e.provider, VersionedWriteProvider)
@@ -165,9 +166,9 @@ async def _run() -> None:
 
         # behind, and its key holds no version (written from nothing: a move, a first seed) →
         # the Postgres reader, for main and under a draft
-        async def _empty(self, graph_id):
+        async def _empty(self):
             return {"fresh": False, "committed": 2, "projected": 0, "served": None}
-        GraphVersioningService.projection_watermark = _empty
+        route_cache.RouteSnapshot.state = _empty
         for b in ("main", main, None):
             e = await _for_workspace(ds, b)
             assert isinstance(e.provider, VersionedBranchProvider)
@@ -184,7 +185,7 @@ async def _run() -> None:
     finally:
         vconfig.VERSIONED_WRITES_ENABLED = prev_writes
         ContextEngine._resolve_ontology = prev_resolve
-        GraphVersioningService.projection_watermark = prev_wm
+        route_cache.RouteSnapshot.state = prev_wm
         data_source_repo.get_data_source_orm = prev_ds
 
     await db.dispose_engine()

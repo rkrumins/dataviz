@@ -249,6 +249,9 @@ their series are complete: alert on those.
 | `graphver_projection_first_seed_avoided_total` | counter | versioning worker | A replay that would have reloaded a graph into a fresh key (reads going to Postgres for the whole load) found the key still holding a version, and reconciled it in place instead |
 | `graphver_pg_read_slots_shed_total{scope}` | counter | API | A read of a graph the graph store holds no version of was refused (`429`) because that many reads from Postgres already ran: `graph` (New-version builds' **Reads of one graph**) or `process` (**Reads per process**). Each such read costs the whole graph, so they are bounded rather than allowed to take every database connection |
 | `graphver_pg_read_timeouts_total` | counter | API | A read from Postgres cut off at New-version builds' **Statement limit**, answered `503 graph_read_busy` (retryable) |
+| `graphver_route_cache_total{outcome}` | counter | API; versioning worker | A lookup of a versioned graph's route: `hit` (kept, its token unmoved), `shared` (another lookup's read), `read` (read from Postgres: a write moved it, or the process's first), `unchecked` (read from Postgres: Redis couldn't say), `off` (`GRAPHVER_ROUTE_CACHE_SECS=0`). Steady reads are `hit`s; `unchecked` means reads route from Postgres |
+| `graphver_route_announce_failed_total` | counter | API; versioning worker | A committed change to a route that Redis did not take: other processes route by what they kept until it ages out (`GRAPHVER_ROUTE_CACHE_SECS`), and an eviction puts its graph back instead |
+| `graphver_route_announced_all_total` | counter | API; versioning worker | A write to a route that named no graph, so every graph's route was read again; the log names the statement |
 
 ### Alerts worth having
 
@@ -263,6 +266,7 @@ their series are complete: alert on those.
 | Changes held back | `graphver_projection_quarantined > 0` for 30 minutes | Something can't be written to the graph store even on its own. Same runbook |
 | Passes failing | `increase(graphver_projection_passes_total{outcome="failed"}[15m]) > 0` for 30 minutes | Every pass of some graph fails: usually the graph store is unreachable or out of memory |
 | Reads of a graph shed from Postgres | `rate(graphver_pg_read_slots_shed_total[5m]) > 0` or `rate(graphver_pg_read_timeouts_total[5m]) > 0` for 10 minutes | A graph is read from Postgres, its whole graph per read, and the reads are being refused or cut off. See [Reads of a graph answer 429 or 503 graph_read_busy](/docs/runbooks#reads-of-a-graph-answer-429-or-503-graph_read_busy) |
+| Route changes unannounced | `increase(graphver_route_announce_failed_total[5m]) > 0` | A writer can't reach Redis: reads elsewhere can trail its changes by up to `GRAPHVER_ROUTE_CACHE_SECS`, and evictions are put back. Check the `STREAMS` Redis |
 
 How to act on the rebuild signals is in
 [Concurrency and Timeout Tuning](/docs/concurrency-tuning#what-to-watch-and-the-one-number-that-means-stop).
