@@ -253,6 +253,15 @@ NOTES: dict[str, tuple[str, str | None]] = {
         "builds, and per graph.",
         None,
     ),
+    "GRAPHVER_ROUTE_CACHE_SECS": (
+        "The most seconds a process routes reads of a versioned graph by the route it last read "
+        "(its pin, watermark and main branch) without reading it again. It reads it again at once "
+        "when a write moves the graph's route token in Redis (`gvroute:g:<graph id>`, `gvroute:set`, "
+        "`gvroute:all`), which every write to a route announces as its commit returns; this bounds "
+        "only a change that could not be announced. `0` turns the cache off: every read is routed "
+        "from Postgres.",
+        None,
+    ),
     "GRAPHVER_ROUTE_POOL_SIZE": (
         "Connections kept, per process, in the small pool that routes every read of a versioned "
         "graph (its key, its watermark, its main branch). It is apart from `GRAPHVER_POOL_SIZE`, so "
