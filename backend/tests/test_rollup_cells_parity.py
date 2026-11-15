@@ -111,6 +111,56 @@ def test_a_window_edge_ending_on_a_container_lands_on_the_jobs_boundary_cells():
         ("urn:a0", "urn:b0"): (1, 1), ("urn:a1", "urn:b1"): (1, 1), ("urn:a2", "urn:b2"): (0, 1)}
 
 
+def _big_box(children: int, dead: int = 0):
+    """The chains of ``_Svc`` with b2 holding ``children`` more children, ``x0``…, after ``b3``.
+    The first ``dead`` of b2's containment edges are deleted, ``b3``'s first. Each full read of a
+    node's edges (``_incident_edge_ids``) is recorded."""
+    from backend.tests.test_versioning_rollup_canonical import _Svc
+
+    class _BigBox(_Svc):
+        def __init__(self):
+            super().__init__()
+            self.full_reads = []
+            for k in range(children):
+                self.parent[f"x{k}"], self.types[f"x{k}"] = "b2", "lvl3"
+            self.dead = (["ce_b3"] + [f"ce_x{k}" for k in range(children)])[:dead]
+
+        async def _skeletons_at(self, s, gid, bid, ids, seq):
+            out = await super()._skeletons_at(s, gid, bid, ids, seq)
+            return {i: None if i in self.dead else p for i, p in out.items()}
+
+        async def _incident_edge_ids(self, s, gid, bid, node_ids, **kw):
+            self.full_reads.append(set(node_ids))
+            return await super()._incident_edge_ids(s, gid, bid, node_ids, **kw)
+
+    return _BigBox()
+
+
+def test_a_large_container_is_known_for_one_from_a_few_of_its_children():
+    from backend.tests.test_versioning_rollup_canonical import _deltas
+    from backend.tests.test_versioning_rollup_canonical import _projector as canonical_projector
+
+    async def resolver(svc, gid):
+        return (["CONTAINS"], ["FLOWS"])
+
+    edge = [("e1", "create", {"sourceEntityId": "a3", "targetEntityId": "b2", "edgeType": "FLOWS"})]
+    boxed = {("urn:a0", "urn:b0"): (1, 1), ("urn:a1", "urn:b1"): (1, 1),
+             ("urn:a2", "urn:b2"): (1, 1)}
+    probe = projection._KIDS_PROBE
+    # Far more children than are read: one of the first is live, so none other is read.
+    svc = _big_box(children=3 * probe)
+    assert _canonical(_deltas(canonical_projector(resolver, svc), edge)) == boxed
+    assert svc.full_reads == []
+    # Every row read is of a child deleted since: then all of them are, and a later one is live.
+    svc = _big_box(children=3 * probe, dead=probe)
+    assert _canonical(_deltas(canonical_projector(resolver, svc), edge)) == boxed
+    assert svc.full_reads == [{"b2"}]
+    # None of them live at all: not a container, as when every child was read.
+    svc = _big_box(children=3 * probe, dead=3 * probe + 1)
+    gone = _canonical(_deltas(canonical_projector(resolver, svc), edge))
+    assert ("urn:a2", "urn:b2") not in gone and svc.full_reads == [{"b2"}], gone
+
+
 def test_a_reconcile_lands_container_lineage_on_the_jobs_cells_and_recounts_a_new_container():
     contains = [("a0", "CONTAINS", "a1"), ("a1", "CONTAINS", "a2"),
                 ("b0", "CONTAINS", "b1"), ("b1", "CONTAINS", "b2"), ("b2", "CONTAINS", "b3")]

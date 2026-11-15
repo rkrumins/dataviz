@@ -78,6 +78,15 @@ class _Svc:
         """The containment edges out of ``node_ids`` (their children's), as the projector asks."""
         return {f"ce_{c}" for c, par in self.parent.items() if par in set(node_ids)}
 
+    async def _some_incident_edge_ids(self, s, gid, bid, node_ids, *, side="source",
+                                      edge_types=None, per_node=256):
+        """The same, at most ``per_node`` a node, by node."""
+        out = {}
+        for c, par in self.parent.items():
+            if par in set(node_ids) and len(out.get(par, ())) < per_node:
+                out.setdefault(par, []).append(f"ce_{c}")
+        return out
+
     async def _containment_ancestors(self, s, gid, bid, node_ids, cset, as_of):
         seen = set(node_ids)
         edges = {}

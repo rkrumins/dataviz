@@ -464,6 +464,11 @@ integration's many small changes as a few commits.
   source nodes at a time, so a page holding a node with 500,000 children came back as one result,
   about 353 MB in the projector before its lookup in Postgres. Each page is now read 50,000
   relationships at a time.
+- **A window under a large container reads a few of its children, not all of them.** The lineage
+  summaries ask whether each end of a containment change, and of lineage, holds a live child. They
+  read every child's edge to find out, twice a window: 500,000 rows from Postgres for a container
+  of 500,000 children. They now read at most 256 of each node's, and read the rest only when none
+  of those is live.
 - **The relationship drawer reads a hub's relationship directly.** Reading the relationships
   between a few known entities bound both ends, but in the same query part, so FalkorDB still
   walked every relationship of the source: 61 ms a call from a node with 200,000 children. A

@@ -807,7 +807,10 @@ rollups are fresh without waiting for a full aggregation job.
   job's boundary cells: a node holding a containment child is one of its own reps, as the job's
   ancestors-or-self of every containment parent has it, so the raw pair is a boundary cell when both
   ends are containers (never a cube one); and a node whose first child arrives, or whose last goes,
-  has the lineage it ends recounted, as a move's is (`_MOVE_EDGE_CAP` bounds both).
+  has the lineage it ends recounted, as a move's is (`_MOVE_EDGE_CAP` bounds both). Whether a node
+  holds a live child is asked of at most 256 of its containment edge rows first
+  (`_some_incident_edge_ids`, one LIMIT a node). Only a node with that many and none of them live
+  is read whole, so a container of 500,000 children costs a window 256 rows, not 500,000.
 
 **When incremental maintenance can't keep up, it hands off to a rebuild:**
 

@@ -36,7 +36,7 @@ from typing import (Any, Awaitable, Callable, Collection, Dict, Iterable, List, 
                     Optional, Sequence, Set, Tuple)
 
 from sqlalchemy import (TIMESTAMP, Boolean, Text, TextClause, any_, bindparam, cast, insert, select, func,
-                        delete, null, literal, text, update, or_, tuple_, and_, case)
+                        delete, null, literal, text, true, update, or_, tuple_, and_, case)
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import DBAPIError, IntegrityError
@@ -11910,6 +11910,42 @@ class GraphVersioningService:
                 for chunk in _chunks(ids, _IN_LIST_MAX):   # one array a chunk (see _values_at)
                     cand.update((await s.execute(stmt.distinct(), {"ids": list(chunk)})).scalars().all())
         return cand
+
+    async def _some_incident_edge_ids(
+        self, s, graph_id: str, branch_id: str, node_ids, *, side: str = "source",
+        edge_types: Optional[Collection[str]] = None, per_node: int = 256,
+    ) -> Dict[str, List[str]]:
+        """At most ``per_node`` edge version rows for each of *node_ids* on ``side``, in each
+        layer :meth:`_incident_edge_ids` reads. They come through the same index, one LIMIT per
+        node (a LATERAL join). Returns each node's rows as their edge ids, one per row, so an edge
+        with several versions appears several times. A node with fewer than ``per_node`` rows has
+        every edge it ever had here; one with as many may have more.
+
+        This is for a question one live edge answers, such as whether a node holds a child. A
+        container with 500,000 children then costs ``per_node`` rows, not all of its edges'."""
+        ids = list(node_ids)
+        out: Dict[str, List[str]] = {}
+        if not ids:
+            return out
+        main_id = await self._main_branch_id(s, graph_id)
+        layers = [(graph_id, [main_id] if branch_id == main_id else [main_id, branch_id])]
+        layers += [(gid, [bid]) for gid, bid, _at in (await self._layers(s, graph_id, main_id, 0))[1:]]
+        col = {"source": EdgeVersionORM.source_entity_id,
+               "target": EdgeVersionORM.target_entity_id}[side]
+        node = func.unnest(bindparam("ids", type_=ARRAY(Text))).table_valued("id").render_derived()
+        for gid, branches in layers:
+            some = select(EdgeVersionORM.entity_id).where(
+                EdgeVersionORM.graph_id == gid, EdgeVersionORM.branch_id.in_(branches),
+                col == node.c.id)
+            if edge_types is not None:
+                some = some.where(or_(func.upper(EdgeVersionORM.edge_type).in_(list(edge_types)),
+                                      EdgeVersionORM.edge_type.is_(None)))
+            some = some.limit(per_node).lateral()
+            stmt = select(node.c.id, some.c.entity_id).select_from(node).join(some, true())
+            for chunk in _chunks(ids, _IN_LIST_MAX):
+                for nid, eid in (await s.execute(stmt, {"ids": list(chunk)})).all():
+                    out.setdefault(nid, []).append(eid)
+        return out
 
     async def _incident_live_edges(
         self, s, graph_id: str, branch_id: str, node_ids, as_of_seq: Optional[int] = None,

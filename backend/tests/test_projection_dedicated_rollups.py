@@ -119,6 +119,7 @@ def run_window(monkeypatch, rows, *, before=None, resolver=_dedicated, on_rollup
     proj._svc._skeletons_at = chains._skeletons_at
     proj._svc._containment_parents_climb = chains._containment_parents_climb
     proj._svc._incident_edge_ids = chains._incident_edge_ids
+    proj._svc._some_incident_edge_ids = chains._some_incident_edge_ids
 
     async def claim(graph_id, seen_epoch, from_seq):
         return seen_epoch + 1, 0

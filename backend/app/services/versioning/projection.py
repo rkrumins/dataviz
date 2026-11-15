@@ -981,6 +981,9 @@ UNRESOLVED = _Unresolved()
 
 #: Chains a rollup delta keeps cached across its pages, at most (``_compute_rollup_deltas``).
 _CHAIN_CACHE_MAX = 200000
+#: Containment edge rows read of each node before asking whether it holds a live child is
+#: answered from all of them (``_compute_rollup_deltas``' ``prefetch_kids``).
+_KIDS_PROBE = 256
 #: What a staged cell carries besides its weights and types: the ends' depths, levels and labels,
 #: and the level digest (``_CellsOut.convert``).
 _STAMPS = ("sd", "td", "sl", "tl", "slb", "tlb", "dg")
@@ -3815,22 +3818,35 @@ class FalkorProjector:
 
         kids: Dict[Tuple[str, Optional[int]], bool] = {}
 
+        async def holders_of(cand, as_of: Optional[int]) -> Set[str]:
+            """The sources of the live containment edges among ``cand`` at ``as_of``."""
+            live = (await self._svc._skeletons_at(s, graph.id, main_id, list(cand), as_of)
+                    if cand else {})
+            return {_edge_endpoints(p)[0] for p in live.values()
+                    if p is not None and _etype(p) in cont_types}
+
         async def prefetch_kids(ids, as_of: Optional[int]) -> None:
-            """Which of ``ids`` hold a live containment child at ``as_of``, in one batched read:
-            a container is one of its own reps, as the summaries job has it (its rep set is
-            every containment parent among the endpoint's ancestors-OR-self), so a lineage edge
-            ending on one lands on the cells the job's do."""
+            """Which of ``ids`` hold a live containment child at ``as_of``: a container is one of
+            its own reps, as the summaries job has it (its rep set is every containment parent
+            among the endpoint's ancestors-OR-self), so a lineage edge ending on one lands on the
+            cells the job's do.
+
+            One live child answers it, so each is asked first of at most ``_KIDS_PROBE`` of its
+            containment edge rows: a container of 500,000 children costs those, not all of them.
+            Only one with that many rows and no live child among them is read whole."""
             if not use_canonical:
                 return
             need = {i for i in ids if i and (i, as_of) not in kids}
             if not need:
                 return
-            cand = await self._svc._incident_edge_ids(s, graph.id, main_id, need,
-                                                      sides=("source",), edge_types=cont_types)
-            live = (await self._svc._skeletons_at(s, graph.id, main_id, list(cand), as_of)
-                    if cand else {})
-            holding = {_edge_endpoints(p)[0] for p in live.values()
-                       if p is not None and _etype(p) in cont_types}
+            some = await self._svc._some_incident_edge_ids(
+                s, graph.id, main_id, need, side="source", edge_types=cont_types,
+                per_node=_KIDS_PROBE)
+            holding = await holders_of({e for rows in some.values() for e in rows}, as_of)
+            unsure = {i for i in need if i not in holding and len(some.get(i, ())) >= _KIDS_PROBE}
+            if unsure:
+                holding |= await holders_of(await self._svc._incident_edge_ids(
+                    s, graph.id, main_id, unsure, sides=("source",), edge_types=cont_types), as_of)
             for i in need:
                 kids[(i, as_of)] = i in holding
 
