@@ -288,13 +288,17 @@ window's pass and a surplus holds the graph back until a rebuild, as before.
 > [09 · Scale & Limits](09-scale-limits-and-roadmap.md)).
 >
 > **Relationships are found between their two ends.** Every statement that finds one relationship
-> by its ends finds both first, by their urn indexes, then the relationship between them:
-> `MATCH (a:L {urn: x}) MATCH (b:L {urn: y}) MATCH (a)-[r:T]->(b)`. This covers the edge write, the
-> reconcile's fingerprint read, the deletes, and the lineage summaries' read and delete. Matched
-> from one end, `(a {urn: x})-[r]->(b {urn: y})` expands every relationship of `a`. In the 1M nodes
-> + 2M edges run, a container with about 333,000 children made every such lookup time out
+> by its ends finds both first, by their urn indexes, and binds them before it matches the
+> relationship (`_between`):
+> `MATCH (a:L {urn: x}) MATCH (b:L {urn: y}) WITH item, a, b MATCH (a)-[r:T]->(b)`. This covers the
+> reconcile's fingerprint read, the deletes by key, by id and by internal id, and the lineage
+> summaries' read and delete. The edge write is a MERGE between the two found ends. Without the
+> `WITH`, FalkorDB walks every relationship of `a` for each row, whether the ends are written in
+> one pattern or as MATCH clauses of their own. In the 1M nodes + 2M edges run, a root with
+> 500,000 children made those lookups run out of their budget for hours
 > ([09](09-scale-limits-and-roadmap.md) §2). `test_projection_hub_lookups.py` holds every
-> statement to this shape.
+> statement to this shape. `test_hub_lookups_live.py` measures them against a hub on the real
+> engine.
 
 ---
 

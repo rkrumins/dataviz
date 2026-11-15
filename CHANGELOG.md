@@ -451,13 +451,14 @@ integration's many small changes as a few commits.
 
 ### Fixed
 
-- **Rebuilding or seeding a graph with a very large container no longer stalls.** The projector
-  looked each relationship up from one end, so for a node with hundreds of thousands of
-  relationships FalkorDB walked all of them on every lookup. In the 1M nodes + 2M edges scale run,
-  a root with about 333,000 children made every lookup time out, and the rebuild ran for more than
-  four hours without finishing. Every lookup or delete of a relationship now finds both ends first,
-  then the relationship between them. This covers rebuilds, reseeds, builds' seeds, window deletes,
-  and the lineage summaries' reads and deletes.
+- **Rebuilding or seeding a graph with a very large container no longer stalls.** For a node
+  with hundreds of thousands of relationships, FalkorDB walked all of them on every lookup of one.
+  In the 1M nodes + 2M edges scale run, a root with 500,000 children made the lookups run out of
+  their budget, and the rebuild ran for more than four hours without finishing. That held whether
+  the ends were written in one pattern or each in a MATCH clause of its own. Every lookup or delete
+  of a relationship now finds both ends first, and a `WITH` binds them before the relationship is
+  matched between them. This covers rebuilds, reseeds, builds' seeds, window deletes, and the
+  lineage summaries' reads and deletes.
 - **A graph switched to a new key gets its lineage summaries.** The summaries job asked for at the
   same commit as an earlier one was answered with that job, which had written the old key, so the
   new key never got them — after a build's switch, and after a move in place. The ask now names the

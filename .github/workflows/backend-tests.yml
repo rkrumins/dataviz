@@ -164,6 +164,20 @@ jobs:
             tests/integration/test_search_layers_live.py \
             tests/integration/test_search_generic_ontology_live.py \
             tests/integration/test_search_edges_live.py -q
+      # What finding a relationship between two known nodes costs when one of them is a hub (a
+      # container with hundreds of thousands of children): each statement the projector sends
+      # for it must cost per row what it does on an ordinary node, and find exactly what it
+      # should. The shapes it sent before are timed beside them. Its report is the
+      # HUB_LOOKUP_REPORT line in this step's log.
+      - name: Relationship lookups against a hub
+        if: ${{ !cancelled() }}
+        working-directory: backend
+        env:
+          RUN_FALKOR_LIVE: "1"
+          FALKORDB_HOST: localhost
+          FALKORDB_PORT: "6379"
+        run: |
+          python -m pytest tests/integration/test_hub_lookups_live.py -q -s
       # A spike: what GRAPH.COPY on this engine does — whole, one version, the source serving
       # meanwhile — and what it costs (time, memory, stalls, a node without room), for building a
       # graph's next version beside its key (New-version builds). Last: it lowers maxmemory for a

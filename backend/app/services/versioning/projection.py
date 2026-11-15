@@ -784,20 +784,59 @@ def _edge_merge_cypher(rel_type: str, src_label: str, tgt_label: str, *,
     )
 
 
+def _between(rel_type: str, src_label: str, tgt_label: str, *, item: str = "item",
+             src: str = "src", tgt: str = "tgt") -> str:
+    """The relationships ``r`` of ``rel_type`` from ``a`` to ``b``, where ``a`` is the
+    ``src_label`` node whose urn is ``<item>.<src>`` and ``b`` the ``tgt_label`` node whose urn
+    is ``<item>.<tgt>``. Each end is found through its urn index.
+
+    The ``WITH`` is what keeps this cheap. FalkorDB plans the MATCH clauses of one query part as
+    a single pattern, then walks that pattern from one end. In one query part, ``a``'s
+    relationships of ``rel_type`` are all expanded for every row, and ``b`` is filtered after.
+    That stays true however the ends are written. In the 1M nodes + 2M edges scale run, the root
+    holds 500,000 children, and each row cost about 70 ms, at any batch size.
+
+    After the ``WITH`` both ends are already bound. The relationship is then found between them,
+    as MERGE finds one, whatever either end's degree."""
+    return (f"MATCH (a:{src_label} {{urn: {item}.{src}}}) "
+            f"MATCH (b:{tgt_label} {{urn: {item}.{tgt}}}) "
+            f"WITH {item}, a, b "
+            f"MATCH (a)-[r:{rel_type}]->(b)")
+
+
+def _edge_fingerprints_cypher(rel_type: str, src_label: str, tgt_label: str) -> str:
+    """Every copy's fingerprint of the relationships asked for (``$batch`` of ``{src, tgt}``)."""
+    return (f"UNWIND $batch AS it {_between(rel_type, src_label, tgt_label, item='it')} "
+            "RETURN it.src, it.tgt, r.gvHash")
+
+
+def _delete_edge_ids_cypher(rel_type: str, src_label: str, tgt_label: str) -> str:
+    """Delete relationships by the internal ids a page of the key's relationships read
+    (``$batch`` of ``{src, tgt, rid}``), each found between its two ends."""
+    return (f"UNWIND $batch AS it {_between(rel_type, src_label, tgt_label, item='it')} "
+            "WHERE id(r) = it.rid DELETE r")
+
+
+def _rollup_read_cypher(src_label: str, tgt_label: str) -> str:
+    """The summary cells asked for (``$batch`` of ``{s, t}``): weight, types, stamp."""
+    return (f"UNWIND $batch AS item "
+            f"{_between('AGGREGATED', src_label, tgt_label, src='s', tgt='t')} "
+            f"RETURN item.s, item.t, r.weight, r.sourceEdgeTypes, r.gvSeq")
+
+
+def _rollup_delete_cypher(src_label: str, tgt_label: str) -> str:
+    """Delete the summary cells asked for (``$batch`` of ``{s, t}``)."""
+    return (f"UNWIND $batch AS item "
+            f"{_between('AGGREGATED', src_label, tgt_label, src='s', tgt='t')} "
+            f"DELETE r")
+
+
 def _delete_edges_by_key_cypher(rel_type: str, src_label: str, tgt_label: str) -> str:
     """Remove the relationship(s) of one type between two nodes — the
     projector's own edge identity (it MERGEs one per triple), so it needs no
-    entity id and also clears legacy parallel copies. Both ends are found first
-    (their urn indexes), then what joins them: matched from one end alone, a
-    node with hundreds of thousands of relationships (a container's children)
-    would be walked whole for each row."""
-    return (
-        f"UNWIND $batch AS item "
-        f"MATCH (a:{src_label} {{urn: item.src}}) "
-        f"MATCH (b:{tgt_label} {{urn: item.tgt}}) "
-        f"MATCH (a)-[r:{rel_type}]->(b) "
-        f"DELETE r"
-    )
+    entity id and also clears legacy parallel copies. Found between its two
+    ends (:func:`_between`), never by walking one end's relationships."""
+    return f"UNWIND $batch AS item {_between(rel_type, src_label, tgt_label)} DELETE r"
 
 
 def _delete_nodes_cypher(label: str) -> str:
@@ -805,16 +844,11 @@ def _delete_nodes_cypher(label: str) -> str:
 
 
 def _delete_edges_cypher(rel_type: str, src_label: str, tgt_label: str) -> str:
-    # Anchored + typed: both endpoints seek their per-label URN index first, then the
-    # relationship between them (one pattern from ``a`` would expand every relationship ``a``
-    # has, and a container can hold hundreds of thousands). ``item.pid`` is the id a
+    # Anchored + typed: found between its two ends (``_between``), never by walking one end's
+    # relationships, which a container holds hundreds of thousands of. ``item.pid`` is the id a
     # customer's graph knows an edge re-keyed ``edge:<id>`` by (``_edge_merge_cypher``).
-    return (
-        f"UNWIND $batch AS item "
-        f"MATCH (a:{src_label} {{urn: item.src}}) "
-        f"MATCH (b:{tgt_label} {{urn: item.tgt}}) "
-        f"MATCH (a)-[r:{rel_type}]->(b) WHERE r.id IN [item.eid, item.pid] DELETE r"
-    )
+    return (f"UNWIND $batch AS item {_between(rel_type, src_label, tgt_label)} "
+            f"WHERE r.id IN [item.eid, item.pid] DELETE r")
 
 
 # Heal-path sweep: match the deleted node by (label, committed urn) — the
@@ -4100,11 +4134,7 @@ class FalkorProjector:
                     existing[(s_, t_)] = (int(w or 0), list(types or []), int(gv or 0))
 
             await self._laddered(
-                client, "rollup_read",
-                f"UNWIND $batch AS item "
-                f"MATCH (a:{slb} {{urn: item.s}}) MATCH (b:{tlb} {{urn: item.t}}) "
-                f"MATCH (a)-[r:AGGREGATED]->(b) "
-                f"RETURN item.s, item.t, r.weight, r.sourceEdgeTypes, r.gvSeq",
+                client, "rollup_read", _rollup_read_cypher(slb, tlb),
                 items, timeout_ms=_READ_TIMEOUT_MS, read_only=True, on_result=held)
             upserts, deletes = [], []
             for item in items:
@@ -4157,13 +4187,7 @@ class FalkorProjector:
                 logger.warning("%d of %d rollup cells found no end in the key: handed to the "
                                "batch job", len(upserts) - landed[0], len(upserts))
                 return False
-            await self._laddered(
-                client, "rollup_delete",
-                f"UNWIND $batch AS item "
-                f"MATCH (a:{slb} {{urn: item.s}}) MATCH (b:{tlb} {{urn: item.t}}) "
-                f"MATCH (a)-[r:AGGREGATED]->(b) "
-                f"DELETE r",
-                deletes)
+            await self._laddered(client, "rollup_delete", _rollup_delete_cypher(slb, tlb), deletes)
         return True
 
     async def _urn_label_for(
@@ -4663,8 +4687,8 @@ class FalkorProjector:
                         [str(e) for rels in held.values() for _r, e in rels if e])
                 doomed = [(key, rid) for key, rels in held.items() for rid, eid in rels
                           if len(rels) > 1 or want.get(str(eid)) != key]
-                # Each matched from its source by urn, so a delete expands one node's
-                # relationships of one type instead of scanning every relationship for an id.
+                # Each found between its ends by urn (``_between``), instead of scanning every
+                # relationship for an id.
                 anchored: Dict[Tuple[str, str, str], list] = {}
                 loose: List[int] = []
                 for (la, su, rel, lb, tu), rid in doomed:
@@ -4676,10 +4700,8 @@ class FalkorProjector:
                 for (la, rel, lb), items in anchored.items():
                     await self._laddered(
                         client, "edge_delete_id",
-                        f"UNWIND $batch AS it MATCH (a:{_sanitize_label(la)} {{urn: it.src}}) "
-                        f"MATCH (b:{_sanitize_label(lb)} {{urn: it.tgt}}) "
-                        f"MATCH (a)-[r:`{rel}`]->(b) "
-                        "WHERE id(r) = it.rid DELETE r", items)
+                        _delete_edge_ids_cypher(f"`{rel}`", _sanitize_label(la),
+                                                _sanitize_label(lb)), items)
                 await self._laddered(client, "edge_delete_id",
                                      "UNWIND $ids AS i MATCH ()-[r]->() WHERE id(r) = i DELETE r",
                                      loose, param="ids")
@@ -4876,16 +4898,14 @@ class FalkorProjector:
                 for su, tu, fp in (getattr(res, "result_set", None) or []):
                     out.setdefault((sl, str(su), rel, tl, str(tu)), []).append(fp)
 
-            # Both ends first, by their urn indexes, then what joins them: matched from one end
-            # alone, a node holding hundreds of thousands of relationships (a container's
-            # children) is walked whole for every row, at any batch size.
+            # Found between its two ends (``_between``): walked to from one end, a node holding
+            # hundreds of thousands of relationships (a container's children) is expanded whole
+            # for every row, at any batch size.
             await self._laddered(client, "edge_fingerprints",
-                                 f"UNWIND $batch AS it MATCH (a:{_sanitize_label(sl or 'Entity')} "
-                                 f"{{urn: it.src}}) "
-                                 f"MATCH (b:{_sanitize_label(tl or 'Entity')} {{urn: it.tgt}}) "
-                                 f"MATCH (a)-[r:{rel}]->(b) "
-                                 "RETURN it.src, it.tgt, r.gvHash", items,
-                                 timeout_ms=_READ_TIMEOUT_MS, read_only=True, on_result=edges)
+                                 _edge_fingerprints_cypher(rel, _sanitize_label(sl or 'Entity'),
+                                                           _sanitize_label(tl or 'Entity')),
+                                 items, timeout_ms=_READ_TIMEOUT_MS, read_only=True,
+                                 on_result=edges)
         return out
 
     async def _held_urns(self, client, label: str, urns) -> Set[str]:

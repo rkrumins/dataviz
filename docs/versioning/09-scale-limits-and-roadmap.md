@@ -69,35 +69,45 @@ What 1M + 1M left behind: 6.1 GB of graphver in Postgres (each entity's version 
 `main`, and both branches' heads) and 2.7 GB of the import's staged rows until they are swept
 ([08](08-import-export.md) §3c); 1.05 GB for the graph in FalkorDB (`GRAPH.MEMORY USAGE`).
 
-### At 1,000,000 nodes and 2,000,000 edges: a defect found, and fixed
+### At 1,000,000 nodes and 2,000,000 edges: a defect found
 
-Measured by the `versioning-scale` workflow on 14 November 2026 (run 43606161278), on the same
-runner:
+Measured by the `versioning-scale` workflow on 14 November 2026, twice on the same runner: run
+43606161278, and run 43638740082 on `c602d81`, which carried a first attempt at the fix below.
 
-| Step | 1M + 1M | 1M + 2M |
-|------|--------:|--------:|
-| Import into a draft | 1,009 s, 487 MB | 1,508 s, 486 MB |
-| Publish (the graph's lock held throughout) | 526 s, 396 MB | 686 s, 399 MB |
-| Projection of the published window | 381 s, 276 MB (2 passes) | 467 s, 278 MB (2 passes) |
-| Rebuild from nothing | 295 s, 255 MB | did not finish |
+| Step | 1M + 1M | 1M + 2M, first run | 1M + 2M, second run |
+|------|--------:|-------------------:|--------------------:|
+| Import into a draft | 1,009 s, 487 MB | 1,508 s, 486 MB | 1,562 s, 487 MB |
+| Publish (the graph's lock held throughout) | 526 s, 396 MB | 686 s, 399 MB | 733 s, 399 MB |
+| Projection of the published window | 381 s, 276 MB (2 passes) | 467 s, 278 MB (2 passes) | 476 s, 290 MB (2 passes) |
+| Rebuild from nothing | 295 s, 255 MB | did not finish | did not finish |
 
 - **Memory stayed flat**, and the import and the publish grew about as the graph did: 1.5 and 1.3
   times the time for 1.5 times the entities. The edge windows still grew within the import: the
   last tenth took 336% longer than the first (§10, Further work, item 2).
 - **The rebuild found a defect in the projector.**
-  - This graph's containment puts nearly every node under one root, with about 333,000 children.
-    (At 1M + 1M there are 500,000 roots and no such node.)
-  - A rebuild compares every relationship FalkorDB holds with what Postgres says. It looked each
-    one up from its source: `(a {urn})-[r]->(b {urn})`. For each of the root's relationships,
-    FalkorDB walked all of the root's children.
-  - Every such lookup timed out (CI's FalkorDB stops a query after 1 s), at any batch size. The
-    step ran out the job's 300 minutes.
-  - The same lookups serve every seed from Postgres: a full seed, a reseed, and a build's seed. On
-    a graph with such a node, all of them would have stalled the same way.
-- **The fix.** Every lookup or delete of a relationship now finds both ends first, by their urn
-  indexes, then the relationship between them, whatever either end's degree. That covers the
-  fingerprint read, the deletes by key and by id, and the lineage summaries' read and delete.
-  `test_projection_hub_lookups.py` holds every statement to that shape.
+  - This graph's containment puts nearly every node under one root, with 500,000 children. Their
+    relationships are the first 500,000 a rebuild reads, in id order. (At 1M + 1M there are
+    500,000 roots and no such node.)
+  - A rebuild compares every relationship FalkorDB holds with what Postgres says, looking each one
+    up by its two ends. For each of the root's relationships, FalkorDB walked the root's
+    children. The statements that ran out of their 30 s budget
+    (`PROJECTION_FALKOR_READ_TIMEOUT_S`) shrank from 2,366 rows to 352 over the run. So a row cost
+    more than 13 ms at first and more than 85 ms by the end, as the rebuild moved through the root's
+    children.
+  - Each such statement was halved and sent again (§10, item 8). Both runs ran out the job's
+    time, 300 and 330 minutes.
+  - The same lookups serve every seed from Postgres (a full seed, a reseed, a build's seed) and a
+    window's deletes. On a graph with such a node, all of them would have stalled the same way.
+  - The first attempt found each end in a MATCH clause of its own, before the relationship's
+    (`c602d81`). The second run stalled the same way. Yet MERGE finds an edge between the same two
+    ends fast: the projection wrote all 3,000,000 entities, the edges by MERGE, in 69 s of
+    FalkorDB's time.
+- **The fix.** A `WITH` now comes between finding the two ends and matching the relationship
+  (`_between` in `projection.py`). It covers the fingerprint read, the deletes by key, by id and by
+  internal id, and the lineage summaries' read and delete.
+  - `test_projection_hub_lookups.py` holds every statement to that shape.
+  - `test_hub_lookups_live.py`, in CI's live FalkorDB job, measures each shape against a node with
+    200,000 children, and fails if a row costs more there than on a node with one.
 - The rebuild, the export and the read modes at this size are measured by the next run.
 
 ### At 5,000,000 nodes and 5,000,000 edges: where the write path stops scaling
@@ -648,11 +658,12 @@ are set for 100k + 100k. A missed target is reported but doesn't fail the run. T
    - Each of these needs a live FalkorDB to verify.
 
 8. **A pass's time box stops at page boundaries, not within a page.**
-   - *Measured.* In the 1M + 2M run, one rebuild pass ran for more than four hours: every lookup
-     in its page timed out, and each was halved down to one row and retried with a backoff before
-     the next. The 300 s time box (`GRAPHVER_PROJECTION_PASS_MAX_SECS`) is checked between pages.
-     The cause there is fixed (§2, At 1,000,000 nodes and 2,000,000 edges), but nothing yet bounds
-     how long one page can take.
+   - *Measured.* In both 1M + 2M runs, one rebuild pass ran for more than four hours. Its page's
+     lookups kept running out of their budget; each was halved and sent again, and the width the
+     ladder keeps came back to one row under the last that failed, which then failed too. The
+     300 s time box (`GRAPHVER_PROJECTION_PASS_MAX_SECS`) is checked between pages. The cause
+     there is the lookups' (§2, At 1,000,000 nodes and 2,000,000 edges), but nothing yet bounds how
+     long one page can take.
    - *Where to start.* `_laddered` in `projection.py`: the halving, `PROJECTION_FLOOR_RETRIES` and
      the backoff between them. Fail the pass, so it backs off and says why, once its time box has
      passed while statements at one row still time out.
