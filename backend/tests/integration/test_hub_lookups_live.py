@@ -232,7 +232,7 @@ async def _run(report: dict) -> None:
         deletes = (
             ("delete_by_key", "by_key", "HAS",
              lambda sl, tl: projection._delete_edges_by_key_cypher("HAS", sl, tl),
-             lambda at, ks: _rows(at, ks)),
+             _rows),
             ("delete_by_id", "by_id", "HAS",
              lambda sl, tl: projection._delete_edges_cypher("HAS", sl, tl),
              lambda at, ks: [{**it, "eid": ("h" if at == "hub" else "l") + str(k), "pid": None}

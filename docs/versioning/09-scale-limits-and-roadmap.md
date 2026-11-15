@@ -10,9 +10,9 @@
 **TL;DR.** The Versioned Graph is **feature-complete and test-covered for the managed, single-node
 case**. Saves, pulls, previews, reviews and publishes are `O(change)`, not `O(graph)`, and a publish,
 its projection and a rebuild of millions hold a page at a time (§2). It is tested end to end up to
-1,000,000 nodes and 1,000,000 edges. At 5,000,000 of each, the import and the publish take far
-longer than five times as long (§2), and §10 lists that and the other further work the scale runs
-found. The remaining sharp edges are
+1,000,000 nodes and 2,000,000 edges, in every read mode. At 5,000,000 nodes and 5,000,000 edges,
+the import and the publish take far longer than five times as long (§2), and §10 lists that and the
+other further work the scale runs found. The remaining sharp edges are
 deliberately-deferred scale items — export jobs that start over when interrupted (imports resume); no
 retention inside a live graph; and a partitioning key that doesn't help a single hot collaborative
 graph. Re-sync, separately, runs a bounded merge that has not been
@@ -69,17 +69,21 @@ What 1M + 1M left behind: 6.1 GB of graphver in Postgres (each entity's version 
 `main`, and both branches' heads) and 2.7 GB of the import's staged rows until they are swept
 ([08](08-import-export.md) §3c); 1.05 GB for the graph in FalkorDB (`GRAPH.MEMORY USAGE`).
 
-### At 1,000,000 nodes and 2,000,000 edges: a defect found
+### At 1,000,000 nodes and 2,000,000 edges: a defect found, and fixed
 
-Measured by the `versioning-scale` workflow on 14 November 2026, twice on the same runner: run
-43606161278, and run 43638740082 on `c602d81`, which carried a first attempt at the fix below.
+Measured by the `versioning-scale` workflow, three times on the same runner:
+- run 43606161278, on 14 November 2026;
+- run 43638740082 on `c602d81`, which carried a first attempt at the fix below;
+- run 43690420051 on `ee5c43f`, on 15 November, which carried the fix. Every step and every read
+  mode passed.
 
-| Step | 1M + 1M | 1M + 2M, first run | 1M + 2M, second run |
-|------|--------:|-------------------:|--------------------:|
-| Import into a draft | 1,009 s, 487 MB | 1,508 s, 486 MB | 1,562 s, 487 MB |
-| Publish (the graph's lock held throughout) | 526 s, 396 MB | 686 s, 399 MB | 733 s, 399 MB |
-| Projection of the published window | 381 s, 276 MB (2 passes) | 467 s, 278 MB (2 passes) | 476 s, 290 MB (2 passes) |
-| Rebuild from nothing | 295 s, 255 MB | did not finish | did not finish |
+| Step | 1M + 1M | 1M + 2M, first run | 1M + 2M, second run | 1M + 2M, on the fix |
+|------|--------:|-------------------:|--------------------:|--------------------:|
+| Import into a draft | 1,009 s, 487 MB | 1,508 s, 486 MB | 1,562 s, 487 MB | 1,555 s, 492 MB |
+| Publish (the graph's lock held throughout) | 526 s, 396 MB | 686 s, 399 MB | 733 s, 399 MB | 714 s, 402 MB |
+| Projection of the published window | 381 s, 276 MB (2 passes) | 467 s, 278 MB (2 passes) | 476 s, 290 MB (2 passes) | 475 s, 285 MB (2 passes) |
+| Rebuild from nothing | 295 s, 255 MB | did not finish | did not finish | 382 s, 293 MB (2 passes) |
+| Export | 86 s, 164 MB | — | — | 103 s, 167 MB |
 
 - **Memory stayed flat**, and the import and the publish grew about as the graph did: 1.5 and 1.3
   times the time for 1.5 times the entities. The edge windows still grew within the import: the
@@ -125,7 +129,11 @@ Measured by the `versioning-scale` workflow on 14 November 2026, twice on the sa
   relationships, read in one statement: 353 MB in Python for the rows and their keys alone, before
   their lookup in Postgres, against the rebuild's ceiling of 512 MB. Each page is now read 50,000
   relationships at a time, in internal id order (`_EDGE_SLICE`).
-- The rebuild, the export and the read modes at this size are measured by the next run.
+- **On the fix**, the rebuild landed in 382 s at 293 MB, against its 512 MB ceiling. No statement
+  ran out of its budget, and FalkorDB then held exactly what Postgres holds: 1,000,000 nodes and
+  2,000,000 edges. Its 2,085 FalkorDB statements took 88 s in all.
+- **The read modes at this size** are in What readers get while a change lands, measured, below:
+  every mode landed its change with no read failing.
 
 ### At 5,000,000 nodes and 5,000,000 edges: where the write path stops scaling
 
@@ -163,7 +171,7 @@ the export or the read modes.
 - **What it means today.**
   - A first import of 10 million entities takes about 2 hours, and its publish another 3.4 hours.
   - At that size the read modes don't fit in a 6-hour CI job.
-  - Tested end to end: up to 1,000,000 nodes and 1,000,000 edges.
+  - Tested end to end: up to 1,000,000 nodes and 2,000,000 edges.
   - The causes, the leads and what done looks like are in §10, Further work found by the scale
     runs, items 1 to 3.
 
@@ -238,6 +246,27 @@ After every mode FalkorDB held exactly what Postgres holds, and no read failed. 
 Steps at that size in the same run (each in a process of its own): import into a draft 1,009 s and
 487 MB; publish 526 s and 396 MB; projection of the published window 381 s and 276 MB (2 passes);
 rebuild from nothing 295 s and 255 MB; export 86 s and 164 MB.
+
+The same on a graph of 1,000,000 nodes and 2,000,000 edges (run 43690420051), with changes of
+100,000 rows and 4 readers:
+
+| Read mode | Landed in | Reads meanwhile | Latency p50 / p95 / p99 | Errors | Read from | Versions readers saw | FalkorDB memory |
+|---|--:|--:|--:|--:|---|---|--:|
+| Always the latest | 28 s, 1 pass | 38,475 | 3.7 / 8.9 / 69.3 ms | 0 | FalkorDB 95%, Postgres 5% | the old one, then the new one at once | 1,408 → 1,438 MB |
+| Update in place | 30 s, 1 pass | 62,967 | 3.8 / 6.0 / 8.4 ms | 0 | FalkorDB | the old one, with parts of the new one as written | 1,426 → 1,468 MB |
+| Switch when ready, copied | 55 s, 3 passes | 88,872 | 3.7 / 6.5 / 8.8 ms | 0 | FalkorDB | one whole version at a time | 1,463 → 4,447 MB |
+| Switch when ready, seeded | 642 s, 4 passes | 668,251 | 3.7 / 5.4 / 7.9 ms | 0 | FalkorDB | one whole version at a time | 1,482 → 3,017 MB |
+
+After every mode FalkorDB held exactly what Postgres holds, and no read failed. Twice the edges
+changed little for readers:
+- reads from a key were as fast as at 1M + 1M;
+- a copy took 2.0 times the graph's memory at its peak, and a seed 1.0 times;
+- only the seed's time grew much: 642 s, against 522 s.
+
+The read-modes step runs every mode's import, publish, projection and build in its one process. It
+peaked at 1,162 MB (901 MB on the 1M + 1M run on `fbf1bfe`). Its longest event-loop stall was 2.1 s,
+in the change's edge windows (1.6 s at 1M + 1M; §10, item 4). The memory ceilings above hold each
+step in a process of its own.
 
 The same on a graph of 100,000 nodes and 100,000 edges, with changes of 20,000 rows:
 
@@ -646,8 +675,8 @@ are set for 100k + 100k. A missed target is reported but doesn't fail the run. T
      - The client retries twice and honours `Retry-After`, up to 5 s.
      - The harness reads the way the web pods do: bounded, retried, from several processes
        (`--readers`, `--reader-procs`). It reports shed reads and retries.
-   - *Measured so far:* 4 readers in one process, with no read failing (§2). Next: 50 readers in
-     each of 4 processes, at 1M nodes and 2M edges.
+   - *Measured so far:* 4 readers in one process, with no read failing, at 1M + 1M and at 1M + 2M
+     (§2). Next: 50 readers in each of 4 processes, at 1M nodes and 2M edges.
    - *What to expect.* In Always the latest, reads go to Postgres while FalkorDB catches up. With
      hundreds of readers on one graph, those bounds shed most of those reads, so readers wait for
      their retries. Update in place and Switch when ready keep them on FalkorDB. The run above
