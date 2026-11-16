@@ -16,6 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.auth.dependencies import requires
+from backend.app.common import activity_context
 from backend.app.db.engine import get_db_session
 from backend.app.db.models import PlatformSettingsORM, WorkspaceDataSourceORM
 from backend.app.db.repositories import data_source_repo
@@ -25,6 +26,8 @@ from backend.app.services.activity import recorder
 from backend.app.services.aggregation.models import AggregationJobORM
 from backend.app.providers.shard_capacity import human_bytes
 from backend.app.services.graph_store.topology import key_slot
+from backend.app.services.settings import registry as settings_registry
+from backend.app.services.settings import store as settings_store
 from backend.app.services.system_status import probes
 from backend.app.services.versioning import config as vconfig
 from backend.app.services.versioning import (build_policy, draft_retention, keymigrate, residency,
@@ -296,12 +299,21 @@ async def get_residency_policy(
     """What the capacity loop evicts and loads by (doc 17), with ``enabled``: whether a system
     administrator has turned Graph residency on (Admin → Features), and ``switch``: where it is —
     its grace period, or the graphs still being brought back after it was turned off."""
-    return await _policy(await session.get(PlatformSettingsORM, 1))
+    return await _policy(session)
 
 
-async def _policy(row) -> dict:
+async def _platform_settings(session: AsyncSession, *, save: bool = False) -> list:
+    """The settings store's platform values. For a save, under the store's writer lock, so saves
+    through these routes go one at a time and the last one wins, as they always did."""
+    if save:
+        await settings_store.lock(session, settings_registry().DOMAIN)
+    return await settings_store.read_scope(session, settings_registry().DOMAIN, "platform", "")
+
+
+async def _policy(session: AsyncSession) -> dict:
     enabled = await residency_policy.enabled()
-    return {**residency_policy.describe(row), "enabled": enabled,
+    row = await session.get(PlatformSettingsORM, 1)
+    return {**residency_policy.describe(await _platform_settings(session)), "enabled": enabled,
             "switch": await residency.switch_status(row, enabled)}
 
 
@@ -314,26 +326,29 @@ async def put_residency_policy(
     """Partial: only the values named change, and ``-1`` clears one back to its default. A value
     out of its range, of the wrong kind, or contradicting another (Coldline idle longer than
     Standard idle; a stop mark less than 5 points under the start mark) is a 422 naming the
-    field, and nothing is saved. Recorded with each changed value's before and after; this
-    process applies the change at once, the others within 30 seconds."""
-    row = await session.get(PlatformSettingsORM, 1)
-    if row is None:
-        row = PlatformSettingsORM(id=1)
-        session.add(row)
-    before = residency_policy.saved_values(row)
+    field, and nothing is saved. Saved in the settings store (its history says who, and the
+    ``X-Activity-Reason``) and recorded with each changed value's before and after; this process
+    applies the change at once, the others within about two seconds."""
+    rows = await _platform_settings(session, save=True)
+    before = residency_policy.stored_values(rows)
     _validate(body, before)
-    residency_policy.apply(row, body)
-    after = residency_policy.saved_values(row)
+    after = residency_policy.merged(before, body)
     changed = sorted(w for w in after if after[w] != before[w])
     if changed:
-        row.updated_at = row.gv_policy_updated_at = datetime.now(timezone.utc).isoformat()
-        row.updated_by = row.gv_policy_updated_by = user.id
-        await recorder.record_for_request(
-            session, "platform.residency_policy.updated",
-            details={"from": {w: before[w] for w in changed}, "to": {w: after[w] for w in changed}})
-    await session.commit()
-    residency_policy.invalidate()
-    return await _policy(await session.get(PlatformSettingsORM, 1))
+        async def record(s: AsyncSession, _change_set) -> None:
+            row = await s.get(PlatformSettingsORM, 1)       # the write-through made it, if missing
+            row.updated_at = row.gv_policy_updated_at = datetime.now(timezone.utc).isoformat()
+            row.updated_by = row.gv_policy_updated_by = user.id
+            await recorder.record_for_request(
+                s, "platform.residency_policy.updated",
+                details={"from": {w: before[w] for w in changed},
+                         "to": {w: after[w] for w in changed}})
+
+        await residency_policy.apply(session, rows, {w: after[w] for w in changed}, user.id,
+                                     reason=activity_context.current().stated_reason,
+                                     before_commit=record)
+        await residency_policy.invalidate()
+    return await _policy(session)
 
 
 def _validate(body: Dict[str, Any], saved: Dict[str, Any]) -> None:
@@ -355,11 +370,12 @@ async def get_build_policy(
     Postgres: each value as saved, its default and its effective value, each setting's kind, range
     and help (``fields``), and ``enabled``: whether a system administrator has turned New-version
     builds on (Admin → Features)."""
-    return await _build_policy(await session.get(PlatformSettingsORM, 1))
+    return await _build_policy(session)
 
 
-async def _build_policy(row) -> dict:
-    return {**build_policy.describe(row), "enabled": await build_policy.enabled()}
+async def _build_policy(session: AsyncSession) -> dict:
+    return {**build_policy.describe(await _platform_settings(session)),
+            "enabled": await build_policy.enabled()}
 
 
 @router.put("/build-policy", summary="Change New-version build settings")
@@ -370,15 +386,13 @@ async def put_build_policy(
 ) -> dict:
     """Partial: only the values named change, and ``-1`` clears one back to its default. A value
     out of its range, of the wrong kind, or contradicting another (more Postgres reads at once per
-    graph than per process) is a 422 naming the field, and nothing is saved. Recorded with each
-    changed value's before and after. Every process reads the change on its next look, within two
-    seconds (within 30 without Redis); a build already under way keeps the trigger and room values
-    it started with."""
-    row = await session.get(PlatformSettingsORM, 1)
-    if row is None:
-        row = PlatformSettingsORM(id=1)
-        session.add(row)
-    before = build_policy.saved_values(row)
+    graph than per process) is a 422 naming the field, and nothing is saved. Saved in the settings
+    store (its history says who, and the ``X-Activity-Reason``) and recorded with each changed
+    value's before and after. Every process reads the change on its next look, within two seconds
+    (within 30 without Redis); a build already under way keeps the trigger and room values it
+    started with."""
+    rows = await _platform_settings(session, save=True)
+    before = build_policy.stored_values(rows)
     try:
         build_policy.validate(body, before)
     except build_policy.PolicyInvalid as exc:
@@ -387,15 +401,20 @@ async def put_build_policy(
     after = build_policy.merged(before, body)
     changed = sorted(w for w in after if after[w] != before[w])
     if changed:
-        build_policy.save(row, after, user.id)
-        row.updated_at = datetime.now(timezone.utc).isoformat()
-        row.updated_by = user.id
-        await recorder.record_for_request(
-            session, "platform.build_policy.updated",
-            details={"from": {w: before[w] for w in changed}, "to": {w: after[w] for w in changed}})
-    await session.commit()
-    await build_policy.invalidate()
-    return await _build_policy(await session.get(PlatformSettingsORM, 1))
+        async def record(s: AsyncSession, _change_set) -> None:
+            row = await s.get(PlatformSettingsORM, 1)       # the write-through made it, if missing
+            row.updated_at = datetime.now(timezone.utc).isoformat()
+            row.updated_by = user.id
+            await recorder.record_for_request(
+                s, "platform.build_policy.updated",
+                details={"from": {w: before[w] for w in changed},
+                         "to": {w: after[w] for w in changed}})
+
+        await build_policy.save(session, rows, {w: after[w] for w in changed}, user.id,
+                                reason=activity_context.current().stated_reason,
+                                before_commit=record)
+        await build_policy.invalidate()
+    return await _build_policy(session)
 
 
 @router.get("/draft-retention",
@@ -454,7 +473,7 @@ async def preview_residency_policy(
     refuses them) against current memory and graphs, acting on nothing: per master, what the
     next pass would evict (graph, data source, label, bytes, reason), which waiting loads would
     start, and which would still wait and why."""
-    saved = residency_policy.saved_values(await session.get(PlatformSettingsORM, 1))
+    saved = residency_policy.stored_values(await _platform_settings(session))
     _validate(body, saved)
     policy = residency_policy.effective(residency_policy.merged(saved, body))
     decided, snap = await residency.preview(policy)

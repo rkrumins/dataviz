@@ -195,10 +195,10 @@ READ_MAX_LAG: int = int(os.getenv("GRAPHVER_READ_MAX_LAG", "-1"))
 #   in_place  the version FalkorDB last finished, while the next is written into the same key;
 #   beside    exactly that version, while the next is built in a second key, then one switch
 #             (with New-version builds off, ``candidateKeysEnabled``, it reads as in_place).
+# Kept as given: a value no mode names is reported (the setting says invalid_env, and
+# warn_invalid_settings_env logs it at start-up), and the setting's code default, latest, applies.
 READ_MODES = ("latest", "in_place", "beside")
 READ_MODE: str = os.getenv("GRAPHVER_READ_MODE", "latest")
-if READ_MODE not in READ_MODES:
-    READ_MODE = "latest"
 # After each projection, cheaply reconcile live node/edge COUNTS between Postgres
 # (the SoR) and FalkorDB (the cache); on a mismatch, bounded-heal by reseeding the
 # graph from Postgres once. Guards against a silently dropped delete leaving the
@@ -757,6 +757,26 @@ def lane_pool_size(lanes) -> int:
     if "bootstrap" in lanes:
         size += 3 * BOOTSTRAP_SLOTS + 2
     return size
+
+
+def warn_invalid_settings_env() -> None:
+    """Log one warning for each environment variable a versioned-graph setting takes its default
+    from (``config/versioned_graph_settings.py``) whose value the setting can't take, as this module
+    parsed it: not of the setting's kind, or out of its range. The setting then runs on its code
+    default and says so (``invalid_env``). Called at start-up, by the API and the versioning worker;
+    it imports the settings resolver only when called, so this module still imports on its own."""
+    from backend.app.config import versioned_graph_settings as registry
+    from backend.app.services.settings import resolver
+    from backend.app.services.settings.snapshot import env_reader
+
+    ctx = resolver.context(registry.SETTINGS, {},
+                           env=env_reader(registry.SETTINGS, registry.DEPLOYMENT))
+    for setting in registry.SETTINGS:
+        env = resolver.resolve(ctx, setting.key)["trail"][0]["env"]
+        if env is not None and not env["valid"]:
+            logging.getLogger(__name__).warning(
+                "%s=%r is not a value %s (%s) can take; its default, %r, applies instead",
+                env["name"], env["value"], setting.key, setting.label, setting.default.code)
 
 
 def _selftest() -> None:

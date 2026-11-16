@@ -36,7 +36,9 @@ pytestmark = pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"),
 
 
 async def _set_policy(**columns) -> dict:
-    """Save policy columns on the platform settings row; returns what they were."""
+    """Save columns on the platform settings row (where the switch is; the policy's values are the
+    settings store's, ``settings_world``, and the old columns a save writes through to); returns
+    what they were."""
     async with get_async_session() as s:
         row = await s.get(PlatformSettingsORM, 1)
         if row is None:
@@ -46,7 +48,6 @@ async def _set_policy(**columns) -> dict:
         for name, value in columns.items():
             setattr(row, name, value)
         await s.commit()
-    residency_policy.invalidate()
     return before
 
 
@@ -137,7 +138,6 @@ async def store():
     await models.create_schema_and_partitions()
     redis_client._client = None     # the bus client a pass reads reservations with: this loop's
     yield GraphVersioningService()
-    residency_policy.invalidate()
     # A case leaves graphs evicted or behind on purpose; in the trash, no later suite's poll
     # (project_pending, a hundred at a time, most behind first) has to work through them.
     async with db.graphver_session() as s:
@@ -153,25 +153,22 @@ async def _residency(gid: str) -> str:
         return (await s.get(ProjectionStateORM, gid)).residency
 
 
-async def test_a_new_graph_gets_the_class_the_policy_names(store, monkeypatch):
+async def test_a_new_graph_gets_the_class_the_policy_names(store, monkeypatch, settings_world):
     """With residency on; off, creating a graph reads no policy, and it is Standard."""
     svc = store
-    before = await _set_policy(gv_default_residency="coldline")
-    try:
-        _switch(False)
-        off = (await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(),
-                                      workspace_id="ws_res", actor="a"))["graph_id"]
-        assert await _residency(off) == "standard"
-        _switch(True)
-        gid = (await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(),
-                                      workspace_id="ws_res", actor="a"))["graph_id"]
-        assert await _residency(gid) == "coldline"
-        await _set_policy(gv_default_residency=None)
-        other = (await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(),
-                                        workspace_id="ws_res", actor="a"))["graph_id"]
-        assert await _residency(other) == "standard"
-    finally:
-        await _set_policy(**before)
+    settings_world.set("residency.class", "platform", "", "coldline")
+    _switch(False)
+    off = (await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(),
+                                  workspace_id="ws_res", actor="a"))["graph_id"]
+    assert await _residency(off) == "standard"
+    _switch(True)
+    gid = (await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(),
+                                  workspace_id="ws_res", actor="a"))["graph_id"]
+    assert await _residency(gid) == "coldline"
+    settings_world.set("residency.class", "platform", "", None)
+    other = (await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(),
+                                    workspace_id="ws_res", actor="a"))["graph_id"]
+    assert await _residency(other) == "standard"
 
 
 # ── the gate inside project_graph ──────────────────────────────────────────────────────────────
@@ -768,23 +765,20 @@ async def test_a_graph_queued_by_the_loop_is_queued_once_and_keeps_its_place(
 
 @live
 async def test_idle_graphs_go_by_class_and_eviction_off_stops_it(
-        store, falkor, mine, residency_on, monkeypatch):
+        store, falkor, mine, residency_on, monkeypatch, settings_world):
     svc, proj = store, FalkorProjector(graph_client_factory=make_falkor_graph_factory())
     cold, std = await _live_graphs(svc, proj, mine, 2)
     two_hours = datetime.now(timezone.utc) - timedelta(hours=2)
     await _set_ps(cold, residency="coldline", last_read_at=two_hours)
     await _set_ps(std, last_read_at=two_hours)                     # well inside its 7 days
-    before = await _set_policy(gv_eviction_enabled=False)
-    try:
-        p = await CapacityLoop(proj).run_once(graph_ids=[cold, std])
-        assert p.evictions == [] and (await _ps(cold)).status == "idle"
-        await _set_policy(gv_eviction_enabled=None)
-        p = await CapacityLoop(proj).run_once(graph_ids=[cold, std])
-        assert _evicted(p) == [(cold, "idle_coldline")]
-        assert (await _ps(cold)).evicted_reason == "idle_coldline"
-        assert (await _ps(std)).status == "idle"
-    finally:
-        await _set_policy(**before)
+    settings_world.set("residency.autoUnload", "platform", "", False)
+    p = await CapacityLoop(proj).run_once(graph_ids=[cold, std])
+    assert p.evictions == [] and (await _ps(cold)).status == "idle"
+    settings_world.set("residency.autoUnload", "platform", "", None)
+    p = await CapacityLoop(proj).run_once(graph_ids=[cold, std])
+    assert _evicted(p) == [(cold, "idle_coldline")]
+    assert (await _ps(cold)).evicted_reason == "idle_coldline"
+    assert (await _ps(std)).status == "idle"
 
 
 @live
@@ -922,7 +916,7 @@ async def test_a_moved_graph_s_old_key_is_dropped_while_the_graph_is_out_of_falk
 
 @live
 async def test_lowering_the_start_mark_through_the_admin_route_evicts_at_the_next_pass(
-        store, falkor, mine, residency_on, monkeypatch):
+        store, falkor, mine, residency_on, monkeypatch, settings_world):
     svc, proj = store, FalkorProjector(graph_client_factory=make_falkor_graph_factory())
     (gid,) = await _live_graphs(svc, proj, mine, 1)
     used = await _used(falkor)

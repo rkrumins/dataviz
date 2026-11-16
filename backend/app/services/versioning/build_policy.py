@@ -2,29 +2,35 @@
 key while the key that serves it keeps serving, then switched to — and the pacing and Postgres limits
 that keep reads served while a graph is written.
 
-Every value is changed live by a system administrator (``/admin/versioning/build-policy``, Admin →
-Infrastructure → New-version builds) and kept as JSON on the single ``platform_settings`` row
-(``gv_build_policy``); a value not saved there takes the environment's default (``config``).
-:func:`resolve` is the one reader: the saved value, else the default, in its range, memoized for up
-to 30 seconds per process — re-read sooner when a save bumps the policy's generation in Redis
-(:func:`invalidate`) — and never raising: a row that can't be read gives the last policy read, else
-the defaults. The routes refuse what :func:`resolve` would clamp, naming the field (:func:`validate`).
-Each setting is described once, in :data:`FIELDS`, which the admin card renders from.
+Every value is a versioned-graph setting (``config/versioned_graph_settings.py``), kept in the
+settings store at the platform's scope (``services.settings``) and changed live by a system
+administrator (``/admin/versioning/build-policy``, Admin → Infrastructure → New-version builds). This
+module keeps the names they had before the store, for the code that acts on them: each value by its
+wire name (its setting's ``Legacy.build_policy``), in its old spelling (``copyMaxBytes`` 0: no limit).
+:func:`resolve` brings this process's settings up to date (``settings.effective.refresh``: Redis at
+most every two seconds, the database only when a save moved the settings' generation), so a save
+reaches every process within about two seconds, and :func:`current` reads them without IO. Neither
+raises: with the database out of reach, the values last read keep serving, and before any were read
+the defaults. The route refuses what the resolver would clamp, naming the field (:func:`validate`),
+saves through the store (:func:`save`) and, for one release, writes the old JSON too
+(``platform_settings.gv_build_policy``, :func:`saved_values`). Each setting's card is described once,
+in :data:`FIELDS`, which the admin card renders from.
 
 Whether builds happen at all is a switch, not a value: ``candidateKeysEnabled`` (Admin → Features,
 :func:`switch_state`).
 """
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
-import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Any, Callable, Dict, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
 
 from backend.app.db.repositories.profiling_repo import INHERIT
+from backend.app.services.settings import effective as in_force
+from backend.app.services.settings import legacy, registry, resolver, store
+from backend.app.services.settings.resolver import Row
+from backend.app.services.settings.snapshot import env_reader
 
 from . import config
 
@@ -175,14 +181,12 @@ class PolicyInvalid(ValueError):
         self.field = field
 
 
-_MEMO_TTL_S = 30.0
-#: How often a fresh memo still asks Redis whether a save moved the policy's generation.
-_GEN_CHECK_S = 2.0
-_GEN_KEY = "gv:build_policy:gen"
-#: ``policy``: the memo, until ``at`` is 30 seconds old or the generation moves; ``good``: the last
-#: policy read, kept through a failed read.
-_MEMO: Dict[str, Any] = {"policy": None, "at": 0.0, "gen": None, "gen_at": 0.0, "good": None}
-_clock = time.monotonic
+#: Each field's setting in the registry, by wire name.
+_SETTINGS = {s.legacy.build_policy: s for s in registry().SETTINGS
+             if s.legacy is not None and s.legacy.build_policy}
+#: The policy built from this process's settings as last refreshed, and the context it came from:
+#: built again only when a refresh brought new rows or switches.
+_BUILT: Dict[str, Any] = {"ctx": None, "policy": None}
 
 
 async def switch_state(session=None) -> Optional[bool]:
@@ -206,46 +210,47 @@ async def enabled() -> bool:
     return await switch_state() is True
 
 
-def _in_range(f: Field, value: Any, fallback: Any) -> Any:
-    """``value`` as ``f`` holds it: a number clamped to its range, a choice or a switch as given;
-    ``fallback`` for anything that can't be read as one."""
-    if f.kind == "bool":
-        return value if isinstance(value, bool) else fallback
-    if f.kind == "choice":
-        return value if value in f.choices else fallback
-    if isinstance(value, bool):
-        return fallback
-    try:
-        number = float(value) if f.kind == "ratio" else int(value)
-    except (TypeError, ValueError):
-        return fallback
-    clamped = max(f.lo, min(f.hi, number))
-    return float(clamped) if f.kind == "ratio" else int(clamped)
+def _context(saved: Mapping[str, Any]) -> resolver.Context:
+    """The settings as the platform would hold ``saved`` (by wire name, in the old spelling; None:
+    not set), with the deployment's environment, for the resolver."""
+    reg = registry()
+    rows = [Row(s.key, "platform", "", resolver.decode(s, saved[wire]))
+            for wire, s in _SETTINGS.items() if saved.get(wire) is not None]
+    return resolver.context(reg.SETTINGS, rows, env=env_reader(reg.SETTINGS, reg.DEPLOYMENT),
+                            why=reg.WHY)
 
 
-def _single(saved: Mapping[str, Any]) -> Dict[str, Any]:
-    """Each value saved, else its default, in its own range — the pairs not yet put in order."""
+def _values(ctx: resolver.Context) -> Dict[str, Any]:
+    """Each value in force at the platform, by wire name, in its old spelling. The read mode is the
+    one the platform chose (else its default), whether New-version builds are on or not: what a
+    graph with no mode of its own reads by, as before the store (``candidates`` says whether a
+    build happens)."""
     out = {}
     for f in FIELDS:
-        env = f.default()
-        default = _in_range(f, env, env)
-        value = saved.get(f.wire)
-        out[f.wire] = default if value is None else _in_range(f, value, default)
+        s = _SETTINGS[f.wire]
+        value = (resolver.resolve(ctx, s.key)["declared"] if f.wire == "readMode"
+                 else resolver.effective(ctx, s.key))
+        value = resolver.encode(s, value)
+        out[f.wire] = float(value) if f.kind == "ratio" else value
     return out
 
 
+def _policy(ctx: resolver.Context) -> BuildPolicy:
+    """The policy of this process's settings ``ctx``, built once per context."""
+    if _BUILT["ctx"] is not ctx:
+        _BUILT.update(ctx=ctx, policy=BuildPolicy(_values(ctx)))
+    return _BUILT["policy"]
+
+
 def effective(saved: Mapping[str, Any]) -> BuildPolicy:
-    """The settings in force given the values ``saved`` (by wire name; None = unset): no more
-    builds per worker than its projection concurrency, and no more Postgres reads per graph than per
-    process."""
-    values = _single(saved)
-    values["buildConcurrency"] = min(values["buildConcurrency"], max(1, config.PROJECTION_CONCURRENCY))
-    values["pgReadsPerGraph"] = min(values["pgReadsPerGraph"], values["pgReadsPerProcess"])
-    return BuildPolicy(values)
+    """The settings in force given the values ``saved`` (by wire name, in the old spelling; None =
+    unset), as the resolver holds them: each in its range, no more builds per worker than its
+    projection concurrency, and no more Postgres reads per graph than per process."""
+    return BuildPolicy(_values(_context(saved)))
 
 
 def defaults() -> BuildPolicy:
-    """The settings with nothing saved."""
+    """The settings with nothing saved: the environment's where it is valid, else the code's."""
     return effective({})
 
 
@@ -260,32 +265,27 @@ def _stored(row) -> Dict[str, Any]:
 
 
 def saved_values(row) -> Dict[str, Any]:
-    """What ``row`` (``platform_settings``, or None) holds for each value, by wire name."""
+    """What ``row`` (``platform_settings``, or None) holds for each value, by wire name: the old
+    storage, which a save still writes through to for one release."""
     values = _stored(row).get("values") or {}
     return {f.wire: values.get(f.wire) for f in FIELDS}
 
 
-async def _generation() -> Optional[str]:
-    """The policy's generation in Redis, which a save moves; None when Redis can't say."""
-    try:
-        from backend.app.services.aggregation.redis_client import get_redis
-
-        gen = await asyncio.wait_for(get_redis().get(_GEN_KEY), timeout=0.2)
-    except Exception:  # noqa: BLE001 — without Redis, the 30-second memo still bounds staleness
-        return None
-    return gen.decode() if isinstance(gen, bytes) else (str(gen) if gen is not None else None)
+def stored_values(rows: Sequence[Row]) -> Dict[str, Any]:
+    """What the settings store holds for each value at the platform (``rows``: its platform rows,
+    ``store.read_scope``), by wire name, in the old spelling; None: not set."""
+    held = {r.key: r.value for r in rows}
+    out = {}
+    for f in FIELDS:
+        s = _SETTINGS[f.wire]
+        out[f.wire] = None if held.get(s.key) is None else resolver.encode(s, held[s.key])
+    return out
 
 
 async def invalidate() -> None:
-    """Drop this process's memo, and move the policy's generation in Redis so every other process
-    reads a just-saved policy on its next look (within two seconds), not 30 seconds later."""
-    _MEMO.update(policy=None, at=0.0)
-    try:
-        from backend.app.services.aggregation.redis_client import get_redis
-
-        await asyncio.wait_for(get_redis().incr(_GEN_KEY), timeout=0.5)
-    except Exception:  # noqa: BLE001 — the others then see it within the memo's 30 seconds
-        logger.info("builds: the New-version build settings' generation could not be moved")
+    """Read the settings again now, in this process. A save through the store has moved the
+    settings' generation already, so every other process reads it within two seconds."""
+    await in_force.refresh(strict=True)
 
 
 def read_mode_of(override: Optional[str], policy: Optional["BuildPolicy"] = None) -> str:
@@ -304,46 +304,20 @@ def max_lag_of(mode: str) -> Optional[int]:
 
 
 def current() -> BuildPolicy:
-    """The settings :func:`resolve` last read, else the defaults: for a path that runs per statement
-    and can't wait on a read. Its caller resolves now and then (the projector, per pass section),
-    so a change reaches it within about as long as :func:`resolve` takes to see one."""
-    return _MEMO["policy"] or defaults()
+    """The settings in force as this process last refreshed them, else the defaults, without IO:
+    for a path that runs per statement and can't wait on a read. Its caller resolves now and then
+    (the projector, per pass section; the worker, each poll), so a change reaches it within about
+    as long as :func:`resolve` takes to see one."""
+    return _policy(in_force.context_now())
 
 
 async def resolve(session=None) -> BuildPolicy:
-    """The settings in force: memoized for up to 30 seconds, sooner when a save moves the
-    generation, and never raising. When the row can't be read, the last policy read, or with none
-    yet the defaults, kept as the memo for its 30 seconds. Without ``session``, a READONLY-pool
-    session of the management database is opened when the memo is stale."""
-    now = _clock()
-    policy = _MEMO["policy"]
-    if policy is not None and now - _MEMO["at"] < _MEMO_TTL_S:
-        if now - _MEMO["gen_at"] < _GEN_CHECK_S:
-            return policy
-        gen = await _generation()
-        _MEMO["gen_at"] = now
-        if gen is None or gen == _MEMO["gen"]:
-            return policy
-    gen = await _generation()
-    from backend.app.db.models import PlatformSettingsORM
-
-    try:
-        if session is not None:
-            row = await session.get(PlatformSettingsORM, 1)
-        else:
-            from backend.app.db.engine import get_readonly_session
-
-            async with get_readonly_session() as own:
-                row = await own.get(PlatformSettingsORM, 1)
-    except Exception as exc:  # noqa: BLE001 — a settings read must never fail its caller
-        fallback = _MEMO["good"] or defaults()
-        logger.warning("New-version build settings unreadable, using %s: %s",
-                       "the last ones read" if _MEMO["good"] else "the defaults", exc)
-        _MEMO.update(policy=fallback, at=now, gen=gen, gen_at=now)
-        return fallback
-    policy = effective(saved_values(row))
-    _MEMO.update(policy=policy, at=now, gen=gen, gen_at=now, good=policy)
-    return policy
+    """The settings in force, after bringing this process's up to date: Redis is asked at most
+    every two seconds whether a save moved the settings' generation, and the database read only
+    when one did (or every 30 seconds without Redis). Never raising: with the database out of
+    reach, the values last read, or before any the defaults. ``session`` is not read: the
+    settings are read on a pool of their own."""
+    return _policy(await in_force.refresh())
 
 
 def _is_inherit(value: Any) -> bool:
@@ -383,8 +357,10 @@ def validate(values: Mapping[str, Any], saved: Mapping[str, Any]) -> None:
         elif type(value) is not int or not f.lo <= value <= f.hi:
             raise PolicyInvalid(wire, f"must be a whole number from {int(f.lo):,} to {int(f.hi):,}, "
                                       "or -1 for the default")
-    after = _single(merged(saved, values))
-    per_graph, per_process = after["pgReadsPerGraph"], after["pgReadsPerProcess"]
+    # Each value as it would be chosen once saved (else its default), before it is held to the other.
+    after = _context(merged(saved, values))
+    per_graph, per_process = (resolver.resolve(after, _SETTINGS[wire].key)["declared"]
+                              for wire in ("pgReadsPerGraph", "pgReadsPerProcess"))
     if per_graph > per_process and {"pgReadsPerGraph", "pgReadsPerProcess"} & set(values):
         raise PolicyInvalid(
             "pgReadsPerGraph" if "pgReadsPerGraph" in values else "pgReadsPerProcess",
@@ -392,21 +368,35 @@ def validate(values: Mapping[str, Any], saved: Mapping[str, Any]) -> None:
             f"({per_process})")
 
 
-def save(row, values: Mapping[str, Any], actor: Optional[str]) -> None:
-    """Write the settings ``values`` (by wire name, None = unset; already validated and merged)
-    onto ``row``, with who saved them and when."""
-    row.gv_build_policy = json.dumps({
-        "values": {w: v for w, v in values.items() if v is not None},
-        "updatedBy": actor,
-        "updatedAt": datetime.now(timezone.utc).isoformat(),
-    }, sort_keys=True)
+async def save(session, rows: Sequence[Row], values: Mapping[str, Any], actor: Optional[str], *,
+               reason: Optional[str] = None,
+               before_commit: Optional[store.Hook] = None) -> store.ChangeSet:
+    """Save ``values`` (by wire name, in the old spelling; None clears one; already validated)
+    through the settings store, each checked against its version in ``rows`` (the platform's, as
+    read for the change), as the old route's (``legacy_api``), and commit. In the same transaction
+    the old JSON is written through, then ``before_commit`` runs (the route's activity record)."""
+    versions = {r.key: r.version for r in rows}
+    changes = [store.Change(s.key, "platform", "", versions.get(s.key, 0),
+                            value=None if values[wire] is None else resolver.decode(s, values[wire]))
+               for wire, s in _SETTINGS.items() if wire in values]
+
+    async def through(s, change_set: store.ChangeSet) -> None:
+        await legacy.write_through(s, change_set)
+        if before_commit is not None:
+            await before_commit(s, change_set)
+
+    return await store.apply(session, registry().DOMAIN, changes, actor=actor, reason=reason,
+                             source="legacy_api", before_commit=through)
 
 
-def describe(row) -> Dict[str, Any]:
-    """Each value as saved, its default and its effective value; each setting's kind, range, unit,
-    section, label and help, for the admin card; and who changed the settings last and when."""
-    saved, default, effect = saved_values(row), defaults(), effective(saved_values(row))
-    stored = _stored(row)
+def describe(rows: Sequence[Row]) -> Dict[str, Any]:
+    """Each value as saved (``rows``: the settings store's at the platform, ``store.read_scope``),
+    its default and its effective value; each setting's kind, range, unit, section, label and help,
+    for the admin card; and who changed the settings last and when."""
+    saved = stored_values(rows)
+    default, effect = defaults(), effective(saved)
+    keys = {s.key for s in _SETTINGS.values()}
+    last = max((r for r in rows if r.key in keys), key=lambda r: r.rev, default=None)
     return {
         "values": {f.wire: {"saved": saved[f.wire], "default": default[f.wire],
                             "effective": effect[f.wire]} for f in FIELDS},
@@ -417,6 +407,7 @@ def describe(row) -> Dict[str, Any]:
                     "max": (f.hi if f.kind == "ratio" else int(f.hi)) if f.kind in ("int", "ratio")
                     else None,
                     "choices": list(f.choices) or None, "applies": f.applies} for f in FIELDS],
-        "updatedBy": stored.get("updatedBy"),
-        "updatedAt": stored.get("updatedAt"),
+        "updatedBy": last.updated_by if last is not None else None,
+        "updatedAt": (last.updated_at.isoformat()
+                      if last is not None and last.updated_at is not None else None),
     }

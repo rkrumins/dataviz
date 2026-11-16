@@ -114,6 +114,10 @@ async def _amain() -> None:
         _install_metrics()
     except Exception as exc:              # noqa: BLE001 — never fail startup
         logger.warning("metrics backend not installed: %s", exc)
+    try:
+        config.warn_invalid_settings_env()
+    except Exception as exc:              # noqa: BLE001 — never fail startup
+        logger.warning("versioned-graph settings: the environment was not checked: %s", exc)
     metrics_server = await _serve_metrics()
     lanes = config.worker_lanes()
     if not os.getenv("GRAPHVER_POOL_SIZE"):

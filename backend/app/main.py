@@ -481,6 +481,15 @@ async def lifespan(_app: FastAPI):
     except Exception as exc:              # noqa: BLE001 — never fail startup
         logger.warning("metrics backend not installed: %s", exc)
 
+    # A versioned-graph setting's environment default that the setting can't take: said once here,
+    # as the setting then runs on its code default.
+    try:
+        from .services.versioning.config import warn_invalid_settings_env
+
+        warn_invalid_settings_env()
+    except Exception as exc:              # noqa: BLE001 — never fail startup
+        logger.warning("versioned-graph settings: the environment was not checked: %s", exc)
+
     # Interactive reads first: when the breaker proxy sees FalkorDB starve a
     # read (queue full, server-side or client deadline), stamp the shared
     # read-pressure key so aggregation writers in other pods yield their

@@ -20,7 +20,6 @@ from fastapi import HTTPException
 
 from backend.app.api.v1.endpoints import versioning_admin as va
 from backend.app.auth import api_key_surface
-from backend.app.db.models import PlatformSettingsORM
 from backend.app.main import app
 from backend.app.services.versioning import keymigrate, residency, residency_policy
 from backend.app.services.versioning.residency_plan import Graph, Master, admit, plan
@@ -399,38 +398,34 @@ async def test_a_master_claimed_for_a_waiting_load_takes_no_other_key_or_load(mo
         return snap
 
     monkeypatch.setattr(residency, "gather", gather)
-    residency_policy._MEMO.update(policy=POLICY, at=residency_policy._clock())
-    try:
-        assert plan(POLICY, masters, claimed, NOW).masters[0].claimed
-        assert (await residency.place_key("graph_01JA2B3C4D5E6F7G8H9JKMNPQR", "default",
-                                          taken=set()))[1] == "m2"
-        on_m1 = keymigrate.placed_key("graph_01JA2B3C4D5E6F7G8H9JKMNPQR", [(0, 8191)], set())
-        assert (await residency.admission_on("big", "default", on_m1))[3] == "busy"
+    assert plan(POLICY, masters, claimed, NOW).masters[0].claimed
+    assert (await residency.place_key("graph_01JA2B3C4D5E6F7G8H9JKMNPQR", "default",
+                                      taken=set()))[1] == "m2"
+    on_m1 = keymigrate.placed_key("graph_01JA2B3C4D5E6F7G8H9JKMNPQR", [(0, 8191)], set())
+    assert (await residency.admission_on("big", "default", on_m1))[3] == "busy"
 
-        async def key(load, snap):
-            return None if load.endpoint == "m3" else (f"k_{load.endpoint}", {"master": load.endpoint})
+    async def key(load, snap):
+        return None if load.endpoint == "m3" else (f"k_{load.endpoint}", {"master": load.endpoint})
 
-        started = []
+    started = []
 
-        async def start(graph_id, *, key=None, shard_map=None):
-            started.append((graph_id, shard_map["master"]))
-            return True
+    async def start(graph_id, *, key=None, shard_map=None):
+        started.append((graph_id, shard_map["master"]))
+        return True
 
-        monkeypatch.setattr(residency, "_load_key", key)
-        monkeypatch.setattr(residency, "_start_load", start)
-        decided = Plan(masters=[
-            MasterPlan(master=_master(used_pct=10), reserved=0, used_after=None, claimed=True),
-            MasterPlan(master=_master(endpoint="m2", used_pct=50), reserved=0, used_after=None),
-            MasterPlan(master=_master(endpoint="m3", used_pct=5), reserved=0, used_after=None,
-                       loads=[Load("g", "m3", 10 * MB)])])
-        loop = residency.CapacityLoop(SimpleNamespace(drop_graph=None))
-        await loop._act(decided, residency.Snapshot(
-            masters=[m.master for m in decided.masters],
-            rows={"g": {"placed": True, "provider": "default", "key": "old",
-                        "status": "evicted"}}))
-        assert started == [("g", "m2")]
-    finally:
-        residency_policy.invalidate()
+    monkeypatch.setattr(residency, "_load_key", key)
+    monkeypatch.setattr(residency, "_start_load", start)
+    decided = Plan(masters=[
+        MasterPlan(master=_master(used_pct=10), reserved=0, used_after=None, claimed=True),
+        MasterPlan(master=_master(endpoint="m2", used_pct=50), reserved=0, used_after=None),
+        MasterPlan(master=_master(endpoint="m3", used_pct=5), reserved=0, used_after=None,
+                   loads=[Load("g", "m3", 10 * MB)])])
+    loop = residency.CapacityLoop(SimpleNamespace(drop_graph=None))
+    await loop._act(decided, residency.Snapshot(
+        masters=[m.master for m in decided.masters],
+        rows={"g": {"placed": True, "provider": "default", "key": "old",
+                    "status": "evicted"}}))
+    assert started == [("g", "m2")]
 
 
 def test_no_room_is_made_that_would_not_let_the_load_in():
@@ -487,13 +482,9 @@ async def test_admission_answers_for_the_master_the_load_would_go_to(monkeypatch
         return snap
 
     monkeypatch.setattr(residency, "gather", gather)
-    residency_policy._MEMO.update(policy=POLICY, at=residency_policy._clock())
-    try:
-        assert await residency.admission("g") == (True, "m2", 0, None)
-        snap.graphs[0] = _graph("g", status="evicted", size=600 * MB)        # 780 MB > 700 MB
-        assert await residency.admission("g") == (False, "m2", 80 * MB, "capacity")
-    finally:
-        residency_policy.invalidate()
+    assert await residency.admission("g") == (True, "m2", 0, None)
+    snap.graphs[0] = _graph("g", status="evicted", size=600 * MB)        # 780 MB > 700 MB
+    assert await residency.admission("g") == (False, "m2", 80 * MB, "capacity")
 
 
 async def test_a_new_key_is_placed_on_the_roomiest_master_of_its_provider(monkeypatch):
@@ -509,14 +500,10 @@ async def test_a_new_key_is_placed_on_the_roomiest_master_of_its_provider(monkey
         return snap
 
     monkeypatch.setattr(residency, "gather", gather)
-    residency_policy._MEMO.update(policy=POLICY, at=residency_policy._clock())
     gid = "graph_01JA2B3C4D5E6F7G8H9JKMNPQR"
-    try:
-        key, master = await residency.place_key(gid, "default", taken=set())
-        assert master == "m2" and key_slot(key) >= 8192 and key.startswith(f"gvp_{gid}")
-        assert asked == [{"providers": ["default"]}]
-    finally:
-        residency_policy.invalidate()
+    key, master = await residency.place_key(gid, "default", taken=set())
+    assert master == "m2" and key_slot(key) >= 8192 and key.startswith(f"gvp_{gid}")
+    assert asked == [{"providers": ["default"]}]
 
 
 async def test_placement_and_admission_pass_over_held_and_busy_masters(monkeypatch):
@@ -539,19 +526,15 @@ async def test_placement_and_admission_pass_over_held_and_busy_masters(monkeypat
         return snap
 
     monkeypatch.setattr(residency, "gather", gather)
-    residency_policy._MEMO.update(policy=POLICY, at=residency_policy._clock())
     gid = "graph_01JA2B3C4D5E6F7G8H9JKMNPQR"
-    try:
-        assert (await residency.place_key(gid, "default", taken=set()))[1] == "m1"
-        assert await residency.admission("g") == (True, "m3", 0, None)
-        on = {m: keymigrate.placed_key(gid, snap.slots[m], set()) for m in ("m1", "m2", "m3")}
-        assert await residency.admission_on("g", "default", on["m1"]) == (True, "m1", 0, None)
-        assert await residency.admission_on("g", "default", on["m2"]) == (
-            False, "m2", None, "loading")
-        assert await residency.admission_on("g", "default", on["m3"]) == (
-            False, "m3", None, "busy")
-    finally:
-        residency_policy.invalidate()
+    assert (await residency.place_key(gid, "default", taken=set()))[1] == "m1"
+    assert await residency.admission("g") == (True, "m3", 0, None)
+    on = {m: keymigrate.placed_key(gid, snap.slots[m], set()) for m in ("m1", "m2", "m3")}
+    assert await residency.admission_on("g", "default", on["m1"]) == (True, "m1", 0, None)
+    assert await residency.admission_on("g", "default", on["m2"]) == (
+        False, "m2", None, "loading")
+    assert await residency.admission_on("g", "default", on["m3"]) == (
+        False, "m3", None, "busy")
 
 
 async def test_setting_always_checks_room_only(monkeypatch):
@@ -567,13 +550,9 @@ async def test_setting_always_checks_room_only(monkeypatch):
         return snap
 
     monkeypatch.setattr(residency, "gather", gather)
-    residency_policy._MEMO.update(policy=POLICY, at=residency_policy._clock())
-    try:
-        assert await residency.admission("g") == (True, "m1", 0, None)
-        snap.graphs[0] = _graph("g", status="evicted", size=700 * MB)       # 910 MB > 700 MB
-        assert await residency.admission("g") == (False, "m1", 210 * MB, "capacity")
-    finally:
-        residency_policy.invalidate()
+    assert await residency.admission("g") == (True, "m1", 0, None)
+    snap.graphs[0] = _graph("g", status="evicted", size=700 * MB)       # 910 MB > 700 MB
+    assert await residency.admission("g") == (False, "m1", 210 * MB, "capacity")
 
 
 def test_a_load_in_flight_on_the_master_holds_the_next_and_reserves_its_room():
@@ -694,12 +673,8 @@ async def test_a_new_key_goes_to_the_next_master_when_none_hashes_to_the_roomies
         return snap
 
     monkeypatch.setattr(residency, "gather", gather)
-    residency_policy._MEMO.update(policy=POLICY, at=residency_policy._clock())
-    try:
-        key, master = await residency.place_key(gid, "default", taken=set())
-        assert master == "m2" and key.startswith(f"gvp_{gid}")
-    finally:
-        residency_policy.invalidate()
+    key, master = await residency.place_key(gid, "default", taken=set())
+    assert master == "m2" and key.startswith(f"gvp_{gid}")
 
 
 async def test_a_load_no_key_lands_on_goes_to_the_next_master_in_the_same_pass(monkeypatch):
@@ -718,7 +693,6 @@ async def test_a_load_no_key_lands_on_goes_to_the_next_master_in_the_same_pass(m
 
     monkeypatch.setattr(residency, "_load_key", key)
     monkeypatch.setattr(residency, "_start_load", start)
-    residency_policy._MEMO.update(policy=POLICY, at=residency_policy._clock())
     decided = Plan(masters=[
         MasterPlan(master=_master(used_pct=10), reserved=0, used_after=None,
                    loads=[Load("g", "m1", 10 * MB)]),
@@ -728,10 +702,7 @@ async def test_a_load_no_key_lands_on_goes_to_the_next_master_in_the_same_pass(m
                               rows={"g": {"placed": True, "provider": "default", "key": "old",
                                           "status": "evicted"}})
     loop = residency.CapacityLoop(SimpleNamespace(drop_graph=None))
-    try:
-        await loop._act(decided, snap)
-    finally:
-        residency_policy.invalidate()
+    await loop._act(decided, snap)
     assert started == [("g", "k_m3", "m3")]              # m2 has no room for it: 79 % + 13 MB
     assert loop._started["g"][0] == "m3"
 
@@ -871,13 +842,11 @@ def test_a_resident_graph_asks_for_no_load():
 
 # ── the preview: the planner on proposed values, acting on nothing ───────────────────────────────
 class _Session:
-    """The management session the preview reads the saved values and the labels through."""
+    """The management session the preview reads the labels through (the saved values are the
+    settings store's, ``settings_world``)."""
 
-    def __init__(self, row=None):
-        self.row, self.commits = row, 0
-
-    async def get(self, cls, pk):
-        return self.row
+    def __init__(self):
+        self.commits = 0
 
     async def execute(self, stmt):
         return SimpleNamespace(all=lambda: [("ds_cold", "Cold lake"), ("ds_std", "Warehouse")])
@@ -897,13 +866,13 @@ def _snapshot() -> residency.Snapshot:
     return residency.Snapshot(masters=[_master(used_pct=72)], graphs=graphs, rows=rows)
 
 
-async def _preview(body, row=None):
+async def _preview(body):
     snap = _snapshot()
 
     async def gather(**kw):
         return snap
 
-    session = _Session(row)
+    session = _Session()
     with patch.object(residency, "gather", gather), patch.object(residency, "_clock", lambda: NOW):
         out = await va.preview_residency_policy(body, _user=SimpleNamespace(id="usr_admin"),
                                                 session=session)
@@ -911,9 +880,9 @@ async def _preview(body, row=None):
     return out, snap
 
 
-async def test_the_preview_is_the_planner_on_the_proposed_values():
-    out, snap = await _preview({"highWaterPct": 70, "lowWaterPct": 60},
-                               PlatformSettingsORM(id=1, gv_load_margin_pct=150))
+async def test_the_preview_is_the_planner_on_the_proposed_values(settings_world):
+    settings_world.set("residency.loadMarginPct", "platform", "", 150)
+    out, snap = await _preview({"highWaterPct": 70, "lowWaterPct": 60})
     policy = residency_policy.effective({"highWaterPct": 70, "lowWaterPct": 60,
                                          "loadMarginPct": 150})
     expected = plan(policy, snap.masters, snap.graphs, NOW)
@@ -929,14 +898,14 @@ async def test_the_preview_is_the_planner_on_the_proposed_values():
     assert (out["evictions"], out["evictedBytes"], out["loads"]) == (1, 150 * MB, 0)
 
 
-async def test_the_preview_of_nothing_new_is_the_next_pass_as_it_stands():
+async def test_the_preview_of_nothing_new_is_the_next_pass_as_it_stands(settings_world):
     out, _snap = await _preview({})
     (master,) = out["masters"]
     assert master["evictions"] == []                          # 72 % is under the 80 % start mark
     assert [x["graphId"] for x in master["loads"]] == ["asked"]
 
 
-async def test_the_preview_refuses_what_a_save_would():
+async def test_the_preview_refuses_what_a_save_would(settings_world):
     with pytest.raises(HTTPException) as caught:
         await _preview({"lowWaterPct": 79})
     assert caught.value.status_code == 422 and caught.value.detail["field"] == "lowWaterPct"
