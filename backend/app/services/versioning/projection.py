@@ -2525,6 +2525,9 @@ class FalkorProjector:
             raise _BuildRefused(f"{why}: rebuilt in place, as the projector started it")
         if no_room and policy["noRoomPolicy"] == "in_place":
             raise _BuildRefused(f"{why}: written in place (noRoomPolicy in_place)")
+        if no_room:                          # asked for room and told to wait, once a pass
+            from backend.app.services.settings import signals
+            signals.bump("builds.waited_for_room", graph_id=graph_id)
         waited = _secs_since(state.get("since"))
         if waited is not None and waited > int(policy["noRoomAlertSecs"]):
             increment("graphver_build_waiting_total", reason="room")
@@ -2543,6 +2546,7 @@ class FalkorProjector:
         way through a window) has nothing exact to copy: the build is dropped and the change
         written in place."""
         from backend.app.jobs.metrics import increment, observe
+        from redis.exceptions import TimeoutError as RedisTimeoutError
 
         build_id, name, provider = state["id"], ps.candidate_graph_name, ps.falkor_provider
         served = await self._serving_whole(ps)
@@ -2550,7 +2554,12 @@ class FalkorProjector:
         if (await read_projection_marker(await self._graph_client(name, provider)))[0]:
             await self.drop_graph(name, provider)
         started = time.monotonic()
-        await source.copy(name)
+        try:
+            await source.copy(name)
+        except (TimeoutError, RedisTimeoutError):  # it outlived the socket: an attempt failed
+            from backend.app.services.settings import signals
+            signals.bump("builds.copy_timed_out", graph_id=graph_id)
+            raise
         took = time.monotonic() - started
         exists, copied = await read_projection_marker(await self._graph_client(name, provider))
         if exists is not True or copied != served:
@@ -2990,6 +2999,9 @@ class FalkorProjector:
             return
         if took:
             increment("graphver_builds_total", step="dropped")
+            if why.startswith("gave up after"):          # out of its attempts
+                from backend.app.services.settings import signals
+                signals.bump("builds.dropped", graph_id=graph_id)
             logger.warning("build %s of %s dropped (%s): %s", build_id, graph_id, took, why)
             await nudge_projection(graph_id)
 

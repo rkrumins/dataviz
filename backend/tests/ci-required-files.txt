@@ -292,6 +292,8 @@ tests/test_service_accounts_api.py
 tests/test_settings_effective.py
 tests/test_settings_facts.py
 tests/test_settings_resolver.py
+tests/test_settings_signal_sites.py
+tests/test_settings_signals.py
 tests/test_settings_snapshot.py
 tests/test_settings_validate.py
 tests/test_settings_world.py
@@ -316,6 +318,7 @@ tests/test_upload_pins.py
 tests/test_versioned_branch_aggregated_edges.py
 tests/test_versioned_branch_resolve_identities.py
 tests/test_versioned_branch_trace_closure.py
+tests/test_versioned_graph_health_api.py
 tests/test_versioned_graph_settings_api.py
 tests/test_versioned_sources_lookup.py
 tests/test_versioning_access_groups.py

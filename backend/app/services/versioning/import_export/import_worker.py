@@ -1139,6 +1139,8 @@ class ImportWorker:
         if live < int(self._limits["minLive"]):
             return
         by_urn = int(((tally.get("refused") or {}).get("hints") or {}).get(BY_URN) or 0)
+        from backend.app.services.settings import signals
+        signals.bump("imports.replace_stopped_low_match", graph_id=snap.graph_id)
         raise IdentifierMatchedNothing(
             f"Stopped after the file's first {decided:,} node rows: by "
             f"identifier={self._identifier}, only {matched:,} of them found an entity, in a graph of "
@@ -1200,6 +1202,8 @@ class ImportWorker:
                            "guard, as allowMassDelete asked", job_id, absent, verdict["live"], creates)
         if verdict["state"] != "blocked":
             return
+        from backend.app.services.settings import signals
+        signals.bump("imports.replace_refused_by_guard", graph_id=snap.graph_id)
         limits = verdict["limits"]
         sources = verdict["sources"].values()
         whose = ("this data source's" if "data_source" in sources

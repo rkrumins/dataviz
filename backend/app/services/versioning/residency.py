@@ -1142,6 +1142,9 @@ class CapacityLoop:
             if entered:
                 self._told.add(wait.graph_id)
                 metrics.increment("versioning_residency_load_waits_total", reason=wait.reason)
+            if wait.reason == "capacity":            # asked for room and told to wait, this pass
+                from backend.app.services.settings import signals
+                signals.bump("residency.load_waited_for_room", graph_id=wait.graph_id)
             if entered and wait.reason == "capacity":
                 logger.warning("residency: graph %s waits for room on %s: its load needs %d bytes "
                                "more than the master has under its start mark",
@@ -1166,6 +1169,9 @@ class CapacityLoop:
         if not await evictor.evict(e.graph_id, drop_graph=self._proj.drop_graph, reason=e.reason):
             return False
         metrics.increment("versioning_residency_evictions_total", reason=e.reason)
+        if e.reason == "pressure":
+            from backend.app.services.settings import signals
+            signals.bump("residency.unloaded_under_pressure", graph_id=e.graph_id)
         logger.info("residency: evicted graph %s from %s (%s, %s bytes)",
                     e.graph_id, e.endpoint, e.reason, e.bytes)
         await _emit_event("platform.versioning.graph_evicted", {

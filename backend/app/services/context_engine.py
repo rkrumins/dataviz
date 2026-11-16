@@ -17,6 +17,7 @@ from backend.common.models.graph import (
 )
 
 from ..providers.base import GraphDataProvider
+from .settings import signals
 from .versioning.errors import HTTP_MAPPED, AccessDenied
 from ..config.resilience import (
     FALKORDB_AGGREGATED_READ_TIMEOUT_SECS,
@@ -291,6 +292,14 @@ class ContextEngine:
                             getattr(provider, "manager_cache_key", None), wm.get("falkor_provider"),
                             wm.get("falkor_graph_name"), gid):
                         served = wm["served"]
+                    elif wm["served"] is None and wm.get("status") is not None:
+                        # Postgres serves it: counted when its key holds a version, further behind
+                        # the head than the read mode allows. Never a reason for the read to fail.
+                        from .versioning.service import serving_seq
+                        if serving_seq(wm.get("projected") or 0, wm.get("committed") or 0,
+                                       wm["status"], getattr(snap, "served_commit_seq", None),
+                                       -1) is not None:
+                            signals.bump("reads.from_database_while_behind", graph_id=gid)
                 main_served = served is not None
                 read_provider = None
                 read_branch: Optional[str] = None
@@ -472,6 +481,13 @@ class ContextEngine:
                                                "falkor_graph_name")})
         serving = fork_serving_seq(plan["serving"], plan["fresh"], plan["status"],
                                    plan["window_rows"], plan["last_error"])
+        if serving is None and not plan["root_trashed"]:
+            # Postgres serves the root: counted for it when its key holds a version it is still
+            # writing past, or one further behind the head than its read mode allows.
+            from .versioning.service import serving_seq
+            if plan["serving"] is not None or serving_seq(
+                    plan["projected"], plan["committed"], plan["status"], None, -1) is not None:
+                signals.bump("reads.from_database_while_behind", graph_id=root_id)
         base = None
         if serving is not None and not plan["root_trashed"]:
             try:

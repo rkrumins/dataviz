@@ -22,6 +22,7 @@ from .endpoints import (
     versioning,
     versioning_admin,
     versioned_graph_settings,
+    versioned_graph_health,
     admin_idp_groups,
     admin_idp_providers,
     admin_user_identities,
@@ -138,6 +139,11 @@ api_router.include_router(
 # with the versioning router below.
 api_router.include_router(
     versioned_graph_settings.platform_router, prefix="/admin/versioning/settings",
+    tags=["admin:versioning"],
+)
+# What happened, counted where it happened (services/settings/signals.py): system admins.
+api_router.include_router(
+    versioned_graph_health.signals_router, prefix="/admin/versioning/signals",
     tags=["admin:versioning"],
 )
 api_router.include_router(
@@ -503,6 +509,11 @@ api_router.include_router(
 )
 api_router.include_router(
     versioned_graph_settings.graph_router, prefix="/{ws_id}/versioning/graphs/{graph_id}/settings",
+    tags=["versioning:workspace"], dependencies=[Depends(versioning_write_gate)],
+)
+# A graph's health, the top of its settings drawer: read with the data-source read, gated like them.
+api_router.include_router(
+    versioned_graph_health.health_router, prefix="/{ws_id}/versioning/graphs/{graph_id}/health",
     tags=["versioning:workspace"], dependencies=[Depends(versioning_write_gate)],
 )
 

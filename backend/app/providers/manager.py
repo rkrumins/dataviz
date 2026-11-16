@@ -33,6 +33,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.services.aggregation.admission import drop_slot, take_slot_once
+from backend.app.services.settings import signals
 
 from backend.common.adapters import (
     AsyncCircuitBreaker,
@@ -1304,6 +1305,7 @@ class ProviderManager:
             whole = await self.acquire_provider_slot("graphver-pg", "*", size=per_process)
         except ProviderBusy:
             increment("graphver_pg_read_slots_shed_total", scope="process")
+            signals.bump("reads.asked_to_retry", graph_id=graph_id)
             raise
         try:
             one = await self.acquire_provider_slot("graphver-pg", graph_id, size=per_graph)
@@ -1311,6 +1313,7 @@ class ProviderManager:
             whole.release()
             if isinstance(exc, ProviderBusy):
                 increment("graphver_pg_read_slots_shed_total", scope="graph")
+                signals.bump("reads.asked_to_retry", graph_id=graph_id)
             raise
         try:
             yield

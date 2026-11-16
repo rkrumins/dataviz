@@ -28,6 +28,7 @@ from backend.app.observability.event_loop_monitor import (
 )
 from backend.app.providers.eviction_budget import make_registry_budget_resolver
 from backend.app.services.projection_target import repair_projection_target
+from backend.app.services.settings import signals
 
 logger = logging.getLogger(__name__)
 
@@ -168,6 +169,8 @@ async def _amain() -> None:
         run_event_loop_monitor(stats=EventLoopLagStats(), shutdown=monitor_stop),
         name="event-loop-monitor")
     keeper = LeaseKeeper(exit_on_wedge=True).start()
+    # What its lanes count (services/settings/signals.py), added to Redis every ten seconds.
+    signals.start_flusher()
 
     # This process caches provider configs + graph clients (via the registry factory)
     # and has NO warmup loop, so an admin repointing a provider would otherwise leave
@@ -194,6 +197,7 @@ async def _amain() -> None:
             await invalidation_listener.stop()
         except Exception:
             pass
+        await signals.stop_flusher()
         await close_broker_redis()
         await db.dispose_engine()
         logger.info("versioning worker stopped")

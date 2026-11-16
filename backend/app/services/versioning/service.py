@@ -3101,9 +3101,12 @@ class GraphVersioningService:
                     *_of_workspaces(BranchORM.graph_id, workspace_ids, except_workspace_ids),
                 )
                 .values(status="abandoned", updated_at=_now())
-                .returning(BranchORM.id)
-            )).scalars().all()
-            return list(swept)
+                .returning(BranchORM.id, BranchORM.graph_id)
+            )).all()
+        from backend.app.services.settings import signals
+        for _branch_id, graph_id in swept:                   # once the sweep has committed
+            signals.bump("drafts.idle_closed", graph_id=graph_id)
+        return [branch_id for branch_id, _graph_id in swept]
 
     async def release_publishing(
         self, *, graph_id: Optional[str] = None, branch_id: Optional[str] = None,
@@ -3221,7 +3224,7 @@ class GraphVersioningService:
                             gone = False
                             break
                     if gone:
-                        await s.execute(
+                        marked = await s.execute(
                             update(BranchORM).where(BranchORM.id == branch_id,
                                                     BranchORM.prune_finished_at.is_(None))
                             .values(prune_finished_at=_now(), updated_at=BranchORM.updated_at)
@@ -3229,6 +3232,9 @@ class GraphVersioningService:
                         finished.append(branch_id)
             logger.info("removed %d rows of closed draft %s on graph %s%s", removed, branch_id,
                         gid, "" if gone else "; carried on next pass")
+            if gone and marked.rowcount:      # finished here (not by another worker), committed
+                from backend.app.services.settings import signals
+                signals.bump("drafts.changes_removed", graph_id=gid)
         return finished
 
     @staticmethod
