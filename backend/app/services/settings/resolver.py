@@ -309,7 +309,7 @@ class _At:
             if explain and all(code != c for c, _f in why):
                 why.append((code, fix))
 
-        default, source, env_entry, env_invalid = _default(s, ctx.env)
+        default, source, env_entry, env_problem = _default(s, ctx.env)
         chain = self._chain(s)
         platform = ctx.rows.get((key, "platform", ""))
         limits = (platform.limits if platform is not None and platform.limits is not None
@@ -332,8 +332,10 @@ class _At:
             break
         if exception:
             say("outside_limits_exception")
-        if env_invalid and source == "default":
+        if env_problem == "invalid_env" and source == "default":
             say("invalid_env")
+        if env_problem == "env_out_of_range" and source == "env":
+            say("env_out_of_range")
         value = _in_range(s, declared)
 
         for cap in s.caps:
@@ -395,7 +397,7 @@ class _At:
                   else "adjusted" if not _same(value, declared)
                   else "locked" if locked and below
                   else "exception" if exception
-                  else "invalid_env" if env_invalid and source == "default"
+                  else "invalid_env" if env_problem == "invalid_env" and source == "default"
                   else "in_effect")
         out: Dict[str, Any] = {"key": key, "effective": value, "declared": declared,
                                "source": source}
@@ -440,22 +442,29 @@ class _At:
 
 
 def _default(setting: Setting, env: EnvReader
-             ) -> Tuple[Any, str, Optional[Dict[str, Any]], bool]:
+             ) -> Tuple[Any, str, Optional[Dict[str, Any]], Optional[str]]:
     """The value in force with nothing chosen: the environment's when it is valid, else the code
     default. Returns it, its source (``env`` or ``default``), the trail's ``env`` entry (None when
-    the deployment gives nothing of its own) and whether the environment's value was invalid."""
+    the deployment gives nothing of its own) and what was wrong with the environment's value:
+    ``invalid_env`` (it can't be this setting's: the code default applies) or
+    ``env_out_of_range`` (the right kind outside the range: it is held to the range, as the
+    policies before the store held it, so an upgrade never moves a deployment's value further
+    than the range requires)."""
     code = setting.default.code
     reading = env(setting.default.env) if setting.default.env else None
     if reading is None:
-        return code, "default", None, False
+        return code, "default", None, None
     value = decode(setting, reading.value)
     valid = value_error(setting, value) is None
     own = reading.set or not valid or not _same(value, code)
     entry = ({"name": reading.name, "value": value if valid else reading.value, "valid": valid}
              if own else None)
     if not valid:
-        return code, "default", entry, True
-    return value, "env" if own else "default", entry, False
+        if value_error(setting, value, ranged=False) is None:
+            entry["held"] = _in_range(setting, value)
+            return value, "env", entry, "env_out_of_range"
+        return code, "default", entry, "invalid_env"
+    return value, "env" if own else "default", entry, None
 
 
 def _fix(req: Requirement) -> Optional[Dict[str, Any]]:

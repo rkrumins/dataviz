@@ -122,6 +122,7 @@ WHYS = (
     Why("locked_by_platform", "Locked for the whole platform."),
     Why("outside_limits_exception", "Outside the limits, kept as an exception."),
     Why("invalid_env", "The deployment's value is invalid."),
+    Why("env_out_of_range", "The deployment's value is outside the range."),
     Why("follows_root", "A fork follows its root graph."),
     Why("derived_from_levels", "The allowed draft levels decide it.",
         {"setting": "drafts.levels", "to": "any"}),
@@ -200,7 +201,6 @@ def test_the_environment_counts_only_when_it_parses_and_is_in_range():
                                          "valid": True}}
     for name, bad, key, code in (
             ("GRAPHVER_READ_MODE", "fastest", "reads.mode", "latest"),
-            ("GRAPHVER_DRAFT_RETENTION_DAYS", 99_999, "drafts.keepClosedDays", 30),
             ("GRAPHVER_IMPORT_IDENTIFIER", "prop.", "imports.identifier", "entity_id"),
             ("IMPORT_MAX_REFUSED_ROWS", "lots", "imports.maxRefusedRows", "0")):
         got = r.resolve(ctx(environ=env({name: bad})), key)
@@ -208,6 +208,15 @@ def test_the_environment_counts_only_when_it_parses_and_is_in_range():
                                                                    "invalid_env"), key
         assert got["trail"][0]["env"] == {"name": name, "value": bad, "valid": False}
         assert [w["code"] for w in got["why"]] == ["invalid_env"]
+    # The right kind outside its range is held to the range, as the policies before the store held
+    # it, and reported: an upgrade never moves a deployment's value further than the range requires.
+    held = r.resolve(ctx(environ=env({"GRAPHVER_DRAFT_RETENTION_DAYS": 99_999})),
+                     "drafts.keepClosedDays")
+    assert (held["effective"], held["declared"], held["source"], held["status"]) == (
+        3650, 99_999, "env", "adjusted")
+    assert held["trail"][0]["env"] == {"name": "GRAPHVER_DRAFT_RETENTION_DAYS", "value": 99_999,
+                                       "valid": False, "held": 3650}
+    assert [w["code"] for w in held["why"]] == ["env_out_of_range"]
     # A value chosen on the platform makes the deployment's invalid one beside the point.
     chosen = r.resolve(ctx(row("reads.mode", "platform", "in_place"),
                            environ=env({"GRAPHVER_READ_MODE": "fastest"})), "reads.mode")

@@ -3327,6 +3327,8 @@ WHY: Tuple[Why, ...] = (
                                     "administrator chose it, so it stays in force as an exception."),
     Why("invalid_env", "The deployment's environment value isn't valid, so the built-in default is "
                        "in force."),
+    Why("env_out_of_range", "The deployment's environment value is outside this setting's range, so "
+                            "the nearest allowed value is in force."),
     Why("follows_root", "A fork follows the graph it was forked from: change this on that graph."),
     Why("derived_from_levels", "Only one draft level is allowed, so new drafts start at that level.",
         {"setting": "drafts.levels", "to": "any"}),

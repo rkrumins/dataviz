@@ -21,6 +21,7 @@ Whether builds happen at all is a switch, not a value: ``candidateKeysEnabled`` 
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from dataclasses import dataclass
@@ -282,10 +283,22 @@ def stored_values(rows: Sequence[Row]) -> Dict[str, Any]:
     return out
 
 
+#: The generation the previous image's processes watch (its memo of this policy). Moved on a save
+#: for one release, so a rolling deploy's old pods read the save within two seconds too.
+_OLD_GEN_KEY = "gv:build_policy:gen"
+
+
 async def invalidate() -> None:
     """Read the settings again now, in this process. A save through the store has moved the
-    settings' generation already, so every other process reads it within two seconds."""
+    settings' generation already, so every other process reads it within two seconds; the old
+    generation moves too, for processes still on the previous image."""
     await in_force.refresh(strict=True)
+    try:
+        from backend.app.services.aggregation.redis_client import get_redis
+
+        await asyncio.wait_for(get_redis().incr(_OLD_GEN_KEY), timeout=0.5)
+    except Exception:  # noqa: BLE001 — the previous image then reads it within its 30-second memo
+        logger.info("builds: the previous image's build-settings generation could not be moved")
 
 
 def read_mode_of(override: Optional[str], policy: Optional["BuildPolicy"] = None) -> str:

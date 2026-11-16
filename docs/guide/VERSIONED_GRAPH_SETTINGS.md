@@ -56,6 +56,7 @@ When the value in force isn't the one chosen, the app says why:
 | `locked_by_platform` | A system administrator locked this setting for the whole platform, so the platform's value is in force. |
 | `outside_limits_exception` | This value is outside the limits set for workspaces. A system administrator chose it, so it stays in force as an exception. |
 | `invalid_env` | The deployment's environment value isn't valid, so the built-in default is in force. |
+| `env_out_of_range` | The deployment's environment value is outside this setting's range, so the nearest allowed value is in force. |
 | `follows_root` | A fork follows the graph it was forked from: change this on that graph. |
 | `derived_from_levels` | Only one draft level is allowed, so new drafts start at that level. |
 | `guard_off` | The replace guard is off, so this limit isn't checked. |

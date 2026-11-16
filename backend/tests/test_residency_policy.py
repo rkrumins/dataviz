@@ -172,9 +172,8 @@ def test_with_nothing_saved_every_value_is_its_default():
 
 
 def test_the_defaults_come_from_the_environment_where_valid_and_in_order(monkeypatch):
-    """An environment default the setting can't take — out of its range — is reported
-    (``invalid_env``) and the code default applies, where it was once held to the range; a valid
-    one is used, and the pairs are still kept in order."""
+    """An environment default out of its range is held to the range, as before the store, and
+    reported (``env_out_of_range``); a valid one is used, and the pairs are still kept in order."""
     monkeypatch.setattr(config, "EVICTION_ENABLED", False)
     monkeypatch.setattr(config, "MASTER_HIGH_WATER_PCT", 60)
     monkeypatch.setattr(config, "MASTER_LOW_WATER_PCT", 58)         # within its range, not 5 below
@@ -182,9 +181,9 @@ def test_the_defaults_come_from_the_environment_where_valid_and_in_order(monkeyp
     policy = rp.defaults()
     assert policy.eviction_enabled is False
     assert (policy.high_water_pct, policy.low_water_pct) == (60, 55)
-    assert policy.capacity_interval_secs == 60
+    assert policy.capacity_interval_secs == 15
     found = resolver.resolve(effective.context_now(), "residency.capacityIntervalSecs")
-    assert "invalid_env" in [w["code"] for w in found["why"]]
+    assert "env_out_of_range" in [w["code"] for w in found["why"]]
 
 
 async def test_a_saved_value_wins_and_an_unset_one_is_the_default(settings_world):

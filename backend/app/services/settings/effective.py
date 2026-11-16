@@ -23,6 +23,7 @@ does nothing while it is False.
 """
 from __future__ import annotations
 
+import functools
 import logging
 from typing import Any, Mapping, Optional, Tuple
 
@@ -36,6 +37,7 @@ logger = logging.getLogger(__name__)
 _STATE: dict = {"ctx": None, "rows": None, "switches": None}
 
 
+@functools.lru_cache(maxsize=1)
 def _switch_keys() -> Tuple[str, ...]:
     """The feature switches the registry's requirements name (its settings' and their choices')."""
     keys = set()
