@@ -263,6 +263,9 @@ export const SUMMARY: GraphsSummary = {
     graphs: 42, inMemory: 34, unloaded: 4, loading: 1, waitingForRoom: 2, noCopy: 1, building: 2, failing: 1, withOwnSettings: 7,
 }
 
+/** How many graphs the inventory counts: the figures' 42, and three forks, which the figures leave out. */
+export const GRAPHS_TOTAL = SUMMARY.graphs + 3
+
 export const PROVIDERS = [
     { id: 'falkor-eu', name: 'EU graph store', type: 'falkordb', status: 'healthy', error: null, isActive: true, versionedGraphs: 31 },
     { id: 'falkor-us', name: 'US graph store', type: 'falkordb', status: 'healthy', error: null, isActive: true, versionedGraphs: 11 },

@@ -61,13 +61,13 @@ export function Segmented<T extends string>({ options, value, onChange, label, s
               'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
               'disabled:opacity-40 disabled:cursor-not-allowed',
               size === 'sm' ? 'h-6 px-2 text-[11px]' : 'h-8 px-3 text-xs',
-              on ? 'bg-canvas-elevated text-ink shadow-sm' : 'text-ink-muted hover:text-ink',
+              on ? 'bg-canvas-elevated text-ink shadow-sm' : 'text-ink-secondary hover:text-ink',
             )}
           >
             {Icon && <Icon className="w-3.5 h-3.5" aria-hidden />}
             {o.label}
             {o.count !== undefined && (
-              <span className={cn('tabular-nums text-[10px] font-semibold', on ? 'text-ink-secondary' : 'text-ink-muted')}>
+              <span className="tabular-nums text-[10px] font-semibold text-ink-secondary">
                 {o.count.toLocaleString()}
               </span>
             )}

@@ -443,6 +443,7 @@ async def test_the_inventory_filters_by_what_is_in_force_and_counts_the_fleet(cl
     page = await va.list_graphs(provider=None, status=None, workspace_id=None, kind=None, q=None,
                                 cursor="graph_1", limit=1, _user=None, read_mode="latest")
     assert [g["graphId"] for g in page["graphs"]] == ["graph_2"] and page["nextCursor"] is None
+    assert page["total"] == 2, "the graphs in that mode, on every page"
     assert await _ids(read_mode="in_place") == []
     summary = await probes.versioned_graphs_summary()
     assert summary == {"graphs": 2, "inMemory": 1, "unloaded": 1, "loading": 0,

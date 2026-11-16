@@ -101,6 +101,7 @@ async def _run() -> None:
     page = await _list(workspace_id=ws)
     assert [g["graphId"] for g in page["graphs"]] == [main, fork, orphan, failed]
     assert page["nextCursor"] is None
+    assert page["total"] == 4
     rows = {g["graphId"]: g for g in page["graphs"]}
     assert rows[main] | {"lastProjectedAt": None, "updatedAt": None} == {
         "graphId": main, "workspaceId": ws, "workspaceName": f"Workspace {ws}",
@@ -138,6 +139,7 @@ async def _run() -> None:
     while True:
         page = await _list(workspace_id=ws, limit=2, cursor=cursor)
         assert len(page["graphs"]) <= 2
+        assert page["total"] == 4, "every page counts every graph the filters keep"
         seen += [g["graphId"] for g in page["graphs"]]
         cursor = page["nextCursor"]
         if cursor is None:
@@ -148,6 +150,7 @@ async def _run() -> None:
     assert await _ids(workspace_id=ws, kind="main") == [main]
     assert await _ids(workspace_id=ws, kind="fork") == [fork]
     assert await _ids(workspace_id=ws, kind="orphan") == [orphan, failed]
+    assert (await _list(workspace_id=ws, kind="orphan", limit=1))["total"] == 2
     assert await _ids(provider=other_prov) == [orphan, elsewhere, waiting]
     assert await _ids(workspace_id=ws, status="failed") == [failed]
     assert await _ids(workspace_id=ws, status="lagging") == []

@@ -1467,7 +1467,8 @@ async def list_versioned_graphs(
     graph id, data source id, FalkorDB key or data-source label. ``read_mode`` keeps the graphs whose
     ``readModeEffective`` is that mode, ``residency`` those of that class, and ``own_settings``
     those that chose a versioned-graph setting of their own (False: those that didn't); a fork
-    has none of the three. Unlike a probe it raises rather than degrading."""
+    has none of the three. ``total`` counts every graph the filters keep, on every page, for the
+    inventory's "8 of 42". Unlike a probe it raises rather than degrading."""
     from sqlalchemy import func, or_
 
     from backend.app.services.versioning import config as vconfig
@@ -1515,6 +1516,7 @@ async def list_versioned_graphs(
         own = list(await _sources_with_own_settings())
         stmt = stmt.where(~is_fork, GraphORM.data_source_id.in_(own)) if own_settings else (
             stmt.where(or_(is_fork, GraphORM.data_source_id.notin_(own))))
+    filtered = stmt                 # every page's graphs: what ``total`` counts
     if cursor:
         stmt = stmt.where(GraphORM.id > cursor)
 
@@ -1535,20 +1537,26 @@ async def list_versioned_graphs(
     async with graphver_session() as session:
         if read_mode is None:
             page = (await session.execute(stmt.order_by(GraphORM.id).limit(limit + 1))).all()
+            total = (await session.execute(
+                filtered.with_only_columns(func.count()).order_by(None))).scalar_one()
         else:
-            # The mode in force is resolved here, not in SQL: read on, a batch at a time, until a
-            # page holds limit + 1 graphs in that mode or none are left.
-            page, after = [], None
-            while len(page) <= limit:
-                batch = (await session.execute(
-                    (stmt if after is None else stmt.where(GraphORM.id > after))
-                    .order_by(GraphORM.id).limit(_INVENTORY_SCAN))).all()
-                page += [r for r in batch
-                         if (mode := row_read_mode(r)) is not None and mode.effective == read_mode]
-                if len(batch) < _INVENTORY_SCAN:
-                    break
-                after = batch[-1].id
-            page = page[:limit + 1]
+            # The mode in force is resolved here, not in SQL: read on, a batch at a time, keeping
+            # the graphs in that mode, until ``until`` are kept or none are left.
+            async def in_mode(base, until=None):
+                kept, after = [], None
+                while until is None or len(kept) < until:
+                    batch = (await session.execute(
+                        (base if after is None else base.where(GraphORM.id > after))
+                        .order_by(GraphORM.id).limit(_INVENTORY_SCAN))).all()
+                    kept += [r for r in batch
+                             if (mode := row_read_mode(r)) is not None and mode.effective == read_mode]
+                    if len(batch) < _INVENTORY_SCAN:
+                        break
+                    after = batch[-1].id
+                return kept
+
+            page = (await in_mode(stmt, until=limit + 1))[:limit + 1]
+            total = len(await in_mode(filtered))
     more = len(page) > limit
     page = page[:limit]
 
@@ -1603,6 +1611,7 @@ async def list_versioned_graphs(
             "build": candidates.block(r),
         } for r in page],
         "nextCursor": page[-1].id if more else None,
+        "total": total,
     }
 
 

@@ -135,11 +135,11 @@ export function MemoryMarks({
                                     'whitespace-nowrap rounded-md px-1.5 py-px text-[10.5px] font-semibold leading-4 tabular-nums',
                                     'group-focus-visible:ring-2 group-focus-visible:ring-accent-lineage/40',
                                     mark === 'start' ? 'translate-x-[calc(50%-6px)]' : '-translate-x-[calc(50%-6px)]',
-                                    moved(mark) ? 'bg-accent-lineage text-white' : 'bg-ink-secondary text-ink-inverse',
+                                    moved(mark) ? 'bg-indigo-600 text-white' : 'bg-ink-secondary text-ink-inverse',
                                 )}>
                                     {mark === 'start' ? 'Start' : 'Stop'} {value[mark]}%
                                 </span>
-                                <span aria-hidden className={cn('mt-0.5 h-3 w-3 rotate-45 rounded-[2px]', moved(mark) ? 'bg-accent-lineage' : 'bg-ink-secondary')} />
+                                <span aria-hidden className={cn('mt-0.5 h-3 w-3 rotate-45 rounded-[2px]', moved(mark) ? 'bg-indigo-600' : 'bg-ink-secondary')} />
                             </div>
                         </div>
                     ))}
@@ -155,10 +155,10 @@ export function MemoryMarks({
                                 <li key={n.id}>
                                     <div className="mb-1 flex flex-wrap items-baseline justify-between gap-x-3 text-[11.5px]">
                                         <span className="font-semibold text-ink">{n.label}</span>
-                                        <span className="tabular-nums text-ink-muted">
-                                            {formatBytes(n.usedBytes)} of {formatBytes(n.maxBytes)} · <span className="font-medium text-ink-secondary">{Math.round(p)}%</span>
+                                        <span className="tabular-nums text-ink-secondary">
+                                            {formatBytes(n.usedBytes)} of {formatBytes(n.maxBytes)} · <span className="font-medium text-ink">{Math.round(p)}%</span>
                                             {' · '}
-                                            <span className={cn(zone === 'over' ? 'text-rose-600 dark:text-rose-400' : zone === 'between' ? 'text-amber-700 dark:text-amber-400' : '')}>
+                                            <span className={cn(zone === 'over' ? 'text-rose-700 dark:text-rose-400' : zone === 'between' ? 'text-amber-700 dark:text-amber-400' : '')}>
                                                 {zone === 'over' ? 'Unloads now' : zone === 'between' ? 'Between the marks' : 'Room to load'}
                                             </span>
                                         </span>
@@ -176,14 +176,14 @@ export function MemoryMarks({
                                         {/* The marks cross each gauge, not the words above it. */}
                                         {(['stop', 'start'] as Mark[]).map((mark) => (
                                             <span key={mark} aria-hidden className={cn('pointer-events-none absolute -top-1 h-[18px] w-0.5 -translate-x-1/2 rounded-full',
-                                                moved(mark) ? 'bg-accent-lineage' : 'bg-ink-secondary/80')} style={{ left: `${value[mark]}%` }} />
+                                                moved(mark) ? 'bg-indigo-600' : 'bg-ink-secondary/80')} style={{ left: `${value[mark]}%` }} />
                                         ))}
                                     </div>
                                 </li>
                             )
                         })}
                     </ul>
-                    <div aria-hidden className="mt-2 flex justify-between text-[10px] tabular-nums text-ink-muted">
+                    <div aria-hidden className="mt-2 flex justify-between text-[10px] tabular-nums text-ink-secondary">
                         <span>0%</span><span>50%</span><span>100%</span>
                     </div>
                 </div>

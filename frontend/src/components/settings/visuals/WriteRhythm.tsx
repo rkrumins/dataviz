@@ -8,7 +8,7 @@
  */
 import { motion } from 'framer-motion'
 import { cn } from '@/lib/utils'
-import { formatMs, formatNumber } from '@/lib/units'
+import { formatMs, formatRatio } from '@/lib/units'
 import { useCalmMotion } from './motion'
 import { LegendKey, VisualFrame } from './VisualFrame'
 
@@ -63,7 +63,7 @@ export function WriteRhythm({ statementTargetMs, pacingRatio, readPressureRatio,
         { label: 'Normally', ratio: pacingRatio, nextRatio: next?.pacingRatio },
         { label: 'While reads wait', ratio: readPressureRatio, nextRatio: next?.readPressureRatio },
     ]
-    const say = (r: Rhythm) => `Each write of ${formatMs(r.statementTargetMs)} is followed by a pause of ${formatMs(Math.round(r.statementTargetMs * r.pacingRatio))} (×${formatNumber(r.pacingRatio)}), so reads get ${pct(share(r.pacingRatio))} of the node’s time. While reads wait, the pause grows to ${formatMs(Math.round(r.statementTargetMs * r.readPressureRatio))} (×${formatNumber(r.readPressureRatio)}): reads get ${pct(share(r.readPressureRatio))}.`
+    const say = (r: Rhythm) => `Each write of ${formatMs(r.statementTargetMs)} is followed by a pause of ${formatMs(Math.round(r.statementTargetMs * r.pacingRatio))} (${formatRatio(r.pacingRatio)} of the write), so reads get ${pct(share(r.pacingRatio))} of the node’s time. While reads wait, the pause grows to ${formatMs(Math.round(r.statementTargetMs * r.readPressureRatio))} (${formatRatio(r.readPressureRatio)} of the write): reads get ${pct(share(r.readPressureRatio))}.`
 
     return (
         <VisualFrame
@@ -79,7 +79,7 @@ export function WriteRhythm({ statementTargetMs, pacingRatio, readPressureRatio,
             caption={(
                 <>
                     <span className="block">{say({ statementTargetMs, pacingRatio, readPressureRatio })}</span>
-                    {changed && next && <>{' '}<span className="block font-medium text-accent-lineage">With your changes: {say(next)}</span></>}
+                    {changed && next && <>{' '}<span className="block font-medium text-indigo-700 dark:text-indigo-300">With your changes: {say(next)}</span></>}
                 </>
             )}
         >
@@ -96,14 +96,14 @@ export function WriteRhythm({ statementTargetMs, pacingRatio, readPressureRatio,
                             <span className="text-right sm:text-left">
                                 <span className="text-lg font-semibold text-ink">{pct(share(row.ratio))}</span>
                                 {nextShare !== null && Math.round(nextShare * 100) !== Math.round(share(row.ratio) * 100) && (
-                                    <span className="ml-1.5 text-sm font-semibold text-accent-lineage">→ {pct(nextShare)}</span>
+                                    <span className="ml-1.5 text-sm font-semibold text-indigo-700 dark:text-indigo-300">→ {pct(nextShare)}</span>
                                 )}
-                                <span className="block text-[10.5px] text-ink-muted">for reads</span>
+                                <span className="block text-[10.5px] text-ink-secondary">for reads</span>
                             </span>
                         </div>
                     )
                 })}
-                <div aria-hidden className={cn('flex justify-between text-[10px] tabular-nums text-ink-muted sm:ml-[8.5rem] sm:mr-[7.5rem]')}>
+                <div aria-hidden className={cn('flex justify-between text-[10px] tabular-nums text-ink-secondary sm:ml-[8.5rem] sm:mr-[7.5rem]')}>
                     <span>0</span><span>{formatMs(span / 2)}</span><span>{formatMs(span)}</span>
                 </div>
             </div>

@@ -350,8 +350,8 @@ def _ex_pressure(values, facts):
     target = int(_v(values, "updates.statementTargetMs"))
     ratio, usual = float(_v(values, "updates.readPressureRatio")), float(_v(values, "updates.pacingRatio"))
     if ratio <= usual:
-        return (f"At {ratio:g}, no longer than the usual pause ({usual:g}), so waiting reads get no "
-                f"extra time.")
+        return (f"At {_share(ratio)}, no longer than the usual pause ({_share(usual)}), so waiting "
+                f"reads get no extra time.")
     pause = min(5000, round(target * ratio))
     return (f"While reads on a node are waiting, a write that takes {target:,} ms is followed by a "
             f"{pause:,} ms pause: reads get about {round(100 * pause / (target + pause))}% of the "
@@ -963,14 +963,14 @@ _UPDATES = (
         takes_effect=_NEXT_WRITE,
         section="pacing",
         range=(0, 5),
-        unit="×",
+        unit="share",
         uses=("updates.statementTargetMs",),
         visual="write_rhythm",
         legacy=Legacy(build_policy="pacingRatio"),
         guidance=Guidance(
             summary="The pause after each write to the graph store, as a share of the time it took.",
             means=("After each write the worker pauses, so reads waiting on that node go first. At "
-                   "0.25 it pauses a quarter as long as the write took, at most 5 seconds; at 0 it "
+                   "25% it pauses a quarter as long as the write took, at most 5 seconds; at 0 it "
                    "pauses only while reads are waiting (Pause while reads wait)."),
             effects=(
                 Effect("read_speed", "Reads get more of the node's time while a graph updates.",
@@ -1008,7 +1008,7 @@ _UPDATES = (
         takes_effect=_NEXT_WRITE,
         section="pacing",
         range=(0, 10),
-        unit="×",
+        unit="share",
         uses=("updates.pacingRatio", "updates.statementTargetMs"),
         legacy=Legacy(build_policy="readPressureRatio"),
         guidance=Guidance(
@@ -1673,7 +1673,7 @@ _RESIDENCY = (
                                        "in memory is queued to load, and a Standard or Coldline "
                                        "graph may be unloaded once idle."),
         audience="business",
-        question="Should this graph stay ready in memory when nobody is using it?",
+        question="Should graphs stay ready in memory when nobody is using them?",
         section="class",
         choices=(
             Choice(
@@ -3318,7 +3318,7 @@ WHY: Tuple[Why, ...] = (
     Why("switch_off", "A feature switch this setting needs is off, so it has no effect until the "
                       "switch is on."),
     Why("builds_off", "Keep serving, switch when ready needs New-version builds, which is off, so "
-                      "this graph updates in place until it is on.",
+                      "updates are written in place until it is on.",
         {"feature": "candidateKeysEnabled", "to": True}),
     Why("connected_graph", "This is a connected graph: its copy belongs to its owner, so it is never "
                            "copied or built beside, and it updates in place. Adopting it onto a "

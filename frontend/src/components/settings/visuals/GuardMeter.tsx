@@ -81,10 +81,10 @@ function Meter({ label, share, limit, nextLimit, floor = false, hit }: {
         <div>
             <div className="mb-1 flex items-baseline justify-between gap-3 text-[11.5px]">
                 <span className="font-semibold text-ink">{label}</span>
-                <span className="tabular-nums text-ink-muted">
-                    <span className={cn('font-semibold', hit ? 'text-rose-600 dark:text-rose-400' : 'text-ink-secondary')}>{formatRatio(share)}</span>
+                <span className="tabular-nums text-ink-secondary">
+                    <span className={cn('font-semibold', hit ? 'text-rose-700 dark:text-rose-400' : 'text-ink')}>{formatRatio(share)}</span>
                     {' · '}{floor ? 'stops early under' : 'stopped at'} {formatRatio(limit)}
-                    {nextLimit !== undefined && nextLimit !== limit && <span className="font-semibold text-accent-lineage"> → {formatRatio(nextLimit)}</span>}
+                    {nextLimit !== undefined && nextLimit !== limit && <span className="font-semibold text-indigo-700 dark:text-indigo-300"> → {formatRatio(nextLimit)}</span>}
                 </span>
             </div>
             <div aria-hidden className="relative h-2.5 rounded-full bg-black/[0.06] dark:bg-white/[0.08]">
@@ -129,7 +129,7 @@ export function GuardMeter({ limits, next, sample, className }: {
             caption={(
                 <>
                     A replace of {formatCount(sample.importRows, 'rows')} into a graph of {formatCount(sample.liveItems, 'items')}. {now.why}
-                    {then && <>{' '}<span className="font-medium text-accent-lineage">With your changes: {then.why}</span></>}
+                    {then && <>{' '}<span className="font-medium text-indigo-700 dark:text-indigo-300">With your changes: {then.why}</span></>}
                 </>
             )}
         >
@@ -140,7 +140,7 @@ export function GuardMeter({ limits, next, sample, className }: {
                 <Banner.icon aria-hidden className="w-4 h-4 shrink-0" />
                 {Banner.words}
             </div>
-            <p className="-mt-2 mb-4 text-[11px] text-ink-muted">Drag the handles to try another replace.</p>
+            <p className="-mt-2 mb-4 text-[11px] text-ink-secondary">Drag the handles to try another replace.</p>
             <div className="space-y-4">
                 <div className="space-y-1.5">
                     <Meter label="Deletes" share={deletes / s.live} limit={limits.deleteShare} nextLimit={changed ? next?.deleteShare : undefined}

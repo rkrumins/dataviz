@@ -101,7 +101,8 @@ async def list_graphs(
 ) -> dict:
     """The fleet inventory: one page of every versioned graph, by graph id, including the forks
     and orphans the Infrastructure projection rollup leaves out — so the ninth failing graph, a
-    fork's key or a graph whose data source was deleted can be found and acted on."""
+    fork's key or a graph whose data source was deleted can be found and acted on. ``total`` is
+    how many graphs the filters keep, on every page."""
     return await probes.list_versioned_graphs(
         provider=provider, status=status, workspace_id=workspace_id, kind=kind, q=q,
         cursor=cursor, limit=limit, read_mode=read_mode, residency=residency_class,

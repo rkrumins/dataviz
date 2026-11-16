@@ -48,7 +48,7 @@ When the value in force isn't the one chosen, the app says why:
 | Reason | What it means |
 |---|---|
 | `switch_off` | A feature switch this setting needs is off, so it has no effect until the switch is on. |
-| `builds_off` | Keep serving, switch when ready needs New-version builds, which is off, so this graph updates in place until it is on. |
+| `builds_off` | Keep serving, switch when ready needs New-version builds, which is off, so updates are written in place until it is on. |
 | `connected_graph` | This is a connected graph: its copy belongs to its owner, so it is never copied or built beside, and it updates in place. Adopting it onto a platform copy changes that. |
 | `not_used_by_mode` | Not used: the read mode in force is Always the latest, which never serves an older version. |
 | `capped_by_deployment` | Your deployment caps this value, so the cap is in force. |
@@ -182,8 +182,8 @@ How new data is written into the graph store without slowing reads.
 |---|---|---|
 | [Write target](#updates-statementtargetms) | 500 ms | Platform |
 | [Longest write](#updates-writeceilingsecs) | 10 seconds | Platform |
-| [Pause after a write](#updates-pacingratio) | 0.25× | Platform |
-| [Pause while reads wait](#updates-readpressureratio) | 2× | Platform |
+| [Pause after a write](#updates-pacingratio) | 25% | Platform |
+| [Pause while reads wait](#updates-readpressureratio) | 200% | Platform |
 | [Keep the previous copy for](#updates-retiregracesecs) | 15 minutes | Platform |
 
 ### `updates-statementTargetMs`
@@ -269,12 +269,12 @@ A write still running after this long is stopped and sent again in halves, so no
 | Fact | Value |
 |---|---|
 | Key | `updates.pacingRatio` |
-| Kind | A multiple of the write's time, 0 to 5 |
-| Default | 0.25× · environment variable `GRAPHVER_PROJECTION_PACING_RATIO` |
+| Kind | A share, 0% to 500% |
+| Default | 25% · environment variable `GRAPHVER_PROJECTION_PACING_RATIO` |
 | Set at | Platform (system administrators) |
 | Takes effect | The next write, once the worker reads its settings again, which it does as it updates each graph. |
 
-After each write the worker pauses, so reads waiting on that node go first. At 0.25 it pauses a quarter as long as the write took, at most 5 seconds; at 0 it pauses only while reads are waiting (Pause while reads wait).
+After each write the worker pauses, so reads waiting on that node go first. At 25% it pauses a quarter as long as the write took, at most 5 seconds; at 0 it pauses only while reads are waiting (Pause while reads wait).
 
 **What it changes**
 
@@ -288,7 +288,7 @@ After each write the worker pauses, so reads waiting on that node go first. At 0
 - Canvases are slow whenever a graph updates: raise it.
 - Updates take too long while reads are quiet: lower it.
 
-**Recommended:** 0.25×. Reads get a fifth of the node's time even while a graph updates, and updates still land quickly. While reads are waiting, the pause grows anyway (Pause while reads wait).
+**Recommended:** 25%. Reads get a fifth of the node's time even while a graph updates, and updates still land quickly. While reads are waiting, the pause grows anyway (Pause while reads wait).
 
 **Risk:** Low. High values slow every update; 0 lets a long update hold the node's reads.
 
@@ -307,8 +307,8 @@ After each write the worker pauses, so reads waiting on that node go first. At 0
 | Fact | Value |
 |---|---|
 | Key | `updates.readPressureRatio` |
-| Kind | A multiple of the write's time, 0 to 10 |
-| Default | 2× · environment variable `GRAPHVER_PROJECTION_READ_PRESSURE_RATIO` |
+| Kind | A share, 0% to 1000% |
+| Default | 200% · environment variable `GRAPHVER_PROJECTION_READ_PRESSURE_RATIO` |
 | Set at | Platform (system administrators) |
 | Takes effect | The next write, once the worker reads its settings again, which it does as it updates each graph. |
 
@@ -327,7 +327,7 @@ When reads on a node are queueing, the worker pauses this share of each write's 
 - Reads time out or are asked to retry while a large graph updates: raise it.
 - Updates stall during busy hours: lower it.
 
-**Recommended:** 2×. While reads wait, each write is followed by a pause twice as long, so reads get two thirds of the node's time until they catch up.
+**Recommended:** 200%. While reads wait, each write is followed by a pause twice as long, so reads get two thirds of the node's time until they catch up.
 
 **Risk:** Low. High values can hold an update back for as long as reads stay busy.
 
@@ -830,7 +830,7 @@ These settings act only while the **Graph residency** switch is on (Admin → Fe
 
 **Residency class.** Whether a graph stays in the graph store's memory when nobody reads it.
 
-*Asked as:* Should this graph stay ready in memory when nobody is using it?
+*Asked as:* Should graphs stay ready in memory when nobody is using them?
 
 | Fact | Value |
 |---|---|
@@ -2092,7 +2092,7 @@ Starting points: each profile sets the settings it covers for one outcome. Apply
 | [Read mode](#reads-mode) | Always the latest | Always the latest | Platform, Workspace, Graph |
 | [Most versions behind](#reads-maxversionsbehind) | Unlimited | Unlimited | Platform, Workspace, Graph |
 | [Write target](#updates-statementtargetms) | 500 ms | 500 ms | Platform |
-| [Pause after a write](#updates-pacingratio) | 0.25× | 0.25× | Platform |
+| [Pause after a write](#updates-pacingratio) | 25% | 25% | Platform |
 | [Rebuilds and moves too](#builds-forrebuilds) | On | On | Platform |
 | [How a build makes its copy](#builds-method) | Auto | Auto | Platform |
 | [With no room](#builds-noroom) | Wait for room | Wait for room | Platform |
@@ -2120,7 +2120,7 @@ Starting points: each profile sets the settings it covers for one outcome. Apply
 | [Read mode](#reads-mode) | Keep serving, update in place | Always the latest | Platform, Workspace, Graph |
 | [Most versions behind](#reads-maxversionsbehind) | Unlimited | Unlimited | Platform, Workspace, Graph |
 | [Write target](#updates-statementtargetms) | 250 ms | 500 ms | Platform |
-| [Pause after a write](#updates-pacingratio) | 0.5× | 0.25× | Platform |
+| [Pause after a write](#updates-pacingratio) | 50% | 25% | Platform |
 
 **What you give up:** While a large change is written, readers can see part of it before the rest, and large updates take longer to land.
 
@@ -2178,7 +2178,7 @@ Starting points: each profile sets the settings it covers for one outcome. Apply
 | Setting | It sets | Default | Set at |
 |---|---|---|---|
 | [Write target](#updates-statementtargetms) | 1 second | 500 ms | Platform |
-| [Pause after a write](#updates-pacingratio) | 0.1× | 0.25× | Platform |
+| [Pause after a write](#updates-pacingratio) | 10% | 25% | Platform |
 | [With no room](#builds-noroom) | Update in place | Wait for room | Platform |
 
 **What you give up:** Reads wait longer behind writes, and a change whose build finds no room can be seen part-way, until you apply Balanced again; the build value needs New-version builds.

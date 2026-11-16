@@ -111,7 +111,7 @@ export function NumberInput({
     const atLow = value != null && value <= lo
     const atHigh = value != null && value >= hi
     const stepperCls = cn(
-        'grid place-items-center h-full w-8 shrink-0 text-ink-muted transition-colors',
+        'grid place-items-center h-full w-8 shrink-0 text-ink-secondary transition-colors',
         'hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.06]',
         'disabled:opacity-35 disabled:hover:bg-transparent disabled:cursor-not-allowed',
     )
@@ -154,11 +154,11 @@ export function NumberInput({
                 onKeyDown={onKeyDown}
                 className={cn(
                     'h-full min-w-0 w-full flex-1 bg-transparent px-2.5 text-right tabular-nums outline-none',
-                    'placeholder:text-ink-muted disabled:cursor-not-allowed',
+                    'placeholder:text-ink-secondary disabled:cursor-not-allowed',
                     inputClassName,
                 )}
             />
-            {unit && <span className="pr-2.5 -ml-1 text-xs font-medium text-ink-muted shrink-0 select-none">{unit}</span>}
+            {unit && <span className="pr-2.5 -ml-1 text-xs font-medium text-ink-secondary shrink-0 select-none">{unit}</span>}
             {steppers && (
                 <button type="button" tabIndex={-1} aria-label={name ? `Increase ${name}` : 'Increase'}
                     disabled={off || atHigh} onClick={() => bump(step)} className={cn(stepperCls, 'border-l border-glass-border/60')}>

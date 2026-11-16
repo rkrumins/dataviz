@@ -4,7 +4,7 @@
  *   choice                cards (rich for read modes and the business lens, compact otherwise)
  *   bool                  a switch, with On / Off said in words
  *   count, days           a number with its unit noun
- *   percent, ratio        a slider and a number together; a ratio is a share (%) or a multiplier (×)
+ *   percent, ratio        a slider and a number together; a ratio reads as a share (%)
  *   ms, seconds, bytes    a number with a unit picker, stored in base units
  *   *_or_unlimited,       "Up to a limit" / "Unlimited" (or "For a set time" / "Forever"), then the
  *   days_or_forever       number; the words are values, never a magic number
@@ -27,7 +27,7 @@ import { Segmented } from '@/components/ui/Segmented'
 import { Slider } from '@/components/ui/Slider'
 import { Switch } from '@/components/ui/Switch'
 import { ChoiceCards } from './ChoiceCards'
-import { allowedChoices, boundsAt, formatValue, inheritedAt, ratioStyle, SCOPE_LABEL } from './format'
+import { allowedChoices, boundsAt, formatValue, inheritedAt, SCOPE_LABEL } from './format'
 import type { Lens } from './lens'
 import type { DimensionInfo, ResolvedSetting, Scope, Setting, SettingValue, TrailScope } from './types'
 
@@ -48,6 +48,8 @@ export interface SettingControlProps {
 
 interface Common {
     s: Setting
+    /** The scope being edited, for the words that name it. */
+    scope: Scope
     value: SettingValue | null
     onChange: (value: SettingValue | null) => void
     inherit: { scope: TrailScope; value: SettingValue }
@@ -66,12 +68,15 @@ const firstNumber = (fallback: number, ...vs: Array<SettingValue | null | undefi
     return fallback
 }
 
+/** Whose own value a change sets: the scope being edited. */
+const OWN: Record<Scope, string> = { platform: 'the platform’s own', workspace: 'this workspace’s own', graph: 'this graph’s own' }
+
 function InheritNote({ c }: { c: Common }) {
     if (c.value !== null) return null
     return (
-        <p className="mt-1.5 text-[11px] text-ink-muted">
+        <p className="mt-1.5 text-[11px] text-ink-secondary">
             {c.inherit.scope === 'default' ? 'The default' : `From the ${SCOPE_LABEL[c.inherit.scope].toLowerCase()}`}:{' '}
-            <span className="font-medium text-ink-secondary">{formatValue(c.s, c.inherit.value)}</span>. Change it to set this one’s own.
+            <span className="font-medium text-ink">{formatValue(c.s, c.inherit.value)}</span>. Change it to set {OWN[c.scope]}.
         </p>
     )
 }
@@ -83,7 +88,7 @@ function BoolControl({ c }: { c: Common }) {
             <div className="flex items-center gap-2.5">
                 <Switch size="sm" checked={on} onChange={(v) => c.onChange(v)} disabled={c.disabled}
                     aria-labelledby={c.labelledBy} aria-label={c.labelledBy ? undefined : c.s.label} aria-describedby={c.describedBy} />
-                <span className={cn('text-[13px] font-medium', on ? 'text-ink' : 'text-ink-muted')}>{on ? 'On' : 'Off'}</span>
+                <span className={cn('text-[13px] font-medium', on ? 'text-ink' : 'text-ink-secondary')}>{on ? 'On' : 'Off'}</span>
             </div>
             <InheritNote c={c} />
         </div>
@@ -106,7 +111,8 @@ function CountControl({ c, noun }: { c: Common; noun?: string }) {
                 invalid={c.invalid}
                 disabled={c.disabled}
                 aria-labelledby={c.labelledBy}
-                aria-label={c.labelledBy ? undefined : c.s.label}
+                // Its title names it (aria-labelledby wins); the label stands in where a title scrolled out of view isn't read.
+                aria-label={c.s.label}
                 aria-describedby={c.describedBy}
             />
             <InheritNote c={c} />
@@ -114,19 +120,17 @@ function CountControl({ c, noun }: { c: Common; noun?: string }) {
     )
 }
 
-/** A level: a slider and a number together. A share is shown in percent, a multiplier with ×. */
-function LevelControl({ c, mode }: { c: Common; mode: 'percent' | 'share' | 'times' }) {
+/** A level: a slider and a number together, in percent (a share is its ratio × 100). */
+function LevelControl({ c, mode }: { c: Common; mode: 'percent' | 'share' }) {
     const scale = mode === 'share' ? 100 : 1
-    const unit = mode === 'times' ? '×' : '%'
-    const step = mode === 'times' ? 0.05 : 1
     const lo = (c.bounds.min ?? 0) * scale
-    const hi = c.bounds.max !== undefined ? c.bounds.max * scale : mode === 'times' ? 4 : 100
+    const hi = c.bounds.max !== undefined ? c.bounds.max * scale : 100
     const scaled = (v: number) => Number((v * scale).toFixed(4))
     const own = num(c.value)
     const shown = scaled(own ?? num(c.inherit.value) ?? lo / scale)
     const rec = num(c.s.guidance.recommended.value)
-    const words = (v: number) => (mode === 'times' ? `×${formatNumber(v)}` : `${formatNumber(v)}%`)
-    const send = (v: number | null) => c.onChange(v === null ? null : Number((v / scale).toFixed(mode === 'times' ? 2 : 4)))
+    const words = (v: number) => `${formatNumber(v)}%`
+    const send = (v: number | null) => c.onChange(v === null ? null : Number((v / scale).toFixed(4)))
     return (
         <div className="w-full">
             <div className="flex items-center gap-3">
@@ -136,7 +140,7 @@ function LevelControl({ c, mode }: { c: Common; mode: 'percent' | 'share' | 'tim
                     onChange={send}
                     min={lo}
                     max={hi}
-                    step={step}
+                    step={1}
                     format={words}
                     marks={rec !== null ? [{ value: scaled(rec), label: 'Recommended' }] : []}
                     disabled={c.disabled}
@@ -152,9 +156,9 @@ function LevelControl({ c, mode }: { c: Common; mode: 'percent' | 'share' | 'tim
                     placeholder={formatNumber(shown)}
                     min={lo}
                     max={hi}
-                    step={step}
-                    decimals={mode === 'times' ? 2 : 1}
-                    unit={unit}
+                    step={1}
+                    decimals={1}
+                    unit="%"
                     steppers={false}
                     name={c.s.label}
                     invalid={c.invalid}
@@ -240,7 +244,7 @@ function IdentifierControl({ c }: { c: Common }) {
                 onChange={(k) => set(k)}
                 options={MATCH_KINDS.map((m) => ({ value: m.kind, label: m.label, disabled: c.disabled }))}
             />
-            <p className="text-[11px] leading-relaxed text-ink-muted">{MATCH_KINDS.find((m) => m.kind === match.kind)?.help}</p>
+            <p className="text-[11px] leading-relaxed text-ink-secondary">{MATCH_KINDS.find((m) => m.kind === match.kind)?.help}</p>
             {match.kind === 'prop' && (
                 <div className="space-y-2">
                     <Input
@@ -262,7 +266,7 @@ function IdentifierControl({ c }: { c: Common }) {
                 </div>
             )}
             {c.value === null && (
-                <p className="text-[11px] text-ink-muted">
+                <p className="text-[11px] text-ink-secondary">
                     {c.inherit.scope === 'default' ? 'The default' : `From the ${SCOPE_LABEL[c.inherit.scope].toLowerCase()}`}: {identifierLabel(String(c.inherit.value))}.
                 </p>
             )}
@@ -310,7 +314,7 @@ export function SettingControl({
     'aria-labelledby': labelledBy, 'aria-describedby': describedBy,
 }: SettingControlProps) {
     const inherit = resolved ? inheritedAt(resolved, scope) : { scope: 'default' as const, value: s.default.code }
-    const c: Common = { s, value, onChange, inherit, bounds: boundsAt(s, resolved, scope), disabled, invalid, labelledBy, describedBy }
+    const c: Common = { s, scope, value, onChange, inherit, bounds: boundsAt(s, resolved, scope), disabled, invalid, labelledBy, describedBy }
     const unit = s.unit ?? undefined
 
     switch (s.kind) {
@@ -336,7 +340,7 @@ export function SettingControl({
         case 'count': return <CountControl c={c} noun={unit} />
         case 'days': return <CountControl c={c} noun="days" />
         case 'percent': return <LevelControl c={c} mode="percent" />
-        case 'ratio': return <LevelControl c={c} mode={ratioStyle(s) === 'times' ? 'times' : 'share'} />
+        case 'ratio': return <LevelControl c={c} mode="share" />
         case 'ms': return <QuantityControl c={c} units={MS_UNITS} unitNames={{ ms: 'milliseconds', s: 'seconds', min: 'minutes' }} />
         case 'seconds': return <QuantityControl c={c} units={DURATION_UNITS} unitNames={DURATION_UNIT_NAMES} />
         case 'bytes': return <QuantityControl c={c} units={BYTE_UNITS} />
@@ -345,6 +349,6 @@ export function SettingControl({
         case 'bytes_or_unlimited': return <OrWordControl c={c} word="unlimited" quantity />
         case 'identifier': return <IdentifierControl c={c} />
         case 'refusal_budget': return <RefusalBudgetControl c={c} />
-        default: return <p className="text-xs text-ink-muted">{formatValue(s, value ?? inherit.value)}</p>
+        default: return <p className="text-xs text-ink-secondary">{formatValue(s, value ?? inherit.value)}</p>
     }
 }

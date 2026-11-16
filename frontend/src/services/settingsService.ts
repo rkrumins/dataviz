@@ -352,6 +352,8 @@ export interface GraphInventoryFilter extends VersionedGraphsFilter {
 export interface GraphInventoryPage {
     graphs: VersionedGraphRow[]
     nextCursor: string | null
+    /** How many graphs the filters keep, on every page; absent from a server that doesn't count them. */
+    total?: number
 }
 
 /** One setting at a graph, in brief: the value in force, the one chosen, where it came from, and why they differ. */

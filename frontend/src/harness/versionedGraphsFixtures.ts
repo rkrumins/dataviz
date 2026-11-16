@@ -14,7 +14,7 @@
  *   conflict         every save is refused: someone changed a value meanwhile
  */
 import {
-    BRANCHES, COMMITS, FEATURES, FORK_HEALTH, FORK_IMPORT_SETTINGS, FORKS, GRAPHS, HEALTH, HISTORY, IMPORT_SETTINGS,
+    BRANCHES, COMMITS, FEATURES, FORK_HEALTH, FORK_IMPORT_SETTINGS, FORKS, GRAPHS, GRAPHS_TOTAL, HEALTH, HISTORY, IMPORT_SETTINGS,
     OPERATOR_SCHEMA, PROVIDERS, RESOLVED, SCHEMA, SUMMARY, TOPOLOGY, WATERMARK, WORKSPACE_GRAPHS, WORKSPACE_HISTORY,
     WS, GRAPH, ROOT,
     graphValues, platformValues, preview, workspaceImpact, workspaceValues,
@@ -93,7 +93,7 @@ export function versionedGraphsFetch(scenario: Scenario): typeof fetch {
         if (p.endsWith('/admin/versioning/graphs')) {
             if (scenario === 'loading') return never()
             if (scenario === 'error') return failed('The graph store didn’t answer in time')
-            return json({ graphs: scenario === 'empty' ? [] : GRAPHS, nextCursor: scenario === 'empty' ? null : 'graph_ship' })
+            return json({ graphs: scenario === 'empty' ? [] : GRAPHS, nextCursor: scenario === 'empty' ? null : 'graph_ship', total: scenario === 'empty' ? 0 : GRAPHS_TOTAL })
         }
 
         if (p.endsWith('/admin/versioning/settings/preview')) return json(preview(body.changes ?? [], url.searchParams.get('mode') === 'full' ? 'full' : 'quick'))
