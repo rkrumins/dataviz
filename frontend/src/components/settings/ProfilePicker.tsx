@@ -277,7 +277,7 @@ export function ProfilePicker({ profiles, scope, editor, resolved, onStage, onCl
                 </section>
             )}
 
-            <div className="sticky bottom-0 z-10 -mx-1 flex flex-wrap items-center justify-end gap-x-3 gap-y-2 rounded-xl border border-glass-border/60 bg-canvas-elevated/95 px-3 py-2.5 backdrop-blur-md">
+            <div className="sticky bottom-0 z-10 -mx-1 flex flex-wrap items-center justify-end gap-x-3 gap-y-2 rounded-xl border border-glass-border/60 bg-canvas-elevated px-3 py-2.5">
                 <p aria-live="polite" className="mr-auto min-w-0 text-xs text-ink-muted">
                     {picked && <span className="sr-only">{picked.title}: </span>}
                     {plan && plan.stage.length > 0
