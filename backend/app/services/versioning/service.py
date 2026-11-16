@@ -593,6 +593,18 @@ _DRAFT_ROWS: Tuple[Tuple[str, str], ...] = (
     ("node_versions", "graph_id, branch_id, commit_seq"),
 )
 
+
+def _of_workspaces(graph_id, workspace_ids: Optional[Collection[str]],
+                   except_ids: Collection[str]) -> List[Any]:
+    """What keeps a sweep to the graphs (``graph_id``, a column) of ``workspace_ids`` (None: any)
+    and of none of ``except_ids``: the graph store can't join the workspaces whose settings decide."""
+    where: List[Any] = []
+    if workspace_ids is not None:
+        where.append(graph_id.in_(select(GraphORM.id).where(GraphORM.workspace_id.in_(workspace_ids))))
+    if except_ids:
+        where.append(graph_id.not_in(select(GraphORM.id).where(GraphORM.workspace_id.in_(except_ids))))
+    return where
+
 # Commit kinds a machine writes; every other kind on main is a person's work. The same split
 # lifecycle.py uses. The sync curation guard reads it (see _human_commit_in_sync_base).
 _MACHINE_COMMIT_KINDS = ("genesis", "import", "sync")
@@ -3056,18 +3068,20 @@ class GraphVersioningService:
             return self._branch_meta(branch)
 
     async def sweep_idle_drafts(
-        self, *, now: Optional[datetime] = None, ttl_days: Optional[int] = None,
+        self, *, ttl_days: int, now: Optional[datetime] = None,
+        workspace_ids: Optional[Collection[str]] = None, except_workspace_ids: Collection[str] = (),
     ) -> List[str]:
-        """Auto-abandon open drafts idle past the TTL (plan §17 #8) and return the
-        ids swept. One ``UPDATE … RETURNING`` — O(stale), atomic. Only ``open``
-        drafts/fork-drafts are touched; ``main`` and terminal branches are left be.
+        """Auto-abandon open drafts idle past the TTL, ``ttl_days`` (``drafts.idleCloseDays``;
+        plan §17 #8), and return the ids swept. One ``UPDATE … RETURNING`` — O(stale), atomic.
+        Only ``open`` drafts/fork-drafts are touched; ``main`` and terminal branches are left be.
         ``updated_at`` is the idle clock (bumped by checkpoint/publish/abandon).
         An idle draft still in use is kept: one with a live PR, staged (uncheckpointed)
         work, or on a deleted graph (its purge owns it). A ``publishing`` draft is not open.
         Nor is a frozen graph's draft touched — nobody can edit it — and its clock restarts at
-        the unfreeze (``lifecycle_changed_at``), so a freeze never costs a draft."""
-        ttl = config.DRAFT_TTL_DAYS if ttl_days is None else ttl_days
-        cutoff = ((now or datetime.now(timezone.utc)) - timedelta(days=ttl)).isoformat()
+        the unfreeze (``lifecycle_changed_at``), so a freeze never costs a draft. Only the drafts
+        of graphs in ``workspace_ids`` (None: any) and in none of ``except_workspace_ids``: the
+        worker's sweep runs once per window (``settings.effective.by_workspace``)."""
+        cutoff = ((now or datetime.now(timezone.utc)) - timedelta(days=ttl_days)).isoformat()
         live_pr = select(1).where(MergeRequestORM.source_branch_id == BranchORM.id,
                                   MergeRequestORM.status.not_in(_TERMINAL_PR_STATUS))
         staged = select(1).where(WorkingChangeORM.graph_id == BranchORM.graph_id,
@@ -3084,6 +3098,7 @@ class GraphVersioningService:
                     BranchORM.status == "open",
                     BranchORM.updated_at < cutoff,
                     ~live_pr.exists(), ~staged.exists(), ~held.exists(),
+                    *_of_workspaces(BranchORM.graph_id, workspace_ids, except_workspace_ids),
                 )
                 .values(status="abandoned", updated_at=_now())
                 .returning(BranchORM.id)
@@ -3120,6 +3135,7 @@ class GraphVersioningService:
     async def prune_closed_drafts(
         self, *, older_than_days: int, budget_secs: Optional[float] = None,
         now: Optional[datetime] = None, graph_id: Optional[str] = None,
+        workspace_ids: Optional[Collection[str]] = None, except_workspace_ids: Collection[str] = (),
     ) -> List[str]:
         """Remove the changes of drafts merged or abandoned more than ``older_than_days`` ago, and
         return the ids of those whose removal finished. A merged draft's changes are in ``main`` —
@@ -3138,7 +3154,10 @@ class GraphVersioningService:
         Spends at most ``budget_secs`` (``DRAFT_PRUNE_PASS_SECS``): a removal cut off is carried on
         first by the next pass, wherever it runs. Two workers on one draft only repeat each
         other's deletes; it is called finished only once none of its rows is found. ``graph_id``
-        keeps the pass to one graph's drafts."""
+        keeps the pass to one graph's drafts. ``workspace_ids`` (None: any) and
+        ``except_workspace_ids`` keep the drafts it newly takes to some workspaces' graphs, for the
+        worker's sweep, which runs once per window (``settings.effective.by_workspace``); a
+        removal already under way is finished whoever's it is."""
         from .purge_worker import delete_window
 
         deadline = time.monotonic() + (config.DRAFT_PRUNE_PASS_SECS if budget_secs is None
@@ -3157,6 +3176,7 @@ class GraphVersioningService:
             b.kind.in_(("draft", "fork_draft")), b.status.in_(("merged", "abandoned")),
             b.pruned_at.is_(None), b.updated_at < cutoff,
             ~live_pr.exists(), ~live_job.exists(), ~held.exists(),
+            *_of_workspaces(b.graph_id, workspace_ids, except_workspace_ids),
         ).order_by(b.updated_at).limit(1).with_for_update(skip_locked=True))
         under_way = select(BranchORM.id, BranchORM.graph_id).where(
             BranchORM.pruned_at.isnot(None), BranchORM.prune_finished_at.is_(None),
@@ -3539,10 +3559,26 @@ class GraphVersioningService:
     # ------------------------------------------------------------------ #
     # Forking + pull requests (copy-on-write — plan §8, §12.5)            #
     # ------------------------------------------------------------------ #
+    @staticmethod
+    async def _forks_allowed(s, parent: GraphORM) -> int:
+        """How many live forks ``parent`` may have (``forks.maxPerGraph``): its graph's value (a
+        fork's, its root's), else its workspace's, else the platform's, as this process last read
+        them. Its callers refresh them before they lock."""
+        from backend.app.services.settings import effective
+
+        root = parent
+        while root.fork_parent_graph_id:
+            above = await s.get(GraphORM, root.fork_parent_graph_id)
+            if above is None:
+                break
+            root = above
+        return effective.value("forks.maxPerGraph", workspace_id=parent.workspace_id,
+                               graph_id=root.data_source_id)
+
     async def _fork_slot(self, s, parent_graph_id: str) -> Optional[GraphORM]:
         """The live parent a new fork may read, or None when it is missing or trashed. Its row
         is read FOR KEY SHARE, so a purge being queued (FOR UPDATE) finishes first and is seen,
-        or waits and counts the fork. At most ``config.MAX_FORKS_PER_GRAPH`` live forks
+        or waits and counts the fork. At most :meth:`_forks_allowed` live forks
         (:class:`ForkLimit`); the caller holds the parent's graph lock, so the count and the
         insert are one step."""
         parent = (await self._bounded_lock(s, select(GraphORM).where(
@@ -3553,8 +3589,9 @@ class GraphVersioningService:
             return None
         live_forks = await s.scalar(select(func.count()).select_from(GraphORM).where(
             GraphORM.fork_parent_graph_id == parent_graph_id, GraphORM.deleted_at.is_(None)))
-        if live_forks >= config.MAX_FORKS_PER_GRAPH:
-            raise ForkLimit(config.MAX_FORKS_PER_GRAPH)
+        limit = await self._forks_allowed(s, parent)
+        if live_forks >= limit:
+            raise ForkLimit(limit)
         return parent
 
     async def fork_preflight(self, *, parent_graph_id: str, workspace_id: str) -> None:
@@ -3562,6 +3599,9 @@ class GraphVersioningService:
         it writes anything of its own: a parent that is missing, trashed or in another workspace
         (``ValueError``), one whose editing is paused (:class:`GraphNotWritable`), or one at its
         fork cap (:class:`ForkLimit`). fork_graph checks all of it again under the parent's lock."""
+        from backend.app.services.settings import effective
+
+        await effective.refresh()
         async with self._session() as s:
             parent = await s.get(GraphORM, parent_graph_id)
             if parent is None or parent.deleted_at is not None or parent.workspace_id != workspace_id:
@@ -3570,8 +3610,9 @@ class GraphVersioningService:
                 raise GraphNotWritable(parent.lifecycle_state)
             live_forks = await s.scalar(select(func.count()).select_from(GraphORM).where(
                 GraphORM.fork_parent_graph_id == parent_graph_id, GraphORM.deleted_at.is_(None)))
-            if live_forks >= config.MAX_FORKS_PER_GRAPH:
-                raise ForkLimit(config.MAX_FORKS_PER_GRAPH)
+            limit = await self._forks_allowed(s, parent)
+            if live_forks >= limit:
+                raise ForkLimit(limit)
 
     async def fork_graph(
         self,
@@ -3590,10 +3631,13 @@ class GraphVersioningService:
         ``data_source_id`` is the fork's data source, the ``dsfork_…`` id of the row the route
         made for it; one is minted when it is left out.
 
-        At most ``config.MAX_FORKS_PER_GRAPH`` live forks per parent (:class:`ForkLimit`), and
-        none of a trashed parent (:meth:`_fork_slot`)."""
+        At most ``forks.maxPerGraph`` live forks per parent (:class:`ForkLimit`), and none of a
+        trashed parent (:meth:`_fork_slot`)."""
+        from backend.app.services.settings import effective
+
         if data_source_id is not None and not data_source_id.startswith("dsfork_"):
             raise ValueError(f"a fork's data source id starts with dsfork_, not {data_source_id!r}")
+        await effective.refresh()                   # before the lock: the fork cap is read under it
         async with self._session() as s:
             await self._lock_graph(s, parent_graph_id)
             parent = await self._fork_slot(s, parent_graph_id)
@@ -3699,7 +3743,7 @@ class GraphVersioningService:
     async def delete_fork(self, *, graph_id: str, workspace_id: str, actor: str) -> str:
         """Move a fork to the trash; returns its parent's id. Its drafts and pull requests are
         kept, and it can be restored (:meth:`restore_fork`) until a purge of it is queued: by
-        the reaper once ``config.PURGE_GRACE_DAYS`` have passed, or by its parent's purge, which
+        the reaper once ``trash.restoreDays`` have passed, or by its parent's purge, which
         takes it along. Refused while its pull request into the parent is live
         (:class:`PullRequestExists`) or forks of its own are (:class:`LiveForks`). The row is
         held FOR UPDATE, so an open_pr or fork_graph on it (FOR KEY SHARE) is seen or sees us."""
@@ -3723,6 +3767,9 @@ class GraphVersioningService:
         Refused once a purge of it exists (:class:`ForkNotRestorable` ``purging``), while its
         parent is missing or trashed (``parent_deleted``), and at the parent's fork cap
         (:class:`ForkLimit`), counted under the parent's graph lock as fork_graph counts."""
+        from backend.app.services.settings import effective
+
+        await effective.refresh()                   # before the lock: the fork cap is read under it
         async with self._session() as s:
             f = await s.get(GraphORM, graph_id)
             if f is None or f.workspace_id != workspace_id:
@@ -3750,8 +3797,11 @@ class GraphVersioningService:
     async def list_forks(self, *, graph_id: str, workspace_id: str, limit: int) -> List[dict]:
         """A graph's direct forks, newest first, live and trashed: when a trashed one was
         deleted and by whom, whether its purge is queued (no undo then), and when its undo
-        window (``config.PURGE_GRACE_DAYS``) ends. A live one says how far it is from this graph
-        (:meth:`_fork_distance`)."""
+        window (``trash.restoreDays``, its workspace's) ends. A live one says how far it is from
+        this graph (:meth:`_fork_distance`)."""
+        from backend.app.services.settings import effective
+
+        restore_days = await effective.value_of("trash.restoreDays", workspace_id=workspace_id)
         purging = select(JobORM.id).where(JobORM.job_type == PURGE_JOB_TYPE,
                                           JobORM.graph_id == GraphORM.id).exists()
         async with self._session() as s:
@@ -3766,7 +3816,7 @@ class GraphVersioningService:
             **self._graph_meta(g), "deleted_at": g.deleted_at, "deleted_by": g.deleted_by,
             "purging": bool(p),
             "purge_after": (datetime.fromisoformat(g.deleted_at)
-                            + timedelta(days=config.PURGE_GRACE_DAYS)).isoformat()
+                            + timedelta(days=restore_days)).isoformat()
             if g.deleted_at else None,
             **distance.get(g.id, dict.fromkeys(_FORK_DISTANCE)),
         } for g, p in rows]

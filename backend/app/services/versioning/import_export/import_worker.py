@@ -239,15 +239,14 @@ def refused_budget(value: Optional[str]) -> str:
     """``maxRefusedRows`` as an import takes it, checked: how many of its file's rows may be refused
     before the import holds — ``0``, none (the default); a count, ``100``; a share of the file's
     rows, ``0.5%``; or ``-1``, any. Raises ``ValueError``, saying what it may be. ``None`` is the
-    platform's (``IMPORT_MAX_REFUSED_ROWS``); one that isn't a limit holds on any refused row,
-    rather than stop every import."""
+    platform's (``imports.maxRefusedRows``, as this process last read it). The environment's
+    ``IMPORT_MAX_REFUSED_ROWS``, when it isn't a limit, holds on any refused row rather than stop
+    every import."""
     if value is None:
-        try:
-            return _checked_budget(config.IMPORT_MAX_REFUSED_ROWS)
-        except ValueError:
-            logger.warning("IMPORT_MAX_REFUSED_ROWS=%r isn't a limit: imports hold on any refused row",
-                           config.IMPORT_MAX_REFUSED_ROWS)
-            return "0"
+        from backend.app.services.settings import effective, registry, resolver
+
+        return resolver.encode(registry().BY_KEY["imports.maxRefusedRows"],
+                               effective.value("imports.maxRefusedRows"))
     return _checked_budget(str(value))
 
 
@@ -396,30 +395,39 @@ class IdentifierMatchedNothing(Exception):
 
 
 def platform_limits() -> Dict[str, Any]:
-    """The replace guard's limits as the platform sets them (``IMPORT_REPLACE_*``): a job made
-    before its data source's were kept on it runs under these."""
-    limits = {"minLive": config.IMPORT_REPLACE_GUARD_MIN_LIVE,
-              "deleteFraction": config.IMPORT_REPLACE_GUARD_DELETE_FRACTION,
-              "createFraction": config.IMPORT_REPLACE_GUARD_CREATE_FRACTION,
-              "minMatchFraction": config.IMPORT_REPLACE_MIN_MATCH_FRACTION}
+    """The replace guard's limits as the platform sets them (``imports.guardMinLive``,
+    ``imports.guardDeleteShare``, ``imports.guardCreateShare``, ``imports.minMatchShare``, as this
+    process last read them): a job made before its data source's were kept on it runs under
+    these."""
+    from backend.app.services.settings import effective
+
+    limits = {"minLive": effective.value("imports.guardMinLive"),
+              "deleteFraction": effective.value("imports.guardDeleteShare"),
+              "createFraction": effective.value("imports.guardCreateShare"),
+              "minMatchFraction": effective.value("imports.minMatchShare")}
     return {**limits, "sources": dict.fromkeys(limits, "platform")}
 
 
 def replace_verdict(live: int, deletes: int, creates: int, *, allowed: bool,
-                    limits: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """The replace guard (``IMPORT_REPLACE_GUARD``) on a scope of ``live`` entities, before the
-    import, from which a replace would delete ``deletes`` and into which it made ``creates`` (with
-    its refused rows that matched nothing, which the identifier found no entity for, as a create):
-    ``state`` ``off`` (the guard is off), ``passed``, ``overridden`` (past the limits, and sent with
-    allowMassDelete) or ``blocked``, with the counts, the limits in force (``limits``: the job's,
-    its data source's or the platform's, else the platform's) and where each came from."""
+                    limits: Optional[Dict[str, Any]] = None,
+                    guard: Optional[bool] = None) -> Dict[str, Any]:
+    """The replace guard on a scope of ``live`` entities, before the import, from which a replace
+    would delete ``deletes`` and into which it made ``creates`` (with its refused rows that matched
+    nothing, which the identifier found no entity for, as a create): ``state`` ``off`` (the guard,
+    ``guard``, is off), ``passed``, ``overridden`` (past the limits, and sent with allowMassDelete)
+    or ``blocked``, with the counts, the limits in force and where each came from. ``limits`` and
+    ``guard`` are the job's, kept from its graph's; left out, the platform's
+    (``imports.replaceGuard``)."""
+    from backend.app.services.settings import effective
+
     limits = limits or platform_limits()
+    guard = effective.value("imports.replaceGuard") if guard is None else guard
     names = ("minLive", "deleteFraction", "createFraction")
     in_force = {name: limits[name] for name in names}
     past = (live > 0 and live >= in_force["minLive"]
             and deletes >= in_force["deleteFraction"] * live
             and creates >= in_force["createFraction"] * live)
-    state = ("off" if not config.IMPORT_REPLACE_GUARD else "passed" if not past
+    state = ("off" if not guard else "passed" if not past
              else "overridden" if allowed else "blocked")
     sources = limits.get("sources") or {}
     return {"state": state, "live": live, "deletes": deletes, "creates": creates,
@@ -605,9 +613,12 @@ class ImportWorker:
         # What a replace may delete: "all" in its scope the file leaves out, or "keyed" — by a
         # property, only the nodes that hold it, and the edges between two of them.
         self._replace_scope = "all"
-        # The replace guard's and fail-fast's limits: the job's (its data source's or the
-        # platform's, when it was made), with where each came from.
+        # The replace guard's and fail-fast's limits, and the guard's switch: the job's (its graph's
+        # when it was made), with where each came from; a switch the job doesn't keep is the
+        # platform's. The most properties its graph's imports may match by, likewise.
         self._limits: Dict[str, Any] = platform_limits()
+        self._guard: Optional[bool] = None
+        self._max_properties: Optional[int] = None
         # identifier=prop.<name>: the property, and the nodes the draft holds a value of it for
         # beyond what main's index says (its own changes, this job's windows, and the nodes main
         # changed after the draft's base), both ways; and the main commit those last are read to
@@ -644,6 +655,8 @@ class ImportWorker:
         self._limits = (job.get("import_settings") or {}).get("replaceLimits") or platform_limits()
         self._refused_budget = refused_budget((job.get("import_settings") or {}).get("maxRefusedRows"))
         self._replace_scope = (job.get("import_settings") or {}).get("replaceScope") or "all"
+        self._guard = (job.get("import_settings") or {}).get("replaceGuard")
+        self._max_properties = (job.get("import_settings") or {}).get("maxMatchingProperties")
         actor = await self._branch_owner(graph_id, branch_id)
         self._source = (job["source_uri"], job["import_format"])
 
@@ -1106,7 +1119,7 @@ class ImportWorker:
     async def _fail_fast(self, job_id: str, snap) -> None:
         """After a replace's first node window, however many rows it holds: stop
         (:class:`IdentifierMatchedNothing`) when fewer than the job's ``minMatchFraction``
-        (``IMPORT_REPLACE_MIN_MATCH_FRACTION``, or its data source's) of the rows decided so far
+        (its graph's, kept on the job: ``imports.minMatchShare``) of the rows decided so far
         found an entity, in a graph whose main as the draft reads it (a fork's with its parent's)
         holds at least its ``minLive``, rather than read the rest of the file and have the replace
         guard refuse it at the end. By a property alone, the message says how many of the rows
@@ -1175,7 +1188,7 @@ class ImportWorker:
         # budget let its refused rows through, instead of deleting its scope and making nothing.
         unmatched = await self._refused_unmatched(job_id)
         verdict = replace_verdict(before, absent, creates + unmatched, allowed=self._allow_mass_delete,
-                                  limits=self._limits)
+                                  limits=self._limits, guard=self._guard)
         if unmatched:
             verdict["refusedUnmatched"] = unmatched
         if keyed:
@@ -1188,8 +1201,9 @@ class ImportWorker:
         if verdict["state"] != "blocked":
             return
         limits = verdict["limits"]
-        whose = ("this data source's" if "data_source" in verdict["sources"].values()
-                 else "the platform's")
+        sources = verdict["sources"].values()
+        whose = ("this data source's" if "data_source" in sources
+                 else "this workspace's" if "workspace" in sources else "the platform's")
         prop = self._prop
         raise ReplaceBlocked(
             f"Nothing was deleted: this replace would delete {absent:,} of the {verdict['live']:,} "
@@ -1240,7 +1254,7 @@ class ImportWorker:
         if not self._prop:
             return
         if build:
-            await matching.ensure(graph_id, self._prop, job_id=job_id)
+            await matching.ensure(graph_id, self._prop, job_id=job_id, limit=self._max_properties)
         else:
             await matching.ensure_ready(graph_id, self._prop)
         self._prop_of, self._prop_holders = {}, {}

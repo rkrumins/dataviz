@@ -175,7 +175,7 @@ async def test_the_worker_sweeps_the_store_daily(monkeypatch):
             return 0
 
     class _Versioning:
-        async def sweep_idle_drafts(self):
+        async def sweep_idle_drafts(self, **_window):
             return []
 
     async def _settle(_versioning):

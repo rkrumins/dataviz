@@ -115,6 +115,7 @@ tests/integration/test_revision_overlay_reads.py
 tests/integration/test_rollup_delta_staging.py
 tests/integration/test_route_cache_e2e.py
 tests/integration/test_seed_identity.py
+tests/integration/test_settings_consumers_live.py
 tests/integration/test_settings_import_live.py
 tests/integration/test_settings_legacy_routes_live.py
 tests/integration/test_settings_store_live.py

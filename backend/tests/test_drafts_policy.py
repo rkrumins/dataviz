@@ -2,12 +2,16 @@
 may have, and whether the person who opened a review may approve or merge it.
 
 * Each field resolves on its own: the data source's override, else its workspace's setting, else
-  the built-in default (public, any, allowed, allowed), and says which level it came from.
+  the built-in default (public, any, allowed, allowed), and says which level it came from. The
+  values live in the settings store (``tests/common/settings_world.py`` stands in for it); a
+  fork's are its root's. The old columns resolve by the same rule (``drafts_policy.resolve``).
 * A level that is the only one allowed is also where a new draft starts.
 * Workspace admins set the policy for their workspace and for each of its data sources; anyone
   who reads a data source reads it. None of it is on the API-key surface.
-* A real change is recorded in the activity log once, with what it was and what it became; saving
-  what is already there records nothing. ``"inherit"`` clears a field, and a field left out stays.
+* A real change is saved through the store (``legacy_api``, with the stated reason), written
+  through to the old columns, a data source's forks' too, and recorded in the activity log once,
+  with what it was and what it became; saving what is already there records nothing.
+  ``"inherit"`` clears a field, and a field left out stays.
 """
 from __future__ import annotations
 
@@ -118,7 +122,7 @@ async def _recorded(db_session) -> list[dict]:
 
 @pytest.mark.asyncio
 async def test_a_workspace_sets_its_policy_and_a_change_is_recorded_once(
-        test_client, db_session, estate, versioning_on):
+        test_client, db_session, estate, versioning_on, settings_world):
     base = "/api/v1/ws_1/versioning/drafts-policy"
     start = await test_client.get(base)
     assert start.status_code == 200, start.text
@@ -153,7 +157,8 @@ async def test_a_workspace_sets_its_policy_and_a_change_is_recorded_once(
 
 
 @pytest.mark.asyncio
-async def test_a_data_source_overrides_its_workspace(test_client, db_session, estate, versioning_on):
+async def test_a_data_source_overrides_its_workspace(test_client, db_session, estate, versioning_on,
+                                                     settings_world):
     await test_client.put("/api/v1/ws_1/versioning/drafts-policy", json={"selfMerge": False})
     path = "/api/v1/ws_1/versioning/data-sources/ds_1/drafts-policy"
     changed = await test_client.put(path, json={"levels": "private_only"})
@@ -183,15 +188,63 @@ async def test_a_data_source_of_another_workspace_is_not_found(
 
 
 @pytest.mark.asyncio
-async def test_load_reads_the_source_and_its_workspace(db_session, estate):
-    ds = await db_session.get(WorkspaceDataSourceORM, "ds_1")
-    ds.review_self_approval = False
-    await db_session.flush()
+async def test_load_reads_the_source_and_its_workspace(db_session, estate, settings_world):
+    settings_world.set("drafts.selfApproval", "graph", "ds_1", False)
     policy = await drafts_policy.load(db_session, "ds_1")
     assert (policy.self_approval, dict(policy.sources)["selfApproval"]) == (False, "data_source")
     with pytest.raises(LookupError):
         await drafts_policy.load(db_session, "ds_missing")
     assert V.get_workspace_drafts_policy is not None
+
+
+@pytest.mark.asyncio
+async def test_a_workspace_value_reaches_a_graph_without_its_own_and_a_fork_follows_its_root(
+        db_session, estate, settings_world):
+    from backend.app.services import fork_sources
+    db_session.add(fork_sources.fork_row(await db_session.get(WorkspaceDataSourceORM, "ds_1"),
+                                         ds_id="dsfork_1", name="try", parent_graph_id="g_0",
+                                         actor="u"))
+    await db_session.commit()
+    settings_world.set("drafts.levels", "workspace", "ws_1", "private_only")
+    policy = await drafts_policy.load(db_session, "ds_1")
+    assert (policy.levels, policy.default_visibility) == ("private_only", "private")
+    assert dict(policy.sources) == {"levels": "workspace", "defaultVisibility": "workspace",
+                                    "selfApproval": "default", "selfMerge": "default"}
+    assert (await drafts_policy.load(db_session, "ds_9")).levels == "any", "another workspace's"
+    assert (await drafts_policy.effective("ws_1")).levels == "private_only"
+    settings_world.set("drafts.levels", "graph", "ds_1", "public_only")    # its own wins
+    assert (await drafts_policy.load(db_session, "ds_1")).levels == "public_only"
+    fork = await drafts_policy.load(db_session, "dsfork_1")
+    assert (fork.levels, dict(fork.sources)["levels"]) == ("public_only", "data_source")
+
+
+@pytest.mark.asyncio
+async def test_a_change_is_saved_through_the_store_and_written_through_to_the_old_columns(
+        test_client, db_session, estate, versioning_on, settings_world):
+    from backend.app.services import fork_sources
+    db_session.add(fork_sources.fork_row(await db_session.get(WorkspaceDataSourceORM, "ds_1"),
+                                         ds_id="dsfork_1", name="try", parent_graph_id="g_0",
+                                         actor="u"))
+    await db_session.commit()
+    path = "/api/v1/ws_1/versioning/data-sources/ds_1/drafts-policy"
+    changed = await test_client.put(path, json={"levels": "private_only"},
+                                    headers={"X-Activity-Reason": "Keep drafts private"})
+    assert changed.status_code == 200, changed.text
+    [saved] = settings_world.saves
+    assert (saved.source, saved.actor, saved.reason) == (
+        "legacy_api", "usr_test000000", "Keep drafts private")
+    assert [(a.key, a.scope, a.scope_id, a.after_value) for a in saved.applied] == [
+        ("drafts.levels", "graph", "ds_1", "private_only")]
+    columns = {r.id: r.draft_levels for r in (await db_session.execute(
+        select(WorkspaceDataSourceORM).execution_options(populate_existing=True))).scalars()}
+    assert (columns["ds_1"], columns["dsfork_1"]) == ("private_only", "private_only")
+    # A fork's are its parent's: refused, and nothing saved.
+    fork = await test_client.put("/api/v1/ws_1/versioning/data-sources/dsfork_1/drafts-policy",
+                                 json={"levels": "any"})
+    assert fork.status_code == 409 and fork.json()["detail"]["type"] == "fork_settings_follow_parent"
+    assert len(settings_world.saves) == 1 and len(await _recorded(db_session)) == 1
+    follows = (await test_client.get("/api/v1/ws_1/versioning/data-sources/dsfork_1/drafts-policy"))
+    assert follows.json()["overrides"]["levels"] == "private_only"
 
 
 #: Every call that can open a draft, and the keyword that carries the level it opens it at.

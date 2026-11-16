@@ -132,6 +132,9 @@ class SettingsWorld:
             self._moved()
         return change_set
 
+    async def lock(self, session, domain: str) -> None:
+        """``store.lock``: one test, one writer."""
+
     # ── The store's reads ─────────────────────────────────────────────────────────────────────────
     def _rows(self, keep) -> List[Row]:
         return sorted((r for r in self.rows.values() if keep(r)), key=lambda r: r.rev)
@@ -154,7 +157,7 @@ class SettingsWorld:
 
     def install_store(self, monkeypatch) -> None:
         """This world in place of the store's writes and reads."""
-        for name in ("apply", "read_domain", "read_since", "read_scope"):
+        for name in ("apply", "lock", "read_domain", "read_since", "read_scope"):
             monkeypatch.setattr(store, name, getattr(self, name))
 
 

@@ -2033,14 +2033,14 @@ async def _tell_draft_people(session: AsyncSession, svc: GraphVersioningService,
 
 async def _drafts_policy_of(session: AsyncSession, data_source_id: Optional[str]):
     """The drafts and reviews policy ``data_source_id`` works under (``drafts_policy``). A graph
-    whose data source row is gone follows the built-in policy."""
+    whose data source row is gone follows the platform's policy."""
     from backend.app.services import drafts_policy
     if data_source_id:
         try:
             return await drafts_policy.load(session, data_source_id)
         except LookupError:
             pass
-    return drafts_policy.resolve()
+    return await drafts_policy.effective()
 
 
 async def _pr_policy(svc: GraphVersioningService, session: AsyncSession, pr: dict):
@@ -3990,7 +3990,7 @@ _ALLOW_MASS_DELETE = Query(False, alias="allowMassDelete", description=(
 
 _MAX_REFUSED_ROWS = Query(None, alias="maxRefusedRows", max_length=16, description=(
     "How many of the file's rows may be refused before the import holds: 0 (none: the default, "
-    "unless the platform's IMPORT_MAX_REFUSED_ROWS says otherwise), a count such as 100, a share "
+    "unless the graph's import settings say otherwise), a count such as 100, a share "
     "of the file's rows such as 0.5%, or -1 (any). Past it, a replace deletes nothing and fails "
     "(rows_refused), and autoPublish leaves the draft for review. Within it, the import goes on "
     "without them, and a replace keeps what a refused row still names (a refused delete row, only "
@@ -4019,10 +4019,13 @@ def _with_replace_scope(settings: dict, requested: Optional[str]) -> dict:
 
 def _with_refused_budget(settings: dict, requested: Optional[str]) -> dict:
     """The job's settings, with how many refused rows it allows (``maxRefusedRows``): the request's,
-    checked (422, saying what it may be), else the platform's. A job keeps it, resumed or not."""
+    checked (422, saying what it may be), else its graph's (:func:`_import_settings_for`). A job
+    keeps it, resumed or not."""
     from backend.app.services.versioning.import_export.import_worker import refused_budget
-    try:      # called directly, an unsent parameter is its Query: the platform's, as unsent
-        return {**settings, "maxRefusedRows": refused_budget(requested if isinstance(requested, str) else None)}
+    if not isinstance(requested, str):    # called directly, an unsent parameter is its Query
+        return settings
+    try:
+        return {**settings, "maxRefusedRows": refused_budget(requested)}
     except ValueError as exc:
         raise HTTPException(status_code=422, detail={"type": "invalid_max_refused_rows",
                                                      "message": str(exc)})
@@ -4041,18 +4044,23 @@ async def _identity_property_of(session: AsyncSession, row) -> Optional[str]:
 async def _import_settings_for(session: AsyncSession, data_source_id: Optional[str],
                                requested: Optional[str], *, fork: bool = False) -> tuple:
     """``(identifier, settings)``: what an import into the data source's graph (``fork``: a fork's)
-    runs under (``services.import_settings``) — the request's identifier, checked (422 with the
-    grammar), else the data source's, else the platform's, a property default ``entity_id`` on a
-    fork but for its identifier property; and what its job keeps: where the identifier came from,
-    and the replace guard's limits with where each came from."""
+    runs under, from the settings store (``services.import_settings``). The identifier is the
+    request's, checked (422 with the grammar), else the graph's, else its workspace's, else the
+    platform's; on a fork, a property default is ``entity_id`` but for its identifier property.
+    The settings are what its job keeps: where the identifier came from, the replace guard's switch
+    and limits with where each came from, the refused rows it allows, and how many properties its
+    graph may match by."""
     from backend.app.db.models import WorkspaceDataSourceORM
-    from backend.app.services import import_settings
+    from backend.app.services import fork_sources, import_settings
     from backend.app.services.versioning.import_export import identifier as identifiers
     row = (await session.get(WorkspaceDataSourceORM, data_source_id)
            if data_source_id and session is not None else None)     # a direct caller may hold none
     identity = await _identity_property_of(session, row) if fork else None
+    root = await fork_sources.governing_row(session, row) if row is not None else None
     try:
-        return import_settings.for_import(row, requested, fork=fork, identity_property=identity)
+        return await import_settings.for_import(
+            row.workspace_id if row is not None else None, data_source_id, requested,
+            root_id=root.id if root is not row else None, fork=fork, identity_property=identity)
     except identifiers.IdentifierError as exc:
         raise HTTPException(status_code=422, detail={"type": "invalid_identifier",
                                                      "message": str(exc)})
@@ -4613,17 +4621,28 @@ async def _settings_row(session: AsyncSession, meta: dict):
 
 async def _import_settings_view(session: AsyncSession, row, graph_id: str, *,
                                 fork: bool = False) -> dict:
-    from backend.app.services import import_settings
-    from backend.app.services.versioning import config as gv_config
+    """The graph's import settings from the settings store: its own (a fork's: its root's, which
+    it follows), the platform's, and what holds for it."""
+    from backend.app.services import fork_sources, import_settings
+    from backend.app.services.settings import effective as settings
     from backend.app.services.versioning.import_export import keys as matching
     identity = await _identity_property_of(session, row) if fork else None
+    root = await fork_sources.governing_row(session, row) if row is not None else None
+    ws_id = row.workspace_id if row is not None else None
+    root_id = root.id if root is not row else None
+    effective = await import_settings.effective(ws_id, row.id if row is not None else None,
+                                                root_id=root_id, fork=fork,
+                                                identity_property=identity)
     return {"dataSourceId": row.id if row is not None else None,
-            "overrides": import_settings.settings_of(row), "platform": import_settings.platform(),
-            "effective": import_settings.resolve(row, fork=fork, identity_property=identity),
-            "replaceGuard": gv_config.IMPORT_REPLACE_GUARD,
+            "overrides": (await import_settings.own(session, root.id) if root is not None
+                          else import_settings.settings_of(None)),
+            "platform": import_settings.platform(), "effective": effective,
+            "replaceGuard": settings.value(
+                "imports.replaceGuard", workspace_id=ws_id, graph_id=row.id if row is not None else None,
+                graph_facts={"fork_of": root_id} if root_id else None),
             "followsParent": bool(row is not None and row.fork_of_data_source_id),
             "matchingProperties": await matching.listed(graph_id),
-            "maxMatchingProperties": gv_config.MAX_MATCHING_PROPERTIES}
+            "maxMatchingProperties": settings.value("imports.maxMatchingProperties")}
 
 
 @router.get("/graphs/{graph_id}/import-settings", response_model=ImportSettingsResponse)
@@ -4650,11 +4669,13 @@ async def put_import_settings(
     session: AsyncSession = Depends(get_db_session),
 ):
     """Set this graph's import settings (workspace admins), field by field; ``"inherit"`` goes back
-    to the platform's. An import that names its own identifier still uses it, and one already made
-    keeps the settings it was made with. A fork's are its parent's (409
-    ``fork_settings_follow_parent``). A change is recorded in the activity log."""
+    to the workspace's or the platform's. An import that names its own identifier still uses it,
+    and one already made keeps the settings it was made with. A fork's are its parent's (409
+    ``fork_settings_follow_parent``). A change is saved through the settings store and recorded in
+    the activity log."""
     from backend.app.services import fork_sources, import_settings
     from backend.app.services.activity import recorder
+    from backend.app.services.settings import legacy
     from backend.app.services.versioning.import_export import identifier as identifiers
     row = await _settings_row(session, meta)
     if row is None:
@@ -4671,13 +4692,24 @@ async def put_import_settings(
         if changes["identifier"] is None:
             raise HTTPException(status_code=422, detail={
                 "type": "invalid_identifier", "message": f"{identifiers._GRAMMAR}, or inherit"})
-    governing = fork_sources.governing(row)
-    before, after = import_settings.apply(row, changes)
-    await fork_sources.follow_parent(session, row, governing)
-    if after:
-        await recorder.record_for_request(
-            session, "workspace.versioning.import_settings_updated", **recorder.data_source_target(row),
-            details={"from": before, "to": after})
+    if row.fork_of_data_source_id:
+        governing = fork_sources.governing(row)
+        import_settings.apply(row, changes)
+        await fork_sources.follow_parent(session, row, governing)
+    else:
+        field_of = {key: api for _column, api, key in import_settings.FIELDS}
+
+        async def record(s: AsyncSession, change_set) -> None:
+            await recorder.record_for_request(
+                s, "workspace.versioning.import_settings_updated", **recorder.data_source_target(row),
+                details={"from": {field_of[a.key]: a.before_value for a in change_set.applied},
+                         "to": {field_of[a.key]: a.after_value for a in change_set.applied}})
+
+        # Written through to the old columns of the data source and of its forks.
+        await legacy.save(session, "graph", row.id, {
+            key: None if changes[api] == "inherit" else changes[api]
+            for _column, api, key in import_settings.FIELDS if api in changes},
+            actor=_user.id, record=record)
     return await _import_settings_view(session, row, graph_id,
                                        fork=bool(meta.get("fork_parent_graph_id")))
 
@@ -5654,7 +5686,7 @@ async def list_reviewer_candidates(
     workspace's — says someone else approves. Never a service account, which never reviews."""
     from backend.app.db.repositories import binding_repo, group_repo, permission_repo, user_repo
     from backend.app.services import drafts_policy
-    ws = await _policy_workspace(session, ws_id)
+    await _policy_workspace(session, ws_id)
     ds = await _policy_source(session, ws_id, data_source_id) if data_source_id else None
     bindings = await binding_repo.list_for_scope(session, scope_type="workspace", scope_id=ws_id)
     role_perms = await permission_repo.get_role_permissions_for_roles(
@@ -5667,7 +5699,9 @@ async def list_reviewer_candidates(
             ids.add(b.subject_id)
         elif b.subject_type == "group":
             ids.update(m.user_id for m in await group_repo.list_group_members(session, b.subject_id))
-    if not drafts_policy.resolve(ws, ds).self_approval:
+    policy = (await drafts_policy.load(session, ds.id) if ds is not None
+              else await drafts_policy.effective(ws_id))
+    if not policy.self_approval:
         ids.discard(user.id)
     idents = await user_repo.get_identities_by_ids(session, sorted(ids))
     people = [{"user_id": uid, "display_name": i["name"] or None, "email": i["email"]}
@@ -5852,9 +5886,14 @@ async def get_workspace_drafts_policy(
     """The workspace's own drafts and reviews settings, and the policy its data sources start
     from: the level a new draft starts at, the levels it may have, and whether a review's opener
     may approve and merge it."""
+    await _policy_workspace(session, ws_id)
+    return await _workspace_policy(session, ws_id)
+
+
+async def _workspace_policy(session: AsyncSession, ws_id: str) -> dict:
     from backend.app.services import drafts_policy
-    ws = await _policy_workspace(session, ws_id)
-    return {"settings": drafts_policy.settings_of(ws), "effective": drafts_policy.resolve(ws).as_dict()}
+    return {"settings": await drafts_policy.own(session, "workspace", ws_id),
+            "effective": (await drafts_policy.effective(ws_id)).as_dict()}
 
 
 @router.put("/drafts-policy", response_model=WorkspaceDraftsPolicyResponse)
@@ -5864,20 +5903,28 @@ async def put_workspace_drafts_policy(
     session: AsyncSession = Depends(get_db_session),
 ):
     """Set the workspace's drafts and reviews policy (workspace admins). A data source's own
-    override still wins. A change is recorded in the activity log; drafts already open keep their
-    level."""
+    override still wins. A change is saved through the settings store and recorded in the
+    activity log; drafts already open keep their level."""
     from backend.app.services import drafts_policy
     ws = await _policy_workspace(session, ws_id)
-    before, after = drafts_policy.apply(ws, drafts_policy.changes_from(body))
-    if after:
-        await _record_policy_change(session, "workspace", before, after, workspace_id=ws_id,
+
+    async def record(s: AsyncSession, before: dict, after: dict) -> None:
+        await _record_policy_change(s, "workspace", before, after, workspace_id=ws_id,
                                     target_type="workspace", target_id=ws_id, target_label=ws.name)
-    return {"settings": drafts_policy.settings_of(ws), "effective": drafts_policy.resolve(ws).as_dict()}
+
+    await drafts_policy.save(session, "workspace", ws_id, drafts_policy.changes_from(body),
+                             actor=_user.id, record=record)
+    return await _workspace_policy(session, ws_id)
 
 
-def _source_policy(drafts_policy, ws, ds) -> dict:
-    return {"overrides": drafts_policy.settings_of(ds), "workspace": drafts_policy.settings_of(ws),
-            "effective": drafts_policy.resolve(ws, ds).as_dict()}
+async def _source_policy(session: AsyncSession, ws_id: str, ds) -> dict:
+    """A data source's own settings (a fork's: its root's, which it follows), its workspace's, and
+    what holds for it."""
+    from backend.app.services import drafts_policy, fork_sources
+    root = await fork_sources.governing_row(session, ds)
+    return {"overrides": await drafts_policy.own(session, "graph", root.id),
+            "workspace": await drafts_policy.own(session, "workspace", ws_id),
+            "effective": (await drafts_policy.load(session, ds.id)).as_dict()}
 
 
 @router.get("/data-sources/{data_source_id}/drafts-policy", response_model=DataSourceDraftsPolicyResponse)
@@ -5888,9 +5935,9 @@ async def get_data_source_drafts_policy(
 ):
     """A data source's drafts and reviews policy: its own overrides, its workspace's settings, and
     what holds for it, with the level each field came from."""
-    from backend.app.services import drafts_policy
     ds = await _policy_source(session, ws_id, data_source_id)
-    return _source_policy(drafts_policy, await _policy_workspace(session, ws_id), ds)
+    await _policy_workspace(session, ws_id)
+    return await _source_policy(session, ws_id, ds)
 
 
 @router.put("/data-sources/{data_source_id}/drafts-policy", response_model=DataSourceDraftsPolicyResponse)
@@ -5900,18 +5947,26 @@ async def put_data_source_drafts_policy(
     session: AsyncSession = Depends(get_db_session),
 ):
     """Override the workspace's drafts and reviews policy for one data source (workspace admins),
-    field by field; ``"inherit"`` goes back to the workspace's. A change is recorded once."""
+    field by field; ``"inherit"`` goes back to the workspace's. A change is saved through the
+    settings store and recorded once."""
     from backend.app.services import drafts_policy, fork_sources
     from backend.app.services.activity import recorder
     ds = await _policy_source(session, ws_id, data_source_id)
-    governing = fork_sources.governing(ds)
-    before, after = drafts_policy.apply(ds, drafts_policy.changes_from(body))
-    # A fork's policy is its parent's (409 here); a parent's forks take its new one.
-    await fork_sources.follow_parent(session, ds, governing)
-    if after:
-        await _record_policy_change(session, "data_source", before, after,
-                                    **recorder.data_source_target(ds))
-    return _source_policy(drafts_policy, await _policy_workspace(session, ws_id), ds)
+    await _policy_workspace(session, ws_id)
+    changes = drafts_policy.changes_from(body)
+    if ds.fork_of_data_source_id:
+        # A fork's policy is its parent's: 409 for a change of it.
+        governing = fork_sources.governing(ds)
+        drafts_policy.apply(ds, changes)
+        await fork_sources.follow_parent(session, ds, governing)
+    else:
+        async def record(s: AsyncSession, before: dict, after: dict) -> None:
+            await _record_policy_change(s, "data_source", before, after,
+                                        **recorder.data_source_target(ds))
+
+        # Written through to the old columns of the data source and of its forks.
+        await drafts_policy.save(session, "graph", ds.id, changes, actor=_user.id, record=record)
+    return await _source_policy(session, ws_id, ds)
 
 
 @router.get("/data-sources/{data_source_id}/pull-requests", response_model=List[PrResponse])

@@ -5,7 +5,8 @@
   ``projection_state`` column) and the setting it holds, from the registry's ``Legacy`` fields.
 * :func:`write_through` — a save written to the old storage too, so the previous image, rolled
   back to, behaves as configured. What has no old location (a workspace's read mode, limits, the
-  settings that were env-only) is not kept by a rollback.
+  settings that were env-only) is not kept by a rollback. :func:`save` is an old endpoint's save
+  through the store, written through.
 * :func:`import_graph_values` — the graphs' own values (``projection_state``), copied once at
   start-up by the versioning worker when the import migration could not reach the graph store
   (a separate ``GRAPHVER_DB_URL``): the ``settings_imports`` marker ``legacy_graph``.
@@ -199,6 +200,31 @@ async def write_through(session: AsyncSession, change_set: store.ChangeSet, *,
     await session.flush()
     if read_modes:
         await _write_graphs(read_modes)
+
+
+async def save(session: AsyncSession, scope: str, scope_id: str, values: Mapping[str, Any], *,
+               actor: Optional[str], record: Optional[store.Hook] = None) -> store.ChangeSet:
+    """Save ``values`` (by setting key; None inherits) at one scope, as an old endpoint saves them.
+    They go through the store (``legacy_api``, with the request's stated reason), each at the
+    version it has now, read under the writers' lock so no save comes between. They are written
+    through to the old storage, and ``record`` (the old endpoint's activity event) runs in the same
+    transaction when one changed. Commits."""
+    from backend.app.common import activity_context
+
+    reg = registry()
+    await store.lock(session, reg.DOMAIN)
+    held = {r.key: r for r in await store.read_scope(session, reg.DOMAIN, scope, scope_id)}
+
+    async def before_commit(s: AsyncSession, change_set: store.ChangeSet) -> None:
+        await write_through(s, change_set)
+        if record is not None and change_set.applied:
+            await record(s, change_set)
+
+    return await store.apply(session, reg.DOMAIN, [
+        store.Change(key, scope, scope_id, held[key].version if key in held else 0, value=value)
+        for key, value in values.items()], actor=actor,
+        reason=activity_context.current().stated_reason, source="legacy_api",
+        before_commit=before_commit)
 
 
 def _source_and_forks(ds_id: str):

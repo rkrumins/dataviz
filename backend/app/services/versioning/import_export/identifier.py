@@ -20,8 +20,6 @@ from __future__ import annotations
 
 from typing import Optional
 
-from .. import config
-
 ENTITY_ID, URN = "entity_id", "urn"
 _PROP = "prop."
 #: What follows a property to fall back to the urn: ``prop.<name>,urn``.
@@ -78,8 +76,9 @@ def falls_back(identifier: Optional[str]) -> bool:
 
 
 def platform_default() -> str:
-    """``GRAPHVER_IMPORT_IDENTIFIER``, when it is one an import may name; else ``entity_id``."""
-    try:
-        return parse(config.IMPORT_IDENTIFIER) or ENTITY_ID
-    except IdentifierError:
-        return ENTITY_ID
+    """The platform's identifier (``imports.identifier``, as this process last read it): before a
+    system administrator sets one, ``GRAPHVER_IMPORT_IDENTIFIER`` when it is one an import may
+    name, else ``entity_id``."""
+    from backend.app.services.settings import effective
+
+    return effective.value("imports.identifier")

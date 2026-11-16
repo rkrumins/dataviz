@@ -1,51 +1,62 @@
-"""How long a merged or abandoned draft keeps its changes before the versioning worker removes them.
+"""How long a merged or abandoned draft keeps its changes before the versioning worker removes them:
+``drafts.keepClosedDays`` in the settings store (``config/versioned_graph_settings.py``), the
+platform's unless a workspace chose its own. Forever keeps them for good.
 
-A system administrator sets it live (``/admin/versioning/draft-retention``, Admin → Infrastructure
-→ Versioned graphs → Draft retention). It is stored on the single ``platform_settings`` row
-(``gv_draft_retention_days``); NULL there means unset, and ``GRAPHVER_DRAFT_RETENTION_DAYS``
-applies (30). ``0`` keeps every draft's changes for good.
+The worker's sweep reads every workspace's window once a pass (``settings.effective.by_workspace``)
+and removes by each, for its workspaces' graphs, and by the platform's for every other graph. When
+the settings can't be read, the pass removes nothing: falling back to the default could remove what
+an administrator chose to keep.
 
-:func:`retention_days` is what the worker's sweep reads, once a pass. When the row cannot be read it
-answers None, and the pass removes nothing: falling back to the default could remove what an
-administrator chose to keep.
+A system administrator sets the platform's window through ``/admin/versioning/draft-retention``
+too, in that route's words (:func:`describe`): days, ``0`` for good, null for the environment's
+default (``GRAPHVER_DRAFT_RETENTION_DAYS``, 30). :func:`effective` is the window the old column
+(``platform_settings.gv_draft_retention_days``) gives, which one release keeps writing.
 """
 from __future__ import annotations
 
-import logging
 from typing import Any, Dict, Optional
 
 from . import config
 
-logger = logging.getLogger(__name__)
-
-#: The days a window may be: 0 (keep for good) to ten years.
+#: The setting, in the settings store.
+KEY = "drafts.keepClosedDays"
+#: The days a window may be, in the route's words: 0 (keep for good) to ten years.
 MIN_DAYS, MAX_DAYS = 0, 3650
 
 
 def effective(saved: Optional[int]) -> int:
-    """The window in force for ``saved`` (None: the environment's default), within range."""
+    """The window the old column gives for ``saved`` (None: the environment's default), within
+    range."""
     days = config.DRAFT_RETENTION_DAYS if saved is None else saved
     return max(MIN_DAYS, min(MAX_DAYS, int(days)))
 
 
-def describe(row) -> Dict[str, Any]:
-    """The window as the admin card shows it: ``days`` in force, ``saved`` (None: the default
-    applies), ``default``, and the range a value may take."""
-    saved = getattr(row, "gv_draft_retention_days", None) if row is not None else None
-    return {"days": effective(saved), "saved": saved, "default": effective(None),
+async def describe(session) -> Dict[str, Any]:
+    """The platform's window as the admin card shows it, in the route's words: ``days`` in force,
+    as ``saved`` (None: the default applies), ``default``, and the range a value may take."""
+    from backend.app.services.settings import effective as settings, registry, resolver, store
+
+    reg = registry()
+    setting = reg.BY_KEY[KEY]
+    found = resolver.resolve(await settings.refresh(strict=True), KEY)
+    held = {r.key: r.value for r in await store.read_scope(session, reg.DOMAIN, "platform", "")}
+    return {"days": resolver.encode(setting, found["effective"]),
+            "saved": resolver.encode(setting, held.get(KEY)),
+            "default": resolver.encode(setting, found["trail"][0]["value"]),
             "min": MIN_DAYS, "max": MAX_DAYS}
 
 
-async def retention_days() -> Optional[int]:
-    """The window in force, read now from the management database; None when it cannot be read."""
-    from backend.app.db.engine import get_readonly_session
-    from backend.app.db.models import PlatformSettingsORM
+async def save(session, days: Optional[int], *, actor: Optional[str], record) -> None:
+    """Set the platform's window from the route's words (``days``; 0 for good; None: the
+    default), through the settings store as an old endpoint saves (``settings.legacy.save``).
+    When it changed, ``record(session, before)``, with what it was in those words, runs in the same
+    transaction. Commits."""
+    from backend.app.services.settings import legacy, registry, resolver
 
-    try:
-        async with get_readonly_session() as s:
-            row = await s.get(PlatformSettingsORM, 1)
-    except Exception:  # noqa: BLE001 — unread is not the default: nothing is removed this pass
-        logger.warning("draft retention could not be read; no draft's changes are removed this pass",
-                       exc_info=True)
-        return None
-    return describe(row)["days"]
+    setting = registry().BY_KEY[KEY]
+
+    async def recorded(s, change_set) -> None:
+        await record(s, resolver.encode(setting, change_set.applied[0].before_value))
+
+    await legacy.save(session, "platform", "", {KEY: resolver.decode(setting, days)}, actor=actor,
+                      record=recorded)

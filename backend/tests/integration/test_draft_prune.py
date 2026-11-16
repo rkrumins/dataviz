@@ -15,6 +15,8 @@ Pins:
 - A removal cut off by the pass's budget is finished first by the next pass. A window another
   worker emptied at the same moment deletes nothing here, so the draft is looked at again before it
   is called finished.
+- The worker's sweep removes by each workspace's window (``drafts.keepClosedDays``), for its own
+  graphs only; forever skips its window, and while the settings can't be read nothing is removed.
 """
 from __future__ import annotations
 
@@ -191,6 +193,58 @@ def test_a_closed_draft_keeps_its_record_and_loses_its_changes_after_the_window(
         await models.create_schema_and_partitions()
         try:
             await _cases(GraphVersioningService(), monkeypatch)
+        finally:
+            await db.dispose_engine()
+    asyncio.run(run())
+
+
+async def _by_workspace(svc, settings_world) -> None:
+    """The worker's sweep removes by each workspace's window, for that workspace's graphs only:
+    one of 7 days removes a draft closed 10 days ago, forever and 30 days keep theirs. Every other
+    graph takes the platform's, forever here, so nothing else in the database is touched. While
+    the settings can't be read, nothing is removed."""
+    from backend.app.services.versioning.draft_retention import KEY
+    from backend.app.services.versioning.worker import ProjectionWorker
+
+    tag = os.urandom(3).hex()
+    closed = {}
+    for name in ("week", "keep", "month"):
+        gid = (await svc.create_graph(data_source_id=f"ds_{name}_{tag}",
+                                      workspace_id=f"ws_{name}_{tag}", actor="alice"))["graph_id"]
+        await svc.apply_ops(graph_id=gid, actor="alice", message="seed", ops=[_node("N")])
+        draft = await svc.open_draft(graph_id=gid, owner="alice")
+        await svc.apply_ops(graph_id=gid, branch_id=draft, actor="alice", message="edit",
+                            ops=[_upd("N", description=name)])
+        await svc.abandon_draft(graph_id=gid, branch_id=draft, actor="alice")
+        closed[name] = (gid, draft)
+    ten_days_ago = (datetime.now(timezone.utc) - timedelta(days=10)).isoformat()
+    async with db.graphver_session() as s:
+        await s.execute(update(BranchORM).where(BranchORM.id.in_([b for _g, b in closed.values()]))
+                        .values(updated_at=ten_days_ago))
+    settings_world.set(KEY, "platform", "", "forever")
+    settings_world.set("drafts.idleCloseDays", "platform", "", "forever")
+    for name, days in (("week", 7), ("keep", "forever"), ("month", 30)):
+        settings_world.set(KEY, "workspace", f"ws_{name}_{tag}", days)
+
+    settings_world.readable = False
+    await ProjectionWorker(None, versioning=svc).sweep_once()
+    assert [(await _branch(b)).pruned_at for _g, b in closed.values()] == [None] * 3, \
+        "unread: nothing is removed"
+    settings_world.readable = True
+    await ProjectionWorker(None, versioning=svc).sweep_once()
+    gid, draft = closed["week"]
+    assert (await _branch(draft)).prune_finished_at is not None
+    assert await _rows(gid, draft) == {t: 0 for t, _o in _DRAFT_ROWS}
+    for name in ("keep", "month"):              # forever skips its window; 30 days isn't due
+        gid, draft = closed[name]
+        assert (await _branch(draft)).pruned_at is None and sum((await _rows(gid, draft)).values())
+
+
+def test_each_workspaces_window_removes_only_its_own_graphs_closed_drafts(settings_world):
+    async def run():
+        await models.create_schema_and_partitions()
+        try:
+            await _by_workspace(GraphVersioningService(), settings_world)
         finally:
             await db.dispose_engine()
     asyncio.run(run())

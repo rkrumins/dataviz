@@ -87,6 +87,28 @@ def test_readable_is_whether_the_snapshot_could_read_the_store(snap):
     assert effective.readable() is True
 
 
+def test_by_workspace_gives_each_value_with_the_workspaces_it_holds_for(snap):
+    """For a sweep across the graph store: the workspaces that choose their own value, by value,
+    and last the platform's for every other. A workspace choosing the platform's value, or none,
+    has no group of its own."""
+    key = "drafts.keepClosedDays"
+    snap.readable = True
+    snap.rows_now = index([Row(key, "platform", "", 30, rev=1),
+                           Row(key, "workspace", "ws_b", 7, rev=2),
+                           Row(key, "workspace", "ws_a", 7, rev=3),
+                           Row(key, "workspace", "ws_same", 30, rev=4),
+                           Row(key, "workspace", "ws_none", None, rev=5)])
+    assert _run(effective.by_workspace(key)) == [(7, ("ws_a", "ws_b"), ()),
+                                                 (30, None, ("ws_a", "ws_b"))]
+    snap.rows_now = index([Row(key, "platform", "", 30, {"lock": True}, rev=6),
+                           Row(key, "workspace", "ws_a", 7, rev=7)])
+    assert _run(effective.by_workspace(key)) == [(30, None, ())], "locked: the platform's for all"
+    snap.readable = False
+    assert _run(effective.by_workspace(key)) is None, "unreadable='skip': no sweep"
+    assert _run(effective.by_workspace("reads.mode")) == [("latest", None, ())], \
+        "unreadable='last_known': the last rows read"
+
+
 def test_the_context_is_rebuilt_only_when_something_changed(snap):
     first = _run(effective.refresh())
     assert _run(effective.refresh()) is first       # same rows, same switches

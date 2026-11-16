@@ -232,7 +232,7 @@ async def _by_urn_alone(svc, ie, store) -> None:
     assert (await ie.get_job(job["job_id"]))["identifier"] == "urn"
 
 
-async def _guard(svc, ie, store, monkeypatch) -> None:
+async def _guard(svc, ie, store, monkeypatch, settings_world) -> None:
     _BY["identifier"] = "urn"                                 # rows keyed by urn
     monkeypatch.setattr(config, "IMPORT_REPLACE_GUARD_MIN_LIVE", 10)
     monkeypatch.setattr(config, "IMPORT_REPLACE_MIN_MATCH_FRACTION", 0)    # the guard, alone
@@ -265,11 +265,9 @@ async def _guard(svc, ie, store, monkeypatch) -> None:
     assert allowed["summary"]["deleted"] == 20, allowed["summary"]
     # Its data source's limits hold over the platform's, as its job keeps them: judged only from a
     # scope of 1,000, the same file goes through, and the verdict says whose limits those were.
-    from types import SimpleNamespace
     from backend.app.services import import_settings
-    own = SimpleNamespace(**{column: None for column, _api, _d in import_settings.FIELDS})
-    own.import_replace_min_live = 1000
-    _identifier, kept = import_settings.for_import(own, "urn")
+    settings_world.set("imports.guardMinLive", "graph", ds, 1000)
+    _identifier, kept = await import_settings.for_import("ws1", ds, "urn")
     _job, looser = await _run_job(ie, store, gid, other, identifier="urn", import_settings=kept)
     assert looser["status"] == "completed", looser
     assert looser["importSettings"]["replaceLimits"]["minLive"] == 1000
@@ -370,7 +368,8 @@ async def _by_a_property(svc, ie, store, monkeypatch) -> None:
     assert on_fork["summary"]["failure"]["code"] == "matching_property_on_fork", on_fork
 
 
-def test_a_snapshot_replaced_every_run_keeps_every_id_and_writes_only_what_changed(monkeypatch):
+def test_a_snapshot_replaced_every_run_keeps_every_id_and_writes_only_what_changed(
+        monkeypatch, settings_world):
     async def run():
         await models.create_schema_and_partitions()
         # Through monkeypatch, as the cases below set it again: set directly, the case's own
@@ -384,7 +383,7 @@ def test_a_snapshot_replaced_every_run_keeps_every_id_and_writes_only_what_chang
             for identifier in ("entity_id", "urn", f"prop.{KEY}"):
                 await _recurring_snapshot(svc, ie, ie.store, identifier)
             await _by_urn_alone(svc, ie, ie.store)
-            await _guard(svc, ie, ie.store, monkeypatch)
+            await _guard(svc, ie, ie.store, monkeypatch, settings_world)
             await _by_a_property(svc, ie, ie.store, monkeypatch)
         finally:
             shutil.rmtree(root, ignore_errors=True)

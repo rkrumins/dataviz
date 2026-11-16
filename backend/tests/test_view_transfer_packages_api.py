@@ -440,6 +440,28 @@ async def test_a_packages_data_is_imported_where_it_is_into_any_target(
     assert row.draft_branch_id == started["branchId"]
 
 
+async def test_a_packages_data_runs_by_its_data_sources_import_settings(
+        test_client, db_session, graph, services, small_parts, settings_world):
+    """As any import: its rows find their entities by the data source's identifier, and its job
+    keeps the rest of what it runs under, never the platform's in their place."""
+    versioning, jobs = services
+    dev, uat = await _workspace(test_client, "Dev"), await _workspace(test_client, "UAT")
+    ds = await _data_source(db_session, uat)
+    versioning.track(uat, ds)
+    settings_world.set("imports.identifier", "graph", ds, "prop.external_id")
+    settings_world.set("imports.maxRefusedRows", "workspace", uat, "10")
+    upload = await _upload(test_client, await _package_file(test_client, await _view(test_client, dev)))
+    await jobs.inspect_queued()
+    data = await test_client.post(f"{_TRANSFER}/packages/{upload}/data",
+                                  json={"workspaceId": uat, "dataSourceId": ds})
+    assert data.status_code == 200, data.text
+    [job] = jobs.of("imp")
+    assert (job["identifier"], job["import_settings"]["identifierSource"]) == (
+        "prop.external_id", "data_source")
+    assert (job["import_settings"]["maxRefusedRows"], job["import_settings"]["replaceGuard"]) == (
+        "10", True)
+
+
 async def test_a_packages_data_for_a_view_places_what_it_creates_in_that_view(
         test_client, db_session, graph, services, small_parts):
     """Into a view (an update), the data job is scoped to it: the roots it creates are placed in

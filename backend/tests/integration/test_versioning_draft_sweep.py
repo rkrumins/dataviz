@@ -6,7 +6,9 @@ idle draft that is still in use: one with a live PR, one being published, one wi
 staged (uncheckpointed) work, and one on a deleted graph. It is global
 (a janitor across all graphs). A frozen graph's drafts are not swept (nobody can touch them), and
 after an unfreeze each gets a full TTL again. The worker runs it on a timer; here we drive
-sweep_once directly, which is all the worker loop adds.
+sweep_once directly, which is all the worker loop adds. It runs once per workspace's own TTL
+(``drafts.idleCloseDays``), for that workspace's graphs only; forever skips it, and while the
+settings can't be read nothing is closed.
 """
 import asyncio
 import os
@@ -142,6 +144,38 @@ async def _frozen() -> None:
 @pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
 def test_the_sweep_spares_drafts_of_a_frozen_or_just_unfrozen_graph():
     asyncio.run(_frozen())
+
+
+async def _by_workspace(settings_world) -> None:
+    """Each workspace's idle window closes only its own graphs' drafts: 30 days closes one idle
+    for 60, forever keeps it. Every other graph takes the platform's, forever here, so nothing
+    else in the database is closed. While the settings can't be read, nothing is closed."""
+    await models.create_schema_and_partitions()
+    svc = GraphVersioningService()
+    tag = os.urandom(3).hex()
+    idle = {}
+    for name in ("month", "keep"):
+        gid = (await svc.create_graph(data_source_id=f"ds_{name}_{tag}",
+                                      workspace_id=f"ws_{name}_{tag}", actor="alice"))["graph_id"]
+        idle[name] = await svc.open_draft(graph_id=gid, owner="alice")
+        await _backdate(idle[name], 60)
+    settings_world.set("drafts.idleCloseDays", "platform", "", "forever")
+    settings_world.set("drafts.keepClosedDays", "platform", "", "forever")
+    settings_world.set("drafts.idleCloseDays", "workspace", f"ws_month_{tag}", 30)
+    settings_world.set("drafts.idleCloseDays", "workspace", f"ws_keep_{tag}", "forever")
+
+    settings_world.readable = False
+    assert await ProjectionWorker(None, versioning=svc).sweep_once() == [], "unread: none closed"
+    settings_world.readable = True
+    assert await ProjectionWorker(None, versioning=svc).sweep_once() == [idle["month"]]
+    async with db.graphver_session() as s:
+        assert (await s.get(BranchORM, idle["keep"])).status == "open"
+    await db.dispose_engine()
+
+
+@pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
+def test_each_workspaces_idle_window_closes_only_its_own_graphs_drafts(settings_world):
+    asyncio.run(_by_workspace(settings_world))
 
 
 if __name__ == "__main__":

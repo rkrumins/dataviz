@@ -108,6 +108,21 @@ def _now_minus(secs: int) -> str:
     return (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(seconds=secs)).isoformat()
 
 
+def _past_grace(windows, workspace_id, deleted_at):
+    """``deleted_at`` (a column) is older than the trash window of the workspace in
+    ``workspace_id``: one condition per window (``settings.effective.by_workspace`` of
+    ``trash.restoreDays``)."""
+    past = []
+    for days, workspace_ids, except_ids in windows:
+        where = [deleted_at < _now_minus(days * 86400)]
+        if workspace_ids is not None:
+            where.append(workspace_id.in_(workspace_ids))
+        elif except_ids:
+            where.append(workspace_id.not_in(except_ids))
+        past.append(and_(*where))
+    return or_(*past)
+
+
 def _sch() -> str:
     return config.graphver_schema()
 
@@ -848,7 +863,9 @@ class Reaper:
 
     The grace period lives here and nowhere else. A data source deleted 31 days ago is not a
     scheduling problem — it is just a row whose `deleted_at` is older than the cutoff. Asking that
-    question every 15 minutes is the entire mechanism.
+    question every 15 minutes is the entire mechanism. The cutoff is its workspace's trash window
+    (``trash.restoreDays``, the platform's unless the workspace chose one); while that can't be
+    read, nothing expires.
 
     It runs in three stages per data source, and stops at whichever one is still in progress:
       1. tombstone expired, no purge queued  -> queue one
@@ -882,16 +899,21 @@ class Reaper:
 
     async def run_once(self) -> Dict[str, int]:
         from backend.app.db.models import WorkspaceDataSourceORM
+        from backend.app.services.settings import effective
 
         rehomed = await self._misplaced_graphs()
-        cutoff = _now_minus(config.PURGE_GRACE_DAYS * 86400)
+        # Each workspace's trash window; None when it can't be read: nothing expires this pass.
+        windows = await effective.by_workspace("trash.restoreDays")
         Session = self._app_sessions()
-        async with Session() as s:
-            expired = (await s.execute(
-                select(WorkspaceDataSourceORM.id, WorkspaceDataSourceORM.workspace_id,
-                       WorkspaceDataSourceORM.deleted_by)
-                .where(WorkspaceDataSourceORM.deleted_at.isnot(None),
-                       WorkspaceDataSourceORM.deleted_at < cutoff))).all()
+        expired = []
+        if windows is not None:
+            async with Session() as s:
+                expired = (await s.execute(
+                    select(WorkspaceDataSourceORM.id, WorkspaceDataSourceORM.workspace_id,
+                           WorkspaceDataSourceORM.deleted_by)
+                    .where(WorkspaceDataSourceORM.deleted_at.isnot(None),
+                           _past_grace(windows, WorkspaceDataSourceORM.workspace_id,
+                                       WorkspaceDataSourceORM.deleted_at)))).all()
 
         queued = reaped = 0
         for ds_id, ws_id, actor in expired:
@@ -959,7 +981,8 @@ class Reaper:
                         logger.info("reaper: %s is past its grace period and is now gone", ds_id)
             except Exception:
                 logger.exception("reaper: %s failed; carrying on with the rest", ds_id)
-        queued += await self._expired_forks(cutoff)
+        if windows is not None:
+            queued += await self._expired_forks(windows)
 
         # A purge that failed on infrastructure, or was refused for forks (queued again only once
         # none reads the graph), is queued again — including one whose data source row is
@@ -1148,14 +1171,15 @@ class Reaper:
             logger.info("reaper: dropped %d fork cop(ies) nothing reads", dropped)
         return dropped
 
-    async def _expired_forks(self, cutoff: str) -> int:
-        """Queue the purge of each trashed fork whose grace ran out by ``cutoff``. One whose purge
-        exists is skipped, whatever its status: a failed one is the revive pass's."""
+    async def _expired_forks(self, windows) -> int:
+        """Queue the purge of each trashed fork whose grace ran out, by its workspace's trash
+        window (``windows``, :func:`_past_grace`). One whose purge exists is skipped, whatever its
+        status: a failed one is the revive pass's."""
         async with self._gv() as gs:
             expired = (await gs.execute(
                 select(GraphORM.id, GraphORM.workspace_id, GraphORM.deleted_by).where(
                     GraphORM.fork_parent_graph_id.isnot(None), GraphORM.deleted_at.isnot(None),
-                    GraphORM.deleted_at < cutoff,
+                    _past_grace(windows, GraphORM.workspace_id, GraphORM.deleted_at),
                     ~select(JobORM.id).where(JobORM.job_type == PURGE_JOB_TYPE,
                                              JobORM.graph_id == GraphORM.id).exists()))).all()
         queued = 0

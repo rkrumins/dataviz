@@ -441,10 +441,11 @@ async def get_draft_retention(
     session: AsyncSession = Depends(get_db_session),
 ) -> dict:
     """``days`` in force, as ``saved`` (null: ``GRAPHVER_DRAFT_RETENTION_DAYS`` applies, ``default``)
-    and the range a value may take. A draft merged or abandoned more than ``days`` ago has its changes
-    removed by the versioning worker, which keeps its record: the draft, its commits and its review.
-    ``0`` keeps them for good."""
-    return draft_retention.describe(await session.get(PlatformSettingsORM, 1))
+    and the range a value may take: the platform's, which a workspace may choose otherwise for its
+    own graphs. A draft merged or abandoned more than ``days`` ago has its changes removed by the
+    versioning worker, which keeps its record: the draft, its commits and its review. ``0`` keeps
+    them for good."""
+    return await draft_retention.describe(session)
 
 
 class DraftRetentionChange(BaseModel):
@@ -461,22 +462,17 @@ async def put_draft_retention(
     session: AsyncSession = Depends(get_db_session),
 ) -> dict:
     """``days`` from 0 to 3650, or null for the default; another value is a 422 and nothing is
-    saved. Recorded with the value before and after. The worker reads it at the start of each pass
-    (hourly): a shorter window removes the changes of the drafts it now reaches within the hour, and
-    removed changes do not come back if the window is lengthened again."""
-    row = await session.get(PlatformSettingsORM, 1)
-    if row is None:
-        row = PlatformSettingsORM(id=1)
-        session.add(row)
-    before = row.gv_draft_retention_days
-    if body.days != before:
-        row.gv_draft_retention_days = body.days
-        row.updated_at = datetime.now(timezone.utc).isoformat()
-        row.updated_by = user.id
-        await recorder.record_for_request(session, "platform.draft_retention.updated",
+    saved. Saved through the settings store (the platform's ``drafts.keepClosedDays``) and recorded
+    with the value before and after. The worker reads it at the start of each pass (hourly): a
+    shorter window removes the changes of the drafts it now reaches within the hour, and removed
+    changes do not come back if the window is lengthened again."""
+    async def record(s: AsyncSession, before: Optional[int]) -> None:
+        (await s.get(PlatformSettingsORM, 1)).updated_by = user.id
+        await recorder.record_for_request(s, "platform.draft_retention.updated",
                                           details={"from": before, "to": body.days})
-    await session.commit()
-    return draft_retention.describe(row)
+
+    await draft_retention.save(session, body.days, actor=user.id, record=record)
+    return await draft_retention.describe(session)
 
 
 @router.post("/residency-policy/preview",

@@ -79,7 +79,7 @@ from backend.common.models.management import (
 )
 from backend.insights_service.enqueue import enqueue_stats_job_safe, polls_stats
 
-from backend.app.services.versioning import config as gv_config
+from backend.app.services.settings import effective
 from backend.app.services.versioning.errors import LockBusy
 from backend.app.services.versioning.service import GraphVersioningService
 
@@ -671,7 +671,7 @@ async def list_deleted_data_sources(
         return []
 
     users = await _display_names(session, [r.deleted_by for r in rows if r.deleted_by])
-    grace = gv_config.PURGE_GRACE_DAYS
+    grace = await effective.value_of("trash.restoreDays", workspace_id=workspace_id)
     now = datetime.now(timezone.utc)
 
     out: List[DeletedDataSource] = []
@@ -1091,8 +1091,8 @@ async def remove_data_source(
     await data_source_transfer.cancel_open_for_source(
         session, ds_id, actor=_user.id, note="The data source was deleted.",
     )
-    logger.info("data source %s moved to trash by %s (restorable for %s days)",
-                ds_id, _user.id, gv_config.PURGE_GRACE_DAYS)
+    logger.info("data source %s moved to trash by %s (restorable for %s days)", ds_id, _user.id,
+                await effective.value_of("trash.restoreDays", workspace_id=workspace_id))
 
 
 @router.post("/{workspace_id}/data-sources/{ds_id}/restore", response_model=DataSourceResponse)

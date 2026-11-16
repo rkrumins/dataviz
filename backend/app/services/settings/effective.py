@@ -19,13 +19,14 @@ A graph's value resolves graph → workspace → platform, so a graph target nam
 reach before any rows were read, every value is the deployment's environment or the code default,
 as it was before the store existed. :func:`readable` says whether the last refresh could read the
 store, for the settings the registry marks ``unreadable="skip"``: a pass that would act on one
-does nothing while it is False.
+does nothing while it is False. :func:`by_workspace` gives a platform and workspace setting's
+values for a sweep that runs once per value, honouring that.
 """
 from __future__ import annotations
 
 import functools
 import logging
-from typing import Any, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from . import registry
 from .resolver import Context, Target, context, effective as _effective
@@ -122,6 +123,31 @@ def readable() -> bool:
     :func:`refresh` read it, and while the database can't be read (the last rows, or the defaults,
     serve meanwhile)."""
     return snapshot().readable
+
+
+Window = Tuple[Any, Optional[Tuple[str, ...]], Tuple[str, ...]]
+
+
+async def by_workspace(key: str) -> Optional[List[Window]]:
+    """``key``'s values in force for a sweep across the graph store, which can't join workspaces,
+    as ``(value, workspace_ids, except_ids)``. There is one for each value that workspaces choose
+    for themselves (``except_ids`` empty), and last the platform's, for every workspace but those
+    (``workspace_ids`` None). Read fresh. None while the store can't be read (:func:`readable`), for
+    a setting the registry marks ``unreadable="skip"``: a sweep that removes then removes nothing."""
+    ctx = await refresh(strict=True)
+    if not readable() and registry().BY_KEY[key].unreadable == "skip":
+        logger.warning("settings: %s can't be read; a sweep that removes by it does nothing", key)
+        return None
+    platform = _effective(ctx, key, target())
+    own: Dict[Any, List[str]] = {}
+    for (row_key, scope, workspace_id), row in ctx.rows.items():
+        if row_key == key and scope == "workspace" and row.value is not None:
+            value = _effective(ctx, key, target(workspace_id))
+            if value != platform:
+                own.setdefault(value, []).append(workspace_id)
+    others = tuple(sorted(w for ids in own.values() for w in ids))
+    return [(value, tuple(sorted(ids)), ()) for value, ids in own.items()] + [
+        (platform, None, others)]
 
 
 def reset() -> None:
