@@ -80,6 +80,13 @@ def test_a_strict_setting_asks_at_once(snap):
     assert snap.asked == [True, False]
 
 
+def test_readable_is_whether_the_snapshot_could_read_the_store(snap):
+    snap.readable = False
+    assert effective.readable() is False
+    snap.readable = True
+    assert effective.readable() is True
+
+
 def test_the_context_is_rebuilt_only_when_something_changed(snap):
     first = _run(effective.refresh())
     assert _run(effective.refresh()) is first       # same rows, same switches

@@ -17,7 +17,9 @@ the next request.
 A graph's value resolves graph → workspace → platform, so a graph target names its workspace too
 (``graph_id`` is the data source's id). Before the first refresh, and while the database is out of
 reach before any rows were read, every value is the deployment's environment or the code default,
-as it was before the store existed.
+as it was before the store existed. :func:`readable` says whether the last refresh could read the
+store, for the settings the registry marks ``unreadable="skip"``: a pass that would act on one
+does nothing while it is False.
 """
 from __future__ import annotations
 
@@ -111,6 +113,13 @@ async def value_of(key: str, *, workspace_id: Optional[str] = None,
     strict = strict or registry().BY_KEY[key].freshness == "strict"
     ctx = await refresh(strict=strict)
     return _effective(ctx, key, target(workspace_id, graph_id, graph_facts))
+
+
+def readable() -> bool:
+    """Whether the values come from the store as the database last gave them: False before a
+    :func:`refresh` read it, and while the database can't be read (the last rows, or the defaults,
+    serve meanwhile)."""
+    return snapshot().readable
 
 
 def reset() -> None:

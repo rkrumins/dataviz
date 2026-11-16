@@ -191,6 +191,35 @@ def _feature_flags_at_their_defaults():
 
 
 @pytest.fixture(autouse=True)
+def _settings_in_memory(monkeypatch):
+    """Every test starts with no versioned-graph setting saved, read from memory.
+
+    ``settings.effective`` reads each process's snapshot of the settings store. That snapshot asks
+    Redis and reads the management database through the real engine. From a test, that is the dev
+    Postgres where one runs, which the SQLite harness never migrates, on a connection that outlives
+    the test's loop, as the flags' cold cache would above. Here it reads an empty store in memory
+    (``tests/common/settings_world.py``). Every value is then the environment's or the code
+    default, as before the store existed, and nothing is asked of Redis or a database. A test
+    that saves values asks for ``settings_world``.
+    """
+    from backend.app.services.settings import effective
+    from tests.common.settings_world import SettingsWorld
+
+    world = SettingsWorld()
+    world.install(monkeypatch)
+    yield world
+    effective.reset()
+
+
+@pytest.fixture
+def settings_world(_settings_in_memory, monkeypatch):
+    """The test's settings store, in memory: values it saves (``set``), and the store's writes
+    and reads (``store.apply``, which needs Postgres) for a route that saves through them."""
+    _settings_in_memory.install_store(monkeypatch)
+    return _settings_in_memory
+
+
+@pytest.fixture(autouse=True)
 def _view_source_kinds_unknown():
     """Every test starts with the view reads' versioned/external lookup marked as
     having just failed, so ``sourceKind`` is unknown and nothing reaches for the

@@ -160,6 +160,29 @@ async def test_with_the_database_down_from_the_start_the_defaults_apply(world):
     assert len(await snap.rows()) == 2 and world.loads == [None, None]
 
 
+async def test_readable_says_whether_the_rows_are_the_databases_as_last_asked(world):
+    """For a setting the registry marks ``unreadable="skip"``: a pass acts on it only then."""
+    snap = _snap(world)
+    assert snap.readable is False                     # nothing read yet: the defaults serve
+    await snap.rows()
+    assert snap.readable is True
+    world.db_down = True
+    world.now += RELOAD_S
+    await snap.rows()
+    assert snap.readable is False and snap.current()  # the last rows serve, and it says so
+    world.now += GEN_CHECK_S
+    await snap.rows(strict=True)
+    assert snap.readable is False                     # not read again for 30 s
+    world.db_down = False
+    world.now += RELOAD_S
+    await snap.rows()
+    assert snap.readable is True
+    down = _snap(world)
+    world.db_down = True
+    await down.rows()
+    assert down.readable is False                     # never read: the defaults, unreadable
+
+
 async def test_callers_at_once_share_one_check(world):
     snap = _snap(world)
     await snap.rows()

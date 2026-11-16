@@ -293,6 +293,7 @@ tests/test_settings_facts.py
 tests/test_settings_resolver.py
 tests/test_settings_snapshot.py
 tests/test_settings_validate.py
+tests/test_settings_world.py
 tests/test_shard_capacity.py
 tests/test_source_changed_signal.py
 tests/test_squash_plan_unit.py

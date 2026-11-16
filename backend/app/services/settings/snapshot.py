@@ -10,7 +10,8 @@ domain's generation in Redis (``settings:gen:<domain>``, which every save moves)
 * with Redis out of reach, the rows are reloaded every 30 seconds, and every 30 seconds anyway, in
   case a save could not move the generation;
 * with the database out of reach, the last rows keep serving (the code defaults before any were
-  read), the failure is logged, and the next try waits 30 seconds.
+  read), the failure is logged, and the next try waits 30 seconds. :attr:`Snapshot.readable` says
+  so meanwhile, for a setting the registry marks ``unreadable="skip"``.
 
 The clock, the generation reader and the loader are injected, for tests. :meth:`Snapshot.current`
 is the sync read (no IO, as ``build_policy.current``); :meth:`Snapshot.rows` the async one.
@@ -81,6 +82,7 @@ class Snapshot:
         self._rev = 0
         self._gen: Optional[str] = None
         self._loaded = False
+        self._failed = False
         self._checked_at = self._loaded_at = self._retry_at = -math.inf
         self._loop: Any = None
         self._lock: Optional[asyncio.Lock] = None
@@ -89,6 +91,12 @@ class Snapshot:
     def rev(self) -> int:
         """The highest ``rev`` read: the rows written after it are what a reload asks for."""
         return self._rev
+
+    @property
+    def readable(self) -> bool:
+        """Whether the rows are the database's as last asked: False before the first read, and
+        after a read failed until one succeeds, while the last rows (or the defaults) serve."""
+        return self._loaded and not self._failed
 
     def current(self) -> Mapping[RowKey, Row]:
         """The rows as last read, by ``(key, scope, scope_id)``, without IO: for a path that can't
@@ -132,7 +140,7 @@ class Snapshot:
         try:
             rows = await self._load(self.domain, self._rev if self._loaded else None)
         except Exception as exc:  # noqa: BLE001 — a settings read never fails its caller
-            self._retry_at = now + RELOAD_S
+            self._retry_at, self._failed = now + RELOAD_S, True
             logger.warning("settings: %s could not be read (%s); %s for %.0f s", self.domain, exc,
                            "keeping the last rows read" if self._loaded else "using the defaults",
                            RELOAD_S)
@@ -143,7 +151,7 @@ class Snapshot:
                 merged[(row.key, row.scope, row.scope_id)] = row
                 self._rev = max(self._rev, row.rev)
             self._rows = merged
-        self._gen, self._loaded, self._loaded_at = gen, True, now
+        self._gen, self._loaded, self._loaded_at, self._failed = gen, True, now, False
 
 
 _SNAPSHOTS: Dict[str, Snapshot] = {}
