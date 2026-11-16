@@ -103,7 +103,7 @@ export function ChangeReviewDialog({
                     <Heading id={`${id}-changes`}>What changes</Heading>
                     <ol className="space-y-2">
                         {items.map((item) => (
-                            <li key={item.key} className="rounded-xl border border-glass-border/60 px-4 py-3">
+                            <li key={item.id ?? item.key} className="rounded-xl border border-glass-border/60 px-4 py-3">
                                 <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
                                     <p className="text-[13px] font-semibold text-ink">{item.label}</p>
                                     <p className="text-[11px] text-ink-muted">{item.how}</p>

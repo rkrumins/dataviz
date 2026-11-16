@@ -13,8 +13,8 @@ export interface ValidationContext {
     values: Values
     /** The value's bounds at this scope (range ∩ the platform's limits). */
     bounds?: { min?: number; max?: number }
-    /** For a choice: what may be chosen here. */
-    allowed?: SettingValue[] | null
+    /** For a choice: what may be chosen here (a number's bounds are `bounds`). */
+    allowed?: SettingValue[] | { min: number; max: number } | null
     /** Labels for the other settings rules name. */
     settings?: Record<string, Setting>
 }
@@ -22,8 +22,9 @@ export interface ValidationContext {
 export function validateValue(s: Setting, v: SettingValue | null, ctx: ValidationContext): string | null {
     if (v === null) return null
     if (s.kind === 'choice') {
-        if (ctx.allowed && !ctx.allowed.some((a) => sameValue(a, v))) {
-            return `Not allowed here. Choose ${ctx.allowed.map((a) => formatValue(s, a)).join(' or ')}.`
+        const allowed = Array.isArray(ctx.allowed) ? ctx.allowed : null
+        if (allowed && !allowed.some((a) => sameValue(a, v))) {
+            return `Not allowed here. Choose ${allowed.map((a) => formatValue(s, a)).join(' or ')}.`
         }
         return null
     }

@@ -36,13 +36,14 @@ function FrameStrip({ frames }: { frames: Frame[] }) {
                 return (
                     <span key={f.when} className="min-w-0 rounded-lg bg-black/[0.03] px-2 py-1.5 dark:bg-white/[0.04]">
                         <span className="block text-[9.5px] font-semibold uppercase tracking-[0.08em] text-ink-muted">{WHEN_LABEL[f.when]}</span>
+                        {/* Wraps rather than truncating: "Version 5, with parts of 6" is the point of the card. */}
                         <span className={cn(
-                            'mt-1 inline-flex max-w-full rounded-full px-1.5 py-px text-[10px] font-semibold leading-4',
+                            'mt-1 inline-flex max-w-full rounded-lg px-1.5 py-px text-[10px] font-semibold leading-4',
                             tone === 'new' ? 'bg-emerald-500/12 text-emerald-700 dark:text-emerald-300'
                                 : tone === 'mix' ? 'bg-gradient-to-r from-slate-500/10 to-emerald-500/15 text-ink-secondary'
                                     : 'bg-slate-500/10 text-ink-secondary',
                         )}>
-                            <span className="truncate">{f.shows}</span>
+                            <span className="min-w-0 break-words">{f.shows}</span>
                         </span>
                         <span className={cn('mt-1 flex items-center gap-1 text-[10px]',
                             f.source === 'database' ? 'text-amber-700 dark:text-amber-400' : 'text-ink-muted')}>

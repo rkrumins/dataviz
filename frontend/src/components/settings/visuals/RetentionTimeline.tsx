@@ -93,7 +93,8 @@ export function RetentionTimeline({ days, nextDays, className }: { days: Days; n
 // ── Idle unloading ──────────────────────────────────────────────────────────
 
 const MIN_SECS = 60
-const TICKS: Array<[number, string]> = [[60, '1 min'], [3600, '1 h'], [86400, '1 day'], [604800, '1 week'], [2592000, '30 days'], [31536000, '1 year']]
+// On a log scale "30 days" sits too close to "1 week" for both labels to fit: it is left out.
+const TICKS: Array<[number, string]> = [[60, '1 min'], [3600, '1 h'], [86400, '1 day'], [604800, '1 week'], [31536000, '1 year']]
 
 export function IdleTimeline({ standardIdleSecs, coldlineIdleSecs, autoUnload = true, next, className }: {
     standardIdleSecs: number
@@ -134,9 +135,10 @@ export function IdleTimeline({ standardIdleSecs, coldlineIdleSecs, autoUnload = 
                 {lanes.map((l) => {
                     const end = l.secs === null || !autoUnload ? 100 : x(l.secs)
                     return (
-                        <div key={l.id} className="grid grid-cols-[4.5rem_minmax(0,1fr)_6.5rem] items-center gap-3">
-                            <span className="text-xs font-semibold text-ink">{l.label}</span>
-                            <div className="relative h-6">
+                        // A phone stacks each lane's track under its name; wider, they share a line.
+                        <div key={l.id} className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-0.5 sm:grid-cols-[4.5rem_minmax(0,1fr)_6.5rem]">
+                            <span className="col-start-1 row-start-1 text-xs font-semibold text-ink">{l.label}</span>
+                            <div className="relative col-span-2 row-start-2 h-6 sm:col-span-1 sm:col-start-2 sm:row-start-1">
                                 <span aria-hidden className="absolute left-0 top-1/2 h-1 -translate-y-1/2 rounded-full bg-ink-secondary/75" style={{ width: `${end}%` }} />
                                 {end < 100 && <span aria-hidden className="absolute right-0 top-1/2 -translate-y-1/2 border-t-2 border-dashed border-ink-muted/45" style={{ left: `${end}%` }} />}
                                 {end < 100 && <span aria-hidden className="absolute top-1/2 h-3 w-3 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-canvas-elevated bg-ink-secondary" style={{ left: `${end}%` }} />}
@@ -145,16 +147,17 @@ export function IdleTimeline({ standardIdleSecs, coldlineIdleSecs, autoUnload = 
                                 )}
                                 <span aria-hidden className="absolute inset-y-0 w-px bg-ink/70" style={{ left: `${pos / 10}%` }} />
                             </div>
-                            <span className={cn('text-[11px]', loaded(l.secs) ? 'text-ink-secondary' : 'text-ink-muted')}>
+                            <span className={cn('col-start-2 row-start-1 text-right text-[11px] sm:col-start-3 sm:text-left', loaded(l.secs) ? 'text-ink-secondary' : 'text-ink-muted')}>
                                 {l.secs === null || !autoUnload ? 'Never unloads' : `After ${read(l.secs)}`}
                                 {l.next !== undefined && l.next !== l.secs && autoUnload && <span className="block font-semibold text-accent-lineage">→ {read(l.next)}</span>}
                             </span>
                         </div>
                     )
                 })}
-                <div aria-hidden className="relative ml-[5.25rem] mr-[7.25rem] h-4 text-[10px] text-ink-muted">
+                <div aria-hidden className="relative h-4 text-[10px] text-ink-muted sm:ml-[5.25rem] sm:mr-[7.25rem]">
                     {TICKS.filter(([s]) => s <= maxSecs).map(([s, label]) => (
-                        <span key={s} className={cn('absolute whitespace-nowrap', s === MIN_SECS ? '' : '-translate-x-1/2')} style={{ left: `${x(s)}%` }}>{label}</span>
+                        <span key={s} className={cn('absolute whitespace-nowrap', s === MIN_SECS ? '' : x(s) > 97 ? '-translate-x-full' : '-translate-x-1/2')}
+                            style={{ left: `${x(s)}%` }}>{label}</span>
                     ))}
                 </div>
             </div>

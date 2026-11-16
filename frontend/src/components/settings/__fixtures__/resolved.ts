@@ -15,7 +15,9 @@
  *
  * `FACTS` are the live figures the explainers draw.
  */
-import type { ResolvedSetting, ResolvedValues, SettingsFacts, SettingValue, SignalCount, TrailStep, WhyItem } from '../types'
+import type {
+    EnvReading, ResolvedSetting, ResolvedValues, SettingsFacts, SettingValue, SignalCount, TrailStep, WhyItem,
+} from '../types'
 import { SCHEMA, SETTINGS_BY_KEY } from './schema'
 
 const GB = 1024 ** 3
@@ -45,7 +47,12 @@ function resolve(key: string, r: Partial<ResolvedSetting> & { trail: TrailStep[]
     }
 }
 
-const dflt = (key: string, env: SettingValue | null = null): TrailStep => ({ scope: 'default', value: SETTINGS_BY_KEY[key].default.code, env })
+/** The Default level; `env` is what the deployment's env var holds, when it holds something of its own. */
+const dflt = (key: string, env: Omit<EnvReading, 'name'> | null = null): TrailStep => ({
+    scope: 'default',
+    value: SETTINGS_BY_KEY[key].default.code,
+    env: env ? { name: SETTINGS_BY_KEY[key].default.env ?? '', ...env } : null,
+})
 
 // ── Platform: a system admin ────────────────────────────────────────────────
 
@@ -60,8 +67,9 @@ const PLATFORM_CHOSEN: Record<string, SettingValue> = {
 
 const PLATFORM_LIMITS: Record<string, TrailStep['limits']> = {
     'reads.mode': { allowed: ['latest', 'in_place'] },
-    'drafts.keepClosedDays': { min: 1, max: 90 },
-    'forks.maxPerGraph': { min: 0, max: 20 },
+    'drafts.keepClosedDays': { range: [1, 90] },
+    'forks.maxPerGraph': { range: [0, 20] },
+    'imports.replaceGuard': { lock: true },
 }
 
 export const PLATFORM_VALUES: ResolvedValues = Object.fromEntries(SCHEMA.settings.map((s, i) => {
@@ -74,7 +82,7 @@ export const PLATFORM_VALUES: ResolvedValues = Object.fromEntries(SCHEMA.setting
     }
     if (s.key === 'reads.maxVersionsBehind') r = { ...r, status: 'not_used', why: [why('not_used_by_mode')] }
     if (s.key === 'database.readTimeoutMs') {
-        r = { ...r, trail: [dflt(s.key, 'thirty seconds'), step], status: 'invalid_env', why: [why('invalid_env')] }
+        r = { ...r, trail: [dflt(s.key, { value: 'thirty seconds', valid: false }), step], status: 'invalid_env', why: [why('invalid_env')] }
     }
     return [s.key, r]
 }))

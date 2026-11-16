@@ -1,22 +1,24 @@
 /**
  * ScopeBadge — which level a value belongs to: Default, Platform, Workspace or Graph, each with
- * its own glyph so the trail and the row read at a glance. `here` marks the level being edited,
- * with a firmer edge rather than the accent, which the kit keeps for a staged change.
+ * its own glyph so the trail and the row read at a glance; or the deployment, when its env var set
+ * the default. `here` marks the level being edited, with a firmer edge rather than the accent,
+ * which the kit keeps for a staged change.
  */
+import { Server } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { SCOPE_LABEL } from './format'
 import { SCOPE_ICON } from './meta'
 import type { TrailScope } from './types'
 
 export function ScopeBadge({ scope, here = false, prefix, className }: {
-    scope: TrailScope
+    scope: TrailScope | 'env'
     /** The level being edited: outlined in the accent. */
     here?: boolean
     /** Words before the level: "From", "Set for". */
     prefix?: string
     className?: string
 }) {
-    const Icon = SCOPE_ICON[scope]
+    const Icon = scope === 'env' ? Server : SCOPE_ICON[scope]
     return (
         <span className={cn(
             'inline-flex items-center gap-1 rounded-md px-1.5 py-px text-[11px] font-medium leading-4 whitespace-nowrap',
@@ -25,7 +27,7 @@ export function ScopeBadge({ scope, here = false, prefix, className }: {
         )}>
             <Icon className="w-3 h-3 shrink-0" aria-hidden />
             {/* One run of text, so it reads "From Platform", not "FromPlatform". */}
-            <span>{prefix && <span className="font-normal">{prefix} </span>}{SCOPE_LABEL[scope]}</span>
+            <span>{prefix && <span className="font-normal">{prefix} </span>}{scope === 'env' ? 'Your deployment' : SCOPE_LABEL[scope]}</span>
         </span>
     )
 }

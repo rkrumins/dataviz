@@ -27,7 +27,7 @@ import { Segmented } from '@/components/ui/Segmented'
 import { Slider } from '@/components/ui/Slider'
 import { Switch } from '@/components/ui/Switch'
 import { ChoiceCards } from './ChoiceCards'
-import { boundsAt, formatValue, inheritedAt, ratioStyle, SCOPE_LABEL } from './format'
+import { allowedChoices, boundsAt, formatValue, inheritedAt, ratioStyle, SCOPE_LABEL } from './format'
 import type { Lens } from './lens'
 import type { DimensionInfo, ResolvedSetting, Scope, Setting, SettingValue, TrailScope } from './types'
 
@@ -320,7 +320,7 @@ export function SettingControl({
                     setting={s}
                     value={value}
                     onChange={onChange}
-                    allowed={resolved?.allowed}
+                    allowed={allowedChoices(resolved)}
                     inherit={{ from: inherit.scope, value: inherit.value }}
                     effective={resolved?.effective}
                     recommended={s.guidance.recommended.forThisPlatform?.value ?? s.guidance.recommended.value}

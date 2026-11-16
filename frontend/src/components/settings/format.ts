@@ -10,7 +10,7 @@ import {
     formatBytes, formatBytesOrUnlimited, formatCount, formatCountOrUnlimited, formatDays, formatDaysOrForever,
     formatDuration, formatMs, formatPercent, formatRatio, formatRefusalBudget, type RatioStyle,
 } from '@/lib/units'
-import type { ResolvedSetting, Scope, Setting, SettingValue, TrailScope, TrailStep, WhyFix } from './types'
+import type { Limits, ResolvedSetting, Scope, Setting, SettingValue, TrailScope, TrailStep, WhyFix } from './types'
 
 export const SCOPE_LABEL: Record<TrailScope, string> = {
     default: 'Default', platform: 'Platform', workspace: 'Workspace', graph: 'Graph',
@@ -96,10 +96,17 @@ export function lockedFor(r: ResolvedSetting, scope: Scope): boolean {
 export function boundsAt(s: Setting, r: ResolvedSetting | undefined, scope: Scope): { min?: number; max?: number } {
     let min = s.range?.[0]
     let max = s.range?.[1]
-    const limits = r ? limitsFor(r, scope) : null
-    if (limits?.min !== undefined) min = min === undefined ? limits.min : Math.max(min, limits.min)
-    if (limits?.max !== undefined) max = max === undefined ? limits.max : Math.min(max, limits.max)
+    const range = r ? limitsFor(r, scope)?.range : null
+    if (range) {
+        min = min === undefined ? range[0] : Math.max(min, range[0])
+        max = max === undefined ? range[1] : Math.min(max, range[1])
+    }
     return { min, max }
+}
+
+/** The choices the viewer may pick at this scope (null: any, or not a choice). */
+export function allowedChoices(r: ResolvedSetting | undefined): SettingValue[] | null {
+    return Array.isArray(r?.allowed) ? r.allowed : null
 }
 
 /** Words for who may change a value: "a system admin". */
@@ -108,6 +115,25 @@ export const EDITOR_LABEL = { system_admin: 'a system admin', workspace_admin: '
 /** Two values are the same choice. */
 export function sameValue(a: SettingValue | null | undefined, b: SettingValue | null | undefined): boolean {
     return a === b || (a != null && b != null && String(a) === String(b) && typeof a === typeof b)
+}
+
+/** Limits that bound anything: some allowed choices, or a range. */
+export const hasLimits = (l?: Limits | null): l is Limits => Boolean(l && (l.allowed?.length || l.range))
+
+/** Two sets of limits allow the same (the order of allowed choices doesn't matter). */
+export function sameLimits(a: Limits | null | undefined, b: Limits | null | undefined): boolean {
+    const norm = (l: Limits | null | undefined) => JSON.stringify([
+        l?.allowed ? l.allowed.map(String).sort() : null, l?.range ?? null, Boolean(l?.lock),
+    ])
+    return norm(a) === norm(b)
+}
+
+/** What limits allow, in words: "Allowed: Always the latest, Keep serving, update in place. From 1 day to 90 days". */
+export function limitsWords(s: Setting, limits: Limits): string {
+    const parts: string[] = []
+    if (limits.allowed?.length) parts.push(`Allowed: ${limits.allowed.map((v) => formatValue(s, v)).join(', ')}`)
+    if (limits.range) parts.push(`From ${formatValue(s, limits.range[0])} to ${formatValue(s, limits.range[1])}`)
+    return parts.join('. ')
 }
 
 /** The switches' names as the app shows them, for a fix that turns one on. Pages pass the live names. */

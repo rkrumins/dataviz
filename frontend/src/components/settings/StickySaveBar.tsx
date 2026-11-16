@@ -32,7 +32,8 @@ export function StickySaveBar({ count, onReview, onDiscard, problems = 0, saving
             >
                 <div className={cn(
                     'mx-auto flex max-w-3xl flex-wrap items-center gap-x-4 gap-y-2 rounded-2xl border border-accent-lineage/25 px-4 py-3',
-                    'bg-canvas-elevated/95 backdrop-blur-md',
+                    // Opaque: it sits in the page's scroller, where a backdrop-filter re-samples every frame.
+                    'bg-canvas-elevated',
                     'shadow-[0_1px_2px_rgba(15,23,42,0.08),0_18px_48px_-18px_rgba(15,23,42,0.45)] dark:shadow-[0_18px_48px_-18px_rgba(0,0,0,0.9)]',
                 )}>
                     <span aria-hidden className="h-2 w-2 shrink-0 rounded-full bg-accent-lineage" />

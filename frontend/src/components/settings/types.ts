@@ -169,12 +169,14 @@ export interface TakesEffect {
     text: string
 }
 
-/** Limits a platform administrator sets on what lower scopes may choose. */
+/** Limits a platform administrator sets on what lower scopes may choose, as the server stores them. */
 export interface Limits {
-    allowed?: SettingValue[]
-    min?: number
-    max?: number
-    locked?: boolean
+    /** The choices lower scopes may pick. */
+    allowed?: SettingValue[] | null
+    /** The lowest and highest value they may set. */
+    range?: [number, number] | null
+    /** The same value for everyone: lower scopes' values are kept but ignored. */
+    lock?: boolean | null
 }
 
 export interface Setting {
@@ -344,13 +346,24 @@ export interface SettingsSchema {
 export const STATUSES = ['in_effect', 'adjusted', 'dormant', 'not_used', 'locked', 'exception', 'invalid_env'] as const
 export type Status = (typeof STATUSES)[number]
 
+/** What the deployment's env var holds for a setting (the Default level's). */
+export interface EnvReading {
+    /** The env var. */
+    name: string
+    /** Its value: as read when it can't be this setting's (`valid` false). */
+    value: SettingValue
+    valid: boolean
+    /** Set when the value is the right kind but out of range: the value held to the range. */
+    held?: SettingValue
+}
+
 /** One level of the trail Default → Platform → Workspace → Graph. */
 export interface TrailStep {
     scope: TrailScope
     /** The value chosen at this level; null when it chose none. */
     value: SettingValue | null
-    /** Default only: the deployment's env value, when it sets one. */
-    env?: SettingValue | null
+    /** Default only: the deployment's env value, when it sets one of its own. */
+    env?: EnvReading | null
     /** Platform only: lower scopes' values are ignored. */
     locked?: boolean
     /** Platform only: what lower scopes may choose. */
@@ -371,8 +384,8 @@ export interface ResolvedSetting {
     effective: SettingValue
     /** The value chosen at the winning level, before caps and fallbacks. */
     declared: SettingValue | null
-    /** The level the value came from. */
-    source: TrailScope
+    /** The level the value came from: `env` when the deployment's env var set the default. */
+    source: TrailScope | 'env'
     trail: TrailStep[]
     status: Status
     why: WhyItem[]
@@ -380,10 +393,12 @@ export interface ResolvedSetting {
     editable: boolean
     /** Who may change it at this scope. */
     editor: Editor | null
-    /** For a choice: what may be chosen at this scope. */
-    allowed: SettingValue[] | null
+    /** What the viewer may choose at this scope: a choice's ids, or a ranged number's bounds. */
+    allowed: SettingValue[] | { min: number; max: number } | null
     /** For optimistic concurrency: send it back as `expectedVersion`. */
     version: number
+    /** The platform only: the limits saved for lower levels; null: the setting's default limits. */
+    limits?: Limits | null
 }
 
 export type ResolvedValues = Record<string, ResolvedSetting>

@@ -5,7 +5,7 @@
  */
 import { act, renderHook } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
-import { GRAPH_VALUES } from '../__fixtures__/resolved'
+import { GRAPH_VALUES, PLATFORM_VALUES } from '../__fixtures__/resolved'
 import type { ResolvedValues } from '../types'
 import { useStagedChanges } from '../useStagedChanges'
 
@@ -89,5 +89,46 @@ describe('useStagedChanges', () => {
         const { result } = renderHook(() => useStagedChanges(GRAPH_VALUES, 'graph'))
         act(() => result.current.stage('updates.pacingRatio', 1))
         expect(result.current.dirtyCount).toBe(0)
+    })
+})
+
+describe('useStagedChanges: the platform’s limits', () => {
+    const READS = 'reads.mode'
+    const ALL = { allowed: ['latest', 'in_place', 'beside'] }
+
+    it('stages limits beside a value, as one PATCH item per key, and drops limits put back as they were', () => {
+        const { result } = renderHook(() => useStagedChanges(PLATFORM_VALUES, 'platform'))
+        act(() => {
+            result.current.stage(READS, 'in_place')
+            result.current.stageLimits(READS, ALL)
+        })
+        expect(result.current.dirtyCount).toBe(2)
+        expect(result.current.stagedLimits(READS)).toEqual(ALL)
+        expect(result.current.limitChanges).toEqual([{ key: READS, ownBefore: null, ownAfter: ALL, before: { allowed: ['latest', 'in_place'] }, expectedVersion: 1 }])
+        expect(result.current.payload()).toEqual([{ key: READS, value: 'in_place', limits: ALL, expectedVersion: 1 }])
+        // The limits in force again (the defaults, in another order): nothing to save for them.
+        act(() => result.current.stageLimits(READS, { allowed: ['in_place', 'latest'] }))
+        expect(result.current.stagedLimits(READS)).toBeUndefined()
+        expect(result.current.payload()).toEqual([{ key: READS, value: 'in_place', expectedVersion: 1 }])
+    })
+
+    it('stages limits alone, and back to the defaults (null) only when some are saved', () => {
+        const { result } = renderHook(() => useStagedChanges(PLATFORM_VALUES, 'platform'))
+        act(() => result.current.stageLimits('forks.maxPerGraph', { range: [0, 50] }))
+        expect(result.current.payload()).toEqual([{ key: 'forks.maxPerGraph', limits: { range: [0, 50] }, expectedVersion: PLATFORM_VALUES['forks.maxPerGraph'].version }])
+        act(() => result.current.stageLimits(READS, null))
+        expect(result.current.stagedLimits(READS)).toBeUndefined()   // none saved: the defaults already apply
+    })
+
+    it('undoes saved limits at the versions in force after the save, and never below the platform', () => {
+        const { result, rerender } = renderHook(({ values }) => useStagedChanges(values, 'platform'), { initialProps: { values: PLATFORM_VALUES } })
+        act(() => result.current.stageLimits(READS, ALL))
+        act(() => result.current.markSaved())
+        rerender({ values: { ...PLATFORM_VALUES, [READS]: { ...PLATFORM_VALUES[READS], version: 5, limits: ALL } } })
+        expect(result.current.undoPayload()).toEqual([{ key: READS, limits: null, expectedVersion: 5 }])
+
+        const graph = renderHook(() => useStagedChanges(GRAPH_VALUES, 'graph'))
+        act(() => graph.result.current.stageLimits(READS, ALL))
+        expect(graph.result.current.dirtyCount).toBe(0)
     })
 })

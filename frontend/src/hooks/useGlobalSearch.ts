@@ -11,6 +11,7 @@ import { scoreCandidates, type FieldSpec } from '@/utils/searchScoring'
 import { getIndex, runSearch, type DocsSearchArea } from '@/components/docs/search/useDocsSearchIndex'
 import { interpolateBrand } from '@/lib/brandText'
 import { PAGE_INDEX, pageAllowed, type PageEntry } from '@/lib/pageIndex'
+import { loadSettingEntries } from '@/lib/settingsPaletteIndex'
 import { usePermissionClaims } from '@/store/auth'
 import { useBrand } from '@/store/branding'
 import { isFeatureOn, useFeaturesStore } from '@/store/features'
@@ -203,19 +204,29 @@ export function useGlobalSearch(
     const featureValues = useFeaturesStore(s => s.values)
     const brand = useBrand()
 
+    // Each versioned-graph setting is a destination too; its index is the
+    // registry's large catalogue, so it loads only once there is a query.
+    const settingsIndexQuery = useQuery({
+        queryKey: ['globalSearch', 'settingsIndex'],
+        queryFn: loadSettingEntries,
+        enabled: appWide && debouncedQuery.length > 0,
+        staleTime: Infinity,
+        gcTime: Infinity,
+    })
+
     // The palette must offer no door that then slams: same catalogue
     // specs, same predicate, as the route guards.
     const visiblePages = useMemo(
         () =>
             appWide
-                ? PAGE_INDEX.filter(entry =>
+                ? [...PAGE_INDEX, ...(settingsIndexQuery.data ?? [])].filter(entry =>
                     pageAllowed(entry, {
                         claims, sidebar, adminSections, analyticsAllowed,
                         featureOn: key => isFeatureOn(featureValues, key),
                     })
                 )
                 : [],
-        [appWide, claims, sidebar, adminSections, analyticsAllowed, featureValues]
+        [appWide, claims, sidebar, adminSections, analyticsAllowed, featureValues, settingsIndexQuery.data]
     )
 
     const viewsQuery = useQuery({

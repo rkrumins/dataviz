@@ -116,6 +116,7 @@ _ADMIN_SECTION_ANCHORS: dict[str, tuple[str, ...]] = {
     "overview":      ("/admin/stats-polling",),
     "redis":         ("/admin/redis",),
     "graph-store":   ("/admin/graph-store",),
+    "versioned-graphs": ("/admin/versioning",),
     "infrastructure": ("/admin/system/status",),
     "branding":      ("/admin/branding",),
     "features":      ("/admin/features",),

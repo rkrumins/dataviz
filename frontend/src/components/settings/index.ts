@@ -32,16 +32,18 @@ export { GuardMeter, type GuardLimits } from './visuals/GuardMeter'
 export { SymptomFinder } from './visuals/SymptomFinder'
 export { SettingVisual } from './visuals/SettingVisual'
 
-export { useStagedChanges, diffStaged, type PatchItem, type StagedChange, type StagedChanges } from './useStagedChanges'
+export {
+    useStagedChanges, diffStaged, type PatchItem, type StagedChange, type StagedChanges, type StagedLimitChange,
+} from './useStagedChanges'
 export { useLens, lensFor, orderForLens, type Lens } from './lens'
 export {
-    formatValue, settingAnchor, describeFix, inheritedAt, ownValue, boundsAt, lockedFor, limitsFor, sameValue,
-    SCOPE_LABEL, SCOPE_HERE, FEATURE_NAMES,
+    formatValue, settingAnchor, describeFix, inheritedAt, ownValue, boundsAt, lockedFor, limitsFor, sameValue, stepAt,
+    hasLimits, sameLimits, limitsWords, SCOPE_LABEL, SCOPE_HERE, FEATURE_NAMES, EDITOR_LABEL,
 } from './format'
 export { STATUS_META, SCOPE_ICON, VERDICT_META, RISK_META } from './meta'
 export { searchSettings, symptomIndex, normalize, type SearchHit, type MatchField } from './search'
 export { compassScores, compassMoves, scoreWords, type CompassPoint, type CompassDriver } from './compass'
 export { choiceImpacts, changeImpacts, type Impact } from './impacts'
-export { reviewItems, type ReviewItem } from './review'
+export { reviewItems, limitReviewItems, describeLimits, type ReviewItem } from './review'
 export { validateValue, validateStaged, type ValidationContext } from './validate'
 export { applyProfile, skipWords, type ProfilePlan, type SkipReason } from './profiles'

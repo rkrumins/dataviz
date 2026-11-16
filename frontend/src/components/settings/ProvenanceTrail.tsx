@@ -13,22 +13,11 @@
 import { ArrowRight, Check, ChevronRight, Lock, Ruler, ShieldAlert } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { HoverTip } from '@/components/ui/HoverTip'
-import { formatValue, SCOPE_HERE, SCOPE_LABEL, sameValue, stepAt } from './format'
+import { formatValue, hasLimits, limitsWords, SCOPE_HERE, SCOPE_LABEL, sameValue, stepAt } from './format'
 import { SCOPE_ICON } from './meta'
-import type { Limits, ResolvedSetting, Scope, Setting, SettingValue, TrailStep } from './types'
+import type { ResolvedSetting, Scope, Setting, SettingValue, TrailStep } from './types'
 
 type StepState = 'winner' | 'overridden' | 'ignored' | 'unset' | 'later'
-
-function limitsWords(s: Setting, limits: Limits): string {
-    const parts: string[] = []
-    if (limits.allowed?.length) parts.push(`Allowed: ${limits.allowed.map((v) => formatValue(s, v)).join(', ')}`)
-    if (limits.min !== undefined && limits.max !== undefined) parts.push(`From ${formatValue(s, limits.min)} to ${formatValue(s, limits.max)}`)
-    else if (limits.min !== undefined) parts.push(`At least ${formatValue(s, limits.min)}`)
-    else if (limits.max !== undefined) parts.push(`At most ${formatValue(s, limits.max)}`)
-    return parts.join('. ')
-}
-
-const hasLimits = (l?: Limits | null): l is Limits => Boolean(l && (l.allowed?.length || l.min !== undefined || l.max !== undefined))
 
 function TrailBadge({ icon: Icon, label, tip, tone = 'neutral' }: {
     icon: typeof Lock
@@ -62,7 +51,8 @@ export function ProvenanceTrail({ setting, resolved, scope, staged, className }:
     const platform = stepAt(resolved, 'platform')
     const locked = Boolean(platform?.locked)
     const order = resolved.trail.map((t) => t.scope)
-    const winner = order.indexOf(resolved.source)
+    // A value the deployment's env var set is the Default level's.
+    const winner = order.indexOf(resolved.source === 'env' ? 'default' : resolved.source)
     const platformAt = order.indexOf('platform')
     const adjusted = resolved.declared !== null && !sameValue(resolved.effective, resolved.declared)
 
@@ -119,8 +109,12 @@ export function ProvenanceTrail({ setting, resolved, scope, staged, className }:
                                 {caption[state] && <span className="sr-only"> ({caption[state]})</span>}
                             </div>
                             {t.scope === 'default' && setting.default.env && t.env != null && (
-                                <p className={cn('mt-0.5 text-[10px]', resolved.status === 'invalid_env' ? 'text-rose-600 dark:text-rose-400' : 'text-ink-muted')}>
-                                    {resolved.status === 'invalid_env' ? 'Deployment value ignored' : 'Set by your deployment'}
+                                <p className={cn('mt-0.5 text-[10px]',
+                                    !t.env.valid && t.env.held === undefined ? 'text-rose-600 dark:text-rose-400'
+                                        : t.env.held !== undefined ? 'text-amber-700 dark:text-amber-400' : 'text-ink-muted')}>
+                                    {!t.env.valid && t.env.held === undefined ? `Deployment value ignored: “${String(t.env.value)}”`
+                                        : t.env.held !== undefined ? `Your deployment’s ${formatValue(setting, t.env.value)}, held to ${formatValue(setting, t.env.held)}`
+                                            : 'Set by your deployment'}
                                 </p>
                             )}
                             {state !== 'winner' && state !== 'later' && t.value !== null && t.value !== undefined && (

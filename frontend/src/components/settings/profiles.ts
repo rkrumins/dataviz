@@ -46,15 +46,18 @@ function skipReason(value: SettingValue, scope: Scope, editor: Editor | null, r:
     if (lockedFor(r, scope) || r.why.some((w) => w.code === 'locked_by_platform')) return 'locked'
     const mayHere = editor === 'system_admin' || (editor === 'workspace_admin' && r.editor === 'workspace_admin')
     if (!r.editable || !mayHere) return r.editor === 'system_admin' && editor !== 'system_admin' ? 'system_admin_only' : 'no_permission'
-    if (Array.isArray(r.allowed) && !r.allowed.some((a) => sameValue(a, value))) return 'not_allowed'
-    // A system admin's value outside the limits stays in force as an exception; a workspace
-    // admin's would be refused.
-    const limits = editor === 'system_admin' ? null : limitsFor(r, scope)
-    if (limits?.allowed && !limits.allowed.some((a) => sameValue(a, value))) return 'not_allowed'
+    // `allowed` is what this editor may choose here, as the server resolved it: the choices, or the
+    // lowest and highest number.
     const n = asNumber(value)
-    if (limits && n !== null && ((limits.min !== undefined && n < limits.min) || (limits.max !== undefined && n > limits.max))) {
+    if (Array.isArray(r.allowed) && !r.allowed.some((a) => sameValue(a, value))) return 'not_allowed'
+    if (r.allowed && !Array.isArray(r.allowed) && n !== null && (n < r.allowed.min || n > r.allowed.max)) {
         return 'not_allowed'
     }
+    // A system admin's value outside the limits stays in force as an exception; a workspace
+    // admin's would be refused. The platform's limits as stored: `{allowed, range, lock}`.
+    const limits = editor === 'system_admin' ? null : limitsFor(r, scope)
+    if (limits?.allowed && !limits.allowed.some((a) => sameValue(a, value))) return 'not_allowed'
+    if (limits?.range && n !== null && (n < limits.range[0] || n > limits.range[1])) return 'not_allowed'
     return null
 }
 

@@ -52,6 +52,9 @@ export interface SettingRowProps {
     /** The row a deep link pointed at. */
     highlighted?: boolean
     className?: string
+    /** Drawn inside the row, under the control: what the page adds (the platform's limits, the
+     *  server's preview of a staged value). */
+    children?: ReactNode
 }
 
 function CopyLink({ anchor, label }: { anchor: string; label: string }) {
@@ -79,7 +82,7 @@ function CopyLink({ anchor, label }: { anchor: string; label: string }) {
 
 export function SettingRow({
     setting: s, resolved, scope, lens = 'business', staged, onStage, onUnstage, error, onFix, fixLabel, dimensions = [],
-    glossary, visual, defaultOpen = false, highlighted = false, className,
+    glossary, visual, defaultOpen = false, highlighted = false, className, children,
 }: SettingRowProps) {
     const [open, setOpen] = useState(defaultOpen)
     // Announce a change of status, not the status a row opens with.
@@ -135,9 +138,12 @@ export function SettingRow({
     return (
         <article
             id={anchor}
+            // A deep link moves focus here (and screen readers with it); never a tab stop.
+            tabIndex={-1}
             aria-labelledby={ids.title}
             className={cn(
-                'relative scroll-mt-24 rounded-2xl border bg-canvas-elevated transition-[border-color,box-shadow] duration-200',
+                'relative scroll-mt-24 rounded-2xl border bg-canvas-elevated outline-none transition-[border-color,box-shadow] duration-200',
+                'focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
                 isStaged ? 'border-accent-lineage/35' : 'border-glass-border/50',
                 highlighted && 'shadow-[0_0_0_4px_rgb(var(--nx-divider-rgb)/0.08)]',
                 className,
@@ -166,7 +172,7 @@ export function SettingRow({
                             )}
                             <div className="mt-1 flex flex-wrap items-center gap-1.5 sm:justify-end">
                                 <ScopeBadge scope={resolved.source} here={resolved.source === scope}
-                                    prefix={resolved.source === 'default' ? undefined : resolved.source === scope ? 'Set at' : 'From'} />
+                                    prefix={resolved.source === 'default' ? undefined : resolved.source === 'env' ? 'Set by' : resolved.source === scope ? 'Set at' : 'From'} />
                                 <StatusBadge status={resolved.status} />
                             </div>
                         </div>
@@ -200,6 +206,8 @@ export function SettingRow({
                     </p>
                 </div>
             </div>
+
+            {children && <div className="-mt-1 px-5 pb-5 sm:px-6 sm:pb-6">{children}</div>}
 
             <div className="flex flex-wrap items-center gap-1.5 border-t border-glass-border/50 px-3 py-2 sm:px-4">
                 <Button size="sm" variant="ghost" rightIcon={ChevronDown} aria-expanded={open} aria-controls={ids.panel}
