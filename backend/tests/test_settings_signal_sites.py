@@ -187,11 +187,12 @@ async def test_a_read_shed_from_a_full_database_slot_counts_for_its_graph(monkey
 
 
 def _snap(**kw) -> route_cache.RouteSnapshot:
-    fields = dict(graph_id="g1", data_source_id="ds_1", fork_parent_graph_id=None, root_id=None,
-                  deleted=False, main_branch_id="br_main", committed=9, projected=5,
-                  served_commit_seq=5, status="idle", read_mode="latest",
-                  falkor_graph_name="g_ds_1", falkor_provider=None, window_rows=None,
-                  last_error=None, residency="standard", size_bytes=None)
+    fields = dict(graph_id="g1", data_source_id="ds_1", workspace_id="ws_1",
+                  fork_parent_graph_id=None, root_id=None, deleted=False, main_branch_id="br_main",
+                  committed=9, projected=5, served_commit_seq=5, status="idle",
+                  read_mode="latest", falkor_graph_name="g_ds_1", falkor_provider=None,
+                  platform_copy=True, window_rows=None, last_error=None, residency="standard",
+                  size_bytes=None)
     return route_cache.RouteSnapshot(**{**fields, **kw})
 
 

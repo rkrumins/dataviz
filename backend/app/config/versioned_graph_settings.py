@@ -777,7 +777,8 @@ _READS = (
                 "in any mode. With 200 readers at 1M nodes and 2M edges, GRAPH.COPY took 76 to 88 s, "
                 "past the projector's 75 s socket, three times: the build was dropped and the change "
                 "written in place. One rule applies the mode to every read: service.serving_seq with "
-                "build_policy.max_lag_of (0 for latest). candidates.wanted builds beside only above "
+                "the lag build_policy.read_mode_for resolves for the graph (0 for latest). "
+                "candidates.wanted builds beside only above "
                 "buildAboveRows, on a platform-owned key, with candidateKeysEnabled on; a graph whose "
                 "summaries live in a graph named from its key, or whose key other data sources read, "
                 "is written in place (projection._keeps_its_key)."),
@@ -842,9 +843,10 @@ _READS = (
             example=_ex_max_behind,
             evidence=(
                 "service.serving_seq: behind its head, a key serves main at the version it last "
-                "published unless committed - held > lag; the lag is build_policy.max_lag_of(mode): "
-                "0 for latest, else GRAPHVER_READ_MAX_LAG (-1, any). The same bound decides whether "
-                "a rebuild or a move can be built beside the key (service._beside_ok)."),
+                "published unless committed - held > lag; the lag is build_policy.read_mode_for's "
+                "max_lag: 0 for latest, else this setting as it resolves for the graph "
+                "(GRAPHVER_READ_MAX_LAG -1: any). The same bound decides whether a rebuild or a "
+                "move can be built beside the key (service._beside_ok)."),
             aliases=("max lag", "staleness", "versions behind", "read lag", "GRAPHVER_READ_MAX_LAG"),
         ),
     ),
@@ -3252,7 +3254,8 @@ GLOSSARY: Tuple[Term, ...] = (
          "joins retired_keys."),
     Term("Read mode", "What readers see while a new version of a graph loads: Always the latest, "
                       "Keep serving, update in place, or Keep serving, switch when ready.",
-         "build_policy.read_mode_of, applied by service.serving_seq with the mode's lag cap."),
+         "build_policy.read_mode_for, per graph, applied by service.serving_seq with the mode's "
+         "lag cap."),
     Term("Residency class", "Whether a graph stays in memory when nobody reads it: Always, Standard "
                             "or Coldline.",
          "projection_state.residency."),

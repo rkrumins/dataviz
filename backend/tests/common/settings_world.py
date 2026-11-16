@@ -16,14 +16,19 @@ database out of reach, as the real snapshot sees it: the last rows read keep ser
 ``effective.readable()`` says so. The stand-ins replace module attributes, so the code under
 test calls them as ``store.apply(...)``, never as a name imported from ``store``. A test against
 Postgres and Redis that reads the real store calls :func:`use_the_database` first.
+
+No graph's own value waits for its import (``settings.legacy.graph_values_imported``), so a
+graph's read mode is the store's. A test of the time before the graphs' own values were copied
+from a separate graph store calls ``not_imported``.
 """
 from __future__ import annotations
 
 import json
+import math
 import uuid
 from typing import Any, Dict, List, Optional, Sequence, Set
 
-from backend.app.services.settings import effective, registry, store
+from backend.app.services.settings import effective, legacy, registry, store
 from backend.app.services.settings import snapshot as snapshots
 from backend.app.services.settings.resolver import Row, RowKey
 from backend.app.services.settings.store import KEEP, Applied, Change, ChangeSet, SettingsConflict
@@ -72,6 +77,18 @@ class SettingsWorld:
     def readable(self, value: bool) -> None:
         self._readable = value
         self._moved()
+
+    def not_imported(self, monkeypatch) -> None:
+        """The graphs' own values still to be copied from a separate graph store: the import
+        migration ran (``legacy`` in ``imports``) but ``legacy_graph`` isn't there yet, which the
+        process asks, as it does every 30 seconds until it is."""
+        self.imports = {legacy.MARKER}
+
+        async def imports_done():
+            return set(self.imports)
+
+        monkeypatch.setattr(legacy, "_imports_done", imports_done)
+        _ask_again(monkeypatch)
 
     # ── Saving ────────────────────────────────────────────────────────────────────────────────────
     def set(self, key: str, scope: str, scope_id: str, value: Any, *,
@@ -160,8 +177,11 @@ class SettingsWorld:
 
     # ── Putting it in place ───────────────────────────────────────────────────────────────────────
     def install(self, monkeypatch) -> None:
-        """This world's snapshot as the process's, from a fresh ``effective``."""
+        """This world's snapshot as the process's, from a fresh ``effective``. No graph's own
+        value waits for its import, and the process asks nothing about it."""
         monkeypatch.setitem(snapshots._SNAPSHOTS, self.domain, self.snapshot)
+        monkeypatch.setitem(legacy._GRAPH_VALUES, "imported", True)
+        monkeypatch.setitem(legacy._GRAPH_VALUES, "final", True)
         effective.reset()
 
     def install_store(self, monkeypatch) -> None:
@@ -171,10 +191,18 @@ class SettingsWorld:
             monkeypatch.setattr(store, name, getattr(self, name))
 
 
+def _ask_again(monkeypatch) -> None:
+    """The process has not asked whether the graphs' own values are in the store yet: it will."""
+    monkeypatch.setitem(legacy._GRAPH_VALUES, "imported", False)
+    monkeypatch.setitem(legacy._GRAPH_VALUES, "final", False)
+    monkeypatch.setitem(legacy._GRAPH_VALUES, "asked_at", -math.inf)
+
+
 def use_the_database(monkeypatch) -> snapshots.Snapshot:
     """For a test against Postgres and Redis: the process's snapshot reads the real store again,
-    from a fresh ``effective``."""
+    from a fresh ``effective``, and asks it whether the graphs' own values are in it."""
     snap = snapshots.Snapshot(registry().DOMAIN)
     monkeypatch.setitem(snapshots._SNAPSHOTS, snap.domain, snap)
+    _ask_again(monkeypatch)
     effective.reset()
     return snap

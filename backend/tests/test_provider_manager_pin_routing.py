@@ -59,8 +59,8 @@ def _route_row(row):
     if row is None:
         return None
     graph_id, provider, name = row
-    return (graph_id, "ds_1", None, False, 3, "br_main", True, 3, 3, "idle", None, name, provider,
-            None, None, "standard", None)
+    return (graph_id, "ds_1", "ws_1", None, False, 3, "br_main", True, 3, 3, "idle", None, name,
+            provider, True, None, None, "standard", None)
 
 
 @pytest.fixture

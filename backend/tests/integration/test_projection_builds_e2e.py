@@ -159,12 +159,17 @@ def _policy(**over):
 
 
 @pytest.fixture
-def builds_on(monkeypatch):
+def builds_on(monkeypatch, settings_world):
     """New-version builds on, a build for any window of more than one row, room for a copy, no
     summaries job running. Returns a setter for the policy and the copy room (an exception there
     is raised by the admission), and what was reserved and given back: a copy's room is reserved
-    for its build when it fits (``("held", build id)``)."""
+    for its build when it fits (``("held", build id)``). The versioned-graph settings are in
+    memory (``settings_world``): a graph's read mode is saved there (``set_read_mode``), and
+    Keep serving, switch when ready is in force while the switch, as ``state["switch"]`` says it,
+    is on."""
     from backend.app.services.aggregation.admission import AggregationAdmission
+    from backend.app.services.feature_flags import feature_flags
+    from backend.app.services.settings import effective
 
     from backend.app.providers import falkor_graph_registry
 
@@ -173,10 +178,16 @@ def builds_on(monkeypatch):
              "seeded_on": [], "summaries_met": False}
 
     async def resolve(session=None):
+        await effective.refresh()              # what each graph's read mode resolves from
         return state["policy"]
 
     async def switch(session=None):
         return state["switch"]
+
+    flag = feature_flags.is_enabled_self_session
+
+    async def flags(key, default=False):
+        return state["switch"] if key == build_policy.SWITCH else await flag(key, default)
 
     async def room(graph_id, provider, key, holder, **k):
         if isinstance(state["room"], BaseException):
@@ -213,6 +224,7 @@ def builds_on(monkeypatch):
     monkeypatch.setattr(build_policy, "resolve", resolve)
     monkeypatch.setattr(build_policy, "current", lambda: state["policy"])
     monkeypatch.setattr(build_policy, "switch_state", switch)
+    monkeypatch.setattr(feature_flags, "is_enabled_self_session", flags)
     monkeypatch.setattr(residency, "admit_build_copy", room)
     monkeypatch.setattr(residency, "admit_build_seed", seed_room)
     monkeypatch.setattr(falkor_graph_registry, "list_graph_keys", graph_keys)
@@ -280,6 +292,40 @@ async def _run_a_large_publish_is_built_beside_and_switched_to() -> None:
 
 def test_a_large_publish_is_built_beside_and_switched_to(builds_on):
     asyncio.run(_run_a_large_publish_is_built_beside_and_switched_to())
+
+
+async def _run_a_workspaces_switch_when_ready_builds_its_graphs_large_publishes(world,
+                                                                               state) -> None:
+    svc, fake = GraphVersioningService(), BuildFalkor()
+    gid, proj, _serving = await _seed(svc, fake)                  # a graph of workspace ws1
+    world.set("reads.mode", "platform", "", None,                 # workspaces may choose it
+              limits={"allowed": ["latest", "in_place", "beside"]})
+    world.set("reads.mode", "workspace", "ws1", "beside")
+    await _edit_publish(svc, gid, "a", _create("D", "E"), "a large change")
+    wm = await svc.projection_watermark(gid)
+    assert (wm["read_mode"], wm["read_mode_source"], wm["read_mode_why"]) == (
+        "beside", "workspace", [])
+    # Inside a request it is the worker's: more rows than a build is asked for above.
+    assert not await proj.fits_inline(gid)
+    state["switch"] = False                                       # builds off: in place, inline
+    assert await proj.fits_inline(gid)
+    wm = await svc.projection_watermark(gid)
+    assert (wm["read_mode"], wm["read_mode_declared"]) == ("in_place", "beside")
+    assert [w["code"] for w in wm["read_mode_why"]] == ["builds_off"]
+    state["switch"] = True
+    await proj.project_graph(gid)
+    ps = await _ps(gid)
+    assert ps.candidate_state["reason"] == "window", ps.candidate_state
+
+
+def test_a_workspaces_switch_when_ready_builds_its_graphs_large_publishes(builds_on,
+                                                                          settings_world):
+    """Keep serving, switch when ready chosen for the workspace, not the graph: its graphs read
+    by it, a large publish is built beside, and an inline projection stops at the build
+    threshold — only while New-version builds are on; with them off, the mode in force is update
+    in place, and the watermark says why."""
+    asyncio.run(_run_a_workspaces_switch_when_ready_builds_its_graphs_large_publishes(
+        settings_world, builds_on))
 
 
 async def _run_a_small_publish_or_another_mode_is_written_in_place(state) -> None:

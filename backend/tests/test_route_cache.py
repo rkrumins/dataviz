@@ -9,12 +9,16 @@ read. A data source with no live graph is remembered against the set's token.
 
 The graphver session notes each write to a route's columns, by the unit of work or as an ORM
 statement, and its commit announces them; a write that names no graph moves every graph's route.
-No database or Redis: the route's query and Redis are stubbed.
+
+A route reads by its graph's read mode as it resolves, platform → workspace → graph, from the
+process's settings: no settings IO per read, and a strict look at them when the route's token
+moved, as a save of a read mode moves it.
+
+No database or Redis: the route's query and Redis are stubbed, and the settings are in memory.
 """
 from __future__ import annotations
 
 import asyncio
-from dataclasses import replace
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -64,11 +68,11 @@ class _Redis:
 
 
 def _route(gid="g1", ds="ds1", **kw):
-    fields = dict(graph_id=gid, data_source_id=ds, fork_parent_graph_id=None, root_id=None,
-                  deleted=False, main_branch_id="br_main", committed=3, projected=3,
+    fields = dict(graph_id=gid, data_source_id=ds, workspace_id="ws1", fork_parent_graph_id=None,
+                  root_id=None, deleted=False, main_branch_id="br_main", committed=3, projected=3,
                   served_commit_seq=3, status="idle", read_mode=None, falkor_graph_name="K1",
-                  falkor_provider=None, window_rows=None, last_error=None, residency="standard",
-                  size_bytes=None)
+                  falkor_provider=None, platform_copy=True, window_rows=None, last_error=None,
+                  residency="standard", size_bytes=None)
     fields.update(kw)
     return rc.RouteSnapshot(**fields)
 
@@ -253,19 +257,116 @@ async def _state_of(snap):
     return await snap.state()
 
 
-def test_its_state_is_what_the_watermark_says_of_the_route(store, monkeypatch):
-    from backend.app.services.versioning import build_policy
-
-    async def _policy(session=None):
-        return build_policy.defaults()
-
-    monkeypatch.setattr(build_policy, "resolve", _policy)
+def test_its_state_is_what_the_watermark_says_of_the_route(store, settings_world):
     behind = _route(committed=5, projected=3, served_commit_seq=3, status="projecting")
     state = _run(_state_of(behind))
     assert state["served"] is None and state["fresh"] is False           # latest: Postgres serves
-    state = _run(_state_of(replace(behind, read_mode="in_place")))
+    settings_world.set("reads.mode", "graph", "ds1", "in_place")
+    state = _run(_state_of(behind))
     assert state["served"] == 3 and state["read_mode"] == "in_place"     # the version it holds
     assert _run(_state_of(_route()))["served"] == 3
+
+
+# ── The read mode a route reads by: platform → workspace → graph ──────────────────────────────────
+_BEHIND = dict(committed=5, projected=3, served_commit_seq=3, status="projecting")
+
+
+def _reads(snap) -> tuple:
+    state = _run(_state_of(snap))
+    return state["read_mode"], state["served"]
+
+
+def test_a_route_reads_by_the_platforms_mode_its_workspaces_and_its_own(store, settings_world):
+    """Behind its head, a graph read Always the latest goes to Postgres (served None) and one
+    updated in place keeps its key's version (3). The platform's mode reaches every graph; a
+    workspace's, its graphs only; a graph's own wins over both; cleared, it takes its workspace's
+    again."""
+    mine, other = _route(**_BEHIND), _route("g2", "ds2", workspace_id="ws2", **_BEHIND)
+    assert _reads(mine) == _reads(other) == ("latest", None)              # the code default
+    settings_world.set("reads.mode", "platform", "", "in_place")
+    assert _reads(mine) == _reads(other) == ("in_place", 3)
+    settings_world.set("reads.mode", "workspace", "ws1", "latest")
+    assert (_reads(mine), _reads(other)) == (("latest", None), ("in_place", 3))
+    settings_world.set("reads.mode", "graph", "ds1", "in_place")
+    assert _reads(mine) == ("in_place", 3)
+    settings_world.set("reads.mode", "graph", "ds1", None)
+    assert _reads(mine) == ("latest", None)
+
+
+def test_how_far_behind_a_route_serves_is_its_graphs_most_versions_behind(store, settings_world):
+    settings_world.set("reads.mode", "platform", "", "in_place")
+    settings_world.set("reads.maxVersionsBehind", "workspace", "ws1", 1)
+    assert _reads(_route(**_BEHIND)) == ("in_place", None)                # 2 behind, 1 allowed
+    assert _reads(_route("g2", "ds2", workspace_id="ws2", **_BEHIND)) == ("in_place", 3)
+    settings_world.set("reads.maxVersionsBehind", "graph", "ds1", "unlimited")
+    assert _reads(_route(**_BEHIND)) == ("in_place", 3)
+
+
+def test_switch_when_ready_reads_in_place_until_builds_are_on_and_on_a_connected_graph(
+        store, settings_world, monkeypatch):
+    """Keep serving, switch when ready is in force only with New-version builds on and a
+    platform copy; else the graph updates in place, and says why."""
+    from backend.app.services.feature_flags import feature_flags
+    from backend.app.services.versioning import build_policy
+
+    settings_world.set("reads.mode", "graph", "ds1", "beside")
+    assert _reads(_route(**_BEHIND)) == ("in_place", 3)
+    mode = build_policy.read_mode_for(workspace_id="ws1", data_source_id="ds1",
+                                      platform_copy=True)
+    assert (mode.declared, mode.source) == ("beside", "graph")
+    assert "builds_off" in [w["code"] for w in mode.why]
+    monkeypatch.setitem(feature_flags._cache, build_policy.SWITCH, True)
+    assert _reads(_route(**_BEHIND)) == ("beside", 3)
+    assert _reads(_route(platform_copy=False, **_BEHIND)) == ("in_place", 3)
+    mode = build_policy.read_mode_for(workspace_id="ws1", data_source_id="ds1",
+                                      platform_copy=False)
+    assert "connected_graph" in [w["code"] for w in mode.why]
+
+
+def _saved_elsewhere(world, *row) -> None:
+    """A value another process saved just now: in the store, the settings' generation moved,
+    and this process's clock where it was, so its settings are not due a look."""
+    now = world._now
+    world.set(*row)
+    world._now = now
+
+
+def test_a_moved_token_asks_the_settings_at_once_and_a_kept_route_asks_nothing(
+        store, settings_world, monkeypatch):
+    """No settings IO per read: a kept route resolves its read mode from this process's
+    settings. A save that routes reads moves the graph's token after the settings' generation;
+    the lookup that reads the route again asks the settings at once (a strict check), so
+    "Always the latest" holds from the next read, not two seconds later."""
+    snapshot, asked = settings_world.snapshot, {"generation": 0, "rows": 0}
+    generation, load = snapshot._generation, snapshot._load
+
+    async def counted_generation(domain):
+        asked["generation"] += 1
+        return await generation(domain)
+
+    async def counted_load(domain, after):
+        asked["rows"] += 1
+        return await load(domain, after)
+
+    monkeypatch.setattr(snapshot, "_generation", counted_generation)
+    monkeypatch.setattr(snapshot, "_load", counted_load)
+    settings_world.set("reads.mode", "platform", "", "in_place")
+
+    async def go():
+        assert (await (await rc.route_of_graph("g1")).state())["read_mode"] == "in_place"
+        warm = dict(asked)
+        for _ in range(100):
+            await (await rc.route_of_graph("g1")).state()
+        assert asked == warm, "a kept route asks nothing of the settings"
+        _saved_elsewhere(settings_world, "reads.mode", "graph", "ds1", "latest")
+        assert (await (await rc.route_of_graph("g1")).state())["read_mode"] == "in_place"
+        assert asked == warm, "not due a look, and nothing told this route"
+        store["redis"].data[rc._key("g1")] = "moved"            # the save's announcement
+        snap = await rc.route_of_graph("g1")
+        assert asked == {"generation": warm["generation"] + 1, "rows": warm["rows"] + 1}
+        assert (await snap.state())["read_mode"] == "latest"
+        assert store["reads"] == ["g1", "g1"]
+    _run(go())
 
 
 # ── Noting route changes ──────────────────────────────────────────────────────────────────────────
@@ -311,9 +412,19 @@ def test_a_write_to_a_routes_columns_is_noted_by_its_graph(stmt, params, graphs)
 def test_a_write_to_no_column_of_a_route_is_not_noted():
     for stmt in (update(PS).where(PS.graph_id == "g1").values(progress_done=5),
                  update(PS).values(last_read_at="now"),
-                 update(GraphORM).where(GraphORM.id == "g1").values(workspace_id="ws2"),
+                 update(GraphORM).where(GraphORM.id == "g1").values(tenant_id="t2"),
                  select(PS.graph_id)):
         assert _executed(stmt)[0] is None, stmt
+
+
+def test_a_move_to_another_workspace_or_owner_moves_the_route():
+    """Its workspace is whose settings its read mode resolves through, and whether its copy is
+    the platform's decides whether Keep serving, switch when ready can be in force."""
+    noted, _out = _executed(update(GraphORM).where(GraphORM.id.in_(["g1", "g2"]))
+                            .values(workspace_id="ws2"))
+    assert noted == {"graphs": {"g1", "g2"}, "set": False, "all": False}
+    noted, _out = _executed(update(PS).where(PS.graph_id == "g3").values(owns_falkor_graph=True))
+    assert noted["graphs"] == {"g3"}
 
 
 def test_which_graphs_are_live_moves_with_a_graph_created_trashed_or_restored():
@@ -349,7 +460,7 @@ def test_the_unit_of_work_notes_a_changed_route_column_and_nothing_else():
     graph = GraphORM(id="g2")
     sync = SimpleNamespace(info={}, new=(), deleted=(), dirty=(ps, graph))
     ps.progress_done = 4
-    graph.workspace_id = "ws2"
+    graph.tenant_id = "t2"
     rc._flushed(sync, None)
     assert rc._PENDING not in sync.info
     ps.status = "projecting"

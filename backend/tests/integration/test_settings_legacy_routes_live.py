@@ -1,15 +1,20 @@
-"""The old build and residency routes against Postgres and Redis, now that they save through the
-settings store (PUT ``/admin/versioning/build-policy`` and ``/residency-policy``).
+"""The old build, residency and read-mode routes against Postgres and Redis, now that they save
+through the settings store (PUT ``/admin/versioning/build-policy``, ``/residency-policy`` and
+``/graphs/{graph_id}/read-mode``).
 
 Pins:
 - A PUT saves in the store with its history: ``legacy_api``, who, and the reason the person gave.
-- In the same transaction it writes the old storage through (the JSON, the ``gv_*`` columns), so
-  the previous image, rolled back to, behaves as configured; and it records its activity event.
-- ``-1`` still clears a value: inherit (NULL) in the store, NULL in the old column.
+- In the same transaction it writes the old storage through (the JSON, the ``gv_*`` columns, a
+  graph's ``projection_state.read_mode``), so the previous image, rolled back to, behaves as
+  configured; and it records its activity event.
+- ``-1`` still clears a value: inherit (NULL) in the store, NULL in the old column; a graph's read
+  mode clears with null or ``inherit``.
 - A refused PUT saves nothing anywhere, a change to the residency class among them (it is the
   class every graph inherits now, set in Admin → Versioned graphs); sent back as it is, it passes.
 - PUTs at once go one at a time, under the store's writer lock, and the last one wins, as before.
 - This process reads the change at once.
+- With the graph store in a database of its own, until the versioning worker has copied the
+  graphs' values into the store, a graph's read mode is its column's; then the store's.
 
 Needs ``GRAPHVER_E2E=1``, ``MANAGEMENT_DB_URL`` (a role that may create databases) and the bus
 Redis, as ``test_settings_store_live.py``, whose helpers it uses.
@@ -18,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 from types import SimpleNamespace
 from typing import Iterator
@@ -27,10 +33,12 @@ from fastapi import HTTPException
 
 from backend.app.api.v1.endpoints import versioning_admin as va
 from backend.app.common import activity_context
+from backend.app.services.settings import effective, legacy
 from backend.app.services.versioning import build_policy, config, residency_policy
+from backend.app.services.versioning.service import GraphVersioningService
 from backend.tests.common.settings_world import use_the_database
 from backend.tests.integration.test_settings_store_live import (  # noqa: F401 — fixtures
-    engines_at, query, redis_bus, scratch_database, upgrade_cli)
+    engines_at, graph, graph_store_tables, query, redis_bus, scratch_database, seed, upgrade_cli)
 
 pytestmark = pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"),
                                 reason="set GRAPHVER_E2E=1 + a live Postgres and Redis")
@@ -137,3 +145,71 @@ async def test_puts_at_once_go_one_at_a_time_and_the_last_one_wins(db):
                        "WHERE key = 'builds.maxAttempts' AND scope = 'platform'")
     assert row.value in (4, 5) and row.version == 2
     assert len(_history(db, "builds.maxAttempts")) == 2
+
+
+async def _put_read_mode(mode) -> dict:
+    from backend.app.db.engine import get_async_session
+
+    async with get_async_session() as session:
+        return await va.set_graph_read_mode("graph_rm", va.ReadModeRequest(mode=mode),
+                                            user=_ADMIN, session=session)
+
+
+async def test_a_graphs_read_mode_is_its_columns_until_copied_then_the_put_saves_it_in_the_store(
+        engines_at, redis_bus, monkeypatch):  # noqa: F811 — fixtures
+    """The graph store apart: the upgrade can't copy the graphs' values, so until the versioning
+    worker's start-up import has, a graph's own read mode is its ``projection_state`` column's.
+    Copied, it is the store's; the old route then saves the graph's value in the store and writes
+    the column through, recorded, read by this process at once; ``inherit`` clears both."""
+    def column() -> str:
+        return query(apart, "SELECT read_mode FROM graphver.projection_state "
+                            "WHERE graph_id = 'graph_rm'")[0][0]
+
+    def stored() -> list:
+        return [(r.value, r.version) for r in query(
+            name, "SELECT value, version FROM setting_values WHERE key = 'reads.mode' "
+                  "AND scope = 'graph' AND scope_id = 'ds_rm'")]
+
+    async def in_force() -> tuple:
+        wm = await GraphVersioningService().projection_watermark("graph_rm")
+        return wm["read_mode"], wm["read_mode_source"]
+
+    with scratch_database("settings_rm") as name, scratch_database("settings_rm_gv") as apart:
+        upgrade_cli(name, "upgrade")                    # as the release before the store left it
+        upgrade_cli(name, "downgrade", "--revision", "20261113_1400_gv_ps_candidate")
+        graph_store_tables(apart)
+        seed(apart, *graph("graph_rm", "ds_rm", "ws_rm", read_mode="in_place",
+                           owns_falkor_graph=True, falkor_graph_name="gvt_rm"))
+        upgrade_cli(name, "upgrade", graph_store=apart)
+        engines_at(name, apart)
+        use_the_database(monkeypatch)
+        await build_policy.resolve()
+        assert legacy.graph_values_imported() is False
+        assert await in_force() == ("in_place", "graph")              # its column's meanwhile
+
+        assert await legacy.import_graph_values() == 1                # the worker's start-up
+        monkeypatch.setitem(legacy._GRAPH_VALUES, "asked_at", -math.inf)
+        await build_policy.resolve()
+        await effective.refresh(strict=True)
+        assert legacy.graph_values_imported() is True
+        assert stored() == [("in_place", 1)] and await in_force() == ("in_place", "graph")
+
+        token = activity_context.bind(activity_context.ActivityContext(
+            actor_id=_ADMIN.id, stated_reason=_REASON))
+        try:
+            out = await _put_read_mode("latest")
+            assert (out["readMode"], out["readModeEffective"], out["readModeSource"]) == (
+                "latest", "latest", "graph")
+            assert stored() == [("latest", 2)] and column() == "latest"
+            assert {(c.source, c.actor, c.reason) for c in query(
+                name, "SELECT source, actor, reason FROM setting_changes "
+                      "WHERE key = 'reads.mode' AND version = 2")} == {
+                ("legacy_api", "usr_admin", _REASON)}
+            assert len(query(name, "SELECT 1 FROM outbox_events WHERE event_type = "
+                                   "'platform.versioning.read_mode_changed'")) == 1
+            out = await _put_read_mode("inherit")
+            assert (out["readMode"], out["readModeEffective"], out["readModeSource"]) == (
+                None, "latest", "default")
+            assert stored() == [(None, 3)] and column() is None
+        finally:
+            activity_context.reset(token)

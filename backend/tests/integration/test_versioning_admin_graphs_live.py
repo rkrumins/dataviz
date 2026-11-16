@@ -109,8 +109,10 @@ async def _run() -> None:
         "owned": True, "forkParentGraphId": None, "orphan": False, "retiredKeys": [],
         "residency": "standard", "residencyState": "resident", "evictedReason": None,
         "lastReadAt": None, "sizeBytes": None, "rehydratingSince": None,
-        # No read mode of its own: the platform's, Always the latest by default; and no build.
-        "readMode": None, "readModeEffective": "latest", "build": None,
+        # No read mode of its own: Always the latest, the default, as nothing chose another;
+        # and no build.
+        "readMode": None, "readModeEffective": "latest", "readModeSource": "default",
+        "readModeWhy": [], "build": None,
     }
     # A fork has no residency of its own (doc 17): no key, no class, no state; its root's row has
     # them, and its reads count there. Nor a projection's state: it is never evicted, behind or

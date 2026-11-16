@@ -67,7 +67,7 @@ def _run(case):
     asyncio.run(go())
 
 
-def test_a_kept_route_moves_with_each_write_made_elsewhere():
+def test_a_kept_route_moves_with_each_write_made_elsewhere(settings_world):
     async def case(svc):
         ds, gid = await _graph(svc)
         fake = FakeFalkor()
@@ -173,11 +173,42 @@ def test_a_write_no_process_was_told_of_is_seen_once_the_route_ages_out(monkeypa
 
     async def case(svc):
         ds, gid = await _graph(svc)
-        assert (await _route(ds))["read_mode"] == "latest"
+        assert (await _route(ds))["status"] == "idle"
         async with db.graphver_session() as s:                     # a raw statement: unnoticed
-            await s.execute(text("UPDATE graphver.projection_state SET read_mode = 'beside' "
+            await s.execute(text("UPDATE graphver.projection_state SET status = 'evicted' "
                                  "WHERE graph_id = :g"), {"g": gid})
-        assert (await _route(ds))["read_mode"] == "latest"
+        assert (await _route(ds))["status"] == "idle"
         await asyncio.sleep(0.6)
-        assert (await _route(ds))["read_mode"] == "beside"
+        assert (await _route(ds))["status"] == "evicted"
+    _run(case)
+
+
+def test_a_routes_read_mode_is_its_graphs_else_its_workspaces_else_the_platforms(
+        settings_world):
+    """Behind its head, a graph read Always the latest goes to Postgres (served None) and one
+    updated in place keeps its key's version. The mode resolves platform → workspace → graph
+    from the settings, read with no statement to Postgres, and a fork reads its root's key by the
+    root's mode."""
+    async def case(svc):
+        ds, gid = await _graph(svc)
+        await FalkorProjector(graph_client_factory=FakeFalkor()).project_graph(gid)
+        await svc.apply_ops(graph_id=gid, actor="u", message="b", ops=[_node("B")])
+        held = (await _route(ds))["projected"]
+        fork = (await svc.fork_graph(parent_graph_id=gid, workspace_id="ws1",
+                                     actor="u"))["graph_id"]
+
+        async def reads():
+            route = await _route(ds)
+            return route["read_mode"], route["served"], (await svc.fork_read_plan(fork))["serving"]
+
+        assert await reads() == ("latest", None, None)
+        settings_world.set("reads.mode", "platform", "", "in_place")
+        assert await reads() == ("in_place", held, held)
+        settings_world.set("reads.mode", "workspace", "ws1", "latest")
+        assert await reads() == ("latest", None, None)
+        assert await svc.set_read_mode(gid, "in_place") == (True, None)
+        assert await reads() == ("in_place", held, held)
+        assert (await svc.projection_watermark(fork))["read_mode_source"] == "graph"
+        assert await svc.set_read_mode(gid, None) == (True, "in_place")
+        assert await reads() == ("latest", None, None)
     _run(case)

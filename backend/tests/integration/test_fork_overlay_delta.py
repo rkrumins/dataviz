@@ -221,7 +221,8 @@ def test_past_the_ceiling_a_fork_reads_postgres(monkeypatch):
     _run(case)
 
 
-def test_a_fork_reads_its_roots_key_at_the_version_the_key_holds_whole(read_mode_in_place):
+def test_a_fork_reads_its_roots_key_at_the_version_the_key_holds_whole(read_mode_in_place,
+                                                                       settings_world):
     """Behind its root's head, a fork reads the root's key at the version the key serves, while the
     key holds exactly that (idle since it published): its patch set is against the root there, so
     it reads as the fork does, at whatever base, and never shows a change its root made since. A

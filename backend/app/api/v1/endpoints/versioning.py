@@ -1077,13 +1077,18 @@ class WatermarkModel(_ApiModel):
     last_read_at: Optional[datetime] = Field(default=None, alias="lastReadAt")
     size_bytes: Optional[int] = Field(default=None, alias="sizeBytes")
     rehydrating_since: Optional[datetime] = Field(default=None, alias="rehydratingSince")
-    # What readers of main get while a newer version lands: latest (always the newest published
-    # version, from Postgres until FalkorDB holds it), in_place (the version FalkorDB last finished,
-    # while the next is written into it) or beside (exactly that version, while the next is built
-    # in a second key, then one switch); and whether the graph set it ("graph") or it is the
-    # platform's ("platform"). A fork's are its root's.
+    # What readers of main get while a newer version lands, the mode in force: latest (always the
+    # newest published version, from Postgres until FalkorDB holds it), in_place (the version
+    # FalkorDB last finished, while the next is written into it) or beside (exactly that version,
+    # while the next is built in a second key, then one switch). Then the mode chosen
+    # (readModeDeclared) and where (readModeSource: graph, workspace, platform, env or default),
+    # and why the mode in force differs (readModeWhy, each {code, text, fix}): beside updates in
+    # place while New-version builds are off (builds_off) or on a connected graph
+    # (connected_graph). A fork's are its root's.
     read_mode: str = Field(default="latest", alias="readMode")
+    read_mode_declared: Optional[str] = Field(default=None, alias="readModeDeclared")
     read_mode_source: str = Field(default="platform", alias="readModeSource")
+    read_mode_why: List[Dict[str, Any]] = Field(default_factory=list, alias="readModeWhy")
     # The version rows of a window written a page at a time, in flight: null when none is.
     window_rows: Optional[int] = Field(default=None, alias="windowRows")
     # A new version built beside the serving key (read mode beside), while one is: null when none
@@ -2785,7 +2790,9 @@ async def _watermark_model(session: AsyncSession, wm: dict) -> WatermarkModel:
                           size_bytes=wm.get("size_bytes"),
                           rehydrating_since=wm.get("rehydrating_since"),
                           read_mode=wm.get("read_mode", "latest"),
+                          read_mode_declared=wm.get("read_mode_declared"),
                           read_mode_source=wm.get("read_mode_source", "platform"),
+                          read_mode_why=wm.get("read_mode_why") or [],
                           window_rows=wm.get("window_rows"),
                           candidate=(BuildModel(**wm["candidate"]) if wm.get("candidate")
                                      else None))

@@ -1486,7 +1486,8 @@ async def run_readmodes(*, graph_id: str, store: CountingStore, nodes: int, edge
         ps.falkor_graph_name, ps.falkor_provider, ps.owns_falkor_graph = name, None, True
         ps.projected_commit_seq, ps.served_commit_seq, ps.status = 0, None, "idle"
         ps.last_error, ps.failed_attempts, ps.next_retry_at, ps.read_mode = None, 0, None, None
-    real = (build_policy.resolve, build_policy.current, build_policy.switch_state)
+    real = (build_policy.resolve, build_policy.current, build_policy.switch_state,
+            build_policy.read_mode_for)
     runs, gone, keys = {}, {"nodes": set(), "edges": set()}, {name}
     async with probing(store) as probes:
         seeded = await _land(graph_id, factory, timeout_s)
@@ -1526,8 +1527,14 @@ async def _modes(graph_id, svc, store, factory, modes, changes, readers, timeout
 
             async def switch(session=None):
                 return True
+
+            def in_force(_m=mode, **_graph):
+                return build_policy.ReadMode(_m, _m, "graph", (), -1)
+            # The run's mode in force in this process, with builds on as above; and saved as the
+            # graph's own in the settings store, which the readers' processes resolve it from.
             build_policy.resolve, build_policy.current, build_policy.switch_state = (
                 resolve, lambda _p=policy: _p, switch)
+            build_policy.read_mode_for = in_force
             await svc.set_read_mode(graph_id, mode)
 
             stop_file = os.path.join(work, f"stop_{mode_run}")
@@ -1609,7 +1616,8 @@ async def _modes(graph_id, svc, store, factory, modes, changes, readers, timeout
                 "exactVersions": set(landing.get("versions", [])) <= {before, landed["seq"]},
             }
     finally:
-        build_policy.resolve, build_policy.current, build_policy.switch_state = real
+        (build_policy.resolve, build_policy.current, build_policy.switch_state,
+         build_policy.read_mode_for) = real
         for key in keys:
             with contextlib.suppress(Exception):
                 await (await _client(factory, key)).delete()

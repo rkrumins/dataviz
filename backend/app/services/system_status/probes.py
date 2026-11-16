@@ -1508,14 +1508,17 @@ async def list_versioned_graphs(
 
     from backend.app.services.versioning import build_policy, candidates
 
-    policy = await build_policy.resolve()
+    await build_policy.resolve()
 
-    def read_mode_effective(r) -> Optional[str]:
-        """What its readers get while a newer version lands, its own mode or else the platform's;
-        a fork follows its root's (None)."""
+    def row_read_mode(r):
+        """What its readers get while a newer version lands, as it resolves for the graph,
+        graph → workspace → platform (``build_policy.read_mode_for``); a fork follows its root's
+        (None)."""
         if r.fork_parent_graph_id is not None:
             return None
-        return build_policy.read_mode_of(r.read_mode, policy)
+        return build_policy.read_mode_for(workspace_id=r.workspace_id,
+                                          data_source_id=r.data_source_id,
+                                          platform_copy=bool(r.owns_falkor_graph), own=r.read_mode)
 
     async with graphver_session() as session:
         if read_mode is None:
@@ -1528,7 +1531,8 @@ async def list_versioned_graphs(
                 batch = (await session.execute(
                     (stmt if after is None else stmt.where(GraphORM.id > after))
                     .order_by(GraphORM.id).limit(_INVENTORY_SCAN))).all()
-                page += [r for r in batch if read_mode_effective(r) == read_mode]
+                page += [r for r in batch
+                         if (mode := row_read_mode(r)) is not None and mode.effective == read_mode]
                 if len(batch) < _INVENTORY_SCAN:
                     break
                 after = batch[-1].id
@@ -1558,6 +1562,19 @@ async def list_versioned_graphs(
             "rehydratingSince": r.rehydrating_since if r.status == "rehydrating" else None,
         }
 
+    def read_mode_fields(r) -> dict:
+        """What its readers get while a newer version lands: its own mode (None: it takes its
+        workspace's or the platform's), the one in force, where the one chosen was chosen and why
+        the one in force differs (Keep serving, switch when ready updates in place while
+        New-version builds are off, or on a connected graph). A fork follows its root's."""
+        mode = row_read_mode(r)
+        if mode is None:
+            return dict.fromkeys(("readMode", "readModeEffective", "readModeSource",
+                                  "readModeWhy"))
+        return {"readMode": mode.declared if mode.source == "graph" else None,
+                "readModeEffective": mode.effective, "readModeSource": mode.source,
+                "readModeWhy": list(mode.why)}
+
     return {
         "graphs": [{
             **_projection_row(r, directory.get(r.data_source_id) or {}),
@@ -1569,10 +1586,7 @@ async def list_versioned_graphs(
                              "retireAfter": e["retireAfter"], "afterSeq": e["afterSeq"]}
                             for e in r.retired_keys or []],
             **residency_of(r),
-            # What its readers get while a newer version lands: its own mode (None: the
-            # platform's) and the one in force. A fork follows its root's.
-            "readMode": None if r.fork_parent_graph_id is not None else r.read_mode,
-            "readModeEffective": read_mode_effective(r),
+            **read_mode_fields(r),
             # A new version built beside its key (read mode beside), while one is.
             "build": candidates.block(r),
         } for r in page],

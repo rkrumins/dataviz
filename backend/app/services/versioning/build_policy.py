@@ -18,12 +18,17 @@ in :data:`FIELDS`, which the admin card renders from.
 
 Whether builds happen at all is a switch, not a value: ``candidateKeysEnabled`` (Admin → Features,
 :func:`switch_state`).
+
+What a graph's readers get while a newer version lands is resolved per graph, platform → workspace
+→ graph, by :func:`read_mode_for`: every reader of the read mode asks it.
 """
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
+from collections import ChainMap
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
 
@@ -301,19 +306,68 @@ async def invalidate() -> None:
         logger.info("builds: the previous image's build-settings generation could not be moved")
 
 
-def read_mode_of(override: Optional[str], policy: Optional["BuildPolicy"] = None) -> str:
-    """A graph's read mode: its own (``projection_state.read_mode``), else the platform's
-    (``readMode``, from ``policy``, else as last resolved)."""
-    if override in config.READ_MODES:
-        return override
-    return (policy or current())["readMode"]
+@dataclass(frozen=True)
+class ReadMode:
+    """What a graph's readers get while a newer version lands (``reads.mode``), as it resolves."""
+    #: The mode in force: ``latest``, ``in_place`` or ``beside``. Keep serving, switch when ready
+    #: is in force only with New-version builds on and a platform copy; else the graph updates in
+    #: place, and ``why`` says so (``builds_off``, ``connected_graph``).
+    effective: str
+    #: The mode chosen, and where: ``graph``, ``workspace``, ``platform``, ``env`` or ``default``.
+    declared: str
+    source: str
+    #: Why the mode in force differs from the one chosen, or the choice is otherwise marked:
+    #: ``{code, text, fix}`` each, as the settings API says it.
+    why: Tuple[Dict[str, Any], ...]
+    #: The graph's ``reads.maxVersionsBehind``, as ``serving_seq`` takes it: -1 for no limit.
+    max_behind: int
+
+    @property
+    def max_lag(self) -> int:
+        """How many versions behind its head a copy may serve the graph's readers in the mode in
+        force (``serving_seq``): none for ``latest``, so they read Postgres until the graph store
+        holds the newest version; else :attr:`max_behind`."""
+        return 0 if self.effective == "latest" else self.max_behind
 
 
-def max_lag_of(mode: str) -> Optional[int]:
-    """How far behind its head a key may serve a graph in ``mode`` (``serving_seq``): not at all
-    for ``latest``, so its reads go to Postgres until FalkorDB holds the newest version; else None,
-    the platform's ``GRAPHVER_READ_MAX_LAG``."""
-    return 0 if mode == "latest" else None
+#: Each graph's read mode as last worked out, and the settings it was worked out from: worked out
+#: again only once a refresh brought new rows or switches, so a read pays a lookup, not a
+#: resolution.
+_MODES: Dict[str, Any] = {"ctx": None, "imported": None, "found": {}}
+_MODES_KEPT = 10_000
+
+
+def read_mode_for(*, workspace_id: Optional[str], data_source_id: Optional[str],
+                  platform_copy: bool, own: Optional[str] = None) -> ReadMode:
+    """A graph's read mode, resolved graph → workspace → platform → environment → default from
+    this process's settings as last refreshed (:func:`resolve`), without IO. The graph is named
+    by its data source (``data_source_id``, in ``workspace_id``; a fork: its root's, whose copy
+    serves it); ``platform_copy``: whether its copy is the platform's (False: a connected graph,
+    whose copy is never built beside). ``own``: the mode ``projection_state.read_mode`` holds,
+    which is the graph's own until its values are in the settings store
+    (``settings.legacy.graph_values_imported``)."""
+    ctx = in_force.context_now()
+    imported = legacy.graph_values_imported()
+    held = None if imported or own not in config.READ_MODES else own
+    memo = _MODES
+    if memo["ctx"] is not ctx or memo["imported"] is not imported:
+        memo.update(ctx=ctx, imported=imported, found={})
+    key = (workspace_id, data_source_id, bool(platform_copy), held)
+    found = memo["found"].get(key)
+    if found is None:
+        if len(memo["found"]) >= _MODES_KEPT:
+            memo["found"].clear()
+        if not imported and data_source_id:
+            at = ("reads.mode", "graph", data_source_id)
+            ctx = dataclasses.replace(ctx, rows=ChainMap({at: Row(*at, held)}, ctx.rows))
+        target = in_force.target(workspace_id, data_source_id,
+                                 {"platform_copy": bool(platform_copy)})
+        res = resolver.resolve(ctx, "reads.mode", target)
+        behind = resolver.effective(ctx, "reads.maxVersionsBehind", target)
+        found = memo["found"][key] = ReadMode(
+            res["effective"], res["declared"], res["source"], tuple(res["why"]),
+            -1 if behind == resolver.UNLIMITED else int(behind))
+    return found
 
 
 def current() -> BuildPolicy:
@@ -329,8 +383,11 @@ async def resolve(session=None) -> BuildPolicy:
     every two seconds whether a save moved the settings' generation, and the database read only
     when one did (or every 30 seconds without Redis). Never raising: with the database out of
     reach, the values last read, or before any the defaults. ``session`` is not read: the
-    settings are read on a pool of their own."""
-    return _policy(await in_force.refresh())
+    settings are read on a pool of their own. Until the graphs' own values are found in the
+    settings store, whether they are is asked too, every 30 seconds (:func:`read_mode_for`)."""
+    ctx = await in_force.refresh()
+    await legacy.check_graph_values()
+    return _policy(ctx)
 
 
 def _is_inherit(value: Any) -> bool:

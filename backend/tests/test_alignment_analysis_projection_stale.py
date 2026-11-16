@@ -14,7 +14,8 @@ projection is caught up (a finding that is always on is a finding nobody reads).
 
 The versioning store is a decoupled schema; the endpoint reads it through the
 management session, so the SQLite test DB needs it attached — mirroring the
-``aggregation`` schema the session-wide conftest engine already attaches.
+``aggregation`` schema the session-wide conftest engine already attaches. A
+graph's read mode is the versioned-graph settings' (``settings_world``).
 """
 import json
 
@@ -37,11 +38,11 @@ async def graphver_schema(db_session):
     await db_session.execute(text("ATTACH DATABASE ':memory:' AS graphver"))
     await db_session.execute(text(
         "CREATE TABLE graphver.graphs (id TEXT PRIMARY KEY, data_source_id TEXT, "
-        "main_head_commit_seq BIGINT)"))
+        "main_head_commit_seq BIGINT, workspace_id TEXT)"))
     await db_session.execute(text(
         "CREATE TABLE graphver.projection_state (graph_id TEXT PRIMARY KEY, "
         "projected_commit_seq BIGINT, falkor_graph_name TEXT, last_error TEXT, "
-        "status TEXT, served_commit_seq BIGINT, read_mode TEXT)"))
+        "status TEXT, served_commit_seq BIGINT, read_mode TEXT, owns_falkor_graph BOOLEAN)"))
     yield
     await db_session.execute(text("DROP TABLE graphver.projection_state"))
     await db_session.execute(text("DROP TABLE graphver.graphs"))
@@ -49,7 +50,7 @@ async def graphver_schema(db_session):
 
 
 async def _seed(db_session, *, projected, head, falkor_name="gv_real", last_error=None,
-                agg_ready=False, status="idle", served=None, read_mode=None):
+                agg_ready=False, status="idle", served=None):
     db_session.add(_m.WorkspaceORM(id="ws_stale", name="Stale WS"))
     db_session.add(_m.ProviderORM(id="prov_stale", name="P", provider_type="falkordb"))
     db_session.add(_m.WorkspaceDataSourceORM(
@@ -70,11 +71,12 @@ async def _seed(db_session, *, projected, head, falkor_name="gv_real", last_erro
         schema_updated_at="2026-08-30T00:00:00Z"))
     await db_session.commit()
     await db_session.execute(text(
-        "INSERT INTO graphver.graphs VALUES ('g_stale', 'ds_stale', :head)"), {"head": head})
+        "INSERT INTO graphver.graphs VALUES ('g_stale', 'ds_stale', :head, 'ws_stale')"),
+        {"head": head})
     await db_session.execute(text(
-        "INSERT INTO graphver.projection_state VALUES ('g_stale', :p, :name, :err, :st, :sv, :rm)"),
-        {"p": projected, "name": falkor_name, "err": last_error, "st": status, "sv": served,
-         "rm": read_mode})
+        "INSERT INTO graphver.projection_state "
+        "VALUES ('g_stale', :p, :name, :err, :st, :sv, NULL, 1)"),
+        {"p": projected, "name": falkor_name, "err": last_error, "st": status, "sv": served})
     await db_session.commit()
 
 
@@ -104,11 +106,11 @@ async def test_a_lagging_projection_is_reported_with_both_sequence_numbers(
 
 
 async def test_a_lagging_projection_that_still_serves_its_last_version_is_a_warning(
-        test_client: AsyncClient, db_session, graphver_schema):
+        test_client: AsyncClient, db_session, graphver_schema, settings_world):
     """Behind, but its key still serves the version it last published, rollups included:
     reads are complete, only not the newest. Said, and not as the wedge."""
-    await _seed(db_session, projected=4, head=9, last_error="verify mismatch at seq 9",
-                read_mode="in_place")
+    settings_world.set("reads.mode", "workspace", "ws_stale", "in_place")
+    await _seed(db_session, projected=4, head=9, last_error="verify mismatch at seq 9")
 
     finding = (await _findings(test_client)).get("PROJECTION_STALE")
     assert finding is not None and finding["severity"] == "warning", finding
@@ -119,11 +121,12 @@ async def test_a_lagging_projection_that_still_serves_its_last_version_is_a_warn
 
 
 async def test_a_lagging_projection_read_latest_reads_the_version_log(
-        test_client: AsyncClient, db_session, graphver_schema):
+        test_client: AsyncClient, db_session, graphver_schema, settings_world):
     """Read Always the latest, main reads go to the version log while the key catches up,
     whatever version it holds: said as such, with no rolled-up connections."""
-    await _seed(db_session, projected=4, head=9, last_error="verify mismatch at seq 9",
-                read_mode="latest")
+    settings_world.set("reads.mode", "workspace", "ws_stale", "in_place")
+    settings_world.set("reads.mode", "graph", "ds_stale", "latest")
+    await _seed(db_session, projected=4, head=9, last_error="verify mismatch at seq 9")
 
     finding = (await _findings(test_client)).get("PROJECTION_STALE")
     assert finding is not None and finding["severity"] == "critical", finding
@@ -182,12 +185,13 @@ async def test_a_lagging_projection_is_not_reported_as_canonicalized(
 
 
 async def test_a_lagging_projection_that_serves_its_last_version_stays_canonicalized(
-        test_client: AsyncClient, db_session, graphver_schema):
+        test_client: AsyncClient, db_session, graphver_schema, settings_world):
     """Behind, reads still go through the graph at the version it last published (or, in
     a rebuild in place, the version it held): the read path is the canonicalized one."""
+    settings_world.set("reads.mode", "graph", "ds_stale", "in_place")
     for projected, status, served in ((4, "idle", 4), (0, "rebuilding", 4)):
         await _seed(db_session, projected=projected, head=9, agg_ready=True, status=status,
-                    served=served, read_mode="in_place")
+                    served=served)
         agg = await _aggregation_block(test_client)
         assert agg["canonicalized"] is True, (projected, status)
         assert agg["projectorCurrent"] is False

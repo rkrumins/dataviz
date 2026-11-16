@@ -134,6 +134,19 @@ describe('deriveSync — what readers get while a newer version lands', () => {
     expect(beside.lanes[1].lines.join(' ')).not.toMatch(/Parts of version/)
   })
 
+  it('goes by the mode in force: switch when ready chosen with New-version builds off is written in place', () => {
+    const buildsOff = [{ code: 'builds_off', text: 'New-version builds is off', fix: { feature: 'candidateKeysEnabled', to: true } }]
+    const chosen = { readMode: 'in_place' as const, readModeDeclared: 'beside' as const, readModeSource: 'workspace' as const, readModeWhy: buildsOff }
+    const v = deriveSync(versioned({ projected: 9, fresh: false, status: 'projecting', served: 9, ...chosen }), NOW)
+    expect(v.chip).toBe('Showing #9 · writing #11')
+    expect(v.lanes[1].lines.join(' ')).toMatch(/Parts of version #11 can show before the rest of it is written/)
+    // A build left from before builds went off is not one views wait for: the change is written in place.
+    const left = deriveSync(versioned({ projected: 9, fresh: false, status: 'idle', served: 9, ...chosen,
+      candidate: { step: 'catching_up', seq: 10, attempts: 0 } }), NOW)
+    expect(left.headline).toBe('Showing an earlier version while the graph updates')
+    expect(left.lanes[1].lines.join(' ')).not.toMatch(/built beside it/)
+  })
+
   it('says, switching when ready, that views show exactly one version while the next is built beside it', () => {
     const building = (candidate: NonNullable<NonNullable<SyncStatus['versioned']>['candidate']>) =>
       deriveSync(versioned({ projected: 9, fresh: false, status: 'idle', served: 9, readMode: 'beside', candidate }), NOW)

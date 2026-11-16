@@ -658,8 +658,9 @@ def serving_seq(projected: int, committed: int, status: Optional[str],
     up or rebuilds in place: the version the key last published (its watermark, or during a
     rebuild, which resets that, ``served_commit_seq``) — complete with its lineage summaries, with
     part of the next window or of the rebuild's repairs over it. ``max_lag`` caps how many versions
-    behind (0: the head only, a graph read ``latest``: ``build_policy.max_lag_of``), else
-    ``GRAPHVER_READ_MAX_LAG``. None while the key is out of FalkorDB, being loaded
+    behind: the graph's, as its read mode resolves (``build_policy.read_mode_for``: 0, the head
+    only, for a graph read ``latest``; else ``reads.maxVersionsBehind``, -1 for any); None, the
+    deployment's ``GRAPHVER_READ_MAX_LAG``. None while the key is out of FalkorDB, being loaded
     or reset, or holds no published version (a first seed, a move, an Adopt, a lost key). Seq 1 is
     a graph's genesis, its empty first commit: a key at it holds nothing anyone published — a new
     graph's key is empty, and an enabled source's own graph is not yet a version history holds."""
@@ -791,12 +792,23 @@ def _forget_build(ps, *, keep: Optional[Tuple[str, str]] = None) -> None:
     ps.candidate_state = None
 
 
+def _read_mode(ps, graph) -> "build_policy.ReadMode":
+    """A graph's read mode from its rows (``build_policy.read_mode_for``): its workspace and data
+    source, whether its copy is the platform's, and the mode its projection state holds. A graph
+    with no projection state has no copy of its own."""
+    return build_policy.read_mode_for(
+        workspace_id=graph.workspace_id if graph is not None else None,
+        data_source_id=graph.data_source_id if graph is not None else None,
+        platform_copy=bool(getattr(ps, "owns_falkor_graph", False)),
+        own=getattr(ps, "read_mode", None))
+
+
 def _beside_ok(ps, graph, *, reason: str) -> bool:
     """Whether a graph's row lets a rebuild or a move (``reason``) be built beside its key, as
     ``candidates.beside_wanted`` lets the policy: a live graph and no fork; a key the platform owns
     and has pinned; idle (no pass in flight, no rebuild or reset in place, not out of FalkorDB);
-    and serving reads of main a version it published (``serving_seq``, within the platform's
-    ``GRAPHVER_READ_MAX_LAG``), past genesis — so its readers keep that version until the switch,
+    and serving reads of main a version it published (``serving_seq``, within the graph's
+    ``reads.maxVersionsBehind``), past genesis — so its readers keep that version until the switch,
     and a build only ever exists beside a key that serves. A move also needs the key to hold that
     version whole as far as the row tells, with no window part-written into it: beside would keep
     its readers on a key part way between versions, where a move in place sends them to Postgres,
@@ -809,7 +821,7 @@ def _beside_ok(ps, graph, *, reason: str) -> bool:
     if ps.status != "idle" or (ps.projected_commit_seq or 0) <= 1:
         return False
     if serving_seq(ps.projected_commit_seq, graph.main_head_commit_seq, ps.status,
-                   ps.served_commit_seq, build_policy.max_lag_of("beside")) is None:
+                   ps.served_commit_seq, _read_mode(ps, graph).max_behind) is None:
         return False
     if reason == "move":
         return ps.served_commit_seq == ps.projected_commit_seq and ps.window_rows is None
@@ -5242,11 +5254,12 @@ class GraphVersioningService:
             projected = ps.projected_commit_seq if ps else 0
             status = ps.status if ps else "idle"
             fresh = serves_head(projected, committed, status)
-            # The graph's read mode, else the platform's: ``latest`` serves the key only at the head.
-            own_mode = getattr(ps, "read_mode", None) if ps else None
-            read_mode = build_policy.read_mode_of(own_mode, await build_policy.resolve())
+            # The graph's read mode, graph → workspace → platform: ``latest`` serves the key only
+            # at the head.
+            await build_policy.resolve()
+            mode = _read_mode(ps, graph)
             served = serving_seq(projected, committed, status, ps.served_commit_seq if ps else None,
-                                 build_policy.max_lag_of(read_mode))
+                                 mode.max_lag)
             # The revision each side is at — the main commit with that seq (one indexed read). The
             # sync indicators show it, so "version #12" can be matched to a commit in History.
             revisions: Dict[int, CommitORM] = {}
@@ -5286,10 +5299,15 @@ class GraphVersioningService:
                 # overlays whatever serves main.
                 "read_route": {"main": "falkordb" if served is not None else "postgres",
                                "drafts": "overlay"},
-                # What its readers get while a newer version lands (``config.READ_MODES``), and
-                # whether the graph set it or it is the platform's.
-                "read_mode": read_mode,
-                "read_mode_source": "graph" if own_mode in config.READ_MODES else "platform",
+                # What its readers get while a newer version lands (``config.READ_MODES``): the
+                # mode in force; the one chosen, and where (graph, workspace, platform, env or
+                # default); and why they differ (``{code, text, fix}``: Keep serving, switch when
+                # ready updates in place while New-version builds are off, ``builds_off``, or on a
+                # connected graph, ``connected_graph``).
+                "read_mode": mode.effective,
+                "read_mode_declared": mode.declared,
+                "read_mode_source": mode.source,
+                "read_mode_why": list(mode.why),
                 # Failure reason + last success + live full-reseed progress — the Data
                 # health UI needs these to converge to an honest done/failed state.
                 "last_error": ps.last_error if ps else None,
@@ -5331,18 +5349,67 @@ class GraphVersioningService:
                                       else None),
             }
 
-    async def set_read_mode(self, graph_id: str, mode: Optional[str]) -> Tuple[bool, Optional[str]]:
+    async def set_read_mode(self, graph_id: str, mode: Optional[str], *,
+                            actor: Optional[str] = None, reason: Optional[str] = None,
+                            source: str = "api", session=None,
+                            on_change: Optional[Callable[[Any, Optional[str]],
+                                                         Awaitable[None]]] = None,
+                            check: Optional[Callable[..., Awaitable[None]]] = None,
+                            ) -> Tuple[bool, Optional[str]]:
         """Set what a graph's readers get while a newer version lands (``config.READ_MODES``), or
-        None for the platform's: ``(found, the mode it had)``. Routing reads it per request, so
-        the next read goes by it."""
+        None for its workspace's or the platform's: ``(found, the graph's own mode before)``;
+        nothing is saved for a graph with no projection state (not found). Saved as the graph's
+        value in the settings store (``reads.mode`` at its data source, by ``actor`` for
+        ``reason``, ``source`` as the store records it), in ``session`` (the management
+        database's; else one of its own), under the store's writer lock, so saves go one at a time
+        and the last one wins. In the same transaction it is written through to
+        ``projection_state.read_mode``, for the previous image, and ``on_change(session, before)``
+        runs when the graph's own mode changed (the route's activity record). ``check(session,
+        scope, scope_id, changes)`` runs under the lock before anything is saved, and refuses by
+        raising (``settings.service.checker``: the platform's lock among the rest). Then the
+        graph's route is announced and this process reads the settings again: the next read in
+        any process goes by it."""
         if mode is not None and mode not in config.READ_MODES:
             raise ValueError(f"unknown read mode {mode!r}")
         async with self._session() as s:
+            graph = await s.get(GraphORM, graph_id)
             ps = await s.get(ProjectionStateORM, graph_id)
-            if ps is None:
+            if graph is None or ps is None:
                 return False, None
-            before, ps.read_mode = ps.read_mode, mode
-            return True, before
+            data_source_id, held = graph.data_source_id, ps.read_mode
+        from backend.app.db.engine import get_async_session
+        from backend.app.services.settings import effective, effects, legacy, registry, store
+
+        domain = registry().DOMAIN
+        async with (contextlib.nullcontext(session) if session is not None
+                    else get_async_session()) as ms:
+            await store.lock(ms, domain)
+            row = next((r for r in await store.read_scope(ms, domain, "graph", data_source_id)
+                        if r.key == "reads.mode"), None)
+            # Until the graphs' own values are in the store, a graph's own mode is the one its
+            # projection state holds (``legacy.graph_values_imported``).
+            before = (row.value if row is not None
+                      else None if legacy.graph_values_imported() else held)
+
+            async def through(sess, change_set) -> None:
+                await legacy.write_through(sess, change_set)
+                if not change_set.applied and held != mode:
+                    # The store holds it already, but the graph store doesn't (a mode only the
+                    # graph store held, cleared before the graphs' values were copied): there too.
+                    async with self._session() as gs:
+                        (await gs.get(ProjectionStateORM, graph_id)).read_mode = mode
+                if on_change is not None and before != mode:
+                    await on_change(sess, before)
+
+            changes = [store.Change("reads.mode", "graph", data_source_id,
+                                    row.version if row is not None else 0, value=mode)]
+            if check is not None:
+                await check(ms, "graph", data_source_id, changes)
+            change_set = await store.apply(ms, domain, changes, actor=actor, reason=reason,
+                                           source=source, before_commit=through)
+        await effects.after_save(change_set)
+        await effective.refresh(strict=True)
+        return True, before
 
     async def residency_state(self, graph_id: str) -> Optional[Dict[str, object]]:
         """What a read needs to know of a graph's residency (doc 17), in one small read: its
@@ -5358,15 +5425,18 @@ class GraphVersioningService:
                        ProjectionStateORM.projected_commit_seq, ProjectionStateORM.falkor_provider,
                        ProjectionStateORM.falkor_graph_name, ProjectionStateORM.served_commit_seq,
                        ProjectionStateORM.window_rows, ProjectionStateORM.last_error,
-                       ProjectionStateORM.read_mode)
+                       ProjectionStateORM.read_mode, GraphORM.workspace_id,
+                       GraphORM.data_source_id, ProjectionStateORM.owns_falkor_graph)
                 .join(GraphORM, GraphORM.id == ProjectionStateORM.graph_id)
                 .where(ProjectionStateORM.graph_id == graph_id))).first()
         if row is None:
             return None
+        await build_policy.resolve()
+        mode = build_policy.read_mode_for(workspace_id=row[11], data_source_id=row[12],
+                                          platform_copy=bool(row[13]), own=row[10])
         return {"status": row[0], "residency": row[1], "size_bytes": row[2], "committed": row[3],
                 "projected": row[4], "fresh": serves_head(row[4], row[3], row[0]),
-                "serving": serving_seq(row[4], row[3], row[0], row[7], build_policy.max_lag_of(
-                    build_policy.read_mode_of(row[10], await build_policy.resolve()))),
+                "serving": serving_seq(row[4], row[3], row[0], row[7], mode.max_lag),
                 "window_rows": row[8], "last_error": row[9],
                 "falkor_provider": row[5], "falkor_graph_name": row[6]}
 
@@ -5483,7 +5553,7 @@ class GraphVersioningService:
             if ps.status in ("projecting", "rebuilding") and ps.projected_commit_seq < ps.target_commit_seq:
                 return False
             beside = candidates.beside_wanted(
-                read_mode=build_policy.read_mode_of(ps.read_mode, policy), switch_on=switch_on,
+                read_mode=_read_mode(ps, graph).effective, switch_on=switch_on,
                 for_rebuilds=policy["buildForRebuilds"]) and _beside_ok(ps, graph,
                                                                         reason="rebuild")
             _forget_build(ps)          # a window's build: the rebuild supersedes it
@@ -5514,11 +5584,16 @@ class GraphVersioningService:
         is asked first, without the graph's lock: a graph that does not read ``beside`` answers at
         once, so its rebuild in place never waits on that lock."""
         async with self._session() as s:
-            mode = (await s.execute(select(ProjectionStateORM.read_mode).where(
-                ProjectionStateORM.graph_id == graph_id))).scalar_one_or_none()
-        if not candidates.beside_wanted(read_mode=build_policy.read_mode_of(mode, policy),
-                                        switch_on=switch_on,
-                                        for_rebuilds=policy["buildForRebuilds"]):
+            row = (await s.execute(
+                select(GraphORM.workspace_id, GraphORM.data_source_id,
+                       ProjectionStateORM.owns_falkor_graph, ProjectionStateORM.read_mode)
+                .join(ProjectionStateORM, ProjectionStateORM.graph_id == GraphORM.id)
+                .where(GraphORM.id == graph_id))).first()
+        if row is None or not candidates.beside_wanted(
+                read_mode=build_policy.read_mode_for(
+                    workspace_id=row.workspace_id, data_source_id=row.data_source_id,
+                    platform_copy=bool(row.owns_falkor_graph), own=row.read_mode).effective,
+                switch_on=switch_on, for_rebuilds=policy["buildForRebuilds"]):
             return False
         async with self._session() as s:
             await self._lock_graph(s, graph_id)
@@ -5529,7 +5604,7 @@ class GraphVersioningService:
             )).scalar_one_or_none()
             if (ps is None or ps.epoch != epoch or ps.candidate_state is not None
                     or not candidates.beside_wanted(
-                        read_mode=build_policy.read_mode_of(ps.read_mode, policy),
+                        read_mode=_read_mode(ps, graph).effective,
                         switch_on=switch_on, for_rebuilds=policy["buildForRebuilds"])
                     or not _beside_ok(ps, graph, reason="rebuild")):
                 return False
@@ -5611,7 +5686,7 @@ class GraphVersioningService:
                         # The move goes; a rebuild it carried does not.
                         kept = _rebuild_after_move(
                             ps, graph, build["rebuild"], beside=candidates.beside_wanted(
-                                read_mode=build_policy.read_mode_of(ps.read_mode, policy),
+                                read_mode=_read_mode(ps, graph).effective,
                                 switch_on=switch_on, for_rebuilds=policy["buildForRebuilds"]
                             ) and _beside_ok(ps, graph, reason="rebuild"))
                         building = candidates.block(ps) if kept == "beside" else None
@@ -5638,7 +5713,7 @@ class GraphVersioningService:
                         return {"changed": False, "from": cur, "to": tgt, "retiring": None,
                                 "beside": True, "building": candidates.block(ps), "cancelled": None}
                     beside = candidates.beside_wanted(
-                        read_mode=build_policy.read_mode_of(ps.read_mode, policy),
+                        read_mode=_read_mode(ps, graph).effective,
                         switch_on=switch_on, for_rebuilds=policy["buildForRebuilds"]
                     ) and _beside_ok(ps, graph, reason="move")
                     if beside:
@@ -7721,11 +7796,10 @@ class GraphVersioningService:
             committed = root.main_head_commit_seq
             projected = ps.projected_commit_seq if ps is not None else 0
             status = ps.status if ps is not None else "idle"
-            mode = build_policy.read_mode_of(getattr(ps, "read_mode", None) if ps is not None
-                                             else None, await build_policy.resolve())
+            await build_policy.resolve()
             serving = serving_seq(projected, committed, status,
                                   ps.served_commit_seq if ps is not None else None,
-                                  build_policy.max_lag_of(mode))
+                                  _read_mode(ps, root).max_lag)
             window_rows = ps.window_rows if ps is not None else None
             last_error = ps.last_error if ps is not None else None
             on_key = fork_serving_seq(serving, serves_head(projected, committed, status), status,

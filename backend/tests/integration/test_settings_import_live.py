@@ -285,8 +285,10 @@ async def test_every_effective_value_is_the_one_the_old_storage_resolves_to(
             elif old is not None and old.data_source_column in imports:
                 check(s, target, import_settings.resolve(ds)[imports[old.data_source_column]])
             elif old is not None and old.projection_state_column and ds_id in states:
+                # As the old reader read a graph's read mode: its own, else the platform's.
                 mode, cls = states[ds_id]
-                check(s, target, cls if s.materialized else build_policy.read_mode_of(mode, policy))
+                check(s, target, cls if s.materialized
+                      else mode if mode in config.READ_MODES else policy["readMode"])
     assert wrong == [], wrong
     # The store reads them as not set (``20261116_1100_settings_import``): the platform's holds.
     assert hand_made == [("imports.identifier", "ds_b", "", "entity_id"),

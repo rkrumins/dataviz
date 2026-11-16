@@ -24,6 +24,11 @@ latest" stays exact. A write whose statement names no graph, in its ``WHERE`` or
 returns, moves every graph's token (``gvroute:all``). A graph created, trashed, restored or deleted also moves ``gvroute:set``, the
 token a data source with no live graph is remembered against.
 
+A graph's read mode is resolved from the versioned-graph settings, platform → workspace → graph, in
+this process (``build_policy.read_mode_for``), not read with its route. A save of a setting that
+routes reads moves the tokens of the graphs it reaches (``settings.effects``), and a route read
+again because its token moved asks the settings at once, so it reads by the mode just saved.
+
 What this cannot see is bounded by a snapshot's age: a write whose announcement failed (Redis out of
 the writer's reach), a raw SQL statement, a change made outside the application. A lookup that
 can't read Redis reads Postgres, as before, and is counted. An eviction, which drops its graph's
@@ -50,14 +55,16 @@ from .models import BranchORM, GraphORM, ProjectionStateORM
 
 logger = logging.getLogger(__name__)
 
-#: What a route reads of a graph's row; and, of that, what says which graphs are live.
-_GRAPH_ROUTE = frozenset({"data_source_id", "fork_parent_graph_id", "deleted_at",
+#: What a route reads of a graph's row; and, of that, what says which graphs are live. Its
+#: workspace is whose settings its read mode resolves through.
+_GRAPH_ROUTE = frozenset({"data_source_id", "workspace_id", "fork_parent_graph_id", "deleted_at",
                           "main_head_commit_seq"})
 _GRAPH_SET = frozenset({"data_source_id", "deleted_at"})
-#: What a route reads of a graph's projection state.
+#: What a route reads of a graph's projection state. Whether its copy is the platform's decides
+#: whether Keep serving, switch when ready can be in force.
 _STATE_ROUTE = frozenset({"projected_commit_seq", "served_commit_seq", "status", "read_mode",
-                          "falkor_graph_name", "falkor_provider", "window_rows", "last_error",
-                          "residency", "size_bytes"})
+                          "falkor_graph_name", "falkor_provider", "owns_falkor_graph",
+                          "window_rows", "last_error", "residency", "size_bytes"})
 
 _ALL, _SET = "gvroute:all", "gvroute:set"
 _TOKEN_EX = 7 * 24 * 3600      # a token not moved for a week goes; the next lookup sets another
@@ -79,6 +86,7 @@ class RouteSnapshot:
 
     graph_id: str
     data_source_id: str
+    workspace_id: Optional[str]
     fork_parent_graph_id: Optional[str]
     #: A fork's root parent, whose store it reads (up a fork of a fork); None for a graph not forked.
     root_id: Optional[str]
@@ -88,10 +96,13 @@ class RouteSnapshot:
     projected: int
     served_commit_seq: Optional[int]
     status: str
-    #: The graph's own read mode; None: the platform's.
+    #: The read mode its projection state holds: the graph's own until the graphs' values are in
+    #: the settings store (``build_policy.read_mode_for``).
     read_mode: Optional[str]
     falkor_graph_name: Optional[str]
     falkor_provider: Optional[str]
+    #: Whether its copy is the platform's (False: a connected graph's).
+    platform_copy: bool
     window_rows: Optional[int]
     last_error: Optional[str]
     residency: Optional[str]
@@ -109,17 +120,22 @@ class RouteSnapshot:
     async def state(self) -> Dict[str, Any]:
         """What ``projection_watermark`` says of a graph's route (a graph not forked): the version
         its key serves reads of main at (``served``, :func:`~.service.serving_seq`; None: Postgres
-        serves them), by its read mode as it resolves now, and what residency's ``mark`` reads."""
+        serves them), by its read mode as it resolves now (platform → workspace → graph, from
+        this process's settings: no IO but a check of the settings' generation, at most every two
+        seconds), and what residency's ``mark`` reads."""
         from . import build_policy
         from .service import serves_head, serving_seq
 
-        mode = build_policy.read_mode_of(self.read_mode, await build_policy.resolve())
+        await build_policy.resolve()
+        mode = build_policy.read_mode_for(workspace_id=self.workspace_id,
+                                          data_source_id=self.data_source_id,
+                                          platform_copy=self.platform_copy, own=self.read_mode)
         return {
             "served": serving_seq(self.projected, self.committed, self.status,
-                                  self.served_commit_seq, build_policy.max_lag_of(mode)),
+                                  self.served_commit_seq, mode.max_lag),
             "fresh": serves_head(self.projected, self.committed, self.status),
             "committed": self.committed, "projected": self.projected, "status": self.status,
-            "read_mode": mode, "falkor_graph_name": self.falkor_graph_name,
+            "read_mode": mode.effective, "falkor_graph_name": self.falkor_graph_name,
             "falkor_provider": self.falkor_provider, "window_rows": self.window_rows,
             "last_error": self.last_error, "residency": self.residency,
             "size_bytes": self.size_bytes,
@@ -256,6 +272,14 @@ async def route_of_graph(graph_id: str) -> Optional[RouteSnapshot]:
         if snap is not None and _good(snap.taken_at, snap.tokens, now, arrived):
             _count("shared")
             return snap
+        if now is not None and (snap is None or snap.tokens != now):
+            # Its token moved (or this process has none): a write, or a save of a setting that
+            # routes reads (``settings.effects``), which moved the settings' generation first. The
+            # settings are asked now, so a read mode saved a moment ago is the one this route
+            # reads by: "Always the latest" stays exact.
+            from backend.app.services.settings import effective
+
+            await effective.refresh(strict=True)
         taken = _clock()
         snap = await _read(graph_id)
         _count(_outcome(now))
@@ -339,29 +363,31 @@ async def _read(graph_id: str) -> Optional[RouteSnapshot]:
     ps = ProjectionStateORM
     async with graphver_route_session() as s:
         row = (await s.execute(
-            select(GraphORM.id, GraphORM.data_source_id, GraphORM.fork_parent_graph_id,
-                   GraphORM.deleted_at.is_not(None), GraphORM.main_head_commit_seq, main,
+            select(GraphORM.id, GraphORM.data_source_id, GraphORM.workspace_id,
+                   GraphORM.fork_parent_graph_id, GraphORM.deleted_at.is_not(None),
+                   GraphORM.main_head_commit_seq, main,
                    ps.graph_id.is_not(None), ps.projected_commit_seq, ps.served_commit_seq,
                    ps.status, ps.read_mode, ps.falkor_graph_name, ps.falkor_provider,
-                   ps.window_rows, ps.last_error, ps.residency, ps.size_bytes)
+                   ps.owns_falkor_graph, ps.window_rows, ps.last_error, ps.residency,
+                   ps.size_bytes)
             .outerjoin(ps, ps.graph_id == GraphORM.id)
             .where(GraphORM.id == graph_id))).first()
         if row is None:
             return None
-        root, parent = None, row[2]
+        root, parent = None, row[3]
         while parent:                    # a fork reads its root parent's store, up a fork of a fork
             root, parent = parent, await s.scalar(
                 select(GraphORM.fork_parent_graph_id).where(GraphORM.id == parent))
-    (gid, ds, fork_parent, deleted, committed, main_id, has_state, projected, served, status,
-     mode, name, provider, window_rows, last_error, residency, size) = row
+    (gid, ds, ws, fork_parent, deleted, committed, main_id, has_state, projected, served, status,
+     mode, name, provider, owned, window_rows, last_error, residency, size) = row
     if not has_state:                    # as projection_watermark reads a graph with no state row
         projected, served, status, residency = 0, None, "idle", "standard"
     return RouteSnapshot(
-        graph_id=gid, data_source_id=ds, fork_parent_graph_id=fork_parent, root_id=root,
-        deleted=bool(deleted), main_branch_id=main_id, committed=committed or 0,
+        graph_id=gid, data_source_id=ds, workspace_id=ws, fork_parent_graph_id=fork_parent,
+        root_id=root, deleted=bool(deleted), main_branch_id=main_id, committed=committed or 0,
         projected=projected or 0, served_commit_seq=served, status=status, read_mode=mode,
-        falkor_graph_name=name, falkor_provider=provider, window_rows=window_rows,
-        last_error=last_error, residency=residency, size_bytes=size)
+        falkor_graph_name=name, falkor_provider=provider, platform_copy=bool(owned),
+        window_rows=window_rows, last_error=last_error, residency=residency, size_bytes=size)
 
 
 # ── Announcements ─────────────────────────────────────────────────────────────────────────────────

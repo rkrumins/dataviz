@@ -403,8 +403,12 @@ class ProjectorHealth:
     # The version the key holds whole (``projection_state.served_commit_seq``), which a rebuild
     # in place keeps serving; NULL when it holds none, or on a row from before the column.
     served_commit_seq: Optional[int] = None
-    # The graph's own read mode (``projection_state.read_mode``); NULL takes the platform's.
+    # The read mode its projection state holds (the graph's own until the graphs' values are in
+    # the settings store), its workspace, whose settings it resolves through, and whether its
+    # copy is the platform's (``build_policy.read_mode_for``).
     read_mode: Optional[str] = None
+    workspace_id: Optional[str] = None
+    platform_copy: bool = False
 
     @property
     def commits_behind(self) -> int:
@@ -478,14 +482,17 @@ class ProjectorHealth:
         """The key serves reads of main a version of it, rollups included (``serving_seq``,
         ``versioning/service.py``): its head, or while it catches up or rebuilds in place, the
         version it last published. Not while it is written from nothing, out of FalkorDB, or past
-        ``GRAPHVER_READ_MAX_LAG`` — nor behind its head at all for a graph read ``latest``."""
+        the graph's ``reads.maxVersionsBehind`` — nor behind its head at all for a graph read
+        ``latest`` — by its read mode as it resolves from this process's settings, as
+        :func:`projector_health` last refreshed them."""
         from backend.app.services.versioning import build_policy
         from backend.app.services.versioning.service import serving_seq
 
-        mode = build_policy.read_mode_of(self.read_mode)
+        mode = build_policy.read_mode_for(workspace_id=self.workspace_id,
+                                          data_source_id=self.data_source_id,
+                                          platform_copy=self.platform_copy, own=self.read_mode)
         return serving_seq(self.projected_commit_seq or 0, self.main_head_commit_seq or 0,
-                           self.status, self.served_commit_seq,
-                           build_policy.max_lag_of(mode)) is not None
+                           self.status, self.served_commit_seq, mode.max_lag) is not None
 
     @property
     def current(self) -> bool:
@@ -507,9 +514,18 @@ async def projector_health(
 
     Raises :class:`ProjectorHealthUnavailable` on any failure. There is no
     stale-serving and no fail-open dict — see the exception's docstring.
+
+    Each call also brings this process's versioned-graph settings up to date
+    (``build_policy.resolve``: Redis at most every two seconds), which each
+    graph's :attr:`ProjectorHealth.serving` resolves its read mode from — so a
+    process that reads no route, the aggregation control plane's sweep, still
+    goes by a saved read mode.
     """
     global _health_cache, _health_cache_at
 
+    from backend.app.services.versioning import build_policy
+
+    await build_policy.resolve()
     now = time.monotonic()
     if _health_cache is not None and (now - _health_cache_at) < ttl_secs:
         return _health_cache
@@ -536,6 +552,8 @@ async def projector_health(
                     ProjectionStateORM.status,
                     ProjectionStateORM.served_commit_seq,
                     ProjectionStateORM.read_mode,
+                    GraphORM.workspace_id,
+                    ProjectionStateORM.owns_falkor_graph,
                 )
                 .outerjoin(
                     ProjectionStateORM,
@@ -558,10 +576,12 @@ async def projector_health(
                 checked_at=checked_at,
                 served_commit_seq=None if served is None else int(served),
                 read_mode=read_mode,
+                workspace_id=workspace_id,
+                platform_copy=bool(owned),
             )
             for (
                 ds_id, graph_id, head, projected, last_error, falkor_name,
-                status, served, read_mode,
+                status, served, read_mode, workspace_id, owned,
             ) in rows
             if ds_id
         }

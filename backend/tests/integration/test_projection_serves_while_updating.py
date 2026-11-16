@@ -209,16 +209,10 @@ def test_a_held_back_full_replay_is_reconciled_in_place_not_reloaded(monkeypatch
     asyncio.run(_run_a_held_back_full_replay_is_reconciled_in_place_not_reloaded(monkeypatch))
 
 
-async def _run_a_graph_read_latest_goes_to_postgres_until_falkordb_holds_its_head(monkeypatch) -> None:
+async def _run_a_graph_read_latest_goes_to_postgres_until_falkordb_holds_its_head(world) -> None:
     from backend.app.services.system_status.probes import list_versioned_graphs
-    from backend.app.services.versioning import build_policy
 
-    platform = {"readMode": "in_place"}
-
-    async def resolve(session=None):
-        return build_policy.BuildPolicy({**build_policy.defaults().values, **platform})
-
-    monkeypatch.setattr(build_policy, "resolve", resolve)
+    world.set("reads.mode", "platform", "", "in_place")
     svc, fake = GraphVersioningService(), LiveFalkor()
     gid, proj, _graph = await _seed(svc, fake)                 # projected at seq 3
     await _edit_publish(svc, gid, "a", _create("D"), "after the last pass")     # head 4
@@ -242,15 +236,21 @@ async def _run_a_graph_read_latest_goes_to_postgres_until_falkordb_holds_its_hea
     assert (await proj.project_graph(gid))["projected"] == 4
     assert await _serving(svc, gid) == (4, "falkordb", True)
 
-    # Back to the platform's; the platform's own mode set to latest reads the same way.
+    # Back to the platform's; its workspace's mode, always the latest, reaches it; and the
+    # platform's own mode set to latest reads the same way.
     await _edit_publish(svc, gid, "a", _create("E"), "another")                  # head 5
     assert await svc.set_read_mode(gid, None) == (True, "latest")
     assert (await _serving(svc, gid))[:2] == (4, "falkordb")
-    platform["readMode"] = "latest"
+    world.set("reads.mode", "workspace", "ws1", "latest")
+    wm = await svc.projection_watermark(gid)
+    assert (wm["served"], wm["read_mode"], wm["read_mode_source"]) == (None, "latest", "workspace")
+    world.set("reads.mode", "workspace", "ws1", None)
+    world.set("reads.mode", "platform", "", "latest")
     wm = await svc.projection_watermark(gid)
     assert (wm["served"], wm["read_mode"], wm["read_mode_source"]) == (None, "latest", "platform")
     await db.dispose_engine()
 
 
-def test_a_graph_read_latest_goes_to_postgres_until_falkordb_holds_its_head(monkeypatch):
-    asyncio.run(_run_a_graph_read_latest_goes_to_postgres_until_falkordb_holds_its_head(monkeypatch))
+def test_a_graph_read_latest_goes_to_postgres_until_falkordb_holds_its_head(settings_world):
+    asyncio.run(_run_a_graph_read_latest_goes_to_postgres_until_falkordb_holds_its_head(
+        settings_world))

@@ -119,14 +119,41 @@ def test_rebuilds_and_moves_too_says_what_is_built_beside_and_nothing_more():
     assert "seeded from Postgres while readers keep the current version" in field.help
 
 
-def test_a_graphs_own_read_mode_wins_over_the_platforms():
-    platform = bp.effective({"readMode": "beside"})
-    assert bp.read_mode_of(None, platform) == "beside"
-    assert bp.read_mode_of("latest", platform) == "latest"
-    assert bp.read_mode_of("sideways", platform) == "beside", "a value no mode names is ignored"
+def _mode(ws="ws1", ds="ds1", copy=True, own=None) -> bp.ReadMode:
+    return bp.read_mode_for(workspace_id=ws, data_source_id=ds, platform_copy=copy, own=own)
+
+
+async def test_a_graphs_read_mode_is_its_own_else_its_workspaces_else_the_platforms(
+        settings_world):
+    """``read_mode_for``: graph → workspace → platform → environment → default, with where the
+    mode in force was chosen; how far behind a copy may serve follows the mode (none for
+    latest) and the graph's ``reads.maxVersionsBehind`` (-1: no limit)."""
+    assert (_mode().effective, _mode().source, _mode().max_lag) == ("latest", "default", 0)
+    assert _mode().max_behind == -1 == config.READ_MAX_LAG
+    settings_world.set("reads.mode", "platform", "", "in_place")
+    settings_world.set("reads.mode", "workspace", "ws2", "latest")
+    settings_world.set("reads.mode", "graph", "ds3", "latest")
+    settings_world.set("reads.maxVersionsBehind", "workspace", "ws1", 4)
+    await bp.resolve()
+    assert (_mode().effective, _mode().source, _mode().max_lag) == ("in_place", "platform", 4)
+    assert (_mode("ws2", "ds2").effective, _mode("ws2", "ds2").source) == ("latest", "workspace")
+    assert (_mode("ws1", "ds3").effective, _mode("ws1", "ds3").source) == ("latest", "graph")
+    assert (_mode("ws1", "ds3").max_lag, _mode("ws1", "ds3").max_behind) == (0, 4)
+    assert _mode(own="beside").effective == "in_place", "the old column, once imported, is not"
     assert bp.effective({"readMode": "sideways"})["readMode"] == "latest"
-    assert (bp.max_lag_of("latest"), bp.max_lag_of("in_place"), bp.max_lag_of("beside")) == (
-        0, None, None)
+
+
+async def test_each_graphs_mode_is_worked_out_once_per_refresh_that_brought_something(
+        settings_world):
+    """A read pays a lookup: the same answer until a refresh brought new rows or switches."""
+    await bp.resolve()
+    first = _mode()
+    assert _mode() is first
+    await bp.resolve()
+    assert _mode() is first, "nothing new"
+    settings_world.set("reads.mode", "workspace", "ws1", "in_place")
+    await bp.resolve()
+    assert _mode() is not first and _mode().effective == "in_place"
 
 
 def test_a_saved_value_out_of_range_is_clamped_and_ordered_never_refused(monkeypatch):
@@ -171,15 +198,82 @@ async def test_a_store_save_reaches_current_after_a_refresh(settings_world):
     assert (await bp.resolve())["flipMaxLagRows"] == 50 == bp.current()["flipMaxLagRows"]
 
 
-async def test_the_platforms_read_mode_is_its_own_whether_builds_are_on_or_not(settings_world):
-    """What a graph with no mode of its own reads by, as before the store: Keep serving, switch
-    when ready is not turned into update in place here while New-version builds are off (the
-    resolver's effective value does that, for the read path to use later)."""
+async def test_switch_when_ready_is_in_force_only_with_builds_on_and_a_platform_copy(
+        settings_world, monkeypatch):
+    """The platform's value as saved stays its own (the old card shows it), but a graph reads
+    Keep serving, switch when ready only with New-version builds on and its copy the platform's:
+    else it updates in place, and says why (``builds_off``, ``connected_graph``), with the fix."""
+    from backend.app.services.feature_flags import feature_flags
+
     settings_world.set("reads.mode", "platform", "", "beside")
-    await effective.refresh()
-    assert effective.value("reads.mode") == "in_place"
+    await bp.resolve()
     assert bp.current()["readMode"] == "beside"
-    assert bp.read_mode_of(None) == "beside" and bp.read_mode_of("latest") == "latest"
+    off = _mode()
+    assert (off.effective, off.declared, off.source) == ("in_place", "beside", "platform")
+    assert [(w["code"], w["fix"]) for w in off.why if w["code"] == "builds_off"] == [
+        ("builds_off", {"feature": "candidateKeysEnabled", "to": True})]
+    monkeypatch.setitem(feature_flags._cache, bp.SWITCH, True)
+    await bp.resolve()
+    assert _mode().effective == "beside"
+    connected = _mode(copy=False)
+    assert connected.effective == "in_place"
+    assert "connected_graph" in [w["code"] for w in connected.why]
+
+
+async def test_until_the_graphs_values_are_copied_a_graphs_own_mode_is_its_columns(
+        settings_world, monkeypatch):
+    """A graph store in a database of its own: until the versioning worker has copied the graphs'
+    values into the store (the import migration's ``legacy`` marker without ``legacy_graph``), a
+    graph's own mode is the one ``projection_state.read_mode`` holds, so none is lost meanwhile.
+    The markers are asked at most every 30 seconds until ``legacy_graph`` is there, then never
+    again."""
+    from backend.app.services.settings import legacy
+
+    asked = []
+    settings_world.not_imported(monkeypatch)
+    imports_done = legacy._imports_done
+
+    async def counted():
+        asked.append(1)
+        return await imports_done()
+
+    monkeypatch.setattr(legacy, "_imports_done", counted)
+    settings_world.set("reads.mode", "platform", "", "latest")
+    await bp.resolve()
+    await bp.resolve()
+    assert len(asked) == 1 and legacy.graph_values_imported() is False
+    held = _mode(own="in_place")
+    assert (held.effective, held.source) == ("in_place", "graph")
+    assert _mode(own=None).effective == "latest"
+    assert _mode(own="sideways").effective == "latest", "a value no mode names is not one"
+
+    settings_world.imports.add(legacy.GRAPH_MARKER)          # the worker copied them
+    await bp.resolve()
+    assert len(asked) == 1, "asked again only 30 seconds on"
+    monkeypatch.setitem(legacy._GRAPH_VALUES, "asked_at", float("-inf"))
+    await bp.resolve()
+    monkeypatch.setitem(legacy._GRAPH_VALUES, "asked_at", float("-inf"))
+    await bp.resolve()
+    assert len(asked) == 2 and legacy.graph_values_imported() is True
+    assert _mode(own="in_place").effective == "latest", "the store's now"
+
+
+async def test_with_no_import_at_all_nothing_waits_for_one(settings_world, monkeypatch):
+    """A store made from nothing (a new installation: nothing was saved before the store, and no
+    import ran) has no graph value to wait for: the store's, though still asked every 30 seconds
+    in case the import migration runs yet."""
+    from backend.app.services.settings import legacy
+
+    settings_world.not_imported(monkeypatch)
+    settings_world.imports.clear()
+    await bp.resolve()
+    assert legacy.graph_values_imported() is True and legacy._GRAPH_VALUES["final"] is False
+    assert _mode(own="in_place").effective == "latest"
+    settings_world.imports.add(legacy.MARKER)                # the import migration, now
+    monkeypatch.setitem(legacy._GRAPH_VALUES, "asked_at", float("-inf"))
+    await bp.resolve()
+    assert legacy.graph_values_imported() is False
+    assert _mode(own="in_place").effective == "in_place"
 
 
 async def test_unreadable_settings_keep_the_last_values_read_and_never_raise(settings_world):

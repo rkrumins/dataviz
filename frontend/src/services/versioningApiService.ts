@@ -241,10 +241,14 @@ export interface Watermark {
   lastReadAt?: string | null
   sizeBytes?: number | null
   rehydratingSince?: string | null
-  /** What readers of main get while a newer version lands (latest | in_place | beside), and
-   *  whether the graph chose it or it is the platform's. A fork's are its root's. */
+  /** What readers of main get while a newer version lands, the mode in force (latest | in_place |
+   *  beside); the mode chosen, where it was chosen, and why the one in force differs (switch when
+   *  ready updates in place while New-version builds are off, or on a connected graph). A fork's
+   *  are its root's. */
   readMode?: 'latest' | 'in_place' | 'beside'
-  readModeSource?: 'graph' | 'platform'
+  readModeDeclared?: 'latest' | 'in_place' | 'beside'
+  readModeSource?: 'graph' | 'workspace' | 'platform' | 'env' | 'default'
+  readModeWhy?: { code: string; text: string; fix?: Record<string, unknown> | null }[]
   /** The version rows of a window written a page at a time, still in flight; null when none is. */
   windowRows?: number | null
   /** A new version built beside the serving key (read mode `beside`), while one is; null when

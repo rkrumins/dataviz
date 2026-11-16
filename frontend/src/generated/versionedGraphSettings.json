@@ -386,7 +386,7 @@
     },
     {
       "definition": "What readers see while a new version of a graph loads: Always the latest, Keep serving, update in place, or Keep serving, switch when ready.",
-      "technical": "build_policy.read_mode_of, applied by service.serving_seq with the mode's lag cap.",
+      "technical": "build_policy.read_mode_for, per graph, applied by service.serving_seq with the mode's lag cap.",
       "term": "Read mode"
     },
     {
@@ -959,7 +959,7 @@
             "weight": "low"
           }
         ],
-        "evidence": "Measured by the versioning-scale workflow (docs/versioning/09 §2) at 1,000,000 nodes and 1,000,000 edges, a change of 100,000 rows, 4 readers: Always the latest landed in 29 s, reads p99 66 ms, 5% of them from Postgres; update in place 30 s, p99 9 ms, no extra memory; switch when ready by a copy 56 s, p99 9.6 ms, FalkorDB at 2.0x the graph's memory at the peak; by a seed from Postgres 522 s, at 1.1x. No read failed in any mode. With 200 readers at 1M nodes and 2M edges, GRAPH.COPY took 76 to 88 s, past the projector's 75 s socket, three times: the build was dropped and the change written in place. One rule applies the mode to every read: service.serving_seq with build_policy.max_lag_of (0 for latest). candidates.wanted builds beside only above buildAboveRows, on a platform-owned key, with candidateKeysEnabled on; a graph whose summaries live in a graph named from its key, or whose key other data sources read, is written in place (projection._keeps_its_key).",
+        "evidence": "Measured by the versioning-scale workflow (docs/versioning/09 §2) at 1,000,000 nodes and 1,000,000 edges, a change of 100,000 rows, 4 readers: Always the latest landed in 29 s, reads p99 66 ms, 5% of them from Postgres; update in place 30 s, p99 9 ms, no extra memory; switch when ready by a copy 56 s, p99 9.6 ms, FalkorDB at 2.0x the graph's memory at the peak; by a seed from Postgres 522 s, at 1.1x. No read failed in any mode. With 200 readers at 1M nodes and 2M edges, GRAPH.COPY took 76 to 88 s, past the projector's 75 s socket, three times: the build was dropped and the change written in place. One rule applies the mode to every read: service.serving_seq with the lag build_policy.read_mode_for resolves for the graph (0 for latest). candidates.wanted builds beside only above buildAboveRows, on a platform-owned key, with candidateKeysEnabled on; a graph whose summaries live in a graph named from its key, or whose key other data sources read, is written in place (projection._keeps_its_key).",
         "example": "With Always the latest, an import of 100,000 changes shows the moment it is published, read from the database until the graph store has it: slower on a large graph, and without lineage summaries meanwhile.",
         "means": "A publish or an import lands in the database at once, as one new version. Then the graph store, which answers reads fast, is updated, and on a large graph that takes a while. The read mode decides what readers get meanwhile: the newest version, read from the database; the graph store's copy as it is updated; or one whole version until a new copy is built and everyone switches to it.",
         "recommended": {
@@ -1068,7 +1068,7 @@
             "weight": "medium"
           }
         ],
-        "evidence": "service.serving_seq: behind its head, a key serves main at the version it last published unless committed - held > lag; the lag is build_policy.max_lag_of(mode): 0 for latest, else GRAPHVER_READ_MAX_LAG (-1, any). The same bound decides whether a rebuild or a move can be built beside the key (service._beside_ok).",
+        "evidence": "service.serving_seq: behind its head, a key serves main at the version it last published unless committed - held > lag; the lag is build_policy.read_mode_for's max_lag: 0 for latest, else this setting as it resolves for the graph (GRAPHVER_READ_MAX_LAG -1: any). The same bound decides whether a rebuild or a move can be built beside the key (service._beside_ok).",
         "example": "A graph set to update in place keeps serving its copy, however many versions it falls behind, until it catches up.",
         "means": "With Keep serving, update in place or Keep serving, switch when ready, readers stay on the graph store's copy while it catches up, at the version it last finished. This caps how many versions behind that may be. Further behind, readers go to the database for the newest version until the copy catches up. Always the latest doesn't use it: it never serves an older version.",
         "recommended": {

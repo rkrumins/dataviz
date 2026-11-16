@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, replace
-from typing import Any, Collection, Dict, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
 from backend.app.db.repositories.profiling_repo import INHERIT
 from backend.app.services.settings import effective as in_force
@@ -252,12 +252,9 @@ def classes(ctx: resolver.Context, *, pending: bool = False) -> Classes:
     return Classes(inherited, workspaces, own)
 
 
-def graph_values_pending(done: Collection[str]) -> bool:
-    """Whether the graphs' own values are still to be copied into the settings store, given the
-    one-time imports ``done``: the import migration ran (``legacy``) but could not reach a
-    separate graph store (no ``legacy_graph`` yet), so the versioning worker copies them at
-    start-up (``legacy.import_graph_values``)."""
-    return legacy.MARKER in done and legacy.GRAPH_MARKER not in done
+#: Whether the graphs' own values are still to be copied into the settings store, given the
+#: one-time imports done: the rule kept beside the import markers (``legacy.graph_values_pending``).
+graph_values_pending = legacy.graph_values_pending
 
 
 async def stored_classes() -> Classes:

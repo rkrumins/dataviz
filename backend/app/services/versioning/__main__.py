@@ -125,6 +125,16 @@ async def _amain() -> None:
         # Before the first session: the engine is built from this on first use.
         config.POOL_SIZE = config.lane_pool_size(lanes)
     await models.create_schema_and_partitions()
+    try:
+        # The graphs' own versioned-graph settings, when the graph store is a database of its own
+        # the upgrade could not read: copied into the settings store once, under its marker.
+        # Until then, every process reads a graph's own read mode from the graph store.
+        from backend.app.services.settings import legacy
+
+        await legacy.import_graph_values()
+    except Exception as exc:              # noqa: BLE001 — never fail startup
+        logger.warning("versioned-graph settings: the graphs' own values were not imported: %s",
+                       exc)
     # target_resolver self-heals the projection target (the data source's real graph the canvas reads)
     # on every projection, so the standalone worker matches the interactive project_now path.
     # edge_types_resolver keeps :AGGREGATED rollups maintained incrementally; on_rollups_stale

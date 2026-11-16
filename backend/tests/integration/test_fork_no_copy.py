@@ -43,7 +43,7 @@ async def _root(svc, key, **pin):
     return gid
 
 
-def test_a_fork_is_never_projected(read_mode_in_place):
+def test_a_fork_is_never_projected(read_mode_in_place, settings_world):
     from backend.app.services.versioning.cache_manager import CacheManager
     from backend.app.services.versioning.reconcile import ProjectionReconciler
 

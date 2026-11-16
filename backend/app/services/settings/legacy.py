@@ -9,7 +9,9 @@
   through the store, written through.
 * :func:`import_graph_values` — the graphs' own values (``projection_state``), copied once at
   start-up by the versioning worker when the import migration could not reach the graph store
-  (a separate ``GRAPHVER_DB_URL``): the ``settings_imports`` marker ``legacy_graph``.
+  (a separate ``GRAPHVER_DB_URL``): the ``settings_imports`` marker ``legacy_graph``. While they
+  wait for it (:func:`graph_values_pending`; in a process, :func:`check_graph_values` and
+  :func:`graph_values_imported`), a graph's own read mode is the one ``projection_state`` holds.
 * :func:`legacy_diff` — what the old storage holds that the store doesn't (a value changed through
   an old endpoint mid-rollout), and with ``adopt`` taken into the store:
   ``python -m backend.app.services.settings legacy-diff [--adopt]``.
@@ -21,9 +23,12 @@ from __future__ import annotations
 
 import json
 import logging
+import math
+import time
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Sequence
+from typing import (Any, Awaitable, Callable, Collection, Dict, List, Mapping, Optional, Sequence,
+                    Set)
 
 from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -308,6 +313,59 @@ async def import_graph_values() -> Optional[int]:
     if copied:
         await store.announce(reg.DOMAIN)
     return copied
+
+
+def graph_values_pending(done: Collection[str]) -> bool:
+    """Whether the graphs' own values are still to be copied into the store, given the one-time
+    imports ``done``: the import migration ran (``legacy``) but could not reach a separate graph
+    store (no ``legacy_graph`` yet), so the versioning worker copies them at start-up
+    (:func:`import_graph_values`)."""
+    return MARKER in done and GRAPH_MARKER not in done
+
+
+#: Whether the graphs' own values are in the store as this process last found
+#: (:func:`graph_values_pending`), whether that can still change, and when it last asked. Until it
+#: has asked, and while they wait for their import, a graph's own read mode is the one the graph
+#: store holds (``projection_state.read_mode``, which every save through the store writes too:
+#: :func:`write_through`), so a graph store in a database of its own never loses a graph's mode
+#: meanwhile. Once ``legacy_graph`` is there, nothing is asked again.
+_GRAPH_VALUES: Dict[str, Any] = {"imported": False, "final": False, "asked_at": -math.inf}
+#: How long a process waits before it asks again, until ``legacy_graph`` is there.
+_GRAPH_VALUES_ASK_S = 30.0
+
+
+def graph_values_imported() -> bool:
+    """Whether the graphs' own values are in the store, as this process last found, without IO:
+    False until :func:`check_graph_values` has asked, and while they wait for their import."""
+    return _GRAPH_VALUES["imported"]
+
+
+async def check_graph_values() -> bool:
+    """Ask the store whether the graphs' own values are in it, at most every 30 seconds until
+    ``legacy_graph`` is there, then never again. Never raises: what can't be read is asked again
+    30 seconds later, the last answer serving meanwhile."""
+    if _GRAPH_VALUES["final"]:
+        return True
+    now = time.monotonic()
+    if now - _GRAPH_VALUES["asked_at"] < _GRAPH_VALUES_ASK_S:
+        return _GRAPH_VALUES["imported"]
+    _GRAPH_VALUES["asked_at"] = now
+    try:
+        done = await _imports_done()
+    except Exception:  # noqa: BLE001 — a settings read never fails its caller
+        logger.warning("settings: whether the graphs' own values were imported could not be "
+                       "read; their read modes stay as last found", exc_info=True)
+        return _GRAPH_VALUES["imported"]
+    _GRAPH_VALUES.update(imported=not graph_values_pending(done), final=GRAPH_MARKER in done)
+    return _GRAPH_VALUES["imported"]
+
+
+async def _imports_done() -> Set[str]:
+    """The one-time imports that have run, on the READONLY pool."""
+    from backend.app.db.engine import get_readonly_session
+
+    async with get_readonly_session() as session:
+        return await store.imports_done(session)
 
 
 # ── Comparing ─────────────────────────────────────────────────────────────────────────────────────

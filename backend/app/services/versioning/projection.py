@@ -1552,10 +1552,12 @@ class FalkorProjector:
         """Whether the graph's next pass is small enough to run inside an interactive request
         (``project_now``): at most ``limit`` (``PROJECTION_INLINE_MAX_ROWS``) version rows to
         project, counted no further than that. A first seed or a rebuild never is, nor a graph
-        building a new version beside its key, nor a window its read mode builds beside
-        (``beside``, larger than ``buildAboveRows``): a build's copy and catch-up are the
-        worker's. A graph this cannot read is left to the pass to judge."""
+        building a new version beside its key, nor a window its read mode builds beside (Keep
+        serving, switch when ready in force — New-version builds on, a platform copy — and larger
+        than ``buildAboveRows``): a build's copy and catch-up are the worker's. A graph this
+        cannot read is left to the pass to judge."""
         limit = config.PROJECTION_INLINE_MAX_ROWS if limit is None else limit
+        policy = await build_policy.resolve()
         async with self._session() as s:
             ps = await s.get(ProjectionStateORM, graph_id)
             graph = await s.get(GraphORM, graph_id)
@@ -1563,8 +1565,10 @@ class FalkorProjector:
                 return True
             if isinstance(getattr(ps, "candidate_state", None), dict):
                 return False
-            policy = build_policy.current()
-            if build_policy.read_mode_of(getattr(ps, "read_mode", None), policy) == "beside":
+            if build_policy.read_mode_for(
+                    workspace_id=graph.workspace_id, data_source_id=graph.data_source_id,
+                    platform_copy=bool(ps.owns_falkor_graph),
+                    own=getattr(ps, "read_mode", None)).effective == "beside":
                 limit = min(limit, int(policy["buildAboveRows"]))
             from_seq = ps.projected_commit_seq
             to_seq = max(ps.target_commit_seq, graph.main_head_commit_seq)
@@ -1876,8 +1880,8 @@ class FalkorProjector:
         # keeps serving its version whole (``candidates.wanted``); a smaller one, or one already
         # part-written in place, is written here as it always was.
         if (from_seq > 0 and owned and idle and not window_in_flight
-                and await self._queue_build(graph_id, own_mode, seen_epoch, name, provider_id,
-                                            from_seq, to_seq)):
+                and await self._queue_build(graph_id, graph, own_mode, seen_epoch, name,
+                                            provider_id, from_seq, to_seq)):
             return await self._advance_candidate(graph_id)
         if (from_seq == 0 and to_seq > 1 and owned and ps.status == "idle"
                 and await residency_policy.switch_state() is not False):
@@ -2302,18 +2306,22 @@ class FalkorProjector:
 
     # ── a new version built beside the serving key (read mode ``beside``; ``candidates``) ──────
 
-    async def _queue_build(self, graph_id: str, own_mode: Optional[str], epoch: int,
-                           serving: str, provider_id: Optional[str], from_seq: int,
+    async def _queue_build(self, graph_id: str, row: GraphORM, own_mode: Optional[str],
+                           epoch: int, serving: str, provider_id: Optional[str], from_seq: int,
                            to_seq: int) -> bool:
         """Ask for the window ``(from_seq, to_seq]`` to be built beside the serving key, when the
-        graph wants that (``candidates.wanted``: it reads ``beside``, New-version builds is on,
-        and the window holds more version rows than ``buildAboveRows``, counted no further).
-        True once recorded, fenced on the pass's ``epoch``; the build's key keeps the serving
-        key's hash tag (``keymigrate.build_key``). A graph that must keep its key
+        graph wants that (``candidates.wanted``: Keep serving, switch when ready is in force for
+        it — ``row``, its graph's row, in its workspace's settings; ``own_mode``, the mode its
+        projection state holds — New-version builds is on, and the window holds more version rows
+        than ``buildAboveRows``, counted no further). Its key is the platform's: the pass asks
+        only then. True once recorded, fenced on the pass's ``epoch``; the build's key keeps the
+        serving key's hash tag (``keymigrate.build_key``). A graph that must keep its key
         (:meth:`_keeps_its_key`: the switch would leave its dedicated summaries, or other data
         sources reading it, behind) has the window written in place instead."""
         policy = await build_policy.resolve()
-        read_mode = build_policy.read_mode_of(own_mode, policy)
+        read_mode = build_policy.read_mode_for(
+            workspace_id=row.workspace_id, data_source_id=row.data_source_id, platform_copy=True,
+            own=own_mode).effective
         if read_mode != "beside":
             return False
         switch_on = await build_policy.switch_state()
@@ -2374,11 +2382,15 @@ class FalkorProjector:
         if state.get("retryAt") and state["retryAt"] > _now():
             return {**noop, "skipped": "build_backoff", "retryAt": state["retryAt"]}
         policy = await build_policy.resolve()
-        mode = build_policy.read_mode_of(getattr(ps, "read_mode", None), policy)
-        if mode != "beside":
-            # Its readers no longer switch when ready: the change is written in place, as the
-            # mode they read now says, rather than built on and switched to.
-            await self._drop_build(graph_id, build_id, f"the graph now reads {mode}")
+        mode = build_policy.read_mode_for(
+            workspace_id=graph.workspace_id, data_source_id=graph.data_source_id,
+            platform_copy=bool(ps.owns_falkor_graph), own=getattr(ps, "read_mode", None))
+        if mode.effective != "beside" and not (
+                mode.declared == "beside" and await build_policy.switch_state() is None):
+            # Its readers no longer switch when ready (another mode chosen, or New-version builds
+            # turned off): the change is written in place, as the mode in force says, rather than
+            # built on and switched to. A switch that can't be read is not off: the build goes on.
+            await self._drop_build(graph_id, build_id, f"the graph now reads {mode.effective}")
             return noop
         tried = int(state.get("attempts") or 0)
         if tried >= int(policy["buildMaxAttempts"]):

@@ -22,6 +22,8 @@ that presented the stored ``ready`` column as the whole truth.
 The last two were originally counted as wedges and both were false alarms on
 ordinary operation; see the tests for what each one actually costs.
 """
+import asyncio
+
 import pytest
 
 from backend.app.services.aggregation.reconcile import (
@@ -224,24 +226,64 @@ def test_an_unversioned_source_is_untouched_by_projection_fields():
 
 # ── The health reading itself ───────────────────────────────────────────
 
-def test_a_key_behind_that_serves_its_last_version_is_not_stalled():
+def test_a_key_behind_that_serves_its_last_version_is_not_stalled(settings_world):
     """While the key serves the version it last published (behind, idle, or
     rebuilt in place), main reads stay on it with their rollups: nothing is
-    missing from the canvas, so the verdict stays managed."""
+    missing from the canvas, so the verdict stays managed. The graph's read mode
+    is the versioned-graph settings', as this process last read them."""
     from backend.app.services.aggregation.reconcile_sweeper import (
         _projection_ctx,
     )
+    from backend.app.services.settings import effective
 
-    for h in (_health(projected_commit_seq=380, main_head_commit_seq=400, read_mode="in_place"),
+    settings_world.set("reads.mode", "graph", "ds_v", "in_place")
+    asyncio.run(effective.refresh())
+    for h in (_health(projected_commit_seq=380, main_head_commit_seq=400),
               _health(projected_commit_seq=0, main_head_commit_seq=400,
-                      served_commit_seq=380, read_mode="in_place")):
+                      served_commit_seq=380)):
         assert h.behind is True and h.serving is True
         assert h.stalled is False and h.current is True
         v = evaluate(_versioned(**_projection_ctx(h)), POLICY)
         assert v.drift_state == "managed" and v.skip == "platform_mastered"
     # Read Always the latest, main reads go to Postgres meanwhile, which holds no rollups.
-    h = _health(projected_commit_seq=380, main_head_commit_seq=400, read_mode="latest")
+    settings_world.set("reads.mode", "graph", "ds_v", "latest")
+    asyncio.run(effective.refresh())
+    h = _health(projected_commit_seq=380, main_head_commit_seq=400)
     assert h.behind is True and h.serving is False and h.stalled is True
+
+
+class _OneGraph:
+    """The graph store as ``projector_health`` reads it: one graph, 20 commits behind, its key
+    holding the version it last published, in workspace ``ws_v``."""
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_exc):
+        return False
+
+    async def execute(self, _stmt):
+        row = ("ds_v", "g_1", 400, 380, None, "gvp_k", "idle", 380, None, "ws_v", True)
+        return type("Rows", (), {"all": lambda _self: [row]})()
+
+
+async def test_the_control_plane_goes_by_a_read_mode_saved_elsewhere(settings_world, monkeypatch):
+    """The aggregation control plane reads no route, so nothing else there brings its settings
+    up to date: each sweep's ``projector_health`` does, so a read mode saved in another process
+    is the one ``serving`` (and the sweep's ``projection_serving``) goes by."""
+    from backend.app.services import versioned_sources
+    from backend.app.services.aggregation.reconcile_sweeper import _projection_ctx
+
+    monkeypatch.setattr("backend.app.services.versioning.db.get_session_factory",
+                        lambda: _OneGraph)
+    versioned_sources.reset_health_cache()
+    health = (await versioned_sources.projector_health(ttl_secs=0))["ds_v"]
+    assert (health.workspace_id, health.platform_copy) == ("ws_v", True)
+    assert health.serving is False and health.stalled is True      # latest: Postgres serves
+    settings_world.set("reads.mode", "workspace", "ws_v", "in_place")
+    health = (await versioned_sources.projector_health(ttl_secs=0))["ds_v"]
+    assert health.serving is True and _projection_ctx(health)["projection_serving"] is True
+    versioned_sources.reset_health_cache()
 
 
 def test_an_unpinned_graph_is_never_stalled():
@@ -367,14 +409,18 @@ async def test_readiness_under_a_wedge_does_not_report_plain_ready(
 
 @pytest.mark.asyncio
 async def test_readiness_while_the_key_serves_its_last_version_is_ready(
-    agg_session, stub_health,
+    agg_session, stub_health, settings_world,
 ):
     """Behind, but the key still serves the version it last published, rollups
     included: the connections are on the canvas, of that version, and the sync
     chip says a newer one is being written. The gap stays on the wire as
     evidence; nothing says the connections are missing."""
+    from backend.app.services.settings import effective
+
+    settings_world.set("reads.mode", "workspace", "ws_v", "in_place")
+    await effective.refresh()
     stub_health["ds_v"] = _health(projected_commit_seq=95, last_error="boom",
-                                  read_mode="in_place")
+                                  workspace_id="ws_v")
 
     r = await _service().get_readiness("ds_v", agg_session)
 

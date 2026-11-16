@@ -343,20 +343,21 @@ def test_a_seeding_build_reserves_its_room_on_its_keys_master_and_is_no_graph_of
     assert not by["node1"].seeding and not by["node2"].evictions
 
 
-def test_a_rebuild_or_a_move_is_built_beside_only_a_key_that_serves():
+def test_a_rebuild_or_a_move_is_built_beside_only_a_key_that_serves(settings_world):
     """The row's half (``service._beside_ok``): a live graph that is no fork, on a key the platform
-    owns and pinned, idle, serving a version it published past genesis within the read lag. A move
-    also needs the version whole, no window part-written."""
-    from backend.app.services.versioning import config as gv_config
+    owns and pinned, idle, serving a version it published past genesis within the graph's
+    ``reads.maxVersionsBehind``. A move also needs the version whole, no window part-written."""
+    from backend.app.services.versioning import build_policy
     from backend.app.services.versioning.service import _beside_ok
 
-    graph = SimpleNamespace(deleted_at=None, fork_parent_graph_id=None, main_head_commit_seq=5)
+    graph = SimpleNamespace(deleted_at=None, fork_parent_graph_id=None, main_head_commit_seq=5,
+                            workspace_id="ws1", data_source_id="ds1")
 
     def ps(**over):
         return SimpleNamespace(**{"graph_id": "g1", "owns_falkor_graph": True,
                                   "falkor_graph_name": "gvp_g1{ab.1}", "status": "idle",
                                   "projected_commit_seq": 4, "served_commit_seq": 4,
-                                  "window_rows": None, **over})
+                                  "window_rows": None, "read_mode": None, **over})
 
     for reason in ("rebuild", "move"):
         assert _beside_ok(ps(), graph, reason=reason), reason
@@ -374,15 +375,11 @@ def test_a_rebuild_or_a_move_is_built_beside_only_a_key_that_serves():
     for row in ({"served_commit_seq": 3}, {"served_commit_seq": None}, {"window_rows": 900}):
         assert _beside_ok(ps(**row), graph, reason="rebuild"), row
         assert not _beside_ok(ps(**row), graph, reason="move"), row
-    # Further behind its head than GRAPHVER_READ_MAX_LAG, the key serves nothing.
-    old = gv_config.READ_MAX_LAG
-    try:
-        gv_config.READ_MAX_LAG = 0
-        assert not _beside_ok(ps(), graph, reason="rebuild")
-        assert _beside_ok(ps(projected_commit_seq=5, served_commit_seq=5), graph,
-                          reason="rebuild")
-    finally:
-        gv_config.READ_MAX_LAG = old
+    # Further behind its head than its workspace's most versions behind, the key serves nothing.
+    settings_world.set("reads.maxVersionsBehind", "workspace", "ws1", 0)
+    asyncio.run(build_policy.resolve())
+    assert not _beside_ok(ps(), graph, reason="rebuild")
+    assert _beside_ok(ps(projected_commit_seq=5, served_commit_seq=5), graph, reason="rebuild")
 
 
 def test_a_rebuild_built_beside_leaves_the_serving_key_alone_and_nudges_the_worker(monkeypatch):
