@@ -7,10 +7,11 @@ versioned graphs, their routes and the live facts stood in for.
 * A save is checked whole: every refusal code, a value only another role may set, a value changed
   since it was read; the platform's limits (allowed, lock) and a system administrator's
   exception to them. A fork follows its root.
-* A save records one activity event, writes through to the old storage, and moves the routes of
-  the graphs a routing setting reaches.
+* A save records one activity event, writes through to the old storage, moves the routes of the
+  graphs a routing setting reaches, and writes the residency class of the graphs a class reaches.
 * The schema answers 304 to its ETag, and keeps live facts for system administrators.
-* The preview, quick and full; the inventory's summary route.
+* The preview, quick and full (its residency part with the proposed classes); the inventory's
+  summary route.
 
 The real store, the history and its revert, and the inventory's filters run against Postgres in
 ``integration/test_versioned_graph_settings_live.py``.
@@ -92,7 +93,14 @@ async def estate(db_session):
 @pytest.fixture
 def world(settings_world, test_client, estate, monkeypatch):
     """The store in memory, the graphs above, and what reaches past the management database
-    recorded instead: the write-through, the route announcements, the live facts."""
+    recorded instead: the write-through, the route announcements, the graphs' residency classes
+    written to their rows, the live facts."""
+    from backend.app.services.versioning import residency
+
+    async def keep_classes(**reach):
+        settings_world.kept.append(reach)
+        return []
+
     async def graphs(*, workspace_id=None, graph_id=None, data_source_id=None):
         return [g for g in GRAPHS if workspace_id in (None, g.workspace_id)
                 and graph_id in (None, g.graph_id) and data_source_id in (None, g.data_source_id)]
@@ -113,9 +121,11 @@ def world(settings_world, test_client, estate, monkeypatch):
         return dict(FACTS)
 
     settings_world.announced, settings_world.written, settings_world.collected = [], [], 0
+    settings_world.kept = []
     monkeypatch.setattr(service, "graphs", graphs)
     monkeypatch.setattr(effects, "_graphs_of", graphs_of)
     monkeypatch.setattr(route_cache, "announce", announce)
+    monkeypatch.setattr(residency, "keep_classes", keep_classes)
     monkeypatch.setattr(legacy, "write_through", write_through)
     monkeypatch.setattr(facts, "collect", collect)
     app.dependency_overrides[get_versioning_service] = _Versioning
@@ -499,6 +509,33 @@ async def test_routes_are_all_moved_when_the_graphs_cant_be_listed(world, monkey
     assert world.announced == [([], True)]
 
 
+async def test_a_class_save_writes_the_classes_of_the_graphs_it_reaches(world, test_client):
+    """The evictor reads each graph's class on its row: a graph's own class re-classes that graph,
+    a workspace's the workspace's graphs, the platform's every graph (in one statement each,
+    ``residency.keep_classes``). A save of anything else writes no class."""
+    for path in (_G, _W, _P):
+        saved = await test_client.patch(path, json=_save(_change("residency.class", "always")))
+        assert saved.status_code == 200, saved.text
+    assert world.kept == [{"workspaces": set(), "sources": {"ds_1"}},
+                          {"workspaces": {"ws_1"}, "sources": set()},
+                          {"workspaces": None, "sources": None}]
+    await test_client.patch(_W, json=_save(_change("drafts.levels", "any")))
+    assert len(world.kept) == 3
+
+
+async def test_a_class_not_written_after_a_save_is_left_to_the_next_memory_check(
+        world, test_client, monkeypatch, caplog):
+    from backend.app.services.versioning import residency
+
+    async def down(**_reach):
+        raise ConnectionError("the graph store is out of reach")
+
+    monkeypatch.setattr(residency, "keep_classes", down)
+    saved = await test_client.patch(_W, json=_save(_change("residency.class", "coldline")))
+    assert saved.status_code == 200 and len(world.saves) == 1          # the save stands
+    assert "the next memory check writes them" in caplog.text
+
+
 # ── The schema ────────────────────────────────────────────────────────────────────────────────────
 async def test_the_schema_answers_304_while_its_etag_holds(world, test_client):
     first = await test_client.get(_SCHEMA)
@@ -656,6 +693,47 @@ async def test_the_residency_part_plans_the_next_check_with_the_proposed_marks(
                        "graphId": "g_1", "dataSourceId": "ds_1", "label": "Ledger",
                        "bytes": 3 * _GB, "reason": "memory"}]}]}
     assert "graphs_unloaded" in [w["code"] for w in impact["warnings"]]
+
+
+async def test_the_residency_part_plans_the_next_check_with_the_proposed_classes(
+        world, test_client, monkeypatch):
+    """A class change at any scope is planned with each graph of the class it would have: a
+    workspace's reaches its graphs, not a graph with a class of its own, nor another workspace's.
+    While the graphs' own values wait for their import (a separate graph store), only a graph's
+    own class moves it: the others keep the class on their row."""
+    from backend.app.services.versioning import residency
+
+    planned = []
+
+    async def plan(policy, *, classes=None, **_kw):
+        planned.append(classes)
+        x = SimpleNamespace(graph_id="g_1", bytes=2 * _GB)
+        master = SimpleNamespace(master=SimpleNamespace(endpoint="falkor-0:6379", used=4 * _GB,
+                                                        maxmemory=16 * _GB),
+                                 used_after=4 * _GB, evictions=[], loads=[x], waits=[])
+        return (SimpleNamespace(masters=[master], evictions=[], loads=[x]),
+                SimpleNamespace(rows={"g_1": {"data_source_id": "ds_1"}}))
+
+    monkeypatch.setattr(residency, "preview", plan)
+    world.set("residency.class", "graph", "ds_own", "coldline")
+    world.set("residency.class", "platform", "", "standard")
+    got = await test_client.post(_W + "/preview", params={"mode": "full"}, json=_save(
+        _change("residency.class", "always")))
+    assert got.status_code == 200, got.text
+    impact = got.json()["impact"]
+    assert impact["residency"]["loads"] == 1
+    assert impact["residency"]["nodes"][0]["loads"] == [
+        {"graphId": "g_1", "dataSourceId": "ds_1", "label": "Ledger", "bytes": 2 * _GB}]
+    classes = planned[-1]
+    assert classes.of("ws_1", "ds_1", "standard") == "always"           # the workspace's graph
+    assert classes.of("ws_1", "ds_own", "standard") == "coldline"       # its own class wins
+    assert classes.of("ws_2", "ds_9", "coldline") == "standard"         # the platform's
+    world.imports = {"legacy"}                                           # graph values pending
+    await test_client.post(_W + "/preview", params={"mode": "full"}, json=_save(
+        _change("residency.class", "always")))
+    classes = planned[-1]
+    assert classes.of("ws_1", "ds_1", "coldline") == "coldline"         # kept as on its row
+    assert classes.of("ws_1", "ds_own", "standard") == "coldline"
 
 
 # ── The activity log and the inventory ────────────────────────────────────────────────────────────

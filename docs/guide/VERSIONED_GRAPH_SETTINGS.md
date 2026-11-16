@@ -870,7 +870,7 @@ With Graph residency on, the graph store keeps each graph by its class and each 
 
 **Example:** A Standard graph nobody reads for 7 days is unloaded; its next read comes from the database and loads it again.
 
-**Evidence:** residency_plan.plan: idle eviction by class (standard_idle_secs, coldline_idle_secs), pressure eviction Coldline first, then Standard by oldest read; never an Always graph, a key the platform did not mint, a leased graph, or one with a pass or a window in flight. residency.mark: a person's read asks for the load of a Standard or Always graph, and of a Coldline graph with more entities than coldlineCanvasLoadAbove. Each graph's class is projection_state.residency; today a new graph takes the policy's defaultResidency (docs/versioning/17 §10 to §12).
+**Evidence:** residency_plan.plan: idle eviction by class (standard_idle_secs, coldline_idle_secs), pressure eviction Coldline first, then Standard by oldest read; never an Always graph, a key the platform did not mint, a leased graph, or one with a pass or a window in flight. residency.mark: a person's read asks for the load of a Standard or Always graph, and of a Coldline graph with more entities than coldlineCanvasLoadAbove. Each graph's class in force is kept on projection_state.residency, which the evictor's guard reads: a new graph gets it, a save writes it to the graphs it reaches, and each capacity pass puts it back in step first (residency.keep_classes; docs/versioning/17 §10 to §12).
 
 **Problems it answers:** A graph is slow to open after a quiet spell; Graph store memory alarms; A rarely used graph takes memory others need.
 

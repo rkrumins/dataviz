@@ -3,7 +3,8 @@ through to the ``platform_settings`` columns for one release, migration
 ``20261030_1400_residency_policy``), how they resolve (``residency_policy.resolve``: the store's
 value, else the environment's where valid, clamped to its range, as this process's settings
 snapshot last read it, never raising) and the system administrator's routes that read and change
-them.
+them — all but the residency class, which every graph now inherits (``classes``) and which the
+routes refuse to change.
 
 The ORM/migration agreement, the resolver and the routes are checked without a database (the store
 is the in-memory one every test starts with, ``tests/common/settings_world.py``); the migration's
@@ -31,6 +32,7 @@ from backend.app.db.models import PlatformSettingsORM
 from backend.app.main import app
 from backend.app.services.activity import catalogue
 from backend.app.services.settings import effective, resolver
+from backend.app.services.settings import registry as settings_registry
 from backend.app.services.versioning import config, residency_policy as rp
 
 _VERSIONS = Path(__file__).resolve().parents[1] / "alembic" / "versions"
@@ -243,9 +245,52 @@ async def test_a_store_save_reaches_resolve_after_a_refresh(settings_world):
     assert (await rp.resolve()).high_water_pct == _DEFAULTS["highWaterPct"]
 
 
-async def test_a_new_graph_gets_the_default_class(settings_world):
+async def test_a_new_graph_gets_the_class_in_force_for_it(settings_world):
+    """The platform's, else its workspace's, else one its data source's graph had before."""
     settings_world.set("residency.class", "platform", "", "coldline")
     assert await rp.default_class() == "coldline"
+    settings_world.set("residency.class", "workspace", "ws_1", "always")
+    assert await rp.default_class("ws_1", "ds_new") == "always"
+    assert await rp.default_class("ws_2", "ds_new") == "coldline"
+    settings_world.set("residency.class", "graph", "ds_back", "standard")
+    assert await rp.default_class("ws_1", "ds_back") == "standard"
+
+
+def _classes(*rows, pending=False):
+    """The classes the settings give with ``rows`` (scope, scope id, class) saved."""
+    reg = settings_registry()
+    ctx = resolver.context(reg.SETTINGS, [resolver.Row("residency.class", scope, scope_id, cls)
+                                          for scope, scope_id, cls in rows], why=reg.WHY)
+    return rp.classes(ctx, pending=pending)
+
+
+def test_a_graph_s_class_is_its_own_else_its_workspace_s_else_the_platform_s():
+    found = _classes(("platform", "", "coldline"), ("workspace", "ws_1", "always"),
+                     ("graph", "ds_1", "standard"))
+    assert (found.inherited, dict(found.workspaces), dict(found.own)) == (
+        "coldline", {"ws_1": "always"}, {"ds_1": "standard"})
+    assert found.of("ws_1", "ds_1", "coldline") == "standard"
+    assert found.of("ws_1", "ds_2", "standard") == "always"
+    assert found.of("ws_2", "ds_3", "always") == "coldline"
+    assert _classes().of("ws_1", "ds_1", "always") == "standard"        # nothing saved
+
+
+def test_a_class_the_resolver_cannot_take_is_passed_over_as_it_is_there():
+    found = _classes(("workspace", "ws_1", "hot"), ("graph", "ds_1", "warm"))
+    assert found.of("ws_1", "ds_1", "always") == "standard"
+
+
+def test_while_the_graphs_values_wait_for_their_import_a_graph_keeps_the_class_on_its_row():
+    """A separate graph store's graphs have their own classes copied into the store at the
+    worker's start-up (the ``legacy_graph`` marker). Until then nothing is inherited: a graph
+    keeps the class on its row unless one was set on it since, so a rollout re-classes none."""
+    found = _classes(("platform", "", "coldline"), ("workspace", "ws_1", "always"),
+                     ("graph", "ds_1", "standard"), pending=True)
+    assert found.of("ws_1", "ds_1", "coldline") == "standard"
+    assert found.of("ws_1", "ds_2", "coldline") == "coldline"
+    assert rp.graph_values_pending({"legacy"})
+    assert not rp.graph_values_pending({"legacy", "legacy_graph"})
+    assert not rp.graph_values_pending(set())             # a store made from nothing
 
 
 async def test_residency_is_off_unless_an_admin_turns_it_on(request):
@@ -298,23 +343,20 @@ async def test_put_saves_through_the_store_writes_the_columns_and_records_from_a
     this process reads it at once."""
     _save(settings_world, highWaterPct=85)
     session, recorded = _Session(PlatformSettingsORM(id=1, gv_high_water_pct=85)), []
-    out = await _put({"highWaterPct": 75, "lowWaterPct": 60, "defaultResidency": "coldline"},
-                     session, recorded)
+    out = await _put({"highWaterPct": 75, "lowWaterPct": 60}, session, recorded)
     (change_set,) = settings_world.saves
     assert (change_set.source, change_set.actor) == ("legacy_api", "usr_admin")
     assert {(a.key, a.before_value, a.after_value) for a in change_set.applied} == {
-        ("residency.unloadStartPct", 85, 75), ("residency.unloadStopPct", None, 60),
-        ("residency.class", None, "coldline")}
+        ("residency.unloadStartPct", 85, 75), ("residency.unloadStopPct", None, 60)}
     row = session.row
-    assert (row.gv_high_water_pct, row.gv_low_water_pct, row.gv_default_residency) == (
-        75, 60, "coldline")
+    assert (row.gv_high_water_pct, row.gv_low_water_pct) == (75, 60)
     assert row.gv_policy_updated_by == "usr_admin" and row.gv_policy_updated_at
     assert row.updated_by == "usr_admin" and row.updated_at and session.commits == 1
     assert out["updatedBy"] == "usr_admin"
     assert out["values"]["highWaterPct"]["effective"] == 75
     assert recorded == [("platform.residency_policy.updated", {"details": {
-        "from": {"defaultResidency": None, "highWaterPct": 85, "lowWaterPct": None},
-        "to": {"defaultResidency": "coldline", "highWaterPct": 75, "lowWaterPct": 60}}})]
+        "from": {"highWaterPct": 85, "lowWaterPct": None},
+        "to": {"highWaterPct": 75, "lowWaterPct": 60}}})]
     assert effective.value("residency.unloadStartPct") == 75    # this process reads it at once
 
 
@@ -322,15 +364,65 @@ async def test_minus_one_clears_a_value_back_to_its_default(settings_world):
     _save(settings_world, evictionEnabled=False, defaultResidency="always", bytesPerEntity=900)
     session, recorded = _Session(PlatformSettingsORM(
         id=1, gv_eviction_enabled=False, gv_default_residency="always", gv_bytes_per_entity=900)), []
-    out = await _put({"evictionEnabled": -1, "defaultResidency": -1, "bytesPerEntity": -1},
-                     session, recorded)
-    assert (session.row.gv_eviction_enabled, session.row.gv_default_residency,
-            session.row.gv_bytes_per_entity) == (None, None, None)
+    out = await _put({"evictionEnabled": -1, "bytesPerEntity": -1}, session, recorded)
+    assert (session.row.gv_eviction_enabled, session.row.gv_bytes_per_entity) == (None, None)
     assert all(settings_world.rows[(rp._SETTINGS[w].key, "platform", "")].value is None
-               for w in ("evictionEnabled", "defaultResidency", "bytesPerEntity"))
+               for w in ("evictionEnabled", "bytesPerEntity"))
+    assert settings_world.rows[("residency.class", "platform", "")].value == "always"
     assert out["values"]["bytesPerEntity"] == {"saved": None, "default": 550, "effective": 550}
-    assert recorded[0][1]["details"]["to"] == {
-        "bytesPerEntity": None, "defaultResidency": None, "evictionEnabled": None}
+    assert recorded[0][1]["details"]["to"] == {"bytesPerEntity": None, "evictionEnabled": None}
+
+
+@pytest.mark.parametrize("saved, sent", [
+    (None, "coldline"),            # a class where none was saved
+    ("always", "standard"),        # another class
+    ("always", -1),                # back to the default: another class too
+])
+async def test_a_change_to_the_class_is_refused_and_says_where_it_is_set_now(saved, sent,
+                                                                            settings_world):
+    """The platform's class was the class a new graph got; it is now the class every graph
+    inherits, set in Admin → Versioned graphs. Nothing in the PUT is saved."""
+    if saved:
+        _save(settings_world, defaultResidency=saved)
+    session = _Session(PlatformSettingsORM(id=1, gv_default_residency=saved))
+    with pytest.raises(HTTPException) as caught:
+        await _put({"highWaterPct": 75, "defaultResidency": sent}, session)
+    detail = caught.value.detail
+    assert caught.value.status_code == 422
+    assert (detail["type"], detail["field"]) == ("invalid_residency_policy", "defaultResidency")
+    assert "the class every graph inherits" in detail["message"]
+    assert "Admin → Versioned graphs (residency.class)" in detail["message"]
+    assert session.commits == 0 and settings_world.saves == []
+
+
+@pytest.mark.parametrize("saved, sent", [
+    (None, None),                  # an echo of what is saved
+    (None, "standard"),            # an echo of what is in force
+    (None, -1),                    # cleared: as it is
+    ("coldline", "coldline"),
+])
+async def test_the_class_sent_back_as_it_is_passes_and_the_rest_is_saved(saved, sent,
+                                                                        settings_world):
+    """An old client that echoes the whole policy still saves the values it changed; the class is
+    left as it is, never saved here."""
+    if saved:
+        _save(settings_world, defaultResidency=saved)
+    session = _Session(PlatformSettingsORM(id=1, gv_default_residency=saved))
+    echo = {**rp.stored_values(list(settings_world.rows.values())), "defaultResidency": sent,
+            "highWaterPct": 75}
+    out = await _put(echo, session)
+    (change_set,) = settings_world.saves
+    assert [(a.key, a.after_value) for a in change_set.applied] == [
+        ("residency.unloadStartPct", 75)]
+    assert out["values"]["defaultResidency"]["saved"] == saved
+    assert session.row.gv_default_residency == saved
+
+
+async def test_the_preview_refuses_a_change_to_the_class_as_the_put_does(settings_world):
+    with pytest.raises(HTTPException) as caught:
+        await va.preview_residency_policy({"defaultResidency": "always"}, _user=_ADMIN,
+                                          session=_Session(PlatformSettingsORM(id=1)))
+    assert caught.value.status_code == 422 and caught.value.detail["field"] == "defaultResidency"
 
 
 async def test_a_save_that_changes_nothing_records_nothing(settings_world):

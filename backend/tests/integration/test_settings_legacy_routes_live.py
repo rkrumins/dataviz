@@ -6,7 +6,8 @@ Pins:
 - In the same transaction it writes the old storage through (the JSON, the ``gv_*`` columns), so
   the previous image, rolled back to, behaves as configured; and it records its activity event.
 - ``-1`` still clears a value: inherit (NULL) in the store, NULL in the old column.
-- A refused PUT saves nothing anywhere.
+- A refused PUT saves nothing anywhere, a change to the residency class among them (it is the
+  class every graph inherits now, set in Admin → Versioned graphs); sent back as it is, it passes.
 - PUTs at once go one at a time, under the store's writer lock, and the last one wins, as before.
 - This process reads the change at once.
 
@@ -97,14 +98,17 @@ async def test_the_old_build_policy_put_saves_in_the_store_and_writes_the_old_js
 
 
 async def test_the_old_residency_put_saves_in_the_store_and_writes_the_old_columns(db):
-    out = await _put(va.put_residency_policy, {"highWaterPct": 75, "defaultResidency": "coldline"})
+    with pytest.raises(HTTPException) as caught:          # the class is set elsewhere now
+        await _put(va.put_residency_policy, {"highWaterPct": 75, "defaultResidency": "coldline"})
+    assert (caught.value.status_code, caught.value.detail["field"]) == (422, "defaultResidency")
+    assert _platform(db, "residency.") == {}
+    out = await _put(va.put_residency_policy, {"highWaterPct": 75, "defaultResidency": "standard"})
     assert out["values"]["highWaterPct"]["effective"] == 75 and out["updatedBy"] == "usr_admin"
-    assert _platform(db, "residency.") == {"residency.unloadStartPct": 75,
-                                           "residency.class": "coldline"}
+    assert _platform(db, "residency.") == {"residency.unloadStartPct": 75}
     (row,) = query(db, "SELECT gv_high_water_pct, gv_default_residency, gv_policy_updated_by, "
                        "gv_policy_updated_at FROM platform_settings WHERE id = 1")
     assert (row.gv_high_water_pct, row.gv_default_residency, row.gv_policy_updated_by) == (
-        75, "coldline", "usr_admin")
+        75, None, "usr_admin")
     assert row.gv_policy_updated_at
     assert (await residency_policy.resolve()).high_water_pct == 75
 

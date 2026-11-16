@@ -4,6 +4,9 @@ for a workspace's graphs, the drafts a shorter window removes and the inventory.
 
 * A save at each scope round-trips, and the old storage and the activity log hear of it once.
 * A value changed since it was read is a conflict, and nothing is saved.
+* A residency class saved at any scope reaches the rows of the graphs it covers in the graph
+  store, where the evictor reads it, except while a separate graph store's own values wait for
+  their import.
 * History is scoped: system administrators see every change, a workspace its own and its
   graphs', a graph its own. Its filters and pages hold, and it names who made each change.
 * A change set is put back, checked as a save is: another place's is not found (404), one changed
@@ -143,16 +146,19 @@ async def client(api_db, engines_at, redis_bus, monkeypatch):  # noqa: F811 — 
 
 
 def _reset(name: str) -> None:
-    """Nothing saved, for the next test: the store's rows and history, and the old storage."""
+    """Nothing saved, for the next test: the store's rows, history and one-time imports, the old
+    storage, and the graphs' classes as seeded."""
     engine = create_engine(db_url(name, "psycopg2"))
     with engine.begin() as conn:
         conn.execute(text("DELETE FROM setting_values"))
         conn.execute(text("DELETE FROM setting_changes"))
+        conn.execute(text("DELETE FROM settings_imports"))
         conn.execute(text("DELETE FROM outbox_events"))
         conn.execute(text("DELETE FROM platform_settings"))
         conn.execute(text("UPDATE workspaces SET draft_levels = NULL"))
         conn.execute(text("UPDATE workspace_data_sources SET import_identifier = NULL"))
-        conn.execute(text("UPDATE graphver.projection_state SET read_mode = NULL"))
+        conn.execute(text("UPDATE graphver.projection_state SET read_mode = NULL, residency = "
+                          "CASE graph_id WHEN 'graph_1' THEN 'always' ELSE 'standard' END"))
     engine.dispose()
 
 
@@ -241,6 +247,58 @@ async def test_a_value_changed_since_it_was_read_is_a_conflict_and_nothing_is_sa
                                              "scopeId": "ws_1", "expected": 0, "actual": 1}]
     assert query(api_db, "SELECT count(*) FROM setting_values WHERE key = 'drafts.selfMerge'"
                  )[0][0] == 0
+
+
+# ── Each graph's residency class, on its row ──────────────────────────────────────────────────────
+def _classes(name: str) -> dict:
+    return dict(query(name, "SELECT graph_id, residency FROM graphver.projection_state"))
+
+
+def _mark(name: str, marker: str) -> None:
+    """A one-time import marked as run (``settings_imports``)."""
+    engine = create_engine(db_url(name, "psycopg2"))
+    with engine.begin() as conn:
+        conn.execute(text("INSERT INTO settings_imports (name) VALUES (:n)"), {"n": marker})
+    engine.dispose()
+
+
+async def test_a_class_saved_at_each_scope_reaches_the_rows_of_the_graphs_it_covers(client,
+                                                                                   api_db):
+    """The evictor reads each graph's class on its row, so a save writes it there: a workspace's
+    class reaches its graphs, a graph's own class wins, the platform's reaches the graphs with
+    neither, and a fork, which reads through its root's key, has none of its own."""
+    await _patch(client, _W1, _change("residency.class", "coldline"))
+    assert _classes(api_db) == {"graph_1": "coldline", "graph_fork": "standard",
+                                "graph_2": "standard"}
+    await _patch(client, _G1, _change("residency.class", "standard"))
+    await _patch(client, _P, _change("residency.class", "always"))
+    assert _classes(api_db) == {"graph_1": "standard", "graph_fork": "standard",
+                                "graph_2": "always"}
+    await _patch(client, _W1, _change("residency.class", None, 1))
+    assert _classes(api_db)["graph_1"] == "standard"                     # its own, still
+    await _patch(client, _G1, _change("residency.class", None, 1))
+    assert _classes(api_db)["graph_1"] == "always"                       # the platform's
+
+
+async def test_while_the_graphs_values_wait_for_their_import_no_row_is_re_classed(client,
+                                                                                api_db):
+    """With the graph store in a database of its own, the import migration leaves the graphs'
+    own values to the worker's start-up import (``legacy`` without ``legacy_graph``). Meanwhile
+    a class saved for a workspace or the platform re-classes no graph, so a rollout changes
+    none; one saved for a graph does. Once imported, the next memory check writes the rest."""
+    from backend.app.services.versioning import residency
+
+    _mark(api_db, "legacy")
+    await _patch(client, _W1, _change("residency.class", "coldline"))
+    await _patch(client, _P, _change("residency.class", "coldline"))
+    assert _classes(api_db) == {"graph_1": "always", "graph_fork": "standard",
+                                "graph_2": "standard"}
+    await _patch(client, _G1, _change("residency.class", "standard"))
+    assert _classes(api_db)["graph_1"] == "standard"
+    _mark(api_db, "legacy_graph")
+    assert await residency.keep_classes() == ["graph_2"]
+    assert _classes(api_db) == {"graph_1": "standard", "graph_fork": "standard",
+                                "graph_2": "coldline"}
 
 
 # ── History and revert ────────────────────────────────────────────────────────────────────────────

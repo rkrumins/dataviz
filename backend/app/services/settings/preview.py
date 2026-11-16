@@ -11,7 +11,8 @@ part the change can't affect is null.
 * ``memory`` — the free memory a copy of the largest graph would need, against each node's under
   its start mark (system administrators only: node memory is operator data);
 * ``residency`` — what the next memory check would unload, load and leave waiting on each node
-  with the proposed values, as the residency preview plans it (``residency.preview``);
+  with the proposed values and classes, as the residency preview plans it
+  (``residency.preview``);
 * ``database`` — the most reads one process runs on the database at once, per graph and in all;
 * ``drafts`` — closed drafts whose changes the next sweep would remove under a shorter window;
 * ``outsideLimits`` — values chosen for workspaces and graphs that new limits would leave outside
@@ -31,7 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.config.settings_types import Setting
 from backend.app.db.models import WorkspaceDataSourceORM
 
-from . import resolver
+from . import resolver, store
 from .resolver import SYSTEM_ADMIN, Context, Target
 
 logger = logging.getLogger(__name__)
@@ -43,6 +44,7 @@ _MEMORY = frozenset({"builds.copyRoomPct", "builds.copyMaxBytes", "builds.method
                      "residency.unloadStartPct"})
 _DATABASE = ("database.readsPerProcess", "database.readsPerGraph", "database.readTimeoutMs")
 _RETENTION = "drafts.keepClosedDays"
+_CLASS = "residency.class"
 
 
 async def labels(session: AsyncSession, data_source_ids: Iterable[Optional[str]]
@@ -83,7 +85,8 @@ async def impact(session: AsyncSession, target: Target, before: Context, after: 
             out["alwaysLatest"] = _always_latest(before, after, scoped)
     if operator and changed & _MEMORY:
         await part("memory", _memory(before, after, facts))
-    if operator and target.scope == "platform" and changed & _residency_keys(before.settings):
+    if operator and (_CLASS in changed or (target.scope == "platform"
+                                           and changed & _residency_keys(before.settings))):
         await part("residency", _residency(session, after))
     if changed & set(_DATABASE) or (out["alwaysLatest"] or {}).get("joining"):
         out["database"] = _database(before, after, target, facts if operator else None)
@@ -187,13 +190,17 @@ def _residency_keys(settings: Mapping[str, Setting]) -> Set[str]:
 
 
 async def _residency(session: AsyncSession, after: Context) -> Dict[str, Any]:
-    """The capacity planner run on the proposed values against current memory and graphs, acting
-    on nothing, as the residency policy's preview runs it."""
+    """The capacity planner run on the proposed values against current memory and graphs, each
+    graph of the class the proposed settings give it, acting on nothing, as the residency
+    policy's preview runs it."""
     from backend.app.services.versioning import residency, residency_policy
 
     wire = {s.legacy.residency_policy: resolver.encode(s, resolver.effective(after, s.key))
             for s in after.settings.values() if s.key in _residency_keys(after.settings)}
-    decided, snap = await residency.preview(residency_policy.effective(wire))
+    pending = residency_policy.graph_values_pending(await store.imports_done(session))
+    decided, snap = await residency.preview(residency_policy.effective(wire),
+                                            classes=residency_policy.classes(after,
+                                                                             pending=pending))
     listed = [x for m in decided.masters for x in (*m.evictions, *m.loads, *m.waits)]
     named = await labels(session, (snap.rows.get(x.graph_id, {}).get("data_source_id")
                                    for x in listed))

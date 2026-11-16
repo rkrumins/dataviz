@@ -26,6 +26,7 @@ from backend.app.services.activity import recorder
 from backend.app.services.aggregation.models import AggregationJobORM
 from backend.app.providers.shard_capacity import human_bytes
 from backend.app.services.graph_store.topology import key_slot
+from backend.app.services.settings import legacy as settings_legacy
 from backend.app.services.settings import registry as settings_registry
 from backend.app.services.settings import store as settings_store
 from backend.app.services.system_status import probes
@@ -315,7 +316,10 @@ async def get_residency_policy(
 ) -> dict:
     """What the capacity loop evicts and loads by (doc 17), with ``enabled``: whether a system
     administrator has turned Graph residency on (Admin → Features), and ``switch``: where it is —
-    its grace period, or the graphs still being brought back after it was turned off."""
+    its grace period, or the graphs still being brought back after it was turned off.
+    ``values.defaultResidency`` is the platform's residency class (``residency.class``): once the
+    class a new graph got, it is now the class every graph inherits unless its workspace or the
+    graph itself has one, and it is changed in Admin → Versioned graphs, not here."""
     return await _policy(session)
 
 
@@ -343,13 +347,18 @@ async def put_residency_policy(
     """Partial: only the values named change, and ``-1`` clears one back to its default. A value
     out of its range, of the wrong kind, or contradicting another (Coldline idle longer than
     Standard idle; a stop mark less than 5 points under the start mark) is a 422 naming the
-    field, and nothing is saved. Saved in the settings store (its history says who, and the
-    ``X-Activity-Reason``) and recorded with each changed value's before and after; this process
-    applies the change at once, the others within about two seconds."""
+    field, and nothing is saved. So is a change to ``defaultResidency``, which is now the class
+    every graph inherits, changed in Admin → Versioned graphs; sent back as it is (a client that
+    echoes the whole policy), it is accepted and the other values are saved. Saved in the
+    settings store (its history says who, and the ``X-Activity-Reason``) and recorded with each
+    changed value's before and after; this process applies the change at once, the others within
+    about two seconds."""
     rows = await _platform_settings(session, save=True)
     before = residency_policy.stored_values(rows)
     _validate(body, before)
-    after = residency_policy.merged(before, body)
+    # The class passes only as it is (residency_policy.CLASS_MOVED), so it is never saved here.
+    after = residency_policy.merged(before, {w: v for w, v in body.items()
+                                             if w != "defaultResidency"})
     changed = sorted(w for w in after if after[w] != before[w])
     if changed:
         async def record(s: AsyncSession, _change_set) -> None:
@@ -745,11 +754,14 @@ async def set_graph_residency(
     user: User = Depends(requires("system:admin")),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict:
-    """Always (never evicted), Standard or Coldline (doc 17). Always on a graph whose key is not
-    in FalkorDB has its room checked now (room only: setting a class writes nothing): 409
-    ``capacity_insufficient``, naming the master and the shortfall, when its load would not fit
-    there; otherwise the class is set and its load asked for. Recorded with the class before and
-    after."""
+    """Always (never evicted), Standard or Coldline (doc 17), as the graph's own class: saved in
+    the settings store at the graph's scope (``residency.class``; its history says who, and the
+    ``X-Activity-Reason``), so the graph no longer follows its workspace's or the platform's
+    class, and written to its row before the answer, where the evictor reads it. Always on a
+    graph whose key is not in FalkorDB has its room checked now (room only: setting a class
+    writes nothing): 409 ``capacity_insufficient``, naming the master and the shortfall, when its
+    load would not fit there; otherwise the class is set and its load asked for. Recorded with
+    the class before and after."""
     meta = await _graph_with_a_key(graph_id)
     wm = await get_versioning_service().projection_watermark(graph_id)
     cls, out = body.residency_class, wm["residency_state"] in ("evicted", "waiting_capacity")
@@ -757,14 +769,28 @@ async def set_graph_residency(
         admitted = await residency.admission(graph_id)
         if not admitted.fits:
             raise _capacity_insufficient(admitted, "this graph")
-    before = await residency.set_class(graph_id, cls)
+    before, domain, ds = wm["residency"], settings_registry().DOMAIN, meta["data_source_id"]
+    await settings_store.lock(session, domain)
+    own = next((r for r in await settings_store.read_scope(session, domain, "graph", ds)
+                if r.key == residency_policy.CLASS), None)
+
+    async def record(s: AsyncSession, change_set) -> None:
+        await settings_legacy.write_through(s, change_set)
+        if before != cls:
+            await recorder.record_for_request(
+                s, "platform.versioning.residency_changed",
+                details={"graphId": graph_id, "workspaceId": meta["workspace_id"],
+                         "dataSourceId": ds, "from": before, "to": cls},
+                best_effort=True,   # the class is saved whether or not this is recorded
+            )
+
+    await settings_store.apply(
+        session, domain, [settings_store.Change(residency_policy.CLASS, "graph", ds,
+                                                own.version if own is not None else 0,
+                                                value=cls)],
+        actor=user.id, reason=activity_context.current().stated_reason, source="legacy_api",
+        before_commit=record)
+    await residency.keep_classes(sources=[ds])
     if cls == "always" and out:
         await residency.request_load(graph_id)
-    if before != cls:
-        await recorder.record_for_request(
-            session, "platform.versioning.residency_changed",
-            details={"graphId": graph_id, "workspaceId": meta["workspace_id"],
-                     "dataSourceId": meta["data_source_id"], "from": before, "to": cls},
-            best_effort=True,   # the class is already set
-        )
     return {"graphId": graph_id, "residency": cls, "state": wm["residency_state"]}

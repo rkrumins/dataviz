@@ -156,6 +156,11 @@ async def read_scope(session: AsyncSession, domain: str, scope: str, scope_id: s
     return await _rows(session, _V.domain == domain, _V.scope == scope, _V.scope_id == scope_id)
 
 
+async def read_key(session: AsyncSession, domain: str, key: str) -> List[Row]:
+    """One setting's rows, at every scope."""
+    return await _rows(session, _V.domain == domain, _V.key == key)
+
+
 # ── Writes ────────────────────────────────────────────────────────────────────────────────────────
 def _same(a: Any, b: Any) -> bool:
     return json.dumps(a, sort_keys=True) == json.dumps(b, sort_keys=True)

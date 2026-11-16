@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Set
 
 from backend.app.services.settings import effective, registry, store
 from backend.app.services.settings import snapshot as snapshots
@@ -41,6 +41,9 @@ class SettingsWorld:
         self.rows: Dict[RowKey, Row] = {}
         #: Every save that changed something, oldest first (``store.apply``'s change sets).
         self.saves: List[ChangeSet] = []
+        #: The one-time imports that have run (``settings_imports``): none, as in a store made
+        #: from nothing.
+        self.imports: Set[str] = set()
         self._readable = True
         self._rev = 0
         self._now = 0.0
@@ -149,6 +152,12 @@ class SettingsWorld:
         return self._rows(lambda r: domain == self.domain and (r.scope, r.scope_id) == (scope,
                                                                                          scope_id))
 
+    async def read_key(self, session, domain: str, key: str) -> List[Row]:
+        return self._rows(lambda r: domain == self.domain and r.key == key)
+
+    async def imports_done(self, session) -> Set[str]:
+        return set(self.imports)
+
     # ── Putting it in place ───────────────────────────────────────────────────────────────────────
     def install(self, monkeypatch) -> None:
         """This world's snapshot as the process's, from a fresh ``effective``."""
@@ -157,7 +166,8 @@ class SettingsWorld:
 
     def install_store(self, monkeypatch) -> None:
         """This world in place of the store's writes and reads."""
-        for name in ("apply", "lock", "read_domain", "read_since", "read_scope"):
+        for name in ("apply", "lock", "read_domain", "read_since", "read_scope", "read_key",
+                     "imports_done"):
             monkeypatch.setattr(store, name, getattr(self, name))
 
 

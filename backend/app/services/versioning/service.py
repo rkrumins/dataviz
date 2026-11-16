@@ -978,7 +978,7 @@ class GraphVersioningService:
         session=None,
     ) -> Dict[str, str]:
         """Create a blank versioned graph: graph row + ``main`` branch + empty
-        genesis commit + projection state, in the residency class the policy gives a new graph
+        genesis commit + projection state, in the residency class in force for it
         (``residency_policy.default_class``).  Returns ids and the genesis seq.
 
         ``provider_aliases``: the providers on ``falkor_provider``'s server, through any of which
@@ -1028,12 +1028,12 @@ class GraphVersioningService:
             # full-seed into it, so it starts parked and its first projection is the first
             # commit's window.
             parked = bool(falkor_graph_name) and not owns_falkor_graph
-            from .residency_policy import default_class, enabled
+            from .residency_policy import default_class
             s.add(
                 ProjectionStateORM(
                     graph_id=graph.id, projected_commit_seq=1 if parked else 0, target_commit_seq=1,
-                    # The policy's class for a new graph; with residency off, no policy is read.
-                    residency=await default_class() if await enabled() else "standard",
+                    # The class in force for it, which every graph's row keeps, residency on or off.
+                    residency=await default_class(workspace_id, data_source_id),
                     falkor_graph_name=falkor_graph_name,   # the data source's real graph
                     falkor_provider=falkor_provider,       # FalkorDB instance (per-provider eviction)
                     # THE GUARDRAIL, recorded at birth from a fact we actually know: we own the

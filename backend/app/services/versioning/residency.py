@@ -16,9 +16,10 @@ The capacity loop (:class:`CapacityLoop`: the projection lane, every policy inte
 across workers) reads the switch from the feature store first (``residency_policy.switch_state``):
 unreadable, the pass does nothing; on, nothing is evicted for ``GRACE_SECS`` after the leader first
 saw it on (kept on the platform settings row, :func:`_switch_phase`); off, the pass only loads,
-until no graph is left out of FalkorDB. It reads each cluster master's memory and every graph with
-a key of its own (:func:`gather`), asks the planner what to do (``residency_plan.plan``) and does
-it: an eviction
+until no graph is left out of FalkorDB. It puts back in step any graph whose class on its row is
+not the one its settings give (:func:`keep_classes`, which a save runs too). It reads each cluster
+master's memory and every graph with a key of its own (:func:`gather`), asks the planner what to
+do (``residency_plan.plan``) and does it: an eviction
 through ``CacheManager.evict`` (its guarded UPDATE and drop) with its reason, after which the graph
 stays evicted; a load by marking the graph ``rehydrating`` and nudging the projection lane, whose
 full seed of the graph's key is the load; a load that does not fit by marking the graph
@@ -272,14 +273,60 @@ async def mark(graph: Mapping, state: Optional[Mapping]) -> None:
         pass
 
 
-async def set_class(graph_id: str, residency: str) -> Optional[str]:
-    """Set a graph's residency class; returns the class it had (None: no projection row)."""
+#: Writers of the graphs' classes go one at a time (a transaction's lock), each reading the
+#: settings once the one before it has written: the last to write has read every save before it.
+_CLASSES_LOCK = "gvresidency:classes"
+_KEEP_CLASSES = """
+UPDATE {state} ps SET residency = c.cls, updated_at = :now
+FROM (
+    SELECT g.id, coalesce(own.cls, ws.cls, CAST(:inherited AS text)) AS cls
+    FROM {graphs} g
+    LEFT JOIN unnest(CAST(:own_ids AS text[]), CAST(:own_classes AS text[])) AS own(id, cls)
+        ON own.id = g.data_source_id
+    LEFT JOIN unnest(CAST(:ws_ids AS text[]), CAST(:ws_classes AS text[])) AS ws(id, cls)
+        ON ws.id = g.workspace_id
+    WHERE g.fork_parent_graph_id IS NULL AND g.deleted_at IS NULL{reach}
+) c
+WHERE ps.graph_id = c.id AND c.cls IS NOT NULL AND ps.residency IS DISTINCT FROM c.cls
+RETURNING ps.graph_id
+"""
+
+
+async def keep_classes(*, workspaces: Optional[Collection[str]] = None,
+                       sources: Optional[Collection[str]] = None,
+                       graph_ids: Optional[Collection[str]] = None) -> List[str]:
+    """Write each live graph's class in force (``residency.class``, as the settings store holds it
+    now: ``residency_policy.stored_classes``) to its row, ``projection_state.residency``, where
+    the evictor reads it in SQL. Every graph's, or, when any is given, only the graphs of
+    ``workspaces``, of ``sources`` (data sources) and ``graph_ids``. A fork has no class of its
+    own: it has no key, and its reads count for its root's. A graph in the trash is left as it
+    is; restored, the next capacity pass writes its class before it plans. One statement whatever
+    the number of graphs, writing only the rows whose class moves, and those graphs' routes are
+    announced (a route holds the class, for :func:`mark`). Returns the graphs it re-classed."""
+    from . import route_cache
+
+    reach, params = [], {}
+    for clause, name, wanted in (("g.workspace_id", "in_workspaces", workspaces),
+                                 ("g.data_source_id", "in_sources", sources),
+                                 ("g.id", "in_graphs", graph_ids)):
+        if wanted is not None:
+            reach.append(f"{clause} = ANY(CAST(:{name} AS text[]))")
+            params[name] = sorted(wanted)
+    schema = config.graphver_schema()
+    statement = text(_KEEP_CLASSES.format(
+        state=f'"{schema}".projection_state', graphs=f'"{schema}".graphs',
+        reach=f" AND ({' OR '.join(reach)})" if reach else ""))
     async with db.graphver_session() as s:
-        ps = await s.get(ProjectionStateORM, graph_id)
-        if ps is None:
-            return None
-        before, ps.residency = ps.residency, residency
-        return before
+        await s.execute(select(func.pg_advisory_xact_lock(func.hashtext(_CLASSES_LOCK))))
+        chosen = await residency_policy.stored_classes()
+        moved = list((await s.execute(statement, {
+            **params, "now": _now(), "inherited": chosen.inherited,
+            "own_ids": list(chosen.own), "own_classes": list(chosen.own.values()),
+            "ws_ids": list(chosen.workspaces),
+            "ws_classes": list(chosen.workspaces.values())})).scalars())
+    if moved:
+        await route_cache.announce(moved)
+    return moved
 
 
 async def non_resident(data_source_id: str) -> Optional[str]:
@@ -534,14 +581,16 @@ async def _read_masters(provider: str, client, mode) -> Tuple[List[Master], Dict
 
 async def gather(*, graph_ids: Optional[Collection[str]] = None,
                  providers: Optional[Collection[str]] = None,
-                 reload_all: bool = False) -> Snapshot:
+                 reload_all: bool = False,
+                 classes: Optional[residency_policy.Classes] = None) -> Snapshot:
     """Read what a pass decides from: every live graph that is not a fork and has a key of its
     own (only ``graph_ids``, when given; only those on ``providers``, when given), when each load
     was asked for, which graphs a read lease holds, whether each graph's key may change, and every
     master of each of their providers (and of ``providers``): its memory, its hold, what the
     aggregation write governor holds on it and its slots. Waiting graphs whose request the broker
     lost go to the end of the queue, and so does an Always graph that is not resident — and, with
-    ``reload_all`` (the switch off), every evicted graph.
+    ``reload_all`` (the switch off), every evicted graph. Each graph is of the class on its row,
+    or of the one ``classes`` gives it (a preview of classes not saved yet).
 
     A build seeding a graph's next version counts on the master of its own key, by its own
     provider's slots (a move's is the provider it moves to): in a snapshot of that provider
@@ -571,6 +620,9 @@ async def gather(*, graph_ids: Optional[Collection[str]] = None,
                                      build_of.in_(list(providers)))))
     async with db.graphver_session() as s:
         found = (await s.execute(query)).all()
+    class_of = {r.graph_id: (r.residency if classes is None else
+                             classes.of(r.workspace_id, r.data_source_id, r.residency))
+                for r in found}
     default = config.DEFAULT_FALKOR_PROVIDER
     # The graphs this snapshot holds as graphs: those it was asked about. A graph served elsewhere
     # is here for its build alone.
@@ -592,7 +644,7 @@ async def gather(*, graph_ids: Optional[Collection[str]] = None,
     now = time.time()
     for r in served:
         if r.graph_id not in asked and (r.status == "waiting_capacity" or (
-                r.status == "evicted" and (reload_all or r.residency == "always"))):
+                r.status == "evicted" and (reload_all or class_of[r.graph_id] == "always"))):
             asked[r.graph_id] = snap.requeue[r.graph_id] = now
     estimate: Dict[str, Optional[int]] = {}
     for r in found:              # only a load asked for, or one in flight, needs an estimate
@@ -605,8 +657,8 @@ async def gather(*, graph_ids: Optional[Collection[str]] = None,
             except _Unread:
                 snap.sized = False
     dedicated = await _dedicated({r.data_source_id for r in found})
-    held = await _held([r for r in served
-                        if r.owns_falkor_graph and r.status == "idle" and r.residency != "always"])
+    held = await _held([r for r in served if r.owns_falkor_graph and r.status == "idle"
+                        and class_of[r.graph_id] != "always"])
     by_provider: Dict[str, List[Any]] = {p: [] for p in providers or ()}
     for r in served:
         by_provider.setdefault(r.falkor_provider or default, []).append(r)
@@ -650,14 +702,16 @@ async def gather(*, graph_ids: Optional[Collection[str]] = None,
     broker: Dict[str, bool] = {}            # the read leases' broker, as this pass found it
     for r in found:
         if r.graph_id in served_ids:
-            candidate = r.owns_falkor_graph and r.status == "idle" and r.residency != "always"
+            candidate = (r.owns_falkor_graph and r.status == "idle"
+                         and class_of[r.graph_id] != "always")
             target = max(r.target_commit_seq, r.main_head_commit_seq)
             placed = dedicated is not None and r.data_source_id not in dedicated
             snap.rows[r.graph_id] = dict(r._mapping, key=r.falkor_graph_name,
                                          provider=r.falkor_provider or default,
                                          endpoint=endpoint_of[r.graph_id], placed=placed)
             snap.graphs.append(Graph(
-                graph_id=r.graph_id, endpoint=endpoint_of[r.graph_id], residency=r.residency,
+                graph_id=r.graph_id, endpoint=endpoint_of[r.graph_id],
+                residency=class_of[r.graph_id],
                 status=r.status, owned=bool(r.owns_falkor_graph),
                 # Not while it builds: the evictor leaves such a graph alone (_evictable).
                 evictable=(bool(r.past_genesis and r.enable_finished)
@@ -677,7 +731,7 @@ async def gather(*, graph_ids: Optional[Collection[str]] = None,
             # load meanwhile. Never evicted, never loaded: it is not the graph's resident key.
             snap.graphs.append(Graph(
                 graph_id=r.graph_id, endpoint=endpoint_of[f"{r.graph_id}#build"],
-                residency=r.residency, status="building", owned=True, evictable=False,
+                residency=class_of[r.graph_id], status="building", owned=True, evictable=False,
                 size_bytes=r.size_bytes, entities=estimate.get(r.graph_id), seeding=True,
                 provider=r.candidate_provider or default, placed=False, build=True))
     return snap
@@ -968,10 +1022,11 @@ def _by_room(plans: Collection[MasterPlan], policy) -> List[MasterPlan]:
 
 
 async def preview(policy, *, graph_ids: Optional[Collection[str]] = None,
-                  now: Optional[datetime] = None) -> Tuple[Plan, Snapshot]:
+                  now: Optional[datetime] = None,
+                  classes: Optional[residency_policy.Classes] = None) -> Tuple[Plan, Snapshot]:
     """What the next pass would do under ``policy`` at ``now`` (default: the clock), acting on
-    nothing."""
-    snap = await gather(graph_ids=graph_ids)
+    nothing; with ``classes``, with each graph of the class they give it."""
+    snap = await gather(graph_ids=graph_ids, classes=classes)
     return plan(policy, snap.masters, snap.graphs, now or _clock(), sized=snap.sized), snap
 
 
@@ -992,7 +1047,8 @@ class CapacityLoop:
 
     async def run_once(self, *, graph_ids: Optional[Collection[str]] = None) -> Optional[Plan]:
         """One pass, under the leader lock: the Graph residency switch read from the feature store
-        (:func:`_switch_phase`), then gather, plan, act, measure. In the grace period after it was
+        (:func:`_switch_phase`), each graph's class put back in step with the settings
+        (:func:`_reconcile`), then gather, plan, act, measure. In the grace period after it was
         turned on, and while it brings graphs back after it was turned off, a pass evicts nothing;
         loads and admission go on. Returns the plan, or None when no pass ran: another worker's
         pass holds the lock, the switch could not be read, or it is off with nothing to bring
@@ -1013,6 +1069,7 @@ class CapacityLoop:
                 policy = replace(policy, eviction_enabled=False)
             if phase != "reloading":
                 await _start_idle_clocks(graph_ids)
+            await _reconcile(graph_ids)
             snap = await gather(graph_ids=graph_ids, reload_all=phase == "reloading")
             await _requeue(snap)
             decided = plan(policy, snap.masters, snap.graphs, _clock(), sized=snap.sized)
@@ -1387,6 +1444,22 @@ async def _start_idle_clocks(graph_ids: Optional[Collection[str]] = None) -> Non
                             .execution_options(synchronize_session=False))
     except Exception:  # noqa: BLE001 — still never idle; the next pass tries again
         logger.warning("residency: idle clocks not started", exc_info=True)
+
+
+async def _reconcile(graph_ids: Optional[Collection[str]] = None) -> None:
+    """Each graph's class on its row put back in step with the settings before the pass plans by
+    it (:func:`keep_classes`): a save writes the classes it changes, and this rights any write
+    that was missed. Best effort: if the settings can't be read, the pass plans by the classes on
+    the rows, which the evictor's guard reads anyway."""
+    try:
+        moved = await keep_classes(graph_ids=graph_ids)
+    except Exception:  # noqa: BLE001 — the classes on the rows stand; the next pass tries again
+        logger.warning("residency: the graphs' classes could not be checked against the "
+                       "settings; this pass plans by the classes on their rows", exc_info=True)
+        return
+    if moved:
+        logger.warning("residency: %d graph(s) had a class out of step with the settings, now "
+                       "corrected: %s", len(moved), ", ".join(moved[:10]))
 
 
 async def _requeue(snap: Snapshot) -> None:

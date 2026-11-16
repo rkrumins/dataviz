@@ -69,8 +69,29 @@ async def _graphs_of(workspaces: Sequence[str], sources: Sequence[str]) -> List[
 
 
 async def materialize(change_set: store.ChangeSet) -> None:
-    """The hook where each graph's stored value of a ``materialized`` setting is kept in step with
-    a save: the residency class, which the evictor reads in SQL (``projection_state.residency``)
-    because it can't ask the resolver. Until graphs inherit their class from their workspace and
-    the platform, each graph's stored class is the one set on it through its residency route, so a
-    save here has nothing to write."""
+    """Each graph's stored value of a ``materialized`` setting kept in step with a save: the
+    residency class, which the evictor reads in SQL (``projection_state.residency``) because it
+    can't ask the resolver. A graph's own class re-classes that graph, a workspace's the
+    workspace's graphs, the platform's every graph (one with a class of its own, or of its
+    workspace, keeps it): one statement for them all (``residency.keep_classes``). Best effort: a
+    class not written here is written by the next memory check, which puts every graph's class
+    in step before it plans."""
+    settings = registry().BY_KEY
+    classes = [a for a in change_set.applied if a.key in settings
+               and settings[a.key].materialized == "projection_state.residency"]
+    if not classes:
+        return
+    from backend.app.services.versioning import residency
+
+    everywhere = any(a.scope == "platform" for a in classes)
+    try:
+        moved = await residency.keep_classes(
+            workspaces=None if everywhere else {a.scope_id for a in classes
+                                                if a.scope == "workspace"},
+            sources=None if everywhere else {a.scope_id for a in classes if a.scope == "graph"})
+    except Exception:  # noqa: BLE001 — the save stands; the next memory check writes them
+        logger.warning("settings: the graphs' residency classes could not be written; the next "
+                       "memory check writes them", exc_info=True)
+        return
+    if moved:
+        logger.info("settings: %d graph(s) re-classed", len(moved))

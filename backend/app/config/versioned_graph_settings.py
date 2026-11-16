@@ -1747,8 +1747,10 @@ _RESIDENCY = (
                 "a key the platform did not mint, a leased graph, or one with a pass or a window in "
                 "flight. residency.mark: a person's read asks for the load of a Standard or Always "
                 "graph, and of a Coldline graph with more entities than coldlineCanvasLoadAbove. Each "
-                "graph's class is projection_state.residency; today a new graph takes the policy's "
-                "defaultResidency (docs/versioning/17 §10 to §12)."),
+                "graph's class in force is kept on projection_state.residency, which the evictor's "
+                "guard reads: a new graph gets it, a save writes it to the graphs it reaches, and "
+                "each capacity pass puts it back in step first (residency.keep_classes; "
+                "docs/versioning/17 §10 to §12)."),
             aliases=("residency", "class", "Always", "Standard", "Coldline", "keep loaded",
                      "eviction class", "defaultResidency"),
         ),

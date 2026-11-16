@@ -14,6 +14,13 @@ what the resolver would clamp, naming the field (:func:`validate`), save through
 (:func:`apply`) and, for one release, write the old ``platform_settings`` columns too
 (:func:`saved_values`).
 
+The residency class (``residency.class``, ``defaultResidency`` on the wire) is the exception. It
+was the class a new graph got; it is now the class every graph inherits, platform → workspace →
+graph, set in Admin → Versioned graphs. The policy route reads it but refuses a change to it
+(:data:`CLASS_MOVED`). The evictor decides in SQL, so each graph's class in force is kept on its
+row (``projection_state.residency``): :func:`classes` works it out from the settings, and
+``residency.keep_classes`` writes it after a save and before each capacity pass.
+
 Whether any of it applies is not a policy value but a switch a system administrator turns on and
 off at runtime: Graph residency (Admin → Features, ``residencyEnabled``; :func:`switch_state`). The
 versioning worker reads it from the feature store at the start of every capacity pass and decides
@@ -23,17 +30,23 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, replace
-from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
+from typing import Any, Collection, Dict, Mapping, Optional, Sequence, Tuple
 
 from backend.app.db.repositories.profiling_repo import INHERIT
 from backend.app.services.settings import effective as in_force
 from backend.app.services.settings import legacy, registry, resolver, store
-from backend.app.services.settings.resolver import Row
+from backend.app.services.settings.resolver import Row, Target
 from backend.app.services.settings.snapshot import env_reader
 
 logger = logging.getLogger(__name__)
 
 CLASSES = ("always", "standard", "coldline")
+#: The setting a graph's class is.
+CLASS = "residency.class"
+#: Why the policy route refuses a change to the class (``defaultResidency``).
+CLASS_MOVED = ("The platform's residency class is now the class every graph inherits, not only "
+               "the class of a new graph. Change it in Admin → Versioned graphs "
+               "(residency.class).")
 
 
 @dataclass(frozen=True)
@@ -193,9 +206,73 @@ async def resolve(session=None) -> ResidencyPolicy:
     return policy
 
 
-async def default_class() -> str:
-    """The class a new graph gets."""
-    return (await resolve()).default_residency
+async def default_class(workspace_id: Optional[str] = None,
+                        data_source_id: Optional[str] = None) -> str:
+    """The class a new graph gets: the one in force for it (``residency.class``: one its data
+    source's graph had, else its workspace's, else the platform's), as this process's settings
+    last read them. It inherits from there on."""
+    return await in_force.value_of(CLASS, workspace_id=workspace_id, graph_id=data_source_id)
+
+
+@dataclass(frozen=True)
+class Classes:
+    """Each graph's class as the settings give it: its own, by its data source (``own``), else its
+    workspace's (``workspaces``), else ``inherited``. ``inherited`` is None while the graphs' own
+    values wait for their import (:func:`graph_values_pending`): until then a graph keeps the
+    class on its row unless one was set on it since, and nothing is re-classed."""
+    inherited: Optional[str]
+    workspaces: Mapping[str, str]
+    own: Mapping[str, str]
+
+    def of(self, workspace_id: Optional[str], data_source_id: Optional[str], stored: str) -> str:
+        """A graph's class, given the class ``stored`` on its row."""
+        own = self.own.get(data_source_id)
+        if own is not None:
+            return own
+        if self.inherited is None:
+            return stored
+        return self.workspaces.get(workspace_id, self.inherited)
+
+
+def classes(ctx: resolver.Context, *, pending: bool = False) -> Classes:
+    """The classes the settings in ``ctx`` give, as the resolver resolves them. ``pending``: the
+    graphs' own values are not in the store yet (:func:`graph_values_pending`)."""
+    own: Dict[str, str] = {}
+    workspaces: Dict[str, str] = {}
+    for (key, scope, scope_id), row in ctx.rows.items():
+        if key != CLASS or row.value is None or not scope_id:
+            continue
+        if scope == "graph":
+            # Its own, unless the resolver passes over it (a value it can't take, a lock).
+            if resolver.effective(ctx, CLASS, Target("graph", graph_id=scope_id)) == row.value:
+                own[scope_id] = row.value
+        elif scope == "workspace" and not pending:
+            workspaces[scope_id] = resolver.effective(ctx, CLASS, Target("graph", scope_id))
+    inherited = None if pending else resolver.effective(ctx, CLASS, Target("graph"))
+    return Classes(inherited, workspaces, own)
+
+
+def graph_values_pending(done: Collection[str]) -> bool:
+    """Whether the graphs' own values are still to be copied into the settings store, given the
+    one-time imports ``done``: the import migration ran (``legacy``) but could not reach a
+    separate graph store (no ``legacy_graph`` yet), so the versioning worker copies them at
+    start-up (``legacy.import_graph_values``)."""
+    return legacy.MARKER in done and legacy.GRAPH_MARKER not in done
+
+
+async def stored_classes() -> Classes:
+    """The classes as the settings store holds them now. Read from the store, not this process's
+    snapshot, which can be seconds behind: what writes the classes must never put back one that
+    a save has just changed."""
+    from backend.app.db.engine import get_readonly_session
+
+    reg = registry()
+    async with get_readonly_session() as session:
+        rows = await store.read_key(session, reg.DOMAIN, CLASS)
+        done = await store.imports_done(session)
+    ctx = resolver.context(reg.SETTINGS, rows, env=env_reader(reg.SETTINGS, reg.DEPLOYMENT),
+                           why=reg.WHY)
+    return classes(ctx, pending=graph_values_pending(done))
 
 
 def _is_inherit(value: Any) -> bool:
@@ -211,8 +288,10 @@ def merged(saved: Mapping[str, Any], values: Mapping[str, Any]) -> Dict[str, Any
 
 def validate(values: Mapping[str, Any], saved: Mapping[str, Any]) -> None:
     """Refuse a change (``values`` by wire name; ``-1`` clears one, None leaves it) that names an
-    unknown value, gives one of the wrong kind or out of its range, or would contradict another
-    once in force with what is ``saved``: :class:`PolicyInvalid` naming the field."""
+    unknown value, gives one of the wrong kind or out of its range, would change the residency
+    class (:data:`CLASS_MOVED`; the class in force sent back unchanged, as a client that echoes
+    the whole policy sends it, passes), or would contradict another once in force with what is
+    ``saved``: :class:`PolicyInvalid` naming the field."""
     for wire, value in values.items():
         if wire not in WIRE_NAMES:
             raise PolicyInvalid(wire, f"{wire} is not a residency setting")
@@ -230,6 +309,9 @@ def validate(values: Mapping[str, Any], saved: Mapping[str, Any]) -> None:
             if type(value) is not int or not lo <= value <= hi:
                 raise PolicyInvalid(wire, f"must be a whole number from {lo:,} to {hi:,}, or -1 "
                                           "for the default")
+    if "defaultResidency" in values and (effective(merged(saved, values)).default_residency
+                                         != effective(saved).default_residency):
+        raise PolicyInvalid("defaultResidency", CLASS_MOVED)
     # Each value as it would be chosen once saved (else its default), before it is held to another.
     ctx = _context(merged(saved, values))
     after = {wire: resolver.resolve(ctx, _SETTINGS[wire].key)["declared"]
