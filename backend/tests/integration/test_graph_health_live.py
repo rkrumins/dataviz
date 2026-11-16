@@ -27,7 +27,7 @@ from sqlalchemy import update
 from backend.app.auth.dependencies import get_current_user, get_permission_claims
 from backend.app.services.permission_service import PermissionClaims
 from backend.app.services.settings import signals
-from backend.app.services.versioning import db as gvdb
+from backend.app.services.versioning import config as gv_config, db as gvdb
 from backend.app.services.versioning import models
 from backend.app.services.versioning.models import BranchORM
 from backend.app.services.versioning.service import GraphVersioningService
@@ -193,14 +193,18 @@ async def test_a_graphs_health_and_the_signals_route_over_a_real_graph(client, g
     assert body["readMode"]["effective"] in ("latest", "in_place", "beside")
     assert body["readMode"]["source"] in ("default", "env", "platform")
     assert (body["memory"]["loaded"], body["memory"]["class"]) == (False, "standard")
-    assert body["lastBuild"] is None and body["progress"] is None and body["follows"] is None
+    # No build in flight or kept: none switched within the retire grace in force, and no more.
+    assert (body["lastBuild"]["outcome"], body["lastBuild"]["windowSecs"]) == (
+        "none", gv_config.RETIRE_GRACE_SECS)
+    assert body["progress"] is None and body["follows"] is None
     mine = {s["id"]: s["count24h"] for s in body["signals"]}
     assert mine == {**dict.fromkeys(signals.IDS, 0), "reads.asked_to_retry": 2,
                     "imports.replace_refused_by_guard": 5}
     assert [p["part"] for p in body["problems"]] == ["lastUpdate"]
 
     forked = (await client.get(f"/api/v1/ws_1/versioning/graphs/{fork}/health")).json()
-    assert forked["follows"] == {"graphId": gid, "dataSourceId": "ds_health"}
+    assert forked["follows"] == {"graphId": gid, "dataSourceId": "ds_health",
+                                 "label": "Health ledger"}
     assert forked["head"]["seq"] == head                     # its root's copy, as it reads it
     assert "follows_root" in {w["code"] for w in forked["readMode"]["why"]}
     theirs = {s["id"]: s["count24h"] for s in forked["signals"]}

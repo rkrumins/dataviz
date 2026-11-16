@@ -1319,6 +1319,8 @@ def _projection_rows(forks: bool = False):
         "rehydrating": status == "rehydrating",
         "waiting_capacity": status == "waiting_capacity",
         "failed": err,
+        # A new version built beside its copy, while one is (``candidates.block``).
+        "building": ProjectionStateORM.candidate_state.isnot(None),
     }
     rows = (
         select(
@@ -1460,8 +1462,9 @@ async def list_versioned_graphs(
 
     Unlike the probe it keeps forks (whose ``dsfork_`` data source is a fork's row, never counted
     as present) and orphans (not a fork, and its data source is gone), and marks them. ``kind`` is ``main``,
-    ``fork`` or ``orphan``; ``status`` a rollup bucket; ``q`` matches the graph id, data source
-    id, FalkorDB key or data-source label. ``read_mode`` keeps the graphs whose
+    ``fork`` or ``orphan``; ``status`` a rollup bucket (``rehydrating``: loading, as each row's
+    ``residencyState`` says it; ``building``: a new version built beside); ``q`` matches the
+    graph id, data source id, FalkorDB key or data-source label. ``read_mode`` keeps the graphs whose
     ``readModeEffective`` is that mode, ``residency`` those of that class, and ``own_settings``
     those that chose a versioned-graph setting of their own (False: those that didn't); a fork
     has none of the three. Unlike a probe it raises rather than degrading."""
@@ -1480,7 +1483,16 @@ async def list_versioned_graphs(
     if provider:
         stmt = stmt.where(func.coalesce(func.nullif(ProjectionStateORM.falkor_provider, ""),
                                         vconfig.DEFAULT_FALKOR_PROVIDER) == provider)
-    if status:
+    if status == "rehydrating":
+        # Loading as each row and the fleet's figure say it (``residency_state_of``): a load in
+        # flight, or a copy written from nothing (a first seed, a move's, an Adopt's).
+        from backend.app.services.versioning.service import residency_state_sql
+
+        stmt = stmt.where(~is_fork, residency_state_sql(
+            func.coalesce(ProjectionStateORM.status, "idle"),
+            ProjectionStateORM.projected_commit_seq, ProjectionStateORM.falkor_graph_name,
+            GraphORM.id) == "rehydrating")
+    elif status:
         stmt = stmt.where(buckets[status])
     if workspace_id:
         stmt = stmt.where(GraphORM.workspace_id == workspace_id)
@@ -1564,16 +1576,16 @@ async def list_versioned_graphs(
 
     def read_mode_fields(r) -> dict:
         """What its readers get while a newer version lands: its own mode (None: it takes its
-        workspace's or the platform's), the one in force, where the one chosen was chosen and why
-        the one in force differs (Keep serving, switch when ready updates in place while
+        workspace's or the platform's), the one in force, the one chosen, where it was chosen and
+        why the one in force differs (Keep serving, switch when ready updates in place while
         New-version builds are off, or on a connected graph). A fork follows its root's."""
         mode = row_read_mode(r)
         if mode is None:
-            return dict.fromkeys(("readMode", "readModeEffective", "readModeSource",
-                                  "readModeWhy"))
+            return dict.fromkeys(("readMode", "readModeEffective", "readModeDeclared",
+                                  "readModeSource", "readModeWhy"))
         return {"readMode": mode.declared if mode.source == "graph" else None,
-                "readModeEffective": mode.effective, "readModeSource": mode.source,
-                "readModeWhy": list(mode.why)}
+                "readModeEffective": mode.effective, "readModeDeclared": mode.declared,
+                "readModeSource": mode.source, "readModeWhy": list(mode.why)}
 
     return {
         "graphs": [{
@@ -1597,9 +1609,10 @@ async def list_versioned_graphs(
 async def versioned_graphs_summary() -> dict:
     """The fleet's figures (``GET /admin/versioning/graphs/summary``), over every live versioned
     graph that is not a fork (a fork has no copy, state or settings of its own): how many there
-    are; how many are in memory, unloaded, loading and waiting for room to load
-    (``residency_state_of``); how many have a new version being built, how many failed their last
-    update, and how many chose a versioned-graph setting of their own. Raises rather than
+    are; how many are in memory, unloaded, loading, waiting for room to load, and have no copy in
+    the graph store yet (``residency_state_of``: the five add up to the graphs, and the inventory's
+    filters list the same graphs); how many have a new version being built, how many failed their
+    last update, and how many chose a versioned-graph setting of their own. Raises rather than
     degrading, as the inventory does."""
     from sqlalchemy import select
 
@@ -1625,6 +1638,7 @@ async def versioned_graphs_summary() -> dict:
         "unloaded": states.count("evicted"),
         "loading": states.count("rehydrating"),
         "waitingForRoom": states.count("waiting_capacity"),
+        "noCopy": states.count(None),
         "building": sum(candidates.block(r) is not None for r in rows),
         "failing": sum(r.last_error is not None for r in rows),
         "withOwnSettings": sum(r.data_source_id in own for r in rows),

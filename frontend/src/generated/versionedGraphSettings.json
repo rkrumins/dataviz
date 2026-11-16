@@ -181,120 +181,154 @@
       "attr": "ROUTE_CACHE_SECS",
       "category": "reads",
       "env": "GRAPHVER_ROUTE_CACHE_SECS",
+      "kind": "seconds",
       "label": "Where reads go, kept for",
-      "means": "How long a process may go on sending a graph's reads where it last looked, to its copy or to the database, before looking again. A write tells every process at once, so this only bounds a change that couldn't be announced."
+      "means": "How long a process may go on sending a graph's reads where it last looked, to its copy or to the database, before looking again. A write tells every process at once, so this only bounds a change that couldn't be announced.",
+      "unit": null
     },
     {
       "attr": "PROJECTION_CONCURRENCY",
       "category": "updates",
       "env": "GRAPHVER_PROJECTION_CONCURRENCY",
+      "kind": "count",
       "label": "Graphs each worker updates at once",
-      "means": "How many graphs each worker updates at once. Builds count among them, so it also caps Builds per worker."
+      "means": "How many graphs each worker updates at once. Builds count among them, so it also caps Builds per worker.",
+      "unit": "graphs"
     },
     {
       "attr": "PROJECTION_POLL_SECS",
       "category": "updates",
       "env": "GRAPHVER_PROJECTION_POLL_SECS",
+      "kind": "seconds",
       "label": "Look for work every",
-      "means": "How often a worker looks for graphs to update, besides the nudge each publish sends it."
+      "means": "How often a worker looks for graphs to update, besides the nudge each publish sends it.",
+      "unit": null
     },
     {
       "attr": "PROJECTION_BATCH_SIZE",
       "category": "updates",
       "env": "GRAPHVER_PROJECTION_BATCH_SIZE",
+      "kind": "count",
       "label": "Most changes in one write",
-      "means": "The most changes one write sends; the write target makes writes smaller still."
+      "means": "The most changes one write sends; the write target makes writes smaller still.",
+      "unit": "changes"
     },
     {
       "attr": "PROJECTION_PASS_MAX_SECS",
       "category": "updates",
       "env": "GRAPHVER_PROJECTION_PASS_MAX_SECS",
+      "kind": "seconds",
       "label": "Longest turn of one graph",
-      "means": "A large update stops at a page boundary after this long and carries on in its next turn, so other graphs get theirs."
+      "means": "A large update stops at a page boundary after this long and carries on in its next turn, so other graphs get theirs.",
+      "unit": null
     },
     {
       "attr": "PROJECTION_INLINE_MAX_ROWS",
       "category": "updates",
       "env": "GRAPHVER_PROJECTION_INLINE_MAX_ROWS",
+      "kind": "count",
       "label": "Written straight after a publish, up to",
-      "means": "A change up to this size is written into the graph store straight after its publish; a larger one by the worker. It is also the default of Changes left at the switch."
+      "means": "A change up to this size is written into the graph store straight after its publish; a larger one by the worker. It is also the default of Changes left at the switch.",
+      "unit": "changes"
     },
     {
       "attr": null,
       "category": "builds",
       "env": "PROJECTION_FALKOR_WRITE_TIMEOUT_S",
+      "kind": "seconds",
       "label": "Longest wait on one write",
-      "means": "How long the worker waits on one write to the graph store. A copy waits this plus 15 seconds, 75 by default, and one that takes longer fails that attempt."
+      "means": "How long the worker waits on one write to the graph store. A copy waits this plus 15 seconds, 75 by default, and one that takes longer fails that attempt.",
+      "unit": null
     },
     {
       "attr": "TRACE_LEASE_TTL_SECS",
       "category": "residency",
       "env": "GRAPHVER_TRACE_LEASE_TTL_SECS",
+      "kind": "seconds",
       "label": "A read holds its graph for",
-      "means": "How long a person's read keeps its graph from being unloaded."
+      "means": "How long a person's read keeps its graph from being unloaded.",
+      "unit": null
     },
     {
       "attr": "POOL_SIZE",
       "category": "database",
       "env": "GRAPHVER_POOL_SIZE",
+      "kind": "count",
       "label": "Database connections per process",
-      "means": "Connections each process keeps for versioned graphs. Reads at once per process should stay under it."
+      "means": "Connections each process keeps for versioned graphs. Reads at once per process should stay under it.",
+      "unit": "connections"
     },
     {
       "attr": "POOL_MAX_OVERFLOW",
       "category": "database",
       "env": "GRAPHVER_POOL_MAX_OVERFLOW",
+      "kind": "count",
       "label": "Extra connections at a peak",
-      "means": "Connections a process may open past its pool at a peak."
+      "means": "Connections a process may open past its pool at a peak.",
+      "unit": "connections"
     },
     {
       "attr": "ROUTE_POOL_SIZE",
       "category": "database",
       "env": "GRAPHVER_ROUTE_POOL_SIZE",
+      "kind": "count",
       "label": "Connections for finding where reads go",
-      "means": "A small pool of its own that finds where each read goes, so heavy reads can't stop that."
+      "means": "A small pool of its own that finds where each read goes, so heavy reads can't stop that.",
+      "unit": "connections"
     },
     {
       "attr": "DRAFT_SWEEP_SECS",
       "category": "drafts",
       "env": "GRAPHVER_DRAFT_SWEEP_SECS",
+      "kind": "seconds",
       "label": "Draft sweep every",
-      "means": "How often the worker closes idle drafts and removes closed drafts' changes."
+      "means": "How often the worker closes idle drafts and removes closed drafts' changes.",
+      "unit": null
     },
     {
       "attr": "REAP_POLL_SECS",
       "category": "drafts",
       "env": "GRAPHVER_REAP_POLL_SECS",
+      "kind": "seconds",
       "label": "Trash check every",
-      "means": "How often the trash is checked for data sources past their restore window."
+      "means": "How often the trash is checked for data sources past their restore window.",
+      "unit": null
     },
     {
       "attr": "FORK_REWIND_MAX",
       "category": "drafts",
       "env": "GRAPHVER_FORK_REWIND_MAX",
+      "kind": "count",
       "label": "Most changes a fork reads through",
-      "means": "Changes a fork and the graph it came from may have made since they parted before the fork's reads go to the database."
+      "means": "Changes a fork and the graph it came from may have made since they parted before the fork's reads go to the database.",
+      "unit": "changes"
     },
     {
       "attr": "IMPORT_COMMIT_WINDOW",
       "category": "imports",
       "env": "IMPORT_COMMIT_WINDOW",
+      "kind": "count",
       "label": "Rows per import step",
-      "means": "Rows an import saves to its draft at a time; the early stop decides after the first such step."
+      "means": "Rows an import saves to its draft at a time; the early stop decides after the first such step.",
+      "unit": "rows"
     },
     {
       "attr": "TRANSFER_SLOTS",
       "category": "imports",
       "env": "GRAPHVER_TRANSFER_SLOTS",
+      "kind": "count",
       "label": "Jobs per worker",
-      "means": "Import, export and publish jobs each worker runs at once."
+      "means": "Import, export and publish jobs each worker runs at once.",
+      "unit": "jobs"
     },
     {
       "attr": "STAGING_GC_DAYS",
       "category": "imports",
       "env": "IMPORT_STAGING_GC_DAYS",
+      "kind": "days",
       "label": "Staged rows kept for",
-      "means": "Days a finished import's staged rows are kept, to resume or re-run it."
+      "means": "Days a finished import's staged rows are kept, to resume or re-run it.",
+      "unit": null
     }
   ],
   "dimensions": [

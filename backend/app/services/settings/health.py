@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from . import resolver, service, signals
+from . import preview as previews, resolver, service, signals
 
 logger = logging.getLogger(__name__)
 
@@ -62,8 +62,9 @@ async def graph_health(session: AsyncSession, svc: Any, meta: Mapping[str, Any])
             store_id = service.root_of(graph, by_id).graph_id
     if store_id != gid:
         follows = by_id.get(store_id) if by_id else None
-        out["follows"] = {"graphId": store_id,
-                          "dataSourceId": follows.data_source_id if follows else None}
+        ds = follows.data_source_id if follows else None
+        out["follows"] = {"graphId": store_id, "dataSourceId": ds,
+                          "label": await _label(session, ds) if ds else None}
 
     if wm is None:
         for part in ("head", "serving", "versionsBehind"):
@@ -78,10 +79,11 @@ async def graph_health(session: AsyncSession, svc: Any, meta: Mapping[str, Any])
         out.update(head=head, serving=serving,
                    versionsBehind=max(0, head["seq"] - serving["seq"]))
 
+    ctx = None
     try:
+        ctx = await service.context(session)
         if graph is None:
             raise LookupError(gid)
-        ctx = await service.context(session)
         mode = resolver.resolve(ctx, "reads.mode", service.target_of(graph, by_id))
         out["readMode"] = {k: mode[k] for k in ("effective", "declared", "source", "why")}
     except Exception:  # noqa: BLE001
@@ -97,15 +99,24 @@ async def graph_health(session: AsyncSession, svc: Any, meta: Mapping[str, Any])
         problem("memory", "Its copy in memory can't be read.")
         problem("lastBuild", "Its new-version builds can't be read.")
     else:
-        loaded = store.get("residency_state") == "resident"
+        state = store.get("residency_state")
+        loaded = state == "resident"
         node = None
         if loaded and store.get("falkor_graph_name"):
             node, why = await _node(store.get("falkor_provider"), store["falkor_graph_name"])
             if why:
                 problem("memory.node", why)
         out["memory"] = {"bytes": store.get("size_bytes"), "node": node, "loaded": loaded,
+                         "state": state, "rehydratingSince": store.get("rehydrating_since"),
                          "class": store.get("residency"), "lastReadAt": store.get("last_read_at")}
-        out["lastBuild"] = _last_build(store)
+        grace = None
+        if ctx is not None:
+            try:
+                grace = resolver.effective(ctx, "updates.retireGraceSecs")
+            except Exception:  # noqa: BLE001 — the build is still told; only how far back isn't
+                logger.warning("graph health: the retire grace could not be resolved",
+                               exc_info=True)
+        out["lastBuild"] = _last_build(store, grace)
 
     try:
         own = await signals.read("24h", graph_id=gid)
@@ -129,25 +140,64 @@ def _revision(rev: Optional[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
             "actor": rev.get("actor"), "message": rev.get("message")}
 
 
-def _last_build(wm: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
-    """The build in flight: ``running``, or ``waiting`` (for room, a lock or a summaries job), with
-    why, or the error its last attempt failed with; ``at``, when it was asked for. Else the last
-    one, while the copy it retired is kept (minutes; nothing else records a finished build):
-    ``switched``, ``at`` known while no later update has published; or ``dropped``, ``at`` when it
-    was. None: neither."""
+#: What a build waits for, from the words the projector records with the wait
+#: (``projection.py``: ``update_candidate(..., waiting=...)``): room for its copy on its node; a
+#: summaries job building the serving copy's lineage summaries; or a lock another change holds
+#: (``LockBusy``'s words, "… try again shortly"), a memory check's among them.
+_WAITS = (("room", "no room"), ("summaries", "lineage-summaries job"), ("lock", "try again"))
+
+
+def _waiting_for(why: str) -> Optional[str]:
+    """``room``, ``summaries`` or ``lock``: what a build waits for, as its recorded words say;
+    None when they say none of these (the words themselves are served as ``why``)."""
+    return next((code for code, words in _WAITS if words in why), None)
+
+
+def _last_build(wm: Mapping[str, Any], grace_secs: Optional[int] = None) -> Dict[str, Any]:
+    """What is known of the graph's new-version builds, every key always there:
+
+    * the build in flight: ``running``, or ``waiting`` with what for (``waitingFor``: ``room``,
+      ``lock``, ``summaries``, or None when its words name none of them); ``why``, the words of
+      the wait, or the error its last attempt failed with; ``attempts`` failed so far; ``since``,
+      when it was asked for;
+    * else the last one, while the copy it left is kept (nothing else records a finished build):
+      ``switched``, its readers switched to it, ``at`` when, known while no later update has
+      published, and the previous copy removed from ``copyRemovedAfter`` on (at the next retire
+      run after it); or ``not_switched``: it was given up without a switch (why isn't recorded),
+      ``at`` when, as its own copy is removed from then on, ``copyRemovedAfter``;
+    * else ``none``: nothing in flight, and no switch within ``windowSecs`` (the retire grace in
+      force; a switch's previous copy is kept that long), null when that can't be read. A build
+      given up without a switch shows only until the next retire run."""
+    out: Dict[str, Any] = {"outcome": "none", "since": None, "at": None, "waitingFor": None,
+                           "why": None, "attempts": None, "copyRemovedAfter": None,
+                           "windowSecs": None}
     build = wm.get("candidate")
     if build:
         waiting = build.get("waiting")
-        return {"outcome": "waiting" if waiting else "running", "at": build.get("since"),
-                "why": waiting or build.get("error")}
+        return {**out, "outcome": "waiting" if waiting else "running",
+                "waitingFor": _waiting_for(waiting) if waiting else None,
+                "why": waiting or build.get("error"), "attempts": build.get("attempts"),
+                "since": build.get("since")}
     left = [e for e in wm.get("retired_keys") or [] if isinstance(e, Mapping) and e.get("build")]
     if not left:
-        return None
+        return {**out, "windowSecs": grace_secs}
     last = left[-1]                           # retired_keys only ever grows at its end
     if last.get("afterSeq"):                  # the copy its readers were switched from
         at = wm.get("last_projected_at") if wm.get("projected") == last["afterSeq"] else None
-        return {"outcome": "switched", "at": at, "why": None}
-    return {"outcome": "dropped", "at": last.get("retireAfter"), "why": None}
+        return {**out, "outcome": "switched", "at": at,
+                "copyRemovedAfter": last.get("retireAfter")}
+    # Its own copy, retired at once when it was given up: due from that moment.
+    return {**out, "outcome": "not_switched", "at": last.get("retireAfter"),
+            "copyRemovedAfter": last.get("retireAfter")}
+
+
+async def _label(session: AsyncSession, data_source_id: str) -> Optional[str]:
+    """A data source's label, to name the graph a fork follows; None when it can't be read."""
+    try:
+        return (await previews.labels(session, [data_source_id])).get(data_source_id)
+    except Exception:  # noqa: BLE001 — the root is still named by its ids
+        logger.warning("graph health: %s could not be named", data_source_id, exc_info=True)
+        return None
 
 
 async def _node(provider: Optional[str], key: str) -> Tuple[Optional[str], Optional[str]]:

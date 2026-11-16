@@ -271,12 +271,16 @@ class Why:
 
 @dataclass(frozen=True)
 class DeploymentFact:
-    """A value the deployment sets (env only), shown read-only beside the settings it bounds."""
+    """A value the deployment sets (env only), shown read-only beside the settings it bounds.
+    ``kind`` and ``unit`` say how its value reads, as a setting's do; a system administrator is
+    served the value itself, as config reads it when they ask."""
     env: str
     label: str
     category: str
     means: str
     attr: Optional[str] = None
+    kind: Kind = "count"
+    unit: Optional[str] = None
 
 
 @dataclass(frozen=True)

@@ -262,9 +262,12 @@ async def test_a_graphs_health_composes_each_part_from_what_is_kept(world, test_
     assert isinstance(mode["why"], list)
     assert body["progress"] is None
     assert body["memory"] == {"bytes": 4 * _GB, "node": "falkor-0:6379/g_fin", "loaded": True,
-                              "class": "standard", "lastReadAt": "2026-11-16T13:00:00+00:00"}
-    assert body["lastBuild"] == {"outcome": "waiting", "at": "2026-11-16T13:10:00+00:00",
-                                 "why": "no room for a copy on its node (capacity)"}
+                              "state": "resident", "rehydratingSince": None, "class": "standard",
+                              "lastReadAt": "2026-11-16T13:00:00+00:00"}
+    assert body["lastBuild"] == {"outcome": "waiting", "since": "2026-11-16T13:10:00+00:00",
+                                 "at": None, "waitingFor": "room", "attempts": None,
+                                 "why": "no room for a copy on its node (capacity)",
+                                 "copyRemovedAfter": None, "windowSecs": None}
     counts = {s["id"]: s["count24h"] for s in body["signals"]}
     assert list(counts) == list(signals.IDS)
     assert counts == {**dict.fromkeys(signals.IDS, 0), "builds.waited_for_room": 3,
@@ -282,6 +285,13 @@ async def test_a_graph_its_database_serves_reads_at_its_head(world, test_client)
     assert body["serving"] == {"seq": 9, "version": body["head"]["version"], "source": "database"}
     assert body["versionsBehind"] == 0
     assert (body["memory"]["loaded"], body["memory"]["node"]) == (False, None)   # not in memory
+    assert body["memory"]["state"] == "evicted"
+    # Being loaded, as the inventory says it: not "unloaded", and since when.
+    world.versioning.watermarks["g_1"].update(residency_state="rehydrating",
+                                               rehydrating_since="2026-11-16T13:20:00+00:00")
+    memory = (await test_client.get(_HEALTH.format("g_1"))).json()["memory"]
+    assert (memory["state"], memory["loaded"], memory["rehydratingSince"]) == (
+        "rehydrating", False, "2026-11-16T13:20:00+00:00")
 
 
 async def test_a_fork_reports_its_roots_copy_and_says_so(world, test_client):
@@ -291,7 +301,8 @@ async def test_a_fork_reports_its_roots_copy_and_says_so(world, test_client):
                    ("imports.replace_refused_by_guard", "g_1", 7),
                    ("drafts.idle_closed", "g_fork", 2))
     body = (await test_client.get(_HEALTH.format("g_fork"))).json()
-    assert body["follows"] == {"graphId": "g_1", "dataSourceId": "ds_1"}
+    # Its root, named: the panel says whose health it shows.
+    assert body["follows"] == {"graphId": "g_1", "dataSourceId": "ds_1", "label": "Ledger"}
     assert body["serving"]["source"] == "database"                # it reads its root there
     assert (body["memory"]["class"], body["memory"]["node"]) == ("standard",
                                                                  "falkor-0:6379/g_fin")
@@ -332,20 +343,51 @@ async def test_each_part_that_cant_be_read_is_null_with_its_problem(world, test_
 
 
 # ── The last build ────────────────────────────────────────────────────────────────────────────────
+def _build(**kw) -> dict:
+    return {"outcome": "none", "since": None, "at": None, "waitingFor": None, "why": None,
+            "attempts": None, "copyRemovedAfter": None, "windowSecs": None, **kw}
+
+
 def test_the_last_build_is_the_one_in_flight_else_the_one_whose_copy_is_still_kept():
-    assert health._last_build(_wm()) is None
+    # Nothing in flight and nothing kept: no switch within the retire grace; no more is known.
+    assert health._last_build(_wm(), 900) == _build(windowSecs=900)
+    assert health._last_build(_wm()) == _build()
     running = _wm(candidate={"id": "b", "waiting": None, "error": "the copy timed out",
-                             "since": "t0"})
-    assert health._last_build(running) == {"outcome": "running", "at": "t0",
-                                           "why": "the copy timed out"}
+                             "attempts": 1, "since": "t0"})
+    assert health._last_build(running) == _build(outcome="running", since="t0",
+                                                 why="the copy timed out", attempts=1)
     switched = _wm(projected=8, retired_keys=[
         {"name": "old", "retireAfter": "t9", "afterSeq": 5},              # a move's, no build
         {"name": "k_b", "retireAfter": "t2", "afterSeq": 0, "build": "b1"},
         {"name": "g_fin_old", "retireAfter": "t8", "afterSeq": 8, "build": "b2"}])
-    assert health._last_build(switched) == {"outcome": "switched",
-                                            "at": "2026-11-16T12:30:00+00:00", "why": None}
+    # When it switched, and from when the copy its readers left is removed: each time named.
+    assert health._last_build(switched, 900) == _build(
+        outcome="switched", at="2026-11-16T12:30:00+00:00", copyRemovedAfter="t8")
     # Written to since it switched: when it switched isn't known any more.
     assert health._last_build({**switched, "projected": 9})["at"] is None
-    dropped = _wm(retired_keys=[{"name": "k_b", "retireAfter": "t2", "afterSeq": 0,
-                                 "build": "b1"}])
-    assert health._last_build(dropped) == {"outcome": "dropped", "at": "t2", "why": None}
+    # Given up without a switch: why isn't recorded, so nothing says "dropped after its
+    # attempts"; its own copy is retired at once, so its time is when it was given up.
+    given_up = _wm(retired_keys=[{"name": "k_b", "retireAfter": "t2", "afterSeq": 0,
+                                  "build": "b1"}])
+    assert health._last_build(given_up) == _build(outcome="not_switched", at="t2",
+                                                  copyRemovedAfter="t2")
+
+
+@pytest.mark.parametrize("why, waiting_for", [
+    # The words the projector records with each wait (projection.py).
+    ("no room for a copy on its node (capacity)", "room"),
+    ("no room for a copy on its node (too_large); no room for a seed", "room"),
+    ("a lineage-summaries job is building the serving key's summaries", "summaries"),
+    ("a capacity pass is under way; try again shortly", "lock"),
+    ("graph g_1 is busy with another change; try again shortly", "lock"),
+    ("something else entirely", None),
+])
+def test_a_waiting_build_says_what_it_waits_for(why, waiting_for):
+    found = health._last_build(_wm(candidate={"id": "b", "waiting": why, "since": "t0"}))
+    assert (found["outcome"], found["waitingFor"], found["why"]) == ("waiting", waiting_for, why)
+
+
+async def test_with_no_build_kept_the_health_says_how_far_back_it_sees(world, test_client):
+    world.settings.set("updates.retireGraceSecs", "platform", "", 1_800)
+    body = (await test_client.get(_HEALTH.format("g_1"))).json()
+    assert body["lastBuild"] == _build(windowSecs=1_800)

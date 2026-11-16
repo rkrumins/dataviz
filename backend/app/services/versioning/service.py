@@ -702,6 +702,17 @@ def residency_state_of(status: str, projected: int, key: Optional[str],
     return "rehydrating" if projected == 0 else "resident"
 
 
+def residency_state_sql(status, projected, key, graph_id):
+    """:func:`residency_state_of` as a SQL expression over the columns that decide it (``status``
+    already coalesced to ``idle``): the same answer, row for row, so a filter lists the graphs a
+    figure counts and a row says."""
+    return case(
+        (status.in_(("evicted", "rehydrating", "waiting_capacity")), status),
+        (or_(key.is_(None), key == literal("gv_") + graph_id), null()),
+        (func.coalesce(projected, 0) == 0, "rehydrating"),
+        else_="resident")
+
+
 def bootstrap_unfinished(graph_id) -> tuple:
     """The ``jobs`` rows that say a graph's "enable version control" job has not COMPLETED
     (:meth:`GraphVersioningService._assert_not_bootstrapping`). ``graph_id`` is an id or a

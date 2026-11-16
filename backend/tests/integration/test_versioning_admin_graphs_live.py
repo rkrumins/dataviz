@@ -6,6 +6,8 @@
 * It pages by graph id: each page continues where the last stopped, and none repeats a graph.
 * It filters by provider, status, workspace, kind (main, fork or orphan) and a search that matches
   a graph id, data source id, key or data-source label.
+* Loading means one thing for a row, the Loading filter and the fleet's figure; each memory
+  figure counts what its filter lists, and with the graphs that have no copy they add up.
 
 Needs ``GRAPHVER_E2E=1`` and Postgres.
 """
@@ -40,16 +42,17 @@ async def _seed_data_source(ds: str, ws: str, label: str) -> None:
 
 
 async def _seed_graph(gid, *, ws, ds, provider, head=3, projected=3, status="idle", error=None,
-                      owned=False, fork_of=None, deleted=False, retired=None):
+                      owned=False, fork_of=None, deleted=False, retired=None, key="", build=None):
     async with db.graphver_session() as s:
         s.add(GraphORM(id=gid, data_source_id=ds, workspace_id=ws, kind="manual",
                        main_head_commit_seq=head, fork_parent_graph_id=fork_of,
                        deleted_at=models._now() if deleted else None))
         s.add(ProjectionStateORM(graph_id=gid, projected_commit_seq=projected,
                                  target_commit_seq=projected, status=status,
-                                 falkor_provider=provider, falkor_graph_name=f"gvt_{gid}",
+                                 falkor_provider=provider,
+                                 falkor_graph_name=f"gvt_{gid}" if key == "" else key,
                                  owns_falkor_graph=owned, last_error=error,
-                                 retired_keys=retired))
+                                 retired_keys=retired, candidate_state=build))
 
 
 async def _list(**kw):
@@ -111,8 +114,8 @@ async def _run() -> None:
         "lastReadAt": None, "sizeBytes": None, "rehydratingSince": None,
         # No read mode of its own: Always the latest, the default, as nothing chose another;
         # and no build.
-        "readMode": None, "readModeEffective": "latest", "readModeSource": "default",
-        "readModeWhy": [], "build": None,
+        "readMode": None, "readModeEffective": "latest", "readModeDeclared": "latest",
+        "readModeSource": "default", "readModeWhy": [], "build": None,
     }
     # A fork has no residency of its own (doc 17): no key, no class, no state; its root's row has
     # them, and its reads count there. Nor a projection's state: it is never evicted, behind or
@@ -165,9 +168,59 @@ async def _run() -> None:
     assert await _ids(q=f"{tag}_f_ws2") == [elsewhere], "the graph id matches"
     assert await _ids(q=f"{tag}%") == [], "a search is literal, not a LIKE pattern"
 
+    # Loading means one thing for a row, the Loading filter and the fleet's figure
+    # (residency_state_of): a load in flight, or a copy written from nothing (a first seed, a
+    # move's, an Adopt's). A graph with no copy yet is in none of the memory states, and the
+    # figures say how many: the five add up to the graphs.
+    ws3 = f"ws_inv3_{tag}"
+    loading, seeding, nocopy, unpinned, building = (
+        f"graph_{tag}_{n}" for n in ("h_loading", "i_seeding", "j_nocopy", "k_unpinned",
+                                     "l_building"))
+    await _seed_graph(loading, ws=ws3, ds=f"ds_loading_{tag}", provider=prov, projected=0,
+                      status="rehydrating", owned=True)
+    await _seed_graph(seeding, ws=ws3, ds=f"ds_seeding_{tag}", provider=prov, projected=0,
+                      status="projecting", owned=True)
+    # Nothing written yet either (watermark 0), yet no copy: not loading.
+    await _seed_graph(nocopy, ws=ws3, ds=f"ds_nocopy_{tag}", provider=prov, projected=0,
+                      key=None)
+    await _seed_graph(unpinned, ws=ws3, ds=f"ds_unpinned_{tag}", provider=prov, projected=0,
+                      key=f"gv_{unpinned}")
+    # A new version built beside its copy: the Building figure's, and its filter's.
+    await _seed_graph(building, ws=ws3, ds=f"ds_building_{tag}", provider=prov, owned=True,
+                      build={"id": f"build_{tag}", "step": "queued", "reason": "window",
+                             "mode": "copy", "attempts": 0, "since": "2026-11-16T12:00:00+00:00"})
+    states = {g["graphId"]: g["residencyState"] for g in (await _list(workspace_id=ws3))["graphs"]}
+    assert states == {loading: "rehydrating", seeding: "rehydrating", nocopy: None,
+                      unpinned: None, building: "resident"}
+    assert await _ids(workspace_id=ws3, status="rehydrating") == [loading, seeding]
+    assert await _ids(workspace_id=ws3, status="building") == [building]
+    for bucket in ("evicted", "waiting_capacity"):
+        assert await _ids(workspace_id=ws3, status=bucket) == []
+    figures = await probes.versioned_graphs_summary()
+    memory = ("inMemory", "unloaded", "loading", "waitingForRoom", "noCopy")
+    assert sum(figures[k] for k in memory) == figures["graphs"]
+    assert figures["noCopy"] >= 2
+
+    async def everyone(status):
+        listed, cursor = [], None
+        while True:
+            page = await _list(status=status, cursor=cursor, limit=200)
+            listed += [g for g in page["graphs"] if not g["forkParentGraphId"]]
+            if (cursor := page["nextCursor"]) is None:
+                return listed
+
+    # The Loading figure counts exactly the graphs its filter lists; so do the others.
+    for bucket, figure in (("rehydrating", "loading"), ("evicted", "unloaded"),
+                           ("waiting_capacity", "waitingForRoom"), ("building", "building")):
+        assert len(await everyone(bucket)) == figures[figure], bucket
+
     async with db.graphver_session() as s:          # leave no graph waiting on the shared store
         await s.execute(update(ProjectionStateORM).where(ProjectionStateORM.graph_id == waiting)
                         .values(status="evicted"))
+        await s.execute(update(ProjectionStateORM).where(ProjectionStateORM.graph_id.in_(
+            (loading, seeding))).values(status="evicted"))
+        await s.execute(update(ProjectionStateORM).where(ProjectionStateORM.graph_id == building)
+                        .values(candidate_state=None))
     await db.dispose_engine()
     await close_db()
 

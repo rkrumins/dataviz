@@ -83,7 +83,7 @@ async def list_graphs(
     provider: Optional[str] = Query(
         None, min_length=1, description="FalkorDB provider id; 'default' for the env instance"),
     status: Optional[Literal["fresh", "lagging", "projecting", "rebuilding", "evicted",
-                             "rehydrating", "waiting_capacity", "failed"]] = None,
+                             "rehydrating", "waiting_capacity", "failed", "building"]] = None,
     workspace_id: Optional[str] = Query(None, alias="workspaceId", min_length=1),
     kind: Optional[Literal["main", "fork", "orphan"]] = None,
     q: Optional[str] = Query(None, min_length=1, max_length=200),
@@ -111,9 +111,10 @@ async def list_graphs(
 @router.get("/graphs/summary",
             summary="The fleet's figures: graphs in memory, unloaded, loading, building, failing")
 async def graphs_summary(_user: User = Depends(requires("system:admin"))) -> dict:
-    """Over every live versioned graph but forks: how many there are, in memory, unloaded, loading
-    and waiting for room; how many have a new version being built, failed their last update, and
-    chose a versioned-graph setting of their own."""
+    """Over every live versioned graph but forks: how many there are; in memory, unloaded, loading,
+    waiting for room and with no copy yet (the five add up to the graphs, and ``status`` on the
+    inventory lists the same ones); how many have a new version being built, failed their last
+    update, and chose a versioned-graph setting of their own."""
     return await probes.versioned_graphs_summary()
 
 

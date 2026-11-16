@@ -446,4 +446,5 @@ async def test_the_inventory_filters_by_what_is_in_force_and_counts_the_fleet(cl
     assert await _ids(read_mode="in_place") == []
     summary = await probes.versioned_graphs_summary()
     assert summary == {"graphs": 2, "inMemory": 1, "unloaded": 1, "loading": 0,
-                       "waitingForRoom": 0, "building": 0, "failing": 0, "withOwnSettings": 1}
+                       "waitingForRoom": 0, "noCopy": 0, "building": 0, "failing": 0,
+                       "withOwnSettings": 1}

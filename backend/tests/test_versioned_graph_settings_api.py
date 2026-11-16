@@ -9,7 +9,8 @@ versioned graphs, their routes and the live facts stood in for.
   exception to them. A fork follows its root.
 * A save records one activity event, writes through to the old storage, moves the routes of the
   graphs a routing setting reaches, and writes the residency class of the graphs a class reaches.
-* The schema answers 304 to its ETag, and keeps live facts for system administrators.
+* The schema answers 304 to its ETag, its caller's own, and keeps live facts and the values the
+  deployment sets (read when asked) for system administrators.
 * The preview, quick and full (its residency part with the proposed classes); the inventory's
   summary route.
 
@@ -560,6 +561,72 @@ async def test_the_schema_is_for_everyone_and_its_live_facts_for_system_admins(
         assert world.collected == 1 and any(for_platform)
     else:
         assert world.collected == 0 and not any(for_platform)
+    # How each deployment fact reads is everyone's; its value, and each cap's, an operator's.
+    assert all(f["kind"] in ("count", "seconds", "days") for f in body["deployment"])
+    caps = [c for s in body["settings"] for c in s["caps"]]
+    served = [k for k in ("value", "set", "problem") if any(k in f for f in body["deployment"])]
+    assert served == (["value", "set", "problem"] if persona == "system_admin" else [])
+    assert all(("value" in c) == (persona == "system_admin") for c in caps)
+
+
+def _fact(body, env):
+    return next(f for f in body["deployment"] if f["env"] == env)
+
+
+def _cap(body, key):
+    return next(s for s in body["settings"] if s["key"] == key)["caps"][0]
+
+
+async def test_a_system_admin_reads_each_value_the_deployment_sets_as_config_has_it_now(
+        world, test_client, monkeypatch):
+    from backend.app.services.versioning import config
+
+    monkeypatch.delenv("GRAPHVER_PROJECTION_POLL_SECS", raising=False)
+    monkeypatch.delenv("PROJECTION_FALKOR_WRITE_TIMEOUT_S", raising=False)
+    first = await test_client.get(_SCHEMA)
+    body = first.json()
+    poll = _fact(body, "GRAPHVER_PROJECTION_POLL_SECS")
+    assert (poll["value"], poll["set"], poll["problem"], poll["kind"], poll["unit"]) == (
+        config.PROJECTION_POLL_SECS, False, None, "seconds", None)
+    pool = _fact(body, "GRAPHVER_POOL_SIZE")
+    assert (pool["value"], pool["kind"], pool["unit"]) == (config.POOL_SIZE, "count",
+                                                           "connections")
+    # Read only by the worker, and not set here: no value is made up for it.
+    timeout = _fact(body, "PROJECTION_FALKOR_WRITE_TIMEOUT_S")
+    assert (timeout["value"], timeout["set"]) == (None, False) and timeout["problem"]
+    # Each cap's value: the deployment's, or that of the setting that caps it, in force.
+    assert _cap(body, "builds.perWorker")["value"] == config.PROJECTION_CONCURRENCY
+    assert _cap(body, "database.readsPerGraph")["value"] == _value(
+        (await test_client.get(_P)).json(), "database.readsPerProcess")["effective"]
+
+    # Read when asked: a value config holds differently now is the one served, under a new tag.
+    monkeypatch.setattr(config, "PROJECTION_POLL_SECS", 7)
+    monkeypatch.setattr(config, "PROJECTION_CONCURRENCY", 3)
+    monkeypatch.setenv("PROJECTION_FALKOR_WRITE_TIMEOUT_S", "90")
+    again = await test_client.get(_SCHEMA, headers={"If-None-Match": first.headers["etag"]})
+    assert again.status_code == 200 and again.headers["etag"] != first.headers["etag"]
+    body = again.json()
+    assert _fact(body, "GRAPHVER_PROJECTION_POLL_SECS")["value"] == 7
+    assert _cap(body, "builds.perWorker")["value"] == 3
+    timeout = _fact(body, "PROJECTION_FALKOR_WRITE_TIMEOUT_S")
+    assert (timeout["value"], timeout["set"], timeout["problem"]) == (90, True, None)
+    monkeypatch.setenv("PROJECTION_FALKOR_WRITE_TIMEOUT_S", "soon")
+    timeout = _fact((await test_client.get(_SCHEMA)).json(), "PROJECTION_FALKOR_WRITE_TIMEOUT_S")
+    assert timeout["value"] is None and "soon" in timeout["problem"]
+
+
+async def test_the_schemas_tag_is_its_callers_own_so_no_role_is_served_anothers(world,
+                                                                               test_client):
+    operator = await test_client.get(_SCHEMA)
+    as_("member")
+    member = await test_client.get(_SCHEMA, headers={"If-None-Match": operator.headers["etag"]})
+    assert member.status_code == 200 and member.headers["etag"] != operator.headers["etag"]
+    assert not any("value" in f for f in member.json()["deployment"])
+    assert (await test_client.get(_SCHEMA, headers={"If-None-Match": member.headers["etag"]})
+            ).status_code == 304
+    as_("system_admin")
+    assert (await test_client.get(_SCHEMA, headers={"If-None-Match": member.headers["etag"]})
+            ).status_code == 200
 
 
 # ── Preview ───────────────────────────────────────────────────────────────────────────────────────

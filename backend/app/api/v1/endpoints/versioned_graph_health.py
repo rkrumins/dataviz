@@ -94,14 +94,18 @@ async def get_graph_health(
       source}``, the one its readers get, from the graph store or the database (``version``:
       ``{commitId, at, actor, message}``); ``versionsBehind``, how far that is from the head;
     * ``readMode`` ``{effective, declared, source, why}``, as its settings resolve;
-    * ``memory`` ``{bytes, node, loaded, class, lastReadAt}``, its copy;
-    * ``lastBuild`` ``{outcome, at, why}``: the new-version build in flight (``running``,
-      ``waiting``), else the last one while the copy it retired is kept (``switched``,
-      ``dropped``);
+    * ``memory`` ``{bytes, node, loaded, state, rehydratingSince, class, lastReadAt}``, its copy:
+      ``state`` as the inventory has it (``resident``, ``evicted``, ``rehydrating``: being
+      loaded, ``waiting_capacity``: waiting for room; null with no copy);
+    * ``lastBuild`` ``{outcome, since, at, waitingFor, why, attempts, copyRemovedAfter,
+      windowSecs}``: the new-version build in flight (``running``, ``waiting`` for ``room``, a
+      ``lock`` or a ``summaries`` job), else the last one while the copy it left is kept
+      (``switched``, ``not_switched``: when, and from when that copy is removed), else ``none``
+      (no switch within ``windowSecs``, the retire grace in force);
     * ``signals`` ``[{id, count24h}]``, each signal's count for it over the last 24 hours;
     * ``progress``, null until updates publish their progress.
 
     Each part that can't be read is null, with a ``problems`` entry ``{part, message}``. A fork
-    reports its root's copy, named by ``follows`` ``{graphId, dataSourceId}`` (null for a graph
-    that is no fork)."""
+    reports its root's copy, named by ``follows`` ``{graphId, dataSourceId, label}`` (null for a
+    graph that is no fork)."""
     return await health.graph_health(session, svc, meta)
