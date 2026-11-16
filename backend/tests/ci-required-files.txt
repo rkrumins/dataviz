@@ -133,11 +133,13 @@ tests/test_graph_cache_deploy_config.py
 tests/test_graph_change_op_contract.py
 tests/test_graph_changes_edge_ids.py
 tests/test_graph_changes_idempotency.py
+tests/test_graph_digest_api.py
 tests/test_graph_export_api.py
 tests/test_graph_store_api.py
 tests/test_graph_store_fork_settings.py
 tests/test_graph_store_limits.py
 tests/test_graph_store_topology.py
+tests/test_graph_watch_migration.py
 tests/test_heal_native_leftovers.py
 tests/test_helm_worker_lanes.py
 tests/test_housekeeping_loops.py

@@ -23,6 +23,7 @@ from .endpoints import (
     versioning_admin,
     versioned_graph_settings,
     versioned_graph_health,
+    graph_digest,
     admin_idp_groups,
     admin_idp_providers,
     admin_user_identities,
@@ -514,6 +515,12 @@ api_router.include_router(
 # A graph's health, the top of its settings drawer: read with the data-source read, gated like them.
 api_router.include_router(
     versioned_graph_health.health_router, prefix="/{ws_id}/versioning/graphs/{graph_id}/health",
+    tags=["versioning:workspace"], dependencies=[Depends(versioning_write_gate)],
+)
+# What changed in a graph since you last looked, and watching it: a person's own marker and
+# watches, read and kept with the data-source read, gated like the routes above.
+api_router.include_router(
+    graph_digest.router, prefix="/{ws_id}/versioning/graphs/{graph_id}",
     tags=["versioning:workspace"], dependencies=[Depends(versioning_write_gate)],
 )
 

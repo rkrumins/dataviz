@@ -24,7 +24,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, Optional
 
-from . import db, provenance
+from . import db, digest, provenance
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +42,8 @@ EVENT_BY_KIND: Dict[str, str] = {
 def note(session, graph, commit) -> None:
     """Record ``commit``'s event once ``session``'s transaction commits. ``graph`` is the graph
     whose ``main`` it moved; the event reads ``commit`` when it is recorded, so stats set later in
-    the transaction are in it."""
+    the transaction are in it. The people watching the graph hear of a publish, an undo or a
+    restore then too (``digest.note``)."""
     if commit.kind not in EVENT_BY_KIND:
         return
     graph_id, workspace_id, data_source_id = graph.id, graph.workspace_id, graph.data_source_id
@@ -52,6 +53,7 @@ def note(session, graph, commit) -> None:
                                  data_source_id=data_source_id, commit=commit)
 
     db.after_commit(session, record)
+    digest.note(session, graph, commit)
 
 
 def details_of(graph_id: str, commit: Any) -> Dict[str, Any]:
