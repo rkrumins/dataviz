@@ -761,11 +761,11 @@ async def test_a_preview_plans_with_the_classes_proposed(store, monkeypatch):
     monkeypatch.setattr(residency, "_provider_client", client)
     monkeypatch.setattr(residency, "_read_masters", masters)
     policy = await residency_policy.resolve()
-    as_they_are, _snap = await residency.preview(policy, graph_ids=[out, idle])
+    as_they_are = (await residency.preview(policy, graph_ids=[out, idle]))[0]
     assert as_they_are.loads == [] and as_they_are.evictions == []
     proposed = residency_policy.Classes("standard", {}, {await _ds(out): "always",
                                                           await _ds(idle): "coldline"})
-    planned, _snap = await residency.preview(policy, graph_ids=[out, idle], classes=proposed)
+    planned = (await residency.preview(policy, graph_ids=[out, idle], classes=proposed))[0]
     assert [x.graph_id for x in planned.loads] == [out]
     assert [(e.graph_id, e.reason) for e in planned.evictions] == [(idle, "idle_coldline")]
     assert (await _residency(out), await _residency(idle)) == ("standard", "standard")
