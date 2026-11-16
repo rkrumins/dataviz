@@ -288,6 +288,7 @@ tests/test_seed_templates.py
 tests/test_service_account_keys.py
 tests/test_service_account_lifecycle.py
 tests/test_service_accounts_api.py
+tests/test_settings_effective.py
 tests/test_settings_facts.py
 tests/test_settings_resolver.py
 tests/test_settings_snapshot.py
