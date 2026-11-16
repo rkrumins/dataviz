@@ -26,6 +26,7 @@ import {
     CheckCircle2,
     ClipboardCheck,
     Clock,
+    Eye,
     GitMerge,
     GitPullRequestArrow,
     KeyRound,
@@ -245,6 +246,12 @@ const KIND_VISUALS: Record<string, KindVisual> = {
     },
     'draft.transferred': {
         Icon: ArrowRightLeft,
+        icon: 'text-indigo-500',
+        tile: 'bg-indigo-500/10',
+    },
+    // A graph you watch, or an entity in it, has a new version.
+    'watch.new_version': {
+        Icon: Eye,
         icon: 'text-indigo-500',
         tile: 'bg-indigo-500/10',
     },

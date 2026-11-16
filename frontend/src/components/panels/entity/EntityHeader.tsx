@@ -4,7 +4,7 @@
  * The Business view leaves out Copy URN and the JSON tab (its At a glance tile copies the ID);
  * both views can Customize what the drawer shows.
  */
-import type { ComponentType } from 'react'
+import type { ComponentType, ReactNode } from 'react'
 import {
   ArrowDownRight, ArrowUpLeft, Check, Code, Copy, ExternalLink, Eye, Focus, GitBranch, GitBranchPlus,
   Pencil, RotateCcw, SlidersHorizontal, Trash2,
@@ -33,6 +33,7 @@ export function EntityHeader({
   nodeId, titleId, typeName, colors, confidence, title, technicalLine, isGhost, onRestore,
   onTraceUp, onTraceDown, onFullTrace, onFocusConnections, copiedUrn, onCopyUrn, externalUrl,
   editable, editBlocked, dirty, onStartEditing, onClose, onFocusNode, customizing = false, onCustomize,
+  watch,
 }: {
   nodeId: string
   titleId: string
@@ -64,6 +65,8 @@ export function EntityHeader({
   customizing?: boolean
   /** Opens or closes it; absent, not offered. */
   onCustomize?: () => void
+  /** Watching it (`EntityWatchButton`): among the quick actions, where it is a versioned graph's. */
+  watch?: ReactNode
 }) {
   const technical = usePersonaMode() === 'technical'
   // Upstream and downstream wear the product's lineage direction pair (lib/lineageDirectionColors.ts)
@@ -157,6 +160,7 @@ export function EntityHeader({
         {externalUrl && (
           <Button size="sm" variant="subtle" leftIcon={ExternalLink} onClick={() => window.open(externalUrl, '_blank', 'noopener')}>Open</Button>
         )}
+        {watch}
         {onCustomize && (
           <Button size="sm" variant={customizing ? 'secondary' : 'ghost'} leftIcon={SlidersHorizontal}
                   aria-pressed={customizing} onClick={onCustomize} className="ml-auto">

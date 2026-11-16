@@ -143,3 +143,23 @@ describe('what became of a draft', () => {
         expect(row.querySelector('.lucide-bell')).toBeNull()
     })
 })
+
+describe('a graph you watch', () => {
+    it('shows a new version with its own icon, and opens where the change is', async () => {
+        mockList.mockResolvedValue({
+            items: [message({
+                kind: 'watch.new_version', title: 'New version of “Ledger”',
+                body: 'Version #216: “Fix owner emails”. 12 added, 3 changed, 1 removed.',
+                link: '/workspaces/ws_1?ds=ds_1&dstab=versioning', resourceType: 'data_source', resourceId: 'ds_1',
+            })],
+            unread: 1,
+        })
+        renderBell()
+        fireEvent.click(await screen.findByLabelText('Inbox, 1 unread'))
+        const row = (await screen.findByText('New version of “Ledger”')).closest('[role="button"]')!
+        expect(row.querySelector('.lucide-eye')).not.toBeNull()
+        expect(row.querySelector('.lucide-bell')).toBeNull()
+        fireEvent.click(row)
+        await waitFor(() => expect(navigate).toHaveBeenCalledWith('/workspaces/ws_1?ds=ds_1&dstab=versioning'))
+    })
+})

@@ -2208,6 +2208,88 @@ export function getHistoryMonths(
   return vfetch<HistoryMonths>(`${base(wsId)}/graphs/${graphId}/history/months${qs ? `?${qs}` : ''}`)
 }
 
+// ============================================
+// What changed since you last looked, and watching
+// ============================================
+
+/** A person a digest names: `id` null is the platform's own; `name` null, not in the directory. */
+export interface DigestPerson { id: string | null; name: string | null }
+
+/** What a version recorded of itself. */
+export interface DigestCounts { added: number; changed: number; removed: number }
+
+export interface DigestVersion {
+  seq: number
+  /** Its commit. */
+  version: string
+  kind: string
+  at: string
+  author: DigestPerson
+  message: string | null
+  /** Null where the version recorded none: shown as "—", never 0. */
+  counts: DigestCounts | null
+}
+
+export interface DigestReview { id: string; title: string | null; url: string; author: DigestPerson; at: string }
+
+export interface DigestWatched {
+  urn: string
+  entityId: string
+  name: string | null
+  change: 'added' | 'changed' | 'removed'
+  /** Its last change in the window. */
+  seq: number
+  at: string
+}
+
+export interface GraphDigest {
+  /** The reader's seen marker, or null: then `window` is the last 7 days. */
+  since: { seq: number; at: string } | null
+  window: 'since_seen' | 'last_7_days'
+  head: { seq: number; version: string | null }
+  /** Newest first, at most 50 (`truncated` past them). */
+  versions: DigestVersion[]
+  /** How many versions the window holds; null when the 7-day window is truncated. */
+  total: number | null
+  truncated: boolean
+  authors: Array<DigestPerson & { versions: number }>
+  reviewsWaiting: DigestReview[]
+  reviewsMore: boolean
+  watchedChanged: DigestWatched[]
+}
+
+/** What changed in the graph since the reader last looked. */
+export function getGraphDigest(wsId: string, graphId: string): Promise<GraphDigest> {
+  return vfetch<GraphDigest>(`${base(wsId)}/graphs/${graphId}/digest`)
+}
+
+/** "I've seen up to version `seq`": the marker only moves forward. Answers the marker after. */
+export function markDigestSeen(wsId: string, graphId: string, seq: number): Promise<{ seq: number; at: string }> {
+  return vfetch(`${base(wsId)}/graphs/${graphId}/digest/seen`, jsonBody({ seq }))
+}
+
+export interface GraphWatching {
+  graph: boolean
+  entities: Array<{ urn: string; since: string }>
+  entitiesMax: number
+}
+
+export function getGraphWatch(wsId: string, graphId: string): Promise<GraphWatching> {
+  return vfetch<GraphWatching>(`${base(wsId)}/graphs/${graphId}/watch`)
+}
+
+/** Watch the graph, or the entity `entityUrn` names; a publish that changes it tells you. */
+export function watchGraph(wsId: string, graphId: string, entityUrn?: string): Promise<GraphWatching> {
+  return vfetch<GraphWatching>(`${base(wsId)}/graphs/${graphId}/watch`, {
+    method: 'PUT', body: JSON.stringify(entityUrn ? { entityUrn } : {}),
+  })
+}
+
+export function unwatchGraph(wsId: string, graphId: string, entityUrn?: string): Promise<GraphWatching> {
+  const qs = entityUrn ? `?entityUrn=${encodeURIComponent(entityUrn)}` : ''
+  return vfetch<GraphWatching>(`${base(wsId)}/graphs/${graphId}/watch${qs}`, { method: 'DELETE' })
+}
+
 /** Top-level groups of a PR's Files Changed as a containment tree. */
 export function getMergeRequestDiffSummary(
   wsId: string, prId: string, limit?: number,
