@@ -2281,7 +2281,7 @@ Still in the code or the database, but acted on by nothing; they go in a later r
 
 ## If you used the old endpoints
 
-The endpoints that saved these settings before keep working for one more release. They save through the settings store, so their changes appear in the history with everyone else's. Move to the settings API, which also returns where each value came from and why the one in force may differ:
+The endpoints that saved these settings before keep working for one more release. They save through the settings store, so their changes appear in the history with everyone else's, and every answer says it is deprecated: a `Deprecation: true` header, and a `Link` header naming the route that replaces it. Move to the settings API, which also returns where each value came from and why the one in force may differ:
 
 | Old endpoint | Use instead | What it carried |
 |---|---|---|

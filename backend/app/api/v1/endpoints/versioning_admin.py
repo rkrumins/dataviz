@@ -40,7 +40,7 @@ from backend.app.services.versioning.messaging import nudge_projection
 from backend.app.services.versioning.service import ConcurrencyError
 from backend.auth_service.interface import User
 
-from .versioning import (_domain_errors, _settings_refusals, _watermark_model,
+from .versioning import (_domain_errors, _settings_refusals, _superseded_by, _watermark_model,
                          get_versioning_service, rebuild_now)
 
 router = APIRouter()
@@ -310,7 +310,8 @@ async def _target_key(graph_id: str, body: ProjectionMoveRequest, current: dict,
 
 
 @router.get("/residency-policy",
-            summary="The residency policy: each value as saved, its default and its effective value")
+            summary="The residency policy: each value as saved, its default and its effective value",
+            deprecated=True, dependencies=[Depends(_superseded_by("/api/v1/admin/versioning/settings"))])
 async def get_residency_policy(
     _user: User = Depends(requires("system:admin")),
     session: AsyncSession = Depends(get_db_session),
@@ -339,7 +340,8 @@ async def _policy(session: AsyncSession) -> dict:
             "switch": await residency.switch_status(row, enabled)}
 
 
-@router.put("/residency-policy", summary="Change residency policy values")
+@router.put("/residency-policy", summary="Change residency policy values",
+            deprecated=True, dependencies=[Depends(_superseded_by("/api/v1/admin/versioning/settings"))])
 async def put_residency_policy(
     body: Dict[str, Any] = Body(..., examples=[{"highWaterPct": 75, "coldlineIdleSecs": -1}]),
     user: User = Depends(requires("system:admin")),
@@ -387,7 +389,8 @@ def _validate(body: Dict[str, Any], saved: Dict[str, Any]) -> None:
 
 
 @router.get("/build-policy",
-            summary="New-version builds: each setting as saved, its default and its effective value")
+            summary="New-version builds: each setting as saved, its default and its effective value",
+            deprecated=True, dependencies=[Depends(_superseded_by("/api/v1/admin/versioning/settings"))])
 async def get_build_policy(
     _user: User = Depends(requires("system:admin")),
     session: AsyncSession = Depends(get_db_session),
@@ -405,7 +408,8 @@ async def _build_policy(session: AsyncSession) -> dict:
             "enabled": await build_policy.enabled()}
 
 
-@router.put("/build-policy", summary="Change New-version build settings")
+@router.put("/build-policy", summary="Change New-version build settings",
+            deprecated=True, dependencies=[Depends(_superseded_by("/api/v1/admin/versioning/settings"))])
 async def put_build_policy(
     body: Dict[str, Any] = Body(..., examples=[{"copyMarginPct": 150, "noRoomPolicy": -1}]),
     user: User = Depends(requires("system:admin")),
@@ -445,7 +449,8 @@ async def put_build_policy(
 
 
 @router.get("/draft-retention",
-            summary="How long a merged or abandoned draft keeps its changes")
+            summary="How long a merged or abandoned draft keeps its changes",
+            deprecated=True, dependencies=[Depends(_superseded_by("/api/v1/admin/versioning/settings"))])
 async def get_draft_retention(
     _user: User = Depends(requires("system:admin")),
     session: AsyncSession = Depends(get_db_session),
@@ -465,7 +470,8 @@ class DraftRetentionChange(BaseModel):
 
 
 @router.put("/draft-retention",
-            summary="Change how long a merged or abandoned draft keeps its changes")
+            summary="Change how long a merged or abandoned draft keeps its changes",
+            deprecated=True, dependencies=[Depends(_superseded_by("/api/v1/admin/versioning/settings"))])
 async def put_draft_retention(
     body: DraftRetentionChange,
     user: User = Depends(requires("system:admin")),
@@ -486,7 +492,8 @@ async def put_draft_retention(
 
 
 @router.post("/residency-policy/preview",
-             summary="What the next capacity pass would do with these residency values")
+             summary="What the next capacity pass would do with these residency values",
+             deprecated=True, dependencies=[Depends(_superseded_by("/api/v1/admin/versioning/settings/preview?mode=full"))])
 async def preview_residency_policy(
     body: Dict[str, Any] = Body(default_factory=dict, examples=[{"highWaterPct": 70}]),
     _user: User = Depends(requires("system:admin")),
@@ -701,7 +708,8 @@ class ReadModeRequest(BaseModel):
 
 
 @router.put("/graphs/{graph_id}/read-mode",
-            summary="Set what a versioned graph's readers get while a new version lands")
+            summary="Set what a versioned graph's readers get while a new version lands",
+            deprecated=True, dependencies=[Depends(_superseded_by("/api/v1/{ws_id}/versioning/graphs/{graph_id}/settings"))])
 async def set_graph_read_mode(
     graph_id: str,
     body: ReadModeRequest,

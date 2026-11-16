@@ -4652,7 +4652,26 @@ async def _import_settings_view(session: AsyncSession, row, graph_id: str, *,
             "maxMatchingProperties": settings.value("imports.maxMatchingProperties")}
 
 
-@router.get("/graphs/{graph_id}/import-settings", response_model=ImportSettingsResponse)
+def _superseded_by(successor: str):
+    """A dependency for an old settings route: its answer says it is deprecated
+    (``Deprecation: true``) and names the settings API route that replaces it (a ``Link`` with
+    ``rel="successor-version"``), with this request's own ids put into it where the paths share
+    them. The old routes keep working for one more release
+    (``docs/guide/VERSIONED_GRAPH_SETTINGS.md``, "If you used the old endpoints")."""
+    class _Kept(dict):
+        def __missing__(self, key: str) -> str:
+            return "{" + key + "}"
+
+    def mark(request: Request, response: Response) -> None:
+        response.headers["Deprecation"] = "true"
+        response.headers["Link"] = (f'<{successor.format_map(_Kept(request.path_params))}>; '
+                                    'rel="successor-version"')
+
+    return mark
+
+
+@router.get("/graphs/{graph_id}/import-settings", response_model=ImportSettingsResponse,
+             deprecated=True, dependencies=[Depends(_superseded_by("/api/v1/{ws_id}/versioning/graphs/{graph_id}/settings"))])
 async def get_import_settings(
     ws_id: str, graph_id: str,
     _user: User = Depends(requires(_READ, workspace="ws_id")),
@@ -4668,7 +4687,8 @@ async def get_import_settings(
                                        fork=bool(meta.get("fork_parent_graph_id")))
 
 
-@router.put("/graphs/{graph_id}/import-settings", response_model=ImportSettingsResponse)
+@router.put("/graphs/{graph_id}/import-settings", response_model=ImportSettingsResponse,
+             deprecated=True, dependencies=[Depends(_superseded_by("/api/v1/{ws_id}/versioning/graphs/{graph_id}/settings"))])
 async def put_import_settings(
     ws_id: str, graph_id: str, body: ImportSettingsChange,
     _user: User = Depends(requires("workspace:admin", workspace="ws_id")),
@@ -5911,7 +5931,8 @@ async def list_drafts_whose_owner_left(
     return drafts
 
 
-@router.get("/drafts-policy", response_model=WorkspaceDraftsPolicyResponse)
+@router.get("/drafts-policy", response_model=WorkspaceDraftsPolicyResponse,
+             deprecated=True, dependencies=[Depends(_superseded_by("/api/v1/{ws_id}/versioning/settings"))])
 async def get_workspace_drafts_policy(
     ws_id: str,
     _user: User = Depends(requires(_READ, workspace="ws_id")),
@@ -5930,7 +5951,8 @@ async def _workspace_policy(session: AsyncSession, ws_id: str) -> dict:
             "effective": (await drafts_policy.effective(ws_id)).as_dict()}
 
 
-@router.put("/drafts-policy", response_model=WorkspaceDraftsPolicyResponse)
+@router.put("/drafts-policy", response_model=WorkspaceDraftsPolicyResponse,
+             deprecated=True, dependencies=[Depends(_superseded_by("/api/v1/{ws_id}/versioning/settings"))])
 async def put_workspace_drafts_policy(
     ws_id: str, body: DraftsPolicySettings,
     _user: User = Depends(requires("workspace:admin", workspace="ws_id")),
@@ -5964,7 +5986,8 @@ async def _source_policy(session: AsyncSession, ws_id: str, ds) -> dict:
             "effective": (await drafts_policy.load(session, ds.id)).as_dict()}
 
 
-@router.get("/data-sources/{data_source_id}/drafts-policy", response_model=DataSourceDraftsPolicyResponse)
+@router.get("/data-sources/{data_source_id}/drafts-policy", response_model=DataSourceDraftsPolicyResponse,
+             deprecated=True, dependencies=[Depends(_superseded_by("/api/v1/{ws_id}/versioning/graphs/{graph_id}/settings"))])
 async def get_data_source_drafts_policy(
     ws_id: str, data_source_id: str,
     _user: User = Depends(requires(_READ, workspace="ws_id")),
@@ -5977,7 +6000,8 @@ async def get_data_source_drafts_policy(
     return await _source_policy(session, ws_id, ds)
 
 
-@router.put("/data-sources/{data_source_id}/drafts-policy", response_model=DataSourceDraftsPolicyResponse)
+@router.put("/data-sources/{data_source_id}/drafts-policy", response_model=DataSourceDraftsPolicyResponse,
+             deprecated=True, dependencies=[Depends(_superseded_by("/api/v1/{ws_id}/versioning/graphs/{graph_id}/settings"))])
 async def put_data_source_drafts_policy(
     ws_id: str, data_source_id: str, body: DraftsPolicySettings,
     _user: User = Depends(requires("workspace:admin", workspace="ws_id")),

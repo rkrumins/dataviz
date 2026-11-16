@@ -177,6 +177,20 @@ async def test_a_data_source_overrides_its_workspace(test_client, db_session, es
     assert (await test_client.get(path)).json() == body
 
 
+async def test_the_old_routes_say_they_are_deprecated_and_name_what_replaces_them(
+        test_client, db_session, estate, versioning_on):
+    """They keep working for one more release, and every answer says what replaces them, with this
+    request's ids (``test_settings_legacy_deprecation.py`` covers every old route)."""
+    resp = await test_client.get("/api/v1/ws_1/versioning/drafts-policy")
+    assert resp.status_code == 200, resp.text
+    assert resp.headers["Deprecation"] == "true"
+    assert resp.headers["Link"] == '</api/v1/ws_1/versioning/settings>; rel="successor-version"'
+    resp = await test_client.get("/api/v1/ws_1/versioning/data-sources/ds_1/drafts-policy")
+    assert resp.status_code == 200, resp.text
+    assert resp.headers["Link"] == ('</api/v1/ws_1/versioning/graphs/{graph_id}/settings>; '
+                                    'rel="successor-version"')
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("method", ["GET", "PUT"])
 async def test_a_data_source_of_another_workspace_is_not_found(

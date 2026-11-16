@@ -358,8 +358,9 @@ def _old_endpoints(anchors: dict) -> list:
         "",
         ("The endpoints that saved these settings before keep working for one more release. They "
          "save through the settings store, so their changes appear in the history with everyone "
-         "else's. Move to the settings API, which also returns where each value came from and why "
-         "the one in force may differ:"),
+         "else's, and every answer says it is deprecated: a `Deprecation: true` header, and a "
+         "`Link` header naming the route that replaces it. Move to the settings API, which also "
+         "returns where each value came from and why the one in force may differ:"),
         "",
         *_table(["Old endpoint", "Use instead", "What it carried"], [list(r) for r in rows]),
         "",
