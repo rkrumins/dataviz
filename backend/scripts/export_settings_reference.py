@@ -222,44 +222,44 @@ _INTRO = [
     "",
     "### Where a value comes from",
     "",
-    "Each setting has one value in force for each graph. It comes from the most specific level "
+    "Each setting has one value in force for each graph. It comes from the most specific level " +
     "that chose one:",
     "",
     "1. **Graph**: one data source's graph. A fork follows the graph it was forked from.",
     "2. **Workspace**: every graph in the workspace.",
     "3. **Platform**: every graph.",
-    "4. **Default**: the deployment's environment variable if it is set and valid, else the "
+    "4. **Default**: the deployment's environment variable if it is set and valid, else the " +
     "built-in value.",
     "",
-    "So a graph with nothing of its own takes its workspace's value, else the platform's, else the "
-    "default. The app shows the whole trail, Default → Platform → Workspace → Graph, with the "
+    "So a graph with nothing of its own takes its workspace's value, else the platform's, else the " +
+    "default. The app shows the whole trail, Default → Platform → Workspace → Graph, with the " +
     "level in force highlighted.",
     "",
     "### Who may set what",
     "",
     "- **System administrators** set the platform's values, and may set any level.",
-    "- **Workspace administrators** set their workspace's values and their graphs', for the "
+    "- **Workspace administrators** set their workspace's values and their graphs', for the " +
     "settings marked so below.",
-    "- Settings that spend the graph store's memory or the database's capacity are system "
-    "administrators' only, at every level: Updates & loading, New-version builds, Memory & "
+    "- Settings that spend the graph store's memory or the database's capacity are system " +
+    "administrators' only, at every level: Updates & loading, New-version builds, Memory & " +
     "residency (the residency class too), Database reads, and Matching properties per graph.",
     "",
     "### Limits and exceptions",
     "",
     "A system administrator can limit what workspace administrators choose:",
     "",
-    "- **Allowed choices**, such as which read modes a workspace may pick. By default workspaces "
+    "- **Allowed choices**, such as which read modes a workspace may pick. By default workspaces " +
     "may choose Always the latest or Keep serving, update in place.",
     "- **A range**: the lowest and highest number allowed.",
     "- **A lock**: the platform's value holds everywhere, and lower levels can't change it.",
     "",
-    "A value a system administrator sets outside the limits stays in force, marked as an "
+    "A value a system administrator sets outside the limits stays in force, marked as an " +
     "exception, so tightening a limit never changes a graph without anyone noticing.",
     "",
     "### When a change takes effect",
     "",
-    "A saved value reaches every process within a few seconds. Each setting below says when it is "
-    "then acted on: at the next read, the next write, the next memory check, the next sweep or "
+    "A saved value reaches every process within a few seconds. Each setting below says when it is " +
+    "then acted on: at the next read, the next write, the next memory check, the next sweep or " +
     "the next import.",
     "",
 ]
@@ -346,17 +346,17 @@ def render_guide() -> str:
         "",
         "## Where to next",
         "",
-        "- [Feature Switches](/guide/feature-switches) — when you want to turn on New-version "
+        "- [Feature Switches](/guide/feature-switches) — when you want to turn on New-version " +
         "builds or Graph residency.",
-        "- [The Graph Store: Shards, Replicas & Placement](/guide/graph-store-topology) — when you "
+        "- [The Graph Store: Shards, Replicas & Placement](/guide/graph-store-topology) — when you " +
         "want to see each node's memory.",
-        "- [Import & Export](/guide/import-export) — when you want to see how an import uses these "
+        "- [Import & Export](/guide/import-export) — when you want to see how an import uses these " +
         "settings.",
-        "- [Projection & Cache](/docs/versioning-projection-and-cache) — when you want the "
+        "- [Projection & Cache](/docs/versioning-projection-and-cache) — when you want the " +
         "mechanism behind reads, updates and builds.",
-        "- [Forks & Residency](/docs/versioning-forks-and-residency) — when you want how memory "
+        "- [Forks & Residency](/docs/versioning-forks-and-residency) — when you want how memory " +
         "and residency work.",
-        "- [Scale, Limits & Roadmap](/docs/versioning-scale-and-roadmap) — when you want the "
+        "- [Scale, Limits & Roadmap](/docs/versioning-scale-and-roadmap) — when you want the " +
         "measured numbers.",
     ]
     return "\n".join(out) + "\n"
