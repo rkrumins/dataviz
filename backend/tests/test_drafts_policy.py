@@ -247,6 +247,44 @@ async def test_a_change_is_saved_through_the_store_and_written_through_to_the_ol
     assert follows.json()["overrides"]["levels"] == "private_only"
 
 
+
+@pytest.mark.asyncio
+async def test_an_old_endpoint_is_no_way_around_the_platforms_limits(
+        test_client, db_session, estate, versioning_on, settings_world):
+    """A workspace administrator saving through the old drafts-policy endpoints is checked as the
+    settings API checks them: a level the platform doesn't allow workspaces, or a setting it locked,
+    is refused and nothing is saved. A system administrator's value outside the limits is saved,
+    and kept as an exception."""
+    from backend.app.auth.dependencies import get_permission_claims
+    from backend.tests.test_versioned_graph_settings_api import PERSONAS
+
+    settings_world.set("drafts.levels", "platform", "", None,
+                       limits={"allowed": ["any", "public_only"]})
+    settings_world.set("drafts.selfApproval", "platform", "", True, limits={"lock": True})
+    workspace, source = ("/api/v1/ws_1/versioning/drafts-policy",
+                         "/api/v1/ws_1/versioning/data-sources/ds_1/drafts-policy")
+    signed_in = app.dependency_overrides.get(get_permission_claims)
+    app.dependency_overrides[get_permission_claims] = lambda: PERSONAS["admin_here"]
+    try:
+        outside = await test_client.put(workspace, json={"levels": "private_only"})
+        assert outside.status_code == 422, outside.text
+        assert [e["code"] for e in outside.json()["detail"]["errors"]] == ["outside_limits"]
+        locked = await test_client.put(source, json={"selfApproval": False})
+        assert locked.status_code == 422, locked.text
+        assert [e["code"] for e in locked.json()["detail"]["errors"]] == ["locked"]
+        assert settings_world.saves == [] and await _recorded(db_session) == []
+        within = await test_client.put(workspace, json={"levels": "public_only"})
+        assert within.status_code == 200, within.text
+    finally:
+        if signed_in is None:
+            app.dependency_overrides.pop(get_permission_claims, None)
+        else:
+            app.dependency_overrides[get_permission_claims] = signed_in
+    exception = await test_client.put(source, json={"levels": "private_only"})
+    assert exception.status_code == 200, exception.text
+    assert [(a.key, a.scope_id, a.after_value) for a in settings_world.saves[-1].applied] == [
+        ("drafts.levels", "ds_1", "private_only")]
+
 #: Every call that can open a draft, and the keyword that carries the level it opens it at.
 _OPENS_A_DRAFT = {"open_draft": "visibility", "_add_draft": "visibility",
                   "create_import_job": "draft_visibility", "resolve_graph": "draft_visibility"}

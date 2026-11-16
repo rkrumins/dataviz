@@ -4665,6 +4665,7 @@ async def get_import_settings(
 async def put_import_settings(
     ws_id: str, graph_id: str, body: ImportSettingsChange,
     _user: User = Depends(requires("workspace:admin", workspace="ws_id")),
+    claims: PermissionClaims = Depends(get_permission_claims),
     meta: dict = Depends(graph_in_workspace),
     session: AsyncSession = Depends(get_db_session),
 ):
@@ -4706,10 +4707,12 @@ async def put_import_settings(
                          "to": {field_of[a.key]: a.after_value for a in change_set.applied}})
 
         # Written through to the old columns of the data source and of its forks.
-        await legacy.save(session, "graph", row.id, {
-            key: None if changes[api] == "inherit" else changes[api]
-            for _column, api, key in import_settings.FIELDS if api in changes},
-            actor=_user.id, record=record)
+        with _settings_refusals():
+            await legacy.save(session, "graph", row.id, {
+                key: None if changes[api] == "inherit" else changes[api]
+                for _column, api, key in import_settings.FIELDS if api in changes},
+                actor=_user.id, record=record, editor=_settings_editor(claims, ws_id),
+                workspace_id=ws_id)
     return await _import_settings_view(session, row, graph_id,
                                        fork=bool(meta.get("fork_parent_graph_id")))
 
@@ -5838,6 +5841,29 @@ async def _policy_source(session: AsyncSession, ws_id: str, data_source_id: str)
     return ds
 
 
+@contextmanager
+def _settings_refusals():
+    """A save an old settings endpoint makes through the settings store, refused as the settings
+    API refuses it: 403 for a value the caller may not set, 422 for one outside the platform's
+    limits or otherwise invalid. Nothing is saved."""
+    from backend.app.services.settings import service as settings_service, validate
+
+    try:
+        yield
+    except validate.SettingNotPermitted as exc:
+        raise HTTPException(status_code=403, detail={
+            "type": exc.code, "message": str(exc), "denied": exc.denied}) from exc
+    except settings_service.InvalidSettings as exc:
+        raise HTTPException(status_code=422, detail={
+            "type": exc.code, "message": str(exc), "errors": exc.errors}) from exc
+
+
+def _settings_editor(claims: PermissionClaims, ws_id: str) -> Optional[str]:
+    from backend.app.services.settings import service as settings_service
+
+    return settings_service.editor_of(claims, ws_id)
+
+
 async def _record_policy_change(session: AsyncSession, scope: str, before: dict, after: dict,
                                 **target) -> None:
     """A real change, once, with what it was and what it became: in the same transaction as the
@@ -5900,6 +5926,7 @@ async def _workspace_policy(session: AsyncSession, ws_id: str) -> dict:
 async def put_workspace_drafts_policy(
     ws_id: str, body: DraftsPolicySettings,
     _user: User = Depends(requires("workspace:admin", workspace="ws_id")),
+    claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Set the workspace's drafts and reviews policy (workspace admins). A data source's own
@@ -5912,8 +5939,10 @@ async def put_workspace_drafts_policy(
         await _record_policy_change(s, "workspace", before, after, workspace_id=ws_id,
                                     target_type="workspace", target_id=ws_id, target_label=ws.name)
 
-    await drafts_policy.save(session, "workspace", ws_id, drafts_policy.changes_from(body),
-                             actor=_user.id, record=record)
+    with _settings_refusals():
+        await drafts_policy.save(session, "workspace", ws_id, drafts_policy.changes_from(body),
+                                 actor=_user.id, record=record,
+                                 editor=_settings_editor(claims, ws_id))
     return await _workspace_policy(session, ws_id)
 
 
@@ -5944,6 +5973,7 @@ async def get_data_source_drafts_policy(
 async def put_data_source_drafts_policy(
     ws_id: str, data_source_id: str, body: DraftsPolicySettings,
     _user: User = Depends(requires("workspace:admin", workspace="ws_id")),
+    claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Override the workspace's drafts and reviews policy for one data source (workspace admins),
@@ -5965,7 +5995,10 @@ async def put_data_source_drafts_policy(
                                         **recorder.data_source_target(ds))
 
         # Written through to the old columns of the data source and of its forks.
-        await drafts_policy.save(session, "graph", ds.id, changes, actor=_user.id, record=record)
+        with _settings_refusals():
+            await drafts_policy.save(session, "graph", ds.id, changes, actor=_user.id,
+                                     record=record, editor=_settings_editor(claims, ws_id),
+                                     workspace_id=ws_id)
     return await _source_policy(session, ws_id, ds)
 
 
