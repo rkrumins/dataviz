@@ -96,11 +96,13 @@ function ReadModeRow({ wm, wsId, graphId }: { wm: Watermark; wsId: string; graph
   } else {
     const chosen = r.declared && !sameValue(r.declared, r.effective) ? r.declared : null
     const where = r.source && <SourceChip source={r.source} />
+    const promise = reads?.choices.find((c) => c.id === r.effective)?.promise ?? ''
     shown = (
       <>
         <span className="inline-flex flex-wrap items-center gap-1.5">
-          <HoverTip label={say(r.effective)} detail={reads?.choices.find((c) => c.id === r.effective)?.promise ?? ''}>
-            <span className="font-medium">{say(r.effective)}</span>
+          {/* The tip is the pointer's; the same words are read out to a screen reader. */}
+          <HoverTip label={say(r.effective)} detail={promise}>
+            <span className="font-medium">{say(r.effective)}{promise && <span className="sr-only">: {promise}</span>}</span>
           </HoverTip>
           {!chosen && where}
         </span>

@@ -13,17 +13,16 @@
  * A workspace admin chooses within the platform's limits; a system admin may go past them (the
  * value is kept as an exception); anyone else reads. The sub-tab is in `?vg=`; a link to a setting
  * (`#reads-mode`) opens Defaults at it. What is staged stays staged while the other tabs are open,
- * the values aren't refreshed over it, and leaving the page (a reload, another page) asks first.
+ * the values aren't refreshed over it, and leaving the page (a reload, another page) asks first,
+ * counting what a graph's drawer has staged (`LeaveGuard`).
  * The page keeps the tab while something is staged (`onStagedChange`).
  */
-import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
-import { Link, UNSAFE_DataRouterContext, useBlocker, useLocation, useSearchParams } from 'react-router-dom'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Link, useLocation, useSearchParams } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import { BookOpen, History, Info, Network, ShieldCheck, SlidersHorizontal } from 'lucide-react'
-import { ConfirmDialog } from '@/components/ui/Dialog'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/Tabs'
 import { settingAnchor, type ResolvedValues, type Scope, type SettingsFacts } from '@/components/settings'
-import { useUnsavedChangesWarning } from '@/hooks/useUnsavedChangesWarning'
 import { usePermission } from '@/store/auth'
 import { useFeature } from '@/store/features'
 import {
@@ -31,6 +30,7 @@ import {
 } from '@/services/settingsService'
 import { GraphSettingsDrawer } from './GraphSettingsDrawer'
 import { HistoryView } from './HistoryView'
+import { LeaveGuard } from './LeaveGuard'
 import { graphName } from './meta'
 import { SettingsView } from './SettingsView'
 import { Failed, SettingsSkeleton } from './states'
@@ -45,31 +45,9 @@ const NO_FACTS: SettingsFacts = {}
 /** A trigger's count of what is staged under it. */
 function StagedCount({ n }: { n: number }) {
     return (
-        <span className="ml-0.5 rounded-full bg-indigo-700 px-1.5 text-[10px] font-semibold leading-4 text-white dark:bg-indigo-500">
+        <span className="ml-0.5 rounded-full bg-indigo-700 px-1.5 text-[10px] font-semibold leading-4 text-white dark:bg-indigo-600">
             {n}<span className="sr-only"> not saved</span>
         </span>
-    )
-}
-
-/**
- * Asks before another page drops what is staged. The app's router is a data router, which can hold
- * a navigation; a plain one (a test's, the harness's) can't, and gets no guard.
- */
-function LeaveGuard({ count, onDiscard }: { count: number; onDiscard: () => void }) {
-    const blocker = useBlocker(({ currentLocation, nextLocation }) => count > 0 && currentLocation.pathname !== nextLocation.pathname)
-    const blocked = blocker.state === 'blocked'
-    return (
-        <ConfirmDialog
-            open={blocked}
-            onOpenChange={(open) => { if (!open && blocker.state === 'blocked') blocker.reset() }}
-            title={`Leave without saving ${count} ${count === 1 ? 'change' : 'changes'}?`}
-            confirmLabel="Discard and leave"
-            cancelLabel="Stay"
-            tone="danger"
-            onConfirm={() => { if (blocker.state !== 'blocked') return; onDiscard(); blocker.proceed() }}
-        >
-            Your changes to this workspace’s defaults are staged, not saved. Leaving discards them.
-        </ConfirmDialog>
     )
 }
 
@@ -83,7 +61,6 @@ export function WorkspaceVersionedGraphs({ workspaceId, workspaceName, onStagedC
     const [params, setParams] = useSearchParams()
     const location = useLocation()
     const qc = useQueryClient()
-    const dataRouter = useContext(UNSAFE_DataRouterContext)
     const versioningOn = useFeature('versioningEnabled')
     // Reading the history and putting a change back are a workspace admin's (a system admin is one everywhere).
     const canAdmin = usePermission('workspace:admin', workspaceId)
@@ -106,7 +83,8 @@ export function WorkspaceVersionedGraphs({ workspaceId, workspaceName, onStagedC
     const editor = useSettingsEditor({ place, values, settings: byKey, where, refetch: valuesQ.refetch })
     const staged = editor.staged.dirtyCount
     useEffect(() => { dirty.current = staged > 0 })
-    useUnsavedChangesWarning(staged > 0)
+    // What a graph's drawer has staged: leaving the page drops it too.
+    const [drawerStaged, setDrawerStaged] = useState(0)
     useEffect(() => {
         onStagedChange?.(staged)
     }, [staged, onStagedChange])
@@ -149,7 +127,8 @@ export function WorkspaceVersionedGraphs({ workspaceId, workspaceName, onStagedC
     const readOnly = !versioningOn || data?.editor == null
     let defaults
     if (schemaQ.error) defaults = <Failed what="what each setting is" error={schemaQ.error} onRetry={() => void schemaQ.refetch()} />
-    else if (valuesQ.error) defaults = <Failed what="this workspace’s settings" error={valuesQ.error} onRetry={() => void valuesQ.refetch()} />
+    // A read again that failed keeps the values already read (and what is staged over them).
+    else if (valuesQ.error && !valuesQ.data) defaults = <Failed what="this workspace’s settings" error={valuesQ.error} onRetry={() => void valuesQ.refetch()} />
     else if (!schema || !data) defaults = <SettingsSkeleton />
     else {
         defaults = (
@@ -189,14 +168,14 @@ export function WorkspaceVersionedGraphs({ workspaceId, workspaceName, onStagedC
 
             <Tabs value={tab} onValueChange={setTab}>
                 <TabsList aria-label="Versioned graphs in this workspace" className="mb-6 w-full max-w-md">
-                    <TabsTrigger value="defaults" icon={SlidersHorizontal} badge={staged > 0 ? <StagedCount n={staged} /> : undefined}>
+                    <TabsTrigger value="defaults" className="text-ink-secondary" icon={SlidersHorizontal} badge={staged > 0 ? <StagedCount n={staged} /> : undefined}>
                         Defaults
                     </TabsTrigger>
-                    <TabsTrigger value="graphs" icon={Network}
+                    <TabsTrigger value="graphs" className="text-ink-secondary" icon={Network}
                         badge={listed !== null ? <span className="text-[11px] font-normal text-ink-secondary">{listed}<span className="sr-only"> graphs</span></span> : undefined}>
                         Graphs
                     </TabsTrigger>
-                    {canAdmin && <TabsTrigger value="history" icon={History}>History</TabsTrigger>}
+                    {canAdmin && <TabsTrigger value="history" icon={History} className="text-ink-secondary">History</TabsTrigger>}
                 </TabsList>
 
                 <TabsContent value="defaults">{defaults}</TabsContent>
@@ -216,9 +195,10 @@ export function WorkspaceVersionedGraphs({ workspaceId, workspaceName, onStagedC
 
             {drawer && (
                 <GraphSettingsDrawer workspaceId={workspaceId} graphId={drawer.graphId} open={drawerOpen} onOpenChange={onDrawerOpenChange}
-                    label={graphName(drawer)} />
+                    label={graphName(drawer)} onStagedChange={setDrawerStaged} />
             )}
-            {dataRouter && <LeaveGuard count={staged} onDiscard={() => editor.staged.reset()} />}
+            <LeaveGuard count={staged + drawerStaged} what={drawerStaged ? 'these settings' : 'this workspace’s defaults'}
+                onDiscard={() => editor.staged.reset()} />
         </div>
     )
 }

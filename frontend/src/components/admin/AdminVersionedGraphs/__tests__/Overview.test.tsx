@@ -61,8 +61,17 @@ describe('Overview', () => {
         expect(screen.queryByText(/^0$/)).not.toBeInTheDocument()
     })
 
+    it('asks for the figures and the list beside the registry, not after it', async () => {
+        // The registry never answers: the figures and the list are asked for all the same.
+        const sent = mockApi('ok', (req) => (req.path.endsWith('/settings/versioned-graphs/schema') ? new Promise<Response>(() => {}) : undefined))
+        renderWithApi(<AdminVersionedGraphs />, { path: OVERVIEW })
+        await waitFor(() => expect(calls(sent, 'GET', '/admin/versioning/graphs/summary')).toHaveLength(1))
+        await waitFor(() => expect(calls(sent, 'GET', '/admin/versioning/graphs')).toHaveLength(1))
+    })
+
     it('opens the list on the graphs a figure counts', async () => {
-        const sent = mockApi()
+        // A fleet building new versions (the harness has New-version builds off, so it counts none).
+        const sent = mockApi('ok', (req) => (req.path.endsWith('/graphs/summary') ? json(SUMMARY) : undefined))
         renderWithApi(<AdminVersionedGraphs />, { path: OVERVIEW })
         await screen.findByText('The fleet now')
         await userEvent.click((await tile('Failing')).getByRole('button', { name: 'Show them: Failing' }))

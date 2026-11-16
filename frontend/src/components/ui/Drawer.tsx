@@ -7,8 +7,12 @@
  *
  * Like Dialog: drive it with `open` and keep it mounted, and it slides in without an exit
  * animation. Reduced motion drops the slide (`globals.css` quiets `animate-in`).
+ *
+ * `dismissible={false}` holds it open: Esc, the overlay and ✕ don't close it. With
+ * `onDismissAttempt`, they ask its owner instead (and ✕ stays on), so work in it can be kept or
+ * discarded on purpose ("Discard 2 changes?").
  */
-import type { ReactNode } from 'react'
+import type { MouseEvent, ReactNode } from 'react'
 import * as RadixDialog from '@radix-ui/react-dialog'
 import { X } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -31,14 +35,22 @@ export interface DrawerProps {
     side?: 'right' | 'left'
     size?: keyof typeof WIDTH
     dismissible?: boolean
+    /** While not `dismissible`: Esc, the overlay or ✕ asked to close it. */
+    onDismissAttempt?: () => void
     className?: string
 }
 
 export function Drawer({
     open, onOpenChange, title, description, eyebrow, actions, children, footer, side = 'right', size = 'lg',
-    dismissible = true, className,
+    dismissible = true, onDismissAttempt, className,
 }: DrawerProps) {
     const hold = (e: Event) => { if (!dismissible) e.preventDefault() }
+    // Esc, a press outside and ✕ are someone asking to close; focus moving away is not.
+    const ask = (e: Event | MouseEvent) => {
+        if (dismissible) return
+        e.preventDefault()
+        onDismissAttempt?.()
+    }
     const focus = useReturnFocus()
     return (
         <RadixDialog.Root open={open} onOpenChange={(next) => { if (next || dismissible) onOpenChange(next) }}>
@@ -48,8 +60,8 @@ export function Drawer({
                     {...(description ? {} : { 'aria-describedby': undefined })}
                     onOpenAutoFocus={focus.onOpenAutoFocus}
                     onCloseAutoFocus={focus.onCloseAutoFocus}
-                    onEscapeKeyDown={hold}
-                    onPointerDownOutside={hold}
+                    onEscapeKeyDown={ask}
+                    onPointerDownOutside={ask}
                     onInteractOutside={hold}
                     className={cn(
                         'fixed inset-y-0 z-[60] flex h-full w-full flex-col bg-canvas-elevated text-ink outline-none',
@@ -66,19 +78,20 @@ export function Drawer({
                 >
                     <div className="flex items-start gap-3 border-b border-glass-border/60 px-5 sm:px-6 pt-5 pb-4">
                         <div className="min-w-0 flex-1">
-                            {eyebrow && <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-ink-muted">{eyebrow}</p>}
+                            {eyebrow && <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-ink-secondary">{eyebrow}</p>}
                             <RadixDialog.Title className={cn('text-base font-semibold tracking-tight text-ink', eyebrow && 'mt-0.5')}>
                                 {title}
                             </RadixDialog.Title>
                             {description && (
-                                <RadixDialog.Description className="mt-1 text-[13px] leading-relaxed text-ink-muted">
+                                <RadixDialog.Description className="mt-1 text-[13px] leading-relaxed text-ink-secondary">
                                     {description}
                                 </RadixDialog.Description>
                             )}
                         </div>
                         {actions && <div className="flex items-center gap-1.5 shrink-0">{actions}</div>}
                         <RadixDialog.Close asChild>
-                            <IconButton icon={X} label="Close" tip={false} disabled={!dismissible} className="-mr-2 shrink-0" />
+                            <IconButton icon={X} label="Close" tip={false} disabled={!dismissible && !onDismissAttempt} onClick={ask}
+                                className="-mr-2 shrink-0" />
                         </RadixDialog.Close>
                     </div>
                     <div className="min-h-0 flex-1 overflow-y-auto px-5 sm:px-6 py-5">{children}</div>

@@ -104,7 +104,7 @@ export function SettingsSearch({ settings, categories = [], onSelect, placeholde
                         className="grid place-items-center w-6 h-6 rounded-md text-ink-muted hover:text-ink">
                         <X aria-hidden className="w-3.5 h-3.5" />
                     </button>
-                ) : shortcut && <Kbd shortcut="/" />}
+                ) : shortcut && <Kbd shortcut="/" className="[@media(pointer:coarse)]:hidden" />}
             </div>
             <ul
                 id={listId}

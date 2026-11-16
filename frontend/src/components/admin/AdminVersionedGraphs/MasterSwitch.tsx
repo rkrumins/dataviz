@@ -20,12 +20,12 @@ export function MasterSwitchStatus({ featureKey }: { featureKey: string }) {
     const on = useFeature(featureKey)
     return (
         <Card padding="md" className={cn(on ? '' : 'border-amber-500/25 bg-amber-500/[0.03]')}>
-            <div className="flex items-start gap-4">
-                <span className={cn('grid place-items-center w-10 h-10 shrink-0 rounded-xl',
+            <div className="flex flex-wrap items-start gap-x-4 gap-y-3">
+                <span className={cn('hidden w-10 h-10 shrink-0 place-items-center rounded-xl sm:grid',
                     on ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400' : 'bg-black/[0.05] text-ink-secondary dark:bg-white/[0.06]')}>
                     <Power aria-hidden className="w-5 h-5" />
                 </span>
-                <div className="min-w-0 flex-1">
+                <div className="min-w-0 flex-1 basis-56">
                     <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-ink-secondary">Switch for this category</p>
                     <h3 className="mt-0.5 text-[15px] font-semibold tracking-tight text-ink">{FEATURE_NAMES[featureKey] ?? featureKey}</h3>
                     <p className={cn('mt-1 text-xs font-medium', on ? 'text-ink-secondary' : 'text-amber-800 dark:text-amber-300')}>
@@ -33,7 +33,7 @@ export function MasterSwitchStatus({ featureKey }: { featureKey: string }) {
                             : 'Off for the whole platform: the settings below are kept, and take effect once a system admin turns it on.'}
                     </p>
                 </div>
-                <span className={cn('mt-1 shrink-0 rounded-full px-2.5 py-0.5 text-xs font-semibold',
+                <span className={cn('ml-auto mt-1 shrink-0 rounded-full px-2.5 py-0.5 text-xs font-semibold',
                     on ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300' : 'bg-black/[0.05] text-ink-secondary dark:bg-white/[0.07]')}>
                     {on ? 'On' : 'Off'}
                 </span>
@@ -65,24 +65,25 @@ export function MasterSwitchCard({ featureKey, switches, readOnly = false }: {
     const id = `switch-${featureKey}`
     return (
         <Card padding="md" className={cn(on ? '' : 'border-amber-500/25 bg-amber-500/[0.03]')}>
-            <div className="flex items-start gap-4">
-                <span className={cn('grid place-items-center w-10 h-10 shrink-0 rounded-xl',
-                    on ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400' : 'bg-black/[0.05] text-ink-muted dark:bg-white/[0.06]')}>
+            {/* On a phone the switch drops under its words rather than squeezing them into a column. */}
+            <div className="flex flex-wrap items-start gap-x-4 gap-y-3">
+                <span className={cn('hidden w-10 h-10 shrink-0 place-items-center rounded-xl sm:grid',
+                    on ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400' : 'bg-black/[0.05] text-ink-secondary dark:bg-white/[0.06]')}>
                     <Power aria-hidden className="w-5 h-5" />
                 </span>
-                <div className="min-w-0 flex-1">
-                    <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-ink-muted">Switch for this category</p>
+                <div className="min-w-0 flex-1 basis-56">
+                    <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-ink-secondary">Switch for this category</p>
                     <h3 id={id} className="mt-0.5 text-[15px] font-semibold tracking-tight text-ink">{feature.name}</h3>
                     <p className={cn('mt-1 text-xs font-medium', on ? 'text-ink-secondary' : 'text-amber-700 dark:text-amber-300')} aria-live="polite">
                         {on ? 'On: the settings below are in effect.' : 'Off: the settings below are kept, and take effect once it is on.'}
                     </p>
                     {last && (
-                        <p className="mt-0.5 text-[11px] text-ink-muted">
+                        <p className="mt-0.5 text-[11px] text-ink-secondary">
                             Turned {last.to === false ? 'off' : 'on'} by {last.actorName} · <DateTime at={last.at} />
                         </p>
                     )}
                 </div>
-                <div className="flex shrink-0 items-center gap-2 pt-1">
+                <div className="ml-auto flex shrink-0 items-center gap-2 pt-1">
                     <span className="text-[13px] font-medium text-ink-secondary" aria-hidden>{on ? 'On' : 'Off'}</span>
                     <Switch checked={on} disabled={readOnly || switches.saving === featureKey} aria-labelledby={id}
                         onChange={(next) => switches.request(featureKey, next)} />

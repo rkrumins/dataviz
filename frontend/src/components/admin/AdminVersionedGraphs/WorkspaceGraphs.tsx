@@ -181,7 +181,8 @@ export function WorkspaceGraphs({ workspaceId, schema, onOpenSettings, onOpenDat
                                         Settings…
                                     </Button>
                                     {g.dataSourceId && (
-                                        <Button size="sm" variant="ghost" leftIcon={FolderOpen} onClick={() => onOpenDataSource(g.dataSourceId!)} aria-label={`Open the data source of ${name}`}>
+                                        <Button size="sm" variant="ghost" leftIcon={FolderOpen} onClick={() => onOpenDataSource(g.dataSourceId!)} aria-label={`Open the data source of ${name}`}
+                                            className="text-ink-secondary">
                                             Data source
                                         </Button>
                                     )}

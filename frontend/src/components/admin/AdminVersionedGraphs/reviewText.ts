@@ -21,6 +21,10 @@ export function refusalWords(e: SettingsRequestError, settings: Record<string, S
     if (e.type === 'setting_not_permitted' && e.denied.length) {
         return `Nothing was saved. ${e.denied.map((d) => `You can’t change ${label(d.key)} here${d.editor ? `: only ${EDITOR_LABEL[d.editor]} can` : ''}.`).join(' ')}`
     }
+    if (e.type === 'acknowledgement_required') {
+        const n = e.warnings.length
+        return `Nothing was saved: this change does ${n === 1 ? 'something' : `${formatCount(n)} things`} you need to acknowledge first. Read ${n === 1 ? 'its warning' : 'each warning'} in this review, tick it, and save again.`
+    }
     return `Nothing was saved: ${e.message}`
 }
 

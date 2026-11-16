@@ -184,7 +184,7 @@ export function GuidancePanel({
 
     return (
         <div id={id} className={cn('grid gap-x-8 gap-y-6 lg:grid-cols-[minmax(0,1.55fr)_minmax(0,1fr)]', className)}>
-            {visual && <div className="lg:col-span-2">{visual}</div>}
+            {visual && <div className="min-w-0 lg:col-span-2">{visual}</div>}
 
             <div className="space-y-5 min-w-0">
                 <section className="space-y-1.5">

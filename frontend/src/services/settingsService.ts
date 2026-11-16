@@ -108,10 +108,18 @@ export interface SettingConflict {
     actual: number
 }
 
+/** A warning the full preview raises, and a save must acknowledge: `{code, text}`, with the setting that causes it. */
+export interface SettingsWarning {
+    code: string
+    text: string
+    key?: string
+}
+
 /**
  * A refused request. `type` is the server's: `invalid_settings` (422), `setting_not_permitted`
- * (403), `settings_conflict` (409), `follows_root` (409, a fork), `not_revertible` (409),
- * `feature_disabled` (403, version control is off), `not_found` (404).
+ * (403), `settings_conflict` (409), `acknowledgement_required` (409, a warning the save didn't
+ * acknowledge), `follows_root` (409, a fork), `not_revertible` (409), `feature_disabled` (403,
+ * version control is off), `not_found` (404).
  */
 export class SettingsRequestError extends Error {
     readonly status: number | null
@@ -119,10 +127,12 @@ export class SettingsRequestError extends Error {
     readonly errors: SettingProblem[]
     readonly denied: SettingDenied[]
     readonly conflicts: SettingConflict[]
+    /** What the save must acknowledge, from 409 `acknowledgement_required`. */
+    readonly warnings: SettingsWarning[]
     /** A fork's root, from 409 `follows_root`. */
     readonly root: { graphId: string; dataSourceId: string | null; workspaceId: string | null } | null
 
-    constructor(message: string, init: Partial<Pick<SettingsRequestError, 'status' | 'type' | 'errors' | 'denied' | 'conflicts' | 'root'>> = {}) {
+    constructor(message: string, init: Partial<Pick<SettingsRequestError, 'status' | 'type' | 'errors' | 'denied' | 'conflicts' | 'warnings' | 'root'>> = {}) {
         super(message)
         this.name = 'SettingsRequestError'
         this.status = init.status ?? null
@@ -130,6 +140,7 @@ export class SettingsRequestError extends Error {
         this.errors = init.errors ?? []
         this.denied = init.denied ?? []
         this.conflicts = init.conflicts ?? []
+        this.warnings = init.warnings ?? []
         this.root = init.root ?? null
     }
 }
@@ -140,6 +151,7 @@ interface WireRefusal {
     errors?: SettingProblem[]
     denied?: SettingDenied[]
     conflicts?: SettingConflict[]
+    warnings?: SettingsWarning[]
     rootGraphId?: string
     rootDataSourceId?: string | null
     workspaceId?: string | null
@@ -157,6 +169,7 @@ export function settingsError(err: unknown): SettingsRequestError {
         errors: d.errors ?? [],
         denied: d.denied ?? [],
         conflicts: d.conflicts ?? [],
+        warnings: d.warnings ?? [],
         root: type === 'follows_root' && d.rootGraphId
             ? { graphId: d.rootGraphId, dataSourceId: d.rootDataSourceId ?? null, workspaceId: d.workspaceId ?? null }
             : null,
@@ -512,11 +525,15 @@ export const settingsService = {
 
     values: async (place: SettingsPlace): Promise<SettingsValues> => toValues(await call<WireValues>(settingsPath(place))),
 
-    /** `items` carry `value` and/or `limits`; a field left out stays as it is. */
-    save: async (place: SettingsPlace, items: PatchItem[], reason: string): Promise<SaveResult> => {
+    /**
+     * `items` carry `value` and/or `limits`; a field left out stays as it is. `acknowledge`: the codes
+     * of the warnings the person acknowledged in the review (a save that raises one it must
+     * acknowledge, without its code, is refused: 409 `acknowledgement_required`).
+     */
+    save: async (place: SettingsPlace, items: PatchItem[], reason: string, acknowledge: string[] = []): Promise<SaveResult> => {
         const w = await call<WireValues & { changeSetId: string | null }>(settingsPath(place), withReason({
             method: 'PATCH',
-            body: JSON.stringify({ changes: items, reason }),
+            body: JSON.stringify({ changes: items, reason, ...(acknowledge.length ? { acknowledge } : {}) }),
         }, reason))
         return { ...toValues(w), changeSetId: w.changeSetId ?? null }
     },
@@ -674,7 +691,8 @@ function invalidateAfterSave(qc: ReturnType<typeof useQueryClient>) {
 export function useSaveSettings(place: SettingsPlace) {
     const qc = useQueryClient()
     return useMutation({
-        mutationFn: ({ items, reason }: { items: PatchItem[]; reason: string }) => settingsService.save(place, items, reason),
+        mutationFn: ({ items, reason, acknowledge }: { items: PatchItem[]; reason: string; acknowledge?: string[] }) =>
+            settingsService.save(place, items, reason, acknowledge),
         onSuccess: (res) => {
             qc.setQueryData(settingsKeys.values(place), res)
             invalidateAfterSave(qc)
@@ -703,12 +721,16 @@ export function useSettingsHistory(place: SettingsPlace, filter: HistoryFilter) 
     })
 }
 
+/** A page read less than 15 s ago isn't asked for again (the Overview's is asked for beside the registry). */
+const LIST_FRESH_MS = 15_000
+
 export function useGraphInventory(filter: GraphInventoryFilter) {
     return useInfiniteQuery({
         queryKey: settingsKeys.graphs(filter),
         queryFn: ({ pageParam }) => settingsService.graphs(filter, pageParam),
         initialPageParam: null as string | null,
         getNextPageParam: (last) => last.nextCursor ?? undefined,
+        staleTime: LIST_FRESH_MS,
         retry: 1,
         refetchOnWindowFocus: false,
     })
@@ -727,7 +749,7 @@ export function useWorkspaceGraphs(workspaceId: string) {
 }
 
 export function useGraphsSummary() {
-    return useQuery({ queryKey: settingsKeys.summary(), queryFn: settingsService.summary, refetchInterval: REFRESH_MS, retry: 1 })
+    return useQuery({ queryKey: settingsKeys.summary(), queryFn: settingsService.summary, staleTime: LIST_FRESH_MS, refetchInterval: REFRESH_MS, retry: 1 })
 }
 
 /** Each node's memory, for the gauges; a failure leaves them out (the explainers then draw nothing). */

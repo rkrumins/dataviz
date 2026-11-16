@@ -7,12 +7,13 @@
  * Given `signals`, counts of what actually happened, each problem a registry signal answers says
  * how often ("happened 12 times in the last 24 h"), marked once the count reaches the signal's
  * `warnAt`; problems with counts come first, and the settings behind each signal join its list.
+ * When the server couldn't count them (`signalsUnavailable`), it says so rather than show none.
  */
 import { useId, useMemo, useState } from 'react'
-import { Activity, ArrowUpRight, Sparkles, Stethoscope, TriangleAlert } from 'lucide-react'
+import { Activity, ArrowUpRight, Sparkles, Stethoscope, TriangleAlert, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { formatCount, formatNumber } from '@/lib/units'
-import { Button } from '@/components/ui/Button'
+import { Button, IconButton } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
 import { CATALOGUE } from '../catalogue'
 import { formatValue, sameValue } from '../format'
@@ -45,7 +46,9 @@ function happenedWords(h: Happened): string {
         : `happened ${formatCount(h.count, h.signal.unit)} in ${windowWords(h.window)}`
 }
 
-export function SymptomFinder({ settings, values, staged = {}, onStage, onShow, signals, signalDefinitions = CATALOGUE.signals, className }: {
+export function SymptomFinder({
+    settings, values, staged = {}, onStage, onShow, onClose, signals, signalsUnavailable = false, signalDefinitions = CATALOGUE.signals, className,
+}: {
     settings: Setting[]
     /** The values in force: only settings present here are offered. */
     values: ResolvedValues
@@ -53,8 +56,12 @@ export function SymptomFinder({ settings, values, staged = {}, onStage, onShow, 
     staged?: Record<string, SettingValue | null>
     onStage?: (key: string, value: SettingValue) => void
     onShow?: (key: string) => void
+    /** Folds the finder away: a close button in its header. */
+    onClose?: () => void
     /** Counts of what actually happened (the signals API, a graph's health). Without them, the finder lists problems only. */
     signals?: SignalCount[]
+    /** The server couldn't count what happened: said, so no count reads as "nothing happened". */
+    signalsUnavailable?: boolean
     /** The registry's signals, which join a count to the problem it answers: the shipped catalogue's by default. */
     signalDefinitions?: Signal[]
     className?: string
@@ -103,12 +110,19 @@ export function SymptomFinder({ settings, values, staged = {}, onStage, onShow, 
                 <span className="grid place-items-center w-9 h-9 shrink-0 rounded-xl bg-black/[0.04] text-ink-secondary dark:bg-white/[0.06]">
                     <Stethoscope aria-hidden className="w-4 h-4" />
                 </span>
-                <div className="min-w-0">
-                    <h3 id={titleId} className="text-[15px] font-semibold tracking-tight text-ink">Something’s wrong?</h3>
-                    <p className="mt-0.5 text-xs text-ink-muted">Start from what you see. You get the settings behind it and what to try.</p>
+                <div className="min-w-0 flex-1">
+                    <h2 id={titleId} className="text-[15px] font-semibold tracking-tight text-ink">Something’s wrong?</h2>
+                    <p className="mt-0.5 text-xs text-ink-secondary">Start from what you see. You get the settings behind it and what to try.</p>
                 </div>
+                {onClose && <IconButton icon={X} label="Close the finder" size="sm" className="-mr-1.5 -mt-1 shrink-0" onClick={onClose} />}
             </div>
 
+            {signalsUnavailable && (
+                <p className="mt-3 flex items-start gap-1.5 text-[11.5px] leading-snug text-ink-secondary">
+                    <TriangleAlert aria-hidden className="mt-0.5 w-3 h-3 shrink-0 text-amber-600 dark:text-amber-400" />
+                    How often each problem happened can’t be counted right now, so no counts are shown. The problems and their settings still are.
+                </p>
+            )}
             <Input
                 containerClassName="mt-4"
                 aria-label="Describe the problem"
@@ -149,7 +163,13 @@ export function SymptomFinder({ settings, values, staged = {}, onStage, onShow, 
                         </button>
                     )
                 })}
-                {shown.length === 0 && <p className="text-xs text-ink-muted">No problem matches “{query.trim()}”. Try fewer words.</p>}
+                {shown.length === 0 && (
+                    <p className="text-xs text-ink-secondary">
+                        {index.length === 0
+                            ? 'No settings to start from yet: the problems they answer are listed here once the server lists the settings.'
+                            : `No problem matches “${query.trim()}”. Try fewer words.`}
+                    </p>
+                )}
             </div>
 
             <div aria-live="polite" className="mt-4">

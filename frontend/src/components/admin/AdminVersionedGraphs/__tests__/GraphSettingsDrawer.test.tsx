@@ -5,16 +5,24 @@
  * and the same save model as the platform's: stage, review, a reason, save, undo. Labels come from
  * the registry's generated catalogue.
  */
+import { useState } from 'react'
 import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { CATALOGUE } from '@/components/settings'
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { CATALOGUE, STATUS_META } from '@/components/settings'
 import { REASON_HEADER } from '@/services/activityReason'
+import { useAuthStore } from '@/store/auth'
 import { DEFAULT_FEATURES, useFeaturesStore } from '@/store/features'
+import { GraphSettingsSummary } from '@/features/versioning/components/GraphSettingsSummary'
+import { AdminVersionedGraphs } from '..'
 import { GraphSettingsDrawer } from '../GraphSettingsDrawer'
+import { WorkspaceVersionedGraphs } from '../WorkspaceVersionedGraphs'
 import { GRAPH, HEALTH, ROOT, WS } from '../__fixtures__/api'
 import type { GraphHealth } from '@/services/settingsService'
-import { calls, json, mockApi, renderWithApi } from './helpers'
+import { allowMenus, calls, json, mockApi, renderWithApi } from './helpers'
+
+vi.mock('@tanstack/react-virtual', async () => (await import('./helpers')).virtualizerMock())
+beforeAll(allowMenus)
 
 const S = Object.fromEntries(CATALOGUE.settings.map((s) => [s.key, s]))
 const title = (key: string, id: string) => S[key].choices.find((c) => c.id === id)!.title
@@ -119,17 +127,50 @@ describe('GraphSettingsDrawer', () => {
         expect(screen.queryByRole('heading', { name: 'Health now' })).not.toBeInTheDocument()
     })
 
-    it('follows a fork to its root: it has no settings of its own', async () => {
+    it('follows a fork to its root, named: it has no settings of its own', async () => {
         const sent = mockApi('fork')
         renderDrawer()
         expect(await screen.findByText('This graph is a fork, so it has no settings of its own.')).toBeInTheDocument()
         expect(screen.queryByRole('article')).not.toBeInTheDocument()
-        await userEvent.click(screen.getByRole('button', { name: 'Open the root graph’s settings' }))
+        // The root by its name, as the fork's health names the graph it reads through.
+        expect(await screen.findByText(/^It follows the settings of/)).toHaveTextContent('It follows the settings of Revenue lineage, the graph it was forked from.')
+        await userEvent.click(screen.getByRole('button', { name: 'Open Revenue lineage’s settings' }))
         expect(await screen.findByRole('article', { name: S['reads.mode'].label })).toBeInTheDocument()
         expect(calls(sent, 'GET', `/graphs/${ROOT}/settings`)).toHaveLength(1)
-        expect(screen.getByRole('dialog', { name: 'The graph Sales lineage follows' })).toBeInTheDocument()
+        expect(screen.getByRole('dialog', { name: 'Revenue lineage' })).toHaveTextContent('Graph settings · followed by Sales lineage')
         await userEvent.click(screen.getByRole('button', { name: /Back to Sales lineage/ }))
         expect(await screen.findByText('This graph is a fork, so it has no settings of its own.')).toBeInTheDocument()
+    })
+
+    it('asks before Back drops what is staged at the root', async () => {
+        mockApi('fork')
+        renderDrawer()
+        await userEvent.click(await screen.findByRole('button', { name: 'Open Revenue lineage’s settings' }))
+        await userEvent.click((await row('drafts.selfApproval')).getByRole('switch'))
+        await userEvent.click(screen.getByRole('button', { name: /Back to Sales lineage/ }))
+        const ask = await screen.findByRole('dialog', { name: 'Discard 1 change?' })
+        await userEvent.click(within(ask).getByRole('button', { name: 'Keep editing' }))
+        expect(screen.getByRole('region', { name: 'Unsaved changes' })).toHaveTextContent('1 change not saved yet')
+        await userEvent.click(screen.getByRole('button', { name: /Back to Sales lineage/ }))
+        await userEvent.click(within(await screen.findByRole('dialog', { name: 'Discard 1 change?' })).getByRole('button', { name: 'Discard and go back' }))
+        expect(await screen.findByText('This graph is a fork, so it has no settings of its own.')).toBeInTheDocument()
+    })
+
+    it('lists what a graph can’t set with whether each is in effect here, and why not', async () => {
+        mockApi('workspace-admin')
+        renderDrawer()
+        const elsewhere = (await screen.findByText(/^Set for every graph/)).closest('details')!
+        const served = (await import('../__fixtures__/api')).graphValues('workspace_admin').values
+        const inactive = served.filter((r) => !CATALOGUE.settings.find((x) => x.key === r.key)?.scopes.graph && r.status !== 'in_effect')
+        expect(inactive.length).toBeGreaterThan(0)
+        // An inactive value never reads as in force: its status and the server's why are on its row.
+        expect(within(elsewhere).getByText(new RegExp(`${inactive.length} not in effect here`))).toBeInTheDocument()
+        for (const r of inactive) {
+            const item = within(within(elsewhere).getByText(S[r.key].label).closest('li')!)
+            expect(item.getByText(STATUS_META[r.status].label)).toBeInTheDocument()
+            if (r.why[0]) expect(item.getByText(r.why[0].text)).toBeInTheDocument()
+        }
+        expect(within(elsewhere).queryByText(/In force here/)).not.toBeInTheDocument()
     })
 
     it('stages a graph’s own value, saves it with a reason after Review, and undoes it', async () => {
@@ -147,8 +188,10 @@ describe('GraphSettingsDrawer', () => {
         const save = calls(sent, 'PATCH', settingsPath)[0]
         expect(save.body).toEqual({ changes: [{ key: 'drafts.selfApproval', value: true, expectedVersion: 3 }], reason: 'Finance reviews its own drafts' })
         expect(decodeURIComponent(save.headers.get(REASON_HEADER) ?? '')).toBe('Finance reviews its own drafts')
-        expect((await screen.findAllByText('Saved 1 change to Sales lineage.')).length).toBeGreaterThan(0)
-        // The drawer holds the keyboard's focus: its own Undo, inside it, not only the app's toast's.
+        // One confirmation, in the drawer that holds the keyboard's focus: its own Undo, and no toast besides.
+        const drawer = screen.getByRole('dialog', { name: 'Sales lineage' })
+        expect(await within(drawer).findByRole('button', { name: 'Undo this save' })).toBeInTheDocument()
+        expect(screen.getAllByText('Saved 1 change to Sales lineage.').filter((el) => !drawer.contains(el))).toHaveLength(0)
         await userEvent.click(within(screen.getByRole('dialog', { name: 'Sales lineage' })).getByRole('button', { name: 'Undo this save' }))
         await waitFor(() => expect(calls(sent, 'PATCH', settingsPath)).toHaveLength(2))
         // Back to inheriting: the graph had no value of its own.
@@ -193,5 +236,81 @@ describe('GraphSettingsDrawer', () => {
         expect(await screen.findByText(/Version control is turned off for this deployment/)).toBeInTheDocument()
         expect((await row('reads.mode')).queryByRole('radio')).not.toBeInTheDocument()
         expect(screen.queryByRole('region', { name: 'Unsaved changes' })).not.toBeInTheDocument()
+    })
+})
+
+describe('GraphSettingsDrawer: nothing staged is dropped without asking', () => {
+    it('asks on Esc and on ✕, keeps the changes on "Keep editing", and closes on "Discard and close"', async () => {
+        mockApi('workspace-admin')
+        function Opened() {
+            const [open, setOpen] = useState(true)
+            return <><GraphSettingsDrawer workspaceId={WS} graphId={GRAPH} open={open} onOpenChange={setOpen} label="Sales lineage" />
+                {!open && <p>Drawer closed</p>}</>
+        }
+        renderWithApi(<Opened />)
+        await userEvent.click((await row('drafts.selfApproval')).getByRole('switch'))
+        await userEvent.keyboard('{Escape}')
+        const ask = await screen.findByRole('dialog', { name: 'Discard 1 change?' })
+        await userEvent.click(within(ask).getByRole('button', { name: 'Keep editing' }))
+        expect(screen.getByRole('region', { name: 'Unsaved changes' })).toHaveTextContent('1 change not saved yet')
+
+        // ✕ stays on while changes are staged, and asks the same.
+        const close = within(screen.getByRole('dialog', { name: 'Sales lineage' })).getByRole('button', { name: 'Close' })
+        expect(close).toBeEnabled()
+        await userEvent.click(close)
+        await userEvent.click(within(await screen.findByRole('dialog', { name: 'Discard 1 change?' })).getByRole('button', { name: 'Discard and close' }))
+        expect(await screen.findByText('Drawer closed')).toBeInTheDocument()
+        expect(screen.queryByRole('dialog', { name: 'Sales lineage' })).not.toBeInTheDocument()
+    })
+
+    it('closes at once on Esc while nothing is staged', async () => {
+        mockApi('workspace-admin')
+        function Opened() {
+            const [open, setOpen] = useState(true)
+            return <><GraphSettingsDrawer workspaceId={WS} graphId={GRAPH} open={open} onOpenChange={setOpen} label="Sales lineage" />
+                {!open && <p>Drawer closed</p>}</>
+        }
+        renderWithApi(<Opened />)
+        await row('drafts.selfApproval')
+        await userEvent.keyboard('{Escape}')
+        expect(await screen.findByText('Drawer closed')).toBeInTheDocument()
+        expect(screen.queryByRole('dialog', { name: /^Discard/ })).not.toBeInTheDocument()
+    })
+
+    it('from the fleet’s inventory', async () => {
+        mockApi('ok')
+        renderWithApi(<AdminVersionedGraphs />, { path: '/admin/versioned-graphs' })
+        const sales = (await screen.findByText('Sales lineage')).closest('[role="row"]') as HTMLElement
+        await userEvent.click(within(sales).getByRole('button', { name: /^Settings/ }))
+        await userEvent.click((await row('drafts.selfApproval')).getByRole('switch'))
+        await userEvent.keyboard('{Escape}')
+        await userEvent.click(within(await screen.findByRole('dialog', { name: 'Discard 1 change?' })).getByRole('button', { name: 'Keep editing' }))
+        expect(screen.getByRole('dialog', { name: 'Sales lineage' })).toBeInTheDocument()
+        expect(within(screen.getByRole('dialog', { name: 'Sales lineage' })).getByRole('region', { name: 'Unsaved changes' })).toHaveTextContent('1 change not saved yet')
+    })
+
+    it('from a workspace’s graphs', async () => {
+        mockApi('workspace-admin')
+        useAuthStore.setState({ permissions: { sid: 't', global: [], ws: { [WS]: ['workspace:admin', 'workspace:datasource:read'] } }, permissionsStatus: 'ready' } as never)
+        renderWithApi(<WorkspaceVersionedGraphs workspaceId={WS} workspaceName="Finance" />,
+            { path: `/workspaces/${WS}?tab=versioned-graphs&vg=graphs`, route: '/workspaces/:wsId' })
+        await userEvent.click(await screen.findByRole('button', { name: 'Settings for Sales lineage' }))
+        await userEvent.click((await row('drafts.selfApproval')).getByRole('switch'))
+        await userEvent.keyboard('{Escape}')
+        await userEvent.click(within(await screen.findByRole('dialog', { name: 'Discard 1 change?' })).getByRole('button', { name: 'Discard and close' }))
+        await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Sales lineage' })).not.toBeInTheDocument())
+    })
+
+    it('from a data source’s card', async () => {
+        mockApi('workspace-admin')
+        renderWithApi(<GraphSettingsSummary wsId={WS} graphId={GRAPH} label="Sales lineage" />,
+            { path: `/workspaces/${WS}?ds=ds_sales&dstab=versioning`, route: '/workspaces/:wsId' })
+        await userEvent.click(await screen.findByRole('button', { name: 'Open settings' }))
+        await userEvent.click((await row('drafts.selfApproval')).getByRole('switch'))
+        await userEvent.keyboard('{Escape}')
+        expect(await screen.findByRole('dialog', { name: 'Discard 1 change?' })).toBeInTheDocument()
+        await userEvent.keyboard('{Escape}')
+        await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Discard 1 change?' })).not.toBeInTheDocument())
+        expect(screen.getByRole('dialog', { name: 'Sales lineage' })).toBeInTheDocument()
     })
 })

@@ -96,7 +96,7 @@ export function ReadTimeline({ setting, value, next, className }: {
                     <div key={p.when} className="relative min-w-[5.5rem] flex-1">
                         {phase === i && (
                             <motion.div layoutId={`${id}-phase`} transition={transition} aria-hidden
-                                className="absolute inset-0 rounded-xl border border-ink/10 bg-canvas-elevated shadow-[0_1px_2px_rgba(15,23,42,0.06)] dark:border-white/10" />
+                                className="absolute inset-0 rounded-xl border border-ink/15 bg-canvas-elevated shadow-[0_1px_2px_rgba(15,23,42,0.06)] dark:border-white/15 dark:bg-white/[0.06]" />
                         )}
                         <div className={cn('relative flex h-7 items-center justify-center text-[10.5px] font-semibold uppercase tracking-[0.08em]',
                             phase === i ? 'text-ink' : 'text-ink-secondary')}>
@@ -108,8 +108,7 @@ export function ReadTimeline({ setting, value, next, className }: {
                             const t = tone(c, f)
                             const Source = f.source === 'database' ? Database : HardDrive
                             return (
-                                <div key={c.id} className={cn(ROW, 'relative flex flex-col items-center justify-center gap-1 px-1.5 transition-opacity duration-200 motion-reduce:transition-none',
-                                    phase === i ? 'opacity-100' : 'opacity-40')}>
+                                <div key={c.id} className={cn(ROW, 'relative flex flex-col items-center justify-center gap-1 px-1.5')}>
                                     <span className={cn('max-w-full truncate rounded-full px-2 py-0.5 text-[10.5px] font-semibold leading-4',
                                         t === 'new' ? 'bg-emerald-500/12 text-emerald-700 dark:text-emerald-300'
                                             : t === 'mix' ? 'bg-gradient-to-r from-slate-500/10 to-emerald-500/20 text-ink-secondary'

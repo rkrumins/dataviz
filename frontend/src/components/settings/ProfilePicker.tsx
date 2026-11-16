@@ -277,17 +277,22 @@ export function ProfilePicker({ profiles, scope, editor, resolved, onStage, onCl
                 </section>
             )}
 
-            <div className="sticky bottom-0 z-10 -mx-1 flex flex-wrap items-center justify-end gap-x-3 gap-y-2 rounded-xl border border-glass-border/60 bg-canvas-elevated px-3 py-2.5">
-                <p aria-live="polite" className="mr-auto min-w-0 text-xs text-ink-muted">
+            {/* Pinned to the drawer's bottom edge (past its body's padding), so the list scrolls under a
+                footer rather than around a box floating over it. */}
+            <div className="sticky -bottom-5 z-10 -mx-5 -mb-5 flex flex-wrap items-center justify-end gap-x-3 gap-y-2 border-t border-glass-border/60 bg-canvas-elevated px-5 py-3 sm:-mx-6 sm:px-6">
+                <p aria-live="polite" className="mr-auto min-w-0 text-xs text-ink-secondary">
                     {picked && <span className="sr-only">{picked.title}: </span>}
                     {plan && plan.stage.length > 0
                         ? `Stages ${plural(plan.stage.length, 'change')} for ${here}. Nothing is saved yet.`
                         : 'Nothing to stage here.'}
                 </p>
-                <Button variant="ghost" onClick={onClose}>Cancel</Button>
-                <Button variant="primary" disabled={!plan || plan.stage.length === 0} onClick={apply}>
-                    {picked ? `Apply ${picked.title}` : 'Apply'}
-                </Button>
+                <div className="flex items-center gap-2">
+                    <Button variant="ghost" onClick={onClose} className="text-ink-secondary">Cancel</Button>
+                    <Button variant="primary" disabled={!plan || plan.stage.length === 0} onClick={apply}
+                        className="bg-indigo-600 hover:bg-indigo-700 hover:brightness-100">
+                        {picked ? `Apply ${picked.title}` : 'Apply'}
+                    </Button>
+                </div>
             </div>
         </div>
     )

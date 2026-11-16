@@ -181,12 +181,14 @@ function Figures({ onFilter }: { onFilter: (f: GraphInventoryFilter) => void }) 
     )
 }
 
-export function Overview({ schema, values, switches, signals, providers, onShowSetting, onStage, onOpenSettings, onGoToSettings }: {
+export function Overview({ schema, values, switches, signals, signalsUnavailable, providers, onShowSetting, onStage, onOpenSettings, onGoToSettings }: {
     schema: ServedSchema
     /** The platform's values, for the finder; absent while they load. */
     values: ResolvedValues | undefined
     switches: FeatureSwitches
     signals?: SignalCount[]
+    /** The server couldn't count the signals: the finder says so. */
+    signalsUnavailable?: boolean
     providers: GraphProvider[]
     /** Opens Settings at a setting. */
     onShowSetting: (key: string) => void
@@ -245,7 +247,8 @@ export function Overview({ schema, values, switches, signals, providers, onShowS
 
             {values && (
                 <SymptomFinder settings={schema.settings.filter((s) => values[s.key])} values={values}
-                    onStage={(k: string, v: SettingValue) => onStage(k, v)} onShow={onShowSetting} {...(signals ? { signals } : {})} />
+                    onStage={(k: string, v: SettingValue) => onStage(k, v)} onShow={onShowSetting} {...(signals ? { signals } : {})}
+                    signalsUnavailable={signalsUnavailable} />
             )}
 
             <GraphInventory filter={filter} onFilter={setFilter} onOpenSettings={onOpenSettings} providers={providers} />
