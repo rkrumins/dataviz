@@ -196,6 +196,14 @@ def _translate_renamed_alembic_version(connection) -> None:
         "20260712_1730_view_activity_data_changed": "20260712_1730_val_data_changed",
         # 38 chars — over the default VARCHAR(32); shortened 2026-07-21.
         "20260719_1200_rebrand_default_branding": "20260719_1200_rebrand_branding",
+        # Renumbered 2026-11-12, when 20261112_1700_gv_ps_pressure was put
+        # before it: the served column's migration is now
+        # 20261112_1800_gv_ps_served. A database an image of that morning
+        # stamped with the old id holds the served column but not the
+        # pressure one, so it resumes from the parent both share, not from
+        # 1800: 1700_gv_ps_pressure adds the column it lacks, and
+        # 1800_gv_ps_served finds its own already there.
+        "20261112_1700_gv_ps_served": "20261112_1600_import_settings",
     }
     renamed_to = _RENAMED_REVISIONS.get(current_version)
     if renamed_to:

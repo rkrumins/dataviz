@@ -165,11 +165,37 @@ the image that owns that revision. `env.py` used to "recover" by stamping back t
 which left the schema untouched and replayed the whole chain over live data. That was the single
 most destructive line in the migration path.
 
+**A revision that was renamed or renumbered after an image shipped it is translated, not
+refused.** `_RENAMED_REVISIONS` in `env.py` maps each retired id to the revision such a database
+resumes from, before the check above:
+- A pure rename (an id shortened to fit `VARCHAR(32)`) maps to the new id of the same migration.
+- A renumbering that put another migration before it maps to the last revision the old database
+  really holds: their shared parent, never the renamed migration. Otherwise the inserted migration
+  is marked applied without having run. `20261112_1700_gv_ps_served` became
+  `20261112_1800_gv_ps_served` when `20261112_1700_gv_ps_pressure` went before it, so it maps to
+  `20261112_1600_import_settings`. Both migrations are guarded and re-runnable, so the pressure
+  column is added and the served one is found in place.
+- Don't rename or renumber a migration once an image has been built from it. When it can't be
+  helped, add the old id to the map; `test_alembic_upgrade_resilience.py` checks every entry
+  against the chain.
+
+## While the running release holds a lock
+
+The upgrade Job runs before the new release rolls out, while the old one still serves. A
+migration that alters a table the release reads (`projection_state`, `platform_settings`) sets
+`lock_timeout = '5s'`. Waiting longer would queue every read of the table behind its `ALTER`, but
+a publish or an import window can hold the table longer than that. Each migration commits on its
+own, so `upgrade` runs the one that gave up again, after a growing pause (5 s, 10 s, 20 s, then
+every 30 s), for up to `--lock-retry-secs` (180). Each time it logs the transactions open longer
+than the wait. If it still gives up, the log names them: let them finish, or stop them, and run it
+again. Give the Job longer with `--lock-retry-secs`, and keep Helm's `--timeout` above it.
+
 ## Commands
 
 ```bash
 synodic-upgrade upgrade                    # to head (fast path on a virgin database)
 synodic-upgrade upgrade --no-fast-path     # force the chain even on a virgin database
+synodic-upgrade upgrade --lock-retry-secs 600  # wait longer for the running release's locks
 synodic-upgrade repair                     # reconcile a pointer that trails the schema
 synodic-upgrade verify-schema              # exit 0 iff the schema structurally matches the ORM
 synodic-upgrade check --wait 60            # exit 0 iff alembic_version is at head

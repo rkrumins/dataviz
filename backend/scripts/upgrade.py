@@ -13,7 +13,10 @@ Two deployment roles:
   Alembic head. Pods fail to start otherwise.
 
 Subcommands:
-    upgrade   [--revision REV]   alembic upgrade (default: head)
+    upgrade   [--revision REV]   alembic upgrade (default: head); a migration
+              [--lock-retry-secs S]  that gives up waiting for a lock the
+                                 running release holds is run again, for up
+                                 to S seconds (default 180)
     downgrade  --revision REV    alembic downgrade
     repair                       reconcile a version pointer that trails the
                                  physical schema (see ``cmd_repair``)
@@ -40,6 +43,7 @@ import time
 from alembic import command
 from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine, text
+from sqlalchemy.exc import DBAPIError
 
 from backend.app.db.engine import _alembic_config
 
@@ -47,6 +51,11 @@ from backend.app.db.engine import _alembic_config
 # invocations of this script (Job + ad-hoc ``kubectl exec``) serialise
 # cleanly. The lock is released on disconnect even if Python crashes.
 LOCK_KEY = 0x53594E4F
+
+#: SQLSTATE ``lock_not_available``: a statement gave up waiting for a lock (``lock_timeout``).
+_LOCK_NOT_AVAILABLE = "55P03"
+#: How long ``upgrade`` keeps running a migration again that gave up waiting for a lock.
+LOCK_RETRY_SECS = 180.0
 
 log = logging.getLogger("synodic-upgrade")
 
@@ -154,8 +163,62 @@ def _install_fresh(cfg) -> None:
     log.info("Stamped to head")
 
 
+def _lock_timed_out(exc: BaseException) -> bool:
+    """True when ``exc`` is a statement that gave up waiting for a lock."""
+    return getattr(getattr(exc, "orig", None), "pgcode", None) == _LOCK_NOT_AVAILABLE
+
+
+def _long_transactions() -> str:
+    """The transactions open longer than a migration waits for a lock, the likely holders of the
+    one it gave up on: pid, age, state and the start of their query. Best effort, for the log."""
+    try:
+        engine = create_engine(_sync_url(), pool_pre_ping=True)
+        try:
+            with engine.connect() as conn:
+                rows = conn.execute(text(
+                    "SELECT pid, date_trunc('second', now() - xact_start), state, left(query, 80) "
+                    "FROM pg_stat_activity WHERE xact_start IS NOT NULL "
+                    "AND pid <> pg_backend_pid() AND now() - xact_start > interval '5 seconds' "
+                    "ORDER BY xact_start LIMIT 5")).all()
+        finally:
+            engine.dispose()
+    except Exception:  # noqa: BLE001 — only a hint for the log
+        return ""
+    return "; ".join(f"pid {pid} open {age} ({state}): {query!r}" for pid, age, state, query in rows)
+
+
+def _upgrade_retrying_locks(cfg, revision: str, budget_s: float, *,
+                            sleep=time.sleep, clock=time.monotonic) -> None:
+    """``alembic upgrade``, run again while a migration gives up waiting for a lock.
+
+    A migration that alters a table the running release reads (``projection_state``,
+    ``platform_settings``) waits at most 5 s for its lock (``lock_timeout``): waiting longer would
+    queue every read of the table behind it. While the release runs, a transaction holding the
+    table that long (a publish, an import window) makes it give up. Each migration commits on its
+    own, so the ones before it stay applied and alembic resumes from the one that gave up: this
+    runs the upgrade again after a pause that lets the release's queries through, until
+    ``budget_s`` has passed, and logs the transactions open longer than the wait."""
+    deadline = clock() + budget_s
+    pause, attempt = 5.0, 1
+    while True:
+        try:
+            command.upgrade(cfg, revision)
+            return
+        except DBAPIError as exc:
+            if not _lock_timed_out(exc) or clock() + pause > deadline:
+                raise
+            held = _long_transactions()
+            log.warning("Attempt %d: a migration gave up waiting for a lock the running release "
+                        "holds%s. Trying again in %.0f s.", attempt,
+                        f" (transactions open longer: {held})" if held else "", pause)
+            sleep(pause)
+            attempt += 1
+            pause = min(pause * 2, 30.0)
+
+
 @_with_advisory_lock
-def cmd_upgrade(revision: str, fast_path: bool = True) -> int:
+def cmd_upgrade(revision: str, fast_path: bool = True,
+                lock_retry_secs: float = LOCK_RETRY_SECS) -> int:
     cfg = _alembic_config()
 
     if fast_path and revision == "head":
@@ -168,7 +231,7 @@ def cmd_upgrade(revision: str, fast_path: bool = True) -> int:
             return 0
 
     log.info("Alembic upgrade -> %s", revision)
-    command.upgrade(cfg, revision)
+    _upgrade_retrying_locks(cfg, revision, lock_retry_secs)
     log.info("Upgrade complete")
     return 0
 
@@ -464,6 +527,11 @@ def main() -> int:
         help="Replay the migration chain even on a virgin database "
              "(what CI uses to keep the chain itself exercised)",
     )
+    up.add_argument(
+        "--lock-retry-secs", type=float, default=LOCK_RETRY_SECS,
+        help="How long to keep running a migration again that gave up waiting "
+             "for a lock the running release holds (default %(default)s)",
+    )
 
     down = sub.add_parser("downgrade", help="Run alembic downgrade")
     down.add_argument("--revision", required=True)
@@ -495,7 +563,8 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.cmd == "upgrade":
-        return cmd_upgrade(args.revision, fast_path=not args.no_fast_path)
+        return cmd_upgrade(args.revision, fast_path=not args.no_fast_path,
+                           lock_retry_secs=args.lock_retry_secs)
     if args.cmd == "downgrade":
         return cmd_downgrade(args.revision)
     if args.cmd == "repair":

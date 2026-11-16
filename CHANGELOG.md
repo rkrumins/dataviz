@@ -467,6 +467,19 @@ integration's many small changes as a few commits.
 
 ### Fixed
 
+- **The upgrade no longer stops on a database stamped `20261112_1700_gv_ps_served`.** An image
+  built from this work on the morning of 12 November stamped that id. The served column's
+  migration was then renumbered to `20261112_1800_gv_ps_served`, with
+  `20261112_1700_gv_ps_pressure` put before it, so every later image refused the database
+  ("alembic_version records '20261112_1700_gv_ps_served', which this image's migration chain does
+  not contain"). `alembic/env.py` now resumes such a database from `20261112_1600_import_settings`:
+  the upgrade adds the pressure column it lacks and finds the served one already there.
+- **The upgrade waits out the running release's locks instead of failing.** Each migration that
+  alters a table the release reads waits at most 5 s for its lock, and gave up whenever a publish
+  or an import held the table longer: the upgrade Job exited 1 with `LockNotAvailable`, and every
+  service waited on it. `synodic-upgrade upgrade` now runs such a migration again, after pauses
+  that let the release's queries through, for up to 180 s (`--lock-retry-secs`). Each time it logs
+  the transactions open longer than the wait.
 - **Rebuilding or seeding a graph with a very large container no longer stalls.** For a node
   with hundreds of thousands of relationships, FalkorDB walked all of them on every lookup of one.
   In the 1M nodes + 2M edges scale run, a root with 500,000 children made the lookups run out of
