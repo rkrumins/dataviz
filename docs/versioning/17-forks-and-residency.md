@@ -965,10 +965,11 @@ stays loaded, as before residency.
 - **The versioning worker**, at the start of every capacity pass, from the feature store itself
   (`residency_policy.switch_state`): on, off, or unreadable. Only the worker evicts graphs or brings
   them back, and it decides there; a switch it cannot read makes the pass do nothing.
-- **The API**, through its flag cache (30 seconds), as every switch is read. On, a person's read
-  holds its graph's read lease and is noted for `last_read_at` (§14), and a new graph gets the
-  policy's class (off, Standard). A first seed, a move, an Adopt and a package seed are admitted
-  with it on, and while it cannot be read (§12). The policy routes say `enabled`.
+- **The API**, through its flag cache (a save reaches it within about two seconds), as every switch
+  is read. On, a person's read holds its graph's read lease and is noted for `last_read_at` (§14),
+  and a new graph gets the policy's class (off, Standard). A first seed, a move, an Adopt and a
+  package seed are admitted with it on, and while it cannot be read (§12). The policy routes say
+  `enabled`.
 - **Reads never depend on it.** What only residency writes — `evicted`, `waiting_capacity`,
   `rehydrating` — means "not in FalkorDB" whatever the switch says: such a graph is read from
   Postgres, FalkorDB-only work answers **503** `graph_loading`, and a person's read asks for its

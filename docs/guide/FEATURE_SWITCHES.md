@@ -82,7 +82,7 @@ one must stay available, and the row shows how many are on (for example
 | Who | When they see the change |
 | --- | --- |
 | You, in the tab you made it in | Immediately. |
-| The server | Immediately on the server process that saved the change. Other server processes keep switch values for up to 30 seconds, so allow half a minute for the change to apply on every server. |
+| The server | Immediately on the server process that saved the change. Other server processes see it within about two seconds. If they can't reach Redis, they keep switch values for up to 30 seconds. |
 | Everyone else | Their browser checks when the product loads, whenever they switch back to its tab, and every minute while it stays in view — so the change reaches them within about a minute and a half at most. Nobody needs to reload. |
 
 Turning a switch off makes a capability unavailable; it never deletes
