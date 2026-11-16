@@ -1476,7 +1476,7 @@ async def test_the_retire_pass_drops_a_key_an_eviction_could_not(
 @live
 @pytest.mark.parametrize("residency_class", ["standard", "always"])
 async def test_a_key_the_master_lost_is_evicted_not_reseeded_outside_admission(
-        store, falkor, mine, residency_on, monkeypatch, residency_class):
+        store, falkor, mine, residency_on, monkeypatch, residency_class, settings_world):
     """A master that restarts without its data loses every key it held, and liveness used to
     lower them all to 0 for the poll to reseed at once, unadmitted. With residency on such a graph
     is evicted (lost): a Standard one loads on its next read, an Always one is queued by the next
@@ -1486,7 +1486,7 @@ async def test_a_key_the_master_lost_is_evicted_not_reseeded_outside_admission(
     (gid,) = await _live_graphs(svc, proj, mine, 1)
     await _publish(svc, gid, "B")
     await proj.project_graph(gid)                        # past genesis, a marker at seq 3
-    await _set_ps(gid, residency=residency_class)
+    await _set_class(settings_world, gid, residency_class)
     await (await factory((await _ps(gid)).falkor_graph_name)).delete()      # the master lost it
     await proj.check_liveness()
     ps = await _ps(gid)
