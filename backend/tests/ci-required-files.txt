@@ -122,6 +122,7 @@ tests/test_falkordb_replication.py
 tests/test_falkordb_run_guarded.py
 tests/test_falkordb_store_outage.py
 tests/test_falkordb_write_and_wait_unit.py
+tests/test_feature_flag_generation.py
 tests/test_fold_batch_ops.py
 tests/test_fork_data_sources.py
 tests/test_forks_feature_flag.py

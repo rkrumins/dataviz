@@ -282,6 +282,9 @@ async def patch_features(
             )
     if meta is None:
         meta = await feature_registry_repo.get_ui_meta(session)
+    # Committed first, so what the other processes reload once told is this save.
+    await session.commit()
+    await _flag_service.announce()
 
     schema = [d for d in definitions if not d.get("deprecated")]
     schema_keys = {d["key"] for d in schema}
@@ -447,6 +450,9 @@ async def deprecate_definition(
         raise HTTPException(status_code=404, detail={"detail": f"Feature not found: {key}", "code": "NOT_FOUND"})
     await feature_flags_repo.remove_keys_from_config(session, {key})
     _flag_service.invalidate()
+    # Committed first, so what the other processes reload once told is this change.
+    await session.commit()
+    await _flag_service.announce()
     return await _full_response(session)
 
 
