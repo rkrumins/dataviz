@@ -1,8 +1,10 @@
 /**
  * Screenshot every Admin → Versioned graphs state through the real browser: the Overview, Settings
  * in both lenses, a Review with staged changes, History, a graph's settings drawer, and the states
- * a person can meet (an error, read-only, a fork, a workspace admin), against the harness's
- * in-memory API (`src/harness/versionedGraphsHarness.tsx`).
+ * a person can meet (an error, read-only, a fork, a workspace admin); then a workspace's Versioned
+ * graphs tab (`ws-*`: its defaults within the platform's limits, a review, its graphs, its history)
+ * and a data source's Versioning tab (`ds-*`: the settings summary and the drawer it opens), against
+ * the harness's in-memory API (`src/harness/versionedGraphsHarness.tsx`).
  *
  * Unlike the other shot scripts it drives Chromium over the DevTools Protocol (as `app-probe.mjs`
  * does, without Playwright), because a review exists only after something is staged: each state
@@ -73,6 +75,40 @@ const STATES = {
     'overview-error': { query: 'tab=overview&scenario=error', wait: 'Couldn’t list' },
     readonly: { query: 'tab=settings&scenario=readonly&lens=business', wait: 'You can read these settings' },
     empty: { query: 'tab=history&scenario=empty', wait: 'No changes yet' },
+
+    // A workspace's Versioned graphs tab: its defaults (a workspace admin, unless the scenario says otherwise), graphs and history.
+    'ws-defaults': { query: 'page=workspace&scenario=workspace-admin&lens=business', wait: 'What your settings trade' },
+    'ws-defaults-operator': { query: 'page=workspace&scenario=workspace-admin&lens=operator', wait: 'What your settings trade' },
+    'ws-limits': { query: 'page=workspace&scenario=workspace-admin&lens=operator', hash: '#reads-mode', wait: 'What your settings trade', scrollTo: '#reads-mode' },
+    'ws-platform-wide': { query: 'page=workspace&scenario=workspace-admin&lens=operator', wait: 'What your settings trade', scrollTo: '#category-builds' },
+    'ws-review': {
+        query: 'page=workspace&scenario=workspace-admin&lens=operator', wait: 'What your settings trade', viewport: true,
+        steps: [
+            `__h.click('#reads-mode [role=radio]', 'Always the latest')`,
+            `__h.click('#trash-restoredays button', 'Use recommended')`,
+            'wait:800',
+            `__h.click('button', 'Review changes')`,
+            'wait:600',
+            `__h.type('[role=dialog] textarea', 'Nightly imports were slowing the finance canvases')`,
+            'wait:400',
+        ],
+    },
+    'ws-graphs': { query: 'page=workspace&tab=graphs&scenario=workspace-admin', wait: 'This workspace’s graphs' },
+    'ws-history': { query: 'page=workspace&tab=history&scenario=workspace-admin', wait: 'Every change, with why' },
+    'ws-readonly': { query: 'page=workspace&scenario=readonly&lens=business', wait: 'You can read this workspace’s settings' },
+    'ws-system-admin': { query: 'page=workspace&scenario=ok&lens=business', wait: 'As a system admin', scrollTo: '#category-residency' },
+    'ws-error': { query: 'page=workspace&scenario=error', wait: 'Couldn’t read' },
+    'ws-loading': { query: 'page=workspace&scenario=loading', wait: 'The defaults this workspace' },
+    'ws-graphs-empty': { query: 'page=workspace&tab=graphs&scenario=empty', wait: 'No versioned graphs here yet' },
+
+    // A data source's Versioning tab: the settings summary, where the graph lives, and the drawer opened from the summary.
+    'ds-tab': { query: 'page=datasource&scenario=workspace-admin', wait: 'Values it doesn’t set come from its workspace' },
+    'ds-drawer': {
+        query: 'page=datasource&scenario=workspace-admin', wait: 'Values it doesn’t set come from its workspace', viewport: true,
+        steps: [`__h.click('button', 'Open settings')`, 'wait:1800'],
+    },
+    'ds-fork': { query: 'page=datasource&scenario=fork', wait: 'This graph is a fork' },
+    'ds-error': { query: 'page=datasource&scenario=error', wait: 'Couldn’t read this graph’s settings' },
 }
 
 STATES['review-end'].steps = [
@@ -84,6 +120,9 @@ STATES['review-end'].steps = [
 const DEFAULT_SHOTS = ['overview', 'settings-business', 'settings-operator', 'review', 'history', 'drawer', 'error']
     .flatMap((s) => [s, `${s}:dark`, `${s}:phone`])
     .concat(['inventory:phone', 'review-end', 'settings-residency', 'drawer-fork', 'overview-error', 'readonly', 'empty'])
+    .concat(['ws-defaults', 'ws-graphs', 'ws-history', 'ws-review', 'ds-tab', 'ds-drawer'].flatMap((s) => [s, `${s}:dark`, `${s}:phone`]))
+    .concat(['ws-defaults-operator', 'ws-limits', 'ws-platform-wide', 'ws-readonly', 'ws-system-admin', 'ws-error', 'ws-loading', 'ws-graphs-empty',
+        'ds-fork', 'ds-error'])
 
 function findChromium() {
     if (process.env.CHROMIUM_PATH) return process.env.CHROMIUM_PATH

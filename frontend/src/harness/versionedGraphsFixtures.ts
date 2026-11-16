@@ -1,22 +1,24 @@
 /**
- * The versioned-graphs harness's server: every route Admin → Versioned graphs reads or writes,
- * answered from the section's API fixtures (`AdminVersionedGraphs/__fixtures__/api.ts`), by
- * scenario. A save is applied to the fixture's values, so a review, a save and its Undo play out as
- * they would against the real API.
+ * The versioned-graphs harness's server: every route Admin → Versioned graphs, a workspace's
+ * Versioned graphs tab and a data source's Versioning tab read or write, answered from the section's
+ * API fixtures (`AdminVersionedGraphs/__fixtures__/api.ts`), by scenario. A save is applied to the
+ * fixture's values, so a review, a save and its Undo play out as they would against the real API.
  *
- *   ok               everything answers
- *   loading          the settings, figures and list never answer
- *   error            the settings, figures, list and history fail
+ *   ok               everything answers, for a system admin
+ *   loading          the settings, figures and lists never answer
+ *   error            the settings, figures, lists and history fail
  *   empty            no graphs and no history yet
- *   readonly         the platform's settings for a viewer who may only read them
- *   workspace-admin  a graph's settings for its workspace admin
+ *   readonly         the settings for a viewer who may only read them
+ *   workspace-admin  a workspace's and a graph's settings for the workspace's admin
  *   fork             the graph is a fork (409 follows_root)
  *   conflict         every save is refused: someone changed a value meanwhile
  */
 import {
-    FEATURES, GRAPHS, HEALTH, HISTORY, MASTERS, PROVIDERS, SCHEMA, SUMMARY, WS, GRAPH, ROOT,
-    graphValues, platformValues, preview,
+    BRANCHES, COMMITS, FEATURES, FORK_IMPORT_SETTINGS, FORKS, GRAPHS, HEALTH, HISTORY, IMPORT_SETTINGS, MASTERS, PROVIDERS, RESOLVED,
+    SCHEMA, SUMMARY, WATERMARK, WORKSPACE_GRAPHS, WORKSPACE_HISTORY, WS, GRAPH, ROOT,
+    graphValues, platformValues, preview, workspaceImpact, workspaceValues,
 } from '../components/admin/AdminVersionedGraphs/__fixtures__/api'
+import type { ResolvedSetting, TrailScope } from '../components/settings/types'
 import type { PatchItem } from '../components/settings/useStagedChanges'
 
 export type Scenario = 'ok' | 'loading' | 'error' | 'empty' | 'readonly' | 'workspace-admin' | 'fork' | 'conflict'
@@ -24,9 +26,31 @@ export type Scenario = 'ok' | 'loading' | 'error' | 'empty' | 'readonly' | 'work
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
 const never = () => new Promise<Response>(() => {})
 const failed = (message: string, status = 503) => json({ detail: message }, status)
+const ORDER: TrailScope[] = ['default', 'platform', 'workspace', 'graph']
+
+/** A workspace's values with `changes` saved there: a value null inherits from the nearest level above with one. */
+function savedAtWorkspace<T extends { values: ResolvedSetting[]; version: number }>(place: T, changes: PatchItem[]): T {
+    return {
+        ...place,
+        values: place.values.map((r) => {
+            const c = changes.find((x) => x.key === r.key)
+            if (!c || !('value' in c)) return r
+            const trail = r.trail.map((t) => (t.scope === 'workspace' ? { ...t, value: c.value ?? null } : t))
+            const above = trail.filter((t) => ORDER.indexOf(t.scope) < ORDER.indexOf('workspace') && t.value !== null).at(-1) ?? r.trail[0]
+            const v = c.value ?? above.value ?? r.effective
+            return { ...r, trail, effective: v, declared: v, source: c.value !== null && c.value !== undefined ? 'workspace' : above.scope, version: r.version + 1 }
+        }),
+        version: place.version + 1,
+    }
+}
+
+const conflict = (key: string, scope: string, scopeId: string) => json({ detail: {
+    type: 'settings_conflict', message: 'Changed since it was read', conflicts: [{ key, scope, scopeId, expected: 1, actual: 2 }],
+} }, 409)
 
 export function versionedGraphsFetch(scenario: Scenario): typeof fetch {
     let platform = platformValues(scenario === 'readonly' ? null : 'system_admin')
+    let workspace = workspaceValues(scenario === 'readonly' ? null : scenario === 'workspace-admin' ? 'workspace_admin' : 'system_admin')
     let saves = 0
 
     const save = (changes: PatchItem[]) => {
@@ -78,16 +102,44 @@ export function versionedGraphsFetch(scenario: Scenario): typeof fetch {
         if (/\/admin\/versioning\/settings\/history\/[^/]+\/revert$/.test(p)) return json({ ...platform, changeSetId: 'cs_revert' })
         if (p.endsWith('/admin/versioning/settings')) {
             if (method === 'PATCH') {
-                if (scenario === 'conflict') {
-                    const key = body.changes?.[0]?.key ?? 'reads.mode'
-                    return json({ detail: { type: 'settings_conflict', message: 'Changed since it was read', conflicts: [{ key, scope: 'platform', scopeId: '', expected: 1, actual: 2 }] } }, 409)
-                }
+                if (scenario === 'conflict') return conflict(body.changes?.[0]?.key ?? 'reads.mode', 'platform', '')
                 return json(save(body.changes ?? []))
             }
             if (scenario === 'loading') return never()
             if (scenario === 'error') return failed('The settings store couldn’t be read', 500)
             if (scenario === 'empty') return json({ ...platform, values: [] })
             return json(platform)
+        }
+
+        // A workspace's settings, its graphs and its history (`admin` is the platform's, above).
+        const ws = p.match(/\/api\/v1\/(?!admin\/)[^/]+\/versioning\/settings(\/preview|\/graphs|\/history(?:\/[^/]+\/revert)?)?$/)
+        if (ws) {
+            const rest = ws[1] ?? ''
+            if (rest === '/graphs') {
+                if (scenario === 'loading') return never()
+                if (scenario === 'error') return failed('The graph store didn’t answer in time')
+                return json({ scope: 'workspace', workspaceId: WS, graphs: scenario === 'empty' ? [] : WORKSPACE_GRAPHS, nextCursor: null })
+            }
+            if (rest === '/preview') {
+                const base = Object.fromEntries(workspace.values.map((r) => [r.key, r]))
+                const full = url.searchParams.get('mode') === 'full'
+                return json({ ...preview(body.changes ?? [], full ? 'full' : 'quick', base), scope: 'workspace',
+                    ...(full ? { impact: workspaceImpact(body.changes ?? []) } : {}) })
+            }
+            if (rest.endsWith('/revert')) return json({ ...workspace, changeSetId: 'cs_revert' })
+            if (rest === '/history') {
+                if (scenario === 'error') return failed('The settings store couldn’t be read', 500)
+                return json({ scope: 'workspace', entries: scenario === 'empty' ? [] : WORKSPACE_HISTORY, nextCursor: null })
+            }
+            if (method === 'PATCH') {
+                if (scenario === 'conflict') return conflict(body.changes?.[0]?.key ?? 'reads.mode', 'workspace', WS)
+                saves += 1
+                workspace = savedAtWorkspace(workspace, body.changes ?? [])
+                return json({ ...workspace, changeSetId: `cs_harness_${saves}` })
+            }
+            if (scenario === 'loading') return never()
+            if (scenario === 'error') return failed('The settings store couldn’t be read', 500)
+            return json(workspace)
         }
 
         const graph = p.match(/\/api\/v1\/([^/]+)\/versioning\/graphs\/([^/]+)\/(settings|health)(\/preview)?$/)
@@ -99,7 +151,22 @@ export function versionedGraphsFetch(scenario: Scenario): typeof fetch {
                 return json({ detail: { type: 'follows_root', message: 'A fork follows its root graph’s settings', rootGraphId: ROOT, rootDataSourceId: 'ds_root', workspaceId: WS } }, 409)
             }
             if (method === 'PATCH') return json({ ...graphValues('workspace_admin'), changeSetId: 'cs_graph' })
+            if (scenario === 'loading') return never()
+            if (scenario === 'error') return failed('The settings store couldn’t be read', 500)
             return json(graphValues(scenario === 'workspace-admin' ? 'workspace_admin' : 'system_admin'))
+        }
+
+        // What a data source's Versioning tab reads besides the settings.
+        const vers = p.match(/\/api\/v1\/(?!admin\/)[^/]+\/versioning\/(resolve|graphs\/[^/]+\/(branches|commits|forks|watermark|import-settings)|data-sources\/[^/]+\/pull-requests)$/)
+        if (vers) {
+            const [, route, what] = vers
+            if (route === 'resolve') return json(RESOLVED)
+            if (route.startsWith('data-sources/')) return json([])
+            if (what === 'branches') return json(url.searchParams.getAll('status').length ? [] : BRANCHES)
+            if (what === 'commits') return json(COMMITS)
+            if (what === 'forks') return json(scenario === 'fork' ? [] : FORKS)
+            if (what === 'watermark') return json(WATERMARK)
+            return json(scenario === 'fork' ? FORK_IMPORT_SETTINGS : IMPORT_SETTINGS)
         }
         return json({ detail: `not in the versioned-graphs harness: ${method} ${p}` }, 404)
     }

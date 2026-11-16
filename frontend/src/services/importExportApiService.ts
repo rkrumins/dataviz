@@ -110,9 +110,10 @@ export function whereText(r: Pick<RefusedRow, 'rowIndex' | 'at'>): string {
   return `#${r.rowIndex}`
 }
 
-/** Where an import setting came from: the graph's own, or the platform's; `fork`: a fork matches
- *  by Entity ID where its parent's default is a property, which a fork can't match by yet. */
-export type ImportSettingSource = 'data_source' | 'platform' | 'fork'
+/** Where an import setting came from: the graph's own, its workspace's, or the platform's; `fork`:
+ *  a fork matches by Entity ID where its parent's default is a property, which a fork can't match
+ *  by yet. */
+export type ImportSettingSource = 'data_source' | 'workspace' | 'platform' | 'fork'
 
 /** The replace guard's verdict on a replace import, before it deletes anything. */
 export interface ReplaceGuardVerdict {

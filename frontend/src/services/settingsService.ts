@@ -15,8 +15,9 @@
  *   POST history/{changeSet}/revert   put a change back
  *
  * The rest: the registry with its guidance (`/settings/versioned-graphs/schema`, which the browser
- * revalidates against its ETag), the fleet inventory and its figures, each node's memory, the
- * signals counted over the last day, and one graph's health.
+ * revalidates against its ETag), the fleet inventory and its figures, a workspace's graphs with
+ * what each sets itself (`/{ws}/versioning/settings/graphs`), each node's memory, the signals
+ * counted over the last day, and one graph's health.
  *
  * The server's resolver dicts are the kit's `ResolvedSetting` as they are (`components/settings/
  * types.ts`); the one reshaping here is that a place's values arrive as a list and the kit keys
@@ -30,7 +31,8 @@ import { authFetch } from './apiClient'
 import { withReason } from './activityReason'
 import type { VersionedGraphRow, VersionedGraphsFilter } from './systemStatusService'
 import type {
-    Audience, Editor, Limits, NodeMemory, ResolvedSetting, ResolvedValues, Scope, SettingsSchema, SettingValue, WhyItem,
+    Audience, Editor, Limits, NodeMemory, ResolvedSetting, ResolvedValues, Scope, SettingsSchema, SettingValue, Status, TrailScope,
+    WhyItem,
 } from '@/components/settings/types'
 import type { PatchItem } from '@/components/settings/useStagedChanges'
 
@@ -351,6 +353,34 @@ export interface GraphInventoryPage {
     nextCursor: string | null
 }
 
+/** One setting at a graph, in brief: the value in force, the one chosen, where it came from, and why they differ. */
+export interface BriefSetting {
+    effective: SettingValue
+    declared: SettingValue | null
+    source: TrailScope | 'env'
+    status: Status
+    why: WhyItem[]
+}
+
+/** One of a workspace's versioned graphs, as its page lists them. */
+export interface WorkspaceGraph {
+    graphId: string
+    dataSourceId: string | null
+    /** Its data source's name; null when it has none. */
+    label: string | null
+    /** A fork's root: the graph whose settings it follows. */
+    follows: { graphId: string; dataSourceId: string | null } | null
+    /** The keys of the settings it chose itself (a fork: none). */
+    ownSettings: string[]
+    readMode: BriefSetting
+    residencyClass: BriefSetting
+}
+
+export interface WorkspaceGraphsPage {
+    graphs: WorkspaceGraph[]
+    nextCursor: string | null
+}
+
 /** The fleet's figures, over every live graph but forks. */
 export interface GraphsSummary {
     graphs: number
@@ -492,6 +522,10 @@ export const settingsService = {
 
     summary: (): Promise<GraphsSummary> => call<GraphsSummary>(`${API}/admin/versioning/graphs/summary`),
 
+    /** One page of a workspace's graphs, by graph id; pass the previous page's `nextCursor`. */
+    workspaceGraphs: (workspaceId: string, cursor?: string | null): Promise<WorkspaceGraphsPage> =>
+        call<WorkspaceGraphsPage>(`${API}/${enc(workspaceId)}/versioning/settings/graphs${cursor ? `?cursor=${enc(cursor)}` : ''}`),
+
     /**
      * Each graph store node's memory now: the residency preview of no change (what the memory
      * gauges and the explainers draw). A node whose memory couldn't be read is left out.
@@ -549,6 +583,7 @@ export const settingsKeys = {
     preview: (place: SettingsPlace, mode: PreviewMode, body: string) => [...settingsKeys.all, 'preview', mode, ...placeKey(place), body] as const,
     history: (place: SettingsPlace, filter: HistoryFilter) => [...settingsKeys.all, 'history', ...placeKey(place), filter] as const,
     graphs: (filter: GraphInventoryFilter) => [...settingsKeys.all, 'graphs', filter] as const,
+    workspaceGraphs: (workspaceId: string) => [...settingsKeys.all, 'workspace-graphs', workspaceId] as const,
     summary: () => [...settingsKeys.all, 'summary'] as const,
     nodes: () => [...settingsKeys.all, 'nodes'] as const,
     signals: () => [...settingsKeys.all, 'signals', '24h'] as const,
@@ -629,6 +664,18 @@ export function useGraphInventory(filter: GraphInventoryFilter) {
     return useInfiniteQuery({
         queryKey: settingsKeys.graphs(filter),
         queryFn: ({ pageParam }) => settingsService.graphs(filter, pageParam),
+        initialPageParam: null as string | null,
+        getNextPageParam: (last) => last.nextCursor ?? undefined,
+        retry: 1,
+        refetchOnWindowFocus: false,
+    })
+}
+
+/** A workspace's graphs, a page at a time (by graph id). */
+export function useWorkspaceGraphs(workspaceId: string) {
+    return useInfiniteQuery({
+        queryKey: settingsKeys.workspaceGraphs(workspaceId),
+        queryFn: ({ pageParam }) => settingsService.workspaceGraphs(workspaceId, pageParam),
         initialPageParam: null as string | null,
         getNextPageParam: (last) => last.nextCursor ?? undefined,
         retry: 1,

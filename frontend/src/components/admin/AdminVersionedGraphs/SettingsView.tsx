@@ -1,12 +1,14 @@
 /**
- * Settings — every platform setting, by category, for the platform's system admins.
+ * Settings — every setting, by category: the platform's for its system admins, or a workspace's
+ * (`scope="workspace"`) on that workspace's page, within the platform's limits.
  *
- *   rail          the seven categories, each with how many values differ from the default and how
- *                 many are staged; a select on a phone
+ *   rail          the seven categories, each with how many values are chosen at this level (on the
+ *                 platform: differ from the default) and how many are staged; a select on a phone
  *   toolbar       Business / Operator lens, search (`/`), "Changed only", a profile to start from
  *   guides        the trade-off compass and "Something's wrong?", folded to one line each so the
  *                 first setting is on the first screen
- *   categories    each with its posture, its switch, its settings and what the deployment sets
+ *   categories    each with its posture, its switch, its settings and what the deployment sets;
+ *                 for a workspace, what only the platform sets is listed read-only, with its value
  *   save bar      Review → the full preview, warnings, a reason → Save → Undo
  *
  * A link to `#reads-mode` (or a search result, or a symptom's "Show") scrolls to that setting,
@@ -28,8 +30,8 @@ import {
     type Values, type WhyFix,
 } from '@/components/settings'
 import type { ServedSchema, SettingsValues, SignalCount } from '@/services/settingsService'
-import { CategoryIcon, CategorySection } from './CategorySection'
-import { MasterSwitchCard } from './MasterSwitch'
+import { CategoryIcon, CategorySection, PlatformWideSettings } from './CategorySection'
+import { MasterSwitchCard, MasterSwitchStatus } from './MasterSwitch'
 import type { FeatureSwitches } from './useFeatureSwitches'
 import { categoryAnchor } from './meta'
 import { ProfileEntry } from './ProfileEntry'
@@ -38,10 +40,37 @@ import { VisualContext } from './visualContext'
 import { SavedBar, SettingsReview } from './SettingsReview'
 import type { SettingsEditor } from './useSettingsEditor'
 
-/** A value chosen here that differs from the default. */
-const changedHere = (r: ResolvedSetting) => {
-    const own = ownValue(r, 'platform')
-    return own !== null && !sameValue(own, r.trail[0]?.value)
+type Level = 'platform' | 'workspace'
+
+/** On the platform, a value chosen there that differs from the default; for a workspace, any value it chose. */
+const changedHere = (r: ResolvedSetting, scope: Level) => {
+    const own = ownValue(r, scope)
+    return own !== null && (scope !== 'platform' || !sameValue(own, r.trail[0]?.value))
+}
+
+/** What the page says about the values chosen at its level. */
+const WORDS: Record<Level, {
+    changed: (n: number) => string
+    /** None chosen: `settable`, how many could be. */
+    none: (settable: number) => string
+    only: string
+    onlyLabel: string
+    readOnly: string
+}> = {
+    platform: {
+        changed: (n) => `${n} changed`,
+        none: () => 'All defaults',
+        only: 'Changed only',
+        onlyLabel: 'Show changed settings only',
+        readOnly: 'You can read these settings and why each is what it is. Only a system admin can change them.',
+    },
+    workspace: {
+        changed: (n) => `${n} ${n === 1 ? 'value' : 'values'} set here`,
+        none: (settable) => (settable ? 'All inherited' : 'Platform-wide'),
+        only: 'Set here only',
+        onlyLabel: 'Show settings set for this workspace only',
+        readOnly: 'You can read this workspace’s settings and why each is what it is. A workspace admin can change them.',
+    },
 }
 
 /** Seven axes on a tile: the compass at a glance, beside its one-line summary. */
@@ -99,11 +128,12 @@ function CompassSummary({ dimensions, settings, current, next, inactive, open, o
     )
 }
 
-const RailItem = memo(function RailItem({ id, label, icon, changed, staged, current, onJump }: {
+const RailItem = memo(function RailItem({ id, label, icon, note, staged, current, onJump }: {
     id: string
     label: string
     icon: string
-    changed: number
+    /** How many values are chosen at this level, in words: "2 changed", "All defaults". */
+    note: string
     staged: number
     current: boolean
     onJump: (id: string) => void
@@ -120,7 +150,7 @@ const RailItem = memo(function RailItem({ id, label, icon, changed, staged, curr
                 <span className="min-w-0 flex-1">
                     <span className="block truncate text-[13px] font-medium">{label}</span>
                     <span className="block text-[11px] text-ink-muted">
-                        {changed ? `${changed} changed` : 'All defaults'}
+                        {note}
                         {staged > 0 && <span className="font-semibold text-accent-lineage"> · {staged} not saved</span>}
                     </span>
                 </span>
@@ -130,17 +160,23 @@ const RailItem = memo(function RailItem({ id, label, icon, changed, staged, curr
     )
 })
 
-export function SettingsView({ schema, data, editor, switches, facts, signals, readOnly }: {
+export function SettingsView({ schema, data, editor, switches, facts, signals, readOnly, scope = 'platform', where = 'the platform' }: {
     schema: ServedSchema
     data: SettingsValues
     editor: SettingsEditor
-    switches: FeatureSwitches
+    /** The feature switches, which the platform's page turns on and off; without them a category's switch is shown, not flipped. */
+    switches?: FeatureSwitches
     facts: SettingsFacts
     /** Signal counts for the finder, where the server counts them. */
     signals?: SignalCount[]
     readOnly: boolean
+    /** The level edited: the platform, or a workspace, within the platform's limits. */
+    scope?: Level
+    /** Where a save applies, for the review: "the platform", "the Finance workspace". */
+    where?: string
 }) {
     const values = data.values
+    const words = WORDS[scope]
     const { staged } = editor
     const [lens, setLens] = useLens()
     const [onlyChangedAsked, setOnlyChanged] = useState(false)
@@ -154,7 +190,8 @@ export function SettingsView({ schema, data, editor, switches, facts, signals, r
     const byKey = useMemo(() => Object.fromEntries(schema.settings.map((s) => [s.key, s])), [schema.settings])
     const keyOfAnchor = useMemo(() => Object.fromEntries(schema.settings.map((s) => [settingAnchor(s.key), s.key])), [schema.settings])
     const present = useMemo(() => schema.settings.filter((s) => values[s.key]), [schema.settings, values])
-    const editLimits = data.editor === 'system_admin' && !readOnly
+    // What the platform lets lower levels choose is set on the platform alone.
+    const editLimits = scope === 'platform' && data.editor === 'system_admin' && !readOnly
 
     const categories = useMemo(() => {
         const sorted = [...schema.categories].sort((a, b) => a.order - b.order)
@@ -168,20 +205,22 @@ export function SettingsView({ schema, data, editor, switches, facts, signals, r
         for (const k of [...staged.changes.map((c) => c.key), ...staged.limitChanges.map((l) => l.key)]) out.set(k, (out.get(k) ?? 0) + 1)
         return out
     }, [staged.changes, staged.limitChanges])
+    // Counted over the settings this level can have: below the platform, some are the platform's alone.
     const counts = useMemo(() => Object.fromEntries(categories.map((c) => {
-        const own = present.filter((s) => s.category === c.id)
+        const own = present.filter((s) => s.category === c.id && s.scopes[scope])
         return [c.id, {
             total: own.length,
-            changed: own.filter((s) => changedHere(values[s.key])).length,
+            changed: own.filter((s) => changedHere(values[s.key], scope)).length,
             staged: own.reduce((n, s) => n + (stagedKeys.get(s.key) ?? 0), 0),
         }]
-    })), [categories, present, values, stagedKeys])
+    })), [categories, present, values, stagedKeys, scope])
     const changedTotal = Object.values(counts).reduce((n, c) => n + c.changed, 0)
+    const note = (id: string) => (counts[id]?.changed ? words.changed(counts[id].changed) : words.none(counts[id]?.total ?? 0))
 
     // The setting a link points at (`#reads-mode`) is marked, and shown even when "Changed only"
     // would hide it.
     const highlight: string | null = keyOfAnchor[location.hash.slice(1)] ?? null
-    const onlyChanged = onlyChangedAsked && !(highlight && !changedHere(values[highlight]) && !stagedKeys.has(highlight))
+    const onlyChanged = onlyChangedAsked && !(highlight && !changedHere(values[highlight], scope) && !stagedKeys.has(highlight))
     const inactive = useMemo(() => Object.values(values).filter((r) => r.status === 'dormant' || r.status === 'not_used').map((r) => r.key), [values])
 
     // ── Showing one setting: a deep link, a search result, a symptom's "Show" ──
@@ -237,13 +276,14 @@ export function SettingsView({ schema, data, editor, switches, facts, signals, r
     useEffect(() => { latestSwitches.current = switches })
     const { stage } = editor
     const onFix = useCallback((fix: WhyFix) => {
-        if (fix.feature) latestSwitches.current.request(fix.feature, fix.to !== false)
+        if (fix.feature) latestSwitches.current?.request(fix.feature, fix.to !== false)
         else if (fix.setting) {
             stage(fix.setting, fix.to)
             show(fix.setting)
         }
     }, [stage, show])
-    const featureNames = useMemo(() => ({ ...FEATURE_NAMES, ...switches.names }), [switches.names])
+    const switchNames = switches?.names
+    const featureNames = useMemo(() => ({ ...FEATURE_NAMES, ...switchNames }), [switchNames])
     const fixLabel = useCallback((fix: WhyFix) => describeFix(fix, { settings: byKey, featureNames }), [byKey, featureNames])
     const { current, next } = staged
     const visuals = useMemo(() => ({ settings: byKey, current, next, facts, stage }), [byKey, current, next, facts, stage])
@@ -254,7 +294,7 @@ export function SettingsView({ schema, data, editor, switches, facts, signals, r
             key={s.key}
             setting={s}
             resolved={values[s.key]}
-            scope="platform"
+            scope={scope}
             lens={lens}
             staged={staged.isStaged(s.key) ? staged.valueAt(s.key) : undefined}
             error={editor.errors[s.key]}
@@ -303,7 +343,7 @@ export function SettingsView({ schema, data, editor, switches, facts, signals, r
                     <p className="px-3 pb-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-ink-muted">Categories</p>
                     <ul className="space-y-0.5">
                         {categories.map((c) => (
-                            <RailItem key={c.id} id={c.id} label={c.label} icon={c.icon} changed={counts[c.id]?.changed ?? 0}
+                            <RailItem key={c.id} id={c.id} label={c.label} icon={c.icon} note={note(c.id)}
                                 staged={counts[c.id]?.staged ?? 0} current={currentCategory === c.id} onJump={jump} />
                         ))}
                     </ul>
@@ -317,7 +357,7 @@ export function SettingsView({ schema, data, editor, switches, facts, signals, r
                             onChange={jump}
                             options={categories.map((c) => ({
                                 value: c.id,
-                                label: `${c.label}${counts[c.id]?.changed ? ` · ${counts[c.id].changed} changed` : ''}${counts[c.id]?.staged ? ` · ${counts[c.id].staged} not saved` : ''}`,
+                                label: `${c.label}${counts[c.id]?.changed ? ` · ${words.changed(counts[c.id].changed)}` : ''}${counts[c.id]?.staged ? ` · ${counts[c.id].staged} not saved` : ''}`,
                             }))}
                         />
                     </div>
@@ -325,21 +365,21 @@ export function SettingsView({ schema, data, editor, switches, facts, signals, r
                     {readOnly && (
                         <p role="note" className="flex items-start gap-2 rounded-2xl border border-glass-border/60 bg-black/[0.02] px-4 py-3 text-[13px] text-ink-secondary dark:bg-white/[0.03]">
                             <Eye aria-hidden className="mt-0.5 w-4 h-4 shrink-0 text-ink-muted" />
-                            You can read these settings and why each is what it is. Only a system admin can change them.
+                            {words.readOnly}
                         </p>
                     )}
 
                     <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
                         <LensSwitch value={lens} onChange={setLens} />
                         <label className="inline-flex items-center gap-2 text-[13px] font-medium text-ink-secondary">
-                            <Switch size="sm" checked={onlyChanged} onChange={askOnlyChanged} aria-label="Show changed settings only" />
-                            Changed only <span className="text-xs font-normal text-ink-muted">({changedTotal + stagedKeys.size})</span>
+                            <Switch size="sm" checked={onlyChanged} onChange={askOnlyChanged} aria-label={words.onlyLabel} />
+                            {words.only} <span className="text-xs font-normal text-ink-muted">({changedTotal + stagedKeys.size})</span>
                         </label>
                     </div>
                     <SettingsSearch className="max-w-2xl" settings={present} categories={schema.categories} onSelect={show} placeholder={searchPlaceholder} />
 
                     {!readOnly && (
-                        <ProfileEntry profiles={schema.profiles} scope="platform" editor={data.editor} resolved={values} onStage={editor.stage} />
+                        <ProfileEntry profiles={schema.profiles} scope={scope} editor={data.editor} resolved={values} onStage={editor.stage} />
                     )}
 
                     <div className="grid gap-3 lg:grid-cols-2">
@@ -369,18 +409,25 @@ export function SettingsView({ schema, data, editor, switches, facts, signals, r
                     <div className="space-y-12">
                         {categories.map((c) => {
                             const all = present.filter((s) => s.category === c.id)
-                            const shown = onlyChanged ? all.filter((s) => changedHere(values[s.key]) || stagedKeys.has(s.key)) : all
+                            const settable = all.filter((s) => s.scopes[scope])
+                            // Below the platform: what only the platform sets, read-only, with the value in force here.
+                            const fixed = all.filter((s) => !s.scopes[scope])
+                            const shown = onlyChanged ? settable.filter((s) => changedHere(values[s.key], scope) || stagedKeys.has(s.key)) : settable
                             return (
                                 <CategorySection
                                     key={c.id}
                                     category={c}
+                                    scope={scope}
                                     settings={shown}
-                                    total={all.length}
+                                    total={settable.length}
                                     changed={counts[c.id]?.changed ?? 0}
                                     staged={counts[c.id]?.staged ?? 0}
                                     lens={lens}
-                                    masterSwitch={c.masterSwitch ? <MasterSwitchCard featureKey={c.masterSwitch} switches={switches} readOnly={readOnly} /> : undefined}
+                                    masterSwitch={!c.masterSwitch ? undefined : switches
+                                        ? <MasterSwitchCard featureKey={c.masterSwitch} switches={switches} readOnly={readOnly} />
+                                        : <MasterSwitchStatus featureKey={c.masterSwitch} />}
                                     extra={onlyChanged ? undefined : memoryGauges(c.id)}
+                                    fixed={onlyChanged || fixed.length === 0 ? undefined : <PlatformWideSettings settings={fixed} values={values} highlight={highlight} />}
                                     deployment={onlyChanged ? [] : schema.deployment.filter((f) => f.category === c.id)}
                                     row={row}
                                     filtered={onlyChanged}
@@ -400,7 +447,7 @@ export function SettingsView({ schema, data, editor, switches, facts, signals, r
                 open={editor.review.open}
                 onOpenChange={editor.review.setOpen}
                 items={editor.review.items}
-                where="the platform"
+                where={where}
                 settings={byKey}
                 dimensions={schema.dimensions}
                 impact={editor.review.full?.impact}
@@ -422,7 +469,7 @@ export function SettingsView({ schema, data, editor, switches, facts, signals, r
             >
                 Your staged changes go back to the values in force. Nothing has been saved.
             </ConfirmDialog>
-            {switches.dialogs}
+            {switches?.dialogs}
             <p className="sr-only" aria-live="polite">{editor.announcement}</p>
         </VisualContext.Provider>
     )

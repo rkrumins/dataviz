@@ -1,7 +1,8 @@
 /**
  * History — every change to versioned-graph settings, newest first: who made it, when, why, how
  * (saved here, through the old settings, carried over when settings moved, or a revert), where (the
- * platform, a workspace, a graph), and each value and limit from → to.
+ * platform, a workspace, a graph), and each value and limit from → to. On the platform it lists
+ * every change; on a workspace's page (`place`), the workspace's own and its graphs'.
  *
  * Filters run on the server. "Put back…" opens the same review a save does — what each value goes
  * back to, what that would do where it can be worked out, a reason — then reverts the change as one.
@@ -18,7 +19,8 @@ import { Select } from '@/components/ui/Select'
 import { Skeleton } from '@/components/ui/Skeleton'
 import { useAppNotifications } from '@/components/ui/notifications'
 import {
-    ScopeBadge, changeImpacts, describeLimits, formatValue, sameLimits, type Limits, type ReviewItem, type Setting, type SettingValue,
+    ScopeBadge, changeImpacts, describeLimits, formatValue, sameLimits, type Limits, type ReviewItem, type Scope, type Setting,
+    type SettingValue,
 } from '@/components/settings'
 import {
     PLATFORM, groupChangeSets, settingsError, useRevertChangeSet, useSettingsHistory, useSettingsPreview,
@@ -65,7 +67,13 @@ function revertItems(set: ChangeSet, settings: Record<string, Setting>): ReviewI
     })
 }
 
-function ChangeSetCard({ set, settings, onRevert }: { set: ChangeSet; settings: Record<string, Setting>; onRevert: (set: ChangeSet) => void }) {
+function ChangeSetCard({ set, settings, name, onRevert }: {
+    set: ChangeSet
+    settings: Record<string, Setting>
+    /** The workspace's or graph's name, where the page knows it. */
+    name: string | null
+    onRevert: (set: ChangeSet) => void
+}) {
     return (
         <article aria-label={`Change by ${set.actor?.name ?? 'the system'}`} className="rounded-2xl border border-glass-border/50 bg-canvas-elevated">
             <header className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-glass-border/40 px-5 py-3">
@@ -73,7 +81,9 @@ function ChangeSetCard({ set, settings, onRevert }: { set: ChangeSet; settings: 
                 <span className="text-xs text-ink-muted"><DateTime at={set.at} /></span>
                 <Badge tone={set.source === 'revert' ? 'info' : 'neutral'} size="sm">{SOURCE_LABEL[set.source] ?? set.source}</Badge>
                 <ScopeBadge scope={set.scope} />
-                {set.scope !== 'platform' && <code className="max-w-[12rem] truncate font-mono text-[10.5px] text-ink-muted" title={set.scopeId}>{set.scopeId}</code>}
+                {set.scope !== 'platform' && (name
+                    ? <span className="max-w-[14rem] truncate text-xs font-medium text-ink-secondary" title={set.scopeId}>{name}</span>
+                    : <code className="max-w-[12rem] truncate font-mono text-[10.5px] text-ink-muted" title={set.scopeId}>{set.scopeId}</code>)}
                 <Button size="sm" variant="ghost" leftIcon={Undo2} onClick={() => onRevert(set)} className="ml-auto">Put back…</Button>
             </header>
             <div className="space-y-3 px-5 py-3.5">
@@ -108,9 +118,16 @@ function ChangeSetCard({ set, settings, onRevert }: { set: ChangeSet; settings: 
     )
 }
 
-export function HistoryView({ schema, onGoToSettings }: { schema: ServedSchema; onGoToSettings: () => void }) {
+export function HistoryView({ schema, place = PLATFORM, placeName, onGoToSettings }: {
+    schema: ServedSchema
+    /** Whose history: the platform's (every change), or a workspace's (its own values and its graphs'). */
+    place?: SettingsPlace
+    /** A workspace's or a graph's name, by its id (a graph's: its data source's), where the page knows it. */
+    placeName?: (scope: Scope, scopeId: string) => string | null
+    onGoToSettings: () => void
+}) {
     const [filter, setFilter] = useState<HistoryFilter>({})
-    const q = useSettingsHistory(PLATFORM, filter)
+    const q = useSettingsHistory(place, filter)
     const settings = useMemo(() => Object.fromEntries(schema.settings.map((s) => [s.key, s])), [schema.settings])
     const entries = useMemo(() => q.data?.pages.flatMap((p) => p.entries) ?? [], [q.data])
     const sets = useMemo(() => groupChangeSets(entries), [entries])
@@ -118,18 +135,26 @@ export function HistoryView({ schema, onGoToSettings }: { schema: ServedSchema; 
     const [reverting, setReverting] = useState<ChangeSet | null>(null)
     const [round, setRound] = useState(0)
     const [error, setError] = useState<SettingsRequestError | null>(null)
-    const revert = useRevertChangeSet(PLATFORM)
+    const revert = useRevertChangeSet(place)
     const { notify } = useAppNotifications()
     const filtered = Object.keys(filter).length > 0
+    const nameOf = (set: ChangeSet) => (set.scope === 'platform' ? null : placeName?.(set.scope, set.scopeId) ?? null)
+    /** Where putting a change set back applies, for its review: "the platform", "the Finance workspace", "Sales lineage". */
+    const whereOf = (set: ChangeSet) => {
+        const name = nameOf(set)
+        if (set.scope === 'platform') return 'the platform'
+        if (set.scope === 'workspace') return name ? `the ${name} workspace` : 'a workspace'
+        return name ?? 'a graph'
+    }
 
-    const place = reverting ? placeOf(reverting) : null
-    const previewItems = useMemo(() => (reverting && place ? reverting.entries.map((e) => ({
+    const revertPlace = reverting ? placeOf(reverting) : null
+    const previewItems = useMemo(() => (reverting && revertPlace ? reverting.entries.map((e) => ({
         key: e.key,
         ...(e.from.value !== e.to.value ? { value: e.from.value } : {}),
         ...(reverting.scope === 'platform' && limitsChanged(e) ? { limits: e.from.limits as Limits | null } : {}),
         expectedVersion: e.version,
-    })) : []), [reverting, place])
-    const preview = useSettingsPreview(place ?? PLATFORM, previewItems, 'full', { enabled: Boolean(reverting && place) })
+    })) : []), [reverting, revertPlace])
+    const preview = useSettingsPreview(revertPlace ?? PLATFORM, previewItems, 'full', { enabled: Boolean(reverting && revertPlace) })
 
     const field = (key: keyof HistoryFilter) => (value: string) => setFilter((f) => {
         const next = { ...f }
@@ -169,9 +194,11 @@ export function HistoryView({ schema, onGoToSettings }: { schema: ServedSchema; 
             <div className="flex flex-wrap items-center gap-2">
                 <Select size="sm" aria-label="Setting" value={filter.key ?? ''} onChange={field('key')}
                     options={[{ value: '', label: 'Every setting' }, ...schema.settings.map((s) => ({ value: s.key, label: s.label }))]} />
-                <Select size="sm" aria-label="Where" value={filter.scope ?? ''} onChange={field('scope')}
-                    options={[{ value: '', label: 'Platform, workspaces and graphs' }, { value: 'platform', label: 'The platform' },
-                        { value: 'workspace', label: 'Workspaces' }, { value: 'graph', label: 'Graphs' }]} />
+                {place.scope === 'platform' && (
+                    <Select size="sm" aria-label="Where" value={filter.scope ?? ''} onChange={field('scope')}
+                        options={[{ value: '', label: 'Platform, workspaces and graphs' }, { value: 'platform', label: 'The platform' },
+                            { value: 'workspace', label: 'Workspaces' }, { value: 'graph', label: 'Graphs' }]} />
+                )}
                 <Select size="sm" aria-label="Who" value={filter.actor ?? ''} onChange={field('actor')}
                     options={[{ value: '', label: 'Anyone' }, ...people.map((p) => ({ value: p.id, label: p.name ?? p.id }))]} />
                 <label className="inline-flex items-center gap-1.5 text-xs text-ink-muted">
@@ -205,7 +232,9 @@ export function HistoryView({ schema, onGoToSettings }: { schema: ServedSchema; 
                 />
             ) : (
                 <div className="space-y-3">
-                    {sets.map((set) => <ChangeSetCard key={set.id} set={set} settings={settings} onRevert={(s) => { setError(null); setReverting(s) }} />)}
+                    {sets.map((set) => (
+                        <ChangeSetCard key={set.id} set={set} settings={settings} name={nameOf(set)} onRevert={(s) => { setError(null); setReverting(s) }} />
+                    ))}
                     {q.hasNextPage && (
                         <div className="flex justify-center pt-1">
                             <Button size="sm" variant="secondary" loading={q.isFetchingNextPage} onClick={() => void q.fetchNextPage()}>Load older changes</Button>
@@ -218,14 +247,14 @@ export function HistoryView({ schema, onGoToSettings }: { schema: ServedSchema; 
                 open={reverting !== null}
                 onOpenChange={(open) => { if (!open) setReverting(null) }}
                 items={reverting ? revertItems(reverting, settings) : []}
-                where={!reverting ? '' : reverting.scope === 'platform' ? 'the platform' : reverting.scope === 'workspace' ? 'a workspace' : 'a graph'}
+                where={reverting ? whereOf(reverting) : ''}
                 settings={settings}
                 dimensions={schema.dimensions}
-                impact={place ? preview.data?.impact : undefined}
-                impactPending={Boolean(place) && preview.isFetching}
-                impactError={place && preview.error ? settingsError(preview.error) : null}
+                impact={revertPlace ? preview.data?.impact : undefined}
+                impactPending={Boolean(revertPlace) && preview.isFetching}
+                impactError={revertPlace && preview.error ? settingsError(preview.error) : null}
                 onRetryImpact={() => void preview.refetch()}
-                impactNote={reverting && !place ? 'What putting a graph’s values back does is checked when they are put back: a value someone changed since is refused, and nothing changes.' : undefined}
+                impactNote={reverting && !revertPlace ? 'What putting a graph’s values back does is checked when they are put back: a value someone changed since is refused, and nothing changes.' : undefined}
                 onSave={doRevert}
                 saving={revert.isPending}
                 error={error}

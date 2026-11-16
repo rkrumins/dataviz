@@ -7,6 +7,10 @@
  * key is found rather than its source's. `showActions` adds Check sync and Rebuild for managers;
  * everyone else gets the same card read-only. A customer's graph another writer kept writing to
  * says how much of it history doesn't hold; with `dataSourceId`, a manager brings that in.
+ *
+ * What readers get while a newer version lands is the read mode in force, where it was chosen and
+ * why it differs from the one chosen: the watermark's, from a server that resolves it through the
+ * settings (it says why: `readModeWhy`), else the settings' answer for the graph (`reads.mode`).
  */
 import { useState } from 'react'
 import { Database, History, RefreshCw, RotateCcw } from 'lucide-react'
@@ -20,10 +24,14 @@ import { Skeleton, SkeletonText } from '@/components/ui/Skeleton'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { PlacementRow } from '@/components/admin/AdminGraphStore/GraphStorePlacementCard'
 import { useGraphPlacementByGraph } from '@/components/admin/shared/useGraphStoreTopology'
+import { formatValue, sameValue } from '@/components/settings/format'
+import type { TrailScope } from '@/components/settings/types'
 import type { ExternalDrift, Watermark } from '@/services/versioningApiService'
+import { settingsError, useSettingsSchema, useSettingsValues } from '@/services/settingsService'
 import {
   useBringIntoHistory, useProjectionWatermark, useReconcileProjection, useRebuildProjection,
 } from '../hooks/useVersioning'
+import { SourceChip } from './SettingSource'
 
 const plural = (n: number, one: string, many: string) => `${n.toLocaleString()} ${n === 1 ? one : many}`
 
@@ -49,6 +57,68 @@ const EVICTED_BECAUSE: Record<string, string> = {
   idle_standard: 'unread past its idle time', idle_coldline: 'unread past its idle time',
   pressure: 'to make room', lost: 'its graph store lost it', admin: 'by an administrator',
   load_stalled: 'its load stalled; it loads again on its next read',
+}
+
+/** The read mode in force, the one chosen, where it was chosen, and why the two differ. */
+interface InForce {
+  effective: string
+  declared: string | null
+  source: TrailScope | 'env' | null
+  why: Array<{ text: string }>
+}
+
+/**
+ * What readers get while a newer version lands: the mode in force. Where it is the mode chosen, where
+ * that was chosen; where it isn't, what was chosen, where, and why. The watermark's, when it says
+ * why; else the settings' answer for the graph, read once (the watermark is what this card polls).
+ */
+function ReadModeRow({ wm, wsId, graphId }: { wm: Watermark; wsId: string; graphId: string }) {
+  const fromWatermark = Array.isArray(wm.readModeWhy) && Boolean(wm.readMode)
+  const schemaQ = useSettingsSchema()
+  const valuesQ = useSettingsValues({ scope: 'graph', workspaceId: wsId, graphId }, { enabled: !fromWatermark, staged: () => true })
+  const reads = schemaQ.data?.settings.find((s) => s.key === 'reads.mode')
+  const resolved = valuesQ.data?.values['reads.mode']
+  const r: InForce | null = fromWatermark
+    ? { effective: wm.readMode!, declared: wm.readModeDeclared ?? null, source: wm.readModeSource ?? null, why: wm.readModeWhy! }
+    : resolved ? { effective: String(resolved.effective), declared: resolved.declared === null ? null : String(resolved.declared),
+      source: resolved.source, why: resolved.status === 'in_effect' ? [] : resolved.why } : null
+  const error = fromWatermark ? null : valuesQ.error ? settingsError(valuesQ.error) : null
+  const say = (id: string) => (reads ? formatValue(reads, id) : id)
+
+  let shown
+  if (error?.type === 'follows_root') {
+    shown = <span className="text-ink-secondary">The same as the graph it was forked from</span>
+  } else if (error) {
+    shown = <><span aria-hidden>—</span><span className="sr-only">Not known</span><span className="block text-[11px] text-ink-secondary">Couldn’t be read: {error.message}</span></>
+  } else if (!r || (!reads && !schemaQ.error)) {
+    // Without the registry's names (it couldn't be read), the mode's own id says it.
+    shown = <Skeleton className="h-4 w-48 max-w-full" />
+  } else {
+    const chosen = r.declared && !sameValue(r.declared, r.effective) ? r.declared : null
+    const where = r.source && <SourceChip source={r.source} />
+    shown = (
+      <>
+        <span className="inline-flex flex-wrap items-center gap-1.5">
+          <HoverTip label={say(r.effective)} detail={reads?.choices.find((c) => c.id === r.effective)?.promise ?? ''}>
+            <span className="font-medium">{say(r.effective)}</span>
+          </HoverTip>
+          {!chosen && where}
+        </span>
+        {chosen && (
+          <span className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[11px] text-ink-secondary">
+            <span>Chosen: {say(chosen)}</span>{where}
+          </span>
+        )}
+        {r.why[0]?.text && <span className="block text-[11px] text-amber-800 dark:text-amber-400">{r.why[0].text}</span>}
+      </>
+    )
+  }
+  return (
+    <>
+      <dt className="text-ink-secondary">Readers get</dt>
+      <dd className="min-w-0 text-ink">{shown}</dd>
+    </>
+  )
 }
 
 /** Whether the graph is in memory, in plain words (residency, doc 17). */
@@ -147,6 +217,7 @@ export function ProjectionHealthCard({ wsId, graphId, showActions = false, dataS
         <dd className="font-mono text-[11px] text-ink-secondary break-all">{wm.projectionKey}</dd>
         <dt className="text-ink-muted">Watermark</dt>
         <dd className="text-ink tabular-nums">{watermarkText(wm)}</dd>
+        <ReadModeRow wm={wm} wsId={wsId} graphId={graphId} />
         {wm.residency && (
           <>
             <dt className="text-ink-muted">Residency</dt>

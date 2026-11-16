@@ -12,16 +12,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useLocation, useNavigate, useSearchParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
-import { BookOpen, History, LayoutDashboard, RotateCw, SlidersHorizontal } from 'lucide-react'
+import { BookOpen, History, LayoutDashboard, SlidersHorizontal } from 'lucide-react'
 import { PageContainer } from '@/components/layout/PageContainer'
-import { Button } from '@/components/ui/Button'
 import { EmptyState } from '@/components/ui/EmptyState'
-import { Skeleton } from '@/components/ui/Skeleton'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/Tabs'
 import { settingAnchor, type ResolvedValues, type SettingValue } from '@/components/settings'
 import { systemStatusService, type VersionedGraphRow } from '@/services/systemStatusService'
 import {
-    PLATFORM, settingsError, signalCounts, useNodeMemory, useSettingsSchema, useSettingsValues, useSignals,
+    PLATFORM, signalCounts, useNodeMemory, useSettingsSchema, useSettingsValues, useSignals,
 } from '@/services/settingsService'
 import { GraphSettingsDrawer } from './GraphSettingsDrawer'
 import { HistoryView } from './HistoryView'
@@ -29,34 +27,12 @@ import { useFeatureSwitches } from './useFeatureSwitches'
 import { categoryAnchor } from './meta'
 import { Overview } from './Overview'
 import { SettingsView } from './SettingsView'
+import { Failed, SettingsSkeleton } from './states'
 import { useSettingsEditor } from './useSettingsEditor'
 
 const TABS = ['overview', 'settings', 'history'] as const
 type Tab = (typeof TABS)[number]
 const EMPTY: ResolvedValues = {}
-
-function Failed({ what, error, onRetry }: { what: string; error: unknown; onRetry: () => void }) {
-    return (
-        <div role="alert" className="flex flex-wrap items-center gap-3 rounded-2xl border border-rose-500/25 bg-rose-500/[0.05] px-5 py-4">
-            <p className="min-w-0 flex-1 text-[13px] text-rose-700 dark:text-rose-300">Couldn’t read {what}: {settingsError(error).message}</p>
-            <Button size="sm" leftIcon={RotateCw} onClick={onRetry}>Try again</Button>
-        </div>
-    )
-}
-
-function SettingsSkeleton() {
-    return (
-        <div aria-busy="true" aria-label="Loading the settings" className="grid gap-10 lg:grid-cols-[13.5rem_minmax(0,1fr)]">
-            <div className="hidden space-y-2 lg:block">{[0, 1, 2, 3, 4, 5, 6].map((i) => <Skeleton key={i} className="h-10 rounded-xl" />)}</div>
-            <div className="space-y-4">
-                <Skeleton className="h-9 w-80 rounded-xl" />
-                <Skeleton className="h-10 w-full max-w-2xl rounded-xl" />
-                <Skeleton className="h-24 rounded-2xl" />
-                {[0, 1, 2].map((i) => <Skeleton key={i} className="h-48 rounded-2xl" />)}
-            </div>
-        </div>
-    )
-}
 
 export function AdminVersionedGraphs() {
     const [params, setParams] = useSearchParams()

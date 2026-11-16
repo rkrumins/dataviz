@@ -1,11 +1,16 @@
 /**
  * One category of settings: its hero (what it covers, and the posture sentence the server writes
  * from the values in force), its switch where it has one, its settings grouped by the registry's
- * sections, and what the deployment sets for it, read-only.
+ * sections, what only the platform sets (on a workspace's page), and what the deployment sets for
+ * it, read-only.
  */
 import type { ReactNode } from 'react'
-import { Activity, Database, Eye, GitBranch, Layers, MemoryStick, Server, Settings2, Upload, type LucideIcon } from 'lucide-react'
-import type { Category, DeploymentFact, Lens, Setting } from '@/components/settings'
+import { Activity, Database, Eye, GitBranch, Globe, Layers, MemoryStick, Server, Settings2, Upload, type LucideIcon } from 'lucide-react'
+import { cn } from '@/lib/utils'
+import {
+    ScopeBadge, StatusBadge, formatValue, settingAnchor,
+    type Category, type DeploymentFact, type Lens, type ResolvedValues, type Setting,
+} from '@/components/settings'
 import { categoryAnchor } from './meta'
 
 const CATEGORY_ICONS: Record<string, LucideIcon> = {
@@ -43,14 +48,69 @@ function DeploymentFacts({ facts, lens }: { facts: DeploymentFact[]; lens: Lens 
     )
 }
 
+/**
+ * On a workspace's page, a category's settings only a system admin sets, for every workspace: each
+ * with the value in force here and where it came from. Each keeps its anchor, so a search or a
+ * link to it lands here.
+ */
+export function PlatformWideSettings({ settings, values, highlight }: {
+    settings: Setting[]
+    values: ResolvedValues
+    /** The setting a link points at. */
+    highlight: string | null
+}) {
+    return (
+        <section aria-label="Set for the whole platform" className="rounded-2xl border border-glass-border/50 bg-black/[0.015] dark:bg-white/[0.02]">
+            <div className="px-5 pt-4">
+                <h3 className="flex items-center gap-2 text-[13px] font-semibold text-ink">
+                    <Globe aria-hidden className="w-3.5 h-3.5 text-ink-secondary" /> Set for the whole platform
+                </h3>
+                <p className="mt-0.5 text-xs text-ink-secondary">In force for this workspace’s graphs. Only a system admin changes these, for every workspace at once.</p>
+            </div>
+            <ul className="mt-3 divide-y divide-glass-border/40 border-t border-glass-border/40">
+                {settings.map((s) => {
+                    const r = values[s.key]
+                    return (
+                        <li key={s.key} id={settingAnchor(s.key)} tabIndex={-1}
+                            className={cn('flex scroll-mt-24 flex-wrap items-start justify-between gap-x-4 gap-y-1.5 px-5 py-3 outline-none',
+                                'focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent-lineage/40',
+                                highlight === s.key && 'bg-black/[0.03] dark:bg-white/[0.04]')}>
+                            <div className="min-w-0 flex-1 basis-60">
+                                <p className="text-[13px] font-medium text-ink">{s.label}</p>
+                                <p className="text-[11.5px] leading-relaxed text-ink-secondary">{s.guidance.summary}</p>
+                            </div>
+                            <div className="flex shrink-0 flex-wrap items-center gap-1.5">
+                                <span className="text-[13px] font-semibold text-ink">{formatValue(s, r.effective)}</span>
+                                <ScopeBadge scope={r.source} prefix={r.source === 'default' ? undefined : r.source === 'env' ? 'Set by' : 'From'} />
+                                {r.status !== 'in_effect' && <StatusBadge status={r.status} />}
+                            </div>
+                        </li>
+                    )
+                })}
+            </ul>
+        </section>
+    )
+}
+
+/** How many of a category's settings are chosen at this level, in words. */
+function counted(scope: 'platform' | 'workspace', total: number, changed: number): string {
+    if (scope === 'platform') return changed === 0 ? `All ${total} at their defaults` : `${changed} of ${total} changed from the default`
+    if (total === 0) return 'Only a system admin sets these, for the whole platform'
+    if (changed === 0) return total === 1 ? 'Its one setting here follows the platform' : `All ${total} settings follow the platform`
+    return `${changed} of ${total} ${total === 1 ? 'setting' : 'settings'} set for this workspace`
+}
+
 export function CategorySection({
-    category, settings, total, changed, staged, lens, masterSwitch, extra, deployment, row, filtered, onShowAll,
+    category, scope = 'platform', settings, total, changed, staged, lens, masterSwitch, extra, fixed, deployment, row, filtered, onShowAll,
 }: {
     category: Category
+    /** The level the page edits. */
+    scope?: 'platform' | 'workspace'
     /** The settings shown, in registry order. */
     settings: Setting[]
+    /** The category's settings this level can have. */
     total: number
-    /** Values chosen here that differ from the default. */
+    /** Values chosen here (on the platform: that differ from the default). */
     changed: number
     /** Values and limits staged in this category. */
     staged: number
@@ -58,6 +118,8 @@ export function CategorySection({
     masterSwitch?: ReactNode
     /** Drawn under the switch: the memory gauges. */
     extra?: ReactNode
+    /** Drawn after the settings: what only the platform sets (a workspace's page). */
+    fixed?: ReactNode
     deployment: DeploymentFact[]
     row: (s: Setting) => ReactNode
     /** The "changed only" filter hides some. */
@@ -80,9 +142,13 @@ export function CategorySection({
                 <div className="min-w-0 flex-1">
                     <h2 id={titleId} className="text-lg font-semibold tracking-tight text-ink">{category.label}</h2>
                     <p className="text-[13px] text-ink-muted">{category.summary}</p>
-                    <p className="mt-2 max-w-3xl text-[13.5px] leading-relaxed text-ink-secondary">{category.posture}</p>
+                    {/* The server writes it from the platform's values: below the platform, it says so. */}
+                    <p className="mt-2 max-w-3xl text-[13.5px] leading-relaxed text-ink-secondary">
+                        {scope !== 'platform' && <span className="font-semibold text-ink">Across the platform: </span>}
+                        {category.posture}
+                    </p>
                     <p className="mt-1.5 text-[11.5px] text-ink-muted">
-                        {changed === 0 ? `All ${total} at their defaults` : `${changed} of ${total} changed from the default`}
+                        {counted(scope, total, changed)}
                         {staged > 0 && <span className="font-semibold text-accent-lineage"> · {staged} not saved</span>}
                     </p>
                 </div>
@@ -99,10 +165,11 @@ export function CategorySection({
             ))}
             {settings.length === 0 && filtered && (
                 <p className="rounded-2xl border border-dashed border-glass-border/70 px-5 py-4 text-[13px] text-ink-muted">
-                    Every setting here is at its default.{' '}
+                    {scope === 'platform' ? 'Every setting here is at its default.' : 'None of these is set for this workspace.'}{' '}
                     <button type="button" onClick={onShowAll} className="font-semibold text-accent-lineage underline-offset-2 hover:underline">Show them all</button>
                 </p>
             )}
+            {fixed}
             {deployment.length > 0 && <DeploymentFacts facts={deployment} lens={lens} />}
         </section>
     )

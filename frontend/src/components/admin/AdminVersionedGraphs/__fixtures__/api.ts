@@ -3,21 +3,28 @@
  * sends, built from the settings kit's fixtures (`components/settings/__fixtures__`), so every
  * label, choice and why is the registry's own.
  *
- *   values      the platform's (with saved limits) and a graph's, every setting, as a list
+ *   values      the platform's (with saved limits), the workspace "Finance"'s and a graph's, every
+ *               setting, as a list, for whoever is looking (a system admin, a workspace admin, a
+ *               viewer)
  *   inventory   eight graphs: platform copies and connected graphs, a fork, an orphan, unloaded,
  *               loading, waiting for room, failing and building beside
+ *   workspace   Finance's graphs, each with what it sets itself (a fork among them), and its history
  *   history     four change sets: a save, a workspace's, one carried over, a change of limits
  *   preview     answered from the values: each staged value in force, "switch when ready" held to
  *               "update in place" while builds are off; the full preview's impact
  *   health      a graph's, with one part the server couldn't read
+ *   versioning  what a data source's Versioning tab reads: its graph, drafts, history, forks, where
+ *               the graph lives (the watermark, with the read mode in force and why) and its imports
  */
 import { SCHEMA, SETTINGS_BY_KEY } from '@/components/settings/__fixtures__/schema'
-import { FACTS, GRAPH_VALUES, PLATFORM_VALUES } from '@/components/settings/__fixtures__/resolved'
+import { FACTS, GRAPH_VALUES, PLATFORM_VALUES, WORKSPACE_VALUES } from '@/components/settings/__fixtures__/resolved'
 import { sameLimits } from '@/components/settings/format'
-import type { Editor, ResolvedSetting, TrailStep } from '@/components/settings/types'
+import type { Editor, ResolvedSetting, ResolvedValues, TrailStep } from '@/components/settings/types'
 import type { PatchItem } from '@/components/settings/useStagedChanges'
 import type { VersionedGraphRow } from '@/services/systemStatusService'
-import type { GraphHealth, GraphsSummary, HistoryEntry, Impact } from '@/services/settingsService'
+import type { ImportSettings } from '@/services/importExportApiService'
+import type { Watermark } from '@/services/versioningApiService'
+import type { GraphHealth, GraphsSummary, HistoryEntry, Impact, WorkspaceGraph } from '@/services/settingsService'
 
 export { SCHEMA, SETTINGS_BY_KEY }
 
@@ -70,10 +77,45 @@ export function graphValues(viewer: Editor = 'workspace_admin') {
     return { scope: 'graph', workspaceId: WS, graphId: GRAPH, dataSourceId: 'ds_sales', editor: viewer, values, version: 31 }
 }
 
+/**
+ * The workspace Finance's values, every setting, for `viewer` (null: someone who may only read): the
+ * kit's workspace fixture where it has one, else the platform's answer walked down to the
+ * workspace. A workspace admin may choose within the platform's limits (switch when ready isn't
+ * offered; the replace guard is locked); a system admin may go past them, and set the class.
+ */
+export function workspaceValues(viewer: Editor | null = 'workspace_admin') {
+    const values = SCHEMA.settings.map((s): ResolvedSetting => {
+        const may = s.scopes.workspace ?? null
+        const base = WORKSPACE_VALUES[s.key]
+        const p = PLATFORM_VALUES[s.key]
+        const platform = p.trail.find((t) => t.scope === 'platform')
+        const limits = platform?.limits
+        const editable = may !== null && !platform?.locked
+            && (viewer === 'system_admin' || (viewer === 'workspace_admin' && may === 'workspace_admin'))
+        const bound = viewer === 'workspace_admin'
+        const allowed = !editable ? null
+            : s.kind === 'choice' ? s.choices.map((c) => c.id).filter((id) => !bound || !limits?.allowed || limits.allowed.includes(id))
+                : s.range ? {
+                    min: bound && limits?.range ? Math.max(s.range[0], limits.range[0]) : s.range[0],
+                    max: bound && limits?.range ? Math.min(s.range[1], limits.range[1]) : s.range[1],
+                } : null
+        if (base) return { ...base, editable, editor: may, allowed }
+        return {
+            ...p,
+            trail: [...p.trail, ...(may ? [{ scope: 'workspace' as const, value: null }] : [])],
+            editable,
+            editor: may,
+            allowed,
+            version: 0,
+        }
+    })
+    return { scope: 'workspace', workspaceId: WS, editor: viewer, values, version: 18 }
+}
+
 // ── Preview ─────────────────────────────────────────────────────────────────
 
-/** What the server would answer for `changes` at the platform (quick, or full with the impact). */
-export function preview(changes: PatchItem[], mode: 'quick' | 'full', base = PLATFORM_VALUES) {
+/** What the server would answer for `changes` at the platform, or at `base`'s place (quick, or full with the impact). */
+export function preview(changes: PatchItem[], mode: 'quick' | 'full', base: ResolvedValues = PLATFORM_VALUES) {
     const values = changes.flatMap((c) => {
         const r = base[c.key]
         if (!r || !('value' in c)) return []
@@ -247,4 +289,133 @@ export const FEATURES = {
     values: { versioningEnabled: true, candidateKeysEnabled: false, residencyEnabled: true },
     version: 7,
     lastChanges: { residencyEnabled: { from: false, to: true, actorName: 'Ada Lovelace', at: '2026-11-10T09:30:00Z' } },
+}
+
+// ── A workspace's graphs and history ────────────────────────────────────────
+
+const brief = (key: string, over: Partial<WorkspaceGraph['readMode']> = {}): WorkspaceGraph['readMode'] => {
+    const r = GRAPH_VALUES[key] ?? PLATFORM_VALUES[key]
+    return { effective: r.effective, declared: r.declared, source: r.source, status: r.status, why: r.why, ...over }
+}
+
+/** Finance's graphs: Sales lineage sets five values itself, Payments two, Orders none; a fork follows Sales lineage. */
+export const WORKSPACE_GRAPHS: WorkspaceGraph[] = [
+    { graphId: 'graph_orders', dataSourceId: 'ds_orders', label: 'Orders', follows: null, ownSettings: [],
+        readMode: brief('reads.mode', { effective: 'in_place', declared: 'in_place', source: 'workspace', status: 'in_effect', why: [] }),
+        residencyClass: brief('residency.class', { effective: 'standard', declared: 'standard', source: 'default', status: 'in_effect', why: [] }) },
+    { graphId: 'graph_payments', dataSourceId: 'ds_pay', label: 'Payments', follows: null, ownSettings: ['reads.mode', 'residency.class'],
+        readMode: brief('reads.mode', { effective: 'latest', declared: 'latest', source: 'graph', status: 'in_effect', why: [] }),
+        residencyClass: brief('residency.class', { effective: 'always', declared: 'always', source: 'graph', status: 'in_effect', why: [] }) },
+    { graphId: GRAPH, dataSourceId: 'ds_sales', label: 'Sales lineage', follows: null,
+        ownSettings: ['drafts.defaultVisibility', 'imports.guardDeleteShare', 'imports.identifier', 'reads.mode', 'residency.class'],
+        readMode: brief('reads.mode'), residencyClass: brief('residency.class') },
+    { graphId: 'graph_fork', dataSourceId: 'dsfork_7', label: 'Sales lineage · Q4 what-if', follows: { graphId: GRAPH, dataSourceId: 'ds_sales' },
+        ownSettings: [], readMode: brief('reads.mode'), residencyClass: brief('residency.class') },
+]
+
+/** Finance's history: its own changes and its graphs', newest first. */
+export const WORKSPACE_HISTORY: HistoryEntry[] = [
+    entry({ id: 52, changeSetId: 'cs_w3', key: 'imports.identifier', at: '2026-11-16T11:20:00Z', actor: { id: 'usr_alice', name: 'Alice Martin' },
+        reason: 'Sales rows carry their SKU', scope: 'graph', scopeId: 'ds_sales', from: { value: null, limits: null }, to: { value: 'prop.sku', limits: null }, version: 3 }),
+    entry({ id: 51, changeSetId: 'cs_w2', key: 'reads.mode', at: '2026-11-15T09:05:00Z', actor: { id: 'usr_grace', name: 'Grace Hopper' },
+        reason: 'Nightly imports were slowing the finance canvases', scope: 'workspace', scopeId: WS,
+        from: { value: 'latest', limits: null }, to: { value: 'in_place', limits: null } }),
+    entry({ id: 30, changeSetId: 'cs_2', key: 'drafts.keepClosedDays', at: '2026-11-12T10:12:00Z', actor: { id: 'usr_grace', name: 'Grace Hopper' },
+        reason: 'Finance keeps closed drafts for its audits', scope: 'workspace', scopeId: WS, from: { value: 30, limits: null }, to: { value: 'forever', limits: null } }),
+    entry({ id: 14, changeSetId: 'cs_w1', key: 'drafts.levels', at: '2026-11-02T08:00:00Z', actor: null, source: 'migration',
+        reason: 'Carried over from the drafts and reviews policy', scope: 'workspace', scopeId: WS,
+        from: { value: null, limits: null }, to: { value: 'public_only', limits: null } }),
+]
+
+// ── A data source's Versioning tab ──────────────────────────────────────────
+
+/** The data source Sales lineage's graph, as the tab resolves it. */
+export const RESOLVED = { graphId: GRAPH, mainBranchId: 'br_main', mainHeadCommitSeq: 214, kind: 'bootstrap', lifecycleState: 'live', lifecycleRev: 3 }
+
+export const BRANCHES = [
+    { branchId: 'br_main', kind: 'main', name: 'main', status: 'open', createdAt: '2026-10-01T09:00:00Z', updatedAt: '2026-11-16T16:21:00Z' },
+    { branchId: 'br_q4', kind: 'draft', name: 'Q4 price corrections', status: 'open', owner: 'usr_alice', userNames: { usr_alice: 'Alice Martin' },
+        createdAt: '2026-11-14T10:00:00Z', updatedAt: '2026-11-16T12:00:00Z' },
+]
+
+export const COMMITS = {
+    commits: [
+        { commit_id: 'cm_214', commit_seq: 214, kind: 'import', message: 'Q4 import', actor: 'usr_alice', actor_kind: 'human', automation: false,
+            created_at: '2026-11-16T16:21:00Z', stats: { create: 1200, update: 16_900, delete: 300 } },
+        { commit_id: 'cm_213', commit_seq: 213, kind: 'squash_publish', message: 'Q3 corrections', actor: 'usr_alice', actor_kind: 'human', automation: false,
+            created_at: '2026-11-16T15:02:00Z', stats: { create: 0, update: 42, delete: 1 } },
+    ],
+    userNames: { usr_alice: 'Alice Martin' },
+}
+
+export const FORKS = [
+    { graphId: 'graph_fork', workspaceId: WS, kind: 'fork', forkParentGraphId: GRAPH, forkBaseCommitSeq: 210, mainHeadCommitSeq: 4,
+        createdBy: 'usr_alice', createdAt: '2026-11-10T09:00:00Z', purging: false, userNames: { usr_alice: 'Alice Martin' },
+        dataSourceId: 'dsfork_7', label: 'Sales lineage · Q4 what-if', ahead: 4, behind: 2, updateRecommended: false, readsFrom: 'overlay', countsCapped: false },
+]
+
+/** Where the graph lives, and the read mode in force with why, as a server that resolves it through the settings says. */
+export const WATERMARK: Watermark = {
+    committed: 214, projected: 213, fresh: false, served: 213, status: 'projecting', target: 214,
+    projectionKey: 'gvp_graph_sales{les.3}', providerId: 'falkor-eu', providerName: 'EU graph store', owned: true,
+    epoch: 7, failedAttempts: 0, nextRetryAt: null, livenessError: null,
+    residency: 'coldline', residencyState: 'resident', sizeBytes: 9.4 * 1024 ** 3,
+    readMode: 'in_place', readModeDeclared: 'beside', readModeSource: 'graph',
+    readModeWhy: [{ code: 'builds_off', text: SCHEMA.why.builds_off?.text ?? '', fix: null }],
+}
+
+/** What the graph's imports run under, and the properties they match by. */
+export const IMPORT_SETTINGS: ImportSettings = {
+    dataSourceId: 'ds_sales',
+    overrides: { identifier: 'prop.sku', replaceMinLive: null, replaceDeleteFraction: 0.3, replaceCreateFraction: null, replaceMinMatchFraction: null },
+    platform: { identifier: 'entity_id', replaceMinLive: 5000, replaceDeleteFraction: 0.5, replaceCreateFraction: 0.5, replaceMinMatchFraction: 0.05 },
+    effective: {
+        identifier: 'prop.sku', replaceMinLive: 5000, replaceDeleteFraction: 0.3, replaceCreateFraction: 0.5, replaceMinMatchFraction: 0.05,
+        sources: { identifier: 'data_source', replaceMinLive: 'platform', replaceDeleteFraction: 'data_source', replaceCreateFraction: 'platform',
+            replaceMinMatchFraction: 'platform' },
+    },
+    replaceGuard: false,
+    followsParent: false,
+    matchingProperties: [
+        { name: 'sku', status: 'ready', seq: 214, current: true, createdAt: '2026-11-01T09:00:00Z' },
+        { name: 'legacy_code', status: 'building', seq: 120, current: false, createdAt: '2026-11-16T16:00:00Z' },
+    ],
+    maxMatchingProperties: 10,
+}
+
+/** A fork's import settings: its root's default is a property, which a fork can't match by yet. */
+export const FORK_IMPORT_SETTINGS: ImportSettings = {
+    ...IMPORT_SETTINGS,
+    dataSourceId: 'dsfork_7',
+    effective: { ...IMPORT_SETTINGS.effective, identifier: 'entity_id', sources: { ...IMPORT_SETTINGS.effective.sources, identifier: 'fork' } },
+    followsParent: true,
+    matchingProperties: [],
+}
+
+/**
+ * The full preview's impact at the workspace Finance: its four graphs, of which only Orders follows
+ * the workspace's read mode (Payments and Sales lineage set their own, and the fork follows Sales
+ * lineage). A workspace admin gets no node memory or residency figures.
+ */
+export function workspaceImpact(changes: PatchItem[]): Impact {
+    const base = impact(changes)
+    const reads = changes.find((c) => c.key === 'reads.mode' && 'value' in c)
+    // Inheriting takes the platform's, Always the latest; switch when ready updates in place while builds are off.
+    const to = reads ? reads.value ?? 'latest' : null
+    const moves = to === 'latest'
+    return {
+        ...base,
+        graphs: {
+            inScope: WORKSPACE_GRAPHS.length,
+            changed: moves ? 1 : 0,
+            samples: moves ? [{ graphId: 'graph_orders', dataSourceId: 'ds_orders', workspaceId: WS, label: 'Orders',
+                changes: [{ key: 'reads.mode', from: 'in_place', to: 'latest' }] }] : [],
+        },
+        alwaysLatest: reads ? { joining: moves ? 1 : 0, leaving: 0 } : null,
+        memory: null,
+        residency: null,
+        drafts: base.drafts ? { workspaces: 1, removedAtNextSweep: 4 } : null,
+        warnings: base.warnings.map((w) => (w.code === 'drafts_removed'
+            ? { ...w, text: 'The next sweep removes the changes of 4 closed drafts in this workspace, and that can’t be undone.' } : w)),
+    }
 }
