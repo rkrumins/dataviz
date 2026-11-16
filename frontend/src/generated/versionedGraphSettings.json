@@ -505,6 +505,123 @@
       "term": "Exception"
     }
   ],
+  "profiles": [
+    {
+      "audience": "business",
+      "caution": "The settings it covers go back to their built-in values here, including any you tuned for your platform.",
+      "id": "balanced",
+      "promise": "The built-in values: readers see the newest version as soon as it is published, and writes to the graph store leave reads their turn.",
+      "scopes": [
+        "platform",
+        "workspace",
+        "graph"
+      ],
+      "title": "Balanced",
+      "values": {
+        "builds.forRebuilds": true,
+        "builds.method": "auto",
+        "builds.noRoom": "wait",
+        "builds.perWorker": 2,
+        "reads.maxVersionsBehind": "unlimited",
+        "reads.mode": "latest",
+        "residency.class": "standard",
+        "residency.coldlineIdleSecs": 3600,
+        "residency.coldlineLoadAbove": 500000,
+        "residency.standardIdleSecs": 604800,
+        "updates.pacingRatio": 0.25,
+        "updates.statementTargetMs": 500
+      },
+      "when": [
+        "You are starting out, or aren't sure which trade suits you.",
+        "You tried another profile and want the built-in values back."
+      ]
+    },
+    {
+      "audience": "business",
+      "caution": "While a large change is written, readers can see part of it before the rest, and large updates take longer to land.",
+      "id": "fastest-reads",
+      "promise": "Reads stay on the graph store at full speed while new data loads, and writes give way to them.",
+      "scopes": [
+        "platform",
+        "workspace",
+        "graph"
+      ],
+      "title": "Fastest reads",
+      "values": {
+        "reads.maxVersionsBehind": "unlimited",
+        "reads.mode": "in_place",
+        "updates.pacingRatio": 0.5,
+        "updates.statementTargetMs": 250
+      },
+      "when": [
+        "Views of a large graph slow down for a while after each big import.",
+        "Fast canvases matter more than seeing a large change all at once."
+      ]
+    },
+    {
+      "audience": "business",
+      "caution": "While a graph updates, its reads come from the database: slower on a large graph, without lineage summaries meanwhile, and asked to retry under heavy load.",
+      "id": "always-exact",
+      "promise": "Readers always see the newest published version, whole, read from the database until the graph store has it.",
+      "scopes": [
+        "platform",
+        "workspace",
+        "graph"
+      ],
+      "title": "Always exact",
+      "values": {
+        "reads.mode": "latest"
+      },
+      "when": [
+        "The newest data must show the moment it is published, even if views are slower meanwhile.",
+        "Reports and checks must read exactly the version just published."
+      ]
+    },
+    {
+      "audience": "operator",
+      "caution": "Graphs nobody read in the last half hour are read from the database, which is slower, and builds take much longer; the memory values need Graph residency on, and the build values New-version builds.",
+      "id": "least-memory",
+      "promise": "Graphs give their memory back half an hour after their last read, and a build needs about its graph's size rather than twice it.",
+      "scopes": [
+        "platform",
+        "workspace",
+        "graph"
+      ],
+      "title": "Least memory",
+      "values": {
+        "builds.forRebuilds": false,
+        "builds.method": "reseed",
+        "builds.perWorker": 1,
+        "residency.class": "coldline",
+        "residency.coldlineIdleSecs": 1800,
+        "residency.coldlineLoadAbove": 2000000,
+        "residency.standardIdleSecs": 86400
+      },
+      "when": [
+        "The graph store is short of memory, or its memory costs too much.",
+        "Most graphs are opened now and then rather than all day."
+      ]
+    },
+    {
+      "audience": "operator",
+      "caution": "Reads wait longer behind writes, and a change whose build finds no room can be seen part-way, until you apply Balanced again; the build value needs New-version builds.",
+      "id": "big-import-tonight",
+      "promise": "Writes to the graph store go faster while few people read, so a large import lands sooner, and a build with no room is written in place rather than wait.",
+      "scopes": [
+        "platform"
+      ],
+      "title": "Big import tonight",
+      "values": {
+        "builds.noRoom": "in_place",
+        "updates.pacingRatio": 0.1,
+        "updates.statementTargetMs": 1000
+      },
+      "when": [
+        "A large import or replace runs tonight, while few people read.",
+        "The new version must be in place by morning, even where a build finds no room."
+      ]
+    }
+  ],
   "retired": [
     {
       "name": "falkorMaxResident",
@@ -5748,6 +5865,140 @@
       "unreadable": "last_known",
       "uses": [],
       "visual": null
+    }
+  ],
+  "signals": [
+    {
+      "id": "builds.waited_for_room",
+      "label": "Builds waited for room",
+      "settings": [
+        "builds.method",
+        "builds.copyRoomPct",
+        "builds.copyMaxBytes",
+        "builds.noRoom",
+        "residency.unloadStartPct"
+      ],
+      "symptom": "Builds wait for room",
+      "unit": "times",
+      "warnAt": 30
+    },
+    {
+      "id": "builds.copy_timed_out",
+      "label": "Copies timed out",
+      "settings": [
+        "builds.method",
+        "builds.copyMaxBytes"
+      ],
+      "symptom": "Copies time out on a large graph",
+      "unit": "times",
+      "warnAt": 3
+    },
+    {
+      "id": "builds.dropped",
+      "label": "Builds dropped after their last attempt",
+      "settings": [
+        "builds.maxAttempts",
+        "builds.method",
+        "builds.copyMaxBytes"
+      ],
+      "symptom": "A build gave up too soon",
+      "unit": "times",
+      "warnAt": 1
+    },
+    {
+      "id": "reads.asked_to_retry",
+      "label": "Reads asked to retry: too many at once on the database",
+      "settings": [
+        "database.readsPerGraph",
+        "database.readsPerProcess",
+        "reads.mode"
+      ],
+      "symptom": "Reads are asked to retry while data loads",
+      "unit": "times",
+      "warnAt": 50
+    },
+    {
+      "id": "reads.from_database_while_behind",
+      "label": "Reads served from the database while the graph store caught up",
+      "settings": [
+        "reads.mode",
+        "reads.maxVersionsBehind"
+      ],
+      "symptom": "Reads are slow while data loads",
+      "unit": "times",
+      "warnAt": null
+    },
+    {
+      "id": "residency.unloaded_under_pressure",
+      "label": "Graphs unloaded because memory ran short",
+      "settings": [
+        "residency.autoUnload",
+        "residency.unloadStartPct",
+        "residency.unloadStopPct",
+        "residency.class"
+      ],
+      "symptom": "Graphs unload unexpectedly",
+      "unit": "times",
+      "warnAt": 10
+    },
+    {
+      "id": "residency.load_waited_for_room",
+      "label": "Loads waited for room",
+      "settings": [
+        "residency.loadMarginPct",
+        "residency.unloadStartPct",
+        "residency.bytesPerEntity",
+        "residency.autoUnload"
+      ],
+      "symptom": "Loads wait for room",
+      "unit": "times",
+      "warnAt": 30
+    },
+    {
+      "id": "imports.replace_refused_by_guard",
+      "label": "Replaces stopped by the replace guard",
+      "settings": [
+        "imports.replaceGuard",
+        "imports.guardMinLive",
+        "imports.guardDeleteShare",
+        "imports.guardCreateShare",
+        "imports.identifier"
+      ],
+      "symptom": "A replace import is refused",
+      "unit": "times",
+      "warnAt": 1
+    },
+    {
+      "id": "imports.replace_stopped_low_match",
+      "label": "Replaces stopped early because too few rows matched",
+      "settings": [
+        "imports.minMatchShare",
+        "imports.identifier",
+        "imports.guardMinLive"
+      ],
+      "symptom": "A replace import stopped after its first rows",
+      "unit": "times",
+      "warnAt": 1
+    },
+    {
+      "id": "drafts.idle_closed",
+      "label": "Idle drafts closed",
+      "settings": [
+        "drafts.idleCloseDays"
+      ],
+      "symptom": "My draft was closed while I was away",
+      "unit": "times",
+      "warnAt": null
+    },
+    {
+      "id": "drafts.changes_removed",
+      "label": "Closed drafts' changes removed",
+      "settings": [
+        "drafts.keepClosedDays"
+      ],
+      "symptom": "Old drafts' changes are gone",
+      "unit": "times",
+      "warnAt": null
     }
   ],
   "why": {

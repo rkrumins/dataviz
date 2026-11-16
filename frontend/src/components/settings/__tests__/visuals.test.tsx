@@ -10,8 +10,9 @@ import userEvent from '@testing-library/user-event'
 import { useState } from 'react'
 import { describe, expect, it, vi } from 'vitest'
 import { SCHEMA, SETTINGS_BY_KEY } from '../__fixtures__/schema'
-import { FACTS, GRAPH_VALUES, PLATFORM_VALUES } from '../__fixtures__/resolved'
+import { FACTS, GRAPH_VALUES, PLATFORM_VALUES, SIGNAL_COUNTS } from '../__fixtures__/resolved'
 import { compassMoves, compassScores } from '../compass'
+import { symptomIndex } from '../search'
 import type { Values } from '../types'
 import { CopyRoomBar } from '../visuals/CopyRoomBar'
 import { GuardMeter } from '../visuals/GuardMeter'
@@ -195,5 +196,36 @@ describe('SymptomFinder', () => {
         expect(onStage).toHaveBeenCalledWith('imports.identifier', 'entity_id')
         await user.click(within(result).getByRole('button', { name: 'Show match rows by' }))
         expect(onShow).toHaveBeenCalledWith('imports.identifier')
+    })
+
+    it('says how often each problem happened, leads with what did, and marks what reached its mark', async () => {
+        const user = userEvent.setup()
+        render(<SymptomFinder settings={SCHEMA.settings} values={PLATFORM_VALUES} signals={SIGNAL_COUNTS} />)
+        const signal = (id: string) => SCHEMA.signals.find((s) => s.id === id)!
+        const loads = signal('residency.load_waited_for_room')
+        const retries = signal('reads.asked_to_retry')
+        const chips = within(screen.getByRole('group', { name: 'Common problems' })).getAllByRole('button')
+        // 38 loads waited (mark 30) and one replace stopped (mark 1) lead; then the rest that happened.
+        expect(chips[0]).toHaveAccessibleName(`${loads.symptom}: happened 38 times in the last 24 h, worth a look`)
+        expect(chips[1]).toHaveAccessibleName(`${signal('imports.replace_refused_by_guard').symptom}: happened 1 time in the last 24 h, worth a look`)
+        expect(screen.getByRole('button', { name: `${retries.symptom}: happened 12 times in the last 24 h` })).toBeInTheDocument()
+
+        await user.click(chips[0])
+        expect(screen.getByRole('list', { name: 'What happened' })).toHaveTextContent(
+            `${loads.label}: happened 38 times in the last 24 h. Worth a look.`)
+        // The settings behind the signal join the ones whose guidance names the problem.
+        for (const key of loads.settings) expect(screen.getByText(SETTINGS_BY_KEY[key].label)).toBeInTheDocument()
+
+        await user.click(screen.getByRole('button', { name: new RegExp(`^${retries.symptom}`) }))
+        const happened = screen.getByRole('list', { name: 'What happened' })
+        expect(happened).toHaveTextContent(`${retries.label}: happened 12 times in the last 24 h.`)
+        expect(happened).not.toHaveTextContent('Worth a look')
+    })
+
+    it('without signals, lists the problems as before: plain names, most-answered first', () => {
+        render(<SymptomFinder settings={SCHEMA.settings} values={PLATFORM_VALUES} />)
+        const chips = within(screen.getByRole('group', { name: 'Common problems' })).getAllByRole('button')
+        expect(chips.map((c) => c.textContent)).toEqual(symptomIndex(SCHEMA.settings).slice(0, 10).map((e) => e.symptom))
+        expect(screen.queryByRole('list', { name: 'What happened' })).toBeNull()
     })
 })

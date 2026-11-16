@@ -41,11 +41,13 @@ from backend.app.config.settings_types import (
     Frame,
     Guidance,
     Legacy,
+    Profile,
     Recommendation,
     Requirement,
     Retired,
     Rule,
     Setting,
+    Signal,
     Term,
     Why,
     schema,
@@ -3413,6 +3415,138 @@ RETIRED: Tuple[Retired, ...] = (
                           "nothing reads it: every graph keeps the same history whatever it says."),
 )
 
+# ---------------------------------------------------------------------------------------------
+# Profiles: one-click starting points. Each value is one its setting's guidance gives for the
+# outcome the profile promises; Balanced puts back the built-in value of every setting the others
+# change.
+# ---------------------------------------------------------------------------------------------
+
+_ALL_SCOPES = ("platform", "workspace", "graph")
+
+_TUNED: Tuple[Profile, ...] = (
+    Profile(
+        id="fastest-reads",
+        title="Fastest reads",
+        promise=("Reads stay on the graph store at full speed while new data loads, and writes give "
+                 "way to them."),
+        audience="business",
+        when=("Views of a large graph slow down for a while after each big import.",
+              "Fast canvases matter more than seeing a large change all at once."),
+        values={"reads.mode": "in_place", "reads.maxVersionsBehind": "unlimited",
+                "updates.statementTargetMs": 250, "updates.pacingRatio": 0.5},
+        scopes=_ALL_SCOPES,
+        caution=("While a large change is written, readers can see part of it before the rest, and "
+                 "large updates take longer to land."),
+    ),
+    Profile(
+        id="always-exact",
+        title="Always exact",
+        promise=("Readers always see the newest published version, whole, read from the database "
+                 "until the graph store has it."),
+        audience="business",
+        when=("The newest data must show the moment it is published, even if views are slower "
+              "meanwhile.",
+              "Reports and checks must read exactly the version just published."),
+        values={"reads.mode": "latest"},
+        scopes=_ALL_SCOPES,
+        caution=("While a graph updates, its reads come from the database: slower on a large graph, "
+                 "without lineage summaries meanwhile, and asked to retry under heavy load."),
+    ),
+    Profile(
+        id="least-memory",
+        title="Least memory",
+        promise=("Graphs give their memory back half an hour after their last read, and a build "
+                 "needs about its graph's size rather than twice it."),
+        audience="operator",
+        when=("The graph store is short of memory, or its memory costs too much.",
+              "Most graphs are opened now and then rather than all day."),
+        values={"builds.forRebuilds": False, "builds.method": "reseed", "builds.perWorker": 1,
+                "residency.class": "coldline", "residency.standardIdleSecs": 86_400,
+                "residency.coldlineIdleSecs": 1_800, "residency.coldlineLoadAbove": 2_000_000},
+        scopes=_ALL_SCOPES,
+        caution=("Graphs nobody read in the last half hour are read from the database, which is "
+                 "slower, and builds take much longer; the memory values need Graph residency on, "
+                 "and the build values New-version builds."),
+    ),
+    Profile(
+        id="big-import-tonight",
+        title="Big import tonight",
+        promise=("Writes to the graph store go faster while few people read, so a large import lands "
+                 "sooner, and a build with no room is written in place rather than wait."),
+        audience="operator",
+        when=("A large import or replace runs tonight, while few people read.",
+              "The new version must be in place by morning, even where a build finds no room."),
+        values={"updates.statementTargetMs": 1_000, "updates.pacingRatio": 0.1,
+                "builds.noRoom": "in_place"},
+        scopes=("platform",),
+        caution=("Reads wait longer behind writes, and a change whose build finds no room can be "
+                 "seen part-way, until you apply Balanced again; the build value needs New-version "
+                 "builds."),
+    ),
+)
+
+_TUNED_KEYS = {key for profile in _TUNED for key in profile.values}
+
+PROFILES: Tuple[Profile, ...] = (
+    Profile(
+        id="balanced",
+        title="Balanced",
+        promise=("The built-in values: readers see the newest version as soon as it is published, "
+                 "and writes to the graph store leave reads their turn."),
+        audience="business",
+        when=("You are starting out, or aren't sure which trade suits you.",
+              "You tried another profile and want the built-in values back."),
+        values={s.key: s.default.code for s in SETTINGS if s.key in _TUNED_KEYS},
+        scopes=_ALL_SCOPES,
+        caution=("The settings it covers go back to their built-in values here, including any you "
+                 "tuned for your platform."),
+    ),
+    *_TUNED,
+)
+
+# ---------------------------------------------------------------------------------------------
+# Signals: what actually happened. The ids are fixed (the counters bump them by id); each symptom
+# is one of its settings' symptoms, so "Something's wrong?" can show how often it happened.
+# ``warn_at`` is a count in 24 hours. A build or a load that has to wait asks for room again about
+# once a minute, and each ask that waits counts: 30 is about half an hour of waiting, as long as
+# Alert after waiting allows by default.
+# ---------------------------------------------------------------------------------------------
+
+SIGNALS: Tuple[Signal, ...] = (
+    Signal("builds.waited_for_room", "Builds waited for room", "Builds wait for room",
+           ("builds.method", "builds.copyRoomPct", "builds.copyMaxBytes", "builds.noRoom",
+            "residency.unloadStartPct"), warn_at=30),
+    Signal("builds.copy_timed_out", "Copies timed out", "Copies time out on a large graph",
+           ("builds.method", "builds.copyMaxBytes"), warn_at=3),
+    Signal("builds.dropped", "Builds dropped after their last attempt", "A build gave up too soon",
+           ("builds.maxAttempts", "builds.method", "builds.copyMaxBytes"), warn_at=1),
+    Signal("reads.asked_to_retry", "Reads asked to retry: too many at once on the database",
+           "Reads are asked to retry while data loads",
+           ("database.readsPerGraph", "database.readsPerProcess", "reads.mode"), warn_at=50),
+    Signal("reads.from_database_while_behind",
+           "Reads served from the database while the graph store caught up",
+           "Reads are slow while data loads", ("reads.mode", "reads.maxVersionsBehind")),
+    Signal("residency.unloaded_under_pressure", "Graphs unloaded because memory ran short",
+           "Graphs unload unexpectedly",
+           ("residency.autoUnload", "residency.unloadStartPct", "residency.unloadStopPct",
+            "residency.class"), warn_at=10),
+    Signal("residency.load_waited_for_room", "Loads waited for room", "Loads wait for room",
+           ("residency.loadMarginPct", "residency.unloadStartPct", "residency.bytesPerEntity",
+            "residency.autoUnload"), warn_at=30),
+    Signal("imports.replace_refused_by_guard", "Replaces stopped by the replace guard",
+           "A replace import is refused",
+           ("imports.replaceGuard", "imports.guardMinLive", "imports.guardDeleteShare",
+            "imports.guardCreateShare", "imports.identifier"), warn_at=1),
+    Signal("imports.replace_stopped_low_match",
+           "Replaces stopped early because too few rows matched",
+           "A replace import stopped after its first rows",
+           ("imports.minMatchShare", "imports.identifier", "imports.guardMinLive"), warn_at=1),
+    Signal("drafts.idle_closed", "Idle drafts closed", "My draft was closed while I was away",
+           ("drafts.idleCloseDays",)),
+    Signal("drafts.changes_removed", "Closed drafts' changes removed", "Old drafts' changes are gone",
+           ("drafts.keepClosedDays",)),
+)
+
 
 def schema_json(values: Optional[Mapping[str, Any]] = None,
                 facts: Optional[Mapping[str, Any]] = None) -> dict:
@@ -3420,4 +3554,5 @@ def schema_json(values: Optional[Mapping[str, Any]] = None,
     sentences rendered with ``values`` (else the code defaults) and its recommendations with
     ``facts``."""
     return schema(domain=DOMAIN, categories=CATEGORIES, settings=SETTINGS, glossary=GLOSSARY,
-                  why=WHY, deployment=DEPLOYMENT, retired=RETIRED, values=values, facts=facts)
+                  why=WHY, deployment=DEPLOYMENT, retired=RETIRED, profiles=PROFILES,
+                  signals=SIGNALS, values=values, facts=facts)

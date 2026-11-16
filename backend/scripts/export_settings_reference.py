@@ -93,7 +93,10 @@ def _show(s, value) -> str:
         return _days(value)
     if s.kind in ("identifier", "refusal_budget"):
         return f"`{value}`"
-    return f"{value:,}" + (f" {s.unit}" if s.unit else "")
+    unit = s.unit
+    if unit and value == 1:     # "1 build", "1 property"
+        unit = unit[:-3] + "y" if unit.endswith("ies") else unit.removesuffix("s")
+    return f"{value:,}" + (f" {unit}" if unit else "")
 
 
 def _kind(s) -> str:
@@ -213,6 +216,61 @@ def _setting(s, example: str) -> list:
     return out
 
 
+def _link(key: str, anchors: dict) -> str:
+    return f"[{_esc(registry.BY_KEY[key].label)}](#{anchors[key]})"
+
+
+def _profiles(anchors: dict) -> list:
+    """The profiles: a summary table, then each one's promise, when to choose it, the values it sets
+    and what it costs. Each heading is its title, whose id is the profile's id (``#fastest-reads``)."""
+    lens = {"business": "Business", "operator": "Operator"}
+    out = [
+        "## Profiles",
+        "",
+        ("Starting points: each profile sets the settings it covers for one outcome. Applying one in "
+         "the app stages its values at the level you are editing, only for the settings you may set "
+         "there, and says which it left out and why. Nothing is saved until you review the changes "
+         "and save them."),
+        "",
+        *_table(["Profile", "What it gives you", "Lens", "Applies at"], [
+            [f"[{_esc(p.title)}](#{p.id})", _esc(p.promise), lens[p.audience],
+             ", ".join(scope.title() for scope in p.scopes)] for p in registry.PROFILES]),
+        "",
+    ]
+    for p in registry.PROFILES:
+        rows = [[_link(key, anchors), _esc(_show(registry.BY_KEY[key], value)),
+                 _esc(_show(registry.BY_KEY[key], registry.BY_KEY[key].default.code)),
+                 ", ".join(scope.title() for scope in registry.BY_KEY[key].scopes)]
+                for key, value in p.values.items()]
+        out += [f"### {_esc(p.title)}", "", f"**{_esc(p.promise)}**", "",
+                "**Choose it when**", "", *(f"- {_esc(w)}" for w in p.when), "",
+                *_table(["Setting", "It sets", "Default", "Set at"], rows), "",
+                f"**What you give up:** {_esc(p.caution)}", "",
+                f"**Applies at:** {', '.join(scope.title() for scope in p.scopes)}. Shown first in "
+                f"the {lens[p.audience]} lens.", ""]
+    return out
+
+
+def _signals(anchors: dict) -> list:
+    """What actually happened: each counter, the problem it answers and the settings behind it."""
+    return [
+        "## Signals",
+        "",
+        ("What actually happened, counted as it happens. The app's \"Something's wrong?\" finder "
+         "shows each count beside the problem it answers, with the settings behind it, and marks "
+         "it once the count reaches the number worth a look. A dash: the count is shown, never "
+         "marked."),
+        "",
+        *_table(["Signal", "Counts", "The problem it answers", "Settings behind it",
+                 "Worth a look from"], [
+            [f"`{sig.id}`", _esc(sig.label), _esc(sig.symptom),
+             ", ".join(_link(key, anchors) for key in sig.settings),
+             f"{sig.warn_at:,} in 24 hours" if sig.warn_at is not None else "—"]
+            for sig in registry.SIGNALS]),
+        "",
+    ]
+
+
 # --------------------------------------------------------------------------- #
 # The guide                                                                    #
 # --------------------------------------------------------------------------- #
@@ -318,6 +376,7 @@ def render_guide() -> str:
              ", ".join(scope.title() for scope in s.scopes)] for s in settings]), ""]
         for s in settings:
             out += _setting(s, examples[s.key])
+    out += [*_profiles(anchors), *_signals(anchors)]
     out += [
         "## Glossary",
         "",

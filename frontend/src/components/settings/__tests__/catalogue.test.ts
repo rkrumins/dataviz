@@ -59,4 +59,18 @@ describe('the generated catalogue', () => {
             if (s.kind === 'choice') expect(s.choices.map((c) => c.id)).toContain(s.default.code)
         }
     })
+
+    it('ships profiles and signals that name only settings, levels and problems that exist', () => {
+        const symptoms = new Set(CATALOGUE.settings.flatMap((s) => s.guidance.symptoms))
+        expect(CATALOGUE.profiles.length).toBeGreaterThanOrEqual(5)
+        for (const p of CATALOGUE.profiles) {
+            expect(AUDIENCES).toContain(p.audience)
+            for (const scope of p.scopes) expect(SCOPES).toContain(scope)
+            for (const key of Object.keys(p.values)) expect(keys).toContain(key)
+        }
+        for (const s of CATALOGUE.signals) {
+            expect(symptoms).toContain(s.symptom)
+            for (const key of s.settings) expect(keys).toContain(key)
+        }
+    })
 })

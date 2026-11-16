@@ -12,7 +12,11 @@ facts are claims about the code. These tests hold both:
   * memory-heavy settings are system administrators' at every scope;
   * every name a setting points at (rules, caps, requirements, uses, why codes) exists;
   * examples, postures and recommendations render, with and without live facts;
-  * the generated guide has the anchor each setting's ``docs`` link points at.
+  * every profile's values are values their settings take, settable where the profile applies,
+    and it names each feature switch it relies on; Balanced is the built-in values;
+  * every signal is one of the fixed counters and answers a symptom its settings name;
+  * the generated guide has the anchor each setting's ``docs`` link points at, and a section for
+    each profile.
 
 Pure ``ast``/``pathlib`` and the stdlib-only registry: no app, no database. CI runs it with
 ``--noconftest`` (.github/workflows/alembic-guards.yml).
@@ -21,6 +25,7 @@ from __future__ import annotations
 
 import ast
 import json
+import math
 import operator
 import re
 import typing
@@ -30,13 +35,16 @@ import pytest
 
 from backend.app.config import settings_types as types
 from backend.app.config.feature_wiring import FEATURE_WIRING
+from backend.app.config.features_seed import SEED_DEFINITIONS
 from backend.app.config.versioned_graph_settings import (
     BY_KEY,
     CATEGORIES,
     DEPLOYMENT,
     GLOSSARY,
+    PROFILES,
     RETIRED,
     SETTINGS,
+    SIGNALS,
     WHY,
     schema_json,
 )
@@ -71,6 +79,13 @@ _CONTRACT_WHY = ("switch_off", "builds_off", "connected_graph", "not_used_by_mod
                  "outside_limits_exception", "invalid_env", "follows_root", "derived_from_levels",
                  "guard_off")
 _MEMORY_HEAVY = ("residency.", "builds.", "updates.", "database.", "imports.maxMatchingProperties")
+#: The insight contract's profiles, and its signals' fixed ids (the counters bump them by these).
+_CONTRACT_PROFILES = ("balanced", "fastest-reads", "least-memory", "always-exact", "big-import-tonight")
+_SIGNAL_IDS = ("builds.waited_for_room", "builds.copy_timed_out", "builds.dropped",
+               "reads.asked_to_retry", "reads.from_database_while_behind",
+               "residency.unloaded_under_pressure", "residency.load_waited_for_room",
+               "imports.replace_refused_by_guard", "imports.replace_stopped_low_match",
+               "drafts.idle_closed", "drafts.changes_removed")
 
 #: Live facts the store provides, for rendering recommendations here.
 _FACTS = {
@@ -93,12 +108,18 @@ def _module(path: Path) -> ast.Module:
 
 
 def _assignments(path: Path) -> dict:
-    """A module's top-level ``NAME = value`` and ``NAME: type = value``, by name."""
+    """A module's top-level ``NAME = value``, ``A, B = a, b`` and ``NAME: type = value``, by name."""
     out = {}
     for node in _module(path).body:
         if isinstance(node, ast.Assign) and len(node.targets) == 1 \
                 and isinstance(node.targets[0], ast.Name):
             out.setdefault(node.targets[0].id, node.value)
+        elif isinstance(node, ast.Assign) and len(node.targets) == 1 \
+                and isinstance(node.targets[0], ast.Tuple) and isinstance(node.value, ast.Tuple) \
+                and len(node.targets[0].elts) == len(node.value.elts):
+            for name, value in zip(node.targets[0].elts, node.value.elts, strict=True):
+                if isinstance(name, ast.Name):
+                    out.setdefault(name.id, value)
         elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.value:
             out.setdefault(node.target.id, node.value)
     return out
@@ -129,7 +150,13 @@ def _evaluate(expr: ast.AST, names: dict):
     if isinstance(expr, ast.Name):
         return _evaluate(names[expr.id], names)
     if isinstance(expr, ast.Tuple):
-        return tuple(_evaluate(e, names) for e in expr.elts)
+        out = []
+        for e in expr.elts:
+            if isinstance(e, ast.Starred):
+                out.extend(_evaluate(e.value, names))
+            else:
+                out.append(_evaluate(e, names))
+        return tuple(out)
     if isinstance(expr, ast.Dict):
         return {_evaluate(k, names): _evaluate(v, names)
                 for k, v in zip(expr.keys, expr.values, strict=True)}
@@ -270,6 +297,9 @@ def test_no_engineering_words_in_what_the_app_shows():
         yield "why", [w.text for w in WHY]
         yield "deployment", [t for d in DEPLOYMENT for t in (d.label, d.means)]
         yield "retired", [r.why for r in RETIRED]
+        for p in PROFILES:
+            yield f"profile:{p.id}", [p.title, p.promise, p.caution, *p.when]
+        yield "signals", [t for sig in SIGNALS for t in (sig.label, sig.symptom, sig.unit)]
         for doc in (schema_json(), schema_json(facts=_FACTS)):
             for item in doc["settings"]:
                 rec = item["guidance"]["recommended"]["forThisPlatform"]
@@ -496,7 +526,8 @@ def test_schema_json_is_json_and_every_field_name_is_camel_case():
 
     def walk(node, path):
         if isinstance(node, dict):
-            data_keyed = path in (("why",),) or path[-1:] == ("effects",) and "choices" in path
+            data_keyed = (path in (("why",),) or path[-1:] == ("effects",) and "choices" in path
+                          or path[-1:] == ("values",) and path[:1] == ("profiles",))
             for k, v in node.items():
                 if not data_keyed and not camel.match(k):
                     bad.append("/".join(map(str, path + (k,))))
@@ -509,6 +540,146 @@ def test_schema_json_is_json_and_every_field_name_is_camel_case():
     assert not bad, f"not camelCase: {bad}"
     assert [s["key"] for s in doc["settings"]] == _KEYS
     assert all(s["docs"].startswith("versioned-graph-settings#") for s in doc["settings"])
+    assert [p["id"] for p in doc["profiles"]] == [p.id for p in PROFILES]
+    assert [s["id"] for s in doc["signals"]] == [s.id for s in SIGNALS]
+    assert all("warnAt" in s for s in doc["signals"])
+
+
+# ── Profiles: starting points that are values their settings take ─────────────
+
+_RESOLVER = _assignments(_APP / "services" / "settings" / "resolver.py")
+#: The word a kind takes besides a number, and the kinds whose numbers are whole: read from the
+#: resolver, so a profile is held to the rules a save is.
+_WORDS = _evaluate(_RESOLVER["WORDS"], _RESOLVER)
+_WHOLE = _evaluate(_RESOLVER["_WHOLE"], _RESOLVER)
+_SWITCH_NAMES = {d["key"]: d["name"] for d in SEED_DEFINITIONS}
+
+
+def _value_problem(s, value):
+    """Why ``value`` can't be the setting's (``resolver.value_error``'s codes), or None."""
+    if s.kind == "bool":
+        return None if isinstance(value, bool) else "invalid_value"
+    if s.kind == "choice":
+        return None if any(c.id == value for c in s.choices) else "invalid_choice"
+    if s.kind == "identifier":
+        ok = isinstance(value, str) and re.fullmatch(r"entity_id|urn|prop\.[^,\s]+(,urn)?", value)
+        return None if ok else "invalid_identifier"
+    if s.kind == "refusal_budget":
+        ok = isinstance(value, str) and re.fullmatch(r"unlimited|\d+|\d+(\.\d+)?%", value)
+        return None if ok else "invalid_budget"
+    if s.kind in _WORDS and value == _WORDS[s.kind]:
+        return None
+    if (isinstance(value, bool) or not isinstance(value, (int, float))
+            or (s.kind in _WHOLE and not isinstance(value, int)) or not math.isfinite(value)):
+        return "invalid_value"
+    if s.range is not None and not s.range[0] <= value <= s.range[1]:
+        return "out_of_range"
+    return None
+
+
+def _number(value):
+    """A value compared by a rule, as the resolver compares it: the words are infinite."""
+    if value in ("unlimited", "forever"):
+        return math.inf
+    return None if isinstance(value, bool) or not isinstance(value, (int, float)) else float(value)
+
+
+def test_the_contracts_profiles_are_there_each_once():
+    ids = [p.id for p in PROFILES]
+    assert len(ids) == len(set(ids))
+    assert set(_CONTRACT_PROFILES) <= set(ids)
+    for p in PROFILES:
+        assert re.fullmatch(r"[a-z]+(-[a-z]+)*", p.id), p.id
+        # The guide's heading for it is its title, whose anchor is its id.
+        assert p.title.lower().replace(" ", "-") == p.id, p.id
+        assert p.audience in typing.get_args(types.Audience), p.id
+        for text in (p.promise, p.caution):
+            assert text.strip().endswith(".") and ". " not in text, f"{p.id}: one sentence: {text!r}"
+        assert p.when and all(w.strip().endswith(".") for w in p.when), p.id
+        assert p.values, p.id
+
+
+@pytest.mark.parametrize("profile", PROFILES, ids=lambda p: p.id)
+def test_a_profiles_values_are_values_their_settings_take(profile):
+    """Kind, range and choices as the resolver reads a value, and the cross-field rules on the
+    values once it is applied over the defaults. A profile that sets one side of a rule sets the
+    other, so applying it can't break the rule against values chosen before."""
+    for key, value in profile.values.items():
+        assert key in BY_KEY, f"{profile.id}: no setting {key}"
+        assert _value_problem(BY_KEY[key], value) is None, \
+            f"{profile.id}: {key} = {value!r} is {_value_problem(BY_KEY[key], value)}"
+    applied = {**types.defaults_of(SETTINGS), **profile.values}
+    for s in SETTINGS:
+        for rule in s.rules:
+            if not {s.key, rule.other} & set(profile.values):
+                continue
+            assert {s.key, rule.other} <= set(profile.values), \
+                f"{profile.id}: sets one side of the rule {s.key} {rule.op} {rule.other}"
+            this, other = _number(applied[s.key]), _number(applied[rule.other])
+            broken = this > other - rule.margin if rule.op == "<=" else this < other + rule.margin
+            assert not broken, f"{profile.id}: {s.key} {rule.op} {rule.other}: {rule.message}"
+
+
+@pytest.mark.parametrize("profile", PROFILES, ids=lambda p: p.id)
+def test_a_profiles_scopes_allow_its_values(profile):
+    """Every value can be set at one of the profile's scopes, every scope has a value to set, and
+    what a workspace admin sets there is within the platform's default limits."""
+    assert profile.scopes and len(set(profile.scopes)) == len(profile.scopes)
+    assert set(profile.scopes) <= set(types.SCOPES), profile.id
+    for key in profile.values:
+        assert set(BY_KEY[key].scopes) & set(profile.scopes), \
+            f"{profile.id}: {key} can't be set at {profile.scopes}"
+    for scope in profile.scopes:
+        here = [key for key in profile.values if scope in BY_KEY[key].scopes]
+        assert here, f"{profile.id}: nothing to set at {scope}"
+        for key in here:
+            s, value = BY_KEY[key], profile.values[key]
+            if s.scopes[scope] != "workspace_admin":
+                continue
+            allowed, bounds = s.default_limits.get("allowed"), s.default_limits.get("range")
+            assert allowed is None or value in allowed, f"{profile.id}: {key} = {value!r} at {scope}"
+            assert not bounds or bounds[0] <= _number(value) <= bounds[1], f"{profile.id}: {key}"
+
+
+def test_balanced_is_the_built_in_value_of_everything_the_other_profiles_change():
+    balanced = next(p for p in PROFILES if p.id == "balanced")
+    for key, value in balanced.values.items():
+        default = BY_KEY[key].default.code
+        assert value == default and type(value) is type(default), f"{key}: {value!r}, not {default!r}"
+    assert set(balanced.values) == {key for p in PROFILES if p is not balanced for key in p.values}
+    assert balanced.scopes == types.SCOPES
+
+
+def test_a_profile_names_every_feature_switch_it_relies_on():
+    """A value that differs from the default and needs a switch (its setting's, or its choice's,
+    as Keep serving, switch when ready needs New-version builds) has the switch named in the
+    caution, so a profile never relies on one silently."""
+    for p in PROFILES:
+        for key, value in p.values.items():
+            s = BY_KEY[key]
+            if value == s.default.code and type(value) is type(s.default.code):
+                continue
+            chosen = next((c for c in s.choices if c.id == value), None)
+            for r in (*s.requires, *(chosen.requires if chosen else ())):
+                if r.feature:
+                    assert _SWITCH_NAMES[r.feature] in p.caution, \
+                        f"{p.id}: {key} = {value!r} needs {_SWITCH_NAMES[r.feature]}"
+
+
+# ── Signals: what actually happened, tied to a problem the settings answer ────
+
+def test_the_signals_are_the_fixed_counters_each_answering_a_symptom_of_its_settings():
+    ids = [sig.id for sig in SIGNALS]
+    assert len(ids) == len(set(ids)), f"a signal twice in {ids}"
+    assert set(ids) == set(_SIGNAL_IDS), f"not the fixed ids: {set(ids) ^ set(_SIGNAL_IDS)}"
+    for sig in SIGNALS:
+        assert sig.label.strip() and sig.unit.strip(), sig.id
+        assert sig.settings and len(set(sig.settings)) == len(sig.settings), sig.id
+        for key in sig.settings:
+            assert key in BY_KEY, f"{sig.id}: no setting {key}"
+        # The finder joins a count to its problem by this text: one its own settings answer.
+        assert any(sig.symptom in BY_KEY[key].guidance.symptoms for key in sig.settings), sig.id
+        assert sig.warn_at is None or (type(sig.warn_at) is int and sig.warn_at >= 1), sig.id
 
 
 # ── The env vars the app now also sets, said so where operators look ──────────
@@ -569,6 +740,15 @@ def test_every_docs_anchor_is_a_heading_in_the_generated_guide():
     ids = _heading_ids(_GUIDE.read_text(encoding="utf-8"))
     missing = [s["docs"] for s in schema_json()["settings"] if s["docs"].split("#", 1)[1] not in ids]
     assert not missing, f"no heading in {_GUIDE.name} for: {missing}"
+
+
+def test_the_guide_has_a_section_for_each_profile_and_lists_every_signal():
+    md = _GUIDE.read_text(encoding="utf-8")
+    ids = _heading_ids(md)
+    assert {"profiles", "signals"} <= ids
+    assert {p.id for p in PROFILES} <= ids, "a profile's anchor is its id"
+    signals = md.split("\n## Signals\n", 1)[1].split("\n## ", 1)[0]
+    assert all(f"`{sig.id}`" in signals for sig in SIGNALS)
 
 
 def test_the_guide_is_registered_in_the_app_under_its_docs_slug():

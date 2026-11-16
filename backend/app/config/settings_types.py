@@ -31,6 +31,13 @@ app (``--noconftest``), and the generated guide and the app's catalogue come fro
     raised and when lowered, when to change it, a recommended value and why, a risk, an example,
     and the symptoms it answers. ``tests/test_settings_registry.py`` fails a setting that lacks any
     of them, so a setting cannot ship without its explanation.
+
+    STARTING POINTS AND EVIDENCE
+    ----------------------------
+    A ``Profile`` is a starting point: values for the settings it covers, chosen for one outcome.
+    Applying one stages, at the level being edited, only the values its editor may set there, and
+    nothing is saved until it is reviewed. A ``Signal`` is evidence: a count of something that
+    actually happened, tied to the symptom it answers, so "Something's wrong?" can say how often.
 """
 from __future__ import annotations
 
@@ -278,6 +285,39 @@ class Retired:
     why: str
 
 
+@dataclass(frozen=True)
+class Profile:
+    """A one-click starting point: a value for each setting it covers, chosen for one outcome.
+
+    Every value is one its setting takes (kind, range, choices, cross-field rules), and the
+    ``caution`` names each feature switch a value that differs from the default needs, so a
+    profile never relies on a switch silently. Applying it at a scope stages only the values the
+    person may set there; nothing is saved until the change is reviewed."""
+    id: str                                 # "fastest-reads": the guide's anchor for it too
+    title: str
+    promise: str                            # one sentence: the outcome
+    audience: Audience
+    when: Tuple[str, ...]                   # when to choose it
+    values: Mapping[str, Any]               # setting key → value
+    scopes: Tuple[Scope, ...]               # where it can be applied
+    caution: str = ""                       # what you give up, in one sentence
+
+
+@dataclass(frozen=True)
+class Signal:
+    """What actually happened: a counter the platform keeps, one count per event its ``label``
+    names, tied to the problem it is evidence of. ``symptom`` is one of its ``settings``'
+    ``guidance.symptoms``, so "Something's wrong?" can say, beside that problem, how often it
+    happened. ``warn_at``: the count in 24 hours from which it is worth a look (None: a count is
+    only information, however high)."""
+    id: str                                 # fixed: the counters bump it by this id
+    label: str
+    symptom: str
+    settings: Tuple[str, ...]               # the settings that drive it
+    unit: str = "times"
+    warn_at: Optional[int] = None
+
+
 # ---------------------------------------------------------------------------------------------
 # One serialisation, used by the API, the generated catalogue and the generated guide
 # ---------------------------------------------------------------------------------------------
@@ -311,7 +351,8 @@ def defaults_of(settings: Sequence[Setting]) -> dict:
 
 def schema(*, domain: str, categories: Sequence[Category], settings: Sequence[Setting],
            glossary: Sequence[Term], why: Sequence[Why], deployment: Sequence[DeploymentFact],
-           retired: Sequence[Retired], values: Optional[Values] = None,
+           retired: Sequence[Retired], profiles: Sequence[Profile] = (),
+           signals: Sequence[Signal] = (), values: Optional[Values] = None,
            facts: Optional[Facts] = None) -> dict:
     """The registry as one JSON document. Examples and posture sentences are rendered here, with
     ``values`` (else the code defaults) and ``facts``, so no template language crosses to the app."""
@@ -347,4 +388,6 @@ def schema(*, domain: str, categories: Sequence[Category], settings: Sequence[Se
         "why": {w.code: {"text": w.text, "fix": _plain(w.fix)} for w in why},
         "deployment": _plain(list(deployment)),
         "retired": _plain(list(retired)),
+        "profiles": _plain(list(profiles)),
+        "signals": _plain(list(signals)),
     }

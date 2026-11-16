@@ -15,7 +15,7 @@
  *
  * `FACTS` are the live figures the explainers draw.
  */
-import type { ResolvedSetting, ResolvedValues, SettingsFacts, SettingValue, TrailStep, WhyItem } from '../types'
+import type { ResolvedSetting, ResolvedValues, SettingsFacts, SettingValue, SignalCount, TrailStep, WhyItem } from '../types'
 import { SCHEMA, SETTINGS_BY_KEY } from './schema'
 
 const GB = 1024 ** 3
@@ -184,3 +184,22 @@ export const FACTS: SettingsFacts = {
     largestGraph: { name: 'Sales lineage', bytes: 9.4 * GB },
     sampleImport: { liveItems: 120000, importRows: 118500, matched: 96000, deletes: 24000, creates: 22500 },
 }
+
+/**
+ * What happened on this platform in the last 24 hours, as the signals API counts it. New-version
+ * builds are off here, so nothing was built; loads waited past their mark (30) and one replace was
+ * stopped by the guard (mark 1), while retries (12 of 50) and unloads (4 of 10) stayed under theirs.
+ */
+export const SIGNAL_COUNTS: SignalCount[] = [
+    { id: 'builds.waited_for_room', count: 0, window: '24h' },
+    { id: 'builds.copy_timed_out', count: 0, window: '24h' },
+    { id: 'builds.dropped', count: 0, window: '24h' },
+    { id: 'reads.asked_to_retry', count: 12, window: '24h' },
+    { id: 'reads.from_database_while_behind', count: 1840, window: '24h' },
+    { id: 'residency.unloaded_under_pressure', count: 4, window: '24h' },
+    { id: 'residency.load_waited_for_room', count: 38, window: '24h' },
+    { id: 'imports.replace_refused_by_guard', count: 1, window: '24h' },
+    { id: 'imports.replace_stopped_low_match', count: 0, window: '24h' },
+    { id: 'drafts.idle_closed', count: 3, window: '24h' },
+    { id: 'drafts.changes_removed', count: 5, window: '24h' },
+]

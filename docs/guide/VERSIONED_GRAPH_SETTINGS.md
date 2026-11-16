@@ -2066,6 +2066,143 @@ Matching by a property keeps an index of its values in the database: built by th
 
 **Also searched as:** matching properties, alternate keys, external ids, GRAPHVER_MAX_MATCHING_PROPERTIES.
 
+## Profiles
+
+Starting points: each profile sets the settings it covers for one outcome. Applying one in the app stages its values at the level you are editing, only for the settings you may set there, and says which it left out and why. Nothing is saved until you review the changes and save them.
+
+| Profile | What it gives you | Lens | Applies at |
+|---|---|---|---|
+| [Balanced](#balanced) | The built-in values: readers see the newest version as soon as it is published, and writes to the graph store leave reads their turn. | Business | Platform, Workspace, Graph |
+| [Fastest reads](#fastest-reads) | Reads stay on the graph store at full speed while new data loads, and writes give way to them. | Business | Platform, Workspace, Graph |
+| [Always exact](#always-exact) | Readers always see the newest published version, whole, read from the database until the graph store has it. | Business | Platform, Workspace, Graph |
+| [Least memory](#least-memory) | Graphs give their memory back half an hour after their last read, and a build needs about its graph's size rather than twice it. | Operator | Platform, Workspace, Graph |
+| [Big import tonight](#big-import-tonight) | Writes to the graph store go faster while few people read, so a large import lands sooner, and a build with no room is written in place rather than wait. | Operator | Platform |
+
+### Balanced
+
+**The built-in values: readers see the newest version as soon as it is published, and writes to the graph store leave reads their turn.**
+
+**Choose it when**
+
+- You are starting out, or aren't sure which trade suits you.
+- You tried another profile and want the built-in values back.
+
+| Setting | It sets | Default | Set at |
+|---|---|---|---|
+| [Read mode](#reads-mode) | Always the latest | Always the latest | Platform, Workspace, Graph |
+| [Most versions behind](#reads-maxversionsbehind) | Unlimited | Unlimited | Platform, Workspace, Graph |
+| [Write target](#updates-statementtargetms) | 500 ms | 500 ms | Platform |
+| [Pause after a write](#updates-pacingratio) | 0.25× | 0.25× | Platform |
+| [Rebuilds and moves too](#builds-forrebuilds) | On | On | Platform |
+| [How a build makes its copy](#builds-method) | Auto | Auto | Platform |
+| [With no room](#builds-noroom) | Wait for room | Wait for room | Platform |
+| [Builds per worker](#builds-perworker) | 2 builds | 2 builds | Platform |
+| [Residency class](#residency-class) | Standard | Standard | Platform, Workspace, Graph |
+| [Unload a Standard graph after](#residency-standardidlesecs) | 7 days | 7 days | Platform |
+| [Unload a Coldline graph after](#residency-coldlineidlesecs) | 1 hour | 1 hour | Platform |
+| [Load a Coldline graph on opening above](#residency-coldlineloadabove) | 500,000 items | 500,000 items | Platform |
+
+**What you give up:** The settings it covers go back to their built-in values here, including any you tuned for your platform.
+
+**Applies at:** Platform, Workspace, Graph. Shown first in the Business lens.
+
+### Fastest reads
+
+**Reads stay on the graph store at full speed while new data loads, and writes give way to them.**
+
+**Choose it when**
+
+- Views of a large graph slow down for a while after each big import.
+- Fast canvases matter more than seeing a large change all at once.
+
+| Setting | It sets | Default | Set at |
+|---|---|---|---|
+| [Read mode](#reads-mode) | Keep serving, update in place | Always the latest | Platform, Workspace, Graph |
+| [Most versions behind](#reads-maxversionsbehind) | Unlimited | Unlimited | Platform, Workspace, Graph |
+| [Write target](#updates-statementtargetms) | 250 ms | 500 ms | Platform |
+| [Pause after a write](#updates-pacingratio) | 0.5× | 0.25× | Platform |
+
+**What you give up:** While a large change is written, readers can see part of it before the rest, and large updates take longer to land.
+
+**Applies at:** Platform, Workspace, Graph. Shown first in the Business lens.
+
+### Always exact
+
+**Readers always see the newest published version, whole, read from the database until the graph store has it.**
+
+**Choose it when**
+
+- The newest data must show the moment it is published, even if views are slower meanwhile.
+- Reports and checks must read exactly the version just published.
+
+| Setting | It sets | Default | Set at |
+|---|---|---|---|
+| [Read mode](#reads-mode) | Always the latest | Always the latest | Platform, Workspace, Graph |
+
+**What you give up:** While a graph updates, its reads come from the database: slower on a large graph, without lineage summaries meanwhile, and asked to retry under heavy load.
+
+**Applies at:** Platform, Workspace, Graph. Shown first in the Business lens.
+
+### Least memory
+
+**Graphs give their memory back half an hour after their last read, and a build needs about its graph's size rather than twice it.**
+
+**Choose it when**
+
+- The graph store is short of memory, or its memory costs too much.
+- Most graphs are opened now and then rather than all day.
+
+| Setting | It sets | Default | Set at |
+|---|---|---|---|
+| [Rebuilds and moves too](#builds-forrebuilds) | Off | On | Platform |
+| [How a build makes its copy](#builds-method) | From the database only | Auto | Platform |
+| [Builds per worker](#builds-perworker) | 1 build | 2 builds | Platform |
+| [Residency class](#residency-class) | Coldline | Standard | Platform, Workspace, Graph |
+| [Unload a Standard graph after](#residency-standardidlesecs) | 1 day | 7 days | Platform |
+| [Unload a Coldline graph after](#residency-coldlineidlesecs) | 30 minutes | 1 hour | Platform |
+| [Load a Coldline graph on opening above](#residency-coldlineloadabove) | 2,000,000 items | 500,000 items | Platform |
+
+**What you give up:** Graphs nobody read in the last half hour are read from the database, which is slower, and builds take much longer; the memory values need Graph residency on, and the build values New-version builds.
+
+**Applies at:** Platform, Workspace, Graph. Shown first in the Operator lens.
+
+### Big import tonight
+
+**Writes to the graph store go faster while few people read, so a large import lands sooner, and a build with no room is written in place rather than wait.**
+
+**Choose it when**
+
+- A large import or replace runs tonight, while few people read.
+- The new version must be in place by morning, even where a build finds no room.
+
+| Setting | It sets | Default | Set at |
+|---|---|---|---|
+| [Write target](#updates-statementtargetms) | 1 second | 500 ms | Platform |
+| [Pause after a write](#updates-pacingratio) | 0.1× | 0.25× | Platform |
+| [With no room](#builds-noroom) | Update in place | Wait for room | Platform |
+
+**What you give up:** Reads wait longer behind writes, and a change whose build finds no room can be seen part-way, until you apply Balanced again; the build value needs New-version builds.
+
+**Applies at:** Platform. Shown first in the Operator lens.
+
+## Signals
+
+What actually happened, counted as it happens. The app's "Something's wrong?" finder shows each count beside the problem it answers, with the settings behind it, and marks it once the count reaches the number worth a look. A dash: the count is shown, never marked.
+
+| Signal | Counts | The problem it answers | Settings behind it | Worth a look from |
+|---|---|---|---|---|
+| `builds.waited_for_room` | Builds waited for room | Builds wait for room | [How a build makes its copy](#builds-method), [Free memory a copy needs](#builds-copyroompct), [Largest graph copied](#builds-copymaxbytes), [With no room](#builds-noroom), [Start unloading at](#residency-unloadstartpct) | 30 in 24 hours |
+| `builds.copy_timed_out` | Copies timed out | Copies time out on a large graph | [How a build makes its copy](#builds-method), [Largest graph copied](#builds-copymaxbytes) | 3 in 24 hours |
+| `builds.dropped` | Builds dropped after their last attempt | A build gave up too soon | [Attempts before giving up](#builds-maxattempts), [How a build makes its copy](#builds-method), [Largest graph copied](#builds-copymaxbytes) | 1 in 24 hours |
+| `reads.asked_to_retry` | Reads asked to retry: too many at once on the database | Reads are asked to retry while data loads | [Reads at once per graph](#database-readspergraph), [Reads at once per process](#database-readsperprocess), [Read mode](#reads-mode) | 50 in 24 hours |
+| `reads.from_database_while_behind` | Reads served from the database while the graph store caught up | Reads are slow while data loads | [Read mode](#reads-mode), [Most versions behind](#reads-maxversionsbehind) | — |
+| `residency.unloaded_under_pressure` | Graphs unloaded because memory ran short | Graphs unload unexpectedly | [Unload graphs automatically](#residency-autounload), [Start unloading at](#residency-unloadstartpct), [Stop unloading at](#residency-unloadstoppct), [Residency class](#residency-class) | 10 in 24 hours |
+| `residency.load_waited_for_room` | Loads waited for room | Loads wait for room | [Headroom a load needs](#residency-loadmarginpct), [Start unloading at](#residency-unloadstartpct), [Memory per item, estimated](#residency-bytesperentity), [Unload graphs automatically](#residency-autounload) | 30 in 24 hours |
+| `imports.replace_refused_by_guard` | Replaces stopped by the replace guard | A replace import is refused | [Replace guard](#imports-replaceguard), [Guard graphs of at least](#imports-guardminlive), [Stop a replace that deletes](#imports-guarddeleteshare), [And makes again](#imports-guardcreateshare), [Match rows by](#imports-identifier) | 1 in 24 hours |
+| `imports.replace_stopped_low_match` | Replaces stopped early because too few rows matched | A replace import stopped after its first rows | [Stop early below a match share of](#imports-minmatchshare), [Match rows by](#imports-identifier), [Guard graphs of at least](#imports-guardminlive) | 1 in 24 hours |
+| `drafts.idle_closed` | Idle drafts closed | My draft was closed while I was away | [Close idle drafts after](#drafts-idleclosedays) | — |
+| `drafts.changes_removed` | Closed drafts' changes removed | Old drafts' changes are gone | [Keep closed drafts' changes for](#drafts-keepcloseddays) | — |
+
 ## Glossary
 
 | Term | What it means | Technical details |

@@ -14,16 +14,21 @@
  */
 import catalogue from '@/generated/versionedGraphSettings.json'
 import type {
-    Cap, Category, Choice, DefaultSpec, DeploymentFact, Effect, Frame, Guidance, Legacy, Recommended, Requirement,
-    Retired, Rule, Setting, SettingsSchema, TakesEffect, Term, WhyText,
+    Cap, Category, Choice, DefaultSpec, DeploymentFact, Effect, Frame, Guidance, Legacy, Profile, Recommended, Requirement,
+    Retired, Rule, Setting, SettingsSchema, Signal, TakesEffect, Term, WhyText,
 } from './types'
 
-/** A type with its word lists widened to `string` (and tuples to arrays), as a JSON import types them. */
+/**
+ * A type with its word lists widened to `string` (and tuples to arrays), as a JSON import types them.
+ * A map keyed by data (a profile's values) may be `undefined` at a key: in an array, a JSON import
+ * gives each object the keys its siblings have and it lacks, as `undefined`.
+ */
 type Widen<T> = T extends string ? string
     : T extends number ? number
         : T extends boolean ? boolean
             : T extends readonly (infer U)[] ? Widen<U>[]
-                : T extends object ? { [K in keyof T]: Widen<T[K]> }
+                : T extends object
+                    ? string extends keyof T ? { [k: string]: Widen<T[string & keyof T]> | undefined } : { [K in keyof T]: Widen<T[K]> }
                     : T
 
 /** Every key of every member of a union (`keyof` of a union keeps only the shared ones). */
@@ -55,6 +60,8 @@ export type CatalogueFieldsKnown = [
     Assert<Known<Json['why'][keyof Json['why']], WhyText>>,
     Assert<Known<Json['deployment'][number], DeploymentFact>>,
     Assert<Known<Json['retired'][number], Retired>>,
+    Assert<Known<Json['profiles'][number], Profile>>,
+    Assert<Known<Json['signals'][number], Signal>>,
 ]
 
 /** The catalogue as the app ships it: every field the kit reads is there, in its shape. */

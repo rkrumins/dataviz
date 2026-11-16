@@ -267,6 +267,51 @@ export interface Retired {
     why: string
 }
 
+/**
+ * A one-click starting point: a value for each setting it covers, chosen for one outcome. Applying
+ * one stages, at the level being edited, only the values the person may set there
+ * (`applyProfile`); nothing is saved until the change is reviewed.
+ */
+export interface Profile {
+    /** "fastest-reads": also its section's anchor in the guide. */
+    id: string
+    title: string
+    /** One sentence: the outcome. */
+    promise: string
+    audience: Audience
+    /** When to choose it. */
+    when: string[]
+    /** A value for each setting it covers, by key. */
+    values: Values
+    /** Where it can be applied. */
+    scopes: Scope[]
+    /** What you give up, in one sentence. It names each feature switch the profile needs. */
+    caution: string
+}
+
+/** What actually happened: a counter the platform keeps, tied to the problem it is evidence of. */
+export interface Signal {
+    /** Fixed: the counters bump it by this id ("builds.waited_for_room"). */
+    id: string
+    /** What one count is, in plain words. */
+    label: string
+    /** One of its settings' `guidance.symptoms`: the finder shows the count beside this problem. */
+    symptom: string
+    /** The settings that drive it. */
+    settings: string[]
+    unit: string
+    /** The count from which it is worth a look (set for 24 hours); null: only information. */
+    warnAt: number | null
+}
+
+/** A signal's count over a window, as the signals API and a graph's health report it. */
+export interface SignalCount {
+    id: string
+    count: number
+    /** "1h", "24h" or "7d". */
+    window: string
+}
+
 export interface DimensionInfo {
     id: Dimension
     label: string
@@ -288,6 +333,10 @@ export interface SettingsSchema {
     why: Record<string, WhyText>
     deployment: DeploymentFact[]
     retired: Retired[]
+    /** One-click starting points. */
+    profiles: Profile[]
+    /** The counters "Something's wrong?" shows beside the problems they answer. */
+    signals: Signal[]
 }
 
 // ── The resolver's answer ───────────────────────────────────────────────────

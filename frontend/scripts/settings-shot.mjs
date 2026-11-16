@@ -19,7 +19,9 @@ const OUT = '.harness'
 
 const SHOTS = process.argv.slice(2).length ? process.argv.slice(2) : [
   'platform', 'platform:dark', 'business', 'business:dark', 'graph', 'graph:dark', 'graph:mobile',
-  'review', 'review:dark', 'visuals', 'visuals:dark', 'primitives', 'primitives:dark', 'business:mobile',
+  'review', 'review:dark', 'visuals', 'visuals:dark', 'visuals-signals', 'visuals-signals:dark',
+  'profiles', 'profiles:dark', 'profiles:mobile', 'profiles-applied', 'profiles-applied:dark',
+  'primitives', 'primitives:dark', 'business:mobile',
 ]
 
 function findChromium() {

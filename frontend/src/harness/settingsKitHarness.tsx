@@ -9,8 +9,13 @@
  *
  * `npm run harness:settings` drives Chromium over every fixture and writes PNGs to .harness/.
  *
- *   fixture   platform | business | graph | review | visuals | primitives
+ *   fixture   platform | business | graph | review | visuals | visuals-signals | profiles |
+ *             profiles-applied | primitives
  *   theme     `dark` for the dark palette
+ *
+ * `visuals-signals` gives the symptom finder a day's signal counts; `profiles` opens the profile
+ * picker on the platform with Fastest reads chosen, and `profiles-applied` applies Balanced to a
+ * graph as a workspace admin, to show what was staged and what was left out.
  */
 import { MotionGlobalConfig } from 'framer-motion'
 import { useEffect, useMemo, useState } from 'react'
@@ -26,13 +31,13 @@ import { QuantityInput } from '../components/ui/QuantityInput'
 import { Select } from '../components/ui/Select'
 import { Switch } from '../components/ui/Switch'
 import {
-    ChangeReviewDialog, CopyRoomBar, GuardMeter, IdleTimeline, LensSwitch, MemoryMarks, ReadTimeline, RetentionTimeline,
+    ChangeReviewDialog, CopyRoomBar, GuardMeter, IdleTimeline, LensSwitch, MemoryMarks, ProfilePicker, ReadTimeline, RetentionTimeline,
     SettingRow, SettingsSearch, SettingVisual, StickySaveBar, SymptomFinder, TradeoffCompass, WriteRhythm,
     describeFix, orderForLens, reviewItems, settingAnchor, useStagedChanges, validateStaged, boundsAt,
     type Lens, type ResolvedValues, type Scope, type SettingValue,
 } from '../components/settings'
 import { SCHEMA, SETTINGS_BY_KEY } from '../components/settings/__fixtures__/schema'
-import { FACTS, GRAPH_VALUES, PLATFORM_VALUES } from '../components/settings/__fixtures__/resolved'
+import { FACTS, GRAPH_VALUES, PLATFORM_VALUES, SIGNAL_COUNTS } from '../components/settings/__fixtures__/resolved'
 import { BYTE_UNITS, DURATION_UNITS } from '../lib/units'
 import { usePreferencesStore } from '../store/preferences'
 
@@ -153,15 +158,27 @@ function SettingsPage({ scope, values, lens, onLens, inDrawer = false }: {
     )
 }
 
-function Visuals() {
+/** Clicks what a person would, once the page has drawn: a harness state is a URL, not a script. */
+function useClickOnce(find: () => HTMLElement | null | undefined, when: boolean) {
+    useEffect(() => {
+        if (!when) return
+        const t = setTimeout(() => find()?.click(), 0)
+        return () => clearTimeout(t)
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- once, on mount
+    }, [])
+}
+
+function Visuals({ signals = false }: { signals?: boolean }) {
     const [marks, setMarks] = useState({ start: 85, stop: 70 })
     const current = Object.fromEntries(Object.values(PLATFORM_VALUES).map((r) => [r.key, r.effective]))
+    // With the day's counts, open the problem that leads: what happened most past its mark.
+    useClickOnce(() => document.querySelector<HTMLElement>('[aria-label="Common problems"] button'), signals)
     return (
         <div className="grid items-start gap-6 xl:grid-cols-2">
             <TradeoffCompass dimensions={SCHEMA.dimensions} settings={SCHEMA.settings} current={current}
                 next={{ ...current, 'reads.mode': 'in_place', 'residency.unloadStartPct': 90 }}
                 inactive={Object.values(PLATFORM_VALUES).filter((r) => r.status === 'dormant' || r.status === 'not_used').map((r) => r.key)} />
-            <SymptomFinder settings={SCHEMA.settings} values={PLATFORM_VALUES} />
+            <SymptomFinder settings={SCHEMA.settings} values={PLATFORM_VALUES} signals={signals ? SIGNAL_COUNTS : undefined} />
             <ReadTimeline className="xl:col-span-2" setting={SETTINGS_BY_KEY['reads.mode']} value="latest" next="beside" />
             <MemoryMarks nodes={FACTS.nodes!} start={marks.start} stop={marks.stop} saved={{ start: 80, stop: 70 }} margin={5}
                 onChange={(start, stop) => setMarks({ start, stop })} />
@@ -172,6 +189,27 @@ function Visuals() {
             <RetentionTimeline days={30} nextDays={14} />
             <IdleTimeline standardIdleSecs={604800} coldlineIdleSecs={3600} next={{ standardIdleSecs: 1209600 }} />
         </div>
+    )
+}
+
+/**
+ * The profile picker as a page hosts it, in a drawer: on the platform as a system admin with Fastest
+ * reads chosen, or (`applied`) on a graph as a workspace admin with Balanced applied.
+ */
+function Profiles({ applied }: { applied: boolean }) {
+    const scope: Scope = applied ? 'graph' : 'platform'
+    const values = applied ? GRAPH_VALUES : PLATFORM_VALUES
+    const staged = useStagedChanges(values, scope)
+    const [open, setOpen] = useState(true)
+    useClickOnce(() => (applied
+        ? [...document.querySelectorAll<HTMLElement>('button')].find((b) => b.textContent?.startsWith('Apply '))
+        : document.querySelector<HTMLElement>('[role="radio"][aria-label="Fastest reads"]')), true)
+    return (
+        <Drawer open={open} onOpenChange={setOpen} size="xl" title="Start from a profile"
+            eyebrow={applied ? 'Graph · Sales lineage' : 'Administration · Versioned graphs'}>
+            <ProfilePicker profiles={SCHEMA.profiles} scope={scope} editor={applied ? 'workspace_admin' : 'system_admin'}
+                resolved={values} onStage={staged.stage} onClose={() => setOpen(false)} />
+        </Drawer>
     )
 }
 
@@ -226,10 +264,11 @@ export function SettingsKitHarness() {
                 {fixture !== 'graph' && <Button size="sm" variant="ghost" className="ml-auto" onClick={() => setDrawer(true)}>Open a graph’s settings</Button>}
             </div>
             <main className="mx-auto max-w-6xl px-4 py-8 sm:px-6">
-                {fixture === 'visuals' ? <Visuals />
+                {fixture === 'visuals' || fixture === 'visuals-signals' ? <Visuals signals={fixture === 'visuals-signals'} />
                     : fixture === 'primitives' ? <Primitives />
                         : fixture !== 'graph' && <SettingsPage scope="platform" values={PLATFORM_VALUES} lens={lens} onLens={setLens} />}
             </main>
+            {fixture.startsWith('profiles') && <Profiles applied={fixture === 'profiles-applied'} />}
             <Drawer open={drawer} onOpenChange={setDrawer} eyebrow="Graph · Finance" title="Sales lineage" size="xl"
                 description="Settings for this graph. Values it doesn’t set come from the workspace, then the platform.">
                 <SettingsPage scope="graph" values={GRAPH_VALUES} lens="business" onLens={() => {}} inDrawer />

@@ -20,6 +20,7 @@ export { ChangeReviewDialog, type ChangeReviewDialogProps, type ReviewWarning } 
 export { StickySaveBar } from './StickySaveBar'
 export { SettingsSearch } from './SettingsSearch'
 export { LensSwitch } from './LensSwitch'
+export { ProfilePicker, type ProfilePickerProps } from './ProfilePicker'
 
 export { TradeoffCompass } from './visuals/TradeoffCompass'
 export { ReadTimeline } from './visuals/ReadTimeline'
@@ -43,3 +44,4 @@ export { compassScores, compassMoves, scoreWords, type CompassPoint, type Compas
 export { choiceImpacts, changeImpacts, type Impact } from './impacts'
 export { reviewItems, type ReviewItem } from './review'
 export { validateValue, validateStaged, type ValidationContext } from './validate'
+export { applyProfile, skipWords, type ProfilePlan, type SkipReason } from './profiles'
