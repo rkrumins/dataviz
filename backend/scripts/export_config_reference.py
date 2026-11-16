@@ -747,6 +747,10 @@ PINNED = {
     "AGGREGATION_DISPATCH_MODE": "aggregation",
     "LOG_LEVEL": "observability",
     "METRICS_PORT": "observability",
+    # Read beside other subsystems too (the settings facts, the settings import migration); each
+    # belongs where an operator looks for it.
+    "GUNICORN_WORKERS": "http",
+    "GRAPHVER_DB_URL": "versioning",
 }
 
 #: The same, by name prefix, for families defined in the central ``config/resilience.py``.

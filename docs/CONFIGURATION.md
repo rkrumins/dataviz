@@ -147,6 +147,7 @@ The API server: what it accepts and serves, and which part of the backend each p
 
 | Variable | Default | Read in |
 |---|---|---|
+| `GUNICORN_WORKERS` | (empty) | `backend/app/services/settings/facts.py` |
 | `GZIP_COMPRESSLEVEL` | `1` | `backend/app/main.py` |
 | `HTTP_TIMEOUT_DATA_SOURCE_MOVE_SECS` | `120` | `backend/app/main.py` |
 | `HTTP_TIMEOUT_VIEW_TRANSFER_SECS` | `120` | `backend/app/main.py` |
@@ -162,7 +163,7 @@ The Postgres database that holds users, workspaces, views and settings. Per-role
 | Variable | Default | Description | Read in |
 |---|---|---|---|
 | `CREDENTIAL_ENCRYPTION_KEY` | — (secret, set your own) | Fernet key that encrypts the credentials stored for data sources and identity providers. Unset, credentials are stored unencrypted, except with `ENV=production`, where saving one fails instead. | `backend/app/db/repositories/connection_repo.py` |
-| `MANAGEMENT_DB_URL` | `postgresql+asyncpg://synodic:***@localhost:5432/synodic` / required / — *(differs by call site)* | Address of the management database: a Postgres URL starting with `postgresql+asyncpg://`. Unset, processes fall back to the local development database. | `backend/alembic/env.py`, `backend/app/db/engine.py`, `backend/app/services/system_status/probes.py` +4 more |
+| `MANAGEMENT_DB_URL` | `postgresql+asyncpg://synodic:***@localhost:5432/synodic` / required / — *(differs by call site)* | Address of the management database: a Postgres URL starting with `postgresql+asyncpg://`. Unset, processes fall back to the local development database. | `backend/alembic/env.py`, `backend/alembic/versions/20261116_1100_settings_import.py`, `backend/app/db/engine.py` +5 more |
 
 ### Internal tuning
 
@@ -667,7 +668,7 @@ Drafts and commits, projection into the graph store, and import and export.
 | `GRAPHVER_COLDLINE_CANVAS_LOAD_ABOVE` | `500000` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_COLDLINE_IDLE_SECS` | `3600` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_COMMIT_MAX_RETRIES` | `5` | `backend/app/services/versioning/config.py` |
-| `GRAPHVER_DB_URL` | — | `backend/app/services/system_status/probes.py`, `backend/app/services/versioning/config.py` |
+| `GRAPHVER_DB_URL` | — | `backend/alembic/versions/20261116_1100_settings_import.py`, `backend/app/services/system_status/probes.py`, `backend/app/services/versioning/config.py` |
 | `GRAPHVER_DEFAULT_AUDIT_TIER` | `commit_only` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_DIFF_TREE_MAX_CHANGES` | `20000` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_DRAIN_SECS` | `40` | `backend/app/services/versioning/config.py` |
