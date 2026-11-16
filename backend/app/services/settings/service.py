@@ -345,6 +345,23 @@ def _check(ctx: Context, place: Place, changes: Sequence[Change], editor: str) -
         raise InvalidSettings(errors)
 
 
+def checker(editor: Optional[str], workspace_id: Optional[str] = None):
+    """What an old endpoint's save (``legacy.save(check=...)``) runs under the writers' lock: the
+    changes checked for ``editor`` exactly as a PATCH is (the platform's limits and locks among the
+    rest), raising what a PATCH raises. None when there is nobody to check for. A graph's
+    ``workspace_id`` names the workspace its values resolve through."""
+    if editor is None:
+        return None
+
+    async def check(session: AsyncSession, scope: str, scope_id: str,
+                    changes: Sequence[Change]) -> None:
+        target = (Target("graph", workspace_id, scope_id) if scope == "graph"
+                  else Target("workspace", scope_id) if scope == "workspace" else Target())
+        _check(await context(session), Place(target), changes, editor)
+
+    return check
+
+
 async def _record(session: AsyncSession, change_set: store.ChangeSet, place: Place) -> None:
     """The change set's one activity event, filed under its place, with each value before and
     after, and the platform's limits where they changed, under the reason it was saved with."""

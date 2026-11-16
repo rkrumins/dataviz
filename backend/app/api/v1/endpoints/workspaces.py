@@ -1091,7 +1091,7 @@ async def remove_data_source(
     await data_source_transfer.cancel_open_for_source(
         session, ds_id, actor=_user.id, note="The data source was deleted.",
     )
-    logger.info("data source %s moved to trash by %s (restorable for %s days)", ds_id, _user.id,
+    logger.info("data source %s moved to trash by %s (restorable for %s days)", ds.id, _user.id,
                 await effective.value_of("trash.restoreDays", workspace_id=workspace_id))
 
 

@@ -118,7 +118,7 @@ def world(settings_world, test_client, estate, monkeypatch):
     monkeypatch.setattr(route_cache, "announce", announce)
     monkeypatch.setattr(legacy, "write_through", write_through)
     monkeypatch.setattr(facts, "collect", collect)
-    app.dependency_overrides[get_versioning_service] = lambda: _Versioning()
+    app.dependency_overrides[get_versioning_service] = _Versioning
     as_("system_admin")
     return settings_world
 

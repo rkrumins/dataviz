@@ -23,7 +23,7 @@ import json
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Mapping, Optional, Sequence
+from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Sequence
 
 from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -204,19 +204,17 @@ async def write_through(session: AsyncSession, change_set: store.ChangeSet, *,
 
 async def save(session: AsyncSession, scope: str, scope_id: str, values: Mapping[str, Any], *,
                actor: Optional[str], record: Optional[store.Hook] = None,
-               editor: Optional[str] = None,
-               workspace_id: Optional[str] = None) -> store.ChangeSet:
+               check: Optional[Callable[..., Awaitable[None]]] = None) -> store.ChangeSet:
     """Save ``values`` (by setting key; None inherits) at one scope, as an old endpoint saves them.
     They go through the store (``legacy_api``, with the request's stated reason), each at the
     version it has now, read under the writers' lock so no save comes between. They are written
     through to the old storage, and ``record`` (the old endpoint's activity event) runs in the same
     transaction when one changed. Commits.
 
-    With ``editor`` (who saves: ``system_admin`` or ``workspace_admin``), the values are checked
-    as the settings API checks them first, against the platform's limits and locks among the rest,
-    so an old endpoint is no way around them: ``validate.SettingNotPermitted`` or
-    ``service.InvalidSettings`` is raised and nothing is saved. A graph's ``workspace_id`` names
-    the workspace its values resolve through."""
+    ``check`` (``service.checker`` for who saves) runs first, under the lock: the values are
+    checked as the settings API checks them, against the platform's limits and locks among the
+    rest, so an old endpoint is no way around them. What it raises is raised, and nothing is
+    saved."""
     from backend.app.common import activity_context
 
     reg = registry()
@@ -224,13 +222,8 @@ async def save(session: AsyncSession, scope: str, scope_id: str, values: Mapping
     held = {r.key: r for r in await store.read_scope(session, reg.DOMAIN, scope, scope_id)}
     changes = [store.Change(key, scope, scope_id, held[key].version if key in held else 0,
                             value=value) for key, value in values.items()]
-    if editor is not None:
-        from . import service
-        from .resolver import Target
-
-        target = (Target("graph", workspace_id, scope_id) if scope == "graph"
-                  else Target("workspace", scope_id) if scope == "workspace" else Target())
-        service._check(await service.context(session), service.Place(target), changes, editor)
+    if check is not None:
+        await check(session, scope, scope_id, changes)
 
     async def before_commit(s: AsyncSession, change_set: store.ChangeSet) -> None:
         await write_through(s, change_set)

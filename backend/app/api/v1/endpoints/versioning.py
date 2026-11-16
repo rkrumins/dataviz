@@ -4711,8 +4711,7 @@ async def put_import_settings(
             await legacy.save(session, "graph", row.id, {
                 key: None if changes[api] == "inherit" else changes[api]
                 for _column, api, key in import_settings.FIELDS if api in changes},
-                actor=_user.id, record=record, editor=_settings_editor(claims, ws_id),
-                workspace_id=ws_id)
+                actor=_user.id, record=record, check=_settings_check(claims, ws_id))
     return await _import_settings_view(session, row, graph_id,
                                        fork=bool(meta.get("fork_parent_graph_id")))
 
@@ -5858,10 +5857,12 @@ def _settings_refusals():
             "type": exc.code, "message": str(exc), "errors": exc.errors}) from exc
 
 
-def _settings_editor(claims: PermissionClaims, ws_id: str) -> Optional[str]:
+def _settings_check(claims: PermissionClaims, ws_id: str):
+    """The check an old settings endpoint's save runs: the caller's, as the settings API checks a
+    PATCH (``settings.service.checker``)."""
     from backend.app.services.settings import service as settings_service
 
-    return settings_service.editor_of(claims, ws_id)
+    return settings_service.checker(settings_service.editor_of(claims, ws_id), ws_id)
 
 
 async def _record_policy_change(session: AsyncSession, scope: str, before: dict, after: dict,
@@ -5942,7 +5943,7 @@ async def put_workspace_drafts_policy(
     with _settings_refusals():
         await drafts_policy.save(session, "workspace", ws_id, drafts_policy.changes_from(body),
                                  actor=_user.id, record=record,
-                                 editor=_settings_editor(claims, ws_id))
+                                 check=_settings_check(claims, ws_id))
     return await _workspace_policy(session, ws_id)
 
 
@@ -5997,8 +5998,7 @@ async def put_data_source_drafts_policy(
         # Written through to the old columns of the data source and of its forks.
         with _settings_refusals():
             await drafts_policy.save(session, "graph", ds.id, changes, actor=_user.id,
-                                     record=record, editor=_settings_editor(claims, ws_id),
-                                     workspace_id=ws_id)
+                                     record=record, check=_settings_check(claims, ws_id))
     return await _source_policy(session, ws_id, ds)
 
 

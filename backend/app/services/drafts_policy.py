@@ -131,12 +131,12 @@ async def own(session, scope: str, scope_id: str) -> Dict[str, Any]:
 
 
 async def save(session, scope: str, scope_id: str, changes: dict, *, actor: Optional[str],
-               record, editor: Optional[str] = None, workspace_id: Optional[str] = None) -> None:
+               record, check=None) -> None:
     """Save ``changes`` (by API field; ``"inherit"`` clears one) at a workspace or a data source's
     graph, through the settings store as an old endpoint saves (``settings.legacy.save``, which
-    checks them for ``editor`` against the platform's limits and locks). When a field changed,
-    ``record(session, before, after)`` runs in the same transaction with what the fields that
-    changed were and became, by API field. Commits."""
+    runs ``check`` first: ``settings.service.checker`` for who saves, against the platform's limits
+    and locks). When a field changed, ``record(session, before, after)`` runs in the same
+    transaction with what the fields that changed were and became, by API field. Commits."""
     from backend.app.services.settings import legacy
 
     field_of = {key: api for api, key in KEYS.items()}
@@ -148,7 +148,7 @@ async def save(session, scope: str, scope_id: str, changes: dict, *, actor: Opti
     await legacy.save(session, scope, scope_id,
                       {KEYS[api]: None if value == "inherit" else value
                        for api, value in changes.items()}, actor=actor, record=recorded,
-                      editor=editor, workspace_id=workspace_id)
+                      check=check)
 
 
 def apply(row: Any, changes: dict) -> tuple[dict, dict]:
