@@ -1,0 +1,135 @@
+/**
+ * How a setting's value reads, and what its trail says about it.
+ *
+ * `formatValue` is the one place a value becomes words, by kind and in its unit ("30 days",
+ * "Forever", "×0.5", "Keep serving, update in place"), so the row, the trail, the review and the
+ * history all say the same thing.
+ */
+import { identifierLabel } from '@/features/import-export/identifier'
+import {
+    formatBytes, formatBytesOrUnlimited, formatCount, formatCountOrUnlimited, formatDays, formatDaysOrForever,
+    formatDuration, formatMs, formatPercent, formatRatio, formatRefusalBudget, type RatioStyle,
+} from '@/lib/units'
+import type { ResolvedSetting, Scope, Setting, SettingValue, TrailScope, TrailStep, WhyFix } from './types'
+
+export const SCOPE_LABEL: Record<TrailScope, string> = {
+    default: 'Default', platform: 'Platform', workspace: 'Workspace', graph: 'Graph',
+}
+
+/** "this graph", "this workspace", "the platform": where a change made here applies. */
+export const SCOPE_HERE: Record<Scope, string> = {
+    platform: 'the platform', workspace: 'this workspace', graph: 'this graph',
+}
+
+/** The order levels are consulted in, most general first. */
+export const TRAIL_ORDER: TrailScope[] = ['default', 'platform', 'workspace', 'graph']
+
+/** The anchor a setting's row carries, and its guide section: `reads.mode` → `reads-mode`. */
+export function settingAnchor(key: string): string {
+    return key.replaceAll('.', '-').toLowerCase()
+}
+
+/** A ratio is a share of a whole unless it is a multiplier (a "×" unit, or a range past 1). */
+export function ratioStyle(s: Setting): RatioStyle {
+    if (s.unit === '×' || s.unit === 'x') return 'times'
+    return s.range && s.range[1] > 1 ? 'times' : 'share'
+}
+
+export function choiceTitle(s: Setting, id: SettingValue): string {
+    return s.choices.find((c) => c.id === id)?.title ?? String(id)
+}
+
+/** A value as people read it, with its unit. `null` reads as "Not set". */
+export function formatValue(s: Setting, v: SettingValue | null | undefined): string {
+    if (v === null || v === undefined) return 'Not set'
+    const n = Number(v)
+    switch (s.kind) {
+        case 'bool': return v ? 'On' : 'Off'
+        case 'choice': return choiceTitle(s, v)
+        case 'count': return formatCount(n, s.unit ?? undefined)
+        case 'ratio': return formatRatio(n, ratioStyle(s))
+        case 'percent': return formatPercent(n)
+        case 'ms': return formatMs(n)
+        case 'seconds': return formatDuration(n)
+        case 'bytes': return formatBytes(n)
+        case 'days': return formatDays(n)
+        case 'days_or_forever': return formatDaysOrForever(v === 'forever' ? 'forever' : n)
+        case 'count_or_unlimited': return formatCountOrUnlimited(v === 'unlimited' ? 'unlimited' : n, s.unit ?? undefined)
+        case 'bytes_or_unlimited': return formatBytesOrUnlimited(v === 'unlimited' ? 'unlimited' : n)
+        case 'identifier': return identifierLabel(String(v))
+        case 'refusal_budget': return formatRefusalBudget(String(v))
+        default: return String(v)
+    }
+}
+
+export function stepAt(r: ResolvedSetting, scope: TrailScope): TrailStep | undefined {
+    return r.trail.find((t) => t.scope === scope)
+}
+
+/** The value chosen at `scope` itself (null: it inherits). */
+export function ownValue(r: ResolvedSetting, scope: Scope): SettingValue | null {
+    return stepAt(r, scope)?.value ?? null
+}
+
+/** What clearing `scope`'s own value would leave in force: the nearest level above it with a value. */
+export function inheritedAt(r: ResolvedSetting, scope: Scope): { scope: TrailScope; value: SettingValue } {
+    const above = TRAIL_ORDER.slice(0, TRAIL_ORDER.indexOf(scope)).reverse()
+    for (const level of above) {
+        const v = stepAt(r, level)?.value
+        if (v !== null && v !== undefined) return { scope: level, value: v }
+    }
+    return { scope: 'default', value: r.trail[0]?.value ?? r.effective }
+}
+
+/** The platform's limits, when they bind a lower scope. */
+export function limitsFor(r: ResolvedSetting, scope: Scope) {
+    if (scope === 'platform') return null
+    return stepAt(r, 'platform')?.limits ?? null
+}
+
+/** Whether the platform locked the value for lower scopes. */
+export function lockedFor(r: ResolvedSetting, scope: Scope): boolean {
+    return scope !== 'platform' && Boolean(stepAt(r, 'platform')?.locked)
+}
+
+/** The numeric bounds a value may take at `scope`: the setting's range, narrowed by the platform's limits. */
+export function boundsAt(s: Setting, r: ResolvedSetting | undefined, scope: Scope): { min?: number; max?: number } {
+    let min = s.range?.[0]
+    let max = s.range?.[1]
+    const limits = r ? limitsFor(r, scope) : null
+    if (limits?.min !== undefined) min = min === undefined ? limits.min : Math.max(min, limits.min)
+    if (limits?.max !== undefined) max = max === undefined ? limits.max : Math.min(max, limits.max)
+    return { min, max }
+}
+
+/** Words for who may change a value: "a system admin". */
+export const EDITOR_LABEL = { system_admin: 'a system admin', workspace_admin: 'a workspace admin' } as const
+
+/** Two values are the same choice. */
+export function sameValue(a: SettingValue | null | undefined, b: SettingValue | null | undefined): boolean {
+    return a === b || (a != null && b != null && String(a) === String(b) && typeof a === typeof b)
+}
+
+/** The switches' names as the app shows them, for a fix that turns one on. Pages pass the live names. */
+export const FEATURE_NAMES: Record<string, string> = {
+    candidateKeysEnabled: 'New-version builds',
+    residencyEnabled: 'Graph residency',
+}
+
+const lowerFirst = (s: string) => s.charAt(0).toLowerCase() + s.slice(1)
+
+/** A fix in words, for its button: "Turn on New-version builds", "Use “Keep serving, update in place”". */
+export function describeFix(fix: WhyFix, { settings, featureNames = FEATURE_NAMES }: {
+    settings?: Record<string, Setting>
+    featureNames?: Record<string, string>
+} = {}): string {
+    if (fix.feature) {
+        const name = featureNames[fix.feature] ?? lowerFirst(fix.feature.replace(/Enabled$/, '').replace(/([a-z])([A-Z])/g, '$1 $2'))
+        return `${fix.to === false ? 'Turn off' : 'Turn on'} ${name}`
+    }
+    const s = fix.setting ? settings?.[fix.setting] : undefined
+    if (!s) return `Set ${fix.setting ?? 'it'} to ${String(fix.to)}`
+    if (s.kind === 'bool') return `${fix.to ? 'Turn on' : 'Turn off'} ${lowerFirst(s.label)}`
+    if (s.kind === 'choice') return `Use “${choiceTitle(s, fix.to)}”`
+    return `Set ${lowerFirst(s.label)} to ${formatValue(s, fix.to)}`
+}
