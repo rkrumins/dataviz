@@ -78,7 +78,7 @@ describe('Settings: what a person meets', () => {
         renderWithApi(<AdminVersionedGraphs />, { path: SETTINGS })
         const rail = await screen.findByRole('navigation', { name: 'Setting categories' })
         for (const c of CATALOGUE.categories) {
-            expect(within(rail).getByRole('button', { name: new RegExp(c.label.replace(/[&]/g, '\\$&')) })).toBeInTheDocument()
+            expect(within(rail).getByRole('button', { name: (name) => name.includes(c.label) })).toBeInTheDocument()
             expect(screen.getByRole('heading', { level: 2, name: c.label })).toBeInTheDocument()
         }
         // The fixture's platform chose five values of its own: two of them New-version builds'.

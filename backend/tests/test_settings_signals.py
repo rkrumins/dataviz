@@ -196,7 +196,7 @@ def test_the_flusher_flushes_on_its_interval_and_once_more_when_it_stops(redis):
         assert len(redis.executed) == 1
         signals.bump("drafts.changes_removed", graph_id="g1")
         stop.set()
-        await task
+        await asyncio.wait_for(task, timeout=5)        # the flusher ends with its stop
         assert redis.hashes["sig:drafts.changes_removed:2026111613"] == {"n": 2}
 
         signals.start_flusher()

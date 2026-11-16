@@ -73,7 +73,7 @@ describe('LayerHierarchyPanel — an anchored column past its first page', () =>
     vi.useFakeTimers()
     fire = null
     vi.stubGlobal('IntersectionObserver', class {
-      constructor(cb: (entries: { isIntersecting: boolean }[]) => void) { fire = cb }
+      constructor(cb: (entries: { isIntersecting: boolean }[]) => void, _options?: IntersectionObserverInit) { fire = cb }
       observe() {}
       unobserve() {}
       disconnect() {}
