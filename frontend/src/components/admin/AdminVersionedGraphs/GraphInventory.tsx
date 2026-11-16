@@ -8,10 +8,13 @@
  * settings of their own, and a search); pages come by cursor; only the rows in view are drawn, so
  * thousands of graphs scroll as smoothly as ten. A phone shows each graph as a card.
  *
- * Each row opens the graph's settings, and its menu rebuilds the copy, checks it against the
- * database, loads an unloaded graph, moves a platform copy, adopts a connected graph's copy onto a
- * platform copy, opens the data source, or moves a fork to the trash. What each action did is said
- * under its row.
+ * Each row says what its readers get as the server resolves it: the mode in force, where it was
+ * chosen, and, when the one chosen can't be had, which it was and why.
+ *
+ * Each row opens the graph's settings, and its menu rebuilds the copy (after a confirmation), checks
+ * it against the database, loads an unloaded graph, moves a platform copy, adopts a connected
+ * graph's copy onto a platform copy, opens the data source, or moves a fork to the trash. What each
+ * action did is said under its row, in a cell of its own.
  */
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { useNavigate } from 'react-router-dom'
@@ -52,6 +55,7 @@ const STATUS_OPTIONS: Array<{ value: ProjectionBucket; label: string }> = [
     { value: 'evicted', label: 'Unloaded' },
     { value: 'rehydrating', label: 'Loading' },
     { value: 'waiting_capacity', label: 'Waiting for room' },
+    { value: 'building', label: 'Building a new version' },
     { value: 'failed', label: 'Failed' },
 ]
 
@@ -67,6 +71,19 @@ const STATE_CHIP: Record<ResidencyState, { label: string; tone: 'success' | 'neu
     rehydrating: { label: 'Loading', tone: 'info' },
     waiting_capacity: { label: 'Waiting for room', tone: 'warning' },
 }
+
+/** Whether a graph's copy is in memory, as its row and its health say it. */
+export function ResidencyChip({ state, since }: { state: ResidencyState; since?: string | null }) {
+    const chip = STATE_CHIP[state]
+    return (
+        <Badge tone={chip?.tone ?? 'neutral'} size="sm" title={since ? `Loading since ${new Date(since).toLocaleString()}` : undefined}>
+            {chip?.label ?? state}
+        </Badge>
+    )
+}
+
+/** Where a graph's read mode was chosen, when it was chosen for it. */
+const SOURCE_WORDS: Partial<Record<string, string>> = { graph: 'set on this graph', workspace: 'set for its workspace' }
 
 const STATE_WORDS: Record<string, string> = {
     projecting: 'updating', rebuilding: 'rebuilding', evicted: 'unloaded', rehydrating: 'loading', waiting_capacity: 'waiting for room',
@@ -92,7 +109,7 @@ function buildTitle(b: BuildState): string {
         'Readers keep exactly the version served now until the new one is built and checked, then switch at once.',
         b.step === 'seeding' && b.reason !== 'rebuild' && b.reason !== 'move'
             ? 'Its copy is written from the database, as no copy fits or one is not wanted.' : '',
-        b.step === 'seeding' && b.progress?.total ? `${Math.round(((b.progress.done ?? 0) / b.progress.total) * 100)}% written.` : '',
+        b.step === 'seeding' && b.progress?.total ? `${Math.floor(((b.progress.done ?? 0) / b.progress.total) * 100)}% written.` : '',
         b.waiting ? `Waiting: ${b.waiting}.` : '',
         b.error ? `Attempt ${b.attempts ?? 1} failed: ${b.error}.` : '',
     ].filter(Boolean).join(' ')
@@ -130,11 +147,12 @@ function stateLabel(row: VersionedGraphRow): string {
 }
 
 const nameOf = (row: VersionedGraphRow) => row.dataSourceLabel ?? row.dataSourceId
+const DEFAULT_STORE = 'Default graph store'
 const canAdopt = (row: VersionedGraphRow) => !row.owned && !row.forkParentGraphId && !row.orphan && Boolean(row.falkorGraphName)
     && row.falkorGraphName !== `gv_${row.graphId}`
 const canLoad = (row: VersionedGraphRow) => !row.forkParentGraphId && (row.residencyState === 'evicted' || row.residencyState === 'waiting_capacity')
 
-const COLS = 'md:grid md:grid-cols-[minmax(13rem,1.4fr)_minmax(11rem,1fr)_minmax(11rem,1fr)_minmax(9rem,0.8fr)_auto] md:gap-x-4'
+const COLS = 'md:grid md:grid-cols-[minmax(13rem,1.4fr)_minmax(11rem,1fr)_minmax(11rem,1fr)_minmax(9rem,0.8fr)_9rem] md:gap-x-4'
 const ITEM_CLS = cn(
     'flex w-full cursor-pointer items-start gap-2.5 rounded-lg px-3 py-2 text-left text-[13px] text-ink outline-none',
     'data-[highlighted]:bg-black/[0.05] dark:data-[highlighted]:bg-white/[0.07]',
@@ -153,7 +171,7 @@ function MenuItem({ icon: Icon, label, hint, disabled, onSelect }: {
             <Icon aria-hidden className="mt-0.5 w-4 h-4 shrink-0 text-ink-muted" />
             <span className="min-w-0">
                 <span className="block">{label}</span>
-                {hint && <span className="block text-[11px] text-ink-muted">{hint}</span>}
+                {hint && <span className="block text-[11px] text-ink-secondary">{hint}</span>}
             </span>
         </DropdownMenu.Item>
     )
@@ -163,7 +181,7 @@ function MenuItem({ icon: Icon, label, hint, disabled, onSelect }: {
 function Cell({ label, children, className }: { label: string; children: ReactNode; className?: string }) {
     return (
         <div role="cell" className={cn('min-w-0', className)}>
-            <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-ink-muted md:hidden">{label}</p>
+            <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-ink-secondary md:hidden">{label}</p>
             {children}
         </div>
     )
@@ -185,6 +203,8 @@ export function GraphInventory({ filter, onFilter, onOpenSettings, providers }: 
     const [moving, setMoving] = useState<VersionedGraphRow | null>(null)
     const [adopting, setAdopting] = useState<VersionedGraphRow | null>(null)
     const [trashing, setTrashing] = useState<VersionedGraphRow | null>(null)
+    const [rebuilding, setRebuilding] = useState<VersionedGraphRow | null>(null)
+    const rebuildReads = choice(READS, rebuilding?.readModeEffective)
     const providerName = new Map(providers.map((p) => [p.id, p.name]))
     const filtered = Object.keys(filter).length > 0
 
@@ -246,6 +266,7 @@ export function GraphInventory({ filter, onFilter, onOpenSettings, providers }: 
             setBusy(null)
             if (action === 'adopt') setAdopting(null)
             if (action === 'trash') setTrashing(null)
+            if (action === 'rebuild') setRebuilding(null)
         }
     }
 
@@ -259,7 +280,7 @@ export function GraphInventory({ filter, onFilter, onOpenSettings, providers }: 
             <div className="flex flex-wrap items-end justify-between gap-3">
                 <div>
                     <h2 id="inventory-title" className="text-lg font-semibold tracking-tight text-ink">Every versioned graph</h2>
-                    <p className="text-[13px] text-ink-muted">Forks and orphans included, each with the copy it is read from and its state.</p>
+                    <p className="text-[13px] text-ink-secondary">Forks and orphans included, each with the copy it is read from and its state.</p>
                 </div>
                 <ReseedMenu providers={providers} />
             </div>
@@ -279,12 +300,12 @@ export function GraphInventory({ filter, onFilter, onOpenSettings, providers }: 
                     options={[{ value: '', label: 'Any class' }, ...CLASSES.choices.map((c) => ({ value: c.id, label: c.title }))]} />
                 <Select size="sm" aria-label="Own settings" value={filter.ownSettings === undefined ? '' : filter.ownSettings ? 'yes' : 'no'}
                     onChange={field('ownSettings')}
-                    options={[{ value: '', label: 'Own settings or not' }, { value: 'yes', label: 'With settings of their own' }, { value: 'no', label: 'Following their workspace' }]} />
+                    options={[{ value: '', label: 'With or without own settings' }, { value: 'yes', label: 'With settings of their own' }, { value: 'no', label: 'Following their workspace' }]} />
                 <Select size="sm" aria-label="Provider" value={filter.provider ?? ''} onChange={field('provider')}
-                    options={[{ value: '', label: 'All providers' }, { value: 'default', label: 'default' },
+                    options={[{ value: '', label: 'All providers' }, { value: 'default', label: DEFAULT_STORE },
                         ...providers.filter((p) => p.type === 'falkordb').map((p) => ({ value: p.id, label: p.name }))]} />
                 {filtered && (
-                    <Button size="sm" variant="ghost" leftIcon={Undo2} onClick={() => { setSearch(''); onFilter({}) }}>Clear filters</Button>
+                    <Button size="sm" variant="ghost" leftIcon={Undo2} onClick={() => { setSearch(''); onFilter({}) }} className="text-ink-secondary">Clear filters</Button>
                 )}
             </div>
 
@@ -301,131 +322,146 @@ export function GraphInventory({ filter, onFilter, onOpenSettings, providers }: 
                 <EmptyState
                     icon={Database}
                     title={filtered ? 'No graph matches these filters' : 'No versioned graphs yet'}
-                    description={filtered ? 'Try fewer filters, or another search.' : 'A data source’s graph is listed here once versioning is turned on for it.'}
-                    action={filtered ? { label: 'Clear filters', onClick: () => { setSearch(''); onFilter({}) } } : undefined}
+                    description={filtered ? 'Try fewer filters, or another search.' : 'A data source’s graph is listed here once versioning is turned on for it, on the data source’s Versioning tab in its workspace.'}
+                    action={filtered
+                        ? { label: 'Clear filters', onClick: () => { setSearch(''); onFilter({}) } }
+                        : { label: 'Open workspaces', onClick: () => navigate('/workspaces') }}
                 />
             ) : (
-                <div role="table" aria-label="Versioned graphs" aria-rowcount={rows.length + 1} className="rounded-2xl border border-glass-border/50 bg-canvas-elevated">
-                    <div role="rowgroup" className="hidden border-b border-glass-border/50 md:block">
-                        <div role="row" aria-rowindex={1} className={cn(COLS, 'px-5 py-2.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-ink-muted')}>
-                            <span role="columnheader">Graph</span>
-                            <span role="columnheader">Reads and memory</span>
-                            <span role="columnheader">Graph store copy</span>
-                            <span role="columnheader">State</span>
-                            <span role="columnheader"><span className="sr-only">Actions</span></span>
+                <div className="rounded-2xl border border-glass-border/50 bg-canvas-elevated">
+                    <div role="table" aria-label="Versioned graphs" aria-rowcount={rows.length + 1}>
+                        {/* The same gutter as the list's scrollbar, so each column sits over its own. */}
+                        <div role="rowgroup" className="hidden overflow-hidden border-b border-glass-border/50 [scrollbar-gutter:stable] md:block">
+                            <div role="row" aria-rowindex={1} className={cn(COLS, 'px-5 py-2.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-ink-secondary')}>
+                                <span role="columnheader">Graph</span>
+                                <span role="columnheader">Reads and memory</span>
+                                <span role="columnheader">Graph store copy</span>
+                                <span role="columnheader">State</span>
+                                <span role="columnheader"><span className="sr-only">Actions</span></span>
+                                <span role="columnheader" className="sr-only">What the last action did</span>
+                            </div>
+                        </div>
+                        <div ref={scrollRef} tabIndex={0} aria-label="Graphs, scroll for more" role="rowgroup"
+                            className="max-h-[min(70vh,44rem)] overflow-y-auto overscroll-contain outline-none [scrollbar-gutter:stable] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent-lineage/40">
+                            <div className="relative w-full" style={{ height: virtualizer.getTotalSize() }}>
+                                {items.map((v) => {
+                                    const row = rows[v.index]
+                                    const n = notes[row.graphId]
+                                    const mine = busy?.startsWith(`${row.graphId}:`)
+                                    const reads = choice(READS, row.readModeEffective)
+                                    const declared = row.readModeDeclared && row.readModeDeclared !== row.readModeEffective
+                                        ? choice(READS, row.readModeDeclared) : undefined
+                                    const whyMode = row.readModeWhy?.[0]?.text
+                                    const setWhere = row.readModeSource ? SOURCE_WORDS[row.readModeSource] : undefined
+                                    const cls = choice(CLASSES, row.residency)
+                                    return (
+                                        <div key={v.key} ref={virtualizer.measureElement} data-index={v.index} role="row" aria-rowindex={v.index + 2}
+                                            className={cn(COLS, 'absolute left-0 top-0 w-full space-y-3 border-b border-glass-border/40 px-5 py-4 last:border-b-0 md:space-y-0')}
+                                            style={{ transform: `translateY(${v.start}px)` }}>
+                                            <Cell label="Graph">
+                                                <div className="flex flex-wrap items-center gap-1.5">
+                                                    <span className={cn('max-w-full truncate', row.dataSourceLabel ? 'text-[13px] font-semibold text-ink' : 'font-mono text-[11.5px] text-ink-secondary')} title={row.graphId}>
+                                                        {nameOf(row)}
+                                                    </span>
+                                                    {row.forkParentGraphId && <Badge tone="info" size="sm">Fork</Badge>}
+                                                    {row.orphan && <Badge tone="warning" size="sm">Orphan</Badge>}
+                                                </div>
+                                                <p className="mt-0.5 truncate text-[11.5px] text-ink-secondary">{row.workspaceName ?? row.workspaceId}</p>
+                                                {row.orphan && <p className="text-[11px] text-ink-secondary">Its data source no longer exists</p>}
+                                            </Cell>
+                                            <Cell label="Reads and memory">
+                                                <div className="flex flex-wrap items-center gap-1">
+                                                    {!row.forkParentGraphId && reads && (
+                                                        <Badge tone="neutral" size="sm" title={reads.promise}>Reads: {reads.short}</Badge>
+                                                    )}
+                                                    {!row.forkParentGraphId && reads && setWhere && <span className="text-[11px] text-ink-secondary">{setWhere}</span>}
+                                                    {!row.forkParentGraphId && cls && <Badge tone="neutral" variant="outline" size="sm" title={cls.promise}>Class: {cls.title}</Badge>}
+                                                    {/* The State column already says unloaded, loading or waiting for room, unless it says Failed. */}
+                                                    {!row.forkParentGraphId && row.residencyState && (row.residencyState !== row.status || row.lastError) && (
+                                                        <ResidencyChip state={row.residencyState} since={row.rehydratingSince} />
+                                                    )}
+                                                    {row.build && (
+                                                        <Badge tone={row.build.error ? 'warning' : 'info'} size="sm" title={buildTitle(row.build)}>{buildChip(row.build)}</Badge>
+                                                    )}
+                                                    {row.forkParentGraphId && <span className="text-[11.5px] text-ink-secondary">Follows the graph it was forked from</span>}
+                                                </div>
+                                                {!row.forkParentGraphId && declared && (
+                                                    <p className="mt-1 text-[11px] leading-snug">
+                                                        <span className="font-semibold text-amber-800 dark:text-amber-300">Chose {declared.short}</span>
+                                                        {whyMode && <span className="block text-ink-secondary">{whyMode}</span>}
+                                                    </p>
+                                                )}
+                                                {!row.forkParentGraphId && (row.sizeBytes != null || row.lastReadAt) && (
+                                                    <p className="mt-1 text-[11px] text-ink-secondary">
+                                                        {row.sizeBytes != null && formatBytes(row.sizeBytes)}
+                                                        {row.sizeBytes != null && row.lastReadAt && ' · '}
+                                                        {row.lastReadAt && <DateTime at={row.lastReadAt} prefix="read " />}
+                                                    </p>
+                                                )}
+                                            </Cell>
+                                            <Cell label="Graph store copy">
+                                                <p className="text-[12.5px] text-ink-secondary">
+                                                    {row.falkorProvider ? (providerName.get(row.falkorProvider) ?? row.falkorProvider) : DEFAULT_STORE}
+                                                    <span className="ml-1.5 text-[11px] text-ink-secondary">{row.owned ? 'Platform copy' : 'Connected graph'}</span>
+                                                </p>
+                                                <p className="truncate font-mono text-[10.5px] text-ink-secondary" title={row.falkorGraphName ?? undefined}>{row.falkorGraphName ?? 'No copy yet'}</p>
+                                                {row.retiredKeys.map((k) => (
+                                                    <p key={`${k.provider}:${k.name}`} className="text-[10.5px] text-ink-secondary">
+                                                        Previous copy {k.name} on {k.provider ? (providerName.get(k.provider) ?? k.provider) : DEFAULT_STORE}: removed once the new one catches up
+                                                    </p>
+                                                ))}
+                                            </Cell>
+                                            <Cell label="State">
+                                                <p className="text-[12.5px] font-medium text-ink-secondary">
+                                                    {stateLabel(row)}
+                                                    {row.lag > 0 && <span className="font-normal text-ink-secondary"> · {formatCount(row.lag, 'versions')} behind</span>}
+                                                </p>
+                                                {row.lastError && <p className="line-clamp-2 break-words font-mono text-[10.5px] text-rose-700 dark:text-rose-300">{row.lastError}</p>}
+                                                <p className="text-[11px] text-ink-secondary">{row.lastProjectedAt ? <DateTime at={row.lastProjectedAt} prefix="Updated " /> : 'Never updated'}</p>
+                                            </Cell>
+                                            <div role="cell" className="flex items-start gap-1.5 md:justify-end">
+                                                <Button size="sm" variant="secondary" leftIcon={Settings2} onClick={() => onOpenSettings(row)}
+                                                    aria-label={`Settings… for ${nameOf(row)}`}
+                                                    disabled={row.orphan} title={row.orphan ? 'Its data source no longer exists' : undefined}>
+                                                    Settings…
+                                                </Button>
+                                                <DropdownMenu.Root modal={false}>
+                                                    <DropdownMenu.Trigger asChild>
+                                                        <button type="button" aria-label={`More actions for ${nameOf(row)}`} disabled={busy !== null}
+                                                            className="grid place-items-center w-7 h-7 rounded-lg text-ink-secondary outline-none hover:bg-black/[0.05] hover:text-ink focus-visible:ring-2 focus-visible:ring-accent-lineage/40 disabled:opacity-40 dark:hover:bg-white/10">
+                                                            <MoreHorizontal aria-hidden className="w-4 h-4" />
+                                                        </button>
+                                                    </DropdownMenu.Trigger>
+                                                    <DropdownMenu.Portal>
+                                                        <DropdownMenu.Content align="end" sideOffset={4}
+                                                            className="z-[70] w-64 rounded-xl border border-glass-border/60 bg-canvas-elevated p-1 shadow-[0_18px_48px_-18px_rgba(15,23,42,0.45)] dark:shadow-[0_18px_48px_-18px_rgba(0,0,0,0.9)]">
+                                                            <MenuItem icon={Hammer} label="Rebuild…" hint="Write its copy again from the database" onSelect={() => setRebuilding(row)} />
+                                                            <MenuItem icon={ShieldCheck} label="Check sync" hint="Compare the copy with the database" onSelect={() => void act(row, 'check')} />
+                                                            {canLoad(row) && <MenuItem icon={HardDriveDownload} label="Load now" onSelect={() => void act(row, 'load')} />}
+                                                            <MenuItem icon={MoveRight} label="Move…" disabled={!row.owned || row.orphan}
+                                                                hint={!row.owned ? 'Only platform copies move; this is a connected graph' : row.orphan ? 'Its data source no longer exists' : undefined}
+                                                                onSelect={() => setMoving(row)} />
+                                                            {canAdopt(row) && <MenuItem icon={RefreshCw} label="Adopt…" hint="Read from a platform copy instead" onSelect={() => setAdopting(row)} />}
+                                                            <MenuItem icon={FolderOpen} label="Open data source" disabled={row.orphan}
+                                                                hint={row.orphan ? 'Its data source no longer exists' : undefined}
+                                                                onSelect={() => navigate(`/workspaces/${row.workspaceId}?ds=${encodeURIComponent(row.dataSourceId)}&dstab=versioning`)} />
+                                                            {row.forkParentGraphId && <MenuItem icon={Trash2} label="Move to trash…" onSelect={() => setTrashing(row)} />}
+                                                        </DropdownMenu.Content>
+                                                    </DropdownMenu.Portal>
+                                                </DropdownMenu.Root>
+                                            </div>
+                                            {/* What the last action did, in a cell of its own: under the row, across it. */}
+                                            <div role="cell" className={cn('md:col-span-5', (mine || n) && 'md:mt-2')} aria-live="polite">
+                                                {mine && <p className="text-[11.5px] text-ink-secondary">Working…</p>}
+                                                {n && !mine && <p className={cn('text-[12px]', NOTE_CLS[n.tone])}>{n.text}</p>}
+                                            </div>
+                                        </div>
+                                    )
+                                })}
+                            </div>
                         </div>
                     </div>
-                    <div ref={scrollRef} tabIndex={0} aria-label="Graphs, scroll for more" role="rowgroup"
-                        className="max-h-[min(70vh,44rem)] overflow-y-auto overscroll-contain outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent-lineage/40">
-                        <div className="relative w-full" style={{ height: virtualizer.getTotalSize() }}>
-                            {items.map((v) => {
-                                const row = rows[v.index]
-                                const n = notes[row.graphId]
-                                const mine = busy?.startsWith(`${row.graphId}:`)
-                                const reads = choice(READS, row.readModeEffective)
-                                const cls = choice(CLASSES, row.residency)
-                                return (
-                                    <div key={v.key} ref={virtualizer.measureElement} data-index={v.index} role="row" aria-rowindex={v.index + 2}
-                                        className={cn(COLS, 'absolute left-0 top-0 w-full space-y-3 border-b border-glass-border/40 px-5 py-4 last:border-b-0 md:space-y-0')}
-                                        style={{ transform: `translateY(${v.start}px)` }}>
-                                        <Cell label="Graph">
-                                            <div className="flex flex-wrap items-center gap-1.5">
-                                                <span className={cn('max-w-full truncate', row.dataSourceLabel ? 'text-[13px] font-semibold text-ink' : 'font-mono text-[11.5px] text-ink-secondary')} title={row.graphId}>
-                                                    {nameOf(row)}
-                                                </span>
-                                                {row.forkParentGraphId && <Badge tone="info" size="sm">Fork</Badge>}
-                                                {row.orphan && <Badge tone="warning" size="sm">Orphan</Badge>}
-                                            </div>
-                                            <p className="mt-0.5 truncate text-[11.5px] text-ink-muted">{row.workspaceName ?? row.workspaceId}</p>
-                                            {row.orphan && <p className="text-[11px] text-ink-muted">Its data source no longer exists</p>}
-                                        </Cell>
-                                        <Cell label="Reads and memory">
-                                            <div className="flex flex-wrap gap-1">
-                                                {!row.forkParentGraphId && reads && (
-                                                    <Badge tone={row.readMode ? 'accent' : 'neutral'} size="sm" title={reads.promise}>
-                                                        Reads: {reads.short}{row.readMode ? ' · own' : ''}
-                                                    </Badge>
-                                                )}
-                                                {!row.forkParentGraphId && cls && <Badge tone="neutral" variant="outline" size="sm" title={cls.promise}>{cls.title}</Badge>}
-                                                {!row.forkParentGraphId && row.residencyState && (
-                                                    <Badge tone={STATE_CHIP[row.residencyState]?.tone ?? 'neutral'} size="sm"
-                                                        title={row.rehydratingSince ? `Loading since ${new Date(row.rehydratingSince).toLocaleString()}` : undefined}>
-                                                        {STATE_CHIP[row.residencyState]?.label ?? row.residencyState}
-                                                    </Badge>
-                                                )}
-                                                {row.build && (
-                                                    <Badge tone={row.build.error ? 'warning' : 'info'} size="sm" title={buildTitle(row.build)}>{buildChip(row.build)}</Badge>
-                                                )}
-                                                {row.forkParentGraphId && <span className="text-[11.5px] text-ink-muted">Follows the graph it was forked from</span>}
-                                            </div>
-                                            {!row.forkParentGraphId && (row.sizeBytes != null || row.lastReadAt) && (
-                                                <p className="mt-1 text-[11px] text-ink-muted">
-                                                    {row.sizeBytes != null && formatBytes(row.sizeBytes)}
-                                                    {row.sizeBytes != null && row.lastReadAt && ' · '}
-                                                    {row.lastReadAt && <DateTime at={row.lastReadAt} prefix="read " />}
-                                                </p>
-                                            )}
-                                        </Cell>
-                                        <Cell label="Graph store copy">
-                                            <p className="text-[12.5px] text-ink-secondary">
-                                                {row.falkorProvider ? (providerName.get(row.falkorProvider) ?? row.falkorProvider) : 'default'}
-                                                <span className="ml-1.5 text-[11px] text-ink-muted">{row.owned ? 'Platform copy' : 'Connected graph'}</span>
-                                            </p>
-                                            <p className="truncate font-mono text-[10.5px] text-ink-muted" title={row.falkorGraphName ?? undefined}>{row.falkorGraphName ?? 'No copy yet'}</p>
-                                            {row.retiredKeys.map((k) => (
-                                                <p key={`${k.provider}:${k.name}`} className="text-[10.5px] text-ink-muted">
-                                                    Previous copy {k.name} on {k.provider ? (providerName.get(k.provider) ?? k.provider) : 'default'}: removed once the new one catches up
-                                                </p>
-                                            ))}
-                                        </Cell>
-                                        <Cell label="State">
-                                            <p className="text-[12.5px] font-medium text-ink-secondary">
-                                                {stateLabel(row)}
-                                                {row.lag > 0 && <span className="font-normal text-ink-muted"> · {formatCount(row.lag)} behind</span>}
-                                            </p>
-                                            {row.lastError && <p className="line-clamp-2 break-all font-mono text-[10.5px] text-rose-600 dark:text-rose-400">{row.lastError}</p>}
-                                            <p className="text-[11px] text-ink-muted">{row.lastProjectedAt ? <DateTime at={row.lastProjectedAt} prefix="Updated " /> : 'Never updated'}</p>
-                                        </Cell>
-                                        <div role="cell" className="flex items-start gap-1.5 md:justify-end">
-                                            <Button size="sm" variant="secondary" leftIcon={Settings2} onClick={() => onOpenSettings(row)}
-                                                disabled={row.orphan} title={row.orphan ? 'Its data source no longer exists' : undefined}>
-                                                Settings…
-                                            </Button>
-                                            <DropdownMenu.Root modal={false}>
-                                                <DropdownMenu.Trigger asChild>
-                                                    <button type="button" aria-label={`More actions for ${nameOf(row)}`} disabled={busy !== null}
-                                                        className="grid place-items-center w-7 h-7 rounded-lg text-ink-muted outline-none hover:bg-black/[0.05] hover:text-ink focus-visible:ring-2 focus-visible:ring-accent-lineage/40 disabled:opacity-40 dark:hover:bg-white/10">
-                                                        <MoreHorizontal aria-hidden className="w-4 h-4" />
-                                                    </button>
-                                                </DropdownMenu.Trigger>
-                                                <DropdownMenu.Portal>
-                                                    <DropdownMenu.Content align="end" sideOffset={4}
-                                                        className="z-[70] w-64 rounded-xl border border-glass-border/60 bg-canvas-elevated p-1 shadow-[0_18px_48px_-18px_rgba(15,23,42,0.45)] dark:shadow-[0_18px_48px_-18px_rgba(0,0,0,0.9)]">
-                                                        <MenuItem icon={Hammer} label="Rebuild" onSelect={() => void act(row, 'rebuild')} />
-                                                        <MenuItem icon={ShieldCheck} label="Check sync" hint="Compare the copy with the database" onSelect={() => void act(row, 'check')} />
-                                                        {canLoad(row) && <MenuItem icon={HardDriveDownload} label="Load now" onSelect={() => void act(row, 'load')} />}
-                                                        <MenuItem icon={MoveRight} label="Move…" disabled={!row.owned || row.orphan}
-                                                            hint={!row.owned ? 'Only platform copies move; this is a connected graph' : row.orphan ? 'Its data source no longer exists' : undefined}
-                                                            onSelect={() => setMoving(row)} />
-                                                        {canAdopt(row) && <MenuItem icon={RefreshCw} label="Adopt…" hint="Read from a platform copy instead" onSelect={() => setAdopting(row)} />}
-                                                        <MenuItem icon={FolderOpen} label="Open data source" disabled={row.orphan}
-                                                            hint={row.orphan ? 'Its data source no longer exists' : undefined}
-                                                            onSelect={() => navigate(`/workspaces/${row.workspaceId}?ds=${encodeURIComponent(row.dataSourceId)}&dstab=versioning`)} />
-                                                        {row.forkParentGraphId && <MenuItem icon={Trash2} label="Move to trash…" onSelect={() => setTrashing(row)} />}
-                                                    </DropdownMenu.Content>
-                                                </DropdownMenu.Portal>
-                                            </DropdownMenu.Root>
-                                        </div>
-                                        <div className={cn('md:col-span-5', (mine || n) && 'md:mt-2')} aria-live="polite">
-                                            {mine && <p className="text-[11.5px] text-ink-muted">Working…</p>}
-                                            {n && !mine && <p className={cn('text-[12px]', NOTE_CLS[n.tone])}>{n.text}</p>}
-                                        </div>
-                                    </div>
-                                )
-                            })}
-                        </div>
-                    </div>
-                    <div className="flex flex-wrap items-center justify-between gap-2 border-t border-glass-border/50 px-5 py-3 text-[12px] text-ink-muted">
+                    <div className="flex flex-wrap items-center justify-between gap-2 border-t border-glass-border/50 px-5 py-3 text-[12px] text-ink-secondary">
                         <span>{formatCount(rows.length)} {rows.length === 1 ? 'graph' : 'graphs'} shown{query.hasNextPage ? ', more to load' : ''}</span>
                         {query.hasNextPage && (
                             <Button size="sm" variant="secondary" loading={query.isFetchingNextPage} onClick={() => void query.fetchNextPage()}>Load more</Button>
@@ -433,6 +469,22 @@ export function GraphInventory({ filter, onFilter, onOpenSettings, providers }: 
                     </div>
                 </div>
             )}
+
+            <ConfirmDialog
+                open={rebuilding !== null}
+                onOpenChange={(open) => { if (!open) setRebuilding(null) }}
+                title="Rebuild this graph’s copy?"
+                confirmLabel="Rebuild"
+                pending={rebuilding !== null && busy === `${rebuilding.graphId}:rebuild`}
+                onConfirm={() => (rebuilding ? act(rebuilding, 'rebuild') : undefined)}
+            >
+                {rebuilding && (
+                    <>
+                        {nameOf(rebuilding)}’s copy in the graph store is written again from the database. Meanwhile its readers are
+                        served as its read mode says{rebuildReads ? ` (${rebuildReads.title})` : ''}.
+                    </>
+                )}
+            </ConfirmDialog>
 
             <ConfirmDialog
                 open={adopting !== null}
@@ -522,7 +574,7 @@ function ReseedMenu({ providers }: { providers: GraphProvider[] }) {
                 <DropdownMenu.Portal>
                     <DropdownMenu.Content align="end" sideOffset={4}
                         className="z-[70] w-72 rounded-xl border border-glass-border/60 bg-canvas-elevated p-1 shadow-[0_18px_48px_-18px_rgba(15,23,42,0.45)] dark:shadow-[0_18px_48px_-18px_rgba(0,0,0,0.9)]">
-                        <DropdownMenu.Label className="px-3 pb-1 pt-2 text-[11px] text-ink-muted">
+                        <DropdownMenu.Label className="px-3 pb-1 pt-2 text-[11px] text-ink-secondary">
                             Use after a graph store was restored or rebuilt: its graphs are written again from the database.
                         </DropdownMenu.Label>
                         {stores.map((p) => (

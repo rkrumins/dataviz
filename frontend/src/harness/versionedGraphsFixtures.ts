@@ -14,8 +14,9 @@
  *   conflict         every save is refused: someone changed a value meanwhile
  */
 import {
-    BRANCHES, COMMITS, FEATURES, FORK_IMPORT_SETTINGS, FORKS, GRAPHS, HEALTH, HISTORY, IMPORT_SETTINGS, MASTERS, PROVIDERS, RESOLVED,
-    SCHEMA, SUMMARY, WATERMARK, WORKSPACE_GRAPHS, WORKSPACE_HISTORY, WS, GRAPH, ROOT,
+    BRANCHES, COMMITS, FEATURES, FORK_HEALTH, FORK_IMPORT_SETTINGS, FORKS, GRAPHS, HEALTH, HISTORY, IMPORT_SETTINGS,
+    OPERATOR_SCHEMA, PROVIDERS, RESOLVED, SCHEMA, SUMMARY, TOPOLOGY, WATERMARK, WORKSPACE_GRAPHS, WORKSPACE_HISTORY,
+    WS, GRAPH, ROOT,
     graphValues, platformValues, preview, workspaceImpact, workspaceValues,
 } from '../components/admin/AdminVersionedGraphs/__fixtures__/api'
 import type { ResolvedSetting, TrailScope } from '../components/settings/types'
@@ -77,16 +78,17 @@ export function versionedGraphsFetch(scenario: Scenario): typeof fetch {
         const method = (init?.method ?? 'GET').toUpperCase()
         const body = init?.body ? JSON.parse(String(init.body)) as { changes?: PatchItem[] } : {}
 
-        if (p.endsWith('/settings/versioned-graphs/schema')) return json(SCHEMA)
+        // The deployment's values are a system administrator's to see.
+        if (p.endsWith('/settings/versioned-graphs/schema')) return json(scenario === 'readonly' || scenario === 'workspace-admin' ? SCHEMA : OPERATOR_SCHEMA)
         if (p.endsWith('/admin/features')) return json(FEATURES)
         if (p.endsWith('/admin/system/status')) return json({ status: 'healthy', graphProviders: PROVIDERS, services: [] })
-        if (p.endsWith('/residency-policy/preview')) return json(MASTERS)
+        if (p.endsWith('/admin/graph-store/topology')) return json(TOPOLOGY)
         if (p.endsWith('/admin/versioning/signals')) return json({ detail: 'Not Found' }, 404)
 
         if (p.endsWith('/admin/versioning/graphs/summary')) {
             if (scenario === 'loading') return never()
             if (scenario === 'error') return failed('The graph store didn’t answer in time')
-            return json(scenario === 'empty' ? { graphs: 0, inMemory: 0, unloaded: 0, loading: 0, waitingForRoom: 0, building: 0, failing: 0, withOwnSettings: 0 } : SUMMARY)
+            return json(scenario === 'empty' ? { graphs: 0, inMemory: 0, unloaded: 0, loading: 0, waitingForRoom: 0, noCopy: 0, building: 0, failing: 0, withOwnSettings: 0 } : SUMMARY)
         }
         if (p.endsWith('/admin/versioning/graphs')) {
             if (scenario === 'loading') return never()
@@ -123,7 +125,7 @@ export function versionedGraphsFetch(scenario: Scenario): typeof fetch {
             if (rest === '/preview') {
                 const base = Object.fromEntries(workspace.values.map((r) => [r.key, r]))
                 const full = url.searchParams.get('mode') === 'full'
-                return json({ ...preview(body.changes ?? [], full ? 'full' : 'quick', base), scope: 'workspace',
+                return json({ ...preview(body.changes ?? [], full ? 'full' : 'quick', base, 'workspace'), scope: 'workspace',
                     ...(full ? { impact: workspaceImpact(body.changes ?? []) } : {}) })
             }
             if (rest.endsWith('/revert')) return json({ ...workspace, changeSetId: 'cs_revert' })
@@ -145,8 +147,8 @@ export function versionedGraphsFetch(scenario: Scenario): typeof fetch {
         const graph = p.match(/\/api\/v1\/([^/]+)\/versioning\/graphs\/([^/]+)\/(settings|health)(\/preview)?$/)
         if (graph) {
             const [, , gid, what, previewing] = graph
-            if (what === 'health') return json(HEALTH)
-            if (previewing) return json({ ...preview(body.changes ?? [], url.searchParams.get('mode') === 'full' ? 'full' : 'quick'), scope: 'graph' })
+            if (what === 'health') return json(scenario === 'fork' && gid === GRAPH ? FORK_HEALTH : HEALTH)
+            if (previewing) return json({ ...preview(body.changes ?? [], url.searchParams.get('mode') === 'full' ? 'full' : 'quick', undefined, 'graph'), scope: 'graph' })
             if (scenario === 'fork' && gid === GRAPH) {
                 return json({ detail: { type: 'follows_root', message: 'A fork follows its root graph’s settings', rootGraphId: ROOT, rootDataSourceId: 'ds_root', workspaceId: WS } }, 409)
             }

@@ -84,12 +84,12 @@ describe('SettingControl', () => {
         expect(onChange).toHaveBeenLastCalledWith(0.29)
     })
 
-    it('ratio as a multiplier: shown with ×', () => {
+    it('ratio as a multiplier: shown in percent too, stored as the ratio', () => {
         const onChange = setup('updates.pacingRatio', PLATFORM_VALUES, 'platform', 0.5)
         const slider = screen.getByRole('slider', { name: S['updates.pacingRatio'].label })
-        expect(slider).toHaveAttribute('aria-valuetext', '×0.5')
+        expect(slider).toHaveAttribute('aria-valuetext', '50%')
         fireEvent.keyDown(slider, { key: 'ArrowRight' })
-        expect(onChange).toHaveBeenLastCalledWith(0.55)
+        expect(onChange).toHaveBeenLastCalledWith(0.51)
     })
 
     it('seconds: a number in its largest round unit, with the unit spoken in full', () => {

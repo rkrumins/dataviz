@@ -35,6 +35,8 @@ async function reviewAndSave(words = reason) {
     // Each value from → to, and what saving would do, before anything is saved.
     expect(within(dialog).getAllByRole('listitem').length).toBeGreaterThan(0)
     await userEvent.type(within(dialog).getByLabelText(/Why are you making this change/), words)
+    // Save waits for what the change does.
+    await waitFor(() => expect(within(dialog).getByRole('button', { name: /^Save/ })).toBeEnabled())
     await userEvent.click(within(dialog).getByRole('button', { name: /^Save/ }))
     return dialog
 }
@@ -109,10 +111,14 @@ describe('Settings: stage, review, save, undo', () => {
         renderWithApi(<AdminVersionedGraphs />, { path: SETTINGS })
         await stageReadMode('beside')
 
-        expect(row('reads.mode').getByText(`Changing to ${title('reads.mode', 'beside')}`)).toBeInTheDocument()
         expect(screen.getByRole('region', { name: 'Unsaved changes' })).toHaveTextContent('1 change not saved yet')
-        // The quick preview, once the edits pause: switch when ready is held to update in place while builds are off.
+        // The row's head is the server's answer, once the edits pause: switch when ready is held to update in place
+        // while builds are off, and the row says what was chosen and offers the fix.
         expect(await row('reads.mode').findByText(`Once saved: ${title('reads.mode', 'in_place')}`)).toBeInTheDocument()
+        expect(row('reads.mode').getByText(`Chosen: ${title('reads.mode', 'beside')}`)).toBeInTheDocument()
+        expect(row('reads.mode').queryByText(/^Changing to/)).not.toBeInTheDocument()
+        expect(row('reads.mode').getByText('Adjusted once saved:')).toBeInTheDocument()
+        expect(row('reads.mode').getAllByRole('button', { name: 'Turn on New-version builds' }).length).toBeGreaterThan(0)
         expect(calls(sent, 'POST', '/settings/preview').at(-1)?.query.get('mode')).toBe('quick')
         expect(calls(sent, 'PATCH', '/admin/versioning/settings')).toHaveLength(0)
 
@@ -130,6 +136,43 @@ describe('Settings: stage, review, save, undo', () => {
         expect(calls(sent, 'PATCH', '/admin/versioning/settings')[1].body).toEqual({
             changes: [{ key: 'reads.mode', value: null, expectedVersion: 2 }], reason: `Undo: ${reason}`,
         })
+    })
+
+    it('holds Save until what the change does is worked out, and when it can’t be, offers to try again or to save without it', async () => {
+        let full: 'never' | 'fail' | 'answer' = 'never'
+        const sent = mockApi('ok', (req) => {
+            if (req.query.get('mode') !== 'full') return undefined
+            if (full === 'never') return new Promise<Response>(() => {})
+            return full === 'fail' ? json({ detail: 'The graph store didn’t answer in time' }, 503) : undefined
+        })
+        renderWithApi(<AdminVersionedGraphs />, { path: SETTINGS })
+        await stageReadMode('beside')
+        await userEvent.click(within(screen.getByRole('region', { name: 'Unsaved changes' })).getByRole('button', { name: 'Review changes' }))
+        let dialog = await screen.findByRole('dialog', { name: 'Review 1 change to the platform' })
+        await userEvent.type(within(dialog).getByLabelText(/Why are you making this change/), reason)
+        expect(within(dialog).getByRole('button', { name: 'Save change' })).toBeDisabled()
+        expect(dialog).toHaveTextContent('Save waits for what this changes.')
+        await userEvent.click(within(dialog).getByRole('button', { name: 'Keep editing' }))
+
+        // Another value: the answer still on its way above belongs to the last one.
+        full = 'fail'
+        await stageReadMode('in_place')
+        await userEvent.click(within(screen.getByRole('region', { name: 'Unsaved changes' })).getByRole('button', { name: 'Review changes' }))
+        dialog = await screen.findByRole('dialog', { name: 'Review 1 change to the platform' })
+        await userEvent.type(within(dialog).getByLabelText(/Why are you making this change/), reason)
+        expect(await within(dialog).findByText(/Couldn’t work out what this changes: The graph store didn’t answer in time/)).toBeInTheDocument()
+        const save = within(dialog).getByRole('button', { name: 'Save change' })
+        expect(save).toBeDisabled()
+        await userEvent.click(within(dialog).getByRole('checkbox', { name: /Save without seeing what this changes/ }))
+        expect(save).toBeEnabled()
+
+        // Trying again: answered this time, so nothing is saved blind.
+        full = 'answer'
+        await userEvent.click(within(dialog).getByRole('button', { name: 'Try again' }))
+        await waitFor(() => expect(within(dialog).queryByRole('checkbox', { name: /Save without seeing/ })).not.toBeInTheDocument())
+        await waitFor(() => expect(save).toBeEnabled())
+        await userEvent.click(save)
+        await waitFor(() => expect(calls(sent, 'PATCH', '/admin/versioning/settings')).toHaveLength(1))
     })
 
     it('stages what workspaces may choose beside the value, and asks to acknowledge the values left outside', async () => {

@@ -75,6 +75,36 @@ describe('ChangeReviewDialog', () => {
         expect(onSave).toHaveBeenCalledWith('Imports were slowing canvases')
     })
 
+    it('waits for what the change does before it saves, and saves without it only when told to', async () => {
+        const user = userEvent.setup()
+        const props = { open: true, onOpenChange: () => {}, items: ITEMS, onSave: vi.fn() }
+        const { rerender } = render(<ChangeReviewDialog {...props} impactLoading />)
+        const dialog = screen.getByRole('dialog', { name: 'Review 2 changes' })
+        await user.type(within(dialog).getByRole('textbox', { name: /Why are you making this change/ }), 'Imports were slowing canvases')
+        const save = within(dialog).getByRole('button', { name: 'Save 2 changes' })
+        expect(save).toBeDisabled()
+        expect(dialog).toHaveTextContent('Save waits for what this changes.')
+
+        // It couldn't be worked out: its warnings aren't known, so saving without them is a choice.
+        rerender(<ChangeReviewDialog {...props} impactFailed impact={<p>Couldn’t work out what this changes.</p>} />)
+        expect(save).toBeDisabled()
+        expect(dialog).toHaveTextContent('Acknowledge the warning to save.')
+        const unseen = () => within(dialog).getByRole('checkbox', { name: /Save without seeing what this changes/ })
+        await user.click(unseen())
+        expect(save).toBeEnabled()
+
+        // Trying again asks again.
+        rerender(<ChangeReviewDialog {...props} impactLoading />)
+        expect(save).toBeDisabled()
+        rerender(<ChangeReviewDialog {...props} impactFailed impact={<p>Couldn’t work out what this changes.</p>} />)
+        expect(unseen()).not.toBeChecked()
+        expect(save).toBeDisabled()
+        // Answered: nothing more to acknowledge.
+        rerender(<ChangeReviewDialog {...props} impact={<p>Nothing else changes.</p>} />)
+        expect(within(dialog).queryByRole('checkbox')).not.toBeInTheDocument()
+        expect(save).toBeEnabled()
+    })
+
     it('offers to reload and re-apply after a conflict', async () => {
         const onReapply = vi.fn()
         render(<ChangeReviewDialog open onOpenChange={() => {}} items={ITEMS} onSave={() => {}}

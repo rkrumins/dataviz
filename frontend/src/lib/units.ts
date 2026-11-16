@@ -10,9 +10,9 @@
  * "1h30m", "13gb", "200k"). A parse that can't read the text returns `null`, never a guess.
  *
  * - Bytes are binary (1 KB = 1,024 bytes), counted the way the graph store's nodes report memory.
- * - Durations are seconds; `ms` values are milliseconds.
- * - A `percent` is 0–100 ("85%"); a `ratio` is a plain number, shown as a share ("40%") or as a
- *   multiplier ("×0.5").
+ * - Durations are seconds, said in words ("15 seconds", "1 hour 30 minutes") as the server says
+ *   them; `ms` values are milliseconds, "250 ms" under a second.
+ * - A `percent` is 0–100 ("85%"); a `ratio` is a plain number, shown in percent ("40%", "250%").
  * - `"unlimited"` and `"forever"` are values in their own right, never a magic number.
  *
  * Numbers use the reader's locale for separators, and parse accepts the same separators back.
@@ -308,10 +308,10 @@ export const MS_UNITS: QuantityUnit[] = [
     { id: 'min', label: 'min', factor: 60_000 },
 ]
 
-/** `250` → "250 ms", `1500` → "1,500 ms", `30000` → "30 s", `90000` → "1 min 30 s". */
+/** `250` → "250 ms", `1500` → "1,500 ms", `30000` → "30 seconds", `90000` → "1 minute 30 seconds". */
 export function formatMs(ms: number, locale?: string): string {
     if (Math.abs(ms) < 1000 || ms % 1000 !== 0) return `${formatNumber(ms, { locale })} ms`
-    return formatDuration(ms / 1000, { style: 'short', locale })
+    return formatDuration(ms / 1000, { locale })
 }
 
 /** "250", "250ms", "1.5s", "2 min", "1 min 30 s" → milliseconds. */

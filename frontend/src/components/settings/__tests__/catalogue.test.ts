@@ -58,6 +58,11 @@ describe('the generated catalogue', () => {
             for (const u of s.uses) expect(keys).toContain(u)
             if (s.kind === 'choice') expect(s.choices.map((c) => c.id)).toContain(s.default.code)
         }
+        // A deployment fact's value reads as a setting's of its kind would.
+        for (const d of CATALOGUE.deployment) {
+            expect(KINDS).toContain(d.kind)
+            expect(categories).toContain(d.category)
+        }
     })
 
     it('ships profiles and signals that name only settings, levels and problems that exist', () => {

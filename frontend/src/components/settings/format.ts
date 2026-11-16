@@ -2,8 +2,8 @@
  * How a setting's value reads, and what its trail says about it.
  *
  * `formatValue` is the one place a value becomes words, by kind and in its unit ("30 days",
- * "Forever", "×0.5", "Keep serving, update in place"), so the row, the trail, the review and the
- * history all say the same thing.
+ * "Forever", "50%", "15 seconds", "Keep serving, update in place"), so the row, the trail, the
+ * review and the history all say the same thing.
  */
 import { identifierLabel } from '@/features/import-export/identifier'
 import {
@@ -29,10 +29,12 @@ export function settingAnchor(key: string): string {
     return key.replaceAll('.', '-').toLowerCase()
 }
 
-/** A ratio is a share of a whole unless it is a multiplier (a "×" unit, or a range past 1). */
-export function ratioStyle(s: Setting): RatioStyle {
-    if (s.unit === '×' || s.unit === 'x') return 'times'
-    return s.range && s.range[1] > 1 ? 'times' : 'share'
+/**
+ * How a ratio reads: always in percent, a multiplier too ("pauses 25% of the write's time", "250%"),
+ * as the server's own sentences say it. Kept per setting for the controls that ask.
+ */
+export function ratioStyle(_s: Setting): RatioStyle {
+    return 'share'
 }
 
 export function choiceTitle(s: Setting, id: SettingValue): string {

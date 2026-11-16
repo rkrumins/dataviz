@@ -4,7 +4,9 @@
  * marks forks, orphans and platform copies, pages by cursor, filters on the server, and from each
  * row's menu rebuilds a graph's copy, checks it against the database, opens its data source, moves
  * a fork to the trash, moves a platform copy, loads an unloaded graph and adopts a connected
- * graph's copy; "Settings…" opens the graph's settings.
+ * graph's copy; "Settings…" opens the graph's settings. Each row says the read mode in force, where
+ * it was chosen, and the one chosen when it can't be had, with the server's why; the table's
+ * semantics hold (every row's parts are cells, its footer outside it).
  */
 import { useState } from 'react'
 import { screen, waitFor, within } from '@testing-library/react'
@@ -86,18 +88,58 @@ beforeEach(() => {
 
 describe('GraphInventory', () => {
     it("says what each graph's readers get while a new version lands, and opens its settings from its row", async () => {
-        const own = row({ graphId: 'graph_e', dataSourceId: 'ds5', dataSourceLabel: 'Payments', owned: true, readMode: 'latest', readModeEffective: 'latest' })
+        const own = row({ graphId: 'graph_e', dataSourceId: 'ds5', dataSourceLabel: 'Payments', owned: true, readMode: 'latest', readModeEffective: 'latest',
+            readModeSource: 'graph' })
         serve({ graphs: [MAIN, own, FORK], nextCursor: null })
         const onOpenSettings = vi.fn()
         renderWithApi(<Inventory onOpenSettings={onOpenSettings} />)
 
-        expect(await screen.findByText(`Reads: ${short('in_place')}`)).toBeInTheDocument()
-        expect(screen.getByText(`Reads: ${short('latest')} · own`)).toBeInTheDocument()
+        await screen.findByText('Customer 360')
+        expect(rowOf('Customer 360').getByText(`Reads: ${short('in_place')}`)).toBeInTheDocument()
+        expect(rowOf('Customer 360').queryByText(/^set /)).not.toBeInTheDocument()     // the platform's, as every graph's
+        expect(rowOf('Payments').getByText(`Reads: ${short('latest')}`)).toBeInTheDocument()
+        expect(rowOf('Payments').getByText('set on this graph')).toBeInTheDocument()
+        expect(rowOf('Customer 360').getByText(`Class: ${classTitle('standard')}`)).toBeInTheDocument()
         expect(rowOf('dsfork_1').queryByText(/^Reads:/)).not.toBeInTheDocument()   // a fork follows its root
         expect(rowOf('dsfork_1').getByText('Follows the graph it was forked from')).toBeInTheDocument()
 
-        await userEvent.click(rowOf('Payments').getByRole('button', { name: 'Settings…' }))
+        // One name per graph, and the visible words in it.
+        await userEvent.click(rowOf('Payments').getByRole('button', { name: 'Settings… for Payments' }))
         expect(onOpenSettings).toHaveBeenCalledWith(own)
+    })
+
+    it('shows the mode in force when the one chosen can’t be had: which was chosen, why, and where', async () => {
+        const why = CATALOGUE.why.builds_off
+        const held = row({ graphId: 'graph_h', dataSourceId: 'ds_h', dataSourceLabel: 'Sales lineage', owned: true, readMode: 'beside',
+            readModeEffective: 'in_place', readModeDeclared: 'beside', readModeSource: 'graph', readModeWhy: [{ code: 'builds_off', text: why.text, fix: why.fix }] })
+        const viaWorkspace = row({ graphId: 'graph_w', dataSourceId: 'ds_w', dataSourceLabel: 'Billing', owned: false, readMode: null,
+            readModeEffective: 'in_place', readModeDeclared: 'beside', readModeSource: 'workspace',
+            readModeWhy: [{ code: 'connected_graph', text: CATALOGUE.why.connected_graph.text, fix: null }] })
+        serve({ graphs: [held, viaWorkspace], nextCursor: null })
+        renderWithApi(<Inventory />)
+
+        const sales = within((await screen.findByText('Sales lineage')).closest('[role="row"]') as HTMLElement)
+        expect(sales.getByText(`Reads: ${short('in_place')}`)).toBeInTheDocument()       // in force, never the choice
+        expect(sales.getByText(`Chose ${short('beside')}`)).toBeInTheDocument()
+        expect(sales.getByText(why.text)).toBeInTheDocument()
+        expect(sales.getByText('set on this graph')).toBeInTheDocument()
+        expect(rowOf('Billing').getByText(`Chose ${short('beside')}`)).toBeInTheDocument()
+        expect(rowOf('Billing').getByText('set for its workspace')).toBeInTheDocument()
+        expect(rowOf('Billing').getByText(CATALOGUE.why.connected_graph.text)).toBeInTheDocument()
+    })
+
+    it('keeps the table’s semantics: every part of a row a cell, a header for each, the footer outside it', async () => {
+        serve({ graphs: [MAIN, FORK], nextCursor: 'graph_b' })
+        renderWithApi(<Inventory />)
+        await screen.findByText('Customer 360')
+        const table = screen.getByRole('table', { name: 'Versioned graphs' })
+        for (const r of within(table).getAllByRole('row')) {
+            for (const child of r.children) expect(['cell', 'columnheader']).toContain(child.getAttribute('role'))
+        }
+        const headers = within(table).getAllByRole('columnheader')
+        expect(within(table).getAllByRole('row').slice(1).every((r) => r.children.length === headers.length)).toBe(true)
+        expect(within(table).queryByRole('button', { name: /load more/i })).not.toBeInTheDocument()
+        expect(screen.getByRole('button', { name: /load more/i })).toBeInTheDocument()
     })
 
     it('lists every graph with its copy and marks forks, orphans and platform copies', async () => {
@@ -156,7 +198,15 @@ describe('GraphInventory', () => {
         renderWithApi(<Inventory />)
         await screen.findByText('Customer 360')
 
-        await userEvent.click(await menuItem('dsfork_1', 'Rebuild'))
+        // A rebuild asks first, saying what it does.
+        await userEvent.click(await menuItem('dsfork_1', /^Rebuild…/))
+        let confirm = await screen.findByRole('dialog', { name: 'Rebuild this graph’s copy?' })
+        expect(confirm).toHaveTextContent('dsfork_1’s copy in the graph store is written again from the database.')
+        await userEvent.click(within(confirm).getByRole('button', { name: 'Cancel' }))
+        expect(rebuildProjection).not.toHaveBeenCalled()
+        await userEvent.click(await menuItem('dsfork_1', /^Rebuild…/))
+        confirm = await screen.findByRole('dialog', { name: 'Rebuild this graph’s copy?' })
+        await userEvent.click(within(confirm).getByRole('button', { name: 'Rebuild' }))
         expect(rebuildProjection).toHaveBeenCalledWith('ws1', 'graph_b')
         expect(await screen.findByText('Rebuild started')).toBeInTheDocument()
 
@@ -182,7 +232,8 @@ describe('GraphInventory', () => {
         expect(screen.getByText('Moving to gvp_graph_m{raph_m.2}').getAttribute('title')).toMatch(/written from the database into gvp_graph_m\{raph_m\.2\}/)
         expect(screen.getByText('Building from the database').getAttribute('title')).toMatch(/as no copy fits/)
 
-        await userEvent.click(await menuItem('Ledger', 'Rebuild'))
+        await userEvent.click(await menuItem('Ledger', /^Rebuild…/))
+        await userEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Rebuild' }))
         expect(await screen.findByText('Rebuilding in a new copy: readers keep the current version until it is checked and switched to')).toBeInTheDocument()
     })
 
@@ -195,7 +246,8 @@ describe('GraphInventory', () => {
 
         await userEvent.click(await menuItem('Customer 360', /^Check sync/))
         expect(await screen.findByText('In sync with the database')).toBeInTheDocument()
-        await userEvent.click(await menuItem('Customer 360', 'Rebuild'))
+        await userEvent.click(await menuItem('Customer 360', /^Rebuild…/))
+        await userEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Rebuild' }))
         expect(await screen.findByText('no projection target for this graph')).toBeInTheDocument()
     })
 
@@ -334,14 +386,15 @@ describe('GraphInventory', () => {
         renderWithApi(<Inventory />)
         await screen.findByText('Customer 360')
 
-        expect(rowOf('Customer 360').getByText(classTitle('standard'))).toBeInTheDocument()
+        expect(rowOf('Customer 360').getByText(`Class: ${classTitle('standard')}`)).toBeInTheDocument()
         expect(rowOf('Customer 360').getByText('In memory')).toBeInTheDocument()
-        expect(rowOf('Orders').getByText(classTitle('coldline'))).toBeInTheDocument()
-        expect(rowOf('Orders').getAllByText('Unloaded').length).toBeGreaterThan(0)
-        expect(rowOf('Loading one').getByText(classTitle('always'))).toBeInTheDocument()
+        expect(rowOf('Orders').getByText(`Class: ${classTitle('coldline')}`)).toBeInTheDocument()
+        // Said once: its state is the row's state.
+        expect(rowOf('Orders').getAllByText('Unloaded')).toHaveLength(1)
+        expect(rowOf('Loading one').getByText(`Class: ${classTitle('always')}`)).toBeInTheDocument()
         expect(rowOf('Loading one').getByText('Loading')).toBeInTheDocument()
         expect(rowOf('Waiting one').getAllByText('Waiting for room').length).toBeGreaterThan(0)
-        for (const c of CLASSES.choices) expect(rowOf('dsfork_1').queryByText(c.title)).not.toBeInTheDocument()
+        for (const c of CLASSES.choices) expect(rowOf('dsfork_1').queryByText(`Class: ${c.title}`)).not.toBeInTheDocument()
     })
 
     it('names why a graph cannot be adopted, offers no Adopt on a graph with no copy, and says it costs two copies', async () => {
@@ -411,7 +464,7 @@ describe('GraphInventory', () => {
         await waitFor(() => expect(listCalls(sent)).toHaveLength(2))
     })
 
-    it('filters by graphs being loaded and graphs waiting for room', async () => {
+    it('filters by graphs being loaded, waiting for room and building a new version', async () => {
         const sent = serve({ graphs: [MAIN], nextCursor: null })
         renderWithApi(<Inventory />)
         await screen.findByText('Customer 360')
@@ -419,12 +472,33 @@ describe('GraphInventory', () => {
         await waitFor(() => expect(listCalls(sent).at(-1)?.query.get('status')).toBe('waiting_capacity'))
         await userEvent.selectOptions(screen.getByLabelText('Status'), 'rehydrating')
         await waitFor(() => expect(listCalls(sent).at(-1)?.query.get('status')).toBe('rehydrating'))
+        await userEvent.selectOptions(screen.getByLabelText('Status'), 'building')
+        await waitFor(() => expect(listCalls(sent).at(-1)?.query.get('status')).toBe('building'))
+    })
+
+    it('says how many versions a graph is behind, and never rounds a copy up to written', async () => {
+        const behind = row({ graphId: 'graph_l', dataSourceLabel: 'Lagging', lag: 3, committed: 9, projected: 6 })
+        const seeding = row({ graphId: 'graph_s', dataSourceLabel: 'Seeding', owned: true, readModeEffective: 'beside',
+            build: { step: 'seeding', reason: 'window', progress: { done: 996, total: 1000 } } })
+        serve({ graphs: [behind, seeding], nextCursor: null })
+        renderWithApi(<Inventory />)
+        await screen.findByText('Lagging')
+        expect(rowOf('Lagging').getByText(/· 3 versions behind/)).toBeInTheDocument()
+        expect(screen.getByText('Building from the database').getAttribute('title')).toMatch(/ 99% written\./)
     })
 
     it('shows the previous copy a moved graph is still retiring', async () => {
         serve({ graphs: [{ ...FORK, retiredKeys: [{ name: 'gv_fork_old', provider: 'falkor-eu', retireAfter: '2026-10-18T12:15:00Z', afterSeq: 5 }] }], nextCursor: null })
         renderWithApi(<Inventory />)
         expect(await screen.findByText('Previous copy gv_fork_old on EU graph store: removed once the new one catches up')).toBeInTheDocument()
+    })
+
+    it('names the default graph store, not "default"', async () => {
+        serve({ graphs: [row({ falkorProvider: null })], nextCursor: null })
+        renderWithApi(<Inventory />)
+        await screen.findByText('Customer 360')
+        expect(screen.getAllByText('Default graph store').some((el) => el.tagName === 'P')).toBe(true)
+        expect(within(screen.getByLabelText('Provider')).getByRole('option', { name: 'Default graph store' })).toBeInTheDocument()
     })
 
     it('says what failed and offers to try again, and teaches when there is nothing yet', async () => {
@@ -436,5 +510,6 @@ describe('GraphInventory', () => {
         fail = false
         await userEvent.click(screen.getByRole('button', { name: 'Try again' }))
         expect(await screen.findByText('No versioned graphs yet')).toBeInTheDocument()
+        expect(screen.getByRole('button', { name: 'Open workspaces' })).toBeInTheDocument()
     })
 })

@@ -5,9 +5,14 @@
  * change sets; signals and a graph's health are absent (null), not an error, while the server
  * can't answer them (404).
  */
+import { createElement, type ReactNode } from 'react'
+import { act, renderHook } from '@testing-library/react'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { REASON_HEADER } from '../activityReason'
-import { groupChangeSets, settingsError, settingsService, type HistoryEntry } from '../settingsService'
+import {
+    groupChangeSets, PLATFORM, settingsError, settingsKeys, settingsService, signalCounts, useSaveSettings, type HistoryEntry,
+} from '../settingsService'
 
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
 
@@ -104,5 +109,42 @@ describe('settingsService', () => {
         await expect(settingsService.health('ws', 'g')).resolves.toBeNull()
         answer({ asOf: '2026-11-16T10:00:00Z', versionsBehind: 0 })
         await expect(settingsService.health('ws', 'g')).resolves.toMatchObject({ versionsBehind: 0, head: null, memory: null, problems: [] })
+    })
+
+    it('keeps a fork’s root and the progress in a graph’s health', async () => {
+        const follows = { graphId: 'g_root', dataSourceId: 'ds_root', label: 'Revenue lineage' }
+        answer({ asOf: '2026-11-16T10:00:00Z', follows, progress: { done: 3, total: 9 } })
+        await expect(settingsService.health('ws', 'g')).resolves.toMatchObject({ follows, progress: { done: 3, total: 9 } })
+        answer({ asOf: '2026-11-16T10:00:00Z' })
+        await expect(settingsService.health('ws', 'g')).resolves.toMatchObject({ follows: null, progress: null })
+    })
+
+    it('reads each node’s memory from the graph store’s cached topology, planning nothing', async () => {
+        const node = (endpoint: string, used: number | null, maxmemory: number | null) => ({ endpoint, memory: { used, maxmemory } })
+        const fetch = answer({ instances: [{ shards: [
+            { master: node('falkor-0:6379', 2048, 8192) }, { master: node('falkor-1:6379', null, 8192) }, { master: node('falkor-2:6379', 1024, 0) },
+        ] }] })
+        await expect(settingsService.nodeMemory()).resolves.toEqual([{ id: 'falkor-0:6379', label: 'falkor-0:6379', usedBytes: 2048, maxBytes: 8192 }])
+        const { url, init } = sentTo(fetch)
+        expect(new URL(url, 'http://x').pathname).toBe('/api/v1/admin/graph-store/topology')
+        expect(init?.method ?? 'GET').toBe('GET')
+    })
+
+    it('gives the finder no counts while the server can’t count, rather than zeros', () => {
+        const counts = { asOf: '2026-11-16T10:00:00Z', window: '24h', signals: [{ id: 'reads.asked_to_retry', count: 2 }] }
+        expect(signalCounts({ ...counts, unavailable: false })).toEqual([{ id: 'reads.asked_to_retry', count: 2, window: '24h' }])
+        expect(signalCounts({ ...counts, signals: [], unavailable: true })).toBeUndefined()
+    })
+
+    it('after a save, reads the inventory, its figures and a graph’s health again', async () => {
+        answer({ scope: 'platform', editor: 'system_admin', values: [resolved('reads.mode', 2)], version: 2, changeSetId: 'cs_1' })
+        const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+        for (const key of [settingsKeys.graphs({}), settingsKeys.summary(), settingsKeys.health('ws', 'g')]) qc.setQueryData(key, {})
+        const wrapper = ({ children }: { children: ReactNode }) => createElement(QueryClientProvider, { client: qc }, children)
+        const { result } = renderHook(() => useSaveSettings(PLATFORM), { wrapper })
+        await act(() => result.current.mutateAsync({ items: [{ key: 'reads.mode', value: 'in_place', expectedVersion: 1 }], reason: 'why' }))
+        for (const key of [settingsKeys.graphs({}), settingsKeys.summary(), settingsKeys.health('ws', 'g')]) {
+            expect(qc.getQueryState(key)?.isInvalidated).toBe(true)
+        }
     })
 })

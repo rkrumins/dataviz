@@ -167,10 +167,17 @@ export interface VersionedGraphRow extends ProjectionWorstRow {
     sizeBytes: number | null
     /** While it is being loaded: since when (a load has no timeout). */
     rehydratingSince: string | null
-    /** Its own read mode (null: the platform's), and the one in force. Null on a fork, which
-     *  follows its root. */
+    /** Its own read mode (null: it takes its workspace's or the platform's), and the one in force.
+     *  Null on a fork, which follows its root. */
     readMode: ReadMode | null
     readModeEffective: ReadMode | null
+    /** The mode chosen for it, wherever it was chosen; the one in force differs when it can't be had.
+     *  These three are null on a fork. */
+    readModeDeclared?: ReadMode | null
+    /** Where the mode chosen was chosen: `graph`, `workspace`, `platform`, `env` or `default`. */
+    readModeSource?: 'graph' | 'workspace' | 'platform' | 'env' | 'default' | null
+    /** Why the mode in force differs from the one chosen: `{code, text, fix}` each, the server's words. */
+    readModeWhy?: Array<{ code: string; text: string; fix: { feature?: string; setting?: string; to: unknown } | null }> | null
     /** A new version built beside its key (read mode beside), while one is; absent or null when
      *  none is. */
     build?: BuildState | null
@@ -316,8 +323,10 @@ export interface ProjectionMoveResult {
     watermark: Watermark
 }
 
+/** A state the inventory filters by: `rehydrating` is loading as each row says it (a load, or a copy
+ *  written from nothing); `building`, a new version built beside its copy. */
 export type ProjectionBucket = 'fresh' | 'lagging' | 'projecting' | 'rebuilding' | 'evicted'
-    | 'rehydrating' | 'waiting_capacity' | 'failed'
+    | 'rehydrating' | 'waiting_capacity' | 'failed' | 'building'
 
 export interface VersionedGraphsFilter {
     provider?: string

@@ -5,11 +5,13 @@
  *
  * - The BUSINESS lens titles the row with the setting's question ("What should people see while
  *   new data loads?") and draws choices as outcome cards; the OPERATOR lens titles it with the
- *   label and adds the env var, when a change takes effect, any deployment cap, and the measured
- *   evidence on demand.
+ *   label and adds the env var, when a change takes effect, any deployment cap with its value (for
+ *   a system admin), and the measured evidence on demand.
  * - Beside the value in force, the level it came from ("From Platform", "Set at Graph").
  * - Changing the control STAGES a value; so does "Use recommended" and "Use the platform's". Nothing
- *   here saves. A staged row carries the accent: a bar, "Changing to …", and the change on its trail.
+ *   here saves. A staged row carries the accent: a bar, the server's answer for it ("Once saved: …",
+ *   and "Chosen: …" when the value in force would differ; "Checking…" until it answers; nothing
+ *   while the value needs a fix), and the change on its trail.
  * - A row the viewer may not change shows its value and says who can.
  * - Each row has an anchor (`#reads-mode`) and a button that copies a link to it.
  * - A change of status (after a save, or a switch turned on) is announced.
@@ -42,6 +44,11 @@ export interface SettingRowProps {
     onUnstage?: () => void
     /** What is wrong with the staged value. */
     error?: string | null
+    /** The server's answer for the staged values (the quick preview): what is in force once saved.
+     *  Only an answer for the value staged now is shown. */
+    preview?: ResolvedSetting
+    /** That answer is on its way. */
+    checking?: boolean
     onFix?: (fix: WhyFix, item: WhyItem) => void
     fixLabel?: (fix: WhyFix) => string
     dimensions?: DimensionInfo[]
@@ -72,7 +79,7 @@ function CopyLink({ anchor, label }: { anchor: string; label: string }) {
                 type="button"
                 onClick={copy}
                 aria-label={copied ? `Link to ${label} copied` : `Copy a link to ${label}`}
-                className="grid place-items-center w-8 h-8 rounded-lg text-ink-muted transition-colors hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.06] outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
+                className="grid place-items-center w-8 h-8 rounded-lg text-ink-secondary transition-colors hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.06] outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40"
             >
                 {copied ? <Check aria-hidden className="w-4 h-4 text-emerald-500" /> : <Link2 aria-hidden className="w-4 h-4" />}
             </button>
@@ -81,8 +88,8 @@ function CopyLink({ anchor, label }: { anchor: string; label: string }) {
 }
 
 export function SettingRow({
-    setting: s, resolved, scope, lens = 'business', staged, onStage, onUnstage, error, onFix, fixLabel, dimensions = [],
-    glossary, visual, defaultOpen = false, highlighted = false, className, children,
+    setting: s, resolved, scope, lens = 'business', staged, onStage, onUnstage, error, preview, checking = false, onFix, fixLabel,
+    dimensions = [], glossary, visual, defaultOpen = false, highlighted = false, className, children,
 }: SettingRowProps) {
     const [open, setOpen] = useState(defaultOpen)
     // Announce a change of status, not the status a row opens with.
@@ -99,6 +106,9 @@ export function SettingRow({
     const own = isStaged ? staged : ownValue(resolved, scope)
     const inherit = inheritedAt(resolved, scope)
     const next = own ?? inherit.value
+    // The server's answer, when it is for the value staged now (an answer for an earlier one is kept
+    // while the next is asked for); never while that value needs a fix.
+    const answer = isStaged && !error && preview && sameValue(ownValue(preview, scope), staged) ? preview : undefined
     const locked = lockedFor(resolved, scope)
     const editable = resolved.editable && !locked && Boolean(s.scopes[scope])
     const business = lens === 'business'
@@ -130,7 +140,7 @@ export function SettingRow({
             <Lock aria-hidden className="mt-0.5 w-3.5 h-3.5 shrink-0 text-ink-muted" />
             <div className="min-w-0">
                 <p className="text-[13px] font-semibold text-ink">{formatValue(s, resolved.effective)}</p>
-                <p className="text-[11.5px] text-ink-muted">{readOnlyWhy}</p>
+                <p className="text-[11.5px] text-ink-secondary">{readOnlyWhy}</p>
             </div>
         </div>
     )
@@ -157,7 +167,7 @@ export function SettingRow({
                     <div className="flex flex-wrap items-start justify-between gap-x-6 gap-y-2">
                         <div className="min-w-0 flex-1 basis-64">
                             {business && s.question && (
-                                <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-ink-muted">{s.label}</p>
+                                <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-ink-secondary">{s.label}</p>
                             )}
                             <h3 id={ids.title} className={cn('font-semibold tracking-tight text-ink', business && s.question ? 'mt-0.5 text-[15px]' : 'text-sm')}>
                                 {title}
@@ -165,11 +175,18 @@ export function SettingRow({
                             <p id={ids.summary} className="mt-1 text-[13px] leading-relaxed text-ink-secondary max-w-prose">{s.guidance.summary}</p>
                         </div>
                         <div className="shrink-0 sm:text-right">
-                            <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-ink-muted">In force</p>
+                            <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-ink-secondary">In force</p>
                             <p className="text-[13px] font-semibold text-ink">{formatValue(s, resolved.effective)}</p>
-                            {isStaged && !sameValue(next, resolved.effective) && (
-                                <p className="text-xs font-semibold text-accent-lineage">Changing to {formatValue(s, next)}</p>
-                            )}
+                            {answer ? (
+                                <>
+                                    <p className="text-xs font-semibold text-indigo-700 dark:text-indigo-300">Once saved: {formatValue(s, answer.effective)}</p>
+                                    {answer.declared !== null && !sameValue(answer.declared, answer.effective) && (
+                                        <p className="text-[11px] text-ink-secondary">Chosen: {formatValue(s, answer.declared)}</p>
+                                    )}
+                                </>
+                            ) : isStaged && !error && checking ? (
+                                <p className="text-xs text-ink-secondary">Checking…</p>
+                            ) : null}
                             <div className="mt-1 flex flex-wrap items-center gap-1.5 sm:justify-end">
                                 <ScopeBadge scope={resolved.source} here={resolved.source === scope}
                                     prefix={resolved.source === 'default' ? undefined : resolved.source === 'env' ? 'Set by' : resolved.source === scope ? 'Set at' : 'From'} />
@@ -179,17 +196,23 @@ export function SettingRow({
                     </div>
 
                     {!business && (
-                        <p className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11.5px] text-ink-muted">
-                            {s.default.env && <code className="rounded-md bg-black/[0.04] px-1.5 py-px font-mono text-[11px] text-ink-secondary dark:bg-white/[0.06]">{s.default.env}</code>}
+                        <p className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11.5px] text-ink-secondary">
+                            {/* A long env var wraps rather than widening a phone's page. */}
+                            {s.default.env && <code className="min-w-0 rounded-md bg-black/[0.04] px-1.5 py-px font-mono text-[11px] text-ink-secondary [overflow-wrap:anywhere] dark:bg-white/[0.06]">{s.default.env}</code>}
                             <span>{s.takesEffect.text}</span>
                             {s.caps.filter((c) => c.deployment).map((c) => (
-                                <span key={c.deployment}>Capped by <code className="font-mono text-[11px]">{c.deployment}</code></span>
+                                <span key={c.deployment} className="min-w-0">
+                                    {c.value != null ? <>Capped at <span className="font-semibold text-ink">{formatValue(s, c.value)}</span> by </> : 'Capped by '}
+                                    <code className="font-mono text-[11px] [overflow-wrap:anywhere]">{c.deployment}</code>
+                                    {c.value === null && c.problem && <>: its value couldn’t be read. {c.problem}</>}
+                                </span>
                             ))}
                             {s.guidance.evidence && (
                                 <HoverTip label={s.guidance.evidence} width="data" className="inline-flex">
-                                    <span tabIndex={0} className="inline-flex cursor-help items-center gap-1 rounded font-medium text-ink-secondary underline decoration-dotted underline-offset-[3px] outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40">
+                                    <button type="button" onClick={() => setOpen(true)} aria-controls={ids.panel}
+                                        className="inline-flex items-center gap-1 rounded font-medium text-ink-secondary underline decoration-dotted underline-offset-[3px] outline-none hover:text-ink focus-visible:ring-2 focus-visible:ring-accent-lineage/40">
                                         <FlaskConical aria-hidden className="w-3 h-3" /> Evidence
-                                    </span>
+                                    </button>
                                 </HoverTip>
                             )}
                         </p>
@@ -211,23 +234,23 @@ export function SettingRow({
 
             <div className="flex flex-wrap items-center gap-1.5 border-t border-glass-border/50 px-3 py-2 sm:px-4">
                 <Button size="sm" variant="ghost" rightIcon={ChevronDown} aria-expanded={open} aria-controls={ids.panel}
-                    onClick={() => setOpen((o) => !o)} className={cn('[&>svg:last-child]:transition-transform', open && '[&>svg:last-child]:rotate-180')}>
+                    onClick={() => setOpen((o) => !o)} className={cn('text-ink-secondary [&>svg:last-child]:transition-transform', open && '[&>svg:last-child]:rotate-180')}>
                     {open ? 'Less' : 'How it works'}
                 </Button>
                 {editable && !sameValue(next, rec) && (
                     <HoverTip label={s.guidance.recommended.forThisPlatform?.why ?? s.guidance.recommended.why} className="inline-flex">
-                        <Button size="sm" variant="ghost" leftIcon={Sparkles} onClick={() => onStage(rec)}>
+                        <Button size="sm" variant="ghost" leftIcon={Sparkles} onClick={() => onStage(rec)} className="text-ink-secondary">
                             Use recommended · {formatValue(s, rec)}
                         </Button>
                     </HoverTip>
                 )}
                 {editable && own !== null && (
-                    <Button size="sm" variant="ghost" leftIcon={CornerDownRight} onClick={() => onStage(null)}>
+                    <Button size="sm" variant="ghost" leftIcon={CornerDownRight} onClick={() => onStage(null)} className="text-ink-secondary">
                         {inheritLabel} · {formatValue(s, inherit.value)}
                     </Button>
                 )}
                 {isStaged && onUnstage && (
-                    <Button size="sm" variant="ghost" leftIcon={Undo2} onClick={onUnstage}>Revert</Button>
+                    <Button size="sm" variant="ghost" leftIcon={Undo2} onClick={onUnstage} className="text-ink-secondary">Revert</Button>
                 )}
                 <span className="ml-auto" />
                 <CopyLink anchor={anchor} label={s.label} />

@@ -2,7 +2,8 @@
  * Admin → Versioned graphs → Overview: where things stand, in a sentence built from the fleet's
  * figures and the read mode the server describes, then each category's posture; the figures, each
  * defined and dated, "—" with why (never 0) when they couldn't be read, and a way into the list;
- * "Something's wrong?"; and every graph. The opening and closing tests replace Infrastructure's
+ * "Something's wrong?"; and every graph. The memory states, graphs with no copy yet among them, add
+ * up to the graphs; each button says which figure or graph it is for. The opening and closing tests replace Infrastructure's
  * ProjectionPanel ones for this page (graphs loading and waiting for room are counted).
  */
 import { screen, waitFor, within } from '@testing-library/react'
@@ -25,27 +26,37 @@ describe('Overview', () => {
         mockApi()
         renderWithApi(<AdminVersionedGraphs />, { path: OVERVIEW })
         const reads = SCHEMA.categories.find((c) => c.id === 'reads')!
-        expect(await screen.findByText((text) => text.startsWith('42 versioned graphs: 35 in memory, 4 unloaded, 1 loading, 2 waiting for room.')
+        expect(await screen.findByRole('heading', { level: 2, name: 'Where things stand' })).toBeInTheDocument()
+        expect(await screen.findByText((text) => text.startsWith('42 versioned graphs: 34 in memory, 4 unloaded, 1 loading, 2 waiting for room, 1 with no copy yet.')
             && text.endsWith(reads.posture))).toBeInTheDocument()
-        expect(await screen.findByText('New-version builds is off; Graph residency is on.')).toBeInTheDocument()
+        expect(await screen.findByText('New-version builds: off · Graph residency: on')).toBeInTheDocument()
         for (const c of SCHEMA.categories.filter((x) => x.id !== 'reads')) expect(screen.getByText(c.posture)).toBeInTheDocument()
     })
 
-    it('shows each figure with what it counts and when it was read, counting graphs loading and waiting for room', async () => {
+    it('shows each figure with what it counts and when it was read, the memory states adding up to the graphs', async () => {
         mockApi()
         renderWithApi(<AdminVersionedGraphs />, { path: OVERVIEW })
         await screen.findByText('The fleet now')
         expect((await tile('Versioned graphs')).getByText(String(SUMMARY.graphs))).toBeInTheDocument()
-        expect((await tile('In memory')).getByRole('img')).toHaveAccessibleName('In memory: 35, Unloaded: 4, Loading: 1, Waiting for room: 2')
+        expect((await tile('In memory')).getByRole('img'))
+            .toHaveAccessibleName('In memory: 34, Unloaded: 4, Loading: 1, Waiting for room: 2, No copy yet: 1')
+        expect(SUMMARY.inMemory + SUMMARY.unloaded + SUMMARY.loading + SUMMARY.waitingForRoom + SUMMARY.noCopy).toBe(SUMMARY.graphs)
         expect((await tile('Failing')).getByText('1')).toBeInTheDocument()
-        expect(screen.getAllByRole('button', { name: 'What this counts' })).toHaveLength(5)
-        expect(screen.getByText(/^As of /)).toBeInTheDocument()
+        // Each definition is named for its figure.
+        const definitions = screen.getAllByRole('button', { name: /^What “.+” counts$/ }).map((b) => b.getAttribute('aria-label'))
+        expect(definitions).toHaveLength(5)
+        expect(new Set(definitions).size).toBe(5)
+        // Read when it was read, and not announced again each time the clock moves.
+        expect(screen.getByText(/^As of /).closest('[aria-live]')).toBeNull()
     })
 
     it('shows "—" and why when the figures couldn’t be read, never 0', async () => {
         mockApi('ok', (req) => (req.path.endsWith('/graphs/summary') ? json({ detail: 'The graph store didn’t answer in time' }, 503) : undefined))
         renderWithApi(<AdminVersionedGraphs />, { path: OVERVIEW })
         expect(await screen.findByText(/Couldn’t read the figures: The graph store didn’t answer in time/, {}, { timeout: 4000 })).toBeInTheDocument()
+        // Said once, as an alert, not in every tile.
+        expect(screen.getAllByText(/Couldn’t read the figures/)).toHaveLength(1)
+        expect(screen.getByText(/Couldn’t read the figures/).closest('[role="alert"]')).not.toBeNull()
         expect(screen.getAllByLabelText('Not known')).toHaveLength(5)
         expect(screen.queryByText(/^0$/)).not.toBeInTheDocument()
     })
@@ -54,8 +65,10 @@ describe('Overview', () => {
         const sent = mockApi()
         renderWithApi(<AdminVersionedGraphs />, { path: OVERVIEW })
         await screen.findByText('The fleet now')
-        await userEvent.click((await tile('Failing')).getByRole('button', { name: /Show them/ }))
+        await userEvent.click((await tile('Failing')).getByRole('button', { name: 'Show them: Failing' }))
         await waitFor(() => expect(calls(sent, 'GET', '/admin/versioning/graphs').at(-1)?.query.get('status')).toBe('failed'))
+        await userEvent.click((await tile('Building a new version')).getByRole('button', { name: 'Show them: Building a new version' }))
+        await waitFor(() => expect(calls(sent, 'GET', '/admin/versioning/graphs').at(-1)?.query.get('status')).toBe('building'))
         await userEvent.click((await tile('In memory')).getByRole('button', { name: /2 waiting for room/ }))
         await waitFor(() => expect(calls(sent, 'GET', '/admin/versioning/graphs').at(-1)?.query.get('status')).toBe('waiting_capacity'))
     })
@@ -69,7 +82,7 @@ describe('Overview', () => {
 
         await userEvent.click(screen.getByRole('tab', { name: /Overview/ }))
         const sales = (await screen.findByText('Sales lineage')).closest('[role="row"]') as HTMLElement
-        await userEvent.click(within(sales).getByRole('button', { name: 'Settings…' }))
+        await userEvent.click(within(sales).getByRole('button', { name: 'Settings… for Sales lineage' }))
         expect(await screen.findByRole('dialog', { name: 'Sales lineage' })).toBeInTheDocument()
     })
 

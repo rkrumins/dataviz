@@ -29,7 +29,8 @@
 import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { authFetch } from './apiClient'
 import { withReason } from './activityReason'
-import type { VersionedGraphRow, VersionedGraphsFilter } from './systemStatusService'
+import { graphStoreService } from './graphStoreService'
+import type { ResidencyState, VersionedGraphRow, VersionedGraphsFilter } from './systemStatusService'
 import type {
     Audience, Editor, Limits, NodeMemory, ResolvedSetting, ResolvedValues, Scope, SettingsSchema, SettingValue, Status, TrailScope,
     WhyItem,
@@ -381,13 +382,15 @@ export interface WorkspaceGraphsPage {
     nextCursor: string | null
 }
 
-/** The fleet's figures, over every live graph but forks. */
+/** The fleet's figures, over every live graph but forks. The five memory states add up to `graphs`. */
 export interface GraphsSummary {
     graphs: number
     inMemory: number
     unloaded: number
     loading: number
     waitingForRoom: number
+    /** No copy in the graph store yet. */
+    noCopy: number
     building: number
     failing: number
     withOwnSettings: number
@@ -409,6 +412,8 @@ export interface SignalDefinition {
 export interface SignalCounts {
     asOf: string
     window: string
+    /** The server couldn't count them (Redis out of reach): no counts, never zeros. */
+    unavailable: boolean
     signals: Array<{
         id: string
         count: number
@@ -451,9 +456,31 @@ export interface Revision {
 }
 
 /**
+ * What is known of a graph's new-version builds: the one in flight (`running`, or `waiting` for
+ * room, a lock or a summaries job), else the last while the copy it left is kept (`switched`, or
+ * `not_switched`: given up without a switch), else `none` (no switch within `windowSecs`).
+ */
+export interface LastBuild {
+    outcome: 'running' | 'waiting' | 'switched' | 'not_switched' | 'none'
+    /** In flight: when it was asked for. */
+    since: string | null
+    /** Finished: when it switched, or was given up; null when not known. */
+    at: string | null
+    waitingFor: 'room' | 'lock' | 'summaries' | null
+    /** Why it waits, or the error its last attempt failed with: the server's words. */
+    why: string | null
+    /** In flight: attempts that failed so far. */
+    attempts: number | null
+    /** Finished: from when the copy it left (the previous one after a switch) is removed. */
+    copyRemovedAfter: string | null
+    /** `none`: how far back a switch would still show (the retire grace in force). */
+    windowSecs: number | null
+}
+
+/**
  * A graph's health right now: each part best effort (null, with a problem saying why). A version
  * is known by its `seq` ("version #42"); its `version` is the revision behind it, null when that
- * couldn't be read.
+ * couldn't be read. A fork's serving, memory and builds are its root's, which `follows` names.
  */
 export interface GraphHealth {
     asOf: string
@@ -461,10 +488,18 @@ export interface GraphHealth {
     serving: { seq: number; version: Revision | null; source: 'graph_store' | 'database' | null } | null
     versionsBehind: number | null
     readMode: { effective: string; declared: string | null; source: string; why: WhyItem[] } | null
+    /** Kept as served: null until updates publish their progress. */
+    progress: Record<string, unknown> | null
     lastUpdate: { finishedAt: string | null; durationSecs: number | null; rows: number | null; ratePerSec: number | null } | null
-    memory: { bytes: number | null; node: string | null; loaded: boolean | null; class: string | null; lastReadAt: string | null } | null
-    lastBuild: { outcome: 'switched' | 'dropped' | 'failed' | 'waiting' | 'running'; at: string | null; why: string | null } | null
+    /** Its copy; `state` as the inventory has it (null: no copy in the graph store yet). */
+    memory: {
+        bytes: number | null; node: string | null; loaded: boolean | null; state: ResidencyState | null
+        rehydratingSince: string | null; class: string | null; lastReadAt: string | null
+    } | null
+    lastBuild: LastBuild | null
     signals: Array<{ id: string; count24h: number }> | null
+    /** A fork: the graph whose copy it reads through, named. */
+    follows: { graphId: string; dataSourceId: string | null; label: string | null } | null
     problems: Array<{ part: string; message: string }>
 }
 
@@ -527,15 +562,14 @@ export const settingsService = {
         call<WorkspaceGraphsPage>(`${API}/${enc(workspaceId)}/versioning/settings/graphs${cursor ? `?cursor=${enc(cursor)}` : ''}`),
 
     /**
-     * Each graph store node's memory now: the residency preview of no change (what the memory
-     * gauges and the explainers draw). A node whose memory couldn't be read is left out.
+     * Each graph store node's memory, as the Graph store page last read it (its cached topology:
+     * nothing is planned or swept to answer). What the memory gauges and the explainers draw; a
+     * master whose memory couldn't be read, or that has no limit, is left out.
      */
     nodeMemory: async (): Promise<NodeMemory[]> => {
-        const w = await call<{ masters: Array<{ endpoint: string; usedBytes: number | null; maxBytes: number | null }> }>(
-            `${API}/admin/versioning/residency-policy/preview`, { method: 'POST', body: '{}' },
-        )
-        return w.masters.flatMap((m) => (m.usedBytes != null && m.maxBytes
-            ? [{ id: m.endpoint, label: m.endpoint, usedBytes: m.usedBytes, maxBytes: m.maxBytes }] : []))
+        const t = await graphStoreService.getTopology()
+        return t.instances.flatMap((i) => i.shards.flatMap(({ master: m }) => (m.memory.used != null && m.memory.maxmemory
+            ? [{ id: m.endpoint, label: m.endpoint, usedBytes: m.memory.used, maxBytes: m.memory.maxmemory }] : [])))
     },
 
     /** Null when the server doesn't count signals yet (404). */
@@ -558,10 +592,12 @@ export const settingsService = {
                 serving: w.serving ?? null,
                 versionsBehind: w.versionsBehind ?? null,
                 readMode: w.readMode ?? null,
+                progress: w.progress ?? null,
                 lastUpdate: w.lastUpdate ?? null,
                 memory: w.memory ?? null,
                 lastBuild: w.lastBuild ?? null,
                 signals: w.signals ?? null,
+                follows: w.follows ?? null,
                 problems: w.problems ?? [],
             }
         } catch (err) {
@@ -626,14 +662,20 @@ export function useSettingsPreview(place: SettingsPlace, items: PatchItem[], mod
     })
 }
 
+/** What a save or a revert can change besides the values: the history, the registry's sentences,
+ *  and the fleet as the inventory, its figures and a graph's health say it. */
+function invalidateAfterSave(qc: ReturnType<typeof useQueryClient>) {
+    for (const part of ['history', 'graphs', 'summary', 'health', 'workspace-graphs'] as const) void qc.invalidateQueries({ queryKey: [...settingsKeys.all, part] })
+    void qc.invalidateQueries({ queryKey: settingsKeys.schema() })
+}
+
 export function useSaveSettings(place: SettingsPlace) {
     const qc = useQueryClient()
     return useMutation({
         mutationFn: ({ items, reason }: { items: PatchItem[]; reason: string }) => settingsService.save(place, items, reason),
         onSuccess: (res) => {
             qc.setQueryData(settingsKeys.values(place), res)
-            void qc.invalidateQueries({ queryKey: [...settingsKeys.all, 'history'] })
-            void qc.invalidateQueries({ queryKey: settingsKeys.schema() })
+            invalidateAfterSave(qc)
         },
     })
 }
@@ -644,8 +686,7 @@ export function useRevertChangeSet(place: SettingsPlace) {
         mutationFn: ({ changeSetId, reason }: { changeSetId: string; reason: string }) => settingsService.revert(place, changeSetId, reason),
         onSuccess: () => {
             void qc.invalidateQueries({ queryKey: [...settingsKeys.all, 'values'] })
-            void qc.invalidateQueries({ queryKey: [...settingsKeys.all, 'history'] })
-            void qc.invalidateQueries({ queryKey: settingsKeys.schema() })
+            invalidateAfterSave(qc)
         },
     })
 }
@@ -703,9 +744,9 @@ export function useSignals(enabled: boolean) {
     })
 }
 
-/** As the finder takes them. */
+/** As the finder takes them. None when the server couldn't count them: an empty list would read as "nothing happened". */
 export function signalCounts(counts: SignalCounts | null | undefined): SignalCount[] | undefined {
-    return counts ? counts.signals.map((s) => ({ id: s.id, count: s.count, window: counts.window })) : undefined
+    return counts && !counts.unavailable ? counts.signals.map((s) => ({ id: s.id, count: s.count, window: counts.window })) : undefined
 }
 
 export function useGraphHealth(workspaceId: string, graphId: string, enabled: boolean) {
