@@ -686,6 +686,16 @@ def _commit_summary(template: str) -> Callable[[dict], str]:
     return _build
 
 
+def _settings_summary(template: str) -> Callable[[dict], str]:
+    """A save of settings (``services.settings.service``): ``template`` holds ``{keys}``, the
+    settings it changed, and for a workspace's or a graph's one ``{}``, whose they are."""
+    def _build(p: dict) -> str:
+        changed = _detail(p, "to")
+        keys = ", ".join(sorted(changed)) if isinstance(changed, dict) and changed else "nothing"
+        return template.replace("{keys}", keys).format(_subject(p))
+    return _build
+
+
 def _summary_job_triggered(p: dict) -> str:
     source = _detail(p, "triggerSource")
     mode = {"onboarding": " (onboarding)", "api": " (via the API)"}.get(source or "", "")
@@ -865,6 +875,8 @@ _EVENT_META.update({
     "workspace.versioning.unfrozen": ("info", _envelope_summary("Resumed editing of the versioned graph of {}")),
     "workspace.versioning.drafts_policy_updated": ("info", _envelope_summary("Changed the drafts and reviews policy of {}")),
     "workspace.versioning.import_settings_updated": ("info", _envelope_summary("Changed the import settings of {}")),
+    "workspace.versioning.settings_updated": ("info", _settings_summary("Changed the versioned-graph settings of {}: {keys}")),
+    "workspace.versioning.graph_settings_updated": ("info", _settings_summary("Changed the settings of versioned graph {}: {keys}")),
     "workspace.versioning.draft_visibility_changed": ("info", _envelope_summary("Changed who can see a draft of {}")),
     "workspace.versioning.draft_transferred": ("info", _envelope_summary("Handed on a draft of {}")),
     "provider.connection.created": ("info", _envelope_summary("Registered provider {}")),
@@ -896,6 +908,8 @@ _EVENT_META.update({
     "platform.build_policy.updated": ("info", lambda p: (
         "Changed how new versions of versioned graphs are built"
     )),
+    "platform.versioning.settings_updated": ("info", _settings_summary(
+        "Changed the platform's versioned-graph settings: {keys}")),
     "platform.versioning.residency_changed": ("info", lambda p: (
         f"Set versioned graph {_detail(p, 'graphId') or '?'} to "
         f"{(_detail(p, 'to') or '?').capitalize()} residency"
@@ -988,6 +1002,8 @@ LABELS: dict[str, str] = {
     "workspace.versioning.unfrozen": "Resumed version control editing",
     "workspace.versioning.drafts_policy_updated": "Changed the drafts and reviews policy",
     "workspace.versioning.import_settings_updated": "Changed the import settings",
+    "workspace.versioning.settings_updated": "Changed a workspace's versioned-graph settings",
+    "workspace.versioning.graph_settings_updated": "Changed a versioned graph's settings",
     "workspace.versioning.draft_visibility_changed": "Changed who can see a draft",
     "workspace.versioning.draft_transferred": "Handed on a draft",
     "provider.connection.created": "Registered a provider",
@@ -1003,6 +1019,7 @@ LABELS: dict[str, str] = {
     "platform.residency_policy.updated": "Changed residency policy",
     "platform.draft_retention.updated": "Changed draft retention",
     "platform.build_policy.updated": "Changed new-version build settings",
+    "platform.versioning.settings_updated": "Changed the platform's versioned-graph settings",
     "platform.versioning.residency_changed": "Changed a versioned graph's residency",
     "platform.versioning.read_mode_changed": "Changed what a versioned graph's readers get while it updates",
     "platform.versioning.load_requested": "Asked for a versioned graph's load",

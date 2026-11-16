@@ -1434,9 +1434,26 @@ async def probe_projection_lag() -> Optional[dict]:
     }
 
 
+#: Graphs the inventory reads at a time while it filters by the read mode in force.
+_INVENTORY_SCAN = 500
+
+
+async def _sources_with_own_settings() -> set[str]:
+    """The data sources whose versioned graph chose a setting of its own (a fork never does)."""
+    from backend.app.db.engine import PoolRole, get_session_factory
+    from backend.app.services.settings import registry, service, store
+
+    async with asyncio.timeout(_BUDGET_DB):
+        async with get_session_factory(PoolRole.READONLY)() as s:
+            rows = await store.read_domain(s, registry().DOMAIN)
+    return set(service.own_values({(r.key, r.scope, r.scope_id): r for r in rows}))
+
+
 async def list_versioned_graphs(
     *, provider: Optional[str], status: Optional[str], workspace_id: Optional[str],
     kind: Optional[str], q: Optional[str], cursor: Optional[str], limit: int,
+    read_mode: Optional[str] = None, residency: Optional[str] = None,
+    own_settings: Optional[bool] = None,
 ) -> dict:
     """One page of the fleet inventory (``GET /admin/versioning/graphs``): every live versioned
     graph with its FalkorDB provider, key, ownership and projection state, by graph id.
@@ -1444,7 +1461,10 @@ async def list_versioned_graphs(
     Unlike the probe it keeps forks (whose ``dsfork_`` data source is a fork's row, never counted
     as present) and orphans (not a fork, and its data source is gone), and marks them. ``kind`` is ``main``,
     ``fork`` or ``orphan``; ``status`` a rollup bucket; ``q`` matches the graph id, data source
-    id, FalkorDB key or data-source label. Unlike a probe it raises rather than degrading."""
+    id, FalkorDB key or data-source label. ``read_mode`` keeps the graphs whose
+    ``readModeEffective`` is that mode, ``residency`` those of that class, and ``own_settings``
+    those that chose a versioned-graph setting of their own (False: those that didn't); a fork
+    has none of the three. Unlike a probe it raises rather than degrading."""
     from sqlalchemy import func, or_
 
     from backend.app.services.versioning import config as vconfig
@@ -1477,19 +1497,47 @@ async def list_versioned_graphs(
             ProjectionStateORM.falkor_graph_name.icontains(q, autoescape=True),
             GraphORM.data_source_id.in_(await _present_data_source_ids(label_contains=q)),
         ))
+    if residency:
+        stmt = stmt.where(~is_fork, ProjectionStateORM.residency == residency)
+    if own_settings is not None:
+        own = list(await _sources_with_own_settings())
+        stmt = stmt.where(~is_fork, GraphORM.data_source_id.in_(own)) if own_settings else (
+            stmt.where(or_(is_fork, GraphORM.data_source_id.notin_(own))))
     if cursor:
         stmt = stmt.where(GraphORM.id > cursor)
 
+    from backend.app.services.versioning import build_policy, candidates
+
+    policy = await build_policy.resolve()
+
+    def read_mode_effective(r) -> Optional[str]:
+        """What its readers get while a newer version lands, its own mode or else the platform's;
+        a fork follows its root's (None)."""
+        if r.fork_parent_graph_id is not None:
+            return None
+        return build_policy.read_mode_of(r.read_mode, policy)
+
     async with graphver_session() as session:
-        page = (await session.execute(stmt.order_by(GraphORM.id).limit(limit + 1))).all()
+        if read_mode is None:
+            page = (await session.execute(stmt.order_by(GraphORM.id).limit(limit + 1))).all()
+        else:
+            # The mode in force is resolved here, not in SQL: read on, a batch at a time, until a
+            # page holds limit + 1 graphs in that mode or none are left.
+            page, after = [], None
+            while len(page) <= limit:
+                batch = (await session.execute(
+                    (stmt if after is None else stmt.where(GraphORM.id > after))
+                    .order_by(GraphORM.id).limit(_INVENTORY_SCAN))).all()
+                page += [r for r in batch if read_mode_effective(r) == read_mode]
+                if len(batch) < _INVENTORY_SCAN:
+                    break
+                after = batch[-1].id
+            page = page[:limit + 1]
     more = len(page) > limit
     page = page[:limit]
 
     live = set(present_ids)
     directory = await _resolve_data_sources([r.data_source_id for r in page])
-    from backend.app.services.versioning import build_policy, candidates
-
-    policy = await build_policy.resolve()
 
     def residency_of(r) -> dict:
         """Residency (doc 17): its class, whether its key is in FalkorDB, why it was evicted, its
@@ -1524,12 +1572,48 @@ async def list_versioned_graphs(
             # What its readers get while a newer version lands: its own mode (None: the
             # platform's) and the one in force. A fork follows its root's.
             "readMode": None if r.fork_parent_graph_id is not None else r.read_mode,
-            "readModeEffective": None if r.fork_parent_graph_id is not None
-            else build_policy.read_mode_of(r.read_mode, policy),
+            "readModeEffective": read_mode_effective(r),
             # A new version built beside its key (read mode beside), while one is.
             "build": candidates.block(r),
         } for r in page],
         "nextCursor": page[-1].id if more else None,
+    }
+
+
+async def versioned_graphs_summary() -> dict:
+    """The fleet's figures (``GET /admin/versioning/graphs/summary``), over every live versioned
+    graph that is not a fork (a fork has no copy, state or settings of its own): how many there
+    are; how many are in memory, unloaded, loading and waiting for room to load
+    (``residency_state_of``); how many have a new version being built, how many failed their last
+    update, and how many chose a versioned-graph setting of their own. Raises rather than
+    degrading, as the inventory does."""
+    from sqlalchemy import select
+
+    from backend.app.services.versioning import candidates
+    from backend.app.services.versioning.db import graphver_session
+    from backend.app.services.versioning.models import GraphORM, ProjectionStateORM
+    from backend.app.services.versioning.service import residency_state_of
+
+    stmt = (select(GraphORM.id, GraphORM.data_source_id, ProjectionStateORM.status,
+                   ProjectionStateORM.projected_commit_seq, ProjectionStateORM.falkor_graph_name,
+                   ProjectionStateORM.last_error, ProjectionStateORM.candidate_state)
+            .select_from(GraphORM)
+            .outerjoin(ProjectionStateORM, ProjectionStateORM.graph_id == GraphORM.id)
+            .where(GraphORM.deleted_at.is_(None), GraphORM.fork_parent_graph_id.is_(None)))
+    async with graphver_session() as session:
+        rows = (await session.execute(stmt)).all()
+    own = await _sources_with_own_settings()
+    states = [residency_state_of(r.status or "idle", r.projected_commit_seq or 0,
+                                 r.falkor_graph_name, r.id) for r in rows]
+    return {
+        "graphs": len(rows),
+        "inMemory": states.count("resident"),
+        "unloaded": states.count("evicted"),
+        "loading": states.count("rehydrating"),
+        "waitingForRoom": states.count("waiting_capacity"),
+        "building": sum(candidates.block(r) is not None for r in rows),
+        "failing": sum(r.last_error is not None for r in rows),
+        "withOwnSettings": sum(r.data_source_id in own for r in rows),
     }
 
 

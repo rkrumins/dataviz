@@ -8,7 +8,7 @@ an API key is refused.
 """
 import contextlib
 from datetime import datetime, timezone
-from typing import Any, Dict, Literal, Optional, Tuple
+from typing import Annotated, Any, Dict, Literal, Optional, Tuple
 
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -89,13 +89,30 @@ async def list_graphs(
                                   description="The previous page's nextCursor"),
     limit: int = Query(50, ge=1, le=200),
     _user: User = Depends(requires("system:admin")),
+    read_mode: Annotated[Optional[Literal["latest", "in_place", "beside"]], Query(
+        alias="readModeEffective", description="Only graphs whose readers get this mode")] = None,
+    residency_class: Annotated[Optional[Literal["always", "standard", "coldline"]], Query(
+        alias="residency", description="Only graphs of this residency class")] = None,
+    own_settings: Annotated[Optional[bool], Query(
+        alias="ownSettings", description="Only graphs that chose a versioned-graph setting of "
+                                         "their own (false: that didn't)")] = None,
 ) -> dict:
     """The fleet inventory: one page of every versioned graph, by graph id, including the forks
     and orphans the Infrastructure projection rollup leaves out — so the ninth failing graph, a
     fork's key or a graph whose data source was deleted can be found and acted on."""
     return await probes.list_versioned_graphs(
         provider=provider, status=status, workspace_id=workspace_id, kind=kind, q=q,
-        cursor=cursor, limit=limit)
+        cursor=cursor, limit=limit, read_mode=read_mode, residency=residency_class,
+        own_settings=own_settings)
+
+
+@router.get("/graphs/summary",
+            summary="The fleet's figures: graphs in memory, unloaded, loading, building, failing")
+async def graphs_summary(_user: User = Depends(requires("system:admin"))) -> dict:
+    """Over every live versioned graph but forks: how many there are, in memory, unloaded, loading
+    and waiting for room; how many have a new version being built, failed their last update, and
+    chose a versioned-graph setting of their own."""
+    return await probes.versioned_graphs_summary()
 
 
 class ProjectionMoveRequest(BaseModel):

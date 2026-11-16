@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
-from sqlalchemy import func, select, text, tuple_
+from sqlalchemy import and_, false, func, or_, select, text, tuple_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -261,15 +261,21 @@ async def history(session: AsyncSession, domain: str, *, scope: Optional[str] = 
                   scope_id: Optional[str] = None, key: Optional[str] = None,
                   actor: Optional[str] = None, since: Optional[datetime] = None,
                   until: Optional[datetime] = None, limit: int = 50,
-                  before_id: Optional[int] = None) -> Tuple[List[HistoryEntry], Optional[int]]:
+                  before_id: Optional[int] = None,
+                  places: Optional[Sequence[Tuple[str, Sequence[str]]]] = None,
+                  ) -> Tuple[List[HistoryEntry], Optional[int]]:
     """Changes, newest first, filtered by scope (and its id), key, actor and time (``since``
     inclusive, ``until`` exclusive); a page of ``limit``, and the ``before_id`` of the next page
-    (None: no more)."""
+    (None: no more). ``places`` keeps the changes at any of several places, each a scope and its
+    ids: a workspace's own and its graphs'."""
     query = select(*_HISTORY).where(_C.domain == domain)
     for column, wanted in ((_C.scope, scope), (_C.scope_id, scope_id), (_C.key, key),
                            (_C.actor, actor)):
         if wanted is not None:
             query = query.where(column == wanted)
+    if places is not None:
+        query = query.where(or_(false(), *(and_(_C.scope == s, _C.scope_id.in_(list(ids)))
+                                           for s, ids in places)))
     if since is not None:
         query = query.where(_C.at >= since)
     if until is not None:
