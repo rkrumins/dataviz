@@ -316,6 +316,8 @@ tests/test_trash_purge_state.py
 tests/test_type_change_roundtrip.py
 tests/test_typed_compiler.py
 tests/test_typed_patch_merge.py
+tests/test_update_progress.py
+tests/test_update_progress_endpoints.py
 tests/test_upload_pins.py
 tests/test_versioned_branch_aggregated_edges.py
 tests/test_versioned_branch_resolve_identities.py
