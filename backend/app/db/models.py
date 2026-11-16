@@ -13,12 +13,15 @@ from sqlalchemy import (
     Index,
     Integer,
     LargeBinary,
+    PrimaryKeyConstraint,
+    Sequence,
     Text,
     UniqueConstraint,
     and_,
+    func,
     text,
 )
-from sqlalchemy.dialects.postgresql import DOUBLE_PRECISION
+from sqlalchemy.dialects.postgresql import DOUBLE_PRECISION, JSONB, TIMESTAMP, UUID
 from sqlalchemy.orm import relationship
 
 from .engine import Base
@@ -345,6 +348,106 @@ class PlatformSettingsORM(Base):
             f"<PlatformSettings identity={self.identity_property!r} "
             f"name={self.name_property!r}>"
         )
+
+
+# ------------------------------------------------------------------ #
+# setting_values / setting_changes / settings_imports                  #
+# (the settings store: ``backend.app.services.settings.store``)        #
+# ------------------------------------------------------------------ #
+
+#: Every write to ``setting_values`` takes the next number, so a process reloads only the rows
+#: written since it last read (``rev > :last``). ``create_all`` makes both sequences before the
+#: tables. The defaults are spelled ``func.nextval`` / ``func.now`` so the SQLite test harness can
+#: still ``create_all`` (it wraps them in parentheses; Postgres gets them as written).
+_SETTING_VALUES_REV = "setting_values_rev_seq"
+_SETTING_CHANGES_ID = "setting_changes_id_seq"
+Sequence(_SETTING_VALUES_REV, metadata=Base.metadata)
+Sequence(_SETTING_CHANGES_ID, metadata=Base.metadata)
+
+
+class SettingValueORM(Base):
+    """One value chosen for a setting, at one scope.
+
+    Code says what a setting is (``backend.app.config.versioned_graph_settings``); this table
+    holds only what the platform, a workspace or a graph chose. ``scope_id`` is ``''`` for the
+    platform, else the workspace's id, or the data source's id for its versioned graph. ``value``
+    NULL means nothing is chosen here, and the scope above decides: the one marker for "inherit"
+    (``"unlimited"`` and ``"forever"`` are values). ``limits``, on platform rows only, bound what
+    workspace admins may choose below (``allowed``, ``range``, ``lock``); NULL takes the
+    setting's default limits. ``version`` is the value's own, for optimistic concurrency; ``rev``
+    the domain's change counter. Rows are never deleted.
+    """
+
+    __tablename__ = "setting_values"
+
+    domain = Column(Text, nullable=False)
+    key = Column(Text, nullable=False)
+    scope = Column(Text, nullable=False)
+    scope_id = Column(Text, nullable=False)
+    value = Column(JSONB(none_as_null=True), nullable=True)
+    limits = Column(JSONB(none_as_null=True), nullable=True)
+    version = Column(Integer, nullable=False)
+    rev = Column(BigInteger, nullable=False, server_default=func.nextval(_SETTING_VALUES_REV))
+    updated_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
+    updated_by = Column(Text, nullable=True)
+
+    __table_args__ = (
+        PrimaryKeyConstraint("domain", "key", "scope", "scope_id", name="pk_setting_values"),
+        # A process's reload: what was written since it last read.
+        Index("ix_setting_values_rev", "domain", "rev"),
+        # A workspace's or a graph's own values.
+        Index("ix_setting_values_scope", "domain", "scope", "scope_id"),
+        CheckConstraint("scope IN ('platform','workspace','graph')",
+                        name="ck_setting_values_scope"),
+        CheckConstraint("(scope = 'platform') = (scope_id = '')",
+                        name="ck_setting_values_scope_id"),
+        CheckConstraint("limits IS NULL OR scope = 'platform'",
+                        name="ck_setting_values_limits"),
+    )
+
+
+class SettingChangeORM(Base):
+    """One value's change, before and after (its value and its limits), under the change set of
+    the save it was part of: who, why (``X-Activity-Reason``), and how — ``api``, ``legacy_api``
+    (an old endpoint), ``migration`` (copied from where it was saved before the store) or
+    ``revert``. ``version`` is the value's after the change."""
+
+    __tablename__ = "setting_changes"
+
+    id = Column(BigInteger, primary_key=True, server_default=func.nextval(_SETTING_CHANGES_ID))
+    change_set = Column(UUID(as_uuid=True), nullable=False)
+    domain = Column(Text, nullable=False)
+    key = Column(Text, nullable=False)
+    scope = Column(Text, nullable=False)
+    scope_id = Column(Text, nullable=False)
+    before_value = Column(JSONB(none_as_null=True), nullable=True)
+    after_value = Column(JSONB(none_as_null=True), nullable=True)
+    before_limits = Column(JSONB(none_as_null=True), nullable=True)
+    after_limits = Column(JSONB(none_as_null=True), nullable=True)
+    version = Column(Integer, nullable=False)
+    actor = Column(Text, nullable=True)
+    reason = Column(Text, nullable=True)
+    source = Column(Text, nullable=False)
+    at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        Index("ix_setting_changes_set", "change_set"),
+        # History, newest first, of one scope or one setting.
+        Index("ix_setting_changes_scope", "domain", "scope", "scope_id", "id"),
+        Index("ix_setting_changes_key", "domain", "key", "id"),
+        CheckConstraint("source IN ('api','legacy_api','migration','revert')",
+                        name="ck_setting_changes_source"),
+    )
+
+
+class SettingsImportORM(Base):
+    """A one-time import into the settings store that has run, by name, with what it did."""
+
+    __tablename__ = "settings_imports"
+
+    name = Column(Text, primary_key=True)
+    at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
+    detail = Column(JSONB(none_as_null=True), nullable=True)
 
 
 # ------------------------------------------------------------------ #
