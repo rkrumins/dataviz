@@ -162,6 +162,50 @@ NOTES: dict[str, tuple[str, str | None]] = {
         "minutes on it, so a draft of millions of rows is removed over a few sweeps.",
         None,
     ),
+    "GRAPHVER_DRAFT_TTL_DAYS": (
+        "Days an open draft may go untouched before the versioning worker's sweep abandons it: not "
+        "one with a live review or staged edits, nor one on a deleted, frozen or recently unfrozen "
+        "graph.",
+        None,
+    ),
+    "GRAPHVER_PURGE_GRACE_DAYS": (
+        "Days a deleted data source stays in the trash, restorable, before the reaper (every "
+        "`GRAPHVER_REAP_POLL_SECS`) queues its purge, which removes it and its version history for "
+        "good. Forks in the trash follow the same window.",
+        None,
+    ),
+    "GRAPHVER_MAX_FORKS_PER_GRAPH": (
+        "Live forks one graph may have; one more is refused with `409 fork_limit`. Forks in the "
+        "trash don't count.",
+        None,
+    ),
+    "GRAPHVER_READ_MAX_LAG": (
+        "How many versions behind main's head a graph's FalkorDB key may still serve reads of main "
+        "while it catches up or rebuilds in place, for a graph that reads `in_place` or `beside`; "
+        "further behind, its reads go to Postgres. `-1` (the default): however far behind. `0`: the "
+        "head only. A graph that reads `latest` never serves an older version.",
+        None,
+    ),
+    "IMPORT_REPLACE_GUARD": (
+        "Refuse a replace import that would delete most of its scope and make most of it again "
+        "(limits: `IMPORT_REPLACE_GUARD_MIN_LIVE`, `_DELETE_FRACTION`, `_CREATE_FRACTION`), unless "
+        "it is sent with `allowMassDelete=true`. `0` turns the guard off; the early stop "
+        "(`IMPORT_REPLACE_MIN_MATCH_FRACTION`) still applies.",
+        None,
+    ),
+    "IMPORT_MAX_REFUSED_ROWS": (
+        "How many of an import's rows may be refused before it holds, when the import doesn't say: "
+        "`0` holds on any refused row, a count (`100`) or a share of the file's rows (`0.5%`) goes "
+        "on within it, and `-1` always goes on. Held, a replace deletes nothing and an "
+        "`autoPublish` import leaves its draft for review.",
+        None,
+    ),
+    "GRAPHVER_MAX_MATCHING_PROPERTIES": (
+        "Properties one graph's imports may match nodes by (`identifier=prop.<name>`), each with an "
+        "index of its values kept in Postgres; one more is refused "
+        "(`too_many_matching_properties`).",
+        None,
+    ),
     "GRAPHVER_PROJECTION_CANDIDATE_ABOVE": (
         "Changed rows above which a publish is built in a second FalkorDB key while the current one keeps serving, then switched to (New-version builds, when its switch is on); smaller ones are written in place, paced. A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds.",
         None,
@@ -643,6 +687,32 @@ NOTES: dict[str, tuple[str, str | None]] = {
         None,
     ),
 }
+
+#: Variables an administrator can now also set in the app: the key the settings registry
+#: (``backend/app/config/versioned_graph_settings.py``) gives each, its category there, and the
+#: levels it may be set at. The variable stays the default wherever no value is set. Each one's
+#: description says so; ``tests/test_settings_registry.py`` holds this map to the registry.
+PROMOTED: dict[str, tuple[str, str, tuple[str, ...]]] = {
+    "GRAPHVER_READ_MAX_LAG": ("reads.maxVersionsBehind", "Reads & consistency",
+                              ("platform", "workspace", "graph")),
+    "GRAPHVER_DRAFT_TTL_DAYS": ("drafts.idleCloseDays", "Drafts & history", ("platform", "workspace")),
+    "GRAPHVER_MAX_FORKS_PER_GRAPH": ("forks.maxPerGraph", "Drafts & history",
+                                     ("platform", "workspace", "graph")),
+    "GRAPHVER_PURGE_GRACE_DAYS": ("trash.restoreDays", "Drafts & history", ("platform", "workspace")),
+    "IMPORT_REPLACE_GUARD": ("imports.replaceGuard", "Imports", ("platform", "workspace", "graph")),
+    "IMPORT_MAX_REFUSED_ROWS": ("imports.maxRefusedRows", "Imports", ("platform", "workspace", "graph")),
+    "GRAPHVER_MAX_MATCHING_PROPERTIES": ("imports.maxMatchingProperties", "Imports", ("platform",)),
+}
+
+
+def _promoted(key: str, category: str, scopes: tuple) -> str:
+    """The sentence a promoted variable's description ends with."""
+    levels = [{"platform": "the platform", "workspace": "a workspace", "graph": "a graph"}[s]
+              for s in scopes]
+    where = levels[0] if len(levels) == 1 else ", ".join(levels[:-1]) + " or " + levels[-1]
+    return (f" Also set in Admin → Versioned graphs → {category} as `{key}`, for {where}; this "
+            "variable is the default where none is set.")
+
 
 #: What ``ENV=production`` turns on, from ``backend/app/main.py`` and the other places
 #: that read ``ENV``.
@@ -1824,6 +1894,9 @@ def build() -> str:
     descriptions, keys = template_descriptions()
     descriptions = {name: text for name, text in descriptions.items() if name in variables}
     descriptions.update({name: note for name, (note, _) in NOTES.items() if name in variables})
+    for name, promoted in PROMOTED.items():
+        if name in descriptions:
+            descriptions[name] += _promoted(*promoted)
     print(f"{TAG} {reads} env reads: {len(variables)} variables "
           f"({len(descriptions)} described, {len(variables) - len(descriptions)} internal tuning), "
           f"{len(patterns)} name patterns, {len(unresolved)} unresolved.", file=sys.stderr)

@@ -11,7 +11,9 @@ name: Guards
 #    already-migrated database keeps working fine, so it survives local testing. The guard test has
 #    existed since June; the bug still shipped three times, because nothing ran the test.
 #
-# 2. FEATURE WIRING. The Admin → Features page must not lie about which switches do something.
+# 2. FEATURE WIRING. The Admin → Features page must not lie about which switches do something,
+#    nor the versioned-graph settings registry about the code it describes, nor the guide and the
+#    app's catalogue generated from it about the registry.
 #
 # 3. CONFIGURATION REFERENCE. docs/CONFIGURATION.md is generated from every environment variable
 #    the backend reads, by `backend/scripts/export_config_reference.py`. A new setting, a changed
@@ -91,6 +93,20 @@ jobs:
       # exactly what a CI job has and the dev container does not (it mounts backend only).
       - name: Declared gates and UI surfaces exist
         run: python -m pytest backend/tests/test_feature_wiring.py -q --noconftest
+
+      # The versioned-graph settings registry (app/config/versioned_graph_settings.py) describes
+      # every setting once: the API, the app's catalogue and the guide come from it. This holds its
+      # facts to the code (each default to versioning/config.py, each stored value to the policy
+      # that stores it today, who may set what) and fails a setting that lacks its explanation.
+      # Pure `ast` and the stdlib-only registry, like the test above.
+      - name: Every versioned-graph setting is described, and true to the code
+        run: python -m pytest backend/tests/test_settings_registry.py -q --noconftest
+
+      # docs/guide/VERSIONED_GRAPH_SETTINGS.md and frontend/src/generated/versionedGraphSettings.json
+      # are generated from the registry. On drift it prints the diff and the command that
+      # regenerates them.
+      - name: The settings guide and catalogue match the registry
+        run: python3 backend/scripts/export_settings_reference.py --check
 
   config-reference:
     name: Configuration reference matches the code

@@ -96,11 +96,15 @@ class Default:
 
 @dataclass(frozen=True)
 class Effect:
-    """What raising and lowering a value does to one dimension, in a sentence each."""
+    """What raising and lowering a value does to one dimension, in a sentence each. ``up_verdict``
+    says whether ``up`` is the better or the worse side for the dimension (``down`` is the other),
+    so the app can draw the trade without reading the words. For a switch, ``up`` is turning it on;
+    for a choice, ``up`` names the choices that do better on the dimension."""
     dimension: Dimension
     up: str
     down: str
     weight: Weight = "medium"
+    up_verdict: Optional[Verdict] = None
 
 
 @dataclass(frozen=True)
