@@ -32,6 +32,7 @@ import {
   useBringIntoHistory, useProjectionWatermark, useReconcileProjection, useRebuildProjection,
 } from '../hooks/useVersioning'
 import { SourceChip } from './SettingSource'
+import { UpdateProgress } from './UpdateProgress'
 
 const plural = (n: number, one: string, many: string) => `${n.toLocaleString()} ${n === 1 ? one : many}`
 
@@ -271,6 +272,8 @@ export function ProjectionHealthCard({ wsId, graphId, showActions = false, dataS
           </>
         )}
       </dl>
+
+      <UpdateProgress progress={wm.progress} className="mt-3 border-t border-glass-border pt-3" />
 
       <div className="mt-3">
         {placementQ.isLoading && !placements ? (

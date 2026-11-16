@@ -6,6 +6,8 @@
  * canvas + Properties panel read from catches up in the background. Without a signal, a user sees a
  * brief window where the panel still shows the old value — confusing. So we show:
  *   • "Syncing changes…"  while the projection is actively catching up (status projecting/rebuilding)
+ *     — or, once the server says how far it is (`progress`), that: "Version 42 · 63% · about 4 min
+ *     left", a new version built beside the one shown included
  *   • "Synced"            for a few seconds AFTER it finishes (the confirmation), then nothing
  * Reads stay CORRECT from Postgres meanwhile (the watermark-gated fallback). A graph that is merely
  * behind-and-idle (no worker running) is not "syncing" — we don't nag.
@@ -15,6 +17,8 @@ import { Check, Loader2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { HoverTip } from '@/components/ui/HoverTip'
 import { useProjectionWatermark } from '../hooks/useVersioning'
+import { UpdateProgress } from './UpdateProgress'
+import { describeProgress } from './updateProgressWords'
 
 // Only these projection states mean the cache is genuinely catching up right now.
 const ACTIVE_PROJECTION = new Set(['projecting', 'rebuilding'])
@@ -25,7 +29,10 @@ export function RefreshingBadge({ workspaceId, graphId, className }: {
   className?: string
 }) {
   const wm = useProjectionWatermark(workspaceId, graphId)
-  const syncing = !!graphId && wm.data?.fresh === false && ACTIVE_PROJECTION.has(wm.data?.status ?? 'idle')
+  // How far it is, while the server knows: a pass, or a new version built beside the one shown.
+  const progress = wm.data?.fresh === false ? wm.data.progress ?? null : null
+  const syncing = !!graphId && wm.data?.fresh === false
+    && (ACTIVE_PROJECTION.has(wm.data?.status ?? 'idle') || !!progress)
 
   // Show a brief "Synced" confirmation right after a sync completes (syncing → fresh).
   const [justSynced, setJustSynced] = useState(false)
@@ -43,15 +50,19 @@ export function RefreshingBadge({ workspaceId, graphId, className }: {
     return (
       <HoverTip
         className="inline-flex"
-        label="Applying your saved changes to the fast read layer"
+        label={progress ? describeProgress(progress).sentence : 'Applying your saved changes to the fast read layer'}
         detail="Reads stay correct the whole time — nothing is waiting on this"
       >
         <span
-          className={cn('flex items-center gap-1.5 px-2 py-0.5 rounded-md text-[11px] font-medium',
-            'bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20', className)}
+          className={cn('flex min-w-0 items-center gap-1.5 px-2 py-0.5 rounded-md text-[11px] font-medium',
+            'bg-amber-500/10 text-amber-700 dark:text-amber-300 border border-amber-500/20', className)}
         >
-          <Loader2 className="w-3 h-3 animate-spin" />
-          Syncing changes…
+          {progress ? <UpdateProgress progress={progress} variant="chip" /> : (
+            <>
+              <Loader2 className="w-3 h-3 animate-spin" />
+              Syncing changes…
+            </>
+          )}
         </span>
       </HoverTip>
     )

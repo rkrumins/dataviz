@@ -15,6 +15,7 @@ import { Button } from '@/components/ui/Button'
 import { DateTime } from '@/components/ui/DateTime'
 import { Skeleton } from '@/components/ui/Skeleton'
 import { CATALOGUE } from '@/components/settings'
+import { UpdateProgress } from '@/features/versioning/components/UpdateProgress'
 import { settingsError, useGraphHealth, type GraphHealth, type Revision, type SignalDefinition } from '@/services/settingsService'
 import { ResidencyChip } from './GraphInventory'
 
@@ -144,6 +145,7 @@ export function GraphHealthPanel({ workspaceId, graphId, enabled, signals: defin
                 </h3>
                 <p className="text-[11px] text-ink-secondary"><DateTime at={h.asOf} prefix="As of " /></p>
             </div>
+            <UpdateProgress progress={h.progress} className="mt-3 rounded-xl bg-indigo-500/[0.05] px-3 py-2.5 dark:bg-indigo-400/[0.07]" />
             <dl className="mt-3 grid gap-x-6 gap-y-3.5 sm:grid-cols-2">
                 <Fact label="Readers are" missing={missing('versionsBehind', behind)}>
                     <span className={cn('font-semibold', behind ? 'text-amber-700 dark:text-amber-300' : '')}>

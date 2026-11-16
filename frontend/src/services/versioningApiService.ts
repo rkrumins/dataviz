@@ -254,6 +254,29 @@ export interface Watermark {
   /** A new version built beside the serving key (read mode `beside`), while one is; null when
    *  none is. The serving key keeps serving `served` whole meanwhile. */
   candidate?: BuildState | null
+  /** How far the update in flight is and the time it has left; null while none is. */
+  progress?: GraphUpdateProgress | null
+}
+
+/**
+ * How far a graph's update in flight is, as the server last heard from the projector: its phase
+ * (`updating` a version into the copy readers read, `building` one beside it, `switching` readers
+ * to it once caught up, `loading` a copy back into memory, `seeding` a first copy); the rows done
+ * of its total, where the phase counts them (null where it doesn't, e.g. a copy); their rate,
+ * smoothed, and the time left derived from them (null while the rate is too young to trust, or
+ * rows have stopped landing); and the version it writes (`targetVersion`, as readers know it).
+ */
+export interface GraphUpdateProgress {
+  phase: 'updating' | 'building' | 'switching' | 'loading' | 'seeding'
+  done: number | null
+  total: number | null
+  unit: string
+  ratePerSec: number | null
+  etaSecs: number | null
+  startedAt: string | null
+  updatedAt: string | null
+  targetSeq: number | null
+  targetVersion: number | null
 }
 
 /** A new version of a graph built beside the key that serves it. */

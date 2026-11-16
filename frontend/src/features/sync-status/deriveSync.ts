@@ -165,7 +165,8 @@ export function deriveSync(doc: SyncStatus | undefined, now: number = Date.now()
     const showingOlder = !v.fresh && v.served != null
     const shown = showingOlder ? v.served! : v.projected
     const behind = Math.max(0, v.committed - shown)
-    const active = v.status === 'projecting' || v.status === 'rebuilding'
+    // Being written now: a pass, or a load (`rehydrating`), whose pass writes its whole copy.
+    const active = v.status === 'projecting' || v.status === 'rebuilding' || v.status === 'rehydrating'
     const pct = v.progressTotal ? Math.round(((v.progressDone ?? 0) / v.progressTotal) * 100) : null
     // The mode in force, which is what views get: switch when ready chosen while New-version
     // builds are off, or on a connected graph, is in force as update in place (`readModeDeclared`
