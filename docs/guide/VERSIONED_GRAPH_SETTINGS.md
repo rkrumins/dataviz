@@ -41,6 +41,10 @@ A value a system administrator sets outside the limits stays in force, marked as
 
 A saved value reaches every process within a few seconds. Each setting below says when it is then acted on: at the next read, the next write, the next memory check, the next sweep or the next import.
 
+### Saving a change
+
+Nothing is saved until you review it: each value before and after, what the change does to your graphs, and a reason, which the history keeps. A change that removes what can't be brought back (the changes of closed drafts the next sweep would remove), or that moves a high-risk setting the riskier way, must be acknowledged first. The settings API refuses such a save (`409 acknowledgement_required`, naming each warning) unless its request lists the warnings' codes in `acknowledge`.
+
 ### Why a value differs from the one chosen
 
 When the value in force isn't the one chosen, the app says why:

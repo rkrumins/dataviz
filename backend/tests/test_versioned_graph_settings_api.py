@@ -142,8 +142,9 @@ def _change(key, value, version=0, **kw):
     return {"key": key, "value": value, "expectedVersion": version, **kw}
 
 
-def _save(*changes, reason=None):
-    return {"changes": list(changes), **({"reason": reason} if reason else {})}
+def _save(*changes, reason=None, acknowledge=None):
+    return {"changes": list(changes), **({"reason": reason} if reason else {}),
+            **({"acknowledge": acknowledge} if acknowledge is not None else {})}
 
 
 def _value(body, key):
@@ -386,7 +387,8 @@ async def test_a_save_answers_the_new_values_records_once_and_writes_through(
 
 async def test_the_reason_comes_from_the_header_when_the_body_has_none(world, test_client,
                                                                      db_session):
-    await test_client.patch(_G, json=_save(_change("imports.identifier", "urn")),
+    await test_client.patch(_G, json=_save(_change("imports.identifier", "urn"),
+                                           acknowledge=["risky_change"]),
                             headers={"X-Activity-Reason": "Rows%20carry%20their%20URN"})
     assert world.saves[0].reason == "Rows carry their URN"
     (event,) = await _events(db_session, "workspace.versioning.graph_settings_updated")
@@ -465,6 +467,95 @@ async def test_a_change_twice_in_one_save_is_refused(world, test_client):
                                                      _change("drafts.levels", "public_only")))
     assert refused.status_code == 422
     assert [e["code"] for e in refused.json()["detail"]["errors"]] == ["duplicate_change"]
+
+
+async def test_a_save_must_acknowledge_a_high_risk_change_and_nothing_is_saved_until_it_does(
+        world, test_client):
+    as_("admin_here")
+    change = _change("imports.identifier", "urn")
+    refused = await test_client.patch(_G, json=_save(change))
+    assert refused.status_code == 409, refused.text
+    detail = refused.json()["detail"]
+    note = world_registry().BY_KEY["imports.identifier"].guidance.risk_note
+    assert detail["type"] == "acknowledgement_required"
+    assert detail["warnings"] == [{"code": "risky_change", "key": "imports.identifier",
+                                   "text": note}]
+    assert note in detail["message"] and world.saves == []
+    # What the full preview asks to acknowledge is what the save refuses without.
+    preview_ = await test_client.post(_G + "/preview", params={"mode": "full"},
+                                      json=_save(change))
+    assert detail["warnings"] == preview_.json()["impact"]["warnings"]
+    # Another warning's code doesn't stand for it.
+    other = await test_client.patch(_G, json=_save(change, acknowledge=["drafts_removed"]))
+    assert other.status_code == 409 and world.saves == []
+    saved = await test_client.patch(_G, json=_save(change, acknowledge=["risky_change"]))
+    assert saved.status_code == 200, saved.text
+    assert _value(saved.json(), "imports.identifier")["effective"] == "urn"
+    assert len(world.saves) == 1
+
+
+async def test_a_high_risk_setting_moved_the_safer_way_needs_no_acknowledgement(world,
+                                                                               test_client):
+    # More room for a copy is safer; turning the replace guard back on too.
+    saved = await test_client.patch(_P, json=_save(_change("builds.copyRoomPct", 300),
+                                                   _change("imports.replaceGuard", True)))
+    assert saved.status_code == 200, saved.text
+    refused = await test_client.patch(_P, json=_save(_change("builds.copyRoomPct", 150, 1)))
+    assert refused.status_code == 409
+    assert [w["code"] for w in refused.json()["detail"]["warnings"]] == ["risky_change"]
+
+
+async def test_a_save_must_acknowledge_the_closed_drafts_a_shorter_window_removes(
+        world, test_client, monkeypatch):
+    counted = []
+
+    async def drafts(workspaces, was, will):
+        counted.append((workspaces, was, will))
+        return 12
+
+    monkeypatch.setattr(preview, "_closed_drafts", drafts)
+    as_("admin_here")
+    refused = await test_client.patch(_W, json=_save(_change("drafts.keepClosedDays", 7)))
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["detail"]["warnings"] == [{
+        "code": "drafts_removed", "key": "drafts.keepClosedDays",
+        "text": "The next sweep removes the changes of 12 closed drafts, and that can't be "
+                "undone."}]
+    assert counted == [(["ws_1"], 30, 7)] and world.saves == []
+    saved = await test_client.patch(_W, json=_save(_change("drafts.keepClosedDays", 7),
+                                                   acknowledge=["drafts_removed"]))
+    assert saved.status_code == 200, saved.text
+    # A longer window removes nothing: nothing to acknowledge, and no drafts are counted.
+    longer = await test_client.patch(_W, json=_save(_change("drafts.keepClosedDays", 60, 1)))
+    assert longer.status_code == 200, longer.text
+    assert len(counted) == 2
+
+
+async def test_only_what_cant_be_taken_back_or_is_high_risk_must_be_acknowledged(
+        world, test_client, monkeypatch):
+    async def down(workspaces, was, will):
+        raise ConnectionError("the versioning database is out of reach")
+
+    world.set("forks.maxPerGraph", "workspace", "ws_1", 50)
+    # A lock leaves a workspace's value ignored: the review says so, the save doesn't need it.
+    locked = await test_client.patch(_P, json=_save(_change("forks.maxPerGraph", None,
+                                                            limits={"lock": True})))
+    assert locked.status_code == 200, locked.text
+    # Drafts that can't be counted hold nothing up: the full preview names that part unavailable.
+    monkeypatch.setattr(preview, "_closed_drafts", down)
+    shorter = await test_client.patch(_P, json=_save(_change("drafts.keepClosedDays", 7)))
+    assert shorter.status_code == 200, shorter.text
+
+
+async def test_the_old_endpoints_check_a_save_without_asking_for_acknowledgements(world,
+                                                                                db_session):
+    from backend.app.services.settings.store import Change
+
+    check = service.checker("system_admin")
+    # The check an old endpoint's save runs takes a high-risk change as before: the review that
+    # asks for acknowledgements is the settings API's.
+    await check(db_session, "platform", "", [Change("builds.copyRoomPct", "platform", "", 0,
+                                                    value=150)])
 
 
 async def test_limits_bound_workspace_admins_and_a_system_admins_value_outside_them_stands(

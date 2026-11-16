@@ -170,8 +170,9 @@ def _change(key, value, version=0, **kw):
     return {"key": key, "value": value, "expectedVersion": version, **kw}
 
 
-def _save(*changes, reason=None):
-    return {"changes": list(changes), **({"reason": reason} if reason else {})}
+def _save(*changes, reason=None, acknowledge=None):
+    return {"changes": list(changes), **({"reason": reason} if reason else {}),
+            **({"acknowledge": acknowledge} if acknowledge is not None else {})}
 
 
 def _value(body, key):
@@ -191,7 +192,7 @@ async def test_a_save_at_each_scope_round_trips_through_the_store(client, api_db
                  reason="Serve while updating")
     await _patch(client, _W1, _change("drafts.levels", "public_only"))
     saved = await _patch(client, _G1, _change("imports.identifier", "urn"),
-                         _change("reads.mode", "beside"))
+                         _change("reads.mode", "beside"), acknowledge=["risky_change"])
     assert saved["changeSetId"]
     mode = _value(saved, "reads.mode")
     # New-version builds are off, so "switch when ready" updates in place for now.
@@ -313,7 +314,7 @@ async def test_history_is_scoped_filtered_and_paged(client):
     await _patch(client, _W2, _change("drafts.levels", "any"))
     as_(client, "usr_wsadmin")
     await _patch(client, _W1, _change("drafts.levels", "public_only"), reason="Open reviews")
-    await _patch(client, _G1, _change("imports.identifier", "urn"))
+    await _patch(client, _G1, _change("imports.identifier", "urn"), acknowledge=["risky_change"])
 
     workspace = await _history(client, _W1)
     assert [(e["key"], e["scope"], e["scopeId"]) for e in workspace["entries"]] == [
@@ -352,7 +353,8 @@ async def test_a_change_set_is_put_back_checked_as_a_save_is(client, api_db):
     platform = await _patch(client, _P, _change("updates.pacingRatio", 0.5))
     system_only = await _patch(client, _W1, _change("residency.class", "coldline"))
     as_(client, "usr_wsadmin")
-    graph_save = await _patch(client, _G1, _change("imports.identifier", "urn"))
+    graph_save = await _patch(client, _G1, _change("imports.identifier", "urn"),
+                              acknowledge=["risky_change"])
 
     # Another place's change set is not this workspace's to see, nor one that doesn't exist.
     for change_set in (platform["changeSetId"], "00000000-0000-0000-0000-000000000000"):
@@ -375,7 +377,8 @@ async def test_a_change_set_is_put_back_checked_as_a_save_is(client, api_db):
     assert query(api_db, "SELECT import_identifier FROM workspace_data_sources "
                          "WHERE id = 'ds_1'")[0][0] is None              # written through
     # Changed again since: the first change set can't be put back as it was.
-    await _patch(client, _G1, _change("imports.identifier", "entity_id", 2))
+    await _patch(client, _G1, _change("imports.identifier", "entity_id", 2),
+                 acknowledge=["risky_change"])
     stale = await client.post(f"{_G1}/history/{graph_save['changeSetId']}/revert")
     assert stale.status_code == 409 and stale.json()["detail"]["type"] == "settings_conflict"
     as_(client, "usr_root")
@@ -422,6 +425,19 @@ async def test_a_full_preview_reads_the_graph_store(client):
     assert (await client.get(_P + "/history")).json()["entries"] == []       # nothing saved
 
 
+async def test_a_save_that_removes_closed_drafts_must_acknowledge_it(client):
+    refused = await _patch(client, _P, _change("drafts.keepClosedDays", 7), status=409)
+    # graph_1's draft closed 10 days ago: a 7-day window's next sweep removes its changes.
+    assert refused["detail"]["type"] == "acknowledgement_required"
+    assert refused["detail"]["warnings"] == [{
+        "code": "drafts_removed", "key": "drafts.keepClosedDays",
+        "text": "The next sweep removes the changes of 1 closed draft, and that can't be undone."}]
+    assert (await client.get(_P + "/history")).json()["entries"] == []       # nothing saved
+    saved = await _patch(client, _P, _change("drafts.keepClosedDays", 7),
+                         acknowledge=["drafts_removed"])
+    assert _value(saved, "drafts.keepClosedDays")["effective"] == 7
+
+
 # ── The inventory ─────────────────────────────────────────────────────────────────────────────────
 async def _ids(**kw):
     args = dict(provider=None, status=None, workspace_id=None, kind=None, q=None, cursor=None,
@@ -434,7 +450,7 @@ async def test_the_inventory_filters_by_what_is_in_force_and_counts_the_fleet(cl
     from backend.app.services.versioning import build_policy
 
     await build_policy.invalidate()            # the platform's read mode as this database has it
-    await _patch(client, _G1, _change("imports.identifier", "urn"))
+    await _patch(client, _G1, _change("imports.identifier", "urn"), acknowledge=["risky_change"])
     assert await _ids(own_settings=True) == ["graph_1"]
     assert await _ids(own_settings=False) == ["graph_2", "graph_fork"]
     assert await _ids(residency_class="always") == ["graph_1"]
