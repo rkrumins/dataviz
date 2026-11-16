@@ -2279,6 +2279,23 @@ Still in the code or the database, but acted on by nothing; they go in a later r
 | `GRAPHVER_EVICT_SECS` | How often count-based unloading ran. It no longer runs, so nothing reads this. |
 | `audit_tier` | Each graph's audit tier (GRAPHVER_DEFAULT_AUDIT_TIER). It is stored, but nothing reads it: every graph keeps the same history whatever it says. |
 
+## If you used the old endpoints
+
+The endpoints that saved these settings before keep working for one more release. They save through the settings store, so their changes appear in the history with everyone else's. Move to the settings API, which also returns where each value came from and why the one in force may differ:
+
+| Old endpoint | Use instead | What it carried |
+|---|---|---|
+| `GET`, `PUT /api/v1/admin/versioning/build-policy` | `GET`, `PATCH /api/v1/admin/versioning/settings` | [Read mode](#reads-mode), [Write target](#updates-statementtargetms), [Longest write](#updates-writeceilingsecs), [Pause after a write](#updates-pacingratio), [Pause while reads wait](#updates-readpressureratio), [Keep the previous copy for](#updates-retiregracesecs), [Build above](#builds-aboverows), [Rebuilds and moves too](#builds-forrebuilds), [How a build makes its copy](#builds-method), [Free memory a copy needs](#builds-copyroompct), [Largest graph copied](#builds-copymaxbytes), [With no room](#builds-noroom), [Alert after waiting](#builds-noroomalertsecs), [Builds per worker](#builds-perworker), [Attempts before giving up](#builds-maxattempts), [Changes left at the switch](#builds-switchmaxlagrows), [Longest read](#database-readtimeoutms), [Reads at once per graph](#database-readspergraph), [Reads at once per process](#database-readsperprocess) |
+| `GET`, `PUT /api/v1/admin/versioning/residency-policy` | `GET`, `PATCH /api/v1/admin/versioning/settings` | [Residency class](#residency-class), [Unload graphs automatically](#residency-autounload), [Unload a Standard graph after](#residency-standardidlesecs), [Unload a Coldline graph after](#residency-coldlineidlesecs), [Start unloading at](#residency-unloadstartpct), [Stop unloading at](#residency-unloadstoppct), [Headroom a load needs](#residency-loadmarginpct), [Memory per item, estimated](#residency-bytesperentity), [Load a Coldline graph on opening above](#residency-coldlineloadabove), [Check memory every](#residency-capacityintervalsecs) |
+| `POST /api/v1/admin/versioning/residency-policy/preview` | `POST /api/v1/admin/versioning/settings/preview?mode=full` | What a change would unload and load, as part of its impact. |
+| `GET`, `PUT /api/v1/admin/versioning/draft-retention` | `GET`, `PATCH /api/v1/admin/versioning/settings` | [Keep closed drafts' changes for](#drafts-keepcloseddays) |
+| `PUT /api/v1/admin/versioning/graphs/{graph}/read-mode` | `PATCH /api/v1/{ws}/versioning/graphs/{graph}/settings` | [Read mode](#reads-mode) |
+| `GET`, `PUT /api/v1/{ws}/versioning/drafts-policy` | `GET`, `PATCH /api/v1/{ws}/versioning/settings` | [New drafts start](#drafts-defaultvisibility), [Draft levels allowed](#drafts-levels), [People may approve their own reviews](#drafts-selfapproval), [People may merge their own reviews](#drafts-selfmerge) |
+| `GET`, `PUT /api/v1/{ws}/versioning/data-sources/{dataSource}/drafts-policy` | `GET`, `PATCH /api/v1/{ws}/versioning/graphs/{graph}/settings` | [New drafts start](#drafts-defaultvisibility), [Draft levels allowed](#drafts-levels), [People may approve their own reviews](#drafts-selfapproval), [People may merge their own reviews](#drafts-selfmerge) |
+| `GET`, `PUT /api/v1/{ws}/versioning/graphs/{graph}/import-settings` | `GET`, `PATCH /api/v1/{ws}/versioning/graphs/{graph}/settings` | [Match rows by](#imports-identifier), [Guard graphs of at least](#imports-guardminlive), [Stop a replace that deletes](#imports-guarddeleteshare), [And makes again](#imports-guardcreateshare), [Stop early below a match share of](#imports-minmatchshare) |
+
+A residency policy `PUT` that changes `defaultResidency` is refused. It used to set the class a new graph started with; [Residency class](#residency-class) is now the class every graph inherits, unless its workspace or the graph sets its own.
+
 ## Where to next
 
 - [Feature Switches](/guide/feature-switches) — when you want to turn on New-version builds or Graph residency.

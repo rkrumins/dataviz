@@ -323,6 +323,53 @@ _INTRO = [
 ]
 
 
+def _old_endpoints(anchors: dict) -> list:
+    """Each endpoint that saved these settings before the settings store, what replaces it, and the
+    settings it carried, read from each setting's ``legacy``."""
+    def carried(where) -> str:
+        return ", ".join(_link(s.key, anchors) for s in registry.SETTINGS
+                         if s.legacy and where(s.legacy, s))
+
+    platform, workspace = "/api/v1/admin/versioning/settings", "/api/v1/{ws}/versioning/settings"
+    graph = "/api/v1/{ws}/versioning/graphs/{graph}/settings"
+    rows = [
+        ("`GET`, `PUT /api/v1/admin/versioning/build-policy`", f"`GET`, `PATCH {platform}`",
+         carried(lambda old, s: old.build_policy)),
+        ("`GET`, `PUT /api/v1/admin/versioning/residency-policy`", f"`GET`, `PATCH {platform}`",
+         carried(lambda old, s: old.residency_policy)),
+        ("`POST /api/v1/admin/versioning/residency-policy/preview`",
+         f"`POST {platform}/preview?mode=full`",
+         "What a change would unload and load, as part of its impact."),
+        ("`GET`, `PUT /api/v1/admin/versioning/draft-retention`", f"`GET`, `PATCH {platform}`",
+         carried(lambda old, s: old.platform_column and not old.residency_policy)),
+        ("`PUT /api/v1/admin/versioning/graphs/{graph}/read-mode`", f"`PATCH {graph}`",
+         carried(lambda old, s: old.projection_state_column == "read_mode")),
+        ("`GET`, `PUT /api/v1/{ws}/versioning/drafts-policy`", f"`GET`, `PATCH {workspace}`",
+         carried(lambda old, s: old.workspace_column)),
+        ("`GET`, `PUT /api/v1/{ws}/versioning/data-sources/{dataSource}/drafts-policy`",
+         f"`GET`, `PATCH {graph}`",
+         carried(lambda old, s: old.data_source_column and s.category == "drafts")),
+        ("`GET`, `PUT /api/v1/{ws}/versioning/graphs/{graph}/import-settings`",
+         f"`GET`, `PATCH {graph}`",
+         carried(lambda old, s: old.data_source_column and s.category == "imports")),
+    ]
+    return [
+        "## If you used the old endpoints",
+        "",
+        ("The endpoints that saved these settings before keep working for one more release. They "
+         "save through the settings store, so their changes appear in the history with everyone "
+         "else's. Move to the settings API, which also returns where each value came from and why "
+         "the one in force may differ:"),
+        "",
+        *_table(["Old endpoint", "Use instead", "What it carried"], [list(r) for r in rows]),
+        "",
+        ("A residency policy `PUT` that changes `defaultResidency` is refused. It used to set the "
+         f"class a new graph started with; {_link('residency.class', anchors)} is now the class "
+         "every graph inherits, unless its workspace or the graph sets its own."),
+        "",
+    ]
+
+
 def render_guide() -> str:
     rendered = registry.schema_json()   # the anchors, and the examples with the code defaults
     anchors = {item["key"]: item["docs"].split("#", 1)[1] for item in rendered["settings"]}
@@ -403,6 +450,7 @@ def render_guide() -> str:
         *_table(["Name", "Why it is retired"],
                 [[f"`{r.name}`", _esc(r.why)] for r in registry.RETIRED]),
         "",
+        *_old_endpoints(anchors),
         "## Where to next",
         "",
         "- [Feature Switches](/guide/feature-switches) — when you want to turn on New-version " +
