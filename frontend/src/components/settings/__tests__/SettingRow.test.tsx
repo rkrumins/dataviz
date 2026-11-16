@@ -5,6 +5,7 @@
  * change of status is announced. Words come from the registry's catalogue.
  */
 import { render, screen, within } from '@testing-library/react'
+import type { ResolvedSetting, SettingValue } from '../types'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import { SCHEMA, SETTINGS_BY_KEY as S } from '../__fixtures__/schema'
@@ -37,8 +38,29 @@ describe('SettingRow', () => {
         expect(article).toHaveTextContent(s.default.env as string)
         expect(article).toHaveTextContent(s.takesEffect.text)
         expect(article).toHaveTextContent('Capped by GRAPHVER_PROJECTION_CONCURRENCY')
-        within(article).getByText('Evidence').focus()
+        // The evidence is a real button: its tip on focus, and a press opens the guidance where it is kept.
+        const evidence = within(article).getByRole('button', { name: 'Evidence' })
+        evidence.focus()
         expect(await screen.findByRole('tooltip')).toHaveTextContent(s.guidance.evidence.slice(0, 40))
+        await userEvent.click(evidence)
+        expect(within(article).getByRole('button', { name: 'Less' })).toHaveAttribute('aria-expanded', 'true')
+    })
+
+    it('operator lens: a cap with the value a system admin is served, and an env var that wraps', () => {
+        const s = S['builds.perWorker']
+        const capped = { ...s, caps: s.caps.map((c) => ({ ...c, value: 4 })) }
+        row({ setting: capped, resolved: PLATFORM_VALUES['builds.perWorker'], scope: 'platform', lens: 'operator' })
+        const article = screen.getByRole('article', { name: s.label })
+        expect(article).toHaveTextContent('Capped at 4 builds by GRAPHVER_PROJECTION_CONCURRENCY')
+        expect(within(article).getByText(s.default.env as string)).toHaveClass('[overflow-wrap:anywhere]')
+    })
+
+    it('says a cap whose value couldn’t be read, and why', () => {
+        const s = S['builds.perWorker']
+        const unread = { ...s, caps: s.caps.map((c) => ({ ...c, value: null, problem: 'It couldn’t be read just now.' })) }
+        row({ setting: unread, resolved: PLATFORM_VALUES['builds.perWorker'], scope: 'platform', lens: 'operator' })
+        expect(screen.getByRole('article', { name: s.label }))
+            .toHaveTextContent('Capped by GRAPHVER_PROJECTION_CONCURRENCY: its value couldn’t be read. It couldn’t be read just now.')
     })
 
     it('says which level the value in force comes from', () => {
@@ -58,13 +80,37 @@ describe('SettingRow', () => {
         expect(onStage).toHaveBeenCalledWith(220)
     })
 
+    it('heads a staged row with the server’s answer for it, never a guess', () => {
+        const s = S['reads.mode']
+        const r = GRAPH_VALUES['reads.mode']
+        // The server's answer for "switch when ready" staged at the graph: held to update in place.
+        const answer = (staged: SettingValue): ResolvedSetting => ({
+            ...r, effective: 'in_place', declared: staged, status: 'adjusted',
+            trail: r.trail.map((t) => (t.scope === 'graph' ? { ...t, value: staged } : t)),
+        })
+        // The row's own head, before its trail (whose last step may say "In force" too).
+        const head = () => within(screen.getByRole('article', { name: s.question })).getAllByText('In force')[0].parentElement as HTMLElement
+        const { rerender } = render(<SettingRow setting={s} resolved={r} scope="graph" staged="beside" checking onStage={() => {}} />)
+        expect(head()).toHaveTextContent('Checking…')
+        expect(head()).not.toHaveTextContent('Once saved')
+        rerender(<SettingRow setting={s} resolved={r} scope="graph" staged="beside" preview={answer('beside')} onStage={() => {}} />)
+        expect(head()).toHaveTextContent(`Once saved: ${s.choices.find((c) => c.id === 'in_place')!.title}`)
+        expect(head()).toHaveTextContent(`Chosen: ${s.choices.find((c) => c.id === 'beside')!.title}`)
+        // An answer for an earlier staged value says nothing about this one.
+        rerender(<SettingRow setting={s} resolved={r} scope="graph" staged="latest" preview={answer('beside')} onStage={() => {}} />)
+        expect(head()).not.toHaveTextContent('Once saved')
+        // Nor while the staged value needs a fix.
+        rerender(<SettingRow setting={s} resolved={r} scope="graph" staged="beside" preview={answer('beside')} checking error="Not allowed here." onStage={() => {}} />)
+        expect(head()).not.toHaveTextContent(/Once saved|Chosen|Checking/)
+    })
+
     it('offers to inherit again, and to revert a staged change', async () => {
         const onUnstage = vi.fn()
         const { onStage } = row({
             setting: S['imports.guardDeleteShare'], resolved: GRAPH_VALUES['imports.guardDeleteShare'], scope: 'graph', lens: 'operator',
             staged: 0.4, onUnstage,
         })
-        expect(screen.getByRole('article', { name: S['imports.guardDeleteShare'].label })).toHaveTextContent('Changing to 40%')
+        expect(screen.getByRole('article', { name: S['imports.guardDeleteShare'].label })).not.toHaveTextContent('Once saved')
         await userEvent.click(screen.getByRole('button', { name: 'Use the workspace’s value · 25%' }))
         expect(onStage).toHaveBeenLastCalledWith(null)
         await userEvent.click(screen.getByRole('button', { name: 'Revert' }))

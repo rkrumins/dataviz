@@ -3352,55 +3352,60 @@ DEPLOYMENT: Tuple[DeploymentFact, ...] = (
                    "How long a process may go on sending a graph's reads where it last looked, to "
                    "its copy or to the database, before looking again. A write tells every process "
                    "at once, so this only bounds a change that couldn't be announced.",
-                   "ROUTE_CACHE_SECS"),
+                   "ROUTE_CACHE_SECS", kind="seconds"),
     DeploymentFact("GRAPHVER_PROJECTION_CONCURRENCY", "Graphs each worker updates at once", "updates",
                    "How many graphs each worker updates at once. Builds count among them, so it also "
-                   "caps Builds per worker.", "PROJECTION_CONCURRENCY"),
+                   "caps Builds per worker.", "PROJECTION_CONCURRENCY", unit="graphs"),
     DeploymentFact("GRAPHVER_PROJECTION_POLL_SECS", "Look for work every", "updates",
                    "How often a worker looks for graphs to update, besides the nudge each publish "
-                   "sends it.", "PROJECTION_POLL_SECS"),
+                   "sends it.", "PROJECTION_POLL_SECS", kind="seconds"),
     DeploymentFact("GRAPHVER_PROJECTION_BATCH_SIZE", "Most changes in one write", "updates",
                    "The most changes one write sends; the write target makes writes smaller still.",
-                   "PROJECTION_BATCH_SIZE"),
+                   "PROJECTION_BATCH_SIZE", unit="changes"),
     DeploymentFact("GRAPHVER_PROJECTION_PASS_MAX_SECS", "Longest turn of one graph", "updates",
                    "A large update stops at a page boundary after this long and carries on in its "
-                   "next turn, so other graphs get theirs.", "PROJECTION_PASS_MAX_SECS"),
+                   "next turn, so other graphs get theirs.", "PROJECTION_PASS_MAX_SECS",
+                   kind="seconds"),
     DeploymentFact("GRAPHVER_PROJECTION_INLINE_MAX_ROWS", "Written straight after a publish, up to",
                    "updates",
                    "A change up to this size is written into the graph store straight after its "
                    "publish; a larger one by the worker. It is also the default of Changes left at "
-                   "the switch.", "PROJECTION_INLINE_MAX_ROWS"),
+                   "the switch.", "PROJECTION_INLINE_MAX_ROWS", unit="changes"),
     DeploymentFact("PROJECTION_FALKOR_WRITE_TIMEOUT_S", "Longest wait on one write", "builds",
                    "How long the worker waits on one write to the graph store. A copy waits this "
-                   "plus 15 seconds, 75 by default, and one that takes longer fails that attempt."),
+                   "plus 15 seconds, 75 by default, and one that takes longer fails that attempt.",
+                   kind="seconds"),
     DeploymentFact("GRAPHVER_TRACE_LEASE_TTL_SECS", "A read holds its graph for", "residency",
                    "How long a person's read keeps its graph from being unloaded.",
-                   "TRACE_LEASE_TTL_SECS"),
+                   "TRACE_LEASE_TTL_SECS", kind="seconds"),
     DeploymentFact("GRAPHVER_POOL_SIZE", "Database connections per process", "database",
                    "Connections each process keeps for versioned graphs. Reads at once per process "
-                   "should stay under it.", "POOL_SIZE"),
+                   "should stay under it.", "POOL_SIZE", unit="connections"),
     DeploymentFact("GRAPHVER_POOL_MAX_OVERFLOW", "Extra connections at a peak", "database",
-                   "Connections a process may open past its pool at a peak.", "POOL_MAX_OVERFLOW"),
+                   "Connections a process may open past its pool at a peak.", "POOL_MAX_OVERFLOW",
+                   unit="connections"),
     DeploymentFact("GRAPHVER_ROUTE_POOL_SIZE", "Connections for finding where reads go", "database",
                    "A small pool of its own that finds where each read goes, so heavy reads can't "
-                   "stop that.", "ROUTE_POOL_SIZE"),
+                   "stop that.", "ROUTE_POOL_SIZE", unit="connections"),
     DeploymentFact("GRAPHVER_DRAFT_SWEEP_SECS", "Draft sweep every", "drafts",
                    "How often the worker closes idle drafts and removes closed drafts' changes.",
-                   "DRAFT_SWEEP_SECS"),
+                   "DRAFT_SWEEP_SECS", kind="seconds"),
     DeploymentFact("GRAPHVER_REAP_POLL_SECS", "Trash check every", "drafts",
                    "How often the trash is checked for data sources past their restore window.",
-                   "REAP_POLL_SECS"),
+                   "REAP_POLL_SECS", kind="seconds"),
     DeploymentFact("GRAPHVER_FORK_REWIND_MAX", "Most changes a fork reads through", "drafts",
                    "Changes a fork and the graph it came from may have made since they parted "
-                   "before the fork's reads go to the database.", "FORK_REWIND_MAX"),
+                   "before the fork's reads go to the database.", "FORK_REWIND_MAX",
+                   unit="changes"),
     DeploymentFact("IMPORT_COMMIT_WINDOW", "Rows per import step", "imports",
                    "Rows an import saves to its draft at a time; the early stop decides after the "
-                   "first such step.", "IMPORT_COMMIT_WINDOW"),
+                   "first such step.", "IMPORT_COMMIT_WINDOW", unit="rows"),
     DeploymentFact("GRAPHVER_TRANSFER_SLOTS", "Jobs per worker", "imports",
-                   "Import, export and publish jobs each worker runs at once.", "TRANSFER_SLOTS"),
+                   "Import, export and publish jobs each worker runs at once.", "TRANSFER_SLOTS",
+                   unit="jobs"),
     DeploymentFact("IMPORT_STAGING_GC_DAYS", "Staged rows kept for", "imports",
                    "Days a finished import's staged rows are kept, to resume or re-run it.",
-                   "STAGING_GC_DAYS"),
+                   "STAGING_GC_DAYS", kind="days"),
 )
 
 # ---------------------------------------------------------------------------------------------

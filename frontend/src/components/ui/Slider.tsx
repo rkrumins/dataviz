@@ -3,7 +3,8 @@
  * (arrows, Page Up / Page Down, Home / End).
  *
  * A role="slider" thumb with its value spoken in words (`format`: "85%", "While version 6 lands").
- * The track can carry marks (the recommended value, the default) so the choice has landmarks.
+ * The track can carry marks (the recommended value, the default) so the choice has landmarks: their
+ * labels sit above the track and its ends below it, so neither can land on the other.
  * The fill is the accent: a slider is how someone changes a value, and a change is accent-coloured
  * everywhere in the settings kit.
  */
@@ -72,11 +73,21 @@ export function Slider({
 
     const pct = at(value)
     const showEnds = ends !== false && (ends || format)
-    // An end label gives way to a mark's label that would sit on top of it.
-    const startTaken = marks.some((m) => at(m.value) < 14)
-    const endTaken = marks.some((m) => at(m.value) > 86)
     return (
         <div className={cn('select-none', disabled && 'opacity-55', className)}>
+            {marks.length > 0 && (
+                <div className="relative mb-0.5 h-4 text-[10px] text-ink-secondary" aria-hidden>
+                    {marks.map((m) => {
+                        const p = at(m.value)
+                        return (
+                            <span key={`${m.value}-${m.label}`} style={{ left: `${p}%` }}
+                                className={cn('absolute whitespace-nowrap', p < 10 ? '' : p > 90 ? '-translate-x-full' : '-translate-x-1/2')}>
+                                {m.label}
+                            </span>
+                        )
+                    })}
+                </div>
+            )}
             <div
                 ref={track}
                 onPointerDown={onPointerDown}
@@ -114,19 +125,10 @@ export function Slider({
                     style={{ left: `${pct}%` }}
                 />
             </div>
-            {(showEnds || marks.length > 0) && (
-                <div className="relative mt-1 h-4 text-[10px] tabular-nums text-ink-muted" aria-hidden>
-                    {showEnds && !startTaken && <span className="absolute left-0">{ends ? ends[0] : words(min)}</span>}
-                    {marks.map((m) => {
-                        const p = at(m.value)
-                        return (
-                            <span key={`${m.value}-${m.label}`} style={{ left: `${p}%` }}
-                                className={cn('absolute whitespace-nowrap', p < 10 ? '' : p > 90 ? '-translate-x-full' : '-translate-x-1/2')}>
-                                {m.label}
-                            </span>
-                        )
-                    })}
-                    {showEnds && !endTaken && <span className="absolute right-0">{ends ? ends[1] : words(max)}</span>}
+            {showEnds && (
+                <div className="relative mt-1 h-4 text-[10px] tabular-nums text-ink-secondary" aria-hidden>
+                    <span className="absolute left-0">{ends ? ends[0] : words(min)}</span>
+                    <span className="absolute right-0">{ends ? ends[1] : words(max)}</span>
                 </div>
             )}
         </div>

@@ -12,7 +12,8 @@ import { CATALOGUE } from '@/components/settings'
 import { REASON_HEADER } from '@/services/activityReason'
 import { DEFAULT_FEATURES, useFeaturesStore } from '@/store/features'
 import { GraphSettingsDrawer } from '../GraphSettingsDrawer'
-import { GRAPH, ROOT, WS } from '../__fixtures__/api'
+import { GRAPH, HEALTH, ROOT, WS } from '../__fixtures__/api'
+import type { GraphHealth } from '@/services/settingsService'
 import { calls, json, mockApi, renderWithApi } from './helpers'
 
 const S = Object.fromEntries(CATALOGUE.settings.map((s) => [s.key, s]))
@@ -54,12 +55,61 @@ describe('GraphSettingsDrawer', () => {
         const health = within((await screen.findByRole('heading', { name: 'Health now' })).closest('section')!)
         expect(health.getByText('1 version behind')).toBeInTheDocument()
         expect(health.getByText(/Version #213/)).toBeInTheDocument()
-        expect(health.getByText(/#214 published/)).toHaveTextContent('by Alice Martin: “Q4 import”')
+        // The version served is told by its own revision; the latest by its own.
+        expect(health.getByText(/^#213 published/)).toHaveTextContent('by Alice Martin: “Q3 corrections”')
+        expect(health.getByText(/^Latest: #214 published/)).toHaveTextContent('by Alice Martin: “Q4 import”')
         expect(health.getByText('Read from the graph store')).toBeInTheDocument()
         expect(health.getByText(title('reads.mode', 'in_place'))).toBeInTheDocument()
+        expect(health.getByText('In memory')).toBeInTheDocument()
         expect(health.getByText('The build record couldn’t be read: it was being written at the time.')).toBeInTheDocument()
         const behind = CATALOGUE.signals?.find((d) => d.id === 'reads.from_database_while_behind')?.label
-        expect(health.getByText(`${behind ?? 'Reads: from database while behind'}: 12`)).toBeInTheDocument()
+        const counted = health.getByText(behind ?? 'Reads: from database while behind').closest('li')!
+        expect(counted).toHaveTextContent('12 times')
+        // A description list of name and value groups, and nothing else.
+        const list = health.getByText('Readers are').closest('dl')!
+        for (const group of list.children) {
+            expect(group.tagName).toBe('DIV')
+            expect([...group.children].map((c) => c.tagName)).toEqual(['DT', 'DD'])
+        }
+    })
+
+    const withHealth = (h: Partial<GraphHealth>) => mockApi('workspace-admin', (req) => (req.path.endsWith('/health') ? json({ ...HEALTH, ...h }) : undefined))
+    const healthPanel = async () => within((await screen.findByRole('heading', { name: /^Health/ })).closest('section')!)
+    const buildFact = async () => (await healthPanel()).getByText('Last new-version build').parentElement as HTMLElement
+    const build = (b: Partial<NonNullable<GraphHealth['lastBuild']>>) => ({
+        outcome: 'none', since: null, at: null, waitingFor: null, why: null, attempts: null, copyRemovedAfter: null, windowSecs: null, ...b,
+    }) as NonNullable<GraphHealth['lastBuild']>
+
+    it('says what is known of the last build, in the server’s terms', async () => {
+        withHealth({ problems: [], lastBuild: build({ outcome: 'none', windowSecs: 900 }) })
+        const { unmount } = renderDrawer()
+        expect(await buildFact()).toHaveTextContent('None in flight, and none switched to in the last 15 minutes')
+        unmount()
+        withHealth({ problems: [], lastBuild: build({ outcome: 'waiting', waitingFor: 'lock', why: 'a capacity pass is under way; try again shortly', since: '2026-11-16T16:20:00Z' }) })
+        const second = renderDrawer()
+        expect(await buildFact()).toHaveTextContent('Waiting for another change to finish')
+        expect(await buildFact()).not.toHaveTextContent('room')
+        second.unmount()
+        withHealth({ problems: [], lastBuild: build({ outcome: 'not_switched', at: '2026-11-16T16:00:00Z', copyRemovedAfter: '2026-11-16T16:00:00Z' }) })
+        renderDrawer()
+        const fact = await buildFact()
+        expect(fact).toHaveTextContent('Not switched to')
+        expect(fact).not.toHaveTextContent(/dropped|attempts/i)
+        expect(fact).toHaveTextContent('Its copy due to be removed')
+    })
+
+    it('says a fork’s health is its root’s, naming the root', async () => {
+        mockApi('fork')
+        renderDrawer()
+        const heading = await screen.findByRole('heading', { name: /^Health of Revenue lineage/ })
+        expect(heading).toHaveTextContent('Health of Revenue lineage — this fork reads through it')
+        const health = within(heading.closest('section')!)
+        expect(health.getByText('Serving, through its root')).toBeInTheDocument()
+        expect(health.getByText('Memory, its root’s copy')).toBeInTheDocument()
+        // The inventory's words for its state: being loaded, not "Unloaded".
+        expect(health.getByText('Loading')).toBeInTheDocument()
+        expect(health.queryByText('Unloaded')).not.toBeInTheDocument()
+        expect(health.getByText('Waiting for room for its copy')).toBeInTheDocument()
     })
 
     it('draws no health panel while the server can’t report one', async () => {
@@ -89,6 +139,8 @@ describe('GraphSettingsDrawer', () => {
         await userEvent.click(within(await screen.findByRole('region', { name: 'Unsaved changes' })).getByRole('button', { name: 'Review changes' }))
         const dialog = await screen.findByRole('dialog', { name: 'Review 1 change to Sales lineage' })
         await userEvent.type(within(dialog).getByLabelText(/Why are you making this change/), 'Finance reviews its own drafts')
+        // Save waits for what the change does.
+        await waitFor(() => expect(within(dialog).getByRole('button', { name: 'Save change' })).toBeEnabled())
         await userEvent.click(within(dialog).getByRole('button', { name: 'Save change' }))
 
         await waitFor(() => expect(calls(sent, 'PATCH', settingsPath)).toHaveLength(1))

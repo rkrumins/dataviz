@@ -287,10 +287,58 @@ async def values(session: AsyncSession, place: Place, editor: Optional[str], *,
 async def schema(session: AsyncSession, *, operator: bool) -> Dict[str, Any]:
     """The registry (``schema_json``), its examples and posture sentences rendered with the
     platform's values in force. Its recommendations from live facts (node memory, the largest
-    graph) only for an ``operator``: those facts are a system administrator's to see."""
+    graph) only for an ``operator``: those facts are a system administrator's to see. So are the
+    values the deployment sets, read as config has them now: each "set by your deployment"
+    fact's, and each cap's (:func:`_with_deployment_values`)."""
     ctx = await context(session)
     in_force = {key: r["effective"] for key, r in resolver.resolve_all(ctx).items()}
-    return registry().schema_json(in_force, await facts.collect() if operator else None)
+    out = registry().schema_json(in_force, await facts.collect() if operator else None)
+    if operator:
+        _with_deployment_values(out, ctx, in_force)
+    return out
+
+
+def _reading(ctx: Context, env: str) -> Dict[str, Any]:
+    """A value the deployment sets, as this process's config reads it now: ``{value, set,
+    problem}``. ``set`` False: the deployment leaves it to the default. ``value`` None when it
+    can't be read, and ``problem`` says why; never a guess."""
+    try:
+        found = ctx.env(env)
+    except Exception:  # noqa: BLE001 — said, rather than failing the registry
+        logger.warning("settings schema: %s could not be read", env, exc_info=True)
+        return {"value": None, "set": None, "problem": "It couldn't be read just now."}
+    if found is None:                 # read by the worker alone, and not set: its default applies
+        return {"value": None, "set": False,
+                "problem": "Your deployment doesn't set it, and the default the worker uses "
+                           "isn't one this server reads."}
+    value = found.value
+    if isinstance(value, str):        # the raw text, for a value config doesn't read
+        try:
+            number = float(value.strip())
+        except ValueError:
+            return {"value": None, "set": True,
+                    "problem": f"Your deployment's value “{value}” isn't a number."}
+        value = int(number) if number.is_integer() else number
+    return {"value": value, "set": found.set, "problem": None}
+
+
+def _with_deployment_values(out: Dict[str, Any], ctx: Context,
+                            in_force: Mapping[str, Any]) -> None:
+    """Give ``out`` (``schema_json``'s answer) the values the deployment sets, for a system
+    administrator: each deployment fact's ``value``, whether the deployment sets it, and why it
+    can't be read (:func:`_reading`); and each cap's ``value``, the deployment's or that of the
+    setting that caps it, in force on the platform."""
+    for fact in out["deployment"]:
+        fact.update(_reading(ctx, fact["env"]))
+    for setting in out["settings"]:
+        for cap in setting["caps"]:
+            if cap.get("deployment"):
+                reading = _reading(ctx, cap["deployment"])
+                cap.update(value=reading["value"], problem=reading["problem"])
+            else:
+                value = in_force.get(cap.get("setting"))
+                cap.update(value=value, problem=None if value is not None else
+                           "The setting that caps it couldn't be read.")
 
 
 async def workspace_graphs(session: AsyncSession, workspace_id: str, *,

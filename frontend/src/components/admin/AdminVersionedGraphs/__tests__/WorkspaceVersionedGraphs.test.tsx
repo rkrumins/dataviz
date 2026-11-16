@@ -148,7 +148,6 @@ describe('Workspace → Versioned graphs: stage, review, save, undo', () => {
         renderTab()
         await userEvent.click((await rowOnceDrawn('reads.mode')).getByRole('radio', { name: title('reads.mode', 'latest') }))
 
-        expect(row('reads.mode').getByText(`Changing to ${title('reads.mode', 'latest')}`)).toBeInTheDocument()
         expect(screen.getByRole('region', { name: 'Unsaved changes' })).toHaveTextContent('1 change not saved yet')
         expect(await row('reads.mode').findByText(`Once saved: ${title('reads.mode', 'latest')}`)).toBeInTheDocument()
         expect(calls(sent, 'POST', `${SETTINGS}/preview`).at(-1)?.query.get('mode')).toBe('quick')
@@ -192,7 +191,7 @@ describe('Workspace → Versioned graphs: stage, review, save, undo', () => {
         const dialog = await screen.findByRole('dialog', { name: 'Leave without saving 1 change?' })
         await userEvent.click(within(dialog).getByRole('button', { name: 'Stay' }))
         expect(screen.queryByText('Somewhere else')).not.toBeInTheDocument()
-        expect(row('reads.mode').getByText(`Changing to ${title('reads.mode', 'latest')}`)).toBeInTheDocument()
+        expect(await row('reads.mode').findByText(`Once saved: ${title('reads.mode', 'latest')}`)).toBeInTheDocument()
 
         await userEvent.click(screen.getByRole('link', { name: 'Elsewhere' }))
         await userEvent.click(within(await screen.findByRole('dialog', { name: 'Leave without saving 1 change?' })).getByRole('button', { name: 'Discard and leave' }))

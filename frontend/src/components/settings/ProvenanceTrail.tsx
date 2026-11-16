@@ -9,6 +9,8 @@
  *
  * A change being staged shows at the level being edited, in the accent: "→ Update in place". The
  * accent means "your change" across the kit, so the winning level is emphasised without it.
+ *
+ * The badges' explanations show on hover and are read with the badge; they are not tab stops.
  */
 import { ArrowRight, Check, ChevronRight, Lock, Ruler, ShieldAlert } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -27,13 +29,13 @@ function TrailBadge({ icon: Icon, label, tip, tone = 'neutral' }: {
 }) {
     return (
         <HoverTip label={tip} className="inline-flex">
-            <span tabIndex={0} className={cn(
-                'inline-flex items-center gap-0.5 rounded px-1 text-[10px] font-semibold leading-4 outline-none',
-                'focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+            <span className={cn(
+                'inline-flex items-center gap-0.5 rounded px-1 text-[10px] font-semibold leading-4',
                 tone === 'info' ? 'bg-sky-500/10 text-sky-700 dark:text-sky-300' : 'bg-black/[0.06] text-ink-secondary dark:bg-white/[0.08]',
             )}>
                 <Icon className="w-2.5 h-2.5" aria-hidden />
-                {label}
+                <span>{label}</span>
+                <span className="sr-only">: {tip}</span>
             </span>
         </HoverTip>
     )
@@ -85,8 +87,8 @@ export function ProvenanceTrail({ setting, resolved, scope, staged, className }:
                         )}>
                             <div className="flex flex-wrap items-center gap-1">
                                 <Icon aria-hidden className="w-3 h-3 text-ink-muted shrink-0" />
-                                <span className="text-[10px] font-semibold uppercase tracking-[0.08em] text-ink-muted">{SCOPE_LABEL[t.scope]}</span>
-                                {here && <span className="text-[10px] text-ink-muted">· {SCOPE_HERE[t.scope as Scope]}</span>}
+                                <span className="text-[10px] font-semibold uppercase tracking-[0.08em] text-ink-secondary">{SCOPE_LABEL[t.scope]}</span>
+                                {here && <span className="text-[10px] text-ink-secondary">· here<span className="sr-only">: {SCOPE_HERE[t.scope as Scope]}</span></span>}
                                 {t.scope === 'platform' && t.locked && (
                                     <TrailBadge icon={Lock} label="Locked" tip="Workspaces and graphs can’t change this value." />
                                 )}
@@ -101,27 +103,27 @@ export function ProvenanceTrail({ setting, resolved, scope, staged, className }:
                                 {state === 'winner' && !adjusted && <Check aria-hidden className="w-3 h-3 shrink-0 text-emerald-600 dark:text-emerald-400" />}
                                 <span className={cn(
                                     'min-w-0',
-                                    state === 'winner' ? 'font-semibold text-ink' : 'text-ink-muted',
+                                    state === 'winner' ? 'font-semibold text-ink' : 'text-ink-secondary',
                                     (state === 'overridden' || state === 'ignored') && 'line-through decoration-ink-muted/60',
                                 )}>
-                                    {t.value === null || t.value === undefined ? '—' : formatValue(setting, t.value)}
+                                    {t.value === null || t.value === undefined ? 'Not set' : formatValue(setting, t.value)}
                                 </span>
-                                {caption[state] && <span className="sr-only"> ({caption[state]})</span>}
+                                {caption[state] && state !== 'unset' && <span className="sr-only"> ({caption[state]})</span>}
                             </div>
                             {t.scope === 'default' && setting.default.env && t.env != null && (
                                 <p className={cn('mt-0.5 text-[10px]',
                                     !t.env.valid && t.env.held === undefined ? 'text-rose-600 dark:text-rose-400'
-                                        : t.env.held !== undefined ? 'text-amber-700 dark:text-amber-400' : 'text-ink-muted')}>
+                                        : t.env.held !== undefined ? 'text-amber-700 dark:text-amber-400' : 'text-ink-secondary')}>
                                     {!t.env.valid && t.env.held === undefined ? `Deployment value ignored: “${String(t.env.value)}”`
                                         : t.env.held !== undefined ? `Your deployment’s ${formatValue(setting, t.env.value)}, held to ${formatValue(setting, t.env.held)}`
                                             : 'Set by your deployment'}
                                 </p>
                             )}
                             {state !== 'winner' && state !== 'later' && t.value !== null && t.value !== undefined && (
-                                <p aria-hidden className="mt-0.5 text-[10px] text-ink-muted">{caption[state]}</p>
+                                <p aria-hidden className="mt-0.5 text-[10px] text-ink-secondary">{caption[state]}</p>
                             )}
                             {showStaged && (
-                                <p className="mt-1 flex items-center gap-1 text-xs font-semibold text-accent-lineage">
+                                <p className="mt-1 flex items-center gap-1 text-xs font-semibold text-indigo-700 dark:text-indigo-300">
                                     <ArrowRight aria-hidden className="w-3 h-3 shrink-0" />
                                     <span className="sr-only">Your change: </span>
                                     {staged === null ? 'Not set (inherit)' : formatValue(setting, staged)}

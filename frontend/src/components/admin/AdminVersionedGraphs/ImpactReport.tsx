@@ -39,7 +39,7 @@ function Tile({ icon: Icon, figure, title, children, tone = 'neutral' }: {
                 <div className="min-w-0 flex-1">
                     <p className="text-lg font-semibold leading-tight tracking-tight text-ink">{figure}</p>
                     <p className="mt-0.5 text-[12.5px] leading-snug text-ink-secondary">{title}</p>
-                    {children && <div className="mt-2 text-[11.5px] text-ink-muted">{children}</div>}
+                    {children && <div className="mt-2 text-[11.5px] text-ink-secondary">{children}</div>}
                 </div>
             </div>
         </li>
@@ -52,7 +52,7 @@ function Moved({ s, from, to }: { s?: Setting; from: SettingValue; to: SettingVa
     return (
         <span>
             {say(from)} <ArrowRight aria-hidden className="inline w-3 h-3 -mt-0.5" /><span className="sr-only">to</span>{' '}
-            <span className="font-medium text-ink-secondary">{say(to)}</span>
+            <span className="font-medium text-ink">{say(to)}</span>
         </span>
     )
 }
@@ -70,7 +70,7 @@ export function ImpactReport({ impact, settings }: { impact: Impact; settings: R
                     <ul className="space-y-1">
                         {graphs.samples.map((g) => (
                             <li key={g.graphId}>
-                                <span className="font-medium text-ink-secondary">{g.label ?? g.graphId}</span>
+                                <span className="font-medium text-ink">{g.label ?? g.graphId}</span>
                                 {g.changes.map((c) => (
                                     <span key={c.key} className="block">
                                         {settings[c.key]?.label ?? c.key}: <Moved s={settings[c.key]} from={c.from} to={c.to} />
@@ -97,19 +97,26 @@ export function ImpactReport({ impact, settings }: { impact: Impact; settings: R
     }
     if (memory) {
         const fits = memory.nodes.filter((n) => n.fits).length
+        const same = memory.neededBytes.from === memory.neededBytes.to
         tiles.push(
             <Tile key="memory" icon={MemoryStick} tone={memory.copied && memory.nodes.length > 0 && fits === 0 ? 'warning' : 'neutral'}
-                figure={<Moved from={formatBytes(memory.neededBytes.from)} to={formatBytes(memory.neededBytes.to)} />}
-                title={`free on its node for a copy of your largest graph (${formatBytes(memory.largestGraphBytes)})${memory.copied ? '' : ': it is built from the database instead, as it isn’t copied'}.`}>
+                figure={same ? formatBytes(memory.neededBytes.to) : <Moved from={formatBytes(memory.neededBytes.from)} to={formatBytes(memory.neededBytes.to)} />}
+                title={`needed free on one node to copy your largest graph (${formatBytes(memory.largestGraphBytes)})${memory.copied ? '' : ': it is built from the database instead, as it isn’t copied'}.`}>
                 {memory.nodes.length > 0 && (
                     <ul className="space-y-0.5">
                         {memory.nodes.map((n, i) => (
-                            <li key={n.name ?? i} className="flex items-center gap-1.5">
+                            <li key={n.name ?? i} className="flex items-start gap-1.5">
                                 {n.fits
-                                    ? <Check aria-hidden className="w-3 h-3 text-emerald-600 dark:text-emerald-400" />
-                                    : <X aria-hidden className="w-3 h-3 text-amber-600 dark:text-amber-400" />}
-                                <span className="font-mono text-[10.5px]">{n.name ?? `Node ${i + 1}`}</span>
-                                <span>{formatBytes(Math.max(0, n.freeBytes))} free under its start mark{n.fits ? '' : ': not enough'}</span>
+                                    ? <Check aria-hidden className="mt-0.5 w-3 h-3 shrink-0 text-emerald-600 dark:text-emerald-400" />
+                                    : <X aria-hidden className="mt-0.5 w-3 h-3 shrink-0 text-amber-600 dark:text-amber-400" />}
+                                {/* Free under its start mark, or already over it: never clamped to nothing. */}
+                                <span className="min-w-0">
+                                    <span className="font-mono text-[10.5px]">{n.name ?? `Node ${i + 1}`}</span>{' '}
+                                    {n.freeBytes >= 0
+                                        ? `has ${formatBytes(n.freeBytes)} free under its start mark`
+                                        : `is ${formatBytes(-n.freeBytes)} over its start mark already`}
+                                    {n.fits ? ': enough' : ': not enough'}
+                                </span>
                             </li>
                         ))}
                     </ul>
@@ -160,10 +167,24 @@ export function ImpactReport({ impact, settings }: { impact: Impact; settings: R
         )
     }
     if (outsideLimits && outsideLimits.count > 0) {
+        const where = (scope: string, id: string) => `${scope === 'workspace' ? 'Workspace' : scope === 'graph' ? 'Graph' : scope} ${id}`
         tiles.push(
             <Tile key="limits" icon={Ruler} tone="warning"
                 figure={plural(outsideLimits.count, 'value')}
-                title={`chosen for workspaces and graphs ${outsideLimits.count === 1 ? 'is' : 'are'} outside the new limits${outsideLimits.locked ? `; ${formatCount(outsideLimits.locked)} ignored while it is locked` : ''}.`} />,
+                title={`chosen for workspaces and graphs ${outsideLimits.count === 1 ? 'is' : 'are'} outside the new limits${outsideLimits.locked ? `; ${formatCount(outsideLimits.locked)} ignored while it is locked` : ''}.`}>
+                {outsideLimits.samples.length > 0 && (
+                    <ul className="space-y-0.5">
+                        {outsideLimits.samples.map((v) => (
+                            <li key={`${v.key}:${v.scope}:${v.scopeId}`}>
+                                <span className="font-medium text-ink">{where(v.scope, v.scopeId)}</span>: {settings[v.key]?.label ?? v.key}{' '}
+                                {settings[v.key] ? formatValue(settings[v.key], v.value) : String(v.value)}
+                                {v.status === 'locked' ? ', ignored while it is locked' : ', kept as an exception'}
+                            </li>
+                        ))}
+                        {outsideLimits.count > outsideLimits.samples.length && <li>and {plural(outsideLimits.count - outsideLimits.samples.length, 'more value')}.</li>}
+                    </ul>
+                )}
+            </Tile>,
         )
     }
 
@@ -173,7 +194,7 @@ export function ImpactReport({ impact, settings }: { impact: Impact; settings: R
                 ? <ul className="grid gap-2 sm:grid-cols-2">{tiles}</ul>
                 : impact.unavailable.length === 0 && <p className="text-[13px] text-ink-secondary">Nothing else changes: no graph behaves differently.</p>}
             {impact.unavailable.length > 0 && (
-                <p className="flex items-start gap-1.5 text-[11.5px] text-ink-muted">
+                <p className="flex items-start gap-1.5 text-[11.5px] text-ink-secondary">
                     <TriangleAlert aria-hidden className="mt-0.5 w-3 h-3 shrink-0" />
                     Couldn’t work out {impact.unavailable.map((p) => PART_NAME[p] ?? p).join(', ')} just now. The rest is above; saving checks the values again.
                 </p>

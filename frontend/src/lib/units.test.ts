@@ -144,11 +144,11 @@ describe('durations (seconds)', () => {
 })
 
 describe('milliseconds', () => {
-    it('keeps ms under a second, and whole seconds as seconds', () => {
+    it('keeps ms under a second, and whole seconds in words, as every other duration', () => {
         expect(formatMs(250, EN)).toBe('250 ms')
         expect(formatMs(1500, EN)).toBe('1,500 ms')
-        expect(formatMs(30000, EN)).toBe('30 s')
-        expect(formatMs(90000, EN)).toBe('1 min 30 s')
+        expect(formatMs(30000, EN)).toBe('30 seconds')
+        expect(formatMs(90000, EN)).toBe('1 minute 30 seconds')
     })
 
     it('reads ms, seconds and minutes', () => {

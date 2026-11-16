@@ -21,8 +21,8 @@ describe('ProvenanceTrail', () => {
         expect(dflt).toHaveTextContent('DefaultAlways the latest (Overridden)')
         expect(platform).toHaveTextContent('Platform')
         expect(within(platform).getByText('Limits')).toBeInTheDocument()
-        expect(workspace).toHaveTextContent('Workspace— (Not set)')
-        expect(graph).toHaveTextContent('Graph· this graphKeep serving, switch when ready (Chosen)')
+        expect(workspace).toHaveTextContent('WorkspaceNot set')
+        expect(graph).toHaveTextContent('Graph· here: this graphKeep serving, switch when ready (Chosen)')
         expect(inForce).toHaveTextContent('In forceKeep serving, update in place (adjusted from Keep serving, switch when ready)')
     })
 
@@ -43,12 +43,20 @@ describe('ProvenanceTrail', () => {
 
     it('invalid env: the default says the deployment’s value was ignored', () => {
         const [dflt] = trail('database.readTimeoutMs', PLATFORM_VALUES, 'platform')
-        expect(dflt).toHaveTextContent('15 s (In force)Deployment value ignored')
+        expect(dflt).toHaveTextContent('15 seconds (In force)Deployment value ignored')
     })
 
     it('a staged change shows at the level being edited', () => {
         const items = trail('imports.guardDeleteShare', GRAPH_VALUES, 'graph', 0.25)
         expect(items[3]).toHaveTextContent('30% (In force)Your change: 25%')
+    })
+
+    it('reads a badge’s explanation with it, and makes no tab stop of it', () => {
+        const [, platform] = trail('reads.mode', GRAPH_VALUES, 'graph')
+        const limits = within(platform).getByText('Limits').parentElement as HTMLElement
+        expect(limits).toHaveTextContent(/^Limits: Workspaces and graphs may choose only within limits\./)
+        expect(limits).not.toHaveAttribute('tabindex')
+        expect(platform.querySelector('[tabindex]')).toBeNull()
     })
 
     it('a staged return to inheriting says so', () => {

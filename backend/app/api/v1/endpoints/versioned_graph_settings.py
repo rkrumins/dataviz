@@ -137,9 +137,12 @@ async def get_settings_schema(
     """The registry (``settings_types.schema``): categories, settings and their guidance, the
     glossary, why a value in force can differ from the one chosen, what the deployment sets. Its
     examples and posture sentences are rendered with the platform's values in force; its
-    recommendations from live facts (``recommended.forThisPlatform``) only for system
-    administrators, since node memory is operator data. ``If-None-Match`` with its ``ETag``
-    answers 304 while it is unchanged."""
+    recommendations from live facts (``recommended.forThisPlatform``) and the values the
+    deployment sets (each deployment fact's and each cap's ``value``, as config reads them when
+    asked) only for system administrators, since node memory and sizing are operator data.
+    ``If-None-Match`` with its ``ETag`` answers 304 while it is unchanged. The tag is this
+    answer's own hash, so a value read differently since, or another role's answer, never
+    matches it, and the browser revalidates on every use (``no-cache``)."""
     body = await service.schema(session, operator=service.editor_of(claims) == SYSTEM_ADMIN)
     content = json.dumps(body, sort_keys=True, default=str)
     tag = 'W/"' + hashlib.sha256(content.encode()).hexdigest()[:32] + '"'

@@ -121,6 +121,10 @@ export interface Cap {
     deployment: string | null
     enforced: boolean
     why: string
+    /** System admins only, read when the schema was asked for: the ceiling, the deployment's or
+     *  the capping setting's in force; null when it couldn't be read, and `problem` says why. */
+    value?: SettingValue | null
+    problem?: string | null
 }
 
 /** Checked on save: `this <op> other (± margin)`. */
@@ -262,6 +266,15 @@ export interface DeploymentFact {
     category: string
     means: string
     attr: string | null
+    /** How its value reads, as a setting's do. */
+    kind: Kind
+    unit: string | null
+    /** System admins only, as config reads it when the schema was asked for; null when it
+     *  couldn't be read, and `problem` says why. */
+    value?: number | null
+    /** Whether the deployment sets it (false: the default applies); null when not known. */
+    set?: boolean | null
+    problem?: string | null
 }
 
 export interface Retired {

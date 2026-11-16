@@ -22,7 +22,7 @@ import { choiceImpacts } from './impacts'
 import { VERDICT_META } from './meta'
 import type { Choice, DimensionInfo, Frame, Setting, SettingValue, TrailScope } from './types'
 
-const WHEN_LABEL: Record<Frame['when'], string> = { before: 'Before', while: 'While it lands', after: 'After' }
+const WHEN_LABEL: Record<Frame['when'], string> = { before: 'Before', while: 'During', after: 'After' }
 
 /** Before, while and after a new version lands: what readers see and where it is read from. */
 function FrameStrip({ frames }: { frames: Frame[] }) {
@@ -35,18 +35,18 @@ function FrameStrip({ frames }: { frames: Frame[] }) {
                 const Source = f.source === 'database' ? Database : HardDrive
                 return (
                     <span key={f.when} className="min-w-0 rounded-lg bg-black/[0.03] px-2 py-1.5 dark:bg-white/[0.04]">
-                        <span className="block text-[9.5px] font-semibold uppercase tracking-[0.08em] text-ink-muted">{WHEN_LABEL[f.when]}</span>
+                        <span className="block whitespace-nowrap text-[9.5px] font-semibold uppercase tracking-[0.08em] text-ink-secondary">{WHEN_LABEL[f.when]}</span>
                         {/* Wraps rather than truncating: "Version 5, with parts of 6" is the point of the card. */}
                         <span className={cn(
                             'mt-1 inline-flex max-w-full rounded-lg px-1.5 py-px text-[10px] font-semibold leading-4',
-                            tone === 'new' ? 'bg-emerald-500/12 text-emerald-700 dark:text-emerald-300'
+                            tone === 'new' ? 'bg-emerald-500/12 text-emerald-800 dark:text-emerald-300'
                                 : tone === 'mix' ? 'bg-gradient-to-r from-slate-500/10 to-emerald-500/15 text-ink-secondary'
                                     : 'bg-slate-500/10 text-ink-secondary',
                         )}>
                             <span className="min-w-0 break-words">{f.shows}</span>
                         </span>
                         <span className={cn('mt-1 flex items-center gap-1 text-[10px]',
-                            f.source === 'database' ? 'text-amber-700 dark:text-amber-400' : 'text-ink-muted')}>
+                            f.source === 'database' ? 'text-amber-700 dark:text-amber-400' : 'text-ink-secondary')}>
                             <Source aria-hidden className="w-3 h-3 shrink-0" /> {f.source}
                         </span>
                     </span>
@@ -149,7 +149,7 @@ export function ChoiceCards({
                             <span className="block text-[13px] font-semibold text-ink">
                                 {inherit.from === 'default' ? 'Use the default' : `Use the ${SCOPE_LABEL[inherit.from].toLowerCase()}’s choice`}
                             </span>
-                            <span className="block text-xs text-ink-muted">
+                            <span className="block text-xs text-ink-secondary">
                                 Currently <span className="font-medium text-ink-secondary">{formatValue(setting, inherit.value)}</span>. Follows it if it changes.
                             </span>
                         </span>
@@ -201,7 +201,7 @@ export function ChoiceCards({
                                                     <span className="inline-flex rounded-full bg-amber-500/12 px-1.5 py-px text-[10px] font-semibold text-amber-800 dark:text-amber-300">In force now</span>
                                                 )}
                                                 {stale && (
-                                                    <span className="inline-flex rounded-full bg-black/[0.05] px-1.5 py-px text-[10px] font-semibold text-ink-muted dark:bg-white/[0.07]">No longer offered here</span>
+                                                    <span className="inline-flex rounded-full bg-black/[0.05] px-1.5 py-px text-[10px] font-semibold text-ink-secondary dark:bg-white/[0.07]">No longer offered here</span>
                                                 )}
                                             </span>
                                         )}
@@ -230,7 +230,7 @@ export function ChoiceCards({
                                     </span>
                                 )}
                                 {rich && (c.goodFor || c.needs) && (
-                                    <span className="mt-auto block border-t border-glass-border/60 pt-2 text-[11px] leading-snug text-ink-muted">
+                                    <span className="mt-auto block border-t border-glass-border/60 pt-2 text-[11px] leading-snug text-ink-secondary">
                                         {c.goodFor && <><span className="font-semibold text-ink-secondary">Good for </span>{c.goodFor} </>}
                                         {c.needs && <><span className="font-semibold text-ink-secondary">Needs </span>{c.needs}</>}
                                     </span>
@@ -241,7 +241,7 @@ export function ChoiceCards({
                 </div>
             </div>
             {withheld.length > 0 && (
-                <p className="text-[11px] text-ink-muted">Not offered here: {withheld.map((c) => c.title).join(', ')}.</p>
+                <p className="text-[11px] text-ink-secondary">Not offered here: {withheld.map((c) => c.title).join(', ')}.</p>
             )}
         </div>
     )

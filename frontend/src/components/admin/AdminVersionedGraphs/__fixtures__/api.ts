@@ -12,21 +12,47 @@
  *   history     four change sets: a save, a workspace's, one carried over, a change of limits
  *   preview     answered from the values: each staged value in force, "switch when ready" held to
  *               "update in place" while builds are off; the full preview's impact
- *   health      a graph's, with one part the server couldn't read
+ *   health      a graph's, with one part the server couldn't read; a fork's, its root's copy
+ *   topology    each graph store node's memory, as the Graph store page's cached snapshot has it
  *   versioning  what a data source's Versioning tab reads: its graph, drafts, history, forks, where
  *               the graph lives (the watermark, with the read mode in force and why) and its imports
  */
 import { SCHEMA, SETTINGS_BY_KEY } from '@/components/settings/__fixtures__/schema'
 import { FACTS, GRAPH_VALUES, PLATFORM_VALUES, WORKSPACE_VALUES } from '@/components/settings/__fixtures__/resolved'
 import { sameLimits } from '@/components/settings/format'
-import type { Editor, ResolvedSetting, ResolvedValues, TrailStep } from '@/components/settings/types'
+import type { Editor, ResolvedSetting, ResolvedValues, SettingsSchema, TrailScope, TrailStep } from '@/components/settings/types'
 import type { PatchItem } from '@/components/settings/useStagedChanges'
 import type { VersionedGraphRow } from '@/services/systemStatusService'
 import type { ImportSettings } from '@/services/importExportApiService'
 import type { Watermark } from '@/services/versioningApiService'
 import type { GraphHealth, GraphsSummary, HistoryEntry, Impact, WorkspaceGraph } from '@/services/settingsService'
+import type { GraphStoreTopologyResponse } from '@/services/graphStoreService'
 
 export { SCHEMA, SETTINGS_BY_KEY }
+
+/** What this fixture's deployment sets, as config reads it (its env, else config's own default). */
+const DEPLOYED: Record<string, number> = {
+    GRAPHVER_ROUTE_CACHE_SECS: 5, GRAPHVER_PROJECTION_CONCURRENCY: 4, GRAPHVER_PROJECTION_POLL_SECS: 5,
+    GRAPHVER_PROJECTION_BATCH_SIZE: 5_000, GRAPHVER_PROJECTION_PASS_MAX_SECS: 300, GRAPHVER_PROJECTION_INLINE_MAX_ROWS: 20_000,
+    GRAPHVER_TRACE_LEASE_TTL_SECS: 120, GRAPHVER_POOL_SIZE: 10, GRAPHVER_POOL_MAX_OVERFLOW: 5, GRAPHVER_ROUTE_POOL_SIZE: 3,
+    GRAPHVER_DRAFT_SWEEP_SECS: 3_600, GRAPHVER_REAP_POLL_SECS: 900, GRAPHVER_FORK_REWIND_MAX: 200_000, IMPORT_COMMIT_WINDOW: 10_000,
+    GRAPHVER_TRANSFER_SLOTS: 2, IMPORT_STAGING_GC_DAYS: 3,
+}
+
+/**
+ * The registry as a system administrator is served it: each value the deployment sets, and each
+ * cap's. One the server can't read (the worker's own write timeout, unset here) is null, with why.
+ */
+export const OPERATOR_SCHEMA: SettingsSchema = {
+    ...SCHEMA,
+    deployment: SCHEMA.deployment.map((d) => (d.env in DEPLOYED
+        ? { ...d, value: DEPLOYED[d.env], set: false, problem: null }
+        : { ...d, value: null, set: false, problem: 'Your deployment doesn’t set it, and the default the worker uses isn’t one this server reads.' })),
+    settings: SCHEMA.settings.map((s) => ({
+        ...s,
+        caps: s.caps.map((c) => ({ ...c, value: c.deployment ? DEPLOYED[c.deployment] ?? null : PLATFORM_VALUES[c.setting ?? '']?.effective ?? null, problem: null })),
+    })),
+}
 
 export const WS = 'ws_finance'
 export const GRAPH = 'graph_sales'
@@ -114,8 +140,12 @@ export function workspaceValues(viewer: Editor | null = 'workspace_admin') {
 
 // ── Preview ─────────────────────────────────────────────────────────────────
 
-/** What the server would answer for `changes` at the platform, or at `base`'s place (quick, or full with the impact). */
-export function preview(changes: PatchItem[], mode: 'quick' | 'full', base: ResolvedValues = PLATFORM_VALUES) {
+/**
+ * What the server would answer for `changes` at `scope` (quick, or full with the impact), with
+ * `base` the values at that place: as the server's does, each answer's trail holds the value
+ * staged at that scope.
+ */
+export function preview(changes: PatchItem[], mode: 'quick' | 'full', base: ResolvedValues = PLATFORM_VALUES, scope: TrailScope = 'platform') {
     const values = changes.flatMap((c) => {
         const r = base[c.key]
         if (!r || !('value' in c)) return []
@@ -123,6 +153,7 @@ export function preview(changes: PatchItem[], mode: 'quick' | 'full', base: Reso
         const chosen = c.value ?? r.trail[0].value ?? r.effective
         // Switch when ready needs New-version builds, which the fixture has off.
         const held = c.key === 'reads.mode' && chosen === 'beside'
+        const staged = { scope, value: c.value ?? null }
         return [{
             ...r,
             effective: held ? 'in_place' : chosen,
@@ -130,6 +161,8 @@ export function preview(changes: PatchItem[], mode: 'quick' | 'full', base: Reso
             status: held ? 'adjusted' : 'in_effect',
             why: held ? [{ code: 'builds_off', text: SCHEMA.why.builds_off?.text ?? '', fix: SCHEMA.why.builds_off?.fix ?? null }] : [],
             example: s.guidance.example,
+            trail: r.trail.some((t) => t.scope === scope)
+                ? r.trail.map((t) => (t.scope === scope ? { ...t, ...staged } : t)) : [...r.trail, staged],
         }]
     })
     const out: { scope: string; mode: string; values: unknown[]; impact?: Impact } = { scope: 'platform', mode, values }
@@ -200,30 +233,34 @@ export function row(over: Partial<VersionedGraphRow>): VersionedGraphRow {
         updatedAt: null, owned: false, forkParentGraphId: null, orphan: false, retiredKeys: [],
         residency: 'standard', residencyState: 'resident', evictedReason: null, lastReadAt: '2026-11-16T16:20:00Z',
         sizeBytes: 812 * 1024 ** 2, rehydratingSince: null, readMode: null, readModeEffective: 'latest',
+        readModeDeclared: over.readModeEffective === undefined ? 'latest' : over.readModeEffective, readModeSource: 'platform', readModeWhy: [],
         ...over,
     } as VersionedGraphRow
 }
 
 export const GRAPHS: VersionedGraphRow[] = [
     row({ graphId: GRAPH, dataSourceId: 'ds_sales', dataSourceLabel: 'Sales lineage', falkorGraphName: 'gvp_graph_sales{les.3}', owned: true,
-        residency: 'coldline', readMode: 'beside', readModeEffective: 'in_place', sizeBytes: 9.4 * 1024 ** 3 }),
+        residency: 'coldline', readMode: 'beside', readModeEffective: 'in_place', sizeBytes: 9.4 * 1024 ** 3,
+        readModeDeclared: 'beside', readModeSource: 'graph',
+        readModeWhy: [{ code: 'builds_off', text: SCHEMA.why.builds_off?.text ?? '', fix: SCHEMA.why.builds_off?.fix ?? null }] }),
     row({}),
     row({ graphId: 'graph_orders', dataSourceId: 'ds_orders', dataSourceLabel: 'Orders', falkorGraphName: 'gvp_graph_orders{ers.1}', owned: true,
         residency: 'coldline', residencyState: 'evicted', status: 'evicted', evictedReason: 'idle_coldline', lastReadAt: '2026-11-14T09:00:00Z' }),
     row({ graphId: 'graph_payments', dataSourceId: 'ds_pay', dataSourceLabel: 'Payments', falkorGraphName: 'gvp_graph_payments{nts.1}', owned: true,
-        readMode: 'latest', readModeEffective: 'latest', residency: 'always' }),
+        readMode: 'latest', readModeEffective: 'latest', readModeSource: 'graph', residency: 'always' }),
     row({ graphId: 'graph_ledger', dataSourceId: 'ds_ledger', dataSourceLabel: 'Ledger', falkorGraphName: 'gvp_graph_ledger{ger.2}', owned: true,
         readModeEffective: 'beside', build: { step: 'seeding', reason: 'rebuild', rebuild: 'operator', progress: { done: 41_000, total: 100_000 } } }),
     row({ graphId: 'graph_ship', dataSourceId: 'ds_ship', dataSourceLabel: 'Shipments', falkorGraphName: 'gvp_graph_ship{hip.1}', owned: true,
         residencyState: 'waiting_capacity', status: 'waiting_capacity', lag: 3, committed: 9, projected: 6 }),
     row({ graphId: 'graph_fork', dataSourceId: 'dsfork_7', dataSourceLabel: null, falkorGraphName: 'gv_graph_fork', owned: true,
-        forkParentGraphId: GRAPH, residency: null, residencyState: null, readModeEffective: null, sizeBytes: null, lastReadAt: null }),
+        forkParentGraphId: GRAPH, residency: null, residencyState: null, readModeEffective: null, readModeDeclared: null, readModeSource: null,
+        readModeWhy: null, sizeBytes: null, lastReadAt: null }),
     row({ graphId: 'graph_old', dataSourceId: 'ds_gone', dataSourceLabel: null, workspaceName: null, falkorGraphName: 'old_key', orphan: true,
         lastError: 'connection refused by falkordb-1:6379', residencyState: 'evicted', sizeBytes: null }),
 ]
 
 export const SUMMARY: GraphsSummary = {
-    graphs: 42, inMemory: 35, unloaded: 4, loading: 1, waitingForRoom: 2, building: 2, failing: 1, withOwnSettings: 7,
+    graphs: 42, inMemory: 34, unloaded: 4, loading: 1, waitingForRoom: 2, noCopy: 1, building: 2, failing: 1, withOwnSettings: 7,
 }
 
 export const PROVIDERS = [
@@ -231,10 +268,19 @@ export const PROVIDERS = [
     { id: 'falkor-us', name: 'US graph store', type: 'falkordb', status: 'healthy', error: null, isActive: true, versionedGraphs: 11 },
 ]
 
-/** Each node's memory, as the residency preview of no change reports it. */
-export const MASTERS = {
-    masters: (FACTS.nodes ?? []).map((n, i) => ({ endpoint: `falkordb-${i}:6379`, usedBytes: n.usedBytes, maxBytes: n.maxBytes })),
-}
+/** Each node's memory, as the Graph store page's cached topology has it: a master per shard. */
+export const TOPOLOGY = {
+    instances: [{
+        id: 'falkor-eu', providers: [], mode: 'cluster', seeds: [], reachable: true,
+        totals: { masters: 3, replicas: 0, nodesUp: 3, nodesTotal: 3, graphs: 0, unregisteredGraphs: 0 },
+        shards: (FACTS.nodes ?? []).map((n, i) => ({
+            index: i, slotRanges: [], slotCount: 0, replicas: [], graphs: [], graphsTotal: 0, graphsTruncated: false, unregisteredCount: 0,
+            master: { endpoint: `falkordb-${i}:6379`, role: 'master', status: 'up', memory: { used: n.usedBytes, maxmemory: n.maxBytes } },
+        })),
+    }],
+    summary: { instances: 1, providers: 1, masters: 3, replicas: 0, nodesUp: 3, nodesTotal: 3, graphs: 0, unregisteredGraphs: 0, unreachableNodes: 0, findings: 0 },
+    cacheAgeMs: 4_000, ttlS: 30, stale: false,
+} as unknown as GraphStoreTopologyResponse
 
 // ── History ─────────────────────────────────────────────────────────────────
 
@@ -268,10 +314,28 @@ export const HEALTH: GraphHealth = {
         why: [{ code: 'builds_off', text: SCHEMA.why.builds_off?.text ?? '', fix: SCHEMA.why.builds_off?.fix ?? null }],
     },
     lastUpdate: { finishedAt: '2026-11-16T16:21:30Z', durationSecs: 42, rows: 18_400, ratePerSec: 438 },
-    memory: { bytes: 9.4 * 1024 ** 3, node: 'falkordb-2:6379', loaded: true, class: 'coldline', lastReadAt: '2026-11-16T16:23:10Z' },
+    progress: null,
+    memory: {
+        bytes: 9.4 * 1024 ** 3, node: 'falkordb-2:6379', loaded: true, state: 'resident', rehydratingSince: null, class: 'coldline',
+        lastReadAt: '2026-11-16T16:23:10Z',
+    },
     lastBuild: null,
     signals: [{ id: 'reads.from_database_while_behind', count24h: 12 }, { id: 'builds.waited_for_room', count24h: 0 }],
+    follows: null,
     problems: [{ part: 'lastBuild', message: 'The build record couldn’t be read: it was being written at the time.' }],
+}
+
+/** A fork's: what it serves through its root, and the root's copy, being loaded, and its build waiting for room. */
+export const FORK_HEALTH: GraphHealth = {
+    ...HEALTH,
+    follows: { graphId: ROOT, dataSourceId: 'ds_root', label: 'Revenue lineage' },
+    memory: { ...HEALTH.memory!, node: null, loaded: false, state: 'rehydrating', rehydratingSince: '2026-11-16T16:19:00Z' },
+    lastBuild: {
+        outcome: 'waiting', since: '2026-11-16T16:10:00Z', at: null, waitingFor: 'room', why: 'no room for a copy on its node (capacity)',
+        attempts: 0, copyRemovedAfter: null, windowSecs: null,
+    },
+    signals: [{ id: 'builds.waited_for_room', count24h: 3 }],
+    problems: HEALTH.problems.filter((p) => p.part !== 'lastBuild'),
 }
 
 // ── Features ────────────────────────────────────────────────────────────────
