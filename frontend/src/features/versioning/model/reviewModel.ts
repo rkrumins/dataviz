@@ -13,6 +13,9 @@ import { stagedChangeColor, type StagedChange, type StagedChangeType } from '@/s
 import { toPayloadShape } from '@/lib/nodeFields'
 import { nodeUpdatePatch, propertiesPatch } from './stagedChangesToOps'
 import type { ChangeStatus } from './changeModel'
+import { fieldLabel, propertyChange as property, type FieldChange } from './fieldDiff'
+
+export type { FieldChange }
 
 /** A sentence: plain words, and names to set in bold. */
 export type Sentence = (string | { name: string })[]
@@ -33,16 +36,6 @@ export interface ReviewGroup {
   revealId?: string
 }
 
-export interface FieldChange {
-  /** What the drawer calls it. */
-  label: string
-  /** A property's folder ("Technical/Physical") — shown before its name. */
-  folder?: string
-  before: unknown
-  after: unknown
-  kind: 'added' | 'changed' | 'removed'
-}
-
 export interface NameLookup {
   /** An entity's display name by its id or urn (falls back to the id). */
   nameOf: (id: string) => string
@@ -58,13 +51,6 @@ const asObj = (v: unknown): Record<string, unknown> =>
 const str = (v: unknown): string | undefined => (typeof v === 'string' && v.trim() ? v : undefined)
 
 const labelOf = (d: Record<string, unknown>) => str(d.label) ?? str(d.displayName) ?? str(d.name)
-
-const TOP_LABEL: Record<string, string> = {
-  displayName: 'Name', entityType: 'Type', tags: 'Tags', description: 'Description',
-  qualifiedName: 'Qualified name', sourceSystem: 'Source system',
-}
-/** Properties the drawer names for what they are, not by their key. */
-const PROPERTY_LABEL: Record<string, string> = { businessLabel: 'Business label' }
 
 function statusOf(type: StagedChangeType): ChangeStatus {
   const c = stagedChangeColor(type)
@@ -102,21 +88,12 @@ export function fieldChanges(change: StagedChange): FieldChange[] {
   for (const [field, after] of Object.entries(payload)) {
     if (field === 'properties') continue
     const was = (before as Record<string, unknown>)[field]
-    out.push({ label: TOP_LABEL[field] ?? field, before: was, after, kind: was === undefined || was === '' ? 'added' : 'changed' })
+    out.push({ label: fieldLabel(field) ?? field, before: was, after, kind: was === undefined || was === '' ? 'added' : 'changed' })
   }
   const props = before.properties ?? {}
   for (const [k, v] of Object.entries(asObj(payload.properties))) out.push(property(k, props[k], v, k in props ? 'changed' : 'added'))
   for (const k of unset) out.push(property(k, props[k], undefined, 'removed'))
   return out
-}
-
-function property(key: string, before: unknown, after: unknown, kind: FieldChange['kind']): FieldChange {
-  const cut = key.lastIndexOf('/')
-  return {
-    label: PROPERTY_LABEL[key] ?? (cut >= 0 ? key.slice(cut + 1) : key),
-    folder: cut >= 0 ? key.slice(0, cut) : undefined,
-    before, after, kind,
-  }
 }
 
 /** The sentence for one change — or its summary, where it carries too little to say more. */

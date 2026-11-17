@@ -8,7 +8,7 @@ import { ArrowRight } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { inferFieldType } from '@/components/panels/property/fieldTypes'
 import { FormattedDate, FormattedLink } from '@/components/panels/property/valueWidgets'
-import type { FieldChange } from '../model/reviewModel'
+import type { FieldChange } from '../model/fieldDiff'
 
 const KIND_STYLE: Record<FieldChange['kind'], { badge: string; label: string }> = {
   added: { badge: 'bg-emerald-500/12 text-emerald-700 dark:text-emerald-300', label: 'Added' },
@@ -80,7 +80,11 @@ function TagDiff({ before, after }: { before: string[]; after: string[] }) {
 
 const isTags = (v: unknown): v is string[] => Array.isArray(v) && v.every((x) => typeof x === 'string')
 
-export const ReviewValue = memo(function ReviewValue({ field }: { field: FieldChange }) {
+export const ReviewValue = memo(function ReviewValue({ field, plain = false }: {
+  field: FieldChange
+  /** Every row is the same kind (an entity added or removed whole): the badge would only repeat it. */
+  plain?: boolean
+}) {
   const style = KIND_STYLE[field.kind]
   const tags = (field.kind === 'changed' && isTags(field.before) && isTags(field.after))
     || (field.kind === 'added' && isTags(field.after)) || (field.kind === 'removed' && isTags(field.before))
@@ -90,10 +94,12 @@ export const ReviewValue = memo(function ReviewValue({ field }: { field: FieldCh
         <div className="flex items-center gap-1.5 min-w-0">
           <span className="text-xs font-semibold text-ink truncate">{field.label}</span>
         </div>
-        <div className="flex items-center gap-1.5 mt-0.5">
-          <span className={cn('px-1 py-px rounded text-[9px] font-bold uppercase tracking-wide', style.badge)}>{style.label}</span>
-          {field.folder && <span className="text-2xs text-ink-muted truncate">in {field.folder}</span>}
-        </div>
+        {(!plain || field.folder) && (
+          <div className="flex items-center gap-1.5 mt-0.5">
+            {!plain && <span className={cn('px-1 py-px rounded text-[9px] font-bold uppercase tracking-wide', style.badge)}>{style.label}</span>}
+            {field.folder && <span className="text-2xs text-ink-muted truncate">in {field.folder}</span>}
+          </div>
+        )}
       </div>
       <div className="min-w-0 flex items-start gap-2 flex-wrap">
         {tags ? (

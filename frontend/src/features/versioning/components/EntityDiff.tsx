@@ -1,84 +1,104 @@
 /**
- * Field-level before/after detail for one changed entity. Replaces the raw
- * `JSON.stringify` blocks the old dialogs showed with a real two-column diff.
+ * What changed on one entity, property by property: each field and each property its own row,
+ * named the way the drawer names them and shown as the value it is (`ReviewValue`) — never one
+ * `properties: {…} → {…}` line. A summary first ("2 changed · 1 added"), the first rows, then all of
+ * them on request; the technical persona can open the raw before and after.
+ *
+ * Built only for the row someone opens — never up front for every change of a list.
  */
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
+import { Code2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { deriveFieldDeltas, type FieldDelta, type GraphChange } from '../model/changeModel'
+import { usePersonaMode } from '@/store/persona'
+import { JsonTree } from '@/components/ui/JsonTree'
+import type { GraphChange } from '../model/changeModel'
+import { entityFieldChanges, fieldChangeCounts, fromFieldDeltas, type FieldChange } from '../model/fieldDiff'
+import { ReviewValue } from './ReviewValue'
 
-function fmt(v: unknown): string {
-  if (v === undefined || v === null) return '—'
-  if (typeof v === 'string') return v || '""'
-  if (typeof v === 'object') {
-    try {
-      const s = JSON.stringify(v)
-      return s.length > 80 ? `${s.slice(0, 77)}…` : s
-    } catch {
-      return String(v)
-    }
+/** Rows shown before "Show all": enough to read an edit, few enough to draw at once. */
+export const FIRST_ROWS = 25
+
+const COUNT_STYLE: Record<FieldChange['kind'], string> = {
+  changed: 'text-amber-700 dark:text-amber-300',
+  added: 'text-emerald-700 dark:text-emerald-300',
+  removed: 'text-rose-700 dark:text-rose-300',
+}
+
+/** The rows for a change: from its two sides where it has them, else from its field deltas. */
+function rowsOf(change: GraphChange): FieldChange[] {
+  if (change.status === 'modified' && !(change.before && change.after) && change.fields) {
+    return fromFieldDeltas(change.fields, change.kind)
   }
-  return String(v)
+  return entityFieldChanges(change.status === 'added' ? undefined : change.before,
+    change.status === 'removed' ? undefined : change.after, change.kind)
 }
 
-/** Present payload as key/value rows (for added/removed where there's only one side). */
-function payloadRows(payload: Record<string, unknown> | undefined): FieldDelta[] {
-  if (!payload) return []
-  return Object.entries(payload)
-    .filter(([k]) => !k.startsWith('_'))
-    .map(([field, v]) => ({ field, before: undefined, after: v }))
-    .sort((a, b) => a.field.localeCompare(b.field))
-}
+export function EntityDiff({ change, fields }: {
+  change: GraphChange
+  /** Rows already worked out (a revision's, from the history endpoint). */
+  fields?: FieldChange[]
+}) {
+  const technical = usePersonaMode() === 'technical'
+  const [all, setAll] = useState(false)
+  const [raw, setRaw] = useState(false)
+  const rows = useMemo(() => fields ?? rowsOf(change), [fields, change])
+  const counts = useMemo(() => fieldChangeCounts(rows), [rows])
+  const whole = change.status !== 'modified'
+  const hasRaw = !!(change.before || change.after)
 
-export function EntityDiff({ change }: { change: GraphChange }) {
-  // A modified entity's fields are compared here, for the row someone opened — not up front for
-  // every change of a list, which at 100,000 changes was seconds of JSON before anything drew.
-  const rows: FieldDelta[] = useMemo(
-    () => change.status === 'modified'
-      ? change.fields ?? deriveFieldDeltas(change.before, change.after)
-      : change.status === 'added'
-      ? payloadRows(change.after)
-      : payloadRows(change.before),
-    [change],
+  const rawToggle = technical && hasRaw && (
+    <div>
+      <button type="button" onClick={() => setRaw((v) => !v)}
+        className="inline-flex items-center gap-1 text-[10.5px] font-medium text-ink-muted hover:text-ink">
+        <Code2 className="w-3 h-3" aria-hidden />{raw ? 'Hide technical details' : 'Technical details'}
+      </button>
+      {raw && (
+        <div className="mt-1 grid gap-2 sm:grid-cols-2">
+          {(['before', 'after'] as const).filter((side) => change[side]).map((side) => (
+            <div key={side} className="min-w-0">
+              <p className="mb-1 text-[10.5px] font-semibold text-ink-muted">{side === 'before' ? 'Before' : 'After'}</p>
+              <JsonTree value={change[side]} label={side === 'before' ? 'Before' : 'After'} openDepth={2} />
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
   )
 
   if (rows.length === 0) {
-    return <p className="text-[11px] text-ink-muted px-2 py-1.5">No field-level detail.</p>
+    return (
+      <div className="space-y-1">
+        <p className="text-[11px] text-ink-muted px-2 py-1.5">No field-level detail.</p>
+        {rawToggle}
+      </div>
+    )
   }
 
-  const twoSided = change.status === 'modified'
+  const shown = all ? rows : rows.slice(0, FIRST_ROWS)
   return (
-    <div className="rounded-lg border border-glass-border/60 overflow-hidden">
-      {rows.map((r) => (
-        <div
-          key={r.field}
-          className="grid grid-cols-[minmax(0,7rem)_1fr] gap-2 px-2.5 py-1.5 text-[11px] border-b border-glass-border/40 last:border-b-0"
-        >
-          <span className="font-medium text-ink-muted truncate" title={r.field}>
-            {r.field}
-          </span>
-          {twoSided ? (
-            <span className="flex items-center gap-1.5 min-w-0">
-              <span className="text-rose-500/90 line-through truncate" title={fmt(r.before)}>
-                {fmt(r.before)}
-              </span>
-              <span className="text-ink-muted">→</span>
-              <span className="text-emerald-500/90 truncate" title={fmt(r.after)}>
-                {fmt(r.after)}
-              </span>
+    <div className="space-y-1.5">
+      <p className="flex items-center gap-1.5 flex-wrap text-[11px] text-ink-muted px-0.5">
+        {whole ? (
+          <span>{rows.length} field{rows.length === 1 ? '' : 's'} {change.status === 'added' ? 'set' : 'removed'}</span>
+        ) : (
+          (['changed', 'added', 'removed'] as const).filter((k) => counts[k] > 0).map((k, i) => (
+            <span key={k} className="inline-flex items-center gap-1.5">
+              {i > 0 && <span aria-hidden>·</span>}
+              <span className={cn('font-semibold tabular-nums', COUNT_STYLE[k])}>{counts[k].toLocaleString()} {k}</span>
             </span>
-          ) : (
-            <span
-              className={cn(
-                'truncate',
-                change.status === 'removed' ? 'text-rose-500/90 line-through' : 'text-ink',
-              )}
-              title={fmt(r.after)}
-            >
-              {fmt(r.after)}
-            </span>
-          )}
-        </div>
-      ))}
+          ))
+        )}
+      </p>
+      <div className="rounded-xl border border-glass-border overflow-hidden bg-black/[0.015] dark:bg-white/[0.02]">
+        {shown.map((f, i) => <ReviewValue key={`${f.folder ?? ''}/${f.label}/${i}`} field={f} plain={whole} />)}
+      </div>
+      {rows.length > FIRST_ROWS && (
+        <button type="button" onClick={() => setAll((v) => !v)}
+          className="text-[11px] font-semibold text-accent-lineage hover:underline px-0.5">
+          {all ? 'Show fewer' : `Show all ${rows.length.toLocaleString()}`}
+        </button>
+      )}
+      {rawToggle}
     </div>
   )
 }
