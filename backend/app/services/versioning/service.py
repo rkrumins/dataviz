@@ -412,6 +412,14 @@ class ConcurrencyError(RuntimeError):
     an error — it is auto-rebased; only genuine conflicts block a publish."""
 
 
+class ChangeListTooLarge(RuntimeError):
+    """An origin past ``CHANGE_LIST_MAX``: counted, not listed — so not exported either."""
+
+    def __init__(self, too_large: Mapping[str, object]):
+        super().__init__("too many changes to list")
+        self.too_large = dict(too_large)
+
+
 class MergeConflict(RuntimeError):
     """Raised when a 3-way rebase/merge has unresolved field-level conflicts.
 
@@ -4533,6 +4541,8 @@ class GraphVersioningService:
                 big = await self._pr_too_large(s, pr)
                 if big is None:
                     merged, theirs = await self._pr_merge_states(s, pr, containment_edge_types)
+                    # A fork's review lists (and exports) as a window of its main, at any size.
+                    listing = None if self._is_draft_mr(pr) else await self._fork_window(s, pr)
         if squash is not None:
             return await self.diff_commit_summary(graph_id=squash.graph_id, commit_id=squash.id,
                                                   containment_edge_types=containment_edge_types,
@@ -4554,7 +4564,8 @@ class GraphVersioningService:
                 return {**_counted_tree_summary(index, changed), "list": listing}
             return _counted_tree_summary(index, changed)
         index = await asyncio.to_thread(_build_diff_hierarchy, merged, theirs, containment_edge_types)
-        return _hierarchy_summary_view(index, limit)
+        view = _hierarchy_summary_view(index, limit)
+        return {**view, "list": listing} if listing else view
 
     async def diff_pr_children(
         self, *, pr_id: str, container_key: str, containment_edge_types,
@@ -4581,6 +4592,17 @@ class GraphVersioningService:
         index = await asyncio.to_thread(_build_diff_hierarchy, merged, theirs, containment_edge_types)
         return _hierarchy_children_view(index, container_key, limit, offset)
 
+    async def _fork_window(self, s, pr) -> Optional[Dict[str, object]]:
+        """A fork's review as a window of the fork's ``main`` — its own changes since its last
+        merged review, what a change list (and its export) reads: ``{graphId, fromSeq, toSeq}``,
+        or None when it has none."""
+        fork = await s.get(GraphORM, pr.graph_id)
+        if fork is None:
+            return None
+        base = await self._fork_merge_base(s, fork)
+        head = fork.main_head_commit_seq or 0
+        return {"graphId": fork.id, "fromSeq": base, "toSeq": head} if head > base else None
+
     async def _pr_too_large(
         self, s, pr,
     ) -> Optional[Tuple[Optional[BranchORM], int, Optional[Dict[str, object]]]]:
@@ -4594,18 +4616,15 @@ class GraphVersioningService:
         ``main``: ``listing`` is ``{graphId, fromSeq, toSeq}``, ``draft`` None."""
         cap = config.DIFF_TREE_MAX_CHANGES
         if not self._is_draft_mr(pr):
-            fork = await s.get(GraphORM, pr.graph_id)
-            if fork is None:
+            listing = await self._fork_window(s, pr)
+            if listing is None:
                 return None
-            base = await self._fork_merge_base(s, fork)
-            head = fork.main_head_commit_seq or 0
-            if head <= base:
-                return None
-            fork_main = await self._main_branch_id(s, fork.id)
-            changed = await self._own_change_count(s, fork.id, fork_main, base, head, cap)
+            fork_main = await self._main_branch_id(s, listing["graphId"])
+            changed = await self._own_change_count(s, listing["graphId"], fork_main,
+                                                   listing["fromSeq"], listing["toSeq"], cap)
             if changed <= cap:
                 return None
-            return None, changed, {"graphId": fork.id, "fromSeq": base, "toSeq": head}
+            return None, changed, listing
         draft = await s.get(BranchORM, pr.source_branch_id)
         if draft is None:
             return None
@@ -7373,6 +7392,49 @@ class GraphVersioningService:
         return {"entries": [entry_dict(e, names) for e in page], "total": len(positions),
                 "offset": offset, "limit": limit,
                 "hasMore": offset + len(page) < len(positions), "tooLarge": index.too_large}
+
+    async def change_export_rows(
+        self, *, graph_id: str, origin: ChangeOrigin, containment_edge_types,
+        viewer: Optional[Viewer] = None, kind: Optional[str] = None,
+        statuses: Sequence[str] = (), type_: Optional[str] = None, q: Optional[str] = None,
+        detail: str = "changes", chunk: int = 1000,
+    ):
+        """A change list as CSV rows (``change_csv``), a page of ``chunk`` changes at a time, in
+        the list's order and with its filters: one row per change, or — ``detail="properties"`` —
+        one per changed field and property, each page's values read in one batch. Raises
+        ``ChangeListTooLarge`` for an origin counted and not listed."""
+        from backend.app.services.versioning import change_csv
+
+        index = await self._change_index(graph_id, origin, containment_edge_types, viewer)
+        if index.too_large is not None:
+            raise ChangeListTooLarge(index.too_large)
+        positions = await asyncio.to_thread(index.view, kind=kind, statuses=statuses, type_=type_, q=q)
+        for offset in range(0, len(positions), chunk):
+            page = index.page(positions, offset, chunk)
+            names = await self._end_names(graph_id, origin, index, page)
+            entries = [entry_dict(e, names) for e in page]
+            if detail != "properties":
+                yield [change_csv.change_row(e) for e in entries]
+                continue
+            before, after = await self._values_either_side(graph_id, origin, [e["entityId"] for e in entries], viewer)
+            yield [row for e in entries
+                   for row in change_csv.field_rows(e, before.get(e["entityId"]), after.get(e["entityId"]))]
+
+    async def _values_either_side(self, graph_id: str, origin: ChangeOrigin, ids: Sequence[str],
+                                  viewer: Optional[Viewer]) -> Tuple[Dict[str, Optional[dict]], Dict[str, Optional[dict]]]:
+        """Each id's value before and after an origin — :meth:`change_entry`'s two reads, for a
+        page of ids at once."""
+        async with self._session() as s:
+            if origin.branch_id is not None:
+                branch = await self._draft_of(s, graph_id, origin.branch_id, viewer)
+                main_id = await self._main_branch_id(s, graph_id)
+                before = await self._values_at(s, graph_id, main_id, ids, branch.base_commit_seq or 0)
+                after = await self._current_values(s, graph_id, branch.id, ids)
+            else:
+                main_id = await self._window_main(s, graph_id, origin)
+                before = await self._values_at(s, graph_id, main_id, ids, origin.from_seq)
+                after = await self._values_at(s, graph_id, main_id, ids, origin.to_seq)
+        return before, after
 
     async def change_entry(
         self, *, graph_id: str, origin: ChangeOrigin, entity_id: str,

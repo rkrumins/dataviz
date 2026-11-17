@@ -48,6 +48,8 @@ import { STATUS_META } from '@/features/versioning/components/NodeDiffBadge'
 import { PublishActions, PublishBody, usePublishFlow } from '@/features/versioning/components/PublishForm'
 import { ReviewExplorer, ReviewFilterBar } from './review/ReviewExplorer'
 import { canvasLookup } from './review/canvasLookup'
+import { stagedCsvLines } from '@/features/versioning/model/reviewCsv'
+import { downloadCsv } from '@/lib/csv'
 import { stopsFromGroups, useChangeNavigatorStore } from '@/store/changeNavigatorStore'
 
 // Drawn only when the Map is opened: React Flow and the layout engine stay out of the first paint.
@@ -177,6 +179,15 @@ export function StagedChangesPanel({ onConfirm, describe, wsId, graphId, dataSou
   const attention = useMemo(() => groups.reduce((n, g) => n + (needsAttention(g, problemIds) ? 1 : 0), 0), [groups, problemIds])
   const shownGroups = useMemo(() => rows.map(i => groups[i]), [rows, groups])
   const counts = index.facets.status
+  const [exporting, setExporting] = useState(false)
+  const exportShown = async (detail: 'changes' | 'properties') => {
+    setExporting(true)
+    try {
+      downloadCsv(`staged-changes${detail === 'properties' ? '-properties' : ''}.csv`, await stagedCsvLines(shownGroups, detail))
+    } finally {
+      setExporting(false)
+    }
+  }
   const discardShown = () => {
     const ids = shownGroups.flatMap(g => g.changes.map(c => c.id))
     const n = shownGroups.length
@@ -342,6 +353,8 @@ export function StagedChangesPanel({ onConfirm, describe, wsId, graphId, dataSou
                     shown={rows.length}
                     attention={attention}
                     onDiscardShown={discardShown}
+                    onExport={(detail) => void exportShown(detail)}
+                    exporting={exporting}
                     disabled={applyStatus === 'applying'}
                     searchRef={filterInputRef}
                   />

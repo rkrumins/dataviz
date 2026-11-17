@@ -10,8 +10,10 @@ import { useMemo, useState } from 'react'
 import { ChevronRight, Loader2, AlertCircle, Folder, Boxes, Spline, RefreshCw } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { ChangeOrigin } from '../model/changeModel'
-import type { ChangeListOrigin, DiffSummaryResponse, DiffTreeNode } from '@/services/versioningApiService'
+import { changeListExportUrl, type ChangeListOrigin, type DiffSummaryResponse, type DiffTreeNode } from '@/services/versioningApiService'
+import { triggerBrowserDownload } from '@/services/importExportApiService'
 import { ChangeList } from './ChangeList'
+import { ExportMenu } from './ExportMenu'
 import { STATUS_META, NodeDiffBadge } from './NodeDiffBadge'
 import { EntityDiff } from './EntityDiff'
 import { entityTypeStyle } from '@/components/canvas/property-manager/entityTypeStyles'
@@ -313,7 +315,15 @@ export function ChangeTreePanel({
 
   return (
     <div className={cn('space-y-2.5', className)}>
-      <ImpactHeader summary={summary} />
+      <div className="flex items-start gap-2">
+        <div className="flex-1 min-w-0"><ImpactHeader summary={summary} /></div>
+        {/* The same changes as a list exist: they export as CSV, streamed by the server. */}
+        {list && (
+          <ExportMenu count={totalChanges} onExport={(detail) => triggerBrowserDownload(
+            changeListExportUrl(list.wsId, list.graphId, list.origin, {}, detail),
+            `changes${detail === 'properties' ? '-properties' : ''}.csv`)} />
+        )}
+      </div>
       {summaryFirst && (
         <button
           onClick={() => setTreeOpen(!isOpen)}

@@ -22,8 +22,10 @@ Boundary policy
 from __future__ import annotations
 
 import asyncio
+import csv
 import dataclasses
 import inspect
+import io
 import json
 import logging
 import os
@@ -32,7 +34,7 @@ from datetime import datetime
 from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Path, Query, Request, Response, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -49,7 +51,7 @@ from backend.app.api.v1.versioning_gate import (SyncOverrides, fork_write_gate, 
                                                 sync_override_gate)
 from backend.app.auth import api_key_auth, api_key_errors
 from backend.app.auth.dependencies import get_current_user, get_permission_claims, requires
-from backend.app.common.bulkhead import Bulkhead
+from backend.app.common.bulkhead import Bulkhead, Busy
 from backend.app.db.engine import get_db_session
 from backend.app.db.repositories import (api_key_repo, data_source_repo, group_repo, notification_repo,
                                          provider_repo, service_account_repo, user_repo)
@@ -80,6 +82,7 @@ from backend.app.services.versioning.messaging import nudge_projection
 from backend.app.services.versioning.service import (
     AccessDenied,
     ApprovalRequired,
+    ChangeListTooLarge,
     ConcurrencyError,
     DiffTooLarge,
     GraphVersioningService,
@@ -3340,6 +3343,71 @@ async def get_change_entries(
         return await svc.change_entries(
             graph_id=graph_id, origin=origin, containment_edge_types=cset, viewer=viewer,
             kind=kind, statuses=statuses, type_=entity_type, q=q, offset=offset, limit=limit)
+
+
+# Two change-list exports at once per process: each holds a read of the index and, property by
+# property, a page of values at a time while it streams.
+_CHANGE_EXPORTS = Bulkhead("change list exports", 2, wait_seconds=10.0, retry_after_seconds=30)
+
+
+@router.get("/graphs/{graph_id}/diff/export.csv", response_class=StreamingResponse)
+async def export_change_list(
+    ws_id: str, graph_id: str,
+    branch_id: Optional[str] = Query(None, alias="branchId", description=_ORIGIN_DOC["branch_id"]),
+    from_seq: Optional[int] = Query(None, alias="fromSeq", ge=0, description=_ORIGIN_DOC["from_seq"]),
+    to_seq: Optional[int] = Query(None, alias="toSeq", ge=1, description=_ORIGIN_DOC["to_seq"]),
+    kind: Optional[_ChangeKind] = Query(None),
+    status: Optional[str] = Query(None, description="added, modified, removed; comma-separated"),
+    entity_type: Optional[str] = Query(None, alias="type", max_length=256),
+    q: Optional[str] = Query(None, max_length=200),
+    detail: Literal["changes", "properties"] = Query(
+        "changes", description="One row per change, or one per changed field and property"),
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    viewer: Viewer = Depends(viewer_ctx),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """A change list as CSV — the same origin, filters and order as ``/diff/entries`` — streamed
+    a page of 1,000 changes at a time, so 100,000 changes export as they are read. ``detail=
+    properties`` writes one row per changed field and property, named as the app names them.
+    Cells are defused against spreadsheet formulas. Past ``GRAPHVER_CHANGE_LIST_MAX`` changes the
+    list is counted, not listed: 409 ``too_large_to_list``."""
+    from backend.app.services.versioning import change_csv
+
+    origin = _change_origin(branch_id, from_seq, to_seq)
+    statuses = _change_statuses(status)
+    if _CHANGE_EXPORTS.full:
+        raise Busy(_CHANGE_EXPORTS.kind, _CHANGE_EXPORTS.retry_after_seconds)
+    cset = await _live_containment_types(session, ws_id, _meta.get("data_source_id"))
+    rows = svc.change_export_rows(graph_id=graph_id, origin=origin, containment_edge_types=cset,
+                                  viewer=viewer, kind=kind, statuses=statuses, type_=entity_type,
+                                  q=q, detail=detail)
+    # The first page is read before a byte is sent, so a refusal is an answer, not a cut file.
+    with _domain_errors():
+        try:
+            first = await rows.__anext__()
+        except StopAsyncIteration:
+            first = []
+        except ChangeListTooLarge as exc:
+            raise HTTPException(status_code=409, detail={"type": "too_large_to_list", **exc.too_large})
+
+    def _csv(lines) -> str:
+        buf = io.StringIO()
+        csv.writer(buf).writerows(lines)
+        return buf.getvalue()
+
+    async def _stream():
+        async with _CHANGE_EXPORTS.slot():
+            columns = change_csv.FIELD_COLUMNS if detail == "properties" else change_csv.CHANGE_COLUMNS
+            # A BOM, so a spreadsheet reads the names as UTF-8.
+            yield "\ufeff" + _csv([columns]) + _csv(first)
+            async for chunk in rows:
+                yield _csv(chunk)
+
+    name = change_csv.filename(dataclasses.asdict(origin), detail)
+    return StreamingResponse(_stream(), media_type="text/csv; charset=utf-8",
+                             headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
 
 @router.get("/graphs/{graph_id}/diff/entries/{entity_id}", response_model=ChangeEntryResponse)

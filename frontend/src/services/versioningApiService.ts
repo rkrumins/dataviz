@@ -2106,6 +2106,21 @@ export function getChangeSummary(
   return vfetch<ChangeListSummary>(`${base(wsId)}/graphs/${graphId}/diff/summary?${changeOriginParams(origin)}`)
 }
 
+/** Where a change list downloads as CSV — streamed by the server, with the list's filters, in its
+ *  order: one row per change, or (`properties`) one per changed field and property. */
+export function changeListExportUrl(
+  wsId: string, graphId: string, origin: ChangeListOrigin, filter: ChangeListFilter = {},
+  detail: 'changes' | 'properties' = 'changes',
+): string {
+  const sp = changeOriginParams(origin)
+  if (filter.kind) sp.set('kind', filter.kind)
+  if (filter.statuses?.length) sp.set('status', filter.statuses.join(','))
+  if (filter.type) sp.set('type', filter.type)
+  if (filter.q?.trim()) sp.set('q', filter.q.trim())
+  sp.set('detail', detail)
+  return `${base(wsId)}/graphs/${graphId}/diff/export.csv?${sp}`
+}
+
 /** A page of a change list in its fixed order (entities, relationships, structure; by type, then name). */
 export function getChangeEntries(
   wsId: string, graphId: string, origin: ChangeListOrigin, filter: ChangeListFilter = {},

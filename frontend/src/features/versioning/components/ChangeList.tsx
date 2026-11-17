@@ -19,9 +19,13 @@ import { EmptyState } from '@/components/ui/EmptyState'
 import { Segmented, type SegmentedOption } from '@/components/ui/Segmented'
 import { Skeleton, SkeletonText } from '@/components/ui/Skeleton'
 import { useDebouncedValue } from '@/hooks/useDebouncedValue'
-import type {
-  ChangeListCounts, ChangeListKind, ChangeListOrigin, ChangeListRow, ChangeListStatus, ChangeListSummary,
+import { triggerBrowserDownload } from '@/services/importExportApiService'
+import {
+  changeListExportUrl,
+  type ChangeListCounts, type ChangeListKind, type ChangeListOrigin, type ChangeListRow, type ChangeListStatus,
+  type ChangeListSummary,
 } from '@/services/versioningApiService'
+import { ExportMenu, type ExportDetail } from './ExportMenu'
 import { useChangeEntries, useChangeEntry, useChangeSummary } from '../hooks/useVersioning'
 import type { GraphChange } from '../model/changeModel'
 import { changeListSource, useChangeNavigatorStore } from '@/store/changeNavigatorStore'
@@ -233,6 +237,10 @@ export function ChangeList({
             ))}
           </select>
         )}
+        {/* What is listed, as filtered, streamed by the server — however many there are. */}
+        <ExportMenu count={matching || undefined} onExport={(detail: ExportDetail) => triggerBrowserDownload(
+          changeListExportUrl(wsId, graphId, origin, { kind: activeKind ?? undefined, statuses, type: type || undefined, q }, detail),
+          `changes${detail === 'properties' ? '-properties' : ''}.csv`)} />
       </div>
 
       <p className="text-[11px] text-ink-muted tabular-nums" aria-live="polite">

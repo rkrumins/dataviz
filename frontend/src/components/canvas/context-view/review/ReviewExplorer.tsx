@@ -37,6 +37,7 @@ import { CascadeImpactList } from '@/features/versioning/components/CascadeImpac
 import { ConflictChoices } from '@/features/versioning/components/ConflictChoices'
 import { NodeDiffBadge, STATUS_META } from '@/features/versioning/components/NodeDiffBadge'
 import { ReviewValue } from '@/features/versioning/components/ReviewValue'
+import { ExportMenu, type ExportDetail } from '@/features/versioning/components/ExportMenu'
 
 const ROW_HEIGHT = 52
 const HEADING_HEIGHT = 30
@@ -60,7 +61,7 @@ function SentenceView({ sentence }: { sentence: Sentence }) {
 // ─────────────────────────────────────────────────────────────────────────────
 // Filter bar
 
-export function ReviewFilterBar({ index, filter, onChange, shown, attention, onDiscardShown, disabled, searchRef }: {
+export function ReviewFilterBar({ index, filter, onChange, shown, attention, onDiscardShown, onExport, exporting, disabled, searchRef }: {
   index: ReviewIndex
   filter: ReviewFilter
   onChange: (f: ReviewFilter) => void
@@ -70,6 +71,9 @@ export function ReviewFilterBar({ index, filter, onChange, shown, attention, onD
   attention: number
   /** Discard every change the filter shows (offered only while it narrows). */
   onDiscardShown?: () => void
+  /** Save what is shown as CSV. */
+  onExport?: (detail: ExportDetail) => void
+  exporting?: boolean
   disabled?: boolean
   searchRef?: RefObject<HTMLInputElement | null>
 }) {
@@ -170,12 +174,14 @@ export function ReviewFilterBar({ index, filter, onChange, shown, attention, onD
           <button type="button" onClick={() => { setText(''); onChange(NO_FILTER) }}
             className="text-[11px] font-semibold text-accent-lineage hover:underline">Clear filters</button>
         )}
+        <span className="ml-auto" />
         {narrowed && shown > 0 && onDiscardShown && (
           <button type="button" disabled={disabled} onClick={onDiscardShown}
-            className="ml-auto inline-flex items-center gap-1 px-2 h-6 rounded-md text-[11px] font-semibold text-rose-600 dark:text-rose-300 hover:bg-rose-500/10 disabled:opacity-50 disabled:pointer-events-none">
+            className="inline-flex items-center gap-1 px-2 h-6 rounded-md text-[11px] font-semibold text-rose-600 dark:text-rose-300 hover:bg-rose-500/10 disabled:opacity-50 disabled:pointer-events-none">
             <Trash2 className="w-3 h-3" aria-hidden />Discard the {shown.toLocaleString()} shown
           </button>
         )}
+        {onExport && shown > 0 && <ExportMenu onExport={onExport} busy={exporting} count={shown} />}
       </div>
     </div>
   )
