@@ -108,3 +108,22 @@ describe('committedCreatedChildUrns', () => {
     expect([...committedCreatedChildUrns(buildChangeSet([link({})]), ['CONTAINS'])]).toEqual(['ent_C'])
   })
 })
+
+describe('useBranchCreatedDelta', () => {
+  it('is the same Set until what was created changes — a rename does not regroup the canvas', async () => {
+    const { renderHook, act } = await import('@testing-library/react')
+    const { useBranchCreatedDelta } = await import('../useBranchCreatedDelta')
+    const { useStagedChangesStore } = await import('@/store/stagedChangesStore')
+    act(() => useStagedChangesStore.setState({ changes: [change('create_entity', 'urn:new')] }))
+    const { result } = renderHook(() => useBranchCreatedDelta())
+    const first = result.current
+    expect([...first]).toEqual(['urn:new'])
+
+    act(() => useStagedChangesStore.setState((s) => ({ changes: [...s.changes, change('rename_entity', 'urn:old')] })))
+    expect(result.current).toBe(first)
+
+    act(() => useStagedChangesStore.setState((s) => ({ changes: [...s.changes, change('create_entity', 'urn:newer')] })))
+    expect([...result.current].sort()).toEqual(['urn:new', 'urn:newer'])
+    act(() => useStagedChangesStore.setState({ changes: [] }))
+  })
+})

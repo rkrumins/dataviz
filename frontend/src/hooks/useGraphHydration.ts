@@ -26,7 +26,7 @@ import {
     classifyGraphFailure, isFailoverFailure, isRetryableGraphFailure, MAX_READ_RETRIES, retryDelayMs,
 } from '@/services/graphRequestFailure'
 import { toCanvasNode, toCanvasEdge, withFeedLayer } from '@/lib/canvasNodeMapper'
-import { useBranchCreatedDelta, committedCreatedUrns, committedCreatedChildUrns } from '@/hooks/useBranchCreatedDelta'
+import { useBranchCreatedDelta, committedCreatesOf, committedCreatedChildUrns } from '@/hooks/useBranchCreatedDelta'
 import { useIsDraftMode, useBranchStore } from '@/store/branchStore'
 import { normalizeReferenceLayout, deriveEntityScope } from '@/utils/referenceLayout'
 import { isTempUrn } from '@/components/canvas/context-view/assignmentMutations'
@@ -124,20 +124,7 @@ export function pagerAfter(
  *  like node children so no layer size silently caps the canvas. */
 const ROOT_PAGE_SIZE = 200
 
-/** A key that changes exactly when a set of URNs does — its size and two order-independent sums of
- *  each URN's hash — without sorting the set or joining it into one string (at 100,000 URNs, a
- *  multi-megabyte string built again for every new change set). */
-export function urnSetKey(urns: Iterable<string>): string {
-    let n = 0, sum = 0, xor = 0
-    for (const u of urns) {
-        let h = 0x811c9dc5                       // FNV-1a, 32-bit
-        for (let i = 0; i < u.length; i++) h = Math.imul(h ^ u.charCodeAt(i), 0x01000193) >>> 0
-        sum = (sum + h) >>> 0
-        xor = (xor ^ Math.imul(h, 0x9e3779b1)) >>> 0
-        n++
-    }
-    return n === 0 ? '' : `${n}:${sum.toString(36)}:${xor.toString(36)}`
-}
+export { urnSetKey } from '@/hooks/useBranchCreatedDelta'
 
 const CHILD_LOAD_CONCURRENCY = (() => {
     const fromEnv = Number(import.meta.env?.VITE_CHILD_LOAD_CONCURRENCY)
@@ -516,7 +503,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
     // yet, so the refetch wouldn't bring it back).
     const activeChangeSet = useBranchStore((s) => s.activeChangeSet)
     const committedDeltaKey = useMemo(
-        () => (isDraft ? urnSetKey(committedCreatedUrns(activeChangeSet)) : ''),
+        () => (isDraft ? committedCreatesOf(activeChangeSet).key : ''),
         [isDraft, activeChangeSet],
     )
     // Content-stable keys for the hydration effect deps: the schema store

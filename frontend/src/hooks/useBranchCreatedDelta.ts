@@ -73,18 +73,70 @@ export function committedCreatedChildUrns(
   return urns
 }
 
+/** A key that changes exactly when a set of URNs does — its size and two order-independent sums of
+ *  each URN's hash — without sorting the set or joining it into one string (at 100,000 URNs, a
+ *  multi-megabyte string built again for every new change set). */
+export function urnSetKey(urns: Iterable<string>): string {
+  let n = 0, sum = 0, xor = 0
+  for (const u of urns) {
+    let h = 0x811c9dc5                       // FNV-1a, 32-bit
+    for (let i = 0; i < u.length; i++) h = Math.imul(h ^ u.charCodeAt(i), 0x01000193) >>> 0
+    sum = (sum + h) >>> 0
+    xor = (xor ^ Math.imul(h, 0x9e3779b1)) >>> 0
+    n++
+  }
+  return n === 0 ? '' : `${n}:${sum.toString(36)}:${xor.toString(36)}`
+}
+
+/** A set of urns and a content key for it, built once per source and shared by every reader. */
+export interface KeyedUrns { set: Set<string>; key: string }
+
+const EMPTY: KeyedUrns = { set: new Set(), key: '' }
+const stagedCreates = new WeakMap<readonly StagedChange[], KeyedUrns>()
+const committedCreates = new WeakMap<ChangeSet, KeyedUrns>()
+
+/** `branchCreatedUrns`, built once per staged list. */
+export function stagedCreatesOf(changes: readonly StagedChange[]): KeyedUrns {
+  let out = stagedCreates.get(changes)
+  if (!out) {
+    const set = branchCreatedUrns(changes as StagedChange[])
+    out = set.size ? { set, key: urnSetKey(set) } : EMPTY
+    stagedCreates.set(changes, out)
+  }
+  return out
+}
+
+/** `committedCreatedUrns` and its key, built once per change set — a 100k-change draft's are read
+ *  by hydration and by every layer grouping, and must not be rebuilt for each of them. */
+export function committedCreatesOf(changeSet: ChangeSet | null): KeyedUrns {
+  if (!changeSet) return EMPTY
+  let out = committedCreates.get(changeSet)
+  if (!out) {
+    const set = committedCreatedUrns(changeSet)
+    out = set.size ? { set, key: urnSetKey(set) } : EMPTY
+    committedCreates.set(changeSet, out)
+  }
+  return out
+}
+
 /**
  * Reactive branch-created delta for the active scope: live-staged creates (optimistic)
  * UNION committed-in-branch creates (durable across reload). Both are genuinely
  * "created in THIS branch", so honouring the node `layerAssignment` for them in
  * closed-scope stays leak-safe.
+ *
+ * Content-stable: it is a new Set only when what was created changes. Every other staged edit
+ * (a rename, a property) leaves it — and the layer grouping keyed on it — as it was.
  */
 export function useBranchCreatedDelta(): Set<string> {
-  const changes = useStagedChangesStore((s) => s.changes)
-  const changeSet = useBranchStore((s) => s.activeChangeSet)
+  const stagedKey = useStagedChangesStore((s) => stagedCreatesOf(s.changes).key)
+  const committedKey = useBranchStore((s) => committedCreatesOf(s.activeChangeSet).key)
   return useMemo(() => {
-    const urns = branchCreatedUrns(changes)
-    for (const u of committedCreatedUrns(changeSet)) urns.add(u)
-    return urns
-  }, [changes, changeSet])
+    const staged = stagedCreatesOf(useStagedChangesStore.getState().changes).set
+    const committed = committedCreatesOf(useBranchStore.getState().activeChangeSet).set
+    if (staged.size === 0) return committed
+    if (committed.size === 0) return staged
+    return new Set([...committed, ...staged])
+  // Keyed on content, not on the arrays it is read from: that is the point of this hook.
+  }, [stagedKey, committedKey]) // eslint-disable-line react-hooks/exhaustive-deps
 }

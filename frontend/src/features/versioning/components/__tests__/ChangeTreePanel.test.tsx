@@ -114,4 +114,18 @@ describe('ChangeTreePanel', () => {
     }))
     expect(screen.queryByText(/too many to lay out here/)).not.toBeInTheDocument()
   })
+
+  it('says the tree failed, offers to try again and lists the changes — never "nothing here"', () => {
+    listed.mockClear()
+    const onRetry = vi.fn()
+    render(
+      <ChangeTreePanel summary={undefined} error={new Error('timeout')} onRetry={onRetry} fetchChildren={vi.fn()}
+        origin={origin} emptyHint="Nothing here." list={{ wsId: 'ws1', graphId: 'g1', origin: { branchId: 'br_1' } }} />,
+    )
+    expect(screen.getByRole('alert')).toHaveTextContent(/Couldn’t lay these changes out as a tree/)
+    expect(screen.getByText('the change list')).toBeInTheDocument()
+    expect(screen.queryByText('Nothing here.')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /Try again/ }))
+    expect(onRetry).toHaveBeenCalledTimes(1)
+  })
 })

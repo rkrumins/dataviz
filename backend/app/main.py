@@ -2754,6 +2754,8 @@ class _BodySizeLimitMiddleware(BaseHTTPMiddleware):
     _LARGE_BODY_PREFIXES = (
         "/api/v1/import",
         "/api/v1/versioning",
+        # A draft's save: one atomic commit of every staged change (tens of thousands of ops).
+        "/api/v1/graph/changes",
         "/api/v1/views/transfer/inspect",
         "/api/v1/views/transfer/reconcile",
         "/api/v1/views/transfer/import",

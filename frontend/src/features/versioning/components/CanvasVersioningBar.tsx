@@ -169,6 +169,9 @@ export function CanvasVersioningBar({
   // New entities a curated view could not draw: it draws a page of what the draft created.
   const createdNotLoaded = useCanvasStore((s) => s.createdRootsNotLoaded)
   const loadingChanges = diffQ.isLoading || (large && (indexQ.isLoading || countsQ.isLoading))
+  // A busy or timed-out count is not "no changes": it says so, with a retry.
+  const changesFailed = large ? indexQ.isError || countsQ.isError : diffQ.isError
+  const retryChanges = () => { if (large) { void indexQ.refetch(); void countsQ.refetch() } else void diffQ.refetch() }
   // A draft's rings are its own diff's: whatever replaced them (a revision closed, a highlight
   // cleared) gives way to them again.
   const activeChangeSet = useBranchStore((s) => s.activeChangeSet)
@@ -411,7 +414,8 @@ export function CanvasVersioningBar({
         {isDraft && branchId && (
           <div className="flex items-center gap-2 text-ink-muted">
             {loadingChanges ? (
-              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              // A large draft's index takes a moment: say it is being counted.
+              <span className="text-xs inline-flex items-center gap-1.5"><Loader2 className="w-3.5 h-3.5 animate-spin" aria-hidden />Counting changes…</span>
             ) : (
               <>
                 {/* The distinction the whole draft model hinges on — saved to
@@ -428,6 +432,11 @@ export function CanvasVersioningBar({
                       <span className="text-[11px] text-ink-muted/80">in branch</span>
                     </span>
                   </HoverTip>
+                ) : changesFailed ? (
+                  <button type="button" onClick={retryChanges}
+                    className="text-xs font-medium text-amber-600 dark:text-amber-400 hover:underline">
+                    Couldn’t count the changes — try again
+                  </button>
                 ) : uncommitted === 0 && viewChangeCount === 0 ? (
                   <span className="text-xs">No changes yet</span>
                 ) : null}
