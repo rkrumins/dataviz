@@ -129,8 +129,9 @@ to confirm.
    - **Add a property to all** adds a new one.
 4. Choose **Stage for N**. Each entity's change is staged on its own, as if you
    had edited them one by one — an entity you had already changed keeps that
-   change too, and one the edit wouldn't change isn't touched. **Undo** on the
-   message takes the whole edit back.
+   change too, and one the edit wouldn't change isn't touched. It is one step
+   however many entities you hold: **Undo** on the message (or the toolbar's
+   **Undo**) takes the whole edit back.
 
 Outside a draft the same bar says **Details**: the panel shows what they share,
 read-only, with **Edit in a draft**. Choosing one entity's own details closes it.
@@ -237,16 +238,28 @@ read-only.
 1. In the toolbar (or an entity's footer), choose **Review & Save** — it shows
    how many edits are waiting. **Review & Save Changes** opens and says what
    you're changing: *You're changing 3 entities and 2 relationships.*
-2. Check them:
-   - **List** has one card per entity or relationship, saying what changes in
-     words — *Renamed orders to Orders v2*, *Connected Orders → Sales* — and,
-     expanded, each field before and after as the value it is (tags as added
-     and removed chips, dates, links, Yes/No). ↗ shows it on the canvas; ✕
-     discards it (**Redo** brings it back).
-   - **Map** draws the changed entities and relationships, with the entities
-     they hang off faded behind them.
+2. Check them — there may be a handful or tens of thousands:
+   - **List** has one row per entity, relationship or layout change, saying
+     what it does in words — *Renamed orders to Orders v2*, *Connected Orders →
+     Sales*. The selected one shows beside the list: each field and property it
+     changes, before and after, as the value it is (tags as added and removed
+     chips, dates, links, Yes/No), a move's from and to, or what a delete
+     takes with it. **‹ ›** (or `J` / `K`, the arrow keys, `Home` / `End`) move
+     through them — *312 of 1,240* says where you are. **Show on canvas** goes
+     to it; **Step through** walks the changes shown on the canvas (see
+     [Step through changes on the canvas](#step-through-changes-on-the-canvas));
+     the bin (or `Delete`) discards it (**Redo** brings it back).
+   - Narrow what's shown: **All / Entities / Relationships / Layout**,
+     **Added / Modified / Removed**, a type, or a search (`/`). **Needs
+     attention** shows only changes a save refused or that conflict. *1,240
+     shown of 10,482* says how many are left; **Discard the N shown** discards
+     just those.
+   - **Map** draws the changes shown, with the entities they hang off faded
+     behind them. Past 200 entities it groups them by type and kind of change —
+     *Table · 4,812 edited* — with the relationships between the groups
+     summed; choose a group to list just those.
    - **Already saved on this draft** lists what earlier saves and imports
-     changed — it is published with the rest.
+     changed, a page at a time — it is published with the rest.
 3. Under **Where should these go?** choose:
    - **Save to draft** — save and keep working; save again whenever you like.
    - **Save & publish** — save, then publish straight away (if you may).
@@ -278,7 +291,18 @@ draft, **Review & Save** opens straight on **Publish**.
 
 **Committed**, in the amber strip, hides or shows the rings for changes already
 saved to the draft. After an import they're shown, and a message says what the
-import added, updated and removed — **Review changes** opens its map.
+import added, updated and removed — **Review changes** lists them, a page at a
+time.
+
+### Step through changes on the canvas
+
+To see each change where it sits, choose **Step through** in **Review &
+Save**, **Show** on a row of a change list, or the change counts in the amber
+strip. A bar at the bottom of the canvas says *Change 12 of 10,482*, with the
+entity's name and what happened to it; each step opens it on the canvas and in
+its details. **‹ ›** (or `J` / `K`, `[` / `]`) step; **Unsaved / Saved / All**
+chooses which changes; `Esc` or ✕ stops. One the view doesn't show says **Not
+in this view** — **Skip** goes on to the next.
 
 ## When someone else changed the same thing
 
@@ -366,6 +390,10 @@ close the banner to hide it.
 
 Changes you saved with **Review & Save** are in the draft itself, so they're
 there on any device.
+
+If what you have staged is more than this browser can keep, a message says so
+— *too large to keep across a reload* — and nothing older is restored in its
+place. Save it to the draft to keep it.
 
 ## Submit your draft for review
 

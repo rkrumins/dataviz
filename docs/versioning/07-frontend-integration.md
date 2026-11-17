@@ -159,14 +159,37 @@ The entity drawer stages each edit as it is committed — a property edited in p
 → `stageNodeEdit`; there is no separate Stage step. Every staged action is one step in the store's
 undo history (`past` / `redoStack` hold `UndoStep`s), so Undo steps back one edit — a node edited
 twice keeps one staged change but undoes one edit at a time — and Redo re-applies it (`reapply`).
-"Review & Save" (`StagedChangesPanel`) is a guided stepper: Review (List of `reviewModel` groups —
-one per entity/relationship, a sentence, only the fields `nodeUpdatePatch` sends — or a lazy
-`ChangeMap`), a destination (Save to draft / Save & publish / Save & send for review), and Publish
+"Review & Save" (`StagedChangesPanel`) is a guided stepper: Review (the `ReviewExplorer` — a
+virtualized list of `reviewModel` groups, one per entity/relationship/layout change, with the
+selected one's sentence and only the fields `nodeUpdatePatch` sends beside it, filtered by
+`ReviewFilterBar` — or a lazy `ChangeMap`, clustered by type × status past 200 entities), a
+destination (Save to draft / Save & publish / Save & send for review), and Publish
 (the shared `usePublishFlow` / `PublishForm` that `CommitDialog` also renders, over the whole
 draft's counts). Its `onConfirm` resolves `true` once written; the panel then closes or goes on to
 Publish. It runs `saveStagedChangesToDraft` (`ContextViewCanvas.tsx` `StagedChangesPanel
-onConfirm` → `saveStagedChangesToDraft.ts`). The header docstring says "two phases" but the code
-implements **three**, and the separation is the whole point:
+onConfirm` → `saveStagedChangesToDraft.ts`).
+
+At volume (tens of thousands of staged changes) everything per change is built once per version of
+the staged list and shared: `buildReviewIndex` (`model/reviewIndex.ts`: groups, change → group,
+facet counts; a group's sentence is worded when first read), `stagedIndexOf`
+(`store/stagedIndex.ts`: last change per target, node edit / edge edit / edge delete by id — what
+tree rows, drawers and decorations select from, so an edit re-renders only the rows it touches),
+`useEntityDecoration(id)` (one entity's interned decoration). Bulk writes are one store write and
+one Undo step: `stageNodeEdits` (bulk edit), `stageMany` (duplicated relationships, a multi-delete,
+whose delete-impact previews are read six at a time and filled in with one update), `discardMany`
+("Discard the N shown"); Undo/Redo apply a step in one pass (`putChanges`) and gather the canvas
+updates its hooks make into one `updateNodes` (`store/nodeUpdateBatch.ts`). History keeps the last
+`MAX_UNDO_STEPS` (500) actions. A snapshot too large for `localStorage` is removed rather than left
+stale, with one warning.
+
+`ChangeNavigator` (rendered by `ContextViewCanvas`, driven by `store/changeNavigatorStore.ts`) steps
+through changed entities on the canvas — staged (`stopsFromGroups`), saved (`savedStops` of the
+active change set) or both — revealing each with `revealOnCanvas` and opening its drawer; started
+from the explorer's **Step through**, a `ChangeList` row's **Show** (offered while a canvas is
+mounted: `canReveal`) and the draft bar's counts.
+
+The save itself: the header docstring says "two phases" but the code implements **three**, and the
+separation is the whole point:
 
 ### Phase 1 — creates via `provider.createNode` (`saveStagedChangesToDraft.ts:46-100`)
 `create_entity` is intentionally **excluded** from the ops translation (`stagedChangesToOps.ts:5-7,
@@ -278,7 +301,20 @@ Two change-review presentations sit under it:
   row expandable to a field-level `EntityDiff`; also exports `ChangeCountChips`.
 - **`ChangeTreePanel`** — hierarchical, lazy, business-reader-facing: an impact header rolls up per
   entity-type ("17 tables · 40 columns"), with a containment tree whose children page in on demand
-  (`summaryFirst`).
+  (`summaryFirst`). Past `DIFF_TREE_MAX_CHANGES` (or when the tree fails — an error state with Try
+  again, never the empty hint) it lists the same changes from the server-paged `ChangeList`.
+
+Every one of them, the Review Center's Files changed, commit diffs, revision compare and
+`EntityHistory` end in `EntityDiff`, which shows a change **property by property**: `fieldDiff.ts`
+(`entityFieldChanges`, `fromFieldDeltas`, `fromRevisionChanges`) expands nested `properties` (and a
+legacy flattened edge's) into one named row each — the drawer's labels and folders, bookkeeping
+(`version`, `childCount`, `_…`) dropped — rendered with `ReviewValue`, a summary line, the first 25
+rows then "Show all", and the raw before/after for the technical persona.
+
+Large drafts and reviews never hang: a branch past the tree cap is counted from the cached change
+index; a fork review is capped too (its 409 carries the change-list window), with merges and
+hierarchy builds off the event loop; the PR drawer reads Files changed from the change list (the
+full payload diff is fetched only for conflicts) and inbox rows count drafts from the change index.
 
 ---
 

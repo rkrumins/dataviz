@@ -43,6 +43,19 @@ describe('ChangeMap', () => {
     expect(onShowCluster).toHaveBeenCalledWith('Table', 'modified')
   })
 
+  it('lays the clusters out by kind of change, and sums links to unchanged entities into one', () => {
+    const groups = buildReviewGroups([
+      ...Array.from({ length: MAX_NODES + 5 }, (_, i) =>
+        change({ targetId: `urn:n${i}`, targetUrn: `urn:n${i}`, before: { label: `n${i}`, properties: { a: 1 } }, after: { label: `n${i}`, properties: { a: 2 } } })),
+      change({ type: 'create_edge', targetId: 'e1', targetUrn: undefined, after: { source: 'urn:n1', target: 'urn:outside', edgeType: 'FEEDS' } }),
+    ], { nameOf, typeOf: () => 'Table' })
+    render(<ChangeMap groups={groups} nameOf={nameOf} />)
+    expect(screen.getByText('Edited')).toBeInTheDocument()
+    expect(screen.getByText('Linked, unchanged')).toBeInTheDocument()
+    expect(screen.getByText('Unchanged entities')).toBeInTheDocument()
+    expect(screen.getByText('1 linked to')).toBeInTheDocument()
+  })
+
   it('draws the selected change on its own beside the clusters', () => {
     const groups = buildReviewGroups(Array.from({ length: MAX_NODES + 5 }, (_, i) =>
       change({ targetId: `urn:n${i}`, targetUrn: `urn:n${i}`, before: { label: `n${i}`, properties: { a: 1 } }, after: { label: `n${i}`, properties: { a: 2 } } })),

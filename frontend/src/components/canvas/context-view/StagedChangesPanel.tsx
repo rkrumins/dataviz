@@ -272,7 +272,7 @@ export function StagedChangesPanel({ onConfirm, describe, wsId, graphId, dataSou
                   {step === 'publish' ? <Rocket className="w-5 h-5 text-accent-lineage" /> : <FileStack className="w-5 h-5 text-accent-lineage" />}
                   {total > 0 && step === 'review' && (
                     <span className="absolute -top-1.5 -right-1.5 min-w-[20px] h-5 rounded-full bg-accent-lineage text-white text-[10px] font-bold flex items-center justify-center px-1.5 shadow ring-2 ring-canvas-elevated tabular-nums">
-                      {total}
+                      {total.toLocaleString()}
                     </span>
                   )}
                 </div>
@@ -291,7 +291,7 @@ export function StagedChangesPanel({ onConfirm, describe, wsId, graphId, dataSou
                     {failedCount > 0 && problems.length === 0 && step === 'review' && (
                       <span className="ml-1.5 inline-flex items-center gap-1 text-rose-600 dark:text-rose-400 font-semibold">
                         <AlertTriangle className="w-3 h-3" />
-                        {failedCount} previously failed
+                        {failedCount.toLocaleString()} previously failed
                       </span>
                     )}
                   </p>
@@ -420,7 +420,7 @@ export function StagedChangesPanel({ onConfirm, describe, wsId, graphId, dataSou
                     <>
                       <button
                         onClick={() => {
-                          if (confirm(`Discard all ${total} staged change${total === 1 ? '' : 's'}? This cannot be undone.`)) {
+                          if (confirm(`Discard all ${total.toLocaleString()} staged change${total === 1 ? '' : 's'}? This cannot be undone.`)) {
                             discardAll()
                             close()
                           }
@@ -455,7 +455,7 @@ export function StagedChangesPanel({ onConfirm, describe, wsId, graphId, dataSou
                         ) : destination === 'draft' || !canPublishHere ? (
                           <>
                             <Check className="w-4 h-4" strokeWidth={3} />
-                            Save {total} change{total === 1 ? '' : 's'}
+                            Save {total.toLocaleString()} change{total === 1 ? '' : 's'}
                           </>
                         ) : (
                           <>
@@ -551,7 +551,7 @@ function SummaryChip({ status, count, label }: { status: ChangeStatus; count: nu
   return (
     <span className={cn('inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border text-[11px] font-semibold tabular-nums', meta.bg, meta.border, meta.text)}>
       <meta.Icon className="w-3 h-3" />
-      <span className="font-bold">{count}</span>
+      <span className="font-bold">{count.toLocaleString()}</span>
       <span className="opacity-80">{label}</span>
     </span>
   )

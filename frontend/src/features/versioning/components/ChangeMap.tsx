@@ -71,7 +71,8 @@ const edgeStyle = (status: ChangeStatus, isSaved: boolean, width = 2) => ({
   labelBgStyle: { fill: 'var(--nx-bg-elevated)' },
   labelBgPadding: [4, 2] as [number, number],
   labelBgBorderRadius: 4,
-  markerEnd: { type: MarkerType.ArrowClosed, color: STROKE[status], width: 16, height: 16 },
+  // A marker scales with the stroke: kept the same size on a thick summed link.
+  markerEnd: { type: MarkerType.ArrowClosed, color: STROKE[status], width: 32 / width, height: 32 / width },
 })
 
 function layout(ids: Iterable<string>, edges: readonly Edge[]): Map<string, { x: number; y: number }> {
@@ -145,10 +146,16 @@ function build(groups: readonly ReviewGroup[], saved: ChangeSet | null, nameOf: 
 
 const STATUS_WORD: Record<ChangeStatus, string> = { added: 'added', modified: 'edited', removed: 'removed' }
 
+/** Cluster columns, left to right: what the save adds, edits, removes; what the draft has saved;
+ *  the unchanged entities the changes link to; and the selected change drawn one by one. */
+const COLUMN: Record<string, number> = { added: 0, modified: 1, removed: 2, saved: 3, context: 4, near: 5 }
+const COLUMN_LABEL = ['Added', 'Edited', 'Removed', 'Saved on the draft', 'Linked, unchanged', 'Selected']
+
 /**
- * Past {@link MAX_NODES}: one node per type × kind of change (saved changes on their own), the
- * relationships between them summed, and — drawn one by one — the selected entity and the
- * entities its staged relationships reach.
+ * Past {@link MAX_NODES}: one node per type × kind of change (saved changes on their own, the
+ * unchanged entities the changes link to as one), laid out as a matrix — a column per kind of
+ * change, a row per type — with the relationships between them summed; and, drawn one by one, the
+ * selected entity and the entities its staged relationships reach.
  */
 function clusters(groups: readonly ReviewGroup[], saved: ChangeSet | null, nameOf: (id: string) => string, selected: ReviewGroup | undefined): MapModel {
   const data = new Map<string, MapNodeData>()
@@ -172,10 +179,20 @@ function clusters(groups: readonly ReviewGroup[], saved: ChangeSet | null, nameO
     add(id, `cluster:saved|${ch.status}`, () => ({ label: 'Saved on the draft', status: ch.status, context: false, saved: true, selected: false }))
   }
   const sums = new Map<string, { source: string; target: string; status: ChangeStatus; saved: boolean; n: number }>()
+  // A link to an entity that did not change: to the one "Unchanged" cluster, counted once each.
+  const unchanged = new Set<string>()
+  const endOf = (id: string) => {
+    const c = clusterOf.get(id)
+    if (c) return c
+    unchanged.add(id)
+    if (!data.has('cluster:context')) data.set('cluster:context', { label: 'Unchanged entities', context: true, saved: false, selected: false, count: 0 })
+    return 'cluster:context'
+  }
   const sum = (s: string | undefined, t: string | undefined, status: ChangeStatus, isSaved: boolean) => {
-    const cs = s && clusterOf.get(s)
-    const ct = t && clusterOf.get(t)
-    if (!cs || !ct || cs === ct) return
+    if (!s || !t) return
+    const cs = endOf(s)
+    const ct = endOf(t)
+    if (cs === ct) return
     const k = `${cs}>${ct}`
     const was = sums.get(k)
     if (was) was.n++
@@ -188,6 +205,7 @@ function clusters(groups: readonly ReviewGroup[], saved: ChangeSet | null, nameO
     if (ends) sum(ends.source, ends.target, g.status, false)
   }
   for (const ch of saved?.changes ?? []) if (ch.kind === 'edge') sum(ch.sourceUrn, ch.targetUrn, ch.status, true)
+  if (data.has('cluster:context')) data.get('cluster:context')!.count = unchanged.size
   const edges: Edge[] = [...sums.values()].map((e) => ({
     id: `sum:${e.source}>${e.target}`, source: e.source, target: e.target, label: e.n.toLocaleString(),
     ...edgeStyle(e.status, e.saved, Math.min(6, 1.5 + Math.log10(e.n + 1) * 1.5)),
@@ -212,8 +230,33 @@ function clusters(groups: readonly ReviewGroup[], saved: ChangeSet | null, nameO
       reached++
     }
   }
-  const ids = [...data.keys()]
-  return { nodes: toFlow(data, layout(ids, edges)), edges, total: clusterOf.size, byKey }
+  // A row per type, the most changed first; each cluster in its kind's column.
+  const typeRank = new Map<string, number>()
+  for (const [, d] of [...data].filter(([id]) => id.startsWith('cluster:')).sort((a, b) => (b[1].count ?? 0) - (a[1].count ?? 0))) {
+    if (!typeRank.has(d.label)) typeRank.set(d.label, typeRank.size)
+  }
+  const pos = new Map<string, { x: number; y: number }>()
+  const nextRow = new Map<number, number>()
+  for (const [id, d] of data) {
+    const col = !id.startsWith('cluster:') ? COLUMN.near
+      : id === 'cluster:context' ? COLUMN.context
+      : d.saved ? COLUMN.saved : COLUMN[d.status ?? 'modified']
+    const row = id.startsWith('cluster:') && id !== 'cluster:context' && !d.saved
+      ? typeRank.get(d.label)!
+      : (nextRow.get(col) ?? 0)
+    nextRow.set(col, Math.max(nextRow.get(col) ?? 0, row + 1))
+    pos.set(id, { x: col, y: row * (NODE_H + 26) })
+  }
+  // Only the columns in use, side by side.
+  const used = [...nextRow.keys()].sort((a, b) => a - b)
+  const xOf = (col: number) => used.indexOf(col) * (NODE_W + 110)
+  for (const p of pos.values()) p.x = xOf(p.x)
+  const headings: Node<MapNodeData>[] = used.map((col) => ({
+    id: `column:${col}`, type: 'column', position: { x: xOf(col), y: -34 },
+    data: { label: COLUMN_LABEL[col], context: true, saved: false, selected: false },
+    draggable: false, connectable: false, selectable: false,
+  }))
+  return { nodes: [...headings, ...toFlow(data, pos)], edges, total: clusterOf.size, byKey }
 }
 
 const ChangeNode = memo(function ChangeNode({ data }: NodeProps<Node<MapNodeData>>) {
@@ -235,16 +278,22 @@ const ChangeNode = memo(function ChangeNode({ data }: NodeProps<Node<MapNodeData
         <span className={cn('block text-[10px] font-medium truncate', meta ? meta.text : 'text-ink-muted')}>
           {data.count !== undefined && data.status
             ? `${data.count.toLocaleString()} ${STATUS_WORD[data.status]}`
+            : data.count !== undefined ? `${data.count.toLocaleString()} linked to`
             : meta ? `${meta.label}${data.saved ? ' · saved' : ''}` : 'Unchanged'}
         </span>
       </span>
-      {data.count !== undefined && <ListFilter className="w-3.5 h-3.5 text-ink-muted shrink-0" aria-hidden />}
+      {data.count !== undefined && data.status && !data.saved && <ListFilter className="w-3.5 h-3.5 text-ink-muted shrink-0" aria-hidden />}
       <Handle type="source" position={Position.Right} className="!opacity-0 !w-1 !h-1" />
     </div>
   )
 })
 
-const nodeTypes = { change: ChangeNode }
+/** A column's heading in the cluster matrix. */
+const ColumnLabel = memo(function ColumnLabel({ data }: NodeProps<Node<{ label: string }>>) {
+  return <span className="block w-[196px] text-[11px] font-bold uppercase tracking-[0.08em] text-ink-muted">{data.label}</span>
+})
+
+const nodeTypes = { change: ChangeNode, column: ColumnLabel }
 
 export default function ChangeMap({ groups, saved = null, nameOf, selectedKey, onSelect, onShowInList, onReveal, onShowCluster }: {
   /** The staged changes, as Review & Save groups them (and as its filter keeps them). */
@@ -296,10 +345,11 @@ export default function ChangeMap({ groups, saved = null, nameOf, selectedKey, o
           nodesDraggable={false}
           nodesConnectable={false}
           onNodeClick={(_, n) => {
+            if (n.type === 'column') return
             const d = n.data as MapNodeData
-            if (d.count !== undefined && d.status) {
-              if (d.saved) return
-              onShowCluster?.(d.typeId ?? '', d.status)
+            if (d.count !== undefined) {
+              // A group of staged changes lists them; the saved and unchanged groups are context.
+              if (d.status && !d.saved) onShowCluster?.(d.typeId ?? '', d.status)
               return
             }
             select(selected === n.id ? null : n.id)

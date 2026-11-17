@@ -231,9 +231,9 @@ export function describeScope(groups: readonly ReviewGroup[]): string {
   const n = { node: 0, edge: 0, layout: 0 }
   for (const g of groups) n[g.kind]++
   const parts = [
-    n.node && `${n.node} ${n.node === 1 ? 'entity' : 'entities'}`,
-    n.edge && `${n.edge} ${n.edge === 1 ? 'relationship' : 'relationships'}`,
-    n.layout && `${n.layout} layout ${n.layout === 1 ? 'change' : 'changes'}`,
+    n.node && `${n.node.toLocaleString()} ${n.node === 1 ? 'entity' : 'entities'}`,
+    n.edge && `${n.edge.toLocaleString()} ${n.edge === 1 ? 'relationship' : 'relationships'}`,
+    n.layout && `${n.layout.toLocaleString()} layout ${n.layout === 1 ? 'change' : 'changes'}`,
   ].filter(Boolean) as string[]
   return parts.length <= 1 ? (parts[0] ?? 'nothing') : `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`
 }
