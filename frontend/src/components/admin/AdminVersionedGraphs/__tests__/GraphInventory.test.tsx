@@ -62,7 +62,7 @@ const PLATFORM = row({
 })
 
 /** The list endpoint answers `pages` in turn (the last one again after that). */
-function serve(...pages: Array<{ graphs: VersionedGraphRow[]; nextCursor: string | null }>): Sent[] {
+function serve(...pages: Array<{ graphs: VersionedGraphRow[]; nextCursor: string | null; total?: number }>): Sent[] {
     let n = 0
     return mockApi('ok', (req) => (req.path.endsWith('/admin/versioning/graphs') ? json(pages[Math.min(n++, pages.length - 1)]) : undefined))
 }
@@ -159,15 +159,23 @@ describe('GraphInventory', () => {
         expect(screen.queryByRole('button', { name: /load more/i })).not.toBeInTheDocument()
     })
 
-    it('pages on with the cursor and keeps the rows it has', async () => {
-        const sent = serve({ graphs: [MAIN], nextCursor: 'graph_a' }, { graphs: [FORK], nextCursor: null })
+    it('pages on with the cursor and keeps the rows it has, out of the total the server counts', async () => {
+        const sent = serve({ graphs: [MAIN], nextCursor: 'graph_a', total: 2 }, { graphs: [FORK], nextCursor: null, total: 2 })
         renderWithApi(<Inventory />)
 
+        expect(await screen.findByText('1 of 2 graphs shown')).toBeInTheDocument()
         await userEvent.click(await screen.findByRole('button', { name: /load more/i }))
         expect(await screen.findByText('dsfork_1')).toBeInTheDocument()
         expect(screen.getByText('Customer 360')).toBeInTheDocument()
         expect(listCalls(sent).at(-1)?.query.get('cursor')).toBe('graph_a')
         expect(screen.queryByRole('button', { name: /load more/i })).not.toBeInTheDocument()
+        expect(screen.getByText('2 of 2 graphs shown')).toBeInTheDocument()
+    })
+
+    it('without a count from the server, says only how many are shown', async () => {
+        serve({ graphs: [MAIN], nextCursor: 'graph_a' })
+        renderWithApi(<Inventory />)
+        expect(await screen.findByText('1 graph shown, more to load')).toBeInTheDocument()
     })
 
     it('filters on the server by provider, status, kind, read mode, class, own settings and search', async () => {

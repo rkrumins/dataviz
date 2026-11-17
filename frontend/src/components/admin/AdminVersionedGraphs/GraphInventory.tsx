@@ -197,6 +197,8 @@ export function GraphInventory({ filter, onFilter, onOpenSettings, providers }: 
     const navigate = useNavigate()
     const query = useGraphInventory(filter)
     const rows = query.data?.pages.flatMap((p) => p.graphs) ?? []
+    // The latest page's count: the filters' graphs as the server last counted them.
+    const total = query.data?.pages.at(-1)?.total
     const [search, setSearch] = useState(filter.q ?? '')
     const [busy, setBusy] = useState<string | null>(null)
     const [notes, setNotes] = useState<Record<string, RowNote>>({})
@@ -462,7 +464,11 @@ export function GraphInventory({ filter, onFilter, onOpenSettings, providers }: 
                         </div>
                     </div>
                     <div className="flex flex-wrap items-center justify-between gap-2 border-t border-glass-border/50 px-5 py-3 text-[12px] text-ink-secondary">
-                        <span>{formatCount(rows.length)} {rows.length === 1 ? 'graph' : 'graphs'} shown{query.hasNextPage ? ', more to load' : ''}</span>
+                        <span>
+                            {total === undefined
+                                ? `${formatCount(rows.length)} ${rows.length === 1 ? 'graph' : 'graphs'} shown${query.hasNextPage ? ', more to load' : ''}`
+                                : `${formatCount(rows.length)} of ${formatCount(total)} ${total === 1 ? 'graph' : 'graphs'} shown`}
+                        </span>
                         {query.hasNextPage && (
                             <Button size="sm" variant="secondary" loading={query.isFetchingNextPage} onClick={() => void query.fetchNextPage()}>Load more</Button>
                         )}

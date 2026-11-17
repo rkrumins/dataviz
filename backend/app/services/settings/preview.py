@@ -19,12 +19,17 @@ part the change can't affect is null.
   them: in force as exceptions, or ignored while the platform locks the setting;
 * ``warnings`` — what to acknowledge before saving, each ``{code, text}``, with ``key`` where one
   setting is the cause.
+
+A save must acknowledge the warnings in :data:`MUST_ACKNOWLEDGE` (:func:`must_acknowledge`, which
+:func:`.service.save` checks): what the change can't take back, and a high-risk setting moved the
+way its guidance calls worse.
 """
 from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Any, Awaitable, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import (Any, Awaitable, Callable, Dict, Iterable, List, Mapping, Optional, Sequence,
+                    Set, Tuple)
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -45,6 +50,9 @@ _MEMORY = frozenset({"builds.copyRoomPct", "builds.copyMaxBytes", "builds.method
 _DATABASE = ("database.readsPerProcess", "database.readsPerGraph", "database.readTimeoutMs")
 _RETENTION = "drafts.keepClosedDays"
 _CLASS = "residency.class"
+#: The warnings a save is refused without acknowledging: the changes of closed drafts the next
+#: sweep removes for good, and a high-risk setting moved the way its guidance calls worse.
+MUST_ACKNOWLEDGE = ("risky_change", "drafts_removed")
 
 
 async def labels(session: AsyncSession, data_source_ids: Iterable[Optional[str]]
@@ -337,8 +345,10 @@ def _plural(n: int, one: str, many: str) -> str:
     return f"{n:,} {one if n == 1 else many}"
 
 
-def _warnings(before: Context, after: Context, target: Target, changed: Set[str],
-              parts: Mapping[str, Any]) -> List[Dict[str, Any]]:
+def _risky(before: Context, after: Context, target: Target,
+           changed: Set[str]) -> List[Dict[str, Any]]:
+    """``risky_change`` for each high-risk setting the change moves the way its guidance calls
+    worse."""
     out: List[Dict[str, Any]] = []
     for key in sorted(changed):
         s = before.settings[key]
@@ -346,13 +356,40 @@ def _warnings(before: Context, after: Context, target: Target, changed: Set[str]
         will = resolver.effective(after, key, target)
         if s.guidance.risk == "high" and not _same(was, will) and _riskier(s, was, will):
             out.append({"code": "risky_change", "key": key, "text": s.guidance.risk_note})
-    drafts, outside = parts["drafts"], parts["outsideLimits"]
+    return out
+
+
+def _drafts_removed(drafts: Optional[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    if not drafts or not drafts["removedAtNextSweep"]:
+        return []
+    return [{"code": "drafts_removed", "key": _RETENTION, "text": (
+        f"The next sweep removes the changes of "
+        f"{_plural(drafts['removedAtNextSweep'], 'closed draft', 'closed drafts')}, and that "
+        f"can't be undone.")}]
+
+
+async def must_acknowledge(before: Context, after: Context, target: Target, changed: Set[str], *,
+                           in_scope: Callable[[], Awaitable[Sequence[Tuple[Any, Target]]]]
+                           ) -> List[Dict[str, Any]]:
+    """The warnings of :data:`MUST_ACKNOWLEDGE` that saving ``changed`` at ``target`` raises, each
+    as the full preview words it. ``in_scope`` lists the graphs in reach, asked for only when the
+    drafts' window changes. Drafts that can't be counted raise nothing, as the full preview names
+    that part unavailable instead."""
+    out = _risky(before, after, target, changed)
+    if _RETENTION in changed:
+        try:
+            out += _drafts_removed(await _drafts(before, after, await in_scope()))
+        except Exception:  # noqa: BLE001 — as the preview: the save isn't held up by it
+            logger.warning("settings save: the closed drafts a sweep would remove could not be "
+                           "counted", exc_info=True)
+    return out
+
+
+def _warnings(before: Context, after: Context, target: Target, changed: Set[str],
+              parts: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    out = _risky(before, after, target, changed) + _drafts_removed(parts["drafts"])
+    outside = parts["outsideLimits"]
     residency, memory, database = parts["residency"], parts["memory"], parts["database"]
-    if drafts and drafts["removedAtNextSweep"]:
-        out.append({"code": "drafts_removed", "key": _RETENTION, "text": (
-            f"The next sweep removes the changes of "
-            f"{_plural(drafts['removedAtNextSweep'], 'closed draft', 'closed drafts')}, and that "
-            f"can't be undone.")})
     if outside and outside["locked"]:
         n = outside["locked"]
         out.append({"code": "values_locked_out", "text": (

@@ -320,7 +320,9 @@ describe('ProjectionHealthCard', () => {
     it('says where the mode was chosen when it is the one in force', () => {
       wmQ.data = { ...WM, readMode: 'latest', readModeDeclared: 'latest', readModeSource: 'workspace', readModeWhy: [] }
       renderCard()
-      expect(readers()).toHaveTextContent(`${title('latest')}From This workspace`)
+      // The mode's promise is read out to a screen reader with it, where the pointer gets a tip.
+      const promise = READS.choices.find((c) => c.id === 'latest')!.promise
+      expect(readers()).toHaveTextContent(`${title('latest')}: ${promise}From This workspace`)
       expect(screen.queryByText(/^Chosen:/)).not.toBeInTheDocument()
     })
 

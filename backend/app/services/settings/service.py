@@ -22,7 +22,7 @@ import logging
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Collection, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -67,6 +67,18 @@ class FollowsRoot(Exception):
         why = {w.code: w for w in registry().WHY}.get(self.code)
         super().__init__(why.text if why is not None else "A fork follows the graph it was "
                                                           "forked from.")
+
+
+class AcknowledgementRequired(Exception):
+    """A save that does what it must acknowledge (:data:`.preview.MUST_ACKNOWLEDGE`) and doesn't
+    (409 ``acknowledgement_required``): ``warnings``, each ``{code, key?, text}`` as the full
+    preview words it. Nothing was saved."""
+    code = "acknowledgement_required"
+
+    def __init__(self, warnings: List[Dict[str, Any]]):
+        self.warnings = warnings
+        super().__init__("Acknowledge what this change does before saving it: "
+                         + " ".join(w["text"] for w in warnings))
 
 
 class NotRevertible(Exception):
@@ -461,14 +473,30 @@ async def _saved(session: AsyncSession, place: Place, editor: str,
     return out
 
 
+async def _acknowledged(ctx: Context, place: Place, changes: Sequence[Change],
+                        acknowledged: Collection[str]) -> None:
+    """Refuse a save that raises a warning it must acknowledge without acknowledging its code:
+    :class:`AcknowledgementRequired`, naming each such warning."""
+    raised = await previews.must_acknowledge(ctx, with_changes(ctx, place, changes), place.target,
+                                             {c.key for c in changes},
+                                             in_scope=lambda: _in_scope(place))
+    missing = [w for w in raised if w["code"] not in acknowledged]
+    if missing:
+        raise AcknowledgementRequired(missing)
+
+
 async def save(session: AsyncSession, place: Place, changes: Sequence[Change], *, editor: str,
-               actor: str, reason: Optional[str] = None) -> Dict[str, Any]:
+               actor: str, reason: Optional[str] = None,
+               acknowledged: Collection[str] = ()) -> Dict[str, Any]:
     """Save ``changes`` (all at ``place``) as ``editor``, all or nothing: refused as
-    :func:`_check` refuses them, or :class:`~.store.SettingsConflict` (409) for a value changed
-    since it was read. Then what the save sets in motion (:func:`.effects.after_save`). Returns
-    the values as :func:`values` gives them, and the change set's id (None: nothing changed)."""
+    :func:`_check` refuses them; with :class:`AcknowledgementRequired` (409) for a warning of
+    :data:`.preview.MUST_ACKNOWLEDGE` the change raises whose code ``acknowledged`` lacks; or with
+    :class:`~.store.SettingsConflict` (409) for a value changed since it was read. Then what the
+    save sets in motion (:func:`.effects.after_save`). Returns the values as :func:`values` gives
+    them, and the change set's id (None: nothing changed)."""
     ctx = await context(session)
     _check(ctx, place, changes, editor)
+    await _acknowledged(ctx, place, changes, acknowledged)
     change_set = await store.apply(session, registry().DOMAIN, changes, actor=actor, reason=reason,
                                    source="api", before_commit=_before_commit(place))
     await effects.after_save(change_set)

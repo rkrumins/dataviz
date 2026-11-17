@@ -27,7 +27,7 @@ function Pin({ at, label, tone = 'ink', below = false }: { at: number; label: Re
                 tone === 'accent' ? 'bg-accent-lineage' : tone === 'rose' ? 'bg-rose-500' : 'bg-ink-secondary')} />
             <span className={cn('absolute whitespace-nowrap text-[10.5px] font-medium', below ? 'top-[calc(50%+10px)]' : 'bottom-[calc(50%+10px)]',
                 align === 'left-0' ? 'left-0' : align === 'right-0' ? 'right-0' : '-translate-x-1/2',
-                tone === 'accent' ? 'text-accent-lineage' : 'text-ink-secondary')}>
+                tone === 'accent' ? 'text-indigo-700 dark:text-indigo-300' : 'text-ink-secondary')}>
                 {label}
             </span>
         </span>
@@ -66,7 +66,7 @@ export function RetentionTimeline({ days, nextDays, className }: { days: Days; n
             caption={(
                 <>
                     A draft closed {formatDays(shown)} ago: {fate}
-                    {fateNext && <>{' '}<span className="font-medium text-accent-lineage">With your change, {fateNext}</span></>}
+                    {fateNext && <>{' '}<span className="font-medium text-indigo-700 dark:text-indigo-300">With your change, {fateNext}</span></>}
                     {' '}A merged draft’s changes stay in the published graph either way.
                 </>
             )}
@@ -94,7 +94,7 @@ export function RetentionTimeline({ days, nextDays, className }: { days: Days; n
 
 const MIN_SECS = 60
 // On a log scale "30 days" sits too close to "1 week" for both labels to fit: it is left out.
-const TICKS: Array<[number, string]> = [[60, '1 min'], [3600, '1 h'], [86400, '1 day'], [604800, '1 week'], [31536000, '1 year']]
+const TICKS: Array<[number, string]> = [[60, '1 minute'], [3600, '1 hour'], [86400, '1 day'], [604800, '1 week'], [31536000, '1 year']]
 
 export function IdleTimeline({ standardIdleSecs, coldlineIdleSecs, autoUnload = true, next, className }: {
     standardIdleSecs: number
@@ -147,14 +147,14 @@ export function IdleTimeline({ standardIdleSecs, coldlineIdleSecs, autoUnload = 
                                 )}
                                 <span aria-hidden className="absolute inset-y-0 w-px bg-ink/70" style={{ left: `${pos / 10}%` }} />
                             </div>
-                            <span className={cn('col-start-2 row-start-1 text-right text-[11px] sm:col-start-3 sm:text-left', loaded(l.secs) ? 'text-ink-secondary' : 'text-ink-muted')}>
+                            <span className={cn('col-start-2 row-start-1 text-right text-[11px] sm:col-start-3 sm:text-left', loaded(l.secs) ? 'text-ink' : 'text-ink-secondary')}>
                                 {l.secs === null || !autoUnload ? 'Never unloads' : `After ${read(l.secs)}`}
-                                {l.next !== undefined && l.next !== l.secs && autoUnload && <span className="block font-semibold text-accent-lineage">→ {read(l.next)}</span>}
+                                {l.next !== undefined && l.next !== l.secs && autoUnload && <span className="block font-semibold text-indigo-700 dark:text-indigo-300">→ {read(l.next)}</span>}
                             </span>
                         </div>
                     )
                 })}
-                <div aria-hidden className="relative h-4 text-[10px] text-ink-muted sm:ml-[5.25rem] sm:mr-[7.25rem]">
+                <div aria-hidden className="relative h-4 text-[10px] text-ink-secondary sm:ml-[5.25rem] sm:mr-[7.25rem]">
                     {TICKS.filter(([s]) => s <= maxSecs).map(([s, label]) => (
                         <span key={s} className={cn('absolute whitespace-nowrap', s === MIN_SECS ? '' : x(s) > 97 ? '-translate-x-full' : '-translate-x-1/2')}
                             style={{ left: `${x(s)}%` }}>{label}</span>

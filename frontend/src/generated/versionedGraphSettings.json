@@ -1403,7 +1403,7 @@
         ],
         "evidence": "projection._pace: after each write a pause of pacingRatio times its time, readPressureRatio times while the web tier marks reads on the node as starving (agg:readpressure:<node>), at most 5 s (_PACE_MAX_S), none under 5 ms.",
         "example": "A write that takes 500 ms is followed by a 125 ms pause, so reads on that node get about 20% of its time while a graph updates.",
-        "means": "After each write the worker pauses, so reads waiting on that node go first. At 0.25 it pauses a quarter as long as the write took, at most 5 seconds; at 0 it pauses only while reads are waiting (Pause while reads wait).",
+        "means": "After each write the worker pauses, so reads waiting on that node go first. At 25% it pauses a quarter as long as the write took, at most 5 seconds; at 0 it pauses only while reads are waiting (Pause while reads wait).",
         "recommended": {
           "forThisPlatform": null,
           "value": 0.25,
@@ -1448,7 +1448,7 @@
         "when": "next_write"
       },
       "ui": {},
-      "unit": "×",
+      "unit": "share",
       "unreadable": "last_known",
       "uses": [
         "updates.statementTargetMs"
@@ -1549,7 +1549,7 @@
         "when": "next_write"
       },
       "ui": {},
-      "unit": "×",
+      "unit": "share",
       "unreadable": "last_known",
       "uses": [
         "updates.pacingRatio",
@@ -2996,7 +2996,7 @@
       },
       "limitable": [],
       "materialized": "projection_state.residency",
-      "question": "Should this graph stay ready in memory when nobody is using it?",
+      "question": "Should graphs stay ready in memory when nobody is using them?",
       "range": null,
       "requires": [
         {
@@ -6041,7 +6041,7 @@
         "feature": "candidateKeysEnabled",
         "to": true
       },
-      "text": "Keep serving, switch when ready needs New-version builds, which is off, so this graph updates in place until it is on."
+      "text": "Keep serving, switch when ready needs New-version builds, which is off, so updates are written in place until it is on."
     },
     "capped_by_deployment": {
       "fix": null,

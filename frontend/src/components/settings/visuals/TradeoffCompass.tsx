@@ -181,10 +181,10 @@ export function TradeoffCompass({ dimensions, settings, current, next, inactive,
                                 >
                                     <span className="text-xs font-medium text-ink">{p.label}</span>
                                     <DivergingBar score={p.score} ghost={g && Math.abs(delta) > 0.005 ? g.score : undefined} />
-                                    <span id={`${id}-${p.dimension}`} className="col-span-2 text-[11px] text-ink-muted">
+                                    <span id={`${id}-${p.dimension}`} className="col-span-2 text-[11px] text-ink-secondary">
                                         {p.touched ? scoreWords(p.score) : 'Not affected by these settings'}
                                         {g && Math.abs(delta) > 0.005 && (
-                                            <span className="font-semibold text-accent-lineage">
+                                            <span className="font-semibold text-indigo-700 dark:text-indigo-300">
                                                 {' '}→ {scoreWords(g.score) !== scoreWords(p.score) ? scoreWords(g.score) : delta > 0 ? 'a shade better' : 'a shade worse'}
                                                 <span className="sr-only"> with your changes</span>
                                             </span>

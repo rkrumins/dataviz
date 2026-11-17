@@ -310,6 +310,19 @@ def test_no_engineering_words_in_what_the_app_shows():
     assert not found, "jargon in UI copy:\n" + "\n".join(found)
 
 
+def test_copy_the_platform_and_workspaces_show_names_no_one_graph():
+    """A setting a platform or workspace page shows says nothing of "this graph" (nor "this
+    workspace" on the platform's); nor does a why, which can hold at any scope."""
+    one = re.compile(r"\bthis (graph|workspace)\b", re.IGNORECASE)
+    found = [f"{s.key}: {text!r}" for s in SETTINGS if set(s.scopes) - {"graph"}
+             for text in (s.label, s.question, s.takes_effect[1], s.guidance.summary,
+                          s.guidance.means, s.guidance.recommended.why, s.guidance.risk_note,
+                          *s.guidance.change_when)
+             if one.search(text or "")]
+    found += [f"why {w.code}: {w.text!r}" for w in WHY if one.search(w.text)]
+    assert not found, "\n".join(found)
+
+
 # ── Names point at things that exist ──────────────────────────────────────────
 
 def test_every_reference_names_a_setting_a_switch_or_a_why():

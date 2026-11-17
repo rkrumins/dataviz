@@ -64,6 +64,18 @@ describe('SettingControl', () => {
         expect(onChange).toHaveBeenLastCalledWith(80000)
     })
 
+    it('says whose own value a change sets, the scope being edited, and has a name beside its title', () => {
+        const { unmount } = render(<><h3 id="row-title">Graphs from</h3>
+            <SettingControl setting={S['builds.aboveRows']} value={null} onChange={vi.fn()} resolved={PLATFORM_VALUES['builds.aboveRows']}
+                scope="platform" aria-labelledby="row-title" /></>)
+        expect(screen.getByText(/The default:/)).toHaveTextContent(/Change it to set the platform’s own\.$/)
+        // The title names it; its own label stands in where a title can't be read.
+        expect(screen.getByRole('spinbutton', { name: 'Graphs from' })).toHaveAttribute('aria-label', S['builds.aboveRows'].label)
+        unmount()
+        setup('imports.guardMinLive', GRAPH_VALUES, 'graph')
+        expect(screen.getByText(/Change it to set/)).toHaveTextContent(/Change it to set this graph’s own\.$/)
+    })
+
     it('percent: a slider and a number together; the slider takes the arrow keys', () => {
         const onChange = setup('residency.unloadStartPct', PLATFORM_VALUES, 'platform', 85)
         const label = S['residency.unloadStartPct'].label
@@ -84,7 +96,7 @@ describe('SettingControl', () => {
         expect(onChange).toHaveBeenLastCalledWith(0.29)
     })
 
-    it('ratio as a multiplier: shown in percent too, stored as the ratio', () => {
+    it('ratio above 100%: shown in percent too, stored as the ratio', () => {
         const onChange = setup('updates.pacingRatio', PLATFORM_VALUES, 'platform', 0.5)
         const slider = screen.getByRole('slider', { name: S['updates.pacingRatio'].label })
         expect(slider).toHaveAttribute('aria-valuetext', '50%')

@@ -42,8 +42,10 @@ export function StickySaveBar({ count, onReview, onDiscard, problems = 0, saving
                         {problems > 0 && <span className="ml-2 text-xs font-medium text-rose-600 dark:text-rose-400">· {problems} to fix</span>}
                     </p>
                     <div className="flex flex-1 basis-full items-center justify-end gap-2 sm:basis-auto sm:flex-none">
-                        <Button variant="ghost" leftIcon={Undo2} disabled={saving} onClick={onDiscard}>Discard</Button>
-                        <Button variant="primary" rightIcon={ArrowRight} disabled={problems > 0} loading={saving} onClick={onReview}>
+                        <Button variant="ghost" leftIcon={Undo2} disabled={saving} onClick={onDiscard} className="text-ink-secondary">Discard</Button>
+                        {/* AA white on indigo; off, it is grey, not a dimmed slab of the accent. */}
+                        <Button variant="primary" rightIcon={ArrowRight} disabled={problems > 0} loading={saving} onClick={onReview}
+                            className="bg-indigo-600 hover:bg-indigo-700 hover:brightness-100 disabled:bg-black/[0.07] disabled:text-ink-secondary disabled:opacity-100 dark:disabled:bg-white/[0.08]">
                             Review changes
                         </Button>
                     </div>

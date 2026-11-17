@@ -179,7 +179,7 @@ async def _inventory_progress(rows, monkeypatch) -> dict:
             return False
 
         async def execute(self, stmt):
-            return SimpleNamespace(all=lambda: rows)
+            return SimpleNamespace(all=lambda: rows, scalar_one=lambda: len(rows))
 
     from backend.app.services.versioning import build_policy, candidates, db
 
@@ -201,9 +201,12 @@ async def _inventory_progress(rows, monkeypatch) -> dict:
 
 
 class _Stmt:
-    """Enough of a select for the inventory to narrow and order it."""
+    """Enough of a select for the inventory to narrow, order and count it."""
 
     def where(self, *a):
+        return self
+
+    def with_only_columns(self, *a):
         return self
 
     def order_by(self, *a):

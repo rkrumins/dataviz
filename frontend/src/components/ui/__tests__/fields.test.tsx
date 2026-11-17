@@ -151,6 +151,8 @@ describe('QuantityInput', () => {
         const spin = screen.getByRole('spinbutton')
         expect(spin).toHaveValue('30')
         expect(spin).toHaveAttribute('aria-valuetext', '30 minutes')
+        // The picker says its units in full too, never "s" or "d".
+        expect(screen.getAllByRole('option').map((o) => o.textContent)).toEqual(['seconds', 'minutes', 'hours', 'days'])
         fireEvent.keyDown(spin, { key: 'ArrowUp' })
         expect(onChange).toHaveBeenLastCalledWith(1860)
         await user.clear(spin)

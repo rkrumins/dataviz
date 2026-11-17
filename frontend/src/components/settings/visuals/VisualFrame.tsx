@@ -24,7 +24,7 @@ export function VisualFrame({ eyebrow = 'See how it works', title, legend, capti
         >
             <div className="flex flex-wrap items-start justify-between gap-x-6 gap-y-2">
                 <div>
-                    <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-ink-muted">{eyebrow}</p>
+                    <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-ink-secondary">{eyebrow}</p>
                     <p id={`${id}-title`} className="mt-0.5 text-[13px] font-semibold text-ink">{title}</p>
                 </div>
                 {legend && <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-ink-secondary">{legend}</div>}

@@ -77,7 +77,7 @@ export function ReadTimeline({ setting, value, next, className }: {
             caption={(
                 <>
                     {inForce && <span className="block">{narrate(inForce, phase)}</span>}
-                    {staged && <>{' '}<span className="block font-medium text-accent-lineage">With your change: {narrate(staged, phase)}</span></>}
+                    {staged && <>{' '}<span className="block font-medium text-indigo-700 dark:text-indigo-300">With your change: {narrate(staged, phase)}</span></>}
                 </>
             )}
         >
@@ -87,8 +87,8 @@ export function ReadTimeline({ setting, value, next, className }: {
                     {choices.map((c) => (
                         <div key={c.id} className={cn(ROW, 'flex flex-col justify-center pr-2')}>
                             <span className="text-xs font-semibold leading-snug text-ink">{c.title}</span>
-                            {inForce?.id === c.id && <span className="text-[10px] font-medium text-ink-muted">In force</span>}
-                            {staged?.id === c.id && <span className="text-[10px] font-semibold text-accent-lineage">Your change</span>}
+                            {inForce?.id === c.id && <span className="text-[10px] font-medium text-ink-secondary">In force</span>}
+                            {staged?.id === c.id && <span className="text-[10px] font-semibold text-indigo-700 dark:text-indigo-300">Your change</span>}
                         </div>
                     ))}
                 </div>
@@ -96,10 +96,10 @@ export function ReadTimeline({ setting, value, next, className }: {
                     <div key={p.when} className="relative min-w-[5.5rem] flex-1">
                         {phase === i && (
                             <motion.div layoutId={`${id}-phase`} transition={transition} aria-hidden
-                                className="absolute inset-0 rounded-xl border border-ink/10 bg-canvas-elevated shadow-[0_1px_2px_rgba(15,23,42,0.06)] dark:border-white/10" />
+                                className="absolute inset-0 rounded-xl border border-ink/15 bg-canvas-elevated shadow-[0_1px_2px_rgba(15,23,42,0.06)] dark:border-white/15 dark:bg-white/[0.06]" />
                         )}
                         <div className={cn('relative flex h-7 items-center justify-center text-[10.5px] font-semibold uppercase tracking-[0.08em]',
-                            phase === i ? 'text-ink' : 'text-ink-muted')}>
+                            phase === i ? 'text-ink' : 'text-ink-secondary')}>
                             {p.label}
                         </div>
                         {choices.map((c) => {
@@ -108,15 +108,14 @@ export function ReadTimeline({ setting, value, next, className }: {
                             const t = tone(c, f)
                             const Source = f.source === 'database' ? Database : HardDrive
                             return (
-                                <div key={c.id} className={cn(ROW, 'relative flex flex-col items-center justify-center gap-1 px-1.5 transition-opacity duration-200 motion-reduce:transition-none',
-                                    phase === i ? 'opacity-100' : 'opacity-40')}>
+                                <div key={c.id} className={cn(ROW, 'relative flex flex-col items-center justify-center gap-1 px-1.5')}>
                                     <span className={cn('max-w-full truncate rounded-full px-2 py-0.5 text-[10.5px] font-semibold leading-4',
                                         t === 'new' ? 'bg-emerald-500/12 text-emerald-700 dark:text-emerald-300'
                                             : t === 'mix' ? 'bg-gradient-to-r from-slate-500/10 to-emerald-500/20 text-ink-secondary'
                                                 : 'bg-slate-500/10 text-ink-secondary')}>
                                         {f.shows}
                                     </span>
-                                    <span className={cn('flex items-center gap-1 text-[10px]', f.source === 'database' ? 'font-medium text-amber-700 dark:text-amber-400' : 'text-ink-muted')}>
+                                    <span className={cn('flex items-center gap-1 text-[10px]', f.source === 'database' ? 'font-medium text-amber-700 dark:text-amber-400' : 'text-ink-secondary')}>
                                         <Source aria-hidden className="w-3 h-3" />{f.source}
                                     </span>
                                 </div>

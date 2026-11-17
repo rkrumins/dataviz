@@ -11,11 +11,14 @@ saved all or nothing, previewed, and with their history, each change of which ca
   names for it there (403 ``setting_not_permitted``). A fork follows its root (409
   ``follows_root``).
 
-A save is ``{changes: [{key, value?, limits?, expectedVersion}], reason?}``: ``value`` null
-inherits from the scope above and ``limits`` (the platform's only) null takes the setting's default
-limits; left out, either stays. Its reason is the body's, else the ``X-Activity-Reason`` header's.
-Refusals: 422 ``invalid_settings`` (``errors``, each ``{key, code, message}``), 403
-``setting_not_permitted`` (``denied``, each naming the ``editor`` who may), 409
+A save is ``{changes: [{key, value?, limits?, expectedVersion}], reason?, acknowledge?}``:
+``value`` null inherits from the scope above and ``limits`` (the platform's only) null takes the
+setting's default limits; left out, either stays. Its reason is the body's, else the
+``X-Activity-Reason`` header's. ``acknowledge`` holds the codes of the full preview's warnings the
+person acknowledged. Refusals: 422 ``invalid_settings`` (``errors``, each ``{key, code,
+message}``), 403 ``setting_not_permitted`` (``denied``, each naming the ``editor`` who may), 409
+``acknowledgement_required`` (``warnings``, each ``{code, key?, text}``: what the change does that
+can't be taken back, or a high-risk setting moved the riskier way, unacknowledged), 409
 ``settings_conflict`` (``conflicts``, each with the version expected and the one found).
 
 None of these routes is on the API-key surface (``auth/api_key_surface``): a key is refused.
@@ -71,6 +74,12 @@ class SettingsSave(BaseModel):
     changes: List[SettingChange] = Field(..., min_length=1, max_length=100)
     reason: Optional[str] = Field(None, max_length=500,
                                   description="Why; else the X-Activity-Reason header's")
+    acknowledge: List[str] = Field(
+        default_factory=list, max_length=20,
+        description="The codes of the full preview's warnings the person acknowledged "
+                    "(risky_change, drafts_removed, …). A save raising a warning it must "
+                    "acknowledge, without its code here, is refused (409 "
+                    "acknowledgement_required).")
 
 
 class PreviewChange(SettingChange):
@@ -113,6 +122,9 @@ def _answers():
         raise HTTPException(status_code=409, detail={
             "type": exc.code, "message": "Changed since it was read: reload, and apply the "
                                          "changes again", "conflicts": exc.conflicts}) from exc
+    except service.AcknowledgementRequired as exc:
+        raise HTTPException(status_code=409, detail={
+            "type": exc.code, "message": str(exc), "warnings": exc.warnings}) from exc
     except service.FollowsRoot as exc:
         raise HTTPException(status_code=409, detail={
             "type": exc.code, "message": str(exc), "rootGraphId": exc.root.graph_id,
@@ -175,7 +187,8 @@ async def patch_platform_settings(
     does, and ``changeSetId`` (null: nothing changed)."""
     with _answers():
         return await service.save(session, PLATFORM_PLACE, _changes(PLATFORM_PLACE, body.changes),
-                                  editor=SYSTEM_ADMIN, actor=user.id, reason=_reason(body.reason))
+                                  editor=SYSTEM_ADMIN, actor=user.id, reason=_reason(body.reason),
+                                  acknowledged=body.acknowledge)
 
 
 @platform_router.post("/preview", summary="What changing the platform's settings would do")
@@ -264,7 +277,7 @@ async def patch_workspace_settings(
     with _answers():
         return await service.save(session, place, _changes(place, body.changes),
                                   editor=service.editor_of(claims, ws_id), actor=user.id,
-                                  reason=_reason(body.reason))
+                                  reason=_reason(body.reason), acknowledged=body.acknowledge)
 
 
 @workspace_router.post("/preview", summary="What changing a workspace's settings would do")
@@ -365,7 +378,7 @@ async def patch_graph_settings(
         place = await service.graph_place(meta)
         return await service.save(session, place, _changes(place, body.changes),
                                   editor=service.editor_of(claims, ws_id), actor=user.id,
-                                  reason=_reason(body.reason))
+                                  reason=_reason(body.reason), acknowledged=body.acknowledge)
 
 
 @graph_router.post("/preview", summary="What changing a versioned graph's settings would do")

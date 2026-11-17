@@ -87,16 +87,16 @@ export const LimitsEditor = memo(function LimitsEditor({ setting: s, resolved: r
                     <h4 id={`${id}-title`} className="flex items-center gap-1.5 text-[13px] font-semibold text-ink">
                         <Ruler aria-hidden className="w-3.5 h-3.5 text-ink-muted" /> What workspaces and graphs may choose
                     </h4>
-                    <p className="mt-0.5 text-xs text-ink-muted">
-                        Now: <span className="font-medium text-ink-secondary">{describeLimits(s, before ?? s.defaultLimits)}</span>
-                        {isStaged && <span className="font-semibold text-accent-lineage"> → {describeLimits(s, shown)}</span>}
+                    <p className="mt-0.5 text-xs text-ink-secondary">
+                        Now: <span className="font-medium text-ink">{describeLimits(s, before ?? s.defaultLimits)}</span>
+                        {isStaged && <span className="font-semibold text-indigo-700 dark:text-indigo-300"> → {describeLimits(s, shown)}</span>}
                     </p>
                 </div>
                 <div className="flex flex-wrap gap-1">
                     {!isStaged && r.limits && (
-                        <Button size="sm" variant="ghost" leftIcon={CornerDownRight} onClick={() => onStage(s.key, null)}>Use the default limits</Button>
+                        <Button size="sm" variant="ghost" className="text-ink-secondary" leftIcon={CornerDownRight} onClick={() => onStage(s.key, null)}>Use the default limits</Button>
                     )}
-                    {isStaged && <Button size="sm" variant="ghost" leftIcon={Undo2} onClick={() => onUnstage(s.key)}>Revert limits</Button>}
+                    {isStaged && <Button size="sm" variant="ghost" className="text-ink-secondary" leftIcon={Undo2} onClick={() => onUnstage(s.key)}>Revert limits</Button>}
                 </div>
             </div>
 
@@ -108,7 +108,7 @@ export const LimitsEditor = memo(function LimitsEditor({ setting: s, resolved: r
                         <p id={`${id}-lock`} className="flex items-center gap-1 text-[13px] font-medium text-ink">
                             {shown.lock && <Lock aria-hidden className="w-3 h-3 text-ink-muted" />} Same for everyone
                         </p>
-                        <p id={`${id}-lock-help`} className="text-[11.5px] text-ink-muted">
+                        <p id={`${id}-lock-help`} className="text-[11.5px] text-ink-secondary">
                             {shown.lock
                                 ? `Workspaces and graphs use the platform’s value, ${formatValue(s, platformValue)}. Values they chose are kept, and apply again if this is turned off.`
                                 : 'Off: workspaces and graphs may choose their own, within the limits below.'}
@@ -134,7 +134,7 @@ export const LimitsEditor = memo(function LimitsEditor({ setting: s, resolved: r
                                         className="mt-0.5 h-4 w-4 shrink-0 accent-[rgb(var(--nx-accent-lineage-rgb))]" />
                                     <span className="min-w-0">
                                         <span className="block text-[13px] font-medium text-ink">{c.title}</span>
-                                        <span className="block text-[11px] text-ink-muted">{own ? 'The platform’s own choice: always allowed' : c.short}</span>
+                                        <span className="block text-[11px] text-ink-secondary">{own ? 'The platform’s own choice: always allowed' : c.short}</span>
                                     </span>
                                 </label>
                             )
@@ -146,18 +146,18 @@ export const LimitsEditor = memo(function LimitsEditor({ setting: s, resolved: r
             {!shown.lock && canRange && (
                 <fieldset className="mt-3">
                     <legend className="text-[11.5px] font-medium text-ink-secondary">Values they may set</legend>
-                    <div className="mt-1.5 flex flex-wrap items-center gap-2 text-xs text-ink-muted">
+                    <div className="mt-1.5 flex flex-wrap items-center gap-2 text-xs text-ink-secondary">
                         <BoundInput s={s} label={`Lowest ${s.label}`} value={shown.range?.[0] ?? lo} invalid={Boolean(error)}
                             onChange={(v) => set({ range: [v, shown.range?.[1] ?? hi] })} />
                         <span>to</span>
                         <BoundInput s={s} label={`Highest ${s.label}`} value={shown.range?.[1] ?? hi} invalid={Boolean(error)}
                             onChange={(v) => set({ range: [shown.range?.[0] ?? lo, v] })} />
                     </div>
-                    <p className="mt-1 text-[11px] text-ink-muted">The setting itself allows {formatValue(s, lo)} to {formatValue(s, hi)}.</p>
+                    <p className="mt-1 text-[11px] text-ink-secondary">The setting itself allows {formatValue(s, lo)} to {formatValue(s, hi)}.</p>
                 </fieldset>
             )}
 
-            <p role="alert" className={cn('text-xs font-medium text-rose-600 dark:text-rose-400', error ? 'mt-2' : 'sr-only')}>{error ?? ''}</p>
+            <p role="alert" className={cn('text-xs font-medium text-rose-700 dark:text-rose-400', error ? 'mt-2' : 'sr-only')}>{error ?? ''}</p>
         </section>
     )
 })
@@ -168,12 +168,12 @@ export function LimitsNote({ setting: s, resolved: r }: { setting: Setting; reso
     const limits = platform?.limits
     if (!limitsNoteShown(s, r)) return null
     return (
-        <p className="flex items-start gap-1.5 text-[11.5px] text-ink-muted">
+        <p className="flex items-start gap-1.5 text-[11.5px] text-ink-secondary">
             <Ruler aria-hidden className="mt-0.5 w-3 h-3 shrink-0" />
             <span>
                 {platform?.locked
                     ? 'The platform set this for everyone: a system admin can unlock it.'
-                    : <>Workspaces and graphs may choose: <span className="font-medium text-ink-secondary">{describeLimits(s, limits)}</span>. Set by a system admin.</>}
+                    : <>Workspaces and graphs may choose: <span className="font-medium text-ink">{describeLimits(s, limits)}</span>. Set by a system admin.</>}
             </span>
         </p>
     )

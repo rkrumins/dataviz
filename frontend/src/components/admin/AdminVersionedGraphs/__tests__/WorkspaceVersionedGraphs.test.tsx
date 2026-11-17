@@ -100,8 +100,10 @@ describe('Workspace → Versioned graphs: what a person meets', () => {
         mockApi('workspace-admin')
         renderTab()
         await rowOnceDrawn('reads.mode')
-        const updates = within(screen.getByRole('region', { name: CATALOGUE.categories.find((c) => c.id === 'updates')!.label }))
-        const fixed = within(updates.getByRole('region', { name: 'Set for the whole platform' }))
+        const category = CATALOGUE.categories.find((c) => c.id === 'updates')!.label
+        const updates = within(screen.getByRole('region', { name: category }))
+        // Each category's list has a name of its own.
+        const fixed = within(updates.getByRole('region', { name: `${category}: set for the whole platform` }))
         const target = workspaceValues().values.find((r) => r.key === 'updates.statementTargetMs')!
         expect(fixed.getByText(S['updates.statementTargetMs'].label)).toBeInTheDocument()
         expect(fixed.getByText(formatValue(S['updates.statementTargetMs'], target.effective))).toBeInTheDocument()
@@ -263,7 +265,7 @@ describe('Workspace → Versioned graphs: its graphs and its history', () => {
         const wsChange = screen.getByText(`“${reason}”`).closest('article')!
         expect(within(wsChange).getByText('Finance')).toBeInTheDocument()
 
-        await userEvent.click(within(wsChange).getByRole('button', { name: 'Put back…' }))
+        await userEvent.click(within(wsChange).getByRole('button', { name: /^Put back Grace Hopper’s change to / }))
         const dialog = await screen.findByRole('dialog', { name: 'Review 1 change to the Finance workspace' })
         await userEvent.type(within(dialog).getByLabelText(/Why are you making this change/), 'Back to the latest for the audit')
         await userEvent.click(within(dialog).getByRole('button', { name: 'Save change' }))

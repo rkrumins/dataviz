@@ -17,6 +17,7 @@
 import { lazy, Suspense, useMemo, useState, type ReactNode } from 'react'
 import { GitFork, RotateCw, SlidersHorizontal } from 'lucide-react'
 import { formatCount } from '@/lib/units'
+import { useUnsavedChangesWarning } from '@/hooks/useUnsavedChangesWarning'
 import { Button } from '@/components/ui/Button'
 import { Skeleton } from '@/components/ui/Skeleton'
 import { formatValue, sameValue } from '@/components/settings/format'
@@ -94,6 +95,9 @@ export function GraphSettingsSummary({ wsId, graphId, label }: {
     const place: SettingsPlace = useMemo(() => ({ scope: 'graph', workspaceId: wsId, graphId }), [wsId, graphId])
     const [opened, setOpened] = useState(false)
     const [open, setOpen] = useState(false)
+    // What the drawer has staged: a reload or a closed tab asks first (closing the drawer asks itself).
+    const [staged, setStaged] = useState(0)
+    useUnsavedChangesWarning(staged > 0)
     const schemaQ = useSettingsSchema()
     // The drawer reads the same values and may have changes staged over them: no refresh meanwhile.
     const valuesQ = useSettingsValues(place, { staged: () => open })
@@ -182,7 +186,7 @@ export function GraphSettingsSummary({ wsId, graphId, label }: {
             <div className="rounded-xl border border-glass-border bg-canvas-elevated/40 p-4">{body}</div>
             {opened && (
                 <Suspense fallback={null}>
-                    <GraphSettingsDrawer workspaceId={wsId} graphId={graphId} open={open} onOpenChange={setOpen} label={label} />
+                    <GraphSettingsDrawer workspaceId={wsId} graphId={graphId} open={open} onOpenChange={setOpen} label={label} onStagedChange={setStaged} />
                 </Suspense>
             )}
         </section>

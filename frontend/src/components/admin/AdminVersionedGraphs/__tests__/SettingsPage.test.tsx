@@ -3,13 +3,20 @@
  * (loading, an error with a retry, nothing to show, read-only), every category with the posture the
  * server writes, and the one save model — stage, the server's quick answer, Review with the full
  * preview and a reason, Save, Undo — with each refusal where it belongs (a 422 or 403 on its row and
- * in the review, a 409 with "Reload and re-apply my changes"). The platform's limits stage beside
- * the values; a category's switch asks first, as Admin → Features does. Labels come from the
- * registry's generated catalogue.
+ * in the review; a 409 conflict read again with who changed what, to acknowledge before saving over
+ * it, and "Reload and re-apply my changes" when it can't be; a 409 for a warning not acknowledged put
+ * in the review). One confirmation per save. The platform's limits stage beside the values; a
+ * category's switch asks first, as Admin → Features does. Around the rows: "Changed only" counts
+ * each setting once, the finder takes and gives back focus and is the only place on Settings that
+ * asks for the signals, and leaving with changes staged asks first. Labels come from the registry's
+ * generated catalogue.
  */
-import { screen, waitFor, within } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { Link, RouterProvider, createMemoryRouter } from 'react-router-dom'
 import { beforeAll, describe, expect, it } from 'vitest'
+import { NotificationStack, useNotificationStore } from '@/components/ui/notifications'
 import { CATALOGUE } from '@/components/settings'
 import { REASON_HEADER } from '@/services/activityReason'
 import { AdminVersionedGraphs } from '..'
@@ -223,34 +230,177 @@ describe('Settings: stage, review, save, undo', () => {
         expect(await within(dialog).findByRole('alert')).toHaveTextContent(`You can’t change ${S['reads.mode'].label} here: only a system admin can.`)
     })
 
-    it('after a version conflict, reads the values again and saves the staged ones at the versions now in force (409)', async () => {
+    it('after a version conflict, says who changed what and when, and saves over it only once that is acknowledged (409)', async () => {
         let conflict = true
+        const theirs = { id: 99, changeSetId: 'cs_9', at: new Date(Date.now() - 5 * 60_000).toISOString(), actor: { id: 'usr_grace', name: 'Grace Hopper' },
+            reason: 'Reads must be fresh for the close', source: 'api', key: 'reads.mode', scope: 'platform', scopeId: '',
+            from: { value: null, limits: null }, to: { value: 'latest', limits: null }, version: 4 }
         const sent = mockApi('ok', (req) => {
             if (req.method === 'PATCH' && conflict) {
                 conflict = false
                 return json({ detail: { type: 'settings_conflict', message: 'Changed since it was read',
                     conflicts: [{ key: 'reads.mode', scope: 'platform', scopeId: '', expected: 1, actual: 4 }] } }, 409)
             }
-            // Someone else saved meanwhile: read again, the read mode is at version 4.
+            // Someone else saved meanwhile: read again, the read mode is at version 4, and the history says who.
             if (req.method === 'GET' && req.path.endsWith('/admin/versioning/settings') && !conflict) {
                 const now = platformValues()
                 return json({ ...now, values: now.values.map((r) => (r.key === 'reads.mode' ? { ...r, version: 4 } : r)) })
             }
+            if (req.path.endsWith('/settings/history') && !conflict) return json({ scope: 'platform', entries: [theirs], nextCursor: null })
+            return undefined
+        })
+        renderWithApi(<AdminVersionedGraphs />, { path: SETTINGS })
+        await stageReadMode()
+        const dialog = await reviewAndSave()
+        // Read again at once, with who changed it: their change is named, to acknowledge before saving over it.
+        const warning = await within(dialog).findByText(`Grace Hopper changed ${S['reads.mode'].label} to ${title('reads.mode', 'latest')} (5 min ago), after you opened it. Saving puts yours in its place: ${title('reads.mode', 'in_place')}.`)
+        expect(calls(sent, 'GET', '/settings/history').at(-1)!.query.get('key')).toBe('reads.mode')
+        expect(within(dialog).queryByRole('alert')).not.toBeInTheDocument()
+        const save = within(dialog).getByRole('button', { name: 'Save change' })
+        await waitFor(() => expect(save).toBeDisabled())
+        await userEvent.click(within(warning.closest('label')!).getByRole('checkbox'))
+        await waitFor(() => expect(save).toBeEnabled())
+        await userEvent.click(save)
+        await waitFor(() => expect(calls(sent, 'PATCH', '/admin/versioning/settings')).toHaveLength(2))
+        expect((calls(sent, 'PATCH', '/admin/versioning/settings')[1].body as { changes: unknown[] }).changes)
+            .toEqual([{ key: 'reads.mode', value: 'in_place', expectedVersion: 4 }])
+    })
+
+    it('offers "Reload and re-apply my changes" when the values couldn’t be read again after a conflict', async () => {
+        let reads = 0
+        mockApi('ok', (req) => {
+            if (req.method === 'PATCH') return json({ detail: { type: 'settings_conflict', message: 'Changed since it was read',
+                conflicts: [{ key: 'reads.mode', scope: 'platform', scopeId: '', expected: 1, actual: 4 }] } }, 409)
+            if (req.method === 'GET' && req.path.endsWith('/admin/versioning/settings') && ++reads > 1) return json({ detail: 'The settings store couldn’t be read' }, 500)
             return undefined
         })
         renderWithApi(<AdminVersionedGraphs />, { path: SETTINGS })
         await stageReadMode()
         const dialog = await reviewAndSave()
         expect(await within(dialog).findByRole('alert')).toHaveTextContent(`Someone changed ${S['reads.mode'].label} since you opened it.`)
-        const gets = () => calls(sent, 'GET', '/admin/versioning/settings').length
-        const before = gets()
-        await userEvent.click(within(dialog).getByRole('button', { name: 'Reload and re-apply my changes' }))
-        await waitFor(() => expect(gets()).toBe(before + 1))
-        await waitFor(() => expect(within(dialog).queryByRole('alert')).not.toBeInTheDocument())
+        expect(within(dialog).getByRole('button', { name: 'Reload and re-apply my changes' })).toBeInTheDocument()
+        // The page behind keeps the values it read, and the change stays staged.
+        expect(screen.getByText('1 change not saved yet')).toBeInTheDocument()
+    })
+
+    it('sends the warnings acknowledged in the review with the save', async () => {
+        const sent = mockApi()
+        renderWithApi(<AdminVersionedGraphs />, { path: SETTINGS })
+        const keep = await rowOnceDrawn('drafts.keepClosedDays')
+        const days = keep.getAllByRole('spinbutton')[0]
+        await userEvent.clear(days)
+        await userEvent.type(days, '7')
+        await userEvent.click(within(await screen.findByRole('region', { name: 'Unsaved changes' })).getByRole('button', { name: 'Review changes' }))
+        const dialog = await screen.findByRole('dialog', { name: 'Review 1 change to the platform' })
+        const warning = await within(dialog).findByText(/^The next sweep removes the changes of 18 closed drafts/)
+        await userEvent.type(within(dialog).getByLabelText(/Why are you making this change/), reason)
+        await userEvent.click(within(warning.closest('label')!).getByRole('checkbox'))
         await userEvent.click(within(dialog).getByRole('button', { name: 'Save change' }))
+        await waitFor(() => expect(calls(sent, 'PATCH', '/admin/versioning/settings')).toHaveLength(1))
+        expect(calls(sent, 'PATCH', '/admin/versioning/settings')[0].body).toEqual({
+            changes: [{ key: 'drafts.keepClosedDays', value: 7, expectedVersion: platformValues().values.find((r) => r.key === 'drafts.keepClosedDays')!.version }],
+            reason, acknowledge: ['drafts_removed'],
+        })
+    })
+
+    it('puts a warning the server refused the save for in the review, to acknowledge and save again', async () => {
+        const risk = { code: 'risky_change', key: 'reads.mode', text: 'Readers may see a version that is still being written.' }
+        let refuse = true
+        const sent = mockApi('ok', (req) => {
+            if (req.method !== 'PATCH' || !refuse) return undefined
+            refuse = false
+            return json({ detail: { type: 'acknowledgement_required', message: `Acknowledge what this change does before saving it: ${risk.text}`, warnings: [risk] } }, 409)
+        })
+        renderWithApi(<AdminVersionedGraphs />, { path: SETTINGS })
+        await stageReadMode()
+        const dialog = await reviewAndSave()
+        expect(await within(dialog).findByRole('alert')).toHaveTextContent('Nothing was saved: this change does something you need to acknowledge first.')
+        const warning = await within(dialog).findByText(risk.text)
+        const save = within(dialog).getByRole('button', { name: 'Save change' })
+        expect(save).toBeDisabled()
+        await userEvent.click(within(warning.closest('label')!).getByRole('checkbox'))
+        await userEvent.click(save)
         await waitFor(() => expect(calls(sent, 'PATCH', '/admin/versioning/settings')).toHaveLength(2))
-        expect((calls(sent, 'PATCH', '/admin/versioning/settings')[1].body as { changes: unknown[] }).changes)
-            .toEqual([{ key: 'reads.mode', value: 'in_place', expectedVersion: 4 }])
+        expect(calls(sent, 'PATCH', '/admin/versioning/settings')[1].body).toMatchObject({ acknowledge: ['risky_change'] })
+    })
+
+    it('confirms a save once, with one Undo: the toast', async () => {
+        useNotificationStore.setState({ notifications: [] })
+        mockApi()
+        renderWithApi(<AdminVersionedGraphs />, { path: SETTINGS })
+        await stageReadMode()
+        await reviewAndSave()
+        // The words are read out once (a live region) and shown once: the toast, with the one Undo.
+        const shown = (await screen.findAllByText('Saved 1 change to the platform.')).filter((el) => !el.classList.contains('sr-only'))
+        expect(shown).toHaveLength(1)
+        expect(screen.getByTestId('notification-stack')).toContainElement(shown[0])
+        expect(screen.getAllByRole('button', { name: /^Undo/ })).toHaveLength(1)
+    })
+})
+
+describe('Settings: around the rows', () => {
+    it('counts each setting once under "Changed only", changed and staged alike', async () => {
+        mockApi()
+        renderWithApi(<AdminVersionedGraphs />, { path: SETTINGS })
+        await rowOnceDrawn('reads.mode')
+        const count = () => Number(/\((\d+)\)/.exec(screen.getByText('Changed only').closest('label')!.textContent ?? '')![1])
+        const before = count()
+        // Already changed on the platform: staging it again changes nothing in the count.
+        fireEvent.keyDown(row('updates.readPressureRatio').getByRole('slider', { name: S['updates.readPressureRatio'].label }), { key: 'ArrowRight' })
+        expect(screen.getByRole('region', { name: 'Unsaved changes' })).toHaveTextContent('1 change not saved yet')
+        expect(count()).toBe(before)
+        await stageReadMode()
+        expect(count()).toBe(before + 1)
+        await userEvent.click(screen.getByRole('switch', { name: 'Show changed settings only' }))
+        expect(screen.getAllByRole('article')).toHaveLength(before + 1)
+    })
+
+    it('moves focus into "Something’s wrong?" when it opens, and back to its button when it closes', async () => {
+        mockApi()
+        renderWithApi(<AdminVersionedGraphs />, { path: SETTINGS })
+        await rowOnceDrawn('reads.mode')
+        await userEvent.click(screen.getByRole('button', { name: /Something’s wrong\?/ }))
+        await waitFor(() => expect(screen.getByRole('textbox', { name: 'Describe the problem' })).toHaveFocus())
+        await userEvent.click(screen.getByRole('button', { name: 'Close the finder' }))
+        await waitFor(() => expect(screen.getByRole('button', { name: /Something’s wrong\?/ })).toHaveFocus())
+    })
+
+    it('asks for the signals only where a finder shows them', async () => {
+        const sent = mockApi()
+        renderWithApi(<AdminVersionedGraphs />, { path: '/admin/versioned-graphs?tab=history' })
+        await screen.findByText('Every change, with why')
+        await userEvent.click(screen.getByRole('tab', { name: /Settings/ }))
+        await rowOnceDrawn('reads.mode')
+        expect(calls(sent, 'GET', '/admin/versioning/signals')).toHaveLength(0)
+        await userEvent.click(screen.getByRole('button', { name: /Something’s wrong\?/ }))
+        await waitFor(() => expect(calls(sent, 'GET', '/admin/versioning/signals')).toHaveLength(1))
+    })
+
+    it('asks before another page drops what is staged on the platform, and stays when asked to', async () => {
+        mockApi()
+        const router = createMemoryRouter([
+            { path: '/admin/versioned-graphs', element: <><AdminVersionedGraphs /><Link to="/elsewhere">Elsewhere</Link></> },
+            { path: '/elsewhere', element: <p>Somewhere else</p> },
+        ], { initialEntries: [SETTINGS] })
+        render(
+            <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+                <RouterProvider router={router} />
+                <NotificationStack />
+            </QueryClientProvider>,
+        )
+        await stageReadMode()
+        // Another tab of the same page isn't leaving.
+        await userEvent.click(screen.getByRole('tab', { name: /History/ }))
+        expect(screen.queryByRole('dialog', { name: /^Leave without saving/ })).not.toBeInTheDocument()
+        await userEvent.click(screen.getByRole('link', { name: 'Elsewhere' }))
+        const dialog = await screen.findByRole('dialog', { name: 'Leave without saving 1 change?' })
+        expect(dialog).toHaveTextContent('Your changes to the platform’s settings are staged, not saved.')
+        await userEvent.click(within(dialog).getByRole('button', { name: 'Stay' }))
+        expect(screen.queryByText('Somewhere else')).not.toBeInTheDocument()
+
+        await userEvent.click(screen.getByRole('link', { name: 'Elsewhere' }))
+        await userEvent.click(within(await screen.findByRole('dialog', { name: 'Leave without saving 1 change?' })).getByRole('button', { name: 'Discard and leave' }))
+        expect(await screen.findByText('Somewhere else')).toBeInTheDocument()
     })
 })
 

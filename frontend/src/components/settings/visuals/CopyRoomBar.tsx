@@ -62,7 +62,7 @@ export function CopyRoomBar({ graph, copyRoomPct, nextCopyRoomPct, startPct, cop
                 <>
                     {graph.name} is {formatBytes(graph.bytes)}. At {formatNumber(copyRoomPct)}%, a copy needs {formatBytes(need)} free under a node’s start mark ({formatNumber(startPct)}%): it fits on {fits} of {nodes.length} {nodes.length === 1 ? 'node' : 'nodes'}.
                     {needNext !== null && fitsNext !== null && (
-                        <>{' '}<span className="font-medium text-accent-lineage">With your change ({formatNumber(nextCopyRoomPct as number)}%) it needs {formatBytes(needNext)}: it fits on {fitsNext}.</span></>
+                        <>{' '}<span className="font-medium text-indigo-700 dark:text-indigo-300">With your change ({formatNumber(nextCopyRoomPct as number)}%) it needs {formatBytes(needNext)}: it fits on {fitsNext}.</span></>
                     )}
                     {tooBig && typeof copyMaxBytes === 'number' && ` It is larger than the largest graph copied (${formatBytes(copyMaxBytes)}), so it is built from the database instead.`}
                 </>
@@ -77,12 +77,12 @@ export function CopyRoomBar({ graph, copyRoomPct, nextCopyRoomPct, startPct, cop
                         <li key={n.id}>
                             <div className="mb-1.5 flex flex-wrap items-baseline justify-between gap-x-3 text-[11.5px]">
                                 <span className="font-semibold text-ink">{n.label}</span>
-                                <span className="inline-flex items-center gap-1 tabular-nums text-ink-muted">
+                                <span className="inline-flex items-center gap-1 tabular-nums text-ink-secondary">
                                     {formatBytes(free)} of room ·
                                     {ok ? (
                                         <span className="inline-flex items-center gap-0.5 font-medium text-emerald-700 dark:text-emerald-400"><Check aria-hidden className="w-3 h-3" /> A copy fits</span>
                                     ) : (
-                                        <span className="inline-flex items-center gap-0.5 font-medium text-rose-600 dark:text-rose-400"><X aria-hidden className="w-3 h-3" /> {formatBytes(need - free)} short</span>
+                                        <span className="inline-flex items-center gap-0.5 font-medium text-rose-700 dark:text-rose-400"><X aria-hidden className="w-3 h-3" /> {formatBytes(need - free)} short</span>
                                     )}
                                 </span>
                             </div>

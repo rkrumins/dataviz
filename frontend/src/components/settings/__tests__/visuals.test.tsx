@@ -123,7 +123,8 @@ describe('WriteRhythm, CopyRoomBar and the timelines', () => {
     it('WriteRhythm says how much of the node’s time reads get, now and with the change', () => {
         render(<WriteRhythm statementTargetMs={250} pacingRatio={0.5} readPressureRatio={2} next={{ statementTargetMs: 250, pacingRatio: 1, readPressureRatio: 2 }} />)
         const figure = screen.getByRole('figure', { name: 'How a node shares its time while a graph updates' })
-        expect(figure).toHaveAccessibleDescription(/Each write of 250 ms is followed by a pause of 125 ms \(×0\.5\), so reads get 33% of the node’s time/)
+        expect(figure).toHaveAccessibleDescription(/Each write of 250 ms is followed by a pause of 125 ms \(50% of the write\), so reads get 33% of the node’s time/)
+        expect(figure).toHaveAccessibleDescription(/the pause grows to 500 ms \(200% of the write\): reads get 67%/)
         expect(figure).toHaveAccessibleDescription(/With your changes: .*reads get 50%/)
     })
 

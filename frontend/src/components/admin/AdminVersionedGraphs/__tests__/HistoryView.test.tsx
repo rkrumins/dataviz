@@ -3,9 +3,9 @@
  * made, where, and each value and limit from → to — filtered on the server, paged, and put back
  * through the same review a save goes through. Labels come from the registry's catalogue.
  */
-import { screen, waitFor, within } from '@testing-library/react'
+import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { CATALOGUE } from '@/components/settings'
 import { REASON_HEADER } from '@/services/activityReason'
 import { AdminVersionedGraphs } from '..'
@@ -49,16 +49,56 @@ describe('History', () => {
         await changeSet('Large imports were slowing canvases for the sales team')
         await userEvent.selectOptions(screen.getByLabelText('Setting'), 'reads.mode')
         await userEvent.selectOptions(screen.getByLabelText('Where'), 'platform')
-        await userEvent.selectOptions(screen.getByLabelText('Who'), 'usr_ada')
+        await userEvent.click(screen.getByRole('combobox', { name: 'Who' }))
+        await userEvent.click(await screen.findByRole('option', { name: /Ada Lovelace/ }))
         await waitFor(() => expect(Object.fromEntries(calls(sent, 'GET', '/settings/history').at(-1)!.query))
             .toEqual({ key: 'reads.mode', scope: 'platform', actor: 'usr_ada' }))
+        expect(screen.getByRole('combobox', { name: 'Who' })).toHaveValue('Ada Lovelace')
+    })
+
+    it('finds anyone under Who, not only the people in the changes read so far', async () => {
+        const sent = mockApi()
+        renderWithApi(<AdminVersionedGraphs />, { path: HISTORY })
+        await changeSet('Large imports were slowing canvases for the sales team')
+        const who = screen.getByRole('combobox', { name: 'Who' })
+        await userEvent.type(who, 'Katherine')
+        // Nobody named Katherine made a change on the pages read: the directory finds her.
+        await userEvent.click(await screen.findByRole('option', { name: /Katherine Johnson/ }))
+        await waitFor(() => expect(calls(sent, 'GET', '/settings/history').at(-1)!.query.get('actor')).toBe('usr_katherine'))
+        expect(await screen.findByText('No change matches these filters')).toBeInTheDocument()
+        await userEvent.click(screen.getByRole('button', { name: 'Anyone: clear who' }))
+        await waitFor(() => expect(calls(sent, 'GET', '/settings/history').at(-1)!.query.get('actor')).toBeNull())
+    })
+
+    it('reads a change set the pages split to its end before putting it back, so the review lists all of it', async () => {
+        const { HISTORY: ENTRIES } = await import('../__fixtures__/api')
+        // cs_3 is two values: the first page ends with one of them.
+        const sent = mockApi('ok', (req) => (req.path.endsWith('/settings/history') ? json(req.query.get('cursor')
+            ? { scope: 'platform', entries: ENTRIES.slice(2), nextCursor: null }
+            : { scope: 'platform', entries: ENTRIES.slice(0, 2), nextCursor: 40 }) : undefined))
+        renderWithApi(<AdminVersionedGraphs />, { path: HISTORY })
+        const split = await changeSet('Large imports were slowing canvases for the sales team')
+        expect(split.getAllByRole('listitem')).toHaveLength(1)
+        await userEvent.click(split.getByRole('button', { name: /^Put back Ada Lovelace’s change to / }))
+        const dialog = await screen.findByRole('dialog', { name: 'Review 2 changes to the platform' })
+        expect(within(dialog).getByText(S['residency.unloadStartPct'].label)).toBeInTheDocument()
+        expect(calls(sent, 'GET', '/settings/history').at(-1)!.query.get('cursor')).toBe('40')
+    })
+
+    it('names each "Put back" for its change', async () => {
+        mockApi()
+        renderWithApi(<AdminVersionedGraphs />, { path: HISTORY })
+        await changeSet('Large imports were slowing canvases for the sales team')
+        const names = screen.getAllByRole('button', { name: /^Put back/ }).map((b) => b.getAttribute('aria-label'))
+        expect(new Set(names).size).toBe(names.length)
+        expect(names).toEqual(expect.arrayContaining([expect.stringMatching(new RegExp(`^Put back Ada Lovelace’s change to ${S['reads.mode'].label} and 1 more, `))]))
     })
 
     it('puts a change back through the same review: what it does, a reason, then the revert', async () => {
         const sent = mockApi()
         renderWithApi(<AdminVersionedGraphs />, { path: HISTORY })
         const save = await changeSet('Large imports were slowing canvases for the sales team')
-        await userEvent.click(save.getByRole('button', { name: 'Put back…' }))
+        await userEvent.click(save.getByRole('button', { name: /^Put back Ada Lovelace’s change to / }))
 
         const dialog = await screen.findByRole('dialog', { name: 'Review 2 changes to the platform' })
         expect(within(dialog).getByText(S['reads.mode'].label)).toBeInTheDocument()
@@ -83,7 +123,7 @@ describe('History', () => {
             : undefined))
         renderWithApi(<AdminVersionedGraphs />, { path: HISTORY })
         const save = await changeSet('Large imports were slowing canvases for the sales team')
-        await userEvent.click(save.getByRole('button', { name: 'Put back…' }))
+        await userEvent.click(save.getByRole('button', { name: /^Put back Ada Lovelace’s change to / }))
         const dialog = await screen.findByRole('dialog')
         await userEvent.type(within(dialog).getByLabelText(/Why are you making this change/), 'Undo the read mode')
         await userEvent.click(within(dialog).getByRole('button', { name: 'Save 2 changes' }))
@@ -102,5 +142,37 @@ describe('History', () => {
         renderWithApi(<AdminVersionedGraphs />, { path: HISTORY })
         expect(await screen.findByText(/Couldn’t read the history: /, {}, { timeout: 4000 })).toBeInTheDocument()
         expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument()
+    })
+})
+
+/**
+ * The days picked stay the days shown, wherever the reader is: the request asks from the start of
+ * the first to the end of the last, in the reader's time zone (P1-7: Berlin and Los Angeles used to
+ * drift a day on each pick).
+ */
+describe.each([
+    ['Europe/Berlin', '2026-11-15T23:00:00.000Z', '2026-11-16T22:59:59.999Z'],
+    ['America/Los_Angeles', '2026-11-16T08:00:00.000Z', '2026-11-17T07:59:59.999Z'],
+])('History’s days, in %s', (zone, since, until) => {
+    const was = process.env.TZ
+    beforeAll(() => { process.env.TZ = zone })
+    afterAll(() => { process.env.TZ = was })
+
+    it('keeps the days picked, and asks from the start of the first to the end of the last', async () => {
+        const sent = mockApi()
+        renderWithApi(<AdminVersionedGraphs />, { path: HISTORY })
+        await changeSet('Large imports were slowing canvases for the sales team')
+        const from = screen.getByLabelText('Changed on or after')
+        const to = screen.getByLabelText('Changed on or before')
+        fireEvent.change(from, { target: { value: '2026-11-16' } })
+        fireEvent.change(to, { target: { value: '2026-11-16' } })
+        await waitFor(() => expect(Object.fromEntries(calls(sent, 'GET', '/settings/history').at(-1)!.query)).toEqual({ since, until }))
+        expect(from).toHaveValue('2026-11-16')
+        expect(to).toHaveValue('2026-11-16')
+        // Picking again doesn't drift.
+        fireEvent.change(from, { target: { value: '2026-11-16' } })
+        expect(from).toHaveValue('2026-11-16')
+        // Only Ada's save of the 16th, 15:40 UTC, is in that day in both zones.
+        expect(await screen.findByText('“Let teams choose switch when ready for big nightly imports”')).toBeInTheDocument()
     })
 })

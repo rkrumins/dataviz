@@ -12,8 +12,10 @@
  *   history     four change sets: a save, a workspace's, one carried over, a change of limits
  *   preview     answered from the values: each staged value in force, "switch when ready" held to
  *               "update in place" while builds are off; the full preview's impact
- *   health      a graph's, with one part the server couldn't read; a fork's, its root's copy
+ *   health      a graph's, with one part the server couldn't read and the last update, as the server
+ *               always says, not recorded; a fork's, its root's copy
  *   topology    each graph store node's memory, as the Graph store page's cached snapshot has it
+ *   graph       the impact of a graph's own change: the one graph in reach
  *   versioning  what a data source's Versioning tab reads: its graph, drafts, history, forks, where
  *               the graph lives (the watermark, with the read mode in force and why) and its imports
  */
@@ -313,6 +315,7 @@ export const HEALTH: GraphHealth = {
         effective: 'in_place', declared: 'beside', source: 'graph',
         why: [{ code: 'builds_off', text: SCHEMA.why.builds_off?.text ?? '', fix: SCHEMA.why.builds_off?.fix ?? null }],
     },
+    // The last update that finished, as the projector recorded it (gvlast:<graph>).
     lastUpdate: { finishedAt: '2026-11-16T16:21:30Z', durationSecs: 42, rows: 18_400, ratePerSec: 438 },
     progress: null,
     memory: {
@@ -322,7 +325,9 @@ export const HEALTH: GraphHealth = {
     lastBuild: null,
     signals: [{ id: 'reads.from_database_while_behind', count24h: 12 }, { id: 'builds.waited_for_room', count24h: 0 }],
     follows: null,
-    problems: [{ part: 'lastBuild', message: 'The build record couldn’t be read: it was being written at the time.' }],
+    problems: [
+        { part: 'lastBuild', message: 'The build record couldn’t be read: it was being written at the time.' },
+    ],
 }
 
 /** A fork's: what it serves through its root, and the root's copy, being loaded, and its build waiting for room. */
@@ -353,6 +358,34 @@ export const FEATURES = {
     values: { versioningEnabled: true, candidateKeysEnabled: false, residencyEnabled: true },
     version: 7,
     lastChanges: { residencyEnabled: { from: false, to: true, actorName: 'Ada Lovelace', at: '2026-11-10T09:30:00Z' } },
+}
+
+/**
+ * The full preview's impact of a graph's own change: the one graph in reach, which behaves
+ * differently when the change moves a value in force. A workspace admin gets no node memory or
+ * residency figures, and drafts' windows aren't a graph's.
+ */
+export function graphImpact(changes: PatchItem[], base: ResolvedValues): Impact {
+    const moved = changes.flatMap((c) => {
+        const r = base[c.key]
+        if (!r || !('value' in c)) return []
+        const to = c.value ?? r.trail.filter((t) => t.scope !== 'graph' && t.value !== null).at(-1)?.value ?? r.effective
+        // Switch when ready updates in place while New-version builds are off.
+        const inForce = c.key === 'reads.mode' && to === 'beside' ? 'in_place' : to
+        return String(inForce) === String(r.effective) ? [] : [{ key: c.key, from: r.effective, to: inForce }]
+    })
+    const reads = moved.find((m) => m.key === 'reads.mode')
+    return {
+        graphs: { inScope: 1, changed: moved.length ? 1 : 0, samples: moved.length ? [{ graphId: GRAPH, dataSourceId: 'ds_sales', workspaceId: WS, label: 'Sales lineage', changes: moved }] : [] },
+        alwaysLatest: reads ? { joining: reads.to === 'latest' ? 1 : 0, leaving: reads.from === 'latest' ? 1 : 0 } : null,
+        memory: null,
+        residency: null,
+        database: null,
+        drafts: null,
+        outsideLimits: null,
+        warnings: [],
+        unavailable: [],
+    }
 }
 
 // ── A workspace's graphs and history ────────────────────────────────────────

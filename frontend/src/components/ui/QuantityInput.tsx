@@ -1,5 +1,5 @@
 /**
- * QuantityInput — a number with its unit: "13 GB", "30 min".
+ * QuantityInput — a number with its unit: "13 GB", "30 minutes".
  *
  * The value is always held in base units (bytes, seconds, milliseconds), so the unit is only how
  * it is shown and typed. Changing the unit re-shows the same value in it ("1 h" becomes "60 min");
@@ -17,7 +17,7 @@ export interface QuantityInputProps {
     value: number | null
     onChange: (value: number | null) => void
     units: QuantityUnit[]
-    /** Spelled-out unit names, spoken with the value ("1.5 hours"). */
+    /** Spelled-out unit names, shown in the unit picker and spoken with the value ("1.5 hours"). */
     unitNames?: Record<string, string>
     defaultUnit?: string
     /** Bounds in base units. */
@@ -83,8 +83,8 @@ export function QuantityInput({
                 value={unit.id}
                 onChange={setUnitId}
                 disabled={disabled}
-                options={units.map((u) => ({ value: u.id, label: u.label }))}
-                containerClassName="w-[4.75rem] shrink-0"
+                options={units.map((u) => ({ value: u.id, label: unitNames?.[u.id] ?? u.label }))}
+                containerClassName={cn(unitNames ? 'w-[8.5rem]' : 'w-[4.75rem]', 'shrink-0')}
             />
         </div>
     )

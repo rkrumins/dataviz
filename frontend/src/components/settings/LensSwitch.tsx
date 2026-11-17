@@ -28,7 +28,7 @@ export function LensSwitch({ value, onChange, className }: { value: Lens; onChan
                     { value: 'operator', label: 'Operator', icon: Wrench },
                 ]}
             />
-            <p className="text-xs text-ink-muted">{SAYS[value]}</p>
+            <p className="text-xs text-ink-secondary">{SAYS[value]}</p>
         </div>
     )
 }
