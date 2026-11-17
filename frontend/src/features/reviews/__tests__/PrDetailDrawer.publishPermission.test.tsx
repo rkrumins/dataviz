@@ -47,6 +47,9 @@ vi.mock('../../versioning/hooks/useVersioning', () => ({
   useCloseMergeRequest: () => idle,
   useMergeMergeRequest: () => ({ ...idle, mutateAsync: mergeMutateAsync }),
   useUpdateMergeRequest: () => idle,
+  useRequestChanges: () => idle,
+  useWithdrawChangesRequest: () => idle,
+  useDiscardRejected: () => idle,
   useBranchViewChanges: () => ({ data: undefined }),
   useRevertCommit: () => idle,
 }))

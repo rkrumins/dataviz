@@ -419,6 +419,33 @@ def review_closure(requires: Mapping[str, Set[str]], chosen: Iterable[str], *,
     return out
 
 
+def restore_closure(entries: Mapping[str, ChangeEntry], requires: Mapping[str, Set[str]],
+                    chosen: Iterable[str]) -> Dict[str, Optional[str]]:
+    """``chosen`` and what discarding them from the draft takes with them — ``{change: the chosen
+    one it came with}`` (``None`` for a chosen one) — so the draft still holds together: a change
+    put back takes whatever needs it (a new entity, its new relationships and the link to its
+    parent; one link of a move, the other), and a removed entity brought back brings back what it
+    lost with it (its links and relationships — a removed subtree comes back whole). Over
+    :func:`review_requirements`."""
+    inverse: Dict[str, Set[str]] = {}
+    for a, bs in requires.items():
+        for b in bs:
+            inverse.setdefault(b, set()).add(a)
+    out: Dict[str, Optional[str]] = {c: None for c in chosen}
+    stack = list(out)
+    while stack:
+        x = stack.pop()
+        nxt = set(inverse.get(x, ()))
+        e = entries.get(x)
+        if e is not None and e.kind == "node" and e.status == "removed":
+            nxt |= requires.get(x, set())
+        for y in nxt:
+            if y not in out:
+                out[y] = out[x] or x
+                stack.append(y)
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # Changes top-down: the containment tree they sit in                           #
 # --------------------------------------------------------------------------- #

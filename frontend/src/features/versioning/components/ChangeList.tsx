@@ -20,12 +20,15 @@
  * sit under their containers, a level at a time (`ChangeTree`). Searching or narrowing it lists what
  * matches across the whole list, each row saying where it sits — and "Show in hierarchy" opens the
  * way down to it.
+ *
+ * A draft's own saved changes (`restore`) can be discarded — one, or every change shown — each put
+ * back where the draft began, with what holds it together (asked first, from a dry run).
  */
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import {
   ArrowRight, ArrowUpRight, ChevronsDownUp, ChevronsUpDown, List, ListTree, Loader2, MessageSquare, MessageSquarePlus,
-  Search, SearchX,
+  Search, SearchX, Undo2,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { EmptyState } from '@/components/ui/EmptyState'
@@ -39,7 +42,8 @@ import {
   type ChangeListSummary, type DecisionState, type DecisionVerdict, type ReviewChangeRow, type ReviewDecisionSummary,
 } from '@/services/versioningApiService'
 import { ExportMenu, type ExportDetail } from './ExportMenu'
-import { useChangeEntries, useChangeEntry, useChangeSummary } from '../hooks/useVersioning'
+import { useChangeEntries, useChangeEntry, useChangeSummary, useRestoreDraftChanges } from '../hooks/useVersioning'
+import { useAppNotifications } from '@/components/ui/notifications'
 import type { GraphChange } from '../model/changeModel'
 import { changeListSource, useChangeNavigatorStore } from '@/store/changeNavigatorStore'
 import { EntityDiff } from './EntityDiff'
@@ -117,6 +121,8 @@ export interface ChangeListProps {
   /** The review these changes are of: each change carries its discussion — and, in a draft's
    *  review, its decision. */
   review?: { prId: string } & DiscussionAccess & { decisions?: ReviewDecisions }
+  /** A draft's own saved changes, which its editor can discard (each put back where it began). */
+  restore?: { branchId: string }
   className?: string
 }
 
@@ -131,7 +137,7 @@ export interface ReviewDecisions {
 }
 
 export function ChangeList({
-  wsId, graphId, origin, summary, emptyHint = 'No changes.', maxHeight = '60vh', review, className,
+  wsId, graphId, origin, summary, emptyHint = 'No changes.', maxHeight = '60vh', review, restore, className,
 }: ChangeListProps) {
   const commentCounts = useReviewCommentCounts(wsId, review?.prId).data?.entities
   const summaryQ = useChangeSummary(wsId, graphId, summary ? null : origin)
@@ -166,6 +172,29 @@ export function ChangeList({
     setReveal({ entityId, nonce: Date.now() })
   }
   const filter = { kind: tree ? undefined : activeKind, statuses, type: tree ? undefined : type || undefined, q }
+  // Discarding saved changes: a dry run says what comes with them; asked when it is more than the
+  // one chosen; then one restore commit, from the head the dry run read.
+  const { notify } = useAppNotifications()
+  const restoreM = useRestoreDraftChanges(wsId, graphId, restore?.branchId ?? '')
+  const discardSaved = async (pick: { ids: string[]; label: string } | 'shown') => {
+    if (!restore || restoreM.isPending) return
+    const body = pick === 'shown' ? { filter } : { entityIds: pick.ids }
+    try {
+      const dry = await restoreM.mutateAsync({ ...body, dryRun: true })
+      if (!dry.restored) return
+      const extra = dry.impliedCount
+      const ask = pick === 'shown'
+        ? `Discard the ${dry.chosen.toLocaleString()} change${dry.chosen === 1 ? '' : 's'} shown from the draft${extra ? `, and ${extra.toLocaleString()} more that hold them together` : ''}?`
+        : extra ? `Discard ${pick.label} from the draft? ${extra.toLocaleString()} change${extra === 1 ? '' : 's'} that hold it together go with it.` : null
+      if (ask && !window.confirm(`${ask} Each goes back to where the draft began, in one new revision — change it again to bring it back.`)) return
+      const out = await restoreM.mutateAsync({ ...body, expectedHeadCommitId: dry.headCommitId })
+      notify('success', out.restored === 1 && pick !== 'shown'
+        ? `Discarded ${pick.label} from the draft.`
+        : `Discarded ${out.restored.toLocaleString()} changes from the draft.`)
+    } catch (e) {
+      notify('error', (e as Error).message)
+    }
+  }
   // Each row says what it changed before it is opened (`summary`): counts, and its first few fields.
   const plainQ = useChangeEntries(wsId, graphId, origin, filter,
     { enabled: listable && !decisions && !showTree, summary: true, paths: tree })
@@ -229,6 +258,7 @@ export function ChangeList({
     if (decisions?.canDecide && e.key === 'a') { void flow.run('accepted', { entityIds: [row.entityId] }); return true }
     if (decisions?.canDecide && e.key === 'r') { setAsking(row.entityId); return true }
     if (review && e.key === 'c') { setLevel(2); return true }
+    if (restore && (e.key === 'Delete' || e.key === 'Backspace')) { void discardSaved({ ids: [row.entityId], label: rowLabel(row) }); return true }
     return false
   }
   const decideOf = (row: ChangeListRow) => (decisions ? {
@@ -245,6 +275,7 @@ export function ChangeList({
       level={f.level} current={f.current} onToggle={f.onToggle} onLevel={f.onLevel} onFocus={f.onFocus}
       setsize={f.setsize} posinset={f.posinset} depth={f.depth} lead={f.lead} inside={f.inside}
       asking={asking === row.entityId} onAsk={(on) => setAsking(on ? row.entityId : null)} onShow={f.onShow}
+      onDiscard={restore ? () => void discardSaved({ ids: [row.entityId], label: rowLabel(row) }) : undefined}
       review={review} comments={commentCounts?.[row.entityId]} decide={decideOf(row)} />
   )
   const expand = useExpandableRows(rowKeys, {
@@ -371,6 +402,13 @@ export function ChangeList({
             </button>
           </HoverTip>
         )}
+        {restore && !showTree && (narrowed || decision) && matching > 0 && !entriesQ.isLoading && (
+          <button type="button" disabled={restoreM.isPending} onClick={() => void discardSaved('shown')}
+            className="inline-flex items-center gap-1 px-2 h-7 rounded-lg text-[11.5px] font-semibold text-rose-700 dark:text-rose-300 hover:bg-rose-500/10 disabled:opacity-50">
+            {restoreM.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Undo2 className="w-3.5 h-3.5" aria-hidden />}
+            Discard the {matching.toLocaleString()} shown
+          </button>
+        )}
         {decisions?.canDecide && !showTree && matching > 0 && !entriesQ.isLoading && (
           <>
             <button type="button" disabled={flow.busy} onClick={() => void flow.all('accepted', { ...filter, decision: decision ?? undefined })}
@@ -440,6 +478,7 @@ export function ChangeList({
                       onAsk={(on) => setAsking(on ? item.row.entityId : null)}
                       onShow={() => showOnCanvas(item.row)}
                       onShowInTree={tree ? () => showInTree(item.row.entityId) : undefined}
+                      onDiscard={restore ? () => void discardSaved({ ids: [item.row.entityId], label: rowLabel(item.row) }) : undefined}
                       review={review} comments={commentCounts?.[item.row.entityId]}
                       decide={decideOf(item.row)} />
                   )}
@@ -457,7 +496,7 @@ const rowDomId = (entityId: string) => `change-row-${entityId}`
 
 function Row({
   wsId, graphId, origin, row, domId, level, current, onToggle, onLevel, onFocus, setsize, posinset, asking, onAsk,
-  onShow, onShowInTree, review, comments, decide, depth, lead, inside,
+  onShow, onShowInTree, onDiscard, review, comments, decide, depth, lead, inside,
 }: {
   wsId: string
   graphId: string
@@ -479,6 +518,8 @@ function Row({
   onShow: () => void
   /** A search result: open the way down to it, top-down. */
   onShowInTree?: () => void
+  /** A draft's own saved change: put it back where the draft began. */
+  onDiscard?: () => void
   /** In the tree: how deep it sits, what opens its children, and how many changes are under it. */
   depth?: number
   lead?: ReactNode
@@ -536,13 +577,21 @@ function Row({
           )}
         </>
       ) : undefined}
-      actions={canReveal || onShowInTree ? (
+      actions={canReveal || onShowInTree || onDiscard ? (
         <>
           {onShowInTree && (
             <HoverTip label={`Open the way down to ${label}, top-down`} className="inline-flex">
               <button type="button" onClick={onShowInTree} aria-label={`Show ${label} in the hierarchy`}
                 className="inline-flex items-center gap-0.5 px-1.5 h-6 rounded-md text-[11px] font-semibold text-ink-secondary hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.06]">
                 <ListTree className="w-3 h-3" aria-hidden />In hierarchy
+              </button>
+            </HoverTip>
+          )}
+          {onDiscard && (
+            <HoverTip label="Discard this change from the draft" detail="It goes back to where the draft began" shortcut="⌫" className="inline-flex">
+              <button type="button" onClick={onDiscard} aria-label={`Discard the change to ${label}`}
+                className="w-6 h-6 rounded-md flex items-center justify-center text-ink-muted hover:text-rose-600 dark:hover:text-rose-300 hover:bg-rose-500/10">
+                <Undo2 className="w-3.5 h-3.5" aria-hidden />
               </button>
             </HoverTip>
           )}

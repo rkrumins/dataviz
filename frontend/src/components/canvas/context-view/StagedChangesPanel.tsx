@@ -636,7 +636,8 @@ function DraftSavedSection({ changeSet, list, defaultOpen = false }: {
       {open && (
         <div className="px-4 pb-4">
           {list && origin
-            ? <ChangeList wsId={list.wsId} graphId={list.graphId} origin={origin} emptyHint="Nothing saved on this draft yet." />
+            ? <ChangeList wsId={list.wsId} graphId={list.graphId} origin={origin} emptyHint="Nothing saved on this draft yet."
+                restore={{ branchId: list.branchId }} />
             : <ChangesPanel changeSet={changeSet} emptyHint="Nothing saved on this draft yet." />}
         </div>
       )}

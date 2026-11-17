@@ -1214,6 +1214,55 @@ export function useCloseMergeRequest(wsId: string) {
   })
 }
 
+/** Send a draft's review back to its author, with why (it merges once the draft changes). */
+export function useRequestChanges(wsId: string) {
+  const invalidate = useInvalidatePr(wsId)
+  return useMutation({
+    mutationFn: (v: { prId: string; graphId: string; reason?: string | null; expectedHeadCommitId?: string | null }) =>
+      api.requestChanges(wsId, v.prId, { reason: v.reason, expectedHeadCommitId: v.expectedHeadCommitId }),
+    onSuccess: (_r, v) => invalidate(v.prId, v.graphId),
+  })
+}
+
+export function useWithdrawChangesRequest(wsId: string) {
+  const invalidate = useInvalidatePr(wsId)
+  return useMutation({
+    mutationFn: (v: { prId: string; graphId: string }) => api.withdrawChangesRequest(wsId, v.prId),
+    onSuccess: (_r, v) => invalidate(v.prId, v.graphId),
+  })
+}
+
+/** Discard saved changes from a draft (one restore commit); its change lists and canvas read again.
+ *  `dryRun` asks what it would take, changing nothing. */
+export function useRestoreDraftChanges(wsId: string, graphId: string, branchId: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (body: Parameters<typeof api.restoreDraftChanges>[3]) => api.restoreDraftChanges(wsId, graphId, branchId, body),
+    onSuccess: (out) => {
+      if (out.dryRun || !out.commitId) return
+      // The draft against main — its change lists, its canvas tints — and the draft itself.
+      void qc.invalidateQueries({ queryKey: VERSIONING_KEYS.diffVsMain(wsId, graphId, branchId) })
+      void qc.invalidateQueries({ queryKey: VERSIONING_KEYS.branches(wsId, graphId) })
+      void qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'commits'] })
+      void qc.invalidateQueries({ queryKey: ['reviewDecisions', wsId] })
+    },
+  })
+}
+
+/** Discard what a draft's review rejected from the draft — its author taking the review's answer. */
+export function useDiscardRejected(wsId: string) {
+  const qc = useQueryClient()
+  const invalidate = useInvalidatePr(wsId)
+  return useMutation({
+    mutationFn: (v: { prId: string; graphId: string; branchId: string }) => api.discardRejectedChanges(wsId, v.prId),
+    onSuccess: (_r, v) => {
+      invalidate(v.prId, v.graphId)
+      void qc.invalidateQueries({ queryKey: VERSIONING_KEYS.diffVsMain(wsId, v.graphId, v.branchId) })
+      void qc.invalidateQueries({ queryKey: ['reviewDecisions', wsId, v.prId] })
+    },
+  })
+}
+
 /** Edit a PR's title/description in place. */
 export function useUpdateMergeRequest(wsId: string) {
   const invalidate = useInvalidatePr(wsId)
@@ -1231,8 +1280,11 @@ export function useMergeMergeRequest(wsId: string) {
   const invalidate = useInvalidatePr(wsId)
   const bumpMainEpoch = useBranchStore((s) => s.bumpMainEpoch)
   return useMutation({
-    mutationFn: (v: { prId: string; graphId: string; message: string; resolutions?: ResolutionMap; mode?: 'all' | 'accepted' }) =>
-      api.mergeMergeRequest(wsId, v.prId, { message: v.message, resolutions: v.resolutions, mode: v.mode }),
+    mutationFn: (v: {
+      prId: string; graphId: string; message: string; resolutions?: ResolutionMap; mode?: 'all' | 'accepted'; discardRejected?: boolean
+    }) => api.mergeMergeRequest(wsId, v.prId, {
+      message: v.message, resolutions: v.resolutions, mode: v.mode, ...(v.discardRejected ? { discardRejected: true } : {}),
+    }),
     onSuccess: (_r, v) => {
       invalidate(v.prId, v.graphId)
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.prDiff(wsId, v.prId) })

@@ -9,6 +9,10 @@
  * until the job ends, which the drawer shows in progress — and, merged, the drawer stays on it:
  * there is no view to go back to. While forks are off it can't be approved or merged.
  *
+ * A draft's review can be sent back to its author with why (Send back): it waits until the draft
+ * changes, its author told, and the author can take the review's answer in one step — Discard the
+ * rejected changes. Merging what is accepted can discard what was rejected too.
+ *
  * Mounted only while a PR is selected (fresh queries per prId).
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
@@ -18,7 +22,7 @@ import { motion } from 'framer-motion'
 import {
   X, GitMerge, GitBranch, User, Clock, CheckCircle2, XCircle, Loader2, FileDiff, ShieldCheck,
   GitPullRequestArrow, Pencil, Check, ArrowDownToLine, ArrowUpRight, AlertTriangle, GitCommitHorizontal,
-  Undo2, ShieldAlert, LayoutTemplate, MessageSquare,
+  Undo2, ShieldAlert, LayoutTemplate, MessageSquare, CornerUpLeft, Trash2,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Backdrop } from '@/components/ui/Backdrop'
@@ -31,6 +35,7 @@ import {
 import {
   useMergeRequest, usePullLatestDraft, useCommitLog,
   useApproveMergeRequest, useCloseMergeRequest, useMergeMergeRequest, useUpdateMergeRequest,
+  useRequestChanges, useWithdrawChangesRequest, useDiscardRejected,
   useBranchViewChanges, useChangeSummary, usePrDiffSummary, VERSIONING_KEYS,
 } from '../../versioning/hooks/useVersioning'
 import { DraftViewChanges } from '../../versioning/components/DraftViewChanges'
@@ -121,6 +126,14 @@ export function PrDetailDrawer({ wsId, prId, onClose, focusThreadId }: {
   const closePr = useCloseMergeRequest(wsId)
   const merge = useMergeMergeRequest(wsId)
   const update = useUpdateMergeRequest(wsId)
+  const sendBack = useRequestChanges(wsId)
+  const withdraw = useWithdrawChangesRequest(wsId)
+  const discardRejected = useDiscardRejected(wsId)
+  /** Sending it back: the form is open, and what it says. */
+  const [sendingBack, setSendingBack] = useState(false)
+  const [sendBackWhy, setSendBackWhy] = useState('')
+  /** Merging what is accepted also discards what was rejected from the draft. */
+  const [discardOnMerge, setDiscardOnMerge] = useState(false)
   const pullLatest = usePullLatestDraft(wsId, prQ.data?.graphId ?? '')
 
   const pr = prQ.data
@@ -274,7 +287,11 @@ export function PrDetailDrawer({ wsId, prId, onClose, focusThreadId }: {
   const accepted = decisions?.accepted ?? 0
   const rejected = decisions?.rejected ?? 0
   const mergeInPart = deciding && !!decisions && (rejected > 0 || (accepted > 0 && accepted < decisions.total))
+  // Sent back for changes, while that holds: it merges once the draft changes (or it is withdrawn).
+  const sentBack = draftReview && !terminal ? pr?.changesRequested ?? null : null
+  const canSendBack = draftReview && !terminal && !merging && !sentBack && !!viewerCan?.decide
   const busy = approve.isPending || closePr.isPending || merge.isPending || pullLatest.isPending
+    || sendBack.isPending || withdraw.isPending || discardRejected.isPending
 
   // Proactive gate: the server flags a draft MR that lags main head. Mirror it into needsPull so the
   // banner + Pull-latest show up front (the 409 catch in runMerge is the backstop). A clean pull
@@ -286,12 +303,15 @@ export function PrDetailDrawer({ wsId, prId, onClose, focusThreadId }: {
   const runMerge = async (resolutions?: ResolutionMap, mode: 'all' | 'accepted' = 'all') => {
     if (!pr || unsaved > 0) return
     try {
+      const discard = mode === 'accepted' && discardOnMerge && rejected > 0
       const res = await merge.mutateAsync({
         prId, graphId: pr.targetGraphId, message: `Merge: ${derivePrTitle(pr)}`, resolutions, mode,
+        discardRejected: discard,
       })
       if (mode === 'accepted' && accepted < (decisions?.total ?? 0)) {
         // Merged in part: the draft stays open with the rest, and this review reads as merged.
-        notify('success', `Merged ${accepted.toLocaleString()} accepted change${accepted === 1 ? '' : 's'} into main. The rest stay on the draft.`)
+        notify('success', `Merged ${accepted.toLocaleString()} accepted change${accepted === 1 ? '' : 's'} into main. `
+          + (discard ? 'The rejected ones left the draft; anything undecided stays on it.' : 'The rest stay on the draft.'))
         void prQ.refetch()
         return
       }
@@ -744,6 +764,60 @@ export function PrDetailDrawer({ wsId, prId, onClose, focusThreadId }: {
           </div>
         )}
 
+        {/* Sent back for changes: by whom, why, and what lets it merge again. */}
+        {pr && sentBack && (
+          <div role="status" className="mx-5 mb-1 flex items-start gap-2.5 px-3.5 py-2.5 rounded-xl bg-rose-500/[0.06] border border-rose-500/25">
+            <CornerUpLeft className="w-4 h-4 mt-0.5 text-rose-500 shrink-0" aria-hidden />
+            <div className="flex-1 min-w-0 text-[12px] leading-snug">
+              <p className="font-semibold text-ink">
+                Sent back for changes by {ownerName(sentBack.by, pr.userNames)}
+                <span className="font-normal text-ink-muted"> · {timeAgo(sentBack.at)}</span>
+              </p>
+              {sentBack.reason && <p className="mt-0.5 text-ink-secondary break-words">“{sentBack.reason}”</p>}
+              <p className="mt-0.5 text-ink-muted">
+                {rejected > 0 ? `${rejected.toLocaleString()} change${rejected === 1 ? ' was' : 's were'} rejected. ` : ''}
+                It merges once the draft changes{sentBack.by === user?.id ? ', or once you withdraw this' : ''}.
+              </p>
+            </div>
+            <div className="shrink-0 flex flex-col items-end gap-1">
+              {(isAuthor || isOwner) && rejected > 0 && (
+                <button type="button" disabled={busy}
+                  onClick={() => {
+                    if (!window.confirm(`Discard the ${rejected.toLocaleString()} rejected change${rejected === 1 ? '' : 's'} from the draft, and what holds them together? It is one new revision of the draft — change them again to bring them back.`)) return
+                    discardRejected.mutate({ prId, graphId: pr.graphId, branchId: pr.sourceBranchId }, {
+                      onSuccess: (out) => notify('success', `Discarded ${out.restored.toLocaleString()} change${out.restored === 1 ? '' : 's'} from the draft. The review is back in your reviewers’ hands.`),
+                      onError: (e) => notify('error', (e as Error).message),
+                    })
+                  }}
+                  className="inline-flex items-center gap-1 px-2 h-7 rounded-lg text-[11.5px] font-semibold text-rose-700 dark:text-rose-300 hover:bg-rose-500/10 disabled:opacity-50">
+                  {discardRejected.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" aria-hidden />}
+                  Discard the rejected
+                </button>
+              )}
+              {sentBack.by === user?.id && (
+                <button type="button" disabled={busy}
+                  onClick={() => withdraw.mutate({ prId, graphId: pr.graphId }, {
+                    onSuccess: () => notify('success', 'Withdrawn: the review can merge again.'),
+                    onError: (e) => notify('error', (e as Error).message),
+                  })}
+                  className="inline-flex items-center gap-1 px-2 h-7 rounded-lg text-[11.5px] font-semibold text-ink-secondary hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.06] disabled:opacity-50">
+                  {withdraw.isPending && <Loader2 className="w-3.5 h-3.5 animate-spin" />}Withdraw
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Merging what is accepted: the rejected ones can leave the draft in the same step. */}
+        {pr && mergeInPart && rejected > 0 && canMerge && !sentBack && !needsPull && (
+          <label className="mx-5 mb-1 flex items-center gap-2 text-[12px] text-ink-secondary cursor-pointer select-none">
+            <input type="checkbox" checked={discardOnMerge} onChange={(e) => setDiscardOnMerge(e.target.checked)}
+              className="rounded border-glass-border text-accent-lineage focus:ring-accent-lineage/40" />
+            Also discard the {rejected.toLocaleString()} rejected change{rejected === 1 ? '' : 's'} from the draft
+            <span className="text-ink-muted">— only what nobody decided stays on it</span>
+          </label>
+        )}
+
         {/* Action bar — none while a job merges it, which nothing may change meanwhile */}
         {pr && !terminal && canManage && !dismissing && !merging && (
           <div className="px-5 py-3.5 border-t border-glass-border/60 flex items-center gap-2">
@@ -768,6 +842,12 @@ export function PrDetailDrawer({ wsId, prId, onClose, focusThreadId }: {
                 <CheckCircle2 className="w-4 h-4" /> Approve
               </button>
             )}
+            {canSendBack && !sendingBack && (
+              <button type="button" onClick={() => setSendingBack(true)} disabled={busy}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-sm font-semibold text-rose-600 dark:text-rose-300 border border-rose-500/30 bg-rose-500/[0.05] hover:bg-rose-500/10 disabled:opacity-60">
+                <CornerUpLeft className="w-4 h-4" aria-hidden /> Send back
+              </button>
+            )}
             {needsPull ? (
               <button
                 onClick={() => runPull()}
@@ -781,8 +861,9 @@ export function PrDetailDrawer({ wsId, prId, onClose, focusThreadId }: {
             ) : !forksOff && mergeInPart ? (
               <button
                 onClick={() => runMerge(undefined, 'accepted')}
-                disabled={busy || unsaved > 0 || !canMerge || accepted === 0 || (decisions?.missing ?? 0) > 0}
+                disabled={busy || unsaved > 0 || !canMerge || accepted === 0 || (decisions?.missing ?? 0) > 0 || !!sentBack}
                 title={!canMerge ? mergeBlockedWhy ?? 'You can’t merge this review'
+                  : sentBack ? 'Sent back for changes: it merges once the draft changes'
                   : accepted === 0 ? 'Accept the changes that should merge first'
                     : 'Apply the accepted changes to main; the rest stay on the draft'}
                 className="flex-1 inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-xl text-sm font-semibold text-white bg-gradient-to-r from-indigo-500 to-violet-600 hover:from-indigo-600 hover:to-violet-700 shadow-sm disabled:opacity-60"
@@ -793,8 +874,9 @@ export function PrDetailDrawer({ wsId, prId, onClose, focusThreadId }: {
             ) : !forksOff && (
               <button
                 onClick={() => runMerge()}
-                disabled={busy || unsaved > 0 || !canMerge}
-                title={canMerge ? 'Apply these changes to main' : mergeBlockedWhy ?? 'You can’t merge this review'}
+                disabled={busy || unsaved > 0 || !canMerge || !!sentBack}
+                title={!canMerge ? mergeBlockedWhy ?? 'You can’t merge this review'
+                  : sentBack ? 'Sent back for changes: it merges once the draft changes' : 'Apply these changes to main'}
                 className="flex-1 inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-xl text-sm font-semibold text-white bg-gradient-to-r from-indigo-500 to-violet-600 hover:from-indigo-600 hover:to-violet-700 shadow-sm disabled:opacity-60"
               >
                 {merge.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <GitMerge className="w-4 h-4" />}
@@ -809,6 +891,45 @@ export function PrDetailDrawer({ wsId, prId, onClose, focusThreadId }: {
             >
               <XCircle className="w-4 h-4" /> Dismiss
             </button>
+          </div>
+        )}
+
+        {/* Send back: why, in the author's words to read — they are told, with a link here. */}
+        {pr && sendingBack && canSendBack && (
+          <div className="px-5 py-4 border-t border-rose-500/25 bg-rose-500/[0.04]">
+            <div className="flex items-start gap-2.5 mb-2.5">
+              <CornerUpLeft className="w-5 h-5 text-rose-500 mt-0.5 shrink-0" aria-hidden />
+              <div>
+                <p className="text-[13px] font-semibold text-ink">Send this back for changes?</p>
+                <p className="text-[12px] text-ink-muted mt-1 leading-relaxed">
+                  {ownerName(pr.actor, pr.userNames)} is told, with what you say here. It can’t merge until the draft changes
+                  {rejected > 0 ? <> — they see the <span className="font-medium text-rose-500">{rejected.toLocaleString()} rejected</span> change{rejected === 1 ? '' : 's'}, each with your reason, and can discard them in one step</> : ''}.
+                </p>
+              </div>
+            </div>
+            <label className="block">
+              <span className="sr-only">What should change</span>
+              <textarea value={sendBackWhy} onChange={(e) => setSendBackWhy(e.target.value)} rows={3} maxLength={2000} autoFocus
+                placeholder="What should change, and why?"
+                className="w-full rounded-xl border border-glass-border bg-canvas-elevated px-3 py-2 text-[12.5px] text-ink placeholder:text-ink-muted/60 focus:outline-none focus:ring-2 focus:ring-rose-500/30" />
+            </label>
+            <div className="flex items-center gap-2 mt-2.5">
+              <button type="button" disabled={busy}
+                onClick={() => sendBack.mutate({ prId, graphId: pr.graphId, reason: sendBackWhy.trim() || null, expectedHeadCommitId: pr.headCommitId }, {
+                  onSuccess: () => { notify('success', `Sent back to ${ownerName(pr.actor, pr.userNames)}. They’ve been told.`); setSendingBack(false); setSendBackWhy('') },
+                  onError: (e) => {
+                    if (e instanceof HeadMovedError) void prQ.refetch()
+                    notify('error', (e as Error).message)
+                  },
+                })}
+                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-sm font-semibold text-white bg-rose-500 hover:bg-rose-600 shadow-sm disabled:opacity-60">
+                {sendBack.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <CornerUpLeft className="w-4 h-4" aria-hidden />} Send back
+              </button>
+              <button type="button" onClick={() => setSendingBack(false)} disabled={busy}
+                className="px-4 py-2 rounded-xl text-sm font-medium text-ink-muted border border-glass-border hover:text-ink hover:bg-black/[0.03] dark:hover:bg-white/[0.03] disabled:opacity-60">
+                Keep reviewing
+              </button>
+            </div>
           </div>
         )}
 

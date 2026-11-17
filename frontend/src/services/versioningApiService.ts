@@ -572,6 +572,9 @@ export interface PullRequest {
   /** Reviewers whose approval went stale (the draft changed since): they must approve again. */
   staleApprovedBy?: string[] | null
   approvalStatus?: string | null
+  /** A reviewer sent it back for changes, while that holds: it merges once the draft changes, or
+   *  once they withdraw it. */
+  changesRequested?: { by: string; at: string; reason?: string | null; headCommitId?: string | null } | null
   checksStatus?: Record<string, unknown> | null
   actor?: string | null          // who raised it
   createdAt: string              // when raised
@@ -2786,11 +2789,56 @@ export function closeMergeRequest(wsId: string, prId: string): Promise<PullReque
   return vfetch<PullRequest>(`${base(wsId)}/merge-requests/${prId}/close`, jsonBody({}))
 }
 
+/** Send a draft's review back to its author, with why: it does not merge until the draft changes
+ *  (or the request is withdrawn). The draft's people are told. */
+export function requestChanges(
+  wsId: string, prId: string, body: { reason?: string | null; expectedHeadCommitId?: string | null },
+): Promise<PullRequest> {
+  return vfetch<PullRequest>(`${base(wsId)}/merge-requests/${encodeURIComponent(prId)}/request-changes`, jsonBody(body))
+}
+
+export function withdrawChangesRequest(wsId: string, prId: string): Promise<PullRequest> {
+  return vfetch<PullRequest>(`${base(wsId)}/merge-requests/${encodeURIComponent(prId)}/request-changes`, { method: 'DELETE' })
+}
+
+/** What discarding a draft's saved changes did (or, `dryRun`, would do): how many it puts back,
+ *  and which of them came with the ones chosen (what holds them together). */
+export interface RestoreOutcome {
+  restored: number
+  chosen: number
+  implied: Array<{ entityId: string; impliedBy: string }>
+  impliedCount: number
+  dryRun: boolean
+  commitId: string | null
+  headCommitId?: string | null
+}
+
+/** Discard saved changes from a draft — by id, or every change a filter lists — as one restore
+ *  commit that puts each back where the draft began. */
+export function restoreDraftChanges(wsId: string, graphId: string, branchId: string, body: {
+  entityIds?: string[]
+  filter?: ChangeListFilter
+  expectedHeadCommitId?: string | null
+  dryRun?: boolean
+}): Promise<RestoreOutcome> {
+  const { filter, ...rest } = body
+  return vfetch<RestoreOutcome>(`${base(wsId)}/graphs/${graphId}/branches/${encodeURIComponent(branchId)}/restore`, jsonBody({
+    ...rest,
+    ...(filter ? { filter: { kind: filter.kind, statuses: filter.statuses ?? [], type: filter.type, q: filter.q?.trim() || undefined } } : {}),
+  }))
+}
+
+/** Discard what a draft's review rejected from the draft — its author taking the review's answer. */
+export function discardRejectedChanges(wsId: string, prId: string): Promise<RestoreOutcome> {
+  return vfetch<RestoreOutcome>(`${base(wsId)}/merge-requests/${encodeURIComponent(prId)}/discard-rejected`, jsonBody({}))
+}
+
 export async function mergeMergeRequest(
   wsId: string,
   prId: string,
-  /** `mode: 'accepted'`: a draft's review merges only its accepted changes; the draft keeps the rest. */
-  data: { message: string; resolutions?: ResolutionMap; mode?: 'all' | 'accepted' },
+  /** `mode: 'accepted'`: a draft's review merges only its accepted changes; the draft keeps the rest
+   *  — less what it rejected, with `discardRejected`. */
+  data: { message: string; resolutions?: ResolutionMap; mode?: 'all' | 'accepted'; discardRejected?: boolean },
 ): Promise<PublishResult> {
   return followPublish(wsId, await vfetch<PublishResult | QueuedPublish>(
     `${base(wsId)}/merge-requests/${prId}/merge`, jsonBody(data)))

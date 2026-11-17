@@ -622,6 +622,26 @@ class ChangesRejected(_HttpMapped, RuntimeError):
                          {"type": "changes_rejected", "count": count})
 
 
+class DraftMoved(_HttpMapped, RuntimeError):
+    """What a person chose from a draft's changes was chosen from a version of it that has since
+    moved on: what they saw is not what would change."""
+
+    def __init__(self, branch_id: str, head_commit_id: Optional[str]):
+        self.branch_id, self.head_commit_id = branch_id, head_commit_id
+        super().__init__("This draft changed since you looked at it: look again, then try again",
+                         {"type": "draft_moved", "branchId": branch_id, "headCommitId": head_commit_id})
+
+
+class ChangesRequested(_HttpMapped, RuntimeError):
+    """A reviewer sent the review back for changes: it merges once the draft changes, or once they
+    withdraw the request."""
+
+    def __init__(self, pr_id: str, by: str):
+        self.pr_id, self.by = pr_id, by
+        super().__init__("A reviewer asked for changes: this review merges once the draft changes",
+                         {"type": "changes_requested", "prId": pr_id, "by": by})
+
+
 class NothingAccepted(_HttpMapped, RuntimeError):
     """Merge accepted, with nothing accepted (or every acceptance stale)."""
 

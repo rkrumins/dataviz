@@ -814,6 +814,9 @@ class MergePrRequest(_ApiModel):
     resolutions: Optional[Dict[str, Optional[dict]]] = None
     # A draft's review: ``accepted`` merges only its accepted changes, and the draft keeps the rest.
     mode: Literal["all", "accepted"] = "all"
+    # With ``accepted``: also discard the rejected changes from the draft (one restore commit), so
+    # what stays on it is what nobody decided yet.
+    discard_rejected: bool = Field(default=False, alias="discardRejected")
 
 
 class ApproveRequest(_ApiModel):
@@ -1603,6 +1606,9 @@ class PrResponse(_ApiModel):
     # Reviewers whose approval went stale (a content commit since): they must approve again.
     stale_approved_by: Optional[List[str]] = Field(default=None, alias="staleApprovedBy")
     approval_status: Optional[str] = Field(default=None, alias="approvalStatus")
+    # A reviewer sent it back for changes, while that holds: {by, at, reason, headCommitId}. It
+    # merges once the draft changes, or once they withdraw it.
+    changes_requested: Optional[Dict[str, Any]] = Field(default=None, alias="changesRequested")
     checks_status: Optional[dict] = Field(default=None, alias="checksStatus")
     actor: Optional[str] = None                                       # who raised it
     created_at: str = Field(alias="createdAt")                        # when raised
@@ -1647,6 +1653,9 @@ def _collect_actor_ids(item: dict) -> set:
         for v in item.get(f) or ():
             if v:
                 ids.add(v)
+    sent_back = item.get("changes_requested")              # a review sent back: by whom
+    if isinstance(sent_back, dict) and sent_back.get("by"):
+        ids.add(sent_back["by"])
     return ids
 
 
@@ -1963,6 +1972,9 @@ _DRAFT_NEWS = {
     "draft.returned": ('Part of "{name}" was published',
                        "What its review accepted is in the published version now. The rest is still on "
                        "the draft, ready for another review."),
+    "review.changes_requested": ('"{name}" was sent back for changes',
+                                 "A reviewer asked for changes before it is published. Open the review to "
+                                 "see what they rejected, and why."),
 }
 
 
@@ -6043,6 +6055,67 @@ async def close_merge_request(
         return await svc.close_pr(pr_id=pr_id, actor=user.id)
 
 
+class RequestChangesRequest(_ApiModel):
+    reason: Optional[str] = Field(default=None, max_length=2000)
+    # The source head the reviewer saw: 409 head_moved when the draft has moved on since.
+    expected_head_commit_id: Optional[str] = Field(default=None, alias="expectedHeadCommitId")
+
+
+@router.post("/merge-requests/{pr_id}/request-changes", response_model=PrResponse)
+async def request_changes_on_merge_request(
+    ws_id: str, pr_id: str, body: RequestChangesRequest,
+    user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    _pr: dict = Depends(pr_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Send a draft's review back to its author: it does not merge until the draft changes, or
+    until this reviewer withdraws the request (``DELETE``). Whoever may decide its changes may; the
+    draft's people are told, with a link to the review."""
+    can = await _viewer_can(svc, session, _pr, user.id, claims, ws_id)
+    if not can["decide"]:
+        raise HTTPException(status_code=403, detail={"type": can["decideReason"] or "forbidden",
+                                                     "message": "You can't send this review back."})
+    with _domain_errors():
+        meta = await svc.request_changes(pr_id=pr_id, actor=user.id, reason=body.reason,
+                                         expected_head_commit_id=body.expected_head_commit_id)
+    target = str(_pr["target_graph_id"])
+    await _tell_draft_people(session, svc, "review.changes_requested", ws_id=ws_id,
+                             meta=await svc.get_graph(target) or {}, graph_id=target,
+                             branch_id=str(_pr["source_branch_id"]), actor=user.id, pr_id=pr_id)
+    return meta
+
+
+@router.delete("/merge-requests/{pr_id}/request-changes", response_model=PrResponse)
+async def withdraw_changes_request(
+    ws_id: str, pr_id: str,
+    user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    _pr: dict = Depends(pr_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+):
+    """Withdraw a request for changes: the reviewer who made it."""
+    with _domain_errors():
+        return await svc.withdraw_changes_request(pr_id=pr_id, actor=user.id)
+
+
+@router.post("/merge-requests/{pr_id}/discard-rejected")
+async def discard_rejected_changes(
+    ws_id: str, pr_id: str,
+    user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    _pr: dict = Depends(pr_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Discard what a draft's review rejected from the draft, as one restore commit — its author
+    taking the review's answer — and with it what holds those changes together (``implied``)."""
+    if _pr.get("source_graph_id") != _pr.get("target_graph_id"):
+        raise HTTPException(status_code=422, detail={"type": "fork_review", "message": "A fork's review has no rejected changes to discard."})
+    cset = await _pr_containment_types(svc, session, ws_id, _pr)
+    with _tree_errors():
+        return await svc.discard_rejected(pr_id=pr_id, actor=user.id, containment_edge_types=cset)
+
+
 @router.post("/merge-requests/{pr_id}/merge", response_model=PublishResponse)
 async def merge_merge_request(
     ws_id: str, pr_id: str, body: MergePrRequest,
@@ -6095,7 +6168,13 @@ async def merge_merge_request(
     _src_branch = _pr.get("source_branch_id")
     if partial and ((await svc.get_pr(pr_id)) or {}).get("merged_via") == "review_partial":
         # Merged in part: the draft stays open with the rest — its views and layout go live with
-        # its last part, and its people hear it is back for another review.
+        # its last part, and its people hear it is back for another review. Asked to, what was
+        # rejected leaves the draft too (best-effort: the merge stands either way).
+        if body.discard_rejected:
+            try:
+                await svc.discard_rejected(pr_id=pr_id, actor=user.id, containment_edge_types=cset)
+            except Exception:  # noqa: BLE001 — the merge landed; the rejected changes stay on the draft
+                logger.warning("discarding the rejected changes of %s failed", pr_id, exc_info=True)
         await _tell_draft_people(session, svc, "draft.returned", ws_id=ws_id,
                                  meta=await svc.get_graph(target) or {}, graph_id=target,
                                  branch_id=str(_src_branch), actor=user.id, pr_id=pr_id)
@@ -6592,3 +6671,47 @@ async def get_review_change_tree_level(
             graph_id=str(pr["target_graph_id"]), origin=ChangeOrigin(branch_id=str(pr["source_branch_id"])),
             containment_edge_types=cset, parent=parent, offset=offset, limit=limit, summary=summary,
             decisions_for=pr_id)
+
+
+# --------------------------------------------------------------------------- #
+# A draft's saved changes discarded: each back to where the draft began       #
+# --------------------------------------------------------------------------- #
+class RestoreFilter(_ApiModel):
+    kind: Optional[_ChangeKind] = None
+    statuses: List[Literal["added", "modified", "removed"]] = Field(default_factory=list)
+    type: Optional[str] = Field(default=None, max_length=256)
+    q: Optional[str] = Field(default=None, max_length=200)
+
+
+class RestoreChangesRequest(_ApiModel):
+    entity_ids: Optional[List[str]] = Field(default=None, alias="entityIds", max_length=1000)
+    filter: Optional[RestoreFilter] = None
+    expected_head_commit_id: Optional[str] = Field(default=None, alias="expectedHeadCommitId")
+    dry_run: bool = Field(default=False, alias="dryRun")
+    message: Optional[str] = Field(default=None, max_length=2000)
+
+
+@router.post("/graphs/{graph_id}/branches/{branch_id}/restore", dependencies=[Depends(require_feature("editModeEnabled"))])
+async def restore_draft_changes(
+    ws_id: str, graph_id: str, branch_id: str, body: RestoreChangesRequest,
+    user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    viewer: Viewer = Depends(viewer_ctx),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Discard saved changes from a draft — ``entityIds``, or every change ``filter`` lists — as
+    one ``restore`` commit that puts each back where the draft began; what holds a change together
+    goes with it, named in ``implied``. ``dryRun`` answers what it would discard. 409 ``draft_moved``
+    when the draft moved on from ``expectedHeadCommitId``."""
+    if (body.entity_ids is None) == (body.filter is None):
+        raise HTTPException(status_code=422, detail="Name the changes (entityIds) or a filter, not both.")
+    cset = await _live_containment_types(session, ws_id, _meta.get("data_source_id"))
+    f = body.filter
+    with _tree_errors():
+        return await svc.restore_draft_changes(
+            graph_id=graph_id, branch_id=branch_id, actor=user.id, containment_edge_types=cset,
+            entity_ids=body.entity_ids,
+            filter=None if f is None else {"kind": f.kind, "statuses": f.statuses, "type": f.type, "q": f.q},
+            expected_head_commit_id=body.expected_head_commit_id, dry_run=body.dry_run,
+            message=body.message, viewer=viewer)
