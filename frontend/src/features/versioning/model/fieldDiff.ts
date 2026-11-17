@@ -204,7 +204,7 @@ export interface FieldSummary {
   removed: number
   total: number
   /** The first few, as `keyDifferences` orders them: label and how it changed. */
-  top: Array<Pick<FieldChange, 'label' | 'folder' | 'kind'> & Partial<Pick<FieldChange, 'before' | 'after'>>>
+  top: Array<{ label: string; folder?: string | null; kind: FieldChange['kind']; before?: unknown; after?: unknown }>
 }
 
 /** A change's fields counted, with the first few named — what its one-line summary reads. */

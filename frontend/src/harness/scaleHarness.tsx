@@ -78,7 +78,20 @@ window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const limit = Number(u.searchParams.get('limit') ?? 100)
     const entries = Array.from({ length: Math.max(0, Math.min(limit, N - offset)) }, (_, k) => {
       const i = offset + k
-      return { entityId: `e${i}`, kind: 'node', status: (['added', 'modified', 'removed'] as const)[i % 3], type: TYPES[Math.floor(i / 2000) % 5], structural: false, displayName: `entity_${i}`, urn: `urn:e${i}`, qualifiedName: `warehouse.sales.entity_${i}` }
+      const status = (['added', 'modified', 'removed'] as const)[i % 3]
+      // What each row changed, as the server summarizes it (`summary=true`).
+      const fields = u.searchParams.get('summary') !== 'true' ? undefined : status === 'modified'
+        ? { changed: 3, added: 1, removed: 1, total: 5 + (i % 7), top: [
+            { label: 'Description', kind: 'changed', before: 'Daily orders', after: 'Daily customer orders, deduplicated' },
+            { label: 'owner', kind: 'changed', before: 'ana', after: 'bo' },
+            { label: 'tier', kind: 'changed', before: 'silver', after: 'gold' },
+            { label: 'steward', kind: 'added', before: null, after: 'finance' },
+            { label: 'legacy_id', kind: 'removed', before: 'L-17', after: null }] }
+        : { changed: 0, added: status === 'added' ? 6 : 0, removed: status === 'removed' ? 6 : 0, total: 6, top: [
+            { label: 'Name', kind: status === 'added' ? 'added' : 'removed', before: status === 'added' ? null : `entity_${i}`, after: status === 'added' ? `entity_${i}` : null },
+            { label: 'Type', kind: status === 'added' ? 'added' : 'removed', before: status === 'added' ? null : 'Table', after: status === 'added' ? 'Table' : null },
+            { label: 'owner', kind: status === 'added' ? 'added' : 'removed', before: status === 'added' ? null : 'ana', after: status === 'added' ? 'ana' : null }] }
+      return { entityId: `e${i}`, kind: 'node', status, type: TYPES[Math.floor(i / 2000) % 5], structural: false, displayName: `entity_${i}`, urn: `urn:e${i}`, qualifiedName: `warehouse.sales.entity_${i}`, fields }
     })
     return json({ entries, total: N, offset, limit, hasMore: offset + entries.length < N })
   }
@@ -178,7 +191,18 @@ async function drive() {
       report.openMs = Math.round(performance.now() - opened)
       await step('open-row', async () => {
         ;[...document.querySelectorAll<HTMLButtonElement>('[role=listitem] button')].find((b) => /entity_1\b/.test(b.textContent ?? ''))?.click()
-        await until(() => [...document.querySelectorAll('span')].find((s) => /changed$/.test(s.textContent ?? '')))
+        await until(() => [...document.querySelectorAll('button')].find((b) => /^Show all \d+ fields$/.test(b.textContent ?? '')))
+      })
+      await step('expand-all', async () => {
+        ;[...document.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent === 'Expand all')?.click()
+        await until(() => document.querySelectorAll('[role=listitem] [role=region]').length > 4)
+      })
+      await step('scroll-expanded', async () => {
+        const list = document.querySelector('[role=list][aria-label="Changes"]')?.parentElement
+        for (let k = 1; k <= 8 && list; k++) {
+          list.scrollTop = k * 1500
+          await new Promise((r) => setTimeout(r, 60))
+        }
       })
     }
     if (fixture === 'navigator') await until(() => document.querySelector('[aria-label="Change navigator"]'))

@@ -4997,7 +4997,7 @@ class GraphVersioningService:
     async def review_change_entries(
         self, *, pr_id: str, containment_edge_types, decision: Optional[str] = None,
         kind: Optional[str] = None, statuses: Sequence[str] = (), type_: Optional[str] = None,
-        q: Optional[str] = None, offset: int = 0, limit: int = 100,
+        q: Optional[str] = None, offset: int = 0, limit: int = 100, summary: bool = False,
     ) -> Dict[str, object]:
         """:meth:`change_entries` of a draft's review, each with its decision (verdict, reason, who,
         when, what it came with, and ``stale`` once the change was edited since), narrowed by
@@ -5019,6 +5019,8 @@ class GraphVersioningService:
                 "verdict": st[0].verdict, "reason": st[0].reason, "actor": st[0].actor,
                 "decidedAt": st[0].decided_at, "impliedBy": st[0].implied_by, "stale": not st[1]}
             out.append(row)
+        if summary:
+            await self._with_field_summaries(pr.graph_id, ChangeOrigin(branch_id=draft.id), out, None)
         return {"entries": out, "total": len(positions), "offset": offset, "limit": limit,
                 "hasMore": offset + len(page) < len(positions), "tooLarge": None}
 
@@ -7671,20 +7673,47 @@ class GraphVersioningService:
         self, *, graph_id: str, origin: ChangeOrigin, containment_edge_types,
         viewer: Optional[Viewer] = None, kind: Optional[str] = None,
         statuses: Sequence[str] = (), type_: Optional[str] = None, q: Optional[str] = None,
-        offset: int = 0, limit: int = 100,
+        offset: int = 0, limit: int = 100, summary: bool = False,
     ) -> Dict[str, object]:
         """A page of an origin's changes in the index's fixed order (entities, then
         relationships, then structure; by type, then name), narrowed by kind, status, type and
         text. No payload: what a row shows comes from version-row columns, and an edge's ends are
-        named for the page it is on."""
+        named for the page it is on. ``summary``: each row also says what it changed
+        (:meth:`_with_field_summaries`)."""
         index = await self._change_index(graph_id, origin, containment_edge_types, viewer)
         positions = await asyncio.to_thread(index.view, kind=kind, statuses=statuses,
                                             type_=type_, q=q)
         page = index.page(positions, offset, limit)
         names = await self._end_names(graph_id, origin, index, page)
-        return {"entries": [entry_dict(e, names) for e in page], "total": len(positions),
+        entries = [entry_dict(e, names) for e in page]
+        if summary:
+            await self._with_field_summaries(graph_id, origin, entries, viewer)
+        return {"entries": entries, "total": len(positions),
                 "offset": offset, "limit": limit,
                 "hasMore": offset + len(page) < len(positions), "tooLarge": index.too_large}
+
+    async def _with_field_summaries(self, graph_id: str, origin: ChangeOrigin, entries: List[dict],
+                                    viewer: Optional[Viewer]) -> None:
+        """Give each row of a page what it changed, counted, with its first few fields and their
+        values (``change_csv.field_summary``) — read in one batch for the page, both sides. A read
+        that fails leaves the rows as they were (no ``fields``): a summary never fails a page."""
+        from backend.app.services.versioning import change_csv
+        if not entries:
+            return
+        try:
+            before, after = await self._values_either_side(
+                graph_id, origin, [e["entityId"] for e in entries], viewer)
+        except (DraftNotReadable, AccessDenied):
+            raise
+        except Exception:  # noqa: BLE001 — the page stands without its summaries
+            logger.warning("change summaries for %s unavailable", graph_id, exc_info=True)
+            return
+
+        def build():
+            for e in entries:
+                e["fields"] = change_csv.field_summary(
+                    before.get(e["entityId"]), after.get(e["entityId"]), "edge" if e.get("kind") == "edge" else "node")
+        await asyncio.to_thread(build)
 
     async def change_export_rows(
         self, *, graph_id: str, origin: ChangeOrigin, containment_edge_types,

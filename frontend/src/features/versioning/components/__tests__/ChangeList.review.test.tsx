@@ -75,6 +75,8 @@ describe('ChangeList — in a review', () => {
   it('opens a change with its threads, and comments on one field of it', async () => {
     renderList()
     fireEvent.click(await screen.findByRole('button', { name: /Orders/ }))
+    // Opened: its key differences first; its discussion one step further.
+    fireEvent.click(await screen.findByRole('button', { name: /on this change$/ }))
     await waitFor(() => expect(api.listReviewThreads).toHaveBeenCalledWith('ws1', 'pr_1', { entityId: 'T1' }, 0, 20))
     fireEvent.click(await screen.findByRole('button', { name: 'Comment on Description' }))
     expect(screen.getByText('Commenting on')).toBeInTheDocument()

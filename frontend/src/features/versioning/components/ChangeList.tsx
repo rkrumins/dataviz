@@ -18,7 +18,7 @@
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
-import { ArrowRight, ArrowUpRight, ChevronRight, Loader2, MessageSquare, MessageSquarePlus, Search, SearchX } from 'lucide-react'
+import { ArrowRight, ArrowUpRight, ChevronsDownUp, ChevronsUpDown, Loader2, MessageSquare, MessageSquarePlus, Search, SearchX } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { Segmented, type SegmentedOption } from '@/components/ui/Segmented'
@@ -35,7 +35,10 @@ import { useChangeEntries, useChangeEntry, useChangeSummary } from '../hooks/use
 import type { GraphChange } from '../model/changeModel'
 import { changeListSource, useChangeNavigatorStore } from '@/store/changeNavigatorStore'
 import { EntityDiff } from './EntityDiff'
-import { fieldPath } from '../model/fieldDiff'
+import { ExpandableChangeRow } from './ExpandableChangeRow'
+import { ChangeSummary } from './ChangeSummary'
+import { useExpandableRows, type RowLevel } from '@/hooks/useExpandableRows'
+import { fieldPath, fromSummaryTop } from '../model/fieldDiff'
 import { HoverTip } from '@/components/ui/HoverTip'
 import { useReviewCommentCounts, useReviewThreads } from '@/features/reviews/comments/useReviewComments'
 import { ReviewThreads, type DiscussionAccess } from '@/features/reviews/comments/ReviewThreads'
@@ -43,7 +46,7 @@ import { useReviewChanges } from '@/features/reviews/decisions/useReviewDecision
 import {
   DecisionBanner, DecisionFilter, RejectReason, RowDecision, useDecisionFlow,
 } from '@/features/reviews/decisions/DecisionControls'
-import { NodeDiffBadge, STATUS_META } from './NodeDiffBadge'
+import { NodeDiffBadge } from './NodeDiffBadge'
 
 const STATUSES: ChangeListStatus[] = ['added', 'modified', 'removed']
 const KIND_LABEL: Record<ChangeListKind, string> = {
@@ -51,7 +54,8 @@ const KIND_LABEL: Record<ChangeListKind, string> = {
 }
 /** How near the end of what is loaded the next page is asked for. */
 const PREFETCH_ROWS = 25
-const ROW_HEIGHT = 36
+/** A row closed: its name and, under it, what it changed. */
+const ROW_HEIGHT = 54
 const HEADER_HEIGHT = 30
 
 const total = (c?: ChangeListCounts | null) => (c ? c.added + c.modified + c.removed : 0)
@@ -134,9 +138,10 @@ export function ChangeList({
   const decisions = review?.decisions
   const [decision, setDecision] = useState<DecisionState | null>(null)
   const filter = { kind: activeKind, statuses, type: type || undefined, q }
-  const plainQ = useChangeEntries(wsId, graphId, origin, filter, { enabled: listable && !decisions })
+  // Each row says what it changed before it is opened (`summary`): counts, and its first few fields.
+  const plainQ = useChangeEntries(wsId, graphId, origin, filter, { enabled: listable && !decisions, summary: true })
   // A draft's review lists its changes with their decisions — the same list, the same order.
-  const reviewQ = useReviewChanges(wsId, review?.prId, { ...filter, decision: decision ?? undefined }, listable && !!decisions)
+  const reviewQ = useReviewChanges(wsId, review?.prId, { ...filter, decision: decision ?? undefined }, listable && !!decisions, true)
   const entriesQ = (decisions ? reviewQ : plainQ) as unknown as typeof plainQ
   const flow = useDecisionFlow(wsId, review?.prId ?? '', decisions?.headCommitId)
   const rows = useMemo(() => entriesQ.data?.pages.flatMap((p) => p.entries) ?? [], [entriesQ.data])
@@ -176,15 +181,36 @@ export function ChangeList({
     })
   }
 
-  const [open, setOpen] = useState<ReadonlySet<string>>(new Set())
-  const toggle = (id: string) => setOpen((prev) => {
-    const next = new Set(prev)
-    if (next.has(id)) next.delete(id)
-    else next.add(id)
-    return next
-  })
-
   const scrollRef = useRef<HTMLDivElement>(null)
+  const rowKeys = useMemo(() => rows.map((r) => r.entityId), [rows])
+  const itemAt = useMemo(() => {
+    const m = new Map<string, number>()
+    items.forEach((it, i) => { if (it.kind === 'row') m.set(it.row.entityId, i) })
+    return m
+  }, [items])
+  const rowById = useMemo(() => new Map(rows.map((r) => [r.entityId, r])), [rows])
+  const rowIndex = useMemo(() => new Map(rows.map((r, i) => [r.entityId, i])), [rows])
+  // Rejecting asks why, under its row: which row is asking (also from the `r` key).
+  const [asking, setAsking] = useState<string | null>(null)
+  const expand = useExpandableRows(rowKeys, {
+    onNavigate: (id) => {
+      const at = itemAt.get(id)
+      if (at === undefined) return
+      virtualizer.scrollToIndex(at, { align: 'auto' })
+      requestAnimationFrame(() => document.getElementById(rowDomId(id))?.focus())
+    },
+    // A review's own keys: a accept, r reject (asks why), c the change's discussion, o show on canvas.
+    extraKeys: (e, current) => {
+      const row = current ? rowById.get(current) : undefined
+      if (!row || e.shiftKey) return false
+      if (e.key === 'o' && canRevealRows && row.kind === 'node' && row.status !== 'removed') { showOnCanvas(row); return true }
+      if (decisions?.canDecide && e.key === 'a') { void flow.run('accepted', { entityIds: [row.entityId] }); return true }
+      if (decisions?.canDecide && e.key === 'r') { setAsking(row.entityId); return true }
+      if (review && e.key === 'c') { expand.setLevel(row.entityId, 2); return true }
+      return false
+    },
+  })
+  const canRevealRows = useChangeNavigatorStore((st) => st.canReveal)
   const hasMore = !!entriesQ.hasNextPage
   const virtualizer = useVirtualizer({
     count: items.length + (hasMore ? 1 : 0),
@@ -285,6 +311,16 @@ export function ChangeList({
               : `${matching.toLocaleString()} ${activeKind ? KIND_LABEL[activeKind].toLowerCase() : 'changes'}`}
           {rows.length < matching && !entriesQ.isLoading && ` · ${rows.length.toLocaleString()} loaded`}
         </p>
+        {rows.length > 1 && (
+          <HoverTip label={expand.allOpen ? 'Collapse every change' : 'Open every change to its key differences'}
+            shortcut={expand.allOpen ? '⇧←' : '⇧→'} className="inline-flex">
+            <button type="button" onClick={expand.allOpen ? expand.collapseAll : expand.expandAll}
+              className="inline-flex items-center gap-1 px-2 h-7 rounded-lg text-[11.5px] font-semibold text-ink-secondary hover:text-ink hover:bg-black/[0.04] dark:hover:bg-white/[0.06]">
+              {expand.allOpen ? <ChevronsDownUp className="w-3.5 h-3.5" aria-hidden /> : <ChevronsUpDown className="w-3.5 h-3.5" aria-hidden />}
+              {expand.allOpen ? 'Collapse all' : 'Expand all'}
+            </button>
+          </HoverTip>
+        )}
         {decisions?.canDecide && matching > 0 && !entriesQ.isLoading && (
           <>
             <button type="button" disabled={flow.busy} onClick={() => void flow.all('accepted', { ...filter, decision: decision ?? undefined })}
@@ -311,7 +347,8 @@ export function ChangeList({
           description="Try another type or status, or clear the search." />
       ) : (
         <div ref={scrollRef} className="overflow-y-auto custom-scrollbar -mx-1 px-1" style={{ maxHeight }}>
-          <div role="list" aria-label="Changes" className="relative w-full" style={{ height: virtualizer.getTotalSize() }}>
+          <div role="list" aria-label="Changes" onKeyDown={expand.onKeyDown}
+            className="relative w-full" style={{ height: virtualizer.getTotalSize() }}>
             {virtualItems.map((v) => {
               const item = items[v.index]
               return (
@@ -337,7 +374,13 @@ export function ChangeList({
                     </div>
                   ) : (
                     <Row wsId={wsId} graphId={graphId} origin={origin} row={item.row}
-                      open={open.has(item.row.entityId)} onToggle={() => toggle(item.row.entityId)}
+                      level={expand.levelOf(item.row.entityId)} current={expand.current === item.row.entityId}
+                      onToggle={() => expand.toggle(item.row.entityId)}
+                      onLevel={(l) => expand.setLevel(item.row.entityId, l)}
+                      onFocus={() => expand.setCurrent(item.row.entityId)}
+                      setsize={matching} posinset={(rowIndex.get(item.row.entityId) ?? 0) + 1}
+                      asking={asking === item.row.entityId}
+                      onAsk={(on) => setAsking(on ? item.row.entityId : null)}
                       onShow={() => showOnCanvas(item.row)}
                       review={review} comments={commentCounts?.[item.row.entityId]}
                       decide={decisions ? {
@@ -360,13 +403,26 @@ export function ChangeList({
   )
 }
 
-function Row({ wsId, graphId, origin, row, open, onToggle, onShow, review, comments, decide }: {
+const rowDomId = (entityId: string) => `change-row-${entityId}`
+
+function Row({
+  wsId, graphId, origin, row, level, current, onToggle, onLevel, onFocus, setsize, posinset, asking, onAsk,
+  onShow, review, comments, decide,
+}: {
   wsId: string
   graphId: string
   origin: ChangeListOrigin
   row: ChangeListRow
-  open: boolean
+  level: RowLevel
+  current: boolean
   onToggle: () => void
+  onLevel: (level: RowLevel) => void
+  onFocus: () => void
+  setsize: number
+  posinset: number
+  /** Rejecting it asks why, under the row. */
+  asking: boolean
+  onAsk: (asking: boolean) => void
   /** Step through these on the canvas, from this one. */
   onShow: () => void
   review?: ChangeListProps['review']
@@ -382,81 +438,106 @@ function Row({ wsId, graphId, origin, row, open, onToggle, onShow, review, comme
     onDecide: (verdict: DecisionVerdict | null, reason?: string | null) => void
   }
 }) {
-  const meta = STATUS_META[row.status]
   const label = rowLabel(row)
-  const [asking, setAsking] = useState(false)
   const rejected = decide?.decision && !decide.decision.stale && decide.decision.verdict === 'rejected' ? decide.decision : null
   // On a canvas, an entity still there can be shown — and stepped on from — where it sits.
   const canReveal = useChangeNavigatorStore((s) => s.canReveal) && row.kind === 'node' && row.status !== 'removed'
+  const edge = row.kind === 'edge'
   return (
-    <div role="listitem" className={cn('mb-1 rounded-lg border-l-2 bg-canvas-overlay/40 group/row flex flex-col', meta.accent)}>
-      <div className="flex items-center min-w-0">
-        <button
-          type="button"
-          onClick={onToggle}
-          aria-expanded={open}
-          className="flex-1 flex items-center gap-1.5 min-w-0 px-2.5 py-1.5 text-left group"
-        >
-          <ChevronRight className={cn('w-3.5 h-3.5 text-ink-muted/60 transition-transform shrink-0', open && 'rotate-90')} />
-          <meta.Icon className={cn('w-3.5 h-3.5 shrink-0', meta.text)} aria-label={meta.label} />
-          {row.kind === 'edge' ? (
-            <span className="flex items-center gap-1 min-w-0 text-[13px] text-ink">
-              <span className="truncate">{row.sourceName || row.sourceEntityId}</span>
-              <ArrowRight className="w-3 h-3 text-ink-muted/70 shrink-0" />
-              <span className="truncate">{row.targetName || row.targetEntityId}</span>
-            </span>
-          ) : (
-            <span className="text-[13px] text-ink truncate">{label}</span>
-          )}
-          {row.kind === 'node' && row.qualifiedName && row.qualifiedName !== label && (
-            <span className="text-[11px] text-ink-muted/70 truncate min-w-0 hidden sm:inline">{row.qualifiedName}</span>
-          )}
+    <ExpandableChangeRow
+      id={rowDomId(row.entityId)} status={row.status} level={level} current={current}
+      onToggle={onToggle} onFocus={onFocus} setsize={setsize} posinset={posinset}
+      title={edge ? (
+        <span className="inline-flex items-center gap-1 min-w-0 max-w-full">
+          <span className="truncate">{row.sourceName || row.sourceEntityId}</span>
+          <ArrowRight className="w-3 h-3 text-ink-muted/70 shrink-0" aria-label="to" />
+          <span className="truncate">{row.targetName || row.targetEntityId}</span>
+        </span>
+      ) : label}
+      sub={edge ? row.type : (row.qualifiedName && row.qualifiedName !== label ? row.qualifiedName : undefined)}
+      summary={row.fields ? <ChangeSummary summary={row.fields} status={row.status} kind={row.kind} /> : undefined}
+      badges={(comments && comments.total > 0) || decide ? (
+        <>
           {comments && comments.total > 0 && (
             <span
               aria-label={comments.open ? `${comments.open} open thread${comments.open === 1 ? '' : 's'}` : `${comments.total} resolved thread${comments.total === 1 ? '' : 's'}`}
-              className={cn('ml-auto shrink-0 inline-flex items-center gap-1 px-1.5 h-5 rounded-md text-[10.5px] font-semibold tabular-nums',
+              className={cn('inline-flex items-center gap-1 px-1.5 h-5 rounded-md text-[10.5px] font-semibold tabular-nums',
                 comments.open ? 'bg-accent-lineage/10 text-accent-lineage' : 'text-ink-muted')}>
               <MessageSquare className="w-3 h-3" aria-hidden />{comments.open || comments.total}
             </span>
           )}
-        </button>
-        {decide && (
-          <RowDecision decision={decide.decision} canDecide={decide.canDecide} busy={decide.busy} label={label}
-            impliedLabel={decide.impliedLabel} names={decide.names} asking={asking} onAsk={setAsking}
-            onDecide={(v, why) => { setAsking(false); decide.onDecide(v, why) }} />
-        )}
-        {canReveal && (
+          {decide && (
+            <RowDecision decision={decide.decision} canDecide={decide.canDecide} busy={decide.busy} label={label}
+              impliedLabel={decide.impliedLabel} names={decide.names} asking={asking} onAsk={onAsk}
+              onDecide={(v, why) => { onAsk(false); decide.onDecide(v, why) }} />
+          )}
+        </>
+      ) : undefined}
+      actions={canReveal ? (
+        <HoverTip label={`Show ${label} on the canvas`} shortcut="o" className="inline-flex">
           <button type="button" onClick={onShow} aria-label={`Show ${label} on canvas`}
-            className="shrink-0 mr-1 inline-flex items-center gap-0.5 px-1.5 h-6 rounded-md text-[11px] font-semibold text-accent-lineage opacity-0 group-hover/row:opacity-100 focus-visible:opacity-100 hover:bg-accent-lineage/10 transition-opacity">
+            className="inline-flex items-center gap-0.5 px-1.5 h-6 rounded-md text-[11px] font-semibold text-accent-lineage hover:bg-accent-lineage/10">
             Show<ArrowUpRight className="w-3 h-3" aria-hidden />
           </button>
-        )}
-      </div>
-      {asking && decide && (
-        <RejectReason label={label} onCancel={() => setAsking(false)}
-          onReject={(why) => { setAsking(false); decide.onDecide('rejected', why) }} />
+        </HoverTip>
+      ) : undefined}
+      footer={(
+        <>
+          {asking && decide && (
+            <RejectReason label={label} onCancel={() => onAsk(false)}
+              onReject={(why) => { onAsk(false); decide.onDecide('rejected', why) }} />
+          )}
+          {rejected?.reason && (
+            <p className="px-2.5 pb-1.5 pl-10 -mt-0.5 text-[11.5px] text-rose-700/90 dark:text-rose-300/90 truncate">
+              “{rejected.reason}”{decide?.names?.[rejected.actor] ? <span className="text-ink-muted"> — {decide.names[rejected.actor]}</span> : null}
+            </p>
+          )}
+        </>
       )}
-      {rejected?.reason && (
-        <p className="px-2.5 pb-1.5 pl-7 -mt-0.5 text-[11.5px] text-rose-700/90 dark:text-rose-300/90 truncate">
-          “{rejected.reason}”{decide?.names?.[rejected.actor] ? <span className="text-ink-muted"> — {decide.names[rejected.actor]}</span> : null}
-        </p>
-      )}
-      {open && (
-        <div className="px-2.5 pb-2 pl-7">
-          <RowDetail wsId={wsId} graphId={graphId} origin={origin} row={row} review={review} />
+    >
+      {(lvl) => (
+        <div className="space-y-2">
+          {lvl === 1 && row.fields && (row.fields.top.length > 0 || row.fields.total === 0)
+            // Its key differences, from the row's own summary: nothing to fetch, so browsing is instant.
+            ? <EntityDiff change={stubChange(row, origin)} fields={fromSummaryTop(row.fields.top)} depth="key"
+                totalFields={row.fields.total} onShowAll={() => onLevel(2)} />
+            : <RowDetail wsId={wsId} graphId={graphId} origin={origin} row={row} review={review}
+                depth={lvl === 1 ? 'key' : 'all'} onShowAll={() => onLevel(2)} />}
+          {lvl === 1 && review && (
+            // Its discussion is one step further: every field, its threads, and where to comment.
+            <button type="button" onClick={() => onLevel(2)}
+              className="inline-flex items-center gap-1 text-[11px] font-semibold text-accent-lineage hover:underline">
+              <MessageSquare className="w-3 h-3" aria-hidden />
+              {comments && comments.total > 0
+                ? `${comments.total.toLocaleString()} thread${comments.total === 1 ? '' : 's'} on this change`
+                : 'Comment on this change'}
+            </button>
+          )}
         </div>
       )}
-    </div>
+    </ExpandableChangeRow>
   )
 }
 
+/** A row as a change, before its values are read: enough for its key differences to render. */
+function stubChange(row: ChangeListRow, origin: ChangeListOrigin): GraphChange {
+  return {
+    entityId: row.entityId, kind: row.kind, status: row.status, label: rowLabel(row),
+    origin: 'branchId' in origin
+      ? { source: 'branch', branchId: origin.branchId }
+      : { source: 'compare', fromSeq: origin.fromSeq, toSeq: origin.toSeq },
+  }
+}
+
 /** One entity before and after, fetched when its row is opened — in a review, with its threads. */
-function RowDetail({ wsId, graphId, origin, row, review }: {
+function RowDetail({ wsId, graphId, origin, row, review, depth = 'all', onShowAll }: {
   wsId: string
   graphId: string
   origin: ChangeListOrigin
   row: ChangeListRow
   review?: ChangeListProps['review']
+  depth?: 'key' | 'all'
+  onShowAll?: () => void
 }) {
   const q = useChangeEntry(wsId, graphId, origin, row.entityId)
   const [path, setPath] = useState<string | null>(null)
@@ -471,7 +552,12 @@ function RowDetail({ wsId, graphId, origin, row, review }: {
   }, [threadsQ.data])
   if (q.isLoading) return <SkeletonText lines={2} className="py-1" />
   if (q.isError || !q.data) {
-    return <p className="text-[11px] text-ink-muted px-2 py-1.5">Couldn't load this change.</p>
+    return (
+      <p className="flex items-center gap-2 text-[11px] text-ink-muted px-2 py-1.5" role="alert">
+        Couldn't load this change.
+        <button type="button" onClick={() => void q.refetch()} className="font-semibold text-accent-lineage hover:underline">Try again</button>
+      </p>
+    )
   }
   const d = q.data
   const change: GraphChange = {
@@ -485,7 +571,7 @@ function RowDetail({ wsId, graphId, origin, row, review }: {
       ? { source: 'branch', branchId: origin.branchId }
       : { source: 'compare', fromSeq: origin.fromSeq, toSeq: origin.toSeq },
   }
-  if (!review) return <EntityDiff change={change} />
+  if (!review || depth === 'key') return <EntityDiff change={change} depth={depth} onShowAll={onShowAll} />
   return (
     <div className="space-y-2.5">
       <EntityDiff change={change} fieldAction={(f) => {

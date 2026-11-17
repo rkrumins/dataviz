@@ -145,3 +145,53 @@ def filename(origin: Dict[str, Any], detail: str) -> str:
             else f"r{origin.get('from_seq')}-r{origin.get('to_seq')}")
     safe = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in what)
     return f"changes-{safe}{'-properties' if detail == 'properties' else ''}.csv"
+
+
+# --------------------------------------------------------------------------- #
+# A change at a glance: what a change list row says before it is opened       #
+# --------------------------------------------------------------------------- #
+_NAMED = frozenset(label for label, _keys in _NODE_FIELDS + _EDGE_FIELDS)
+_KIND_RANK = {"changed": 0, "added": 1, "removed": 2}
+_CLIP_TEXT = 160
+_CLIP_ITEMS = 12
+
+
+def _kind(before: Any, after: Any) -> str:
+    return "added" if _empty(before) else "removed" if _empty(after) else "changed"
+
+
+def _clip(value: Any) -> Tuple[Any, bool]:
+    """A value short enough to send with every row of a page: text to 160 characters, a list to 12
+    items, an object as compact JSON of 160 characters. Whether it was cut."""
+    if isinstance(value, str):
+        return (value, False) if len(value) <= _CLIP_TEXT else (value[:_CLIP_TEXT - 1] + "…", True)
+    if isinstance(value, (list, tuple)):
+        items = list(value)
+        cut = len(items) > _CLIP_ITEMS
+        return [(_clip(v)[0] if isinstance(v, str) else v) for v in items[:_CLIP_ITEMS]], cut
+    if isinstance(value, dict):
+        text = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+        return (value, False) if len(text) <= _CLIP_TEXT else (text[:_CLIP_TEXT - 1] + "…", True)
+    return value, False
+
+
+def field_summary(before: Optional[Mapping[str, Any]], after: Optional[Mapping[str, Any]], kind: str,
+                  top: int = 5) -> Dict[str, Any]:
+    """What one change did, counted, with its first few fields — the named ones in reading order
+    (Name, Type, Description…), then properties edited, added, removed — each with its two values,
+    clipped. The frontend's ``keyDifferences`` orders them the same way (a shared fixture checks)."""
+    rows = [(label, folder, b, a, _kind(b, a)) for label, folder, b, a in field_changes(before, after, kind)]
+    named = [r for r in rows if not r[1] and r[0] in _NAMED]
+    rest = sorted((r for r in rows if not (not r[1] and r[0] in _NAMED)), key=lambda r: _KIND_RANK[r[4]])
+    counts = {"changed": 0, "added": 0, "removed": 0}
+    for r in rows:
+        counts[r[4]] += 1
+    out = []
+    for label, folder, b, a, k in (named + rest)[:top]:
+        bv, bcut = _clip(b)
+        av, acut = _clip(a)
+        item: Dict[str, Any] = {"label": label, "folder": folder or None, "kind": k, "before": bv, "after": av}
+        if bcut or acut:
+            item["clipped"] = True
+        out.append(item)
+    return {**counts, "total": len(rows), "top": out}

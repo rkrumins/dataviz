@@ -13,14 +13,16 @@ const PAGE = 200
 export const DECISION_KEYS = {
   all: (wsId: string, prId: string) => ['reviewDecisions', wsId, prId] as const,
   summary: (wsId: string, prId: string) => ['reviewDecisions', wsId, prId, 'summary'] as const,
-  changes: (wsId: string, prId: string, f: DecisionFilter) => ['reviewDecisions', wsId, prId, 'changes',
-    f.decision ?? 'all', f.kind ?? 'all', (f.statuses ?? []).join(','), f.type ?? '', (f.q ?? '').trim()] as const,
+  changes: (wsId: string, prId: string, f: DecisionFilter, summary = false) => ['reviewDecisions', wsId, prId, 'changes',
+    f.decision ?? 'all', f.kind ?? 'all', (f.statuses ?? []).join(','), f.type ?? '', (f.q ?? '').trim(),
+    summary ? 'summary' : 'plain'] as const,
 }
 
-export function useReviewChanges(wsId: string, prId: string | null | undefined, filter: DecisionFilter, enabled: boolean) {
+export function useReviewChanges(wsId: string, prId: string | null | undefined, filter: DecisionFilter, enabled: boolean,
+  summary = false) {
   return useInfiniteQuery({
-    queryKey: DECISION_KEYS.changes(wsId, prId ?? '', filter),
-    queryFn: ({ pageParam }) => listReviewChanges(wsId, prId!, filter, pageParam, PAGE),
+    queryKey: DECISION_KEYS.changes(wsId, prId ?? '', filter, summary),
+    queryFn: ({ pageParam }) => listReviewChanges(wsId, prId!, filter, pageParam, PAGE, summary),
     initialPageParam: 0,
     getNextPageParam: (last) => (last.hasMore ? last.offset + last.entries.length : undefined),
     enabled: enabled && !!prId,

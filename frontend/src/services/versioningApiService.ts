@@ -2146,6 +2146,25 @@ export interface ChangeListRow {
   targetEntityId?: string | null
   sourceName?: string | null
   targetName?: string | null
+  /** Asked for with `summary`: what it changed — counts, and its first few fields with their values. */
+  fields?: ChangeFieldSummary | null
+}
+
+/** A change's fields at a glance, as the server summarizes them (`change_csv.field_summary`). */
+export interface ChangeFieldSummary {
+  changed: number
+  added: number
+  removed: number
+  total: number
+  top: Array<{
+    label: string
+    folder?: string | null
+    kind: 'added' | 'changed' | 'removed'
+    before?: unknown
+    after?: unknown
+    /** A value was cut short to travel with the row. */
+    clipped?: boolean
+  }>
 }
 
 export interface ChangeListPage {
@@ -2219,7 +2238,7 @@ export function changeListExportUrl(
 /** A page of a change list in its fixed order (entities, relationships, structure; by type, then name). */
 export function getChangeEntries(
   wsId: string, graphId: string, origin: ChangeListOrigin, filter: ChangeListFilter = {},
-  offset = 0, limit = 100,
+  offset = 0, limit = 100, summary = false,
 ): Promise<ChangeListPage> {
   const sp = changeOriginParams(origin)
   if (filter.kind) sp.set('kind', filter.kind)
@@ -2228,6 +2247,7 @@ export function getChangeEntries(
   if (filter.q?.trim()) sp.set('q', filter.q.trim())
   sp.set('offset', String(offset))
   sp.set('limit', String(limit))
+  if (summary) sp.set('summary', 'true')
   return vfetch<ChangeListPage>(`${base(wsId)}/graphs/${graphId}/diff/entries?${sp}`)
 }
 
@@ -2598,7 +2618,7 @@ export type DecisionFilter = ChangeListFilter & { decision?: DecisionState }
 
 /** A page of a draft review's changes, each with its decision. */
 export function listReviewChanges(
-  wsId: string, prId: string, filter: DecisionFilter = {}, offset = 0, limit = 100,
+  wsId: string, prId: string, filter: DecisionFilter = {}, offset = 0, limit = 100, summary = false,
 ): Promise<ReviewChangePage> {
   const sp = new URLSearchParams()
   if (filter.decision) sp.set('decision', filter.decision)
@@ -2608,6 +2628,7 @@ export function listReviewChanges(
   if (filter.q?.trim()) sp.set('q', filter.q.trim())
   sp.set('offset', String(offset))
   sp.set('limit', String(limit))
+  if (summary) sp.set('summary', 'true')
   return vfetch<ReviewChangePage>(`${base(wsId)}/merge-requests/${encodeURIComponent(prId)}/changes?${sp}`)
 }
 

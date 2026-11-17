@@ -1417,6 +1417,8 @@ class ChangeRow(_ApiModel):
     target_entity_id: Optional[str] = Field(default=None, alias="targetEntityId")
     source_name: Optional[str] = Field(default=None, alias="sourceName")
     target_name: Optional[str] = Field(default=None, alias="targetName")
+    # With ``summary=true``: what the change did — counts, and its first few fields before and after.
+    fields: Optional[Dict[str, Any]] = None
 
 
 class ChangeEntriesResponse(_ApiModel):
@@ -3332,6 +3334,7 @@ async def get_change_entries(
                              "urn, type or id; any case"),
     offset: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=500),
+    summary: bool = Query(False, description="Each row also says what it changed (at most 200 rows a page)"),
     _user: User = Depends(requires(_READ, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
     viewer: Viewer = Depends(viewer_ctx),
@@ -3341,15 +3344,20 @@ async def get_change_entries(
     """A page of a change list, in a fixed order: entities, then relationships, then
     structure; by type, then name. ``offset`` counts into the filtered list, which holds still
     for its key (a draft's head, or two revisions), so paging neither skips nor repeats. No
-    payloads: open one row with ``/diff/entries/{entityId}``."""
+    payloads: open one row with ``/diff/entries/{entityId}``. ``summary=true``: each row also
+    says what it changed — counts and its first few fields, before and after (``fields``)."""
     origin = _change_origin(branch_id, from_seq, to_seq)
     statuses = _change_statuses(status)
     cset = await _live_containment_types(session, ws_id, _meta.get("data_source_id"))
     with _domain_errors():
         return await svc.change_entries(
             graph_id=graph_id, origin=origin, containment_edge_types=cset, viewer=viewer,
-            kind=kind, statuses=statuses, type_=entity_type, q=q, offset=offset, limit=limit)
+            kind=kind, statuses=statuses, type_=entity_type, q=q, offset=offset,
+            limit=min(limit, _SUMMARY_PAGE_MAX) if summary else limit, summary=summary)
 
+
+# A page of change rows that each say what they changed reads both sides of every row: at most this many.
+_SUMMARY_PAGE_MAX = 200
 
 # Two change-list exports at once per process: each holds a read of the index and, property by
 # property, a page of values at a time while it streams.
@@ -6361,18 +6369,20 @@ async def review_changes(
     q: Optional[str] = Query(None, max_length=200),
     offset: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=500),
+    summary: bool = Query(False, description="Each row also says what it changed (at most 200 rows a page)"),
     _user: User = Depends(requires(_READ, workspace="ws_id")),
     pr: dict = Depends(pr_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
     session: AsyncSession = Depends(get_db_session),
 ):
     """A page of a draft review's change list (as ``/graphs/{id}/diff/entries``), each change
-    with its decision, narrowed by ``decision`` too."""
+    with its decision, narrowed by ``decision`` too; ``summary=true`` as there."""
     cset = await _pr_containment_types(svc, session, ws_id, pr)
     with _domain_errors():
         return await svc.review_change_entries(
             pr_id=pr_id, containment_edge_types=cset, decision=decision, kind=kind,
-            statuses=_change_statuses(status), type_=entity_type, q=q, offset=offset, limit=limit)
+            statuses=_change_statuses(status), type_=entity_type, q=q, offset=offset,
+            limit=min(limit, _SUMMARY_PAGE_MAX) if summary else limit, summary=summary)
 
 
 # --------------------------------------------------------------------------- #
