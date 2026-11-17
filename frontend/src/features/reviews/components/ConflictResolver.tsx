@@ -89,14 +89,17 @@ export function ConflictResolver({
   seeds,
   busy,
   error,
+  seedError,
   onCancel,
   onResolve,
 }: {
   conflicts: Array<Record<string, unknown>>
-  /** entityId → the merged payload (diff `after`) used to seed each resolution. */
+  /** entityId → the entity's own value on the side being merged in, each resolution's base. */
   seeds: Record<string, Record<string, unknown> | undefined>
   busy?: boolean
   error?: string | null
+  /** Why a seed could not be read — the resolution waits until every one is here. */
+  seedError?: string | null
   onCancel: () => void
   onResolve: (resolutions: ResolutionMap) => void
 }) {
@@ -144,6 +147,12 @@ export function ConflictResolver({
   }, [allEntries, deleted, picks])
 
   const build = (): ResolutionMap => buildResolutions(byEntity, picks, deleted, seeds)
+  // A field resolution is the entity's own value with the picks laid over it: built without that
+  // value it would drop every field that didn't conflict. So it waits for each one.
+  const unseeded = useMemo(
+    () => allEntries.filter(([eid, list]) => !deleted[eid] && !list.some(isDeleteModify) && !seeds[eid]).length,
+    [allEntries, deleted, seeds],
+  )
 
   const scrollRef = useRef<HTMLDivElement>(null)
   const rowVirtualizer = useVirtualizer({
@@ -265,6 +274,15 @@ export function ConflictResolver({
             <span className="text-[11px] truncate">
               {error ? (
                 <span className="text-rose-500">{error}</span>
+              ) : unseeded > 0 ? (
+                seedError
+                  ? <span className="text-rose-500">{seedError}</span>
+                  : (
+                    <span className="text-ink-muted inline-flex items-center gap-1.5" role="status">
+                      <Loader2 className="w-3 h-3 animate-spin" aria-hidden />
+                      Reading {unseeded.toLocaleString()} {unseeded === 1 ? 'entity' : 'entities'}…
+                    </span>
+                  )
               ) : willDelete > 0 ? (
                 <span className="text-rose-500/90 inline-flex items-center gap-1">
                   <Trash2 className="w-3 h-3" /> {willDelete} {willDelete === 1 ? 'entity' : 'entities'} will be deleted
@@ -278,7 +296,7 @@ export function ConflictResolver({
                 Cancel
               </button>
               <button
-                onClick={() => onResolve(build())} disabled={busy}
+                onClick={() => onResolve(build())} disabled={busy || unseeded > 0}
                 className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-sm font-semibold text-white bg-gradient-to-r from-indigo-500 to-violet-600 hover:from-indigo-600 hover:to-violet-700 shadow-sm disabled:opacity-60"
               >
                 {busy && <Loader2 className="w-3.5 h-3.5 animate-spin" />}

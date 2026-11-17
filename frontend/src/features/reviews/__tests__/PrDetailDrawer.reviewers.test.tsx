@@ -20,7 +20,6 @@ vi.mock('../../versioning/components/ChangeList', () => ({ ChangeList: () => nul
 vi.mock('../../versioning/components/ChangeTreePanel', () => ({ ChangeTreePanel: () => null }))
 vi.mock('../../versioning/hooks/useVersioning', () => ({
   useMergeRequest: () => ({ data: pr, isLoading: false }),
-  usePullRequestDiff: () => ({ data: undefined }),
   useChangeSummary: () => ({ data: undefined, isFetching: false }),
   usePrDiffSummary: () => ({ data: undefined, isFetching: false }),
   VERSIONING_KEYS: {

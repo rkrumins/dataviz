@@ -29,7 +29,7 @@ import {
   type IncomingChanges, type ResolutionMap,
 } from '@/services/versioningApiService'
 import {
-  useMergeRequest, usePullRequestDiff, usePullLatestDraft, useCommitLog,
+  useMergeRequest, usePullLatestDraft, useCommitLog,
   useApproveMergeRequest, useCloseMergeRequest, useMergeMergeRequest, useUpdateMergeRequest,
   useBranchViewChanges, useChangeSummary, usePrDiffSummary, VERSIONING_KEYS,
 } from '../../versioning/hooks/useVersioning'
@@ -38,7 +38,9 @@ import { fromChangeCounts } from '../../versioning/model/changeAdapters'
 import { ChangeCountChips } from '../../versioning/components/ChangesPanel'
 import { ChangeList } from '../../versioning/components/ChangeList'
 import { ChangeTreePanel } from '../../versioning/components/ChangeTreePanel'
-import { getMergeRequestDiffChildren, type ChangeListOrigin } from '@/services/versioningApiService'
+import { getChangeEntry, getMergeRequestDiffChildren, type ChangeListOrigin } from '@/services/versioningApiService'
+import { mapWithConcurrency } from '@/lib/concurrency'
+import { isDeleteModify, normalizeConflict } from '../conflictResolution'
 import { useQueryClient } from '@tanstack/react-query'
 import { CommitRow } from '../../versioning/components/CommitRow'
 import { RevertDialog } from '../../versioning/components/RollbackDialogs'
@@ -171,15 +173,42 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
     )
   }
   const [conflicts, setConflicts] = useState<Array<Record<string, unknown>> | null>(null)
-  // The review's whole diff, read only once a merge comes back with conflicts: entityId → merged
-  // payload, the seed each conflict resolution starts from.
-  const diffQ = usePullRequestDiff(wsId, conflicts ? prId : null)
-  const seeds = useMemo(() => {
-    const out: Record<string, Record<string, unknown> | undefined> = {}
-    const d = diffQ.data
-    if (d) for (const e of [...d.added, ...d.modified]) out[e.entityId] = (e.after as Record<string, unknown>) ?? undefined
-    return out
-  }, [diffQ.data])
+  // What each conflict resolution starts from — the conflicting entity's own value on the draft.
+  // It comes with the conflicts (a merge's 409, a pull's answer); any it left out is read on its
+  // own, a few at a time — never the review's whole diff (tens of megabytes at 100,000 changes).
+  const [givenSeeds, setGivenSeeds] = useState<Record<string, Record<string, unknown> | undefined>>({})
+  const missingSeeds = useMemo(() => {
+    if (!conflicts) return []
+    const out = new Set<string>()
+    for (const c of conflicts.map((x) => normalizeConflict(x))) {
+      if (c.entity_id && !isDeleteModify(c) && !givenSeeds[c.entity_id]) out.add(c.entity_id)
+    }
+    return [...out]
+  }, [conflicts, givenSeeds])
+  const [readSeeds, setReadSeeds] = useState<{ key: string; seeds: Record<string, Record<string, unknown> | undefined>; failed: boolean }>(
+    { key: '', seeds: {}, failed: false })
+  const missingKey = missingSeeds.join('\n')
+  useEffect(() => {
+    if (!pr || !listOrigin || missingSeeds.length === 0) return
+    let gone = false
+    void mapWithConcurrency(missingSeeds, 6, (id) => getChangeEntry(wsId, pr.graphId, listOrigin, id)).then((results) => {
+      if (gone) return
+      const out: Record<string, Record<string, unknown> | undefined> = {}
+      let failed = false
+      results.forEach((r, i) => {
+        if (r.status === 'fulfilled') out[missingSeeds[i]] = (r.value.after ?? undefined) as Record<string, unknown> | undefined
+        else failed = true
+      })
+      setReadSeeds({ key: missingKey, seeds: out, failed })
+    })
+    return () => { gone = true }
+  }, [missingKey]) // eslint-disable-line react-hooks/exhaustive-deps
+  const seeds = useMemo(
+    () => (readSeeds.key === missingKey ? { ...readSeeds.seeds, ...givenSeeds } : givenSeeds),
+    [readSeeds, missingKey, givenSeeds],
+  )
+  const seedError = readSeeds.key === missingKey && readSeeds.failed
+    ? 'Couldn’t read every conflicting entity — close this and merge again.' : null
   const [resolverError, setResolverError] = useState<string | null>(null)
   const [needsPull, setNeedsPull] = useState(false)
   // Why it must pull, once a merge was refused for it (the list's `pullRequired` says only whether).
@@ -269,6 +298,7 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
         return
       }
       if (e instanceof MergeConflictError) {
+        setGivenSeeds(e.seeds)
         setConflicts(e.conflicts)
         setResolverError(resolutions ? 'Some fields still conflict — adjust and retry.' : null)
         return
@@ -289,7 +319,9 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
       {
         onSuccess: (res) => {
           if (!res.clean) {
-            setResolveMode('pull'); setConflicts(res.conflicts)
+            setResolveMode('pull')
+            setGivenSeeds(Object.fromEntries(Object.entries(res.seeds ?? {}).map(([k, v]) => [k, v ?? undefined])))
+            setConflicts(res.conflicts)
             setResolverError(resolutions ? 'Some fields still conflict — adjust and retry.' : null)
             return
           }
@@ -749,9 +781,10 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
           <ConflictResolver
             conflicts={conflicts}
             seeds={seeds}
+            seedError={seedError}
             busy={merge.isPending || pullLatest.isPending}
             error={resolverError}
-            onCancel={() => { setConflicts(null); setResolverError(null); setResolveMode('merge') }}
+            onCancel={() => { setConflicts(null); setGivenSeeds({}); setResolverError(null); setResolveMode('merge') }}
             onResolve={(resolutions) => (resolveMode === 'pull' ? runPull(resolutions) : runMerge(resolutions))}
           />
         )}

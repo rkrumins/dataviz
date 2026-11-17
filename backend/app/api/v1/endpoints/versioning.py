@@ -542,7 +542,10 @@ def _domain_errors():
     except HTTP_MAPPED as exc:       # first: BranchNotOpen is a ValueError, answered 404 below
         raise HTTPException(status_code=exc.status_code, detail=exc.detail, headers=exc.headers)
     except MergeConflict as exc:
-        raise HTTPException(status_code=409, detail={"type": "merge_conflict", "conflicts": exc.conflicts})
+        raise HTTPException(status_code=409, detail={
+            "type": "merge_conflict", "conflicts": exc.conflicts,
+            **({"seeds": exc.seeds} if exc.seeds else {}),
+        })
     except OntologyViolation as exc:
         raise HTTPException(status_code=422, detail={"type": "ontology_violation", "violations": exc.violations})
     except DraftNotReadable:         # before AccessDenied: a 404, as for a branch that doesn't exist

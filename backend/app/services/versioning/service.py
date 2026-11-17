@@ -420,12 +420,16 @@ class MergeConflict(RuntimeError):
     the chosen payloads to land the merge.
     """
 
-    def __init__(self, conflicts, current: Optional[Mapping[str, Tuple[str, Optional[dict]]]] = None):
+    def __init__(self, conflicts, current: Optional[Mapping[str, Tuple[str, Optional[dict]]]] = None,
+                 seeds: Optional[Mapping[str, Optional[dict]]] = None):
         super().__init__(f"{len(conflicts)} unresolved merge conflict(s)")
         self.conflicts = conflicts
         #: entity_id → (kind, the value the edit conflicts WITH) — what a client rebases onto.
         #: Filled by ``apply_ops``'s optimistic-concurrency check; empty for a merge/publish.
         self.current = dict(current or {})
+        #: entity_id → the draft's own value of each conflicting entity — what a resolution is
+        #: built on (as a pull answers). Filled by a review's merge.
+        self.seeds = dict(seeds or {})
 
 
 @dataclass
@@ -4683,7 +4687,11 @@ class GraphVersioningService:
                         s, graph.id, graph, draft, main_id, dict(resolutions or {})
                     )
                     if conflicts:
-                        raise MergeConflict(conflicts)
+                        # Each conflicting entity's own value comes with them — what a resolution
+                        # is built on — so a reviewer never downloads the review's whole diff.
+                        seeds = await self._current_values(
+                            s, graph.id, draft.id, sorted({c["entity_id"] for c in conflicts}))
+                        raise MergeConflict(conflicts, seeds=seeds)
                 if narrow:
                     commit_id = await self._squash_up_to_date(
                         s, graph, draft, main_id, actor, message,

@@ -36,7 +36,6 @@ vi.mock('../../versioning/hooks/useVersioning', () => ({
     isLoading: false,
     refetch: refetchPr,
   }),
-  usePullRequestDiff: () => ({ data: undefined }),
   useChangeSummary: () => ({ data: undefined, isFetching: false }),
   usePrDiffSummary: () => ({ data: undefined, isFetching: false }),
   VERSIONING_KEYS: {

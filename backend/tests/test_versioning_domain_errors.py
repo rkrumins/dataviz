@@ -388,3 +388,23 @@ async def test_a_plain_access_denied_outside_the_versioning_router_is_403_not_50
     assert json.loads(bytes(resp.body))["detail"] == {"type": "access_denied",
                                                       "message": "author cannot approve their own PR"}
     assert main.app.exception_handlers[NotDraftOwner] is not main.app.exception_handlers[AccessDenied]
+
+
+def test_a_review_merge_conflict_carries_each_entitys_own_value():
+    """What a resolution is built on comes with the conflicts — never the review's whole diff."""
+    from backend.app.services.versioning.service import MergeConflict
+
+    conflicts = [{"entity_id": "e1", "path": ["description"], "base": "a", "ours": "b", "theirs": "c", "kind": "field"}]
+    with pytest.raises(HTTPException) as caught:
+        with _domain_errors():
+            raise MergeConflict(conflicts, seeds={"e1": {"displayName": "Orders", "description": "b"}})
+    assert caught.value.status_code == 409
+    assert caught.value.detail == {
+        "type": "merge_conflict", "conflicts": conflicts,
+        "seeds": {"e1": {"displayName": "Orders", "description": "b"}},
+    }
+
+    with pytest.raises(HTTPException) as plain:
+        with _domain_errors():
+            raise MergeConflict(conflicts)
+    assert "seeds" not in plain.value.detail

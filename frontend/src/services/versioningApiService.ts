@@ -611,13 +611,20 @@ export class MergeConflictError extends Error {
   conflicts: Array<Record<string, unknown>>
   /** A draft save's conflicts: each conflicting entity as it is now — what an edit rebases onto. */
   current: Record<string, EntityView>
-  constructor(conflicts: Array<Record<string, unknown>>, current: Record<string, EntityView> = {}) {
+  /** A review's merge: each conflicting entity's own value on the draft — a resolution's base. */
+  seeds: Record<string, Record<string, unknown> | undefined>
+  constructor(
+    conflicts: Array<Record<string, unknown>>,
+    current: Record<string, EntityView> = {},
+    seeds: Record<string, Record<string, unknown> | undefined> = {},
+  ) {
     super(Object.keys(current).length > 0
       ? `Someone else changed ${conflicts.length === 1 ? 'a field' : 'fields'} you edited.`
       : 'Main has moved — there are conflicting changes to resolve.')
     this.name = 'MergeConflictError'
     this.conflicts = conflicts
     this.current = current
+    this.seeds = seeds
   }
 }
 
@@ -955,7 +962,8 @@ export class DiffTooLargeError extends Error {
 function versioningError(status: number, detail: RefusalDetail, fallback: string): Error {
   const d = typeof detail === 'object' && detail ? detail : undefined
   if (status === 409 && d?.type === 'merge_conflict') {
-    return new MergeConflictError(d.conflicts ?? [], (d.current ?? {}) as Record<string, EntityView>)
+    return new MergeConflictError(d.conflicts ?? [], (d.current ?? {}) as Record<string, EntityView>,
+      (d.seeds ?? {}) as Record<string, Record<string, unknown> | undefined>)
   }
   if (status === 409 && d?.type === 'integrity') {
     return new IntegrityError(d.message)
