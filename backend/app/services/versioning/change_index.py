@@ -417,3 +417,88 @@ def review_closure(requires: Mapping[str, Set[str]], chosen: Iterable[str], *,
                 out[y] = out[x] or x
                 stack.append(y)
     return out
+
+
+# --------------------------------------------------------------------------- #
+# Changes top-down: the containment tree they sit in                           #
+# --------------------------------------------------------------------------- #
+ROOT = ""
+
+
+class ChangeTree:
+    """An origin's changes in the containment tree they sit in, built once per version of its
+    change index from what each change's version row says and a parent pointer per entity — no
+    payloads. Every change sits under its container: an entity under its parent, a relationship or
+    a containment link under its source. Each container counts the changes under it, at any depth
+    (``rollup``), and lists its children most-changed first (``children``), so a level is a page
+    of a list already sorted."""
+
+    def __init__(self, index: "ChangeIndex", parent_of: Mapping[str, Optional[str]],
+                 names: Mapping[str, Tuple[Optional[str], Optional[str]]]):
+        self.index = index
+        #: Entity → its container (``None``: at the top). Changed entities and their ancestors.
+        self.parent_of: Dict[str, Optional[str]] = dict(parent_of)
+        #: An unchanged ancestor's name and type, from its version row.
+        self.names = dict(names)
+        self.position: Dict[str, int] = {e.entity_id: i for i, e in enumerate(index.entries)}
+        rollup: Dict[str, List[int]] = {}
+        kids: Dict[str, List[str]] = {}
+
+        def container_of(e: ChangeEntry) -> str:
+            if e.kind == "node":
+                return self.parent_of.get(e.entity_id) or ROOT
+            return e.src or ROOT
+
+        def count_up(start: str, status: str) -> None:
+            k = _STATUS_SLOT[status]
+            seen = 0
+            at: Optional[str] = start
+            while at and seen < 64:                     # a cycle in bad data never loops forever
+                rollup.setdefault(at, [0, 0, 0])[k] += 1
+                at = self.parent_of.get(at)
+                seen += 1
+
+        for e in index.entries:
+            kids.setdefault(container_of(e), []).append(e.entity_id)
+            count_up(container_of(e), e.status)
+        # Unchanged ancestors under their own containers, so every level can be walked down to.
+        for eid, parent in self.parent_of.items():
+            if eid not in self.position:
+                kids.setdefault(parent or ROOT, []).append(eid)
+        self.rollup = rollup
+
+        def order(eid: str) -> tuple:
+            e = self.entry(eid)
+            node = e is None or e.kind == "node"
+            inside = sum(rollup.get(eid, (0, 0, 0)))
+            name = (e.name if e is not None else (self.names.get(eid) or (None, None))[0]) or eid
+            return (not node, -inside, name.casefold(), eid)
+        self.children = {k: sorted(dict.fromkeys(v), key=order) for k, v in kids.items()}
+        #: Where each sits among its container's children — the page a reveal opens there.
+        self.rank: Dict[str, int] = {eid: i for v in self.children.values() for i, eid in enumerate(v)}
+
+    def entry(self, eid: str) -> Optional[ChangeEntry]:
+        i = self.position.get(eid)
+        return self.index.entries[i] if i is not None else None
+
+    def path(self, eid: str) -> List[str]:
+        """Its containers from the top down, itself not included."""
+        out: List[str] = []
+        at = self.parent_of.get(eid) if self.entry(eid) is None or self.entry(eid).kind == "node" else (self.entry(eid).src or None)
+        while at and len(out) < 64:
+            out.append(at)
+            at = self.parent_of.get(at)
+        return list(reversed(out))
+
+    def name_of(self, eid: str) -> Optional[str]:
+        e = self.entry(eid)
+        if e is not None:
+            return e.name or e.urn
+        return (self.names.get(eid) or (None, None))[0]
+
+    def type_of(self, eid: str) -> Optional[str]:
+        e = self.entry(eid)
+        return e.type if e is not None else (self.names.get(eid) or (None, None))[1]
+
+
+_STATUS_SLOT = {"added": 0, "modified": 1, "removed": 2}

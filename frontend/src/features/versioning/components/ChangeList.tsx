@@ -15,10 +15,18 @@
  * and, opened, its threads under what changed — with Comment on any one field of it. A draft's
  * review is decided here too (`review.decisions`): each change accepted or rejected (with why),
  * narrowed by what is decided, and every change shown decided at once.
+ *
+ * Laid out top-down (`Hierarchy`, the Business default; remembered once chosen), the same changes
+ * sit under their containers, a level at a time (`ChangeTree`). Searching or narrowing it lists what
+ * matches across the whole list, each row saying where it sits — and "Show in hierarchy" opens the
+ * way down to it.
  */
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
-import { ArrowRight, ArrowUpRight, ChevronsDownUp, ChevronsUpDown, Loader2, MessageSquare, MessageSquarePlus, Search, SearchX } from 'lucide-react'
+import {
+  ArrowRight, ArrowUpRight, ChevronsDownUp, ChevronsUpDown, List, ListTree, Loader2, MessageSquare, MessageSquarePlus,
+  Search, SearchX,
+} from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { Segmented, type SegmentedOption } from '@/components/ui/Segmented'
@@ -47,6 +55,14 @@ import {
   DecisionBanner, DecisionFilter, RejectReason, RowDecision, useDecisionFlow,
 } from '@/features/reviews/decisions/DecisionControls'
 import { NodeDiffBadge } from './NodeDiffBadge'
+import { ChangeTree, type TreeRowFrame } from './ChangeTree'
+import { useChangeListLayout } from '../hooks/useChangeListLayout'
+import type { ChangeListLayout } from '@/store/preferences'
+
+const LAYOUTS: SegmentedOption<ChangeListLayout>[] = [
+  { value: 'tree', label: 'Hierarchy', icon: ListTree },
+  { value: 'list', label: 'List', icon: List },
+]
 
 const STATUSES: ChangeListStatus[] = ['added', 'modified', 'removed']
 const KIND_LABEL: Record<ChangeListKind, string> = {
@@ -137,11 +153,25 @@ export function ChangeList({
   const listable = !!s && s.listed > 0 && !!activeKind
   const decisions = review?.decisions
   const [decision, setDecision] = useState<DecisionState | null>(null)
-  const filter = { kind: activeKind, statuses, type: type || undefined, q }
+  // Top-down, the tree holds every kind: no kind or type to pick. Narrowed, it lists what matches
+  // across the whole list, each row with where it sits.
+  const [layout, setLayout] = useChangeListLayout()
+  const tree = layout === 'tree'
+  const chooseLayout = (l: ChangeListLayout) => { setLayout(l); if (l === 'tree') setType('') }
+  const narrowed = statuses.length > 0 || (!tree && !!type) || !!q.trim()
+  const showTree = tree && !narrowed && !decision
+  const [reveal, setReveal] = useState<{ entityId: string; nonce: number } | null>(null)
+  const showInTree = (entityId: string) => {
+    setText(''); setStatuses([]); setDecision(null)
+    setReveal({ entityId, nonce: Date.now() })
+  }
+  const filter = { kind: tree ? undefined : activeKind, statuses, type: tree ? undefined : type || undefined, q }
   // Each row says what it changed before it is opened (`summary`): counts, and its first few fields.
-  const plainQ = useChangeEntries(wsId, graphId, origin, filter, { enabled: listable && !decisions, summary: true })
+  const plainQ = useChangeEntries(wsId, graphId, origin, filter,
+    { enabled: listable && !decisions && !showTree, summary: true, paths: tree })
   // A draft's review lists its changes with their decisions — the same list, the same order.
-  const reviewQ = useReviewChanges(wsId, review?.prId, { ...filter, decision: decision ?? undefined }, listable && !!decisions, true)
+  const reviewQ = useReviewChanges(wsId, review?.prId, { ...filter, decision: decision ?? undefined },
+    listable && !!decisions && !showTree, true, tree)
   const entriesQ = (decisions ? reviewQ : plainQ) as unknown as typeof plainQ
   const flow = useDecisionFlow(wsId, review?.prId ?? '', decisions?.headCommitId)
   const rows = useMemo(() => entriesQ.data?.pages.flatMap((p) => p.entries) ?? [], [entriesQ.data])
@@ -192,6 +222,31 @@ export function ChangeList({
   const rowIndex = useMemo(() => new Map(rows.map((r, i) => [r.entityId, i])), [rows])
   // Rejecting asks why, under its row: which row is asking (also from the `r` key).
   const [asking, setAsking] = useState<string | null>(null)
+  // A change's own keys, in either layout: a accept, r reject (asks why), c its discussion, o show on canvas.
+  const changeKeys = (e: KeyboardEvent, row: ChangeListRow, setLevel: (l: RowLevel) => void, show: () => void) => {
+    if (e.shiftKey) return false
+    if (e.key === 'o' && canRevealRows && row.kind === 'node' && row.status !== 'removed') { show(); return true }
+    if (decisions?.canDecide && e.key === 'a') { void flow.run('accepted', { entityIds: [row.entityId] }); return true }
+    if (decisions?.canDecide && e.key === 'r') { setAsking(row.entityId); return true }
+    if (review && e.key === 'c') { setLevel(2); return true }
+    return false
+  }
+  const decideOf = (row: ChangeListRow) => (decisions ? {
+    decision: (row as ReviewChangeRow).decision ?? null,
+    canDecide: decisions.canDecide, busy: flow.busy, names: decisions.names,
+    impliedLabel: (() => {
+      const by = (row as ReviewChangeRow).decision?.impliedBy
+      return by ? labelOf.get(by) ?? null : null
+    })(),
+    onDecide: (verdict: DecisionVerdict | null, reason?: string | null) => void flow.run(verdict, { entityIds: [row.entityId] }, reason),
+  } : undefined)
+  const renderTreeChange = (row: ChangeListRow, f: TreeRowFrame) => (
+    <Row wsId={wsId} graphId={graphId} origin={origin} row={row} domId={f.domId}
+      level={f.level} current={f.current} onToggle={f.onToggle} onLevel={f.onLevel} onFocus={f.onFocus}
+      setsize={f.setsize} posinset={f.posinset} depth={f.depth} lead={f.lead} inside={f.inside}
+      asking={asking === row.entityId} onAsk={(on) => setAsking(on ? row.entityId : null)} onShow={f.onShow}
+      review={review} comments={commentCounts?.[row.entityId]} decide={decideOf(row)} />
+  )
   const expand = useExpandableRows(rowKeys, {
     onNavigate: (id) => {
       const at = itemAt.get(id)
@@ -199,15 +254,9 @@ export function ChangeList({
       virtualizer.scrollToIndex(at, { align: 'auto' })
       requestAnimationFrame(() => document.getElementById(rowDomId(id))?.focus())
     },
-    // A review's own keys: a accept, r reject (asks why), c the change's discussion, o show on canvas.
     extraKeys: (e, current) => {
       const row = current ? rowById.get(current) : undefined
-      if (!row || e.shiftKey) return false
-      if (e.key === 'o' && canRevealRows && row.kind === 'node' && row.status !== 'removed') { showOnCanvas(row); return true }
-      if (decisions?.canDecide && e.key === 'a') { void flow.run('accepted', { entityIds: [row.entityId] }); return true }
-      if (decisions?.canDecide && e.key === 'r') { setAsking(row.entityId); return true }
-      if (review && e.key === 'c') { expand.setLevel(row.entityId, 2); return true }
-      return false
+      return !!row && changeKeys(e, row, (l) => expand.setLevel(row.entityId, l), () => showOnCanvas(row))
     },
   })
   const canRevealRows = useChangeNavigatorStore((st) => st.canReveal)
@@ -241,13 +290,13 @@ export function ChangeList({
   const kindOptions: SegmentedOption<ChangeListKind>[] = kinds.map((k) => ({
     value: k, label: KIND_LABEL[k], count: total(kindCounts(s, k)),
   }))
-  const counts = activeKind ? kindCounts(s, activeKind) : null
-  const narrowed = statuses.length > 0 || !!type || !!q.trim()
+  const counts = tree ? s.counts : activeKind ? kindCounts(s, activeKind) : null
 
   return (
     <div className={cn('flex flex-col gap-2.5 min-h-0', className)}>
       <div className="flex flex-wrap items-center gap-2">
-        {kindOptions.length > 1 && activeKind && (
+        <Segmented label="Lay the changes out" options={LAYOUTS} value={layout} onChange={chooseLayout} />
+        {!tree && kindOptions.length > 1 && activeKind && (
           <Segmented label="What changed" options={kindOptions} value={activeKind} onChange={chooseKind} />
         )}
         <div className="flex items-center gap-1" role="group" aria-label="Show changes that were">
@@ -279,11 +328,11 @@ export function ChangeList({
           <input
             value={text}
             onChange={(e) => setText(e.target.value)}
-            placeholder="Search by name, urn or type…"
+            placeholder={tree ? 'Search every change, anywhere…' : 'Search by name, urn or type…'}
             className="w-full h-8 pl-8 pr-2.5 rounded-lg bg-black/[0.03] dark:bg-white/[0.04] border border-glass-border text-[12.5px] text-ink placeholder:text-ink-muted/60 focus:outline-none focus:ring-2 focus:ring-accent-lineage/40"
           />
         </label>
-        {typeOptions.length > 1 && (
+        {!tree && typeOptions.length > 1 && (
           <select
             aria-label="Type"
             value={type}
@@ -298,7 +347,7 @@ export function ChangeList({
         )}
         {/* What is listed, as filtered, streamed by the server — however many there are. */}
         <ExportMenu count={matching || undefined} onExport={(detail: ExportDetail) => triggerBrowserDownload(
-          changeListExportUrl(wsId, graphId, origin, { kind: activeKind ?? undefined, statuses, type: type || undefined, q }, detail),
+          changeListExportUrl(wsId, graphId, origin, filter, detail),
           `changes${detail === 'properties' ? '-properties' : ''}.csv`)} />
       </div>
 
@@ -306,12 +355,13 @@ export function ChangeList({
 
       <div className="flex items-center gap-2 min-h-[28px]">
         <p className="flex-1 text-[11px] text-ink-muted tabular-nums" aria-live="polite">
-          {entriesQ.isLoading ? 'Loading…'
-            : narrowed || decision ? `${matching.toLocaleString()} matching`
-              : `${matching.toLocaleString()} ${activeKind ? KIND_LABEL[activeKind].toLowerCase() : 'changes'}`}
-          {rows.length < matching && !entriesQ.isLoading && ` · ${rows.length.toLocaleString()} loaded`}
+          {showTree ? `${s.total.toLocaleString()} changes · top-down, under their containers`
+            : entriesQ.isLoading ? 'Loading…'
+              : narrowed || decision ? `${matching.toLocaleString()} matching${tree ? ' anywhere' : ''}`
+                : `${matching.toLocaleString()} ${activeKind ? KIND_LABEL[activeKind].toLowerCase() : 'changes'}`}
+          {!showTree && rows.length < matching && !entriesQ.isLoading && ` · ${rows.length.toLocaleString()} loaded`}
         </p>
-        {rows.length > 1 && (
+        {!showTree && rows.length > 1 && (
           <HoverTip label={expand.allOpen ? 'Collapse every change' : 'Open every change to its key differences'}
             shortcut={expand.allOpen ? '⇧←' : '⇧→'} className="inline-flex">
             <button type="button" onClick={expand.allOpen ? expand.collapseAll : expand.expandAll}
@@ -321,7 +371,7 @@ export function ChangeList({
             </button>
           </HoverTip>
         )}
-        {decisions?.canDecide && matching > 0 && !entriesQ.isLoading && (
+        {decisions?.canDecide && !showTree && matching > 0 && !entriesQ.isLoading && (
           <>
             <button type="button" disabled={flow.busy} onClick={() => void flow.all('accepted', { ...filter, decision: decision ?? undefined })}
               className="inline-flex items-center gap-1 px-2 h-7 rounded-lg text-[11.5px] font-semibold text-emerald-700 dark:text-emerald-300 hover:bg-emerald-500/10 disabled:opacity-50">
@@ -336,7 +386,14 @@ export function ChangeList({
       </div>
       {decisions && <DecisionBanner flow={flow} />}
 
-      {entriesQ.isError ? (
+      {/* Kept while a search shows what matches, so closing it returns to the tree as it was left. */}
+      {tree && (
+        <div hidden={!showTree} className="min-h-0">
+          <ChangeTree source={{ wsId, graphId, origin, prId: decisions ? review?.prId : null }}
+            renderChange={renderTreeChange} changeKeys={changeKeys} reveal={reveal} maxHeight={maxHeight} />
+        </div>
+      )}
+      {showTree ? null : entriesQ.isError ? (
         <p className="text-xs text-ink-muted py-3">Couldn't load this page of changes. Try again in a moment.</p>
       ) : entriesQ.isLoading ? (
         <div className="space-y-1.5" aria-busy>
@@ -382,16 +439,9 @@ export function ChangeList({
                       asking={asking === item.row.entityId}
                       onAsk={(on) => setAsking(on ? item.row.entityId : null)}
                       onShow={() => showOnCanvas(item.row)}
+                      onShowInTree={tree ? () => showInTree(item.row.entityId) : undefined}
                       review={review} comments={commentCounts?.[item.row.entityId]}
-                      decide={decisions ? {
-                        decision: (item.row as ReviewChangeRow).decision ?? null,
-                        canDecide: decisions.canDecide, busy: flow.busy, names: decisions.names,
-                        impliedLabel: (() => {
-                          const by = (item.row as ReviewChangeRow).decision?.impliedBy
-                          return by ? labelOf.get(by) ?? null : null
-                        })(),
-                        onDecide: (verdict, reason) => void flow.run(verdict, { entityIds: [item.row.entityId] }, reason),
-                      } : undefined} />
+                      decide={decideOf(item.row)} />
                   )}
                 </div>
               )
@@ -406,13 +456,15 @@ export function ChangeList({
 const rowDomId = (entityId: string) => `change-row-${entityId}`
 
 function Row({
-  wsId, graphId, origin, row, level, current, onToggle, onLevel, onFocus, setsize, posinset, asking, onAsk,
-  onShow, review, comments, decide,
+  wsId, graphId, origin, row, domId, level, current, onToggle, onLevel, onFocus, setsize, posinset, asking, onAsk,
+  onShow, onShowInTree, review, comments, decide, depth, lead, inside,
 }: {
   wsId: string
   graphId: string
   origin: ChangeListOrigin
   row: ChangeListRow
+  /** Its button's id, when the list focusing it names it otherwise (the tree). */
+  domId?: string
   level: RowLevel
   current: boolean
   onToggle: () => void
@@ -425,6 +477,12 @@ function Row({
   onAsk: (asking: boolean) => void
   /** Step through these on the canvas, from this one. */
   onShow: () => void
+  /** A search result: open the way down to it, top-down. */
+  onShowInTree?: () => void
+  /** In the tree: how deep it sits, what opens its children, and how many changes are under it. */
+  depth?: number
+  lead?: ReactNode
+  inside?: ReactNode
   review?: ChangeListProps['review']
   /** Its threads, open and in all. */
   comments?: { open: number; total: number }
@@ -445,8 +503,9 @@ function Row({
   const edge = row.kind === 'edge'
   return (
     <ExpandableChangeRow
-      id={rowDomId(row.entityId)} status={row.status} level={level} current={current}
+      id={domId ?? rowDomId(row.entityId)} status={row.status} level={level} current={current}
       onToggle={onToggle} onFocus={onFocus} setsize={setsize} posinset={posinset}
+      depth={depth} lead={lead} chevron={lead === undefined}
       title={edge ? (
         <span className="inline-flex items-center gap-1 min-w-0 max-w-full">
           <span className="truncate">{row.sourceName || row.sourceEntityId}</span>
@@ -454,10 +513,14 @@ function Row({
           <span className="truncate">{row.targetName || row.targetEntityId}</span>
         </span>
       ) : label}
-      sub={edge ? row.type : (row.qualifiedName && row.qualifiedName !== label ? row.qualifiedName : undefined)}
+      sub={row.path?.length
+        // A search result says where it sits, top down.
+        ? <span aria-label={`in ${row.path.join(', ')}`}>{row.path.join(' › ')}</span>
+        : edge ? row.type : (row.qualifiedName && row.qualifiedName !== label ? row.qualifiedName : undefined)}
       summary={row.fields ? <ChangeSummary summary={row.fields} status={row.status} kind={row.kind} /> : undefined}
-      badges={(comments && comments.total > 0) || decide ? (
+      badges={(comments && comments.total > 0) || decide || inside ? (
         <>
+          {inside}
           {comments && comments.total > 0 && (
             <span
               aria-label={comments.open ? `${comments.open} open thread${comments.open === 1 ? '' : 's'}` : `${comments.total} resolved thread${comments.total === 1 ? '' : 's'}`}
@@ -473,13 +536,25 @@ function Row({
           )}
         </>
       ) : undefined}
-      actions={canReveal ? (
-        <HoverTip label={`Show ${label} on the canvas`} shortcut="o" className="inline-flex">
-          <button type="button" onClick={onShow} aria-label={`Show ${label} on canvas`}
-            className="inline-flex items-center gap-0.5 px-1.5 h-6 rounded-md text-[11px] font-semibold text-accent-lineage hover:bg-accent-lineage/10">
-            Show<ArrowUpRight className="w-3 h-3" aria-hidden />
-          </button>
-        </HoverTip>
+      actions={canReveal || onShowInTree ? (
+        <>
+          {onShowInTree && (
+            <HoverTip label={`Open the way down to ${label}, top-down`} className="inline-flex">
+              <button type="button" onClick={onShowInTree} aria-label={`Show ${label} in the hierarchy`}
+                className="inline-flex items-center gap-0.5 px-1.5 h-6 rounded-md text-[11px] font-semibold text-ink-secondary hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.06]">
+                <ListTree className="w-3 h-3" aria-hidden />In hierarchy
+              </button>
+            </HoverTip>
+          )}
+          {canReveal && (
+            <HoverTip label={`Show ${label} on the canvas`} shortcut="o" className="inline-flex">
+              <button type="button" onClick={onShow} aria-label={`Show ${label} on canvas`}
+                className="inline-flex items-center gap-0.5 px-1.5 h-6 rounded-md text-[11px] font-semibold text-accent-lineage hover:bg-accent-lineage/10">
+                Show<ArrowUpRight className="w-3 h-3" aria-hidden />
+              </button>
+            </HoverTip>
+          )}
+        </>
       ) : undefined}
       footer={(
         <>

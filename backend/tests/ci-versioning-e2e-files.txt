@@ -18,6 +18,7 @@ tests/integration/test_blank_graph_provisioning.py
 tests/integration/test_bootstrap_falkor_live.py
 tests/integration/test_bootstrap_job.py
 tests/integration/test_change_summaries.py
+tests/integration/test_change_tree.py
 tests/integration/test_children_paging_exact_live.py
 tests/integration/test_children_sibling_lineage_live.py
 tests/integration/test_commit_provenance.py

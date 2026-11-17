@@ -5,6 +5,8 @@
  *   review     Review & Save on `n` staged changes (default 50,000)
  *   map        the same, on the Map (clustered past 200 entities)
  *   changes    a draft's change list of `n` changes (default 100,000), one row opened
+ *   tree       the same list top-down: a warehouse, 5 schemas, 200 tables each, 100 changed columns
+ *              each — a level opened, a page more, a search across all of it, a result revealed
  *   navigator  the canvas change navigator, 10,482 stops (`&missing=1`: one not in this view)
  *
  *   npm run harness
@@ -33,9 +35,10 @@ import { usePersonaStore } from '../store/persona'
 const params = new URLSearchParams(window.location.search)
 const fixture = params.get('fixture') ?? 'review'
 const dark = params.get('theme') === 'dark'
-const N = Number(params.get('n') ?? (fixture === 'changes' ? 100_000 : 50_000))
+const N = Number(params.get('n') ?? (fixture === 'changes' || fixture === 'tree' ? 100_000 : 50_000))
 MotionGlobalConfig.skipAnimations = true
 usePersonaStore.setState({ mode: 'business' })
+usePreferencesStore.setState({ changeListLayout: fixture === 'tree' ? 'tree' : 'list' })
 
 /** What the driver reads: the timings, and the long tasks (ms) each step caused. */
 interface ScaleReport { openMs?: number; steps: Record<string, number[]>; done: boolean; error?: string }
@@ -71,6 +74,17 @@ window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       before: { displayName: `orders_${id}`, description: 'Daily orders', version: 'a1', properties: { owner: 'ana', tier: 'silver', 'Technical/Physical/format': 'csv', retention: 30, pii: false } },
       after: { displayName: `Orders ${id}`, description: 'Daily customer orders, deduplicated', version: 'a2', properties: { owner: 'bo', tier: 'gold', 'Technical/Physical/format': 'parquet', retention: 90, pii: true, steward: 'finance' } },
     })
+  }
+  if (url.includes('/diff/tree')) return json(treeResponse(new URL(url, location.origin)))
+  if (url.includes('/diff/entries') && fixture === 'tree') {
+    // A search across the whole tree: what matches, each with where it sits.
+    const u = new URL(url, location.origin)
+    const q = (u.searchParams.get('q') ?? '').trim()
+    const entries = q ? Array.from({ length: 40 }, (_, k) => {
+      const s = k % 5, t = (k * 7) % 200, c = 7
+      return { ...columnRow(s, t, c), path: ['warehouse', `schema_${s}`, `table_${s}_${t}`] }
+    }) : []
+    return json({ entries, total: q ? 40 : 0, offset: 0, limit: 100, hasMore: false })
   }
   if (url.includes('/diff/entries')) {
     const u = new URL(url, location.origin)
@@ -157,6 +171,44 @@ async function step(name: string, act: () => void | Promise<void>) {
   report.steps[name] = longTasks.filter((t) => t.start >= start && t.start < end).map((t) => t.ms)
 }
 const key = (el: Element, k: string) => el.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true }))
+// The tree fixture: warehouse › 5 schemas › 200 tables each › 100 changed columns each (100,000).
+const SCHEMAS = 5, TABLES = 200, COLUMNS = 100
+const columnRow = (s: number, t: number, c: number) => ({
+  entityId: `c_${s}_${t}_${c}`, kind: 'node', status: (['modified', 'added', 'removed'] as const)[c % 3], type: 'Column',
+  structural: false, displayName: `col_${c}`, urn: `urn:c_${s}_${t}_${c}`,
+  fields: { changed: 2, added: 0, removed: 0, total: 2, top: [
+    { label: 'Description', kind: 'changed', before: 'Order total', after: 'Order total, in cents' },
+    { label: 'owner', kind: 'changed', before: 'ana', after: 'bo' }] },
+})
+const inside = (n: number) => ({ added: Math.floor(n / 3), modified: n - 2 * Math.floor(n / 3), removed: Math.floor(n / 3) })
+function treeResponse(u: URL) {
+  if (u.pathname.endsWith('/path')) {
+    const [, s, t, c] = (u.searchParams.get('entityId') ?? 'c_0_0_0').split('_').map(Number)
+    return { entityId: u.searchParams.get('entityId'), at: c, path: [
+      { id: 'db', name: 'warehouse', at: 0 }, { id: `s_${s}`, name: `schema_${s}`, at: s }, { id: `t_${s}_${t}`, name: `table_${s}_${t}`, at: t }] }
+  }
+  const parent = u.searchParams.get('parent')
+  const offset = Number(u.searchParams.get('offset') ?? 0)
+  const limit = Number(u.searchParams.get('limit') ?? 100)
+  const [kind, a, b] = (parent ?? 'top').split('_')
+  let all: number, item: (i: number) => unknown
+  if (!parent) {
+    all = 1
+    item = () => ({ id: 'db', name: 'warehouse', type: 'Database', hasChildren: true, inside: inside(SCHEMAS * TABLES * COLUMNS) })
+  } else if (kind === 'db') {
+    all = SCHEMAS
+    item = (i) => ({ id: `s_${i}`, name: `schema_${i}`, type: 'Schema', hasChildren: true, inside: inside(TABLES * COLUMNS) })
+  } else if (kind === 's') {
+    all = TABLES
+    item = (i) => ({ id: `t_${a}_${i}`, name: `table_${a}_${i}`, type: 'Table', hasChildren: true, inside: inside(COLUMNS) })
+  } else {
+    all = COLUMNS
+    item = (i) => ({ id: `c_${a}_${b}_${i}`, hasChildren: false, inside: { added: 0, modified: 0, removed: 0 }, change: columnRow(Number(a), Number(b), i) })
+  }
+  const items = Array.from({ length: Math.max(0, Math.min(limit, all - offset)) }, (_, k) => item(offset + k))
+  return { items, total: all, offset, limit, hasMore: offset + items.length < all, path: [] }
+}
+
 function type(input: HTMLInputElement, value: string) {
   Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, value)
   input.dispatchEvent(new Event('input', { bubbles: true }))
@@ -216,6 +268,41 @@ async function drive() {
         }
       })
     }
+    if (fixture === 'tree') {
+      const opened = performance.now()
+      const row = (id: string) => document.getElementById(`change-tree-${id}`) as HTMLButtonElement | null
+      await until(() => row('db'))
+      report.openMs = Math.round(performance.now() - opened)
+      const list = document.querySelector<HTMLElement>('[role=list][aria-label="Changes, top-down"]')!
+      await step('open-level', async () => { row('db')!.click(); await until(() => row('s_0')) })
+      await step('step-in', async () => {
+        key(list, 'j')
+        await frame()
+        key(list, 'ArrowRight')
+        await until(() => row('t_0_0'))
+        key(list, 'ArrowRight')
+        await frame()
+        key(list, 'ArrowRight')
+        await until(() => row('c_0_0_5'))
+      })
+      await step('open-change', async () => { row('c_0_0_1')!.click(); await until(() => list.querySelector('[role=region]')) })
+      await step('more', async () => {
+        const scroller = list.parentElement!
+        scroller.scrollTop = scroller.scrollHeight
+        const more = await until(() => [...document.querySelectorAll<HTMLButtonElement>('button')].find((b) => /^Show 100 more/.test(b.textContent ?? '')))
+        more.click()
+        // The page arrives, then the list grows under where it was scrolled: follow it to the end.
+        await until(() => { scroller.scrollTop = scroller.scrollHeight; return document.querySelector('[id^="change-tree-t_0_19"]') })
+      })
+      await step('search', async () => {
+        type(document.querySelector<HTMLInputElement>('input[placeholder^="Search every change"]')!, 'col_7')
+        await until(() => [...document.querySelectorAll('[role=list][aria-label="Changes"] [role=listitem]')].length >= 5)
+      })
+      await step('reveal', async () => {
+        ;[...document.querySelectorAll<HTMLButtonElement>('button[aria-label$="in the hierarchy"]')][3]?.click()
+        await until(() => row('c_3_21_7')?.getAttribute('tabindex') === '0')
+      })
+    }
     if (fixture === 'navigator') await until(() => document.querySelector('[aria-label="Change navigator"]'))
   } catch (e) {
     report.error = String(e)
@@ -241,7 +328,7 @@ function Harness() {
     }
     void drive()
   }, [])
-  if (fixture === 'changes') {
+  if (fixture === 'changes' || fixture === 'tree') {
     return (
       <div className="min-h-screen bg-canvas p-8">
         <div className="max-w-[720px] mx-auto rounded-2xl border border-glass-border bg-canvas-elevated p-5">

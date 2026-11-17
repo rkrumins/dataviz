@@ -48,8 +48,8 @@ from .changeset import Delta, fold_batch_ops, materialize, net_delta, diff_state
 from backend.common.property_patch import apply_patch, compose_patches, strip_deletes
 from backend.common.service_accounts import is_service_account
 from .entity_serde import edge_payload_from_parts
-from .change_index import (ChangeIndex, ChangeIndexBuilder, ChangeOrigin, IndexCache, compact_entries,
-                           entry_dict, review_closure, review_requirements, stat_changes)
+from .change_index import (ROOT, ChangeIndex, ChangeIndexBuilder, ChangeOrigin, ChangeTree, IndexCache,
+                           compact_entries, entry_dict, review_closure, review_requirements, stat_changes)
 from .errors import (AccessDenied, AmbiguousSpelling, AmbiguousUrn, BranchNotOpen, ChangeListBusy,
                      ContentionExhausted, CrossesUpdate, CurationAtRisk, DraftNotReadable, DraftPruned,
                      EdgeEndsMissing, EntityExists, StagedChangesUnsaved, UniqueViolation,
@@ -4998,6 +4998,7 @@ class GraphVersioningService:
         self, *, pr_id: str, containment_edge_types, decision: Optional[str] = None,
         kind: Optional[str] = None, statuses: Sequence[str] = (), type_: Optional[str] = None,
         q: Optional[str] = None, offset: int = 0, limit: int = 100, summary: bool = False,
+        paths: bool = False,
     ) -> Dict[str, object]:
         """:meth:`change_entries` of a draft's review, each with its decision (verdict, reason, who,
         when, what it came with, and ``stale`` once the change was edited since), narrowed by
@@ -5021,6 +5022,8 @@ class GraphVersioningService:
             out.append(row)
         if summary:
             await self._with_field_summaries(pr.graph_id, ChangeOrigin(branch_id=draft.id), out, None)
+        if paths and out:
+            await self._with_paths(pr.graph_id, ChangeOrigin(branch_id=draft.id), containment_edge_types, out, None)
         return {"entries": out, "total": len(positions), "offset": offset, "limit": limit,
                 "hasMore": offset + len(page) < len(positions), "tooLarge": None}
 
@@ -7673,7 +7676,7 @@ class GraphVersioningService:
         self, *, graph_id: str, origin: ChangeOrigin, containment_edge_types,
         viewer: Optional[Viewer] = None, kind: Optional[str] = None,
         statuses: Sequence[str] = (), type_: Optional[str] = None, q: Optional[str] = None,
-        offset: int = 0, limit: int = 100, summary: bool = False,
+        offset: int = 0, limit: int = 100, summary: bool = False, paths: bool = False,
     ) -> Dict[str, object]:
         """A page of an origin's changes in the index's fixed order (entities, then
         relationships, then structure; by type, then name), narrowed by kind, status, type and
@@ -7688,6 +7691,8 @@ class GraphVersioningService:
         entries = [entry_dict(e, names) for e in page]
         if summary:
             await self._with_field_summaries(graph_id, origin, entries, viewer)
+        if paths and entries:
+            await self._with_paths(graph_id, origin, containment_edge_types, entries, viewer)
         return {"entries": entries, "total": len(positions),
                 "offset": offset, "limit": limit,
                 "hasMore": offset + len(page) < len(positions), "tooLarge": index.too_large}
@@ -7714,6 +7719,169 @@ class GraphVersioningService:
                 e["fields"] = change_csv.field_summary(
                     before.get(e["entityId"]), after.get(e["entityId"]), "edge" if e.get("kind") == "edge" else "node")
         await asyncio.to_thread(build)
+
+    # ------------------------------------------------------------------ #
+    # Changes top-down: their containment tree, a level at a time          #
+    # ------------------------------------------------------------------ #
+    async def _with_paths(self, graph_id: str, origin: ChangeOrigin, containment_edge_types,
+                          entries: List[dict], viewer: Optional[Viewer]) -> None:
+        """Each row's ``path``: its containers' names, top down (from the change tree, built once
+        per version of the list). A failed build leaves the rows without one (logged)."""
+        try:
+            tree = await self._change_tree(graph_id, origin, containment_edge_types, viewer)
+        except (DraftNotReadable, AccessDenied):
+            raise
+        except Exception:  # noqa: BLE001 — the page stands without its paths
+            logger.warning("change paths for %s unavailable", graph_id, exc_info=True)
+            return
+        for e in entries:
+            e["path"] = [tree.name_of(p) or p for p in tree.path(e["entityId"])]
+
+    async def _change_tree(self, graph_id: str, origin: ChangeOrigin, containment_edge_types,
+                           viewer: Optional[Viewer]) -> ChangeTree:
+        """An origin's :class:`ChangeTree`, built once per version of its change index (cached on
+        it, built by one request while others wait for it). An origin too large to list is too
+        large to lay out (:class:`ChangeListTooLarge`)."""
+        index = await self._change_index(graph_id, origin, containment_edge_types, viewer)
+        if index.too_large is not None:
+            raise ChangeListTooLarge(index.too_large)
+        tree = getattr(index, "_tree", None)
+        if tree is not None:
+            return tree
+        lock = index.__dict__.setdefault("_tree_lock", asyncio.Lock())
+        async with lock:
+            tree = getattr(index, "_tree", None)
+            if tree is None:
+                tree = await self._build_change_tree(graph_id, origin, containment_edge_types, index)
+                index._tree = tree
+        return tree
+
+    async def _build_change_tree(self, graph_id: str, origin: ChangeOrigin, containment_edge_types,
+                                 index: ChangeIndex) -> ChangeTree:
+        """Each changed entity's container, then theirs, level by level up to the top: a parent
+        pointer from the containment links the origin changed, else from the live link at its
+        state (from version-row columns, never a payload — one batched read a level), else, for
+        what the origin removed, where it was. O(changed × depth)."""
+        cset = {(t or "").upper() for t in (containment_edge_types or [])}
+        async with self._bounded_session() as s:
+            main_id = await self._main_branch_id(s, graph_id)
+            if origin.branch_id is not None:
+                branch = await self._get_branch(s, graph_id, origin.branch_id)
+                after_branch, after_seq, before_seq = branch.id, None, branch.base_commit_seq or 0
+            else:
+                after_branch, after_seq, before_seq = main_id, origin.to_seq, origin.from_seq
+            parent_of: Dict[str, Optional[str]] = {}
+            removed_from: Dict[str, str] = {}
+            for e in index.entries:
+                if e.structural and e.src and e.tgt:
+                    if e.status == "removed":
+                        removed_from.setdefault(e.tgt, e.src)
+                    else:
+                        parent_of[e.tgt] = e.src
+            todo = {e.entity_id for e in index.entries if e.kind == "node"}
+            todo |= {e.src for e in index.entries if e.kind == "edge" and e.src}
+            todo |= {p for p in parent_of.values() if p}
+            for _depth in range(32):
+                frontier = sorted(x for x in todo if x not in parent_of)
+                if not frontier or not cset:
+                    break
+                found = await self._parents_at(s, graph_id, after_branch, frontier, cset, after_seq)
+                missing = [c for c in frontier if c not in found]
+                for c in missing:
+                    if c in removed_from:
+                        found[c] = removed_from[c]
+                still = [c for c in missing if c not in found]
+                if still:
+                    found.update(await self._parents_at(s, graph_id, main_id, still, cset, before_seq))
+                for c in frontier:
+                    parent_of[c] = found.get(c)
+                todo = {p for p in found.values() if p and p not in parent_of}
+            for x in todo:
+                parent_of.setdefault(x, None)
+            changed = {e.entity_id for e in index.entries}
+            ancestors = sorted({x for x in parent_of if x not in changed} | {p for p in parent_of.values() if p and p not in changed})
+            names: Dict[str, Tuple[Optional[str], Optional[str]]] = {}
+            if ancestors:
+                # Untouched by the origin: as main has them — at the draft's base, or the window's end.
+                seq = after_seq if after_seq is not None else before_seq
+                for eid, st in (await self._hashes_at(s, graph_id, main_id, ancestors, seq)).items():
+                    names[eid] = (st.name or st.urn, st.type)
+                for eid in ancestors:
+                    parent_of.setdefault(eid, None)
+        return await asyncio.to_thread(ChangeTree, index, parent_of, names)
+
+    async def _parents_at(self, s, graph_id: str, branch_id: str, child_ids, cset, seq: Optional[int]) -> Dict[str, str]:
+        """Each child's container at a state, from its live containment link's version-row
+        columns: ``{child: parent}``. A child with none is left out."""
+        edges = await self._incident_edge_ids(s, graph_id, branch_id, child_ids, sides=("target",), edge_types=cset)
+        if not edges:
+            return {}
+        skel = await self._current_skeletons(s, graph_id, branch_id, edges, as_of_seq=seq)
+        wanted = set(child_ids)
+        out: Dict[str, str] = {}
+        for _eid, p in sorted(skel.items()):
+            if not p or (p.get("edgeType") or "").upper() not in cset:
+                continue
+            tgt, src = p.get("targetEntityId"), p.get("sourceEntityId")
+            if tgt in wanted and src and tgt not in out:
+                out[tgt] = src
+        return out
+
+    async def change_tree_level(
+        self, *, graph_id: str, origin: ChangeOrigin, containment_edge_types, parent: Optional[str] = None,
+        viewer: Optional[Viewer] = None, offset: int = 0, limit: int = 100, summary: bool = False,
+        decisions_for: Optional[str] = None,
+    ) -> Dict[str, object]:
+        """One level of an origin's changes top-down: what sits directly in ``parent`` (the top
+        when none), most-changed first, a page at a time. Each item is a change (as a change list
+        row, with its summary when asked) or a container no change touched, with how many changes
+        are under it (``inside``) and whether it holds more (``hasChildren``). ``path``: the
+        containers down to ``parent``, named."""
+        tree = await self._change_tree(graph_id, origin, containment_edge_types, viewer)
+        key = parent or ROOT
+        kids = tree.children.get(key, [])
+        page_ids = kids[offset:offset + limit]
+        page_entries = [tree.entry(eid) for eid in page_ids]
+        names = await self._end_names(graph_id, origin, tree.index, [e for e in page_entries if e is not None])
+        items: List[dict] = []
+        changed_rows: List[dict] = []
+        for eid, e in zip(page_ids, page_entries):
+            inside = tree.rollup.get(eid, [0, 0, 0])
+            item: Dict[str, Any] = {
+                "id": eid, "inside": {"added": inside[0], "modified": inside[1], "removed": inside[2]},
+                "hasChildren": bool(tree.children.get(eid)),
+            }
+            if e is not None:
+                row = entry_dict(e, names)
+                item["change"] = row
+                changed_rows.append(row)
+            else:
+                item["name"] = tree.name_of(eid) or eid
+                item["type"] = tree.type_of(eid)
+            items.append(item)
+        if summary and changed_rows:
+            await self._with_field_summaries(graph_id, origin, changed_rows, viewer)
+        if decisions_for and changed_rows:
+            async with self._session() as s:
+                pr = await s.get(MergeRequestORM, decisions_for)
+                states = await self._decision_states(s, pr, origin.branch_id, [r["entityId"] for r in changed_rows]) if pr else {}
+            for r in changed_rows:
+                st = states.get(r["entityId"])
+                r["decision"] = None if st is None else {
+                    "verdict": st[0].verdict, "reason": st[0].reason, "actor": st[0].actor,
+                    "decidedAt": st[0].decided_at, "impliedBy": st[0].implied_by, "stale": not st[1]}
+        path = [{"id": p, "name": tree.name_of(p) or p} for p in (tree.path(parent) + [parent] if parent else [])]
+        return {"items": items, "total": len(kids), "offset": offset, "limit": limit,
+                "hasMore": offset + len(page_ids) < len(kids), "path": path}
+
+    async def change_tree_path(self, *, graph_id: str, origin: ChangeOrigin, containment_edge_types,
+                               entity_id: str, viewer: Optional[Viewer] = None) -> Dict[str, object]:
+        """Where a change sits, from the top down — what a search result reveals in the tree: each
+        container, and the change itself, with where it sits among its container's children
+        (``at``), so a reveal opens the page it is on."""
+        tree = await self._change_tree(graph_id, origin, containment_edge_types, viewer)
+        return {"entityId": entity_id, "at": tree.rank.get(entity_id),
+                "path": [{"id": p, "name": tree.name_of(p) or p, "at": tree.rank.get(p)} for p in tree.path(entity_id)]}
 
     async def change_export_rows(
         self, *, graph_id: str, origin: ChangeOrigin, containment_edge_types,

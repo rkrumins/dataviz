@@ -80,7 +80,7 @@ describe('ChangeList', () => {
     expect(screen.getByText('Column')).toBeInTheDocument()
     // The second page was asked for from where the first ended.
     expect(api.getChangeEntries).toHaveBeenNthCalledWith(2, 'ws1', 'g1', { branchId: 'br_1' },
-      expect.objectContaining({ kind: 'node' }), 1, 100, true)
+      expect.objectContaining({ kind: 'node' }), 1, 100, true, false)
     expect(screen.getByText('4 entities')).toBeInTheDocument()
   })
 
@@ -93,12 +93,12 @@ describe('ChangeList', () => {
 
     await user.click(screen.getByRole('radio', { name: /Relationships/ }))
     await waitFor(() => expect(api.getChangeEntries).toHaveBeenLastCalledWith(
-      'ws1', 'g1', { fromSeq: 3, toSeq: 9 }, expect.objectContaining({ kind: 'edge' }), 0, 100, true))
+      'ws1', 'g1', { fromSeq: 3, toSeq: 9 }, expect.objectContaining({ kind: 'edge' }), 0, 100, true, false))
 
     const statuses = screen.getByRole('group', { name: /Show changes that were/ })
     await user.click(within(statuses).getByRole('button', { name: /Added/ }))
     await waitFor(() => expect(api.getChangeEntries).toHaveBeenLastCalledWith(
-      'ws1', 'g1', { fromSeq: 3, toSeq: 9 }, expect.objectContaining({ kind: 'edge', statuses: ['added'] }), 0, 100, true))
+      'ws1', 'g1', { fromSeq: 3, toSeq: 9 }, expect.objectContaining({ kind: 'edge', statuses: ['added'] }), 0, 100, true, false))
   })
 
   it('opens a row to its before and after, fetched for that row alone', async () => {

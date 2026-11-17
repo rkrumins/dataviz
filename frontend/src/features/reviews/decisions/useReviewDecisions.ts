@@ -13,16 +13,18 @@ const PAGE = 200
 export const DECISION_KEYS = {
   all: (wsId: string, prId: string) => ['reviewDecisions', wsId, prId] as const,
   summary: (wsId: string, prId: string) => ['reviewDecisions', wsId, prId, 'summary'] as const,
-  changes: (wsId: string, prId: string, f: DecisionFilter, summary = false) => ['reviewDecisions', wsId, prId, 'changes',
+  changes: (wsId: string, prId: string, f: DecisionFilter, summary = false, paths = false) => ['reviewDecisions', wsId, prId, 'changes',
     f.decision ?? 'all', f.kind ?? 'all', (f.statuses ?? []).join(','), f.type ?? '', (f.q ?? '').trim(),
-    summary ? 'summary' : 'plain'] as const,
+    summary ? 'summary' : 'plain', paths ? 'paths' : 'flat'] as const,
+  /** A level of its changes top-down (under `all`, so every decision refreshes it). */
+  tree: (wsId: string, prId: string, parent: string, offset: number) => ['reviewDecisions', wsId, prId, 'tree', parent, offset] as const,
 }
 
 export function useReviewChanges(wsId: string, prId: string | null | undefined, filter: DecisionFilter, enabled: boolean,
-  summary = false) {
+  summary = false, paths = false) {
   return useInfiniteQuery({
-    queryKey: DECISION_KEYS.changes(wsId, prId ?? '', filter, summary),
-    queryFn: ({ pageParam }) => listReviewChanges(wsId, prId!, filter, pageParam, PAGE, summary),
+    queryKey: DECISION_KEYS.changes(wsId, prId ?? '', filter, summary, paths),
+    queryFn: ({ pageParam }) => listReviewChanges(wsId, prId!, filter, pageParam, PAGE, summary, paths),
     initialPageParam: 0,
     getNextPageParam: (last) => (last.hasMore ? last.offset + last.entries.length : undefined),
     enabled: enabled && !!prId,

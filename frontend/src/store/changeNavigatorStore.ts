@@ -108,7 +108,7 @@ export function stopsFromGroups(groups: readonly ReviewGroup[]): NavStop[] {
 export const NAV_PAGE = 500
 
 /** A change list row as a stop: by the canvas's name for it (its urn), called what it is called. */
-const stopOf = (row: ChangeListRow, saved: boolean): NavStop => ({
+export const stopOf = (row: ChangeListRow, saved: boolean): NavStop => ({
   id: row.urn ?? row.entityId,
   name: row.displayName || row.qualifiedName || row.urn || row.entityId,
   status: row.status,

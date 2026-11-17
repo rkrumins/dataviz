@@ -1419,6 +1419,8 @@ class ChangeRow(_ApiModel):
     target_name: Optional[str] = Field(default=None, alias="targetName")
     # With ``summary=true``: what the change did — counts, and its first few fields before and after.
     fields: Optional[Dict[str, Any]] = None
+    # With ``paths=true``: its containers' names, top down.
+    path: Optional[List[str]] = None
 
 
 class ChangeEntriesResponse(_ApiModel):
@@ -3335,6 +3337,7 @@ async def get_change_entries(
     offset: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=500),
     summary: bool = Query(False, description="Each row also says what it changed (at most 200 rows a page)"),
+    paths: bool = Query(False, description="Each row also says where it sits: its containers, top down"),
     _user: User = Depends(requires(_READ, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
     viewer: Viewer = Depends(viewer_ctx),
@@ -3353,7 +3356,7 @@ async def get_change_entries(
         return await svc.change_entries(
             graph_id=graph_id, origin=origin, containment_edge_types=cset, viewer=viewer,
             kind=kind, statuses=statuses, type_=entity_type, q=q, offset=offset,
-            limit=min(limit, _SUMMARY_PAGE_MAX) if summary else limit, summary=summary)
+            limit=min(limit, _SUMMARY_PAGE_MAX) if summary or paths else limit, summary=summary, paths=paths)
 
 
 # A page of change rows that each say what they changed reads both sides of every row: at most this many.
@@ -6370,6 +6373,7 @@ async def review_changes(
     offset: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=500),
     summary: bool = Query(False, description="Each row also says what it changed (at most 200 rows a page)"),
+    paths: bool = Query(False, description="Each row also says where it sits: its containers, top down"),
     _user: User = Depends(requires(_READ, workspace="ws_id")),
     pr: dict = Depends(pr_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
@@ -6382,7 +6386,7 @@ async def review_changes(
         return await svc.review_change_entries(
             pr_id=pr_id, containment_edge_types=cset, decision=decision, kind=kind,
             statuses=_change_statuses(status), type_=entity_type, q=q, offset=offset,
-            limit=min(limit, _SUMMARY_PAGE_MAX) if summary else limit, summary=summary)
+            limit=min(limit, _SUMMARY_PAGE_MAX) if summary or paths else limit, summary=summary, paths=paths)
 
 
 # --------------------------------------------------------------------------- #
@@ -6504,3 +6508,87 @@ async def get_save_job(
         raise HTTPException(status_code=404, detail="save not found")
     result = await ie.save_result(job_id) if row["status"] == "completed" else None
     return _save_job_view(row, result)
+
+
+# --------------------------------------------------------------------------- #
+# Changes top-down: the containment tree they sit in, a level at a time      #
+# --------------------------------------------------------------------------- #
+@contextmanager
+def _tree_errors():
+    with _domain_errors():
+        try:
+            yield
+        except ChangeListTooLarge as exc:
+            raise HTTPException(status_code=409, detail={"type": "too_large_to_list", **exc.too_large})
+
+
+@router.get("/graphs/{graph_id}/diff/tree")
+async def get_change_tree_level(
+    ws_id: str, graph_id: str,
+    branch_id: Optional[str] = Query(None, alias="branchId", description=_ORIGIN_DOC["branch_id"]),
+    from_seq: Optional[int] = Query(None, alias="fromSeq", ge=0, description=_ORIGIN_DOC["from_seq"]),
+    to_seq: Optional[int] = Query(None, alias="toSeq", ge=1, description=_ORIGIN_DOC["to_seq"]),
+    parent: Optional[str] = Query(None, max_length=512, description="The container to list; the top when none"),
+    offset: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=_SUMMARY_PAGE_MAX),
+    summary: bool = Query(False),
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    viewer: Viewer = Depends(viewer_ctx),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """One level of a change list top-down: what sits directly in ``parent`` — each change, or
+    a container no change touched — most-changed first, with how many changes are under each, a
+    page at a time. Built once per version of the change list, without payloads."""
+    origin = _change_origin(branch_id, from_seq, to_seq)
+    cset = await _live_containment_types(session, ws_id, _meta.get("data_source_id"))
+    with _tree_errors():
+        return await svc.change_tree_level(graph_id=graph_id, origin=origin, containment_edge_types=cset,
+                                           parent=parent, viewer=viewer, offset=offset, limit=limit,
+                                           summary=summary)
+
+
+@router.get("/graphs/{graph_id}/diff/tree/path")
+async def get_change_tree_path(
+    ws_id: str, graph_id: str,
+    entity_id: str = Query(..., alias="entityId", max_length=512),
+    branch_id: Optional[str] = Query(None, alias="branchId", description=_ORIGIN_DOC["branch_id"]),
+    from_seq: Optional[int] = Query(None, alias="fromSeq", ge=0, description=_ORIGIN_DOC["from_seq"]),
+    to_seq: Optional[int] = Query(None, alias="toSeq", ge=1, description=_ORIGIN_DOC["to_seq"]),
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    viewer: Viewer = Depends(viewer_ctx),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Where a change sits, its containers from the top down — what a search result reveals."""
+    origin = _change_origin(branch_id, from_seq, to_seq)
+    cset = await _live_containment_types(session, ws_id, _meta.get("data_source_id"))
+    with _tree_errors():
+        return await svc.change_tree_path(graph_id=graph_id, origin=origin, containment_edge_types=cset,
+                                          entity_id=entity_id, viewer=viewer)
+
+
+@router.get("/merge-requests/{pr_id}/tree")
+async def get_review_change_tree_level(
+    ws_id: str, pr_id: str,
+    parent: Optional[str] = Query(None, max_length=512),
+    offset: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=_SUMMARY_PAGE_MAX),
+    summary: bool = Query(False),
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    pr: dict = Depends(pr_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """A draft review's changes top-down (as ``/graphs/{id}/diff/tree``), each change with its
+    decision."""
+    if pr.get("source_graph_id") != pr.get("target_graph_id"):
+        raise HTTPException(status_code=422, detail={"type": "fork_review", "message": "A fork's review is laid out as its own tree."})
+    cset = await _pr_containment_types(svc, session, ws_id, pr)
+    with _tree_errors():
+        return await svc.change_tree_level(
+            graph_id=str(pr["target_graph_id"]), origin=ChangeOrigin(branch_id=str(pr["source_branch_id"])),
+            containment_edge_types=cset, parent=parent, offset=offset, limit=limit, summary=summary,
+            decisions_for=pr_id)

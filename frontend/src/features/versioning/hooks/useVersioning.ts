@@ -541,7 +541,7 @@ export function useCommitDiffSummary(wsId?: string, graphId?: string | null, com
 // ── Change lists: a draft's changes, or main's between two revisions, at any size ──────────────
 
 /** A draft's lists move with it; main between two revisions is fixed for good. */
-const changeListStale = (origin?: ChangeListOrigin | null) =>
+export const changeListStale = (origin?: ChangeListOrigin | null) =>
   origin && !('branchId' in origin) ? Infinity : 10_000
 
 /** Rows a change list page holds. */
@@ -557,15 +557,18 @@ export function useChangeSummary(wsId?: string, graphId?: string | null, origin?
   })
 }
 
-/** A change list a page at a time, narrowed by `filter`; `fetchNextPage` follows the server's offset. */
+/** A change list a page at a time, narrowed by `filter`; `fetchNextPage` follows the server's offset.
+ *  `summary`: each row says what it changed; `paths`: where it sits. */
 export function useChangeEntries(
   wsId: string | undefined, graphId: string | null | undefined, origin: ChangeListOrigin | null | undefined,
-  filter: ChangeListFilter = {}, { enabled = true, summary = false }: { enabled?: boolean; summary?: boolean } = {},
+  filter: ChangeListFilter = {},
+  { enabled = true, summary = false, paths = false }: { enabled?: boolean; summary?: boolean; paths?: boolean } = {},
 ) {
   return useInfiniteQuery({
     queryKey: [...VERSIONING_KEYS.changeList(wsId, graphId, origin), 'entries', filter.kind ?? 'all',
-      (filter.statuses ?? []).join(','), filter.type ?? '', (filter.q ?? '').trim(), summary ? 'summary' : 'plain'],
-    queryFn: ({ pageParam }) => api.getChangeEntries(wsId!, graphId!, origin!, filter, pageParam, CHANGE_LIST_PAGE, summary),
+      (filter.statuses ?? []).join(','), filter.type ?? '', (filter.q ?? '').trim(), summary ? 'summary' : 'plain',
+      paths ? 'paths' : 'flat'],
+    queryFn: ({ pageParam }) => api.getChangeEntries(wsId!, graphId!, origin!, filter, pageParam, CHANGE_LIST_PAGE, summary, paths),
     initialPageParam: 0,
     getNextPageParam: (last) => (last.hasMore ? last.offset + last.entries.length : undefined),
     enabled: enabled && !!wsId && !!graphId && !!origin,

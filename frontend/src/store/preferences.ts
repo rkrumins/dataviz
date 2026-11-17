@@ -16,6 +16,9 @@ export interface DrawerLayout {
   hidden: DrawerSectionId[]
 }
 
+/** A change list top-down under its containers (`tree`), or one list by kind and type. */
+export type ChangeListLayout = 'tree' | 'list'
+
 /** Visual density of list/grid items in the Explorer page. */
 export type ExplorerDensity = 'compact' | 'comfortable' | 'spacious'
 
@@ -280,6 +283,11 @@ interface PreferencesState {
   // Explorer density (affects grid gaps + list row padding)
   explorerDensity: ExplorerDensity
   setExplorerDensity: (density: ExplorerDensity) => void
+
+  /** How change lists lay out: top-down under their containers, or one list. Null until the
+   *  reader chooses: the persona's default (Business top-down, Technical the list). */
+  changeListLayout: ChangeListLayout | null
+  setChangeListLayout: (layout: ChangeListLayout) => void
 
   // Context View display settings — control canvas-side rendering density,
   // zoom, and visual chrome from the header's Display Settings popover.
@@ -553,6 +561,9 @@ export const usePreferencesStore = create<PreferencesState>()(
       // Explorer density
       explorerDensity: 'comfortable',
       setExplorerDensity: (explorerDensity) => set({ explorerDensity }),
+
+      changeListLayout: null,
+      setChangeListLayout: (changeListLayout) => set({ changeListLayout }),
 
       // Context View display settings
       canvasZoom: 1,

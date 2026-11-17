@@ -2148,6 +2148,8 @@ export interface ChangeListRow {
   targetName?: string | null
   /** Asked for with `summary`: what it changed — counts, and its first few fields with their values. */
   fields?: ChangeFieldSummary | null
+  /** Asked for with `paths`: its containers' names, top down. */
+  path?: string[] | null
 }
 
 /** A change's fields at a glance, as the server summarizes them (`change_csv.field_summary`). */
@@ -2235,10 +2237,11 @@ export function changeListExportUrl(
   return `${base(wsId)}/graphs/${graphId}/diff/export.csv?${sp}`
 }
 
-/** A page of a change list in its fixed order (entities, relationships, structure; by type, then name). */
+/** A page of a change list in its fixed order (entities, relationships, structure; by type, then name).
+ *  `summary`: each row says what it changed; `paths`: where it sits. */
 export function getChangeEntries(
   wsId: string, graphId: string, origin: ChangeListOrigin, filter: ChangeListFilter = {},
-  offset = 0, limit = 100, summary = false,
+  offset = 0, limit = 100, summary = false, paths = false,
 ): Promise<ChangeListPage> {
   const sp = changeOriginParams(origin)
   if (filter.kind) sp.set('kind', filter.kind)
@@ -2248,7 +2251,60 @@ export function getChangeEntries(
   sp.set('offset', String(offset))
   sp.set('limit', String(limit))
   if (summary) sp.set('summary', 'true')
+  if (paths) sp.set('paths', 'true')
   return vfetch<ChangeListPage>(`${base(wsId)}/graphs/${graphId}/diff/entries?${sp}`)
+}
+
+/** What sits directly in a container of a change list laid out top-down: a change, or a container
+ *  no change touched — with how many changes are under it. */
+export interface ChangeTreeItem {
+  id: string
+  inside: { added: number; modified: number; removed: number }
+  hasChildren: boolean
+  /** It changed: its row (in a review, with its decision). */
+  change?: ChangeListRow | ReviewChangeRow
+  /** It did not: what it is called. */
+  name?: string
+  type?: string | null
+}
+
+export interface ChangeTreeLevel {
+  items: ChangeTreeItem[]
+  total: number
+  offset: number
+  limit: number
+  hasMore: boolean
+  /** The containers down to this one, named. */
+  path: Array<{ id: string; name: string }>
+}
+
+/** One level of a change list top-down (the top when `parent` is null), most-changed first. */
+export function getChangeTreeLevel(
+  wsId: string, graphId: string, origin: ChangeListOrigin, parent: string | null,
+  offset = 0, limit = 100, summary = false,
+): Promise<ChangeTreeLevel> {
+  const sp = changeOriginParams(origin)
+  if (parent) sp.set('parent', parent)
+  sp.set('offset', String(offset))
+  sp.set('limit', String(limit))
+  if (summary) sp.set('summary', 'true')
+  return vfetch<ChangeTreeLevel>(`${base(wsId)}/graphs/${graphId}/diff/tree?${sp}`)
+}
+
+/** Where a change sits: its containers from the top down, and where each (and it) sits among its
+ *  container's children (`at`) — what revealing it in the tree opens. */
+export interface ChangeTreePath {
+  entityId: string
+  at: number | null
+  path: Array<{ id: string; name: string; at: number | null }>
+}
+
+export function getChangeTreePath(
+  wsId: string, graphId: string, origin: ChangeListOrigin, entityId: string,
+): Promise<ChangeTreePath> {
+  const sp = changeOriginParams(origin)
+  sp.set('entityId', entityId)
+  return vfetch(`${base(wsId)}/graphs/${graphId}/diff/tree/path?${sp}`)
 }
 
 /** One entity's value before and after, for the same origin as its list. */
@@ -2618,7 +2674,7 @@ export type DecisionFilter = ChangeListFilter & { decision?: DecisionState }
 
 /** A page of a draft review's changes, each with its decision. */
 export function listReviewChanges(
-  wsId: string, prId: string, filter: DecisionFilter = {}, offset = 0, limit = 100, summary = false,
+  wsId: string, prId: string, filter: DecisionFilter = {}, offset = 0, limit = 100, summary = false, paths = false,
 ): Promise<ReviewChangePage> {
   const sp = new URLSearchParams()
   if (filter.decision) sp.set('decision', filter.decision)
@@ -2629,7 +2685,20 @@ export function listReviewChanges(
   sp.set('offset', String(offset))
   sp.set('limit', String(limit))
   if (summary) sp.set('summary', 'true')
+  if (paths) sp.set('paths', 'true')
   return vfetch<ReviewChangePage>(`${base(wsId)}/merge-requests/${encodeURIComponent(prId)}/changes?${sp}`)
+}
+
+/** A draft review's changes top-down (as {@link getChangeTreeLevel}), each with its decision. */
+export function getReviewChangeTreeLevel(
+  wsId: string, prId: string, parent: string | null, offset = 0, limit = 100, summary = false,
+): Promise<ChangeTreeLevel> {
+  const sp = new URLSearchParams()
+  if (parent) sp.set('parent', parent)
+  sp.set('offset', String(offset))
+  sp.set('limit', String(limit))
+  if (summary) sp.set('summary', 'true')
+  return vfetch<ChangeTreeLevel>(`${base(wsId)}/merge-requests/${encodeURIComponent(prId)}/tree?${sp}`)
 }
 
 export function getReviewDecisionSummary(wsId: string, prId: string): Promise<ReviewDecisionSummary> {

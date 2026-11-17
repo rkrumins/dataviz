@@ -5,7 +5,8 @@
  * the frame: its colour bar, its button, its badges and its actions (shown on hover and focus).
  *
  * A row is a list item; its button is the one tab stop a list moves between (`tabIndex` from the
- * list's current row), and says whether it is open and what it opens.
+ * list's current row), and says whether it is open and what it opens. In a tree (`depth`), the row
+ * says its level, and `lead` — what opens its children — comes before it.
  */
 import { memo, useId, type ReactNode } from 'react'
 import { ChevronRight } from 'lucide-react'
@@ -38,28 +39,36 @@ export interface ExpandableChangeRowProps {
   children?: (level: RowLevel) => ReactNode
   /** Below the header whatever the level (a rejection's reason, an open reason form). */
   footer?: ReactNode
+  /** In a tree: how deep it sits (0 at the top). */
+  depth?: number
+  /** Before the button: in a tree, what opens its children (or the space for it). */
+  lead?: ReactNode
+  /** The chevron saying it opens (a tree's lead says that for its children instead). */
+  chevron?: boolean
   className?: string
 }
 
 export const ExpandableChangeRow = memo(function ExpandableChangeRow({
-  id, status, title, sub, summary, level, current, onToggle, onFocus, badges, actions, setsize, posinset, children, footer, className,
+  id, status, title, sub, summary, level, current, onToggle, onFocus, badges, actions, setsize, posinset, children, footer,
+  depth, lead, chevron = true, className,
 }: ExpandableChangeRowProps) {
   const regionId = useId()
   const tone = CHANGE_TONE[status]
   const meta = STATUS_META[status]
   const open = level > 0
   return (
-    <div role="listitem" aria-setsize={setsize} aria-posinset={posinset}
+    <div role="listitem" aria-setsize={setsize} aria-posinset={posinset} aria-level={depth !== undefined ? depth + 1 : undefined}
       className={cn('group/row relative mb-1 rounded-xl border transition-colors',
         open ? 'bg-canvas-elevated border-glass-border shadow-sm' : 'border-transparent hover:bg-black/[0.025] dark:hover:bg-white/[0.035]',
         current && 'ring-1 ring-accent-lineage/35',
         className)}>
       <span aria-hidden className={cn('absolute left-0 top-2 bottom-2 w-[3px] rounded-full', tone.bar)} />
       <div className="flex items-start gap-1.5 pl-2.5 pr-1.5 py-1.5">
+        {lead}
         <button id={id} type="button" tabIndex={current ? 0 : -1} aria-expanded={open} aria-controls={open ? regionId : undefined}
           onClick={onToggle} onFocus={onFocus}
           className="flex-1 min-w-0 flex items-start gap-2 text-left rounded-lg px-1 py-0.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40">
-          <ChevronRight className={cn('w-3.5 h-3.5 mt-1 text-ink-muted/60 shrink-0 motion-safe:transition-transform', open && 'rotate-90')} aria-hidden />
+          {chevron && <ChevronRight className={cn('w-3.5 h-3.5 mt-1 text-ink-muted/60 shrink-0 motion-safe:transition-transform', open && 'rotate-90')} aria-hidden />}
           <span className={cn('mt-0.5 w-5 h-5 rounded-md flex items-center justify-center shrink-0', tone.chip)}>
             <meta.Icon className="w-3 h-3" aria-hidden />
           </span>

@@ -26,11 +26,12 @@ const BUDGETS = {
   review: { openMs: 1000, longTaskMs: 200 },
   map: { openMs: 1000, longTaskMs: 300 },
   changes: { openMs: 2000, longTaskMs: 200 },
+  tree: { openMs: 1000, longTaskMs: 200 },
   navigator: { openMs: 1000, longTaskMs: 200 },
 }
 
 const SHOTS = process.argv.slice(2).length ? process.argv.slice(2) : [
-  'review', 'review:dark', 'map', 'map:dark', 'changes', 'changes:dark', 'navigator', 'navigator:dark',
+  'review', 'review:dark', 'map', 'map:dark', 'changes', 'changes:dark', 'tree', 'tree:dark', 'navigator', 'navigator:dark',
 ]
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
