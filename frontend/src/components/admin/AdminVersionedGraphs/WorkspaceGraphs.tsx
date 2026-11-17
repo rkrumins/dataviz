@@ -4,7 +4,8 @@
  * where that was chosen; where it differs (switch when ready updating in place while New-version
  * builds are off), it says what was chosen, where, and why it isn't in force. Each graph opens its
  * settings in the drawer, or its data source. A fork has no settings of its own: it follows the
- * graph it was forked from.
+ * graph it was forked from. With none yet, it offers the workspace's data sources, where version
+ * control is turned on for a graph.
  *
  * Every value is the server's (`GET /{ws}/versioning/settings/graphs`); a phone shows each graph as
  * a card.
@@ -73,11 +74,13 @@ function Brief({ setting, brief, root }: { setting: Setting | undefined; brief: 
     )
 }
 
-export function WorkspaceGraphs({ workspaceId, schema, onOpenSettings, onOpenDataSource }: {
+export function WorkspaceGraphs({ workspaceId, schema, onOpenSettings, onOpenDataSource, onOpenDataSources }: {
     workspaceId: string
     schema: ServedSchema
     onOpenSettings: (graph: WorkspaceGraph) => void
     onOpenDataSource: (dataSourceId: string) => void
+    /** The workspace's data sources: with no versioned graph yet, the next step. */
+    onOpenDataSources?: () => void
 }) {
     const q = useWorkspaceGraphs(workspaceId)
     // The graphs whose own settings are all shown, not only the first few.
@@ -112,7 +115,8 @@ export function WorkspaceGraphs({ workspaceId, schema, onOpenSettings, onOpenDat
     if (graphs.length === 0) {
         return (
             <EmptyState icon={Network} title="No versioned graphs here yet"
-                description="A data source’s graph is listed here once version control is on for it, on the data source’s Versioning tab. It follows this workspace’s defaults until it sets its own." />
+                description="A data source’s graph is listed here once version control is on for it, on the data source’s Versioning tab. It follows this workspace’s defaults until it sets its own."
+                action={onOpenDataSources && { label: 'Open data sources', icon: FolderOpen, onClick: onOpenDataSources }} />
         )
     }
 

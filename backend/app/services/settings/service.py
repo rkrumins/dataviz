@@ -561,8 +561,9 @@ async def history(session: AsyncSession, place: Place, *, key: Optional[str] = N
                   before_id: Optional[int] = None, limit: int = 50) -> Dict[str, Any]:
     """A page of the changes ``place`` may see, newest first: the platform's administrators every
     change (``scope`` narrows them), a workspace its own and its graphs', a graph its own. Each
-    entry: who, when, why, how (``source``), the value and limits before and after, and its
-    change set, which :func:`revert` puts back."""
+    entry: who, when, why, how (``source``), where (``scopeName``: the workspace's name or the
+    graph's data source's label, :func:`.preview.place_names`), the value and limits before and
+    after, and its change set, which :func:`revert` puts back."""
     from backend.app.db.repositories.view_repo import resolve_user_ids
 
     filters: Dict[str, Any] = {"key": key, "actor": actor, "since": since, "until": until,
@@ -580,12 +581,14 @@ async def history(session: AsyncSession, place: Place, *, key: Optional[str] = N
             session, domain, places=[("workspace", [place.scope_id]), ("graph", sources)],
             **filters)
     names = await resolve_user_ids(session, {e.actor for e in found})
+    places = await previews.place_names(session, ((e.scope, e.scope_id) for e in found))
     return {**place.ids(), "entries": [{
         "id": e.id, "changeSetId": str(e.change_set), "at": e.at,
         "actor": ({"id": e.actor, "name": (names.get(e.actor) or (None,))[0]}
                   if e.actor else None),
         "reason": e.reason, "source": e.source, "key": e.key, "scope": e.scope,
-        "scopeId": e.scope_id, "from": {"value": e.before_value, "limits": e.before_limits},
+        "scopeId": e.scope_id, "scopeName": places.get((e.scope, e.scope_id)),
+        "from": {"value": e.before_value, "limits": e.before_limits},
         "to": {"value": e.after_value, "limits": e.after_limits}, "version": e.version,
     } for e in found], "nextCursor": more}
 

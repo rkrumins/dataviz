@@ -79,21 +79,24 @@ usePersonaStore.setState({ mode: params.get('lens') === 'business' ? 'business' 
 
 const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
 
-/** The workspace's page around its Versioned graphs tab: its name and its section tabs. */
+/** The workspace's page around its Versioned graphs tab: its name and its section tabs; the tab can send you to Data Sources. */
 function WorkspacePage() {
     const sections = ['Data Sources', 'Views', 'Aggregation', 'Ontology', 'Reviews', 'Versioned graphs', 'Members', 'Activity']
+    const [section, setSection] = useState('Versioned graphs')
     return (
         <PageContainer className="py-8">
             <p className="text-sm text-ink-muted">Workspaces / <span className="font-medium text-ink">Finance</span></p>
             <h2 className="mt-3 text-2xl font-bold text-ink">Finance</h2>
             <div className="mt-6 flex items-center gap-1 overflow-x-auto border-b border-glass-border" aria-hidden>
                 {sections.map((s) => (
-                    <span key={s} className={s === 'Versioned graphs'
+                    <span key={s} className={s === section
                         ? 'whitespace-nowrap border-b-2 border-indigo-500 px-5 py-3 text-sm font-semibold text-indigo-600 dark:text-indigo-400'
                         : 'whitespace-nowrap border-b-2 border-transparent px-5 py-3 text-sm font-semibold text-ink-muted'}>{s}</span>
                 ))}
             </div>
-            <WorkspaceVersionedGraphs workspaceId={WS} workspaceName="Finance" />
+            {section === 'Versioned graphs'
+                ? <WorkspaceVersionedGraphs workspaceId={WS} workspaceName="Finance" onOpenDataSources={() => setSection('Data Sources')} />
+                : <p className="py-8 text-sm text-ink-secondary">The workspace’s data sources, on the real page.</p>}
         </PageContainer>
     )
 }

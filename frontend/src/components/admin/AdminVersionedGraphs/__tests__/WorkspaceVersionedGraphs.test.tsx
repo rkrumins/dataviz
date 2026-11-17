@@ -15,7 +15,7 @@ import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { Link, RouterProvider, createMemoryRouter } from 'react-router-dom'
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { NotificationStack } from '@/components/ui/notifications'
 import { CATALOGUE, describeLimits } from '@/components/settings'
 import { formatValue } from '@/components/settings/format'
@@ -141,7 +141,7 @@ describe('Workspace → Versioned graphs: what a person meets', () => {
         await waitFor(() => expect(document.activeElement).toBe(target))
     })
 
-    it('offers the profiles and the compass at workspace scope, under a headline of what the workspace sets', async () => {
+    it('offers the profiles, the compass and the guide at workspace scope, under a headline of what the workspace sets', async () => {
         mockApi('workspace-admin')
         renderTab()
         await rowOnceDrawn('reads.mode')
@@ -150,7 +150,10 @@ describe('Workspace → Versioned graphs: what a person meets', () => {
         expect(screen.getByText('Defaults · Finance')).toBeInTheDocument()
         // Every value Finance chose for itself, among the settings a workspace has.
         const own = workspaceValues().values.filter((r) => S[r.key].scopes.workspace && r.trail.find((t) => t.scope === 'workspace')?.value != null)
-        expect(screen.getByRole('heading', { level: 2, name: `${own.length} values set for this workspace` })).toBeInTheDocument()
+        const headline = screen.getByRole('heading', { level: 2, name: `${own.length} values set for this workspace` })
+        // The guide is the hero's, and the tab's intro is one line above it.
+        expect(within(headline.closest('section')!).getByRole('link', { name: 'The settings guide' })).toHaveAttribute('href', '/guide/versioned-graph-settings')
+        expect(screen.getAllByRole('link', { name: 'The settings guide' })).toHaveLength(1)
     })
 
     it('asks each setting’s question in the Business view, with the app’s switch above the tabs', async () => {
@@ -291,10 +294,14 @@ describe('Workspace → Versioned graphs: its graphs and its history', () => {
         expect(list.queryByText(last)).not.toBeInTheDocument()
     })
 
-    it('says so when the workspace has no versioned graph yet', async () => {
+    it('says so when the workspace has no versioned graph yet, and offers its data sources', async () => {
         mockApi('empty')
-        renderTab(`${PATH}&vg=graphs`)
+        const onOpenDataSources = vi.fn()
+        renderWithApi(<WorkspaceVersionedGraphs workspaceId={WS} workspaceName="Finance" onOpenDataSources={onOpenDataSources} />,
+            { path: `${PATH}&vg=graphs`, route: '/workspaces/:wsId' })
         expect(await screen.findByText('No versioned graphs here yet')).toBeInTheDocument()
+        await userEvent.click(screen.getByRole('button', { name: 'Open data sources' }))
+        expect(onOpenDataSources).toHaveBeenCalledTimes(1)
     })
 
     it('lists the workspace’s changes and its graphs’, named, and puts one back through the workspace', async () => {

@@ -254,11 +254,11 @@ export interface Impact {
     } | null
     /** Closed drafts whose changes the next sweep would remove. */
     drafts: { workspaces: number; removedAtNextSweep: number } | null
-    /** Values chosen below the platform that new limits leave outside them. */
+    /** Values chosen below the platform that new limits leave outside them; `label` names where (null: it couldn't be named). */
     outsideLimits: {
         count: number
         locked: number
-        samples: Array<{ key: string; scope: Scope; scopeId: string; value: SettingValue; status: 'exception' | 'locked' }>
+        samples: Array<{ key: string; scope: Scope; scopeId: string; label: string | null; value: SettingValue; status: 'exception' | 'locked' }>
     } | null
     /** What to acknowledge before saving. */
     warnings: Array<{ code: string; text: string; key?: string }>
@@ -310,6 +310,8 @@ export interface HistoryEntry {
     scope: Scope
     /** '' for the platform, a workspace's id, or a graph's data source id. */
     scopeId: string
+    /** The workspace's name, or the graph's data source's label; null for the platform, or a place that is gone. */
+    scopeName: string | null
     from: { value: SettingValue | null; limits: Limits | null }
     to: { value: SettingValue | null; limits: Limits | null }
     version: number
@@ -339,6 +341,7 @@ export interface ChangeSet {
     source: ChangeSource
     scope: Scope
     scopeId: string
+    scopeName: string | null
     entries: HistoryEntry[]
 }
 
@@ -348,7 +351,12 @@ export function groupChangeSets(entries: HistoryEntry[]): ChangeSet[] {
     for (const e of entries) {
         const set = sets.get(e.changeSetId)
         if (set) set.entries.push(e)
-        else sets.set(e.changeSetId, { id: e.changeSetId, at: e.at, actor: e.actor, reason: e.reason, source: e.source, scope: e.scope, scopeId: e.scopeId, entries: [e] })
+        else {
+            sets.set(e.changeSetId, {
+                id: e.changeSetId, at: e.at, actor: e.actor, reason: e.reason, source: e.source, scope: e.scope, scopeId: e.scopeId,
+                scopeName: e.scopeName, entries: [e],
+            })
+        }
     }
     return [...sets.values()]
 }

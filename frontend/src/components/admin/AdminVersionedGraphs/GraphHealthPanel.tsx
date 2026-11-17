@@ -6,6 +6,10 @@
  * Every part is the server's and best effort: a part it couldn't read says "—" and why. Until the
  * server reports health (404), the panel draws nothing. A fork has no copy of its own: what it
  * serves, its memory and its builds are its root's, and the panel says so, naming the root.
+ *
+ * The Business view tells a version by when it was published and by whom ("the version published
+ * 3 min ago by Ada Lovelace"), never by its number, and names no graph store node. The Technical
+ * view keeps both.
  */
 import type { ReactNode } from 'react'
 import { Activity, RotateCw } from 'lucide-react'
@@ -14,7 +18,7 @@ import { formatBytes, formatCount, formatDuration, formatNumber } from '@/lib/un
 import { Button } from '@/components/ui/Button'
 import { DateTime } from '@/components/ui/DateTime'
 import { Skeleton } from '@/components/ui/Skeleton'
-import { CATALOGUE } from '@/components/settings'
+import { CATALOGUE, type Lens } from '@/components/settings'
 import { settingsError, useGraphHealth, type GraphHealth, type Revision, type SignalDefinition } from '@/services/settingsService'
 import { ResidencyChip } from './GraphInventory'
 
@@ -39,6 +43,22 @@ function Published({ revision, seq, lead }: { revision: Revision | null | undefi
             {revision.actor && <> by {revision.actor.name ?? revision.actor.id}</>}
             {revision.message && <>: “{revision.message}”</>}
         </span>
+    )
+}
+
+/**
+ * A version as the Business view tells it, by when and by whom, never by its number: "the version
+ * published 3 min ago by Ada Lovelace: “Q4 import”" (`first`: capitalised). When neither is known,
+ * `unknown`.
+ */
+function PublishedVersion({ revision, first = false, unknown }: { revision: Revision | null | undefined; first?: boolean; unknown: string }) {
+    const who = revision?.actor ? revision.actor.name ?? revision.actor.id : null
+    if (!revision || (!revision.at && !who)) return <>{unknown}</>
+    return (
+        <>
+            {first ? 'The' : 'the'} version published{revision.at && <> <DateTime at={revision.at} /></>}{who && <> by {who}</>}
+            {revision.message && <>: “{revision.message}”</>}
+        </>
     )
 }
 
@@ -99,13 +119,16 @@ function LastBuildFact({ b, asOf }: { b: LastBuild; asOf: string }) {
     )
 }
 
-export function GraphHealthPanel({ workspaceId, graphId, enabled, signals: definitions = [] }: {
+export function GraphHealthPanel({ workspaceId, graphId, enabled, signals: definitions = [], lens = 'operator' }: {
     workspaceId: string
     graphId: string
     enabled: boolean
     /** The registry's signals, to name the counts. */
     signals?: SignalDefinition[]
+    /** The app's view: Business tells a version by when and by whom, and names no node. */
+    lens?: Lens
 }) {
+    const business = lens === 'business'
     const q = useGraphHealth(workspaceId, graphId, enabled)
     if (q.data === null) return null
     if (q.isPending) return <Skeleton aria-label="Reading this graph’s health" className="h-40 rounded-2xl" />
@@ -134,6 +157,9 @@ export function GraphHealthPanel({ workspaceId, graphId, enabled, signals: defin
     const memory = h.memory
     // As the inventory has it: null when the graph has no copy in the graph store yet.
     const state = memory?.state
+    const newer = h.head && h.serving && h.head.seq !== h.serving.seq ? h.head : null
+    const source = h.serving?.source === 'graph_store' ? 'Read from the graph store'
+        : h.serving?.source === 'database' ? 'Read from the database while the graph store catches up' : 'Where reads come from isn’t known'
 
     return (
         <section aria-labelledby={`health-${graphId}`} className="rounded-2xl border border-glass-border/60 bg-black/[0.015] px-4 py-4 dark:bg-white/[0.02] sm:px-5">
@@ -151,14 +177,25 @@ export function GraphHealthPanel({ workspaceId, graphId, enabled, signals: defin
                     </span>
                 </Fact>
                 <Fact label={root ? 'Serving, through its root' : 'Serving'} missing={missing('serving', h.serving) ?? missing('head', h.head)}>
-                    Version #{h.serving?.seq}
-                    {h.head && h.serving && h.head.seq !== h.serving.seq && <span className="text-ink-secondary"> · latest #{h.head.seq}</span>}
-                    <span className="block text-[11.5px] text-ink-secondary">
-                        {h.serving?.source === 'graph_store' ? 'Read from the graph store'
-                            : h.serving?.source === 'database' ? 'Read from the database while the graph store catches up' : 'Where reads come from isn’t known'}
-                    </span>
-                    <Published revision={h.serving?.version} seq={h.serving?.seq} />
-                    {h.head && h.serving && h.head.seq !== h.serving.seq && <Published revision={h.head.version} seq={h.head.seq} lead="Latest: " />}
+                    {business ? (
+                        <>
+                            <PublishedVersion revision={h.serving?.version} first unknown="The version in use now" />
+                            <span className="block text-[11.5px] text-ink-secondary">{source}</span>
+                            {newer && (
+                                <span className="mt-0.5 block text-[11.5px] text-ink-secondary">
+                                    Latest: <PublishedVersion revision={newer.version} unknown="a newer version, not served yet" />
+                                </span>
+                            )}
+                        </>
+                    ) : (
+                        <>
+                            Version #{h.serving?.seq}
+                            {newer && <span className="text-ink-secondary"> · latest #{newer.seq}</span>}
+                            <span className="block text-[11.5px] text-ink-secondary">{source}</span>
+                            <Published revision={h.serving?.version} seq={h.serving?.seq} />
+                            {newer && <Published revision={newer.version} seq={newer.seq} lead="Latest: " />}
+                        </>
+                    )}
                 </Fact>
                 <Fact label="Readers get" missing={missing('readMode', h.readMode)}>
                     {reads?.title ?? h.readMode?.effective}
@@ -181,7 +218,7 @@ export function GraphHealthPanel({ workspaceId, graphId, enabled, signals: defin
                     <span className="block text-[11.5px] text-ink-secondary">
                         {[
                             memory?.class && `${CLASSES.choices.find((c) => c.id === memory.class)?.title ?? memory.class} class`,
-                            memory?.node && `on ${memory.node}`,
+                            !business && memory?.node && `on ${memory.node}`,
                         ].filter(Boolean).join(' · ')}
                         {memory?.rehydratingSince && <> · <DateTime at={memory.rehydratingSince} prefix="loading since " /></>}
                         {memory?.lastReadAt && <> · <DateTime at={memory.lastReadAt} prefix="read " /></>}

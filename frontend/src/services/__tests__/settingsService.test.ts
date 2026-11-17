@@ -96,7 +96,7 @@ describe('settingsService', () => {
 
         const e = (id: number, changeSetId: string, key: string): HistoryEntry => ({
             id, changeSetId, key, at: '2026-11-16T10:00:00Z', actor: null, reason: null, source: 'api', scope: 'platform', scopeId: '',
-            from: { value: null, limits: null }, to: { value: 1, limits: null }, version: 1,
+            scopeName: null, from: { value: null, limits: null }, to: { value: 1, limits: null }, version: 1,
         })
         expect(groupChangeSets([e(3, 'b', 'x'), e(2, 'b', 'y'), e(1, 'a', 'z')]).map((s) => [s.id, s.entries.map((x) => x.key)]))
             .toEqual([['b', ['x', 'y']], ['a', ['z']]])

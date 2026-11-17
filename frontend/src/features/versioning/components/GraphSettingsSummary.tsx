@@ -2,11 +2,12 @@
  * GraphSettingsSummary — on a data source's Versioning tab, the settings that matter most to its
  * owner: what readers see while new data loads, whether the graph stays in memory, what imports
  * find existing items by and whether a replace that would wipe most of the graph is stopped, and
- * which drafts people may make. Each with the value in force; where that is the value chosen, where
- * it was chosen (this graph, this workspace, the platform, the deployment or the default); where it
- * isn't, what was chosen, where, and why it isn't in force. Then how many values the graph sets
- * itself, and "Open settings" for every one of them, in the graph's settings drawer (loaded when
- * first asked for).
+ * which drafts people may make. Each a tile, headed by the setting's question in the Business view
+ * and its label in the Technical view (both the registry's), with the value in force; where that
+ * is the value chosen, where it was chosen (this graph, this workspace, the platform, the
+ * deployment or the default); where it isn't, what was chosen, where, and why it isn't in force.
+ * Then how many values the graph sets itself, and "Open settings" for every one of them, in the
+ * graph's settings drawer (loaded when first asked for).
  *
  * Every value is the server's, from the graph's settings (`GET …/graphs/{id}/settings`), named by
  * the registry it serves; they aren't refreshed while the drawer is open, where they may be staged.
@@ -21,6 +22,7 @@ import { useUnsavedChangesWarning } from '@/hooks/useUnsavedChangesWarning'
 import { Button } from '@/components/ui/Button'
 import { Skeleton } from '@/components/ui/Skeleton'
 import { formatValue, sameValue } from '@/components/settings/format'
+import { useLens } from '@/components/settings/lens'
 import { StatusBadge } from '@/components/settings/StatusBadge'
 import type { ResolvedSetting, Setting } from '@/components/settings/types'
 import { identifierLabel } from '@/features/import-export/identifier'
@@ -56,21 +58,25 @@ function MatchingProperties({ imports }: { imports: ImportSettings }) {
     )
 }
 
+/** A tile: the setting's heading over what is said of it. */
+const TILE = 'min-w-0 rounded-xl border border-glass-border/60 bg-canvas-elevated px-4 py-3'
+const HEADING = 'text-[12.5px] font-medium leading-snug text-ink-secondary'
+
 /**
- * One setting: its name and the value in force. Chosen where it came from, it says where; held
- * back, it says what was chosen and where, and why it isn't in force.
+ * One setting, a tile: its heading (`title`) and the value in force. Chosen where it came from, it
+ * says where; held back, it says what was chosen and where, and why it isn't in force.
  */
-function Item({ setting: s, resolved: r, children }: { setting: Setting; resolved: ResolvedSetting; children?: ReactNode }) {
+function Item({ setting: s, resolved: r, title, children }: { setting: Setting; resolved: ResolvedSetting; title: string; children?: ReactNode }) {
     const choice = s.kind === 'choice' ? s.choices.find((c) => c.id === r.effective) : undefined
     // A choice's short line, where it says more than its title ("Coldline": "Loaded only when needed").
     const more = choice && !choice.title.toLowerCase().includes(choice.short.toLowerCase()) ? choice.short : null
     const chosen = r.declared !== null && !sameValue(r.declared, r.effective) ? formatValue(s, r.declared) : null
     const why = r.status !== 'in_effect' ? r.why[0]?.text : undefined
     return (
-        <div className="min-w-0">
-            <dt className="text-[10px] font-semibold uppercase tracking-[0.12em] text-ink-secondary">{s.label}</dt>
-            <dd className="mt-1 space-y-1">
-                <p className="text-[13px] font-semibold leading-snug text-ink">
+        <div className={TILE}>
+            <dt className={HEADING}>{title}</dt>
+            <dd className="mt-1.5 space-y-1">
+                <p className="text-sm font-semibold leading-snug text-ink">
                     {formatValue(s, r.effective)}
                     {more && <span className="font-normal text-ink-secondary"> · {more}</span>}
                 </p>
@@ -102,7 +108,10 @@ export function GraphSettingsSummary({ wsId, graphId, label }: {
     // The drawer reads the same values and may have changes staged over them: no refresh meanwhile.
     const valuesQ = useSettingsValues(place, { staged: () => open })
     const importsQ = useImportSettings(wsId, graphId)
+    const [lens] = useLens()
     const openSettings = () => { setOpened(true); setOpen(true) }
+    // The registry's words, by the app's view: a setting's question, or its label.
+    const titleOf = (s: Setting) => (lens === 'business' && s.question ? s.question : s.label)
 
     const error = valuesQ.error ? settingsError(valuesQ.error) : schemaQ.error ? settingsError(schemaQ.error) : null
     const fork = error?.type === 'follows_root'
@@ -122,11 +131,11 @@ export function GraphSettingsSummary({ wsId, graphId, label }: {
                     <span>This graph is a fork, so it has no settings of its own: it follows those of the graph it was forked from. Open its settings to see them.</span>
                 </p>
                 {ident && from && (
-                    <dl>
-                        <div className="min-w-0">
-                            <dt className="text-[10px] font-semibold uppercase tracking-[0.12em] text-ink-secondary">{byKey['imports.identifier']?.label ?? 'Match rows by'}</dt>
-                            <dd className="mt-1 space-y-1">
-                                <p className="text-[13px] font-semibold text-ink">{identifierLabel(ident)}</p>
+                    <dl className="grid gap-3 sm:grid-cols-2">
+                        <div className={TILE}>
+                            <dt className={HEADING}>{byKey['imports.identifier'] ? titleOf(byKey['imports.identifier']) : 'Match rows by'}</dt>
+                            <dd className="mt-1.5 space-y-1">
+                                <p className="text-sm font-semibold text-ink">{identifierLabel(ident)}</p>
                                 <span className="inline-flex items-center gap-1 rounded-md bg-black/[0.05] px-1.5 py-px text-[11px] font-medium leading-4 text-ink-secondary dark:bg-white/[0.07]">
                                     <GitFork aria-hidden className="w-3 h-3 shrink-0" />
                                     <span><span className="sr-only">From </span>{FORK_IMPORT_SOURCE_WORDS[from]}</span>
@@ -150,21 +159,21 @@ export function GraphSettingsSummary({ wsId, graphId, label }: {
         )
     } else if (!values || !schemaQ.data) {
         body = (
-            <div aria-busy="true" aria-label="Loading this graph’s settings" className="grid gap-4 sm:grid-cols-2">
-                {SUMMARY_KEYS.map((k) => <Skeleton key={k} className="h-14 rounded-lg" />)}
+            <div aria-busy="true" aria-label="Loading this graph’s settings" className="grid gap-3 sm:grid-cols-2">
+                {SUMMARY_KEYS.map((k) => <Skeleton key={k} className="h-[5.5rem] rounded-xl" />)}
             </div>
         )
     } else {
         body = (
             <>
-                <dl className="grid gap-x-6 gap-y-4 sm:grid-cols-2">
+                <dl className="grid gap-3 sm:grid-cols-2">
                     {SUMMARY_KEYS.map((k) => byKey[k] && values[k] && (
-                        <Item key={k} setting={byKey[k]} resolved={values[k]}>
+                        <Item key={k} setting={byKey[k]} resolved={values[k]} title={titleOf(byKey[k])}>
                             {k === 'imports.identifier' && imports && <MatchingProperties imports={imports} />}
                         </Item>
                     ))}
                 </dl>
-                <p className="mt-4 border-t border-glass-border/60 pt-3 text-[12px] text-ink-secondary">
+                <p className="mt-3 px-1 text-[12px] text-ink-secondary">
                     <span className="font-semibold text-ink">{own === 0 ? 'No value set for this graph' : `${formatCount(own, 'value')} set for this graph`}</span>
                     {' · '}Values it doesn’t set come from its workspace, then the platform.
                 </p>
@@ -178,12 +187,14 @@ export function GraphSettingsSummary({ wsId, graphId, label }: {
                 <h4 id={`settings-summary-${graphId}`} className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-ink-secondary">
                     <SlidersHorizontal aria-hidden className="w-3.5 h-3.5" /> Settings
                 </h4>
-                <Button size="sm" variant="secondary" leftIcon={SlidersHorizontal} onClick={openSettings}
-                    onPointerEnter={() => void loadDrawer()} onFocus={() => void loadDrawer()}>
+                {/* Every setting, and changing them: the card's one step, filled in the app's indigo. */}
+                <Button size="sm" variant="primary" leftIcon={SlidersHorizontal} onClick={openSettings}
+                    onPointerEnter={() => void loadDrawer()} onFocus={() => void loadDrawer()}
+                    className="bg-indigo-600 hover:bg-indigo-700 hover:brightness-100">
                     Open settings
                 </Button>
             </div>
-            <div className="rounded-xl border border-glass-border bg-canvas-elevated/40 p-4">{body}</div>
+            <div className="rounded-2xl border border-glass-border/60 bg-black/[0.015] p-3 dark:bg-white/[0.02] sm:p-4">{body}</div>
             {opened && (
                 <Suspense fallback={null}>
                     <GraphSettingsDrawer workspaceId={wsId} graphId={graphId} open={open} onOpenChange={setOpen} label={label} onStagedChange={setStaged} />

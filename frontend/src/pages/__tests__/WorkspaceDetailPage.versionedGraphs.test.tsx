@@ -37,11 +37,12 @@ vi.mock('@/store/features', () => ({ useFeature: (key: string) => (key === 'vers
 vi.mock('@/hooks/useProfilingAccess', () => ({ useCanReadProfiling: () => false }))
 
 vi.mock('@/components/admin/AdminVersionedGraphs/WorkspaceVersionedGraphs', () => ({
-    WorkspaceVersionedGraphs: ({ workspaceId, workspaceName, onStagedChange }: {
-        workspaceId: string; workspaceName: string; onStagedChange?: (n: number) => void
+    WorkspaceVersionedGraphs: ({ workspaceId, workspaceName, onStagedChange, onOpenDataSources }: {
+        workspaceId: string; workspaceName: string; onStagedChange?: (n: number) => void; onOpenDataSources?: () => void
     }) => (
         <div data-testid="versioned-graphs" data-ws={workspaceId} data-name={workspaceName}>
             <button type="button" onClick={() => onStagedChange?.(2)}>Stage two changes</button>
+            <button type="button" onClick={() => onOpenDataSources?.()}>Open data sources</button>
         </div>
     ),
 }))
@@ -106,6 +107,13 @@ describe('the workspace page’s Versioned graphs tab', () => {
         expect(screen.getByRole('button', { name: /Versioned graphs/ })).toHaveTextContent('2 not saved')
         fireEvent.click(screen.getByRole('button', { name: /Versioned graphs/ }))
         expect(screen.getByTestId('versioned-graphs')).toBeVisible()
+    })
+
+    it('opens Data Sources when the tab asks for them (no versioned graph yet)', async () => {
+        renderPage('/workspaces/ws1?tab=versioned-graphs')
+        fireEvent.click(await screen.findByRole('button', { name: 'Open data sources' }))
+        expect(screen.getByText(/Data sources are the graph databases that feed this workspace/)).toBeInTheDocument()
+        expect(screen.queryByTestId('versioned-graphs')).not.toBeInTheDocument()
     })
 
     it('keeps the drafts whose owner left on Data Sources', () => {

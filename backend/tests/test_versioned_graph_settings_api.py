@@ -11,8 +11,9 @@ versioned graphs, their routes and the live facts stood in for.
   graphs a routing setting reaches, and writes the residency class of the graphs a class reaches.
 * The schema answers 304 to its ETag, its caller's own, and keeps live facts and the values the
   deployment sets (read when asked) for system administrators.
-* The preview, quick and full (its residency part with the proposed classes); the inventory's
-  summary route.
+* The preview, quick and full (its residency part with the proposed classes, and the values left
+  outside new limits named by where they were chosen); the history naming where each change was
+  made; the inventory's summary route.
 
 The real store, the history and its revert, and the inventory's filters run against Postgres in
 ``integration/test_versioned_graph_settings_live.py``.
@@ -21,6 +22,8 @@ from __future__ import annotations
 
 import json
 import re
+import uuid
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -35,7 +38,7 @@ from backend.app.db.models import OutboxEventORM, ProviderORM, WorkspaceDataSour
 from backend.app.main import app
 from backend.app.services.activity import catalogue
 from backend.app.services.permission_service import PermissionClaims
-from backend.app.services.settings import effects, facts, legacy, preview, service
+from backend.app.services.settings import effects, facts, legacy, preview, service, store
 from backend.app.services.settings.service import Graph
 from backend.app.services.versioning import route_cache
 
@@ -777,7 +780,7 @@ async def test_a_full_preview_reports_the_impact_part_by_part(world, test_client
     assert impact["drafts"] == {"workspaces": 2, "removedAtNextSweep": 12}
     assert impact["outsideLimits"] == {"count": 1, "locked": 1, "samples": [{
         "key": "forks.maxPerGraph", "scope": "workspace", "scopeId": "ws_1", "value": 50,
-        "status": "locked"}]}
+        "status": "locked", "label": "Finance"}]}
     assert impact["database"] is None and impact["residency"] is None
     codes = [(w["code"], w.get("key")) for w in impact["warnings"]]
     assert codes == [("risky_change", "builds.copyRoomPct"),
@@ -806,6 +809,19 @@ async def test_a_full_preview_keeps_what_it_can_when_a_source_cant_be_read(world
                                   "readTimeoutMs": {"from": 15000, "to": 15000}, "poolSize": 8}
     assert ("reads_fill_pool", "database.readsPerProcess") in [
         (w["code"], w.get("key")) for w in impact["warnings"]]
+
+
+async def test_a_value_left_outside_new_limits_is_named_by_where_it_was_chosen(world,
+                                                                                test_client):
+    world.set("forks.maxPerGraph", "workspace", "ws_1", 50)
+    world.set("forks.maxPerGraph", "graph", "ds_1", 40)
+    got = await test_client.post(_P + "/preview", params={"mode": "full"}, json=_save(
+        _change("forks.maxPerGraph", None, limits={"lock": True})))
+    assert got.status_code == 200, got.text
+    samples = got.json()["impact"]["outsideLimits"]["samples"]
+    # A graph by its data source's label, a workspace by its name.
+    assert [(s["scope"], s["scopeId"], s["label"]) for s in samples] == [
+        ("graph", "ds_1", "Ledger"), ("workspace", "ws_1", "Finance")]
 
 
 async def test_a_workspace_admins_full_preview_shows_no_operator_data(world, test_client):
@@ -892,6 +908,28 @@ async def test_the_residency_part_plans_the_next_check_with_the_proposed_classes
     classes = planned[-1]
     assert classes.of("ws_1", "ds_1", "coldline") == "coldline"         # kept as on its row
     assert classes.of("ws_1", "ds_own", "standard") == "coldline"
+
+
+# ── History ───────────────────────────────────────────────────────────────────────────────────────
+async def test_each_change_in_the_history_names_where_it_was_made(world, test_client,
+                                                                  monkeypatch):
+    at = datetime(2026, 11, 16, 15, 40, tzinfo=timezone.utc)
+    places = [("graph", "ds_1"), ("workspace", "ws_1"), ("platform", ""), ("workspace", "ws_gone")]
+    found = [store.HistoryEntry(i, uuid.uuid4(), "forks.maxPerGraph", scope, scope_id, None, 3,
+                                None, None, 1, None, None, "api", at)
+             for i, (scope, scope_id) in enumerate(places, start=1)]
+
+    async def history(session, domain, **_filters):
+        return found, None
+
+    monkeypatch.setattr(store, "history", history)
+    got = await test_client.get(_P + "/history")
+    assert got.status_code == 200, got.text
+    # A graph by its data source's label, a workspace by its name; the platform, and a workspace
+    # that is gone, by none.
+    assert [(e["scope"], e["scopeId"], e["scopeName"]) for e in got.json()["entries"]] == [
+        ("graph", "ds_1", "Ledger"), ("workspace", "ws_1", "Finance"), ("platform", "", None),
+        ("workspace", "ws_gone", None)]
 
 
 # ── The activity log and the inventory ────────────────────────────────────────────────────────────

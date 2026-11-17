@@ -793,7 +793,8 @@ export function WorkspaceDetailPage() {
             {versioningEnabled && wsId && (activeSection === 'versioned-graphs' || vgStaged > 0) && (
                 <div hidden={activeSection !== 'versioned-graphs'}>
                     <Suspense fallback={<div className="py-4"><SettingsSkeleton /></div>}>
-                        <WorkspaceVersionedGraphs workspaceId={wsId} workspaceName={workspace.name} onStagedChange={setVgStaged} />
+                        <WorkspaceVersionedGraphs workspaceId={wsId} workspaceName={workspace.name} onStagedChange={setVgStaged}
+                            onOpenDataSources={() => setActiveSection('sources')} />
                     </Suspense>
                 </div>
             )}
