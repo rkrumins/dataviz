@@ -14,6 +14,8 @@ import { useCanvasStore } from '@/store/canvas'
 import { generateIconFallback } from '@/lib/type-visuals'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { useEntityChangeDecoration } from '@/features/versioning/canvas/useDiffDecoration'
+import { useBranchStore } from '@/store/branchStore'
+import type { ChangeSet } from '@/features/versioning/model/changeModel'
 import { usePreferencesStore } from '@/store/preferences'
 import { usePersonaMode } from '@/store/persona'
 import { resolveEntityName, technicalIdentity } from '@/lib/entityDisplayName'
@@ -127,6 +129,24 @@ interface FlatTreeItemProps {
 // Row tint by change state × type. STAGED keeps the loved saturated wash (green/orange/rose) and
 // adds a dashed halo = "unsaved"; COMMITTED uses the same colours in a lighter, solid-ring form =
 // "saved to the branch, not merged". Same colour language as the graph canvas.
+/** Per change set, the entities that got a new child link saved on the draft — an import's new
+ *  rows under a table not opened yet still say so on the table. Built once per change set. */
+const NEW_CHILD_LINKS = new WeakMap<ChangeSet, Set<string>>()
+function parentsWithNewLinks(cs: ChangeSet): Set<string> {
+  let out = NEW_CHILD_LINKS.get(cs)
+  if (!out) {
+    out = new Set()
+    const containment = new Set((useSchemaStore.getState().schema?.containmentEdgeTypes ?? []).map(t => t.toUpperCase()))
+    for (const c of cs.changes) {
+      if (c.kind !== 'edge' || c.status !== 'added' || !c.sourceUrn) continue
+      const type = String(c.after?.edgeType ?? c.after?.type ?? '').toUpperCase()
+      if (containment.has(type)) out.add(c.sourceUrn)
+    }
+    NEW_CHILD_LINKS.set(cs, out)
+  }
+  return out
+}
+
 const FLAT_ROW_STYLE: Record<string, string> = {
   'staged-added': 'bg-gradient-to-r from-green-500/25 via-green-500/15 to-green-500/5 ring-2 ring-green-400/70 shadow-lg shadow-green-500/20 outline-dashed outline-1 -outline-offset-[3px] outline-green-300/70',
   'staged-modified': 'bg-gradient-to-r from-orange-500/25 via-orange-500/15 to-orange-500/5 ring-2 ring-orange-400/70 shadow-lg shadow-orange-500/20 outline-dashed outline-1 -outline-offset-[3px] outline-orange-300/70',
@@ -209,6 +229,22 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
     node.children.forEach(collect)
     return s.changes.some(c => descendantIds.has(c.targetId) || (c.targetUrn ? descendantIds.has(c.targetUrn) : false))
   })
+  // The same for changes SAVED on the draft (by hand, or by an import): a closed container says it
+  // holds some — including children it gained that are not loaded yet.
+  const hasDescendantCommitted = useBranchStore(s => {
+    const cs = s.activeChangeSet
+    if (directChange || hasDescendantChange || s.committedDiffHidden || !cs || cs.changes.length === 0) return false
+    const urn = node.urn ?? node.id
+    if (parentsWithNewLinks(cs).has(urn) && !cs.byEntityId.has(urn)) return true
+    if (!node.children || node.children.length === 0) return false
+    const stack = [...node.children]
+    while (stack.length) {
+      const n = stack.pop()!
+      if (cs.byEntityId.has(n.urn ?? n.id) || parentsWithNewLinks(cs).has(n.urn ?? n.id)) return true
+      if (n.children) stack.push(...n.children)
+    }
+    return false
+  })
 
   // Pulse-on-arrival from a jump-to-node reveal. Backed by a Set so
   // multi-locate flows can pulse many nodes concurrently. Auto-clears
@@ -229,9 +265,11 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
     ?? (directDeco?.state === 'committed' ? `${directDeco.status} vs main` : undefined)
     ?? (directDeco?.state === 'staged' ? `${directDeco.status} · unsaved` : undefined)
     ?? (hasDescendantChange ? 'Contains staged changes' : undefined)
+    ?? (hasDescendantCommitted ? 'Contains changes saved on this draft' : undefined)
   const stagedRowClass = directDeco
     ? FLAT_ROW_STYLE[`${directDeco.state}-${directDeco.status}`]
-    : (hasDescendantChange ? 'border-l-[3px] border-l-amber-400/50' : '')
+    : hasDescendantChange ? 'border-l-[3px] border-l-amber-400/50'
+    : hasDescendantCommitted ? 'border-l-[3px] border-l-emerald-500/45' : ''
   const entityType = useViewEntityType(node.typeId)
   const visual = entityType?.visual
   const nodeColor = visual?.color ?? layer.color

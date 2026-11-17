@@ -357,6 +357,7 @@ import { useStagedChangesStore, type StagedChange } from '@/store/stagedChangesS
 import { StagedChangesPanel } from './StagedChangesPanel'
 import { ImportDialog } from '@/features/import-export/ImportDialog'
 import { ExportDialog } from '@/features/import-export/ExportDialog'
+import type { ImportSummary } from '@/services/importExportApiService'
 import { ExportViewDialog } from '@/features/view-transfer/ExportViewDialog'
 import { SaveAsTemplateDialog } from '@/components/templates/SaveAsTemplateDialog'
 import { useLayoutTemplatesEnabled } from '@/hooks/useLayoutTemplates'
@@ -1730,6 +1731,9 @@ export function ContextViewCanvas({
   // An import commits to the draft server-side; we refresh only when the user LEAVES the import
   // dialog (re-hydrating mid-dialog unmounts it and hides the preview).
   const importedRef = useRef(false)
+  // What the import did, said once its changes are on the canvas.
+  const importedSummaryRef = useRef<ImportSummary | null>(null)
+  const { notify: notifyImport } = useAppNotifications()
   const applyStagedChanges = useStagedChangesStore(s => s.applyAll)
   const queryClient = useQueryClient()
   // Refresh the canvas + versioning surfaces after an import — but only on dialog exit, and only if
@@ -1738,16 +1742,31 @@ export function ContextViewCanvas({
   // re-read against the old layout leaves them unplaced (a curated view never shows them) — then the
   // cached answers the providers hold for the draft before the import, then the draft epoch, which
   // re-keys every draft read and remounts the canvas.
-  const refreshAfterImport = useCallback(async () => {
+  const refreshAfterImport = useCallback(async (announce = true) => {
     if (!importedRef.current) return
     importedRef.current = false
+    const summary = importedSummaryRef.current
+    importedSummaryRef.current = null
     const viewId = useSchemaStore.getState().getActiveView()?.id
     if (viewId) await rereadBranchView(viewId)
     queryClient.invalidateQueries({ queryKey: VERSIONING_KEYS.all })
     invalidateAggregatedEdges()
     releaseProviderCaches()
     useBranchStore.getState().bumpDraftEpoch()
-  }, [queryClient, rereadBranchView])
+    // What the import changed is shown on the canvas — ringed entities, haloed links — even if the
+    // reader had hidden the draft's saved changes before.
+    useBranchStore.getState().setCommittedDiffHidden(false)
+    const n = summary ? summary.new + summary.updated + summary.deleted : 0
+    if (announce && summary && n > 0) {
+      const parts = [
+        summary.new && `${summary.new.toLocaleString()} added`,
+        summary.updated && `${summary.updated.toLocaleString()} updated`,
+        summary.deleted && `${summary.deleted.toLocaleString()} removed`,
+      ].filter(Boolean).join(', ')
+      notifyImport('success', `Imported into your draft: ${parts}. They’re highlighted on the canvas.`,
+        { label: 'Review changes', onClick: () => useStagedChangesStore.getState().openReviewPanel('saved') })
+    }
+  }, [queryClient, rereadBranchView, notifyImport])
   // After a publish/merge, `main@head` moves and the FalkorDB projection (which the canvas +
   // Properties panel read) catches up ASYNCHRONOUSLY, serving the version it last finished until
   // then. The view page re-hydrates when it finishes, for every viewer and canvas
@@ -7081,13 +7100,14 @@ export function ContextViewCanvas({
             onReviewChanges={() => {
               setShowImportDialog(false)
               useVersioningPanelStore.getState().openPanel('changes')
-              void refreshAfterImport()
+              void refreshAfterImport(false)
             }}
-            onImported={() => {
+            onImported={(summary) => {
               // The import committed to the draft server-side. DON'T refresh the canvas now — that
               // would re-hydrate behind the open dialog and unmount its preview. Just remember an
               // import happened; refreshAfterImport() runs when the user closes / reviews.
               importedRef.current = true
+              importedSummaryRef.current = summary
             }}
           />
         )}

@@ -121,4 +121,16 @@ describe('Review & Save — the guided flow', () => {
     expect(state().reviewIntent).toBeNull()
     expect(screen.getByRole('radio', { name: /Save to draft/ })).toHaveAttribute('aria-checked', 'true')
   })
+
+  it('opened after an import, it shows the map of what the draft holds — not Publish', async () => {
+    useStagedChangesStore.setState({ changes: [] })
+    useBranchStore.setState({
+      activeChangeSet: buildChangeSet([{ entityId: 'urn:orders', urn: 'urn:orders', kind: 'node', status: 'added', label: 'urn:orders', origin: { source: 'branch', branchId: 'br1' } }]),
+    } as never)
+    renderPanel()
+    act(() => state().openReviewPanel('saved'))
+    expect(screen.queryByRole('button', { name: /Publish now/ })).not.toBeInTheDocument()
+    expect(await screen.findByText('Orders')).toBeInTheDocument()
+    expect(screen.getByText('Added · saved')).toBeInTheDocument()
+  })
 })

@@ -172,12 +172,13 @@ interface StagedChangesState {
     wsId: string,
     opts?: { graphWrites?: boolean },
   ) => Promise<{ ok: number; failed: number }>
-  /** Open Review & Save — on `'publish'`, with Save & publish chosen (only that exact string: a
-   *  button handing over its click event opens it plainly). */
+  /** Open Review & Save — on `'publish'`, with Save & publish chosen; on `'saved'`, on the map of
+   *  what the draft already holds (after an import). Only those exact strings: a button handing
+   *  over its click event opens it plainly. */
   openReviewPanel: (intent?: unknown) => void
   closeReviewPanel: () => void
-  /** What Review & Save was opened for: `'publish'` preselects Save & publish. */
-  reviewIntent: 'publish' | null
+  /** What Review & Save was opened for. */
+  reviewIntent: 'publish' | 'saved' | null
 
   /** Step back the most recent action: every change it touched goes back to how it was (the canvas
    *  with it — a `before` re-applies itself, a change that was not staged runs its discard hook). */
@@ -549,7 +550,9 @@ export const useStagedChangesStore = create<StagedChangesState>((set, get) => ({
     return { ok, failed }
   },
 
-  openReviewPanel: (intent) => set({ isReviewPanelOpen: true, reviewIntent: intent === 'publish' ? 'publish' : null }),
+  openReviewPanel: (intent) => set({
+    isReviewPanelOpen: true, reviewIntent: intent === 'publish' || intent === 'saved' ? intent : null,
+  }),
   closeReviewPanel: () => set({ isReviewPanelOpen: false, reviewIntent: null }),
 
   hasChange: (targetId) => get().changes.some((c) => c.targetId === targetId),

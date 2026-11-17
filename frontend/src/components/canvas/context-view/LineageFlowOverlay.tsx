@@ -37,6 +37,8 @@ import { useAnchorRailStore } from '@/store/anchorRail'
 import type { ColumnPeripherySummary } from '@/store/columnPeriphery'
 import { formatRibbonCount, type FlowRibbon } from './flowRibbons'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
+import { useBranchStore } from '@/store/branchStore'
+import { committedEdgeLookup } from '@/features/versioning/canvas/committedEdges'
 import { useHoveredNodeId } from '@/hooks/useHighlightState'
 import { useLineageDirectionColors } from '@/hooks/useLineageDirectionColors'
 import { InfoTooltip } from '../search/panel/builder-atoms/InfoTooltip'
@@ -305,6 +307,15 @@ export function LineageFlowOverlay({
     })
     return m
   }, [stagedEdgeChanges])
+
+  // Committed-change lookup — relationships SAVED on the draft (by hand, or by an import) and not
+  // published yet, drawn with a solid halo the way committed entities get a solid ring.
+  const committedChangeSet = useBranchStore(s => s.activeChangeSet)
+  const committedHidden = useBranchStore(s => s.committedDiffHidden)
+  const committedEdges = useMemo(
+    () => committedEdgeLookup(committedHidden ? null : committedChangeSet),
+    [committedChangeSet, committedHidden],
+  )
 
   // Pre-bucket edges by their layer-node DOM-id endpoints so each redraw
   // can iterate O(visible-edges) instead of O(E). Recomputed only when
@@ -1891,6 +1902,7 @@ export function LineageFlowOverlay({
               dash={lineDash(edge, detailed)}
               showDirection={showDirection}
               stagedColor={stagedEdgeColorByEdgeId.get(edge.id)}
+              committedColor={committedEdges.colorOf(edge)}
               isExpanding={expandingEdgeIds?.has(edge.id) ?? false}
               // The bundle count, on the lines being looked at only: on every
               // line, the counts of a fan stacked into columns of numbers.
@@ -2300,6 +2312,8 @@ interface EdgeLineProps {
   dash: string
   showDirection: boolean
   stagedColor: string | undefined
+  /** Saved on the draft, not published: a solid halo (the staged one, dashed, wins). */
+  committedColor?: string
   isExpanding: boolean
   showCount: boolean
   /** What the badge says, when not the line's weight. */
@@ -2310,7 +2324,7 @@ const LINE_TRANSITION = { transition: 'opacity 0.12s ease' }
 
 const EdgeLine = React.memo(function EdgeLine({
   edge, groupOpacity, isHighlighted, isHovered, premiumLook, dash, showDirection,
-  stagedColor, isExpanding, showCount, countLabel,
+  stagedColor, committedColor, isExpanding, showCount, countLabel,
 }: EdgeLineProps) {
   const { pathD, color, dynamicStrokeWidth, edgeOpacity, isGhost, sx, sy, tx, ty } = edge
   // Per-edge gradient id — direction is encoded in the stroke itself. Fades
@@ -2362,6 +2376,22 @@ const EdgeLine = React.memo(function EdgeLine({
             transition: 'all 0.3s ease',
           }}
           className="pointer-events-none"
+        />
+      )}
+
+      {/* COMMITTED-CHANGE HALO — saved on the draft (an import's links too), not published */}
+      {!stagedColor && committedColor && (
+        <path
+          d={pathD}
+          style={{
+            stroke: committedColor,
+            strokeWidth: dynamicStrokeWidth + 4,
+            fill: 'none',
+            strokeOpacity: 0.4,
+            strokeLinecap: 'round',
+          }}
+          className="pointer-events-none"
+          data-committed-change
         />
       )}
 
@@ -2433,6 +2463,7 @@ const EdgeLine = React.memo(function EdgeLine({
   && a.dash === b.dash
   && a.showDirection === b.showDirection
   && a.stagedColor === b.stagedColor
+  && a.committedColor === b.committedColor
   && a.isExpanding === b.isExpanding
   && a.showCount === b.showCount
   && a.countLabel === b.countLabel

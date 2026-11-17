@@ -96,7 +96,9 @@ function build(groups: readonly ReviewGroup[], saved: ChangeSet | null, nameOf: 
   for (const ch of saved?.changes ?? []) {
     if (ch.kind === 'node') {
       const id = ch.urn ?? ch.entityId
-      if (!nodes.has(id) || nodes.get(id)!.context) put(id, { label: ch.label, status: ch.status, context: false, saved: true })
+      // A slim diff names a changed entity by its id: the canvas's name for it reads better.
+      const label = nameOf(id) !== id ? nameOf(id) : ch.label
+      if (!nodes.has(id) || nodes.get(id)!.context) put(id, { label, status: ch.status, context: false, saved: true })
     } else if (ch.sourceUrn && ch.targetUrn) {
       link(`saved:${ch.entityId}`, ch.sourceUrn, ch.targetUrn, ch.status, true)
     }

@@ -156,9 +156,11 @@ export function StagedChangesPanel({ onConfirm, describe, wsId, graphId, dataSou
   useEffect(() => {
     if (isOpen && !wasOpen.current) {
       const s = useStagedChangesStore.getState()
-      setStep(s.changes.length === 0 && draftCount > 0 && canPublishHere ? 'publish' : 'review')
+      // Opened to look at what the draft holds (an import just landed): its map, not Publish.
+      const toLook = s.reviewIntent === 'saved' && draftCount > 0
+      setStep(s.changes.length === 0 && draftCount > 0 && canPublishHere && !toLook ? 'publish' : 'review')
       setDestination(s.reviewIntent === 'publish' && canPublishHere ? 'publish' : 'draft')
-      setView('list')
+      setView(toLook ? 'map' : 'list')
       setFilter('')
       setShown(GROUPS_SHOWN)
       setOpen(null)
@@ -318,7 +320,7 @@ export function StagedChangesPanel({ onConfirm, describe, wsId, graphId, dataSou
                 <SaveProblemsBanner problems={problems} onDiscard={(ids) => ids.forEach(discardUnlessSaving)} />
               )}
 
-              {step === 'review' && total > 0 && (
+              {step === 'review' && (total > 0 || draftCount > 0) && (
                 <div className="flex items-center gap-2 mt-4 flex-wrap">
                   <div className="flex items-center gap-1.5 flex-1 flex-wrap">
                     {counts.added > 0 && <SummaryChip status="added" count={counts.added} label="added" />}
@@ -387,12 +389,12 @@ export function StagedChangesPanel({ onConfirm, describe, wsId, graphId, dataSou
               <>
                 {/* Body */}
                 <div className="relative flex-1 overflow-y-auto px-5 py-4 space-y-5 custom-scrollbar">
-                  {groups.length === 0 ? (
-                    <EmptyState hasFilter={false} onClearFilter={() => setFilter('')} />
-                  ) : view === 'map' ? (
+                  {view === 'map' && (groups.length > 0 || draftCount > 0) ? (
                     <Suspense fallback={<div className="h-[min(52vh,460px)] rounded-2xl border border-glass-border flex items-center justify-center text-xs text-ink-muted gap-2"><Loader2 className="w-4 h-4 animate-spin" />Drawing the map…</div>}>
                       <ChangeMap groups={groups} saved={draftChanges} nameOf={lookup.nameOf} onShowInList={showInList} onReveal={reveal} />
                     </Suspense>
+                  ) : groups.length === 0 ? (
+                    draftCount > 0 ? null : <EmptyState hasFilter={false} onClearFilter={() => setFilter('')} />
                   ) : filtered.length === 0 ? (
                     <EmptyState hasFilter onClearFilter={() => setFilter('')} />
                   ) : (
@@ -447,7 +449,7 @@ export function StagedChangesPanel({ onConfirm, describe, wsId, graphId, dataSou
                   )}
 
                   {draftChanges && draftCount > 0 && view === 'list' && (
-                    <DraftSavedSection changeSet={draftChanges} />
+                    <DraftSavedSection changeSet={draftChanges} defaultOpen={total === 0} />
                   )}
                 </div>
 
@@ -842,8 +844,8 @@ function MoveDetail({ change }: { change: StagedChange }) {
 }
 
 /** What the draft already holds from earlier saves and imports — what publishing takes along too. */
-function DraftSavedSection({ changeSet }: { changeSet: ChangeSet }) {
-  const [open, setOpen] = useState(false)
+function DraftSavedSection({ changeSet, defaultOpen = false }: { changeSet: ChangeSet; defaultOpen?: boolean }) {
+  const [open, setOpen] = useState(defaultOpen)
   return (
     <section className="rounded-2xl border border-glass-border bg-black/[0.015] dark:bg-white/[0.02]">
       <button
