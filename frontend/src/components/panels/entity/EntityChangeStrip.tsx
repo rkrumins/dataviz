@@ -69,11 +69,11 @@ export function EntityChangeStrip({ nodeId, dirty, justStaged, onCancel }: {
         <span className="min-w-0 leading-tight">
           <span className="block font-semibold text-ink truncate">
             {staged
-              ? `${fields || 1} change${fields === 1 ? '' : 's'} staged on this entity`
+              ? `${fields || 1} change${fields === 1 ? '' : 's'} staged`
               : 'Click any value to edit it'}
           </span>
           <span className="block text-[11px] text-ink-muted truncate">
-            {staged ? 'Staged — Review & Save to keep it' : 'Each change is staged as you make it'}
+            {staged ? 'Not saved yet' : 'Each change is staged as you make it'}
           </span>
         </span>
       </span>

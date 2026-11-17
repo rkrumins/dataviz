@@ -13,7 +13,7 @@
  * - A clean drawer adopts a newer stored value than the canvas holds (the summary's value and
  *   token), so an edit is checked against what is stored now.
  */
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { useCanvasStore, type LineageNode } from '@/store/canvas'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { stageNodeEdit } from '@/features/versioning/model/stageNodeEdit'
@@ -44,8 +44,11 @@ export function useEntityEditSession(node: LineageNode | null, stored: EntityVie
     setShown({ id: node.id, data: node.data })
     setForm({ ...node.data })
   }
-  formRef.current = form
-  dirtyRef.current = dirty
+  // In step with what was rendered (a new entity, a node followed) before anything can be typed.
+  useLayoutEffect(() => {
+    formRef.current = form
+    dirtyRef.current = dirty
+  })
 
   // Adopt a newer stored value — never over an edit in progress or a staged one.
   useEffect(() => {

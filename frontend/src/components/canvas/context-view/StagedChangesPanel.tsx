@@ -924,7 +924,7 @@ function DestinationCards({ value, onChange, ctx, disabled }: {
               onClick={() => onChange(o.value)}
               className={cn(
                 'w-full flex items-start gap-2.5 rounded-xl border px-3 py-2.5 text-left transition-colors disabled:opacity-45 disabled:cursor-not-allowed',
-                on ? 'border-accent-lineage/60 bg-accent-lineage/[0.07] ring-1 ring-accent-lineage/30' : 'border-glass-border hover:bg-black/[0.03] dark:hover:bg-white/[0.04]',
+                on ? 'border-accent-lineage/60 bg-accent-lineage/[0.07] ring-1 ring-accent-lineage/30' : 'border-black/10 dark:border-white/10 hover:bg-black/[0.03] dark:hover:bg-white/[0.04]',
               )}
             >
               <o.icon className={cn('w-4 h-4 mt-0.5 flex-shrink-0', on ? 'text-accent-lineage' : 'text-ink-muted')} />

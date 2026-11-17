@@ -61,8 +61,10 @@ function build(groups: readonly ReviewGroup[], saved: ChangeSet | null, nameOf: 
     edges.push({
       id, source, target, label,
       style: { stroke: STROKE[status], strokeWidth: 2, strokeDasharray: isSaved ? undefined : '6 4' },
-      labelStyle: { fontSize: 10, fill: 'currentColor' },
-      labelBgStyle: { fillOpacity: 0 },
+      labelStyle: { fontSize: 10, fontWeight: 600, fill: STROKE[status] },
+      labelBgStyle: { fill: 'var(--nx-bg-elevated)' },
+      labelBgPadding: [4, 2] as [number, number],
+      labelBgBorderRadius: 4,
       markerEnd: { type: MarkerType.ArrowClosed, color: STROKE[status], width: 16, height: 16 },
     })
   }

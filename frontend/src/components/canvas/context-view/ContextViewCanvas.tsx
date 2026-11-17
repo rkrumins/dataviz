@@ -7227,8 +7227,8 @@ export function ContextViewCanvas({
                 notify('success', 'Saved to draft.')
               }
               useSaveProblemsStore.getState().clear()
-              // Nothing written at all: say so (above) and stay on the review.
-              return carriedSomething || unsaved.length === 0
+              // What was carried is cleared either way; the notification above says what landed.
+              return true
             } catch (e) {
               if (e instanceof OntologyViolationError) {
                 // Refused as a whole — nothing was written. Say exactly what and why, on the changes

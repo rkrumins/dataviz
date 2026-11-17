@@ -64,7 +64,7 @@ describe('EntityDrawer — editing is kept only in a draft', () => {
         await user.type(name, 'Orders v2{Enter}')
 
         expect(useStagedChangesStore.getState().changes).toHaveLength(1)
-        expect(screen.getByText(/Review & Save to keep it/)).toBeInTheDocument()
+        expect(screen.getByText('Not saved yet')).toBeInTheDocument()
         expect(screen.getByRole('button', { name: 'Review & Save' })).toBeInTheDocument()
         expect(screen.queryByText(/saved successfully/)).not.toBeInTheDocument()
     })

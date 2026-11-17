@@ -159,7 +159,7 @@ function FieldEditor({ value, fieldType, fieldLabel, onCommit, onDone }: {
   const hold = (e: React.MouseEvent) => e.preventDefault()
 
   return (
-    <div className="space-y-1">
+    <div className="space-y-1" data-inline-editing>
       <div className="flex items-start gap-1">
         {multiline ? (
           <textarea ref={ref} rows={1} {...common} placeholder="Type a value…" className={cn(FIELD, 'resize-none leading-relaxed custom-scrollbar')} />
@@ -200,7 +200,7 @@ function FieldEditor({ value, fieldType, fieldLabel, onCommit, onDone }: {
       {error ? (
         <p role="alert" className="text-2xs text-rose-600 dark:text-rose-400 pl-0.5">{error}</p>
       ) : multiline && (
-        <p className="text-2xs text-ink-muted pl-0.5">Enter keeps it · Shift+Enter for a new line · Esc puts it back</p>
+        <p className="text-2xs text-ink-muted pl-0.5">Enter keeps · Shift+Enter new line · Esc cancels</p>
       )}
       {modal && (
         <MarkdownValueModal
@@ -221,6 +221,7 @@ function TagsEditor({ value, onCommit, onDone }: { value: string[]; onCommit: (n
   return (
     <div
       ref={box}
+      data-inline-editing
       className="flex items-start gap-1"
       onKeyDown={(e) => {
         if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); onDone() }

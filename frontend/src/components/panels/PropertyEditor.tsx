@@ -652,21 +652,18 @@ const PropertyRow = memo(function PropertyRow({
               <HighlightedText text={rowKey} query={query} />
             </button>
           )}
-        </div>
-
-        {mark && (
-          <div className="h-6 flex items-center flex-shrink-0 -ml-0.5">
+          {mark && (
             <HoverTip
               label={mark === 'new' ? 'Added since it was read' : `Was: ${shortValue(was)}`}
               detail="Staged — saved with Review & Save"
-              className="inline-flex"
+              className="inline-flex flex-shrink-0 ml-1.5"
             >
               <span className={cn('px-1.5 py-px rounded text-[9.5px] font-bold uppercase tracking-wide', MARK_STYLE[mark].badge)}>
                 {MARK_STYLE[mark].label}
               </span>
             </HoverTip>
-          </div>
-        )}
+          )}
+        </div>
 
         {/* Value column — flexible, consistent across all kinds */}
         <div className="flex-1 min-w-0">
@@ -687,13 +684,23 @@ const PropertyRow = memo(function PropertyRow({
           )}
         </div>
 
+        {/* Inline, the row reads as a value: its type and actions float over its end when you
+            reach for it (taking no width, so values don't wrap for them), and step aside while a
+            value is being edited. */}
+        <div className={cn(
+          'flex items-center gap-1.5 flex-shrink-0',
+          inline && !readOnly && cn(
+            'absolute right-1 top-1 z-10 h-7 px-1 gap-0.5 rounded-lg bg-canvas-elevated border border-black/10 dark:border-white/10 shadow-sm',
+            'opacity-0 pointer-events-none transition-opacity',
+            'group-hover:opacity-100 group-hover:pointer-events-auto group-focus-within:opacity-100 group-focus-within:pointer-events-auto',
+            'group-has-[[data-inline-editing]]:hidden',
+          ),
+        )}>
         {/* Type control — icon-only on the right (edit only); in read-only the
             formatted value already conveys the type, so the chip is omitted to
             keep the focus on the property name + value. */}
         {!readOnly && (
-          <div className={cn('h-6 flex items-center flex-shrink-0',
-            // Inline, the row reads as a value: its type shows when you reach for the row.
-            inline && 'opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity')}>
+          <div className="h-6 flex items-center flex-shrink-0">
             <FieldTypeChip fieldType={fieldType} onChange={changeType} showLabel={false} />
           </div>
         )}
@@ -701,7 +708,7 @@ const PropertyRow = memo(function PropertyRow({
         {/* Row actions */}
         <div className={cn(
           "flex items-center gap-0.5 flex-shrink-0 h-6",
-          "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity",
+          !inline && "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity",
         )}>
           {isContainer && !readOnly && depth < MAX_DEPTH - 1 && (
             <button
@@ -732,6 +739,7 @@ const PropertyRow = memo(function PropertyRow({
               <Trash2 className="w-3 h-3" />
             </button>
           )}
+        </div>
         </div>
       </div>
 

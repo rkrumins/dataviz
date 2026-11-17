@@ -6,14 +6,11 @@
  */
 import { act, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { useCanvasStore, type LineageNode } from '@/store/canvas'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { useFeaturesStore } from '@/store/features'
-import { usePersonaStore } from '@/store/persona'
-import { usePreferencesStore } from '@/store/preferences'
 import { useSchemaStore } from '@/store/schema'
-import { useWorkspacesStore } from '@/store/workspaces'
 import { stagedChangesToOps } from '@/features/versioning/model/stagedChangesToOps'
 
 vi.mock('../../useDrawerHistoryScope', () => ({
@@ -88,7 +85,7 @@ describe('EntityDrawer — properties edited in place', () => {
     expect(ops()).toEqual([expect.objectContaining({ op: 'update', id: 'urn:orders', payload: { properties: { owner: 'bea' } } })])
     expect(owner()).toBe('bea')
     expect(within(rowOf('owner')).getByText('Edited')).toBeInTheDocument()
-    expect(screen.getByText('1 change staged on this entity')).toBeInTheDocument()
+    expect(screen.getByText('1 change staged')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Review & Save' })).toBeInTheDocument()
   })
 
