@@ -585,7 +585,10 @@ const PropertyRow = memo(function PropertyRow({
 
   useEffect(() => { setKeyDraft(rowKey) }, [rowKey])
 
+  // Esc puts the name back: the blur that follows (the input leaving) must not rename it after all.
+  const keyCancelled = useRef(false)
   const commitKey = () => {
+    if (keyCancelled.current) { keyCancelled.current = false; return }
     setEditingKey(false)
     if (keyDraft !== rowKey && keyDraft.trim()) {
       onKeyChange?.(keyDraft.trim())
@@ -639,13 +642,19 @@ const PropertyRow = memo(function PropertyRow({
               onBlur={commitKey}
               onKeyDown={(e) => {
                 if (e.key === 'Enter') commitKey()
-                if (e.key === 'Escape') { setKeyDraft(rowKey); setEditingKey(false) }
+                if (e.key === 'Escape') {
+                  e.preventDefault()
+                  e.stopPropagation()
+                  keyCancelled.current = true
+                  setKeyDraft(rowKey)
+                  setEditingKey(false)
+                }
               }}
               className="text-xs font-mono px-1.5 py-0.5 rounded bg-black/[0.06] dark:bg-white/10 border border-accent-lineage/40 outline-none min-w-0 w-full"
             />
           ) : (
             <button
-              onClick={() => setEditingKey(true)}
+              onClick={() => { keyCancelled.current = false; setEditingKey(true) }}
               className="text-xs font-mono text-ink hover:text-accent-lineage truncate text-left max-w-full"
               title={`${rowKey} — click to rename`}
             >
@@ -731,13 +740,15 @@ const PropertyRow = memo(function PropertyRow({
             </HoverTip>
           )}
           {!readOnly && (
-            <button
-              onClick={onDelete}
-              className="w-6 h-6 flex items-center justify-center rounded text-ink-muted hover:text-red-500 hover:bg-red-500/10"
-              title="Delete"
-            >
-              <Trash2 className="w-3 h-3" />
-            </button>
+            <HoverTip label={`Delete ${rowKey}`} detail="It stays listed, struck through, until you save — Restore brings it back." className="inline-flex">
+              <button
+                onClick={onDelete}
+                aria-label={`Delete ${rowKey}`}
+                className="w-6 h-6 flex items-center justify-center rounded text-ink-muted hover:text-rose-500 hover:bg-rose-500/10"
+              >
+                <Trash2 className="w-3 h-3" />
+              </button>
+            </HoverTip>
           )}
         </div>
         </div>
@@ -1860,7 +1871,9 @@ function FolderGroup({
   // Edited properties inside — said on the folder, so a closed one still shows its changes.
   const edited = marks && marks.size > 0 ? countMarked(node, marks) : 0
 
+  const nameCancelled = useRef(false)
   const commitName = () => {
+    if (nameCancelled.current) { nameCancelled.current = false; return }
     setEditingName(false)
     const next = nameDraft.trim()
     if (next && next !== node.name && !next.includes(PATH_SEP)) {
@@ -1899,13 +1912,19 @@ function FolderGroup({
               onBlur={commitName}
               onKeyDown={(e) => {
                 if (e.key === 'Enter') commitName()
-                if (e.key === 'Escape') { setNameDraft(node.name); setEditingName(false) }
+                if (e.key === 'Escape') {
+                  e.preventDefault()
+                  e.stopPropagation()
+                  nameCancelled.current = true
+                  setNameDraft(node.name)
+                  setEditingName(false)
+                }
               }}
               className="text-xs font-semibold px-1.5 py-0.5 rounded bg-black/[0.06] dark:bg-white/10 border border-accent-lineage/40 outline-none min-w-0 w-full"
             />
           ) : (
             <button
-              onClick={() => setEditingName(true)}
+              onClick={() => { nameCancelled.current = false; setEditingName(true) }}
               className="text-xs font-semibold text-ink hover:text-accent-lineage truncate text-left max-w-full"
               title={`${node.path} — click to rename folder`}
             >

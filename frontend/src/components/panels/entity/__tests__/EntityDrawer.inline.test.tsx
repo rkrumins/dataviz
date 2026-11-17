@@ -101,7 +101,7 @@ describe('EntityDrawer — properties edited in place', () => {
   it('a removed property stays listed, struck through, until Restore puts it back', async () => {
     const user = userEvent.setup()
     render(<EntityDrawer canEdit />)
-    await user.click(within(rowOf('sla')).getByTitle('Delete'))
+    await user.click(within(rowOf('sla')).getByRole('button', { name: /^Delete / }))
     expect(ops()).toEqual([expect.objectContaining({ unsetProperties: ['sla'] })])
     expect(screen.getByText('Removed')).toBeInTheDocument()
 
