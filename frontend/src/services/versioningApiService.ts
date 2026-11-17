@@ -15,6 +15,7 @@
 import type { ViewDefinitionDiff } from '@/services/viewVersionsApiService'
 import type { GraphEdge, GraphNode } from '@/providers/GraphDataProvider'
 import { fetchWithTimeout } from './fetchWithTimeout'
+import { remember, sendNdjsonInParts } from './importExportApiService'
 import { pollJob } from './importExportApiService'
 import { useHealthStore } from '@/store/health'
 import { readJsonLossless } from '@/lib/losslessJson'
@@ -1792,6 +1793,69 @@ export function applyGraphChanges(
     // Outlasts the 120s /graph tier, so the server's answer always lands.
     timeoutMs: 150_000,
   })
+}
+
+/** Past this many ops a save goes in parts (``saveGraphChangesInParts``): one request of them would
+ *  outlast the request timeout, or the request size limit. */
+export const SAVE_IN_PARTS_ABOVE = 20_000
+
+/** How far a save sent in parts has got. */
+export type SaveProgress =
+  | { phase: 'preparing' }
+  | { phase: 'uploading'; sent: number; total: number }
+  | { phase: 'saving' }
+
+interface SaveJob {
+  jobId: string
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'
+  phase?: string | null
+  error?: { status: number; detail: RefusalDetail } | null
+  result?: GraphChangesResult | null
+}
+
+/**
+ * ``applyGraphChanges`` for a batch too large for one request: its ops go up as NDJSON in parts
+ * (resumable — the same key picks the upload up after a failure or a reload), then the server writes
+ * them as ONE commit in a job, followed here until it ends. Same answer, same refusals (typed as a
+ * one-request save's), and the same Idempotency-Key: a save tried in one request first lands once.
+ */
+export async function saveGraphChangesInParts(
+  wsId: string,
+  graphId: string,
+  branchId: string,
+  ops: GraphChangeOp[],
+  message: string | undefined,
+  idempotencyKey: string,
+  onProgress?: (p: SaveProgress) => void,
+): Promise<GraphChangesResult> {
+  onProgress?.({ phase: 'preparing' })
+  const file = new File(ops.map((op) => `${JSON.stringify(op)}\n`), 'save.ndjson',
+    { type: 'application/x-ndjson', lastModified: 0 })
+  const uploadKey = `save-upload:${idempotencyKey}`
+  const upload = await sendNdjsonInParts(wsId, graphId, file, {
+    key: uploadKey, onProgress: (sent, total) => onProgress?.({ phase: 'uploading', sent, total }),
+  })
+  onProgress?.({ phase: 'saving' })
+  let job = await vfetch<SaveJob>(`${base(wsId)}/graphs/${graphId}/branches/${branchId}/saves`, {
+    method: 'POST',
+    body: JSON.stringify({ uploadId: upload.uploadId, message }),
+    headers: { 'Idempotency-Key': idempotencyKey },
+  })
+  // Followed until it ends; a poll that fails (a blip) is asked again, a few times.
+  for (let delay = 500, misses = 0; job.status === 'pending' || job.status === 'running';) {
+    await new Promise((r) => setTimeout(r, delay))
+    try {
+      job = await vfetch<SaveJob>(`${base(wsId)}/graphs/${graphId}/save-jobs/${job.jobId}`)
+      delay = Math.min(delay * 1.5, 3000)
+      misses = 0
+    } catch (e) {
+      if (++misses >= 5) throw e
+    }
+  }
+  remember(uploadKey, null)
+  if (job.status === 'completed' && job.result) return job.result
+  throw versioningError(job.error?.status ?? 500, job.error?.detail ?? 'The save did not finish. Save again.',
+    'The save did not finish. Save again.')
 }
 
 /**

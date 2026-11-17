@@ -270,6 +270,14 @@ read-only.
    [Submit your draft for review](#submit-your-draft-for-review); **Not now**
    leaves everything saved on the draft.
 
+A very large save — more than 20,000 changes at once, say after a bulk edit —
+is sent in parts and then written as **one** save on the draft, all or
+nothing, as any save is. The button says how far it has got: *Uploading 38 of
+120 MB…*, then *Writing one commit…*. If the connection drops or you reload
+part-way, saving again picks the upload up where it stopped and never saves
+the same changes twice. Up to 200,000 changes go in one save; past that, save
+part of them, then the rest.
+
 **Cancel** closes the dialog and keeps your edits staged. **Discard all**
 throws every staged edit away. With nothing staged but changes saved on the
 draft, **Review & Save** opens straight on **Publish**.

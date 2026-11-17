@@ -25,6 +25,7 @@ import {
   Layers, ListTree, Loader2, Map as MapIcon, OctagonAlert, Rocket, Save, Undo2, Redo2, X,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { useSaveProgressStore } from '@/store/saveProgressStore'
 import { formatShortcut } from '@/lib/platform'
 import { useBranchStore } from '@/store/branchStore'
 import { usePermission } from '@/store/auth'
@@ -463,7 +464,7 @@ export function StagedChangesPanel({ onConfirm, describe, wsId, graphId, dataSou
                         {applyStatus === 'applying' ? (
                           <>
                             <Loader2 className="w-4 h-4 animate-spin" />
-                            Saving…
+                            <SaveProgressLabel />
                           </>
                         ) : destination === 'draft' || !canPublishHere ? (
                           <>
@@ -815,4 +816,18 @@ function SaveProblemsBanner({ problems, onDiscard }: {
       </ul>
     </div>
   )
+}
+
+const MB = 1024 * 1024
+/** "Saving…", or — a save too large for one request — how far it has got: its changes going up,
+ *  then the server writing them as one commit. */
+function SaveProgressLabel() {
+  const p = useSaveProgressStore((s) => s.progress)
+  if (!p) return <>Saving…</>
+  if (p.phase === 'uploading') {
+    const unit = p.total >= 10 * MB ? MB : 1024
+    const n = (b: number) => (b / unit).toLocaleString(undefined, { maximumFractionDigits: unit === MB ? 0 : 1 })
+    return <span className="tabular-nums" aria-live="polite">Uploading {n(p.sent)} of {n(p.total)} {unit === MB ? 'MB' : 'KB'}…</span>
+  }
+  return <span aria-live="polite">{p.phase === 'preparing' ? 'Preparing the save…' : 'Writing one commit…'}</span>
 }

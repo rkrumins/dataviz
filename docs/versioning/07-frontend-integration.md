@@ -203,7 +203,14 @@ in `reconcileSaved`), as the canvas swaps every temp node for its real one in on
 
 ### Phase 2 — mutations + user-drawn edges as ONE atomic commit (`saveStagedChangesToDraft.ts:102-115`)
 `stagedChangesToOps(changes without creates, resolveTempId)` → `applyGraphChanges(ws, ds, branchId,
-ops)` → `POST /graph/changes` (one server-merged commit). The translation
+ops)` → `POST /graph/changes` (one server-merged commit). Past `SAVE_IN_PARTS_ABOVE` (20,000) ops the
+same batch goes in parts instead (`saveGraphChangesInParts`): the ops as NDJSON through the graph's
+resumable uploads (`…/imports/uploads`, remembered under `save-upload:{key}`), then
+`POST …/graphs/{gid}/branches/{bid}/saves` (`Idempotency-Key`: the save's own) queues a `save` job
+that writes them as ONE commit with the route's own apply (`graph._apply_resolved_save`), followed
+at `GET …/save-jobs/{id}` until it answers with the route's result or its typed refusal. Progress
+(`useSaveProgressStore`) shows in Review & Save. The key is shared, so a save tried in one request
+and retried in parts lands once. The translation
 (`stagedChangesToOps.ts:48-126`):
 - `rename_entity`/`update_entity` → an `update` **node** op carrying only the changed fields
   (`nodeUpdatePayload` normalizes canvas `label`/`type` → `displayName`/`entityType`) plus a

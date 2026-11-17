@@ -11103,13 +11103,15 @@ class GraphVersioningService:
         for model, ids in ((NodeVersionORM, node_ids), (EdgeVersionORM, edge_ids)):
             if not ids:
                 continue
-            tokens = list({eid_to_token[e] for e in ids})
+            # Two arrays a chunk (``= ANY``), never an IN list per id and per token: a large save
+            # updating 20,000+ entities would bind past Postgres's 32,767 parameters.
+            stmt = select(model.entity_id, model.content_hash, model.payload).where(
+                model.graph_id == graph_id,
+                model.entity_id == any_(bindparam("ids", type_=ARRAY(Text))),
+                model.content_hash == any_(bindparam("tokens", type_=ARRAY(Text))))
             for chunk in _chunks(ids, _IN_LIST_MAX):
-                rows = (await s.execute(
-                    select(model.entity_id, model.content_hash, model.payload).where(
-                        model.graph_id == graph_id, model.entity_id.in_(chunk),
-                        model.content_hash.in_(tokens))
-                )).all()
+                rows = (await s.execute(stmt, {
+                    "ids": list(chunk), "tokens": list({eid_to_token[e] for e in chunk})})).all()
                 by = {(eid, h): p for eid, h, p in rows}
                 for e in chunk:
                     p = by.get((e, eid_to_token[e]))

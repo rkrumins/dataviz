@@ -476,7 +476,7 @@ class ProjectionStateORM(VersioningBase):
 # An import that holds its draft (``uq_jobs_ingest_active``).
 _INGEST_ACTIVE = "job_type = 'ingest' AND status IN ('pending','running')"
 JOB_TYPES = ("ingest", "projection", "rebuild", "export", "bootstrap", "publish", "purge",
-             "package_inspect", "fork_update", "fork_merge")
+             "package_inspect", "fork_update", "fork_merge", "save")
 
 
 class ProjectionQuarantineORM(VersioningBase):

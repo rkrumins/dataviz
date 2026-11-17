@@ -68,7 +68,7 @@ QUEUED = "queued"
 AWAITING_DECISION = "awaiting_decision"
 
 # The transfer lane's general slots, and its dedicated inspect slot.
-TRANSFER_TYPES: Tuple[str, ...] = ("ingest", "export", "publish", "fork_update", "fork_merge")
+TRANSFER_TYPES: Tuple[str, ...] = ("ingest", "export", "publish", "fork_update", "fork_merge", "save")
 INSPECT_TYPES: Tuple[str, ...] = ("package_inspect",)
 BOOTSTRAP_TYPES: Tuple[str, ...] = ("bootstrap",)
 PURGE_TYPES: Tuple[str, ...] = ("purge",)

@@ -33,7 +33,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Path, Query, Request, Response, status
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Path, Query, Request, Response, status
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 from sqlalchemy.exc import IntegrityError
@@ -166,7 +166,8 @@ def get_import_export_service():
             ontology_resolver=_resolve_ontology_types,
             layout_writer=_write_view_import_assignments,
             publish_hook=_publish_from_job, replace_scope_resolver=_view_export_scope,
-            identity_resolver=_resolve_node_identity_for_import, fork_hook=_fork_from_job)
+            identity_resolver=_resolve_node_identity_for_import, fork_hook=_fork_from_job,
+            save_hook=_save_from_job)
     return _ie_service
 
 
@@ -6372,3 +6373,124 @@ async def review_changes(
         return await svc.review_change_entries(
             pr_id=pr_id, containment_edge_types=cset, decision=decision, kind=kind,
             statuses=_change_statuses(status), type_=entity_type, q=q, offset=offset, limit=limit)
+
+
+# --------------------------------------------------------------------------- #
+# A draft save too large for one request: its ops sent in parts (the import   #
+# upload), then written as ONE commit by the transfer lane                     #
+# --------------------------------------------------------------------------- #
+#: The most ops one save takes, however it is sent: one commit holds them all.
+SAVE_MAX_OPS = int(os.getenv("GRAPHVER_SAVE_MAX_OPS", "200000"))
+
+
+async def _save_from_job(job: dict, ops: list) -> dict:
+    """Write a save sent in parts exactly as ``POST /graph/changes`` writes one: its ops resolved
+    under its Idempotency-Key (the ids a retry of it would mint, in one request or in parts), the
+    data source's live rules, ONE commit (``graph._apply_resolved_save``); a refusal comes back as
+    the HTTP answer the route gives."""
+    from pydantic import ValidationError
+    from backend.app.api.v1.endpoints import graph as graph_ep
+    from backend.app.db.engine import get_async_session
+    from backend.app.services.graph_cache import CacheScope
+    from backend.common.property_patch import InvalidPatch
+    svc = get_versioning_service()
+    gid, bid, actor, key, ws = job["graphId"], job["branchId"], job["actor"], job["key"], job["workspaceId"]
+    try:
+        with _domain_errors():
+            meta = await svc.get_graph(gid)
+            if meta is None:
+                raise HTTPException(status_code=404, detail="graph not found")
+            if meta.get("fork_parent_graph_id"):
+                await require_forks_enabled()
+            if len(ops) > SAVE_MAX_OPS:
+                raise HTTPException(status_code=413, detail={
+                    "type": "too_many_changes", "message": f"A save holds up to {SAVE_MAX_OPS:,} changes. "
+                    "Save part of them, then the rest."})
+            try:
+                typed = [graph_ep.GraphChangeOp.model_validate(o) for o in ops]
+                resolved, assigned = graph_ep._resolve_change_ops(
+                    typed, *graph_ep._replay_minters(f"{gid}/{bid}/{actor}", key), by_ref=True)
+            except (ValidationError, InvalidPatch) as exc:
+                raise HTTPException(status_code=422, detail={"type": "invalid_patch", "message": str(exc)[:500]})
+            if not resolved:
+                return {"commitId": None, "assigned": assigned}
+            async with get_async_session() as session:
+                cset = await _live_containment_types(session, ws, meta.get("data_source_id"))
+                rules = await _rules_for_meta(session, ws, meta)
+                identity = await _node_identity_for_meta(session, meta)
+            return await graph_ep._apply_resolved_save(
+                svc, graph_id=gid, branch_id=bid, actor=actor, ops=resolved, assigned=assigned,
+                message=job.get("message"), idempotency_key=key, containment_edge_types=cset,
+                ontology_rules=rules, node_identity=identity,
+                cache_scope=CacheScope(workspace_id=ws, data_source_id=meta.get("data_source_id"), branch_id=bid))
+    except HTTPException as exc:
+        return {"error": {"status": exc.status_code, "detail": _bounded_refusal(exc.detail)}}
+
+
+class SaveInPartsRequest(_ApiModel):
+    upload_id: str = Field(alias="uploadId", max_length=64)
+    message: Optional[str] = Field(default=None, max_length=2000)
+
+
+class SaveJobResponse(_ApiModel):
+    job_id: str = Field(alias="jobId")
+    status: str
+    phase: Optional[str] = None
+    error: Optional[Dict[str, Any]] = None
+    result: Optional[Dict[str, Any]] = None
+
+
+def _save_job_view(row: dict, result: Optional[dict] = None) -> dict:
+    summary = row.get("summary") or {}
+    error = summary.get("error") if row["status"] == "failed" else None
+    if row["status"] == "failed" and error is None:      # failed outside the save (the worker, say)
+        error = {"status": 500, "detail": {"type": "save_failed",
+                                           "message": row.get("errorMessage") or "The save failed. Send it again."}}
+    return {"jobId": row["jobId"], "status": row["status"], "phase": row.get("phase"), "error": error,
+            "result": result}
+
+
+@router.post("/graphs/{graph_id}/branches/{branch_id}/saves", status_code=202, response_model=SaveJobResponse,
+             dependencies=[Depends(require_feature("editModeEnabled"))])
+async def save_in_parts(
+    ws_id: str, graph_id: str, branch_id: str, body: SaveInPartsRequest,
+    idempotency_key: str = Header(alias="Idempotency-Key", min_length=8, max_length=128),
+    user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    meta: dict = Depends(graph_in_workspace),
+    ie=Depends(get_import_export_service),
+):
+    """Save a draft batch too large for one ``POST /graph/changes``: its ops (that route's, one
+    JSON object a line) were sent as an upload (``…/imports/uploads``, format ``ndjson``), and this
+    queues them to be written as ONE commit — 202 with the job to follow (``…/save-jobs/{jobId}``),
+    whose result is the route's answer. The Idempotency-Key is the save's own: the same key never
+    queues it twice, and a save first tried in one request lands once."""
+    from backend.app.services.versioning.import_export import uploads
+    record = await _load_upload(ie, ws_id, graph_id, meta, body.upload_id, user)
+    with _upload_errors():
+        missing = record["parts"] - len(await uploads.received(ie.store, record))
+        if missing:
+            raise HTTPException(status_code=409, detail={
+                "type": "parts_missing", "message": f"{missing} of the save's {record['parts']} parts haven't arrived."})
+        job = await ie.create_save_job(
+            workspace_id=ws_id, data_source_id=meta.get("data_source_id"), graph_id=graph_id, branch_id=branch_id,
+            actor=user.id, record=record, message=body.message, key=idempotency_key)
+    row = await ie.get_job(job["job_id"])
+    result = await ie.save_result(job["job_id"]) if row and row["status"] == "completed" else None
+    return _save_job_view(row or {"jobId": job["job_id"], "status": job["status"]}, result)
+
+
+@router.get("/graphs/{graph_id}/save-jobs/{job_id}", response_model=SaveJobResponse)
+async def get_save_job(
+    ws_id: str, graph_id: str, job_id: str,
+    user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    ie=Depends(get_import_export_service),
+):
+    """A save sent in parts: queued, running, or — done — its answer as ``POST /graph/changes``
+    gives it (``result``), or its refusal (``error``: that route's status and detail)."""
+    row = await ie.get_job(job_id)
+    if row is None or row.get("graphId") != graph_id or row.get("jobType") != "save" \
+            or await ie.save_job_actor(job_id) != user.id:
+        raise HTTPException(status_code=404, detail="save not found")
+    result = await ie.save_result(job_id) if row["status"] == "completed" else None
+    return _save_job_view(row, result)
