@@ -13,9 +13,10 @@ import { Loader2, Plus, Pencil, Trash2, GitBranch, RefreshCw } from 'lucide-reac
 import { cn } from '@/lib/utils'
 import { HoverTip } from '@/components/ui/HoverTip'
 import { timeAgo, formatUtc } from '@/lib/timeAgo'
-import type { EntityRevision, RevisionChange } from '@/services/versioningApiService'
+import type { EntityRevision } from '@/services/versioningApiService'
 import { useEntityHistoryPages } from '../hooks/useVersioning'
-import type { FieldDelta, GraphChange } from '../model/changeModel'
+import type { GraphChange } from '../model/changeModel'
+import { fromRevisionChanges } from '../model/fieldDiff'
 import { actorName } from '../model/branchVocab'
 import { EntityDiff } from './EntityDiff'
 
@@ -25,24 +26,17 @@ const OP_META: Record<string, { label: string; cls: string; Icon: ComponentType<
   delete: { label: 'deleted', cls: 'text-rose-500', Icon: Trash2 },
 }
 
-/** A change's row label: a property by its name, a field by its path. */
-const labelOf = (c: RevisionChange) => (c.path[0] === 'properties' ? c.path.slice(1).join('.') : c.path.join('.'))
-
-/** A revision in the shape the field diff renders. */
-function asChange(entityId: string, v: EntityRevision): GraphChange {
-  const fields: FieldDelta[] = (v.changes ?? []).map((c) => ({ field: labelOf(c), before: c.before, after: c.after }))
-  const side = (pick: 'before' | 'after') => Object.fromEntries(fields.map((f) => [f.field, f[pick]]))
-  const status: GraphChange['status'] = v.op === 'create' ? 'added' : v.op === 'delete' ? 'removed' : 'modified'
-  return {
+/** A revision as the field diff renders it: its own changes, property by property. */
+function RevisionDiff({ entityId, v }: { entityId: string; v: EntityRevision }) {
+  const fields = useMemo(() => fromRevisionChanges(v.changes ?? []), [v.changes])
+  const change: GraphChange = {
     entityId,
     kind: 'node',
-    status,
+    status: v.op === 'create' ? 'added' : v.op === 'delete' ? 'removed' : 'modified',
     label: entityId,
-    fields: status === 'modified' ? fields : undefined,
-    before: status === 'removed' ? side('before') : undefined,
-    after: status === 'added' ? side('after') : undefined,
     origin: { source: 'commit', commitId: v.commit_id },
   }
+  return <EntityDiff change={change} fields={fields} />
 }
 
 function Timeline({ entityId, rows, dotCls, userNames }: {
@@ -78,7 +72,7 @@ function Timeline({ entityId, rows, dotCls, userNames }: {
             <div className="mt-1.5">
               {v.changes === null
                 ? <p className="text-[11px] text-ink-muted italic">What this revision changed is no longer on record.</p>
-                : <EntityDiff change={asChange(entityId, v)} />}
+                : <RevisionDiff entityId={entityId} v={v} />}
             </div>
           </li>
         )

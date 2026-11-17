@@ -7,7 +7,7 @@
  * same `EntityDiff` the flat ChangesPanel uses.
  */
 import { useMemo, useState } from 'react'
-import { ChevronRight, Loader2, AlertCircle, Folder, Boxes, Spline } from 'lucide-react'
+import { ChevronRight, Loader2, AlertCircle, Folder, Boxes, Spline, RefreshCw } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { ChangeOrigin } from '../model/changeModel'
 import type { ChangeListOrigin, DiffSummaryResponse, DiffTreeNode } from '@/services/versioningApiService'
@@ -225,6 +225,8 @@ function TreeRow(props: {
 export function ChangeTreePanel({
   summary,
   isLoading,
+  error,
+  onRetry,
   fetchChildren,
   origin,
   emptyHint = 'No changes yet.',
@@ -234,6 +236,9 @@ export function ChangeTreePanel({
 }: {
   summary?: DiffSummaryResponse
   isLoading?: boolean
+  /** The summary could not be read (a timeout, a busy server): said as such — never as "no changes". */
+  error?: unknown
+  onRetry?: () => void
   fetchChildren: FetchChildren
   origin: ChangeOrigin
   emptyHint?: string
@@ -255,6 +260,30 @@ export function ChangeTreePanel({
     return (
       <div className="flex items-center gap-2 text-sm text-ink-muted py-8 justify-center">
         <Loader2 className="w-4 h-4 animate-spin" /> Computing changes…
+      </div>
+    )
+  }
+  if (error && !summary) {
+    // What failed, a way to try again, and — where one exists — the same changes a page at a time,
+    // which reads them from the change index and not the tree.
+    return (
+      <div className={cn('space-y-2.5', className)}>
+        <div role="alert" className="rounded-xl border border-amber-500/30 bg-amber-500/[0.06] px-3.5 py-3 flex items-start gap-2.5">
+          <AlertCircle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" aria-hidden />
+          <div className="min-w-0 flex-1">
+            <p className="text-[12.5px] font-semibold text-ink">Couldn’t lay these changes out as a tree</p>
+            <p className="text-[11.5px] text-ink-muted mt-0.5 leading-relaxed">
+              {list ? 'They are listed below, a page at a time.' : 'The server took too long or was busy.'}
+            </p>
+          </div>
+          {onRetry && (
+            <button type="button" onClick={onRetry}
+              className="shrink-0 inline-flex items-center gap-1 px-2 h-7 rounded-lg text-[11.5px] font-semibold text-ink-secondary hover:text-ink hover:bg-black/[0.05] dark:hover:bg-white/[0.08]">
+              <RefreshCw className="w-3.5 h-3.5" aria-hidden /> Try again
+            </button>
+          )}
+        </div>
+        {list && <ChangeList wsId={list.wsId} graphId={list.graphId} origin={list.origin} emptyHint={emptyHint} />}
       </div>
     )
   }

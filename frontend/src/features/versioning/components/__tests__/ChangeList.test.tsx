@@ -27,6 +27,7 @@ vi.mock('@/services/versioningApiService', async (importOriginal) => ({
 }))
 
 import { ChangeList } from '../ChangeList'
+import { useChangeNavigatorStore } from '@/store/changeNavigatorStore'
 
 const NONE = { added: 0, modified: 0, removed: 0 }
 
@@ -124,6 +125,28 @@ describe('ChangeList', () => {
     expect(await screen.findByText('About 300,000 changes')).toBeInTheDocument()
     expect(screen.getByText(/more than a list here shows/)).toBeInTheDocument()
     expect(api.getChangeEntries).not.toHaveBeenCalled()
+  })
+
+  it('shows an entity on the canvas, where there is one, and not one that was removed', async () => {
+    useChangeNavigatorStore.setState({ canReveal: true, active: false })
+    api.getChangeSummary.mockResolvedValue(summary())
+    api.getChangeEntries.mockResolvedValue(page([row('t1', 'modified', 'Table', 'customers'), row('c1', 'removed', 'Column', 'amount')], 0, 2))
+    const user = userEvent.setup()
+    wrap(<ChangeList wsId="ws1" graphId="g1" origin={{ branchId: 'br_1' }} />)
+    await user.click(await screen.findByRole('button', { name: 'Show customers on canvas' }))
+    expect(screen.queryByRole('button', { name: 'Show amount on canvas' })).not.toBeInTheDocument()
+    const nav = useChangeNavigatorStore.getState()
+    expect(nav.active).toBe(true)
+    expect(nav.stops[nav.index]).toMatchObject({ id: 'urn:customers', name: 'customers', saved: true })
+    useChangeNavigatorStore.setState({ canReveal: false, active: false })
+  })
+
+  it('offers no canvas where there is none to show it on', async () => {
+    api.getChangeSummary.mockResolvedValue(summary())
+    api.getChangeEntries.mockResolvedValue(page([row('t1', 'modified', 'Table', 'customers')], 0, 1))
+    wrap(<ChangeList wsId="ws1" graphId="g1" origin={{ branchId: 'br_1' }} />)
+    await screen.findByText('customers')
+    expect(screen.queryByRole('button', { name: /on canvas/ })).not.toBeInTheDocument()
   })
 
   it('says so when nothing changed', async () => {

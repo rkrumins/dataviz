@@ -42,6 +42,10 @@ vi.mock('@/features/versioning/hooks/useVersioning', () => ({
     data: wsId && prId ? { counts: { added: 2, modified: 1, removed: 0 } } : undefined,
     isLoading: false,
   }),
+  useChangeSummary: (wsId?: string, graphId?: string | null, origin?: { branchId?: string } | null) => ({
+    data: wsId && graphId && origin?.branchId === 'b_draft' ? { counts: { added: 40000, modified: 0, removed: 0 } } : undefined,
+    isLoading: false,
+  }),
   useCloseMergeRequest: () => ({ mutate: vi.fn(), isPending: false }),
 }))
 
@@ -65,5 +69,11 @@ describe('a review being merged', () => {
     render(<PrListRow wsId="ws1" pr={mergingPr} onOpen={() => {}} />)
     expect(screen.getByText('3 changes')).toBeInTheDocument()
     expect(screen.queryByTitle(/Dismiss/)).not.toBeInTheDocument()
+  })
+
+  it('counts a draft’s review from its change list, not by merging it', () => {
+    const draftPr: PullRequest = { ...mergingPr, prId: 'pr_draft', status: 'open', graphId: 'g1', sourceBranchId: 'b_draft' }
+    render(<PrListRow wsId="ws1" pr={draftPr} onOpen={() => {}} />)
+    expect(screen.getByText('40000 changes')).toBeInTheDocument()
   })
 })

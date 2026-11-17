@@ -381,6 +381,8 @@ export interface DiffSummaryResponse {
   impact: Record<string, number>
   /** A draft with more changes than the tree lists: counts only, no groups. */
   tooLarge?: { changed: number; limit: number }
+  /** A fork's review past the cap: the window of the fork's main its changes are listed from. */
+  list?: { graphId: string; fromSeq: number; toSeq: number }
 }
 
 export interface DiffChildrenResponse {
@@ -928,13 +930,21 @@ type RefusalDetail = string | {
   actors?: string[]
   /** How many entities a change too large to read whole here changes (`too_large_for_tree`). */
   changed?: number
+  /** Where a fork's review lists those changes a page at a time (`too_large_for_tree`). */
+  list?: { graphId: string; fromSeq: number; toSeq: number }
 } | null | undefined
 
 /** A change too large to read whole here (409 `too_large_for_tree`): a tree's children, or a
  *  review's itemised diff, past `GRAPHVER_DIFF_TREE_MAX_CHANGES`. List it with a change list. */
 export class DiffTooLargeError extends Error {
   readonly status = 409
-  constructor(readonly changed: number, readonly limit: number, message?: string) {
+  constructor(
+    readonly changed: number,
+    readonly limit: number,
+    message?: string,
+    /** A fork's review: the window of the fork's main its changes are listed from. */
+    readonly listing?: { graphId: string; fromSeq: number; toSeq: number },
+  ) {
     super(message ?? `${changed} changes — more than ${limit} are listed a page at a time`)
     this.name = 'DiffTooLargeError'
   }
@@ -987,7 +997,7 @@ function versioningError(status: number, detail: RefusalDetail, fallback: string
     return new ReviewRequiredError(d)
   }
   if (status === 409 && d?.type === 'too_large_for_tree') {
-    return new DiffTooLargeError(d.changed ?? 0, d.limit ?? 0, d.message)
+    return new DiffTooLargeError(d.changed ?? 0, d.limit ?? 0, d.message, d.list)
   }
   if (status === 409 && d?.type === 'graph_not_writable') {
     return new GraphNotWritableError(d.message)
@@ -1009,6 +1019,10 @@ function versioningError(status: number, detail: RefusalDetail, fallback: string
     return new BootstrapDecisionError(d.type, d.message)
   }
   if (status === 401) return new Error('Session expired')
+  if (status === 413) {
+    // Nothing was written: the request was larger than the server takes in one go.
+    return Object.assign(new Error('This is too large to send in one go — nothing was saved. Save part of it, then the rest.'), { status })
+  }
   const msg =
     typeof detail === 'string'
       ? detail

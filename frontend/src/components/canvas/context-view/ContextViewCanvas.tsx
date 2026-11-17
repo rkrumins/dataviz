@@ -80,6 +80,7 @@ import { SelectionBar } from './SelectionBar'
 import { BulkEditPanel } from './BulkEditPanel'
 import { LayerSettingsPanel } from './LayerSettingsPanel'
 import { useRevealNode, type RevealOptions } from '@/hooks/useRevealNode'
+import { ChangeNavigator } from './ChangeNavigator'
 import { useLocateManyOnCanvas } from '@/hooks/useLocateManyOnCanvas'
 import { useRevealPartners, REVEAL_PARTNERS_CAP } from '@/hooks/useRevealPartners'
 import { primeLineageFor } from '@/lib/primeLineageFor'
@@ -357,6 +358,7 @@ import { useStagedChangesStore, type StagedChange } from '@/store/stagedChangesS
 import { StagedChangesPanel } from './StagedChangesPanel'
 import { ImportDialog } from '@/features/import-export/ImportDialog'
 import { ExportDialog } from '@/features/import-export/ExportDialog'
+import type { ImportSummary } from '@/services/importExportApiService'
 import { ExportViewDialog } from '@/features/view-transfer/ExportViewDialog'
 import { SaveAsTemplateDialog } from '@/components/templates/SaveAsTemplateDialog'
 import { useLayoutTemplatesEnabled } from '@/hooks/useLayoutTemplates'
@@ -909,7 +911,8 @@ export function ContextViewCanvas({
       return false
     },
     onCloseEntityDrawer: () => {
-      if (isStagedPanelOpen) { closeStagedChangesPanel(); return true }
+      // Held while a save or a publish from it runs.
+      if (isStagedPanelOpen) { if (useStagedChangesStore.getState().applyStatus !== 'applying') closeStagedChangesPanel(); return true }
       if (drawerNodeId || drawerEdge) {
         // One move: with unsaved edits in the drawer, neither happens until the reader decides.
         useCanvasStore.getState().requestDrawerMove(() => { closeNodeDrawer(); clearSelection() })
@@ -1709,8 +1712,16 @@ export function ContextViewCanvas({
   // /trace/v2 wrappers that lived here are gone with them.
 
   // Staged changes — review-before-save layer for all canvas edits
-  const stagedChangeList = useStagedChangesStore(s => s.changes)
-  const stagedRedoStack = useStagedChangesStore(s => s.redoStack)
+  // Counts, not the lists: the whole canvas re-rendered on every staged edit. The save reads the
+  // list when it runs.
+  const stagedCount = useStagedChangesStore(s => s.changes.length)
+  const stagedRedoCount = useStagedChangesStore(s => s.redoStack.length)
+  const stagedPastCount = useStagedChangesStore(s => s.past.length)
+  // What the draft already holds (saved edits, imports): Review & Save can publish it.
+  const draftChangeCount = useBranchStore(s => s.activeChangeSet
+    ? s.activeChangeSet.counts.added + s.activeChangeSet.counts.modified + s.activeChangeSet.counts.removed : 0)
+  // Nothing is undone under a save in flight (the ⌘Z handler below holds the same rule).
+  const stagedSaving = useStagedChangesStore(s => s.applyStatus === 'applying')
   const isStagedPanelOpen = useStagedChangesStore(s => s.isReviewPanelOpen)
   const openStagedChangesPanel = useStagedChangesStore(s => s.openReviewPanel)
   const closeStagedChangesPanel = useStagedChangesStore(s => s.closeReviewPanel)
@@ -1723,6 +1734,9 @@ export function ContextViewCanvas({
   // An import commits to the draft server-side; we refresh only when the user LEAVES the import
   // dialog (re-hydrating mid-dialog unmounts it and hides the preview).
   const importedRef = useRef(false)
+  // What the import did, said once its changes are on the canvas.
+  const importedSummaryRef = useRef<ImportSummary | null>(null)
+  const { notify: notifyImport } = useAppNotifications()
   const applyStagedChanges = useStagedChangesStore(s => s.applyAll)
   const queryClient = useQueryClient()
   // Refresh the canvas + versioning surfaces after an import — but only on dialog exit, and only if
@@ -1731,16 +1745,31 @@ export function ContextViewCanvas({
   // re-read against the old layout leaves them unplaced (a curated view never shows them) — then the
   // cached answers the providers hold for the draft before the import, then the draft epoch, which
   // re-keys every draft read and remounts the canvas.
-  const refreshAfterImport = useCallback(async () => {
+  const refreshAfterImport = useCallback(async (announce = true) => {
     if (!importedRef.current) return
     importedRef.current = false
+    const summary = importedSummaryRef.current
+    importedSummaryRef.current = null
     const viewId = useSchemaStore.getState().getActiveView()?.id
     if (viewId) await rereadBranchView(viewId)
     queryClient.invalidateQueries({ queryKey: VERSIONING_KEYS.all })
     invalidateAggregatedEdges()
     releaseProviderCaches()
     useBranchStore.getState().bumpDraftEpoch()
-  }, [queryClient, rereadBranchView])
+    // What the import changed is shown on the canvas — ringed entities, haloed links — even if the
+    // reader had hidden the draft's saved changes before.
+    useBranchStore.getState().setCommittedDiffHidden(false)
+    const n = summary ? summary.new + summary.updated + summary.deleted : 0
+    if (announce && summary && n > 0) {
+      const parts = [
+        summary.new && `${summary.new.toLocaleString()} added`,
+        summary.updated && `${summary.updated.toLocaleString()} updated`,
+        summary.deleted && `${summary.deleted.toLocaleString()} removed`,
+      ].filter(Boolean).join(', ')
+      notifyImport('success', `Imported into your draft: ${parts}. They’re highlighted on the canvas.`,
+        { label: 'Review changes', onClick: () => useStagedChangesStore.getState().openReviewPanel('saved') })
+    }
+  }, [queryClient, rereadBranchView, notifyImport])
   // After a publish/merge, `main@head` moves and the FalkorDB projection (which the canvas +
   // Properties panel read) catches up ASYNCHRONOUSLY, serving the version it last finished until
   // then. The view page re-hydrates when it finishes, for every viewer and canvas
@@ -4808,13 +4837,13 @@ export function ContextViewCanvas({
   // Done: switching branches reloads the canvas, which would silently drop
   // staged edits — so route the user through the review panel instead.
   const handleExitEdit = useCallback(() => {
-    if (stagedChangeList.length > 0) {
+    if (stagedCount > 0) {
       openStagedChangesPanel()
       notify('warning', 'Review your pending edits — save or discard them before leaving the draft.')
       return
     }
     useBranchStore.getState().switchToMain()
-  }, [stagedChangeList.length, openStagedChangesPanel, notify])
+  }, [stagedCount, openStagedChangesPanel, notify])
 
   // Tracks nodes currently being fetched — prevents duplicate fetches on rapid clicks.
   // A ref (not state) because we need synchronous reads inside the toggle callback.
@@ -6756,15 +6785,16 @@ export function ContextViewCanvas({
         canEnterEdit={canEnterEdit}
         onEnterEdit={handleEnterEdit}
         onExitEdit={handleExitEdit}
-        pendingChangeCount={stagedChangeList.length}
+        pendingChangeCount={stagedCount}
+        draftChangeCount={draftChangeCount}
         onOpenStagedChanges={openStagedChangesPanel}
         // A pending layout edit is saved first: the import writes its placements into the same
         // overlay, and the debounced save landing after it would put the old layout back over them.
         onImport={() => { void flushLayoutSave().then(() => setShowImportDialog(true)) }}
         onExport={() => setShowExportDialog(true)}
         thisView={thisView}
-        canUndo={stagedChangeList.length > 0}
-        canRedo={stagedRedoStack.length > 0}
+        canUndo={!stagedSaving && (stagedCount > 0 || stagedPastCount > 0)}
+        canRedo={!stagedSaving && stagedRedoCount > 0}
         onUndo={undoStagedChange}
         onRedo={redoStagedChange}
         connectToolOn={edgeConnect.state.tool}
@@ -7073,13 +7103,14 @@ export function ContextViewCanvas({
             onReviewChanges={() => {
               setShowImportDialog(false)
               useVersioningPanelStore.getState().openPanel('changes')
-              void refreshAfterImport()
+              void refreshAfterImport(false)
             }}
-            onImported={() => {
+            onImported={(summary) => {
               // The import committed to the draft server-side. DON'T refresh the canvas now — that
               // would re-hydrate behind the open dialog and unmount its preview. Just remember an
               // import happened; refreshAfterImport() runs when the user closes / reviews.
               importedRef.current = true
+              importedSummaryRef.current = summary
             }}
           />
         )}
@@ -7127,8 +7158,19 @@ export function ContextViewCanvas({
         {/* Save Confirmation Modal — opens when the user clicks Save Blueprint
              or the pending-changes badge. Single source of truth for reviewing
              and confirming a batch of staged edits before they hit the backend. */}
-        <StagedChangesPanel describe={describeStagedChange} onConfirm={async () => {
-          if (!scopeWsId) return
+        {/* Steps through changed entities on the canvas, when something starts it. */}
+        <ChangeNavigator reveal={revealOnCanvas} />
+        <StagedChangesPanel describe={describeStagedChange}
+          wsId={scopeWsId} graphId={graphId} dataSourceId={dataSourceId} viewId={activeView?.id ?? null}
+          onReveal={(id) => {
+            useCanvasStore.getState().openNodeDrawer(id)
+            void revealOnCanvas(id)
+          }}
+          // True once the changes are written: the panel then closes (Save to draft) or goes on to
+          // Publish. Every other way out leaves it open.
+          onConfirm={async () => {
+          if (!scopeWsId) return false
+          const stagedChangeList = useStagedChangesStore.getState().changes
           // Draft mode: persist EVERY change type — creates, edges, updates/deletes, and layer
           // moves — to the draft branch as ONE atomic, server-merged /graph/changes commit. One
           // Review & Save is exactly one commit (the backend mints urns + resolves temp refs).
@@ -7174,7 +7216,6 @@ export function ContextViewCanvas({
               // (a save is user-initiated and infrequent, so the broad refetch is fine).
               queryClient.invalidateQueries({ queryKey: VERSIONING_KEYS.all })
               await flushLayoutSave()   // durably persist the view's referenceLayout (layers + assignments)
-              closeStagedChangesPanel()
               // Only claim what was written. `unsaved` names node fields the op mapper cannot carry
               // (the entity drawer's schema-property inputs, a raw-JSON edit) — an edit made only of
               // those sends no ops at all, and a zero-op save resolves exactly like a commit. A green
@@ -7192,6 +7233,8 @@ export function ContextViewCanvas({
                 notify('success', 'Saved to draft.')
               }
               useSaveProblemsStore.getState().clear()
+              // What was carried is cleared either way; the notification above says what landed.
+              return true
             } catch (e) {
               if (e instanceof OntologyViolationError) {
                 // Refused as a whole — nothing was written. Say exactly what and why, on the changes
@@ -7241,8 +7284,8 @@ export function ContextViewCanvas({
               } else {
                 notify('error', (e as Error).message)
               }
+              return false
             }
-            return
           }
           // Main mode: the view's layout changes persist with the view; graph edits never write to
           // the published graph — they stay staged, marked, for the user to take to a draft.
@@ -7251,12 +7294,13 @@ export function ContextViewCanvas({
             : { ok: 0, failed: 0 }
           if (result.failed === 0) {
             await flushLayoutSave()
-            closeStagedChangesPanel()
+            return true
           } else {
             if (result.ok > 0) await flushLayoutSave()
             notify('warning', `${result.failed} ${result.failed === 1 ? 'change edits' : 'changes edit'} the published graph — open a draft to save ${result.failed === 1 ? 'it' : 'them'}.`,
               canManage && versioningEnabled && canEnterEdit && editModeEnabled
                 ? { label: 'Open a draft', onClick: handleEnterEdit } : undefined)
+            return false
           }
         }} />
 

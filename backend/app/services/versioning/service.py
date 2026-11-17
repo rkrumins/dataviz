@@ -521,10 +521,13 @@ class DiffTooLarge(RuntimeError):
     """A draft changes more entities than its Changes tree lays out (``DIFF_TREE_MAX_CHANGES``):
     its summary is counts only, and the tree has no children to page through."""
 
-    def __init__(self, changed: int, limit: int):
+    def __init__(self, changed: int, limit: int, listing: Optional[Dict[str, object]] = None):
         super().__init__(f"this draft changes {changed} entities; the tree lists up to {limit}")
         self.changed = changed
         self.limit = limit
+        #: Where the same changes are listed a page at a time (``/graphs/{gid}/diff/*``) when that
+        #: is not the review's own draft — a fork's: ``{graphId, fromSeq, toSeq}``.
+        self.listing = listing
 
 
 #: Why a draft behind ``main`` must pull before it lands (``NotUpToDate.reason``, doc 19 §3.5).
@@ -4502,9 +4505,11 @@ class GraphVersioningService:
                 await self._require_review_changes(s, pr)
                 big = await self._pr_too_large(s, pr)
                 if big is not None:
-                    raise DiffTooLarge(big[1], config.DIFF_TREE_MAX_CHANGES)
+                    raise DiffTooLarge(big[1], config.DIFF_TREE_MAX_CHANGES, big[2])
                 merged, theirs = await self._pr_merge_states(s, pr)
-        return _deltas_to_diff_vs_main(net_delta(theirs, merged), theirs)
+        # Pure CPU over every changed entity: off the event loop, so one large review never
+        # stalls the requests sharing this worker.
+        return await asyncio.to_thread(lambda: _deltas_to_diff_vs_main(net_delta(theirs, merged), theirs))
 
     async def diff_pr_summary(
         self, *, pr_id: str, containment_edge_types, limit: int = 200,
@@ -4529,14 +4534,22 @@ class GraphVersioningService:
                                                   containment_edge_types=containment_edge_types,
                                                   limit=limit)
         if big is not None:
-            # Counted from the draft's change index — what the draft changes where it branched
-            # off, which is what merging it changes once it is up to date — instead of merging
-            # every changed entity in the web process for a row of the review inbox.
-            draft, changed = big
-            index = await self._change_index(pr.target_graph_id, ChangeOrigin(branch_id=draft.id),
-                                             containment_edge_types, viewer=None)
+            # Counted from the change index — a draft's: what it changes where it branched off,
+            # which is what merging it changes once it is up to date; a fork's: its own changes
+            # since its last merged review — instead of merging every changed entity in the web
+            # process for a row of the review inbox.
+            draft, changed, listing = big
+            if draft is not None:
+                index = await self._change_index(pr.target_graph_id, ChangeOrigin(branch_id=draft.id),
+                                                 containment_edge_types, viewer=None)
+            else:
+                index = await self._change_index(
+                    listing["graphId"], ChangeOrigin(from_seq=listing["fromSeq"], to_seq=listing["toSeq"]),
+                    containment_edge_types, viewer=None)
+                # Where the panel lists them: that window of the fork's main.
+                return {**_counted_tree_summary(index, changed), "list": listing}
             return _counted_tree_summary(index, changed)
-        index = _build_diff_hierarchy(merged, theirs, containment_edge_types)
+        index = await asyncio.to_thread(_build_diff_hierarchy, merged, theirs, containment_edge_types)
         return _hierarchy_summary_view(index, limit)
 
     async def diff_pr_children(
@@ -4555,27 +4568,43 @@ class GraphVersioningService:
                 await self._require_review_changes(s, pr)
                 big = await self._pr_too_large(s, pr)
                 if big is not None:
-                    raise DiffTooLarge(big[1], config.DIFF_TREE_MAX_CHANGES)
+                    raise DiffTooLarge(big[1], config.DIFF_TREE_MAX_CHANGES, big[2])
                 merged, theirs = await self._pr_merge_states(s, pr, containment_edge_types)
         if squash is not None:
             return await self.diff_commit_children(
                 graph_id=squash.graph_id, commit_id=squash.id, container_key=container_key,
                 containment_edge_types=containment_edge_types, limit=limit, offset=offset)
-        index = _build_diff_hierarchy(merged, theirs, containment_edge_types)
+        index = await asyncio.to_thread(_build_diff_hierarchy, merged, theirs, containment_edge_types)
         return _hierarchy_children_view(index, container_key, limit, offset)
 
-    async def _pr_too_large(self, s, pr) -> Optional[Tuple[BranchORM, int]]:
-        """A draft's review too large to merge inside a request for its diff: ``(draft, at
-        least how many)`` past ``DIFF_TREE_MAX_CHANGES`` — the draft's own changes, and main's
-        since the draft branched off when it is behind (the merge composes both) — else None.
-        Its list is the draft's change list (``/graphs/{gid}/diff/*``). A fork's review is merged
-        in the request at any size, as before."""
+    async def _pr_too_large(
+        self, s, pr,
+    ) -> Optional[Tuple[Optional[BranchORM], int, Optional[Dict[str, object]]]]:
+        """A review too large to merge inside a request for its diff: ``(draft, at least how many,
+        listing)`` past ``DIFF_TREE_MAX_CHANGES``, else None.
+
+        A draft's counts its own changes, and main's since it branched off when it is behind (the
+        merge composes both); its list is the draft's change list (``/graphs/{gid}/diff/*``), so
+        ``listing`` is None. A fork's counts its own changes since its last merged review — the
+        window :meth:`_compute_fork_merge` reads — and lists them as that window of the fork's
+        ``main``: ``listing`` is ``{graphId, fromSeq, toSeq}``, ``draft`` None."""
+        cap = config.DIFF_TREE_MAX_CHANGES
         if not self._is_draft_mr(pr):
-            return None
+            fork = await s.get(GraphORM, pr.graph_id)
+            if fork is None:
+                return None
+            base = await self._fork_merge_base(s, fork)
+            head = fork.main_head_commit_seq or 0
+            if head <= base:
+                return None
+            fork_main = await self._main_branch_id(s, fork.id)
+            changed = await self._own_change_count(s, fork.id, fork_main, base, head, cap)
+            if changed <= cap:
+                return None
+            return None, changed, {"graphId": fork.id, "fromSeq": base, "toSeq": head}
         draft = await s.get(BranchORM, pr.source_branch_id)
         if draft is None:
             return None
-        cap = config.DIFF_TREE_MAX_CHANGES
         changed = await self._change_count(s, pr.target_graph_id, draft.id)
         if changed <= cap:
             graph = await s.get(GraphORM, pr.target_graph_id)
@@ -4583,7 +4612,7 @@ class GraphVersioningService:
             if head > base:
                 main_id = await self._main_branch_id(s, pr.target_graph_id)
                 changed += await self._own_change_count(s, pr.target_graph_id, main_id, base, head, cap)
-        return (draft, changed) if changed > cap else None
+        return (draft, changed, None) if changed > cap else None
 
     async def merge_mr(
         self, *, mr_id: str, actor: str, message: str,
@@ -7237,12 +7266,18 @@ class GraphVersioningService:
         per-type rollup of the changed entities, from the narrow change index, with no groups and
         ``tooLarge`` saying so."""
         async with self._session() as s:
-            counted = await self._count_if_too_large(s, graph_id, branch_id, containment_edge_types, viewer)
-            if counted is not None:
-                return counted
-            merged, theirs = await self._branch_diff_states(
-                s, graph_id, branch_id, containment_edge_types, viewer=viewer)
-        index = _build_diff_hierarchy(merged, theirs, containment_edge_types)
+            changed = await self._too_large_count(s, graph_id, branch_id, viewer)
+            if changed is None:
+                merged, theirs = await self._branch_diff_states(
+                    s, graph_id, branch_id, containment_edge_types, viewer=viewer)
+        if changed is not None:
+            # Counted from the draft's change index — built once per version of the draft and
+            # cached, on a bounded session — not by re-reading every head per request: a 100k
+            # draft's Changes tab opens on its counts at once and lists them a page at a time.
+            index = await self._change_index(graph_id, ChangeOrigin(branch_id=branch_id),
+                                             containment_edge_types, viewer=viewer)
+            return _counted_tree_summary(index, changed)
+        index = await asyncio.to_thread(_build_diff_hierarchy, merged, theirs, containment_edge_types)
         return _hierarchy_summary_view(index, limit)
 
     async def diff_branch_children(
@@ -7252,12 +7287,12 @@ class GraphVersioningService:
         """One container's direct children in a draft's hierarchical diff (lazy-load step).
         :class:`DiffTooLarge` for a draft the tree doesn't lay out."""
         async with self._session() as s:
-            counted = await self._count_if_too_large(s, graph_id, branch_id, containment_edge_types, viewer)
-            if counted is not None:
-                raise DiffTooLarge(counted["tooLarge"]["changed"], counted["tooLarge"]["limit"])
+            changed = await self._too_large_count(s, graph_id, branch_id, viewer)
+            if changed is not None:
+                raise DiffTooLarge(changed, config.DIFF_TREE_MAX_CHANGES)
             merged, theirs = await self._branch_diff_states(
                 s, graph_id, branch_id, containment_edge_types, viewer=viewer)
-        index = _build_diff_hierarchy(merged, theirs, containment_edge_types)
+        index = await asyncio.to_thread(_build_diff_hierarchy, merged, theirs, containment_edge_types)
         return _hierarchy_children_view(index, container_key, limit, offset)
 
     async def branch_change_count(self, *, graph_id: str, branch_id: str) -> int:
@@ -7289,41 +7324,14 @@ class GraphVersioningService:
         return await s.scalar(select(func.count()).select_from(EntityHeadORM).where(
             EntityHeadORM.graph_id == graph_id, EntityHeadORM.branch_id == branch_id)) or 0
 
-    async def _count_if_too_large(self, s, graph_id, branch_id, containment_edge_types, viewer):
-        """The Changes summary of a draft past ``DIFF_TREE_MAX_CHANGES`` — or ``None`` for one the
-        tree can lay out. Classified like :meth:`diff_branch_vs_base` from hashes; the impact
-        rollup counts the changed entities by type (the tree's also counts their containers)."""
+    async def _too_large_count(self, s, graph_id, branch_id, viewer) -> Optional[int]:
+        """How many entities a draft past ``DIFF_TREE_MAX_CHANGES`` changes — or ``None`` for one
+        the tree can lay out. One indexed count; its summary comes from the change index."""
         branch = await self._get_branch(s, graph_id, branch_id)
         await self._assert_branch_readable(s, branch, viewer)
         self._require_changes(branch)
         changed = await self._change_count(s, graph_id, branch_id)
-        if changed <= config.DIFF_TREE_MAX_CHANGES:
-            return None
-        heads = await self._head_index(s, graph_id, branch_id)
-        main_id = await self._main_branch_id(s, graph_id)
-        before = await self._hashes_at(s, graph_id, main_id, list(heads), branch.base_commit_seq or 0)
-        cset = {t.upper() for t in (containment_edge_types or [])}
-        counts = {"added": 0, "modified": 0, "removed": 0}
-        entity_counts = {"added": 0, "modified": 0, "removed": 0}
-        edge_counts = {"added": 0, "modified": 0, "removed": 0}
-        impact: Dict[str, int] = {}
-        for eid, h in heads.items():
-            b = before.get(eid)
-            status = ("added" if b is None and h.live else
-                      "removed" if b is not None and not h.live else
-                      "modified" if b is not None and b.content_hash != h.content_hash else None)
-            if status is None:
-                continue
-            counts[status] += 1
-            typ = h.type if h.live else b.type
-            if h.kind == "node":
-                entity_counts[status] += 1
-                impact[typ or "Other"] = impact.get(typ or "Other", 0) + 1
-            elif (typ or "").upper() not in cset:            # a relationship, not structure
-                edge_counts[status] += 1
-        return {"groups": [], "groupTotal": 0, "counts": counts, "entityCounts": entity_counts,
-                "edgeCounts": edge_counts, "impact": impact,
-                "tooLarge": {"changed": changed, "limit": config.DIFF_TREE_MAX_CHANGES}}
+        return changed if changed > config.DIFF_TREE_MAX_CHANGES else None
 
     # ------------------------------------------------------------------ #
     # Change lists at any size (change_index.py)                          #

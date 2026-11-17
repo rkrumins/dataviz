@@ -21,14 +21,16 @@ everyone sees until it's published.
 
 ```mermaid
 flowchart LR
-  A["Edit in a drawer<br/>or on the canvas"] --> B["Stage changes"]
-  B --> C["Review & Save"]
+  A["Edit in a drawer<br/>or on the canvas<br/>(staged as you go)"] --> C["Review & Save"]
   C --> D["Saved to your draft"]
-  D --> E["Publish:<br/>Submit for review"]
+  D -->|"keep editing"| A
+  D --> E["Publish, or<br/>send for review"]
 ```
 
-- **Stage changes** keeps an edit for review. It is not saved yet.
-- **Review & Save** saves everything you staged to your **draft** in one go.
+- Every edit is **staged** the moment you make it — press `Enter`, click away,
+  flip a switch. A staged edit is kept for review; it is not saved yet.
+- **Review & Save** saves everything staged to your **draft** in one go — as
+  often as you like — and can go straight on to publishing it.
 - Your draft is a working copy of the data source. **Published** — the version
   everyone sees — doesn't change until your draft is published, normally after
   a review in the [Review Center](/guide/review-center).
@@ -68,27 +70,35 @@ You can also start from where you are:
 
 1. Click the entity on the canvas. Its drawer opens on the **View** tab (in the
    Business view, choose **Details** in the bar at the bottom, or press `Enter`).
-2. Choose the **Edit** tab.
-3. Change what you need: **Name**, **Business label** (the name the business
-   knows it by), **Description**, **Qualified name**, **Source system**,
-   **Schema properties** or **Properties**. The footer now says **Unsaved
-   changes**.
-4. Choose **Stage changes**, or press `⌘S` / `Ctrl-S`. The footer says *Staged
-   — Review & Save to keep it*, and the entity gets a dashed halo on the canvas.
+2. Change a property right where it is: click its value (or move to it and
+   press `Enter`), type, and press `Enter` — or click away. `Shift-Enter` starts
+   a new line; ⤢ opens the full editor for long text; a Yes/No switch is kept
+   the moment it flips. `Esc` puts the value back.
+3. The edit is staged straight away: the row is marked **Edited** (hover it to
+   see what it was, or choose ↺ to put it back), the entity gets a dashed halo
+   on the canvas, and the footer says how many changes are staged on the
+   entity, with **Revert** and **Review & Save**.
 
-**Cancel** throws the edit away. `Esc` first leaves the field you're typing in,
-then closes the drawer.
+- **Add property** adds one in place; under it, **Suggested** offers names
+  other entities of the same type carry — one click starts it.
+- A property you delete stays listed, struck through and marked **Removed**,
+  until you save; **Restore** brings it back.
+- The **Edit** tab holds the entity's other fields — **Name**, **Business
+  label** (the name the business knows it by), **Description**, **Qualified
+  name**, **Source system**, **Schema properties** — and each is staged when
+  you press `Enter` or leave it.
+- **Undo** (`⌘Z` / `Ctrl-Z`) steps back one edit at a time; **Redo** puts it
+  back.
 
 To rename an entity without opening its drawer, double-click its row and type.
 In the Business view the row shows the business label, so that is the name you
 change; in the Technical view you change its **Name**.
 
-![An entity drawer on the Edit tab with a changed Description; the footer shows 'Unsaved changes', Cancel and Stage changes (hover tip showing the keyboard shortcut)](/docs-assets/guide/editing-in-a-draft-stage-bar.png)
+### If you leave while typing
 
-### If you leave before staging
-
-Clicking elsewhere on the canvas, choosing another entity or closing the drawer
-with an edit you haven't staged opens **Unsaved changes**:
+Clicking elsewhere stages what you typed. Closing the drawer some other way
+while a field still holds typing (`⌘S` / `Ctrl-S` stages it) opens **Unsaved
+changes**:
 
 | Choose | What happens |
 | --- | --- |
@@ -119,8 +129,9 @@ to confirm.
    - **Add a property to all** adds a new one.
 4. Choose **Stage for N**. Each entity's change is staged on its own, as if you
    had edited them one by one — an entity you had already changed keeps that
-   change too, and one the edit wouldn't change isn't touched. **Undo** on the
-   message takes the whole edit back.
+   change too, and one the edit wouldn't change isn't touched. It is one step
+   however many entities you hold: **Undo** on the message (or the toolbar's
+   **Undo**) takes the whole edit back.
 
 Outside a draft the same bar says **Details**: the panel shows what they share,
 read-only, with **Edit in a draft**. Choosing one entity's own details closes it.
@@ -224,16 +235,44 @@ read-only.
 
 ## Review & Save
 
-1. In the toolbar, choose **Review & Save** — it shows how many edits are
-   waiting. **Review & Save Changes** opens: *Confirm N edits before they hit
-   the backend.*
-2. Check the list. Expand a change to see it before and after, or remove one
-   you don't want with **Discard this change**.
-3. Choose **Save N changes**. *Saved to draft.* confirms it, and the strip's
-   counts now include them.
+1. In the toolbar (or an entity's footer), choose **Review & Save** — it shows
+   how many edits are waiting. **Review & Save Changes** opens and says what
+   you're changing: *You're changing 3 entities and 2 relationships.*
+2. Check them — there may be a handful or tens of thousands:
+   - **List** has one row per entity, relationship or layout change, saying
+     what it does in words — *Renamed orders to Orders v2*, *Connected Orders →
+     Sales*. The selected one shows beside the list: each field and property it
+     changes, before and after, as the value it is (tags as added and removed
+     chips, dates, links, Yes/No), a move's from and to, or what a delete
+     takes with it. **‹ ›** (or `J` / `K`, the arrow keys, `Home` / `End`) move
+     through them — *312 of 1,240* says where you are. **Show on canvas** goes
+     to it; **Step through** walks the changes shown on the canvas (see
+     [Step through changes on the canvas](#step-through-changes-on-the-canvas));
+     the bin (or `Delete`) discards it (**Redo** brings it back).
+   - Narrow what's shown: **All / Entities / Relationships / Layout**,
+     **Added / Modified / Removed**, a type, or a search (`/`). **Needs
+     attention** shows only changes a save refused or that conflict. *1,240
+     shown of 10,482* says how many are left; **Discard the N shown** discards
+     just those.
+   - **Map** draws the changes shown, with the entities they hang off faded
+     behind them. Past 200 entities it groups them by type and kind of change —
+     *Table · 4,812 edited* — with the relationships between the groups
+     summed; choose a group to list just those.
+   - **Already saved on this draft** lists what earlier saves and imports
+     changed, a page at a time — it is published with the rest.
+3. Under **Where should these go?** choose:
+   - **Save to draft** — save and keep working; save again whenever you like.
+   - **Save & publish** — save, then publish straight away (if you may).
+   - **Save & send for review** — save, then raise a review request.
+4. Choose **Save N changes** (or **Save & continue to publish / review**).
+   *Saved to draft.* confirms it. If you chose to publish or review, the same
+   dialog moves on to **Publish** — see
+   [Submit your draft for review](#submit-your-draft-for-review); **Not now**
+   leaves everything saved on the draft.
 
-**Cancel** closes the list and keeps your edits staged. **Discard all** throws
-every staged edit away.
+**Cancel** closes the dialog and keeps your edits staged. **Discard all**
+throws every staged edit away. With nothing staged but changes saved on the
+draft, **Review & Save** opens straight on **Publish**.
 
 > **If it says "Nothing was saved":** the whole save was refused because some
 > changes need attention — for example, a relationship your semantic layer
@@ -244,13 +283,26 @@ every staged edit away.
 
 | On the canvas | Means |
 | --- | --- |
-| Solid ring | Saved to this draft |
+| Solid ring (or, on a relationship, a solid halo) | Saved to this draft — an import's changes too |
 | Dashed halo | Edited, but not saved yet |
 | Green / orange / rose | New / edited / deleted |
+| A coloured stripe on a closed row | Something inside it changed — including new children an import added that aren't loaded yet |
 | A deleted entity still in its place | A deletion saved to this draft stays visible, marked in rose, until the draft is published. Its drawer says **Deleted in this draft**, and **Restore** brings it back |
 
 **Committed**, in the amber strip, hides or shows the rings for changes already
-saved to the draft.
+saved to the draft. After an import they're shown, and a message says what the
+import added, updated and removed — **Review changes** lists them, a page at a
+time.
+
+### Step through changes on the canvas
+
+To see each change where it sits, choose **Step through** in **Review &
+Save**, **Show** on a row of a change list, or the change counts in the amber
+strip. A bar at the bottom of the canvas says *Change 12 of 10,482*, with the
+entity's name and what happened to it; each step opens it on the canvas and in
+its details. **‹ ›** (or `J` / `K`, `[` / `]`) step; **Unsaved / Saved / All**
+chooses which changes; `Esc` or ✕ stops. One the view doesn't show says **Not
+in this view** — **Skip** goes on to the next.
 
 ## When someone else changed the same thing
 
@@ -339,15 +391,22 @@ close the banner to hide it.
 Changes you saved with **Review & Save** are in the draft itself, so they're
 there on any device.
 
+If what you have staged is more than this browser can keep, a message says so
+— *too large to keep across a reload* — and nothing older is restored in its
+place. Save it to the draft to keep it.
+
 ## Submit your draft for review
 
-> **Tip:** **Review & Save** first. Edits that are only staged aren't part of
-> the draft, so they aren't included when it's reviewed or published.
+> **Tip:** edits that are only staged aren't part of the draft. In **Review &
+> Save**, choose **Save & publish** or **Save & send for review** to save them
+> and go on in one step — or, from **Publish**, choose **Review & Save them,
+> then publish**.
 
-1. In the amber strip, choose **Publish**. The **Publish your draft** dialog
-   opens and summarises what the draft changes, including any Views it
-   creates or changes.
-2. Give it a **Title** — what changed, in a sentence — and, optionally, a
+1. Choose **Publish** in the amber strip (it shows once the draft has
+   something to publish), or arrive here from **Review & Save**. It summarises
+   what the whole draft changes, including any Views it creates or changes.
+2. Give it a **Title** — what changed, in a sentence (from **Review & Save** it
+   starts with one taken from what you saved) — and, optionally, a
    **Description** with context for reviewers.
 3. Choose **Submit for review**. *Sent for review.* confirms it, and the
    [Review Center](/guide/review-center) opens on your request. Its address

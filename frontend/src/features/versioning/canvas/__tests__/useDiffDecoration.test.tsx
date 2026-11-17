@@ -1,11 +1,11 @@
 /**
- * useEntityChangeDecoration + nodeDecorationClass — the unified staged/committed decoration.
+ * useEntityDecoration + nodeDecorationClass — the unified staged/committed decoration.
  * Pins: committed keeps the loved solid colour ring; staged builds ON TOP with a dashed halo;
  * staged takes precedence; and the committed-hide toggle hides committed while staged still shows.
  */
 import { renderHook, act } from '@testing-library/react'
 import { describe, it, expect, beforeEach } from 'vitest'
-import { useEntityChangeDecoration, nodeDecorationClass } from '../useDiffDecoration'
+import { useEntityDecoration, nodeDecorationClass } from '../useDiffDecoration'
 import { useBranchStore } from '@/store/branchStore'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { buildChangeSet, type GraphChange } from '../../model/changeModel'
@@ -26,7 +26,7 @@ describe('nodeDecorationClass', () => {
   })
 })
 
-describe('useEntityChangeDecoration', () => {
+describe('useEntityDecoration', () => {
   beforeEach(() => {
     useStagedChangesStore.setState({ changes: [] })
     useBranchStore.setState({ activeChangeSet: null, committedDiffHidden: false })
@@ -41,8 +41,8 @@ describe('useEntityChangeDecoration', () => {
 
   it('a committed change → committed decoration', () => {
     act(() => useBranchStore.setState({ activeChangeSet: changeSet('urn:a', 'added') }))
-    const { result } = renderHook(() => useEntityChangeDecoration())
-    expect(result.current.for('urn:a')).toEqual({ state: 'committed', status: 'added' })
+    const { result } = renderHook(() => useEntityDecoration('urn:a'))
+    expect(result.current).toEqual({ state: 'committed', status: 'added' })
   })
 
   it('staged overrides committed for the same entity', () => {
@@ -50,8 +50,8 @@ describe('useEntityChangeDecoration', () => {
       useBranchStore.setState({ activeChangeSet: changeSet('urn:a', 'added') })
       useStagedChangesStore.setState({ changes: [staged('urn:a', 'rename_entity')] })
     })
-    const { result } = renderHook(() => useEntityChangeDecoration())
-    expect(result.current.for('urn:a')).toEqual({ state: 'staged', status: 'modified' })
+    const { result } = renderHook(() => useEntityDecoration('urn:a'))
+    expect(result.current).toEqual({ state: 'staged', status: 'modified' })
   })
 
   it('committedDiffHidden hides committed, but staged still shows', () => {
@@ -59,9 +59,8 @@ describe('useEntityChangeDecoration', () => {
       useBranchStore.setState({ activeChangeSet: changeSet('urn:c', 'added'), committedDiffHidden: true })
       useStagedChangesStore.setState({ changes: [staged('urn:s', 'create_entity')] })
     })
-    const { result } = renderHook(() => useEntityChangeDecoration())
-    expect(result.current.for('urn:c')).toBeUndefined()                         // committed hidden
-    expect(result.current.for('urn:s')).toEqual({ state: 'staged', status: 'added' }) // staged stays
+    expect(renderHook(() => useEntityDecoration('urn:c')).result.current).toBeUndefined()   // committed hidden
+    expect(renderHook(() => useEntityDecoration('urn:s')).result.current).toEqual({ state: 'staged', status: 'added' }) // staged stays
   })
 
   it('costs a node a lookup, not the change set: 300 rows over 100,000 changes', () => {
@@ -73,16 +72,26 @@ describe('useEntityChangeDecoration', () => {
     act(() => useBranchStore.setState({ activeChangeSet: buildChangeSet(changes) }))
     act(() => useStagedChangesStore.setState({ changes: [staged('urn:7', 'delete_entity')] }))
     const started = performance.now()
-    const rows = Array.from({ length: 300 }, () => renderHook(() => useEntityChangeDecoration()))
+    const rows = Array.from({ length: 300 }, (_, i) => renderHook(() => useEntityDecoration(`urn:${i}`)))
     expect(performance.now() - started).toBeLessThan(1500)
-    expect(rows[0].result.current.for('urn:3')).toEqual({ state: 'committed', status: 'added' })
-    expect(rows[299].result.current.for('urn:4')).toEqual({ state: 'committed', status: 'modified' })
-    expect(rows[150].result.current.for('urn:7')).toEqual({ state: 'staged', status: 'removed' })
+    expect(rows[3].result.current).toEqual({ state: 'committed', status: 'added' })
+    expect(rows[4].result.current).toEqual({ state: 'committed', status: 'modified' })
+    expect(rows[7].result.current).toEqual({ state: 'staged', status: 'removed' })
     rows.forEach((r) => r.unmount())
+  })
+
+  it('re-renders a row only when its own decoration changes', () => {
+    let renders = 0
+    renderHook(() => { renders++; return useEntityDecoration('urn:a') })
+    const before = renders
+    act(() => useStagedChangesStore.setState({ changes: [staged('urn:other', 'rename_entity')] }))
+    expect(renders).toBe(before)
+    act(() => useStagedChangesStore.setState({ changes: [staged('urn:other', 'rename_entity'), staged('urn:a', 'rename_entity')] }))
+    expect(renders).toBe(before + 1)
   })
 })
 
-describe('useEntityChangeDecoration, entity ids that are not urns', () => {
+describe('useEntityDecoration, entity ids that are not urns', () => {
   beforeEach(() => {
     useStagedChangesStore.setState({ changes: [] })
     useBranchStore.setState({ activeChangeSet: null, committedDiffHidden: false })
@@ -92,8 +101,7 @@ describe('useEntityChangeDecoration, entity ids that are not urns', () => {
     const c = { entityId: 'ent_A', urn: 'urn:A', kind: 'node' as const, status: 'added' as const, label: 'A',
       origin: { source: 'branch' as const, branchId: 'b' } }
     act(() => useBranchStore.setState({ activeChangeSet: buildChangeSet([c]) }))
-    const { result } = renderHook(() => useEntityChangeDecoration())
-    expect(result.current.for('urn:A')).toEqual({ state: 'committed', status: 'added' })
-    expect(result.current.for('ent_A')).toBeUndefined()
+    expect(renderHook(() => useEntityDecoration('urn:A')).result.current).toEqual({ state: 'committed', status: 'added' })
+    expect(renderHook(() => useEntityDecoration('ent_A')).result.current).toBeUndefined()
   })
 })

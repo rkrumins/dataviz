@@ -1,6 +1,6 @@
 /**
  * PrDetailDrawer — the review surface for one PR: overview + reviewers/approval, the
- * itemised Files Changed (unified ChangesPanel), a derived activity timeline, and the
+ * Files Changed (a change list read a page at a time, at any size), a derived activity timeline, and the
  * Approve / Merge / Close actions. Merge is conflict-aware: a conflict opens the
  * ConflictResolver, whose resolutions feed straight back into a re-merge.
  *
@@ -31,13 +31,15 @@ import {
 import {
   useMergeRequest, usePullRequestDiff, usePullLatestDraft, useCommitLog,
   useApproveMergeRequest, useCloseMergeRequest, useMergeMergeRequest, useUpdateMergeRequest,
-  useBranchViewChanges,
+  useBranchViewChanges, useChangeSummary, usePrDiffSummary, VERSIONING_KEYS,
 } from '../../versioning/hooks/useVersioning'
 import { DraftViewChanges } from '../../versioning/components/DraftViewChanges'
-import { fromPrDiff } from '../../versioning/model/changeAdapters'
-import { ChangesPanel, ChangeCountChips } from '../../versioning/components/ChangesPanel'
+import { fromChangeCounts } from '../../versioning/model/changeAdapters'
+import { ChangeCountChips } from '../../versioning/components/ChangesPanel'
 import { ChangeList } from '../../versioning/components/ChangeList'
-import { DiffTooLargeError } from '@/services/versioningApiService'
+import { ChangeTreePanel } from '../../versioning/components/ChangeTreePanel'
+import { getMergeRequestDiffChildren, type ChangeListOrigin } from '@/services/versioningApiService'
+import { useQueryClient } from '@tanstack/react-query'
 import { CommitRow } from '../../versioning/components/CommitRow'
 import { RevertDialog } from '../../versioning/components/RollbackDialogs'
 import { IncomingChangesSheet } from '../../versioning/components/IncomingChangesSheet'
@@ -100,7 +102,6 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
   const setReceipt = usePublishReceiptStore((s) => s.setReceipt)
 
   const prQ = useMergeRequest(wsId, prId)
-  const diffQ = usePullRequestDiff(wsId, prId)
   const approve = useApproveMergeRequest(wsId)
   const closePr = useCloseMergeRequest(wsId)
   const merge = useMergeMergeRequest(wsId)
@@ -108,15 +109,32 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
   const pullLatest = usePullLatestDraft(wsId, prQ.data?.graphId ?? '')
 
   const pr = prQ.data
-  // Approve sends the head the PR was read at, so the diff on screen must be of that head: when a
-  // poll brings a new one, read the diff again (Approve waits for it).
-  const refetchDiff = diffQ.refetch
+  // What the review changes, read from the change index a page at a time — never the whole diff on
+  // open, which for a 100,000-change review is tens of megabytes. A draft's review: its own change
+  // list (once merged, main across its merge). A fork's: its summary (counted, and listed from the
+  // window it names, once past the tree's cap).
+  const draftReview = !!pr && isDraftMr(pr)
+  const listOrigin: ChangeListOrigin | null = !pr || !draftReview ? null
+    : pr.status === 'merged' && pr.resultingCommitSeq
+      ? { fromSeq: pr.resultingCommitSeq - 1, toSeq: pr.resultingCommitSeq }
+      : { branchId: pr.sourceBranchId }
+  const draftSummaryQ = useChangeSummary(wsId, draftReview ? pr!.graphId : null, listOrigin)
+  const forkSummaryQ = usePrDiffSummary(wsId, pr && !draftReview ? prId : null, 1000)
+  const changeCounts = draftReview ? draftSummaryQ.data?.counts : forkSummaryQ.data?.counts
+  const changeSet = useMemo(() => (changeCounts ? fromChangeCounts(changeCounts) : null), [changeCounts])
+  const changesFetching = draftSummaryQ.isFetching || forkSummaryQ.isFetching
+  // Approve sends the head the PR was read at, so the changes on screen must be of that head: when a
+  // poll brings a new one, read them again (Approve waits for it).
+  const queryClient = useQueryClient()
   const diffHead = useRef(pr?.headCommitId)
   useEffect(() => {
     if (pr?.headCommitId === diffHead.current) return
-    if (diffHead.current !== undefined) void refetchDiff()
+    if (diffHead.current !== undefined) {
+      if (pr && listOrigin) void queryClient.invalidateQueries({ queryKey: VERSIONING_KEYS.changeList(wsId, pr.graphId, listOrigin) })
+      void queryClient.invalidateQueries({ queryKey: VERSIONING_KEYS.prDiffSummary(wsId, prId) })
+    }
     diffHead.current = pr?.headCommitId
-  }, [pr?.headCommitId, refetchDiff])
+  }, [pr?.headCommitId]) // eslint-disable-line react-hooks/exhaustive-deps
   // Edits still staged on the canvas for this draft are not part of it: a merge would leave them behind.
   const unsaved = useUnsavedCountOnBranch(pr?.sourceBranchId)
 
@@ -152,16 +170,16 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
       },
     )
   }
-  const changeSet = useMemo(() => (diffQ.data ? fromPrDiff(diffQ.data, prId) : null), [diffQ.data, prId])
-  // entityId → merged payload, the seed each conflict resolution starts from.
+  const [conflicts, setConflicts] = useState<Array<Record<string, unknown>> | null>(null)
+  // The review's whole diff, read only once a merge comes back with conflicts: entityId → merged
+  // payload, the seed each conflict resolution starts from.
+  const diffQ = usePullRequestDiff(wsId, conflicts ? prId : null)
   const seeds = useMemo(() => {
     const out: Record<string, Record<string, unknown> | undefined> = {}
     const d = diffQ.data
     if (d) for (const e of [...d.added, ...d.modified]) out[e.entityId] = (e.after as Record<string, unknown>) ?? undefined
     return out
   }, [diffQ.data])
-
-  const [conflicts, setConflicts] = useState<Array<Record<string, unknown>> | null>(null)
   const [resolverError, setResolverError] = useState<string | null>(null)
   const [needsPull, setNeedsPull] = useState(false)
   // Why it must pull, once a merge was refused for it (the list's `pullRequired` says only whether).
@@ -508,10 +526,15 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
               )}
 
               <Section icon={FileDiff} title="Files changed" right={changeSet ? <ChangeCountChips changeSet={changeSet} /> : undefined}>
-                {diffQ.error instanceof DiffTooLargeError && isDraftPr ? (
-                  // Too large to merge in a request for its diff: the draft's own changes, listed a
-                  // page at a time — exactly what merging changes once it is up to date. Merged, what
-                  // its merge changed: main across its commit, which outlives the draft's own rows.
+                {[draftSummaryQ.error, forkSummaryQ.error].some((e) => (e as { status?: number } | null)?.status === 410) ? (
+                  <p className="text-xs text-ink-muted py-3">
+                    This review was closed, and its draft’s changes were removed after the retention period, so what
+                    it proposed can no longer be shown.
+                  </p>
+                ) : draftReview && listOrigin ? (
+                  // The draft's own changes, listed a page at a time from its change index — exactly
+                  // what merging changes once it is up to date. Merged, what its merge changed: main
+                  // across its commit, which outlives the draft's own rows.
                   <>
                     {pr.behind && pr.status !== 'merged' && (
                       <p className="text-[11.5px] text-ink-muted mb-2 leading-relaxed">
@@ -519,25 +542,26 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
                         <strong>main</strong>, this is exactly what merging it changes.
                       </p>
                     )}
-                    <ChangeList wsId={wsId} graphId={pr.graphId}
-                      origin={pr.status === 'merged' && pr.resultingCommitSeq
-                        ? { fromSeq: pr.resultingCommitSeq - 1, toSeq: pr.resultingCommitSeq }
-                        : { branchId: pr.sourceBranchId }}
+                    <ChangeList wsId={wsId} graphId={pr.graphId} origin={listOrigin} summary={draftSummaryQ.data}
                       emptyHint="No changes in this PR." />
                   </>
-                ) : (diffQ.error as { status?: number } | null)?.status === 410 ? (
-                  <p className="text-xs text-ink-muted py-3">
-                    This review was closed, and its draft’s changes were removed after the retention period, so what
-                    it proposed can no longer be shown.
-                  </p>
-                ) : diffQ.isLoading ? (
-                  <div className="flex items-center gap-2 text-sm text-ink-muted py-6 justify-center">
-                    <Loader2 className="w-4 h-4 animate-spin" /> Computing diff…
-                  </div>
-                ) : changeSet ? (
-                  <ChangesPanel changeSet={changeSet} emptyHint="No changes in this PR." />
                 ) : (
-                  <p className="text-xs text-ink-muted py-3">Diff unavailable.</p>
+                  // A fork's review: laid out as a tree within the cap; past it, counted and listed from
+                  // the window of the fork's main its changes are in.
+                  <ChangeTreePanel
+                    summary={forkSummaryQ.data}
+                    isLoading={forkSummaryQ.isLoading}
+                    error={forkSummaryQ.error}
+                    onRetry={() => void forkSummaryQ.refetch()}
+                    fetchChildren={(key, offset) => getMergeRequestDiffChildren(wsId, prId, key, { offset, limit: 50 })}
+                    origin={{ source: 'pr', prId }}
+                    emptyHint="No changes in this PR."
+                    summaryFirst
+                    list={forkSummaryQ.data?.list ? {
+                      wsId, graphId: forkSummaryQ.data.list.graphId,
+                      origin: { fromSeq: forkSummaryQ.data.list.fromSeq, toSeq: forkSummaryQ.data.list.toSeq },
+                    } : undefined}
+                  />
                 )}
               </Section>
 
@@ -607,11 +631,15 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
                   onSuccess: () => notify('success', 'Approved.'),
                   onError: (e) => {
                     // The draft moved on since this review was loaded: load it again before approving.
-                    if (e instanceof HeadMovedError) { void prQ.refetch(); void refetchDiff() }
+                    if (e instanceof HeadMovedError) {
+                      void prQ.refetch()
+                      if (pr && listOrigin) void queryClient.invalidateQueries({ queryKey: VERSIONING_KEYS.changeList(wsId, pr.graphId, listOrigin) })
+                      void queryClient.invalidateQueries({ queryKey: VERSIONING_KEYS.prDiffSummary(wsId, prId) })
+                    }
                     notify('error', (e as Error).message)
                   },
                 })}
-                disabled={busy || diffQ.isFetching}
+                disabled={busy || changesFetching}
                 title="Sign off on these changes so they can be merged"
                 className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-sm font-semibold text-emerald-600 border border-emerald-500/30 bg-emerald-500/[0.06] hover:bg-emerald-500/10 disabled:opacity-60"
               >

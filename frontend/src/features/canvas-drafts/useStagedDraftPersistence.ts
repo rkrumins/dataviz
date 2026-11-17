@@ -21,6 +21,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useCanvasStore } from '@/store/canvas'
+import { useNotificationStore } from '@/components/ui/notifications'
 import { useStagedChangesStore, type StagedChange } from '@/store/stagedChangesStore'
 import { overlayOnReplace, type MoveAfter } from '@/store/stagedOverlay'
 import type { LineageEdge, LineageNode } from '@/store/canvas'
@@ -41,6 +42,10 @@ import {
 
 const SNAPSHOT_VERSION = 1
 const WRITE_DEBOUNCE_MS = 600
+/** A burst of edits still writes the snapshot this often: typing on never leaves it minutes old. */
+const WRITE_MAX_WAIT_MS = 4000
+
+const TOO_LARGE = 'These unsaved changes are too large to keep across a reload — save them to the draft to keep them.'
 
 /** Rebuild the per-change discard closure a restored change lost to JSON — the same undo the
  *  live change had, so discarding restored work puts the canvas back exactly as it does before a
@@ -171,6 +176,19 @@ export function useStagedDraftPersistence(
   const writeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => {
     if (!scopeKey) return
+    // The first edit the pending write holds, for the max wait; and whether the warning was given.
+    let pendingSince: number | null = null
+    let warned = false
+    const write = () => {
+      pendingSince = null
+      const snapshot = buildSnapshot(scopeKey, currentBranchId)
+      if (!snapshot) { clearSnapshot(scopeKey); return }
+      if (writeSnapshot(snapshot)) { warned = false; return }
+      if (!warned) {
+        warned = true
+        useNotificationStore.getState().add({ type: 'warning', message: TOO_LARGE })
+      }
+    }
 
     const unsub = useStagedChangesStore.subscribe((state, prev) => {
       // A save going in-flight: mark the snapshot 'committing' (the save adds
@@ -184,16 +202,15 @@ export function useStagedDraftPersistence(
       if (state.changes === prev.changes && state.applyStatus === prev.applyStatus) return
       if (state.changes.length === 0) {
         if (writeTimerRef.current) clearTimeout(writeTimerRef.current)
+        pendingSince = null
         clearSnapshot(scopeKey)
         clearPendingSave(scopeKey)   // saved or discarded: a save of discarded edits is never sent
         return
       }
       if (writeTimerRef.current) clearTimeout(writeTimerRef.current)
-      writeTimerRef.current = setTimeout(() => {
-        const snapshot = buildSnapshot(scopeKey, currentBranchId)
-        if (snapshot) writeSnapshot(snapshot)
-        else clearSnapshot(scopeKey)
-      }, WRITE_DEBOUNCE_MS)
+      const now = Date.now()
+      pendingSince ??= now
+      writeTimerRef.current = setTimeout(write, Math.max(0, Math.min(WRITE_DEBOUNCE_MS, pendingSince + WRITE_MAX_WAIT_MS - now)))
     })
 
     // Flush synchronously on unload so edits still inside the debounce window

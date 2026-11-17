@@ -92,6 +92,13 @@ describe('stagedDraftPersistence — localStorage round-trip', () => {
     expect(readSnapshot('ws1::ds1::br1')).toBeNull()
   })
 
+  it('says when a snapshot cannot be kept, and leaves no older one behind to restore', () => {
+    expect(writeSnapshot(snap())).toBe(true)
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new DOMException('full', 'QuotaExceededError') })
+    expect(writeSnapshot(snap())).toBe(false)
+    expect(readSnapshot('ws1::ds1::br1')).toBeNull()
+  })
+
   it('markSnapshotCommitting flips phase in place', () => {
     writeSnapshot(snap())
     markSnapshotCommitting('ws1::ds1::br1')

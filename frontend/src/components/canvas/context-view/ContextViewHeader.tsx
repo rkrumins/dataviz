@@ -125,6 +125,8 @@ export interface ContextViewHeaderProps {
 
   /** Number of staged changes pending review/save — drives Review & Save. */
   pendingChangeCount?: number
+  /** Changes already saved on the draft (Review & Save then offers to publish them). */
+  draftChangeCount?: number
   /** Opens the staged-changes review panel (Review & Save click). */
   onOpenStagedChanges?: () => void
   /** Opens the bulk-import dialog (Edit mode). */
@@ -199,6 +201,7 @@ export function ContextViewHeader({
   syncStatus,
   onRetrySync,
   pendingChangeCount = 0,
+  draftChangeCount = 0,
   onOpenStagedChanges,
   onImport,
   onExport,
@@ -405,6 +408,7 @@ export function ContextViewHeader({
                 onUndo={onUndo}
                 onRedo={onRedo}
                 pendingChangeCount={pendingChangeCount}
+                draftChangeCount={draftChangeCount}
                 onOpenStagedChanges={onOpenStagedChanges}
                 onExitEdit={onExitEdit}
                 connectToolOn={connectToolOn}

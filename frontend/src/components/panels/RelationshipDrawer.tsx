@@ -24,6 +24,7 @@ import { memo, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { AlertCircle, ArrowLeftRight, Code, Crosshair, Eye, FileText, History, Info, Pencil, Trash2, Waypoints } from 'lucide-react'
 import { useCanvasStore, type DrawerEdgeTarget, type LineageNode } from '@/store/canvas'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
+import { stagedIndexOf } from '@/store/stagedIndex'
 import { useFeature } from '@/store/features'
 import { useViewContainmentEdgeTypes, useViewRelationshipTypes } from '@/hooks/useViewSchema'
 import { useEdgeVisual } from '@/hooks/useEntityVisual'
@@ -162,9 +163,11 @@ function RelationshipPanel({
 
   // ── Staged work on this relationship ──
   const pendingEdit = useStagedChangesStore((s) =>
-    entityId ? s.changes.find((c) => c.type === 'edit_edge' && c.targetId === entityId) : undefined)
-  const pendingDelete = useStagedChangesStore((s) =>
-    s.changes.find((c) => c.type === 'delete_edge' && (c.targetId === target.id || c.targetId === entityId)))
+    entityId ? stagedIndexOf(s.changes).edgeEdit.get(entityId) : undefined)
+  const pendingDelete = useStagedChangesStore((s) => {
+    const { edgeDelete } = stagedIndexOf(s.changes)
+    return edgeDelete.get(target.id) ?? (entityId ? edgeDelete.get(entityId) : undefined)
+  })
   const storedProps = useMemo(
     () => (stored?.edge.properties ?? record?.properties ?? {}) as Record<string, unknown>, [stored, record])
   const baseVersion = stored?.version ?? record?.version

@@ -39,7 +39,7 @@ export function BooleanToggle({
       <span
         className={cn(
           "relative inline-flex h-5 w-9 shrink-0 rounded-full transition-colors",
-          value ? "bg-emerald-500" : "bg-white/15",
+          value ? "bg-emerald-500" : "bg-black/15 dark:bg-white/15",
         )}
       >
         <span
@@ -77,7 +77,7 @@ export function DateField({
       readOnly={readOnly}
       onChange={(e) => onChange(e.target.value)}
       className={cn(
-        "px-2 py-1 rounded-md bg-white/5 border border-white/10 text-xs",
+        "px-2 py-1 rounded-md bg-black/[0.03] dark:bg-white/5 border border-black/10 dark:border-white/10 text-xs",
         "focus:border-accent-lineage/50 focus:bg-white/8 outline-none transition-colors",
         "[color-scheme:light] dark:[color-scheme:dark]",
         readOnly && "cursor-default opacity-70",
@@ -110,7 +110,7 @@ export function UrlField({
         placeholder="https://…"
         onChange={(e) => onChange(e.target.value)}
         className={cn(
-          "flex-1 min-w-0 px-2 py-1 rounded-md bg-white/5 border border-white/10 text-xs",
+          "flex-1 min-w-0 px-2 py-1 rounded-md bg-black/[0.03] dark:bg-white/5 border border-black/10 dark:border-white/10 text-xs",
           "placeholder:text-ink-muted/50 focus:border-accent-lineage/50 focus:bg-white/8 outline-none transition-colors",
           readOnly && "cursor-default opacity-70",
         )}
@@ -120,7 +120,7 @@ export function UrlField({
           href={trimmed}
           target="_blank"
           rel="noopener noreferrer"
-          className="flex-shrink-0 w-6 h-6 flex items-center justify-center rounded text-ink-muted hover:text-accent-lineage hover:bg-white/10 transition-colors"
+          className="flex-shrink-0 w-6 h-6 flex items-center justify-center rounded text-ink-muted hover:text-accent-lineage hover:bg-black/[0.05] dark:hover:bg-white/10 transition-colors"
           title="Open link"
         >
           <ExternalLink className="w-3 h-3" />
@@ -159,7 +159,7 @@ export function TagInput({
     <div
       onClick={() => inputRef.current?.focus()}
       className={cn(
-        "flex flex-wrap items-center gap-1.5 px-2 py-1.5 rounded-md bg-white/5 border border-white/10 min-h-[2rem]",
+        "flex flex-wrap items-center gap-1.5 px-2 py-1.5 rounded-md bg-black/[0.03] dark:bg-white/5 border border-black/10 dark:border-white/10 min-h-[2rem]",
         !readOnly && "focus-within:border-accent-lineage/50 cursor-text",
       )}
     >
@@ -313,7 +313,7 @@ export const ClampedText = memo(function ClampedText({
       <div>
         <div
           onClick={() => onOpen?.(false)}
-          className="cursor-text rounded-md px-2 py-1 -mx-2 hover:bg-white/[0.04] transition-colors"
+          className="cursor-text rounded-md px-2 py-1 -mx-2 hover:bg-black/[0.03] dark:hover:bg-white/[0.04] transition-colors"
           title="Click to edit"
         >
           {inner}

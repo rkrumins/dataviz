@@ -13,7 +13,7 @@
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
-import { ArrowRight, ChevronRight, Loader2, Search, SearchX } from 'lucide-react'
+import { ArrowRight, ArrowUpRight, ChevronRight, Loader2, Search, SearchX } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { Segmented, type SegmentedOption } from '@/components/ui/Segmented'
@@ -24,6 +24,8 @@ import type {
 } from '@/services/versioningApiService'
 import { useChangeEntries, useChangeEntry, useChangeSummary } from '../hooks/useVersioning'
 import type { GraphChange } from '../model/changeModel'
+import { useBranchStore } from '@/store/branchStore'
+import { savedStops, useChangeNavigatorStore } from '@/store/changeNavigatorStore'
 import { EntityDiff } from './EntityDiff'
 import { NodeDiffBadge, STATUS_META } from './NodeDiffBadge'
 
@@ -285,29 +287,46 @@ function Row({ wsId, graphId, origin, row, open, onToggle }: {
 }) {
   const meta = STATUS_META[row.status]
   const label = rowLabel(row)
+  // On a canvas, an entity still there can be shown — and stepped on from — where it sits.
+  const canReveal = useChangeNavigatorStore((s) => s.canReveal) && row.kind === 'node' && row.status !== 'removed'
+  const showOnCanvas = () => {
+    const id = row.urn ?? row.entityId
+    const saved = 'branchId' in origin ? savedStops(useBranchStore.getState().activeChangeSet) : []
+    const nav = useChangeNavigatorStore.getState()
+    if (saved.some((s) => s.id === id)) nav.start(saved, { scope: 'saved', at: id })
+    else nav.start([{ id, name: label, status: row.status, saved: 'branchId' in origin }], { scope: 'saved' })
+  }
   return (
-    <div role="listitem" className={cn('mb-1 rounded-lg border-l-2 bg-canvas-overlay/40', meta.accent)}>
-      <button
-        type="button"
-        onClick={onToggle}
-        aria-expanded={open}
-        className="w-full flex items-center gap-1.5 min-w-0 px-2.5 py-1.5 text-left group"
-      >
-        <ChevronRight className={cn('w-3.5 h-3.5 text-ink-muted/60 transition-transform shrink-0', open && 'rotate-90')} />
-        <meta.Icon className={cn('w-3.5 h-3.5 shrink-0', meta.text)} aria-label={meta.label} />
-        {row.kind === 'edge' ? (
-          <span className="flex items-center gap-1 min-w-0 text-[13px] text-ink">
-            <span className="truncate">{row.sourceName || row.sourceEntityId}</span>
-            <ArrowRight className="w-3 h-3 text-ink-muted/70 shrink-0" />
-            <span className="truncate">{row.targetName || row.targetEntityId}</span>
-          </span>
-        ) : (
-          <span className="text-[13px] text-ink truncate">{label}</span>
+    <div role="listitem" className={cn('mb-1 rounded-lg border-l-2 bg-canvas-overlay/40 group/row flex flex-col', meta.accent)}>
+      <div className="flex items-center min-w-0">
+        <button
+          type="button"
+          onClick={onToggle}
+          aria-expanded={open}
+          className="flex-1 flex items-center gap-1.5 min-w-0 px-2.5 py-1.5 text-left group"
+        >
+          <ChevronRight className={cn('w-3.5 h-3.5 text-ink-muted/60 transition-transform shrink-0', open && 'rotate-90')} />
+          <meta.Icon className={cn('w-3.5 h-3.5 shrink-0', meta.text)} aria-label={meta.label} />
+          {row.kind === 'edge' ? (
+            <span className="flex items-center gap-1 min-w-0 text-[13px] text-ink">
+              <span className="truncate">{row.sourceName || row.sourceEntityId}</span>
+              <ArrowRight className="w-3 h-3 text-ink-muted/70 shrink-0" />
+              <span className="truncate">{row.targetName || row.targetEntityId}</span>
+            </span>
+          ) : (
+            <span className="text-[13px] text-ink truncate">{label}</span>
+          )}
+          {row.kind === 'node' && row.qualifiedName && row.qualifiedName !== label && (
+            <span className="text-[11px] text-ink-muted/70 truncate min-w-0 hidden sm:inline">{row.qualifiedName}</span>
+          )}
+        </button>
+        {canReveal && (
+          <button type="button" onClick={showOnCanvas} aria-label={`Show ${label} on canvas`}
+            className="shrink-0 mr-1 inline-flex items-center gap-0.5 px-1.5 h-6 rounded-md text-[11px] font-semibold text-accent-lineage opacity-0 group-hover/row:opacity-100 focus-visible:opacity-100 hover:bg-accent-lineage/10 transition-opacity">
+            Show<ArrowUpRight className="w-3 h-3" aria-hidden />
+          </button>
         )}
-        {row.kind === 'node' && row.qualifiedName && row.qualifiedName !== label && (
-          <span className="text-[11px] text-ink-muted/70 truncate min-w-0 hidden sm:inline">{row.qualifiedName}</span>
-        )}
-      </button>
+      </div>
       {open && (
         <div className="px-2.5 pb-2 pl-7">
           <RowDetail wsId={wsId} graphId={graphId} origin={origin} row={row} />

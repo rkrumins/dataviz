@@ -567,6 +567,8 @@ def _domain_errors():
     except DiffTooLarge as exc:
         raise HTTPException(status_code=409, detail={
             "type": "too_large_for_tree", "changed": exc.changed, "limit": exc.limit,
+            # A fork's review lists its changes as a window of the fork's main.
+            **({"list": exc.listing} if exc.listing else {}),
             "message": str(exc)})
     except FeatureDisabledError as exc:   # as main.py answers it, so a queued publish keeps it too
         raise HTTPException(status_code=403, detail={

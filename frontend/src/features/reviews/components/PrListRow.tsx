@@ -9,7 +9,7 @@ import { ChevronRight, GitMerge, AlertTriangle, Plus, Minus, PencilLine, XCircle
 import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
 import type { PullRequest } from '@/services/versioningApiService'
-import { usePrDiffSummary, useCloseMergeRequest } from '@/features/versioning/hooks/useVersioning'
+import { usePrDiffSummary, useCloseMergeRequest, useChangeSummary } from '@/features/versioning/hooks/useVersioning'
 import { ownerName } from '@/features/versioning/model/branchVocab'
 import { OwnerAvatar } from '@/features/versioning/components/BranchStatusBits'
 import { PrStatusBadge, PrKindIcon, derivePrTitle, isDraftMr } from './PrMeta'
@@ -17,10 +17,16 @@ import { PrStatusBadge, PrKindIcon, derivePrTitle, isDraftMr } from './PrMeta'
 const COUNTED_STATUSES = new Set(['open', 'mergeable', 'approved', 'conflicts', 'merging'])
 
 /** Lazy per-row change-count chip. Only fetches for active PRs (a merged/closed PR's diff is
- *  historical); React Query dedups + caches so pagination re-renders are free. */
+ *  historical); React Query dedups + caches so pagination re-renders are free. A draft's review is
+ *  counted from its change index (cached, one row per change) — never a merge per inbox row; a
+ *  fork's from its capped summary. */
 function ChangeCount({ wsId, pr }: { wsId: string; pr: PullRequest }) {
   const enabled = COUNTED_STATUSES.has(pr.status)
-  const q = usePrDiffSummary(enabled ? wsId : undefined, enabled ? pr.prId : undefined, 1)
+  const draft = isDraftMr(pr)
+  const draftQ = useChangeSummary(enabled && draft ? wsId : undefined, pr.graphId,
+    enabled && draft ? { branchId: pr.sourceBranchId } : null)
+  const forkQ = usePrDiffSummary(enabled && !draft ? wsId : undefined, enabled && !draft ? pr.prId : undefined, 1)
+  const q = draft ? draftQ : forkQ
   if (!enabled) return null
   const c = q.data?.counts
   if (!c) {

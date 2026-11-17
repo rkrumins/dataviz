@@ -1,15 +1,19 @@
 /**
- * The entity drawer's View tab — calm and read-only: the entity at a glance, its identifier,
- * descriptive details, where it sits, its properties, classifications, lineage and history.
+ * The entity drawer's View tab — the entity at a glance, its identifier, descriptive details,
+ * where it sits, its properties, classifications, lineage and history. In a draft its properties
+ * are edited in place: click a value, type, Enter — the edit is staged as it is made, and each row
+ * says what changed.
  *
  * Which sections show, and in what order, is the view's (drawerLayout.ts): every one in the
  * Technical view, in the order it always had; the entity at a glance first in the Business view,
  * with the identifier block, the raw details, placement and history switched off. Either can be
  * changed from Customize, which opens above the sections.
  */
-import { Fragment, useMemo, type ReactNode } from 'react'
+import { Fragment, useMemo, useState, type ReactNode } from 'react'
 import { Check, Copy, FileText, History, Info, Link, Tag } from 'lucide-react'
 import { useFeature } from '@/store/features'
+import { useCanvasStore } from '@/store/canvas'
+import { userProperties } from '@/lib/nodeFields'
 import { usePersonaMode } from '@/store/persona'
 import { usePreferencesStore, type DrawerSectionId } from '@/store/preferences'
 import type { EntityFieldDefinition } from '@/types/schema'
@@ -28,6 +32,24 @@ import { CustomizeDetails } from './CustomizeDetails'
 import { featurableKeys, resolveLayout, shownSections } from './drawerLayout'
 
 type Data = Record<string, unknown>
+
+/** Entities read before the suggestions give up: enough to see what a type usually carries. */
+const SUGGEST_SCAN = 2000
+
+/** Property names at least two other loaded entities of this type carry, most common first — read
+ *  once from the canvas as it is when the drawer opens on the entity, never subscribed to. */
+function suggestedPropertyKeys(nodeId: string, typeId: string): string[] {
+  if (!typeId) return []
+  const counts = new Map<string, number>()
+  let scanned = 0
+  for (const n of useCanvasStore.getState().nodes) {
+    const d = n.data as Data
+    if (n.id === nodeId || d.type !== typeId) continue
+    if (++scanned > SUGGEST_SCAN) break
+    for (const k of Object.keys(userProperties(d.properties))) counts.set(k, (counts.get(k) ?? 0) + 1)
+  }
+  return [...counts].filter(([, c]) => c >= 2).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([k]) => k)
+}
 
 /** The descriptive node fields, when any has a value. */
 function DetailsList({ form }: { form: Data }) {
@@ -54,7 +76,8 @@ function DetailsList({ form }: { form: Data }) {
 }
 
 export function EntityViewTab({
-  nodeId, form, original, urn, childCount, tagColors, userProps, copiedUrn, onCopyUrn, canEdit, onStartEdit,
+  nodeId, form, original, urn, childCount, tagColors, userProps, copiedUrn, onCopyUrn, canEdit,
+  originalProps, onCommitProperties,
   onFocusNode, onLocateMany, onRevealPath, history, typeId = '', typeName = '', fields, identity,
   customizing = false, onDoneCustomizing,
 }: {
@@ -69,9 +92,12 @@ export function EntityViewTab({
   userProps: Data
   copiedUrn: boolean
   onCopyUrn: () => void
-  /** Offer "Add properties" when there are none and the drawer can edit. */
+  /** The properties are edited in place (a draft, in edit mode). */
   canEdit: boolean
-  onStartEdit: () => void
+  /** The properties as first read — what each row's edit is told against. */
+  originalProps?: Data
+  /** Stage the properties as edited. */
+  onCommitProperties?: (bag: Data) => void
   onFocusNode?: (nodeId: string) => void | Promise<unknown>
   onLocateMany?: (nodeIds: string[]) => void | Promise<void>
   onRevealPath?: RevealSearchHit
@@ -92,6 +118,13 @@ export function EntityViewTab({
   const sections = useMemo(() => shownSections(resolveLayout(storedLayout, mode)), [storedLayout, mode])
   const hasProps = Object.keys(userProps).length > 0
   const tags = Array.isArray(form.classifications) ? (form.classifications as string[]) : []
+  const editsProps = canEdit && !!onCommitProperties
+  // "Add properties" on an empty entity opens the form in place — for this entity only.
+  const [addingFor, setAddingFor] = useState<string | null>(null)
+  const adding = addingFor === nodeId
+  const suggestions = useMemo(() => (editsProps ? suggestedPropertyKeys(nodeId, typeId) : []), [editsProps, nodeId, typeId])
+  // A property removed since it was read is still listed (struck through, with Restore).
+  const removedSome = !!originalProps && Object.keys(originalProps).some((k) => !(k in userProps))
 
   const render: Record<DrawerSectionId, () => ReactNode> = {
     overview: () => (
@@ -110,15 +143,21 @@ export function EntityViewTab({
     details: () => <DetailsList form={form} />,
     relationship: () => <PlacementSummary nodeId={nodeId} childCount={childCount} onFocusNode={onFocusNode} />,
     properties: () => (
-      <Section title="Properties" icon={FileText} flush={hasProps}>
-        {hasProps ? (
+      <Section title="Properties" icon={FileText} flush={hasProps || (editsProps && (adding || removedSome))}>
+        {hasProps || (editsProps && (adding || removedSome)) ? (
           <PanelErrorBoundary resetKeys={[urn]}>
-            <PropertyEditor value={userProps} onChange={() => {}} readOnly searchable groupByPath bare />
+            {editsProps ? (
+              <PropertyEditor key={nodeId} value={userProps} onChange={(next) => onCommitProperties!(next as Data)}
+                inline original={originalProps} startAdding={adding && !hasProps} suggestions={suggestions}
+                searchable groupByPath bare />
+            ) : (
+              <PropertyEditor value={userProps} onChange={() => {}} readOnly searchable groupByPath bare />
+            )}
           </PanelErrorBoundary>
         ) : (
           <EmptyState compact icon={FileText} title="No properties yet"
-            description={canEdit ? 'Add owners, SLAs, tags — anything worth knowing about it.' : undefined}
-            action={canEdit ? { label: 'Add properties', onClick: onStartEdit } : undefined} />
+            description={editsProps ? 'Add owners, SLAs, tags — anything worth knowing about it.' : undefined}
+            action={editsProps ? { label: 'Add properties', onClick: () => setAddingFor(nodeId) } : undefined} />
         )}
       </Section>
     ),

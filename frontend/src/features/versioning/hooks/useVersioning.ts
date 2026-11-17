@@ -497,7 +497,8 @@ export function usePreviewMergeRequest(wsId?: string, prId?: string | null) {
 /** Top-level groups of a PR's hierarchical Files Changed (children load lazily). */
 export function usePrDiffSummary(wsId?: string, prId?: string | null, limit?: number) {
   return useQuery({
-    queryKey: VERSIONING_KEYS.prDiffSummary(wsId, prId),
+    // The limit is part of the answer: an inbox row's count (1 group) is not the drawer's tree.
+    queryKey: [...VERSIONING_KEYS.prDiffSummary(wsId, prId), limit ?? null],
     queryFn: () => api.getMergeRequestDiffSummary(wsId!, prId!, limit),
     enabled: !!wsId && !!prId,
     staleTime: 15_000,

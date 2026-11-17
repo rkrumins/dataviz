@@ -24,9 +24,22 @@ const idle = { mutate: vi.fn(), mutateAsync: vi.fn(), isPending: false }
 let forksOn = true
 let pr: Record<string, unknown>
 
+const { invalidateQueries } = vi.hoisted(() => ({ invalidateQueries: vi.fn() }))
+vi.mock('@tanstack/react-query', async (orig) => ({
+  ...(await orig<typeof import('@tanstack/react-query')>()),
+  useQueryClient: () => ({ invalidateQueries }),
+}))
+vi.mock('../../versioning/components/ChangeList', () => ({ ChangeList: () => null }))
+vi.mock('../../versioning/components/ChangeTreePanel', () => ({ ChangeTreePanel: () => null }))
 vi.mock('../../versioning/hooks/useVersioning', () => ({
   useMergeRequest: () => ({ data: pr, isLoading: false, refetch }),
   usePullRequestDiff: () => ({ data: undefined }),
+  useChangeSummary: () => ({ data: undefined, isFetching: false }),
+  usePrDiffSummary: () => ({ data: undefined, isFetching: false }),
+  VERSIONING_KEYS: {
+    changeList: (...a: unknown[]) => ['changeList', ...a],
+    prDiffSummary: (...a: unknown[]) => ['prDiffSummary', ...a],
+  },
   usePullLatestDraft: () => idle,
   useCommitLog: () => ({ data: undefined }),
   useApproveMergeRequest: () => idle,
