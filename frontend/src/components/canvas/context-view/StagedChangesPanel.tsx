@@ -214,7 +214,7 @@ export function StagedChangesPanel({ onConfirm, describe, wsId, graphId, dataSou
     const at = groups.find(g => rowKey(g) === key)?.revealId
     if (stops.length === 0) return
     close()
-    useChangeNavigatorStore.getState().start(stops, { scope: 'unsaved', at, narrowed: isNarrowed(filter) })
+    useChangeNavigatorStore.getState().start(stops, { scope: 'unsaved', atId: at, narrowed: isNarrowed(filter) })
   } : undefined
   /** A group's row key from the key the Map knows it by. */
   const rowOf = (key: string) => {

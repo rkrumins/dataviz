@@ -90,7 +90,7 @@ describe('Review & Save — the change explorer', () => {
     const nav = useChangeNavigatorStore.getState()
     expect(state().isReviewPanelOpen).toBe(false)
     expect(nav.active).toBe(true)
-    expect(nav.stops.map((s) => s.id)).toEqual(['urn:a', 'urn:b', 'urn:c'])
+    expect([0, 1, 2].map((i) => nav.source?.at(i)?.id)).toEqual(['urn:a', 'urn:b', 'urn:c'])
     expect(nav.index).toBe(1)
     useChangeNavigatorStore.setState({ canReveal: false, active: false })
   })

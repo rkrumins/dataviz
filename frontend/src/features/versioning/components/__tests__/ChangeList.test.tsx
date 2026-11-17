@@ -137,7 +137,11 @@ describe('ChangeList', () => {
     expect(screen.queryByRole('button', { name: 'Show amount on canvas' })).not.toBeInTheDocument()
     const nav = useChangeNavigatorStore.getState()
     expect(nav.active).toBe(true)
-    expect(nav.stops[nav.index]).toMatchObject({ id: 'urn:customers', name: 'customers', saved: true })
+    expect(nav.index).toBe(0)
+    // The navigator reads what this list lists that is still there, a page at a time, with names.
+    await waitFor(() => expect(nav.source?.at(0)).toMatchObject({ id: 'urn:customers', name: 'customers', saved: true }))
+    expect(api.getChangeEntries).toHaveBeenLastCalledWith('ws1', 'g1', { branchId: 'br_1' },
+      expect.objectContaining({ kind: 'node', statuses: ['added', 'modified'] }), 0, 500)
     useChangeNavigatorStore.setState({ canReveal: false, active: false })
   })
 

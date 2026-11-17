@@ -56,7 +56,7 @@ import { PullBeforeMergeBanner } from './PullBeforeMergeBanner'
 import { ReadRouteChip } from './ReadRouteChip'
 import { RefreshingBadge } from './RefreshingBadge'
 import { ChangeCountChips } from './ChangesPanel'
-import { savedStops, useChangeNavigatorStore } from '@/store/changeNavigatorStore'
+import { changeListSource, useChangeNavigatorStore } from '@/store/changeNavigatorStore'
 import { ContributorsStack } from './ContributorsStack'
 import { OthersSavedChip } from './OthersSavedChip'
 import { CommitDialog } from './CommitDialog'
@@ -432,8 +432,9 @@ export function CanvasVersioningBar({
                       ? `${BRANCH_VOCAB.publish} sends them to the version everyone sees. Click to step through them on the canvas.`
                       : `${BRANCH_VOCAB.publish} sends them to the version everyone sees`}
                   >
-                    {canStep && savedStops(changeSet).length > 0 ? (
-                      <button type="button" onClick={() => useChangeNavigatorStore.getState().start(savedStops(changeSet), { scope: 'saved' })}
+                    {canStep && workspaceId && graphId && branchId ? (
+                      <button type="button" onClick={() => useChangeNavigatorStore.getState().start(
+                        changeListSource(workspaceId, graphId, { branchId }), { scope: 'saved' })}
                         aria-label="Step through the saved changes on the canvas"
                         className="flex items-center gap-1.5 rounded-lg px-1 -mx-1 hover:bg-black/[0.04] dark:hover:bg-white/[0.06]">
                         <ChangeCountChips changeSet={changeSet} />

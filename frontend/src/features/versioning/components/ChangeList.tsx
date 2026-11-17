@@ -24,8 +24,7 @@ import type {
 } from '@/services/versioningApiService'
 import { useChangeEntries, useChangeEntry, useChangeSummary } from '../hooks/useVersioning'
 import type { GraphChange } from '../model/changeModel'
-import { useBranchStore } from '@/store/branchStore'
-import { savedStops, useChangeNavigatorStore } from '@/store/changeNavigatorStore'
+import { changeListSource, useChangeNavigatorStore } from '@/store/changeNavigatorStore'
 import { EntityDiff } from './EntityDiff'
 import { NodeDiffBadge, STATUS_META } from './NodeDiffBadge'
 
@@ -124,6 +123,21 @@ export function ChangeList({
     [s, activeKind],
   )
   const items = useMemo(() => itemsOf(rows, typeCounts), [rows, typeCounts])
+  // Where each entity still there stands among those the navigator steps through — the list's own
+  // order, without what was removed (nothing to show).
+  const stepAt = useMemo(() => {
+    const at = new Map<string, number>()
+    let n = 0
+    for (const r of rows) if (r.kind === 'node' && r.status !== 'removed') at.set(r.entityId, n++)
+    return at
+  }, [rows])
+  const showOnCanvas = (row: ChangeListRow) => {
+    if (!activeKind) return
+    const source = changeListSource(wsId, graphId, origin, { statuses, type: type || undefined, q })
+    useChangeNavigatorStore.getState().start(source, {
+      scope: 'saved', at: stepAt.get(row.entityId) ?? 0, narrowed: statuses.length > 0 || !!type || !!q.trim(),
+    })
+  }
 
   const [open, setOpen] = useState<ReadonlySet<string>>(new Set())
   const toggle = (id: string) => setOpen((prev) => {
@@ -265,7 +279,8 @@ export function ChangeList({
                     </div>
                   ) : (
                     <Row wsId={wsId} graphId={graphId} origin={origin} row={item.row}
-                      open={open.has(item.row.entityId)} onToggle={() => toggle(item.row.entityId)} />
+                      open={open.has(item.row.entityId)} onToggle={() => toggle(item.row.entityId)}
+                      onShow={() => showOnCanvas(item.row)} />
                   )}
                 </div>
               )
@@ -277,25 +292,20 @@ export function ChangeList({
   )
 }
 
-function Row({ wsId, graphId, origin, row, open, onToggle }: {
+function Row({ wsId, graphId, origin, row, open, onToggle, onShow }: {
   wsId: string
   graphId: string
   origin: ChangeListOrigin
   row: ChangeListRow
   open: boolean
   onToggle: () => void
+  /** Step through these on the canvas, from this one. */
+  onShow: () => void
 }) {
   const meta = STATUS_META[row.status]
   const label = rowLabel(row)
   // On a canvas, an entity still there can be shown — and stepped on from — where it sits.
   const canReveal = useChangeNavigatorStore((s) => s.canReveal) && row.kind === 'node' && row.status !== 'removed'
-  const showOnCanvas = () => {
-    const id = row.urn ?? row.entityId
-    const saved = 'branchId' in origin ? savedStops(useBranchStore.getState().activeChangeSet) : []
-    const nav = useChangeNavigatorStore.getState()
-    if (saved.some((s) => s.id === id)) nav.start(saved, { scope: 'saved', at: id })
-    else nav.start([{ id, name: label, status: row.status, saved: 'branchId' in origin }], { scope: 'saved' })
-  }
   return (
     <div role="listitem" className={cn('mb-1 rounded-lg border-l-2 bg-canvas-overlay/40 group/row flex flex-col', meta.accent)}>
       <div className="flex items-center min-w-0">
@@ -321,7 +331,7 @@ function Row({ wsId, graphId, origin, row, open, onToggle }: {
           )}
         </button>
         {canReveal && (
-          <button type="button" onClick={showOnCanvas} aria-label={`Show ${label} on canvas`}
+          <button type="button" onClick={onShow} aria-label={`Show ${label} on canvas`}
             className="shrink-0 mr-1 inline-flex items-center gap-0.5 px-1.5 h-6 rounded-md text-[11px] font-semibold text-accent-lineage opacity-0 group-hover/row:opacity-100 focus-visible:opacity-100 hover:bg-accent-lineage/10 transition-opacity">
             Show<ArrowUpRight className="w-3 h-3" aria-hidden />
           </button>

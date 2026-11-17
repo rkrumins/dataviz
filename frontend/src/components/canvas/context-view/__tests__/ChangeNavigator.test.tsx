@@ -18,7 +18,7 @@ const openNodeDrawer = vi.fn()
 beforeEach(() => {
   openNodeDrawer.mockReset()
   useCanvasStore.setState({ openNodeDrawer } as never)
-  useChangeNavigatorStore.setState({ active: false, stops: [], index: 0 })
+  useChangeNavigatorStore.setState({ active: false, source: null, index: 0 })
 })
 
 describe('ChangeNavigator', () => {
@@ -26,7 +26,7 @@ describe('ChangeNavigator', () => {
     const reveal = vi.fn(async () => 'revealed' as const)
     render(<ChangeNavigator reveal={reveal} />)
     expect(useChangeNavigatorStore.getState().canReveal).toBe(true)
-    act(() => useChangeNavigatorStore.getState().start(stops, { scope: 'all', at: 'urn:b' }))
+    act(() => useChangeNavigatorStore.getState().start(stops, { scope: 'all', atId: 'urn:b' }))
     expect(screen.getByText('Sales')).toBeInTheDocument()
     expect(screen.getByText((_, el) => el?.tagName === 'SPAN' && el.textContent === 'Change 2 of 3')).toBeInTheDocument()
     expect(reveal).toHaveBeenLastCalledWith('urn:b')
@@ -55,5 +55,30 @@ describe('ChangeNavigator', () => {
     act(() => useChangeNavigatorStore.getState().start(stops, { scope: 'all' }))
     fireEvent.keyDown(screen.getByLabelText('field'), { key: 'j' })
     expect(useChangeNavigatorStore.getState().index).toBe(0)
+  })
+
+  it('shows a change still being read, then its name', async () => {
+    let answer!: () => void
+    const pending = new Promise<void>((r) => { answer = r })
+    const src = {
+      total: 3, tooLarge: false, failed: () => false, ensure: () => {},
+      at: (i: number) => (loaded ? stops[i] : undefined),
+    }
+    let loaded = false
+    render(<ChangeNavigator reveal={async () => 'revealed'} />)
+    act(() => useChangeNavigatorStore.getState().start(src, { scope: 'saved', at: 1 }))
+    expect(screen.getByLabelText('Reading this change')).toBeInTheDocument()
+    loaded = true
+    answer()
+    await pending
+    act(() => useChangeNavigatorStore.setState((s) => ({ version: s.version + 1 })))
+    expect(screen.getByText('Sales')).toBeInTheDocument()
+  })
+
+  it('says when a draft has too many changes to step through', () => {
+    const src = { total: 0, tooLarge: true, failed: () => false, ensure: () => {}, at: () => undefined }
+    render(<ChangeNavigator reveal={async () => 'revealed'} />)
+    act(() => useChangeNavigatorStore.setState({ active: true, source: src, index: 0, scope: 'saved' }))
+    expect(screen.getByText(/Too many to step through/)).toBeInTheDocument()
   })
 })
