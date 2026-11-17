@@ -2126,17 +2126,19 @@ Matching by a property keeps an index of its values in the database: built by th
 
 ## Profiles
 
-Starting points: each profile sets the settings it covers for one outcome. Applying one in the app stages its values at the level you are editing, only for the settings you may set there, and says which it left out and why. Nothing is saved until you review the changes and save them.
+Starting points: each profile sets the settings it covers for one outcome. Applying one in the app stages its values at the level you are editing, only for the settings you may set there, and says which it left out and why. Nothing is saved until you review the changes and save them. **Set up with a guide** asks first what matters most, and offers the profiles by their goals.
 
-| Profile | What it gives you | View | Applies at |
-|---|---|---|---|
-| [Balanced](#balanced) | The built-in values: readers see the newest version as soon as it is published, and writes to the graph store leave reads their turn. | Business | Platform, Workspace, Graph |
-| [Fastest reads](#fastest-reads) | Reads stay on the graph store at full speed while new data loads, and writes give way to them. | Business | Platform, Workspace, Graph |
-| [Always exact](#always-exact) | Readers always see the newest published version, whole, read from the database until the graph store has it. | Business | Platform, Workspace, Graph |
-| [Least memory](#least-memory) | Graphs give their memory back half an hour after their last read, and a build needs about its graph's size rather than twice it. | Technical | Platform, Workspace, Graph |
-| [Big import tonight](#big-import-tonight) | Writes to the graph store go faster while few people read, so a large import lands sooner, and a build with no room is written in place rather than wait. | Technical | Platform |
+| Profile | Goal | What it gives you | View | Applies at |
+|---|---|---|---|---|
+| [Balanced](#balanced) | Fresh data and steady views, as built in | The built-in values: readers see the newest version as soon as it is published, and writes to the graph store leave reads their turn. | Business | Platform, Workspace, Graph |
+| [Fastest reads](#fastest-reads) | Fast views, even while new data loads | Reads stay on the graph store at full speed while new data loads, and writes give way to them. | Business | Platform, Workspace, Graph |
+| [Always exact](#always-exact) | Everyone sees the newest data, exactly as published | Readers always see the newest published version, whole, read from the database until the graph store has it. | Business | Platform, Workspace, Graph |
+| [Least memory](#least-memory) | Spend as little memory as possible | Graphs give their memory back half an hour after their last read, and a build needs about its graph's size rather than twice it. | Technical | Platform, Workspace, Graph |
+| [Big import tonight](#big-import-tonight) | A large import lands overnight | Writes to the graph store go faster while few people read, so a large import lands sooner, and a build with no room is written in place rather than wait. | Technical | Platform |
 
 ### Balanced
+
+*Its goal:* Fresh data and steady views, as built in.
 
 **The built-in values: readers see the newest version as soon as it is published, and writes to the graph store leave reads their turn.**
 
@@ -2166,6 +2168,8 @@ Starting points: each profile sets the settings it covers for one outcome. Apply
 
 ### Fastest reads
 
+*Its goal:* Fast views, even while new data loads.
+
 **Reads stay on the graph store at full speed while new data loads, and writes give way to them.**
 
 **Choose it when**
@@ -2186,6 +2190,8 @@ Starting points: each profile sets the settings it covers for one outcome. Apply
 
 ### Always exact
 
+*Its goal:* Everyone sees the newest data, exactly as published.
+
 **Readers always see the newest published version, whole, read from the database until the graph store has it.**
 
 **Choose it when**
@@ -2202,6 +2208,8 @@ Starting points: each profile sets the settings it covers for one outcome. Apply
 **Applies at:** Platform, Workspace, Graph. Shown first in the Business view.
 
 ### Least memory
+
+*Its goal:* Spend as little memory as possible.
 
 **Graphs give their memory back half an hour after their last read, and a build needs about its graph's size rather than twice it.**
 
@@ -2225,6 +2233,8 @@ Starting points: each profile sets the settings it covers for one outcome. Apply
 **Applies at:** Platform, Workspace, Graph.
 
 ### Big import tonight
+
+*Its goal:* A large import lands overnight.
 
 **Writes to the graph store go faster while few people read, so a large import lands sooner, and a build with no room is written in place rather than wait.**
 

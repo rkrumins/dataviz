@@ -35,8 +35,11 @@ const plainStatus = (q: PreviewItem) => q.status === 'in_effect' || q.status ===
 const outcomeShown = (r: ResolvedSetting, quick: PreviewItem | undefined, staged: boolean) =>
     quick ? (staged ? !plainStatus(quick) || Boolean(quick.example) : !sameValue(quick.effective, r.effective) || quick.status !== r.status) : false
 
-/** What the server says a staged value, or a change elsewhere, would mean here — and, when the value in force would differ, why and the fix. */
-function Outcome({ s, quick, staged, onFix, fixLabel }: {
+/**
+ * What the server says a staged value, or a change elsewhere, would mean here — and, when the value
+ * in force would differ, why and the fix. The guided setup says it under each question too.
+ */
+export function Outcome({ s, quick, staged, onFix, fixLabel }: {
     s: Setting
     quick: PreviewItem
     staged: boolean

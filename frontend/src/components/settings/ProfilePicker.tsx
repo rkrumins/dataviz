@@ -135,9 +135,9 @@ function ProfileCard({ profile, on, focusable, onPick }: { profile: Profile; on:
 
 /**
  * The plan, value by value: staged (from the value chosen for this level, set here or inherited, to
- * the profile's), already like this, and left out, by why.
+ * the profile's), already like this, and left out, by why. The guided setup shows a goal's plan too.
  */
-function PlanList({ plan, scope, resolved, done }: { plan: ProfilePlan; scope: Scope; resolved: ResolvedValues; done: boolean }) {
+export function PlanList({ plan, scope, resolved, done }: { plan: ProfilePlan; scope: Scope; resolved: ResolvedValues; done: boolean }) {
     const label = (key: string) => SETTINGS[key]?.label ?? key
     const show = (key: string, v: SettingValue | null | undefined) => (SETTINGS[key] ? formatValue(SETTINGS[key], v) : String(v))
     const already = plan.skipped.filter((x) => x.reason === 'already')

@@ -5,10 +5,12 @@
  *   preview   300 ms after the last edit the server says what the staged values would do (quick);
  *             a newer edit cancels the request for the older one
  *   review    the full preview (graphs, memory, readers, the database, drafts), warnings to
- *             acknowledge, and a reason
+ *             acknowledge, and a reason; in the review dialog, or drawn inline (`setInline`, the
+ *             guided setup's last step), where the full preview runs without the dialog
  *   save      one PATCH with the version each value was decided on and the warnings acknowledged;
  *             then one confirmation with Undo: the app's toast on a page, a bar in place in a
- *             drawer (`confirm`), never both
+ *             drawer (`confirm`), never both; or none, for a caller that confirms it its own way
+ *             (`save(reason, { confirm: false })`, with the Undo in `saved`)
  *   conflict  someone saved one of these values since it was read: the values are read again
  *             with who changed what and when (the history), the staged ones are kept at the
  *             versions now in force, and the review lists each value from theirs to yours, with
@@ -55,6 +57,8 @@ export interface SettingsEditor {
     review: {
         open: boolean
         setOpen: (open: boolean) => void
+        /** The review is drawn in place of the dialog: the full preview runs while it is. */
+        setInline: (inline: boolean) => void
         items: ReviewItem[]
         /** The full preview, with what the review must also have acknowledged: a warning the server refused a save for, someone else's change since. */
         full: PreviewResult | undefined
@@ -62,7 +66,11 @@ export interface SettingsEditor {
         fullError: SettingsRequestError | null
         /** Asks for the full preview again. */
         retryFull: () => void
-        save: (reason: string) => Promise<void>
+        /**
+         * Saves what is staged, with `reason`: true once it is saved. `confirm: false` leaves the
+         * confirmation to the caller: no toast and no bar, the Undo held in `saved` all the same.
+         */
+        save: (reason: string, options?: { confirm?: boolean }) => Promise<boolean>
         saving: boolean
         error: SettingsRequestError | null
         /** After a version conflict the values couldn't be read again for: try again. */
@@ -72,8 +80,12 @@ export interface SettingsEditor {
     }
     /** "Saved 2 changes to the platform." — for an aria-live region. */
     announcement: string
-    /** With `confirm: 'bar'`: the last save, while it can be undone from where it was made. */
-    saved: { words: string; undo: () => void } | null
+    /**
+     * With `confirm: 'bar'`, or a save made with `confirm: false`: the last save, while it can be
+     * undone from where it was made. `undo` is true once the earlier values are back; when it
+     * isn't, `announcement` says why.
+     */
+    saved: { words: string; undo: () => Promise<boolean> } | null
 }
 
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`
@@ -143,10 +155,11 @@ export function useSettingsEditor({ place, values, settings, where, refetch, con
     const save = useSaveSettings(place)
     const [serverErrors, setServerErrors] = useState<Record<string, string>>({})
     const [reviewOpen, setReviewOpen] = useState(false)
+    const [reviewInline, setReviewInline] = useState(false)
     const [saveError, setSaveError] = useState<SettingsRequestError | null>(null)
     const [round, setRound] = useState(0)
     const [announcement, setAnnouncement] = useState('')
-    const [saved, setSaved] = useState<{ words: string; undo: () => void } | null>(null)
+    const [saved, setSaved] = useState<{ words: string; undo: () => Promise<boolean> } | null>(null)
     // Warnings a save was refused for, with the body it was refused for: they stand while it does.
     const [owed, setOwed] = useState<{ body: string; warnings: SettingsWarning[] } | null>(null)
     // Values someone else saved since they were read, the staged ones now over theirs.
@@ -168,6 +181,12 @@ export function useSettingsEditor({ place, values, settings, where, refetch, con
         delete rest[key]
         return rest
     }), [])
+    // Stable: a review drawn inline turns it on and off from an effect.
+    const setInline = useCallback((inline: boolean) => {
+        setReviewInline(inline)
+        if (!inline) setSaveError(null)
+    }, [])
+
     const stage = useCallback((key: string, value: SettingValue | null) => { latest.current.stage(key, value); forget(key) }, [forget])
     const unstage = useCallback((key: string) => { latest.current.unstage(key); forget(key) }, [forget])
     const stageLimits = useCallback((key: string, limits: Limits | null) => { latest.current.stageLimits(key, limits); forget(key) }, [forget])
@@ -195,7 +214,7 @@ export function useSettingsEditor({ place, values, settings, where, refetch, con
     const quickItems = useMemo(() => JSON.parse(settled) as PatchItem[], [settled])
     const quickQuery = useSettingsPreview(place, problems ? [] : quickItems, 'quick')
     const fullItems = useMemo(() => JSON.parse(body) as PatchItem[], [body])
-    const fullQuery = useSettingsPreview(place, fullItems, 'full', { enabled: reviewOpen })
+    const fullQuery = useSettingsPreview(place, fullItems, 'full', { enabled: reviewOpen || reviewInline })
     const quick = useMemo(() => (payload.length ? quickQuery.data?.values ?? {} : {}), [payload.length, quickQuery.data])
 
     // ── Review ──────────────────────────────────────────────────────────────
@@ -266,8 +285,10 @@ export function useSettingsEditor({ place, values, settings, where, refetch, con
         }
     }
 
-    const doSave = async (reason: string) => {
-        if (reconciling) return
+    const doSave = async (reason: string, options?: { confirm?: boolean }): Promise<boolean> => {
+        if (reconciling) return false
+        // Confirmed here (the toast, or a bar), or by the caller in its own way.
+        const confirmHere = options?.confirm !== false
         const sending = staged.payload()
         // Save stays off until every warning shown is acknowledged: the server's are sent back.
         const acknowledge = [...new Set([...(fullQuery.data?.impact?.warnings ?? []), ...refused].map((w) => w.code))]
@@ -289,14 +310,15 @@ export function useSettingsEditor({ place, values, settings, where, refetch, con
             setRound((r) => r + 1)
             const words = `Saved ${plural(valueChanges.length + limitChanges.length, 'change')} to ${where}.`
             setAnnouncement(words)
-            const undoIt = () => void undoNow(undo, reason)
-            if (confirm === 'bar') setSaved({ words, undo: undoIt })
-            else notify('success', words, { label: 'Undo', onClick: undoIt }, UNDO_MS)
+            const undoIt = () => undoNow(undo, reason, confirmHere)
+            if (!confirmHere || confirm === 'bar') setSaved({ words, undo: undoIt })
+            else notify('success', words, { label: 'Undo', onClick: () => void undoIt() }, UNDO_MS)
+            return true
         } catch (err) {
             const e = settingsError(err)
             if (e.type === 'settings_conflict') {
                 void reconcile(e)
-                return
+                return false
             }
             if (e.type === 'acknowledgement_required') setOwed({ body: JSON.stringify(sending), warnings: e.warnings })
             setSaveError(e)
@@ -304,10 +326,12 @@ export function useSettingsEditor({ place, values, settings, where, refetch, con
             for (const p of e.errors) byKey[p.key] = p.message
             for (const d of e.denied) byKey[d.key] = d.editor ? `Only ${EDITOR_LABEL[d.editor]} can change this here. ${d.message}`.trim() : d.message
             if (Object.keys(byKey).length) setServerErrors((prev) => ({ ...prev, ...byKey }))
+            return false
         }
     }
 
-    const undoNow = async (items: PatchItem[], reason: string) => {
+    /** Puts back what a save changed. `confirmHere`: say so with a toast; else its caller does. */
+    const undoNow = async (items: PatchItem[], reason: string, confirmHere: boolean): Promise<boolean> => {
         const send = (acknowledge?: string[]) => save.mutateAsync({ items, reason: `Undo: ${reason}`, acknowledge })
         try {
             // Undo puts back the values in force a moment ago: what that warns about was so before
@@ -320,12 +344,16 @@ export function useSettingsEditor({ place, values, settings, where, refetch, con
             latest.current.clearUndo()
             setSaved(null)
             setAnnouncement('Undone.')
-            notify('success', 'Undone: the earlier values are back.')
+            if (confirmHere) notify('success', 'Undone: the earlier values are back.')
+            return true
         } catch (err) {
             const e = settingsError(err)
-            notify('error', e.type === 'settings_conflict'
+            const words = e.type === 'settings_conflict'
                 ? 'Couldn’t undo: these settings changed again since. Set them back by hand.'
-                : `Couldn’t undo: ${e.message}`)
+                : `Couldn’t undo: ${e.message}`
+            setAnnouncement(words)
+            if (confirmHere) notify('error', words)
+            return false
         }
     }
 
@@ -343,6 +371,7 @@ export function useSettingsEditor({ place, values, settings, where, refetch, con
                 setReviewOpen(open)
                 if (!open) setSaveError(null)
             },
+            setInline,
             items,
             full,
             fullPending: fullQuery.isFetching,

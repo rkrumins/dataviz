@@ -17,9 +17,15 @@
  *              (`ok` is a system admin; `readonly` someone who may only read)
  *   drawer     1: a graph's settings drawer, open (admin page)
  *   theme      `dark` for the dark palette
+ *   coach      1: the guided setup's coach mark, as a first visit in the Business view shows it
+ *              (otherwise it is marked seen, so every other shot is of the page alone)
+ *   motion     1: animations run (confetti mid-flight); otherwise each lands on its end state
+ *
+ * The app's motion policy applies as in the app: the OS's reduced motion (a browser's emulation of
+ * it) quiets framer-motion and the guide's confetti.
  */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { MotionGlobalConfig } from 'framer-motion'
+import { MotionConfig, MotionGlobalConfig } from 'framer-motion'
 import { StrictMode, useEffect, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
@@ -28,7 +34,9 @@ import '../styles/globals.css'
 import { AdminVersionedGraphs } from '../components/admin/AdminVersionedGraphs'
 import { GraphSettingsDrawer } from '../components/admin/AdminVersionedGraphs/GraphSettingsDrawer'
 import { WorkspaceVersionedGraphs } from '../components/admin/AdminVersionedGraphs/WorkspaceVersionedGraphs'
+import { markSetupIntroSeen } from '../components/admin/AdminVersionedGraphs/setupIntro'
 import { PageContainer } from '../components/layout/PageContainer'
+import { markPersonaIntroSeen } from '../components/persona/personaIntro'
 import { NotificationStack } from '../components/ui/notifications'
 import { DataSourceVersioningTab } from '../features/versioning/components/DataSourceVersioningTab'
 import { useAuthStore } from '../store/auth'
@@ -45,10 +53,16 @@ const dark = params.get('theme') === 'dark'
 const drawer = params.get('drawer') === '1'
 
 // Every animation lands on its end state at once: a screenshot otherwise catches a panel mid-slide.
-MotionGlobalConfig.skipAnimations = true
-const still = document.createElement('style')
-still.textContent = '*, *::before, *::after { transition: none !important; animation-duration: 0s !important; }'
-document.head.appendChild(still)
+if (params.get('motion') !== '1') {
+    MotionGlobalConfig.skipAnimations = true
+    const still = document.createElement('style')
+    still.textContent = '*, *::before, *::after { transition: none !important; animation-duration: 0s !important; }'
+    document.head.appendChild(still)
+}
+// The guided setup's coach mark only when asked for. It waits for the Business view's own intro,
+// which shows on the app's top bar: there is none here, so that one counts as seen.
+if (params.get('coach') === '1') markPersonaIntroSeen()
+else markSetupIntroSeen()
 
 window.fetch = versionedGraphsFetch(scenario)
 useFeaturesStore.setState({
@@ -104,6 +118,7 @@ function DataSourcePanel() {
 
 export function Harness() {
     const setTheme = usePreferencesStore((s) => s.setTheme)
+    const calm = usePreferencesStore((s) => s.reducedMotion)
     const [open, setOpen] = useState(drawer)
     useEffect(() => {
         setTheme(dark ? 'dark' : 'light')
@@ -113,17 +128,20 @@ export function Harness() {
         : page === 'datasource' ? `/workspaces/${WS}?ds=ds_sales&dstab=versioning`
             : `/admin/versioned-graphs?tab=${tab}${window.location.hash}`
     return (
-        <div className="min-h-screen bg-canvas text-ink">
-            <MemoryRouter initialEntries={[start]}>
-                <Routes>
-                    <Route path="/admin/versioned-graphs" element={<AdminVersionedGraphs />} />
-                    <Route path="/workspaces/:wsId" element={page === 'datasource' ? <DataSourcePanel /> : <WorkspacePage />} />
-                    <Route path="*" element={<p className="p-8 text-sm">Left the page.</p>} />
-                </Routes>
-                {drawer && page === 'admin' && <GraphSettingsDrawer workspaceId={WS} graphId={GRAPH} open={open} onOpenChange={setOpen} label="Sales lineage" />}
-            </MemoryRouter>
-            <NotificationStack />
-        </div>
+        // The app's motion policy (App.tsx): its calm mode, else the OS's setting.
+        <MotionConfig reducedMotion={calm ? 'always' : 'user'}>
+            <div className="min-h-screen bg-canvas text-ink">
+                <MemoryRouter initialEntries={[start]}>
+                    <Routes>
+                        <Route path="/admin/versioned-graphs" element={<AdminVersionedGraphs />} />
+                        <Route path="/workspaces/:wsId" element={page === 'datasource' ? <DataSourcePanel /> : <WorkspacePage />} />
+                        <Route path="*" element={<p className="p-8 text-sm">Left the page.</p>} />
+                    </Routes>
+                    {drawer && page === 'admin' && <GraphSettingsDrawer workspaceId={WS} graphId={GRAPH} open={open} onOpenChange={setOpen} label="Sales lineage" />}
+                </MemoryRouter>
+                <NotificationStack />
+            </div>
+        </MotionConfig>
     )
 }
 

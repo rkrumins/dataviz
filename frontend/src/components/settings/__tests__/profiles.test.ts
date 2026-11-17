@@ -15,7 +15,7 @@ const why = (plan: ProfilePlan) => Object.fromEntries(plan.skipped.map((s) => [s
 
 /** A profile of the given values, for the levels it names. */
 const profile = (values: Profile['values'], scopes: Profile['scopes'] = ['platform', 'workspace', 'graph']): Profile => ({
-    id: 'test', title: 'Test', promise: '', audience: 'business', when: [], values, scopes, caution: '',
+    id: 'test', title: 'Test', promise: '', goal: '', audience: 'business', when: [], values, scopes, caution: '',
 })
 
 describe('applyProfile', () => {

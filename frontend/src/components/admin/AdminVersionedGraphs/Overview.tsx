@@ -12,7 +12,7 @@
  */
 import { useState, type ReactNode } from 'react'
 import { useReducedMotion } from 'framer-motion'
-import { ArrowRight, RotateCw } from 'lucide-react'
+import { ArrowRight, RotateCw, Route } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { formatCount } from '@/lib/units'
 import { MetricInfo } from '@/components/analytics/MetricInfo'
@@ -209,7 +209,7 @@ function Figures({ onFilter }: { onFilter: (f: GraphInventoryFilter) => void }) 
     )
 }
 
-export function Overview({ schema, values, switches, signals, signalsUnavailable, providers, onShowSetting, onStage, onOpenSettings, onGoToSettings }: {
+export function Overview({ schema, values, switches, signals, signalsUnavailable, providers, onShowSetting, onStage, onOpenSettings, onGoToSettings, setup }: {
     schema: ServedSchema
     /** The platform's values, for the finder; absent while they load. */
     values: ResolvedValues | undefined
@@ -225,6 +225,8 @@ export function Overview({ schema, values, switches, signals, signalsUnavailable
     onOpenSettings: (row: VersionedGraphRow) => void
     /** Opens Settings at a category. */
     onGoToSettings: (category?: string) => void
+    /** The guided setup, for an editor: "Set up with a guide", or "Continue setup". */
+    setup?: { label: string; onStart: () => void }
 }) {
     const [filter, setFilter] = useState<GraphInventoryFilter>({})
     const summary = useGraphsSummary()
@@ -266,7 +268,15 @@ export function Overview({ schema, values, switches, signals, signalsUnavailable
                         )
                     })}
                 </ul>
-                <Button className="mt-5 bg-indigo-600 hover:bg-indigo-700 hover:brightness-100" variant="primary" rightIcon={ArrowRight} onClick={() => onGoToSettings()}>Review the settings</Button>
+                <div className="mt-5 flex flex-wrap items-center gap-2.5">
+                    {setup && (
+                        <Button variant="primary" leftIcon={Route} onClick={setup.onStart}
+                            className="bg-indigo-600 bg-gradient-to-r from-indigo-600 to-violet-600 shadow-indigo-600/25">
+                            {setup.label}
+                        </Button>
+                    )}
+                    <Button className="bg-indigo-600 hover:bg-indigo-700 hover:brightness-100" variant="primary" rightIcon={ArrowRight} onClick={() => onGoToSettings()}>Review the settings</Button>
+                </div>
             </section>
 
             <div className="order-first sm:order-none">

@@ -33,9 +33,11 @@ const found = import.meta.glob<{ ProfilePicker: ComponentType<ProfilePickerProps
 const load = Object.values(found)[0]
 const ProfilePicker = load ? lazy(() => load().then((m) => ({ default: m.ProfilePicker }))) : null
 
-export function ProfileEntry({ profiles, variant = 'card', className, ...pass }: Omit<ProfilePickerProps, 'onClose' | 'profiles'> & {
+export function ProfileEntry({ profiles, variant = 'card', primary = true, className, ...pass }: Omit<ProfilePickerProps, 'onClose' | 'profiles'> & {
     profiles?: SettingsProfile[]
     variant?: 'card' | 'button'
+    /** The button is the page's first step (filled); false beside a first step of the page's own. */
+    primary?: boolean
     className?: string
 }) {
     const [open, setOpen] = useState(false)
@@ -44,11 +46,18 @@ export function ProfileEntry({ profiles, variant = 'card', className, ...pass }:
     return (
         <>
             {variant === 'button' ? (
-                // The page's first step: filled, in the app's indigo-to-violet.
-                <Button variant="primary" leftIcon={Sparkles} onClick={() => setOpen(true)}
-                    className={cn('bg-indigo-600 bg-gradient-to-r from-indigo-600 to-violet-600 shadow-indigo-600/25', className)}>
-                    Start from a profile…
-                </Button>
+                primary ? (
+                    // The page's first step: filled, in the app's indigo-to-violet.
+                    <Button variant="primary" leftIcon={Sparkles} onClick={() => setOpen(true)}
+                        className={cn('bg-indigo-600 bg-gradient-to-r from-indigo-600 to-violet-600 shadow-indigo-600/25', className)}>
+                        Start from a profile…
+                    </Button>
+                ) : (
+                    // Its edge a divider's: the plain glass edge is white, invisible on the hero's card.
+                    <Button leftIcon={Sparkles} onClick={() => setOpen(true)} className={cn('border-glass-border/80', className)}>
+                        Start from a profile…
+                    </Button>
+                )
             ) : (
                 <div className={cn('flex flex-wrap items-center gap-x-4 gap-y-2 rounded-2xl border border-glass-border/50 bg-canvas-elevated px-4 py-3', className)}>
                     <Sparkles aria-hidden className="w-4 h-4 shrink-0 text-ink-muted" />

@@ -14,8 +14,9 @@ facts are claims about the code. These tests hold both:
   * memory-heavy settings are system administrators' at every scope;
   * every name a setting points at (rules, caps, requirements, uses, why codes) exists;
   * examples, postures and recommendations render, with and without live facts;
-  * every profile's values are values their settings take, settable where the profile applies,
-    and it names each feature switch it relies on; Balanced is the built-in values;
+  * every profile names its goal in plain words, its values are values their settings take,
+    settable where the profile applies, and it names each feature switch it relies on; Balanced
+    is the built-in values;
   * every signal is one of the fixed counters and answers a symptom its settings name;
   * the generated guide has the anchor each setting's ``docs`` link points at, and a section for
     each profile.
@@ -300,7 +301,7 @@ def test_no_engineering_words_in_what_the_app_shows():
         yield "deployment", [t for d in DEPLOYMENT for t in (d.label, d.means)]
         yield "retired", [r.why for r in RETIRED]
         for p in PROFILES:
-            yield f"profile:{p.id}", [p.title, p.promise, p.caution, *p.when]
+            yield f"profile:{p.id}", [p.title, p.promise, p.goal, p.caution, *p.when]
         yield "signals", [t for sig in SIGNALS for t in (sig.label, sig.symptom, sig.unit)]
         for doc in (schema_json(), schema_json(facts=_FACTS)):
             for item in doc["settings"]:
@@ -685,6 +686,17 @@ def test_the_contracts_profiles_are_there_each_once():
             assert text.strip().endswith(".") and ". " not in text, f"{p.id}: one sentence: {text!r}"
         assert p.when and all(w.strip().endswith(".") for w in p.when), p.id
         assert p.values, p.id
+
+
+@pytest.mark.parametrize("profile", PROFILES, ids=lambda p: p.id)
+def test_a_profile_names_its_goal_in_plain_words(profile):
+    """The guided setup asks what matters most and offers each profile by its goal: one line, in
+    the words of someone who wants it, with no engineering word in it."""
+    goal = profile.goal
+    assert goal.strip(), f"{profile.id}: no goal"
+    assert goal == goal.strip() and "\n" not in goal, f"{profile.id}: one line: {goal!r}"
+    found = _JARGON.search(goal)
+    assert not found, f"{profile.id}: {found.group(0)!r} in its goal {goal!r}"
 
 
 @pytest.mark.parametrize("profile", PROFILES, ids=lambda p: p.id)

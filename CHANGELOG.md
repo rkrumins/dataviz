@@ -123,6 +123,17 @@ integration's many small changes as a few commits.
   memory and Big import tonight each set the settings they cover. Applying one stages its values at
   the level you are editing, only those you may set there, and says which it left out and why;
   nothing is saved until you review and save.
+- **Set up with a guide.** A few plain questions, then the usual review: what matters most (the
+  profiles, offered by their goals, each showing what it would stage), what people see while new
+  data loads, whether graphs stay in memory, and who approves and publishes drafts, how long closed
+  drafts keep their changes and the replace guard. It stages through the page, so the save bar
+  counts what it stages and nothing is saved before the review; it never turns a feature switch,
+  which saves at once. Closed with choices staged, it keeps them for **Continue setup**, or puts
+  back what was staged before. A save ends on what was saved, how many graphs behave differently
+  and where, with **Undo** for ten seconds. It is on the Settings page, the Overview and an empty
+  History for system administrators, and on a workspace's **Versioned graphs** tab for its
+  administrators; a first visit in the Business view points at it once. Each profile's goal comes
+  from the settings registry, and the generated guide lists it.
 - **Signals: what actually happened.** The settings' **Something's wrong?** finder counts, over the
   last day, the builds that waited for room, copies that timed out, builds dropped, reads asked to
   retry or served from the database while a graph caught up, graphs unloaded because memory ran
@@ -583,6 +594,10 @@ integration's many small changes as a few commits.
 
 ### Fixed
 
+- **Every wizard reads at AA contrast and fits a phone** (a view, a workspace, a data source and
+  the others built on the same frame): Next and Save are a darker indigo, completed steps a darker
+  green, the step line under the title is easier to read, and on a phone the paddings shrink and
+  the steps no longer push Back, Cancel and Next off a short screen.
 - **The upgrade no longer stops on a database stamped `20261112_1700_gv_ps_served`.** An image
   built from this work on the morning of 12 November stamped that id. The served column's
   migration was then renumbered to `20261112_1800_gv_ps_served`, with

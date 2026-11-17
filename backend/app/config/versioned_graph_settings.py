@@ -3479,7 +3479,7 @@ RETIRED: Tuple[Retired, ...] = (
 # ---------------------------------------------------------------------------------------------
 # Profiles: one-click starting points. Each value is one its setting's guidance gives for the
 # outcome the profile promises; Balanced puts back the built-in value of every setting the others
-# change.
+# change. Each goal says that outcome as someone who wants it would: the guided setup asks for it.
 # ---------------------------------------------------------------------------------------------
 
 _ALL_SCOPES = ("platform", "workspace", "graph")
@@ -3490,6 +3490,7 @@ _TUNED: Tuple[Profile, ...] = (
         title="Fastest reads",
         promise=("Reads stay on the graph store at full speed while new data loads, and writes give "
                  "way to them."),
+        goal="Fast views, even while new data loads",
         audience="business",
         when=("Views of a large graph slow down for a while after each big import.",
               "Fast canvases matter more than seeing a large change all at once."),
@@ -3504,6 +3505,7 @@ _TUNED: Tuple[Profile, ...] = (
         title="Always exact",
         promise=("Readers always see the newest published version, whole, read from the database "
                  "until the graph store has it."),
+        goal="Everyone sees the newest data, exactly as published",
         audience="business",
         when=("The newest data must show the moment it is published, even if views are slower "
               "meanwhile.",
@@ -3518,6 +3520,7 @@ _TUNED: Tuple[Profile, ...] = (
         title="Least memory",
         promise=("Graphs give their memory back half an hour after their last read, and a build "
                  "needs about its graph's size rather than twice it."),
+        goal="Spend as little memory as possible",
         audience="operator",
         when=("The graph store is short of memory, or its memory costs too much.",
               "Most graphs are opened now and then rather than all day."),
@@ -3534,6 +3537,7 @@ _TUNED: Tuple[Profile, ...] = (
         title="Big import tonight",
         promise=("Writes to the graph store go faster while few people read, so a large import lands "
                  "sooner, and a build with no room is written in place rather than wait."),
+        goal="A large import lands overnight",
         audience="operator",
         when=("A large import or replace runs tonight, while few people read.",
               "The new version must be in place by morning, even where a build finds no room."),
@@ -3554,6 +3558,7 @@ PROFILES: Tuple[Profile, ...] = (
         title="Balanced",
         promise=("The built-in values: readers see the newest version as soon as it is published, "
                  "and writes to the graph store leave reads their turn."),
+        goal="Fresh data and steady views, as built in",
         audience="business",
         when=("You are starting out, or aren't sure which trade suits you.",
               "You tried another profile and want the built-in values back."),

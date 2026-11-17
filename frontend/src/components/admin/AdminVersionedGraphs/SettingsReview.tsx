@@ -7,22 +7,21 @@
  * worked out, the review says so, offers to try again, and saves only once the person chooses to
  * save without seeing what the change does. The report is told in the app's view (`useLens`).
  *
- * The page's editor (`useSettingsEditor`) and History's revert both open it.
+ * The page's editor (`useSettingsEditor`) and History's revert both open it. What it draws from the
+ * server's answer is `useServerReview`, which the guided setup's last step draws inline too.
  */
 import type { ReactNode } from 'react'
-import { useQueryClient } from '@tanstack/react-query'
-import { CircleCheck, RotateCw, Undo2 } from 'lucide-react'
+import { CircleCheck, Undo2 } from 'lucide-react'
 import { Button } from '@/components/ui/Button'
-import { ChangeReviewDialog, useLens, type DimensionInfo, type ReviewItem, type Setting } from '@/components/settings'
-import { settingsKeys, type Impact, type SettingsRequestError } from '@/services/settingsService'
-import { ImpactReport } from './ImpactReport'
-import { refusalWords, reviewWarnings } from './reviewText'
+import { ChangeReviewDialog, type DimensionInfo, type ReviewItem, type Setting } from '@/components/settings'
+import type { Impact, SettingsRequestError } from '@/services/settingsService'
+import { useServerReview } from './useServerReview'
 
 /**
  * After a save, where the save bar was: what was saved, and Undo, for as long as the toast's. The
  * toast is the app's, outside a drawer's focus; this one is inside, within reach of the keyboard.
  */
-export function SavedBar({ saved }: { saved: { words: string; undo: () => void } | null }) {
+export function SavedBar({ saved }: { saved: { words: string; undo: () => unknown } | null }) {
     if (!saved) return null
     return (
         <div className="sticky bottom-4 z-30 px-0 sm:px-4">
@@ -30,7 +29,7 @@ export function SavedBar({ saved }: { saved: { words: string; undo: () => void }
                 + 'shadow-[0_1px_2px_rgba(15,23,42,0.08),0_18px_48px_-18px_rgba(15,23,42,0.45)] dark:shadow-[0_18px_48px_-18px_rgba(0,0,0,0.9)]'}>
                 <CircleCheck aria-hidden className="w-4 h-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
                 <p className="min-w-0 flex-1 text-[13px] font-medium text-ink">{saved.words}</p>
-                <Button variant="ghost" leftIcon={Undo2} onClick={saved.undo} aria-label="Undo this save" className="text-ink-secondary">Undo</Button>
+                <Button variant="ghost" leftIcon={Undo2} onClick={() => { void saved.undo() }} aria-label="Undo this save" className="text-ink-secondary">Undo</Button>
             </div>
         </div>
     )
@@ -53,44 +52,30 @@ export function SettingsReview({
     onRetryImpact?: () => void
     /** Said in place of the impact when it can't be worked out here. */
     impactNote?: ReactNode
-    onSave: (reason: string) => void | Promise<void>
+    onSave: (reason: string) => unknown
     saving: boolean
     error: SettingsRequestError | null
     onReapply?: () => void
     /** A new value starts a fresh review: an empty reason, nothing acknowledged. */
     round: number
 }) {
-    const qc = useQueryClient()
-    const [lens] = useLens()
-    const retry = onRetryImpact ?? (() => void qc.refetchQueries({ queryKey: [...settingsKeys.all, 'preview', 'full'], type: 'active' }))
-    // Failed: no answer for these values, and none on its way. An answer kept from before still stands.
-    const failed = !impact && Boolean(impactError) && !impactPending
-    const drawn = failed && impactError ? (
-        <div role="alert" className="flex flex-wrap items-center gap-3 rounded-xl border border-amber-500/25 bg-amber-500/[0.05] px-4 py-3">
-            <p className="min-w-0 flex-1 text-[13px] text-ink-secondary">
-                Couldn’t work out what this changes: {impactError.message}.
-            </p>
-            <Button size="sm" variant="secondary" leftIcon={RotateCw} onClick={retry}>Try again</Button>
-        </div>
-    ) : impact ? <ImpactReport impact={impact} settings={settings} lens={lens} />
-        : impactNote ? <p className="text-[13px] text-ink-secondary">{impactNote}</p> : undefined
-
+    const server = useServerReview({ impact, impactPending, impactError, onRetryImpact, impactNote, settings, error })
     return (
         <ChangeReviewDialog
-            key={round}
             open={open}
             onOpenChange={onOpenChange}
             items={items}
             where={where}
             dimensions={dimensions}
-            impact={drawn}
-            impactLoading={impactPending && !impact}
-            impactFailed={failed}
-            warnings={reviewWarnings(impact)}
+            impact={server.impact}
+            impactLoading={server.impactLoading}
+            impactFailed={server.impactFailed}
+            warnings={server.warnings}
             onSave={onSave}
             saving={saving}
-            error={error ? refusalWords(error, settings) : undefined}
+            error={server.error}
             onReapply={onReapply}
+            round={round}
         />
     )
 }
