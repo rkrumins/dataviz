@@ -25,8 +25,8 @@ function Bracket({ from, bytes, scale, className }: { from: number; bytes: numbe
 }
 
 export function CopyRoomBar({ graph, copyRoomPct, nextCopyRoomPct, startPct, copyMaxBytes, nodes, className }: {
-    /** The graph to copy: the largest, usually. */
-    graph: { name: string; bytes: number }
+    /** The largest graph, the one a copy must fit: named by its data source, or null when it can't be. */
+    graph: { name: string | null; bytes: number }
     /** Percent of the graph's size. */
     copyRoomPct: number
     nextCopyRoomPct?: number
@@ -60,7 +60,7 @@ export function CopyRoomBar({ graph, copyRoomPct, nextCopyRoomPct, startPct, cop
             )}
             caption={(
                 <>
-                    {graph.name} is {formatBytes(graph.bytes)}. At {formatNumber(copyRoomPct)}%, a copy needs {formatBytes(need)} free under a node’s start mark ({formatNumber(startPct)}%): it fits on {fits} of {nodes.length} {nodes.length === 1 ? 'node' : 'nodes'}.
+                    {graph.name ? `Your largest graph, ${graph.name}, is` : 'Your largest graph is'} {formatBytes(graph.bytes)}. At {formatNumber(copyRoomPct)}%, a copy needs {formatBytes(need)} free under a node’s start mark ({formatNumber(startPct)}%): it fits on {fits} of {nodes.length} {nodes.length === 1 ? 'node' : 'nodes'}.
                     {needNext !== null && fitsNext !== null && (
                         <>{' '}<span className="font-medium text-indigo-700 dark:text-indigo-300">With your change ({formatNumber(nextCopyRoomPct as number)}%) it needs {formatBytes(needNext)}: it fits on {fitsNext}.</span></>
                     )}

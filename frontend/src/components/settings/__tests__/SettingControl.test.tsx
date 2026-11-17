@@ -78,6 +78,25 @@ describe('SettingControl', () => {
         expect(screen.getByText(/Change it to set/)).toHaveTextContent(/Change it to set this graph’s own\.$/)
     })
 
+    it('says where an inherited value comes from unless asked not to (a row says it itself)', () => {
+        const { unmount } = render(<SettingControl setting={S['builds.aboveRows']} value={null} onChange={vi.fn()}
+            resolved={PLATFORM_VALUES['builds.aboveRows']} scope="platform" inheritNote={false} />)
+        expect(screen.getByRole('spinbutton', { name: S['builds.aboveRows'].label })).toHaveAttribute('placeholder', '200,000')
+        expect(screen.queryByText(/The default:/)).not.toBeInTheDocument()
+        unmount()
+        render(<SettingControl setting={S['imports.identifier']} value={null} onChange={vi.fn()}
+            resolved={WORKSPACE_VALUES['imports.identifier']} scope="workspace" inheritNote={false} />)
+        expect(screen.getByRole('radio', { name: 'Entity ID' })).toHaveAttribute('aria-checked', 'true')
+        expect(screen.queryByText(/^(The default|From the platform):/)).not.toBeInTheDocument()
+    })
+
+    it('bool: an inherited switch says whom it follows, not its value again', () => {
+        setup('residency.autoUnload', PLATFORM_VALUES, 'platform')
+        expect(screen.getByRole('switch', { name: S['residency.autoUnload'].label })).toHaveAttribute('aria-checked', 'true')
+        expect(screen.getAllByText('On')).toHaveLength(1)
+        expect(screen.getByText(/^Follows the default/)).toHaveTextContent('Follows the default. Change it to set the platform’s own.')
+    })
+
     it('percent: a slider and a number together; the slider takes the arrow keys', () => {
         const onChange = setup('residency.unloadStartPct', PLATFORM_VALUES, 'platform', 85)
         const label = S['residency.unloadStartPct'].label

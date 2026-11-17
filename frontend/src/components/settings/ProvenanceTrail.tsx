@@ -30,7 +30,7 @@ function TrailBadge({ icon: Icon, label, tip, tone = 'neutral' }: {
     return (
         <HoverTip label={tip} className="inline-flex">
             <span className={cn(
-                'inline-flex items-center gap-0.5 rounded px-1 text-[10px] font-semibold leading-4',
+                'inline-flex items-center gap-0.5 rounded px-1 text-[11px] font-semibold leading-4',
                 tone === 'info' ? 'bg-sky-500/10 text-sky-700 dark:text-sky-300' : 'bg-black/[0.06] text-ink-secondary dark:bg-white/[0.08]',
             )}>
                 <Icon className="w-2.5 h-2.5" aria-hidden />
@@ -79,7 +79,7 @@ export function ProvenanceTrail({ setting, resolved, scope, staged, className }:
                     <li key={t.scope} className="flex items-stretch">
                         {i > 0 && <ChevronRight aria-hidden className="mx-0.5 w-3.5 h-3.5 self-center text-ink-muted/70 shrink-0" />}
                         <div className={cn(
-                            'min-w-0 max-w-[15rem] rounded-lg border px-2.5 py-1.5',
+                            'min-w-0 max-w-[16rem] rounded-lg border px-2.5 py-1.5',
                             state === 'winner'
                                 ? 'border-ink/20 bg-canvas-elevated shadow-[0_1px_2px_rgba(15,23,42,0.06)] dark:border-white/20'
                                 : 'border-glass-border/60 border-dashed',
@@ -87,8 +87,8 @@ export function ProvenanceTrail({ setting, resolved, scope, staged, className }:
                         )}>
                             <div className="flex flex-wrap items-center gap-1">
                                 <Icon aria-hidden className="w-3 h-3 text-ink-muted shrink-0" />
-                                <span className="text-[10px] font-semibold uppercase tracking-[0.08em] text-ink-secondary">{SCOPE_LABEL[t.scope]}</span>
-                                {here && <span className="text-[10px] text-ink-secondary">· here<span className="sr-only">: {SCOPE_HERE[t.scope as Scope]}</span></span>}
+                                <span className="text-[11px] font-semibold uppercase tracking-[0.08em] text-ink-secondary">{SCOPE_LABEL[t.scope]}</span>
+                                {here && <span className="text-[11px] text-ink-secondary">· here<span className="sr-only">: {SCOPE_HERE[t.scope as Scope]}</span></span>}
                                 {t.scope === 'platform' && t.locked && (
                                     <TrailBadge icon={Lock} label="Locked" tip="Workspaces and graphs can’t change this value." />
                                 )}
@@ -99,7 +99,7 @@ export function ProvenanceTrail({ setting, resolved, scope, staged, className }:
                                     <TrailBadge icon={ShieldAlert} label="Exception" tone="info" tip="A system admin set this outside the platform’s limits. It stays in force until changed." />
                                 )}
                             </div>
-                            <div className="mt-0.5 flex items-center gap-1 text-xs leading-snug">
+                            <div className="mt-0.5 flex items-center gap-1 text-[12.5px] leading-snug">
                                 {state === 'winner' && !adjusted && <Check aria-hidden className="w-3 h-3 shrink-0 text-emerald-600 dark:text-emerald-400" />}
                                 <span className={cn(
                                     'min-w-0',
@@ -111,7 +111,7 @@ export function ProvenanceTrail({ setting, resolved, scope, staged, className }:
                                 {caption[state] && state !== 'unset' && <span className="sr-only"> ({caption[state]})</span>}
                             </div>
                             {t.scope === 'default' && setting.default.env && t.env != null && (
-                                <p className={cn('mt-0.5 text-[10px]',
+                                <p className={cn('mt-0.5 text-[11px]',
                                     !t.env.valid && t.env.held === undefined ? 'text-rose-600 dark:text-rose-400'
                                         : t.env.held !== undefined ? 'text-amber-700 dark:text-amber-400' : 'text-ink-secondary')}>
                                     {!t.env.valid && t.env.held === undefined ? `Deployment value ignored: “${String(t.env.value)}”`
@@ -120,10 +120,10 @@ export function ProvenanceTrail({ setting, resolved, scope, staged, className }:
                                 </p>
                             )}
                             {state !== 'winner' && state !== 'later' && t.value !== null && t.value !== undefined && (
-                                <p aria-hidden className="mt-0.5 text-[10px] text-ink-secondary">{caption[state]}</p>
+                                <p aria-hidden className="mt-0.5 text-[11px] text-ink-secondary">{caption[state]}</p>
                             )}
                             {showStaged && (
-                                <p className="mt-1 flex items-center gap-1 text-xs font-semibold text-indigo-700 dark:text-indigo-300">
+                                <p className="mt-1 flex items-center gap-1 text-[12.5px] font-semibold text-indigo-700 dark:text-indigo-300">
                                     <ArrowRight aria-hidden className="w-3 h-3 shrink-0" />
                                     <span className="sr-only">Your change: </span>
                                     {staged === null ? 'Not set (inherit)' : formatValue(setting, staged)}
@@ -136,9 +136,9 @@ export function ProvenanceTrail({ setting, resolved, scope, staged, className }:
             {adjusted && (
                 <li className="flex items-stretch">
                     <ArrowRight aria-hidden className="mx-1 w-3.5 h-3.5 self-center text-amber-600 dark:text-amber-400 shrink-0" />
-                    <div className="min-w-0 max-w-[15rem] rounded-lg border border-amber-500/30 bg-amber-500/[0.06] px-2.5 py-1.5">
-                        <span className="text-[10px] font-semibold uppercase tracking-[0.08em] text-amber-700 dark:text-amber-300">In force</span>
-                        <div className="mt-0.5 flex items-center gap-1 text-xs font-semibold leading-snug text-ink">
+                    <div className="min-w-0 max-w-[16rem] rounded-lg border border-amber-500/30 bg-amber-500/[0.06] px-2.5 py-1.5">
+                        <span className="text-[11px] font-semibold uppercase tracking-[0.08em] text-amber-700 dark:text-amber-300">In force</span>
+                        <div className="mt-0.5 flex items-center gap-1 text-[12.5px] font-semibold leading-snug text-ink">
                             <Check aria-hidden className="w-3 h-3 shrink-0 text-emerald-600 dark:text-emerald-400" />
                             {formatValue(setting, resolved.effective)}
                             <span className="sr-only"> (adjusted from {formatValue(setting, resolved.declared)})</span>

@@ -123,6 +123,7 @@ describe('Settings in the Business view', () => {
         renderWithApi(<AdminVersionedGraphs />, { path: SETTINGS })
         // A limit that leaves a workspace's and a graph's values outside it, and a memory mark.
         const row = within(await screen.findByRole('article', { name: reads.question }))
+        await user.click(row.getByRole('button', { name: 'Change…' }))
         await user.click(row.getByRole('checkbox', { name: new RegExp(title('reads.mode', 'in_place')) }))
         const start = within(screen.getByRole('article', { name: asked('residency.unloadStartPct') }))
         fireEvent.keyDown(start.getAllByRole('slider')[0], { key: 'ArrowRight' })

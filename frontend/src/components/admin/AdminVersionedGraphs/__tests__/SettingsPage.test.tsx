@@ -5,8 +5,8 @@
  * preview and a reason, Save, Undo — with each refusal where it belongs (a 422 or 403 on its row and
  * in the review; a 409 conflict read again with who changed what, to acknowledge before saving over
  * it, and "Reload and re-apply my changes" when it can't be; a 409 for a warning not acknowledged put
- * in the review). One confirmation per save. The platform's limits stage beside the values; a
- * category's switch asks first, as Admin → Features does. Around the rows: "Changed only" counts
+ * in the review). One confirmation per save. The platform's limits, folded to the line that states
+ * them, open to stage beside the values; a category's switch asks first, as Admin → Features does. Around the rows: "Changed only" counts
  * each setting once, the finder takes and gives back focus and is the only place on Settings that
  * asks for the signals, and leaving with changes staged asks first. The room for a copy is drawn
  * from the platform's real figures, node memory and the largest graph, named, and not at all
@@ -197,9 +197,15 @@ describe('Settings: stage, review, save, undo', () => {
     it('stages what workspaces may choose beside the value, and asks to acknowledge the values left outside', async () => {
         const sent = mockApi()
         renderWithApi(<AdminVersionedGraphs />, { path: SETTINGS })
-        const limits = within((await screen.findAllByText('What workspaces and graphs may choose'))[0].closest('section')!)
+        const limits = within((await rowOnceDrawn('reads.mode')).getByText('What workspaces and graphs may choose').closest('section')!)
+        // Folded to the line that states them: open it to change them.
+        const choice = { name: new RegExp(title('reads.mode', 'in_place')) }
+        expect(limits.queryByRole('checkbox', choice)).not.toBeInTheDocument()
+        await userEvent.click(limits.getByRole('button', { name: 'Change…' }))
         // Only the platform's own choice, `latest`, stays: the workspace and the graph that chose `beside` are outside.
-        await userEvent.click(limits.getByRole('checkbox', { name: new RegExp(title('reads.mode', 'in_place')) }))
+        await userEvent.click(limits.getByRole('checkbox', choice))
+        // Staged, it stays open, and its line says the change.
+        expect(limits.getByRole('button', { name: 'Done' })).toHaveAttribute('aria-expanded', 'true')
 
         await userEvent.click(within(screen.getByRole('region', { name: 'Unsaved changes' })).getByRole('button', { name: 'Review changes' }))
         const dialog = await screen.findByRole('dialog', { name: 'Review 1 change to the platform' })
@@ -452,7 +458,7 @@ describe('Settings: explainers drawn from real facts', () => {
         const copy = await howItWorks(S['builds.copyRoomPct'].label)
         // The figures' largest graph (Sales lineage, 9.4 GB) at the platform's 250%, over the three nodes the topology reads.
         expect(await copy.findByRole('figure', { name: 'Room for a copy' }))
-            .toHaveAccessibleDescription(/^Sales lineage is 9\.4 GB\. At 250%, a copy needs 23\.5 GB free under a node’s start mark \(80%\): it fits on 0 of 3 nodes\./)
+            .toHaveAccessibleDescription(/^Your largest graph, Sales lineage, is 9\.4 GB\. At 250%, a copy needs 23\.5 GB free under a node’s start mark \(80%\): it fits on 0 of 3 nodes\./)
     })
 
     it('names the largest graph plainly when its data source can’t be named', async () => {
@@ -500,6 +506,6 @@ describe('Settings: explainers drawn from real facts', () => {
         mockApi()
         renderWithApi(<AdminVersionedGraphs />, { path: SETTINGS })
         const copy = await howItWorks(S['builds.copyRoomPct'].question || S['builds.copyRoomPct'].label)
-        expect(await copy.findByRole('figure', { name: 'Room for a copy' })).toHaveAccessibleDescription(/^Sales lineage is 9\.4 GB\./)
+        expect(await copy.findByRole('figure', { name: 'Room for a copy' })).toHaveAccessibleDescription(/^Your largest graph, Sales lineage, is 9\.4 GB\./)
     })
 })
