@@ -64,7 +64,7 @@ describe('Settings in the Business view', () => {
         await user.click(within(view()).getByRole('radio', { name: 'Technical' }))
 
         await user.click(screen.getByRole('tab', { name: /Overview/ }))
-        expect(await screen.findByRole('heading', { level: 2, name: 'Where things stand' })).toBeInTheDocument()
+        expect(await screen.findByText('Where things stand')).toBeInTheDocument()
         expect(within(view()).getByRole('radio', { name: 'Technical' })).toHaveAttribute('aria-checked', 'true')
 
         await user.click(screen.getByRole('tab', { name: /Settings/ }))

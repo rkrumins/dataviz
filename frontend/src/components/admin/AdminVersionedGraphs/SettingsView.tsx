@@ -144,7 +144,10 @@ export function SettingsView({
     schema: ServedSchema
     data: SettingsValues
     editor: SettingsEditor
-    /** The feature switches, which the platform's page turns on and off; without them a category's switch is shown, not flipped. */
+    /**
+     * The feature switches, which the platform's page turns on and off (and renders their confirmations, for its
+     * Overview too); without them a category's switch is shown, not flipped.
+     */
     switches?: FeatureSwitches
     facts: SettingsFacts
     /** Signal counts for the finder, where the server counts them. */
@@ -555,7 +558,6 @@ export function SettingsView({
             >
                 Your staged changes go back to the values in force. Nothing has been saved.
             </ConfirmDialog>
-            {switches?.dialogs}
             {offerSetup && <SetupCoachMark anchor={setupButton} />}
             <p className="sr-only" aria-live="polite">{editor.announcement}</p>
         </VisualContext.Provider>

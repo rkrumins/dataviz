@@ -7,12 +7,18 @@
  * graph's copy; "Settings…" opens the graph's settings. Each row says the read mode in force, where
  * it was chosen, and the one chosen when it can't be had, with the server's why; the table's
  * semantics hold (every row's parts are cells, its footer outside it).
+ *
+ * The Business view leaves out the graph store copy and "Reseed a provider…", and filters by a
+ * search, the state and the read mode (another filter shows while it is set). On a phone each graph
+ * is a compact card: name, state, what its readers get and its memory in a line, its actions, and
+ * "Details" with the rest.
  */
 import { useState } from 'react'
 import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { CATALOGUE } from '@/components/settings'
+import { usePersonaStore } from '@/store/persona'
 import type { GraphProvider, VersionedGraphRow } from '@/services/systemStatusService'
 import type { GraphInventoryFilter } from '@/services/settingsService'
 import { row as fixtureRow } from '../__fixtures__/api'
@@ -68,8 +74,8 @@ function serve(...pages: Array<{ graphs: VersionedGraphRow[]; nextCursor: string
 }
 const listCalls = (sent: Sent[]) => sent.filter((r) => r.path.endsWith('/admin/versioning/graphs'))
 
-function Inventory({ onOpenSettings = () => {} }: { onOpenSettings?: (row: VersionedGraphRow) => void }) {
-    const [filter, setFilter] = useState<GraphInventoryFilter>({})
+function Inventory({ onOpenSettings = () => {}, initial = {} }: { onOpenSettings?: (row: VersionedGraphRow) => void; initial?: GraphInventoryFilter }) {
+    const [filter, setFilter] = useState<GraphInventoryFilter>(initial)
     return <GraphInventory filter={filter} onFilter={setFilter} onOpenSettings={onOpenSettings} providers={PROVIDERS} />
 }
 
@@ -548,5 +554,115 @@ describe('GraphInventory', () => {
         await userEvent.click(screen.getByRole('button', { name: 'Try again' }))
         expect(await screen.findByText('No versioned graphs yet')).toBeInTheDocument()
         expect(screen.getByRole('button', { name: 'Open workspaces' })).toBeInTheDocument()
+    })
+})
+
+describe('GraphInventory in the Business view', () => {
+    beforeEach(() => usePersonaStore.setState({ mode: 'business' }))
+
+    it('leaves out the graph store copy and Reseed, and filters by a search, the state and the read mode', async () => {
+        serve({ graphs: [MAIN, FORK], nextCursor: null })
+        renderWithApi(<Inventory />)
+        await screen.findByText('Customer 360')
+        const table = screen.getByRole('table', { name: 'Versioned graphs' })
+        const headers = within(table).getAllByRole('columnheader')
+        expect(headers.map((h) => h.textContent)).toEqual(['Graph', 'Reads and memory', 'State', 'Actions', 'What the last action did'])
+        // A column fewer, and the table's semantics hold.
+        expect(within(table).getAllByRole('row').slice(1).every((r) => r.children.length === headers.length)).toBe(true)
+        expect(screen.queryByText('customer_360')).not.toBeInTheDocument()
+        expect(screen.queryByText('Platform copy')).not.toBeInTheDocument()
+        expect(screen.queryByRole('button', { name: 'Reseed a provider…' })).not.toBeInTheDocument()
+        // What its readers get stays, with what it promises on a tap.
+        expect(rowOf('Customer 360').getByRole('button', { name: `Reads: ${short('in_place')}` })).toBeInTheDocument()
+
+        for (const name of ['Search', 'Status', 'Readers get']) expect(screen.getByLabelText(name)).toBeInTheDocument()
+        for (const name of ['Kind', 'Class', 'Own settings', 'Provider']) expect(screen.queryByLabelText(name)).not.toBeInTheDocument()
+    })
+
+    it('shows a filter it doesn’t offer while it is set, as a figure’s link sets one, so it can be seen and cleared', async () => {
+        const sent = serve({ graphs: [MAIN], nextCursor: null })
+        renderWithApi(<Inventory initial={{ ownSettings: true }} />)
+        await screen.findByText('Customer 360')
+        expect(screen.getByLabelText('Own settings')).toHaveValue('yes')
+        expect(screen.queryByLabelText('Class')).not.toBeInTheDocument()
+        await userEvent.click(screen.getByRole('button', { name: 'Clear filters' }))
+        await waitFor(() => expect([...listCalls(sent).at(-1)!.query.keys()]).toEqual([]))
+        expect(screen.queryByLabelText('Own settings')).not.toBeInTheDocument()
+    })
+
+    it('follows the app’s view as it changes: the Technical view has everything', async () => {
+        serve({ graphs: [MAIN], nextCursor: null })
+        renderWithApi(<Inventory />)
+        await screen.findByText('Customer 360')
+        expect(screen.queryByText('customer_360')).not.toBeInTheDocument()
+        usePersonaStore.setState({ mode: 'technical' })
+        expect(await screen.findByText('customer_360')).toBeInTheDocument()
+        expect(screen.getByRole('button', { name: 'Reseed a provider…' })).toBeInTheDocument()
+        for (const name of ['Kind', 'Class', 'Own settings', 'Provider']) expect(screen.getByLabelText(name)).toBeInTheDocument()
+    })
+})
+
+describe('GraphInventory on a phone', () => {
+    // A phone's width: no room for the columns.
+    beforeEach(() => {
+        vi.stubGlobal('matchMedia', (media: string) => ({ matches: false, media, addEventListener: () => {}, removeEventListener: () => {} }))
+    })
+    afterEach(() => { vi.unstubAllGlobals() })
+
+    const card = (name: string) => within(screen.getByText(name).closest('[role="listitem"]') as HTMLElement)
+
+    it('shows each graph as a compact card: its name, its state, what its readers get and its memory in a line, and its actions', async () => {
+        serve({ graphs: [MAIN, PLATFORM, FORK], nextCursor: null })
+        renderWithApi(<Inventory />)
+        await screen.findByText('Customer 360')
+        expect(screen.queryByRole('table')).not.toBeInTheDocument()
+        expect(within(screen.getByRole('list', { name: 'Versioned graphs, scroll for more' })).getAllByRole('listitem')).toHaveLength(3)
+
+        expect(card('Customer 360').getByText('In sync')).toBeInTheDocument()
+        // "Reads" is an eye on screen, and said to a screen reader.
+        expect(card('Customer 360').getByText(`${short('in_place')} · In memory · 812 MB`)).toHaveTextContent(`Reads: ${short('in_place')} · In memory · 812 MB`)
+        expect(card('Customer 360').getByRole('button', { name: 'Settings… for Customer 360' })).toBeInTheDocument()
+        expect(card('Customer 360').getByRole('button', { name: 'More actions for Customer 360' })).toBeInTheDocument()
+        // Said once: its state is the card's state.
+        expect(card('Orders').getAllByText('Unloaded')).toHaveLength(1)
+        expect(card('Orders').getByText(`${short('in_place')} · 812 MB`)).toBeInTheDocument()
+        expect(card('dsfork_1').getByText('Follows the graph it was forked from')).toBeInTheDocument()
+        // The rest waits behind Details.
+        expect(screen.queryByText('customer_360')).not.toBeInTheDocument()
+    })
+
+    it('opens a card’s details in place, with what each badge promises on a tap, and closes them again', async () => {
+        serve({ graphs: [MAIN, PLATFORM], nextCursor: null })
+        renderWithApi(<Inventory />)
+        await screen.findByText('Customer 360')
+        const details = card('Customer 360').getByRole('button', { name: 'Details: Customer 360' })
+        const region = document.getElementById(details.getAttribute('aria-controls')!)!
+        expect(details).toHaveAttribute('aria-expanded', 'false')
+        expect(region).not.toBeVisible()
+
+        await userEvent.click(details)
+        expect(details).toHaveAttribute('aria-expanded', 'true')
+        expect(region).toBeVisible()
+        const open = within(region)
+        expect(open.getByText('Graph store copy')).toBeInTheDocument()
+        expect(open.getByText('customer_360')).toBeInTheDocument()
+        expect(open.getByRole('button', { name: `Reads: ${short('in_place')}` })).toBeInTheDocument()
+        expect(open.getByText(/^Updated /)).toBeInTheDocument()
+        // Only that card's.
+        expect(card('Orders').getByRole('button', { name: 'Details: Orders' })).toHaveAttribute('aria-expanded', 'false')
+
+        await userEvent.click(details)
+        expect(region).not.toBeVisible()
+        expect(screen.queryByText('customer_360')).not.toBeInTheDocument()
+    })
+
+    it('in the Business view, leaves the graph store copy out of the details', async () => {
+        usePersonaStore.setState({ mode: 'business' })
+        serve({ graphs: [MAIN], nextCursor: null })
+        renderWithApi(<Inventory />)
+        await userEvent.click(await screen.findByRole('button', { name: 'Details: Customer 360' }))
+        expect(screen.getByText('Reads and memory')).toBeInTheDocument()
+        expect(screen.queryByText('Graph store copy')).not.toBeInTheDocument()
+        expect(screen.queryByText('customer_360')).not.toBeInTheDocument()
     })
 })

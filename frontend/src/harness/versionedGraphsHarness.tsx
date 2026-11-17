@@ -13,8 +13,9 @@
  *   tab        admin: overview | settings | history (default overview);
  *              workspace: defaults | graphs | history (default defaults)
  *   lens       business | operator (the persona the page opens on)
- *   scenario   ok | loading | error | empty | readonly | workspace-admin | fork | conflict
- *              (`ok` is a system admin; `readonly` someone who may only read)
+ *   scenario   ok | loading | error | empty | readonly | workspace-admin | fork | conflict | attention | calm
+ *              (`ok` is a system admin; `readonly` someone who may only read; `attention` has much
+ *              needing attention on the Overview, `calm` nothing)
  *   drawer     1: a graph's settings drawer, open (admin page)
  *   theme      `dark` for the dark palette
  *   coach      1: the guided setup's coach mark, as a first visit in the Business view shows it

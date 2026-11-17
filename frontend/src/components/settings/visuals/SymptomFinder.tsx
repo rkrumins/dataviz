@@ -47,7 +47,8 @@ function happenedWords(h: Happened): string {
 }
 
 export function SymptomFinder({
-    settings, values, staged = {}, onStage, onShow, onClose, signals, signalsUnavailable = false, signalDefinitions = CATALOGUE.signals, className,
+    settings, values, staged = {}, onStage, onShow, onClose, signals, signalsUnavailable = false, signalDefinitions = CATALOGUE.signals, initialSymptom,
+    className,
 }: {
     settings: Setting[]
     /** The values in force: only settings present here are offered. */
@@ -64,11 +65,13 @@ export function SymptomFinder({
     signalsUnavailable?: boolean
     /** The registry's signals, which join a count to the problem it answers: the shipped catalogue's by default. */
     signalDefinitions?: Signal[]
+    /** The problem it opens at, picked: a setting's symptom, as a signal names it too; read once, when it mounts. */
+    initialSymptom?: string
     className?: string
 }) {
     const titleId = useId()
     const [query, setQuery] = useState('')
-    const [picked, setPicked] = useState<string | null>(null)
+    const [picked, setPicked] = useState<string | null>(initialSymptom ?? null)
     const happened = useMemo(() => {
         const by = new Map<string, Happened[]>()
         const defs = new Map(signalDefinitions.map((d) => [d.id, d]))
