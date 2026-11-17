@@ -39,6 +39,7 @@ import { boundFieldIds, useCanvasNodeIdentity } from '@/components/dataSource/No
 import { parseIndentedOutline, type ParsedOutlineRow, type OutlineParseContext } from './outlineParser'
 import { useCreateLinkStore } from '../edge-create/createLinkStore'
 import { useHierarchyBuilderStore } from './hierarchyBuilderStore'
+import { ContinueAddingPill } from './ContinueAddingPill'
 import { useHierarchyOutline, type OutlineRow } from './useHierarchyOutline'
 import type { EntityTypeSchema, RelationshipTypeSchema } from '@/types/schema'
 
@@ -108,6 +109,7 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
   const initialMode = useHierarchyBuilderStore((s) => s.initialMode)
   const initialTemplate = useHierarchyBuilderStore((s) => s.initialTemplate)
   const sessionAddedCount = useHierarchyBuilderStore((s) => s.sessionAddedCount)
+  const suspended = useHierarchyBuilderStore((s) => s.suspended)
 
   const {
     tree, active, allowedTypes, edgeOptions, blockedReason, canCommit,
@@ -195,57 +197,60 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
     typeListRef.current?.querySelector('[data-active]')?.scrollIntoView({ block: 'nearest' })
   }, [active.typeId])
 
-  // ── Canvas selection drives the builder. While this panel is open the
-  // entity drawer is suppressed (the canvases mount one right-rail panel at a
-  // time), so a node click would otherwise do nothing — a dead end that forced
-  // users to close the builder, read the drawer, then hunt for a "+" to
-  // resume. Instead: selecting a STAGED entity binds the details editor to it
-  // right here; selecting any container re-scopes "Adding inside X" and
-  // returns focus to the name input. Only TRANSITIONS count — the selection
-  // that existed before the panel opened is ignored. (The signal is any
-  // selection transition, not just clicks: palette jumps, search "Reveal",
-  // and duplicate-selects drive the builder the same way — by design.) ──
+  // ── Canvas selection while adding. A STAGED entity (one this session added) binds the details
+  // editor right here, and re-scopes "Adding inside X" when it can hold children. Any other entity
+  // is a look at what is already there: the builder steps aside — kept as it was, hidden — for
+  // that entity's details, and Continue adding (or Add inside it) brings it back. Clicks are read
+  // from `lastNodeClick` (every click, the same node again included, and in a view whose details
+  // open on demand, where a click moves no drawer); other moves of the drawer (a palette jump, a
+  // search Reveal) count the same. Only TRANSITIONS count — what was selected before the panel
+  // opened, or while it stood aside, is ignored. ──
   const drawerNodeId = useCanvasStore((s) => s.drawerNodeId)
   const lastNodeClick = useCanvasStore((s) => s.lastNodeClick)
-  // Two SEPARATE guards (conflating them replayed the sticky drawer target
-  // after every re-arm — wrong-parent staging): `lastSeenDrawer`/`lastSeenClickSeq`
-  // are updated on EVERY run, so transitions fire exactly once; `reclickArmed`
-  // is the one-shot permission to honor a fresh click on the ALREADY-seen node.
   const lastSeenDrawer = useRef(drawerNodeId)
   const lastSeenClickSeq = useRef(lastNodeClick.seq)
-  const reclickArmed = useRef(false)
-  /**
-   * Re-arm after a PANEL-originated target/binding move. `drawerNodeId` is
-   * sticky, so re-clicking that node produces no drawer transition — without
-   * this, that click would be silently dead.
-   */
-  const clearConsumedClick = useCallback(() => { reclickArmed.current = true }, [])
   useEffect(() => {
-    const isNewTarget = drawerNodeId !== lastSeenDrawer.current
-    lastSeenDrawer.current = drawerNodeId
-    // `lastNodeClick.seq` bumps on every physical click, same node included —
-    // THE re-click signal (selection toggling is click-direction noise).
     const clicked = lastNodeClick.seq !== lastSeenClickSeq.current
     lastSeenClickSeq.current = lastNodeClick.seq
-    if (!drawerNodeId) { reclickArmed.current = false; return }
-    const isReclick = reclickArmed.current && clicked && lastNodeClick.nodeId === drawerNodeId
-    if (!isNewTarget && !isReclick) return
-    const node = canvasNodes.find((n) => n.id === drawerNodeId || (n.data?.urn as string) === drawerNodeId)
+    const moved = drawerNodeId !== lastSeenDrawer.current
+    lastSeenDrawer.current = drawerNodeId
+    if (suspended) return
+    const target = clicked ? lastNodeClick.nodeId : moved ? drawerNodeId : null
+    if (!target) return
+    const node = canvasNodes.find((n) => n.id === target || (n.data?.urn as string) === target)
     if (!node) return
-    reclickArmed.current = false // one shot per re-arm
     const urn = (node.data?.urn as string) || node.id
-    const canNest = ((typeById.get(node.data?.type as string)?.hierarchy.canContain?.length) ?? 0) > 0
     if (tree.some((r) => r.tempUrn === urn)) {
-      // Intentionally NO focusName() here: the click's intent is the details
-      // editor — yanking focus to the name input would fight it.
+      // Intentionally NO focusName() here: the click's intent is the details editor.
       setDetailsRowUrn(urn)
-      if (canNest) retarget(urn)
-    } else if (canNest) {
-      retarget(urn)
-      focusName()
+      if (((typeById.get(node.data?.type as string)?.hierarchy.canContain?.length) ?? 0) > 0) retarget(urn)
+      return
     }
-    // A leaf that isn't staged has nothing to offer the builder — ignore it.
-  }, [drawerNodeId, lastNodeClick, canvasNodes, tree, typeById, retarget, focusName])
+    useHierarchyBuilderStore.getState().suspend()
+    useCanvasStore.getState().openNodeDrawer(node.id)
+  }, [drawerNodeId, lastNodeClick, suspended, canvasNodes, tree, typeById, retarget])
+
+  // Back from an entity's details: where it was, or inside the entity it was asked to add to.
+  const wasSuspended = useRef(suspended)
+  useEffect(() => {
+    const resumed = wasSuspended.current && !suspended
+    wasSuspended.current = suspended
+    if (!resumed) return
+    const to = useHierarchyBuilderStore.getState().takeRetarget()
+    if (to) retarget(to)
+    focusName()
+  }, [suspended, retarget, focusName])
+  // Closing the details it stepped aside for brings it back.
+  const shownWhileAside = useRef<string | null>(null)
+  useEffect(() => {
+    if (!suspended) { shownWhileAside.current = null; return }
+    if (drawerNodeId) shownWhileAside.current = drawerNodeId
+    else if (shownWhileAside.current) useHierarchyBuilderStore.getState().resume()
+  }, [suspended, drawerNodeId])
+  // While it stands aside: the entity on show, and whether things can be added inside it.
+  const asideNode = suspended && drawerNodeId
+    ? canvasNodes.find((n) => n.id === drawerNodeId || (n.data?.urn as string) === drawerNodeId) : undefined
+  const asideCanNest = !!asideNode && ((typeById.get(asideNode.data?.type as string)?.hierarchy.canContain?.length) ?? 0) > 0
 
   // Resolve where the next entity lands ("Adding inside X") from the active parent —
   // a staged row or a real canvas node.
@@ -309,7 +314,7 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
   }, [filteredTypes, highlighted, pickType, typeQuery, onClose])
 
   const doAdd = useCallback(() => { commitSibling(); focusName() }, [commitSibling, focusName])
-  const doAddNest = useCallback(() => { clearConsumedClick(); commitAndNest(); focusName() }, [clearConsumedClick, commitAndNest, focusName])
+  const doAddNest = useCallback(() => { commitAndNest(); focusName() }, [commitAndNest, focusName])
 
   // Expand ⤢ — hand the same scope off to the wider Build Mode surface for
   // adding a lot at once. Carries the rail's ORIGINAL scope (scopeParentUrn/
@@ -339,7 +344,7 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
     if (e.key === 'Enter' && e.altKey) {
       e.preventDefault()
       // ⌥↵ always talks about the ACTIVE row — rebind first if a committed row is shown.
-      if (detailsRowUrn) { clearConsumedClick(); setDetailsRowUrn(null); setDetailsOpen(true) }
+      if (detailsRowUrn) { setDetailsRowUrn(null); setDetailsOpen(true) }
       else setDetailsOpen((v) => !v)
       return
     }
@@ -348,19 +353,18 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
     if (e.key === 'Tab' && !e.shiftKey) {
       e.preventDefault()
       if (active.name.trim()) { doAddNest() }
-      else if (indent()) { clearConsumedClick() }
-      else { setBlockFlash((n) => n + 1) }
+      else if (!indent()) { setBlockFlash((n) => n + 1) }
       return
     }
-    if (e.key === 'Tab' && e.shiftKey) { e.preventDefault(); if (outdent()) clearConsumedClick(); return }
+    if (e.key === 'Tab' && e.shiftKey) { e.preventDefault(); outdent(); return }
     if (e.key === 'Escape') {
       e.preventDefault()
-      if (detailsRowUrn) { clearConsumedClick(); setDetailsRowUrn(null); return }
+      if (detailsRowUrn) { setDetailsRowUrn(null); return }
       if (detailsOpen) { setDetailsOpen(false); return }
       if (active.name) { setName(''); return }
       onClose()
     }
-  }, [active.name, doAdd, doAddNest, indent, outdent, detailsOpen, detailsRowUrn, clearConsumedClick, setName, onClose])
+  }, [active.name, doAdd, doAddNest, indent, outdent, detailsOpen, detailsRowUrn, setName, onClose])
 
   // A multi-line paste into the name input switches straight to paste mode.
   const onNamePaste = useCallback((e: React.ClipboardEvent) => {
@@ -387,6 +391,9 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
         animate={{ opacity: 1, width: 400 }}
         exit={{ opacity: 0, width: 0 }}
         className="relative h-full flex-shrink-0 overflow-hidden glass-panel border-l border-glass-border shadow-lg"
+        // Stepped aside for an entity's details: kept as it was, out of sight and out of reach.
+        hidden={suspended}
+        inert={suspended}
       >
         <div className="w-[400px] h-full flex flex-col">
           {/* ── Header + scope banner ── */}
@@ -424,7 +431,7 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
                     Adding inside <span className="font-semibold text-ink">{parentInfo.name}</span>
                   </span>
                   <button
-                    onClick={() => { clearConsumedClick(); retarget(null) }}
+                    onClick={() => { retarget(null) }}
                     title="Add at the top level instead"
                     aria-label="Add at the top level instead"
                     className="p-0.5 rounded hover:bg-black/10 dark:hover:bg-white/10 text-ink-muted hover:text-ink transition-colors"
@@ -449,7 +456,7 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
                   <ParentPickerPopover
                     nodes={canvasNodes}
                     typeById={typeById}
-                    onPick={(urn) => { clearConsumedClick(); retarget(urn); setShowParentPicker(false); focusName() }}
+                    onPick={(urn) => { retarget(urn); setShowParentPicker(false); focusName() }}
                     onClose={() => setShowParentPicker(false)}
                   />
                 )}
@@ -515,9 +522,9 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
                               canNest={(t?.hierarchy.canContain?.length ?? 0) > 0}
                               descendants={descendantCount(row.tempUrn)}
                               detailsShown={detailsRowUrn === row.tempUrn}
-                              onSelect={() => { clearConsumedClick(); retarget(row.tempUrn); focusName() }}
+                              onSelect={() => { retarget(row.tempUrn); focusName() }}
                               onRenameStart={cancelFocusName}
-                              onToggleDetails={() => { clearConsumedClick(); setDetailsRowUrn((cur) => (cur === row.tempUrn ? null : row.tempUrn)) }}
+                              onToggleDetails={() => { setDetailsRowUrn((cur) => (cur === row.tempUrn ? null : row.tempUrn)) }}
                               onLink={(anchor) => useCreateLinkStore.getState().open({ sourceUrn: row.tempUrn, anchor })}
                               onRemove={() => removeRow(row.changeId)}
                               onRename={(name) => renameRow(row.tempUrn, name)}
@@ -667,7 +674,7 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
                       <button
                         type="button"
                         // Rebinds to the ACTIVE row AND opens its editor — symmetry with ⌥↵.
-                        onClick={() => { clearConsumedClick(); setDetailsRowUrn(null); setDetailsOpen(true) }}
+                        onClick={() => { setDetailsRowUrn(null); setDetailsOpen(true) }}
                         className="text-[11px] font-medium text-accent-lineage hover:underline flex-shrink-0"
                       >
                         Back to new entity
@@ -766,6 +773,13 @@ export function HierarchyBuilderPanel({ onClose, onEntityStaged }: HierarchyBuil
           )}
         </div>
       </motion.div>
+      {suspended && (
+        <ContinueAddingPill key="continue-adding" added={sessionAddedCount}
+          insideName={asideCanNest ? String(asideNode?.data?.label ?? '') || null : null}
+          onContinue={() => useHierarchyBuilderStore.getState().resume()}
+          onAddInside={asideNode ? () => useHierarchyBuilderStore.getState().resume({ parentUrn: (asideNode.data?.urn as string) || asideNode.id }) : undefined}
+          onDone={onClose} />
+      )}
     </AnimatePresence>
   )
 }

@@ -187,6 +187,23 @@ describe('a draft edited end to end in the Business view', () => {
     expect(staged()).toEqual([expect.objectContaining({ type: 'layer_config', summary: 'Deleted layer “Warehouse”' })])
   }, 30000)
 
+  it('clicking an entity while adding steps the builder aside for its details; the pill brings it back', async () => {
+    const h = await openBusiness()
+    await fromLayerMenu(h, 'warehouse', 'Add entity')
+    expect(screen.getByText('Add entities')).toBeInTheDocument()
+    await act(async () => { fireEvent.click(cardBody('INTERMEDIATE_T2')) })
+    await h.settle()
+    expect(builder()).toMatchObject({ isOpen: true, suspended: true })
+    expect(useCanvasStore.getState().drawerNodeId).toBe('INTERMEDIATE_T2')
+    const pill = screen.getByRole('group', { name: 'Adding entities' })
+    // It can hold children: adding inside it is one step.
+    await act(async () => { fireEvent.click(within(pill).getByRole('button', { name: /^Add inside / })) })
+    await h.settle()
+    expect(builder().suspended).toBe(false)
+    expect(screen.queryByRole('group', { name: 'Adding entities' })).not.toBeInTheDocument()
+    expect(screen.getByText(/Adding inside/)).toHaveTextContent(/INTERMEDIATE_T2|Intermediate/i)
+  }, 30000)
+
   it('Create Entity Here, on a column\'s empty space, opens the builder in that layer', async () => {
     const h = await openBusiness()
     const empty = document.querySelector<HTMLElement>('[data-layer-id="report"].group\\/column .custom-scrollbar')!

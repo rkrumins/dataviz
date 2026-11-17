@@ -1442,7 +1442,9 @@ export function ContextViewCanvas({
   // guard. Subscribed via selectors so unrelated store writes don't re-render.
   // `surface` distinguishes the 400px rail from the wider Build Mode panel —
   // only one of the two (never both) mounts at a time.
-  const builderOpen = useHierarchyBuilderStore(s => s.isOpen && s.surface === 'rail')
+  const builderMounted = useHierarchyBuilderStore(s => s.isOpen && s.surface === 'rail')
+  // The builder holds the rail unless it stepped aside for an entity's details (it stays mounted, hidden).
+  const builderOpen = useHierarchyBuilderStore(s => s.isOpen && s.surface === 'rail' && !s.suspended)
   const buildOpen = useHierarchyBuilderStore(s => s.isOpen && s.surface === 'build')
   const builderLayerId = useHierarchyBuilderStore(s => s.layerId)
   const builderParentUrn = useHierarchyBuilderStore(s => s.parentUrn)
@@ -7986,7 +7988,7 @@ export function ContextViewCanvas({
       <AnimatePresence>
         {/* Creation takes the rail when active (it's an explicit action), so it
             is never hidden behind a drawer the user happened to leave open. */}
-        {builderOpen && (
+        {builderMounted && (
           <HierarchyBuilderPanel
             key="hierarchy-builder-panel"
             onClose={() => useHierarchyBuilderStore.getState().close()}
