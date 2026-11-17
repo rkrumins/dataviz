@@ -27,5 +27,5 @@ export const PROGRESS_STATES: Record<string, { title: string; progress: GraphUpd
     loading: { title: 'Loading back into memory', progress: progressOf({ phase: 'loading', done: 88_000, total: 640_000, ratePerSec: 2_400, etaSecs: 4_100 }) },
     copying: { title: 'Built beside: a copy (no rows to count)', progress: progressOf({ phase: 'building', ...UNCOUNTED, startedAt: ago(95) }) },
     building: { title: 'Built beside: seeded from the database', progress: progressOf({ phase: 'building', done: 51_000, total: 120_000, ratePerSec: 410, etaSecs: 168, startedAt: ago(140) }) },
-    switching: { title: 'Switch when ready: catching up', progress: progressOf({ phase: 'switching', done: 3_100, total: 4_000, ratePerSec: 20, etaSecs: 45, startedAt: ago(400) }) },
+    switching: { title: 'Built beside: catching up before the switch', progress: progressOf({ phase: 'switching', done: 3_100, total: 4_000, ratePerSec: 20, etaSecs: 45, startedAt: ago(400) }) },
 }

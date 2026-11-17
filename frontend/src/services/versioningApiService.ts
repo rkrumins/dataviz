@@ -1529,40 +1529,14 @@ export interface EffectiveDraftsPolicy {
   sources: Partial<Record<keyof DraftsPolicySettings, 'data_source' | 'workspace' | 'default'>>
 }
 
-/** A change to one level's settings: a value sets it, `'inherit'` clears it, left out leaves it. */
-export type DraftsPolicyChange = {
-  [K in keyof DraftsPolicySettings]?: NonNullable<DraftsPolicySettings[K]> | 'inherit'
-}
-
-export interface WorkspaceDraftsPolicy {
-  settings: DraftsPolicySettings
-  effective: EffectiveDraftsPolicy
-}
-
 export interface DataSourceDraftsPolicy {
   overrides: DraftsPolicySettings
   workspace: DraftsPolicySettings
   effective: EffectiveDraftsPolicy
 }
 
-export function getWorkspaceDraftsPolicy(wsId: string): Promise<WorkspaceDraftsPolicy> {
-  return vfetch<WorkspaceDraftsPolicy>(`${base(wsId)}/drafts-policy`)
-}
-
-export function putWorkspaceDraftsPolicy(wsId: string, change: DraftsPolicyChange): Promise<WorkspaceDraftsPolicy> {
-  return vfetch<WorkspaceDraftsPolicy>(`${base(wsId)}/drafts-policy`, { method: 'PUT', body: JSON.stringify(change) })
-}
-
 export function getDataSourceDraftsPolicy(wsId: string, dataSourceId: string): Promise<DataSourceDraftsPolicy> {
   return vfetch<DataSourceDraftsPolicy>(`${base(wsId)}/data-sources/${encodeURIComponent(dataSourceId)}/drafts-policy`)
-}
-
-export function putDataSourceDraftsPolicy(
-  wsId: string, dataSourceId: string, change: DraftsPolicyChange,
-): Promise<DataSourceDraftsPolicy> {
-  return vfetch<DataSourceDraftsPolicy>(
-    `${base(wsId)}/data-sources/${encodeURIComponent(dataSourceId)}/drafts-policy`,
-    { method: 'PUT', body: JSON.stringify(change) })
 }
 
 /** Pull the latest main into a draft ("update branch"). Returns `{clean, conflicts, ...}`; on

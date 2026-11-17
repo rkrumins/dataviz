@@ -153,7 +153,7 @@ export function preview(changes: PatchItem[], mode: 'quick' | 'full', base: Reso
         if (!r || !('value' in c)) return []
         const s = SETTINGS_BY_KEY[c.key]
         const chosen = c.value ?? r.trail[0].value ?? r.effective
-        // Switch when ready needs New-version builds, which the fixture has off.
+        // `beside` needs New-version builds, which the fixture has off.
         const held = c.key === 'reads.mode' && chosen === 'beside'
         const staged = { scope, value: c.value ?? null }
         return [{
@@ -370,7 +370,7 @@ export function graphImpact(changes: PatchItem[], base: ResolvedValues): Impact 
         const r = base[c.key]
         if (!r || !('value' in c)) return []
         const to = c.value ?? r.trail.filter((t) => t.scope !== 'graph' && t.value !== null).at(-1)?.value ?? r.effective
-        // Switch when ready updates in place while New-version builds are off.
+        // `beside` updates in place while New-version builds are off.
         const inForce = c.key === 'reads.mode' && to === 'beside' ? 'in_place' : to
         return String(inForce) === String(r.effective) ? [] : [{ key: c.key, from: r.effective, to: inForce }]
     })
@@ -497,7 +497,7 @@ export const FORK_IMPORT_SETTINGS: ImportSettings = {
 export function workspaceImpact(changes: PatchItem[]): Impact {
     const base = impact(changes)
     const reads = changes.find((c) => c.key === 'reads.mode' && 'value' in c)
-    // Inheriting takes the platform's, Always the latest; switch when ready updates in place while builds are off.
+    // Inheriting takes the platform's, `latest`; `beside` updates in place while builds are off.
     const to = reads ? reads.value ?? 'latest' : null
     const moves = to === 'latest'
     return {

@@ -12,7 +12,8 @@
  *   save bar      Review → the full preview, warnings, a reason → Save → Undo
  *
  * A link to `#reads-mode` (or a search result, or a symptom's "Show") scrolls to that setting,
- * focuses it and marks it. Leaving with changes staged asks first: the page's `LeaveGuard`.
+ * focuses it and marks it; a link to `#category-builds` scrolls to that category. Leaving with
+ * changes staged asks first: the page's `LeaveGuard`.
  */
 import { memo, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
@@ -271,6 +272,14 @@ export function SettingsView({
         el?.querySelector<HTMLElement>('h2')?.focus({ preventScroll: true })
         setCurrentCategory(id)
     }, [reduced])
+
+    // A link to a category (`#category-builds`, as Admin → Infrastructure links) opens at it.
+    const linkedCategory = schema.categories.find((c) => location.hash === `#${categoryAnchor(c.id)}`)?.id ?? null
+    useEffect(() => {
+        if (!linkedCategory) return
+        const raf = requestAnimationFrame(() => jump(linkedCategory))
+        return () => cancelAnimationFrame(raf)
+    }, [linkedCategory, jump])
 
     // The rail follows the category in view.
     useEffect(() => {

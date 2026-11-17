@@ -220,7 +220,7 @@ export interface Impact {
             changes: Array<{ key: string; from: SettingValue; to: SettingValue }>
         }>
     } | null
-    /** Graphs whose readers move to Always the latest (read from the database while behind), and away. */
+    /** Graphs whose readers move to `latest` (read from the database while behind), and away. */
     alwaysLatest: { joining: number; leaving: number } | null
     /** The free memory a copy of the largest graph needs, against each node's. */
     memory: {

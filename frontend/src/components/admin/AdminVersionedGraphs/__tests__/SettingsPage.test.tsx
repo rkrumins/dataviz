@@ -15,7 +15,7 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { Link, RouterProvider, createMemoryRouter } from 'react-router-dom'
-import { beforeAll, describe, expect, it } from 'vitest'
+import { beforeAll, describe, expect, it, vi } from 'vitest'
 import { NotificationStack, useNotificationStore } from '@/components/ui/notifications'
 import { CATALOGUE } from '@/components/settings'
 import { REASON_HEADER } from '@/services/activityReason'
@@ -102,6 +102,16 @@ describe('Settings: what a person meets', () => {
         await waitFor(() => expect(document.activeElement).toBe(target))
     })
 
+    it('opens at a category a link points to, as Admin → Infrastructure links', async () => {
+        mockApi()
+        const scroll = vi.spyOn(Element.prototype, 'scrollIntoView')
+        renderWithApi(<AdminVersionedGraphs />, { path: `${SETTINGS}#category-builds` })
+        const builds = CATALOGUE.categories.find((c) => c.id === 'builds')!
+        const section = (await screen.findByRole('heading', { level: 2, name: builds.label })).closest('section')
+        await waitFor(() => expect(scroll.mock.contexts).toContain(section))
+        scroll.mockRestore()
+    })
+
     it('shows only the changed settings when asked', async () => {
         mockApi()
         renderWithApi(<AdminVersionedGraphs />, { path: SETTINGS })
@@ -186,7 +196,7 @@ describe('Settings: stage, review, save, undo', () => {
         const sent = mockApi()
         renderWithApi(<AdminVersionedGraphs />, { path: SETTINGS })
         const limits = within((await screen.findAllByText('What workspaces and graphs may choose'))[0].closest('section')!)
-        // Only the platform's own choice, "Always the latest", stays: the workspace and the graph that chose "switch when ready" are outside.
+        // Only the platform's own choice, `latest`, stays: the workspace and the graph that chose `beside` are outside.
         await userEvent.click(limits.getByRole('checkbox', { name: new RegExp(title('reads.mode', 'in_place')) }))
 
         await userEvent.click(within(screen.getByRole('region', { name: 'Unsaved changes' })).getByRole('button', { name: 'Review changes' }))
@@ -206,16 +216,17 @@ describe('Settings: stage, review, save, undo', () => {
     })
 
     it('puts a refused value’s reason on its row and in the review (422)', async () => {
+        const refused = `${title('reads.mode', 'beside')} isn’t offered on this platform.`
         mockApi('ok', (req) => (req.method === 'PATCH' ? json({ detail: {
             type: 'invalid_settings', message: 'Some values can’t be saved',
-            errors: [{ key: 'reads.mode', code: 'not_allowed', message: 'Switch when ready isn’t offered on this platform.' }],
+            errors: [{ key: 'reads.mode', code: 'not_allowed', message: refused }],
         } }, 422) : undefined))
         renderWithApi(<AdminVersionedGraphs />, { path: SETTINGS })
         await stageReadMode('beside')
         const dialog = await reviewAndSave()
-        expect(await within(dialog).findByRole('alert')).toHaveTextContent(`Nothing was saved. ${S['reads.mode'].label}: Switch when ready isn’t offered on this platform.`)
+        expect(await within(dialog).findByRole('alert')).toHaveTextContent(`Nothing was saved. ${S['reads.mode'].label}: ${refused}`)
         await userEvent.click(within(dialog).getByRole('button', { name: 'Keep editing' }))
-        expect(row('reads.mode').getByText('Switch when ready isn’t offered on this platform.')).toBeInTheDocument()
+        expect(row('reads.mode').getByText(refused)).toBeInTheDocument()
         expect(screen.getByRole('region', { name: 'Unsaved changes' })).toHaveTextContent('1 to fix')
     })
 

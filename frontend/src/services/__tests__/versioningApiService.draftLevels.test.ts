@@ -11,8 +11,8 @@ vi.mock('../fetchWithTimeout', () => ({ fetchWithTimeout: vi.fn() }))
 import { fetchWithTimeout } from '../fetchWithTimeout'
 import {
   getBranch, getBranchFreshness, getDataSourceDraftsPolicy, getDraftLevelImpact,
-  getWorkspaceDraftsPolicy, listBranches, listDraftsWhoseOwnerLeft, listReviewerCandidates, openDraft,
-  publishBranch, putDataSourceDraftsPolicy, putWorkspaceDraftsPolicy, ReviewRequiredError, setDraftLevel,
+  listBranches, listDraftsWhoseOwnerLeft, listReviewerCandidates, openDraft,
+  publishBranch, ReviewRequiredError, setDraftLevel,
   StagedChangesUnsavedError, transferDraft,
 } from '../versioningApiService'
 
@@ -103,29 +103,10 @@ describe('a draft’s people', () => {
 })
 
 describe('the drafts and reviews policy', () => {
-  it('is read and set for the workspace', async () => {
-    answer(200, { settings: {}, effective: { defaultVisibility: 'public', levels: 'any', selfApproval: true,
-                                             selfMerge: true, sources: {} } })
-    await getWorkspaceDraftsPolicy('ws1')
-    expect(call()[0]).toBe(`${V}/drafts-policy`)
-
-    vi.mocked(fetchWithTimeout).mockReset()
-    answer(200, { settings: { selfMerge: false }, effective: {} })
-    await putWorkspaceDraftsPolicy('ws1', { selfMerge: false, levels: 'inherit' })
-    expect(call()[1]?.method).toBe('PUT')
-    expect(sent()).toEqual({ selfMerge: false, levels: 'inherit' })
-  })
-
-  it('is read and overridden for a data source', async () => {
+  it('is read for a data source', async () => {
     answer(200, { overrides: {}, workspace: {}, effective: {} })
     await getDataSourceDraftsPolicy('ws1', 'ds 1')
     expect(call()[0]).toBe(`${V}/data-sources/ds%201/drafts-policy`)
-
-    vi.mocked(fetchWithTimeout).mockReset()
-    answer(200, { overrides: { levels: 'private_only' }, workspace: {}, effective: {} })
-    await putDataSourceDraftsPolicy('ws1', 'ds1', { levels: 'private_only' })
-    expect(call()[0]).toBe(`${V}/data-sources/ds1/drafts-policy`)
-    expect(call()[1]?.method).toBe('PUT')
   })
 
   it('asks for a review where nobody publishes their own changes', async () => {

@@ -172,10 +172,10 @@ export function deriveSync(doc: SyncStatus | undefined, now: number = Date.now()
     // builds are off, or on a connected graph, is in force as update in place (`readModeDeclared`
     // says what was chosen, `readModeWhy` why it differs).
     const inForce = v.readMode
-    // Always the latest: behind its head, views read the newest version from the system of record
+    // `latest`: behind its head, views read the newest version from the system of record
     // by choice, not because anything is wrong — said as such.
     const latestFromRecord = inForce === 'latest' && !v.fresh && v.served === null
-    // Switch when ready: the new version is built beside the one views show, then switched to.
+    // `beside`: the new version is built beside the one views show, then switched to.
     const build = inForce === 'beside' && v.candidate ? v.candidate : null
     const buildFailed = !!build && (build.attempts ?? 0) > 0 && !!build.error
     const record: SyncLane = {

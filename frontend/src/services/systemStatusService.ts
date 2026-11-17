@@ -185,53 +185,6 @@ export interface VersionedGraphRow extends ProjectionWorstRow {
     progress?: GraphUpdateProgress | null
 }
 
-/** One residency policy value: as saved (null: unset), its default, and the
- *  value in force. */
-export interface ResidencyPolicyValue<T> {
-    saved: T | null
-    default: T
-    effective: T
-}
-
-export interface ResidencyPolicyValues {
-    evictionEnabled: ResidencyPolicyValue<boolean>
-    defaultResidency: ResidencyPolicyValue<ResidencyClass>
-    standardIdleSecs: ResidencyPolicyValue<number>
-    coldlineIdleSecs: ResidencyPolicyValue<number>
-    highWaterPct: ResidencyPolicyValue<number>
-    lowWaterPct: ResidencyPolicyValue<number>
-    loadMarginPct: ResidencyPolicyValue<number>
-    bytesPerEntity: ResidencyPolicyValue<number>
-    coldlineCanvasLoadAbove: ResidencyPolicyValue<number>
-    capacityIntervalSecs: ResidencyPolicyValue<number>
-}
-
-export type ResidencyPolicyField = keyof ResidencyPolicyValues
-
-/** Where the Graph residency switch is: on, in its grace period until ``evictionsFrom`` and then
- *  on; off, bringing back the graphs still out of FalkorDB (``reloading``) and then off. */
-export interface ResidencySwitch {
-    enabled: boolean
-    onSince: string | null
-    evictionsFrom: string | null
-    phase: 'off' | 'grace' | 'on' | 'reloading'
-    reloading: number | null
-}
-
-/** ``GET /api/v1/admin/versioning/residency-policy``: ``enabled`` is the Graph residency switch
- *  (Admin → Features), ``switch`` where it is; who changed the values last, and when. */
-export interface ResidencyPolicy {
-    enabled: boolean
-    values: ResidencyPolicyValues
-    ranges: Partial<Record<ResidencyPolicyField, { min: number; max: number }>>
-    updatedBy: string | null
-    updatedAt: string | null
-    switch: ResidencySwitch
-}
-
-/** A partial change: ``-1`` clears a value back to its default. */
-export type ResidencyPolicyChange = Partial<Record<ResidencyPolicyField, number | boolean | string>>
-
 /** One New-version build setting: as saved (null: unset), its default, and the value in force. */
 export interface BuildPolicyValue {
     saved: number | boolean | string | null
@@ -266,47 +219,6 @@ export interface BuildPolicy {
     enabled: boolean
 }
 
-/** ``GET /api/v1/admin/versioning/draft-retention``: how long a merged or abandoned draft keeps its
- *  changes before they are removed — ``days`` in force, as ``saved`` (null: the environment's
- *  ``default``), and the range a value may take. ``0`` keeps them for good. */
-export interface DraftRetention {
-    days: number
-    saved: number | null
-    default: number
-    min: number
-    max: number
-}
-
-export interface ResidencyPreviewItem {
-    graphId: string
-    dataSourceId: string | null
-    label: string | null
-    bytes: number | null
-    reason?: string
-    shortfallBytes?: number | null
-}
-
-export interface ResidencyPreviewMaster {
-    endpoint: string
-    usedBytes: number | null
-    maxBytes: number | null
-    reservedBytes: number
-    usedAfterBytes: number | null
-    hold: string | null
-    evictions: ResidencyPreviewItem[]
-    loads: ResidencyPreviewItem[]
-    waits: ResidencyPreviewItem[]
-}
-
-/** What the next capacity pass would do with these values, acting on nothing. */
-export interface ResidencyPreview {
-    values: Record<ResidencyPolicyField, number | boolean | string>
-    masters: ResidencyPreviewMaster[]
-    evictions: number
-    evictedBytes: number
-    loads: number
-}
-
 /** What ``POST /api/v1/admin/versioning/graphs/{graphId}/projection/move``
  *  did: ``changed`` is false when the graph already was on the target. ``beside``: the move is
  *  built beside the graph's key (read mode beside) — ``building`` is the build, readers keep the
@@ -335,11 +247,6 @@ export interface VersionedGraphsFilter {
     status?: ProjectionBucket
     kind?: 'main' | 'fork' | 'orphan'
     q?: string
-}
-
-export interface VersionedGraphsPage {
-    graphs: VersionedGraphRow[]
-    nextCursor: string | null
 }
 
 export interface ProjectionSection {
@@ -458,13 +365,6 @@ export interface SystemStatusSnapshot {
 export const systemStatusService = {
     get: (): Promise<SystemStatusSnapshot> =>
         authFetch<SystemStatusSnapshot>('/api/v1/admin/system/status'),
-    /** One keyset page of the fleet inventory; pass the previous page's ``nextCursor``. */
-    versionedGraphs: (filter: VersionedGraphsFilter, cursor?: string | null): Promise<VersionedGraphsPage> => {
-        const params = new URLSearchParams()
-        for (const [k, v] of Object.entries(filter)) if (v) params.set(k, v)
-        if (cursor) params.set('cursor', cursor)
-        return authFetch<VersionedGraphsPage>(`/api/v1/admin/versioning/graphs?${params}`)
-    },
     /** Reseed every versioned graph on a FalkorDB provider from Postgres
      *  (after its instance was restored). ``dryRun`` only counts them. */
     resetWatermarks: (provider: string, opts?: { dryRun?: boolean }): Promise<{
@@ -481,52 +381,9 @@ export const systemStatusService = {
             method: 'POST',
             body: JSON.stringify(body),
         }),
-    /** The residency policy: each value as saved, its default and the value in force. */
-    residencyPolicy: (): Promise<ResidencyPolicy> =>
-        authFetch<ResidencyPolicy>('/api/v1/admin/versioning/residency-policy'),
-    /** Save policy values; ``-1`` clears one. A 422 names the field (``detail.field``). */
-    saveResidencyPolicy: (change: ResidencyPolicyChange): Promise<ResidencyPolicy> =>
-        authFetch<ResidencyPolicy>('/api/v1/admin/versioning/residency-policy', {
-            method: 'PUT',
-            body: JSON.stringify(change),
-        }),
     /** New-version builds: each setting as saved, its default and the value in force. */
     buildPolicy: (): Promise<BuildPolicy> =>
         authFetch<BuildPolicy>('/api/v1/admin/versioning/build-policy'),
-    /** Save settings by wire name; ``-1`` clears one. A 422 names the field (``detail.field``). */
-    saveBuildPolicy: (values: Record<string, number | boolean | string>): Promise<BuildPolicy> =>
-        authFetch<BuildPolicy>('/api/v1/admin/versioning/build-policy', {
-            method: 'PUT',
-            body: JSON.stringify(values),
-        }),
-    /** How long a merged or abandoned draft keeps its changes. */
-    draftRetention: (): Promise<DraftRetention> =>
-        authFetch<DraftRetention>('/api/v1/admin/versioning/draft-retention'),
-    /** Save a window, in days (``0`` keeps changes for good); ``null`` goes back to the default. */
-    saveDraftRetention: (days: number | null): Promise<DraftRetention> =>
-        authFetch<DraftRetention>('/api/v1/admin/versioning/draft-retention', {
-            method: 'PUT',
-            body: JSON.stringify({ days }),
-        }),
-    /** What the next capacity pass would do with ``change`` applied (``{}``: as things stand). */
-    previewResidencyPolicy: (change: ResidencyPolicyChange): Promise<ResidencyPreview> =>
-        authFetch<ResidencyPreview>('/api/v1/admin/versioning/residency-policy/preview', {
-            method: 'POST',
-            body: JSON.stringify(change),
-        }),
-    /** Set a graph's class; Always on a graph out of FalkorDB may answer 409
-     *  ``capacity_insufficient`` with a message naming the master. */
-    setGraphResidency: (graphId: string, cls: ResidencyClass): Promise<{ graphId: string; residency: ResidencyClass; state: ResidencyState }> =>
-        authFetch(`/api/v1/admin/versioning/graphs/${encodeURIComponent(graphId)}/residency`, {
-            method: 'PUT',
-            body: JSON.stringify({ class: cls }),
-        }),
-    /** A graph's own read mode, or null for the platform's. */
-    setGraphReadMode: (graphId: string, mode: ReadMode | null): Promise<{ graphId: string; readMode: ReadMode | null; readModeEffective: ReadMode }> =>
-        authFetch(`/api/v1/admin/versioning/graphs/${encodeURIComponent(graphId)}/read-mode`, {
-            method: 'PUT',
-            body: JSON.stringify({ mode }),
-        }),
     /** Load now: ask for an evicted graph's load, which admission decides. */
     loadGraph: (graphId: string): Promise<{ graphId: string; state: ResidencyState; loadRequested: boolean }> =>
         authFetch(`/api/v1/admin/versioning/graphs/${encodeURIComponent(graphId)}/load`, { method: 'POST' }),
