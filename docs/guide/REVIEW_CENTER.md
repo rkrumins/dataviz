@@ -130,6 +130,9 @@ requests. To list only the ready or troubled ones, use the **Status** filter.
      20,000 changes is counted, then listed the same way. If the draft is
      behind **main**, the list shows what the draft changes where it started;
      after **Pull latest** it is exactly what merging changes.
+   - **Discussion** — the conversation about the request: comments on the
+     request as a whole, and every thread on one of its changes, open ones
+     first. A thread on a change names it — choose the name to see what changed.
    - **Activity** — when it was opened, approved, merged or closed, and by
      whom.
 3. To see the changes on the canvas, choose **Browse this branch’s changes**
@@ -237,18 +240,81 @@ discard it.
 In the list, a row's **Dismiss** does the same: it asks *Dismiss?* — choose
 the tick to confirm, or the cross to cancel.
 
+## Discuss a request
+
+Comment where the question is:
+
+- **On one change** — expand its row in **Files changed** and write under what
+  changed (*Comment on this change…*).
+- **On one field or property of it** — point at that line of the change and
+  choose the speech-bubble. The comment names the field (*on Description*).
+- **On the request as a whole** — at the bottom of **Discussion**.
+
+Type **@** to mention someone in the workspace: pick them from the list, and
+they're told in their Inbox. The author of the request, and everyone already in
+a thread, hear about replies. **⌘↵** (Ctrl+Enter) posts. A comment shows at
+once while it's sent; if it can't be sent it stays, with **Retry** and **Edit**,
+so nothing you wrote is lost.
+
+Each thread has **Reply** and **Resolve**. A resolved thread folds to one line
+(**Show** opens it; **Reopen** brings it back). A thread whose change the author
+edited since is marked *Outdated · changed since*. Rows with open threads show
+a count, so you can see at a glance where the conversation is. You can edit or
+delete your own comments; someone who manages the data source can delete
+anyone's. A deleted comment keeps its place, marked deleted.
+
+Following a mention or reply from your Inbox opens the request on that thread.
+
+## Accept or reject changes one by one
+
+For a draft's request, you can decide each change on its own — whoever may
+approve the request can:
+
+1. In **Files changed**, choose ✓ to **accept** a change, or ✗ to **reject**
+   it. Rejecting asks why (optional) — the author sees your reason under the
+   change.
+2. Some changes only make sense together, so deciding one decides what it needs
+   too — and you're told (*Accepted 1 change, and 2 it needs.*, with **Undo**):
+   - a new relationship needs the new entities it joins;
+   - a new entity needs its new link to its parent;
+   - a moved entity's old and new links go together;
+   - a removed entity takes the changes to its relationships, and a removed
+     parent takes its removed children.
+   Rejecting works the other way: what needs the rejected change is rejected
+   with it. If that would reverse something already decided, you're asked first.
+3. Narrow the list with **To decide**, **Accepted**, **Rejected** and **Changed
+   since**, and use **Accept N shown** / **Reject N shown** to decide them all
+   at once — you're told how many, and what else they take, before anything is
+   decided.
+4. If the author edits a change after you decided it, your decision no longer
+   holds: the row says **Changed**, and it's back under **To decide**.
+
+Once anything is decided, the action bar shows where things stand (*12 accepted
+· 3 rejected · 40 to decide*) and **Merge N accepted** replaces **Merge**:
+
+- Only the accepted changes land on Published, as one revision. Rejected and
+  undecided changes **stay on the draft**, which stays open — its author can
+  fix them and open another request for the rest. Its people are told.
+- If an accepted change needs one that isn't accepted (say it changed since),
+  the bar says so, with **Accept them too**.
+- A request with anything rejected merges only this way. Accept everything to
+  merge it whole.
+- The draft must be up to date with Published first (**Pull latest**), and at
+  most 20,000 accepted changes merge at a time. A fork's review is merged
+  whole.
+
 ## Ask for changes
 
-There's no "request changes" button. To get a request changed:
+To get a request changed, reject the changes that need work with a reason, or
+comment on them — mention the author so they're told. Then:
 
-1. Tell the author what needs to change, with the request's link, wherever
-   your team talks.
-2. The author opens the draft — **Browse this branch’s changes**, or **Resume**
+1. The author opens the draft — **Browse this branch’s changes**, or **Resume**
    under **Your work** on their Dashboard — and saves the fixes with **Review &
    Save**. Anyone who can edit the data can make small fixes too: choose
    **Edit**, then the draft under **Continue a draft**.
-3. Open the request again. Everything saved to the draft is already part of
-   it — nobody needs to submit it again.
+2. Open the request again. Everything saved to the draft is already part of
+   it — nobody needs to submit it again. Changes the author edited show as
+   **Changed**, ready to decide again.
 
 See [Editing in a Draft](/guide/editing-in-a-draft) for the editing itself.
 
@@ -257,6 +323,8 @@ See [Editing in a Draft](/guide/editing-in-a-draft) for the editing itself.
 - The draft's changes land on Published as **one new revision** in the
   history.
 - The draft closes as merged, so it no longer appears among the open drafts.
+  (Merging only what's accepted leaves it open with the rest — see
+  [Accept or reject changes one by one](#accept-or-reject-changes-one-by-one).)
 - Views the draft created or changed go live with it.
 - The graph that Views read catches up within moments — see
   [After you publish: is it live yet?](/guide/editing-in-a-draft#after-you-publish-is-it-live-yet)
@@ -279,6 +347,8 @@ by …, bypassing this review*.
 | See a request | Also its author, and anyone it names as a reviewer |
 | **Merge**, **Pull latest**, **Dismiss**, edit the title and description, **Revert this merge** | People who can manage the workspace's data sources |
 | **Approve** | The same people — except the request's author. Only the named reviewers' approvals count towards **Approved** |
+| **Accept** and **reject** changes one by one | Whoever may **Approve** it, on a draft's request |
+| Comment, reply, resolve, mention | Anyone who can see the request (a person, not an API key). Deleting someone else's comment: people who can manage the data source |
 
 Organisation-wide admin roles can do all of these in every workspace. People
 who open an Enterprise View from outside its workspace don't see **Reviews**.

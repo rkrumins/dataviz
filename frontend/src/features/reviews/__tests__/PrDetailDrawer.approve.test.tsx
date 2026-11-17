@@ -24,6 +24,11 @@ vi.mock('@tanstack/react-query', async (orig) => ({
   ...(await orig<typeof import('@tanstack/react-query')>()),
   useQueryClient: () => ({ invalidateQueries }),
 }))
+vi.mock('../decisions/useReviewDecisions', () => ({
+  DECISION_KEYS: { all: (...a: unknown[]) => ['reviewDecisions', ...a] },
+  useReviewDecisionSummary: () => ({ data: undefined }),
+  useDecideChanges: () => ({ mutate: vi.fn(), mutateAsync: vi.fn(), isPending: false }),
+}))
 vi.mock('../comments/ReviewDiscussion', () => ({ ReviewDiscussion: () => null }))
 vi.mock('../comments/useReviewComments', () => ({ useReviewCommentCounts: () => ({ data: undefined }) }))
 vi.mock('../../versioning/components/ChangeList', () => ({ ChangeList: () => null }))

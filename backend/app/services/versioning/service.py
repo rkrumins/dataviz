@@ -23,6 +23,7 @@ Design choices honoured here:
 from __future__ import annotations
 
 import asyncio
+from array import array
 import contextlib
 import logging
 import random
@@ -48,7 +49,7 @@ from backend.common.property_patch import apply_patch, compose_patches, strip_de
 from backend.common.service_accounts import is_service_account
 from .entity_serde import edge_payload_from_parts
 from .change_index import (ChangeIndex, ChangeIndexBuilder, ChangeOrigin, IndexCache, compact_entries,
-                           entry_dict, stat_changes)
+                           entry_dict, review_closure, review_requirements, stat_changes)
 from .errors import (AccessDenied, AmbiguousSpelling, AmbiguousUrn, BranchNotOpen, ChangeListBusy,
                      ContentionExhausted, CrossesUpdate, CurationAtRisk, DraftNotReadable, DraftPruned,
                      EdgeEndsMissing, EntityExists, StagedChangesUnsaved, UniqueViolation,
@@ -59,7 +60,8 @@ from .errors import (AccessDenied, AmbiguousSpelling, AmbiguousUrn, BranchNotOpe
                      PersonRequired, ProjectionAlreadyAdopted, ProjectionPassInFlight,
                      ProjectionKeyInUse, ProjectionKeyInvalid, ProjectionNotAdopted,
                      ResolutionsWithoutConflict, ReviewRequired, SelfMerge, SelfReview,
-                     VersionConflict)
+                     VersionConflict, DecisionConflict, ReviewIncomplete, ChangesRejected,
+                     NothingAccepted, PartialMergeUnsupported)
 from .ids import derived_entity_id, new_entity_id, prefixed_id, uuid_urn
 from .merge import three_way_merge
 from .merkle import MerkleTree, content_hash
@@ -82,6 +84,7 @@ from .models import (
     MergeRequestORM,
     NodeVersionORM,
     ProjectionStateORM,
+    ReviewDecisionORM,
     WorkingChangeORM,
     _now,
 )
@@ -1870,11 +1873,13 @@ class GraphVersioningService:
                                  editors=await self._editors(s, graph.id, draft.id, deltas))
         return await self._finish_squash(s, graph, draft, main_id, squash, deltas, actor, merged_via)
 
-    async def _merged_unchanged(self, s, graph, draft, actor, merged_via: str) -> str:
+    async def _merged_unchanged(self, s, graph, draft, actor, merged_via: str, only=None) -> str:
         """A squash that changes nothing on ``main``: the draft is merged all the same, and no commit
         is written. ``""`` says so — a publish or merge that landed no commit of its own
         (:meth:`publish_outcome` answers it ``unchanged``); never the draft's own head, which is
-        not on ``main``."""
+        not on ``main``. ``only``: a review merged in part (:meth:`_landed_in_part`)."""
+        if only is not None:
+            return await self._landed_in_part(s, graph, draft, None, only, actor)
         draft.status = "merged"
         draft.base_commit_seq = graph.main_head_commit_seq
         # Nothing reaches main, yet the branch is merged all the same (what it holds in views
@@ -1906,7 +1911,7 @@ class GraphVersioningService:
         return squash
 
     async def _finish_squash(self, s, graph, draft, main_id, squash, deltas: List[Delta], actor,
-                             merged_via: str) -> str:
+                             merged_via: str, only=None) -> str:
         """What every squash does once its rows are written: ``main``'s head and Merkle root
         advance, the draft is merged, and the projection is pointed at the new head. ``deltas``
         need only their ids, ops and hashes."""
@@ -1917,7 +1922,44 @@ class GraphVersioningService:
         main_activity.note(s, graph, squash)
         squash.merkle_root = await self._commit_merkle(s, graph.id, main_id, squash, deltas)
         squash.stats = _delta_stats(deltas)
+        if only is not None:
+            return await self._landed_in_part(s, graph, draft, squash, only, actor)
         return await self._squash_landed(s, graph, draft, squash, actor, merged_via)
+
+    async def _landed_in_part(self, s, graph, draft, squash, only, actor) -> str:
+        """A review merged in part: ``main`` holds what was accepted (``squash``, or nothing to
+        write), and the draft stays open with the rest. Its base moves to ``main``'s new head, where
+        every accepted change now equals ``main``'s — so it is no longer the draft's change, and a
+        later change to it on ``main`` pulls in as any other — recorded as a ``pull`` commit, as a
+        pull records ``main``'s changes arriving. Every change left was untouched on ``main``
+        between the two bases (the squash wrote only accepted ones), so it stands as it was."""
+        main_id = await self._main_branch_id(s, graph.id)
+        from_seq, to_seq = draft.base_commit_seq or 0, graph.main_head_commit_seq
+        commit = CommitORM(
+            graph_id=graph.id, branch_id=draft.id, commit_seq=await self._next_seq(s, graph.id, draft.id),
+            parent_commit_id=draft.head_commit_id, kind="pull",
+            message=f"{len(only):,} accepted change{'' if len(only) == 1 else 's'} merged into main; "
+                    "the rest stay on this draft",
+            actor=actor, **commit_provenance(actor), originating_view_id=draft.originating_view_id,
+            source_branch_id=main_id, source_commit_ids=[squash.id] if squash is not None else None,
+            source_commit_count=1 if squash is not None else 0,
+            contributors=[actor] if squash is not None else None,
+        )
+        s.add(commit)
+        await s.flush()
+        commit.merkle_root = None              # a draft carries no fingerprint (_commit_merkle)
+        commit.stats = {**(dict(squash.stats or {}) if squash is not None else {}),
+                        "rebased": _delta_stats([]), "from_seq": from_seq, "to_seq": to_seq,
+                        "landed": len(only)}
+        draft.head_commit_id = commit.id
+        draft.base_commit_seq = to_seq
+        draft.updated_at = graph.updated_at = _now()
+        if squash is None:
+            return ""
+        ps = await s.get(ProjectionStateORM, graph.id)
+        if ps is not None:
+            ps.target_commit_seq = squash.commit_seq
+        return squash.id
 
     async def _squash_landed(self, s, graph, draft, squash, actor, merged_via: str) -> str:
         """What every squash does once ``main``'s head is at it: the draft is merged and the
@@ -1950,6 +1992,7 @@ class GraphVersioningService:
         containment_edge_types: Optional[Sequence[str]] = None,
         ontology_rules: Optional[OntologyRules] = None,
         merged_via: str = "review",
+        only: Optional[set] = None,
     ) -> str:
         """:meth:`_apply_draft_squash` for the common publish (:meth:`_narrow_squash`), at any size.
 
@@ -1964,16 +2007,25 @@ class GraphVersioningService:
         type the ontology spells differently: its payload is canonicalized and re-hashed in Python,
         as the full path does. The outcome is the full path's: the same rows, heads, stats, Merkle
         root, cascade and violations, in one transaction under ``_lock_graph``. A draft that changed
-        more than ``SQUASH_PAGED_ABOVE`` entities goes a page at a time (:meth:`_squash_paged`)."""
+        more than ``SQUASH_PAGED_ABOVE`` entities goes a page at a time (:meth:`_squash_paged`).
+
+        ``only``: a review merged in part — just these of the draft's changes land (its accepted
+        ones, which take what they need with them); the rest stay on the draft
+        (:meth:`_landed_in_part`). Nothing kept may be touched on ``main`` by what lands: a delete
+        that would cascade to an edge the draft keeps a change of is refused."""
         gid, head_seq = graph.id, graph.main_head_commit_seq
         changed = (await s.execute(select(func.count()).select_from(EntityHeadORM).where(
             EntityHeadORM.graph_id == gid, EntityHeadORM.branch_id == draft.id))).scalar_one()
-        if changed > config.SQUASH_PAGED_ABOVE:
+        if changed > config.SQUASH_PAGED_ABOVE and only is None:
             return await self._squash_paged(
                 s, graph, draft, main_id, actor, message,
                 containment_edge_types=containment_edge_types, ontology_rules=ontology_rules,
                 merged_via=merged_via)
         heads = await self._head_index(s, gid, draft.id)
+        kept: set = set()
+        if only is not None:
+            kept = set(heads) - only
+            heads = {eid: h for eid, h in heads.items() if eid in only}
         main = await self._hashes_at(s, gid, main_id, list(heads), head_seq)
         live = {eid for eid, h in heads.items() if h.live and h.table}
         dead = {eid for eid in heads if eid not in live}          # the merged state's tombstones
@@ -1986,6 +2038,9 @@ class GraphVersioningService:
                 if heads[eid].src and (heads[eid].src in dead or heads[eid].tgt in dead)}
         cascaded = sorted(eid for eid, v in hydrated.items() if v.get("sourceEntityId")
                           and (v["sourceEntityId"] in dead or v.get("targetEntityId") in dead))
+        leaked = [eid for eid in cascaded if eid in kept]
+        if leaked:
+            raise ReviewIncomplete(leaked[:50], len(leaked))
 
         # Every edge left standing needs both ends standing (_assert_referential_integrity).
         standing = [(eid, heads[eid].src or None, heads[eid].tgt or None)
@@ -2037,7 +2092,7 @@ class GraphVersioningService:
                    for r in rows if r.op == "delete"]
         copies = [r for r in rows if r.op != "delete"]
         if not deltas and not copies:
-            return await self._merged_unchanged(s, graph, draft, actor, merged_via)
+            return await self._merged_unchanged(s, graph, draft, actor, merged_via, only)
 
         squash = await self._squash_commit(s, graph, draft, main_id, actor, message)
 
@@ -2078,7 +2133,7 @@ class GraphVersioningService:
                                  editors=await self._editors(s, gid, draft.id, deltas))
         deltas += [Delta(r.entity_id, r.op, None, r.prev_content_hash, r.content_hash) for r in copies]
         del rows, copies, kind_by_entity
-        return await self._finish_squash(s, graph, draft, main_id, squash, deltas, actor, merged_via)
+        return await self._finish_squash(s, graph, draft, main_id, squash, deltas, actor, merged_via, only)
 
     async def _squash_paged(
         self, s, graph, draft, main_id, actor, message, *,
@@ -4645,13 +4700,18 @@ class GraphVersioningService:
         queued: bool = False,
         node_identity: Optional[ResolvedNodeIdentity] = None,
         self_merge: bool = True,
+        mode: str = "all",
     ) -> str:
         """Merge a merge request, dispatching on its kind: a fork PR delegates to
         :meth:`merge_pr`; a draft→main MR recomputes the 3-way merge at merge time
         (main may have advanced under continued editing), enforces the
         reviewer-approval gate, then squashes via the shared :meth:`_apply_draft_squash`.
         ``queued`` as for :meth:`publish`. ``self_merge`` False: its data source's policy says
-        someone other than whoever opened it merges it (:class:`SelfMerge`)."""
+        someone other than whoever opened it merges it (:class:`SelfMerge`).
+
+        ``mode="accepted"``: a draft's review merges only its accepted changes
+        (:meth:`decide_changes`) and the draft keeps the rest (:meth:`_merge_scope`); a review with
+        a rejected change merges no other way (:class:`ChangesRejected`)."""
         async with self._session() as s:
             pr = await s.get(MergeRequestORM, mr_id)
             if pr is None:
@@ -4663,6 +4723,9 @@ class GraphVersioningService:
             draft_branch = await s.get(BranchORM, pr.source_branch_id)
             flush_actor = (draft_branch.owner if draft_branch else None) or actor
         if not is_draft:
+            if mode == "accepted":
+                raise PartialMergeUnsupported(
+                    "fork_review", "A fork's review merges its committed history whole.")
             return await self.merge_pr(
                 pr_id=mr_id, actor=actor, message=message, resolutions=resolutions,
                 containment_edge_types=containment_edge_types, ontology_rules=ontology_rules,
@@ -4701,6 +4764,7 @@ class GraphVersioningService:
                 # here and the squash.
                 await self._require_landable(s, graph.id, main_id, draft, graph.main_head_commit_seq)
                 narrow = self._narrow_squash(graph, draft, resolutions)
+                only = await self._merge_scope(s, pr, draft, mode, narrow, containment_edge_types)
                 if not narrow:                                # the narrow squash has no conflicts
                     merged_state, conflicts, theirs = await self._compute_merge_bounded(
                         s, graph.id, graph, draft, main_id, dict(resolutions or {})
@@ -4714,7 +4778,8 @@ class GraphVersioningService:
                 if narrow:
                     commit_id = await self._squash_up_to_date(
                         s, graph, draft, main_id, actor, message,
-                        containment_edge_types=containment_edge_types, ontology_rules=ontology_rules)
+                        containment_edge_types=containment_edge_types, ontology_rules=ontology_rules,
+                        only=only)
                 else:
                     commit_id = await self._apply_draft_squash(
                         s, graph, draft, main_id, merged_state, theirs, actor, message,
@@ -4726,8 +4791,236 @@ class GraphVersioningService:
                 pr.merged_at = _now()
                 pr.merged_by = actor
                 pr.updated_at = _now()
+                if only is not None:
+                    pr.merged_via = "review_partial"         # the draft stays open with the rest
                 return commit_id
         return await self._retry_seq(f"merge_mr {mr_id}", _once)
+
+    async def refuse_if_rejected(self, *, pr_id: str) -> None:
+        """:class:`ChangesRejected` when a review has a rejected change that still holds: it merges
+        what is accepted, never all of it — asked before a merge is queued as a job, too."""
+        async with self._session() as s:
+            pr = await s.get(MergeRequestORM, pr_id)
+            if pr is not None and self._is_draft_mr(pr):
+                await self._refuse_rejected(s, pr)
+
+    async def _refuse_rejected(self, s, pr: MergeRequestORM) -> None:
+        rejected = [eid for (eid,) in (await s.execute(select(ReviewDecisionORM.entity_id).where(
+            ReviewDecisionORM.pr_id == pr.id, ReviewDecisionORM.verdict == "rejected"))).all()]
+        if rejected:
+            states = await self._decision_states(s, pr, pr.source_branch_id, rejected)
+            held = sum(1 for _r, fresh in states.values() if fresh)
+            if held:
+                raise ChangesRejected(held)
+
+    async def _merge_scope(self, s, pr: MergeRequestORM, draft, mode: str, narrow: bool,
+                           containment_edge_types) -> Optional[set]:
+        """What a draft's review merge lands: all of it (``None``), or — ``mode="accepted"`` — its
+        accepted changes, once they hold together (:class:`ReviewIncomplete` naming what they
+        need) and the draft is up to date with ``main`` (the narrow squash writes them). Accepting
+        everything is an ordinary merge."""
+        if mode != "accepted":
+            await self._refuse_rejected(s, pr)
+            return None
+        if not narrow:
+            raise PartialMergeUnsupported(
+                "pull_first", "Pull the latest from main into this draft first: what is accepted "
+                "merges onto a draft that is up to date.")
+        _pr, _draft, index = await self._decidable(pr.id, containment_edge_types)
+        t = await self._review_tally(pr, draft, index)
+        if t["missing"]:
+            raise ReviewIncomplete(sorted(t["missing"])[:50], len(t["missing"]))
+        if not t["accepted"]:
+            raise NothingAccepted()
+        if len(t["accepted"]) > config.SYNC_PUBLISH_MAX_CHANGES:
+            raise PartialMergeUnsupported(
+                "too_large", f"Merge at most {config.SYNC_PUBLISH_MAX_CHANGES:,} accepted changes at a "
+                "time, or accept the whole review to merge it as a job.")
+        return None if len(t["accepted"]) == t["total"] else set(t["accepted"])
+
+    # ------------------------------------------------------------------ #
+    # A draft's review decided change by change; merging what is accepted  #
+    # ------------------------------------------------------------------ #
+    async def _decidable(self, pr_id: str, containment_edge_types, *, live: bool = True):
+        """``(pr, draft, index)`` for deciding a review's changes: a draft's review (a fork's
+        merges committed history whole), still live, whose changes are listed."""
+        async with self._session() as s:
+            pr = await s.get(MergeRequestORM, pr_id)
+            if pr is None:
+                raise ValueError(f"unknown merge request {pr_id}")
+            if not self._is_draft_mr(pr):
+                raise PartialMergeUnsupported(
+                    "fork_review", "A fork's review merges its committed history whole: its changes "
+                    "are not accepted one by one.")
+            if live and pr.status in ("merged", "closed"):
+                raise ValueError(f"merge request {pr_id} is {pr.status}")
+            draft = await s.get(BranchORM, pr.source_branch_id)
+            s.expunge_all()
+        index = await self._change_index(pr.graph_id, ChangeOrigin(branch_id=draft.id), containment_edge_types, None)
+        if index.too_large is not None:
+            raise PartialMergeUnsupported(
+                "too_large", f"This review changes more than {config.CHANGE_LIST_MAX:,} entities — too "
+                "many to decide one by one. Merge it whole, or split the draft.")
+        return pr, draft, index
+
+    @staticmethod
+    async def _review_rules(index: ChangeIndex):
+        """The index's entries by id and what each needs merged with it, worked out once per
+        version of the index (it is cached, and a draft's changes are what they are until it moves)."""
+        cached = getattr(index, "_review_rules", None)
+        if cached is None:
+            def build():
+                by_id = {e.entity_id: e for e in index.entries}
+                return by_id, review_requirements(by_id)
+            cached = await asyncio.to_thread(build)
+            index._review_rules = cached
+        return cached
+
+    async def _decision_states(self, s, pr: MergeRequestORM, draft_id: str, ids=None) -> Dict[str, Tuple[ReviewDecisionORM, bool]]:
+        """Each decision of a review (of ``ids`` only, when given), and whether it still holds: the
+        draft's content hash of the entity is the one it was decided on."""
+        stmt = select(ReviewDecisionORM).where(ReviewDecisionORM.pr_id == pr.id)
+        rows: List[ReviewDecisionORM] = []
+        if ids is None:
+            rows = list((await s.execute(stmt)).scalars())
+        else:
+            for chunk in _chunks(sorted(ids), _IN_LIST_MAX):
+                rows += list((await s.execute(stmt.where(ReviewDecisionORM.entity_id.in_(chunk)))).scalars())
+        hashes = await self._head_hashes(s, pr.graph_id, draft_id, [r.entity_id for r in rows])
+        return {r.entity_id: (r, hashes.get(r.entity_id) == r.content_hash) for r in rows}
+
+    @staticmethod
+    async def _head_hashes(s, graph_id: str, branch_id: str, ids) -> Dict[str, str]:
+        out: Dict[str, str] = {}
+        for chunk in _chunks(sorted(set(ids)), _IN_LIST_MAX):
+            rows = await s.execute(select(EntityHeadORM.entity_id, EntityHeadORM.content_hash).where(
+                EntityHeadORM.graph_id == graph_id, EntityHeadORM.branch_id == branch_id,
+                EntityHeadORM.entity_id == any_(bindparam("ids", type_=ARRAY(Text)))), {"ids": list(chunk)})
+            out.update({eid: h for eid, h in rows.all()})
+        return out
+
+    async def decide_changes(
+        self, *, pr_id: str, actor: str, verdict: Optional[str], containment_edge_types,
+        entity_ids: Optional[Sequence[str]] = None, filter: Optional[Mapping[str, object]] = None,
+        reason: Optional[str] = None, expected_head_commit_id: Optional[str] = None,
+        dry_run: bool = False, force: bool = False,
+    ) -> Dict[str, object]:
+        """Accept or reject changes of a draft's review — ``entity_ids``, or every change ``filter``
+        lists (``kind``, ``statuses``, ``type``, ``q``) — or clear their decision (``verdict``
+        None). What they need decides with them (:func:`review_requirements`): accepting a new edge
+        accepts the new entities it joins; rejecting an entity rejects what needs it. Reversing a
+        decision already made on one of those is refused (:class:`DecisionConflict`) unless
+        ``force``. ``expected_head_commit_id``: the draft's head the reviewer saw
+        (:class:`HeadMoved` when it moved on). ``dry_run``: what it would decide, deciding nothing."""
+        if verdict not in (None, "accepted", "rejected"):
+            raise ValueError("verdict is accepted, rejected or null")
+        pr, draft, index = await self._decidable(pr_id, containment_edge_types)
+        if expected_head_commit_id is not None and expected_head_commit_id != draft.head_commit_id:
+            raise HeadMoved(pr_id, draft.head_commit_id)
+        by_id, requires = await self._review_rules(index)
+        if entity_ids is not None:
+            chosen = [eid for eid in dict.fromkeys(entity_ids) if eid in by_id]
+        else:
+            f = dict(filter or {})
+            positions = await asyncio.to_thread(index.view, kind=f.get("kind"), statuses=f.get("statuses") or (),
+                                                type_=f.get("type"), q=f.get("q"))
+            chosen = [index.entries[i].entity_id for i in positions]
+            if f.get("decision"):                              # what the list shows: e.g. the undecided
+                async with self._session() as s:
+                    states = await self._decision_states(s, pr, draft.id)
+                chosen = [eid for eid in chosen if _decision_is(states.get(eid), f["decision"])]
+        if not chosen:
+            return {"decided": 0, "implied": [], "impliedCount": 0, "overrides": [], "overrideCount": 0,
+                    "dryRun": dry_run}
+        closure = (await asyncio.to_thread(review_closure, requires, chosen, accept=verdict != "rejected")
+                   if verdict else {eid: None for eid in chosen})
+        implied = [{"entityId": eid, "impliedBy": by} for eid, by in closure.items() if by is not None]
+        async with self._session() as s:
+            # One decision write at a time per review, and none while the draft moves on.
+            await s.execute(select(MergeRequestORM.id).where(MergeRequestORM.id == pr_id).with_for_update())
+            head = await s.scalar(select(BranchORM.head_commit_id).where(BranchORM.id == draft.id).with_for_update(read=True))
+            if head != draft.head_commit_id:
+                raise HeadMoved(pr_id, head)
+            states = await self._decision_states(s, pr, draft.id, closure.keys())
+            overrides = [{"entityId": eid, "verdict": row.verdict, "impliedBy": closure[eid]}
+                         for eid, (row, fresh) in states.items()
+                         if verdict and fresh and closure[eid] is not None and row.verdict != verdict]
+            answer = {"decided": len(chosen), "implied": implied[:200], "impliedCount": len(implied),
+                      "overrides": overrides[:200], "overrideCount": len(overrides), "dryRun": dry_run}
+            if dry_run:
+                return answer
+            if overrides and not force:
+                raise DecisionConflict(overrides[:200], len(overrides))
+            if verdict is None:
+                for chunk in _chunks(chosen, _IN_LIST_MAX):
+                    await s.execute(delete(ReviewDecisionORM).where(
+                        ReviewDecisionORM.pr_id == pr_id,
+                        or_(ReviewDecisionORM.entity_id.in_(chunk), ReviewDecisionORM.implied_by.in_(chunk))))
+                return answer
+            hashes = await self._head_hashes(s, pr.graph_id, draft.id, closure.keys())
+            now, why = _now(), (reason or "").strip()[:2000] or None
+            rows = [{"pr_id": pr_id, "entity_id": eid, "graph_id": pr.graph_id, "verdict": verdict,
+                     "reason": why if verdict == "rejected" else None, "content_hash": hashes.get(eid),
+                     "implied_by": by, "actor": actor, "decided_at": now} for eid, by in closure.items()]
+            for chunk in _chunks(rows, 1000):
+                stmt = pg_insert(ReviewDecisionORM).values(chunk)
+                await s.execute(stmt.on_conflict_do_update(
+                    index_elements=[ReviewDecisionORM.pr_id, ReviewDecisionORM.entity_id],
+                    set_={c: stmt.excluded[c] for c in ("verdict", "reason", "content_hash", "implied_by",
+                                                        "actor", "decided_at")}))
+            return answer
+
+    async def _review_tally(self, pr: MergeRequestORM, draft, index: ChangeIndex) -> Dict[str, object]:
+        """Where a review's decisions stand: what is accepted and rejected (still holding), what
+        went stale, and what the accepted changes need that is not accepted (``missing``)."""
+        by_id, requires = await self._review_rules(index)
+        async with self._session() as s:
+            states = await self._decision_states(s, pr, draft.id)
+        accepted = {eid for eid, (r, fresh) in states.items() if fresh and r.verdict == "accepted" and eid in by_id}
+        rejected = {eid for eid, (r, fresh) in states.items() if fresh and r.verdict == "rejected" and eid in by_id}
+        stale = {eid for eid, (_r, fresh) in states.items() if not fresh and eid in by_id}
+        missing = set(await asyncio.to_thread(review_closure, requires, accepted)) - accepted if accepted else set()
+        return {"states": states, "accepted": accepted, "rejected": rejected, "stale": stale,
+                "missing": missing, "total": len(by_id)}
+
+    async def review_decision_summary(self, *, pr_id: str, containment_edge_types) -> Dict[str, object]:
+        """A review's decisions, counted: accepted, rejected, undecided, changed since decided —
+        and what *Merge accepted* would need first (``missing``)."""
+        pr, draft, index = await self._decidable(pr_id, containment_edge_types, live=False)
+        t = await self._review_tally(pr, draft, index)
+        decided = len(t["accepted"]) + len(t["rejected"])
+        return {"total": t["total"], "accepted": len(t["accepted"]), "rejected": len(t["rejected"]),
+                "stale": len(t["stale"]), "undecided": t["total"] - decided,
+                "missing": len(t["missing"]), "missingIds": sorted(t["missing"])[:50],
+                "headCommitId": draft.head_commit_id}
+
+    async def review_change_entries(
+        self, *, pr_id: str, containment_edge_types, decision: Optional[str] = None,
+        kind: Optional[str] = None, statuses: Sequence[str] = (), type_: Optional[str] = None,
+        q: Optional[str] = None, offset: int = 0, limit: int = 100,
+    ) -> Dict[str, object]:
+        """:meth:`change_entries` of a draft's review, each with its decision (verdict, reason, who,
+        when, what it came with, and ``stale`` once the change was edited since), narrowed by
+        ``decision`` too: ``undecided`` (none that still holds), ``accepted``, ``rejected``, ``stale``."""
+        pr, draft, index = await self._decidable(pr_id, containment_edge_types, live=False)
+        positions = await asyncio.to_thread(index.view, kind=kind, statuses=statuses, type_=type_, q=q)
+        async with self._session() as s:
+            states = await self._decision_states(s, pr, draft.id)
+        if decision:
+            positions = array("I", [i for i in positions
+                                    if _decision_is(states.get(index.entries[i].entity_id), decision)])
+        page = index.page(positions, offset, limit)
+        names = await self._end_names(pr.graph_id, ChangeOrigin(branch_id=draft.id), index, page)
+        out = []
+        for e in page:
+            row = entry_dict(e, names)
+            st = states.get(e.entity_id)
+            row["decision"] = None if st is None else {
+                "verdict": st[0].verdict, "reason": st[0].reason, "actor": st[0].actor,
+                "decidedAt": st[0].decided_at, "impliedBy": st[0].implied_by, "stale": not st[1]}
+            out.append(row)
+        return {"entries": out, "total": len(positions), "offset": offset, "limit": limit,
+                "hasMore": offset + len(page) < len(positions), "tooLarge": None}
 
     async def _approvals(self, s, pr: MergeRequestORM) -> Tuple[List[str], List[str]]:
         """``(standing, stale)``: who approved ``pr``, split by whether the approval still holds
@@ -12244,6 +12537,16 @@ def _graphedge_dict(entity_id: str, payload: dict, urn_of: Mapping) -> dict:
         "properties": payload.get("properties") or {},
         "version": content_hash(payload),       # OCC token (see _graphnode_dict)
     }
+
+
+def _decision_is(state, decision: str) -> bool:
+    """Whether a change's decision (``(row, holds)`` or None) is what a review's list narrows to:
+    ``undecided`` (none that still holds), ``stale`` (one made before an edit), or a verdict."""
+    if decision == "undecided":
+        return state is None or not state[1]
+    if decision == "stale":
+        return state is not None and not state[1]
+    return state is not None and state[1] and state[0].verdict == decision
 
 
 def _chunks(seq, n):

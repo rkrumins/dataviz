@@ -11,7 +11,7 @@ The module imports nothing, so any versioning module can raise these.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 
 class _HttpMapped(Exception):
@@ -593,6 +593,54 @@ class DraftPruned(_HttpMapped, RuntimeError):
             {"type": "draft_pruned", "branchId": branch_id, "prunedAt": pruned_at})
 
 
+class DecisionConflict(_HttpMapped, RuntimeError):
+    """Deciding a change would reverse a decision already made on one it takes with it (accepting
+    a new edge accepts the new entities it joins): say so, and do it only when asked again."""
+
+    def __init__(self, overrides: List[Dict[str, Any]], count: int):
+        self.overrides, self.count = overrides, count
+        super().__init__(f"{count} change(s) it takes with it were decided otherwise",
+                         {"type": "decision_conflict", "overrides": overrides, "count": count})
+
+
+class ReviewIncomplete(_HttpMapped, RuntimeError):
+    """What is accepted needs a change that is not: merged without it, the draft's changes would
+    not hold together (a new edge without the new entity it joins)."""
+
+    def __init__(self, needs: List[str], count: int):
+        self.needs, self.count = needs, count
+        super().__init__(f"{count} change(s) the accepted ones need are not accepted",
+                         {"type": "review_incomplete", "needs": needs, "count": count})
+
+
+class ChangesRejected(_HttpMapped, RuntimeError):
+    """A review with rejected changes merges what is accepted, never all of it."""
+
+    def __init__(self, count: int):
+        self.count = count
+        super().__init__(f"{count} change(s) of this review were rejected: merge what is accepted",
+                         {"type": "changes_rejected", "count": count})
+
+
+class NothingAccepted(_HttpMapped, RuntimeError):
+    """Merge accepted, with nothing accepted (or every acceptance stale)."""
+
+    def __init__(self):
+        super().__init__("No change of this review is accepted yet", {"type": "nothing_accepted"})
+
+
+class PartialMergeUnsupported(_HttpMapped, RuntimeError):
+    """Accepting changes one by one, and merging only those, where it cannot be done: a fork's
+    review (it merges committed history as a whole), a review too large to list, or a draft that
+    must pull the latest first."""
+
+    status_code = 422
+
+    def __init__(self, reason: str, message: str):
+        self.reason = reason
+        super().__init__(message, {"type": "partial_merge_unsupported", "reason": reason})
+
+
 HTTP_MAPPED = (BranchNotOpen, MainWriteForbidden, NotDraftOwner, DraftRoleRequired, SelfReview,
                PersonRequired, GroupsUnavailable, IneligibleMember, ServiceAccountMember, HeadMoved,
                LockBusy, ChangeListBusy, RevisionUnsupported, RevisionTooFar, RevisionReadOnly,
@@ -603,4 +651,5 @@ HTTP_MAPPED = (BranchNotOpen, MainWriteForbidden, NotDraftOwner, DraftRoleRequir
                AmbiguousSpelling, NotAnEdge, StagedChangesUnsaved, SelfMerge, ReviewRequired,
                IneligibleOwner, ForkUpdateConflicts, ResolutionsWithoutConflict, ForkNotUpToDate,
                CrossesUpdate, AmbiguousUrn, EntityExists, EdgeEndsMissing, UniqueViolation,
-               DraftPruned)
+               DraftPruned, DecisionConflict, ReviewIncomplete, ChangesRejected, NothingAccepted,
+               PartialMergeUnsupported)

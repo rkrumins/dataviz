@@ -12,7 +12,9 @@
  * each come from the same index the rows do, so they always agree.
  *
  * In a review (`review`), each change also carries its discussion: a count on rows with threads,
- * and, opened, its threads under what changed — with Comment on any one field of it.
+ * and, opened, its threads under what changed — with Comment on any one field of it. A draft's
+ * review is decided here too (`review.decisions`): each change accepted or rejected (with why),
+ * narrowed by what is decided, and every change shown decided at once.
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
@@ -26,7 +28,7 @@ import { triggerBrowserDownload } from '@/services/importExportApiService'
 import {
   changeListExportUrl,
   type ChangeListCounts, type ChangeListKind, type ChangeListOrigin, type ChangeListRow, type ChangeListStatus,
-  type ChangeListSummary,
+  type ChangeListSummary, type DecisionState, type DecisionVerdict, type ReviewChangeRow, type ReviewDecisionSummary,
 } from '@/services/versioningApiService'
 import { ExportMenu, type ExportDetail } from './ExportMenu'
 import { useChangeEntries, useChangeEntry, useChangeSummary } from '../hooks/useVersioning'
@@ -37,6 +39,10 @@ import { fieldPath } from '../model/fieldDiff'
 import { HoverTip } from '@/components/ui/HoverTip'
 import { useReviewCommentCounts, useReviewThreads } from '@/features/reviews/comments/useReviewComments'
 import { ReviewThreads, type DiscussionAccess } from '@/features/reviews/comments/ReviewThreads'
+import { useReviewChanges } from '@/features/reviews/decisions/useReviewDecisions'
+import {
+  DecisionBanner, DecisionFilter, RejectReason, RowDecision, useDecisionFlow,
+} from '@/features/reviews/decisions/DecisionControls'
 import { NodeDiffBadge, STATUS_META } from './NodeDiffBadge'
 
 const STATUSES: ChangeListStatus[] = ['added', 'modified', 'removed']
@@ -88,9 +94,20 @@ export interface ChangeListProps {
   emptyHint?: string
   /** Height the list may grow to before it scrolls. */
   maxHeight?: number | string
-  /** The review these changes are of: each change carries its discussion. */
-  review?: { prId: string } & DiscussionAccess
+  /** The review these changes are of: each change carries its discussion — and, in a draft's
+   *  review, its decision. */
+  review?: { prId: string } & DiscussionAccess & { decisions?: ReviewDecisions }
   className?: string
+}
+
+/** A draft's review, decided change by change. */
+export interface ReviewDecisions {
+  canDecide: boolean
+  /** The draft's head the reviewer is looking at: a decision is refused once it moved on. */
+  headCommitId?: string | null
+  summary?: ReviewDecisionSummary | null
+  /** Who decided, by name. */
+  names?: Record<string, string>
 }
 
 export function ChangeList({
@@ -114,10 +131,14 @@ export function ChangeList({
   const chooseKind = (k: ChangeListKind) => { setKind(k); setType('') }
 
   const listable = !!s && s.listed > 0 && !!activeKind
-  const entriesQ = useChangeEntries(
-    wsId, graphId, origin, { kind: activeKind, statuses, type: type || undefined, q },
-    { enabled: listable },
-  )
+  const decisions = review?.decisions
+  const [decision, setDecision] = useState<DecisionState | null>(null)
+  const filter = { kind: activeKind, statuses, type: type || undefined, q }
+  const plainQ = useChangeEntries(wsId, graphId, origin, filter, { enabled: listable && !decisions })
+  // A draft's review lists its changes with their decisions — the same list, the same order.
+  const reviewQ = useReviewChanges(wsId, review?.prId, { ...filter, decision: decision ?? undefined }, listable && !!decisions)
+  const entriesQ = (decisions ? reviewQ : plainQ) as unknown as typeof plainQ
+  const flow = useDecisionFlow(wsId, review?.prId ?? '', decisions?.headCommitId)
   const rows = useMemo(() => entriesQ.data?.pages.flatMap((p) => p.entries) ?? [], [entriesQ.data])
   const matching = entriesQ.data?.pages[0]?.total ?? 0
 
@@ -136,7 +157,9 @@ export function ChangeList({
       .sort((a, b) => b.n - a.n),
     [s, activeKind],
   )
-  const items = useMemo(() => itemsOf(rows, typeCounts), [rows, typeCounts])
+  // Narrowed by decision, a type's count across the list would not be what is shown under it.
+  const items = useMemo(() => itemsOf(rows, decision ? new Map() : typeCounts), [rows, typeCounts, decision])
+  const labelOf = useMemo(() => new Map(rows.map((r) => [r.entityId, rowLabel(r)])), [rows])
   // Where each entity still there stands among those the navigator steps through — the list's own
   // order, without what was removed (nothing to show).
   const stepAt = useMemo(() => {
@@ -253,12 +276,29 @@ export function ChangeList({
           `changes${detail === 'properties' ? '-properties' : ''}.csv`)} />
       </div>
 
-      <p className="text-[11px] text-ink-muted tabular-nums" aria-live="polite">
-        {entriesQ.isLoading ? 'Loading…'
-          : narrowed ? `${matching.toLocaleString()} matching`
-            : `${matching.toLocaleString()} ${activeKind ? KIND_LABEL[activeKind].toLowerCase() : 'changes'}`}
-        {rows.length < matching && !entriesQ.isLoading && ` · ${rows.length.toLocaleString()} loaded`}
-      </p>
+      {decisions && <DecisionFilter value={decision} onChange={setDecision} summary={decisions.summary} />}
+
+      <div className="flex items-center gap-2 min-h-[28px]">
+        <p className="flex-1 text-[11px] text-ink-muted tabular-nums" aria-live="polite">
+          {entriesQ.isLoading ? 'Loading…'
+            : narrowed || decision ? `${matching.toLocaleString()} matching`
+              : `${matching.toLocaleString()} ${activeKind ? KIND_LABEL[activeKind].toLowerCase() : 'changes'}`}
+          {rows.length < matching && !entriesQ.isLoading && ` · ${rows.length.toLocaleString()} loaded`}
+        </p>
+        {decisions?.canDecide && matching > 0 && !entriesQ.isLoading && (
+          <>
+            <button type="button" disabled={flow.busy} onClick={() => void flow.all('accepted', { ...filter, decision: decision ?? undefined })}
+              className="inline-flex items-center gap-1 px-2 h-7 rounded-lg text-[11.5px] font-semibold text-emerald-700 dark:text-emerald-300 hover:bg-emerald-500/10 disabled:opacity-50">
+              Accept {matching.toLocaleString()} shown
+            </button>
+            <button type="button" disabled={flow.busy} onClick={() => void flow.all('rejected', { ...filter, decision: decision ?? undefined })}
+              className="inline-flex items-center gap-1 px-2 h-7 rounded-lg text-[11.5px] font-semibold text-rose-700 dark:text-rose-300 hover:bg-rose-500/10 disabled:opacity-50">
+              Reject {matching.toLocaleString()} shown
+            </button>
+          </>
+        )}
+      </div>
+      {decisions && <DecisionBanner flow={flow} />}
 
       {entriesQ.isError ? (
         <p className="text-xs text-ink-muted py-3">Couldn't load this page of changes. Try again in a moment.</p>
@@ -299,7 +339,16 @@ export function ChangeList({
                     <Row wsId={wsId} graphId={graphId} origin={origin} row={item.row}
                       open={open.has(item.row.entityId)} onToggle={() => toggle(item.row.entityId)}
                       onShow={() => showOnCanvas(item.row)}
-                      review={review} comments={commentCounts?.[item.row.entityId]} />
+                      review={review} comments={commentCounts?.[item.row.entityId]}
+                      decide={decisions ? {
+                        decision: (item.row as ReviewChangeRow).decision ?? null,
+                        canDecide: decisions.canDecide, busy: flow.busy, names: decisions.names,
+                        impliedLabel: (() => {
+                          const by = (item.row as ReviewChangeRow).decision?.impliedBy
+                          return by ? labelOf.get(by) ?? null : null
+                        })(),
+                        onDecide: (verdict, reason) => void flow.run(verdict, { entityIds: [item.row.entityId] }, reason),
+                      } : undefined} />
                   )}
                 </div>
               )
@@ -311,7 +360,7 @@ export function ChangeList({
   )
 }
 
-function Row({ wsId, graphId, origin, row, open, onToggle, onShow, review, comments }: {
+function Row({ wsId, graphId, origin, row, open, onToggle, onShow, review, comments, decide }: {
   wsId: string
   graphId: string
   origin: ChangeListOrigin
@@ -323,9 +372,20 @@ function Row({ wsId, graphId, origin, row, open, onToggle, onShow, review, comme
   review?: ChangeListProps['review']
   /** Its threads, open and in all. */
   comments?: { open: number; total: number }
+  /** In a draft's review: its decision, and deciding it. */
+  decide?: {
+    decision: ReviewChangeRow['decision']
+    canDecide: boolean
+    busy: boolean
+    names?: Record<string, string>
+    impliedLabel: string | null
+    onDecide: (verdict: DecisionVerdict | null, reason?: string | null) => void
+  }
 }) {
   const meta = STATUS_META[row.status]
   const label = rowLabel(row)
+  const [asking, setAsking] = useState(false)
+  const rejected = decide?.decision && !decide.decision.stale && decide.decision.verdict === 'rejected' ? decide.decision : null
   // On a canvas, an entity still there can be shown — and stepped on from — where it sits.
   const canReveal = useChangeNavigatorStore((s) => s.canReveal) && row.kind === 'node' && row.status !== 'removed'
   return (
@@ -360,6 +420,11 @@ function Row({ wsId, graphId, origin, row, open, onToggle, onShow, review, comme
             </span>
           )}
         </button>
+        {decide && (
+          <RowDecision decision={decide.decision} canDecide={decide.canDecide} busy={decide.busy} label={label}
+            impliedLabel={decide.impliedLabel} names={decide.names} asking={asking} onAsk={setAsking}
+            onDecide={(v, why) => { setAsking(false); decide.onDecide(v, why) }} />
+        )}
         {canReveal && (
           <button type="button" onClick={onShow} aria-label={`Show ${label} on canvas`}
             className="shrink-0 mr-1 inline-flex items-center gap-0.5 px-1.5 h-6 rounded-md text-[11px] font-semibold text-accent-lineage opacity-0 group-hover/row:opacity-100 focus-visible:opacity-100 hover:bg-accent-lineage/10 transition-opacity">
@@ -367,6 +432,15 @@ function Row({ wsId, graphId, origin, row, open, onToggle, onShow, review, comme
           </button>
         )}
       </div>
+      {asking && decide && (
+        <RejectReason label={label} onCancel={() => setAsking(false)}
+          onReject={(why) => { setAsking(false); decide.onDecide('rejected', why) }} />
+      )}
+      {rejected?.reason && (
+        <p className="px-2.5 pb-1.5 pl-7 -mt-0.5 text-[11.5px] text-rose-700/90 dark:text-rose-300/90 truncate">
+          “{rejected.reason}”{decide?.names?.[rejected.actor] ? <span className="text-ink-muted"> — {decide.names[rejected.actor]}</span> : null}
+        </p>
+      )}
       {open && (
         <div className="px-2.5 pb-2 pl-7">
           <RowDetail wsId={wsId} graphId={graphId} origin={origin} row={row} review={review} />

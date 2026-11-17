@@ -1228,8 +1228,8 @@ export function useMergeMergeRequest(wsId: string) {
   const invalidate = useInvalidatePr(wsId)
   const bumpMainEpoch = useBranchStore((s) => s.bumpMainEpoch)
   return useMutation({
-    mutationFn: (v: { prId: string; graphId: string; message: string; resolutions?: ResolutionMap }) =>
-      api.mergeMergeRequest(wsId, v.prId, { message: v.message, resolutions: v.resolutions }),
+    mutationFn: (v: { prId: string; graphId: string; message: string; resolutions?: ResolutionMap; mode?: 'all' | 'accepted' }) =>
+      api.mergeMergeRequest(wsId, v.prId, { message: v.message, resolutions: v.resolutions, mode: v.mode }),
     onSuccess: (_r, v) => {
       invalidate(v.prId, v.graphId)
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.prDiff(wsId, v.prId) })

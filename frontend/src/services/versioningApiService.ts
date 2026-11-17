@@ -579,7 +579,7 @@ export interface PullRequest {
   mergedBy?: string | null
   /** HOW it merged: 'review' (through this PR) or 'direct_publish' (a manager published the source
    *  branch straight to Published, which lands the same changes and so resolves this PR). */
-  mergedVia?: 'review' | 'direct_publish' | null
+  mergedVia?: 'review' | 'review_partial' | 'direct_publish' | null
   closedAt?: string | null       // when + who closed
   closedBy?: string | null
   /** every actor id this PR references (actor/reviewers/approvedBy/mergedBy/closedBy/
@@ -603,6 +603,29 @@ export interface ReviewViewerCan {
   commentReason?: string | null
   /** Whether the reader may remove what others wrote (they manage the data source). */
   moderate?: boolean
+  /** Whether the reader may accept and reject its changes one by one (whoever may approve it, on
+   *  a draft's review), and why not: `fork_review` or an approve refusal. */
+  decide?: boolean
+  decideReason?: string | null
+}
+
+/** A review decided change by change, refused: `decision_conflict` (it would reverse a decision
+ *  on a change it takes with it — `overrides`), `review_incomplete` (what is accepted `needs`
+ *  more), `changes_rejected`, `nothing_accepted`, `partial_merge_unsupported` (`reason`). */
+export type ReviewDecisionRefusal =
+  | 'decision_conflict' | 'review_incomplete' | 'changes_rejected' | 'nothing_accepted' | 'partial_merge_unsupported'
+const REVIEW_DECISION_REFUSALS = new Set<string>([
+  'decision_conflict', 'review_incomplete', 'changes_rejected', 'nothing_accepted', 'partial_merge_unsupported',
+])
+export class ReviewDecisionError extends Error {
+  type: ReviewDecisionRefusal
+  detail: Record<string, unknown>
+  constructor(type: ReviewDecisionRefusal, message: string, detail: Record<string, unknown>) {
+    super(message)
+    this.name = 'ReviewDecisionError'
+    this.type = type
+    this.detail = detail
+  }
 }
 
 /** Map of entityId → resolved payload (or `null` to delete) for conflict resolution. */
@@ -1030,6 +1053,9 @@ function versioningError(status: number, detail: RefusalDetail, fallback: string
   }
   if (status === 409 && (d?.type === 'stale_decision' || d?.type === 'not_awaiting_decision')) {
     return new BootstrapDecisionError(d.type, d.message)
+  }
+  if ((status === 409 || status === 422) && d?.type && REVIEW_DECISION_REFUSALS.has(d.type)) {
+    return new ReviewDecisionError(d.type as ReviewDecisionRefusal, d.message ?? fallback, d as Record<string, unknown>)
   }
   if (status === 401) return new Error('Session expired')
   if (status === 413) {
@@ -2454,6 +2480,92 @@ export interface ReviewThreadFilter {
   state?: 'open' | 'resolved' | 'all'
 }
 
+// ============================================
+// A draft's review decided change by change
+// ============================================
+
+export type DecisionVerdict = 'accepted' | 'rejected'
+export type DecisionState = 'undecided' | 'accepted' | 'rejected' | 'stale'
+
+/** A change's decision: who decided what, why (a rejection), what it came with, and whether the
+ *  change was edited since (`stale`: it no longer holds). */
+export interface ReviewDecision {
+  verdict: DecisionVerdict
+  reason: string | null
+  actor: string
+  decidedAt: string
+  /** The change it was decided with (accepting a new edge accepts the new entity it joins). */
+  impliedBy: string | null
+  stale: boolean
+}
+
+export interface ReviewChangeRow extends ChangeListRow {
+  decision: ReviewDecision | null
+}
+
+export interface ReviewChangePage extends Omit<ChangeListPage, 'entries'> {
+  entries: ReviewChangeRow[]
+}
+
+export interface ReviewDecisionSummary {
+  total: number
+  accepted: number
+  rejected: number
+  stale: number
+  undecided: number
+  /** Changes what is accepted needs that are not accepted: Merge accepted waits for them. */
+  missing: number
+  missingIds: string[]
+  headCommitId: string | null
+}
+
+export interface DecisionOutcome {
+  decided: number
+  /** What was decided with them (up to 200), and how many in all. */
+  implied: Array<{ entityId: string; impliedBy: string }>
+  impliedCount: number
+  /** Decisions it reverses (or would): changes it takes with it that were decided otherwise. */
+  overrides: Array<{ entityId: string; verdict: DecisionVerdict; impliedBy: string | null }>
+  overrideCount: number
+  dryRun: boolean
+}
+
+export type DecisionFilter = ChangeListFilter & { decision?: DecisionState }
+
+/** A page of a draft review's changes, each with its decision. */
+export function listReviewChanges(
+  wsId: string, prId: string, filter: DecisionFilter = {}, offset = 0, limit = 100,
+): Promise<ReviewChangePage> {
+  const sp = new URLSearchParams()
+  if (filter.decision) sp.set('decision', filter.decision)
+  if (filter.kind) sp.set('kind', filter.kind)
+  if (filter.statuses?.length) sp.set('status', filter.statuses.join(','))
+  if (filter.type) sp.set('type', filter.type)
+  if (filter.q?.trim()) sp.set('q', filter.q.trim())
+  sp.set('offset', String(offset))
+  sp.set('limit', String(limit))
+  return vfetch<ReviewChangePage>(`${base(wsId)}/merge-requests/${encodeURIComponent(prId)}/changes?${sp}`)
+}
+
+export function getReviewDecisionSummary(wsId: string, prId: string): Promise<ReviewDecisionSummary> {
+  return vfetch<ReviewDecisionSummary>(`${base(wsId)}/merge-requests/${encodeURIComponent(prId)}/decisions/summary`)
+}
+
+/** Accept or reject changes — by id, or every change a filter lists — or clear them (`verdict`
+ *  null). What they need is decided with them; `dryRun` says what would be. */
+export function decideReviewChanges(wsId: string, prId: string, body: {
+  verdict: DecisionVerdict | null
+  entityIds?: string[]
+  filter?: DecisionFilter
+  reason?: string | null
+  expectedHeadCommitId?: string | null
+  dryRun?: boolean
+  force?: boolean
+}): Promise<DecisionOutcome> {
+  return vfetch<DecisionOutcome>(`${base(wsId)}/merge-requests/${encodeURIComponent(prId)}/decisions`,
+    { method: 'PUT', body: JSON.stringify(body) })
+}
+
 const commentsBase = (wsId: string, prId: string) => `${base(wsId)}/merge-requests/${encodeURIComponent(prId)}/comments`
 
 /** A page of a review's threads, newest first. */
@@ -2523,7 +2635,8 @@ export function closeMergeRequest(wsId: string, prId: string): Promise<PullReque
 export async function mergeMergeRequest(
   wsId: string,
   prId: string,
-  data: { message: string; resolutions?: ResolutionMap },
+  /** `mode: 'accepted'`: a draft's review merges only its accepted changes; the draft keeps the rest. */
+  data: { message: string; resolutions?: ResolutionMap; mode?: 'all' | 'accepted' },
 ): Promise<PublishResult> {
   return followPublish(wsId, await vfetch<PublishResult | QueuedPublish>(
     `${base(wsId)}/merge-requests/${prId}/merge`, jsonBody(data)))

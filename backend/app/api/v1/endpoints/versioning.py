@@ -811,6 +811,8 @@ class RebaseRequest(_ApiModel):
 class MergePrRequest(_ApiModel):
     message: str
     resolutions: Optional[Dict[str, Optional[dict]]] = None
+    # A draft's review: ``accepted`` merges only its accepted changes, and the draft keeps the rest.
+    mode: Literal["all", "accepted"] = "all"
 
 
 class ApproveRequest(_ApiModel):
@@ -1953,6 +1955,9 @@ _DRAFT_NEWS = {
                            "You no longer have access to it. Anything you had staged in it was saved "
                            "first, under your name."),
     "draft.transferred": ('You own "{name}" now', "A draft was handed to you."),
+    "draft.returned": ('Part of "{name}" was published',
+                       "What its review accepted is in the published version now. The rest is still on "
+                       "the draft, ready for another review."),
 }
 
 
@@ -5541,9 +5546,13 @@ async def _viewer_can(svc: GraphVersioningService, session: AsyncSession, pr: di
     # Anyone who sees a review may discuss it — a person, not a key; someone who manages the data
     # source may also remove what others wrote.
     comment = _first_refusal((is_service_account(viewer), "person_required"))
+    # Accepting or rejecting its changes one by one is reviewing it: whoever may approve it, on a
+    # draft's review (a fork's merges its committed history whole).
+    decide = _first_refusal((pr.get("source_graph_id") != pr.get("target_graph_id"), "fork_review")) or approve
     return {"approve": approve is None, "merge": merge is None,
             "approveReason": approve, "mergeReason": merge,
-            "comment": comment is None, "commentReason": comment, "moderate": manages}
+            "comment": comment is None, "commentReason": comment, "moderate": manages,
+            "decide": decide is None, "decideReason": decide}
 
 
 @router.post("/pulls/{pr_id}/approve", response_model=PrResponse)
@@ -6043,9 +6052,11 @@ async def merge_merge_request(
         raise api_key_errors.key_forbidden(
             "api_key_not_allowed", "A fork's review cannot be merged with an API key.")
     policy = await _pr_policy(svc, session, _pr)
-    if source and await svc.branch_change_count(
+    partial = body.mode == "accepted"
+    if source and not partial and await svc.branch_change_count(
             graph_id=target, branch_id=str(source)) > vconfig.SYNC_PUBLISH_MAX_CHANGES:
         with _domain_errors():
+            await svc.refuse_if_rejected(pr_id=pr_id)       # refused now, not by the job
             if not policy.self_merge and user.id == _pr.get("actor"):   # refused now, not by the job
                 raise SelfMerge(pr_id)
             return await _queue_publish(ie, workspace_id=ws_id, meta=await svc.get_graph(target),
@@ -6065,11 +6076,20 @@ async def merge_merge_request(
         commit_id = await svc.merge_mr(
             mr_id=pr_id, actor=user.id, message=body.message, resolutions=body.resolutions,
             containment_edge_types=cset, ontology_rules=rules, node_identity=identity,
-            self_merge=policy.self_merge,
+            self_merge=policy.self_merge, mode=body.mode,
         )
     await _bump_main_cache(str(_pr["target_graph_id"]))            # target advanced — invalidate stale canvas reads now
     await _touch_views_data_updated(str(_pr["target_graph_id"]), user.id)   # views' "data updated" freshness
-    _src_branch = _pr.get("source_branch_id")   # the merged draft — fold its layout overlay into the published view
+    _src_branch = _pr.get("source_branch_id")
+    if partial and ((await svc.get_pr(pr_id)) or {}).get("merged_via") == "review_partial":
+        # Merged in part: the draft stays open with the rest — its views and layout go live with
+        # its last part, and its people hear it is back for another review.
+        await _tell_draft_people(session, svc, "draft.returned", ws_id=ws_id,
+                                 meta=await svc.get_graph(target) or {}, graph_id=target,
+                                 branch_id=str(_src_branch), actor=user.id, pr_id=pr_id)
+        background.add_task(project_now, target)
+        return await _publish_answer(svc, target, commit_id)
+    # The merged draft — fold its layout overlay into the published view
     await _promote_view_layout_overlay(str(_src_branch) if _src_branch else None, user.id)
     if _src_branch and _pr.get("source_graph_id") == target:                 # a draft's, not a fork's
         await _tell_draft_people(session, svc, "draft.published", ws_id=ws_id,
@@ -6259,3 +6279,96 @@ async def resolve_review_thread(
         raise HTTPException(status_code=403, detail={"type": "person_required", "message": "A person resolves a thread."})
     with _comment_errors():
         return await comments.resolve(pr_id=pr_id, thread_id=thread_id, actor=user.id, resolved=action == "resolve")
+
+
+# --------------------------------------------------------------------------- #
+# A draft's review decided change by change — accept, reject (with why) — and  #
+# merged in part: what is accepted lands, the draft keeps the rest             #
+# --------------------------------------------------------------------------- #
+class DecisionFilter(_ApiModel):
+    kind: Optional[_ChangeKind] = None
+    statuses: List[Literal["added", "modified", "removed"]] = Field(default_factory=list)
+    type: Optional[str] = Field(default=None, max_length=256)
+    q: Optional[str] = Field(default=None, max_length=200)
+    decision: Optional[Literal["undecided", "accepted", "rejected", "stale"]] = None
+
+
+class DecideRequest(_ApiModel):
+    verdict: Optional[Literal["accepted", "rejected"]] = None
+    entity_ids: Optional[List[str]] = Field(default=None, alias="entityIds", max_length=1000)
+    filter: Optional[DecisionFilter] = None
+    reason: Optional[str] = Field(default=None, max_length=2000)
+    expected_head_commit_id: Optional[str] = Field(default=None, alias="expectedHeadCommitId")
+    dry_run: bool = Field(default=False, alias="dryRun")
+    force: bool = False
+
+
+@router.put("/merge-requests/{pr_id}/decisions")
+async def decide_review_changes(
+    ws_id: str, pr_id: str, body: DecideRequest,
+    user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    pr: dict = Depends(pr_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Accept or reject changes of a draft's review — ``entityIds``, or every change ``filter``
+    lists — or clear their decision (``verdict`` null). What they need is decided with them and
+    named in ``implied``; reversing a decision on one of those is 409 ``decision_conflict`` unless
+    ``force``. ``dryRun`` answers what it would decide. 409 ``head_moved`` when the draft moved on
+    from ``expectedHeadCommitId``."""
+    if (body.entity_ids is None) == (body.filter is None):
+        raise HTTPException(status_code=422, detail="Name the changes (entityIds) or a filter, not both.")
+    can = await _viewer_can(svc, session, pr, user.id, claims, ws_id)
+    if not can["decide"]:
+        raise HTTPException(status_code=403, detail={"type": can["decideReason"] or "forbidden",
+                                                     "message": "You can't decide this review's changes."})
+    cset = await _pr_containment_types(svc, session, ws_id, pr)
+    f = body.filter
+    with _domain_errors():
+        return await svc.decide_changes(
+            pr_id=pr_id, actor=user.id, verdict=body.verdict, containment_edge_types=cset,
+            entity_ids=body.entity_ids,
+            filter=None if f is None else {"kind": f.kind, "statuses": f.statuses, "type": f.type, "q": f.q,
+                                           "decision": f.decision},
+            reason=body.reason, expected_head_commit_id=body.expected_head_commit_id,
+            dry_run=body.dry_run, force=body.force)
+
+
+@router.get("/merge-requests/{pr_id}/decisions/summary")
+async def review_decision_summary(
+    ws_id: str, pr_id: str,
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    pr: dict = Depends(pr_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Where a draft's review stands, change by change: accepted, rejected, undecided, changed
+    since decided — and what *Merge accepted* still needs (``missing``)."""
+    cset = await _pr_containment_types(svc, session, ws_id, pr)
+    with _domain_errors():
+        return await svc.review_decision_summary(pr_id=pr_id, containment_edge_types=cset)
+
+
+@router.get("/merge-requests/{pr_id}/changes")
+async def review_changes(
+    ws_id: str, pr_id: str,
+    decision: Optional[Literal["undecided", "accepted", "rejected", "stale"]] = Query(None),
+    kind: Optional[_ChangeKind] = Query(None),
+    status: Optional[str] = Query(None, description="added, modified, removed; comma-separated"),
+    entity_type: Optional[str] = Query(None, alias="type", max_length=256),
+    q: Optional[str] = Query(None, max_length=200),
+    offset: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    pr: dict = Depends(pr_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """A page of a draft review's change list (as ``/graphs/{id}/diff/entries``), each change
+    with its decision, narrowed by ``decision`` too."""
+    cset = await _pr_containment_types(svc, session, ws_id, pr)
+    with _domain_errors():
+        return await svc.review_change_entries(
+            pr_id=pr_id, containment_edge_types=cset, decision=decision, kind=kind,
+            statuses=_change_statuses(status), type_=entity_type, q=q, offset=offset, limit=limit)

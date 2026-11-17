@@ -330,6 +330,31 @@ class ReviewCommentORM(VersioningBase):
     )
 
 
+class ReviewDecisionORM(VersioningBase):
+    """A reviewer's verdict on one change of a draft's review: ``accepted`` or ``rejected`` (with
+    why). ``content_hash`` is the draft's hash of the entity when it was decided: the verdict holds
+    only while it still matches — an edit since makes it stale. ``implied_by`` names the change it
+    was decided with (accepting a new edge accepts the new entities it joins); ``None`` for one
+    decided on its own (20261117_1300_gv_decisions)."""
+
+    __tablename__ = "review_decisions"
+
+    pr_id = Column(Text, primary_key=True)
+    entity_id = Column(Text, primary_key=True)
+    graph_id = Column(Text, nullable=False)              # the review's base graph: purged with it
+    verdict = Column(Text, nullable=False)               # accepted | rejected
+    reason = Column(Text, nullable=True)
+    content_hash = Column(Text, nullable=True)
+    implied_by = Column(Text, nullable=True)
+    actor = Column(Text, nullable=False)
+    decided_at = Column(Text, nullable=False, default=_now)
+
+    __table_args__ = _plain(
+        CheckConstraint("verdict IN ('accepted', 'rejected')", name="ck_rd_verdict"),
+        Index("ix_rd_graph", "graph_id"),
+    )
+
+
 class ProjectionStateORM(VersioningBase):
     """FalkorDB projection watermark + placement/eviction state per graph
     (plan §5, §16.5 #9). Drives the read watermark and bounded-staleness."""

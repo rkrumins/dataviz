@@ -25,7 +25,7 @@ import { Backdrop } from '@/components/ui/Backdrop'
 import { Badge } from '@/components/ui/Badge'
 import { timeAgo } from '@/lib/timeAgo'
 import {
-  ForkNotUpToDateError, HeadMovedError, MergeConflictError, NotUpToDateError, type PullReason,
+  ForkNotUpToDateError, HeadMovedError, MergeConflictError, NotUpToDateError, ReviewDecisionError, type PullReason,
   type IncomingChanges, type ResolutionMap,
 } from '@/services/versioningApiService'
 import {
@@ -62,6 +62,7 @@ import { refusalCopy } from '@/features/versioning/model/provenance'
 import { ReviewDiscussion } from '../comments/ReviewDiscussion'
 import { useReviewCommentCounts } from '../comments/useReviewComments'
 import type { DiscussionAccess } from '../comments/ReviewThreads'
+import { DECISION_KEYS, useDecideChanges, useReviewDecisionSummary } from '../decisions/useReviewDecisions'
 
 /** " by 3 changes people made" — what holds a draft's review back from main; people's changes
  *  are what make it pull, so they are what it counts when the server says. */
@@ -265,6 +266,14 @@ export function PrDetailDrawer({ wsId, prId, onClose, focusThreadId }: {
     canModerate: viewerCan?.moderate ?? canManage,
   }
   const openThreads = useReviewCommentCounts(wsId, prId).data?.open ?? 0
+  // A draft's review, decided change by change: Merge accepted lands what is accepted and leaves
+  // the rest on the draft; with anything rejected, it is the only merge there is.
+  const deciding = draftReview && !terminal && !merging
+  const decisions = useReviewDecisionSummary(wsId, prId, deciding).data
+  const acceptMissing = useDecideChanges(wsId, prId)
+  const accepted = decisions?.accepted ?? 0
+  const rejected = decisions?.rejected ?? 0
+  const mergeInPart = deciding && !!decisions && (rejected > 0 || (accepted > 0 && accepted < decisions.total))
   const busy = approve.isPending || closePr.isPending || merge.isPending || pullLatest.isPending
 
   // Proactive gate: the server flags a draft MR that lags main head. Mirror it into needsPull so the
@@ -274,12 +283,18 @@ export function PrDetailDrawer({ wsId, prId, onClose, focusThreadId }: {
   const mustPull = pr?.pullRequired ?? pr?.behind
   useEffect(() => { setNeedsPull(!terminal && !!mustPull) }, [mustPull, terminal])
 
-  const runMerge = async (resolutions?: ResolutionMap) => {
+  const runMerge = async (resolutions?: ResolutionMap, mode: 'all' | 'accepted' = 'all') => {
     if (!pr || unsaved > 0) return
     try {
       const res = await merge.mutateAsync({
-        prId, graphId: pr.targetGraphId, message: `Merge: ${derivePrTitle(pr)}`, resolutions,
+        prId, graphId: pr.targetGraphId, message: `Merge: ${derivePrTitle(pr)}`, resolutions, mode,
       })
+      if (mode === 'accepted' && accepted < (decisions?.total ?? 0)) {
+        // Merged in part: the draft stays open with the rest, and this review reads as merged.
+        notify('success', `Merged ${accepted.toLocaleString()} accepted change${accepted === 1 ? '' : 's'} into main. The rest stay on the draft.`)
+        void prQ.refetch()
+        return
+      }
       setConflicts(null)
       setResolverError(null)
       setForkBehind(null)
@@ -314,6 +329,12 @@ export function PrDetailDrawer({ wsId, prId, onClose, focusThreadId }: {
         setNeedsPull(true)
         setPullReason(e.reason ?? 'people')
         notify('error', refusalCopy(e.reason))
+        return
+      }
+      if (e instanceof ReviewDecisionError) {
+        // Decisions moved under the merge (an edit made one stale, say): read them again.
+        void queryClient.invalidateQueries({ queryKey: DECISION_KEYS.all(wsId, prId) })
+        notify('error', e.message)
         return
       }
       if (e instanceof MergeConflictError) {
@@ -374,7 +395,9 @@ export function PrDetailDrawer({ wsId, prId, onClose, focusThreadId }: {
         Icon: bypassed ? ShieldAlert : GitMerge,
         text: bypassed
           ? `Published directly by ${who}, bypassing this review${sha}`
-          : `Merged by ${who}${sha}`,
+          : pr.mergedVia === 'review_partial'
+            ? `What was accepted merged by ${who}${sha}; the rest stayed on the draft`
+            : `Merged by ${who}${sha}`,
         time: pr.mergedAt ?? pr.updatedAt,
         tint: bypassed ? 'bg-amber-500' : 'bg-violet-500',
       })
@@ -593,8 +616,20 @@ export function PrDetailDrawer({ wsId, prId, onClose, focusThreadId }: {
                         <strong>main</strong>, this is exactly what merging it changes.
                       </p>
                     )}
+                    {pr.mergedVia === 'review_partial' && (
+                      <p className="text-[11.5px] text-ink-muted mb-2 leading-relaxed">
+                        Merged in part: these are the changes its review accepted. The rest stayed on the
+                        draft, for another review.
+                      </p>
+                    )}
                     <ChangeList wsId={wsId} graphId={pr.graphId} origin={listOrigin} summary={draftSummaryQ.data}
-                      emptyHint="No changes in this PR." review={{ prId, ...discussion }} />
+                      emptyHint="No changes in this PR."
+                      review={{
+                        prId, ...discussion,
+                        decisions: deciding ? {
+                          canDecide: !!viewerCan?.decide, headCommitId: pr.headCommitId, summary: decisions, names: pr.userNames ?? undefined,
+                        } : undefined,
+                      }} />
                   </>
                 ) : (
                   // A fork's review: laid out as a tree within the cap; past it, counted and listed from
@@ -679,6 +714,36 @@ export function PrDetailDrawer({ wsId, prId, onClose, focusThreadId }: {
           </div>
         )}
 
+        {/* Where the review's decisions stand, and what Merge accepted still needs. */}
+        {pr && mergeInPart && decisions && (
+          <div className="mx-5 mb-1 space-y-1.5">
+            <p className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11.5px] text-ink-muted tabular-nums">
+              <span><span className="font-semibold text-emerald-700 dark:text-emerald-300">{accepted.toLocaleString()}</span> accepted</span>
+              <span><span className="font-semibold text-rose-700 dark:text-rose-300">{rejected.toLocaleString()}</span> rejected</span>
+              <span><span className="font-semibold text-ink">{decisions.undecided.toLocaleString()}</span> to decide</span>
+              {decisions.stale > 0 && <span className="text-amber-700 dark:text-amber-300">{decisions.stale.toLocaleString()} changed since</span>}
+              <span className="ml-auto">Only what is accepted merges; the rest stays on the draft.</span>
+            </p>
+            {decisions.missing > 0 && (
+              <div className="flex flex-wrap items-center gap-2 px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-700 dark:text-amber-300 text-xs">
+                <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                <span className="flex-1 min-w-0">
+                  {decisions.missing.toLocaleString()} change{decisions.missing === 1 ? '' : 's'} the accepted ones need {decisions.missing === 1 ? 'isn’t' : 'aren’t'} accepted
+                  {decisions.stale > 0 ? ' (some changed since they were decided)' : ''}.
+                </span>
+                {viewerCan?.decide && (
+                  <button type="button" disabled={acceptMissing.isPending}
+                    onClick={() => acceptMissing.mutate({ verdict: 'accepted', entityIds: decisions.missingIds, force: true, expectedHeadCommitId: pr.headCommitId },
+                      { onError: (e) => notify('error', (e as Error).message) })}
+                    className="inline-flex items-center gap-1 px-2 h-7 rounded-lg font-semibold text-emerald-700 dark:text-emerald-300 hover:bg-emerald-500/10 disabled:opacity-50">
+                    {acceptMissing.isPending && <Loader2 className="w-3.5 h-3.5 animate-spin" />}Accept {decisions.missing > decisions.missingIds.length ? `${decisions.missingIds.length} of them` : 'them too'}
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Action bar — none while a job merges it, which nothing may change meanwhile */}
         {pr && !terminal && canManage && !dismissing && !merging && (
           <div className="px-5 py-3.5 border-t border-glass-border/60 flex items-center gap-2">
@@ -712,6 +777,18 @@ export function PrDetailDrawer({ wsId, prId, onClose, focusThreadId }: {
               >
                 {pullLatest.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <ArrowDownToLine className="w-4 h-4" />}
                 Pull latest
+              </button>
+            ) : !forksOff && mergeInPart ? (
+              <button
+                onClick={() => runMerge(undefined, 'accepted')}
+                disabled={busy || unsaved > 0 || !canMerge || accepted === 0 || (decisions?.missing ?? 0) > 0}
+                title={!canMerge ? mergeBlockedWhy ?? 'You can’t merge this review'
+                  : accepted === 0 ? 'Accept the changes that should merge first'
+                    : 'Apply the accepted changes to main; the rest stay on the draft'}
+                className="flex-1 inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-xl text-sm font-semibold text-white bg-gradient-to-r from-indigo-500 to-violet-600 hover:from-indigo-600 hover:to-violet-700 shadow-sm disabled:opacity-60"
+              >
+                {merge.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <GitMerge className="w-4 h-4" />}
+                Merge {accepted.toLocaleString()} accepted
               </button>
             ) : !forksOff && (
               <button
