@@ -133,7 +133,7 @@ function seedStaged() {
   setTimeout(() => {
     const opened = performance.now()
     useStagedChangesStore.getState().openReviewPanel()
-    void until(() => document.querySelector('[role=listbox] [role=option]')).then(() => { report.openMs = Math.round(performance.now() - opened) })
+    void until(() => document.querySelector('[role=list][aria-label="Staged changes"] [role=listitem]')).then(() => { report.openMs = Math.round(performance.now() - opened) })
   }, 1500)
 }
 
@@ -166,14 +166,25 @@ function type(input: HTMLInputElement, value: string) {
 async function drive() {
   try {
     if (fixture === 'review' || fixture === 'map') {
-      const list = await until(() => document.querySelector<HTMLElement>('[role=listbox][aria-label="Staged changes"]'))
+      const list = await until(() => document.querySelector<HTMLElement>('[role=list][aria-label="Staged changes"]'))
+      const scroller = list.parentElement as HTMLElement
       await until(() => report.openMs)
       if (fixture === 'review') {
         await step('settle', () => new Promise((r) => setTimeout(r, 600)))
         await step('first-j', () => { key(list, 'j') })
         await step('step60', async () => { for (let i = 0; i < 60; i++) { key(list, 'j'); await frame() } })
         await step('end', () => { key(list, 'End') })
-        await step('scroll', async () => { list.scrollTop = list.scrollHeight / 2; await frame(); list.scrollTop = list.scrollHeight / 4 })
+        await step('scroll', async () => { scroller.scrollTop = scroller.scrollHeight / 2; await frame(); scroller.scrollTop = scroller.scrollHeight / 4 })
+        await step('home', async () => { key(list, 'Home'); await frame() })
+        await step('open', async () => { key(list, 'ArrowRight'); await until(() => list.querySelector('[role=region]')) })
+        await step('open-all', async () => { key(list, 'ArrowRight'); await frame() })
+        await step('expand-all', async () => {
+          ;[...document.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent === 'Expand all')?.click()
+          await until(() => list.querySelectorAll('[role=region]').length > 4)
+        })
+        await step('scroll-expanded', async () => {
+          for (let k = 1; k <= 8; k++) { scroller.scrollTop += 1500; await new Promise((r) => setTimeout(r, 60)) }
+        })
         await step('filter', async () => {
           type(document.querySelector<HTMLInputElement>('input[placeholder^="Search by name"]')!, 'customer_orders_49')
           await new Promise((r) => setTimeout(r, 400))

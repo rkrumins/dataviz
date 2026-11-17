@@ -281,7 +281,7 @@ describe('a draft edited end to end in the Business view', () => {
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: /^Review & Save/ })) })
     await h.settle()
     const review = () => screen.getByRole('dialog', { name: 'Review & Save Changes' })
-    await act(async () => { fireEvent.click(within(review()).getAllByRole('button', { name: 'Discard change' })[0]) })
+    await act(async () => { fireEvent.click(within(review()).getAllByRole('button', { name: /^Discard (the change to|\d+ changes to)/ })[0]) })
     await h.settle()
     expect(staged()).toHaveLength(1)
     await act(async () => { fireEvent.click(within(review()).getByRole('button', { name: 'Close' })) })
@@ -293,7 +293,7 @@ describe('a draft edited end to end in the Business view', () => {
     expect(review()).toBeInTheDocument()
     expect(useBranchStore.getState().isDraftMode()).toBe(true)
 
-    await act(async () => { fireEvent.click(within(review()).getByRole('button', { name: 'Discard change' })) })
+    await act(async () => { fireEvent.click(within(review()).getByRole('button', { name: /^Discard (the change to|\d+ changes to)/ })) })
     await h.settle()
     expect(staged()).toEqual([])
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Done' })) })

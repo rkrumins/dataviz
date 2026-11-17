@@ -41,10 +41,23 @@ export function useExpandableRows<K extends string>(keys: readonly K[], opts: {
   extraKeys?: (e: KeyboardEvent, current: K | null) => boolean
   /** The level every row opens at (a single change: open). */
   initialLevel?: RowLevel
+  /** A row open from the start (the one chosen elsewhere — on a map). */
+  initiallyOpen?: K | null
+  /** The current row, when the caller holds it (shared with another view); else held here. */
+  current?: K | null
+  onCurrentChange?: (key: K) => void
 } = {}): ExpandableRows<K> {
   const [base, setBase] = useState<RowLevel>(opts.initialLevel ?? 0)
-  const [overrides, setOverrides] = useState<ReadonlyMap<K, RowLevel>>(() => new Map())
-  const [current, setCurrentState] = useState<K | null>(null)
+  const [overrides, setOverrides] = useState<ReadonlyMap<K, RowLevel>>(
+    () => new Map(opts.initiallyOpen ? [[opts.initiallyOpen, 1 as RowLevel]] : []))
+  const [own, setOwn] = useState<K | null>(null)
+  const controlled = opts.current !== undefined
+  const current = controlled ? (opts.current ?? null) : own
+  const onCurrentChange = opts.onCurrentChange
+  const setCurrentState = useCallback((k: K) => {
+    if (controlled) onCurrentChange?.(k)
+    else setOwn(k)
+  }, [controlled, onCurrentChange])
   const optsRef = useRef(opts)
   useLayoutEffect(() => { optsRef.current = opts })
 
@@ -74,7 +87,7 @@ export function useExpandableRows<K extends string>(keys: readonly K[], opts: {
     const k = keys[at]
     setCurrentState(k)
     optsRef.current.onNavigate?.(k, at)
-  }, [keys])
+  }, [keys, setCurrentState])
 
   const onKeyDown = useCallback((e: KeyboardEvent) => {
     if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey || editable(e.target)) return

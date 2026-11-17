@@ -1,7 +1,7 @@
 /**
- * Review & Save at volume: one row per thing changed, the selected one beside the list, moved
- * through with the keyboard or Prev / Next ("2 of 3"), narrowed by the filter bar — and the changes
- * shown discarded in one go.
+ * Review & Save at volume: one row per thing changed, each a summary first and opened to what it
+ * changes, moved through with the keyboard ("Change 2 of 3"), narrowed by the filter bar — and the
+ * changes shown discarded in one go.
  */
 import { act, fireEvent, render, screen, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -14,6 +14,7 @@ vi.mock('@tanstack/react-virtual', () => ({
     })),
     getTotalSize: () => opts.count * 52,
     scrollToIndex: () => undefined,
+    measureElement: () => undefined,
   }),
 }))
 
@@ -31,7 +32,11 @@ const create = (id: string, name: string): StagedChange => ({
 })
 
 const state = () => useStagedChangesStore.getState()
-const detail = () => screen.getByRole('region', { name: 'The selected change' })
+const list = () => screen.getByRole('list', { name: 'Staged changes' })
+const rowButtons = () => within(list()).getAllByRole('button', { expanded: false }).concat(
+  within(list()).queryAllByRole('button', { expanded: true })).filter((b) => b.id.startsWith('review-row-'))
+const rowButton = (name: RegExp) => within(list()).getAllByRole('button').find((b) => b.id.startsWith('review-row-') && name.test(b.textContent ?? ''))!
+const currentRow = () => within(list()).getAllByRole('button').find((b) => b.id.startsWith('review-row-') && b.tabIndex === 0)
 
 beforeEach(() => {
   useStagedChangesStore.setState({
@@ -41,31 +46,44 @@ beforeEach(() => {
 })
 
 describe('Review & Save — the change explorer', () => {
-  it('lists each change and shows the first beside the list', () => {
+  it('lists each change as a summary, none opened yet', () => {
     render(<StagedChangesPanel onConfirm={() => {}} />)
-    expect(screen.getAllByRole('option')).toHaveLength(3)
-    expect(within(detail()).getByText('1')).toBeInTheDocument()
-    expect(within(detail()).getByText((_, el) => el?.tagName === 'P' && el.textContent === 'Renamed orders to Orders')).toBeInTheDocument()
+    expect(within(list()).getAllByRole('listitem')).toHaveLength(3)
+    expect(within(list()).getAllByText('Edited Name')).toHaveLength(2)
+    expect(within(list()).getAllByText((_, el) => el?.tagName === 'SPAN' && el.textContent === 'Added Refunds at the top level').length).toBeGreaterThan(0)
+    expect(within(list()).queryAllByRole('region')).toHaveLength(0)
+    expect(screen.getByText((_, el) => el?.textContent === 'Change 1 of 3')).toBeInTheDocument()
   })
 
-  it('moves through the changes with J/K and Prev / Next', () => {
+  it('opens a change to what it changes, and moves through them by keyboard', () => {
     render(<StagedChangesPanel onConfirm={() => {}} />)
-    const list = screen.getByRole('listbox', { name: 'Staged changes' })
-    fireEvent.keyDown(list, { key: 'j' })
-    expect(screen.getAllByRole('option')[1]).toHaveAttribute('aria-selected', 'true')
-    expect(within(detail()).getByText((_, el) => el?.tagName === 'P' && el.textContent === 'Renamed sales to Sales')).toBeInTheDocument()
-    fireEvent.click(within(detail()).getByRole('button', { name: 'Next change' }))
-    expect(within(detail()).getByText((_, el) => el?.tagName === 'P' && el.textContent === 'Added Refunds at the top level')).toBeInTheDocument()
-    expect(within(detail()).getByRole('button', { name: 'Next change' })).toBeDisabled()
-    fireEvent.keyDown(list, { key: 'Home' })
-    expect(screen.getAllByRole('option')[0]).toHaveAttribute('aria-selected', 'true')
+    fireEvent.click(rowButton(/^orders|^Orders/))
+    expect(rowButton(/Orders/)).toHaveAttribute('aria-expanded', 'true')
+    expect(within(list()).getByRole('region')).toHaveTextContent(/orders.*Orders/)
+    fireEvent.keyDown(rowButton(/Orders/), { key: 'j' })
+    expect(currentRow()).toBe(rowButton(/Sales/))
+    expect(screen.getByText((_, el) => el?.textContent === 'Change 2 of 3')).toBeInTheDocument()
+    fireEvent.keyDown(rowButton(/Sales/), { key: 'ArrowRight' })
+    expect(rowButton(/Sales/)).toHaveAttribute('aria-expanded', 'true')
+    fireEvent.keyDown(rowButton(/Sales/), { key: 'ArrowLeft', shiftKey: true })
+    expect(within(list()).queryAllByRole('region')).toHaveLength(0)
+    fireEvent.keyDown(rowButton(/Sales/), { key: 'Home' })
+    expect(currentRow()).toBe(rowButton(/Orders/))
+  })
+
+  it('opens every change shown at once', () => {
+    render(<StagedChangesPanel onConfirm={() => {}} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Expand all' }))
+    expect(within(list()).getAllByRole('region')).toHaveLength(3)
+    fireEvent.click(screen.getByRole('button', { name: 'Collapse all' }))
+    expect(within(list()).queryAllByRole('region')).toHaveLength(0)
   })
 
   it('narrows by status and discards just the changes shown', () => {
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
     render(<StagedChangesPanel onConfirm={() => {}} />)
     fireEvent.click(screen.getByRole('button', { name: /Modified/ }))
-    expect(screen.getAllByRole('option')).toHaveLength(2)
+    expect(within(list()).getAllByRole('listitem')).toHaveLength(2)
     expect(screen.getByText('shown of 3', { exact: false })).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Discard the 2 shown' }))
     expect(confirmSpy).toHaveBeenCalled()
@@ -75,18 +93,18 @@ describe('Review & Save — the change explorer', () => {
     confirmSpy.mockRestore()
   })
 
-  it('discarding the selected change selects the next', () => {
+  it('discarding the current change moves on to the next', () => {
     render(<StagedChangesPanel onConfirm={() => {}} />)
-    fireEvent.keyDown(screen.getByRole('listbox', { name: 'Staged changes' }), { key: 'Delete' })
+    fireEvent.keyDown(rowButton(/Orders/), { key: 'Delete' })
     expect(state().changes.map((c) => c.id)).toEqual(['b', 'c'])
-    expect(within(detail()).getByText((_, el) => el?.tagName === 'P' && el.textContent === 'Renamed sales to Sales')).toBeInTheDocument()
+    expect(currentRow()).toBe(rowButton(/Sales/))
   })
 
-  it('steps through the changes shown on the canvas, from the selected one', () => {
+  it('steps through the changes shown on the canvas, from the current one', () => {
     useChangeNavigatorStore.setState({ canReveal: true, active: false })
     render(<StagedChangesPanel onConfirm={() => {}} />)
-    fireEvent.keyDown(screen.getByRole('listbox', { name: 'Staged changes' }), { key: 'j' })
-    fireEvent.click(within(detail()).getByRole('button', { name: /Step through/ }))
+    fireEvent.keyDown(rowButton(/Orders/), { key: 'j' })
+    fireEvent.click(screen.getByRole('button', { name: /Step through/ }))
     const nav = useChangeNavigatorStore.getState()
     expect(state().isReviewPanelOpen).toBe(false)
     expect(nav.active).toBe(true)
@@ -95,22 +113,24 @@ describe('Review & Save — the change explorer', () => {
     useChangeNavigatorStore.setState({ canReveal: false, active: false })
   })
 
-  it('lists the changes under a heading per type, and moves between rows only', () => {
+  it('lists the changes under a heading per type, each saying where it stands', () => {
     useStagedChangesStore.setState({
       changes: [rename('a', 'orders', 'Orders'), { ...create('c', 'Refunds'), after: { displayName: 'Refunds', entityType: 'Table' } },
         { ...rename('b', 'sales', 'Sales'), type: 'rename_entity' }],
     } as never)
     render(<StagedChangesPanel onConfirm={() => {}} />)
-    const list = screen.getByRole('listbox', { name: 'Staged changes' })
-    expect(within(list).getByText('Table')).toBeInTheDocument()
-    expect(within(list).getByText('Untyped')).toBeInTheDocument()
-    const options = within(list).getAllByRole('option')
-    expect(options).toHaveLength(3)
-    expect(options.map((o) => o.getAttribute('aria-posinset'))).toEqual(['1', '2', '3'])
-    expect(options.every((o) => o.getAttribute('aria-setsize') === '3')).toBe(true)
-    fireEvent.keyDown(list, { key: 'j' })
-    expect(within(list).getAllByRole('option')[1]).toHaveAttribute('aria-selected', 'true')
-    fireEvent.keyDown(list, { key: 'End' })
-    expect(within(list).getAllByRole('option')[2]).toHaveAttribute('aria-selected', 'true')
+    expect(within(list()).getByText('Table')).toBeInTheDocument()
+    expect(within(list()).getByText('Untyped')).toBeInTheDocument()
+    const items = within(list()).getAllByRole('listitem')
+    expect(items).toHaveLength(3)
+    expect(items.map((o) => o.getAttribute('aria-posinset'))).toEqual(['1', '2', '3'])
+    expect(items.every((o) => o.getAttribute('aria-setsize') === '3')).toBe(true)
+    expect(rowButtons()).toHaveLength(3)
+  })
+
+  it('opens a single change by itself', () => {
+    useStagedChangesStore.setState({ changes: [rename('a', 'orders', 'Orders')] } as never)
+    render(<StagedChangesPanel onConfirm={() => {}} />)
+    expect(rowButton(/Orders/)).toHaveAttribute('aria-expanded', 'true')
   })
 })
