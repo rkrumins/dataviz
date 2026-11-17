@@ -7,7 +7,8 @@
  *              rows, lens, search, profiles, compass and save model as the platform's. What only
  *              the platform sets is listed read-only with its value here, and a category's switch
  *              is shown, not flipped (it is the platform's)
- *   Graphs     each graph with its own settings, read mode and class; its settings open in the drawer
+ *   Graphs     each graph with its own settings, read mode and class; its settings open in the drawer.
+ *              None yet: the page's Data Sources, where a graph is put under version control
  *   History    the workspace's changes and its graphs' (workspace admins, who may put one back)
  *
  * A workspace admin chooses within the platform's limits; a system admin may go past them (the
@@ -19,11 +20,11 @@
  * The page keeps the tab while something is staged (`onStagedChange`).
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Link, useLocation, useSearchParams } from 'react-router-dom'
+import { useLocation, useSearchParams } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
-import { BookOpen, History, Info, Network, ShieldCheck, SlidersHorizontal } from 'lucide-react'
+import { History, Info, Network, ShieldCheck, SlidersHorizontal } from 'lucide-react'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/Tabs'
-import { LensSwitch, settingAnchor, type ResolvedValues, type Scope, type SettingsFacts } from '@/components/settings'
+import { LensSwitch, settingAnchor, type ResolvedValues, type SettingsFacts } from '@/components/settings'
 import { usePermission } from '@/store/auth'
 import { useFeature } from '@/store/features'
 import {
@@ -54,11 +55,13 @@ function StagedCount({ n }: { n: number }) {
     )
 }
 
-export function WorkspaceVersionedGraphs({ workspaceId, workspaceName, onStagedChange }: {
+export function WorkspaceVersionedGraphs({ workspaceId, workspaceName, onStagedChange, onOpenDataSources }: {
     workspaceId: string
     workspaceName: string
     /** How many changes are staged, as it changes: the page keeps the tab (and says so) while any are. */
     onStagedChange?: (count: number) => void
+    /** The page's Data Sources: where version control is turned on for a graph, offered while there is none. */
+    onOpenDataSources?: () => void
 }) {
     const place: SettingsPlace = useMemo(() => ({ scope: 'workspace', workspaceId }), [workspaceId])
     const [params, setParams] = useSearchParams()
@@ -120,13 +123,6 @@ export function WorkspaceVersionedGraphs({ workspaceId, workspaceName, onStagedC
         out.set('dstab', 'versioning')
         return out
     })
-    // History names the workspace, and each graph by its data source's name.
-    const placeName = useCallback((scope: Scope, scopeId: string) => {
-        if (scope === 'workspace') return scopeId === workspaceId ? workspaceName : null
-        const g = graphs.find((x) => x.dataSourceId === scopeId)
-        return g ? graphName(g) : null
-    }, [graphs, workspaceId, workspaceName])
-
     const data = valuesQ.data
     const readOnly = !versioningOn || data?.editor == null
     // The guide is an editor's: a workspace admin's, or a system admin's.
@@ -161,22 +157,15 @@ export function WorkspaceVersionedGraphs({ workspaceId, workspaceName, onStagedC
 
     return (
         <div className="py-4">
-            <div className="mb-5 flex flex-wrap items-start justify-between gap-x-6 gap-y-3">
+            <div className="mb-5 flex flex-wrap items-center justify-between gap-x-6 gap-y-3">
+                {/* One line: the guide is in the Defaults hero. */}
                 <div className="flex min-w-0 flex-1 basis-80 items-start gap-3">
                     <Info aria-hidden className="mt-0.5 w-4 h-4 shrink-0 text-indigo-700 dark:text-indigo-300" />
-                    <p className="max-w-3xl text-sm leading-relaxed text-ink-secondary">
-                        The defaults this workspace’s versioned graphs follow: what readers see while new data loads, how drafts and reviews
-                        work, and how imports match rows. A graph follows them unless it sets its own; the platform decides what may be
-                        chosen here.
+                    <p className="text-sm leading-relaxed text-ink-secondary">
+                        The defaults this workspace’s versioned graphs follow, each graph’s own settings, and every change.
                     </p>
                 </div>
-                <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
-                    <LensSwitch />
-                    <Link to="/guide/versioned-graph-settings"
-                        className="inline-flex items-center gap-1.5 rounded text-[13px] font-medium text-indigo-700 outline-none hover:underline focus-visible:ring-2 focus-visible:ring-accent-lineage/40 dark:text-indigo-300">
-                        <BookOpen aria-hidden className="w-4 h-4" /> The settings guide
-                    </Link>
-                </div>
+                <LensSwitch />
             </div>
 
             <Tabs value={tab} onValueChange={setTab}>
@@ -195,13 +184,14 @@ export function WorkspaceVersionedGraphs({ workspaceId, workspaceName, onStagedC
                 <TabsContent value="graphs">
                     {schemaQ.error ? <Failed what="what each setting is" error={schemaQ.error} onRetry={() => void schemaQ.refetch()} />
                         : !schema ? <SettingsSkeleton />
-                            : <WorkspaceGraphs workspaceId={workspaceId} schema={schema} onOpenSettings={openSettings} onOpenDataSource={openDataSource} />}
+                            : <WorkspaceGraphs workspaceId={workspaceId} schema={schema} onOpenSettings={openSettings} onOpenDataSource={openDataSource}
+                                onOpenDataSources={onOpenDataSources} />}
                 </TabsContent>
                 {canAdmin && (
                     <TabsContent value="history">
                         {schemaQ.error ? <Failed what="what each setting is" error={schemaQ.error} onRetry={() => void schemaQ.refetch()} />
                             : !schema ? <SettingsSkeleton />
-                                : <HistoryView schema={schema} place={place} placeName={placeName} onGoToSettings={() => setTab('defaults')} setup={setup} />}
+                                : <HistoryView schema={schema} place={place} onGoToSettings={() => setTab('defaults')} setup={setup} />}
                     </TabsContent>
                 )}
             </Tabs>

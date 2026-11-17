@@ -8,8 +8,9 @@
  * drawn as zero. A part the change can't affect isn't drawn at all.
  *
  * The Business view names no id and no node: a graph by its name (else "a graph"), a value left
- * outside the limits by where it was chosen ("a workspace"), and the nodes in one sentence ("fits
- * on 2 of 3 nodes"). The Technical view lists each node and id.
+ * outside the limits by where it was chosen ("the Finance workspace", "Sales lineage"; else "a
+ * workspace"), and the nodes in one sentence ("fits on 2 of 3 nodes"). The Technical view names
+ * them too, and adds each node and id.
  */
 import type { ReactNode } from 'react'
 import { ArrowRight, Check, Database, GitBranch, Layers, MemoryStick, Network, Ruler, TriangleAlert, X } from 'lucide-react'
@@ -25,6 +26,7 @@ const PART_NAME: Record<string, string> = {
     residency: 'what the next memory check does',
     database: 'reads on the database',
     drafts: 'drafts that lose their changes',
+    outsideLimits: 'values left outside the new limits',
 }
 
 const plural = (n: number, one: string, many = `${one}s`) => `${formatCount(n)} ${n === 1 ? one : many}`
@@ -176,9 +178,15 @@ export function ImpactReport({ impact, settings, lens }: { impact: Impact; setti
         )
     }
     if (outsideLimits && outsideLimits.count > 0) {
-        const where = (scope: string, id: string) => (business
-            ? (scope === 'workspace' ? 'A workspace' : 'A graph')
-            : `${scope === 'workspace' ? 'Workspace' : scope === 'graph' ? 'Graph' : scope} ${id}`)
+        // By name in both views (a name isn't jargon), a workspace said as one; the Technical view adds the id.
+        const where = ({ scope, scopeId, label }: NonNullable<Impact['outsideLimits']>['samples'][number]) => {
+            const workspace = scope === 'workspace'
+            const name = label ? (workspace ? `The ${label} workspace` : label) : null
+            if (business) return name ?? (workspace ? 'A workspace' : 'A graph')
+            return name
+                ? <>{name} <code className="font-mono text-[10.5px] font-normal text-ink-secondary">({scopeId})</code></>
+                : `${workspace ? 'Workspace' : scope === 'graph' ? 'Graph' : scope} ${scopeId}`
+        }
         tiles.push(
             <Tile key="limits" icon={Ruler} tone="warning"
                 figure={plural(outsideLimits.count, 'value')}
@@ -187,7 +195,7 @@ export function ImpactReport({ impact, settings, lens }: { impact: Impact; setti
                     <ul className="space-y-0.5">
                         {outsideLimits.samples.map((v) => (
                             <li key={`${v.key}:${v.scope}:${v.scopeId}`}>
-                                <span className="font-medium text-ink">{where(v.scope, v.scopeId)}</span>: {settings[v.key]?.label ?? v.key}{' '}
+                                <span className="font-medium text-ink">{where(v)}</span>: {settings[v.key]?.label ?? v.key}{' '}
                                 {settings[v.key] ? formatValue(settings[v.key], v.value) : String(v.value)}
                                 {v.status === 'locked' ? ', ignored while it is locked' : ', kept as an exception'}
                             </li>

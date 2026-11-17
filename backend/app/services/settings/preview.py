@@ -16,7 +16,8 @@ part the change can't affect is null.
 * ``database`` — the most reads one process runs on the database at once, per graph and in all;
 * ``drafts`` — closed drafts whose changes the next sweep would remove under a shorter window;
 * ``outsideLimits`` — values chosen for workspaces and graphs that new limits would leave outside
-  them: in force as exceptions, or ignored while the platform locks the setting;
+  them: in force as exceptions, or ignored while the platform locks the setting; each named by
+  where it was chosen (``label``);
 * ``warnings`` — what to acknowledge before saving, each ``{code, text}``, with ``key`` where one
   setting is the cause.
 
@@ -35,7 +36,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.config.settings_types import Setting
-from backend.app.db.models import WorkspaceDataSourceORM
+from backend.app.db.models import WorkspaceDataSourceORM, WorkspaceORM
 
 from . import resolver, store
 from .resolver import SYSTEM_ADMIN, Context, Target
@@ -64,6 +65,19 @@ async def labels(session: AsyncSession, data_source_ids: Iterable[Optional[str]]
     found = await session.execute(select(WorkspaceDataSourceORM.id, WorkspaceDataSourceORM.label)
                                   .where(WorkspaceDataSourceORM.id.in_(ids)))
     return dict(found.all())
+
+
+async def place_names(session: AsyncSession, places: Iterable[Tuple[str, str]]
+                      ) -> Dict[Tuple[str, str], str]:
+    """What people call each place, by ``(scope, scope id)``: a workspace by its name, a graph by
+    its data source's label. The platform has none, nor has a place that is gone."""
+    wanted = set(places)
+    graphs = await labels(session, (i for s, i in wanted if s == "graph"))
+    ids = sorted({i for s, i in wanted if s == "workspace" and i})
+    workspaces = dict((await session.execute(select(WorkspaceORM.id, WorkspaceORM.name)
+                                             .where(WorkspaceORM.id.in_(ids)))).all()) if ids else {}
+    return {**{("graph", i): n for i, n in graphs.items()},
+            **{("workspace", i): n for i, n in workspaces.items()}}
 
 
 async def impact(session: AsyncSession, target: Target, before: Context, after: Context,
@@ -104,7 +118,7 @@ async def impact(session: AsyncSession, target: Target, before: Context, after: 
         else:
             await part("drafts", _drafts(before, after, scoped))
     if target.scope == "platform":
-        out["outsideLimits"] = _outside_limits(before, after)
+        await part("outsideLimits", _outside_limits(session, before, after))
     out["warnings"] = _warnings(before, after, target, changed, out)
     out["unavailable"] = unavailable
     return out
@@ -301,9 +315,11 @@ def _limits(ctx: Context, s: Setting) -> Mapping[str, Any]:
     return row.limits if row is not None and row.limits is not None else s.default_limits
 
 
-def _outside_limits(before: Context, after: Context) -> Optional[Dict[str, Any]]:
+async def _outside_limits(session: AsyncSession, before: Context, after: Context
+                          ) -> Optional[Dict[str, Any]]:
     """The values below the platform that the new limits would leave outside them, for each setting
-    whose limits change: an exception, in force; or, while locked, ignored."""
+    whose limits change: an exception, in force; or, while locked, ignored. Each one listed is
+    named by where it was chosen (:func:`place_names`)."""
     moved = {s.key: _limits(after, s) for s in after.settings.values()
              if s.limitable and _limits(after, s) != _limits(before, s)}
     if not moved:
@@ -321,8 +337,10 @@ def _outside_limits(before: Context, after: Context) -> Optional[Dict[str, Any]]
         found.append({"key": key, "scope": scope, "scopeId": scope_id, "value": row.value,
                       "status": status})
     found.sort(key=lambda f: (f["key"], f["scope"], f["scopeId"]))
+    shown = found[:SAMPLES]
+    named = await place_names(session, ((f["scope"], f["scopeId"]) for f in shown))
     return {"count": len(found), "locked": sum(f["status"] == "locked" for f in found),
-            "samples": found[:SAMPLES]}
+            "samples": [{**f, "label": named.get((f["scope"], f["scopeId"]))} for f in shown]}
 
 
 # ── Warnings ──────────────────────────────────────────────────────────────────────────────────────

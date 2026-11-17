@@ -15,7 +15,7 @@
  */
 import { useId, useMemo, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
-import { motion, type Transition } from 'framer-motion'
+import { motion } from 'framer-motion'
 import { ArrowRight, ChevronDown, Eye, SlidersHorizontal, Sparkles } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { MOTION } from '@/lib/motion'
@@ -25,6 +25,7 @@ import {
 } from '@/components/settings'
 import { useCalmMotion } from '@/components/settings/visuals/motion'
 import { CategoryIcon } from './CategorySection'
+import { useRise } from './rise'
 
 /** Seven axes on a tile: the compass at a glance, beside its one-line summary. */
 function MiniRadar({ points, ghost }: { points: CompassPoint[]; ghost: CompassPoint[] | null }) {
@@ -79,16 +80,6 @@ export function CompassSummary({ dimensions, settings, current, next, inactive, 
             </div>
         </div>
     )
-}
-
-/** A rise into place, one part after another; nothing moves for a person who asked for calm. */
-function useRise(stagger: number, entry: Transition, y: number) {
-    const { reduced } = useCalmMotion()
-    return (i: number) => (reduced ? { initial: false as const } : {
-        initial: { opacity: 0, y },
-        animate: { opacity: 1, y: 0 },
-        transition: { ...entry, delay: Math.min(i, MOTION.staggerMax) * stagger },
-    })
 }
 
 /** The headline: a number, drawn large, between the words around it. */
@@ -156,7 +147,7 @@ export function SettingsHero({
                             ) : (
                                 <button type="button" onClick={onReview}
                                     className="group inline-flex items-center gap-2 rounded-full border border-indigo-500/25 bg-indigo-500/[0.06] px-3 py-1 text-[12.5px] font-semibold text-indigo-700 outline-none transition-colors hover:bg-indigo-500/10 focus-visible:ring-2 focus-visible:ring-accent-lineage/40 dark:border-indigo-400/30 dark:text-indigo-300">
-                                    {/* Still: a ping isn't quieted by the app's calm mode. */}
+                                    {/* A still dot: staged changes are the person's own, not news to call them to. */}
                                     <span aria-hidden className="h-2 w-2 rounded-full bg-indigo-600 dark:bg-indigo-400" />
                                     {changes} · Review
                                     <ArrowRight aria-hidden className="w-3.5 h-3.5" />

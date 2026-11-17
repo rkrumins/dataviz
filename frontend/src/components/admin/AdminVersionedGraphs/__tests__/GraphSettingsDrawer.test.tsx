@@ -283,6 +283,125 @@ describe('GraphSettingsDrawer', () => {
         expect(await screen.findByText(/Version control is turned off for this deployment/)).toBeInTheDocument()
         expect((await row('reads.mode')).queryByRole('radio')).not.toBeInTheDocument()
         expect(screen.queryByRole('region', { name: 'Unsaved changes' })).not.toBeInTheDocument()
+        // Nothing to stage, so no profile to start from; the finder, which changes nothing, stays.
+        expect(screen.queryByRole('button', { name: 'Choose a profile…' })).not.toBeInTheDocument()
+        expect(screen.getByRole('button', { name: 'Something’s wrong?' })).toBeInTheDocument()
+    })
+})
+
+describe('GraphSettingsDrawer: the ways in, as the settings page has them', () => {
+    it('opens the profiles a graph can take in place, and stages only what may be set for the graph', async () => {
+        const user = userEvent.setup()
+        const sent = mockApi('workspace-admin')
+        renderDrawer()
+        const drawer = await screen.findByRole('dialog', { name: 'Sales lineage' })
+        await row('reads.mode')
+        const toggle = within(drawer).getByRole('button', { name: 'Choose a profile…' })
+        await user.click(toggle)
+        // In the drawer's own body: no drawer stacked on it.
+        const picker = await within(drawer).findByRole('region', { name: 'Start from a profile' })
+        expect(screen.getAllByRole('dialog')).toHaveLength(1)
+        expect(toggle).toHaveAttribute('aria-expanded', 'true')
+        const offered = within(await within(picker).findByRole('radiogroup', { name: 'Profiles' })).getAllByRole('radio')
+        expect(offered.map((r) => r.getAttribute('aria-label')).sort())
+            .toEqual(CATALOGUE.profiles.filter((p) => p.scopes.includes('graph')).map((p) => p.title).sort())
+
+        // A profile that also sets what only the platform has: the graph's values alone are staged.
+        const fastest = CATALOGUE.profiles.find((p) => p.id === 'fastest-reads')!
+        expect(Object.keys(fastest.values).some((k) => !S[k].scopes.graph)).toBe(true)
+        await user.click(within(picker).getByRole('radio', { name: fastest.title }))
+        await user.click(within(picker).getByRole('button', { name: `Apply ${fastest.title}` }))
+        await user.click(await within(picker).findByRole('button', { name: 'Done' }))
+        expect(within(drawer).queryByRole('region', { name: 'Start from a profile' })).not.toBeInTheDocument()
+        expect(toggle).toHaveFocus()
+
+        await user.click(within(within(drawer).getByRole('region', { name: 'Unsaved changes' })).getByRole('button', { name: 'Review changes' }))
+        const dialog = await screen.findByRole('dialog', { name: /^Review \d+ changes? to Sales lineage$/ })
+        await user.type(within(dialog).getByLabelText(/Why are you making this change/), 'Sales canvases first')
+        const save = within(dialog).getByRole('button', { name: /^Save/ })
+        await waitFor(() => expect(save).toBeEnabled())
+        await user.click(save)
+        await waitFor(() => expect(calls(sent, 'PATCH', settingsPath)).toHaveLength(1))
+        const keys = (calls(sent, 'PATCH', settingsPath)[0].body as { changes: Array<{ key: string }> }).changes.map((c) => c.key)
+        expect(keys).toContain('reads.mode')
+        for (const key of keys) {
+            expect(S[key].scopes.graph).toBeTruthy()
+            expect(fastest.values).toHaveProperty([key])
+        }
+    })
+
+    it('shows what the graph’s settings trade, at a glance, opening to the whole compass', async () => {
+        const user = userEvent.setup()
+        mockApi('workspace-admin')
+        renderDrawer()
+        const drawer = await screen.findByRole('dialog', { name: 'Sales lineage' })
+        await row('reads.mode')
+        const compass = within(drawer).getByRole('button', { name: /^What your settings trade/ })
+        expect(compass).toHaveAttribute('aria-expanded', 'false')
+        await user.click(compass)
+        expect(compass).toHaveAttribute('aria-expanded', 'true')
+        expect(within(drawer).getByRole('img', { name: /^Trade-off compass\./ })).toBeInTheDocument()
+    })
+
+    it('finds what is behind a problem from the graph’s own last day, not the platform’s', async () => {
+        const user = userEvent.setup()
+        const sent = mockApi('workspace-admin')
+        renderDrawer()
+        const drawer = await screen.findByRole('dialog', { name: 'Sales lineage' })
+        await row('reads.mode')
+        await user.click(within(drawer).getByRole('button', { name: 'Something’s wrong?' }))
+        const finder = within(within(drawer).getByRole('heading', { name: 'Something’s wrong?' }).closest('section')!)
+        expect(finder.getByRole('textbox', { name: 'Describe the problem' })).toHaveFocus()
+        // The graph's health counted it: 12 reads from the database in the last day.
+        const signal = CATALOGUE.signals.find((d) => d.id === 'reads.from_database_while_behind')!
+        const counted = HEALTH.signals!.find((s) => s.id === signal.id)!.count24h
+        const chip = finder.getByRole('button', { name: `${signal.symptom}: happened ${counted} times in the last 24 h` })
+        await user.click(chip)
+        expect(finder.getByText(`${signal.label}:`).closest('li')).toHaveTextContent(`happened ${counted} times in the last 24 h`)
+        expect(calls(sent, 'GET', '/admin/versioning/signals')).toHaveLength(0)
+
+        // "Show" goes to the setting's row in the drawer.
+        await user.click(finder.getByRole('button', { name: `Show ${S['reads.mode'].label.toLowerCase()}` }))
+        expect(screen.getByRole('article', { name: S['reads.mode'].label })).toHaveFocus()
+    })
+
+    it('says when the graph’s last day couldn’t be counted, rather than show none', async () => {
+        const user = userEvent.setup()
+        mockApi('workspace-admin', (req) => (req.path.endsWith('/health') ? json({ ...HEALTH, signals: null }) : undefined))
+        renderDrawer()
+        const drawer = await screen.findByRole('dialog', { name: 'Sales lineage' })
+        await row('reads.mode')
+        await user.click(within(drawer).getByRole('button', { name: 'Something’s wrong?' }))
+        expect(await within(drawer).findByText(/How often each problem happened can’t be counted right now/)).toBeInTheDocument()
+    })
+
+    it('folds what is set for every graph to how many differ from the default, with a status only where one isn’t in effect', async () => {
+        mockApi('workspace-admin')
+        renderDrawer()
+        const summary = await screen.findByText(/^Set for every graph/)
+        const served = (await import('../__fixtures__/api')).graphValues('workspace_admin').values
+        const elsewhere = served.filter((r) => !S[r.key].scopes.graph)
+        const differ = elsewhere.filter((r) => String(r.declared ?? r.effective) !== String(r.trail[0].value)).length
+        expect(differ).toBeGreaterThan(0)
+        const details = summary.closest('details')!
+        expect(details).not.toHaveAttribute('open')
+        expect(within(summary).getByText(new RegExp(`${differ} differs? from the default`))).toBeInTheDocument()
+        expect(within(details).queryByText(STATUS_META.in_effect.label)).not.toBeInTheDocument()
+        const inForce = elsewhere.find((r) => r.status === 'in_effect')!
+        expect(within(within(details).getByText(S[inForce.key].label).closest('li')!).queryByRole('button')).not.toBeInTheDocument()
+    })
+
+    it('tells a version by when and by whom in the Business view, and names no node', async () => {
+        usePersonaStore.setState({ mode: 'business' })
+        mockApi('workspace-admin')
+        renderDrawer()
+        const health = within((await screen.findByRole('heading', { name: 'Health now' })).closest('section')!)
+        const serving = health.getByText('Serving').parentElement!
+        expect(serving).toHaveTextContent(/The version published .+ by Alice Martin: “Q3 corrections”/)
+        expect(serving).toHaveTextContent(/Latest: the version published .+ by Alice Martin: “Q4 import”/)
+        expect(serving).toHaveTextContent('Read from the graph store')
+        expect(health.getByText('Readers are').closest('dl')!.textContent).not.toMatch(/#\d/)
+        expect(health.getByText('Memory').parentElement).not.toHaveTextContent(HEALTH.memory!.node!)
     })
 })
 

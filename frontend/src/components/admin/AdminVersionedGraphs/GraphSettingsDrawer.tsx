@@ -2,37 +2,45 @@
  * GraphSettingsDrawer — one graph's settings, beside the page it was opened from: the fleet's
  * inventory, a workspace's graphs, or a data source's Versioning tab.
  *
- * At the top, how the graph is doing now. Then each setting a graph can have, with the value in
- * force and where it came from (Default → Platform → Workspace → Graph), why it differs from the
- * one chosen, and "Set for this graph" offering only the choices allowed here. The same save model
- * as everywhere: stage, review the impact, give a reason, save, undo — the save confirmed once,
- * in the drawer, where the keyboard is.
+ * At the top, how the graph is doing now. Then the ways in, as the settings page has them: "Start
+ * from a profile", opening in place (only the profiles a graph can take, staging only what this
+ * person may set here), the trade-off compass at a glance, and "Something's wrong?", the finder,
+ * counting what happened to this graph in the last day (its health's signals). Then each setting a
+ * graph can have, with the value in force and where it came from (Default → Platform → Workspace →
+ * Graph), why it differs from the one chosen, and "Set for this graph" offering only the choices
+ * allowed here. The same save model as everywhere: stage, review the impact, give a reason, save,
+ * undo — the save confirmed once, in the drawer, where the keyboard is.
  *
  *   a fork        has no settings of its own (it follows its root): it says so, names the root (as
  *                 its health does), and opens the root's
  *   not allowed   a setting only a system admin may change shows read-only, saying who may
  *   read-only     a viewer who may not change any, or while version control is off, reads them all
- *   settings a graph can't have (the platform's, a workspace's) are listed at the end, read-only,
- *                 each with whether it is in effect here and why not
+ *   settings a graph can't have (the platform's, a workspace's) are listed at the end, folded and
+ *                 read-only, with how many differ from the default; each says its status only
+ *                 where it isn't in effect here, and why not
  *
  * Nothing staged is dropped without asking: Esc, the overlay, ✕ and "Back" ask "Discard N
  * changes?" first. While something is staged, nothing here is refreshed over it.
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
-import { ArrowLeft, ArrowUpRight, ChevronDown, Eye, GitFork, RotateCw } from 'lucide-react'
+import { ArrowLeft, ArrowUpRight, ChevronDown, Eye, GitFork, RotateCw, Stethoscope } from 'lucide-react'
+import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/Button'
 import { ConfirmDialog } from '@/components/ui/Dialog'
 import { Drawer } from '@/components/ui/Drawer'
 import { Skeleton } from '@/components/ui/Skeleton'
 import {
-    EDITOR_LABEL, FEATURE_NAMES, LensSwitch, ScopeBadge, StatusBadge, StickySaveBar, describeFix, formatValue, useLens,
-    type ResolvedValues, type Setting, type SettingsFacts, type WhyFix,
+    EDITOR_LABEL, FEATURE_NAMES, LensSwitch, ScopeBadge, StatusBadge, StickySaveBar, SymptomFinder, describeFix, formatValue, sameValue,
+    settingAnchor, useLens, type ResolvedSetting, type ResolvedValues, type Setting, type SettingsFacts, type SettingValue, type WhyFix,
 } from '@/components/settings'
+import { useCalmMotion } from '@/components/settings/visuals/motion'
 import { isFeatureOn, useFeaturesStore } from '@/store/features'
 import { settingsError, useGraphHealth, useSettingsSchema, useSettingsValues, type SettingsPlace } from '@/services/settingsService'
 import { GraphHealthPanel } from './GraphHealthPanel'
+import { ProfileEntry } from './ProfileEntry'
 import { RowItem } from './SettingsRows'
+import { CompassSummary } from './SettingsHero'
 import { VisualContext } from './visualContext'
 import { SavedBar, SettingsReview } from './SettingsReview'
 import { useSettingsEditor } from './useSettingsEditor'
@@ -50,6 +58,9 @@ export interface GraphSettingsDrawerProps {
 
 const EMPTY: ResolvedValues = {}
 const NO_FACTS: SettingsFacts = {}
+
+/** The value that applies here isn't the default (the deployment's, else the code's). */
+const notDefault = (r: ResolvedSetting) => !sameValue(r.declared ?? r.effective, r.trail[0]?.value)
 
 /** Where a setting a graph can't have is set, and by whom: "On the platform, by a system admin". */
 function whereSet(s: Setting): string {
@@ -95,6 +106,14 @@ function GraphSettingsBody({ workspaceId, graphId, open, label, viewingRootOf, c
     const versioningOn = useFeaturesStore((s) => isFeatureOn(s.values, 'versioningEnabled'))
     const [lens] = useLens()
     const [asked, setAsked] = useState<Leaving | null>(null)
+    const [compassOpen, setCompassOpen] = useState(false)
+    const [finderOpen, setFinderOpen] = useState(false)
+    // The setting the finder's "Show" went to: marked until another is.
+    const [shown, setShown] = useState<string | null>(null)
+    const bodyRef = useRef<HTMLDivElement>(null)
+    const finderButton = useRef<HTMLButtonElement>(null)
+    const finderPanel = useRef<HTMLDivElement>(null)
+    const { reduced } = useCalmMotion()
     const schema = schemaQ.data
     const byKey = useMemo(() => Object.fromEntries((schema?.settings ?? []).map((s) => [s.key, s])), [schema])
     const served = valuesQ.data?.values ?? EMPTY
@@ -115,17 +134,41 @@ function GraphSettingsBody({ workspaceId, graphId, open, label, viewingRootOf, c
     // A read again that failed keeps the values already read (and what is staged over them).
     const error = valuesQ.error && !valuesQ.data ? settingsError(valuesQ.error) : null
     const forkRoot = error?.type === 'follows_root' ? error.root : null
-    // A fork's root by its name: its health names the graph it reads through (the panel's own read).
-    const forkHealth = useGraphHealth(workspaceId, graphId, open && forkRoot !== null)
-    const rootName = forkHealth.data?.follows?.label ?? null
+    // The panel's own read of the graph's health: a fork's root by its name (the graph it reads
+    // through), and what happened to the graph in the last day, which the finder counts. Not read
+    // again over staged values, as the panel isn't (a fork has none).
+    const healthQ = useGraphHealth(workspaceId, graphId, open && stagedCount === 0)
+    const rootName = healthQ.data?.follows?.label ?? null
+    const signals = useMemo(() => healthQ.data?.signals?.map((s) => ({ id: s.id, count: s.count24h, window: '24h' })), [healthQ.data])
+    // The health says it couldn't count them: the finder says so, rather than show none.
+    const signalsUnavailable = Boolean(healthQ.data) && !healthQ.data?.signals
 
     const fixLabel = useMemo(() => (fix: WhyFix) => describeFix(fix, { settings: byKey, featureNames: FEATURE_NAMES }), [byKey])
     const onFix = useMemo(() => (readOnly ? undefined : (fix: WhyFix) => { if (fix.setting) stage(fix.setting, fix.to) }), [readOnly, stage])
     const { current, next } = staged
     const visuals = useMemo(() => ({ settings: byKey, current, next, facts: NO_FACTS, stage }), [byKey, current, next, stage])
+    const stagedMap = useMemo(() => Object.fromEntries(staged.changes.map((c) => [c.key, c.ownAfter])), [staged.changes])
+    const inactiveKeys = useMemo(() => Object.values(values).filter((r) => r.status === 'dormant' || r.status === 'not_used').map((r) => r.key), [values])
+
+    // Focus follows the finder: into its search as it opens, back to its button as it closes.
+    useEffect(() => { if (finderOpen) finderPanel.current?.querySelector<HTMLElement>('input')?.focus() }, [finderOpen])
+    const closeFinder = () => {
+        setFinderOpen(false)
+        finderButton.current?.focus()
+    }
+    /** A finder's "Show": the setting's row, or its line among those set for every graph (unfolded). */
+    const show = (key: string) => {
+        const el = bodyRef.current?.querySelector<HTMLElement>(`[id="${settingAnchor(key)}"]`)
+        if (!el) return
+        const fold = el.closest('details')
+        if (fold) fold.open = true
+        el.scrollIntoView({ block: 'start', behavior: reduced ? 'auto' : 'smooth' })
+        el.focus({ preventScroll: true })
+        setShown(key)
+    }
 
     // Health isn't polled over staged values either: what the person decides against holds still.
-    const health = <GraphHealthPanel workspaceId={workspaceId} graphId={graphId} enabled={open && stagedCount === 0} signals={schema?.signals} />
+    const health = <GraphHealthPanel workspaceId={workspaceId} graphId={graphId} enabled={open && stagedCount === 0} signals={schema?.signals} lens={lens} />
     // The discard dialog: asked for here (Discard, Back), or by closing the drawer.
     const leaving: Leaving | null = closeAsked ? 'close' : asked
     const goBack = () => { if (stagedCount > 0) setAsked('back'); else onBack() }
@@ -186,13 +229,17 @@ function GraphSettingsBody({ workspaceId, graphId, open, label, viewingRootOf, c
     }
 
     const categories = [...schema.categories].sort((a, b) => a.order - b.order)
-    const own = schema.settings.filter((s) => s.scopes.graph && values[s.key])
-    const elsewhere = schema.settings.filter((s) => !s.scopes.graph && values[s.key])
+    const present = schema.settings.filter((s) => values[s.key])
+    const own = present.filter((s) => s.scopes.graph)
+    const elsewhere = present.filter((s) => !s.scopes.graph)
     const inactive = elsewhere.filter((s) => values[s.key].status !== 'in_effect').length
+    const changed = elsewhere.filter((s) => notDefault(values[s.key])).length
+    // The profiles a graph can take; the picker stages only what this person may set here.
+    const profiles = schema.profiles?.filter((p) => p.scopes.includes('graph'))
 
     return (
         <VisualContext.Provider value={visuals}>
-            <div className="space-y-6">
+            <div ref={bodyRef} className="space-y-6">
                 {viewingRootOf && (
                     <Notice icon={GitFork}>
                         These are the settings of {viewingRootOf.root ? <>{viewingRootOf.root}, </> : ''}the graph {viewingRootOf.fork} was forked
@@ -211,6 +258,30 @@ function GraphSettingsBody({ workspaceId, graphId, open, label, viewingRootOf, c
                 )}
 
                 <LensSwitch />
+
+                {!readOnly && (
+                    <ProfileEntry variant="inline" profiles={profiles} scope="graph" editor={valuesQ.data.editor} resolved={values}
+                        onStage={editor.stage} lens={lens} />
+                )}
+                {/* The compass opens in its own card; the button stays beside it, level with its header. */}
+                <div className={cn('flex flex-wrap gap-3', compassOpen ? 'items-start' : 'items-center')}>
+                    <div className="min-w-0 flex-1 basis-80">
+                        <CompassSummary dimensions={schema.dimensions} settings={present} current={current} next={next}
+                            inactive={inactiveKeys} open={compassOpen} onToggle={() => setCompassOpen((o) => !o)} />
+                    </div>
+                    {/* Finding what's behind a problem changes nothing: a viewer who may only read has it too. */}
+                    <Button ref={finderButton} leftIcon={Stethoscope} aria-expanded={finderOpen}
+                        onClick={() => (finderOpen ? closeFinder() : setFinderOpen(true))}
+                        className={cn('shrink-0 border-glass-border/80', compassOpen && 'sm:mt-[13px]')}>
+                        Something’s wrong?
+                    </Button>
+                </div>
+                {finderOpen && (
+                    <div ref={finderPanel}>
+                        <SymptomFinder settings={present} values={values} staged={stagedMap} signals={signals} signalsUnavailable={signalsUnavailable}
+                            onStage={readOnly ? undefined : (k: string, v: SettingValue) => editor.stage(k, v)} onShow={show} onClose={closeFinder} />
+                    </div>
+                )}
 
                 {categories.map((c) => {
                     const rows = own.filter((s) => s.category === c.id)
@@ -232,7 +303,7 @@ function GraphSettingsBody({ workspaceId, graphId, open, label, viewingRootOf, c
                                     checking={editor.quickPending && staged.isStaged(s.key)}
                                     editLimits={false}
                                     stagedLimits={undefined}
-                                    highlighted={false}
+                                    highlighted={shown === s.key}
                                     onStage={editor.stage}
                                     onUnstage={editor.unstage}
                                     onStageLimits={editor.stageLimits}
@@ -253,7 +324,9 @@ function GraphSettingsBody({ workspaceId, graphId, open, label, viewingRootOf, c
                             <ChevronDown aria-hidden className="w-4 h-4 text-ink-secondary transition-transform group-open:rotate-180 motion-reduce:transition-none" />
                             Set for every graph ({elsewhere.length})
                             <span className="ml-auto text-xs font-normal text-ink-secondary">
-                                Not settable for one graph{inactive > 0 ? ` · ${inactive} not in effect here` : ''}
+                                Not settable for one graph
+                                {` · ${changed === 0 ? 'all at their defaults' : `${changed} ${changed === 1 ? 'differs' : 'differ'} from the default`}`}
+                                {inactive > 0 ? ` · ${inactive} not in effect here` : ''}
                             </span>
                         </summary>
                         <ul className="divide-y divide-glass-border/40 border-t border-glass-border/50">
@@ -261,7 +334,11 @@ function GraphSettingsBody({ workspaceId, graphId, open, label, viewingRootOf, c
                                 const r = values[s.key]
                                 const why = r.status !== 'in_effect' ? r.why[0]?.text : undefined
                                 return (
-                                    <li key={s.key} className="flex flex-wrap items-start justify-between gap-x-4 gap-y-1 px-4 py-2.5">
+                                    // A finder's "Show" comes here: focusable, never a tab stop.
+                                    <li key={s.key} id={settingAnchor(s.key)} tabIndex={-1}
+                                        className={cn('flex scroll-mt-24 flex-wrap items-start justify-between gap-x-4 gap-y-1 px-4 py-2.5 outline-none',
+                                            'focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent-lineage/40',
+                                            shown === s.key && 'bg-black/[0.03] dark:bg-white/[0.04]')}>
                                         <div className="min-w-0 flex-1 basis-56">
                                             <p className="text-[13px] text-ink">{s.label}</p>
                                             <p className="text-[11.5px] text-ink-secondary">{whereSet(s)}</p>
@@ -270,7 +347,8 @@ function GraphSettingsBody({ workspaceId, graphId, open, label, viewingRootOf, c
                                         <div className="flex max-w-full shrink-0 flex-wrap items-center gap-1.5">
                                             <span className="text-[13px] font-semibold text-ink">{formatValue(s, r.effective)}</span>
                                             <ScopeBadge scope={r.source} prefix={r.source === 'default' ? undefined : r.source === 'env' ? 'Set by' : 'From'} />
-                                            <StatusBadge status={r.status} />
+                                            {/* As on the settings page: a status only where the value isn't in effect. */}
+                                            {r.status !== 'in_effect' && <StatusBadge status={r.status} />}
                                         </div>
                                     </li>
                                 )

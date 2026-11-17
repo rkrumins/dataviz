@@ -12,6 +12,13 @@
  *   workspace-admin  a workspace's and a graph's settings for the workspace's admin
  *   fork             the graph is a fork (409 follows_root): its health names the root it follows
  *   conflict         every save is refused: someone changed a value meanwhile
+ *   attention        much needs attention: a graph failing and two waiting for room (as `ok`), the signals
+ *                    counted with two past their marks (loads waited for room, a replace the guard
+ *                    stopped), two platform values held from what was chosen, each with its fix (the read
+ *                    mode `beside` while builds are off; new drafts' visibility under one draft level),
+ *                    and the deployment's read timeout ignored
+ *   calm             nothing needs attention: no graph failing or waiting for room, every signal counted
+ *                    under its mark, and every platform value as chosen
  *
  * As production would answer: the inventory and the history filter on the server and page by
  * cursor, nothing is built beside while New-version builds are off (the harness has them off), a
@@ -23,12 +30,13 @@ import {
     WS, GRAPH, ROOT,
     graphImpact, graphValues, platformValues, preview, workspaceImpact, workspaceValues,
 } from '../components/admin/AdminVersionedGraphs/__fixtures__/api'
-import type { ResolvedSetting, TrailScope } from '../components/settings/types'
+import { SIGNAL_COUNTS } from '../components/settings/__fixtures__/resolved'
+import type { Editor, ResolvedSetting, SettingValue, TrailScope, TrailStep, WhyItem } from '../components/settings/types'
 import type { PatchItem } from '../components/settings/useStagedChanges'
-import type { HistoryEntry } from '../services/settingsService'
+import type { GraphsSummary, HistoryEntry, SignalCounts } from '../services/settingsService'
 import type { VersionedGraphRow } from '../services/systemStatusService'
 
-export type Scenario = 'ok' | 'loading' | 'error' | 'empty' | 'readonly' | 'workspace-admin' | 'fork' | 'conflict'
+export type Scenario = 'ok' | 'loading' | 'error' | 'empty' | 'readonly' | 'workspace-admin' | 'fork' | 'conflict' | 'attention' | 'calm'
 
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
 const never = () => new Promise<Response>(() => {})
@@ -97,8 +105,50 @@ const PEOPLE = [
     { id: 'usr_katherine', displayName: 'Katherine Johnson', email: 'katherine@example.com' },
 ]
 
+/** The registry's why, as the resolver says it. */
+const why = (code: string): WhyItem => ({ code, text: SCHEMA.why[code]?.text ?? code, fix: SCHEMA.why[code]?.fix ?? null })
+
+/**
+ * The platform's values, as the scenario has them. `attention`: the read mode `beside` chosen and held to `in_place`
+ * while New-version builds are off, and private new drafts chosen and held public by the one draft level allowed, each
+ * why with its fix. `calm`: the deployment's read timeout valid, so no deployment value is ignored.
+ */
+export function platformFor(scenario: Scenario, editor: Editor | null): ReturnType<typeof platformValues> {
+    const base = platformValues(editor)
+    type Resolved = Partial<Pick<ResolvedSetting, 'trail' | 'declared' | 'effective' | 'source' | 'status' | 'why'>>
+    /** `value` chosen on the platform, `effective` in force: held from it for the why `code`, if any. */
+    const chosen = (trail: TrailStep[], value: SettingValue, effective: SettingValue, code?: string): Resolved => ({
+        trail: trail.map((t) => (t.scope === 'platform' ? { ...t, value } : t)), declared: value, effective, source: 'platform',
+        status: code ? 'adjusted' : 'in_effect', why: code ? [why(code)] : [],
+    })
+    const over: Record<string, (trail: TrailStep[]) => Resolved> = scenario === 'attention' ? {
+        'reads.mode': (trail) => chosen(trail, 'beside', 'in_place', 'builds_off'),
+        // Read once the mode in force serves an older version.
+        'reads.maxVersionsBehind': () => ({ status: 'in_effect', why: [] }),
+        'drafts.levels': (trail) => chosen(trail, 'public_only', 'public_only'),
+        'drafts.defaultVisibility': (trail) => chosen(trail, 'private', 'public', 'derived_from_levels'),
+    } : scenario === 'calm' ? {
+        'database.readTimeoutMs': (trail) => ({ trail: trail.map((t) => (t.scope === 'default' ? { ...t, env: null } : t)), status: 'in_effect', why: [] }),
+    } : {}
+    return { ...base, values: base.values.map((r) => (over[r.key] ? { ...r, ...over[r.key](r.trail) } : r)) }
+}
+
+/** With no graph failing or waiting for room: those two are in memory instead, so the five still add up. */
+const CALM_SUMMARY: GraphsSummary = { ...SUMMARY, building: 0, failing: 0, waitingForRoom: 0, inMemory: SUMMARY.inMemory + SUMMARY.waitingForRoom }
+
+/** What happened in the last 24 hours, as the signals API counts it: the kit's counts, or, calm, none of what has a mark. */
+function signalsFor(calm: boolean): SignalCounts {
+    const marked = new Set(SCHEMA.signals.filter((s) => s.warnAt !== null).map((s) => s.id))
+    return {
+        asOf: '2026-11-16T16:24:00Z',
+        window: '24h',
+        unavailable: false,
+        signals: SIGNAL_COUNTS.map(({ id, count }) => ({ id, count: calm && marked.has(id) ? 0 : count })),
+    }
+}
+
 export function versionedGraphsFetch(scenario: Scenario): typeof fetch {
-    let platform = platformValues(scenario === 'readonly' ? null : 'system_admin')
+    let platform = platformFor(scenario, scenario === 'readonly' ? null : 'system_admin')
     let workspace = workspaceValues(scenario === 'readonly' ? null : scenario === 'workspace-admin' ? 'workspace_admin' : 'system_admin')
     let saves = 0
 
@@ -131,7 +181,10 @@ export function versionedGraphsFetch(scenario: Scenario): typeof fetch {
         if (p.endsWith('/admin/features')) return json(FEATURES)
         if (p.endsWith('/admin/system/status')) return json({ status: 'healthy', graphProviders: PROVIDERS, services: [] })
         if (p.endsWith('/admin/graph-store/topology')) return json(TOPOLOGY)
-        if (p.endsWith('/admin/versioning/signals')) return json({ detail: 'Not Found' }, 404)
+        // Counted in the two scenarios about what needs attention; elsewhere a server that doesn't count them yet.
+        if (p.endsWith('/admin/versioning/signals')) {
+            return scenario === 'attention' || scenario === 'calm' ? json(signalsFor(scenario === 'calm')) : json({ detail: 'Not Found' }, 404)
+        }
         if (p.endsWith('/api/v1/directory')) {
             const term = (url.searchParams.get('q') ?? '').toLowerCase()
             return json({ users: PEOPLE.filter((u) => `${u.displayName} ${u.email}`.toLowerCase().includes(term)), groups: [] })
@@ -147,7 +200,7 @@ export function versionedGraphsFetch(scenario: Scenario): typeof fetch {
             // Nothing is built beside while New-version builds are off.
             return json(scenario === 'empty'
                 ? { graphs: 0, inMemory: 0, unloaded: 0, loading: 0, waitingForRoom: 0, noCopy: 0, building: 0, failing: 0, withOwnSettings: 0, largestGraph: null }
-                : { ...SUMMARY, building: 0 })
+                : scenario === 'calm' ? CALM_SUMMARY : { ...SUMMARY, building: 0 })
         }
         if (p.endsWith('/admin/versioning/graphs')) {
             if (scenario === 'loading') return never()

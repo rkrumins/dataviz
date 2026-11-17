@@ -323,8 +323,9 @@ async def test_history_is_scoped_filtered_and_paged(client):
     assert entry | {"id": None, "changeSetId": None, "at": None} == {
         "id": None, "changeSetId": None, "at": None, "reason": "Open reviews", "source": "api",
         "actor": {"id": "usr_wsadmin", "name": "Wes Example"}, "key": "drafts.levels",
-        "scope": "workspace", "scopeId": "ws_1", "version": 1,
+        "scope": "workspace", "scopeId": "ws_1", "scopeName": "Finance", "version": 1,
         "from": {"value": None, "limits": None}, "to": {"value": "public_only", "limits": None}}
+    assert workspace["entries"][0]["scopeName"] == "Ledger"            # a graph: its data source
     assert [e["key"] for e in (await _history(client, _G1))["entries"]] == ["imports.identifier"]
     assert (await client.get(_W2 + "/history")).status_code == 403     # not their workspace
     assert (await client.get(_P + "/history")).status_code == 403
@@ -335,6 +336,7 @@ async def test_history_is_scoped_filtered_and_paged(client):
         "imports.identifier", "drafts.levels", "drafts.levels", "updates.pacingRatio"]
     assert [e["key"] for e in (await _history(client, _P, scope="platform"))["entries"]] == [
         "updates.pacingRatio"]
+    assert [e["scopeName"] for e in everything["entries"]] == ["Ledger", "Finance", "Sales", None]
     assert [e["scopeId"] for e in (await _history(client, _P, key="drafts.levels"))["entries"]
             ] == ["ws_1", "ws_2"]
     assert len((await _history(client, _P, actor="usr_wsadmin"))["entries"]) == 2

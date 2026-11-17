@@ -64,7 +64,7 @@ describe('Settings in the Business view', () => {
         await user.click(within(view()).getByRole('radio', { name: 'Technical' }))
 
         await user.click(screen.getByRole('tab', { name: /Overview/ }))
-        expect(await screen.findByRole('heading', { level: 2, name: 'Where things stand' })).toBeInTheDocument()
+        expect(await screen.findByText('Where things stand')).toBeInTheDocument()
         expect(within(view()).getByRole('radio', { name: 'Technical' })).toHaveAttribute('aria-checked', 'true')
 
         await user.click(screen.getByRole('tab', { name: /Settings/ }))
@@ -120,7 +120,7 @@ describe('Settings in the Business view', () => {
         expect(technical).toHaveTextContent(store.technical)
     })
 
-    it('reviews a change with names and sentences: no workspace or graph id, no node by name', async () => {
+    it('reviews a change with names and sentences: each value outside the limits by where it was chosen, no id, no node by name', async () => {
         const user = userEvent.setup()
         mockApi()
         renderWithApi(<AdminVersionedGraphs />, { path: SETTINGS })
@@ -133,18 +133,20 @@ describe('Settings in the Business view', () => {
 
         await user.click(within(screen.getByRole('region', { name: 'Unsaved changes' })).getByRole('button', { name: 'Review changes' }))
         const dialog = await screen.findByRole('dialog', { name: 'Review 2 changes to the platform' })
-        expect(await within(dialog).findByText('A workspace')).toBeInTheDocument()
-        expect(within(dialog).getByText('A graph')).toBeInTheDocument()
+        // Named as the server names them: a workspace by its name, a graph by its data source's.
+        expect(await within(dialog).findByText('The Finance workspace')).toBeInTheDocument()
+        expect(within(dialog).getByText('Sales lineage')).toBeInTheDocument()
         expect(dialog).toHaveTextContent('Fits on 0 of 3 nodes.')
         expect(dialog).toHaveTextContent('On 1 node.')
         expect(dialog.textContent).not.toMatch(/\b(ws|ds|graph)_\w+/)
         expect(dialog).not.toHaveTextContent(/Node \d|falkordb/)
         expect(dialog.querySelector('.font-mono')).toBeNull()
 
-        // The Technical view, as before: where each value was chosen, and each node.
+        // The Technical view: the same names with their ids, and each node.
         act(() => usePersonaStore.getState().setMode('technical'))
-        expect(await within(dialog).findByText('Workspace ws_finance')).toBeInTheDocument()
-        expect(dialog).toHaveTextContent('Graph ds_sales')
+        expect(await within(dialog).findByText('(ws_finance)')).toBeInTheDocument()
+        expect(dialog).toHaveTextContent('The Finance workspace (ws_finance)')
+        expect(dialog).toHaveTextContent('Sales lineage (ds_sales)')
         expect(dialog).toHaveTextContent(/Node 1 has .+ free under its start mark/)
         expect(dialog).toHaveTextContent('falkordb-2:6379')
     })

@@ -1,7 +1,7 @@
 /**
  * Admin → Versioned graphs: one home for every versioned graph and every setting they read.
  *
- *   Overview   where things stand, the fleet's figures, "Something's wrong?" and every graph
+ *   Overview   where things stand, what needs attention, the fleet's figures, "Something's wrong?" and every graph
  *   Settings   every platform setting by category, with the one save model
  *   History    every change, who made it, when and why, and putting one back
  *
@@ -74,10 +74,13 @@ export function AdminVersionedGraphs() {
 
     const qc = useQueryClient()
     const staged = editor.staged.dirtyCount
-    // The figures and the list don't need the registry: asked for beside it, not after it.
+    // The figures and the list don't need the registry: asked for beside it, not after it. Figures already read
+    // aren't read again over staged changes (the Overview's own query waits too).
     useEffect(() => {
         if (tab !== 'overview') return
-        void qc.prefetchQuery({ queryKey: settingsKeys.summary(), queryFn: settingsService.summary, staleTime: 15_000 })
+        if (!dirty.current || qc.getQueryData(settingsKeys.summary()) === undefined) {
+            void qc.prefetchQuery({ queryKey: settingsKeys.summary(), queryFn: settingsService.summary, staleTime: 15_000 })
+        }
         void qc.prefetchInfiniteQuery({
             queryKey: settingsKeys.graphs({}), queryFn: ({ pageParam }) => settingsService.graphs({}, pageParam), initialPageParam: null as string | null,
             staleTime: 15_000,
@@ -116,6 +119,11 @@ export function AdminVersionedGraphs() {
     const stageAndShow = (key: string, value: SettingValue) => {
         editor.stage(key, value)
         showSetting(key)
+    }
+    // The Overview's "Review": the review opens on Settings; with a change to fix first, Settings shows which.
+    const reviewStaged = () => {
+        if (editor.problems === 0) editor.review.setOpen(true)
+        setTab('settings')
     }
 
     let settingsBody
@@ -171,8 +179,10 @@ export function AdminVersionedGraphs() {
                     {schemaQ.error ? <Failed what="what each setting is" error={schemaQ.error} onRetry={() => void schemaQ.refetch()} />
                         : !schema ? <SettingsSkeleton />
                             : (
-                                <Overview schema={schema} values={valuesQ.data?.values} switches={switches} signals={signals} signalsUnavailable={signalsUnavailable} providers={providers}
-                                    onShowSetting={showSetting} onStage={stageAndShow} onOpenSettings={openSettings} onGoToSettings={goToSettings}
+                                <Overview schema={schema} values={valuesQ.data?.values} valuesFailed={Boolean(valuesQ.error) && !valuesQ.data}
+                                    readOnly={valuesQ.data?.editor !== 'system_admin'} switches={switches} signals={signals} signalsUnavailable={signalsUnavailable}
+                                    signalsPending={signalsQ.isLoading} staged={staged} problems={editor.problems} providers={providers}
+                                    onShowSetting={showSetting} onStage={stageAndShow} onReview={reviewStaged} onOpenSettings={openSettings} onGoToSettings={goToSettings}
                                     setup={canSetUp ? { label: setupLabel, onStart: guide.start } : undefined} />
                             )}
                 </TabsContent>
@@ -198,6 +208,8 @@ export function AdminVersionedGraphs() {
             )}
             <LeaveGuard count={staged + drawerStaged} what={drawerStaged ? 'these settings' : 'the platform’s settings'}
                 onDiscard={() => editor.staged.reset()} />
+            {/* A switch's confirmations, once for the page: a category's card on Settings and a fix on either tab ask through them. */}
+            {switches.dialogs}
         </PageContainer>
     )
 }

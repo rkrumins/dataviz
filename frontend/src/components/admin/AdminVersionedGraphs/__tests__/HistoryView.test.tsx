@@ -1,14 +1,18 @@
 /**
  * Admin → Versioned graphs → History: each save as one change set — who, when, why, how it was
- * made, where, and each value and limit from → to — filtered on the server, paged, and put back
- * through the same review a save goes through. Labels come from the registry's catalogue.
+ * made, where (by name; the Technical view adds the key, the version and the id), and each value
+ * and limit from → to — a day at a time, filtered on the server (folded on a phone), paged, and
+ * put back through the same review a save goes through. Labels come from the registry's catalogue.
  */
-import { fireEvent, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { dayLabel } from '@/components/activity/groupEvents'
 import { CATALOGUE } from '@/components/settings'
 import { REASON_HEADER } from '@/services/activityReason'
+import { usePersonaStore } from '@/store/persona'
 import { AdminVersionedGraphs } from '..'
+import { HISTORY as ENTRIES, WS } from '../__fixtures__/api'
 import { SOURCE_LABEL } from '../meta'
 import { calls, json, mockApi, renderWithApi } from './helpers'
 
@@ -43,6 +47,59 @@ describe('History', () => {
         expect(carried.getByText(SOURCE_LABEL.migration)).toBeInTheDocument()
     })
 
+    it('reads a day at a time, newest first, as the activity timeline does', async () => {
+        mockApi()
+        renderWithApi(<AdminVersionedGraphs />, { path: HISTORY })
+        await changeSet('Large imports were slowing canvases for the sales team')
+        const now = new Date()
+        const days = [...new Set(ENTRIES.map((e) => new Date(e.at).toDateString()))].map((d) => dayLabel(new Date(d), now))
+        const headings = screen.getAllByRole('heading', { level: 3 })
+        expect(headings.map((h) => h.textContent)).toEqual(days)
+        // Each change under its own day.
+        const day = headings[0].parentElement!
+        expect(within(day).getByText('“Large imports were slowing canvases for the sales team”')).toBeInTheDocument()
+        expect(within(day).queryByText('“Finance keeps closed drafts for its audits”')).not.toBeInTheDocument()
+    })
+
+    it('names where each change was made in both views; the Technical view adds the key, the version and the id', async () => {
+        usePersonaStore.setState({ mode: 'business' })
+        mockApi()
+        renderWithApi(<AdminVersionedGraphs />, { path: HISTORY })
+        const graph = await changeSet('Sales rows carry their SKU')
+        const workspace = await changeSet('Finance keeps closed drafts for its audits')
+        expect(graph.getByText('Sales lineage')).toBeInTheDocument()
+        expect(workspace.getByText('Finance')).toBeInTheDocument()
+        const sku = ENTRIES.find((e) => e.changeSetId === 'cs_g1')!
+        for (const card of [graph, workspace]) expect(card.queryByText(/\b(ws|ds)_\w+/)).not.toBeInTheDocument()
+        expect(graph.queryByText(sku.key)).not.toBeInTheDocument()
+
+        act(() => usePersonaStore.getState().setMode('technical'))
+        expect(await graph.findByText(sku.scopeId)).toBeInTheDocument()
+        expect(graph.getByText('Sales lineage')).toBeInTheDocument()
+        expect(graph.getByText(sku.key)).toBeInTheDocument()
+        expect(graph.getByText(`version ${sku.version}`)).toBeInTheDocument()
+        expect(workspace.getByText(WS)).toBeInTheDocument()
+    })
+
+    it('folds the filters behind "Filters" on a phone, counting those set', async () => {
+        const user = userEvent.setup()
+        mockApi()
+        renderWithApi(<AdminVersionedGraphs />, { path: HISTORY })
+        await changeSet('Large imports were slowing canvases for the sales team')
+        const toggle = screen.getByRole('button', { name: /^Filters/ })
+        const filters = document.getElementById(toggle.getAttribute('aria-controls')!)!
+        expect(filters).toContainElement(screen.getByLabelText('Setting'))
+        expect(toggle).toHaveAttribute('aria-expanded', 'false')
+        // Out of the way on a phone (`hidden`), always out from `sm` up.
+        expect(filters).toHaveClass('hidden', 'sm:flex')
+        await user.click(toggle)
+        expect(toggle).toHaveAttribute('aria-expanded', 'true')
+        expect(filters).not.toHaveClass('hidden')
+        await user.selectOptions(screen.getByLabelText('Setting'), 'reads.mode')
+        await user.selectOptions(screen.getByLabelText('Where'), 'platform')
+        expect(toggle).toHaveAccessibleName('Filters, 2 set')
+    })
+
     it('filters on the server by setting, place and person', async () => {
         const sent = mockApi()
         renderWithApi(<AdminVersionedGraphs />, { path: HISTORY })
@@ -71,7 +128,6 @@ describe('History', () => {
     })
 
     it('reads a change set the pages split to its end before putting it back, so the review lists all of it', async () => {
-        const { HISTORY: ENTRIES } = await import('../__fixtures__/api')
         // cs_3 is two values: the first page ends with one of them.
         const sent = mockApi('ok', (req) => (req.path.endsWith('/settings/history') ? json(req.query.get('cursor')
             ? { scope: 'platform', entries: ENTRIES.slice(2), nextCursor: null }

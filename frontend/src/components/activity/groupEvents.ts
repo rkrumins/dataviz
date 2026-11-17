@@ -21,7 +21,8 @@ function dayKey(d: Date): string {
     return d.toDateString()
 }
 
-function dayLabel(d: Date, now: Date): string {
+/** A day as the timeline heads it: "Today", "Yesterday", "Mon, Nov 9" (the year when it isn't this one). */
+export function dayLabel(d: Date, now: Date): string {
     const yesterday = new Date(now)
     yesterday.setDate(now.getDate() - 1)
     if (d.toDateString() === now.toDateString()) return 'Today'

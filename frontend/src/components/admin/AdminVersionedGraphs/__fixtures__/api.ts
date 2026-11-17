@@ -9,7 +9,8 @@
  *   inventory   eight graphs: platform copies and connected graphs, a fork, an orphan, unloaded,
  *               loading, waiting for room, failing and building beside
  *   workspace   Finance's graphs, each with what it sets itself (a fork among them), and its history
- *   history     four change sets: a save, a workspace's, one carried over, a change of limits
+ *   history     five change sets: a save, a workspace's, a graph's, one carried over, a change of limits;
+ *               each place named as the server names it (a workspace's name, a graph's data source)
  *   preview     answered from the values: each staged value in force, "switch when ready" held to
  *               "update in place" while builds are off; the full preview's impact
  *   health      a graph's, with one part the server couldn't read and the last update, as the server
@@ -176,9 +177,9 @@ type OutsideValue = NonNullable<Impact['outsideLimits']>['samples'][number]
 
 /** What workspaces and graphs chose for themselves: what staged limits are checked against. */
 const CHOSEN_BELOW: Array<Omit<OutsideValue, 'status'>> = [
-    { key: 'reads.mode', scope: 'workspace', scopeId: WS, value: 'beside' },
-    { key: 'reads.mode', scope: 'graph', scopeId: 'ds_sales', value: 'beside' },
-    { key: 'reads.mode', scope: 'graph', scopeId: 'ds_pay', value: 'latest' },
+    { key: 'reads.mode', scope: 'workspace', scopeId: WS, label: 'Finance', value: 'beside' },
+    { key: 'reads.mode', scope: 'graph', scopeId: 'ds_sales', label: 'Sales lineage', value: 'beside' },
+    { key: 'reads.mode', scope: 'graph', scopeId: 'ds_pay', label: 'Payments', value: 'latest' },
 ]
 
 /** The values staged limits leave outside them: ignored under a lock, else kept as exceptions. */
@@ -290,7 +291,7 @@ export const TOPOLOGY = {
 
 const entry = (over: Partial<HistoryEntry> & Pick<HistoryEntry, 'id' | 'changeSetId' | 'key'>): HistoryEntry => ({
     at: '2026-11-16T14:05:00Z', actor: { id: 'usr_ada', name: 'Ada Lovelace' }, reason: null, source: 'api', scope: 'platform', scopeId: '',
-    from: { value: null, limits: null }, to: { value: null, limits: null }, version: 2, ...over,
+    scopeName: null, from: { value: null, limits: null }, to: { value: null, limits: null }, version: 2, ...over,
 })
 
 export const HISTORY: HistoryEntry[] = [
@@ -300,8 +301,12 @@ export const HISTORY: HistoryEntry[] = [
         from: { value: null, limits: null }, to: { value: 'in_place', limits: null } }),
     entry({ id: 39, changeSetId: 'cs_3', key: 'residency.unloadStartPct', reason: 'Large imports were slowing canvases for the sales team',
         from: { value: null, limits: null }, to: { value: 85, limits: null } }),
+    entry({ id: 35, changeSetId: 'cs_g1', key: 'imports.identifier', at: '2026-11-14T09:30:00Z', actor: { id: 'usr_alice', name: 'Alice Martin' },
+        reason: 'Sales rows carry their SKU', scope: 'graph', scopeId: 'ds_sales', scopeName: 'Sales lineage',
+        from: { value: null, limits: null }, to: { value: 'prop.sku', limits: null }, version: 3 }),
     entry({ id: 30, changeSetId: 'cs_2', key: 'drafts.keepClosedDays', at: '2026-11-12T10:12:00Z', actor: { id: 'usr_grace', name: 'Grace Hopper' },
-        reason: 'Finance keeps closed drafts for its audits', scope: 'workspace', scopeId: WS, from: { value: 30, limits: null }, to: { value: 'forever', limits: null } }),
+        reason: 'Finance keeps closed drafts for its audits', scope: 'workspace', scopeId: WS, scopeName: 'Finance',
+        from: { value: 30, limits: null }, to: { value: 'forever', limits: null } }),
     entry({ id: 12, changeSetId: 'cs_1', key: 'imports.guardMinLive', at: '2026-11-02T08:00:00Z', actor: null, source: 'migration',
         reason: 'Carried over from the import settings', from: { value: null, limits: null }, to: { value: 5000, limits: null } }),
 ]
@@ -415,14 +420,16 @@ export const WORKSPACE_GRAPHS: WorkspaceGraph[] = [
 /** Finance's history: its own changes and its graphs', newest first. */
 export const WORKSPACE_HISTORY: HistoryEntry[] = [
     entry({ id: 52, changeSetId: 'cs_w3', key: 'imports.identifier', at: '2026-11-16T11:20:00Z', actor: { id: 'usr_alice', name: 'Alice Martin' },
-        reason: 'Sales rows carry their SKU', scope: 'graph', scopeId: 'ds_sales', from: { value: null, limits: null }, to: { value: 'prop.sku', limits: null }, version: 3 }),
+        reason: 'Sales rows carry their SKU', scope: 'graph', scopeId: 'ds_sales', scopeName: 'Sales lineage',
+        from: { value: null, limits: null }, to: { value: 'prop.sku', limits: null }, version: 3 }),
     entry({ id: 51, changeSetId: 'cs_w2', key: 'reads.mode', at: '2026-11-15T09:05:00Z', actor: { id: 'usr_grace', name: 'Grace Hopper' },
-        reason: 'Nightly imports were slowing the finance canvases', scope: 'workspace', scopeId: WS,
+        reason: 'Nightly imports were slowing the finance canvases', scope: 'workspace', scopeId: WS, scopeName: 'Finance',
         from: { value: 'latest', limits: null }, to: { value: 'in_place', limits: null } }),
     entry({ id: 30, changeSetId: 'cs_2', key: 'drafts.keepClosedDays', at: '2026-11-12T10:12:00Z', actor: { id: 'usr_grace', name: 'Grace Hopper' },
-        reason: 'Finance keeps closed drafts for its audits', scope: 'workspace', scopeId: WS, from: { value: 30, limits: null }, to: { value: 'forever', limits: null } }),
+        reason: 'Finance keeps closed drafts for its audits', scope: 'workspace', scopeId: WS, scopeName: 'Finance',
+        from: { value: 30, limits: null }, to: { value: 'forever', limits: null } }),
     entry({ id: 14, changeSetId: 'cs_w1', key: 'drafts.levels', at: '2026-11-02T08:00:00Z', actor: null, source: 'migration',
-        reason: 'Carried over from the drafts and reviews policy', scope: 'workspace', scopeId: WS,
+        reason: 'Carried over from the drafts and reviews policy', scope: 'workspace', scopeId: WS, scopeName: 'Finance',
         from: { value: null, limits: null }, to: { value: 'public_only', limits: null } }),
 ]
 

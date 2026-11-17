@@ -1,21 +1,25 @@
 /**
- * History — every change to versioned-graph settings, newest first: who made it, when, why, how
- * (saved here, through the old settings, carried over when settings moved, or a revert), where (the
- * platform, a workspace, a graph), and each value and limit from → to. On the platform it lists
- * every change; on a workspace's page (`place`), the workspace's own and its graphs'.
+ * History — every change to versioned-graph settings, newest first and a day at a time (as the
+ * activity timeline reads): who made it, when, why, how (saved here, through the old settings,
+ * carried over when settings moved, or a revert), where (the platform, a workspace or a graph, by
+ * its name: the server's `scopeName`), and each value and limit from → to. On the platform it lists
+ * every change; on a workspace's page (`place`), the workspace's own and its graphs'. The Technical
+ * view adds each value's key and version, and the place's id.
  *
- * Filters run on the server. The days picked stay as picked (the request asks from the start of the
- * first to the end of the last, in the reader's time zone); "Who" finds anyone in the directory, not
- * only the people on the pages read so far. "Put back…" opens the same review a save does — what
- * each value goes back to, what that would do where it can be worked out, a reason — then reverts
- * the change as one; a change set the pages split is read whole first. With no change yet, an
- * editor is offered the guided setup.
+ * Filters run on the server; on a phone they fold into "Filters", which counts those set. The days
+ * picked stay as picked (the request asks from the start of the first to the end of the last, in
+ * the reader's time zone); "Who" finds anyone in the directory, not only the people on the pages
+ * read so far. "Put back…" opens the same review a save does — what each value goes back to, what
+ * that would do where it can be worked out, a reason — then reverts the change as one; a change
+ * set the pages split is read whole first. With no change yet, an editor is offered the guided
+ * setup.
  */
 import { useId, useMemo, useState, type KeyboardEvent } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { ArrowRight, History, RotateCw, Route, Search, Undo2, X } from 'lucide-react'
+import { ArrowRight, ChevronDown, History, ListFilter, RotateCw, Route, Search, Undo2, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { calendarTime } from '@/lib/smartTime'
+import { calendarTime, toUtcDate } from '@/lib/smartTime'
+import { dayLabel } from '@/components/activity/groupEvents'
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { DateTime } from '@/components/ui/DateTime'
@@ -27,7 +31,7 @@ import { Skeleton } from '@/components/ui/Skeleton'
 import { CONTROL_SHELL, CONTROL_SIZE } from '@/components/ui/controlStyles'
 import { useAppNotifications } from '@/components/ui/notifications'
 import {
-    ScopeBadge, changeImpacts, describeLimits, formatValue, sameLimits, type Limits, type ReviewItem, type Scope, type Setting,
+    ScopeBadge, changeImpacts, describeLimits, formatValue, sameLimits, useLens, type Limits, type ReviewItem, type Setting,
     type SettingValue,
 } from '@/components/settings'
 import { useDebouncedValue } from '@/hooks/useDebouncedValue'
@@ -87,11 +91,23 @@ function changeName(set: ChangeSet, settings: Record<string, Setting>): string {
     return `${who} change to ${what}, ${calendarTime(new Date(set.at), Date.now())}`
 }
 
-function ChangeSetCard({ set, settings, name, reading, onRevert }: {
+/** Change sets by the reader's day, newest first, labelled as the activity timeline labels its days. */
+function byDay(sets: ChangeSet[], now: Date): Array<{ key: string; label: string; sets: ChangeSet[] }> {
+    const days: Array<{ key: string; label: string; sets: ChangeSet[] }> = []
+    for (const set of sets) {
+        const at = toUtcDate(set.at) ?? now
+        const day = days.at(-1)
+        if (day?.key === at.toDateString()) day.sets.push(set)
+        else days.push({ key: at.toDateString(), label: dayLabel(at, now), sets: [set] })
+    }
+    return days
+}
+
+function ChangeSetCard({ set, settings, technical, reading, onRevert }: {
     set: ChangeSet
     settings: Record<string, Setting>
-    /** The workspace's or graph's name, where the page knows it. */
-    name: string | null
+    /** The Technical view: each value's key and version, and the place's id. */
+    technical: boolean
     /** The rest of it is being read before it is put back. */
     reading: boolean
     onRevert: (set: ChangeSet) => void
@@ -101,12 +117,12 @@ function ChangeSetCard({ set, settings, name, reading, onRevert }: {
         <article aria-label={called} className="rounded-2xl border border-glass-border/50 bg-canvas-elevated">
             <header className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-glass-border/40 px-5 py-3">
                 {set.actor ? <PersonChip id={set.actor.id} person={{ name: set.actor.name }} /> : <span className="text-[13px] font-medium text-ink">The system</span>}
-                <span className="text-xs text-ink-secondary"><DateTime at={set.at} /></span>
+                {/* The day is the heading's: the time alone. */}
+                <span className="text-xs text-ink-secondary"><DateTime at={set.at} variant="clock" /></span>
                 <Badge tone={set.source === 'revert' ? 'info' : 'neutral'} size="sm" className="dark:text-ink">{SOURCE_LABEL[set.source] ?? set.source}</Badge>
                 <ScopeBadge scope={set.scope} />
-                {set.scope !== 'platform' && (name
-                    ? <span className="max-w-[14rem] truncate text-xs font-medium text-ink-secondary" title={set.scopeId}>{name}</span>
-                    : <code className="max-w-[12rem] truncate font-mono text-[10.5px] text-ink-secondary" title={set.scopeId}>{set.scopeId}</code>)}
+                {set.scopeName && <span className="max-w-[14rem] truncate text-xs font-medium text-ink-secondary">{set.scopeName}</span>}
+                {technical && set.scopeId && <code className="max-w-[12rem] truncate font-mono text-[10.5px] text-ink-secondary">{set.scopeId}</code>}
                 <Button size="sm" variant="ghost" leftIcon={Undo2} loading={reading} onClick={() => onRevert(set)} className="ml-auto text-ink-secondary"
                     aria-label={`Put back ${called}`}>
                     Put back…
@@ -133,6 +149,13 @@ function ChangeSetCard({ set, settings, name, reading, onRevert }: {
                                     <span className="mt-0.5 block text-[12px] text-ink-secondary">
                                         What workspaces and graphs may choose: {describeLimits(s, e.from.limits ?? s.defaultLimits)}
                                         {' → '}<span className="font-semibold text-ink">{describeLimits(s, e.to.limits ?? s.defaultLimits)}</span>
+                                    </span>
+                                )}
+                                {technical && (
+                                    <span className="mt-0.5 flex flex-wrap items-center gap-x-1.5 text-[11px] text-ink-secondary">
+                                        <code className="font-mono">{e.key}</code>
+                                        <span aria-hidden>·</span>
+                                        <span>version {e.version}</span>
                                     </span>
                                 )}
                             </li>
@@ -252,16 +275,18 @@ function PersonFilter({ value, seen, onChange }: {
     )
 }
 
-export function HistoryView({ schema, place = PLATFORM, placeName, onGoToSettings, setup }: {
+export function HistoryView({ schema, place = PLATFORM, onGoToSettings, setup }: {
     schema: ServedSchema
     /** Whose history: the platform's (every change), or a workspace's (its own values and its graphs'). */
     place?: SettingsPlace
-    /** A workspace's or a graph's name, by its id (a graph's: its data source's), where the page knows it. */
-    placeName?: (scope: Scope, scopeId: string) => string | null
     onGoToSettings: () => void
     /** The guided setup, for an editor: what an empty history offers first. */
     setup?: { label: string; onStart: () => void }
 }) {
+    const [lens] = useLens()
+    const filtersId = useId()
+    // On a phone the filters fold away; from `sm` they are always out.
+    const [filtersOpen, setFiltersOpen] = useState(false)
     const [filter, setFilter] = useState<HistoryFilter>({})
     // The days as picked (YYYY-MM-DD): they stay what the inputs show, in any time zone. The
     // request asks from the start of the first to the end of the last, in the reader's zone.
@@ -275,6 +300,7 @@ export function HistoryView({ schema, place = PLATFORM, placeName, onGoToSetting
     const settings = useMemo(() => Object.fromEntries(schema.settings.map((s) => [s.key, s])), [schema.settings])
     const entries = useMemo(() => q.data?.pages.flatMap((p) => p.entries) ?? [], [q.data])
     const sets = useMemo(() => groupChangeSets(entries), [entries])
+    const timeline = useMemo(() => byDay(sets, new Date()), [sets])
     const people = useMemo(() => [...new Map(entries.flatMap((e) => (e.actor ? [[e.actor.id, e.actor]] : []))).values()], [entries])
     // The change set being put back, by id: read again as more of it arrives.
     const [revertingId, setRevertingId] = useState<string | null>(null)
@@ -285,18 +311,18 @@ export function HistoryView({ schema, place = PLATFORM, placeName, onGoToSetting
     const [error, setError] = useState<SettingsRequestError | null>(null)
     const revert = useRevertChangeSet(place)
     const { notify } = useAppNotifications()
-    const filtered = Object.keys(asked).length > 0
+    // Each filter set counts once: the setting, where, who, and each of the two days.
+    const active = Object.keys(asked).length
+    const filtered = active > 0
     const clearFilters = () => {
         setFilter({})
         setDays({ since: '', until: '' })
     }
-    const nameOf = (set: ChangeSet) => (set.scope === 'platform' ? null : placeName?.(set.scope, set.scopeId) ?? null)
     /** Where putting a change set back applies, for its review: "the platform", "the Finance workspace", "Sales lineage". */
     const whereOf = (set: ChangeSet) => {
-        const name = nameOf(set)
         if (set.scope === 'platform') return 'the platform'
-        if (set.scope === 'workspace') return name ? `the ${name} workspace` : 'a workspace'
-        return name ?? 'a graph'
+        if (set.scope === 'workspace') return set.scopeName ? `the ${set.scopeName} workspace` : 'a workspace'
+        return set.scopeName ?? 'a graph'
     }
 
     const revertPlace = reverting ? placeOf(reverting) : null
@@ -360,7 +386,13 @@ export function HistoryView({ schema, place = PLATFORM, placeName, onGoToSetting
                 <p className="text-[13px] text-ink-secondary">Each save is recorded with who made it, when, the reason they gave, and every value before and after.</p>
             </div>
 
-            <div className="flex flex-wrap items-center gap-2">
+            <Button leftIcon={ListFilter} aria-expanded={filtersOpen} aria-controls={filtersId} onClick={() => setFiltersOpen((o) => !o)}
+                aria-label={active ? `Filters, ${active} set` : 'Filters'} className="border-glass-border/80 sm:hidden">
+                Filters
+                {active > 0 && <span aria-hidden className="rounded-full bg-indigo-600 px-1.5 text-[10.5px] font-semibold leading-4 text-white">{active}</span>}
+                <ChevronDown aria-hidden className={cn('w-4 h-4 text-ink-secondary', filtersOpen && 'rotate-180')} />
+            </Button>
+            <div id={filtersId} className={cn('flex-wrap items-center gap-2 sm:flex', filtersOpen ? 'flex' : 'hidden')}>
                 <Select size="sm" aria-label="Setting" value={filter.key ?? ''} onChange={field('key')}
                     options={[{ value: '', label: 'Every setting' }, ...schema.settings.map((s) => ({ value: s.key, label: s.label }))]} />
                 {place.scope === 'platform' && (
@@ -401,10 +433,15 @@ export function HistoryView({ schema, place = PLATFORM, placeName, onGoToSetting
                     secondaryAction={!filtered && setup ? { label: 'Go to settings', onClick: onGoToSettings } : undefined}
                 />
             ) : (
-                <div className="space-y-3">
-                    {sets.map((set) => (
-                        <ChangeSetCard key={set.id} set={set} settings={settings} name={nameOf(set)} reading={reading === set.id}
-                            onRevert={(x) => { void askRevert(x) }} />
+                <div className="space-y-6">
+                    {timeline.map((day) => (
+                        <div key={day.key} className="space-y-3">
+                            <h3 className="text-[11px] font-semibold uppercase tracking-[0.14em] text-ink-secondary">{day.label}</h3>
+                            {day.sets.map((set) => (
+                                <ChangeSetCard key={set.id} set={set} settings={settings} technical={lens === 'operator'} reading={reading === set.id}
+                                    onRevert={(x) => { void askRevert(x) }} />
+                            ))}
+                        </div>
                     ))}
                     {q.hasNextPage && (
                         <div className="flex justify-center pt-1">

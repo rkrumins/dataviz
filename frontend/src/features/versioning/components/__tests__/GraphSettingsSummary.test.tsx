@@ -4,15 +4,17 @@
  * (this graph, this workspace, the platform…); one held back says what was chosen there and why;
  * how many values the graph sets itself, and the properties its imports match by. A fork says it
  * follows its root, with what its imports match by. "Open settings" opens the graph's settings
- * drawer from the data source. Loading, an error with a retry. Labels come from the registry's
- * generated catalogue.
+ * drawer from the data source. Each tile is headed by the setting's question in the Business view,
+ * and its label in the Technical view. Loading, an error with a retry. Labels come from the
+ * registry's generated catalogue.
  */
-import { screen, waitFor, within } from '@testing-library/react'
+import { act, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { CATALOGUE, STATUS_META } from '@/components/settings'
 import { formatValue } from '@/components/settings/format'
 import { DEFAULT_FEATURES, useFeaturesStore } from '@/store/features'
+import { usePersonaStore } from '@/store/persona'
 import { GRAPH, WS, graphValues } from '@/components/admin/AdminVersionedGraphs/__fixtures__/api'
 import { calls, json, mockApi, renderWithApi } from '@/components/admin/AdminVersionedGraphs/__tests__/helpers'
 import { GraphSettingsSummary } from '../GraphSettingsSummary'
@@ -55,6 +57,22 @@ describe('GraphSettingsSummary', () => {
         expect(screen.getByText(`${own} values set for this graph`)).toBeInTheDocument()
         expect(item('imports.identifier').getByText(/Indexed for matching:/)).toHaveTextContent(
             'Indexed for matching: sku (up to date), legacy_code (indexing). 2 properties of 10 at most.')
+    })
+
+    it('heads each tile with the setting’s question in the Business view, and its label in the Technical view', async () => {
+        usePersonaStore.setState({ mode: 'business' })
+        mockApi('workspace-admin')
+        renderCard()
+        for (const key of SUMMARY_KEYS) expect(await screen.findByText(S[key].question!, { selector: 'dt' })).toBeInTheDocument()
+        expect(screen.queryByText(S['reads.mode'].label, { selector: 'dt' })).not.toBeInTheDocument()
+        // The values, where they came from and why one is held back, as in the Technical view.
+        const reads = within(screen.getByText(S['reads.mode'].question!, { selector: 'dt' }).parentElement!)
+        expect(reads.getByText(title('reads.mode', 'in_place'))).toBeInTheDocument()
+        expect(reads.getByText(CATALOGUE.why.builds_off!.text)).toBeInTheDocument()
+
+        act(() => usePersonaStore.getState().setMode('technical'))
+        for (const key of SUMMARY_KEYS) expect(await screen.findByText(S[key].label, { selector: 'dt' })).toBeInTheDocument()
+        expect(screen.queryByText(S['reads.mode'].question!, { selector: 'dt' })).not.toBeInTheDocument()
     })
 
     it('says when the graph sets nothing itself', async () => {
