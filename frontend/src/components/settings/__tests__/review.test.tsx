@@ -1,7 +1,8 @@
 /**
  * The save model's pieces: the save bar says what is staged and offers Review and Discard; the
  * review shows each change from → to and saves only with a reason and every warning acknowledged;
- * a conflict offers to re-apply; the lens opens on the app's business / technical view.
+ * a conflict offers to re-apply; the switch is the app's own Business / Technical view, and the
+ * lens follows it wherever it is changed.
  */
 import { act, render, renderHook, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -117,20 +118,32 @@ describe('ChangeReviewDialog', () => {
 })
 
 describe('LensSwitch', () => {
-    it('opens on the persona’s view, and switching it changes only this page', async () => {
+    it('is the app’s own Business or Technical switch: choosing a view sets the persona', async () => {
+        act(() => usePersonaStore.setState({ mode: 'business' }))
+        const { container } = render(<LensSwitch />)
+        const group = screen.getByRole('radiogroup', { name: 'Business or Technical view' })
+        expect(within(group).getByRole('radio', { name: 'Business' })).toHaveAttribute('aria-checked', 'true')
+        const says = container.querySelector('p')!
+        const business = says.textContent
+        expect(business).not.toBe('')
+
+        await userEvent.click(within(group).getByRole('radio', { name: 'Technical' }))
+        expect(usePersonaStore.getState().mode).toBe('technical')
+        expect(within(group).getByRole('radio', { name: 'Technical' })).toHaveAttribute('aria-checked', 'true')
+        // A line, on screen and not only in the hover tip, says what the view changes here.
+        expect(says.textContent).not.toBe(business)
+    })
+
+    it('follows a persona change made elsewhere (the top bar, ⌘/), and its setter sets the persona', () => {
         act(() => usePersonaStore.setState({ mode: 'business' }))
         const { result } = renderHook(() => useLens())
         expect(result.current[0]).toBe('business')
-        act(() => usePersonaStore.setState({ mode: 'technical' }))
-        const { result: technical } = renderHook(() => useLens())
-        expect(technical.current[0]).toBe('operator')
+        act(() => usePersonaStore.getState().toggleMode())
+        expect(result.current[0]).toBe('operator')
 
-        const onChange = vi.fn()
-        render(<LensSwitch value="operator" onChange={onChange} />)
-        const group = screen.getByRole('radiogroup', { name: 'Show settings for' })
-        expect(within(group).getByRole('radio', { name: 'Operator' })).toHaveAttribute('aria-checked', 'true')
-        await userEvent.click(within(group).getByRole('radio', { name: 'Business' }))
-        expect(onChange).toHaveBeenCalledWith('business')
+        act(() => result.current[1]('business'))
+        expect(usePersonaStore.getState().mode).toBe('business')
+        act(() => result.current[1]('operator'))
         expect(usePersonaStore.getState().mode).toBe('technical')
     })
 })

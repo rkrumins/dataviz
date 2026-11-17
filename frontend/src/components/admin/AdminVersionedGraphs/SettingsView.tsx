@@ -4,7 +4,8 @@
  *
  *   rail          the seven categories, each with how many values are chosen at this level (on the
  *                 platform: differ from the default) and how many are staged; a select on a phone
- *   toolbar       Business / Operator lens, search (`/`), "Changed only", a profile to start from
+ *   toolbar       search (`/`), "Changed only", a profile to start from; the Business / Technical
+ *                 view is the app's own, switched in the page's header (`LensSwitch`)
  *   guides        the trade-off compass and "Something's wrong?", folded to one line each so the
  *                 first setting is on the first screen
  *   categories    each with its posture, its switch, its settings and what the deployment sets;
@@ -24,7 +25,7 @@ import { ConfirmDialog } from '@/components/ui/Dialog'
 import { Select } from '@/components/ui/Select'
 import { Switch } from '@/components/ui/Switch'
 import {
-    FEATURE_NAMES, LensSwitch, MemoryMarks, SettingsSearch, StickySaveBar, SymptomFinder, TradeoffCompass, compassMoves, compassScores,
+    FEATURE_NAMES, MemoryMarks, SettingsSearch, StickySaveBar, SymptomFinder, TradeoffCompass, compassMoves, compassScores,
     describeFix, ownValue, sameValue, scoreWords, settingAnchor, useLens,
     type CompassPoint, type DimensionInfo, type ResolvedSetting, type Setting, type SettingsFacts, type SettingValue,
     type Values, type WhyFix,
@@ -184,7 +185,7 @@ export function SettingsView({
     const values = data.values
     const words = WORDS[scope]
     const { staged } = editor
-    const [lens, setLens] = useLens()
+    const [lens] = useLens()
     const [onlyChangedAsked, setOnlyChanged] = useState(false)
     const [compassOpen, setCompassOpen] = useState(false)
     const [finderOpen, setFinderOpen] = useState(false)
@@ -395,16 +396,15 @@ export function SettingsView({
                     )}
 
                     <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
-                        <LensSwitch value={lens} onChange={setLens} />
                         <label className="inline-flex items-center gap-2 text-[13px] font-medium text-ink-secondary">
                             <Switch size="sm" checked={onlyChanged} onChange={askOnlyChanged} aria-label={words.onlyLabel} />
                             {words.only} <span className="text-xs font-normal text-ink-secondary">({onlyCount})</span>
                         </label>
                     </div>
-                    <SettingsSearch className="max-w-2xl" settings={present} categories={schema.categories} onSelect={show} placeholder={searchPlaceholder} />
+                    <SettingsSearch className="max-w-2xl" settings={present} categories={schema.categories} onSelect={show} placeholder={searchPlaceholder} lens={lens} />
 
                     {!readOnly && (
-                        <ProfileEntry profiles={schema.profiles} scope={scope} editor={data.editor} resolved={values} onStage={editor.stage} />
+                        <ProfileEntry profiles={schema.profiles} scope={scope} editor={data.editor} resolved={values} onStage={editor.stage} lens={lens} />
                     )}
 
                     {/* Side by side while both are folded; one under the other once either opens. */}

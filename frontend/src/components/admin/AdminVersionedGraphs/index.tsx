@@ -5,6 +5,7 @@
  *   Settings   every platform setting by category, with the one save model
  *   History    every change, who made it, when and why, and putting one back
  *
+ * The header holds the app's Business / Technical switch (`LensSwitch`), so it is on every tab.
  * The tab is in `?tab=`; a link to a setting (`#reads-mode`) opens Settings at it. What is staged
  * on Settings stays staged while you look at the other tabs (and "Use recommended" in the
  * Overview's finder stages there), and isn't polled over: the values and node memory refresh only
@@ -19,7 +20,7 @@ import { BookOpen, History, LayoutDashboard, SlidersHorizontal } from 'lucide-re
 import { PageContainer } from '@/components/layout/PageContainer'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/Tabs'
-import { settingAnchor, type ResolvedValues, type SettingValue } from '@/components/settings'
+import { LensSwitch, settingAnchor, type ResolvedValues, type SettingValue } from '@/components/settings'
 import { systemStatusService, type VersionedGraphRow } from '@/services/systemStatusService'
 import {
     PLATFORM, settingsKeys, settingsService, signalCounts, useNodeMemory, useSettingsSchema, useSettingsValues, useSignals,
@@ -129,10 +130,13 @@ export function AdminVersionedGraphs() {
                         setting with its value, where it came from, and what changing it does.
                     </p>
                 </div>
-                <Link to="/guide/versioned-graph-settings"
-                    className="inline-flex items-center gap-1.5 rounded text-[13px] font-medium text-indigo-700 outline-none hover:underline focus-visible:ring-2 focus-visible:ring-accent-lineage/40 dark:text-indigo-300">
-                    <BookOpen aria-hidden className="w-4 h-4" /> The settings guide
-                </Link>
+                <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
+                    <LensSwitch />
+                    <Link to="/guide/versioned-graph-settings"
+                        className="inline-flex items-center gap-1.5 rounded text-[13px] font-medium text-indigo-700 outline-none hover:underline focus-visible:ring-2 focus-visible:ring-accent-lineage/40 dark:text-indigo-300">
+                        <BookOpen aria-hidden className="w-4 h-4" /> The settings guide
+                    </Link>
+                </div>
             </header>
 
             <Tabs value={tab} onValueChange={setTab} className="mt-6">

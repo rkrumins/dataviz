@@ -1,7 +1,8 @@
 /**
  * SettingsSearch — find a setting by any word for it: its label, the words people use for it
  * ("staleness", "eviction"), a problem it answers ("Canvases are slow while an import lands"), its
- * env var or key. Each result says why it matched.
+ * env var or key. Each result says why it matched; in the Business view an env var or a key still
+ * finds its setting, and the result says the question it asks (or what it is about) instead.
  *
  * A combobox: type, move through results with ↑ ↓, open one with Enter (the page scrolls to it),
  * Esc clears. `/` anywhere on the page (outside a text field) jumps here.
@@ -11,6 +12,7 @@ import { Search, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Kbd } from '@/components/ui/Kbd'
 import { CONTROL_SHELL, CONTROL_SIZE } from '@/components/ui/controlStyles'
+import type { Lens } from './lens'
 import { searchSettings, type MatchField, type SearchHit } from './search'
 import type { Category, Setting } from './types'
 
@@ -18,7 +20,13 @@ const WHY_MATCHED: Partial<Record<MatchField, string>> = {
     alias: 'Also called', symptom: 'Answers', env: 'Env var', key: 'Key', question: 'Asks', summary: 'About',
 }
 
-export function SettingsSearch({ settings, categories = [], onSelect, placeholder = 'Search settings, problems or env vars', shortcut = true, className }: {
+/** Why a result is listed, in the view's words: Business names no env var or key. */
+function reason(hit: SearchHit, lens: Lens): { field: MatchField; text: string } {
+    if (lens === 'operator' || (hit.field !== 'env' && hit.field !== 'key')) return hit
+    return hit.setting.question ? { field: 'question', text: hit.setting.question } : { field: 'summary', text: hit.setting.guidance.summary }
+}
+
+export function SettingsSearch({ settings, categories = [], onSelect, placeholder = 'Search settings, problems or env vars', shortcut = true, lens = 'operator', className }: {
     settings: Setting[]
     categories?: Category[]
     /** A result was chosen: show that setting. */
@@ -26,6 +34,7 @@ export function SettingsSearch({ settings, categories = [], onSelect, placeholde
     placeholder?: string
     /** `/` focuses the search. */
     shortcut?: boolean
+    lens?: Lens
     className?: string
 }) {
     const id = useId()
@@ -34,7 +43,7 @@ export function SettingsSearch({ settings, categories = [], onSelect, placeholde
     const [query, setQuery] = useState('')
     const [active, setActive] = useState(0)
     const [open, setOpen] = useState(false)
-    const hits = useMemo(() => searchSettings(settings, query), [settings, query])
+    const hits = useMemo(() => searchSettings(settings, query).map((hit) => ({ ...hit, ...reason(hit, lens) })), [settings, query, lens])
     const showList = open && query.trim().length > 0
 
     useEffect(() => {

@@ -1,7 +1,8 @@
 /**
  * ProfilePicker — start from a profile: one-click starting points (Balanced, Fastest reads, Always
  * exact, Least memory, Big import tonight), each told as an outcome: what it promises, when to choose
- * it, what you give up, and whom it is for. One radio group; the arrow keys move the choice.
+ * it, what you give up, and whom it is for. One radio group; the arrow keys move the choice. The
+ * Business view lists the business profiles first; the Technical view keeps the registry's order.
  *
  * The chosen profile is previewed for this level: the trade-off compass with its values as the
  * dashed outline, and the plan, value by value: what would be staged (from → to), what is already
@@ -14,12 +15,13 @@
  * resolver's (`resolved`).
  */
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
-import { ArrowRight, Briefcase, Check, CircleCheck, CornerDownRight, Minus, Wrench } from 'lucide-react'
+import { ArrowRight, Briefcase, Check, CircleCheck, Code2, CornerDownRight, Minus } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { onRadioGroupKeyDown } from '@/lib/radioGroupKeys'
 import { Button } from '@/components/ui/Button'
 import { CATALOGUE } from './catalogue'
 import { formatValue, SCOPE_HERE, SCOPE_LABEL } from './format'
+import type { Lens } from './lens'
 import { applyProfile, skipWords, type ProfilePlan, type SkipReason } from './profiles'
 import type { Audience, Editor, Profile, ResolvedValues, Scope, Setting, SettingValue, Values } from './types'
 import { TradeoffCompass } from './visuals/TradeoffCompass'
@@ -37,15 +39,18 @@ export interface ProfilePickerProps {
     onStage: (key: string, value: SettingValue | null) => void
     /** Closes the host's drawer or dialog: after Done, or on Cancel. */
     onClose: () => void
+    /** The app's view: Business lists the business profiles first. */
+    lens?: Lens
 }
 
 const SETTINGS: Record<string, Setting> = Object.fromEntries(CATALOGUE.settings.map((s) => [s.key, s]))
 const ORDER = new Map(CATALOGUE.settings.map((s, i) => [s.key, i]))
 const byOrder = (a: { key: string }, b: { key: string }) => (ORDER.get(a.key) ?? 999) - (ORDER.get(b.key) ?? 999)
 
+/** Whom a profile is for, named as the app's views are (the persona switch's words and icons). */
 const AUDIENCE: Record<Audience, { label: string; icon: typeof Briefcase }> = {
     business: { label: 'Business', icon: Briefcase },
-    operator: { label: 'Operator', icon: Wrench },
+    operator: { label: 'Technical', icon: Code2 },
 }
 
 /** "the platform, workspaces and graphs". */
@@ -187,9 +192,10 @@ function PlanList({ plan, scope, resolved, done }: { plan: ProfilePlan; scope: S
     )
 }
 
-export function ProfilePicker({ profiles, scope, editor, resolved, onStage, onClose }: ProfilePickerProps) {
+export function ProfilePicker({ profiles, scope, editor, resolved, onStage, onClose, lens = 'operator' }: ProfilePickerProps) {
     const id = useId()
-    const offered = profiles.filter((p) => p.scopes.includes(scope))
+    const atScope = profiles.filter((p) => p.scopes.includes(scope))
+    const offered = lens === 'business' ? [...atScope.filter((p) => p.audience === 'business'), ...atScope.filter((p) => p.audience !== 'business')] : atScope
     const elsewhere = profiles.filter((p) => !p.scopes.includes(scope))
     const [pickedId, setPickedId] = useState<string | null>(null)
     const [applied, setApplied] = useState<ProfilePlan | null>(null)

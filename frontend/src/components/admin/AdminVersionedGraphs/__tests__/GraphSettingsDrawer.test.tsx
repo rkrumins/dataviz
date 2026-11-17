@@ -2,16 +2,17 @@
  * A graph's settings drawer: how the graph is doing now, each setting a graph can have with where
  * its value came from, only the choices allowed here, a setting only a system admin may change
  * shown read-only to a workspace admin (saying who may), a fork's settings followed from its root,
- * and the same save model as the platform's: stage, review, a reason, save, undo. Labels come from
- * the registry's generated catalogue.
+ * and the same save model as the platform's: stage, review, a reason, save, undo. It follows the
+ * app's Business / Technical view live. Labels come from the registry's generated catalogue.
  */
 import { useState } from 'react'
-import { screen, waitFor, within } from '@testing-library/react'
+import { act, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { CATALOGUE, STATUS_META } from '@/components/settings'
 import { REASON_HEADER } from '@/services/activityReason'
 import { useAuthStore } from '@/store/auth'
+import { usePersonaStore } from '@/store/persona'
 import { DEFAULT_FEATURES, useFeaturesStore } from '@/store/features'
 import { GraphSettingsSummary } from '@/features/versioning/components/GraphSettingsSummary'
 import { AdminVersionedGraphs } from '..'
@@ -227,6 +228,26 @@ describe('GraphSettingsDrawer', () => {
         await userEvent.click(within(again).getByRole('button', { name: 'Save change' }))
         expect((await screen.findAllByText('Saved 1 change to Sales lineage.')).length).toBeGreaterThan(0)
         expect(calls(sent, 'PATCH', settingsPath)[1].body).toMatchObject({ changes: [{ key: 'residency.class', value: 'standard' }] })
+    })
+
+    it('follows the app’s view live, wherever it is changed, and its own switch is the app’s', async () => {
+        mockApi('workspace-admin')
+        renderDrawer()
+        const reads = S['reads.mode']
+        // Technical, the suite's view: titled by the label, with the env var.
+        expect((await row('reads.mode')).getByText(reads.default.env!)).toBeInTheDocument()
+
+        // Changed elsewhere (the top bar, ⌘/): the open drawer follows, no reopening.
+        act(() => usePersonaStore.getState().setMode('business'))
+        const asked = within(await screen.findByRole('article', { name: reads.question }))
+        expect(asked.queryByText(reads.default.env!)).not.toBeInTheDocument()
+        const view = screen.getByRole('radiogroup', { name: 'Business or Technical view' })
+        expect(within(view).getByRole('radio', { name: 'Business' })).toHaveAttribute('aria-checked', 'true')
+
+        // And changed here: the app's view changes with it.
+        await userEvent.click(within(view).getByRole('radio', { name: 'Technical' }))
+        expect(usePersonaStore.getState().mode).toBe('technical')
+        expect((await row('reads.mode')).getByText(reads.default.env!)).toBeInTheDocument()
     })
 
     it('reads, but offers nothing to change, while version control is off', async () => {

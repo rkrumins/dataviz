@@ -2074,13 +2074,13 @@ Matching by a property keeps an index of its values in the database: built by th
 
 Starting points: each profile sets the settings it covers for one outcome. Applying one in the app stages its values at the level you are editing, only for the settings you may set there, and says which it left out and why. Nothing is saved until you review the changes and save them.
 
-| Profile | What it gives you | Lens | Applies at |
+| Profile | What it gives you | View | Applies at |
 |---|---|---|---|
 | [Balanced](#balanced) | The built-in values: readers see the newest version as soon as it is published, and writes to the graph store leave reads their turn. | Business | Platform, Workspace, Graph |
 | [Fastest reads](#fastest-reads) | Reads stay on the graph store at full speed while new data loads, and writes give way to them. | Business | Platform, Workspace, Graph |
 | [Always exact](#always-exact) | Readers always see the newest published version, whole, read from the database until the graph store has it. | Business | Platform, Workspace, Graph |
-| [Least memory](#least-memory) | Graphs give their memory back half an hour after their last read, and a build needs about its graph's size rather than twice it. | Operator | Platform, Workspace, Graph |
-| [Big import tonight](#big-import-tonight) | Writes to the graph store go faster while few people read, so a large import lands sooner, and a build with no room is written in place rather than wait. | Operator | Platform |
+| [Least memory](#least-memory) | Graphs give their memory back half an hour after their last read, and a build needs about its graph's size rather than twice it. | Technical | Platform, Workspace, Graph |
+| [Big import tonight](#big-import-tonight) | Writes to the graph store go faster while few people read, so a large import lands sooner, and a build with no room is written in place rather than wait. | Technical | Platform |
 
 ### Balanced
 
@@ -2108,7 +2108,7 @@ Starting points: each profile sets the settings it covers for one outcome. Apply
 
 **What you give up:** The settings it covers go back to their built-in values here, including any you tuned for your platform.
 
-**Applies at:** Platform, Workspace, Graph. Shown first in the Business lens.
+**Applies at:** Platform, Workspace, Graph. Shown first in the Business view.
 
 ### Fastest reads
 
@@ -2128,7 +2128,7 @@ Starting points: each profile sets the settings it covers for one outcome. Apply
 
 **What you give up:** While a large change is written, readers can see part of it before the rest, and large updates take longer to land.
 
-**Applies at:** Platform, Workspace, Graph. Shown first in the Business lens.
+**Applies at:** Platform, Workspace, Graph. Shown first in the Business view.
 
 ### Always exact
 
@@ -2145,7 +2145,7 @@ Starting points: each profile sets the settings it covers for one outcome. Apply
 
 **What you give up:** While a graph updates, its reads come from the database: slower on a large graph, without lineage summaries meanwhile, and asked to retry under heavy load.
 
-**Applies at:** Platform, Workspace, Graph. Shown first in the Business lens.
+**Applies at:** Platform, Workspace, Graph. Shown first in the Business view.
 
 ### Least memory
 
@@ -2168,7 +2168,7 @@ Starting points: each profile sets the settings it covers for one outcome. Apply
 
 **What you give up:** Graphs nobody read in the last half hour are read from the database, which is slower, and builds take much longer; the memory values need Graph residency on, and the build values New-version builds.
 
-**Applies at:** Platform, Workspace, Graph. Shown first in the Operator lens.
+**Applies at:** Platform, Workspace, Graph.
 
 ### Big import tonight
 
@@ -2187,7 +2187,7 @@ Starting points: each profile sets the settings it covers for one outcome. Apply
 
 **What you give up:** Reads wait longer behind writes, and a change whose build finds no room can be seen part-way, until you apply Balanced again; the build value needs New-version builds.
 
-**Applies at:** Platform. Shown first in the Operator lens.
+**Applies at:** Platform.
 
 ## Signals
 

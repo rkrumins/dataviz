@@ -5,8 +5,9 @@
  * and the measured evidence.
  *
  * Plain words first. The engineering facts (key, env var, timing, caps, the measured evidence,
- * where it was stored) sit under "Technical details", collapsed except in the operator lens. Defined
- * terms ("graph store", "copy") carry their glossary definition on hover and focus.
+ * where it was stored) sit under "Technical details", collapsed except in the Technical view. Defined
+ * terms ("graph store", "copy") carry their glossary definition on hover and focus, and in the
+ * Technical view the term's technical note too.
  */
 import { Fragment, type ReactNode } from 'react'
 import { BookOpen, CircleDashed, Sparkles } from 'lucide-react'
@@ -43,8 +44,9 @@ function termPattern(term: string): RegExp | null {
         : new RegExp(`(?<=[a-z,;] )${escapeRe(term)}\\b`)
 }
 
-/** Text with the first use of up to three glossary terms underlined, each carrying its definition. */
-function Prose({ text, glossary }: { text: string; glossary: Term[] }) {
+/** Text with the first use of up to three glossary terms underlined, each carrying its definition
+ *  (and, for `technical`, the term's technical note). */
+function Prose({ text, glossary, technical }: { text: string; glossary: Term[]; technical: boolean }) {
     const parts: Array<string | { text: string; term: Term }> = [text]
     let found = 0
     for (const term of [...glossary].sort((a, b) => b.term.length - a.term.length)) {
@@ -60,7 +62,7 @@ function Prose({ text, glossary }: { text: string; glossary: Term[] }) {
     return (
         <>
             {parts.map((p, i) => typeof p === 'string' ? <Fragment key={i}>{p}</Fragment> : (
-                <HoverTip key={i} label={p.term.definition} detail={p.term.technical ? `Technical: ${p.term.technical}` : undefined} className="inline">
+                <HoverTip key={i} label={p.term.definition} detail={technical && p.term.technical ? `Technical: ${p.term.technical}` : undefined} className="inline">
                     <span tabIndex={0} className="cursor-help underline decoration-dotted decoration-ink-muted/60 underline-offset-[3px] outline-none focus-visible:rounded focus-visible:ring-2 focus-visible:ring-accent-lineage/40">
                         {p.text}
                     </span>
@@ -189,7 +191,7 @@ export function GuidancePanel({
             <div className="space-y-5 min-w-0">
                 <section className="space-y-1.5">
                     <Heading>What it means</Heading>
-                    <p className="text-[13px] leading-relaxed text-ink-secondary"><Prose text={g.means} glossary={glossary} /></p>
+                    <p className="text-[13px] leading-relaxed text-ink-secondary"><Prose text={g.means} glossary={glossary} technical={lens === 'operator'} /></p>
                 </section>
                 {(s.kind === 'choice' || g.effects.length > 0) && (
                     <section className="space-y-2">
@@ -211,7 +213,7 @@ export function GuidancePanel({
                     <section className="space-y-1.5">
                         <Heading>For example</Heading>
                         <p className="rounded-xl bg-black/[0.03] px-3.5 py-2.5 text-[13px] leading-relaxed text-ink-secondary dark:bg-white/[0.04]">
-                            <Prose text={g.example} glossary={glossary} />
+                            <Prose text={g.example} glossary={glossary} technical={lens === 'operator'} />
                         </p>
                     </section>
                 )}

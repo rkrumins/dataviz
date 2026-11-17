@@ -5,7 +5,7 @@
  *
  * Save waits for the full preview: its warnings are part of what is acknowledged. When it can't be
  * worked out, the review says so, offers to try again, and saves only once the person chooses to
- * save without seeing what the change does.
+ * save without seeing what the change does. The report is told in the app's view (`useLens`).
  *
  * The page's editor (`useSettingsEditor`) and History's revert both open it.
  */
@@ -13,7 +13,7 @@ import type { ReactNode } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { CircleCheck, RotateCw, Undo2 } from 'lucide-react'
 import { Button } from '@/components/ui/Button'
-import { ChangeReviewDialog, type DimensionInfo, type ReviewItem, type Setting } from '@/components/settings'
+import { ChangeReviewDialog, useLens, type DimensionInfo, type ReviewItem, type Setting } from '@/components/settings'
 import { settingsKeys, type Impact, type SettingsRequestError } from '@/services/settingsService'
 import { ImpactReport } from './ImpactReport'
 import { refusalWords, reviewWarnings } from './reviewText'
@@ -61,6 +61,7 @@ export function SettingsReview({
     round: number
 }) {
     const qc = useQueryClient()
+    const [lens] = useLens()
     const retry = onRetryImpact ?? (() => void qc.refetchQueries({ queryKey: [...settingsKeys.all, 'preview', 'full'], type: 'active' }))
     // Failed: no answer for these values, and none on its way. An answer kept from before still stands.
     const failed = !impact && Boolean(impactError) && !impactPending
@@ -71,7 +72,7 @@ export function SettingsReview({
             </p>
             <Button size="sm" variant="secondary" leftIcon={RotateCw} onClick={retry}>Try again</Button>
         </div>
-    ) : impact ? <ImpactReport impact={impact} settings={settings} />
+    ) : impact ? <ImpactReport impact={impact} settings={settings} lens={lens} />
         : impactNote ? <p className="text-[13px] text-ink-secondary">{impactNote}</p> : undefined
 
     return (
