@@ -311,6 +311,23 @@ def test_an_invalid_read_mode_in_the_environment_is_reported_and_latest_applies(
         config.warn_invalid_settings_env()
     warned = [r.getMessage() for r in caplog.records if r.name == config.__name__]
     assert len(warned) == 1 and "GRAPHVER_READ_MODE='sideways'" in warned[0]
+    assert "its default, 'latest', applies instead" in warned[0]
+
+
+def test_start_up_says_an_environment_value_out_of_its_range_is_held_to_the_range(monkeypatch,
+                                                                                caplog):
+    """The right kind outside its range is held to the nearest end of it (``env_out_of_range``),
+    not swapped for the default, so start-up names that end as the value that applies."""
+    monkeypatch.setenv("GRAPHVER_DRAFT_RETENTION_DAYS", "99999")
+    monkeypatch.setattr(config, "DRAFT_RETENTION_DAYS", 99_999)
+    found = resolver.resolve(effective.context_now(), "drafts.keepClosedDays")
+    assert found["trail"][0]["env"]["held"] == 3650 == found["effective"]
+    with caplog.at_level(logging.WARNING, logger=config.__name__):
+        config.warn_invalid_settings_env()
+    warned = [r.getMessage() for r in caplog.records if r.name == config.__name__]
+    assert len(warned) == 1 and "GRAPHVER_DRAFT_RETENTION_DAYS=99999" in warned[0]
+    assert "the nearest allowed value, 3650, applies instead" in warned[0]
+    assert "default" not in warned[0]
 
 
 def test_config_keeps_the_read_mode_the_environment_gives():

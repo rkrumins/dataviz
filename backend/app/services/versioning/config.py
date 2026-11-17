@@ -763,9 +763,11 @@ def lane_pool_size(lanes) -> int:
 def warn_invalid_settings_env() -> None:
     """Log one warning for each environment variable a versioned-graph setting takes its default
     from (``config/versioned_graph_settings.py``) whose value the setting can't take, as this module
-    parsed it: not of the setting's kind, or out of its range. The setting then runs on its code
-    default and says so (``invalid_env``). Called at start-up, by the API and the versioning worker;
-    it imports the settings resolver only when called, so this module still imports on its own."""
+    parsed it: not of the setting's kind, or out of its range. A value of the right kind out of its
+    range is held to the nearest end of the range (``env_out_of_range``); any other gives way to the
+    code default (``invalid_env``). Each warning names the value that applies. Called at start-up,
+    by the API and the versioning worker; it imports the settings resolver only when called, so
+    this module still imports on its own."""
     from backend.app.config import versioned_graph_settings as registry
     from backend.app.services.settings import resolver
     from backend.app.services.settings.snapshot import env_reader
@@ -774,7 +776,13 @@ def warn_invalid_settings_env() -> None:
                            env=env_reader(registry.SETTINGS, registry.DEPLOYMENT))
     for setting in registry.SETTINGS:
         env = resolver.resolve(ctx, setting.key)["trail"][0]["env"]
-        if env is not None and not env["valid"]:
+        if env is None or env["valid"]:
+            continue
+        if "held" in env:
+            logging.getLogger(__name__).warning(
+                "%s=%r is outside the range of %s (%s); the nearest allowed value, %r, applies "
+                "instead", env["name"], env["value"], setting.key, setting.label, env["held"])
+        else:
             logging.getLogger(__name__).warning(
                 "%s=%r is not a value %s (%s) can take; its default, %r, applies instead",
                 env["name"], env["value"], setting.key, setting.label, setting.default.code)
