@@ -23,6 +23,7 @@
 
 import { create } from 'zustand'
 import { generateId } from '@/lib/utils'
+import { batchNodeUpdates } from './nodeUpdateBatch'
 import type { GraphDataProvider } from '@/providers/GraphDataProvider'
 import type { EntityView } from '@/services/versioningApiService'
 
@@ -153,6 +154,9 @@ interface StagedChangesState {
    *  null — recorded as one undoable step. For a surface that keeps one change per target and
    *  rewrites it with each edit (`stageNodeEdit`). */
   replace: (prev: StagedChange | null, next: StagedChange | null) => void
+  /** `replace` for many changes at once — one write, one Undo step. Returns the step's id (none
+   *  when there was nothing to record). */
+  replaceMany: (entries: UndoStep['entries']) => string | undefined
   /**
    * Patch a staged change's `after` object in place, keeping its reference — so
    * hooks that closed over `after` (e.g. a `create_entity`'s `apply`) observe the
@@ -224,6 +228,11 @@ export const PUBLISHED_READ_ONLY = 'The published graph is read-only — open a 
 const _SCOPE_NULL = '__none__'   // sentinel for the null/unscoped slice in _byScope
 
 const stepOf = (entries: UndoStep['entries']): UndoStep => ({ id: generateId('step'), entries })
+
+/** Undo reaches back this many actions: a long session's history is not kept without end. */
+export const MAX_UNDO_STEPS = 500
+const pushStep = (steps: UndoStep[], step: UndoStep): UndoStep[] =>
+  steps.length >= MAX_UNDO_STEPS ? [...steps.slice(steps.length - MAX_UNDO_STEPS + 1), step] : [...steps, step]
 const entryId = (e: UndoStep['entries'][number]) => (e.after ?? e.before)!.id
 
 /** The steps without any entry about these changes (they are gone — saved, or discarded for good),
@@ -244,6 +253,24 @@ function pruneSteps(steps: UndoStep[], gone: ReadonlySet<string>): UndoStep[] {
 function putChange(changes: StagedChange[], id: string, next: StagedChange | null): StagedChange[] {
   if (!next) return changes.filter((c) => c.id !== id)
   return changes.some((c) => c.id === id) ? changes.map((c) => (c.id === id ? next : c)) : [...changes, next]
+}
+
+/** `putChange` for many, in one pass: each id ends as its last put says, in place where it was,
+ *  appended (in put order) where it was not — an Undo of a 5,000-change step is not 5,000 passes. */
+function putChanges(changes: StagedChange[], puts: ReadonlyArray<readonly [string, StagedChange | null]>): StagedChange[] {
+  if (puts.length === 1) return putChange(changes, puts[0][0], puts[0][1])
+  const final = new Map<string, StagedChange | null>()
+  for (const [id, next] of puts) final.set(id, next)
+  const out: StagedChange[] = []
+  const placed = new Set<string>()
+  for (const c of changes) {
+    if (!final.has(c.id)) { out.push(c); continue }
+    placed.add(c.id)
+    const next = final.get(c.id)
+    if (next) out.push(next)
+  }
+  for (const [id, next] of final) if (next && !placed.has(id)) out.push(next)
+  return out
 }
 
 /** Bring the canvas to `to`: a staged change re-applies itself; a change no longer staged undoes
@@ -322,13 +349,15 @@ function collectStagedSubtree(all: readonly StagedChange[], roots: readonly Stag
 
 /** Run each change's discard hook, in order, a failing one not stopping the rest. */
 function runDiscardHooks(changes: readonly StagedChange[]) {
-  for (const v of changes) {
-    try {
-      v.discard?.()
-    } catch (err) {
-      console.error('[StagedChanges] discard hook failed', err)
+  batchNodeUpdates(() => {
+    for (const v of changes) {
+      try {
+        v.discard?.()
+      } catch (err) {
+        console.error('[StagedChanges] discard hook failed', err)
+      }
     }
-  }
+  })
 }
 
 export const useStagedChangesStore = create<StagedChangesState>((set, get) => ({
@@ -367,7 +396,7 @@ export const useStagedChangesStore = create<StagedChangesState>((set, get) => ({
     const change: StagedChange = { ...input, id, timestamp: Date.now() }
     set((s) => ({
       changes: [...s.changes, change],
-      past: [...s.past, stepOf([{ before: null, after: change }])],
+      past: pushStep(s.past, stepOf([{ before: null, after: change }])),
       // A new edit invalidates the redo stack — once you make a fresh change,
       // we can't redo a previously-discarded one cleanly anymore.
       redoStack: [],
@@ -382,7 +411,7 @@ export const useStagedChangesStore = create<StagedChangesState>((set, get) => ({
     // One action: one Undo takes the whole batch back.
     set((s) => ({
       changes: [...s.changes, ...batch],
-      past: batch.length ? [...s.past, stepOf(batch.map((c) => ({ before: null, after: c })))] : s.past,
+      past: batch.length ? pushStep(s.past, stepOf(batch.map((c) => ({ before: null, after: c })))) : s.past,
       redoStack: [],
     }))
   },
@@ -403,9 +432,17 @@ export const useStagedChangesStore = create<StagedChangesState>((set, get) => ({
     if (!id) return
     set((s) => ({
       changes: putChange(s.changes, id, next),
-      past: [...s.past, stepOf([{ before: prev, after: next }])],
+      past: pushStep(s.past, stepOf([{ before: prev, after: next }])),
       redoStack: [],
     }))
+  },
+
+  replaceMany: (entries) => {
+    const puts = entries.filter((e) => e.before ?? e.after).map((e) => [entryId(e), e.after] as const)
+    if (puts.length === 0) return undefined
+    const step = stepOf(entries.filter((e) => e.before ?? e.after))
+    set((s) => ({ changes: putChanges(s.changes, puts), past: pushStep(s.past, step), redoStack: [] }))
+    return step.id
   },
 
   patchAfter: (changeId, patch, summary) => {
@@ -470,13 +507,7 @@ export const useStagedChangesStore = create<StagedChangesState>((set, get) => ({
     const { changes } = get()
     // Discard in reverse order so dependent changes (e.g. rename after create)
     // restore correctly.
-    for (let i = changes.length - 1; i >= 0; i--) {
-      try {
-        changes[i].discard?.()
-      } catch (err) {
-        console.error('[StagedChanges] discard hook failed', err)
-      }
-    }
+    runDiscardHooks([...changes].reverse())
     set({ changes: [], past: [], redoStack: [], applyStatus: 'idle', lastApplyResult: null })
   },
 
@@ -502,11 +533,12 @@ export const useStagedChangesStore = create<StagedChangesState>((set, get) => ({
       }))
       return true
     }
-    for (const e of [...step.entries].reverse()) showOnCanvas(e.after, e.before, 'undo')
+    const back = [...step.entries].reverse()
+    batchNodeUpdates(() => { for (const e of back) showOnCanvas(e.after, e.before, 'undo') })
     set((s) => ({
-      changes: [...step.entries].reverse().reduce((cs, e) => putChange(cs, entryId(e), e.before), s.changes),
+      changes: putChanges(s.changes, back.map((e) => [entryId(e), e.before] as const)),
       past: s.past.slice(0, -1),
-      redoStack: [...s.redoStack, step],
+      redoStack: pushStep(s.redoStack, step),
     }))
     return true
   },
@@ -517,10 +549,10 @@ export const useStagedChangesStore = create<StagedChangesState>((set, get) => ({
     if (!step) return false
     // A change carrying a `reapply` hook (a drawn link, a create, a node edit, a layer edit) redraws
     // what it changed, so redo restores the canvas, not just the panel row.
-    for (const e of step.entries) showOnCanvas(e.before, e.after, 'redo reapply')
+    batchNodeUpdates(() => { for (const e of step.entries) showOnCanvas(e.before, e.after, 'redo reapply') })
     set((s) => ({
-      changes: step.entries.reduce((cs, e) => putChange(cs, entryId(e), e.after), s.changes),
-      past: [...s.past, step],
+      changes: putChanges(s.changes, step.entries.map((e) => [entryId(e), e.after] as const)),
+      past: pushStep(s.past, step),
       redoStack: s.redoStack.slice(0, -1),
     }))
     return true

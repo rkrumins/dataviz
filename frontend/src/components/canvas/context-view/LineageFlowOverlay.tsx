@@ -36,7 +36,7 @@ import { useColumnPeripheryStore, PERIPHERY_PARTNER_CAP } from '@/store/columnPe
 import { useAnchorRailStore } from '@/store/anchorRail'
 import type { ColumnPeripherySummary } from '@/store/columnPeriphery'
 import { formatRibbonCount, type FlowRibbon } from './flowRibbons'
-import { useStagedChangesStore } from '@/store/stagedChangesStore'
+import { useStagedChangesStore, type StagedChange } from '@/store/stagedChangesStore'
 import { useBranchStore } from '@/store/branchStore'
 import { committedEdgeLookup } from '@/features/versioning/canvas/committedEdges'
 import { useHoveredNodeId } from '@/hooks/useHighlightState'
@@ -106,6 +106,27 @@ type StyledLine = PoolLine & {
   isReverseFlow?: boolean
   isDelegated?: boolean
   isResidual?: boolean
+}
+
+
+/** Each staged relationship's colour, by edge id — one map per version of the staged list, and the
+ *  same map as the last one while its relationship changes are the same. */
+const edgeColorCache = new WeakMap<readonly StagedChange[], Map<string, string>>()
+let lastEdgeColors: { key: string; map: Map<string, string> } = { key: '', map: new Map() }
+function stagedEdgeColors(changes: readonly StagedChange[]): Map<string, string> {
+  const hit = edgeColorCache.get(changes)
+  if (hit) return hit
+  const m = new Map<string, string>()
+  for (const c of changes) {
+    if (c.type === 'create_edge') m.set(c.targetId, '#4ade80')
+    else if (c.type === 'delete_edge') m.set(c.targetId, '#f87171')
+    else if (c.type === 'edit_edge' || c.type === 'reverse_edge') m.set(c.targetId, '#fbbf24')
+  }
+  let key = ''
+  for (const [id, colour] of m) key += `${id}=${colour};`
+  if (key !== lastEdgeColors.key) lastEdgeColors = { key, map: m }
+  edgeColorCache.set(changes, lastEdgeColors.map)
+  return lastEdgeColors.map
 }
 
 export function LineageFlowOverlay({
@@ -295,18 +316,9 @@ export function LineageFlowOverlay({
   // rebuild (which clears stale visibility) from firing.
   const expandedNodesFingerprint = expandedNodes
 
-  // Staged-change lookup map — keyed by edge ID. Recomputed when the staging
-  // store's changes array changes; reads inside the edge .map() are O(1).
-  const stagedEdgeChanges = useStagedChangesStore(s => s.changes)
-  const stagedEdgeColorByEdgeId = useMemo(() => {
-    const m = new Map<string, string>()
-    stagedEdgeChanges.forEach(c => {
-      if (c.type === 'create_edge') m.set(c.targetId, '#4ade80')
-      else if (c.type === 'delete_edge') m.set(c.targetId, '#f87171')
-      else if (c.type === 'edit_edge' || c.type === 'reverse_edge') m.set(c.targetId, '#fbbf24')
-    })
-    return m
-  }, [stagedEdgeChanges])
+  // Staged-change lookup map — keyed by edge ID; reads inside the edge .map() are O(1). The same
+  // map until the staged RELATIONSHIP changes change: an entity edit does not redraw the lines.
+  const stagedEdgeColorByEdgeId = useStagedChangesStore(s => stagedEdgeColors(s.changes))
 
   // Committed-change lookup — relationships SAVED on the draft (by hand, or by an import) and not
   // published yet, drawn with a solid halo the way committed entities get a solid ring.

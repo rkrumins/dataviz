@@ -9,14 +9,12 @@
 import { useMemo } from 'react'
 import { CheckCircle2, PencilLine, Undo2 } from 'lucide-react'
 import { useStagedChangesStore, type StagedChange } from '@/store/stagedChangesStore'
+import { stagedIndexOf } from '@/store/stagedIndex'
 import { nodeUpdatePatch } from '@/features/versioning/model/stagedChangesToOps'
 import { Button } from '@/components/ui/Button'
 import { HoverTip } from '@/components/ui/HoverTip'
 import { Kbd } from '@/components/ui/Kbd'
 import { cn } from '@/lib/utils'
-
-const isNodeEdit = (nodeId: string) => (c: StagedChange) =>
-  (c.type === 'update_entity' || c.type === 'rename_entity') && c.targetId === nodeId
 
 /** How many fields a staged node edit changes, as the save will send them. */
 export function changedFieldCount(change: StagedChange | undefined): number {
@@ -27,7 +25,7 @@ export function changedFieldCount(change: StagedChange | undefined): number {
 }
 
 export function useStagedNodeEdit(nodeId: string): StagedChange | undefined {
-  return useStagedChangesStore((s) => s.changes.find(isNodeEdit(nodeId)))
+  return useStagedChangesStore((s) => stagedIndexOf(s.changes).nodeEdit.get(nodeId))
 }
 
 export function EntityChangeStrip({ nodeId, dirty, justStaged, onCancel }: {

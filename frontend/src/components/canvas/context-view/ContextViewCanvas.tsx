@@ -1712,9 +1712,11 @@ export function ContextViewCanvas({
   // /trace/v2 wrappers that lived here are gone with them.
 
   // Staged changes — review-before-save layer for all canvas edits
-  const stagedChangeList = useStagedChangesStore(s => s.changes)
-  const stagedRedoStack = useStagedChangesStore(s => s.redoStack)
-  const stagedPast = useStagedChangesStore(s => s.past)
+  // Counts, not the lists: the whole canvas re-rendered on every staged edit. The save reads the
+  // list when it runs.
+  const stagedCount = useStagedChangesStore(s => s.changes.length)
+  const stagedRedoCount = useStagedChangesStore(s => s.redoStack.length)
+  const stagedPastCount = useStagedChangesStore(s => s.past.length)
   // What the draft already holds (saved edits, imports): Review & Save can publish it.
   const draftChangeCount = useBranchStore(s => s.activeChangeSet
     ? s.activeChangeSet.counts.added + s.activeChangeSet.counts.modified + s.activeChangeSet.counts.removed : 0)
@@ -4835,13 +4837,13 @@ export function ContextViewCanvas({
   // Done: switching branches reloads the canvas, which would silently drop
   // staged edits — so route the user through the review panel instead.
   const handleExitEdit = useCallback(() => {
-    if (stagedChangeList.length > 0) {
+    if (stagedCount > 0) {
       openStagedChangesPanel()
       notify('warning', 'Review your pending edits — save or discard them before leaving the draft.')
       return
     }
     useBranchStore.getState().switchToMain()
-  }, [stagedChangeList.length, openStagedChangesPanel, notify])
+  }, [stagedCount, openStagedChangesPanel, notify])
 
   // Tracks nodes currently being fetched — prevents duplicate fetches on rapid clicks.
   // A ref (not state) because we need synchronous reads inside the toggle callback.
@@ -6783,7 +6785,7 @@ export function ContextViewCanvas({
         canEnterEdit={canEnterEdit}
         onEnterEdit={handleEnterEdit}
         onExitEdit={handleExitEdit}
-        pendingChangeCount={stagedChangeList.length}
+        pendingChangeCount={stagedCount}
         draftChangeCount={draftChangeCount}
         onOpenStagedChanges={openStagedChangesPanel}
         // A pending layout edit is saved first: the import writes its placements into the same
@@ -6791,8 +6793,8 @@ export function ContextViewCanvas({
         onImport={() => { void flushLayoutSave().then(() => setShowImportDialog(true)) }}
         onExport={() => setShowExportDialog(true)}
         thisView={thisView}
-        canUndo={!stagedSaving && (stagedChangeList.length > 0 || stagedPast.length > 0)}
-        canRedo={!stagedSaving && stagedRedoStack.length > 0}
+        canUndo={!stagedSaving && (stagedCount > 0 || stagedPastCount > 0)}
+        canRedo={!stagedSaving && stagedRedoCount > 0}
         onUndo={undoStagedChange}
         onRedo={redoStagedChange}
         connectToolOn={edgeConnect.state.tool}
@@ -7168,6 +7170,7 @@ export function ContextViewCanvas({
           // Publish. Every other way out leaves it open.
           onConfirm={async () => {
           if (!scopeWsId) return false
+          const stagedChangeList = useStagedChangesStore.getState().changes
           // Draft mode: persist EVERY change type — creates, edges, updates/deletes, and layer
           // moves — to the draft branch as ONE atomic, server-merged /graph/changes commit. One
           // Review & Save is exactly one commit (the backend mints urns + resolves temp refs).

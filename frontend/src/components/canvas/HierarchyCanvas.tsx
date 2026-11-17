@@ -34,7 +34,7 @@ import { InlineNodeEditor } from './InlineNodeEditor'
 import { CommandPalette } from './CommandPalette'
 import { SearchMatchBadge } from './search/SearchMatchBadge'
 import { useSearchHighlight } from './search/useSearchHighlight'
-import { useEntityChangeDecoration, nodeDecorationClass } from '@/features/versioning/canvas/useDiffDecoration'
+import { useEntityDecoration, nodeDecorationClass } from '@/features/versioning/canvas/useDiffDecoration'
 import { useCanvasInteractions } from '@/hooks/useCanvasInteractions'
 import { useCanvasKeyboard } from '@/hooks/useCanvasKeyboard'
 import { useDuplicateSubtree } from '@/hooks/useDuplicateSubtree'
@@ -729,7 +729,7 @@ function HierarchyContainer({
     isHidden: isHiddenByCanvasFilter,
   } = useSearchHighlight(node.urn ?? node.id, { isSelected })
   // Change decoration — staged (dashed) + committed-vs-main (solid), default-on on a draft.
-  const changeDeco = useEntityChangeDecoration().for(node.urn ?? node.id)
+  const changeDeco = useEntityDecoration(node.urn ?? node.id)
 
   // Trace highlighting
   const isHighlighted = isTraceActive && traceContextSet.has(node.id)

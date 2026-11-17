@@ -20,6 +20,7 @@
 import { memo, useCallback, useId, useMemo, useState } from 'react'
 import { useCanvasStore, type LineageNode } from '@/store/canvas'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
+import { stagedIndexOf } from '@/store/stagedIndex'
 import { useSchemaStore } from '@/store/schema'
 import { usePersonaStore } from '@/store/persona'
 import { useFeature } from '@/store/features'
@@ -111,8 +112,7 @@ function OpenEntityDrawer({
   const session = useEntityEditSession(node, summaryQ.data?.value)
   // The entity as first read — what a save's patch is judged against, kept by a staged edit — or
   // null for one not saved yet, whose name and identity properties the server derives afresh.
-  const stagedBefore = useStagedChangesStore((s) => s.changes.find(
-    (c) => (c.type === 'update_entity' || c.type === 'rename_entity') && c.targetId === node.id)?.before)
+  const stagedBefore = useStagedChangesStore((s) => stagedIndexOf(s.changes).nodeEdit.get(node.id)?.before)
   const original = unsavedCreate ? null : ((stagedBefore as Record<string, unknown> | undefined) ?? data)
   const { form, dirty, justStaged, edit, commit, stage, discard } = session
   const isGhost = data.isGhost === true

@@ -84,12 +84,16 @@ export function toSerializableChange(c: StagedChange): SerializableChange {
   }
 }
 
-export function writeSnapshot(snapshot: StagedDraftSnapshot): void {
+/** Keep the snapshot. False when it could not be kept (too large for the browser's storage, or
+ *  private mode): the one there before is removed too, so a reload never brings back an older,
+ *  partial set of the work as if it were all of it. */
+export function writeSnapshot(snapshot: StagedDraftSnapshot): boolean {
   try {
     localStorage.setItem(storageKey(snapshot.scopeKey), JSON.stringify(snapshot))
+    return true
   } catch {
-    // Quota exceeded / private mode — persistence is best-effort; the app
-    // still works, refresh just loses the unsaved work as it did before.
+    clearSnapshot(snapshot.scopeKey)
+    return false
   }
 }
 

@@ -28,7 +28,7 @@
  */
 import { useCallback } from 'react'
 import { useCanvasStore, type LineageEdge } from '@/store/canvas'
-import { useStagedChangesStore } from '@/store/stagedChangesStore'
+import { useStagedChangesStore, type StagedChange } from '@/store/stagedChangesStore'
 import { useStageEntityCreation } from '@/components/canvas/create/useStageEntityCreation'
 import { useGraphHydration } from '@/hooks/useGraphHydration'
 import { useViewIsContainmentEdge } from '@/hooks/useViewSchema'
@@ -340,6 +340,9 @@ export function useDuplicateSubtree(opts?: UseDuplicateSubtreeOptions): UseDupli
     // as a staged create_edge: each copies an edge that already passed the
     // ontology between the same two types (see CreateLinkPopover for the
     // user-drawn path that DOES need the draw-time gate).
+    // One canvas write and one staged write for every copied relationship (one Undo step).
+    const copies: LineageEdge[] = []
+    const edgeChanges: StagedChange[] = []
     for (const edgeStep of plan.edges) {
       const src = edgeStep.keeps === 'source' ? edgeStep.sourceOriginalId : stagedUrns.get(edgeStep.sourceOriginalId)
       const tgt = edgeStep.keeps === 'target' ? edgeStep.targetOriginalId : stagedUrns.get(edgeStep.targetOriginalId)
@@ -354,8 +357,10 @@ export function useDuplicateSubtree(opts?: UseDuplicateSubtreeOptions): UseDupli
         // Unsaved, as a drawn link is: a collapse keeps it, the save redraws it under its real id.
         data: { edgeType: edgeStep.edgeType, relationship: edgeStep.edgeType.toLowerCase(), isPending: 'create' },
       }
-      useCanvasStore.getState().addEdges([copy])
-      useStagedChangesStore.getState().stage({
+      copies.push(copy)
+      edgeChanges.push({
+        id: generateId('staged'),
+        timestamp: Date.now(),
         type: 'create_edge',
         targetId: tempId,
         after: { edgeType: edgeStep.edgeType, source: src, target: tgt },
@@ -370,6 +375,10 @@ export function useDuplicateSubtree(opts?: UseDuplicateSubtreeOptions): UseDupli
         discard: () => useCanvasStore.getState().removeEdge(tempId),
         reapply: () => useCanvasStore.getState().addEdges([copy]),   // redo draws it again
       })
+    }
+    if (copies.length) {
+      useCanvasStore.getState().addEdges(copies)
+      useStagedChangesStore.getState().stageMany(edgeChanges)
     }
 
     return rootCopyUrn

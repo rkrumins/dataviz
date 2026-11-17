@@ -35,5 +35,12 @@ describe('applyGraphChanges', () => {
       new Response(JSON.stringify({ detail: 'branch_not_found' }), { status: 404 }))
     await expect(applyGraphChanges('ws', 'ds', 'br', [], 'm', 'k1')).rejects.toMatchObject({ status: 404 })
   })
-})
 
+  it('says a save too large to send was refused, and that nothing was saved', async () => {
+    vi.mocked(fetchWithTimeout).mockResolvedValue(
+      new Response(JSON.stringify({ detail: 'Request body too large' }), { status: 413 }))
+    await expect(applyGraphChanges('ws', 'ds', 'br', [], 'm', 'k1')).rejects.toMatchObject({
+      status: 413, message: expect.stringMatching(/too large to send in one go — nothing was saved/),
+    })
+  })
+})

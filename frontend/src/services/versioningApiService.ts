@@ -1019,6 +1019,10 @@ function versioningError(status: number, detail: RefusalDetail, fallback: string
     return new BootstrapDecisionError(d.type, d.message)
   }
   if (status === 401) return new Error('Session expired')
+  if (status === 413) {
+    // Nothing was written: the request was larger than the server takes in one go.
+    return Object.assign(new Error('This is too large to send in one go — nothing was saved. Save part of it, then the rest.'), { status })
+  }
   const msg =
     typeof detail === 'string'
       ? detail
