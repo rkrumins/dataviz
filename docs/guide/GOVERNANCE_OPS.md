@@ -28,6 +28,7 @@ so sees them all.
 | **Infrastructure** | Check the live health of every backing service | Super Admin | [Below](#infrastructure) |
 | **Redis & Graph Store** | See how Redis and the default graph store are configured, and test them | Super Admin | [Below](#redis--graph-store) |
 | **Graph store** | See shards, replicas and where every graph lives | Super Admin | [The Graph Store](/guide/graph-store-topology) |
+| **Versioned graphs** | Choose what readers see while new data loads, which graphs stay in memory, how new versions are built, how long drafts last and what imports match by | Super Admin | [Below](#versioned-graphs) · [Versioned Graph Settings](/guide/versioned-graph-settings) |
 | **Branding** | Set the product name, logo, colour and support email | Super Admin | [Below](#branding) |
 | **Features** | Turn capabilities on and off for everybody | Super Admin | [Feature Switches](/guide/feature-switches) |
 | **Telemetry** | Find out which help content people miss | `system:audit:read` — Org Auditors and Super Admins | [Below](#telemetry) |
@@ -92,60 +93,17 @@ bottom:
    **Overlay integrity**.
 6. **Diagnostics & remediation** — what each signal means, why it might be
    happening, and how to resolve it. Expand a finding for the details.
-7. Further panels for **Enabling version control**, **Versioned graph
-   projection** and **Delivery pipelines** (queue depth and consumer lag).
-
-### Versioned graphs: what stays in memory
-
-**What it's for:** deciding which versioned graphs the graph store keeps in
-memory, and getting one back when it matters. **Who:** Super Admins. Postgres
-holds every graph; a graph out of memory is read from it, more slowly, until it
-is loaded again. [Forks & Residency](/docs/versioning-forks-and-residency)
-explains every rule.
-
-1. In **Versioned graph projection**, select **All versioned graphs**. Each row
-   shows the graph's class — **Always**, **Standard** or **Coldline** — and
-   whether it is **In memory**, **Evicted**, **Loading** or **Waiting for
-   room**.
-2. To keep a graph in memory for good, set its class to **Always**. If its
-   master has no room, the row says which master and how much more it needs,
-   and nothing changes.
-3. To bring an evicted graph back now, select **Load now**. It is loaded as soon
-   as its master has room.
-4. To move a customer's own graph onto a copy the platform manages, select
-   **Adopt…**, read what changes and select **Adopt**. From then the platform
-   reads its own copy: changes other tools keep making to the customer's graph
-   no longer show, and **Bring into history** no longer sees them. The
-   customer's graph itself is left exactly as it is. Bring in what it holds
-   first if it should be kept.
-
-**You should now see** a note on the row saying what happened; the graph's
-chips change as it loads.
-
-### Change when graphs leave memory
-
-1. In **All versioned graphs**, select **Residency & eviction**. The card shows
-   each master's memory with its **start** and **stop** marks, every value with
-   the one in force and its default, and who changed them last.
-2. Change a value — how long an unread Standard or Coldline graph stays, the
-   start and stop marks, the headroom a load needs — or select **Reset** to go
-   back to its default.
-3. Select **Save**. The confirmation says what the next pass would do, such as
-   "Saving evicts 12 graphs, 9.4 GB, on master 10.0.0.2:6379". Select **Save**
-   again to apply it.
-
-**You should now see** the new values in force within 30 seconds; the next
-capacity pass acts on them. A value that is
-out of range, or contradicts another, is named next to its field and nothing is
-saved. If the card says Graph residency is off, the values are kept and apply once
-a Super Admin turns it on under **Administration → Features → Graph residency**.
+7. Further panels for **Enabling version control**, **Versioned graph projection** (its **All
+   versioned graphs** opens [Versioned graphs](#versioned-graphs)), **Versioned graph settings**
+   (what each category is set to now, read-only, with **Open the settings**) and **Delivery
+   pipelines** (queue depth and consumer lag).
 
 ### Adjust the graph store's limits
 
 Each node under **Memory headroom** shows its current limits. To change them:
 
-1. Select **Adjust graph store limits** next to the node. The **Graph store
-   limits** dialog opens, with a **How they are sized** link.
+1. Select **Adjust graph store limits** next to the node. The **Graph store** page opens with
+   the node's **Graph store limits** dialog, which has a **How they are sized** link.
 2. Set **Query time cap (TIMEOUT_MAX)**, **Per-query memory ceiling
    (QUERY_MEM_CAPACITY)** or **Effects threshold (EFFECTS_THRESHOLD)**. Raising
    the memory ceiling also needs the **Container memory limit**, because the
@@ -158,8 +116,7 @@ Each node under **Memory headroom** shows its current limits. To change them:
 the graph store restarts; the dialog gives you the `FALKORDB_ARGS` fragment to
 make it permanent. [Rollup Capacity & Large
 Graphs](/guide/rollup-capacity#adjusting-the-graph-stores-own-limits) explains
-every check the dialog makes. The same dialog opens from **Adjust limits** on
-the **Graph store** page.
+every check the dialog makes. **Adjust limits** on the **Graph store** page opens it too.
 
 ### When a provider goes offline
 
@@ -220,6 +177,90 @@ setting names.
 store, every node (masters and replicas), what each holds, how far replicas lag
 and where every graph lives. **Who:** Super Admins. [The Graph Store: Shards,
 Replicas & Placement](/guide/graph-store-topology) explains every figure on it.
+
+---
+
+## Versioned graphs
+
+**What it's for:** every versioned graph, and every setting that decides how they are read,
+updated, built, kept in memory, drafted and imported. **Who:** Super Admins. [Versioned Graph
+Settings](/guide/versioned-graph-settings) explains each setting: what it means, what it changes,
+when to change it and what we recommend.
+
+The page has three tabs:
+
+- **Overview** — a sentence saying where things stand, the fleet's figures (graphs in memory,
+  unloaded, loading or waiting for room, building a new version, failing, and with settings of
+  their own), **Something's wrong?**, and **Every versioned graph**: each graph with what its
+  readers get, its class and its state, **Settings…** to open its settings, and a menu with
+  **Rebuild…**, **Check sync**, **Load now**, **Move…**, **Adopt…** and **Open data source**.
+  **Reseed a provider…** sits above the list.
+- **Settings** — every platform setting, in seven categories, each saying how many of its values
+  differ from the default. Search them with **/**, by name, by the problem they answer or by
+  environment variable; **Changed only** shows the ones that differ.
+- **History** — every change: who made it, when, why, and each value from and to.
+
+A workspace's own values are set on its **Versioned graphs** tab, and one graph's in its settings:
+**Settings…** on its row here, or **Open settings** on its data source's **Versioning** tab.
+
+### Change a setting
+
+1. Open **Administration → Versioned graphs** and choose **Settings**.
+2. Find the setting in its category, or search for it.
+3. Change its value. Nothing is saved yet: the row says what would be in force once saved, and the
+   tab counts what is not saved. **Discard** drops it.
+4. Select **Review changes**. The review lists each value before and after and what the change
+   does to your graphs. Acknowledge any warning it asks you to, and say why you are making the
+   change.
+5. Select **Save change** (or **Save *N* changes**).
+
+**You should now see** the new value in force, with a bar saying what was saved and **Undo**. Every
+server reads it within a few seconds; each setting says when it is then acted on. A value the
+server refuses is named, with why, and nothing is saved. Two categories, **New-version builds** and
+**Memory & residency**, show their switch first: while it is off, their settings are marked
+**Inactive** and kept for when it is on.
+
+### Keep a graph in memory, or get one back
+
+The database holds every graph; a graph out of memory is read from it, more slowly, until it is
+loaded again. [Forks & Residency](/docs/versioning-forks-and-residency) explains every rule.
+
+1. On **Overview**, find the graph in **Every versioned graph**. Its row shows its class —
+   **Always**, **Standard** or **Coldline** — and whether it is **In memory**, **Unloaded**,
+   **Loading** or **Waiting for room**.
+2. To keep it in memory for good, select **Settings…**, set **Residency class** to **Always**
+   under **Memory & residency**, select **Review changes** and save. The review says what the next
+   memory check would load and unload.
+3. To bring an unloaded graph back now, open the row's menu and select **Load now**. It is loaded
+   as soon as its node has room.
+4. To move a customer's own graph onto a copy the platform manages, select **Adopt…** in the row's
+   menu, read what changes and select **Adopt**. From then the platform reads its own copy: changes
+   other tools keep making to the customer's graph no longer show, and **Bring into history** no
+   longer sees them. The customer's graph itself is left exactly as it is. Bring in what it holds
+   first if it should be kept.
+
+**You should now see** a note on the row saying what happened; the graph's chips change as it
+loads.
+
+### Change when graphs leave memory
+
+1. On **Settings**, open **Memory & residency**. **Where unloading starts and stops** shows each
+   node's memory with its **start** and **stop** marks; below it is every value, with the one in
+   force and where it came from.
+2. Change a value — how long an unread Standard or Coldline graph stays, the start and stop marks,
+   the headroom a load needs — or choose **Use the default** to go back to it.
+3. Select **Review changes**. It says what the next memory check would do on each node: the graphs
+   it would unload, load and leave waiting. Say why, then save.
+
+**You should now see** the new values in force within a few seconds; the next memory check acts on
+them. A value that is out of range, or contradicts another, is named and nothing is saved. If the
+**Graph residency** switch at the top of the category is off, the values are kept and apply once a
+Super Admin turns it on.
+
+### See or undo a change
+
+Open **History**. Each change says who made it, when, the reason they gave, and each value from and
+to. Select **Put back…** to undo one: it opens the same review a save does.
 
 ---
 

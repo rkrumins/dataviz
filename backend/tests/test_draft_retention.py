@@ -1,6 +1,6 @@
-"""Draft retention: how long a merged or abandoned draft keeps its changes (Admin → Infrastructure →
-Versioned graphs → Draft retention), and how long an idle draft stays open. Covered here, without a
-database:
+"""Draft retention: how long a merged or abandoned draft keeps its changes (Keep closed drafts'
+changes for, in Admin → Versioned graphs → Settings → Drafts & history), and how long an idle draft
+stays open. Covered here, without a database:
 - where it is stored (``drafts.keepClosedDays`` in the settings store, written through to
   ``platform_settings.gv_draft_retention_days``, migration ``20261111_1000_gv_draft_prune``);
 - how it resolves (``draft_retention``);

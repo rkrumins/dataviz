@@ -188,8 +188,9 @@ LIVENESS_SECS: int = int(os.getenv("GRAPHVER_LIVENESS_SECS", "60"))
 # for goes to Postgres, which composes the graph without its lineage summaries.
 READ_MAX_LAG: int = int(os.getenv("GRAPHVER_READ_MAX_LAG", "-1"))
 # What reads of a versioned graph's main get while a newer version is being written into FalkorDB,
-# unless the graph says otherwise (``projection_state.read_mode``). A system administrator changes it
-# live under Admin → Infrastructure → Versioned graphs → New-version builds (``build_policy``).
+# unless its workspace or the graph says otherwise (``reads.mode``, resolved platform → workspace →
+# graph by ``build_policy.read_mode_for``). It is changed live under Admin → Versioned graphs →
+# Settings → Reads & consistency.
 #   latest    always the newest published version: from Postgres until FalkorDB holds it. The
 #             default: reads of a graph behind its head have always gone to Postgres;
 #   in_place  the version FalkorDB last finished, while the next is written into the same key;
@@ -294,10 +295,10 @@ RETIRE_GRACE_SECS: int = int(os.getenv("GRAPHVER_RETIRE_GRACE_SECS", "900"))
 
 # New-version builds (doc 14 §6, ``build_policy``): a graph's next version built in a second key
 # while its current key keeps serving, then switched to. Each value below is a default that a system
-# administrator overrides live under Admin → Infrastructure → New-version builds; the switch itself
-# is the ``candidateKeysEnabled`` feature flag. Windows of more changed rows than this are built
-# beside the serving key, as are rebuilds and moves of platform-owned keys when the second is 1:
-# the new key seeded from Postgres while readers keep the current version, then switched to.
+# administrator overrides live under Admin → Versioned graphs → Settings → New-version builds; the
+# switch itself is the ``candidateKeysEnabled`` feature flag. Windows of more changed rows than this
+# are built beside the serving key, as are rebuilds and moves of platform-owned keys when the second
+# is 1: the new key seeded from Postgres while readers keep the current version, then switched to.
 PROJECTION_CANDIDATE_ABOVE: int = int(os.getenv("GRAPHVER_PROJECTION_CANDIDATE_ABOVE", "200000"))
 PROJECTION_CANDIDATE_REBUILDS: bool = os.getenv("GRAPHVER_PROJECTION_CANDIDATE_REBUILDS", "1") == "1"
 # How a build makes its key: ``auto`` copies the serving key (GRAPH.COPY) when its node has room,
@@ -376,10 +377,10 @@ DRAFT_TTL_DAYS: int = int(os.getenv("GRAPHVER_DRAFT_TTL_DAYS", "30"))
 # A merged or abandoned draft keeps its changes this many days, then the same pass removes them in
 # windows and keeps its record: the branch, its members, its commits and its review (a merged
 # draft's changes are in main, in the commit it landed as). 0 keeps them for good. A system
-# administrator overrides it live (Admin → Infrastructure → Versioned graphs → Draft retention;
-# ``draft_retention``). Each pass spends at most DRAFT_PRUNE_PASS_SECS on it, so a draft of
-# millions of rows is removed over a few passes rather than holding the worker or the
-# database.
+# administrator overrides it live, for the platform or a workspace (Admin → Versioned graphs →
+# Settings → Drafts & history; ``draft_retention``). Each pass spends at most DRAFT_PRUNE_PASS_SECS
+# on it, so a draft of millions of rows is removed over a few passes rather than holding the
+# worker or the database.
 DRAFT_RETENTION_DAYS: int = int(os.getenv("GRAPHVER_DRAFT_RETENTION_DAYS", "30"))
 DRAFT_PRUNE_PASS_SECS: float = 300.0
 
@@ -762,9 +763,11 @@ def lane_pool_size(lanes) -> int:
 def warn_invalid_settings_env() -> None:
     """Log one warning for each environment variable a versioned-graph setting takes its default
     from (``config/versioned_graph_settings.py``) whose value the setting can't take, as this module
-    parsed it: not of the setting's kind, or out of its range. The setting then runs on its code
-    default and says so (``invalid_env``). Called at start-up, by the API and the versioning worker;
-    it imports the settings resolver only when called, so this module still imports on its own."""
+    parsed it: not of the setting's kind, or out of its range. A value of the right kind out of its
+    range is held to the nearest end of the range (``env_out_of_range``); any other gives way to the
+    code default (``invalid_env``). Each warning names the value that applies. Called at start-up,
+    by the API and the versioning worker; it imports the settings resolver only when called, so
+    this module still imports on its own."""
     from backend.app.config import versioned_graph_settings as registry
     from backend.app.services.settings import resolver
     from backend.app.services.settings.snapshot import env_reader
@@ -773,7 +776,13 @@ def warn_invalid_settings_env() -> None:
                            env=env_reader(registry.SETTINGS, registry.DEPLOYMENT))
     for setting in registry.SETTINGS:
         env = resolver.resolve(ctx, setting.key)["trail"][0]["env"]
-        if env is not None and not env["valid"]:
+        if env is None or env["valid"]:
+            continue
+        if "held" in env:
+            logging.getLogger(__name__).warning(
+                "%s=%r is outside the range of %s (%s); the nearest allowed value, %r, applies "
+                "instead", env["name"], env["value"], setting.key, setting.label, env["held"])
+        else:
             logging.getLogger(__name__).warning(
                 "%s=%r is not a value %s (%s) can take; its default, %r, applies instead",
                 env["name"], env["value"], setting.key, setting.label, setting.default.code)

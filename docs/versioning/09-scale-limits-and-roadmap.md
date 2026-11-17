@@ -5,7 +5,7 @@
 > gaps, and the prioritized roadmap. Nothing here is aspirational marketing; every limit traces to
 > code.
 
-**Re-checked against the code on 2026-10-09 (`42cae50`); §7, §9 and §10's Stage 1–2 subsections again on 2026-10-19 (`57444bd8`); §2–§4 and §8 on 2026-10-30, at millions of entities; §2's 5M section and §10's further work on 2026-11-14, from the scale runs.**
+**Re-checked against the code on 2026-10-09 (`42cae50`); §7, §9 and §10's Stage 1–2 subsections again on 2026-10-19 (`57444bd8`); §2–§4 and §8 on 2026-10-30, at millions of entities; §2's 5M section and §10's further work on 2026-11-14, from the scale runs; §2's second 200-reader run and §9 on 2026-11-17.**
 
 **TL;DR.** The Versioned Graph is **feature-complete and test-covered for the managed, single-node
 case**. Saves, pulls, previews, reviews and publishes are `O(change)`, not `O(graph)`, and a publish,
@@ -314,6 +314,39 @@ What it shows:
     its check for lineage summaries left in its key ran past its 30 s budget twice, and the
     harness's hour ran out.
 
+**Again with 200 readers** (run 43967953534, on `4004f1461`, once each graph's read mode resolved
+platform → workspace → graph): the same graph of 1,000,000 nodes and 2,000,000 edges, changes of
+100,000 rows, and 200 readers as 10 processes of 20. Three modes ran; there was no seeded one. These
+are this run's figures, beside the run above:
+
+| Read mode | Landed in | Reads meanwhile | Latency p50 / p95 / p99 | Errors | Read from | Versions readers saw | FalkorDB memory |
+|---|--:|--:|--:|--:|---|---|--:|
+| Always the latest | 96 s, 1 pass | 293,455 | 41 / 97 / 1,983 ms | 0 (34 shed, then read on a retry) | FalkorDB 96%, Postgres 4% | the old one, then the new one at once | 1,408 → 1,446 MB |
+| Update in place | 83 s, 1 pass | 718,576 | 38 / 78 / 105 ms | 0 | FalkorDB | the old one, with parts of the new one as written | 1,426 → 1,486 MB |
+| Switch when ready, copied | 161 s, 3 passes | 1,044,808 | 40 / 81 / 113 ms | 0 | FalkorDB | one whole version at a time | 1,463 → 4,450 MB |
+
+Each mode's change took 66 to 72 s to import and 58 to 63 s to publish. What it shows:
+- **No read failed.** There were 2.06 million reads in the three modes, and FalkorDB held what
+  Postgres holds after each.
+- **Switch when ready landed by a switch this time:** in 3 passes, one whole version at a time. The
+  copy took about 32 s on the server (FalkorDB's log: 9 s to dump the graph, 21 s to load it),
+  inside the projector's 75 s socket. At its peak FalkorDB held 4,450 MB, about three times the
+  1,463 MB it held before. In run 43728972056, above, the copy outlasted that socket and the change
+  was written in place (§10, item 6).
+- **The p99s are this run's, not a speed-up.** Per mode they were 1,983, 105 and 113 ms, against
+  3,308, 198 and 202 ms in run 43728972056. Both ran on one shared 4-CPU runner, where Postgres,
+  FalkorDB, the change and the 10 reader processes take turns, and such runs vary from one to the
+  next.
+- **The run's checks.** "Switch when ready: one whole version at a time" passed, and so did the
+  read-modes step's per-window growth (−29%, under the 20% target). Its event-loop lag p99 was
+  193 ms, against a target of 50 ms: that step runs every mode's import, publish, projection and
+  build in one process (§10, item 4). It peaked at 2,224 MB, and its longest stall was 7.4 s, in the
+  change's edge windows.
+- **The steps at full size**, each in a process of its own: import into a draft 1,492 s and 493 MB;
+  publish 666 s and 403 MB, the graph's lock held throughout; projection of the published window
+  448 s and 292 MB (2 passes); rebuild from nothing 362 s and 286 MB (2 passes); export 96 s and
+  167 MB.
+
 The first run at 200 readers failed (43699487982, before the route cache, with 50 readers in each
 of 4 processes):
 - In Always the latest, 23,106 of 89,432 reads failed (26%), at p50 177 ms and p99 3.8 s.
@@ -443,10 +476,12 @@ not to the projector.) See [04](04-projection-and-cache.md).
   graph's rows hash to **one partition**, so the busiest graph gets **zero** partition-pruning benefit.
   The key is **immutable-after-data** — decide before loading production data whether a composite key
   (e.g. `(graph_id, entity_id)`) is needed. See [02](02-data-model.md).
-- **Reads while the graph updates show an earlier version.** Every read surface serves main from the
-  key at the version it last published while it catches up or rebuilds (`serving_seq`, doc 04 §5), so
-  a change shows once its pass publishes; the sync chip says so meanwhile. `GRAPHVER_READ_MAX_LAG=0`
-  reads it from Postgres at once instead, without the lineage summaries.
+- **Reads while the graph updates show an earlier version**, in the read modes that keep serving.
+  Every read surface then serves main from the key at the version it last published while it catches
+  up or rebuilds (`serving_seq`, doc 04 §5), so a change shows once its pass publishes; the sync chip
+  says so meanwhile. Always the latest, the default, reads it from Postgres at once instead, without
+  the lineage summaries, and so does a graph further behind than [Most versions
+  behind](/guide/versioned-graph-settings#reads-maxversionsbehind) allows.
 - **A large restructure or an overlapping window still rebuilds rollups in full.** A window of any
   size is maintained by delta, but a move of a subtree over `PROJECTION_ROLLUP_INLINE_CAP` (50,000)
   or an overlap punts to `"stale"` → full rebuild. See [04](04-projection-and-cache.md) §8.
@@ -535,7 +570,12 @@ See [08](08-import-export.md) for detail; the load-bearing ones:
 Almost every knob lives in `backend/app/services/versioning/config.py` and is env-overridable; the
 export limits live in `import_export/stream.py` and the FalkorDB write/read timeouts in
 `projection.py`. The **immutable-after-data** ones (changing them after rows exist corrupts
-hashes/partitions) are marked ⚠. The table is the load-bearing subset.
+hashes/partitions) are marked ⚠. The table is the load-bearing subset. The versioned-graph
+settings are left out: a system administrator sets them live, for the platform, a workspace or a
+graph, and their environment variables (`GRAPHVER_READ_MODE`, `GRAPHVER_READ_MAX_LAG`,
+`GRAPHVER_DRAFT_TTL_DAYS`, `GRAPHVER_DRAFT_RETENTION_DAYS`, `GRAPHVER_MAX_FORKS_PER_GRAPH`,
+`GRAPHVER_PURGE_GRACE_DAYS` and the pacing, build, residency, database-read and import ones)
+give only their defaults. [Versioned Graph Settings](/guide/versioned-graph-settings) explains each one.
 
 | Env var | Default | Purpose |
 |---------|---------|---------|
@@ -545,16 +585,13 @@ hashes/partitions) are marked ⚠. The table is the load-bearing subset.
 | ⚠ `GRAPHVER_HASH_ALGO` / `_DIGEST_SIZE` | `blake2b` / `32` | content + Merkle hash |
 | `GRAPHVER_PROJECTION_INPROCESS` | off | run the worker lanes inside viz-service, honoured only with `SYNODIC_ROLE=dev`; Compose, Kubernetes and Helm run the versioning worker lanes instead |
 | `GRAPHVER_PROJECTION_CONCURRENCY` | `8` | graphs projected per poll pass |
-| `GRAPHVER_READ_MAX_LAG` | `-1` | how many versions behind its head the key may serve main while it updates; `0`: the head only, Postgres meanwhile |
 | `GRAPHVER_PROJECTION_VERIFY` | on | post-projection count reconcile + bounded heal |
 | `GRAPHVER_REBUILD_TIMEOUT_SECS` | `900` | budget for an explicit operator rebuild |
 | `GRAPHVER_VERSIONED_WRITES` | on | write-through: every provider write → an audited commit, which the projector carries to FalkorDB. `0` opts out only data sources without version control; a versioned graph is always written through versioning |
 | `GRAPHVER_FALKOR_MAX_RESIDENT` / `_BUDGETS` | `0` (not acted on) | per-provider RAM-budget eviction, which Graph residency replaces |
-| `GRAPHVER_DRAFT_TTL_DAYS` / `_SWEEP_SECS` | `30` / daily | auto-abandon idle drafts (not those with a live PR or staged edits, nor on a deleted, frozen or recently unfrozen graph) |
-| `GRAPHVER_DRAFT_RETENTION_DAYS` | `30` | days a merged or abandoned draft keeps its changes before the sweep removes them, keeping its record (`0`: for good; Admin → Infrastructure → Versioned graphs → Draft retention overrides it live). At most 5 minutes a sweep |
+| `GRAPHVER_DRAFT_SWEEP_SECS` | `3600` (hourly) | how often the versioning worker sweeps: open drafts idle past their workspace's window are abandoned, and closed drafts' changes past theirs removed ([03](03-branching-commits-merge.md) §3.15) |
 | `GRAPHVER_COMMIT_MAX_RETRIES` | `5` | `commit_seq`-collision retry budget |
 | `GRAPHVER_GRAPH_LOCK_TIMEOUT_MS` | `5000` | longest wait for any one graph, draft, lifecycle, move, PR or graph-row lock; a write `_retry_seq` retries (save, checkpoint, pull, publish, merge, revert, restore, sync, bulk ingest) tries `GRAPHVER_COMMIT_MAX_RETRIES` times before 503 `lock_busy`, anything else answers it after one wait |
-| `GRAPHVER_MAX_FORKS_PER_GRAPH` | `10` | live forks per graph; one more is 409 `fork_limit` |
 | `GRAPHVER_FORK_REWIND_MAX` / `_WARN` | `200000` / `50000` | entities a fork's patch set may classify before its reads go to Postgres / parent changes not taken in that recommend an update ([17](17-forks-and-residency.md) §2, §7) |
 | `GRAPHVER_OVERLAY_CACHE_ENTRIES` | `400000` | entries the overlay deltas a process keeps for drafts' and forks' reads hold together: about 1.2 KB each (0.74 KB a draft's, 0.87 KB a fork's, measured, before allocator slack and the chains a rollup read keeps), so under 512 MB a process; an evicted delta is built again on its next read, 2 to 6 s at 50,000 to 145,000 entries |
 | `GRAPHVER_SET_FIELDS` | `tags` | payload fields merged as unordered sets in 3-way merge |
@@ -564,7 +601,6 @@ hashes/partitions) are marked ⚠. The table is the load-bearing subset.
 | `GRAPHVER_ROLLUP_NET_MAX_CELLS` | `200000` | rollup cells a projection window nets in memory; past it, in `graphver.rollup_deltas` |
 | `GRAPHVER_RESYNC_MAX_ENTITIES` | `250000` | largest graph a re-sync may attempt; `0` disables the guard ([11](11-resync-at-any-scale.md)) |
 | `GRAPHVER_BOOTSTRAP_MERKLE_MAX` | `1000000` | above this, an enable-VC copy defers the Merkle root rather than building it in memory |
-| `GRAPHVER_PURGE_GRACE_DAYS` | `30` | undo window before a deleted data source's version history is purged |
 
 ## 10. Roadmap (prioritized)
 
@@ -740,8 +776,8 @@ are set for 100k + 100k. A missed target is reported but doesn't fail the run. T
        only once a write has moved it, which the write says in Redis as its commit returns. A read
        checks that in one Redis round trip, so Postgres' load no longer grows with readers.
      - Each web process bounds its reads:
-       - from Postgres, per graph (`GRAPHVER_PG_READS_PER_GRAPH`, 4) and in all
-         (`GRAPHVER_PG_READS_PER_PROCESS`, 8);
+       - from Postgres, per graph ([Reads at once per graph](/guide/versioned-graph-settings#database-readspergraph)) and
+         in all ([Reads at once per process](/guide/versioned-graph-settings#database-readsperprocess));
        - from FalkorDB, per key (`PROVIDER_MAX_CONCURRENCY`, 8, with 16 more waiting).
      - Past those bounds a read answers 429 with `Retry-After`. A read past its statement timeout
        answers 503.
@@ -751,12 +787,13 @@ are set for 100k + 100k. A missed target is reported but doesn't fail the run. T
        retries.
    - *Measured.*
      - 200 readers, as 10 processes of 20, at 1M nodes and 2M edges (§2): no read failed in Always
-       the latest, Update in place or Switch when ready, over 2.28 million reads.
-     - Their p50 of 77 ms was queueing on one 4-CPU runner.
+       the latest, Update in place or Switch when ready, over 2.28 million reads in run 43728972056
+       and 2.06 million in run 43967953534.
+     - Their p50 of 77 ms (38 to 41 ms in the second run) was queueing on one 4-CPU runner.
      - Before the route cache, 26% of reads failed.
    - *Still open.*
      - **A copy under load.**
-       - *Measured.* Under 200 readers, `GRAPH.COPY` of 1M + 2M took 76 to 88 s.
+       - *Measured.* Under 200 readers, `GRAPH.COPY` of 1M + 2M took 76 to 88 s (run 43728972056).
          - The client gave up after 75 s, the projector's socket timeout
            (`projection_socket_timeout()`, `falkordb_connection.py`), which is
            `PROJECTION_FALKOR_WRITE_TIMEOUT_S` (60) plus `PROJECTION_SOCKET_TIMEOUT_MARGIN_S` (15).
@@ -765,6 +802,9 @@ are set for 100k + 100k. A missed target is reported but doesn't fail the run. T
          - After 3 attempts the build was dropped and the change written in place.
          - Any copy that takes longer than 75 s fails the same way, under load or for a larger
            graph.
+         - It didn't recur in run 43967953534, at the same size and load: the copy took about
+           32 s, and the change landed by a switch (§2). The 75 s limit stands, so a slower copy
+           would still fail.
        - *Where to start.* `_build_copy` (`projection.py`).
          - Give the copy a socket that waits as long as a copy can take.
          - Have a retry after a timeout use the copy the server made: if the build's key holds the

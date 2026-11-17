@@ -993,7 +993,7 @@
             "weight": "low"
           }
         ],
-        "evidence": "Measured by the versioning-scale workflow (docs/versioning/09 §2) at 1,000,000 nodes and 1,000,000 edges, a change of 100,000 rows, 4 readers: Always the latest landed in 29 s, reads p99 66 ms, 5% of them from Postgres; update in place 30 s, p99 9 ms, no extra memory; switch when ready by a copy 56 s, p99 9.6 ms, FalkorDB at 2.0x the graph's memory at the peak; by a seed from Postgres 522 s, at 1.1x. No read failed in any mode. With 200 readers at 1M nodes and 2M edges, GRAPH.COPY took 76 to 88 s, past the projector's 75 s socket, three times: the build was dropped and the change written in place. One rule applies the mode to every read: service.serving_seq with the lag build_policy.read_mode_for resolves for the graph (0 for latest). candidates.wanted builds beside only above buildAboveRows, on a platform-owned key, with candidateKeysEnabled on; a graph whose summaries live in a graph named from its key, or whose key other data sources read, is written in place (projection._keeps_its_key).",
+        "evidence": "Measured by the versioning-scale workflow (docs/versioning/09 §2) at 1,000,000 nodes and 1,000,000 edges, a change of 100,000 rows, 4 readers: Always the latest landed in 29 s, reads p99 66 ms, 5% of them from Postgres; update in place 30 s, p99 9 ms, no extra memory; switch when ready by a copy 56 s, p99 9.6 ms, FalkorDB at 2.0x the graph's memory at the peak; by a seed from Postgres 522 s, at 1.1x. No read failed in any mode. With 200 readers at 1M nodes and 2M edges, no read failed either: in run 43728972056 GRAPH.COPY took 76 to 88 s, past the projector's 75 s socket, and after 3 attempts the build was dropped and the change written in place; in run 43967953534 the copy took about 32 s and switch when ready landed by a switch, one whole version at a time. One rule applies the mode to every read: service.serving_seq with the lag build_policy.read_mode_for resolves for the graph (0 for latest). candidates.wanted builds beside only above buildAboveRows, on a platform-owned key, with candidateKeysEnabled on; a graph whose summaries live in a graph named from its key, or whose key other data sources read, is written in place (projection._keeps_its_key).",
         "example": "With Always the latest, an import of 100,000 changes shows the moment it is published, read from the database until the graph store has it: slower on a large graph, and without lineage summaries meanwhile.",
         "means": "A publish or an import lands in the database at once, as one new version. Then the graph store, which answers reads fast, is updated, and on a large graph that takes a while. The read mode decides what readers get meanwhile: the newest version, read from the database; the graph store's copy as it is updated; or one whole version until a new copy is built and everyone switches to it.",
         "recommended": {
@@ -2204,7 +2204,7 @@
             "weight": "medium"
           }
         ],
-        "evidence": "residency.copy_room refuses a graph larger than copyMaxBytes (too_large), and auto then seeds it (projection._build_queued). Measured (docs/versioning/09 §10, item 6): under 200 readers, GRAPH.COPY of 1M nodes and 2M edges took 76 to 88 s, past the projector's 75 s socket (PROJECTION_FALKOR_WRITE_TIMEOUT_S 60 + PROJECTION_SOCKET_TIMEOUT_MARGIN_S 15); after 3 attempts the build was dropped and the change written in place. With 4 readers the same copy took about 19 s.",
+        "evidence": "residency.copy_room refuses a graph larger than copyMaxBytes (too_large), and auto then seeds it (projection._build_queued). Measured (docs/versioning/09 §10, item 6): under 200 readers, GRAPH.COPY of 1M nodes and 2M edges took 76 to 88 s in run 43728972056, past the projector's 75 s socket (PROJECTION_FALKOR_WRITE_TIMEOUT_S 60 + PROJECTION_SOCKET_TIMEOUT_MARGIN_S 15); after 3 attempts the build was dropped and the change written in place. In run 43967953534 the same copy took about 32 s and landed. With 4 readers a copy of 1M nodes and 1M edges took about 19 s.",
         "example": "Any graph may be copied once its node has room.",
         "means": "A graph over this size is never copied: with Auto its builds come from the database instead, which needs about half the memory but takes much longer; with Copy only they wait. Copies of very large graphs take long too, and one that outlasts the worker's wait on a write (75 seconds by default) fails that attempt.",
         "recommended": {
@@ -2562,7 +2562,7 @@
             "weight": "medium"
           }
         ],
-        "evidence": "projection._advance_candidate: a build takes a step only while fewer than buildConcurrency are running in that projector; build_policy.effective clamps it to max(1, GRAPHVER_PROJECTION_CONCURRENCY), 8 by default.",
+        "evidence": "projection._advance_candidate: a build takes a step only while fewer than buildConcurrency are running in that projector; the settings resolver caps it at GRAPHVER_PROJECTION_CONCURRENCY (8 by default), never under 1 (its deployment cap).",
         "example": "Each worker runs up to 2 builds at once; more wait their turn.",
         "means": "Each worker updates a number of graphs at once, set by your deployment; up to this many of them may be builds. More builds wait their turn. It can't be more than the graphs a worker updates at once.",
         "recommended": {
@@ -2661,7 +2661,7 @@
             "weight": "medium"
           }
         ],
-        "evidence": "projection._advance_candidate: attempts >= buildMaxAttempts drops the build (drop_candidate); each failure backs off and starts again from a fresh copy, or seeds again. Measured (docs/versioning/09 §10, item 6): under 200 readers, three copies of 1M + 2M timed out at 75 s, and the build was dropped and the change written in place.",
+        "evidence": "projection._advance_candidate: attempts >= buildMaxAttempts drops the build (drop_candidate); each failure backs off and starts again from a fresh copy, or seeds again. Measured (docs/versioning/09 §10, item 6): under 200 readers, in run 43728972056, two of the three attempts to copy 1M + 2M timed out at 75 s and the other found the first's copy already there; the build was dropped and the change written in place.",
         "example": "A build that fails 3 times is dropped, and the change is written in place.",
         "means": "A build step that fails is tried again from a fresh start after a pause. After this many failures the build is dropped, its copy removed, and the change written into the current copy in place, so it still lands.",
         "recommended": {
@@ -3076,7 +3076,7 @@
             "weight": "medium"
           }
         ],
-        "evidence": "residency_plan._plan_master: idle and pressure eviction only with eviction_enabled, and _make_room returns False without it. The capacity pass evicts nothing in the 90 s grace after Graph residency is turned on (residency_policy.GRACE_SECS). With no policy read yet, an unreadable policy turns eviction off (residency_policy.resolve).",
+        "evidence": "residency_plan._plan_master: idle and pressure eviction only with eviction_enabled, and _make_room returns False without it. The capacity pass evicts nothing in the 90 s grace after Graph residency is turned on (residency_policy.GRACE_SECS). While the settings can't be read, before the first read or since one failed, eviction is off and loads go on (residency_policy.resolve).",
         "example": "Standard graphs unread for 7 days and Coldline graphs unread for 1 hour are unloaded, and a node past 80% of its memory unloads graphs until it is at 70%.",
         "means": "On, each memory check unloads graphs left unread past their class's idle time, and graphs on a node past its start mark until it is back at the stop mark. Off, nothing is unloaded, not even to make room for a load: graphs not in memory load only where there is room.",
         "recommended": {
@@ -4145,7 +4145,7 @@
             "weight": "medium"
           }
         ],
-        "evidence": "ProviderManager.pg_read_slot: a place among the process's reads (pgReadsPerProcess) and the graph's (pgReadsPerGraph); past them ProviderBusy, 429 with Retry-After, counted in graphver_pg_read_slots_shed_total. build_policy.effective clamps it to pgReadsPerProcess. Measured (docs/versioning/09 §2): with 200 readers, Always the latest shed 171 reads, each read on a retry.",
+        "evidence": "ProviderManager.pg_read_slot: a place among the process's reads (pgReadsPerProcess) and the graph's (pgReadsPerGraph); past them ProviderBusy, 429 with Retry-After, counted in graphver_pg_read_slots_shed_total. The settings resolver caps it at pgReadsPerProcess. Measured (docs/versioning/09 §2): with 200 readers, Always the latest shed 171 reads in run 43728972056 and 34 in run 43967953534, each read on a retry.",
         "example": "Each process runs up to 4 reads of one graph from the database at once, and 8 in all; more wait briefly, then are asked to retry.",
         "means": "Each read of a graph from the database takes a place; past this many, more wait briefly, then are asked to retry. It keeps one large graph from taking all the database reads a process allows.",
         "recommended": {
@@ -4341,7 +4341,7 @@
             "weight": "medium"
           }
         ],
-        "evidence": "service.prune_closed_drafts, in the worker's sweep (GRAPHVER_DRAFT_SWEEP_SECS, hourly): drafts closed longer ago than the window, kept while a live review, a pending or running job, or a deleted or frozen graph may still need them; removed in windows for at most 5 minutes a sweep (DRAFT_PRUNE_PASS_SECS). A read of a pruned draft's changes is 410 draft_pruned. When the value can't be read, the sweep removes nothing (draft_retention.retention_days).",
+        "evidence": "service.prune_closed_drafts, in the worker's sweep (GRAPHVER_DRAFT_SWEEP_SECS, hourly): drafts closed longer ago than their workspace's window, read once a sweep (settings.effective.by_workspace(draft_retention.KEY)), kept while a live review, a pending or running job, or a deleted or frozen graph may still need them; removed in windows for at most 5 minutes a sweep (DRAFT_PRUNE_PASS_SECS). A read of a pruned draft's changes is 410 draft_pruned. Forever skips the window, and while the settings can't be read the sweep removes nothing (unreadable skip).",
         "example": "A draft merged or abandoned more than 30 days ago has its changes removed at the next hourly sweep; its record stays.",
         "means": "A closed draft's changes take space in the database. After this long they are removed, and the draft's record stays: its name, owner, commits and review. A merged draft's changes are in the published graph, so nothing published is lost. Forever keeps them.",
         "recommended": {
@@ -4439,7 +4439,7 @@
             "weight": "low"
           }
         ],
-        "evidence": "service.sweep_idle_drafts, in the worker's hourly sweep: open drafts whose updated_at is older than the TTL, with no live PR, no staged changes, on a live graph not unfrozen within the TTL, become abandoned. 0 today would close every idle draft at the next sweep, so the app offers forever instead.",
+        "evidence": "service.sweep_idle_drafts, in the worker's hourly sweep, once for each workspace's window (settings.effective.by_workspace, worker.py): open drafts whose updated_at is older than the TTL, with no live PR, no staged changes, on a live graph not unfrozen within the TTL, become abandoned; forever skips the sweep. Before the settings store, GRAPHVER_DRAFT_TTL_DAYS=0 closed every idle draft at the next sweep; now 0 is outside the range and held to 1 day (env_out_of_range), and the app offers forever instead.",
         "example": "A draft nobody saves to for 30 days is closed, unless it has an open review or edits not yet saved.",
         "means": "A draft nobody has saved to, published or changed for this long is closed, as if abandoned. A draft with an open review or edits not yet saved is kept, and so is one on a frozen or deleted graph. Forever never closes idle drafts. A closed draft's changes then follow Keep closed drafts' changes for.",
         "recommended": {
@@ -4560,7 +4560,7 @@
             "weight": "medium"
           }
         ],
-        "evidence": "drafts_policy.resolve: the data source's value, else the workspace's, else public; a levels value other than any forces it (derived). Read when a draft is created, never cached (docs/versioning/03 §3.15).",
+        "evidence": "drafts_policy.effective: the graph's value (a fork's, its root's), else its workspace's, else the platform's, else public; a levels value other than any forces it (derived_from_levels). Read fresh (strict) when a draft is created (docs/versioning/03 §3.15).",
         "example": "A new draft starts public: everyone who can read the data source sees it.",
         "means": "Public drafts are seen by everyone who can read the data, and edited by everyone who can change it. Private drafts are seen only by their owner, their members and their reviewers. When only one level is allowed, new drafts start at that level, whatever this says.",
         "recommended": {
@@ -4986,7 +4986,7 @@
             "weight": "low"
           }
         ],
-        "evidence": "service._fork_slot and fork_preflight: live_forks >= MAX_FORKS_PER_GRAPH raises ForkLimit (409 fork_limit). A fork has no FalkorDB key of its own, so this bounds the readers' patch sets and the forks' rows (docs/versioning/17 §6).",
+        "evidence": "service._fork_slot and fork_preflight: as many live forks as service._forks_allowed (this setting for the root graph, else its workspace's, else the platform's) raises ForkLimit (409 fork_limit). A fork has no FalkorDB key of its own, so this bounds the readers' patch sets and the forks' rows (docs/versioning/17 §6).",
         "example": "Each graph may have 10 live forks; one more is refused. Forks in the trash don't count.",
         "means": "A fork is a separate copy of a graph to work in, which reads through the original. Forks take no copy of their own in the graph store, but the processes that read one hold its changes in memory, and its rows are kept in the database. One fork past this number is refused; forks in the trash don't count. 0 turns forking off.",
         "recommended": {
@@ -5076,7 +5076,7 @@
             "weight": "medium"
           }
         ],
-        "evidence": "purge_worker.Reaper.run_once, every GRAPHVER_REAP_POLL_SECS (900 s): tombstones older than PURGE_GRACE_DAYS have their purge queued; the tombstone's age is the schedule. A fork list's purge_after uses the same window.",
+        "evidence": "purge_worker.Reaper.run_once, every GRAPHVER_REAP_POLL_SECS (900 s): data sources deleted longer ago than their workspace's window (settings.effective.by_workspace) have their purge queued; the tombstone's age is the schedule, and while the settings can't be read nothing expires that pass. A fork list's purge_after uses its workspace's window (service.list_forks).",
         "example": "A deleted data source can be restored for 30 days; then it and its history are removed for good.",
         "means": "Deleting a data source moves it, with its graph and history, to the trash, where it can be restored in one step. After this many days it is removed for good. Forks in the trash follow the same window.",
         "recommended": {
@@ -5165,7 +5165,7 @@
             "weight": "low"
           }
         ],
-        "evidence": "import_export/identifier.py: entity_id, urn, prop.<name> or prop.<name>,urn; import_settings.resolve: the data source's, else the platform's (GRAPHVER_IMPORT_IDENTIFIER), kept on the job. A fork can't match by a property yet, so its default property is entity_id there (docs/versioning/08 §3b).",
+        "evidence": "import_export/identifier.py: entity_id, urn, prop.<name> or prop.<name>,urn; import_settings.for_import: the request's, else the graph's, else its workspace's, else the platform's (GRAPHVER_IMPORT_IDENTIFIER until one is set), kept on the job. A fork follows its root, but can't match by a property yet, so its default property is entity_id there (docs/versioning/08 §3b).",
         "example": "Rows find existing items by their id, then their URN, their identifier property, a field their type is matched by, or a unique qualified name.",
         "means": "Entity ID finds an item by its id, then its URN, its identifier property, a field its type is matched by, or a unique qualified name. URN finds it by its id or URN only. A property finds it by its id or that property's value; a property then URN falls back to the URN for rows without the value. A row that finds nothing makes a new item, so the wrong choice makes duplicates, and a replace import deletes what it didn't find.",
         "recommended": {
@@ -5261,7 +5261,7 @@
             "weight": "low"
           }
         ],
-        "evidence": "import_worker.replace_verdict: state off when IMPORT_REPLACE_GUARD is off; else blocked past the limits unless the import is sent with allowMassDelete (mass_delete_blocked). Measured against the main the draft reads (docs/versioning/08 §6).",
+        "evidence": "import_worker.replace_verdict: state off when the job's replaceGuard is off (this setting as it resolved for the graph when the import was made, import_settings.for_import; a job without one, the platform's); else blocked past the limits unless the import is sent with allowMassDelete (mass_delete_blocked). Measured against the main the draft reads (docs/versioning/08 §6).",
         "example": "A replace of 1,000 items or more that would delete 50% of them and make 50% as many again is stopped before it deletes anything.",
         "means": "A replace import deletes whatever its file leaves out. A file whose rows name items by a different identifier matches nothing, so it would delete everything and make it all again, losing every item's history. On, such an import is stopped before it deletes anything, and its rows stay on the draft for review. Someone who means it can import again with Replace anyway.",
         "recommended": {
@@ -5349,7 +5349,7 @@
             "weight": "low"
           }
         ],
-        "evidence": "import_worker.replace_verdict (live >= minLive) and _fail_fast (main's live count >= minLive), each from the job's limits: the data source's, else the platform's.",
+        "evidence": "import_worker.replace_verdict (live >= minLive) and _fail_fast (main's live count >= minLive), each from the job's limits, kept from when the import was made (import_settings.for_import): the graph's, else its workspace's, else the platform's.",
         "example": "The replace guard checks replaces of 1,000 items or more; smaller ones go straight through.",
         "means": "The replace guard checks a replace only when what it replaces holds at least this many items, and the early stop only when the graph does. Smaller ones are replaced without either check.",
         "recommended": {
@@ -5664,7 +5664,7 @@
             "weight": "medium"
           }
         ],
-        "evidence": "import_worker._fail_fast: after a replace's first node window, matched < minMatchFraction x decided, in a graph of at least minLive live entities, raises IdentifierMatchedNothing; not for a view's scope or with allowMassDelete, and not gated on IMPORT_REPLACE_GUARD (import_worker.py, docs/versioning/08 §6).",
+        "evidence": "import_worker._fail_fast: after a replace's first node window, matched < minMatchFraction x decided, in a graph of at least minLive live entities, raises IdentifierMatchedNothing; not for a view's scope or with allowMassDelete, and not gated on the replace guard (imports.replaceGuard; import_worker.py, docs/versioning/08 §6).",
         "example": "A replace of a whole graph whose first batch of rows matches fewer than 5% of them to existing items stops there.",
         "means": "After its first batch of rows, a replace of a whole graph whose rows found existing items for fewer than this share stops there, naming the identifier it matched by, rather than read the rest of the file first. It applies whether or not the replace guard is on. 0 turns the early stop off.",
         "recommended": {
@@ -5763,7 +5763,7 @@
             "weight": "medium"
           }
         ],
-        "evidence": "import_worker.refused_budget and within_budget: 0, a count, a share ('0.5%') or -1; an invalid platform value holds on any refused row. Kept on jobs.import_settings (docs/versioning/08 §3b).",
+        "evidence": "import_worker.refused_budget and within_budget: 0, a count, a share ('0.5%') or -1; an invalid platform value holds on any refused row. The request's, else this setting as it resolves for the graph when the import is made (import_settings.for_import), kept on jobs.import_settings (docs/versioning/08 §3b).",
         "example": "An import with any refused row holds: a replace deletes nothing, and an import set to publish itself waits for review.",
         "means": "An import refuses rows it can't use, and says why for each. Past this many, a replace deletes nothing and fails, and an import set to publish itself leaves its draft for review instead. Set none (0), a number, a share of the file's rows such as 0.5%, or unlimited. An import can set its own.",
         "recommended": {
@@ -5856,7 +5856,7 @@
             "weight": "low"
           }
         ],
-        "evidence": "import_export/keys.ensure: a property not indexed yet is refused (too_many_matching_properties) when the graph already has MAX_MATCHING_PROPERTIES others; the index is built from main's live nodes a page at a time, minutes at a million nodes (docs/versioning/08 §3b).",
+        "evidence": "import_export/keys.ensure: a property not indexed yet is refused (too_many_matching_properties) when the graph already has as many others as its limit: the import's job keeps it (import_settings.for_import), else the platform's value of this setting; the index is built from main's live nodes a page at a time, minutes at a million nodes (docs/versioning/08 §3b).",
         "example": "Each graph's imports may match items by up to 10 properties, each kept in an index.",
         "means": "Matching by a property keeps an index of its values in the database: built by the first import that names it, reading every item once, then kept up to date by each import that uses it. One property past this number is refused. 0 allows no new property.",
         "recommended": {

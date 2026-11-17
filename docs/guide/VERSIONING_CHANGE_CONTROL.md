@@ -346,7 +346,7 @@ View's sharing.
 | **Fork** a data source; **Delete** and **Restore** a fork | People who can edit the workspace's data sources |
 | **Update from parent** | People who can publish |
 | **Propose to parent** | Anyone who can read the fork |
-| **Drafts and reviews** settings | **Workspace admins** |
+| The drafts and reviews settings | **Workspace admins**, within the limits Super Admins set |
 | Switch version control or edit mode off for everyone | Administrators, in **Administration → Features** |
 
 Organisation-wide admin roles can do all of the above in every workspace.
@@ -357,21 +357,26 @@ Organisation-wide admin roles can do all of the above in every workspace.
 
 ## Drafts and reviews settings
 
-On a workspace's page, **Drafts and reviews** sets, for every data source in it:
+On a workspace's page, the **Versioned graphs** tab sets, under **Drafts &
+history**, for every data source in it:
 
-- **New drafts start** — **Public** (the default) or **Private**;
-- **Drafts may be** — **Public or private**, **Public only** or **Private only**.
-  Turning private drafts off leaves existing private drafts as they are;
-- **Whoever opens a review may approve it** — **Yes** by default;
-- **Whoever opens a review may merge it** — **Yes** by default. With **No**,
-  drafts are published only through a review someone else merges.
+- **New drafts start** — **Public** or **Private**;
+- **Draft levels allowed** — **Public or private**, **Public only** or **Private
+  only**. Turning private drafts off leaves existing private drafts as they are;
+- **People may approve their own reviews**;
+- **People may merge their own reviews**. With it off, drafts are published only
+  through a review someone else merges.
 
-A data source can set its own on its **Versioning** tab; each setting is its
-own or **Use the workspace's setting**. Only workspace admins change them.
+A data source can set its own: on its **Versioning** tab, **Open settings** opens
+its settings, where each one is its own or follows the workspace's (**Use the
+workspace's value** goes back to it). Workspace admins change them, within the
+limits a Super Admin sets for the platform. [Versioned Graph
+Settings](/guide/versioned-graph-settings#drafts--history) explains each one, with its default.
 
-**Drafts whose owner left**, below them, lists the open drafts of people who
-have left the workspace — their name, owner, level and when they last changed,
-never what they hold. Choose **Hand on** to give one a new owner.
+**Drafts whose owner left**, on the workspace's **Data Sources** tab, lists the
+open drafts of people who have left the workspace — their name, owner, level and
+when they last changed, never what they hold. Choose **Hand on** to give one a
+new owner.
 
 ## Where to next
 

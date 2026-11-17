@@ -4,7 +4,8 @@ that keep reads served while a graph is written.
 
 Every value is a versioned-graph setting (``config/versioned_graph_settings.py``), kept in the
 settings store at the platform's scope (``services.settings``) and changed live by a system
-administrator (``/admin/versioning/build-policy``, Admin → Infrastructure → New-version builds). This
+administrator (Admin → Versioned graphs → Settings: Updates & loading, New-version builds and
+Database reads; the old ``/admin/versioning/build-policy`` for one release). This
 module keeps the names they had before the store, for the code that acts on them: each value by its
 wire name (its setting's ``Legacy.build_policy``), in its old spelling (``copyMaxBytes`` 0: no limit).
 :func:`resolve` brings this process's settings up to date (``settings.effective.refresh``: Redis at
@@ -13,8 +14,8 @@ reaches every process within about two seconds, and :func:`current` reads them w
 raises: with the database out of reach, the values last read keep serving, and before any were read
 the defaults. The route refuses what the resolver would clamp, naming the field (:func:`validate`),
 saves through the store (:func:`save`) and, for one release, writes the old JSON too
-(``platform_settings.gv_build_policy``, :func:`saved_values`). Each setting's card is described once,
-in :data:`FIELDS`, which the admin card renders from.
+(``platform_settings.gv_build_policy``, :func:`saved_values`). Each value's old card is described in
+:data:`FIELDS`, which the old route still serves (``fields``).
 
 Whether builds happen at all is a switch, not a value: ``candidateKeysEnabled`` (Admin → Features,
 :func:`switch_state`).

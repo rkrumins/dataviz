@@ -218,8 +218,10 @@ urn, or made in the app, which never had the property: a row whose value no item
 holds yet is found by its urn too. An item found by its urn keeps its id and
 takes the row's value, so the next import finds it by the property.
 
-The choice marked **default** is the data source's. A workspace admin sets it on
-the data source's **Versioning** tab, under **Imports**. A fork can't match by a
+The choice marked **default** is the one in force for the data source: [Match
+rows by](/guide/versioned-graph-settings#imports-identifier). A workspace admin sets it in the data source's
+settings (**Open settings** on its **Versioning** tab, under **Imports**), or for
+the whole workspace on its **Versioned graphs** tab. A fork can't match by a
 property yet, so where its parent's default is a property, a fork's is
 **Entity ID**, and the dialog says so. The property the data source identifies
 its items by is the exception: it holds their urn, so a fork matches by it as
@@ -260,8 +262,9 @@ Most often the file names its items another way: try again with another **Match
 existing items by**. If the file really replaces most of what's there, choose
 **Replace anyway**: the file is imported again into the same draft, its
 deletions included, for you to review before you publish. The
-data source's **Versioning** tab shows the limits the guard uses, and a workspace
-admin can change them there.
+data source's settings (**Open settings** on its **Versioning** tab, under
+**Imports**) show the limits the guard uses, and a workspace admin can change
+them there.
 
 **What a replace never deletes.** An item a row of the file names stays, even
 when that row is refused, and so does every item an edge row names as an end. A

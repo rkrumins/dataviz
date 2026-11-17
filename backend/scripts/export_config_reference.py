@@ -158,8 +158,9 @@ NOTES: dict[str, tuple[str, str | None]] = {
         "Days a merged or abandoned draft keeps its changes before the versioning worker removes "
         "them; `0` keeps them for good. The draft's record stays (its name, owner, commits and "
         "review), and a merged draft's changes are in the published graph. A system administrator "
-        "overrides it live: Admin → Infrastructure → Versioned graphs → Draft retention. Each sweep spends at most 5 "
-        "minutes on it, so a draft of millions of rows is removed over a few sweeps.",
+        "overrides it live: Admin → Versioned graphs → Settings → Drafts & history (`drafts.keepClosedDays`), for the "
+        "platform or a workspace. Each sweep spends at most 5 minutes on it, so a draft of millions of "
+        "rows is removed over a few sweeps.",
         None,
     ),
     "GRAPHVER_DRAFT_TTL_DAYS": (
@@ -207,75 +208,75 @@ NOTES: dict[str, tuple[str, str | None]] = {
         None,
     ),
     "GRAPHVER_PROJECTION_CANDIDATE_ABOVE": (
-        "Changed rows above which a publish is built in a second FalkorDB key while the current one keeps serving, then switched to (New-version builds, when its switch is on); smaller ones are written in place, paced. A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds.",
+        "Changed rows above which a publish is built in a second FalkorDB key while the current one keeps serving, then switched to (New-version builds, when its switch is on); smaller ones are written in place, paced. A system administrator overrides it live: Admin → Versioned graphs → Settings → New-version builds (`builds.aboveRows`).",
         None,
     ),
     "GRAPHVER_PROJECTION_CANDIDATE_REBUILDS": (
-        "`1`: rebuilds and moves of platform-owned keys are built beside too: the new key is seeded from Postgres while reads keep the current version, then they switch to it. A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds.",
+        "`1`: rebuilds and moves of platform-owned keys are built beside too: the new key is seeded from Postgres while reads keep the current version, then they switch to it. A system administrator overrides it live: Admin → Versioned graphs → Settings → New-version builds (`builds.forRebuilds`).",
         None,
     ),
     "GRAPHVER_PROJECTION_CANDIDATE_MODE": (
-        "How a build makes its key: `auto` copies the serving key when its node has room, else seeds from Postgres on the node with most room; `copy` or `reseed` forces one way. A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds.",
+        "How a build makes its key: `auto` copies the serving key when its node has room, else seeds from Postgres on the node with most room; `copy` or `reseed` forces one way. A system administrator overrides it live: Admin → Versioned graphs → Settings → New-version builds (`builds.method`).",
         None,
     ),
     "GRAPHVER_PROJECTION_COPY_MARGIN_PCT": (
-        "The free memory a copy needs on its node, as a share of the graph's size (`220` = ×2.2: while it runs, a copy holds the new key and its own buffer, each about the graph's size). A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds.",
+        "The free memory a copy needs on its node, as a share of the graph's size (`220` = ×2.2: while it runs, a copy holds the new key and its own buffer, each about the graph's size). A system administrator overrides it live: Admin → Versioned graphs → Settings → New-version builds (`builds.copyRoomPct`).",
         None,
     ),
     "GRAPHVER_PROJECTION_COPY_MAX_BYTES": (
-        "The largest graph copied rather than seeded from Postgres; `0`: no limit. A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds.",
+        "The largest graph copied rather than seeded from Postgres; `0`: no limit. A system administrator overrides it live: Admin → Versioned graphs → Settings → New-version builds (`builds.copyMaxBytes`).",
         None,
     ),
     "GRAPHVER_PROJECTION_NO_ROOM_POLICY": (
-        "With no room for a build anywhere: `wait` (the current version keeps serving) or `in_place` (the change is written into the serving key, paced). A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds.",
+        "With no room for a build anywhere: `wait` (the current version keeps serving) or `in_place` (the change is written into the serving key, paced). A system administrator overrides it live: Admin → Versioned graphs → Settings → New-version builds (`builds.noRoom`).",
         None,
     ),
     "GRAPHVER_PROJECTION_NO_ROOM_ALERT_SECS": (
-        "Seconds a build may wait for room before it raises an alert. A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds.",
+        "Seconds a build may wait for room before it raises an alert. A system administrator overrides it live: Admin → Versioned graphs → Settings → New-version builds (`builds.noRoomAlertSecs`).",
         None,
     ),
     "GRAPHVER_PROJECTION_CANDIDATE_CONCURRENCY": (
-        "Builds each versioning worker runs at once, never more than `GRAPHVER_PROJECTION_CONCURRENCY`. A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds.",
+        "Builds each versioning worker runs at once, never more than `GRAPHVER_PROJECTION_CONCURRENCY`. A system administrator overrides it live: Admin → Versioned graphs → Settings → New-version builds (`builds.perWorker`).",
         None,
     ),
     "GRAPHVER_PROJECTION_CANDIDATE_MAX_ATTEMPTS": (
-        "Failures after which a build is dropped and the current version keeps serving. A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds.",
+        "Failures after which a build is dropped and the current version keeps serving. A system administrator overrides it live: Admin → Versioned graphs → Settings → New-version builds (`builds.maxAttempts`).",
         None,
     ),
     "GRAPHVER_PROJECTION_CANDIDATE_FLIP_MAX_LAG_ROWS": (
-        "The most rows a build may still have to catch up when it switches; the rest is applied inside the switch. Defaults to `GRAPHVER_PROJECTION_INLINE_MAX_ROWS`. A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds.",
+        "The most rows a build may still have to catch up when it switches; the rest is written into the new key right after the switch. Defaults to `GRAPHVER_PROJECTION_INLINE_MAX_ROWS`. A system administrator overrides it live: Admin → Versioned graphs → Settings → New-version builds (`builds.switchMaxLagRows`).",
         None,
     ),
     "GRAPHVER_RETIRE_GRACE_SECS": (
-        "Seconds a graph's previous FalkorDB key stays after a switch or a move, so reads under way finish on it. A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds.",
+        "Seconds a graph's previous FalkorDB key stays after a switch or a move, so reads under way finish on it. A system administrator overrides it live: Admin → Versioned graphs → Settings → Updates & loading (`updates.retireGraceSecs`).",
         None,
     ),
     "GRAPHVER_PROJECTION_STATEMENT_TARGET_MS": (
-        "The time each projector write statement aims at; larger batches are split, so reads on the same node keep their turn. A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds.",
+        "The time each projector write statement aims at; larger batches are split, so reads on the same node keep their turn. A system administrator overrides it live: Admin → Versioned graphs → Settings → Updates & loading (`updates.statementTargetMs`).",
         None,
     ),
     "GRAPHVER_PROJECTION_WRITE_CEILING_S": (
-        "The most one projector write statement may take, on any FalkorDB mode, before it is stopped and split. A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds.",
+        "The most one projector write statement may take, on any FalkorDB mode, before it is stopped and split. A system administrator overrides it live: Admin → Versioned graphs → Settings → Updates & loading (`updates.writeCeilingSecs`).",
         None,
     ),
     "GRAPHVER_PROJECTION_PACING_RATIO": (
-        "The pause after each projector write statement, as a share of the time it took. A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds.",
+        "The pause after each projector write statement, as a share of the time it took. A system administrator overrides it live: Admin → Versioned graphs → Settings → Updates & loading (`updates.pacingRatio`).",
         None,
     ),
     "GRAPHVER_PROJECTION_READ_PRESSURE_RATIO": (
-        "The pause after each projector write statement while reads on the node are waiting, as a share of the time it took. A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds.",
+        "The pause after each projector write statement while reads on the node are waiting, as a share of the time it took. A system administrator overrides it live: Admin → Versioned graphs → Settings → Updates & loading (`updates.readPressureRatio`).",
         None,
     ),
     "GRAPHVER_READ_STATEMENT_TIMEOUT_MS": (
-        "The most one read of a versioned graph from Postgres may take (while FalkorDB holds no version of it); past it the read answers 503 and is retried. A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds.",
+        "The most one read of a versioned graph from Postgres may take (while FalkorDB holds no version of it); past it the read answers 503 and is retried. A system administrator overrides it live: Admin → Versioned graphs → Settings → Database reads (`database.readTimeoutMs`).",
         None,
     ),
     "GRAPHVER_PG_READS_PER_GRAPH": (
-        "Reads of one versioned graph from Postgres that run at once per process; more wait briefly, then answer 429. A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds.",
+        "Reads of one versioned graph from Postgres that run at once per process; more wait briefly, then answer 429. A system administrator overrides it live: Admin → Versioned graphs → Settings → Database reads (`database.readsPerGraph`).",
         None,
     ),
     "GRAPHVER_PG_READS_PER_PROCESS": (
-        "Reads from Postgres that run at once per process across graphs, so they never take the whole connection pool. A system administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version builds.",
+        "Reads from Postgres that run at once per process across graphs, so they never take the whole connection pool. A system administrator overrides it live: Admin → Versioned graphs → Settings → Database reads (`database.readsPerProcess`).",
         None,
     ),
     "FALKORDB_STREAK_IGNORE_PROJECTOR_WRITES": (
@@ -292,9 +293,9 @@ NOTES: dict[str, tuple[str, str | None]] = {
         "slower on a large graph), `in_place` (the version "
         "FalkorDB last finished, while the next is written into the same key; readers may see part "
         "of it) or `beside` (exactly that version, while the next is built in a second key, then "
-        "one switch; needs New-version builds on, and room for a second copy). A system "
-        "administrator overrides it live: Admin → Infrastructure → Versioned graphs → New-version "
-        "builds, and per graph.",
+        "one switch; needs New-version builds on, and room for a second copy). Set live in "
+        "Admin → Versioned graphs → Settings → Reads & consistency as `reads.mode`, for the "
+        "platform, a workspace or a graph; this variable is the default where none is set.",
         None,
     ),
     "GRAPHVER_ROUTE_CACHE_SECS": (
@@ -710,8 +711,8 @@ def _promoted(key: str, category: str, scopes: tuple) -> str:
     levels = [{"platform": "the platform", "workspace": "a workspace", "graph": "a graph"}[s]
               for s in scopes]
     where = levels[0] if len(levels) == 1 else ", ".join(levels[:-1]) + " or " + levels[-1]
-    return (f" Also set in Admin → Versioned graphs → {category} as `{key}`, for {where}; this "
-            "variable is the default where none is set.")
+    return (f" Also set in Admin → Versioned graphs → Settings → {category} as `{key}`, for {where}; "
+            "this variable is the default where none is set.")
 
 
 #: What ``ENV=production`` turns on, from ``backend/app/main.py`` and the other places

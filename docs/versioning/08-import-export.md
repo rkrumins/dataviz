@@ -223,9 +223,8 @@ minter is injected) that returns `(ops, resolutions)`:
 - **What a row may name its entity by** is the import's **`identifier`** (`?identifier=` on
   `POST …/imports`, `…/imports/uploads/{id}/complete` and `…/imports/validate`; kept on the job as
   `jobs.identity_strategy`, and so by a resumed job; `identifier.py`). Unnamed, it is the graph's
-  default, which a workspace admin sets on the data source's Versioning tab (see [Import
-  settings](#import-settings)), else the platform's `GRAPHVER_IMPORT_IDENTIFIER`, `entity_id` by
-  default. Whichever it is, an entity's id never changes: the identifier only says how a row finds
+  default, [Match rows by](/guide/versioned-graph-settings#imports-identifier) as it resolves for the graph (see [Import
+  settings](#import-settings)). Whichever it is, an entity's id never changes: the identifier only says how a row finds
   it.
 
   | `identifier` | A node row finds its entity by | An edge's end, by |
@@ -262,7 +261,8 @@ minter is injected) that returns `(ops, resolutions)`:
     draft's base — read from main's version log since the base, as many as main's changes — is
     read as the draft sees it, main at its base: one main deleted since is still the draft's, and
     one main gave another value keeps its old one. A dry run against main reads main's index alone.
-  - At most `GRAPHVER_MAX_MATCHING_PROPERTIES` (10) a graph (`too_many_matching_properties`). Not on
+  - At most [Matching properties per graph](/guide/versioned-graph-settings#imports-maxmatchingproperties) a graph
+    (`too_many_matching_properties`). Not on
     a fork yet (`matching_property_on_fork`): its main is its parent's and its own, and a property
     default it takes from its parent is `entity_id` there, all but `prop.<identifier>`, which is
     `urn` ([Import settings](#import-settings)).
@@ -345,7 +345,8 @@ indexes (migration `20260927_1000_import_indexes`).
 >
 > **Hold or go on.** A replace with refused rows deletes nothing, and an `autoPublish` import with
 > them leaves its draft for review, unless the job's `maxRefusedRows` (`import_worker.refused_budget`;
-> the request's, else `IMPORT_MAX_REFUSED_ROWS`, kept on `jobs.import_settings`) allows them: a
+> the request's, else [Refused rows allowed](/guide/versioned-graph-settings#imports-maxrefusedrows) as it resolves for the
+> graph, kept on `jobs.import_settings`) allows them: a
 > count, a share of the file's rows, or `-1`. Within it, a replace deletes what no row matched or
 > names: a refused row keeps every live entity it names by any key it carries (a refused delete row
 > keeps nothing so), and an edge row its ends (`import_mentions`, §6). The publish goes ahead,
@@ -720,9 +721,10 @@ draft would publish. A whole graph's scope is every entity main holds. A view's 
 view's entities main holds, and its draft makes every entity the draft holds that main doesn't: a
 file naming the view's entities by another key makes them again outside the view, where its
 placements don't reach, so it is refused like a whole graph's, and so is the same file sent again
-into its draft. In a scope of at least `IMPORT_REPLACE_GUARD_MIN_LIVE` (1,000) entities, one that
-would delete at least `IMPORT_REPLACE_GUARD_DELETE_FRACTION` (0.5) of them **and** create at least
-`IMPORT_REPLACE_GUARD_CREATE_FRACTION` (0.5) as many is refused. A scope that really shrank creates
+into its draft. In a scope of at least the job's `minLive` entities, one that would delete at least
+`deleteFraction` of them **and** create at least `createFraction` as many is refused ([Guard graphs
+of at least](/guide/versioned-graph-settings#imports-guardminlive), [Stop a replace that deletes](/guide/versioned-graph-settings#imports-guarddeleteshare),
+[And makes again](/guide/versioned-graph-settings#imports-guardcreateshare)). A scope that really shrank creates
 little, and a file that really dropped rows deletes little, so neither is refused.
 
 - **Refused:** nothing is deleted, and the file's rows stay on the draft for review. The job fails
@@ -738,14 +740,14 @@ little, and a file that really dropped rows deletes little, so neither is refuse
   the job keeps the allowance (`jobs.allow_mass_delete`, `allowMassDelete` on the job), its
   `replaceGuard.state` is `overridden`, and the worker logs it. It never stops early (below).
 - **Earlier, fail fast:** a whole graph's replace whose first node window (full, or all of a
-  smaller file's node rows) finds an entity for fewer than `IMPORT_REPLACE_MIN_MATCH_FRACTION`
-  (0.05) of the rows decided so far, in a graph whose main (a fork's with its parent's) holds at
-  least `IMPORT_REPLACE_GUARD_MIN_LIVE`, stops there (`identifier_matched_nothing`, action
-  `identifier`), naming its identifier, rather than read the rest of the file first. A small file is
-  checked too: the guard measures what a file makes against its whole scope, so a few hundred rows
-  by the wrong key would pass it and delete a large graph. Nothing is deleted; the rows read so far
-  are on the draft. One sent with `allowMassDelete=true` reads the whole file, as the guard would
-  let it through.
+  smaller file's node rows) finds an entity for fewer than the job's `minMatchFraction`
+  ([Stop early below a match share of](/guide/versioned-graph-settings#imports-minmatchshare)) of the rows
+  decided so far, in a graph whose main (a fork's with its parent's) holds at least `minLive`,
+  stops there (`identifier_matched_nothing`, action `identifier`), naming its identifier, rather
+  than read the rest of the file first. A small file is checked too: the guard measures what a file
+  makes against its whole scope, so a few hundred rows by the wrong key would pass it and delete a
+  large graph. Nothing is deleted; the rows read so far are on the draft. One sent with
+  `allowMassDelete=true` reads the whole file, as the guard would let it through.
 - **Refused rows count as unmatched.** The guard adds the job's refused rows that matched nothing
   (`_refused_unmatched`, `replaceGuard.refusedUnmatched`) to what it made: a file whose rows can't be
   matched is refused whatever `maxRefusedRows` let through, rather than delete its scope while making
@@ -754,31 +756,38 @@ little, and a file that really dropped rows deletes little, so neither is refuse
   fix most of them (`hints.by_urn`: rows `prop.<name>,urn` would find by their urn — without the
   property, or whose urn is a node's that has none yet).
 
-The limits are the operator's (env, or Helm `config.imports`), and a workspace admin may set a data
-source's own over them (below); `IMPORT_REPLACE_GUARD=0` turns the guard off everywhere and a
-minimum match fraction of 0 the early stop.
+The guard and its limits are versioned-graph settings, set for the platform, a workspace or a graph
+(below); the environment (or Helm `config.imports`) gives their defaults. With [Replace
+guard](/guide/versioned-graph-settings#imports-replaceguard) off, nothing is refused; a minimum match share of 0 turns off the
+early stop.
 
 ### Import settings
 
-A graph's imports run under its data source's own settings, field by field, over the platform's
-(`services/import_settings.py`; `workspace_data_sources.import_*`, NULL where it sets none):
+A graph's imports run under the import settings in force for it, each resolved on its own, graph →
+workspace → platform (`services/import_settings.py`, from the settings store): [Match rows
+by](/guide/versioned-graph-settings#imports-identifier), the [Replace guard](/guide/versioned-graph-settings#imports-replaceguard) and its limits, [Refused
+rows allowed](/guide/versioned-graph-settings#imports-maxrefusedrows) and, for the platform alone, [Matching properties per
+graph](/guide/versioned-graph-settings#imports-maxmatchingproperties). What each means, its default and when to change it are
+in [Imports](/guide/versioned-graph-settings#imports). A fork follows its root's. The old route names them by API field:
 
-| Setting (API field) | Platform's | What it does |
-|---|---|---|
-| `identifier` | `GRAPHVER_IMPORT_IDENTIFIER` (`entity_id`) | What an import's rows find their entities by when the import names none |
-| `replaceMinLive` | `IMPORT_REPLACE_GUARD_MIN_LIVE` (1,000) | The replace guard judges a scope of at least this many |
-| `replaceDeleteFraction` | `IMPORT_REPLACE_GUARD_DELETE_FRACTION` (0.5) | …refusing a replace that deletes at least this share of it |
-| `replaceCreateFraction` | `IMPORT_REPLACE_GUARD_CREATE_FRACTION` (0.5) | …and creates at least this share as many |
-| `replaceMinMatchFraction` | `IMPORT_REPLACE_MIN_MATCH_FRACTION` (0.05) | A replace whose first node window matches less stops there |
+| API field | Setting |
+|---|---|
+| `identifier` | [Match rows by](/guide/versioned-graph-settings#imports-identifier) |
+| `replaceMinLive` | [Guard graphs of at least](/guide/versioned-graph-settings#imports-guardminlive) |
+| `replaceDeleteFraction` | [Stop a replace that deletes](/guide/versioned-graph-settings#imports-guarddeleteshare) |
+| `replaceCreateFraction` | [And makes again](/guide/versioned-graph-settings#imports-guardcreateshare) |
+| `replaceMinMatchFraction` | [Stop early below a match share of](/guide/versioned-graph-settings#imports-minmatchshare) |
 
-- **Read:** `GET …/graphs/{gid}/import-settings` (anyone who reads the graph, an API key too)
-  answers `overrides` (the graph's own; null where it sets none), `platform`, `effective` (what
-  holds, with `sources`: `data_source`, `platform`, or `fork`, below), `replaceGuard` (the
-  platform's switch), `followsParent`, and `matchingProperties` — each property its imports match
-  by, with its index's `status` (`building`, `ready`), the main commit it describes (`seq`) and
-  whether that is main's head (`current`) — out of `maxMatchingProperties`.
-- **Set:** `PUT` the same path (workspace admins), field by field; `"inherit"` goes back to the
-  platform's, and a field left out stays. A real change is recorded once in the activity log
+- **Read:** `GET …/graphs/{gid}/import-settings` (deprecated; anyone who reads the graph, an API key
+  too) answers `overrides` (the graph's own; null where it sets none), `platform`, `effective` (what
+  holds, with `sources`: `data_source`, `workspace`, `platform`, or `fork`, below), `replaceGuard`
+  (the guard in force for the graph), `followsParent`, and `matchingProperties` — each property its
+  imports match by, with its index's `status` (`building`, `ready`), the main commit it describes
+  (`seq`) and whether that is main's head (`current`) — out of `maxMatchingProperties`.
+- **Set:** through the graph's settings (`PATCH …/graphs/{gid}/settings`), or the deprecated `PUT`
+  of the same path (workspace admins), field by field; `"inherit"` goes back to the workspace's or
+  the platform's, and a field left out stays. Each deprecated answer carries `Deprecation: true` and
+  a `Link` to the graph's settings route. A real change is recorded once in the activity log
   (`workspace.versioning.import_settings_updated`, with what it was and became). An identifier
   follows the request grammar (422 `invalid_identifier`); a fraction is between 0 and 1. A fork's
   settings are its parent's (409 `fork_settings_follow_parent`): set there, they follow to its
@@ -790,13 +799,16 @@ A graph's imports run under its data source's own settings, field by field, over
   data source's, its provider's, its workspace's or the platform's): it is `urn`, on a fork too,
   whether it is the default or the import names it.
 - **Kept on the job.** An import resolves them once, when it is made — its identifier (the
-  request's, else the graph's, else the platform's) and the guard's limits — and keeps them
-  (`jobs.import_settings`: `{identifierSource, replaceLimits: {minLive, deleteFraction,
-  createFraction, minMatchFraction, sources}, maxRefusedRows, replaceScope?}`, `importSettings` on
-  the job; `replaceScope` only when `keyed`), so a resumed job runs under what it started with, and
-  a change made meanwhile applies from the next import. A dry run
-  says where its identifier came from (`identifierSource`).
-- **In the app:** the data source's Versioning tab shows them under **Imports**, and the import
+  request's, else the one in force for the graph), the guard and its limits, the refused rows it
+  allows and the properties it may match by — and keeps them (`jobs.import_settings`:
+  `{identifierSource, replaceGuard, replaceLimits: {minLive, deleteFraction, createFraction,
+  minMatchFraction, sources}, maxRefusedRows, maxMatchingProperties, replaceScope?}`,
+  `importSettings` on the job; `replaceScope` only when `keyed`), so a resumed job runs under what
+  it started with, and a change made meanwhile applies from the next import. A dry run says where
+  its identifier came from (`identifierSource`).
+- **In the app:** the data source's Versioning tab shows what imports match by and whether the
+  replace guard is on, in its **Settings** card; **Open settings** opens the graph's settings, where
+  they are set under **Imports**, and a workspace's are set on its **Versioned graphs** tab. The import
   dialog's **Match existing items by** starts at the graph's default, marked, and says when a
   property no import has matched by yet is indexed first. On a fork whose parent's default is a
   property other than its identifier property, both say its imports match by Entity ID. With
