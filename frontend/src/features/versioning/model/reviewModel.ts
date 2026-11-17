@@ -214,7 +214,11 @@ export function buildReviewGroups(changes: readonly StagedChange[], lookup: Name
       if (statusOf(c.type) !== 'modified') existing.lead(c)
       continue
     }
+    // Named as the canvas names it — or, for an entity the canvas has not loaded (scrolled away, a
+    // large draft), as the change itself does, never by its urn.
+    const known = lookup.nameOf(key)
     const afterName = str(asObj(c.after).displayName)
+      ?? (known !== key ? known : labelOf(asObj(c.after)) ?? labelOf(asObj(c.before)) ?? labelOf(asObj(asObj(asObj(c.before).node).data)))
     const ends = kind === 'edge' ? edgeOf(c) : null
     groups.set(`${kind}:${key}`, new Group({
       key,

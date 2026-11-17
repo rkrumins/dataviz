@@ -226,6 +226,10 @@ export function ReviewExplorer({ index, rows, selected, onSelect, problemIds, on
     overscan: 10,
     getItemKey: (i) => items[i].key,
   })
+  // A new filter: show the selected row (the first, unless it is still shown).
+  useEffect(() => {
+    if (position >= 0) virtualizer.scrollToIndex(position === 0 ? 0 : itemOf[position], { align: 'auto' })
+  }, [rows]) // eslint-disable-line react-hooks/exhaustive-deps
   const go = (to: number) => {
     if (rows.length === 0) return
     const i = Math.max(0, Math.min(rows.length - 1, to))

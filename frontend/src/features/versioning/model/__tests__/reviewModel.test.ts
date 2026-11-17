@@ -92,3 +92,13 @@ describe('buildReviewGroups', () => {
     expect(suggestTitle(two)).toBe('Update Orders and 1 more')
   })
 })
+
+describe('buildReviewGroups — an entity the canvas has not loaded', () => {
+  it('is named as its change names it, never by its urn', () => {
+    const [g] = buildReviewGroups([{
+      id: 'x', type: 'update_entity', targetId: 'urn:far', targetUrn: 'urn:far', timestamp: 0, summary: 's',
+      before: { label: 'far_away', properties: { a: 1 } }, after: { label: 'far_away', properties: { a: 2 } },
+    }], { nameOf: (id) => id })
+    expect(g.name).toBe('far_away')
+  })
+})

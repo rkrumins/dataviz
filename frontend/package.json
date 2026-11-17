@@ -21,6 +21,7 @@
     "harness:search": "node scripts/search-shot.mjs",
     "harness:revision": "node scripts/revision-shot.mjs",
     "harness:provenance": "node scripts/provenance-shot.mjs",
+    "harness:scale": "node scripts/scale-shot.mjs",
     "probe:drawer": "node scripts/app-probe-drawer.mjs",
     "probe:fold": "node scripts/app-probe-fold.mjs",
     "probe:ghosts": "node scripts/app-probe-ghosts.mjs"
