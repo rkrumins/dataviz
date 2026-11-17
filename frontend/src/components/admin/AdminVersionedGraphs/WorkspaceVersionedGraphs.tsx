@@ -142,7 +142,7 @@ export function WorkspaceVersionedGraphs({ workspaceId, workspaceName, onStagedC
                     </p>
                 )}
                 <SettingsView schema={schema} data={{ ...data, values }} editor={editor} facts={NO_FACTS} readOnly={readOnly}
-                    scope="workspace" where={where} />
+                    scope="workspace" where={where} workspaceName={workspaceName} />
             </div>
         )
     }

@@ -12,9 +12,10 @@
  *   refusal_budget        None / a number of rows / a share of rows / Unlimited
  *
  * `value` is what this scope chose; null means it inherits, and the control shows the inherited
- * value as a placeholder and says where it comes from. Changing anything stages a value of this
- * scope's own. Only `allowed` choices are offered, and numbers are bounded by the setting's range
- * narrowed by the platform's limits.
+ * value as a placeholder and, unless `inheritNote` is off (a row says it in a line of its own),
+ * where it comes from. A switch says On or Off once: its note names where it comes from, not the
+ * value again. Changing anything stages a value of this scope's own. Only `allowed` choices are
+ * offered, and numbers are bounded by the setting's range narrowed by the platform's limits.
  */
 import { useId } from 'react'
 import { identifierLabel, MATCH_KINDS, formatIdentifier, parseIdentifier, type MatchKind } from '@/features/import-export/identifier'
@@ -42,6 +43,9 @@ export interface SettingControlProps {
     dimensions?: DimensionInfo[]
     disabled?: boolean
     invalid?: boolean
+    /** Say under the control where an inherited value comes from (on by default). A row that says
+     *  it itself passes false. */
+    inheritNote?: boolean
     'aria-labelledby'?: string
     'aria-describedby'?: string
 }
@@ -56,6 +60,8 @@ interface Common {
     bounds: { min?: number; max?: number }
     disabled: boolean
     invalid: boolean
+    /** Say where an inherited value comes from. */
+    inheritNote: boolean
     labelledBy?: string
     describedBy?: string
 }
@@ -72,11 +78,17 @@ const firstNumber = (fallback: number, ...vs: Array<SettingValue | null | undefi
 const OWN: Record<Scope, string> = { platform: 'the platform’s own', workspace: 'this workspace’s own', graph: 'this graph’s own' }
 
 function InheritNote({ c }: { c: Common }) {
-    if (c.value !== null) return null
+    if (c.value !== null || !c.inheritNote) return null
+    const from = c.inherit.scope === 'default' ? 'the default' : `the ${SCOPE_LABEL[c.inherit.scope].toLowerCase()}`
     return (
-        <p className="mt-1.5 text-[11px] text-ink-secondary">
-            {c.inherit.scope === 'default' ? 'The default' : `From the ${SCOPE_LABEL[c.inherit.scope].toLowerCase()}`}:{' '}
-            <span className="font-medium text-ink">{formatValue(c.s, c.inherit.value)}</span>. Change it to set {OWN[c.scope]}.
+        <p className="mt-1.5 text-[12.5px] text-ink-secondary">
+            {/* A switch has just said On or Off. */}
+            {c.s.kind === 'bool' ? <>Follows {from}</> : (
+                <>
+                    {c.inherit.scope === 'default' ? 'The default' : `From ${from}`}:{' '}
+                    <span className="font-medium text-ink">{formatValue(c.s, c.inherit.value)}</span>
+                </>
+            )}. Change it to set {OWN[c.scope]}.
         </p>
     )
 }
@@ -265,8 +277,8 @@ function IdentifierControl({ c }: { c: Common }) {
                     </label>
                 </div>
             )}
-            {c.value === null && (
-                <p className="text-[11px] text-ink-secondary">
+            {c.value === null && c.inheritNote && (
+                <p className="text-[12.5px] text-ink-secondary">
                     {c.inherit.scope === 'default' ? 'The default' : `From the ${SCOPE_LABEL[c.inherit.scope].toLowerCase()}`}: {identifierLabel(String(c.inherit.value))}.
                 </p>
             )}
@@ -311,10 +323,10 @@ function RefusalBudgetControl({ c }: { c: Common }) {
 
 export function SettingControl({
     setting: s, value, onChange, resolved, scope = 'platform', lens = 'operator', dimensions, disabled = false, invalid = false,
-    'aria-labelledby': labelledBy, 'aria-describedby': describedBy,
+    inheritNote = true, 'aria-labelledby': labelledBy, 'aria-describedby': describedBy,
 }: SettingControlProps) {
     const inherit = resolved ? inheritedAt(resolved, scope) : { scope: 'default' as const, value: s.default.code }
-    const c: Common = { s, scope, value, onChange, inherit, bounds: boundsAt(s, resolved, scope), disabled, invalid, labelledBy, describedBy }
+    const c: Common = { s, scope, value, onChange, inherit, bounds: boundsAt(s, resolved, scope), disabled, invalid, inheritNote, labelledBy, describedBy }
     const unit = s.unit ?? undefined
 
     switch (s.kind) {

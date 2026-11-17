@@ -7,7 +7,7 @@
 export * from './types'
 export { CATALOGUE } from './catalogue'
 
-export { SettingRow, type SettingRowProps } from './SettingRow'
+export { SettingRow, LockedValue, type SettingRowProps } from './SettingRow'
 export { SettingControl, type SettingControlProps } from './SettingControl'
 export { ChoiceCards, type ChoiceCardsProps } from './ChoiceCards'
 export { ProvenanceTrail } from './ProvenanceTrail'

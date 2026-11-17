@@ -3,7 +3,7 @@
  * page knows about it — the server's answer for a staged value (quick preview), the platform's
  * limits (editable on the platform, in words below it), and its explainer.
  *
- * The answer heads the row ("Once saved: …"); under the control it says what that means: the
+ * The answer sits under the control ("Once saved: …"); under the row it says what that means: the
  * worked example, or why the value in force would differ, with the fix one click away.
  *
  * Rows are memoised and take only primitives and stable callbacks, so staging one value redraws
@@ -44,12 +44,12 @@ function Outcome({ s, quick, staged, onFix, fixLabel }: {
     fixLabel: (fix: WhyFix) => string
 }) {
     const plain = plainStatus(quick)
-    // A staged row's header already says what is in force once saved.
+    // A staged row already says, under its control, what is in force once saved: a plain status needs no lead.
     const lead = staged
         ? plain ? null : `${STATUS_META[quick.status].label} once saved:`
         : `With your changes: ${formatValue(s, quick.effective)}${plain ? '' : ` · ${STATUS_META[quick.status].label}`}`
     return (
-        <div className="space-y-1.5 text-[11.5px] leading-relaxed text-ink-secondary">
+        <div className="space-y-1.5 text-[12.5px] leading-relaxed text-ink-secondary">
             {lead && <p className="font-semibold text-ink">{lead}</p>}
             {plain ? quick.example && (
                 <p className="flex items-start gap-2 rounded-xl bg-black/[0.025] px-3 py-2 dark:bg-white/[0.035]">

@@ -56,7 +56,9 @@ const STATES = {
         query: 'tab=settings&lens=operator', wait: 'What your settings trade', viewport: true,
         steps: [
             `__h.click('#reads-mode [role=radio]', 'Keep serving, update in place')`,
-            // Narrow what workspaces and graphs may choose, so the review lists the values left outside.
+            // Narrow what workspaces and graphs may choose, so the review lists the values left outside:
+            // the limits are folded to a line until opened.
+            `__h.click('#reads-mode button', 'Change…')`,
             `__h.click('#reads-mode label', 'Always the latest')`,
             `__h.click('#builds-forrebuilds [role=switch]')`,
             'wait:800',

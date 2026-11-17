@@ -75,7 +75,7 @@ describe('Workspace → Versioned graphs: what a person meets', () => {
         expect(await screen.findByText(/You can read this workspace’s settings and why each is what it is\. A workspace admin can change them\./)).toBeInTheDocument()
         expect(row('reads.mode').queryByRole('radio')).not.toBeInTheDocument()
         expect(row('reads.mode').getByText('Only a workspace admin can change it here.')).toBeInTheDocument()
-        expect(screen.queryByText('Start from a profile.')).not.toBeInTheDocument()
+        expect(screen.queryByRole('button', { name: 'Start from a profile…' })).not.toBeInTheDocument()
         expect(screen.queryByRole('tab', { name: /History/ })).not.toBeInTheDocument()
         expect(calls(sent, 'GET', `${SETTINGS}/history`)).toHaveLength(0)
     })
@@ -136,12 +136,16 @@ describe('Workspace → Versioned graphs: what a person meets', () => {
         await waitFor(() => expect(document.activeElement).toBe(target))
     })
 
-    it('offers the profiles and the compass at workspace scope', async () => {
+    it('offers the profiles and the compass at workspace scope, under a headline of what the workspace sets', async () => {
         mockApi('workspace-admin')
         renderTab()
         await rowOnceDrawn('reads.mode')
-        expect(screen.getByText('Start from a profile.')).toBeInTheDocument()
+        expect(screen.getByRole('button', { name: 'Start from a profile…' })).toBeInTheDocument()
         expect(screen.getByText('What your settings trade')).toBeInTheDocument()
+        expect(screen.getByText('Defaults · Finance')).toBeInTheDocument()
+        // Every value Finance chose for itself, among the settings a workspace has.
+        const own = workspaceValues().values.filter((r) => S[r.key].scopes.workspace && r.trail.find((t) => t.scope === 'workspace')?.value != null)
+        expect(screen.getByRole('heading', { level: 2, name: `${own.length} values set for this workspace` })).toBeInTheDocument()
     })
 
     it('asks each setting’s question in the Business view, with the app’s switch above the tabs', async () => {
@@ -220,7 +224,8 @@ describe('Workspace → Versioned graphs: stage, review, save, undo', () => {
         } }, 422) : undefined))
         renderTab()
         const trash = await rowOnceDrawn('trash.restoreDays')
-        await userEvent.click(trash.getByRole('button', { name: /^Use recommended/ }))
+        // The default is the recommended value: one way back to it.
+        await userEvent.click(trash.getByRole('button', { name: /^Use the default · .+ \(recommended\)$/ }))
         await userEvent.click(within(screen.getByRole('region', { name: 'Unsaved changes' })).getByRole('button', { name: 'Review changes' }))
         const dialog = await screen.findByRole('dialog', { name: 'Review 1 change to the Finance workspace' })
         await userEvent.type(within(dialog).getByLabelText(/Why are you making this change/), reason)

@@ -23,7 +23,7 @@ import type { Dimension, DimensionInfo, Setting, SettingValue, Term, Verdict, We
 const WEIGHT_DOTS: Record<Weight, number> = { low: 1, medium: 2, high: 3 }
 
 function Heading({ children }: { children: ReactNode }) {
-    return <h4 className="text-[10px] font-semibold uppercase tracking-[0.14em] text-ink-secondary">{children}</h4>
+    return <h4 className="text-[11px] font-semibold uppercase tracking-[0.14em] text-ink-secondary">{children}</h4>
 }
 
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -86,10 +86,10 @@ function WeightDots({ weight }: { weight: Weight }) {
 function EffectsTable({ setting, dimensions }: { setting: Setting; dimensions: DimensionInfo[] }) {
     const name = (d: Dimension) => dimensions.find((x) => x.id === d)?.label ?? d
     return (
-        <table className="w-full border-separate border-spacing-0 text-left text-xs">
+        <table className="w-full border-separate border-spacing-0 text-left text-[12.5px]">
             <caption className="sr-only">What raising and lowering {setting.label} does</caption>
             <thead>
-                <tr className="text-[10.5px] text-ink-secondary">
+                <tr className="text-[11px] text-ink-secondary">
                     <th scope="col" className="pb-1.5 pr-4 font-medium">Affects</th>
                     <th scope="col" className="pb-1.5 font-medium">Raising it · Lowering it</th>
                 </tr>
@@ -118,10 +118,10 @@ function VerdictMatrix({ setting, dimensions }: { setting: Setting; dimensions: 
     if (!named.length) return null
     return (
         <div className="overflow-x-auto">
-            <table className="w-full min-w-[22rem] border-separate border-spacing-0 text-left text-xs">
+            <table className="w-full min-w-[22rem] border-separate border-spacing-0 text-left text-[12.5px]">
                 <caption className="sr-only">What each choice of {setting.label} does to each dimension</caption>
                 <thead>
-                    <tr className="text-[10.5px] text-ink-secondary">
+                    <tr className="text-[11px] text-ink-secondary">
                         <th scope="col" className="pb-1.5 pr-3 font-medium">Dimension</th>
                         {setting.choices.map((c) => <th key={c.id} scope="col" className="pb-1.5 px-2 font-medium">{c.short}</th>)}
                     </tr>
@@ -191,7 +191,7 @@ export function GuidancePanel({
             <div className="space-y-5 min-w-0">
                 <section className="space-y-1.5">
                     <Heading>What it means</Heading>
-                    <p className="text-[13px] leading-relaxed text-ink-secondary"><Prose text={g.means} glossary={glossary} technical={lens === 'operator'} /></p>
+                    <p className="text-[13.5px] leading-relaxed text-ink-secondary"><Prose text={g.means} glossary={glossary} technical={lens === 'operator'} /></p>
                 </section>
                 {(s.kind === 'choice' || g.effects.length > 0) && (
                     <section className="space-y-2">
@@ -202,7 +202,7 @@ export function GuidancePanel({
                 {g.changeWhen.length > 0 && (
                     <section className="space-y-1.5">
                         <Heading>When to change it</Heading>
-                        <ul className="space-y-1 text-[13px] leading-relaxed text-ink-secondary">
+                        <ul className="space-y-1 text-[13.5px] leading-relaxed text-ink-secondary">
                             {g.changeWhen.map((w) => (
                                 <li key={w} className="flex gap-2"><span aria-hidden className="text-ink-muted">–</span><span>{w}</span></li>
                             ))}
@@ -212,7 +212,7 @@ export function GuidancePanel({
                 {g.example && (
                     <section className="space-y-1.5">
                         <Heading>For example</Heading>
-                        <p className="rounded-xl bg-black/[0.03] px-3.5 py-2.5 text-[13px] leading-relaxed text-ink-secondary dark:bg-white/[0.04]">
+                        <p className="rounded-xl bg-black/[0.03] px-3.5 py-2.5 text-[13.5px] leading-relaxed text-ink-secondary dark:bg-white/[0.04]">
                             <Prose text={g.example} glossary={glossary} technical={lens === 'operator'} />
                         </p>
                     </section>
@@ -223,13 +223,13 @@ export function GuidancePanel({
                 <section className="space-y-2 rounded-2xl border border-glass-border/60 p-4">
                     <Heading>Recommended</Heading>
                     <p className="text-sm font-semibold text-ink">{formatValue(s, g.recommended.value)}</p>
-                    <p className="text-xs leading-relaxed text-ink-secondary">{g.recommended.why}</p>
+                    <p className="text-[12.5px] leading-relaxed text-ink-secondary">{g.recommended.why}</p>
                     {g.recommended.forThisPlatform && (
                         <div className="rounded-xl bg-black/[0.03] px-3 py-2.5 dark:bg-white/[0.04]">
-                            <p className="text-[11px] font-semibold text-ink">
+                            <p className="text-[12.5px] font-semibold text-ink">
                                 For your platform: {formatValue(s, g.recommended.forThisPlatform.value)}
                             </p>
-                            <p className="mt-0.5 text-[11.5px] leading-relaxed text-ink-secondary">{g.recommended.forThisPlatform.why}</p>
+                            <p className="mt-0.5 text-[12.5px] leading-relaxed text-ink-secondary">{g.recommended.forThisPlatform.why}</p>
                         </div>
                     )}
                     {onUseRecommended && (
@@ -237,22 +237,22 @@ export function GuidancePanel({
                             <Button size="sm" variant="secondary" leftIcon={Sparkles} disabled={already} onClick={() => onUseRecommended(rec)}>
                                 Use recommended
                             </Button>
-                            <span className="text-[11px] text-ink-secondary">{already ? 'Already in use.' : 'Stages it; nothing is saved until you review.'}</span>
+                            <span className="text-[12.5px] text-ink-secondary">{already ? 'Already in use.' : 'Stages it; nothing is saved until you review.'}</span>
                         </div>
                     )}
                 </section>
                 <section className="space-y-1.5">
                     <Heading>Risk</Heading>
                     <Badge tone={risk.tone} size="md">{risk.label}</Badge>
-                    {g.riskNote && <p className="text-xs leading-relaxed text-ink-secondary">{g.riskNote}</p>}
+                    {g.riskNote && <p className="text-[12.5px] leading-relaxed text-ink-secondary">{g.riskNote}</p>}
                 </section>
             </div>
 
             <details open={lens === 'operator'} className="group lg:col-span-2 rounded-2xl border border-glass-border/60 px-4 py-3">
-                <summary className="cursor-pointer select-none text-xs font-semibold text-ink-secondary outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40 rounded">
+                <summary className="cursor-pointer select-none text-[12.5px] font-semibold text-ink-secondary outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40 rounded">
                     Technical details
                 </summary>
-                <dl className="mt-3 grid gap-x-6 gap-y-2 text-xs sm:grid-cols-[max-content_minmax(0,1fr)]">
+                <dl className="mt-3 grid gap-x-6 gap-y-2 text-[12.5px] sm:grid-cols-[max-content_minmax(0,1fr)]">
                     <dt className="text-ink-secondary">Key</dt><dd className="font-mono text-ink">{s.key}</dd>
                     {s.default.env && (<><dt className="text-ink-secondary">Environment variable</dt><dd className="font-mono text-ink [overflow-wrap:anywhere]">{s.default.env}</dd></>)}
                     <dt className="text-ink-secondary">Built-in default</dt><dd className="text-ink">{formatValue(s, s.default.code)}</dd>

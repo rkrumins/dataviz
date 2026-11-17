@@ -87,8 +87,8 @@ export function AdminVersionedGraphs() {
     const signalsUnavailable = signalsQ.data?.unavailable === true
     const facts = useMemo(() => ({
         nodes: nodes.data,
-        // Named by its data source, else plainly; with none measured (or the figures refused), there is none.
-        largestGraph: largest ? { name: largest.label ?? 'Your largest graph', bytes: largest.bytes } : undefined,
+        // Named by its data source where it can be; with none measured (or the figures refused), there is none.
+        largestGraph: largest ? { name: largest.label, bytes: largest.bytes } : undefined,
     }), [nodes.data, largest])
     // The graph store providers: names for the list, and where a graph can move or be reseeded.
     const status = useQuery({ queryKey: ['admin', 'system-status'], queryFn: systemStatusService.get, staleTime: 60_000, refetchOnWindowFocus: false, enabled: tab === 'overview' })

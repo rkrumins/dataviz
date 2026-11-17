@@ -4,31 +4,37 @@
  *
  *   rail          the seven categories, each with how many values are chosen at this level (on the
  *                 platform: differ from the default) and how many are staged; a select on a phone
- *   toolbar       search (`/`), "Changed only", a profile to start from; the Business / Technical
- *                 view is the app's own, switched in the page's header (`LensSwitch`)
- *   guides        the trade-off compass and "Something's wrong?", folded to one line each so the
- *                 first setting is on the first screen
+ *   hero          where the settings stand (`SettingsHero`): a headline counted from the values, the
+ *                 reads posture, a pill while changes are staged, what this platform's facts
+ *                 suggest; the actions (start from a profile, "Something's wrong?"); the trade-off
+ *                 compass at a glance; the search (`/`) and "Changed only". The compass and the finder
+ *                 open full width under it. The Business / Technical view is the app's own,
+ *                 switched in the page's header (`LensSwitch`)
+ *   tasks         in the Business view, "What do you want to do?": business settings' own
+ *                 questions, each a link to its row
  *   categories    each with its posture, its switch, its settings and what the deployment sets;
- *                 for a workspace, what only the platform sets is listed read-only, with its value
+ *                 for a workspace, what only the platform sets is listed read-only, with its value.
+ *                 In the Business view the business categories lead, and the rest follow under
+ *                 "For your platform team", here and in the rail: every one is shown
  *   save bar      Review → the full preview, warnings, a reason → Save → Undo
  *
- * A link to `#reads-mode` (or a search result, or a symptom's "Show") scrolls to that setting,
- * focuses it and marks it; a link to `#category-builds` scrolls to that category. Leaving with
- * changes staged asks first: the page's `LeaveGuard`.
+ * A link to `#reads-mode` (or a search result, a task card, a suggestion, or a symptom's "Show")
+ * scrolls to that setting, focuses it and marks it; a link to `#category-builds` scrolls to that
+ * category. Leaving with changes staged asks first: the page's `LeaveGuard`.
  */
-import { memo, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
+import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { useReducedMotion } from 'framer-motion'
-import { ChevronDown, Eye, Stethoscope } from 'lucide-react'
+import { Stethoscope, UsersRound } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { Button } from '@/components/ui/Button'
 import { ConfirmDialog } from '@/components/ui/Dialog'
 import { Select } from '@/components/ui/Select'
 import { Switch } from '@/components/ui/Switch'
 import {
-    FEATURE_NAMES, MemoryMarks, SettingsSearch, StickySaveBar, SymptomFinder, TradeoffCompass, compassMoves, compassScores,
-    describeFix, ownValue, sameValue, scoreWords, settingAnchor, useLens,
-    type CompassPoint, type DimensionInfo, type ResolvedSetting, type Setting, type SettingsFacts, type SettingValue,
-    type Values, type WhyFix,
+    FEATURE_NAMES, MemoryMarks, SettingsSearch, StickySaveBar, SymptomFinder,
+    describeFix, ownValue, sameValue, settingAnchor, useLens,
+    type Category, type ResolvedSetting, type Setting, type SettingsFacts, type SettingValue, type WhyFix,
 } from '@/components/settings'
 import type { ServedSchema, SettingsValues, SignalCount } from '@/services/settingsService'
 import { CategoryIcon, CategorySection, PlatformWideSettings } from './CategorySection'
@@ -37,6 +43,7 @@ import type { FeatureSwitches } from './useFeatureSwitches'
 import { categoryAnchor } from './meta'
 import { ProfileEntry } from './ProfileEntry'
 import { RowItem } from './SettingsRows'
+import { CompassSummary, SettingsHero, TaskCards, type Headline } from './SettingsHero'
 import { VisualContext } from './visualContext'
 import { SettingsReview } from './SettingsReview'
 import type { SettingsEditor } from './useSettingsEditor'
@@ -54,6 +61,8 @@ const WORDS: Record<Level, {
     changed: (n: number) => string
     /** None chosen: `settable`, how many could be. */
     none: (settable: number) => string
+    /** The hero's headline: `changed` of `settable` settings. */
+    headline: (changed: number, settable: number) => Headline
     only: string
     onlyLabel: string
     readOnly: string
@@ -61,6 +70,9 @@ const WORDS: Record<Level, {
     platform: {
         changed: (n) => `${n} changed`,
         none: () => 'All defaults',
+        headline: (changed, settable) => (changed
+            ? { count: changed, after: ` of ${settable} settings changed from the default` }
+            : { before: 'All ', count: settable, after: ' settings at their defaults' }),
         only: 'Changed only',
         onlyLabel: 'Show changed settings only',
         readOnly: 'You can read these settings and why each is what it is. Only a system admin can change them.',
@@ -68,65 +80,28 @@ const WORDS: Record<Level, {
     workspace: {
         changed: (n) => `${n} ${n === 1 ? 'value' : 'values'} set here`,
         none: (settable) => (settable ? 'All inherited' : 'Platform-wide'),
+        headline: (changed, settable) => (changed
+            ? { count: changed, after: ` ${changed === 1 ? 'value' : 'values'} set for this workspace` }
+            : { before: 'All ', count: settable, after: ' settings follow the platform' }),
         only: 'Set here only',
         onlyLabel: 'Show settings set for this workspace only',
         readOnly: 'You can read this workspace’s settings and why each is what it is. A workspace admin can change them.',
     },
 }
 
-/** Seven axes on a tile: the compass at a glance, beside its one-line summary. */
-function MiniRadar({ points, ghost }: { points: CompassPoint[]; ghost: CompassPoint[] | null }) {
-    const n = points.length || 1
-    const at = (i: number, score: number) => {
-        const a = -Math.PI / 2 + (i * 2 * Math.PI) / n
-        const r = 15 * (0.18 + 0.82 * ((score + 1) / 2))
-        return `${(18 + r * Math.cos(a)).toFixed(1)},${(18 + r * Math.sin(a)).toFixed(1)}`
-    }
-    return (
-        <svg aria-hidden viewBox="0 0 36 36" className="w-9 h-9 shrink-0">
-            <polygon points={points.map((_, i) => at(i, 1)).join(' ')} className="fill-none stroke-ink-muted/25" strokeWidth={1} />
-            <polygon points={points.map((p, i) => at(i, p.score)).join(' ')} className="fill-ink-secondary/10 stroke-ink-secondary" strokeWidth={1.5} strokeLinejoin="round" />
-            {ghost && <polygon points={ghost.map((p, i) => at(i, p.score)).join(' ')} className="fill-none stroke-accent-lineage" strokeWidth={1.5} strokeDasharray="3 2" strokeLinejoin="round" />}
-        </svg>
-    )
-}
+/** In the Business view, what heads the categories a business owner doesn't decide. */
+const PLATFORM_TEAM = 'For your platform team: how writes, builds and database reads run'
 
-/** The compass, folded to a line: the dimensions it leans on most, and how staged changes move them. */
-function CompassSummary({ dimensions, settings, current, next, inactive, open, onToggle }: {
-    dimensions: DimensionInfo[]
-    settings: Setting[]
-    current: Values
-    next: Values
-    inactive: string[]
-    open: boolean
-    onToggle: () => void
-}) {
-    const id = useId()
-    const skip = useMemo(() => new Set(inactive), [inactive])
-    const points = useMemo(() => compassScores(dimensions, settings, current, skip), [dimensions, settings, current, skip])
-    const ghost = useMemo(() => compassScores(dimensions, settings, next, skip), [dimensions, settings, next, skip])
-    const moved = compassMoves(points, ghost)
-    const lead = points.filter((p) => p.touched && Math.abs(p.score) >= 0.1).sort((a, b) => Math.abs(b.score) - Math.abs(a.score)).slice(0, 3)
-    const shifted = moved ? points.filter((p, i) => Math.abs(p.score - ghost[i].score) > 0.005).length : 0
-    return (
-        <div className={cn('rounded-2xl border border-glass-border/50 bg-canvas-elevated', open && 'col-span-full')}>
-            <button type="button" aria-expanded={open} aria-controls={`${id}-panel`} onClick={onToggle}
-                className="flex w-full items-center gap-3 rounded-2xl px-4 py-3 text-left outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40">
-                <MiniRadar points={points} ghost={moved ? ghost : null} />
-                <span className="min-w-0 flex-1">
-                    <span className="block text-[13px] font-semibold text-ink">What your settings trade</span>
-                    <span className="block text-xs text-ink-secondary">
-                        {lead.length ? lead.map((p) => `${p.label} ${scoreWords(p.score)}`).join(' · ') : 'Balanced on every dimension'}
-                        {shifted > 0 && <span className="font-semibold text-indigo-700 dark:text-indigo-300"> · your changes move {shifted}</span>}
-                    </span>
-                </span>
-                <ChevronDown aria-hidden className={cn('w-4 h-4 shrink-0 text-ink-muted transition-transform motion-reduce:transition-none', open && 'rotate-180')} />
-            </button>
-            <div id={`${id}-panel`} hidden={!open} className="px-4 pb-4">
-                {open && <TradeoffCompass dimensions={dimensions} settings={settings} current={current} next={next} inactive={inactive} className="border-0 bg-transparent p-0 sm:p-0" />}
-            </div>
-        </div>
-    )
+/**
+ * "What do you want to do?", in the Business view: up to six business settings, each by its own
+ * question, chosen from the registry's order: the first of each business category, then the next
+ * ones. Nothing here is written for the cards.
+ */
+function pickTasks(settings: Setting[], categories: Category[], max = 6): Setting[] {
+    const business = settings.filter((s) => s.audience === 'business' && s.question)
+    const firsts = categories.filter((c) => c.audience.includes('business'))
+        .flatMap((c) => business.find((s) => s.category === c.id) ?? [])
+    return [...firsts, ...business.filter((s) => !firsts.includes(s))].slice(0, max)
 }
 
 const RailItem = memo(function RailItem({ id, label, icon, note, staged, current, onJump }: {
@@ -162,7 +137,7 @@ const RailItem = memo(function RailItem({ id, label, icon, note, staged, current
 })
 
 export function SettingsView({
-    schema, data, editor, switches, facts, signals, signalsUnavailable, onFinderOpenChange, readOnly, scope = 'platform', where = 'the platform',
+    schema, data, editor, switches, facts, signals, signalsUnavailable, onFinderOpenChange, readOnly, scope = 'platform', where = 'the platform', workspaceName,
 }: {
     schema: ServedSchema
     data: SettingsValues
@@ -181,6 +156,8 @@ export function SettingsView({
     scope?: Level
     /** Where a save applies, for the review: "the platform", "the Finance workspace". */
     where?: string
+    /** The workspace's name, for the hero (`scope="workspace"`). */
+    workspaceName?: string
 }) {
     const values = data.values
     const words = WORDS[scope]
@@ -220,6 +197,8 @@ export function SettingsView({
         return lens === 'operator' ? sorted
             : [...sorted.filter((c) => c.audience.includes('business')), ...sorted.filter((c) => !c.audience.includes('business'))]
     }, [schema.categories, lens])
+    // In the Business view, where the platform team's categories start (under their divider); -1: none.
+    const teamFrom = lens === 'business' ? categories.findIndex((c) => !c.audience.includes('business')) : -1
 
     const stagedKeys = useMemo(() => {
         const out = new Map<string, number>()
@@ -239,6 +218,25 @@ export function SettingsView({
     const onlyCount = useMemo(() => present.filter((s) => s.scopes[scope] && (changedHere(values[s.key], scope) || stagedKeys.has(s.key))).length,
         [present, values, stagedKeys, scope])
     const note = (id: string) => (counts[id]?.changed ? words.changed(counts[id].changed) : words.none(counts[id]?.total ?? 0))
+    // The settings this level has a row for, in the order the page shows them: by category, then section.
+    const rows = useMemo(() => categories.flatMap((c) => {
+        const at = (s: Setting) => {
+            const i = c.sections.findIndex((sec) => sec.id === s.section)
+            return i < 0 ? c.sections.length : i
+        }
+        return present.filter((s) => s.category === c.id && s.scopes[scope]).sort((a, b) => at(a) - at(b))
+    }), [categories, present, scope])
+    const changedCount = useMemo(() => rows.filter((s) => changedHere(values[s.key], scope)).length, [rows, values, scope])
+    // What this platform's facts suggest, where it isn't in force: for a system admin, who can act on it.
+    const suggestions = useMemo(() => (data.editor !== 'system_admin' ? [] : rows.filter((s) => {
+        const ftp = s.guidance.recommended.forThisPlatform
+        return ftp && !sameValue(ftp.value, values[s.key].effective)
+    })), [rows, values, data.editor])
+    const tasks = useMemo(() => (lens === 'business'
+        ? pickTasks(present.filter((s) => s.scopes[scope]), [...schema.categories].sort((a, b) => a.order - b.order)) : []),
+    [lens, present, scope, schema.categories])
+    const icons = useMemo(() => Object.fromEntries(schema.categories.map((c) => [c.id, c.icon])), [schema.categories])
+    const readsPosture = schema.categories.find((c) => c.id === 'reads')?.posture
 
     // The setting a link points at (`#reads-mode`) is marked, and shown even when "Changed only"
     // would hide it.
@@ -251,15 +249,23 @@ export function SettingsView({
         navigate({ search: location.search, hash: settingAnchor(key) }, { replace: true })
     }, [navigate, location.search])
 
+    const goTo = useCallback((key: string) => {
+        const el = document.getElementById(settingAnchor(key))
+        el?.scrollIntoView({ block: 'start', behavior: reduced ? 'auto' : 'smooth' })
+        el?.focus({ preventScroll: true })
+    }, [reduced])
+
     useEffect(() => {
         if (!highlight) return
-        const raf = requestAnimationFrame(() => {
-            const el = document.getElementById(settingAnchor(highlight))
-            el?.scrollIntoView({ block: 'start', behavior: reduced ? 'auto' : 'smooth' })
-            el?.focus({ preventScroll: true })
-        })
+        const raf = requestAnimationFrame(() => goTo(highlight))
         return () => cancelAnimationFrame(raf)
-    }, [highlight, reduced])
+    }, [highlight, goTo])
+
+    /** A setting the page already points at is gone back to by hand: a link to it changes nothing. */
+    const showOrReturn = (key: string) => {
+        if (key === highlight) goTo(key)
+        else show(key)
+    }
 
     /** "Changed only": turning it on lets go of a link to a setting it would hide. */
     const askOnlyChanged = (on: boolean) => {
@@ -365,11 +371,18 @@ export function SettingsView({
         <VisualContext.Provider value={visuals}>
             <div className="grid items-start gap-x-10 gap-y-6 lg:grid-cols-[13.5rem_minmax(0,1fr)]">
                 <nav aria-label="Setting categories" className="sticky top-6 hidden lg:block">
-                    <p className="px-3 pb-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-ink-secondary">Categories</p>
+                    <p className="px-3 pb-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-ink-secondary">Categories</p>
                     <ul className="space-y-0.5">
-                        {categories.map((c) => (
-                            <RailItem key={c.id} id={c.id} label={c.label} icon={c.icon} note={note(c.id)}
-                                staged={counts[c.id]?.staged ?? 0} current={currentCategory === c.id} onJump={jump} />
+                        {categories.map((c, i) => (
+                            <Fragment key={c.id}>
+                                {i === teamFrom && (
+                                    <li className="mx-3 mb-1.5 mt-3 border-t border-glass-border/60 pt-3 text-[11.5px] font-medium leading-snug text-ink-secondary">
+                                        {PLATFORM_TEAM}
+                                    </li>
+                                )}
+                                <RailItem id={c.id} label={c.label} icon={c.icon} note={note(c.id)}
+                                    staged={counts[c.id]?.staged ?? 0} current={currentCategory === c.id} onJump={jump} />
+                            </Fragment>
                         ))}
                     </ul>
                 </nav>
@@ -381,83 +394,109 @@ export function SettingsView({
                             aria-label="Go to a category"
                             value={currentCategory ?? categories[0]?.id ?? ''}
                             onChange={jump}
-                            options={categories.map((c) => ({
-                                value: c.id,
-                                label: `${c.label}${counts[c.id]?.changed ? ` · ${words.changed(counts[c.id].changed)}` : ''}${counts[c.id]?.staged ? ` · ${counts[c.id].staged} not saved` : ''}`,
-                            }))}
+                            options={categories.flatMap((c, i) => [
+                                // The platform team's divider, as the rail has it: a heading among the options, not one to pick.
+                                ...(i === teamFrom ? [{ value: '', label: PLATFORM_TEAM, disabled: true }] : []),
+                                {
+                                    value: c.id,
+                                    label: `${c.label}${counts[c.id]?.changed ? ` · ${words.changed(counts[c.id].changed)}` : ''}${counts[c.id]?.staged ? ` · ${counts[c.id].staged} not saved` : ''}`,
+                                },
+                            ])}
                         />
                     </div>
 
-                    {readOnly && (
-                        <p role="note" className="flex items-start gap-2 rounded-2xl border border-glass-border/60 bg-black/[0.02] px-4 py-3 text-[13px] text-ink-secondary dark:bg-white/[0.03]">
-                            <Eye aria-hidden className="mt-0.5 w-4 h-4 shrink-0 text-ink-muted" />
-                            {words.readOnly}
-                        </p>
-                    )}
-
-                    <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
-                        <label className="inline-flex items-center gap-2 text-[13px] font-medium text-ink-secondary">
-                            <Switch size="sm" checked={onlyChanged} onChange={askOnlyChanged} aria-label={words.onlyLabel} />
-                            {words.only} <span className="text-xs font-normal text-ink-secondary">({onlyCount})</span>
-                        </label>
-                    </div>
-                    <SettingsSearch className="max-w-2xl" settings={present} categories={schema.categories} onSelect={show} placeholder={searchPlaceholder} lens={lens} />
-
-                    {!readOnly && (
-                        <ProfileEntry profiles={schema.profiles} scope={scope} editor={data.editor} resolved={values} onStage={editor.stage} lens={lens} />
-                    )}
-
-                    {/* Side by side while both are folded; one under the other once either opens. */}
-                    <div className={cn('grid gap-3', !compassOpen && !finderOpen && 'lg:grid-cols-2')}>
-                        <CompassSummary dimensions={schema.dimensions} settings={present} current={staged.current} next={staged.next}
-                            inactive={inactive} open={compassOpen} onToggle={() => setCompassOpen((o) => !o)} />
-                        {finderOpen ? (
-                            <div ref={finderPanel}>
-                                <SymptomFinder settings={present} values={values} staged={stagedMap} onStage={readOnly ? undefined : (k: string, v: SettingValue) => editor.stage(k, v)}
-                                    onShow={show} onClose={() => toggleFinder(false)} {...signalProps} signalsUnavailable={signalsUnavailable} />
-                            </div>
-                        ) : (
-                            <button ref={finderButton} type="button" aria-expanded={false} onClick={() => toggleFinder(true)}
-                                className="flex items-center gap-3 rounded-2xl border border-glass-border/50 bg-canvas-elevated px-4 py-3 text-left outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40">
-                                <span className="grid place-items-center w-9 h-9 shrink-0 rounded-xl bg-black/[0.04] text-ink-secondary dark:bg-white/[0.06]">
-                                    <Stethoscope aria-hidden className="w-4 h-4" />
-                                </span>
-                                <span className="min-w-0 flex-1">
-                                    <span className="block text-[13px] font-semibold text-ink">Something’s wrong?</span>
-                                    <span className="block text-xs text-ink-secondary">Start from what you see; get the settings behind it.</span>
-                                </span>
-                                <ChevronDown aria-hidden className="w-4 h-4 shrink-0 text-ink-muted" />
-                            </button>
+                    <SettingsHero
+                        eyebrow={scope === 'platform' ? 'Settings · the platform' : `Defaults · ${workspaceName ?? 'this workspace'}`}
+                        headline={words.headline(changedCount, rows.length)}
+                        posture={readsPosture && (
+                            <>
+                                {/* The server writes it from the platform's values: below the platform, it says so. */}
+                                {scope !== 'platform' && <span className="font-semibold text-ink">Across the platform: </span>}
+                                {readsPosture}
+                            </>
                         )}
-                    </div>
+                        staged={staged.dirtyCount}
+                        problems={editor.problems}
+                        onReview={() => editor.review.setOpen(true)}
+                        suggestions={suggestions.length}
+                        onSuggestions={() => { if (suggestions[0]) showOrReturn(suggestions[0].key) }}
+                        readOnlyNote={readOnly ? words.readOnly : null}
+                        actions={(
+                            <>
+                                {!readOnly && (
+                                    <ProfileEntry variant="button" profiles={schema.profiles} scope={scope} editor={data.editor} resolved={values} onStage={editor.stage} lens={lens} />
+                                )}
+                                {/* Finding what's behind a problem changes nothing: a viewer who may only read has it too. Its
+                                    edge a divider's: the plain glass edge is white, invisible on the card. */}
+                                <Button ref={finderButton} leftIcon={Stethoscope} aria-expanded={finderOpen} onClick={() => toggleFinder(!finderOpen)}
+                                    className="border-glass-border/80">
+                                    Something’s wrong?
+                                </Button>
+                            </>
+                        )}
+                        compass={(
+                            <CompassSummary dimensions={schema.dimensions} settings={present} current={staged.current} next={staged.next}
+                                inactive={inactive} open={compassOpen} onToggle={() => setCompassOpen((o) => !o)} />
+                        )}
+                        compassOpen={compassOpen}
+                        tools={(
+                            <>
+                                <SettingsSearch className="min-w-0 flex-1 basis-72 max-w-2xl" settings={present} categories={schema.categories} onSelect={show}
+                                    placeholder={searchPlaceholder} lens={lens} />
+                                <label className="inline-flex items-center gap-2 text-[13px] font-medium text-ink-secondary">
+                                    <Switch size="sm" checked={onlyChanged} onChange={askOnlyChanged} aria-label={words.onlyLabel} />
+                                    {words.only} <span className="text-[12.5px] font-normal text-ink-secondary">({onlyCount})</span>
+                                </label>
+                            </>
+                        )}
+                    />
 
-                    <div className="space-y-12">
-                        {categories.map((c) => {
+                    {/* Opened from the hero's actions, full width under it. */}
+                    {finderOpen && (
+                        <div ref={finderPanel}>
+                            <SymptomFinder settings={present} values={values} staged={stagedMap} onStage={readOnly ? undefined : (k: string, v: SettingValue) => editor.stage(k, v)}
+                                onShow={show} onClose={() => toggleFinder(false)} {...signalProps} signalsUnavailable={signalsUnavailable} />
+                        </div>
+                    )}
+
+                    <TaskCards tasks={tasks} icons={icons} search={location.search} current={highlight} onAgain={goTo} />
+
+                    <div className="space-y-12 pt-2">
+                        {categories.map((c, i) => {
                             const all = present.filter((s) => s.category === c.id)
                             const settable = all.filter((s) => s.scopes[scope])
                             // Below the platform: what only the platform sets, read-only, with the value in force here.
                             const fixed = all.filter((s) => !s.scopes[scope])
                             const shown = onlyChanged ? settable.filter((s) => changedHere(values[s.key], scope) || stagedKeys.has(s.key)) : settable
                             return (
-                                <CategorySection
-                                    key={c.id}
-                                    category={c}
-                                    scope={scope}
-                                    settings={shown}
-                                    total={settable.length}
-                                    changed={counts[c.id]?.changed ?? 0}
-                                    staged={counts[c.id]?.staged ?? 0}
-                                    lens={lens}
-                                    masterSwitch={!c.masterSwitch ? undefined : switches
-                                        ? <MasterSwitchCard featureKey={c.masterSwitch} switches={switches} readOnly={readOnly} />
-                                        : <MasterSwitchStatus featureKey={c.masterSwitch} />}
-                                    extra={onlyChanged ? undefined : memoryGauges(c.id)}
-                                    fixed={onlyChanged || fixed.length === 0 ? undefined : <PlatformWideSettings settings={fixed} values={values} highlight={highlight} category={c.label} />}
-                                    deployment={onlyChanged ? [] : schema.deployment.filter((f) => f.category === c.id)}
-                                    row={row}
-                                    filtered={onlyChanged}
-                                    onShowAll={() => setOnlyChanged(false)}
-                                />
+                                <Fragment key={c.id}>
+                                    {i === teamFrom && (
+                                        <div className="flex items-center gap-3 border-t border-glass-border/60 pt-8">
+                                            <span className="grid place-items-center w-9 h-9 shrink-0 rounded-xl bg-black/[0.04] text-ink-secondary dark:bg-white/[0.06]">
+                                                <UsersRound aria-hidden className="w-4 h-4" />
+                                            </span>
+                                            <p className="min-w-0 text-[13.5px] font-semibold text-ink-secondary">{PLATFORM_TEAM}</p>
+                                        </div>
+                                    )}
+                                    <CategorySection
+                                        category={c}
+                                        scope={scope}
+                                        settings={shown}
+                                        total={settable.length}
+                                        changed={counts[c.id]?.changed ?? 0}
+                                        staged={counts[c.id]?.staged ?? 0}
+                                        lens={lens}
+                                        masterSwitch={!c.masterSwitch ? undefined : switches
+                                            ? <MasterSwitchCard featureKey={c.masterSwitch} switches={switches} readOnly={readOnly} />
+                                            : <MasterSwitchStatus featureKey={c.masterSwitch} />}
+                                        extra={onlyChanged ? undefined : memoryGauges(c.id)}
+                                        fixed={onlyChanged || fixed.length === 0 ? undefined : <PlatformWideSettings settings={fixed} values={values} highlight={highlight} category={c.label} />}
+                                        deployment={onlyChanged ? [] : schema.deployment.filter((f) => f.category === c.id)}
+                                        row={row}
+                                        filtered={onlyChanged}
+                                        onShowAll={() => setOnlyChanged(false)}
+                                    />
+                                </Fragment>
                             )
                         })}
                     </div>

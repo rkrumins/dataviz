@@ -1,6 +1,7 @@
 /**
  * "Start from a profile": a few values that go together ("Fastest reads", "Least memory"), staged
- * in one go and saved through the same review.
+ * in one go and saved through the same review. A card that says so (`variant="card"`), or a button
+ * among a page's actions (`variant="button"`, the settings page's hero).
  *
  * The picker is the kit's `ProfilePicker` (`components/settings/ProfilePicker.tsx`), loaded the
  * first time it opens. Until the kit has one, or while the registry names no profiles, this draws
@@ -8,6 +9,7 @@
  */
 import { lazy, Suspense, useState, type ComponentType } from 'react'
 import { ArrowRight, Sparkles } from 'lucide-react'
+import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/Button'
 import { Drawer } from '@/components/ui/Drawer'
 import { SkeletonText } from '@/components/ui/Skeleton'
@@ -31,20 +33,32 @@ const found = import.meta.glob<{ ProfilePicker: ComponentType<ProfilePickerProps
 const load = Object.values(found)[0]
 const ProfilePicker = load ? lazy(() => load().then((m) => ({ default: m.ProfilePicker }))) : null
 
-export function ProfileEntry({ profiles, ...pass }: Omit<ProfilePickerProps, 'onClose' | 'profiles'> & { profiles?: SettingsProfile[] }) {
+export function ProfileEntry({ profiles, variant = 'card', className, ...pass }: Omit<ProfilePickerProps, 'onClose' | 'profiles'> & {
+    profiles?: SettingsProfile[]
+    variant?: 'card' | 'button'
+    className?: string
+}) {
     const [open, setOpen] = useState(false)
     if (!ProfilePicker || !profiles?.length) return null
     const named = profiles.slice(0, 2).map((p) => p.title)
     return (
         <>
-            <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-2xl border border-glass-border/50 bg-canvas-elevated px-4 py-3">
-                <Sparkles aria-hidden className="w-4 h-4 shrink-0 text-ink-muted" />
-                <p className="min-w-0 flex-1 basis-56 text-[13px] text-ink-secondary">
-                    <span className="font-semibold text-ink">Start from a profile.</span>{' '}
-                    {profiles.length} starting points, like {named.join(' or ')}. A profile stages its values; nothing is saved until you review.
-                </p>
-                <Button size="sm" rightIcon={ArrowRight} onClick={() => setOpen(true)}>Choose a profile…</Button>
-            </div>
+            {variant === 'button' ? (
+                // The page's first step: filled, in the app's indigo-to-violet.
+                <Button variant="primary" leftIcon={Sparkles} onClick={() => setOpen(true)}
+                    className={cn('bg-indigo-600 bg-gradient-to-r from-indigo-600 to-violet-600 shadow-indigo-600/25', className)}>
+                    Start from a profile…
+                </Button>
+            ) : (
+                <div className={cn('flex flex-wrap items-center gap-x-4 gap-y-2 rounded-2xl border border-glass-border/50 bg-canvas-elevated px-4 py-3', className)}>
+                    <Sparkles aria-hidden className="w-4 h-4 shrink-0 text-ink-muted" />
+                    <p className="min-w-0 flex-1 basis-56 text-[13px] text-ink-secondary">
+                        <span className="font-semibold text-ink">Start from a profile.</span>{' '}
+                        {profiles.length} starting points, like {named.join(' or ')}. A profile stages its values; nothing is saved until you review.
+                    </p>
+                    <Button size="sm" rightIcon={ArrowRight} onClick={() => setOpen(true)}>Choose a profile…</Button>
+                </div>
+            )}
             <Drawer open={open} onOpenChange={setOpen} title="Start from a profile" size="lg"
                 description="Pick the outcome you want. Its values are staged here, for you to review before anything is saved.">
                 <Suspense fallback={<SkeletonText lines={6} />}>

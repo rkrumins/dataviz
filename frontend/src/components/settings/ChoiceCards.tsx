@@ -35,17 +35,17 @@ function FrameStrip({ frames }: { frames: Frame[] }) {
                 const Source = f.source === 'database' ? Database : HardDrive
                 return (
                     <span key={f.when} className="min-w-0 rounded-lg bg-black/[0.03] px-2 py-1.5 dark:bg-white/[0.04]">
-                        <span className="block whitespace-nowrap text-[9.5px] font-semibold uppercase tracking-[0.08em] text-ink-secondary">{WHEN_LABEL[f.when]}</span>
+                        <span className="block whitespace-nowrap text-[11px] font-semibold uppercase tracking-[0.08em] text-ink-secondary">{WHEN_LABEL[f.when]}</span>
                         {/* Wraps rather than truncating: "Version 5, with parts of 6" is the point of the card. */}
                         <span className={cn(
-                            'mt-1 inline-flex max-w-full rounded-lg px-1.5 py-px text-[10px] font-semibold leading-4',
+                            'mt-1 inline-flex max-w-full rounded-lg px-1.5 py-px text-[11px] font-semibold leading-4',
                             tone === 'new' ? 'bg-emerald-500/12 text-emerald-800 dark:text-emerald-300'
                                 : tone === 'mix' ? 'bg-gradient-to-r from-slate-500/10 to-emerald-500/15 text-ink-secondary'
                                     : 'bg-slate-500/10 text-ink-secondary',
                         )}>
                             <span className="min-w-0 break-words">{f.shows}</span>
                         </span>
-                        <span className={cn('mt-1 flex items-center gap-1 text-[10px]',
+                        <span className={cn('mt-1 flex items-center gap-1 text-[11px]',
                             f.source === 'database' ? 'text-amber-700 dark:text-amber-400' : 'text-ink-secondary')}>
                             <Source aria-hidden className="w-3 h-3 shrink-0" /> {f.source}
                         </span>
@@ -66,7 +66,7 @@ function Verdicts({ choice, setting, dimensions }: { choice: Choice; setting: Se
                 const meta = VERDICT_META[i.verdict ?? 'same']
                 const Icon = meta.icon
                 return (
-                    <span key={i.dimension} className={cn('inline-flex items-center gap-0.5 rounded-full px-1.5 py-px text-[10px] font-medium leading-4', meta.chip)}>
+                    <span key={i.dimension} className={cn('inline-flex items-center gap-0.5 rounded-full px-1.5 py-px text-[11px] font-medium leading-4', meta.chip)}>
                         <Icon aria-hidden className="w-2.5 h-2.5" />
                         {dimensions.find((d) => d.id === i.dimension)?.label ?? i.dimension}
                         <span className="sr-only">: {meta.label}</span>
@@ -146,10 +146,10 @@ export function ChoiceCards({
                     >
                         <CornerDownRight aria-hidden className="w-4 h-4 shrink-0 text-ink-muted" />
                         <span className="min-w-0 flex-1">
-                            <span className="block text-[13px] font-semibold text-ink">
+                            <span className="block text-[13.5px] font-semibold text-ink">
                                 {inherit.from === 'default' ? 'Use the default' : `Use the ${SCOPE_LABEL[inherit.from].toLowerCase()}’s choice`}
                             </span>
-                            <span className="block text-xs text-ink-secondary">
+                            <span className="block text-[12.5px] text-ink-secondary">
                                 Currently <span className="font-medium text-ink-secondary">{formatValue(setting, inherit.value)}</span>. Follows it if it changes.
                             </span>
                         </span>
@@ -189,32 +189,32 @@ export function ChoiceCards({
                             >
                                 <span className="flex items-start gap-3">
                                     <span className="min-w-0 flex-1">
-                                        <span className="block text-[13px] font-semibold leading-snug text-ink">{c.title}</span>
+                                        <span className="block text-[13.5px] font-semibold leading-snug text-ink">{c.title}</span>
                                         {(sameValue(c.id, recommended) || inForce || stale) && (
                                             <span className="mt-1 flex flex-wrap gap-1">
                                                 {sameValue(c.id, recommended) && (
-                                                    <span className="inline-flex items-center gap-0.5 rounded-full bg-black/[0.05] px-1.5 py-px text-[10px] font-semibold text-ink-secondary dark:bg-white/[0.07]">
+                                                    <span className="inline-flex items-center gap-0.5 rounded-full bg-black/[0.05] px-1.5 py-px text-[11px] font-semibold text-ink-secondary dark:bg-white/[0.07]">
                                                         <Sparkles aria-hidden className="w-2.5 h-2.5" /> Recommended
                                                     </span>
                                                 )}
                                                 {inForce && (
-                                                    <span className="inline-flex rounded-full bg-amber-500/12 px-1.5 py-px text-[10px] font-semibold text-amber-800 dark:text-amber-300">In force now</span>
+                                                    <span className="inline-flex rounded-full bg-amber-500/12 px-1.5 py-px text-[11px] font-semibold text-amber-800 dark:text-amber-300">In force now</span>
                                                 )}
                                                 {stale && (
-                                                    <span className="inline-flex rounded-full bg-black/[0.05] px-1.5 py-px text-[10px] font-semibold text-ink-secondary dark:bg-white/[0.07]">No longer offered here</span>
+                                                    <span className="inline-flex rounded-full bg-black/[0.05] px-1.5 py-px text-[11px] font-semibold text-ink-secondary dark:bg-white/[0.07]">No longer offered here</span>
                                                 )}
                                             </span>
                                         )}
                                     </span>
                                     <RadioDot on={on} />
                                 </span>
-                                <span id={promiseId} className={cn('block leading-relaxed text-ink-secondary', rich ? 'text-xs' : 'text-[11.5px]')}>
+                                <span id={promiseId} className="block text-[12.5px] leading-relaxed text-ink-secondary">
                                     {c.promise}
                                 </span>
                                 {rich && c.frames.length > 0 && <FrameStrip frames={c.frames} />}
                                 {rich && dimensions.length > 0 && <Verdicts choice={c} setting={setting} dimensions={dimensions} />}
                                 {rich && (c.pros.length > 0 || c.cons.length > 0) && (
-                                    <span className="grid gap-1 text-[11px] leading-snug">
+                                    <span className="grid gap-1 text-[12.5px] leading-snug">
                                         {c.pros.map((p) => (
                                             <span key={p} className="flex gap-1.5 text-ink-secondary">
                                                 <span aria-hidden className="text-emerald-600 dark:text-emerald-400">+</span>
@@ -230,7 +230,7 @@ export function ChoiceCards({
                                     </span>
                                 )}
                                 {rich && (c.goodFor || c.needs) && (
-                                    <span className="mt-auto block border-t border-glass-border/60 pt-2 text-[11px] leading-snug text-ink-secondary">
+                                    <span className="mt-auto block border-t border-glass-border/60 pt-2 text-[12.5px] leading-snug text-ink-secondary">
                                         {c.goodFor && <><span className="font-semibold text-ink-secondary">Good for </span>{c.goodFor} </>}
                                         {c.needs && <><span className="font-semibold text-ink-secondary">Needs </span>{c.needs}</>}
                                     </span>
@@ -241,7 +241,7 @@ export function ChoiceCards({
                 </div>
             </div>
             {withheld.length > 0 && (
-                <p className="text-[11px] text-ink-secondary">Not offered here: {withheld.map((c) => c.title).join(', ')}.</p>
+                <p className="text-[12.5px] text-ink-secondary">Not offered here: {withheld.map((c) => c.title).join(', ')}.</p>
             )}
         </div>
     )

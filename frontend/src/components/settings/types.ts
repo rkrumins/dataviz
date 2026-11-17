@@ -442,6 +442,7 @@ export interface SampleImport {
 
 export interface SettingsFacts {
     nodes?: NodeMemory[]
-    largestGraph?: { name: string; bytes: number }
+    /** Named by its data source; null when it can't be named. */
+    largestGraph?: { name: string | null; bytes: number }
     sampleImport?: SampleImport
 }

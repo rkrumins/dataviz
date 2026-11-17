@@ -131,12 +131,16 @@ describe('WriteRhythm, CopyRoomBar and the timelines', () => {
     })
 
     it('CopyRoomBar measures each node’s room under its start mark, and says where a copy fits', () => {
-        render(<CopyRoomBar graph={FACTS.largestGraph!} copyRoomPct={100} nextCopyRoomPct={220} startPct={80} nodes={FACTS.nodes!} />)
+        const { unmount } = render(<CopyRoomBar graph={FACTS.largestGraph!} copyRoomPct={100} nextCopyRoomPct={220} startPct={80} nodes={FACTS.nodes!} />)
         const figure = screen.getByRole('figure', { name: 'Room for a copy' })
         expect(figure).toHaveAccessibleDescription(
-            /Sales lineage is 9\.4 GB\. At 100%, a copy needs 9\.4 GB free under a node’s start mark \(80%\): it fits on 1 of 3 nodes\. With your change \(220%\) it needs 20\.68 GB: it fits on 0\./)
+            /^Your largest graph, Sales lineage, is 9\.4 GB\. At 100%, a copy needs 9\.4 GB free under a node’s start mark \(80%\): it fits on 1 of 3 nodes\. With your change \(220%\) it needs 20\.68 GB: it fits on 0\./)
         // Node 2: 16 GB × 80% − 3.2 GB used = 9.6 GB of room (the registry's own figure for this node).
         expect(figure).toHaveTextContent('9.6 GB of room · A copy fits')
+        unmount()
+        // A graph whose data source can't be named: said plainly, once.
+        render(<CopyRoomBar graph={{ name: null, bytes: FACTS.largestGraph!.bytes }} copyRoomPct={100} startPct={80} nodes={FACTS.nodes!} />)
+        expect(screen.getByRole('figure', { name: 'Room for a copy' })).toHaveAccessibleDescription(/^Your largest graph is 9\.4 GB\. At 100%/)
     })
 
     it('RetentionTimeline: pick how long ago a draft closed to see whether its changes are kept', () => {
