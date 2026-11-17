@@ -511,7 +511,9 @@ export function CanvasVersioningBar({
 
             {/* The most consequential control in the bar, and the only one in
                 its cluster that said nothing on hover. */}
-            {!readOnlyDraft && (
+            {/* Offered once there is something to publish: changes saved on the draft, views it
+                changes, or edits still staged (the dialog then offers to save them first). */}
+            {!readOnlyDraft && (loadingChanges || changeCount > 0 || viewChangeCount > 0 || uncommitted > 0) && (
             <HoverTip
               className="inline-flex"
               label={`Send this draft to the ${BRANCH_VOCAB.published.toLowerCase()} version everyone sees`}
