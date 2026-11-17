@@ -2,7 +2,8 @@
  * SettingVisual — the explainer a setting names (`setting.visual`), fed from the values in force,
  * the values with staged changes applied, and the platform's live facts. Explainers that move a
  * value (the memory marks) stage through `onStage`. Without the facts an explainer needs, it draws
- * nothing rather than a picture of made-up numbers.
+ * nothing rather than a picture of made-up numbers; the guard meter alone, which tries a replace
+ * rather than measuring one, draws a replace labelled as an example.
  */
 import type { Setting, SettingsFacts, SettingValue, Values } from '../types'
 import { CopyRoomBar } from './CopyRoomBar'
@@ -89,7 +90,6 @@ export function SettingVisual({ setting, settings, current, next = current, fact
                 />
             )
         case 'guard_meter': {
-            if (!facts.sampleImport) return null
             const limits = (v: Values) => ({
                 enabled: (v['imports.replaceGuard'] ?? true) !== false,
                 minLive: n(v, 'imports.guardMinLive', 1000),

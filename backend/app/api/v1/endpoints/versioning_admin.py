@@ -115,7 +115,9 @@ async def graphs_summary(_user: User = Depends(requires("system:admin"))) -> dic
     """Over every live versioned graph but forks: how many there are; in memory, unloaded, loading,
     waiting for room and with no copy yet (the five add up to the graphs, and ``status`` on the
     inventory lists the same ones); how many have a new version being built, failed their last
-    update, and chose a versioned-graph setting of their own."""
+    update, and chose a versioned-graph setting of their own. ``largestGraph`` is the platform copy
+    with the largest measured size, ``{graphId, dataSourceId, workspaceId, label, bytes}``
+    (``label`` null when its data source can't be named), or null while none is measured."""
     return await probes.versioned_graphs_summary()
 
 

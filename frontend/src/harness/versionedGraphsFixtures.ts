@@ -145,7 +145,8 @@ export function versionedGraphsFetch(scenario: Scenario): typeof fetch {
             if (scenario === 'loading') return never()
             if (scenario === 'error') return failed('The graph store didn’t answer in time')
             // Nothing is built beside while New-version builds are off.
-            return json(scenario === 'empty' ? { graphs: 0, inMemory: 0, unloaded: 0, loading: 0, waitingForRoom: 0, noCopy: 0, building: 0, failing: 0, withOwnSettings: 0 }
+            return json(scenario === 'empty'
+                ? { graphs: 0, inMemory: 0, unloaded: 0, loading: 0, waitingForRoom: 0, noCopy: 0, building: 0, failing: 0, withOwnSettings: 0, largestGraph: null }
                 : { ...SUMMARY, building: 0 })
         }
         if (p.endsWith('/admin/versioning/graphs')) {

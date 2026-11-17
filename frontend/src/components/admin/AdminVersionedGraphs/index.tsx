@@ -8,10 +8,11 @@
  * The header holds the app's Business / Technical switch (`LensSwitch`), so it is on every tab.
  * The tab is in `?tab=`; a link to a setting (`#reads-mode`) opens Settings at it. What is staged
  * on Settings stays staged while you look at the other tabs (and "Use recommended" in the
- * Overview's finder stages there), and isn't polled over: the values and node memory refresh only
- * while nothing is. Leaving for another page, or reloading, with anything staged (here or in a
- * graph's drawer) asks first. Each part is asked for where it is shown: the figures and the list
- * beside the registry, node memory on Settings, the signals where a finder shows them.
+ * Overview's finder stages there), and isn't polled over: the values, node memory and the largest
+ * graph refresh only while nothing is. Leaving for another page, or reloading, with anything staged
+ * (here or in a graph's drawer) asks first. Each part is asked for where it is shown: the figures and
+ * the list beside the registry, node memory and the figures' largest graph on Settings, the signals
+ * where a finder shows them.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useLocation, useNavigate, useSearchParams } from 'react-router-dom'
@@ -23,7 +24,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/Tabs'
 import { LensSwitch, settingAnchor, type ResolvedValues, type SettingValue } from '@/components/settings'
 import { systemStatusService, type VersionedGraphRow } from '@/services/systemStatusService'
 import {
-    PLATFORM, settingsKeys, settingsService, signalCounts, useNodeMemory, useSettingsSchema, useSettingsValues, useSignals,
+    PLATFORM, settingsKeys, settingsService, signalCounts, useGraphsSummary, useNodeMemory, useSettingsSchema, useSettingsValues, useSignals,
 } from '@/services/settingsService'
 import { GraphSettingsDrawer } from './GraphSettingsDrawer'
 import { HistoryView } from './HistoryView'
@@ -73,15 +74,22 @@ export function AdminVersionedGraphs() {
             staleTime: 15_000,
         })
     }, [tab, qc])
-    // Node memory for the gauges: read on Settings, and not polled over staged values once read.
+    // Node memory for the gauges, and the largest graph for the copy explainer: read on Settings, and not polled over
+    // staged values once read.
     const nodesRead = qc.getQueryData(settingsKeys.nodes()) !== undefined
     const nodes = useNodeMemory(tab === 'settings' && (staged === 0 || !nodesRead))
+    const summaryRead = qc.getQueryData(settingsKeys.summary()) !== undefined
+    const largest = useGraphsSummary(tab === 'settings' && (staged === 0 || !summaryRead)).data?.largestGraph
     // The signals, where a finder shows them: the Overview's, and Settings' while it is open.
     const [finderOpen, setFinderOpen] = useState(false)
     const signalsQ = useSignals(Boolean(schema?.signals?.length) && (tab === 'overview' || (tab === 'settings' && finderOpen)))
     const signals = signalCounts(signalsQ.data)
     const signalsUnavailable = signalsQ.data?.unavailable === true
-    const facts = useMemo(() => ({ nodes: nodes.data }), [nodes.data])
+    const facts = useMemo(() => ({
+        nodes: nodes.data,
+        // Named by its data source, else plainly; with none measured (or the figures refused), there is none.
+        largestGraph: largest ? { name: largest.label ?? 'Your largest graph', bytes: largest.bytes } : undefined,
+    }), [nodes.data, largest])
     // The graph store providers: names for the list, and where a graph can move or be reseeded.
     const status = useQuery({ queryKey: ['admin', 'system-status'], queryFn: systemStatusService.get, staleTime: 60_000, refetchOnWindowFocus: false, enabled: tab === 'overview' })
     const providers = status.data?.graphProviders ?? []

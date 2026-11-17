@@ -409,6 +409,11 @@ export interface GraphsSummary {
     building: number
     failing: number
     withOwnSettings: number
+    /**
+     * The platform copy with the largest measured size, which the copy-room explainer draws; null while none is
+     * measured. `label` is its data source's name, null when the server couldn't read it.
+     */
+    largestGraph: { graphId: string; dataSourceId: string; workspaceId: string; label: string | null; bytes: number } | null
 }
 
 // ── Signals, health and profiles (later additions; each may be absent) ─────
@@ -748,8 +753,8 @@ export function useWorkspaceGraphs(workspaceId: string) {
     })
 }
 
-export function useGraphsSummary() {
-    return useQuery({ queryKey: settingsKeys.summary(), queryFn: settingsService.summary, staleTime: LIST_FRESH_MS, refetchInterval: REFRESH_MS, retry: 1 })
+export function useGraphsSummary(enabled = true) {
+    return useQuery({ queryKey: settingsKeys.summary(), queryFn: settingsService.summary, enabled, staleTime: LIST_FRESH_MS, refetchInterval: REFRESH_MS, retry: 1 })
 }
 
 /** Each node's memory, for the gauges; a failure leaves them out (the explainers then draw nothing). */

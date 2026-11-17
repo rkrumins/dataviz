@@ -2,8 +2,8 @@
  * The explainers: each is a named figure with a caption in words; the compass draws a ghost only
  * when staged values move a dimension; the memory marks move by keyboard and never let the stop
  * mark pass the start mark less its margin; the read timeline scrubs by keyboard; the guard
- * meter's verdict follows the import; the symptom finder leads to the settings and stages the
- * recommended move.
+ * meter's verdict follows the import, and without one it tries an example, labelled as one; the
+ * symptom finder leads to the settings and stages the recommended move.
  */
 import { fireEvent, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -19,6 +19,7 @@ import { GuardMeter } from '../visuals/GuardMeter'
 import { MemoryMarks } from '../visuals/MemoryMarks'
 import { ReadTimeline } from '../visuals/ReadTimeline'
 import { IdleTimeline, RetentionTimeline } from '../visuals/RetentionTimeline'
+import { SettingVisual } from '../visuals/SettingVisual'
 import { SymptomFinder } from '../visuals/SymptomFinder'
 import { TradeoffCompass } from '../visuals/TradeoffCompass'
 import { WriteRhythm } from '../visuals/WriteRhythm'
@@ -179,6 +180,32 @@ describe('GuardMeter', () => {
         fireEvent.keyDown(screen.getByRole('slider', { name: 'Rows that match an existing item' }), { key: 'Home' })
         expect(figure()).toHaveTextContent('This replace would stop early')
         expect(figure()).toHaveAccessibleDescription(/It stops early: only 0% of its first rows match existing items, under 5%\./)
+    })
+
+    // Where the setting's explainer is drawn: with nothing staged, its limits are the registry's defaults.
+    const explainer = (facts = {}) => (
+        <SettingVisual setting={SETTINGS_BY_KEY['imports.guardDeleteShare']} settings={SETTINGS_BY_KEY} current={{}} facts={facts} />
+    )
+
+    it('without an import to try, tries an example replace, labelled as one, that the defaults stop', () => {
+        render(explainer())
+        expect(within(figure()).getByText('Example')).toBeInTheDocument()
+        expect(within(figure()).getByText('An example replace: drag to try another.')).toBeInTheDocument()
+        expect(figure()).toHaveTextContent('This replace would be stopped')
+        expect(figure()).toHaveAccessibleDescription(
+            /^An example replace of 8,000 rows into a graph of 10,000 items\. It is stopped: it would delete 80% of what it replaces and make 60% as many again/)
+        // Dragging shows the other outcomes: fewer deleted goes through, fewer matching rows stops early.
+        fireEvent.keyDown(screen.getByRole('slider', { name: 'Items the replace deletes' }), { key: 'Home' })
+        expect(figure()).toHaveTextContent('This replace would go through')
+        fireEvent.keyDown(screen.getByRole('slider', { name: 'Rows that match an existing item' }), { key: 'Home' })
+        expect(figure()).toHaveTextContent('This replace would stop early')
+    })
+
+    it('tries an import’s own dry run as it is, with no Example label', () => {
+        render(explainer({ sampleImport: FACTS.sampleImport }))
+        expect(within(figure()).queryByText('Example')).not.toBeInTheDocument()
+        expect(within(figure()).getByText('Drag the handles to try another replace.')).toBeInTheDocument()
+        expect(figure()).toHaveAccessibleDescription(/^A replace of 118,500 rows into a graph of 120,000 items\./)
     })
 })
 

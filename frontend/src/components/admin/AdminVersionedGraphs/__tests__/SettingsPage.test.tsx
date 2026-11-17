@@ -8,8 +8,9 @@
  * in the review). One confirmation per save. The platform's limits stage beside the values; a
  * category's switch asks first, as Admin → Features does. Around the rows: "Changed only" counts
  * each setting once, the finder takes and gives back focus and is the only place on Settings that
- * asks for the signals, and leaving with changes staged asks first. Labels come from the registry's
- * generated catalogue.
+ * asks for the signals, and leaving with changes staged asks first. The room for a copy is drawn
+ * from the platform's real figures, node memory and the largest graph, named, and not at all
+ * without them. Labels come from the registry's generated catalogue.
  */
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -19,8 +20,9 @@ import { beforeAll, describe, expect, it, vi } from 'vitest'
 import { NotificationStack, useNotificationStore } from '@/components/ui/notifications'
 import { CATALOGUE } from '@/components/settings'
 import { REASON_HEADER } from '@/services/activityReason'
+import { usePersonaStore } from '@/store/persona'
 import { AdminVersionedGraphs } from '..'
-import { platformValues } from '../__fixtures__/api'
+import { SUMMARY, platformValues } from '../__fixtures__/api'
 import { allowMenus, calls, json, mockApi, renderWithApi } from './helpers'
 
 const S = Object.fromEntries(CATALOGUE.settings.map((s) => [s.key, s]))
@@ -433,5 +435,71 @@ describe('Settings: a category’s switch', () => {
         renderWithApi(<AdminVersionedGraphs />, { path: SETTINGS })
         await userEvent.click((await rowOnceDrawn('builds.aboveRows')).getAllByRole('button', { name: 'Turn on New-version builds' })[0])
         expect(await screen.findByRole('dialog', { name: 'Turn on New-version builds?' })).toBeInTheDocument()
+    })
+})
+
+describe('Settings: explainers drawn from real facts', () => {
+    const SUMMARY_PATH = '/admin/versioning/graphs/summary'
+    const howItWorks = async (name: string) => {
+        const article = within(await screen.findByRole('article', { name }))
+        await userEvent.click(article.getByRole('button', { name: 'How it works' }))
+        return article
+    }
+
+    it('draws the room for a copy from each node’s memory and the largest graph, named, once its guidance opens', async () => {
+        mockApi()
+        renderWithApi(<AdminVersionedGraphs />, { path: SETTINGS })
+        const copy = await howItWorks(S['builds.copyRoomPct'].label)
+        // The figures' largest graph (Sales lineage, 9.4 GB) at the platform's 250%, over the three nodes the topology reads.
+        expect(await copy.findByRole('figure', { name: 'Room for a copy' }))
+            .toHaveAccessibleDescription(/^Sales lineage is 9\.4 GB\. At 250%, a copy needs 23\.5 GB free under a node’s start mark \(80%\): it fits on 0 of 3 nodes\./)
+    })
+
+    it('names the largest graph plainly when its data source can’t be named', async () => {
+        mockApi('ok', (req) => (req.path.endsWith(SUMMARY_PATH) ? json({ ...SUMMARY, largestGraph: { ...SUMMARY.largestGraph, label: null } }) : undefined))
+        renderWithApi(<AdminVersionedGraphs />, { path: SETTINGS })
+        const copy = await howItWorks(S['builds.copyRoomPct'].label)
+        expect(await copy.findByRole('figure', { name: 'Room for a copy' })).toHaveAccessibleDescription(/^Your largest graph is 9\.4 GB\./)
+    })
+
+    it.each([
+        ['while no graph is measured', 'ok' as const, () => json({ ...SUMMARY, largestGraph: null })],
+        ['for a viewer the figures are refused to', 'readonly' as const, () => json({ detail: 'Not allowed' }, 403)],
+    ])('draws no room for a copy %s', async (_, scenario, answer) => {
+        const sent = mockApi(scenario, (req) => (req.path.endsWith(SUMMARY_PATH) ? answer() : undefined))
+        renderWithApi(<AdminVersionedGraphs />, { path: SETTINGS })
+        const copy = await howItWorks(S['builds.copyRoomPct'].label)
+        expect(copy.getByRole('heading', { name: 'What it means' })).toBeInTheDocument()
+        // The node memory and the figures are read, and the guidance is open: there is no graph to draw.
+        await waitFor(() => {
+            expect(calls(sent, 'GET', SUMMARY_PATH).length).toBeGreaterThan(0)
+            expect(calls(sent, 'GET', '/admin/graph-store/topology').length).toBeGreaterThan(0)
+        })
+        await expect(copy.findByRole('figure', { name: 'Room for a copy' }, { timeout: 500 })).rejects.toThrow()
+    })
+
+    it('reads its figures every 30 s while nothing is staged, and not over a staged change', async () => {
+        vi.useFakeTimers({ shouldAdvanceTime: true })
+        try {
+            const sent = mockApi()
+            renderWithApi(<AdminVersionedGraphs />, { path: SETTINGS })
+            await rowOnceDrawn('reads.mode')
+            await waitFor(() => expect(calls(sent, 'GET', SUMMARY_PATH)).toHaveLength(1))
+            await vi.advanceTimersByTimeAsync(31_000)
+            await waitFor(() => expect(calls(sent, 'GET', SUMMARY_PATH)).toHaveLength(2))
+            await stageReadMode()
+            await vi.advanceTimersByTimeAsync(61_000)
+            expect(calls(sent, 'GET', SUMMARY_PATH)).toHaveLength(2)
+        } finally {
+            vi.useRealTimers()
+        }
+    })
+
+    it('in the Business view too, once its guidance opens under its question', async () => {
+        usePersonaStore.setState({ mode: 'business' })
+        mockApi()
+        renderWithApi(<AdminVersionedGraphs />, { path: SETTINGS })
+        const copy = await howItWorks(S['builds.copyRoomPct'].question || S['builds.copyRoomPct'].label)
+        expect(await copy.findByRole('figure', { name: 'Room for a copy' })).toHaveAccessibleDescription(/^Sales lineage is 9\.4 GB\./)
     })
 })
