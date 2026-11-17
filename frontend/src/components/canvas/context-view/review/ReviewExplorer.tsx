@@ -29,7 +29,9 @@ import { useEntityColorSet } from '@/hooks/useEntityVisual'
 import { JsonView } from '@/components/panels/shell/JsonView'
 import { nodeUpdatePatch } from '@/features/versioning/model/stagedChangesToOps'
 import { fieldChanges, type ReviewGroup, type ReviewKind, type Sentence } from '@/features/versioning/model/reviewModel'
-import { isNarrowed, needsAttention, NO_FILTER, rowKey, type ReviewFilter, type ReviewIndex } from '@/features/versioning/model/reviewIndex'
+import {
+  headingLabel, headingOf, isNarrowed, needsAttention, NO_FILTER, rowKey, type ReviewFilter, type ReviewIndex,
+} from '@/features/versioning/model/reviewIndex'
 import type { ChangeStatus } from '@/features/versioning/model/changeModel'
 import { CascadeImpactList } from '@/features/versioning/components/CascadeImpactList'
 import { ConflictChoices } from '@/features/versioning/components/ConflictChoices'
@@ -37,6 +39,7 @@ import { NodeDiffBadge, STATUS_META } from '@/features/versioning/components/Nod
 import { ReviewValue } from '@/features/versioning/components/ReviewValue'
 
 const ROW_HEIGHT = 52
+const HEADING_HEIGHT = 30
 const STATUSES: ChangeStatus[] = ['added', 'modified', 'removed']
 const KIND_LABEL: Record<ReviewKind | 'all', string> = { all: 'All', node: 'Entities', edge: 'Relationships', layout: 'Layout' }
 /** Changes of one group laid out in its detail before "and N more". */
@@ -205,19 +208,24 @@ export function ReviewExplorer({ index, rows, selected, onSelect, problemIds, on
   }, [rows, groups, selected])
   const current = position >= 0 ? groups[rows[position]] : undefined
 
+  // The rows as drawn: a heading before each run of a type (rows come ordered by it), then the
+  // rows. `itemOf` finds a row's place among them — the keyboard moves between rows, never onto
+  // a heading.
+  const { items, itemOf } = useMemo(() => listItems(rows, groups), [rows, groups])
   const scrollRef = useRef<HTMLDivElement>(null)
   const virtualizer = useVirtualizer({
-    count: rows.length,
+    count: items.length,
     getScrollElement: () => scrollRef.current,
-    estimateSize: () => ROW_HEIGHT,
+    estimateSize: (i) => (items[i].heading ? HEADING_HEIGHT : ROW_HEIGHT),
     overscan: 10,
-    getItemKey: (i) => rowKey(groups[rows[i]]),
+    getItemKey: (i) => items[i].key,
   })
   const go = (to: number) => {
     if (rows.length === 0) return
     const i = Math.max(0, Math.min(rows.length - 1, to))
     onSelect(rowKey(groups[rows[i]]))
-    virtualizer.scrollToIndex(i, { align: 'auto' })
+    // A run's first row brings its heading into view with it.
+    virtualizer.scrollToIndex(i === 0 ? 0 : itemOf[i], { align: 'auto' })
   }
   const discardCurrent = () => {
     if (!current || disabled) return
@@ -245,7 +253,7 @@ export function ReviewExplorer({ index, rows, selected, onSelect, problemIds, on
   if (groups.length === 0) return <EmptyState />
   if (rows.length === 0) return <EmptyState filtered onClear={onClearFilter} />
 
-  const items = virtualizer.getVirtualItems()
+  const drawn = virtualizer.getVirtualItems()
   return (
     <div className="grid gap-3 md:grid-cols-[minmax(260px,360px)_minmax(0,1fr)] h-[min(58vh,600px)] max-md:h-auto">
       <div
@@ -258,11 +266,23 @@ export function ReviewExplorer({ index, rows, selected, onSelect, problemIds, on
         className="relative overflow-y-auto custom-scrollbar rounded-2xl border border-glass-border bg-black/[0.015] dark:bg-white/[0.02] focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40 max-md:max-h-[36vh]"
       >
         <div className="relative w-full" style={{ height: virtualizer.getTotalSize() }}>
-          {items.map((v) => {
-            const g = groups[rows[v.index]]
+          {drawn.map((v) => {
+            const item = items[v.index]
+            if (item.heading) {
+              return (
+                <div key={v.key} role="presentation"
+                  className="absolute left-0 top-0 w-full px-3 flex items-end gap-2 pb-1"
+                  style={{ height: HEADING_HEIGHT, transform: `translateY(${v.start}px)` }}>
+                  <span className="text-[10.5px] font-semibold uppercase tracking-wider text-ink-muted/80 truncate">{item.heading}</span>
+                  <span className="text-[10.5px] text-ink-muted/70 tabular-nums">{item.count.toLocaleString()}</span>
+                </div>
+              )
+            }
+            const g = groups[rows[item.row]]
             return (
               <div key={v.key} className="absolute left-0 top-0 w-full px-1.5 pt-1.5" style={{ height: ROW_HEIGHT, transform: `translateY(${v.start}px)` }}>
-                <Row id={`review-row-${v.index}`} group={g} selected={v.index === position}
+                <Row id={`review-row-${item.row}`} group={g} selected={item.row === position}
+                  setSize={rows.length} posInSet={item.row + 1} heading={headingLabel(headingOf(g))}
                   attention={needsAttention(g, problemIds)} onClick={() => onSelect(rowKey(g))} />
               </div>
             )
@@ -289,12 +309,40 @@ export function ReviewExplorer({ index, rows, selected, onSelect, problemIds, on
   )
 }
 
-function Row({ id, group, selected, attention, onClick }: {
+type ListItem = { key: string; heading: string; count: number; row: -1 } | { key: string; heading: null; count: 0; row: number }
+
+/** Headings and rows, in order — a heading before each run of one type — and each row's item. */
+function listItems(rows: readonly number[], groups: readonly ReviewGroup[]): { items: ListItem[]; itemOf: number[] } {
+  const items: ListItem[] = []
+  const itemOf: number[] = new Array(rows.length)
+  let last: string | null = null
+  let headingAt = -1
+  for (let i = 0; i < rows.length; i++) {
+    const g = groups[rows[i]]
+    const h = headingOf(g)
+    if (h !== last) {
+      headingAt = items.length
+      items.push({ key: `heading:${h}`, heading: headingLabel(h), count: 0, row: -1 })
+      last = h
+    }
+    ;(items[headingAt] as { count: number }).count++
+    itemOf[i] = items.length
+    items.push({ key: rowKey(g), heading: null, count: 0, row: i })
+  }
+  return { items, itemOf }
+}
+
+function Row({ id, group, selected, attention, onClick, setSize, posInSet, heading }: {
   id: string
   group: ReviewGroup
   selected: boolean
   attention: boolean
   onClick: () => void
+  /** Its place among every row shown — the list draws only the few on screen. */
+  setSize: number
+  posInSet: number
+  /** The heading it is listed under, said with it. */
+  heading: string
 }) {
   const meta = STATUS_META[group.status]
   const colors = useEntityColorSet(group.typeId ?? '')
@@ -306,6 +354,8 @@ function Row({ id, group, selected, attention, onClick }: {
       id={id}
       role="option"
       aria-selected={selected}
+      aria-setsize={setSize}
+      aria-posinset={posInSet}
       onClick={onClick}
       className={cn(
         'h-[46px] flex items-center gap-2 pl-2 pr-2.5 rounded-xl border-l-[3px] cursor-pointer select-none transition-colors',
@@ -328,6 +378,7 @@ function Row({ id, group, selected, attention, onClick }: {
           {attention && <CircleAlert className="w-3 h-3 text-rose-500 shrink-0" aria-label="Needs attention" />}
         </span>
         <span className="block text-[11px] text-ink-muted truncate leading-tight mt-0.5">{sentence}</span>
+        <span className="sr-only">{`, ${heading}`}</span>
       </span>
     </div>
   )

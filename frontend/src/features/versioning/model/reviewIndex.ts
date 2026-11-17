@@ -20,6 +20,8 @@ export interface ReviewFacets {
 
 export interface ReviewIndex {
   groups: ReviewGroup[]
+  /** How many groups share a group's heading (`headingOf`) — the order headings come in. */
+  headingCounts: Map<string, number>
   /** A change's id → the index of its group. */
   groupOf: Map<string, number>
   facets: ReviewFacets
@@ -49,8 +51,11 @@ export function buildReviewIndex(changes: readonly StagedChange[], lookup: NameL
   const status: Record<ChangeStatus, number> = { added: 0, modified: 0, removed: 0 }
   const kind: Record<ReviewKind, number> = { node: 0, edge: 0, layout: 0 }
   const types = new Map<string, number>()
+  const headingCounts = new Map<string, number>()
   groups.forEach((g, i) => {
     for (const c of g.changes) groupOf.set(c.id, i)
+    const h = headingOf(g)
+    headingCounts.set(h, (headingCounts.get(h) ?? 0) + 1)
     kind[g.kind]++
     if (g.kind === 'layout') return
     status[g.status]++
@@ -58,6 +63,7 @@ export function buildReviewIndex(changes: readonly StagedChange[], lookup: NameL
   })
   const index: ReviewIndex = {
     groups,
+    headingCounts,
     groupOf,
     facets: { status, kind, types: [...types].map(([type, n]) => ({ type, n })).sort((a, b) => b.n - a.n) },
   }
@@ -80,7 +86,29 @@ function textOf(g: ReviewGroup): string {
   return t
 }
 
-/** The groups the filter keeps, as indices into `index.groups`, in their order. */
+const KIND_ORDER: Record<ReviewKind, number> = { node: 0, edge: 1, layout: 2 }
+
+/** The heading a group is listed under: its kind, and an entity's or relationship's type. */
+export function headingOf(g: ReviewGroup): string {
+  return g.kind === 'layout' ? 'layout:' : `${g.kind}:${(g.kind === 'node' ? g.typeId : g.edgeType) ?? ''}`
+}
+
+/** A heading as it reads: "Table", "FEEDS relationships", "View layout". */
+export function headingLabel(heading: string): string {
+  const cut = heading.indexOf(':')
+  const kind = heading.slice(0, cut)
+  const type = heading.slice(cut + 1)
+  if (kind === 'layout') return 'View layout'
+  if (kind === 'edge') return type ? `${type} relationships` : 'Relationships'
+  return type || 'Untyped'
+}
+
+/**
+ * The groups the filter keeps, as indices into `index.groups`: entities, then relationships, then
+ * layout; within each, by type — the most changed first — and in the order they were made. The
+ * list draws them so, under a heading per type, and every walk of "what's shown" (Prev / Next,
+ * Step through, Discard the N shown) follows the same order.
+ */
 export function filterRows(index: ReviewIndex, f: ReviewFilter, problemIds?: ReadonlySet<string>): number[] {
   const q = f.q.trim().toLowerCase()
   const statuses = f.statuses.length ? new Set(f.statuses) : null
@@ -95,7 +123,24 @@ export function filterRows(index: ReviewIndex, f: ReviewFilter, problemIds?: Rea
     if (q && !textOf(g).includes(q)) continue
     out.push(i)
   }
-  return out
+  const rank = headingRanks(index)
+  const headings = out.map((i) => rank.get(headingOf(groups[i]))!)
+  const order = out.map((_, k) => k).sort((a, b) => headings[a] - headings[b] || out[a] - out[b])
+  return order.map((k) => out[k])
+}
+
+const ranks = new WeakMap<ReviewIndex, Map<string, number>>()
+/** Each heading's place: by kind, then the most changed type first, then by name. */
+function headingRanks(index: ReviewIndex): Map<string, number> {
+  let r = ranks.get(index)
+  if (!r) {
+    const sorted = [...index.headingCounts].sort(([a, na], [b, nb]) =>
+      KIND_ORDER[a.slice(0, a.indexOf(':')) as ReviewKind] - KIND_ORDER[b.slice(0, b.indexOf(':')) as ReviewKind]
+      || nb - na || a.localeCompare(b))
+    r = new Map(sorted.map(([h], i) => [h, i]))
+    ranks.set(index, r)
+  }
+  return r
 }
 
 /** A row's stable key: groups of different kinds may share a target id. */

@@ -94,4 +94,23 @@ describe('Review & Save — the change explorer', () => {
     expect(nav.index).toBe(1)
     useChangeNavigatorStore.setState({ canReveal: false, active: false })
   })
+
+  it('lists the changes under a heading per type, and moves between rows only', () => {
+    useStagedChangesStore.setState({
+      changes: [rename('a', 'orders', 'Orders'), { ...create('c', 'Refunds'), after: { displayName: 'Refunds', entityType: 'Table' } },
+        { ...rename('b', 'sales', 'Sales'), type: 'rename_entity' }],
+    } as never)
+    render(<StagedChangesPanel onConfirm={() => {}} />)
+    const list = screen.getByRole('listbox', { name: 'Staged changes' })
+    expect(within(list).getByText('Table')).toBeInTheDocument()
+    expect(within(list).getByText('Untyped')).toBeInTheDocument()
+    const options = within(list).getAllByRole('option')
+    expect(options).toHaveLength(3)
+    expect(options.map((o) => o.getAttribute('aria-posinset'))).toEqual(['1', '2', '3'])
+    expect(options.every((o) => o.getAttribute('aria-setsize') === '3')).toBe(true)
+    fireEvent.keyDown(list, { key: 'j' })
+    expect(within(list).getAllByRole('option')[1]).toHaveAttribute('aria-selected', 'true')
+    fireEvent.keyDown(list, { key: 'End' })
+    expect(within(list).getAllByRole('option')[2]).toHaveAttribute('aria-selected', 'true')
+  })
 })

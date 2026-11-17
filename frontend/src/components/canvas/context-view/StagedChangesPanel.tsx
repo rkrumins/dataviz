@@ -54,7 +54,7 @@ import { stopsFromGroups, useChangeNavigatorStore } from '@/store/changeNavigato
 const ChangeMap = lazy(() => import('@/features/versioning/components/ChangeMap'))
 
 const EMPTY_INDEX: ReviewIndex = {
-  groups: [], groupOf: new Map(),
+  groups: [], groupOf: new Map(), headingCounts: new Map(),
   facets: { status: { added: 0, modified: 0, removed: 0 }, kind: { node: 0, edge: 0, layout: 0 }, types: [] },
 }
 
