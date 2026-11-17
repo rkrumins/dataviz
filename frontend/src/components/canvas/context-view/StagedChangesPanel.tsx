@@ -22,7 +22,7 @@ import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   AlertTriangle, Check, CheckCircle2, ChevronRight, FileStack, GitPullRequest,
-  Layers, ListTree, Loader2, Map as MapIcon, OctagonAlert, Rocket, Save, Undo2, Redo2, X,
+  Layers, List, ListTree, Loader2, Map as MapIcon, OctagonAlert, Rocket, Save, Undo2, Redo2, X,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useSaveProgressStore } from '@/store/saveProgressStore'
@@ -45,6 +45,7 @@ import { useChangeSummary, useDataSourceDraftsPolicy } from '@/features/versioni
 import { useActiveDraftAccess } from '@/features/versioning/hooks/useActiveDraftAccess'
 import { ChangesPanel, ChangeCountChips } from '@/features/versioning/components/ChangesPanel'
 import { ChangeList } from '@/features/versioning/components/ChangeList'
+import { useChangeListLayout } from '@/features/versioning/hooks/useChangeListLayout'
 import { STATUS_META } from '@/features/versioning/components/NodeDiffBadge'
 import { PublishActions, PublishBody, usePublishFlow } from '@/features/versioning/components/PublishForm'
 import { ReviewExplorer, ReviewFilterBar } from './review/ReviewExplorer'
@@ -117,6 +118,8 @@ export function StagedChangesPanel({ onConfirm, describe, wsId, graphId, dataSou
   const [step, setStep] = useState<'review' | 'publish'>('review')
   const [destination, setDestination] = useState<ReviewDestination>('draft')
   const [view, setView] = useState<'list' | 'map'>('list')
+  // The list top-down or as one list — the same choice as every change list.
+  const [layout, setLayout] = useChangeListLayout()
   const [filter, setFilter] = useState<ReviewFilter>(NO_FILTER)
   /** The selected row (`rowKey`): the List's detail and the Map's highlight. */
   const [selectedKey, setSelectedKey] = useState<string | null>(null)
@@ -330,9 +333,13 @@ export function StagedChangesPanel({ onConfirm, describe, wsId, graphId, dataSou
                   </div>
                   <Segmented
                     label="Show the changes as"
-                    value={view}
-                    onChange={setView}
-                    options={[{ value: 'list', label: 'List', icon: ListTree }, { value: 'map', label: 'Map', icon: MapIcon }]}
+                    value={view === 'map' ? 'map' : layout}
+                    onChange={(v) => { if (v === 'map') setView('map'); else { setView('list'); setLayout(v) } }}
+                    options={[
+                      { value: 'tree', label: 'Hierarchy', icon: ListTree },
+                      { value: 'list', label: 'List', icon: List },
+                      { value: 'map', label: 'Map', icon: MapIcon },
+                    ]}
                   />
                   <UndoRedoCluster
                     canUndo={(changes.length > 0 || past.length > 0) && applyStatus !== 'applying'}
@@ -399,6 +406,7 @@ export function StagedChangesPanel({ onConfirm, describe, wsId, graphId, dataSou
                     <ReviewExplorer
                       index={index}
                       rows={rows}
+                      narrowed={isNarrowed(filter)}
                       selected={selectedKey}
                       onSelect={setSelectedKey}
                       problemIds={problemIds}

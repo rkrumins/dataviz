@@ -60,7 +60,7 @@ function statusOf(type: StagedChangeType): ChangeStatus {
 }
 
 /** The edge a change is about, in whichever shape its surface staged it. */
-function edgeOf(change: StagedChange): { source?: string; target?: string; type?: string } {
+export function edgeOf(change: StagedChange): { source?: string; target?: string; type?: string } {
   const after = asObj(change.after)
   const before = asObj(change.before)
   const e = change.type === 'create_edge' ? after : asObj(before.edge ?? before)

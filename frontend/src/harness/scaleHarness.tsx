@@ -7,6 +7,8 @@
  *   changes    a draft's change list of `n` changes (default 100,000), one row opened
  *   tree       the same list top-down: a warehouse, 5 schemas, 200 tables each, 100 changed columns
  *              each — a level opened, a page more, a search across all of it, a result revealed
+ *   review-tree  Review & Save top-down: the 50,000 staged changes under the canvas's 3,000
+ *              entities (10 databases › 100 schemas › tables), the rest "Elsewhere in the graph"
  *   navigator  the canvas change navigator, 10,482 stops (`&missing=1`: one not in this view)
  *
  *   npm run harness
@@ -38,7 +40,7 @@ const dark = params.get('theme') === 'dark'
 const N = Number(params.get('n') ?? (fixture === 'changes' || fixture === 'tree' ? 100_000 : 50_000))
 MotionGlobalConfig.skipAnimations = true
 usePersonaStore.setState({ mode: 'business' })
-usePreferencesStore.setState({ changeListLayout: fixture === 'tree' ? 'tree' : 'list' })
+usePreferencesStore.setState({ changeListLayout: fixture === 'tree' || fixture === 'review-tree' ? 'tree' : 'list' })
 
 /** What the driver reads: the timings, and the long tasks (ms) each step caused. */
 interface ScaleReport { openMs?: number; steps: Record<string, number[]>; done: boolean; error?: string }
@@ -115,9 +117,11 @@ window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 /** `n` staged changes: edits, creates, deletes (some refused), new relationships — over 3,000
  *  entities on the canvas. */
 function seedStaged() {
+  // Top-down, the canvas's entities sit in a hierarchy: 10 databases › 100 schemas › the tables.
+  const parentOf = (i: number) => (fixture !== 'review-tree' || i < 10 ? undefined : i < 110 ? `urn:n${i % 10}` : `urn:n${10 + (i % 100)}`)
   const nodes = Array.from({ length: 3000 }, (_, i) => ({
     id: `urn:n${i}`, type: 'generic', position: { x: 0, y: 0 },
-    data: { urn: `urn:n${i}`, label: `customer_orders_${i}`, type: TYPES[i % 5] },
+    data: { urn: `urn:n${i}`, label: `customer_orders_${i}`, type: TYPES[i % 5], parentId: parentOf(i) },
   }))
   useCanvasStore.setState({ nodes, _nodeIndex: new Set(nodes.map((n) => n.id)) } as never)
   const changes: StagedChange[] = []
@@ -147,7 +151,7 @@ function seedStaged() {
   setTimeout(() => {
     const opened = performance.now()
     useStagedChangesStore.getState().openReviewPanel()
-    void until(() => document.querySelector('[role=list][aria-label="Staged changes"] [role=listitem]')).then(() => { report.openMs = Math.round(performance.now() - opened) })
+    void until(() => document.querySelector('[role=list][aria-label^="Staged changes"] [role=listitem]')).then(() => { report.openMs = Math.round(performance.now() - opened) })
   }, 1500)
 }
 
@@ -303,6 +307,41 @@ async function drive() {
         await until(() => row('c_3_21_7')?.getAttribute('tabindex') === '0')
       })
     }
+    if (fixture === 'review-tree') {
+      await until(() => report.openMs)
+      const list = await until(() => document.querySelector<HTMLElement>('[role=list][aria-label="Staged changes, top-down"]'))
+      const row = (id: string) => document.getElementById(`change-tree-${id}`) as HTMLButtonElement | null
+      await step('settle', () => new Promise((r) => setTimeout(r, 600)))
+      // These databases and schemas are edited themselves: their chevron opens what is inside.
+      const inside = (name: string) => document.querySelector<HTMLButtonElement>(`button[aria-label="Show what's inside ${name}"]`)
+      await step('open-level', async () => { inside('customer_orders_0')!.click(); await until(() => row('urn:n10')) })
+      await step('step-in', async () => {
+        // Scrolled to, as a person would: only the rows in view are drawn.
+        const scroller = list.parentElement!
+        scroller.scrollTop = 0
+        const target = await until(() => inside('customer_orders_10') ?? void (scroller.scrollTop += 240))
+        target.click()
+        await until(() => list.querySelector('[role=listitem][aria-level="3"]') ?? void (scroller.scrollTop += 120))
+      })
+      await step('elsewhere', async () => {
+        const scroller = list.parentElement!
+        await until(() => { scroller.scrollTop = scroller.scrollHeight; return row('~elsewhere') })
+        row('~elsewhere')!.click()
+        await until(() => { scroller.scrollTop = scroller.scrollHeight; return [...document.querySelectorAll<HTMLButtonElement>('button')].find((b) => /^Show 100 more/.test(b.textContent ?? '')) })
+      })
+      await step('more', async () => {
+        ;[...document.querySelectorAll<HTMLButtonElement>('button')].find((b) => /^Show 100 more/.test(b.textContent ?? ''))!.click()
+        await frame()
+      })
+      await step('filter', async () => {
+        type(document.querySelector<HTMLInputElement>('input[placeholder^="Search by name"]')!, 'customer_orders_2050')
+        await until(() => document.querySelector('[role=list][aria-label="Staged changes"] [role=listitem]'))
+      })
+      await step('reveal', async () => {
+        document.querySelector<HTMLButtonElement>('button[aria-label="Show customer_orders_2050 in the hierarchy"]')!.click()
+        await until(() => row('urn:n2050')?.getAttribute('tabindex') === '0')
+      })
+    }
     if (fixture === 'navigator') await until(() => document.querySelector('[aria-label="Change navigator"]'))
   } catch (e) {
     report.error = String(e)
@@ -320,7 +359,7 @@ function Harness() {
     document.body.style.background = 'var(--nx-bg)'
   }, [setTheme])
   useEffect(() => {
-    if (fixture === 'review' || fixture === 'map') seedStaged()
+    if (fixture === 'review' || fixture === 'map' || fixture === 'review-tree') seedStaged()
     if (fixture === 'navigator') {
       const stops: NavStop[] = Array.from({ length: 10_482 }, (_, i) => ({ id: `urn:${i}`, name: i === 11 ? 'Customer Orders' : `entity_${i}`, status: i % 4 ? 'modified' : 'added', saved: i > 5000 }))
       useStagedChangesStore.setState({ changes: [{ id: 'x', type: 'rename_entity', targetId: 'urn:0', after: {}, summary: '', timestamp: 0 }] } as never)
