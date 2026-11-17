@@ -552,19 +552,8 @@ export interface ImportSettings {
   maxMatchingProperties: number
 }
 
-/** A change to a graph's own settings: `'inherit'` goes back to the platform's. */
-export type ImportSettingsChange = {
-  [K in keyof ImportSettingsValues]?: ImportSettingsValues[K] | 'inherit'
-}
-
 export function getImportSettings(wsId: string, graphId: string): Promise<ImportSettings> {
   return authFetch<ImportSettings>(`${base(wsId)}/graphs/${graphId}/import-settings`)
-}
-
-export function setImportSettings(wsId: string, graphId: string, change: ImportSettingsChange): Promise<ImportSettings> {
-  return authFetch<ImportSettings>(`${base(wsId)}/graphs/${graphId}/import-settings`, {
-    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(change),
-  })
 }
 
 export function getImport(wsId: string, graphId: string, jobId: string): Promise<Job> {

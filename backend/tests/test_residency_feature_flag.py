@@ -43,7 +43,8 @@ def test_the_page_says_what_turning_it_on_and_off_means():
         assert words in switch["description"]
     on = switch["impact_when_on"]
     for words in ("Always, Standard or Coldline", "90 seconds", "Postgres", "wait for room",
-                  "maxmemory", "every pod", "Residency & eviction", "as memory allows"):
+                  "maxmemory", "every pod", "as memory allows",
+                  "Admin → Versioned graphs → Settings → Memory & residency"):
         assert words in on, words
     off = switch["impact_when_off"]
     for words in ("stays loaded", "as memory allows", "Postgres"):
@@ -63,7 +64,7 @@ def test_it_is_a_wired_preview_that_needs_version_control():
     assert (wiring.stage, wiring.posture) == ("experimental", "capability")
     assert wiring.enforced_server_side and wiring.depends_on == ("versioningEnabled",)
     surfaces = " ".join(wiring.ui_surfaces)
-    for words in ("Residency & eviction", "class", "Load now", "Adopt"):
+    for words in ("Memory & residency", "Admin → Versioned graphs", "class", "Load now", "Adopt"):
         assert words in surfaces, words
 
 

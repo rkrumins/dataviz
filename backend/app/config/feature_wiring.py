@@ -285,9 +285,10 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
             "graph's class from the policy",
         ),
         ui_surfaces=(
-            "The Residency & eviction card on Admin → Infrastructure → Versioned graphs: whether "
-            "residency is on, its grace period, and the graphs being brought back",
-            "Each graph's class, Load now and Adopt controls in the versioned graphs list",
+            "The Memory & residency category on Admin → Versioned graphs → Settings: the Graph "
+            "residency switch, and its settings marked Inactive while it is off",
+            "Each graph's class, Load now and Adopt in the list of every versioned graph on "
+            "Admin → Versioned graphs",
         ),
         still_allowed=(
             "Every graph stays loaded, as before residency; an evicted graph reads from Postgres "
@@ -311,8 +312,9 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
             "versioning worker's projection pass",
         ),
         ui_surfaces=(
-            "The New-version builds card and the builds list on Admin → Infrastructure → "
-            "Versioned graphs",
+            "The New-version builds category on Admin → Versioned graphs → Settings: the "
+            "New-version builds switch, and its settings marked Inactive while it is off",
+            "The graphs building a new version, counted and listed on Admin → Versioned graphs",
             "Each graph's build progress in its Versioning tab, Data health and sync status",
         ),
         still_allowed=(

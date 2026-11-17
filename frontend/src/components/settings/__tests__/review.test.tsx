@@ -58,7 +58,8 @@ describe('ChangeReviewDialog', () => {
         const dialog = screen.getByRole('dialog', { name: 'Review 2 changes to this graph' })
         const changes = within(dialog).getAllByRole('listitem').filter((li) => li.parentElement?.tagName === 'OL')
         expect(changes[0]).toHaveTextContent('Read mode')
-        expect(changes[0]).toHaveTextContent('From Keep serving, update in placeto Always the latest')
+        const title = (id: string) => SETTINGS_BY_KEY['reads.mode'].choices.find((c) => c.id === id)!.title
+        expect(changes[0]).toHaveTextContent(`From ${title('in_place')}to ${title('latest')}`)
         expect(changes[0]).toHaveTextContent('Use the platform’s value')
         expect(changes[1]).toHaveTextContent('From 30%to 40%')
         expect(within(changes[1]).getByRole('list', { name: `What changing ${SETTINGS_BY_KEY['imports.guardDeleteShare'].label} does` })).toBeInTheDocument()

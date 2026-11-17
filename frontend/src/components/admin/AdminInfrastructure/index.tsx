@@ -6,10 +6,12 @@
  * truth: projection lag, stream depth/lag, DLQs, and the outbox relay.
  *
  * Read-only observability (v1): verdicts come from work signals in shared
- * state, so the page is equally truthful on docker-compose and GKE.
+ * state, so the page is equally truthful on docker-compose and GKE. What
+ * versioned graphs are set to is summarised here and changed in Admin →
+ * Versioned graphs; a node's limits are changed in Admin → Graph store.
  */
-import { useCallback, useState } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { useState } from 'react'
+import { Navigate, useNavigate, useSearchParams } from 'react-router-dom'
 import { Activity, AlertTriangle, CheckCircle2, Loader2, RefreshCw, XCircle } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { usePermission } from '@/store/auth'
@@ -19,11 +21,11 @@ import { ServiceTile } from './ServiceTile'
 import { ProjectionPanel } from './ProjectionPanel'
 import { StreamsPanel } from './StreamsPanel'
 import { GraphProvidersPanel } from './GraphProvidersPanel'
-import { GraphStoreLimitsDialog } from './GraphStoreLimitsDialog'
+import { graphStoreLimitsPath } from '../shared/aggregationKnobs'
 import { useFleetCapacity } from '../shared/useAggregationCapacity'
 import { DiagnosticsPanel } from './DiagnosticsPanel'
 import { BootstrapJobsPanel } from './BootstrapJobsPanel'
-import { VersionedGraphsPanel } from './VersionedGraphsPanel'
+import { VersionedGraphSettingsPanel } from './VersionedGraphSettingsPanel'
 import { ReseedProviderDialog } from './ReseedProviderDialog'
 import { compactNum, formatAgeMs } from './meta'
 import { PageContainer } from '@/components/layout/PageContainer'
@@ -127,44 +129,29 @@ function Skeleton() {
     )
 }
 
+/**
+ * Links to what this page used to open keep working: the list of every
+ * versioned graph (``?graphs``) is Admin → Versioned graphs now, and a node's
+ * limits (``?limits=<endpoint>``) open on Admin → Graph store.
+ */
 export function AdminInfrastructure() {
+    const [searchParams] = useSearchParams()
+    const limitsFor = searchParams.get('limits')
+    if (limitsFor) return <Navigate to={graphStoreLimitsPath(limitsFor)} replace />
+    if (searchParams.has('graphs')) return <Navigate to="/admin/versioned-graphs" replace />
+    return <InfrastructureHealth />
+}
+
+function InfrastructureHealth() {
     const { data, error, isLoading, isFetching, dataUpdatedAt, refetch, history } = useSystemStatus()
     // The rollup write budget's own reading of the graph tier, so the memory
     // headroom block can mark the reserve and say what still fits.
     const capacity = useFleetCapacity(!!data)
 
-    // A node's own limits are adjusted in a dialog keyed by the URL
-    // (``?limits=<endpoint>``), so the capacity card, a failed source's
-    // guidance and a re-trigger's pre-selection can all link straight to it.
+    // A node's own limits are adjusted on Admin → Graph store, in the dialog
+    // its ``?limits=<endpoint>`` opens.
     const isSystemAdmin = usePermission('system:admin')
-    const [searchParams, setSearchParams] = useSearchParams()
-    const limitsFor = searchParams.get('limits')
-    const openLimits = useCallback((endpoint: string) => {
-        setSearchParams(prev => {
-            const p = new URLSearchParams(prev)
-            p.set('limits', endpoint)
-            return p
-        })
-    }, [setSearchParams])
-    const closeLimits = useCallback(() => {
-        setSearchParams(prev => {
-            const p = new URLSearchParams(prev)
-            p.delete('limits')
-            return p
-        }, { replace: true })
-    }, [setSearchParams])
-
-    // The fleet inventory opens from the projection panel and is keyed by the
-    // URL (``?graphs``) too, so a link to it lands with the list open.
-    const showGraphs = isSystemAdmin && searchParams.has('graphs')
-    const setShowGraphs = useCallback((open: boolean) => {
-        setSearchParams(prev => {
-            const p = new URLSearchParams(prev)
-            if (open) p.set('graphs', '')
-            else p.delete('graphs')
-            return p
-        }, { replace: true })
-    }, [setSearchParams])
+    const navigate = useNavigate()
 
     // The provider whose versioned graphs are being reseeded from Postgres.
     const [reseedFor, setReseedFor] = useState<GraphProvider | null>(null)
@@ -249,7 +236,7 @@ export function AdminInfrastructure() {
                         services={data.services}
                         projection={data.projection}
                         capacity={capacity.data ?? null}
-                        onAdjustLimits={isSystemAdmin ? openLimits : undefined}
+                        onAdjustLimits={isSystemAdmin ? endpoint => navigate(graphStoreLimitsPath(endpoint)) : undefined}
                         onReseed={isSystemAdmin ? setReseedFor : undefined}
                     />
 
@@ -308,20 +295,15 @@ export function AdminInfrastructure() {
                     <ProjectionPanel
                         projection={data.projection}
                         providers={data.graphProviders}
-                        onShowAll={isSystemAdmin ? () => setShowGraphs(true) : undefined}
+                        linkAll={isSystemAdmin}
                     />
-                    {showGraphs && (
-                        <VersionedGraphsPanel providers={data.graphProviders} onClose={() => setShowGraphs(false)} />
-                    )}
+                    {isSystemAdmin && <VersionedGraphSettingsPanel />}
                     <StreamsPanel streams={data.streams} outbox={data.outbox} history={history} />
                 </div>
             ) : null}
 
             {isSystemAdmin && reseedFor && (
                 <ReseedProviderDialog provider={reseedFor} onClose={() => setReseedFor(null)} />
-            )}
-            {isSystemAdmin && limitsFor && (
-                <GraphStoreLimitsDialog open endpoint={limitsFor} onClose={closeLimits} />
             )}
         </PageContainer>
     )

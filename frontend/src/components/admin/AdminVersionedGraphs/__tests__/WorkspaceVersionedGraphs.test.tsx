@@ -83,7 +83,7 @@ describe('Workspace → Versioned graphs: what a person meets', () => {
         mockApi('workspace-admin')
         renderTab()
         const reads = await rowOnceDrawn('reads.mode')
-        // The platform allows Always the latest and update in place; switch when ready is named, not offered.
+        // The platform allows `latest` and `in_place`; `beside` is named, not offered.
         expect(reads.getByRole('radio', { name: title('reads.mode', 'latest') })).toBeInTheDocument()
         expect(reads.queryByRole('radio', { name: title('reads.mode', 'beside') })).not.toBeInTheDocument()
         expect(reads.getByText(`Not offered here: ${title('reads.mode', 'beside')}.`)).toBeInTheDocument()
@@ -235,7 +235,7 @@ describe('Workspace → Versioned graphs: its graphs and its history', () => {
         expect(sales.getByText(CATALOGUE.why.builds_off!.text)).toBeInTheDocument()
 
         expect(rowOf('Orders').getByText('Nothing: it follows the workspace')).toBeInTheDocument()
-        // Update in place, chosen for the workspace and in force: where it was chosen, beside it.
+        // `in_place`, chosen for the workspace and in force: where it was chosen, beside it.
         expect(rowOf('Orders').getByText(title('reads.mode', 'in_place')).closest('[role="cell"]')).toHaveTextContent('From Workspace')
         const fork = rowOf('Sales lineage · Q4 what-if')
         expect(fork.getByText('Follows Sales lineage')).toBeInTheDocument()

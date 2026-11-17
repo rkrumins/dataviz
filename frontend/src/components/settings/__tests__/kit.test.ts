@@ -76,8 +76,9 @@ describe('validateValue', () => {
     })
 
     it('checks choices, identifiers and refusal budgets in their syntax', () => {
+        const title = (id: string) => S['reads.mode'].choices.find((c) => c.id === id)!.title
         expect(validateValue(S['reads.mode'], 'beside', { values, allowed: ['latest', 'in_place'] }))
-            .toBe('Not allowed here. Choose Always the latest or Keep serving, update in place.')
+            .toBe(`Not allowed here. Choose ${title('latest')} or ${title('in_place')}.`)
         expect(validateValue(S['imports.identifier'], 'prop.', { values })).toBe('Name the property.')
         expect(validateValue(S['imports.identifier'], 'prop.a b', { values })).toBe('A property name has no spaces or commas.')
         expect(validateValue(S['imports.identifier'], 'prop.sku,urn', { values })).toBeNull()

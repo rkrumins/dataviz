@@ -46,7 +46,7 @@ function Tile({ icon: Icon, figure, title, children, tone = 'neutral' }: {
     )
 }
 
-/** "Always the latest → Keep serving, update in place", wrapping as text does. */
+/** A value and what it becomes ("30 days → 7 days"), wrapping as text does. */
 function Moved({ s, from, to }: { s?: Setting; from: SettingValue; to: SettingValue }) {
     const say = (v: SettingValue) => (s ? formatValue(s, v) : String(v))
     return (
@@ -85,12 +85,14 @@ export function ImpactReport({ impact, settings }: { impact: Impact; settings: R
         )
     }
     if (alwaysLatest && (alwaysLatest.joining || alwaysLatest.leaving)) {
+        // The mode's name, in the registry's words.
+        const latest = settings['reads.mode'] ? formatValue(settings['reads.mode'], 'latest') : 'latest'
         tiles.push(
             <Tile key="readers" icon={Database}
                 figure={alwaysLatest.joining ? plural(alwaysLatest.joining, 'graph') : plural(alwaysLatest.leaving, 'graph')}
                 title={alwaysLatest.joining
-                    ? 'move to Always the latest: while the graph store catches up after a publish, their readers read from the database.'
-                    : 'move away from Always the latest: readers stay on the graph store while it updates.'}>
+                    ? `move to ${latest}: while the graph store catches up after a publish, their readers read from the database.`
+                    : `move away from ${latest}: readers stay on the graph store while it updates.`}>
                 {alwaysLatest.joining > 0 && alwaysLatest.leaving > 0 && <p>{plural(alwaysLatest.leaving, 'graph')} move away from it.</p>}
             </Tile>,
         )

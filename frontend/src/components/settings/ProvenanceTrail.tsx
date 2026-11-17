@@ -7,7 +7,7 @@
  * allow), a lower level for a system admin's exception, the default for the deployment's env var.
  * When the value in force differs from the one chosen, a last step says what is in force and why.
  *
- * A change being staged shows at the level being edited, in the accent: "→ Update in place". The
+ * A change being staged shows at the level being edited, in the accent: "→ 7 days". The
  * accent means "your change" across the kit, so the winning level is emphasised without it.
  *
  * The badges' explanations show on hover and are read with the badge; they are not tab stops.

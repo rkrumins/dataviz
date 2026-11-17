@@ -60,7 +60,7 @@ describe('applyProfile', () => {
     })
 
     it('keeps a workspace admin within the platform’s limits, and lets a system admin step outside them', () => {
-        // Workspaces may choose Always the latest or Keep serving, update in place; forks are limited to 0 to 20.
+        // Workspaces may choose `latest` or `in_place`; forks are limited to 0 to 20.
         const values = { 'reads.mode': 'beside', 'forks.maxPerGraph': 30 }
         expect(why(applyProfile(profile(values), 'workspace', 'workspace_admin', WORKSPACE_VALUES)))
             .toEqual({ 'reads.mode': 'not_allowed', 'forks.maxPerGraph': 'not_allowed' })

@@ -12,6 +12,8 @@ import { GRAPH_VALUES, PLATFORM_VALUES, WORKSPACE_VALUES } from '../__fixtures__
 import { SettingControl } from '../SettingControl'
 import type { ResolvedValues, Scope, SettingValue } from '../types'
 
+const title = (key: string, id: string) => S[key].choices.find((c) => c.id === id)!.title
+
 function setup(key: string, values: ResolvedValues, scope: Scope, value?: SettingValue | null) {
     const onChange = vi.fn()
     const r = values[key]
@@ -26,16 +28,16 @@ describe('SettingControl', () => {
         const group = screen.getByRole('radiogroup', { name: S['reads.mode'].label })
         const radios = within(group).getAllByRole('radio')
         expect(radios).toHaveLength(4)
-        expect(radios[0]).toHaveTextContent('Use the platform’s choiceCurrently Always the latest.')
+        expect(radios[0]).toHaveTextContent(`Use the platform’s choiceCurrently ${title('reads.mode', 'latest')}.`)
         expect(radios.slice(1).map((r) => r.getAttribute('aria-label'))).toEqual(S['reads.mode'].choices.map((c) => c.title))
-        const beside = screen.getByRole('radio', { name: 'Keep serving, switch when ready' })
+        const beside = screen.getByRole('radio', { name: title('reads.mode', 'beside') })
         expect(beside).toHaveAttribute('aria-checked', 'true')
         expect(beside).toHaveTextContent('No longer offered here')
-        expect(screen.getByRole('radio', { name: 'Keep serving, update in place' })).toHaveTextContent('In force now')
+        expect(screen.getByRole('radio', { name: title('reads.mode', 'in_place') })).toHaveTextContent('In force now')
         beside.focus()
         fireEvent.keyDown(beside, { key: 'ArrowRight' })
         expect(onChange).toHaveBeenLastCalledWith(null)
-        await userEvent.click(screen.getByRole('radio', { name: 'Always the latest' }))
+        await userEvent.click(screen.getByRole('radio', { name: title('reads.mode', 'latest') }))
         expect(onChange).toHaveBeenLastCalledWith('latest')
     })
 

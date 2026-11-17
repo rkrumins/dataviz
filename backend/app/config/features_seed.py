@@ -686,8 +686,8 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
             "evicted graph reads from Postgres, more slowly, until it is loaded again when it is "
             "needed, and loads wait for room on their master. Every FalkorDB master needs a "
             "maxmemory, and every pod must run this release first. The values are under Admin → "
-            "Infrastructure → Versioned graphs → Residency & eviction. Turning it off brings "
-            "graphs back as memory allows."
+            "Versioned graphs → Settings → Memory & residency. Turning it off brings graphs back "
+            "as memory allows."
         ),
         "category_id": "lineage",
         "type": "boolean",
@@ -699,8 +699,9 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
         "admin_hint": (
             "Graph residency needs Version control on. Before turning it on, give every FalkorDB "
             "master a maxmemory and run this release on every pod, and set the classes and values "
-            "you want under Admin → Infrastructure → Versioned graphs. Each change of this switch, "
-            "the grace period, and every eviction and load are recorded in the activity log."
+            "you want under Admin → Versioned graphs → Settings → Memory & residency. Each change "
+            "of this switch, the grace period, and every eviction and load are recorded in the "
+            "activity log."
         ),
         "sort_order": 2,
         "deprecated": False,
@@ -723,7 +724,7 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
             "platform-owned keys, are built in a second key: readers keep the current version, "
             "complete, until the new one is checked and switched to. A copy needs room on its node "
             "for a second copy of the graph; with no room the build waits, or is seeded from "
-            "Postgres elsewhere. The settings are under Admin → Infrastructure → Versioned graphs → "
+            "Postgres elsewhere. The settings are under Admin → Versioned graphs → Settings → "
             "New-version builds."
         ),
         "category_id": "lineage",
@@ -735,9 +736,9 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
         "help_url": "/docs/versioning-projection-and-cache",
         "admin_hint": (
             "New-version builds needs Version control on. Check that FalkorDB has room for a "
-            "second copy of your largest graphs, and set the threshold, room and pacing under "
-            "Admin → Infrastructure → Versioned graphs → New-version builds. Each build's steps, "
-            "switches and failures are recorded in the activity log."
+            "second copy of your largest graphs, and set the threshold and room under Admin → "
+            "Versioned graphs → Settings → New-version builds, and the pacing under Updates & "
+            "loading. Each build's steps, switches and failures are recorded in the activity log."
         ),
         "sort_order": 5,
         "deprecated": False,

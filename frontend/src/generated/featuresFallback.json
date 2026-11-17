@@ -626,9 +626,9 @@
       "default": false,
       "options": null,
       "helpUrl": "/docs/versioning-forks-and-residency#16-turning-residency-on",
-      "adminHint": "Graph residency needs Version control on. Before turning it on, give every FalkorDB master a maxmemory and run this release on every pod, and set the classes and values you want under Admin \u2192 Infrastructure \u2192 Versioned graphs. Each change of this switch, the grace period, and every eviction and load are recorded in the activity log.",
+      "adminHint": "Graph residency needs Version control on. Before turning it on, give every FalkorDB master a maxmemory and run this release on every pod, and set the classes and values you want under Admin \u2192 Versioned graphs \u2192 Settings \u2192 Memory & residency. Each change of this switch, the grace period, and every eviction and load are recorded in the activity log.",
       "impactWhenOff": "Every graph stays loaded, as before residency. Turning it off brings evicted graphs back as memory allows \u2014 until then they read from Postgres \u2014 so make room first. The classes and the values are kept, and apply again once it is on.",
-      "impactWhenOn": "FalkorDB keeps each graph by its class \u2014 Always, Standard or Coldline \u2014 and by each master's memory. The first eviction waits 90 seconds after it is turned on. An evicted graph reads from Postgres, more slowly, until it is loaded again when it is needed, and loads wait for room on their master. Every FalkorDB master needs a maxmemory, and every pod must run this release first. The values are under Admin \u2192 Infrastructure \u2192 Versioned graphs \u2192 Residency & eviction. Turning it off brings graphs back as memory allows.",
+      "impactWhenOn": "FalkorDB keeps each graph by its class \u2014 Always, Standard or Coldline \u2014 and by each master's memory. The first eviction waits 90 seconds after it is turned on. An evicted graph reads from Postgres, more slowly, until it is loaded again when it is needed, and loads wait for room on their master. Every FalkorDB master needs a maxmemory, and every pod must run this release first. The values are under Admin \u2192 Versioned graphs \u2192 Settings \u2192 Memory & residency. Turning it off brings graphs back as memory allows.",
       "sortOrder": 2,
       "deprecated": false,
       "stage": "experimental",
@@ -641,8 +641,8 @@
         "Admission on a new graph's first seed, a move, an Adopt and a package seed, and a new graph's class from the policy"
       ],
       "uiSurfaces": [
-        "The Residency & eviction card on Admin \u2192 Infrastructure \u2192 Versioned graphs: whether residency is on, its grace period, and the graphs being brought back",
-        "Each graph's class, Load now and Adopt controls in the versioned graphs list"
+        "The Memory & residency category on Admin \u2192 Versioned graphs \u2192 Settings: the Graph residency switch, and its settings marked Inactive while it is off",
+        "Each graph's class, Load now and Adopt in the list of every versioned graph on Admin \u2192 Versioned graphs"
       ],
       "stillAllowed": [
         "Every graph stays loaded, as before residency; an evicted graph reads from Postgres until it is brought back",
@@ -662,9 +662,9 @@
       "default": false,
       "options": null,
       "helpUrl": "/docs/versioning-projection-and-cache",
-      "adminHint": "New-version builds needs Version control on. Check that FalkorDB has room for a second copy of your largest graphs, and set the threshold, room and pacing under Admin \u2192 Infrastructure \u2192 Versioned graphs \u2192 New-version builds. Each build's steps, switches and failures are recorded in the activity log.",
+      "adminHint": "New-version builds needs Version control on. Check that FalkorDB has room for a second copy of your largest graphs, and set the threshold and room under Admin \u2192 Versioned graphs \u2192 Settings \u2192 New-version builds, and the pacing under Updates & loading. Each build's steps, switches and failures are recorded in the activity log.",
       "impactWhenOff": "Every change is written into the key that serves reads, as before: during a large import, readers may see the graph partly updated. Builds that haven't started copying are cancelled and their changes are written in place; builds already copying finish.",
-      "impactWhenOn": "A publish that changes more rows than the threshold, and rebuilds and moves of platform-owned keys, are built in a second key: readers keep the current version, complete, until the new one is checked and switched to. A copy needs room on its node for a second copy of the graph; with no room the build waits, or is seeded from Postgres elsewhere. The settings are under Admin \u2192 Infrastructure \u2192 Versioned graphs \u2192 New-version builds.",
+      "impactWhenOn": "A publish that changes more rows than the threshold, and rebuilds and moves of platform-owned keys, are built in a second key: readers keep the current version, complete, until the new one is checked and switched to. A copy needs room on its node for a second copy of the graph; with no room the build waits, or is seeded from Postgres elsewhere. The settings are under Admin \u2192 Versioned graphs \u2192 Settings \u2192 New-version builds.",
       "sortOrder": 5,
       "deprecated": false,
       "stage": "experimental",
@@ -675,7 +675,8 @@
         "Building a large publish, a rebuild or a move of a platform-owned key in a second FalkorDB key while the current one serves, then switching readers to it, in the versioning worker's projection pass"
       ],
       "uiSurfaces": [
-        "The New-version builds card and the builds list on Admin \u2192 Infrastructure \u2192 Versioned graphs",
+        "The New-version builds category on Admin \u2192 Versioned graphs \u2192 Settings: the New-version builds switch, and its settings marked Inactive while it is off",
+        "The graphs building a new version, counted and listed on Admin \u2192 Versioned graphs",
         "Each graph's build progress in its Versioning tab, Data health and sync status"
       ],
       "stillAllowed": [

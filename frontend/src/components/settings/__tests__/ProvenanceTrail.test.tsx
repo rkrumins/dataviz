@@ -16,9 +16,9 @@ function trail(key: string, values: ResolvedValues, scope: Scope, staged?: Setti
 }
 
 describe('ProvenanceTrail', () => {
-    it('adjusted: the graph chose Switch when ready, earlier levels are overridden, and what is in force says so', () => {
+    it('adjusted: the graph chose `beside`, earlier levels are overridden, and what is in force says so', () => {
         const [dflt, platform, workspace, graph, inForce] = trail('reads.mode', GRAPH_VALUES, 'graph')
-        expect(dflt).toHaveTextContent('DefaultAlways the latest (Overridden)')
+        expect(dflt).toHaveTextContent(`Default${S['reads.mode'].choices.find((c) => c.id === 'latest')!.title} (Overridden)`)
         expect(platform).toHaveTextContent('Platform')
         expect(within(platform).getByText('Limits')).toBeInTheDocument()
         expect(workspace).toHaveTextContent('WorkspaceNot set')

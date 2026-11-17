@@ -50,7 +50,6 @@ vi.mock('@/components/admin/workspace/DeletedDataSources', () => ({ DeletedDataS
 vi.mock('@/components/admin/workspace/AddDataSourceWizard', () => ({ AddDataSourceWizard: () => null }))
 vi.mock('@/components/admin/workspace/DataSourceGridCard', () => ({ DataSourceGridCard: () => null }))
 vi.mock('@/components/admin/workspace/WorkspaceNodeIdentityDefaults', () => ({ WorkspaceNodeIdentityDefaults: () => null }))
-vi.mock('@/components/admin/workspace/WorkspaceDraftsPolicy', () => ({ WorkspaceDraftsPolicy: () => <div data-testid="drafts-policy" /> }))
 vi.mock('@/components/admin/workspace/DraftsWhoseOwnerLeft', () => ({ DraftsWhoseOwnerLeft: () => <div data-testid="drafts-owner-left" /> }))
 vi.mock('@/components/admin/workspace/WorkspaceViewsSection', () => ({ default: () => null }))
 vi.mock('@/components/admin/workspace/WorkspaceAggregationDashboard', () => ({ WorkspaceAggregationDashboard: () => null }))
@@ -109,9 +108,8 @@ describe('the workspace page’s Versioned graphs tab', () => {
         expect(screen.getByTestId('versioned-graphs')).toBeVisible()
     })
 
-    it('no longer carries the drafts and reviews policy on Data Sources', () => {
+    it('keeps the drafts whose owner left on Data Sources', () => {
         renderPage('/workspaces/ws1')
-        expect(screen.queryByTestId('drafts-policy')).not.toBeInTheDocument()
         expect(screen.getByTestId('drafts-owner-left')).toBeInTheDocument()
     })
 })

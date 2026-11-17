@@ -234,7 +234,7 @@ export interface Category {
     /** The feature switch the whole category needs. */
     masterSwitch: string | null
     sections: Section[]
-    /** Rendered on the server: "Readers get Always the latest…". */
+    /** Rendered on the server from the values in force: "Readers get …". */
     posture: string
 }
 

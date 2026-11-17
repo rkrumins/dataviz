@@ -130,7 +130,7 @@ export function sameLimits(a: Limits | null | undefined, b: Limits | null | unde
     return norm(a) === norm(b)
 }
 
-/** What limits allow, in words: "Allowed: Always the latest, Keep serving, update in place. From 1 day to 90 days". */
+/** What limits allow, in words: "Allowed: Standard, Coldline. From 1 day to 90 days". */
 export function limitsWords(s: Setting, limits: Limits): string {
     const parts: string[] = []
     if (limits.allowed?.length) parts.push(`Allowed: ${limits.allowed.map((v) => formatValue(s, v)).join(', ')}`)

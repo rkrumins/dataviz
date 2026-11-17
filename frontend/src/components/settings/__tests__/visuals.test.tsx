@@ -107,15 +107,16 @@ describe('MemoryMarks', () => {
 
 describe('ReadTimeline', () => {
     it('scrubs before, while and after with the keyboard, narrating the mode in force and the staged one', () => {
+        const latest = SETTINGS_BY_KEY['reads.mode'].choices.find((c) => c.id === 'latest')!.title
         render(<ReadTimeline setting={SETTINGS_BY_KEY['reads.mode']} value="latest" next="in_place" />)
         const figure = screen.getByRole('figure', { name: 'What readers see while a new version lands' })
         const moment = screen.getByRole('slider', { name: 'Moment' })
         expect(moment).toHaveAttribute('aria-valuetext', 'While a new version lands')
-        expect(figure).toHaveAccessibleDescription(/readers of “Always the latest” see version 6, read from the database/)
+        expect(figure).toHaveAccessibleDescription(expect.stringContaining(`readers of “${latest}” see version 6, read from the database`))
         expect(figure).toHaveAccessibleDescription(/With your change: .*“Keep serving, update in place” see version 5, with parts of 6/)
         fireEvent.keyDown(moment, { key: 'ArrowRight' })
         expect(moment).toHaveAttribute('aria-valuetext', 'After it has landed')
-        expect(figure).toHaveAccessibleDescription(/After it has landed, readers of “Always the latest” see version 6, read from the graph store/)
+        expect(figure).toHaveAccessibleDescription(expect.stringContaining(`After it has landed, readers of “${latest}” see version 6, read from the graph store`))
     })
 })
 
