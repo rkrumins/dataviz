@@ -200,8 +200,7 @@ def _setting(s, example: str) -> list:
     ``#reads-maxversionsbehind``)."""
     g = s.guidance
     out = [f"### `{s.key.replace('.', '-')}`", "", f"**{_esc(s.label)}.** {_esc(g.summary)}", ""]
-    if s.audience == "business":
-        out += [f"*Asked as:* {_esc(s.question)}", ""]
+    out += [f"*Asked as:* {_esc(s.question)}", ""]
     out += [*_table(["Fact", "Value"], _facts_rows(s)), "", _esc(g.means), ""]
     if s.choices:
         out += _choices(s)
