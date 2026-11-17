@@ -33,7 +33,10 @@ const SRC = resolve(__dirname, '..')
 
 /**
  * The surfaces this rule is enforced over: the view page's identity bar and
- * its two panels, the Context View toolbar, and the versioning chrome.
+ * its two panels, the Context View toolbar, the versioning chrome, and the
+ * versioned-graph settings (Admin → Versioned graphs and the settings kit),
+ * where a badge, a figure or a defined word opens its explanation on a tap
+ * (`MetricInfo`) and only a control keeps a HoverTip.
  *
  * DELIBERATELY NOT "every tree these live in". `components/views` also holds
  * the view wizard and the layer studio, and `context-view` also holds the
@@ -60,6 +63,8 @@ const SCOPE = [
   'components/canvas/search/panel/recipes',
   'components/canvas/search/studio',
   'features/versioning/components',
+  'components/admin/AdminVersionedGraphs',
+  'components/settings',
 ]
 
 /**
@@ -163,7 +168,7 @@ const sources = SCOPE.flatMap((entry) => {
   }))
 })
 
-describe('one tooltip system on the view page, the canvas toolbar and the versioning chrome', () => {
+describe('one tooltip system on the view page, the canvas toolbar, the versioning chrome and the graph settings', () => {
   // A guard that scans nothing passes forever.
   it('the sweep actually reaches the surfaces in the complaint', () => {
     expect(sources.length).toBeGreaterThan(30)
@@ -176,6 +181,10 @@ describe('one tooltip system on the view page, the canvas toolbar and the versio
       'components/canvas/context-view/header/HeaderSearch.tsx',
       'features/versioning/components/CanvasVersioningBar.tsx',
       'features/versioning/components/BranchSwitcher.tsx',
+      'components/admin/AdminVersionedGraphs/Overview.tsx',
+      'components/admin/AdminVersionedGraphs/GraphInventory.tsx',
+      'components/settings/StatusBadge.tsx',
+      'components/settings/GuidancePanel.tsx',
     ]) {
       expect(scanned).toContain(known)
     }

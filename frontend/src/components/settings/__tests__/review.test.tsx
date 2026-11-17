@@ -15,6 +15,7 @@ import { useLens } from '../lens'
 import { LensSwitch } from '../LensSwitch'
 import { reviewItems } from '../review'
 import { StickySaveBar } from '../StickySaveBar'
+import { useChangeReview } from '../useChangeReview'
 import { diffStaged } from '../useStagedChanges'
 
 const ITEMS = reviewItems(
@@ -114,6 +115,38 @@ describe('ChangeReviewDialog', () => {
         expect(screen.getByRole('alert')).toHaveTextContent('Someone changed Read mode while you were editing.')
         await userEvent.click(screen.getByRole('button', { name: 'Reload and re-apply my changes' }))
         expect(onReapply).toHaveBeenCalled()
+    })
+})
+
+describe('useChangeReview', () => {
+    const warnings = [{ id: 'db', text: 'Readers of 3 graphs will read from the database while they update.' }]
+
+    it('is ready once there is a reason and every warning is acknowledged, saying what it waits for until then', () => {
+        const { result } = renderHook(() => useChangeReview({ count: 2, warnings }))
+        expect(result.current.ready).toBe(false)
+        expect(result.current.blocking).toBe('Say why to save.')
+        act(() => result.current.setReason('Imports were slowing canvases'))
+        expect(result.current.blocking).toBe('Acknowledge the warning to save.')
+        act(() => result.current.acknowledge('db', true))
+        expect(result.current.ready).toBe(true)
+        expect(result.current.blocking).toBe('')
+    })
+
+    it('starts afresh when the round changes: an empty reason, nothing acknowledged', () => {
+        const { result, rerender } = renderHook((round: number) => useChangeReview({ count: 2, warnings, round }), { initialProps: 0 })
+        act(() => {
+            result.current.setReason('Imports were slowing canvases')
+            result.current.acknowledge('db', true)
+        })
+        expect(result.current.ready).toBe(true)
+        // Nothing new: the same round keeps both.
+        rerender(0)
+        expect(result.current.reason).toBe('Imports were slowing canvases')
+        rerender(1)
+        expect(result.current.reason).toBe('')
+        expect(result.current.acknowledged).toEqual({})
+        expect(result.current.ready).toBe(false)
+        expect(result.current.blocking).toBe('Say why to save.')
     })
 })
 

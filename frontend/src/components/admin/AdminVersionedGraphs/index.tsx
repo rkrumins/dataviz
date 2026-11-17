@@ -6,6 +6,9 @@
  *   History    every change, who made it, when and why, and putting one back
  *
  * The header holds the app's Business / Technical switch (`LensSwitch`), so it is on every tab.
+ * For a system admin, "Set up with a guide" (the Settings hero, the Overview's card and an empty
+ * History) opens the guided setup (`SetupWizard`), whose progress is held here beside the editor
+ * (`useSetupGuide`), so it survives a change of tab: what it stages is this page's.
  * The tab is in `?tab=`; a link to a setting (`#reads-mode`) opens Settings at it. What is staged
  * on Settings stays staged while you look at the other tabs (and "Use recommended" in the
  * Overview's finder stages there), and isn't polled over: the values, node memory and the largest
@@ -33,8 +36,10 @@ import { useFeatureSwitches } from './useFeatureSwitches'
 import { categoryAnchor } from './meta'
 import { Overview } from './Overview'
 import { SettingsView } from './SettingsView'
+import { SetupWizard } from './SetupWizard'
 import { Failed, SettingsSkeleton } from './states'
 import { useSettingsEditor } from './useSettingsEditor'
+import { useSetupGuide } from './useSetupGuide'
 
 const TABS = ['overview', 'settings', 'history'] as const
 type Tab = (typeof TABS)[number]
@@ -53,6 +58,10 @@ export function AdminVersionedGraphs() {
     const editor = useSettingsEditor({ place: PLATFORM, values: valuesQ.data?.values ?? EMPTY, settings: byKey, where: 'the platform', refetch: valuesQ.refetch })
     useEffect(() => { dirty.current = editor.staged.dirtyCount > 0 })
     const switches = useFeatureSwitches()
+    const guide = useSetupGuide(editor)
+    // The guide is a system admin's: the platform's settings are theirs to change.
+    const canSetUp = Boolean(schema) && valuesQ.data?.editor === 'system_admin'
+    const setupLabel = guide.resumable ? 'Continue setup' : 'Set up with a guide'
 
     // A link to a setting opens Settings, whatever the tab says.
     const asked = params.get('tab') as Tab | null
@@ -123,7 +132,8 @@ export function AdminVersionedGraphs() {
     } else {
         settingsBody = (
             <SettingsView schema={schema} data={valuesQ.data} editor={editor} switches={switches} facts={facts} signals={signals} signalsUnavailable={signalsUnavailable}
-                onFinderOpenChange={setFinderOpen} readOnly={valuesQ.data.editor !== 'system_admin'} />
+                onFinderOpenChange={setFinderOpen} readOnly={valuesQ.data.editor !== 'system_admin'}
+                setup={canSetUp ? { label: setupLabel, onStart: guide.start } : undefined} />
         )
     }
 
@@ -162,15 +172,25 @@ export function AdminVersionedGraphs() {
                         : !schema ? <SettingsSkeleton />
                             : (
                                 <Overview schema={schema} values={valuesQ.data?.values} switches={switches} signals={signals} signalsUnavailable={signalsUnavailable} providers={providers}
-                                    onShowSetting={showSetting} onStage={stageAndShow} onOpenSettings={openSettings} onGoToSettings={goToSettings} />
+                                    onShowSetting={showSetting} onStage={stageAndShow} onOpenSettings={openSettings} onGoToSettings={goToSettings}
+                                    setup={canSetUp ? { label: setupLabel, onStart: guide.start } : undefined} />
                             )}
                 </TabsContent>
                 <TabsContent value="settings">{settingsBody}</TabsContent>
                 <TabsContent value="history">
                     {schemaQ.error ? <Failed what="what each setting is" error={schemaQ.error} onRetry={() => void schemaQ.refetch()} />
-                        : !schema ? <SettingsSkeleton /> : <HistoryView schema={schema} onGoToSettings={() => setTab('settings')} />}
+                        : !schema ? <SettingsSkeleton /> : (
+                            <HistoryView schema={schema} onGoToSettings={() => setTab('settings')}
+                                setup={canSetUp ? { label: setupLabel, onStart: guide.start } : undefined} />
+                        )}
                 </TabsContent>
             </Tabs>
+
+            {canSetUp && schema && valuesQ.data && (
+                <SetupWizard guide={guide} editor={editor} schema={schema} values={valuesQ.data.values} viewer={valuesQ.data.editor} scope="platform"
+                    where="the platform" facts={facts} switches={switches} onShowCategory={goToSettings} onSeeSettings={() => goToSettings()}
+                    onOpenHistory={() => setTab('history')} />
+            )}
 
             {drawer && (
                 <GraphSettingsDrawer workspaceId={drawer.workspaceId} graphId={drawer.graphId} open={drawerOpen} onOpenChange={setDrawerOpen}

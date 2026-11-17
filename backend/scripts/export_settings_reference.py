@@ -220,9 +220,10 @@ def _link(key: str, anchors: dict) -> str:
 
 
 def _profiles(anchors: dict) -> list:
-    """The profiles: a summary table, then each one's promise, when to choose it, the values it sets
-    and what it costs. Each heading is its title, whose id is the profile's id (``#fastest-reads``).
-    The app's Business view lists the business profiles first; the Technical view keeps this order."""
+    """The profiles: a summary table, then each one's goal, promise, when to choose it, the values
+    it sets and what it costs. Each heading is its title, whose id is the profile's id
+    (``#fastest-reads``). The app's Business view lists the business profiles first; the Technical
+    view keeps this order. The guided setup offers them by their goals."""
     view = {"business": "Business", "operator": "Technical"}
     out = [
         "## Profiles",
@@ -230,10 +231,11 @@ def _profiles(anchors: dict) -> list:
         ("Starting points: each profile sets the settings it covers for one outcome. Applying one in "
          "the app stages its values at the level you are editing, only for the settings you may set "
          "there, and says which it left out and why. Nothing is saved until you review the changes "
-         "and save them."),
+         "and save them. **Set up with a guide** asks first what matters most, and offers the "
+         "profiles by their goals."),
         "",
-        *_table(["Profile", "What it gives you", "View", "Applies at"], [
-            [f"[{_esc(p.title)}](#{p.id})", _esc(p.promise), view[p.audience],
+        *_table(["Profile", "Goal", "What it gives you", "View", "Applies at"], [
+            [f"[{_esc(p.title)}](#{p.id})", _esc(p.goal), _esc(p.promise), view[p.audience],
              ", ".join(scope.title() for scope in p.scopes)] for p in registry.PROFILES]),
         "",
     ]
@@ -242,7 +244,8 @@ def _profiles(anchors: dict) -> list:
                  _esc(_show(registry.BY_KEY[key], registry.BY_KEY[key].default.code)),
                  ", ".join(scope.title() for scope in registry.BY_KEY[key].scopes)]
                 for key, value in p.values.items()]
-        out += [f"### {_esc(p.title)}", "", f"**{_esc(p.promise)}**", "",
+        out += [f"### {_esc(p.title)}", "", f"*Its goal:* {_esc(p.goal)}.", "",
+                f"**{_esc(p.promise)}**", "",
                 "**Choose it when**", "", *(f"- {_esc(w)}" for w in p.when), "",
                 *_table(["Setting", "It sets", "Default", "Set at"], rows), "",
                 f"**What you give up:** {_esc(p.caution)}", "",

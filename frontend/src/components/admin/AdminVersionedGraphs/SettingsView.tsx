@@ -6,7 +6,8 @@
  *                 platform: differ from the default) and how many are staged; a select on a phone
  *   hero          where the settings stand (`SettingsHero`): a headline counted from the values, the
  *                 reads posture, a pill while changes are staged, what this platform's facts
- *                 suggest; the actions (start from a profile, "Something's wrong?"); the trade-off
+ *                 suggest; the actions ("Set up with a guide" for an editor, its coach mark once in
+ *                 the Business view; start from a profile; "Something's wrong?"); the trade-off
  *                 compass at a glance; the search (`/`) and "Changed only". The compass and the finder
  *                 open full width under it. The Business / Technical view is the app's own,
  *                 switched in the page's header (`LensSwitch`)
@@ -25,7 +26,7 @@
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { useReducedMotion } from 'framer-motion'
-import { Stethoscope, UsersRound } from 'lucide-react'
+import { Route, Stethoscope, UsersRound } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/Button'
 import { ConfirmDialog } from '@/components/ui/Dialog'
@@ -44,6 +45,7 @@ import { categoryAnchor } from './meta'
 import { ProfileEntry } from './ProfileEntry'
 import { RowItem } from './SettingsRows'
 import { CompassSummary, SettingsHero, TaskCards, type Headline } from './SettingsHero'
+import { SetupCoachMark } from './SetupCoachMark'
 import { VisualContext } from './visualContext'
 import { SettingsReview } from './SettingsReview'
 import type { SettingsEditor } from './useSettingsEditor'
@@ -137,7 +139,7 @@ const RailItem = memo(function RailItem({ id, label, icon, note, staged, current
 })
 
 export function SettingsView({
-    schema, data, editor, switches, facts, signals, signalsUnavailable, onFinderOpenChange, readOnly, scope = 'platform', where = 'the platform', workspaceName,
+    schema, data, editor, switches, facts, signals, signalsUnavailable, onFinderOpenChange, readOnly, scope = 'platform', where = 'the platform', workspaceName, setup,
 }: {
     schema: ServedSchema
     data: SettingsValues
@@ -158,6 +160,8 @@ export function SettingsView({
     where?: string
     /** The workspace's name, for the hero (`scope="workspace"`). */
     workspaceName?: string
+    /** The guided setup, for an editor: the hero's first action ("Set up with a guide", or "Continue setup"). */
+    setup?: { label: string; onStart: () => void }
 }) {
     const values = data.values
     const words = WORDS[scope]
@@ -181,6 +185,9 @@ export function SettingsView({
         else finderButton.current?.focus()
     }, [finderOpen])
     const [discarding, setDiscarding] = useState(false)
+    // "Set up with a guide", for its coach mark to point at.
+    const [setupButton, setSetupButton] = useState<HTMLButtonElement | null>(null)
+    const offerSetup = Boolean(setup) && !readOnly
     const [currentCategory, setCurrentCategory] = useState<string | null>(null)
     const location = useLocation()
     const navigate = useNavigate()
@@ -423,8 +430,16 @@ export function SettingsView({
                         readOnlyNote={readOnly ? words.readOnly : null}
                         actions={(
                             <>
+                                {offerSetup && setup && (
+                                    // The page's first step: filled, in the app's indigo-to-violet.
+                                    <Button ref={setSetupButton} variant="primary" leftIcon={Route} onClick={setup.onStart}
+                                        className="bg-indigo-600 bg-gradient-to-r from-indigo-600 to-violet-600 shadow-indigo-600/25">
+                                        {setup.label}
+                                    </Button>
+                                )}
                                 {!readOnly && (
-                                    <ProfileEntry variant="button" profiles={schema.profiles} scope={scope} editor={data.editor} resolved={values} onStage={editor.stage} lens={lens} />
+                                    <ProfileEntry variant="button" primary={!offerSetup} profiles={schema.profiles} scope={scope} editor={data.editor}
+                                        resolved={values} onStage={editor.stage} lens={lens} />
                                 )}
                                 {/* Finding what's behind a problem changes nothing: a viewer who may only read has it too. Its
                                     edge a divider's: the plain glass edge is white, invisible on the card. */}
@@ -534,6 +549,7 @@ export function SettingsView({
                 Your staged changes go back to the values in force. Nothing has been saved.
             </ConfirmDialog>
             {switches?.dialogs}
+            {offerSetup && <SetupCoachMark anchor={setupButton} />}
             <p className="sr-only" aria-live="polite">{editor.announcement}</p>
         </VisualContext.Provider>
     )

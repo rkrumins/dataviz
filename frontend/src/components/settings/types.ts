@@ -293,6 +293,8 @@ export interface Profile {
     title: string
     /** One sentence: the outcome. */
     promise: string
+    /** One plain line: the outcome as someone who wants it says it. The guided setup asks by it. */
+    goal: string
     audience: Audience
     /** When to choose it. */
     when: string[]

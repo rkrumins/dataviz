@@ -6,7 +6,10 @@
  * workspace's graphs, each with what it sets itself, its read mode and class (a fork follows its
  * root), opening its settings in the drawer; and its history, with a change put back through the
  * workspace. Leaving for another page with changes staged asks first. The app's Business /
- * Technical switch sits above the tabs. Labels come from the registry's generated catalogue.
+ * Technical switch sits above the tabs. The guided setup works at workspace scope: a workspace
+ * admin stages within the platform's limits and saves to the workspace; a system admin also sets
+ * the class, and the review warns when a value goes past the limits. Labels come from the
+ * registry's generated catalogue.
  */
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -20,6 +23,8 @@ import { REASON_HEADER } from '@/services/activityReason'
 import { useAuthStore } from '@/store/auth'
 import { DEFAULT_FEATURES, useFeaturesStore } from '@/store/features'
 import { usePersonaStore } from '@/store/persona'
+import { versionedGraphsFetch } from '@/harness/versionedGraphsFixtures'
+import { SETUP_STEPS } from '../setupSteps'
 import { WorkspaceVersionedGraphs } from '../WorkspaceVersionedGraphs'
 import { WORKSPACE_GRAPHS, WS, workspaceValues } from '../__fixtures__/api'
 import { allowMenus, calls, json, mockApi, renderWithApi } from './helpers'
@@ -265,6 +270,27 @@ describe('Workspace → Versioned graphs: its graphs and its history', () => {
         expect(await within(drawer).findByRole('article', { name: S['reads.mode'].label })).toBeInTheDocument()
     })
 
+    it('shows the rest of what a graph sets itself from "+N more", in its row, and fewer again', async () => {
+        const user = userEvent.setup()
+        mockApi('workspace-admin')
+        renderTab(`${PATH}&vg=graphs`)
+        const table = await screen.findByRole('table', { name: 'This workspace’s graphs' })
+        const own = WORKSPACE_GRAPHS.find((g) => g.label === 'Sales lineage')!.ownSettings
+        const list = within(within(table).getByRole('list', { name: 'Set for Sales lineage' }))
+        const last = S[own.at(-1)!].label
+        expect(list.queryByText(last)).not.toBeInTheDocument()
+
+        const more = list.getByRole('button', { name: `+${own.length - 3} more settings` })
+        expect(more).toHaveAttribute('aria-expanded', 'false')
+        await user.click(more)
+        for (const key of own) expect(list.getByText(S[key].label)).toBeInTheDocument()
+        expect(more).toHaveAttribute('aria-expanded', 'true')
+        expect(more).toHaveTextContent('Show fewer')
+
+        await user.click(more)
+        expect(list.queryByText(last)).not.toBeInTheDocument()
+    })
+
     it('says so when the workspace has no versioned graph yet', async () => {
         mockApi('empty')
         renderTab(`${PATH}&vg=graphs`)
@@ -288,5 +314,93 @@ describe('Workspace → Versioned graphs: its graphs and its history', () => {
         await userEvent.type(within(dialog).getByLabelText(/Why are you making this change/), 'Back to the latest for the audit')
         await userEvent.click(within(dialog).getByRole('button', { name: 'Save change' }))
         await waitFor(() => expect(calls(sent, 'POST', `${SETTINGS}/history/cs_w2/revert`)).toHaveLength(1))
+    })
+})
+
+describe('Workspace → Versioned graphs: the guided setup', () => {
+    const P = Object.fromEntries(CATALOGUE.profiles.map((p) => [p.id, p]))
+    const LABELS = SETUP_STEPS.map((s) => s.label)
+    const wizard = () => within(screen.getByRole('dialog', { name: 'Guided setup' }))
+    const question = (key: string) => within(wizard().getByRole('article', { name: S[key].question }))
+    const onStep = (step: string) => Boolean(wizard().queryByText(`Step ${LABELS.indexOf(step) + 1} of ${LABELS.length}: ${step}`))
+    // The step's content follows the chrome once the last step's has left.
+    const stepShown = (step: string) => wizard().findByRole('heading', { level: 3, name: step === 'Review' ? /^Review \d/ : step })
+    /** Next, step by step, each step's content on screen before the next click. */
+    async function nextTo(step: string) {
+        while (!onStep(step)) {
+            await userEvent.click(wizard().getByRole('button', { name: /^Next/ }))
+            await stepShown(LABELS.find(onStep)!)
+        }
+    }
+
+    beforeEach(() => usePersonaStore.setState({ mode: 'business' }))
+    afterEach(() => usePersonaStore.setState({ mode: 'technical' }))
+
+    it('lets a workspace admin set the defaults up within the platform’s limits, and saves them to the workspace', async () => {
+        const sent = mockApi('workspace-admin')
+        renderTab()
+        await userEvent.click(await screen.findByRole('button', { name: 'Set up with a guide' }))
+        const dialog = within(await screen.findByRole('dialog', { name: 'Guided setup' }))
+        expect(dialog.getByText('For the Finance workspace')).toBeInTheDocument()
+        await userEvent.click(dialog.getByRole('radio', { name: P.balanced.goal }))
+        // Of what Balanced sets, a workspace admin may set the read mode here: no limit on versions
+        // behind is past the platform's range, and the rest is the platform's.
+        expect(dialog.getByText('Will be staged · 1')).toBeInTheDocument()
+        expect(dialog.getByText('Outside what the platform allows here:')).toBeInTheDocument()
+        await nextTo('While data loads')
+        expect(screen.getByRole('tab', { name: /Defaults/ })).toHaveTextContent('1 not saved')
+        // `beside` is outside what the platform allows here: named, not offered.
+        expect(question('reads.mode').queryByRole('radio', { name: title('reads.mode', 'beside') })).not.toBeInTheDocument()
+
+        await nextTo('Review')
+        expect(wizard().getByRole('heading', { level: 3, name: 'Review 1 change to the Finance workspace' })).toBeInTheDocument()
+        await userEvent.type(wizard().getByLabelText(/Why are you making this change/), reason)
+        const save = wizard().getByRole('button', { name: 'Save change' })
+        await waitFor(() => expect(save).toBeEnabled())
+        await userEvent.click(save)
+        await waitFor(() => expect(calls(sent, 'PATCH', SETTINGS)).toHaveLength(1))
+        expect(calls(sent, 'PATCH', SETTINGS)[0].body).toEqual({ changes: [{ key: 'reads.mode', value: 'latest', expectedVersion: 2 }], reason })
+        expect(await wizard().findByRole('heading', { name: 'Saved 1 change to the Finance workspace' })).toBeInTheDocument()
+    })
+
+    it('lets a system admin set the class too, and warns in the review when a value goes past the platform’s limits', async () => {
+        signIn('system_admin')
+        // As the server answers a value chosen outside the limits: kept as an exception.
+        const harness = versionedGraphsFetch('ok')
+        const past = { code: 'outside_limits_exception', text: CATALOGUE.why.outside_limits_exception!.text, fix: null }
+        const sent = mockApi('ok', (req) => {
+            if (!(req.method === 'POST' && req.path.endsWith(`${SETTINGS}/preview`) && req.query.get('mode') === 'full')) return undefined
+            return harness(`${req.path}?${req.query}`, { method: 'POST', body: JSON.stringify(req.body) })
+                .then((res) => res.json())
+                .then((body) => json({ ...body, values: body.values.map((v: { key: string; declared: unknown; why: unknown[] }) => (
+                    v.key === 'reads.mode' && v.declared === 'beside' ? { ...v, why: [...v.why, past] } : v)) }))
+        })
+        renderTab()
+        await userEvent.click(await screen.findByRole('button', { name: 'Set up with a guide' }))
+        await screen.findByRole('dialog', { name: 'Guided setup' })
+        expect(wizard().getByRole('radio', { name: P['least-memory'].goal })).toBeEnabled()
+        await nextTo('While data loads')
+        await userEvent.click(question('reads.mode').getByRole('radio', { name: title('reads.mode', 'beside') }))
+        await nextTo('Memory')
+        expect(question('residency.class').getByRole('radio', { name: title('residency.class', 'always') })).toBeInTheDocument()
+
+        await nextTo('Review')
+        const warning = await wizard().findByText(`${S['reads.mode'].label}: ${title('reads.mode', 'beside')}. ${CATALOGUE.why.outside_limits_exception!.text}`)
+        await userEvent.type(wizard().getByLabelText(/Why are you making this change/), reason)
+        const save = wizard().getByRole('button', { name: 'Save change' })
+        expect(save).toBeDisabled()
+        await userEvent.click(within(warning.closest('label')!).getByRole('checkbox'))
+        await waitFor(() => expect(save).toBeEnabled())
+        await userEvent.click(save)
+        await waitFor(() => expect(calls(sent, 'PATCH', SETTINGS)).toHaveLength(1))
+        expect((calls(sent, 'PATCH', SETTINGS)[0].body as { changes: unknown[] }).changes).toEqual([{ key: 'reads.mode', value: 'beside', expectedVersion: 2 }])
+    })
+
+    it('is not offered to someone who may only read', async () => {
+        signIn('viewer')
+        mockApi('readonly')
+        renderTab()
+        expect(await screen.findByText(/A workspace admin can change them\./)).toBeInTheDocument()
+        expect(screen.queryByRole('button', { name: 'Set up with a guide' })).not.toBeInTheDocument()
     })
 })

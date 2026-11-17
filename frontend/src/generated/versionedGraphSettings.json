@@ -543,6 +543,7 @@
     {
       "audience": "business",
       "caution": "The settings it covers go back to their built-in values here, including any you tuned for your platform.",
+      "goal": "Fresh data and steady views, as built in",
       "id": "balanced",
       "promise": "The built-in values: readers see the newest version as soon as it is published, and writes to the graph store leave reads their turn.",
       "scopes": [
@@ -573,6 +574,7 @@
     {
       "audience": "business",
       "caution": "While a large change is written, readers can see part of it before the rest, and large updates take longer to land.",
+      "goal": "Fast views, even while new data loads",
       "id": "fastest-reads",
       "promise": "Reads stay on the graph store at full speed while new data loads, and writes give way to them.",
       "scopes": [
@@ -595,6 +597,7 @@
     {
       "audience": "business",
       "caution": "While a graph updates, its reads come from the database: slower on a large graph, without lineage summaries meanwhile, and asked to retry under heavy load.",
+      "goal": "Everyone sees the newest data, exactly as published",
       "id": "always-exact",
       "promise": "Readers always see the newest published version, whole, read from the database until the graph store has it.",
       "scopes": [
@@ -614,6 +617,7 @@
     {
       "audience": "operator",
       "caution": "Graphs nobody read in the last half hour are read from the database, which is slower, and builds take much longer; the memory values need Graph residency on, and the build values New-version builds.",
+      "goal": "Spend as little memory as possible",
       "id": "least-memory",
       "promise": "Graphs give their memory back half an hour after their last read, and a build needs about its graph's size rather than twice it.",
       "scopes": [
@@ -639,6 +643,7 @@
     {
       "audience": "operator",
       "caution": "Reads wait longer behind writes, and a change whose build finds no room can be seen part-way, until you apply Balanced again; the build value needs New-version builds.",
+      "goal": "A large import lands overnight",
       "id": "big-import-tonight",
       "promise": "Writes to the graph store go faster while few people read, so a large import lands sooner, and a build with no room is written in place rather than wait.",
       "scopes": [

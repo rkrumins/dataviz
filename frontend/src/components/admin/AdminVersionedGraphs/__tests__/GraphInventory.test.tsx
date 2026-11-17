@@ -75,6 +75,14 @@ function Inventory({ onOpenSettings = () => {} }: { onOpenSettings?: (row: Versi
 
 const rowOf = (label: string) => within(screen.getByText(label).closest('[role="row"]') as HTMLElement)
 
+/** Taps the badge named `name` and returns what its definition says, closing it again. */
+async function definition(name: string) {
+    await userEvent.click(screen.getByRole('button', { name }))
+    const words = screen.getByRole('dialog', { name }).textContent ?? ''
+    await userEvent.keyboard('{Escape}')
+    return words
+}
+
 /** Opens a row's menu and returns the item named `name`. */
 async function menuItem(rowLabel: string, name: string | RegExp) {
     await userEvent.click(screen.getByRole('button', { name: `More actions for ${rowLabel}` }))
@@ -234,11 +242,13 @@ describe('GraphInventory', () => {
         rebuildProjection.mockResolvedValue({ started: true, alreadyRunning: false, beside: true, watermark: {} })
         renderWithApi(<Inventory />)
 
-        const chip = await screen.findByText('Rebuilding beside')
-        expect(chip.getAttribute('title')).toMatch(/^The graph is rebuilt from the database in a new copy\. Readers keep exactly/)
-        expect(chip.getAttribute('title')).not.toMatch(/as no copy fits/)
-        expect(screen.getByText('Moving to gvp_graph_m{raph_m.2}').getAttribute('title')).toMatch(/written from the database into gvp_graph_m\{raph_m\.2\}/)
-        expect(screen.getByText('Building from the database').getAttribute('title')).toMatch(/as no copy fits/)
+        // Each chip opens what its build does on a tap.
+        await screen.findByText('Rebuilding beside')
+        const rebuild = await definition('Rebuilding beside')
+        expect(rebuild).toMatch(/The graph is rebuilt from the database in a new copy\. Readers keep exactly/)
+        expect(rebuild).not.toMatch(/as no copy fits/)
+        expect(await definition('Moving to gvp_graph_m{raph_m.2}')).toMatch(/written from the database into gvp_graph_m\{raph_m\.2\}/)
+        expect(await definition('Building from the database')).toMatch(/as no copy fits/)
 
         await userEvent.click(await menuItem('Ledger', /^Rebuild…/))
         await userEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Rebuild' }))
@@ -405,6 +415,25 @@ describe('GraphInventory', () => {
         for (const c of CLASSES.choices) expect(rowOf('dsfork_1').queryByText(`Class: ${c.title}`)).not.toBeInTheDocument()
     })
 
+    it('opens what a read mode and a class promise from their badges, and says in the open since when a graph is loading', async () => {
+        const loading = row({ graphId: 'graph_e', dataSourceLabel: 'Loading one', status: 'rehydrating', residencyState: 'rehydrating',
+            rehydratingSince: new Date(Date.now() - 5 * 60_000).toISOString(), lastError: 'connection refused' })
+        serve({ graphs: [MAIN, loading], nextCursor: null })
+        renderWithApi(<Inventory />)
+        await screen.findByText('Customer 360')
+
+        const inPlace = READS.choices.find((c) => c.id === 'in_place')!
+        await userEvent.click(rowOf('Customer 360').getByRole('button', { name: `Reads: ${inPlace.short}` }))
+        expect(screen.getByRole('dialog', { name: inPlace.title })).toHaveTextContent(inPlace.promise)
+        await userEvent.keyboard('{Escape}')
+        const standard = CLASSES.choices.find((c) => c.id === 'standard')!
+        await userEvent.click(rowOf('Customer 360').getByRole('button', { name: `Class: ${standard.title}` }))
+        expect(screen.getByRole('dialog', { name: standard.title })).toHaveTextContent(standard.promise)
+        await userEvent.keyboard('{Escape}')
+
+        expect(rowOf('Loading one').getByText('since 5 min ago')).toBeInTheDocument()
+    })
+
     it('names why a graph cannot be adopted, offers no Adopt on a graph with no copy, and says it costs two copies', async () => {
         const unpinned = row({ graphId: 'graph_u', dataSourceId: 'ds_u', dataSourceLabel: 'Unpinned', falkorGraphName: null })
         const synthetic = row({ graphId: 'graph_s', dataSourceId: 'ds_s', dataSourceLabel: 'Synthetic', falkorGraphName: 'gv_graph_s' })
@@ -492,7 +521,7 @@ describe('GraphInventory', () => {
         renderWithApi(<Inventory />)
         await screen.findByText('Lagging')
         expect(rowOf('Lagging').getByText(/· 3 versions behind/)).toBeInTheDocument()
-        expect(screen.getByText('Building from the database').getAttribute('title')).toMatch(/ 99% written\./)
+        expect(await definition('Building from the database')).toMatch(/ 99% written\./)
     })
 
     it('shows the previous copy a moved graph is still retiring', async () => {

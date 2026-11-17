@@ -11,7 +11,8 @@
  *   History    the workspace's changes and its graphs' (workspace admins, who may put one back)
  *
  * A workspace admin chooses within the platform's limits; a system admin may go past them (the
- * value is kept as an exception); anyone else reads. The sub-tab is in `?vg=`; a link to a setting
+ * value is kept as an exception); anyone else reads. Either admin may set the defaults up with the
+ * guide (`SetupWizard`, its progress held here, `useSetupGuide`). The sub-tab is in `?vg=`; a link to a setting
  * (`#reads-mode`) opens Defaults at it. What is staged stays staged while the other tabs are open,
  * the values aren't refreshed over it, and leaving the page (a reload, another page) asks first,
  * counting what a graph's drawer has staged (`LeaveGuard`).
@@ -31,10 +32,12 @@ import {
 import { GraphSettingsDrawer } from './GraphSettingsDrawer'
 import { HistoryView } from './HistoryView'
 import { LeaveGuard } from './LeaveGuard'
-import { graphName } from './meta'
+import { categoryAnchor, graphName } from './meta'
 import { SettingsView } from './SettingsView'
+import { SetupWizard } from './SetupWizard'
 import { Failed, SettingsSkeleton } from './states'
 import { useSettingsEditor } from './useSettingsEditor'
+import { useSetupGuide } from './useSetupGuide'
 import { WorkspaceGraphs } from './WorkspaceGraphs'
 
 const TABS = ['defaults', 'graphs', 'history'] as const
@@ -81,6 +84,7 @@ export function WorkspaceVersionedGraphs({ workspaceId, workspaceName, onStagedC
     }])), [served, versioningOn])
     const where = `the ${workspaceName} workspace`
     const editor = useSettingsEditor({ place, values, settings: byKey, where, refetch: valuesQ.refetch })
+    const guide = useSetupGuide(editor)
     const staged = editor.staged.dirtyCount
     useEffect(() => { dirty.current = staged > 0 })
     // What a graph's drawer has staged: leaving the page drops it too.
@@ -125,6 +129,12 @@ export function WorkspaceVersionedGraphs({ workspaceId, workspaceName, onStagedC
 
     const data = valuesQ.data
     const readOnly = !versioningOn || data?.editor == null
+    // The guide is an editor's: a workspace admin's, or a system admin's.
+    const setup = schema && !readOnly ? { label: guide.resumable ? 'Continue setup' : 'Set up with a guide', onStart: guide.start } : undefined
+    const showCategory = (id: string) => {
+        setTab('defaults')
+        requestAnimationFrame(() => requestAnimationFrame(() => document.getElementById(categoryAnchor(id))?.scrollIntoView({ block: 'start' })))
+    }
     let defaults
     if (schemaQ.error) defaults = <Failed what="what each setting is" error={schemaQ.error} onRetry={() => void schemaQ.refetch()} />
     // A read again that failed keeps the values already read (and what is staged over them).
@@ -142,7 +152,7 @@ export function WorkspaceVersionedGraphs({ workspaceId, workspaceName, onStagedC
                     </p>
                 )}
                 <SettingsView schema={schema} data={{ ...data, values }} editor={editor} facts={NO_FACTS} readOnly={readOnly}
-                    scope="workspace" where={where} workspaceName={workspaceName} />
+                    scope="workspace" where={where} workspaceName={workspaceName} setup={setup} />
             </div>
         )
     }
@@ -191,10 +201,16 @@ export function WorkspaceVersionedGraphs({ workspaceId, workspaceName, onStagedC
                     <TabsContent value="history">
                         {schemaQ.error ? <Failed what="what each setting is" error={schemaQ.error} onRetry={() => void schemaQ.refetch()} />
                             : !schema ? <SettingsSkeleton />
-                                : <HistoryView schema={schema} place={place} placeName={placeName} onGoToSettings={() => setTab('defaults')} />}
+                                : <HistoryView schema={schema} place={place} placeName={placeName} onGoToSettings={() => setTab('defaults')} setup={setup} />}
                     </TabsContent>
                 )}
             </Tabs>
+
+            {setup && schema && data && (
+                <SetupWizard guide={guide} editor={editor} schema={schema} values={values} viewer={data.editor} scope="workspace" where={where}
+                    facts={NO_FACTS} onShowCategory={showCategory} onSeeSettings={() => setTab('defaults')}
+                    onOpenHistory={canAdmin ? () => setTab('history') : undefined} />
+            )}
 
             {drawer && (
                 <GraphSettingsDrawer workspaceId={workspaceId} graphId={drawer.graphId} open={drawerOpen} onOpenChange={onDrawerOpenChange}

@@ -1,12 +1,12 @@
 /**
  * StatusBadge — whether the value chosen is the value in force, and if not, why in one word:
  * Adjusted, Inactive, Not used, Locked, Exception, Deployment value ignored. Icon and words, never
- * colour alone; the hint says what the status means, on hover and read with the badge (it is not a
- * tab stop: there is nothing to do on it).
+ * colour alone; a tap, a click or Enter opens what the status means (`MetricInfo`), so it reads on a
+ * phone and by keyboard as well as under a mouse.
  */
+import { MetricInfo } from '@/components/analytics/MetricInfo'
 import { cn } from '@/lib/utils'
 import { Badge } from '@/components/ui/Badge'
-import { HoverTip } from '@/components/ui/HoverTip'
 import { STATUS_META } from './meta'
 import type { Status } from './types'
 
@@ -23,12 +23,11 @@ export function StatusBadge({ status, className }: { status: Status; className?:
         )
     }
     return (
-        <HoverTip label={meta.hint} className="inline-flex">
-            <Badge tone={meta.tone} size="md" className={className}>
+        <MetricInfo definition={{ title: meta.label, what: meta.hint }} className={className}>
+            <Badge tone={meta.tone} size="md">
                 <Icon className="w-3 h-3" aria-hidden />
                 <span>{meta.label}</span>
-                <span className="sr-only">: {meta.hint}</span>
             </Badge>
-        </HoverTip>
+        </MetricInfo>
     )
 }

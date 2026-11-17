@@ -9,7 +9,7 @@
  * Every value is the server's (`GET /{ws}/versioning/settings/graphs`); a phone shows each graph as
  * a card.
  */
-import type { ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
 import { FolderOpen, GitFork, Network, RotateCw, Settings2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { formatCount } from '@/lib/units'
@@ -80,6 +80,13 @@ export function WorkspaceGraphs({ workspaceId, schema, onOpenSettings, onOpenDat
     onOpenDataSource: (dataSourceId: string) => void
 }) {
     const q = useWorkspaceGraphs(workspaceId)
+    // The graphs whose own settings are all shown, not only the first few.
+    const [shownAll, setShownAll] = useState<ReadonlySet<string>>(() => new Set())
+    const toggleAll = (graphId: string) => setShownAll((prev) => {
+        const next = new Set(prev)
+        if (!next.delete(graphId)) next.add(graphId)
+        return next
+    })
     const graphs = q.data?.pages.flatMap((p) => p.graphs) ?? []
     const byKey = Object.fromEntries(schema.settings.map((s) => [s.key, s]))
     const byId = new Map(graphs.map((g) => [g.graphId, g]))
@@ -137,6 +144,7 @@ export function WorkspaceGraphs({ workspaceId, schema, onOpenSettings, onOpenDat
                         const rootName = g.follows ? (root ? graphName(root) : 'its root') : undefined
                         const labels = g.ownSettings.map((k) => byKey[k]?.label ?? k)
                         const more = labels.length - SHOWN_OWN
+                        const all = shownAll.has(g.graphId)
                         return (
                             <div key={g.graphId} role="row" aria-rowindex={i + 2}
                                 className={cn(COLS, 'space-y-3 border-b border-glass-border/40 px-5 py-4 last:border-b-0 lg:space-y-0')}>
@@ -159,12 +167,17 @@ export function WorkspaceGraphs({ workspaceId, schema, onOpenSettings, onOpenDat
                                     ) : (
                                         <>
                                             <p className="text-[12.5px] font-medium text-ink">{formatCount(labels.length, 'setting')} of its own</p>
-                                            <ul className="mt-1 flex flex-wrap gap-1" aria-label={`Set for ${name}`}>
-                                                {labels.slice(0, SHOWN_OWN).map((l) => (
+                                            <ul id={`own-${g.graphId}`} className="mt-1 flex flex-wrap items-center gap-1" aria-label={`Set for ${name}`}>
+                                                {(all ? labels : labels.slice(0, SHOWN_OWN)).map((l) => (
                                                     <li key={l}><Badge tone="neutral" variant="outline" size="sm">{l}</Badge></li>
                                                 ))}
                                                 {more > 0 && (
-                                                    <li><Badge tone="neutral" variant="outline" size="sm" title={labels.slice(SHOWN_OWN).join(', ')}>+{formatCount(more, 'more setting')}</Badge></li>
+                                                    <li>
+                                                        <button type="button" onClick={() => toggleAll(g.graphId)} aria-expanded={all} aria-controls={`own-${g.graphId}`}
+                                                            className="rounded px-1 text-[11px] font-semibold leading-4 text-indigo-700 underline-offset-2 outline-none hover:underline focus-visible:ring-2 focus-visible:ring-accent-lineage/40 dark:text-indigo-300">
+                                                            {all ? 'Show fewer' : `+${formatCount(more, 'more setting')}`}
+                                                        </button>
+                                                    </li>
                                                 )}
                                             </ul>
                                         </>

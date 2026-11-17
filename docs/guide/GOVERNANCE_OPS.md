@@ -203,6 +203,30 @@ The page has three tabs:
 A workspace's own values are set on its **Versioned graphs** tab, and one graph's in its settings:
 **Settings…** on its row here, or **Open settings** on its data source's **Versioning** tab.
 
+### Set up with a guide
+
+**Set up with a guide**, on **Settings** (and on **Overview**, and in **History** before the first
+change), asks the questions most platforms answer first, then opens the usual review. A
+workspace's **Versioned graphs** tab offers the same for its defaults, to its administrators.
+
+1. **What matters most.** Pick the goal closest to yours, such as *Fast views, even while new data
+   loads*. Each shows what it would stage here, value by value, and what it trades. A goal you
+   can't apply here says who can. You can also go on without one.
+2. **While data loads.** What people see while a new version loads, and how far behind a fast
+   view may be.
+3. **Memory.** Whether graphs stay in memory when nobody reads them. Its switch, **Graph
+   residency**, is shown but never turned here: a switch saves at once, and the guide saves nothing
+   before the review.
+4. **Drafts & imports.** Whether people may approve and publish their own changes, how long closed
+   drafts keep their changes, and the replace guard. Each step links to the rest of its category.
+5. **Review.** Every change staged at this level, including any you staged before, what it
+   affects, the warnings to acknowledge, and why you are making the change. Select **Save**.
+
+**You should now see** how many changes were saved, how many graphs behave differently and where,
+with **Undo** for ten seconds; after that, put the change back from **History**. If you close the
+guide with choices staged, it asks whether to keep them (the save bar holds them, and **Continue
+setup** picks up where you were) or discard them (each value goes back to what was staged before).
+
 ### Change a setting
 
 1. Open **Administration → Versioned graphs** and choose **Settings**.

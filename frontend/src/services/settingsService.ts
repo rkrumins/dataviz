@@ -455,6 +455,8 @@ export interface SettingsProfile {
     id: string
     title: string
     promise: string
+    /** One plain line: the outcome as someone who wants it says it. */
+    goal: string
     audience: Audience
     when: string[]
     values: Record<string, SettingValue>

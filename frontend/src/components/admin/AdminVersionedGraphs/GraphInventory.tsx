@@ -26,11 +26,13 @@ import {
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { formatBytes, formatCount } from '@/lib/units'
+import { MetricInfo } from '@/components/analytics/MetricInfo'
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { ConfirmDialog } from '@/components/ui/Dialog'
 import { DateTime } from '@/components/ui/DateTime'
 import { EmptyState } from '@/components/ui/EmptyState'
+import { HoverTip } from '@/components/ui/HoverTip'
 import { Input } from '@/components/ui/Input'
 import { Select } from '@/components/ui/Select'
 import { Skeleton } from '@/components/ui/Skeleton'
@@ -72,13 +74,14 @@ const STATE_CHIP: Record<ResidencyState, { label: string; tone: 'success' | 'neu
     waiting_capacity: { label: 'Waiting for room', tone: 'warning' },
 }
 
-/** Whether a graph's copy is in memory, as its row and its health say it. */
+/** Whether a graph's copy is in memory, as its row and its health say it; a load, since when. */
 export function ResidencyChip({ state, since }: { state: ResidencyState; since?: string | null }) {
     const chip = STATE_CHIP[state]
     return (
-        <Badge tone={chip?.tone ?? 'neutral'} size="sm" title={since ? `Loading since ${new Date(since).toLocaleString()}` : undefined}>
-            {chip?.label ?? state}
-        </Badge>
+        <>
+            <Badge tone={chip?.tone ?? 'neutral'} size="sm">{chip?.label ?? state}</Badge>
+            {since && <DateTime at={since} prefix="since " className="text-[11px] text-ink-secondary" />}
+        </>
     )
 }
 
@@ -356,6 +359,12 @@ export function GraphInventory({ filter, onFilter, onOpenSettings, providers }: 
                                     const whyMode = row.readModeWhy?.[0]?.text
                                     const setWhere = row.readModeSource ? SOURCE_WORDS[row.readModeSource] : undefined
                                     const cls = choice(CLASSES, row.residency)
+                                    const settings = (
+                                        <Button size="sm" variant="secondary" leftIcon={Settings2} onClick={() => onOpenSettings(row)}
+                                            aria-label={`Settings… for ${nameOf(row)}`} disabled={row.orphan}>
+                                            Settings…
+                                        </Button>
+                                    )
                                     return (
                                         <div key={v.key} ref={virtualizer.measureElement} data-index={v.index} role="row" aria-rowindex={v.index + 2}
                                             className={cn(COLS, 'absolute left-0 top-0 w-full space-y-3 border-b border-glass-border/40 px-5 py-4 last:border-b-0 md:space-y-0')}
@@ -374,16 +383,24 @@ export function GraphInventory({ filter, onFilter, onOpenSettings, providers }: 
                                             <Cell label="Reads and memory">
                                                 <div className="flex flex-wrap items-center gap-1">
                                                     {!row.forkParentGraphId && reads && (
-                                                        <Badge tone="neutral" size="sm" title={reads.promise}>Reads: {reads.short}</Badge>
+                                                        <MetricInfo definition={{ title: reads.title, what: reads.promise }}>
+                                                            <Badge tone="neutral" size="sm">Reads: {reads.short}</Badge>
+                                                        </MetricInfo>
                                                     )}
                                                     {!row.forkParentGraphId && reads && setWhere && <span className="text-[11px] text-ink-secondary">{setWhere}</span>}
-                                                    {!row.forkParentGraphId && cls && <Badge tone="neutral" variant="outline" size="sm" title={cls.promise}>Class: {cls.title}</Badge>}
+                                                    {!row.forkParentGraphId && cls && (
+                                                        <MetricInfo definition={{ title: cls.title, what: cls.promise }}>
+                                                            <Badge tone="neutral" variant="outline" size="sm">Class: {cls.title}</Badge>
+                                                        </MetricInfo>
+                                                    )}
                                                     {/* The State column already says unloaded, loading or waiting for room, unless it says Failed. */}
                                                     {!row.forkParentGraphId && row.residencyState && (row.residencyState !== row.status || row.lastError) && (
                                                         <ResidencyChip state={row.residencyState} since={row.rehydratingSince} />
                                                     )}
                                                     {row.build && (
-                                                        <Badge tone={row.build.error ? 'warning' : 'info'} size="sm" title={buildTitle(row.build)}>{buildChip(row.build)}</Badge>
+                                                        <MetricInfo definition={{ title: buildChip(row.build), what: buildTitle(row.build) }}>
+                                                            <Badge tone={row.build.error ? 'warning' : 'info'} size="sm">{buildChip(row.build)}</Badge>
+                                                        </MetricInfo>
                                                     )}
                                                     {row.forkParentGraphId && <span className="text-[11.5px] text-ink-secondary">Follows the graph it was forked from</span>}
                                                 </div>
@@ -422,11 +439,8 @@ export function GraphInventory({ filter, onFilter, onOpenSettings, providers }: 
                                                 <p className="text-[11px] text-ink-secondary">{row.lastProjectedAt ? <DateTime at={row.lastProjectedAt} prefix="Updated " /> : 'Never updated'}</p>
                                             </Cell>
                                             <div role="cell" className="flex items-start gap-1.5 md:justify-end">
-                                                <Button size="sm" variant="secondary" leftIcon={Settings2} onClick={() => onOpenSettings(row)}
-                                                    aria-label={`Settings… for ${nameOf(row)}`}
-                                                    disabled={row.orphan} title={row.orphan ? 'Its data source no longer exists' : undefined}>
-                                                    Settings…
-                                                </Button>
+                                                {/* Why it is off is said in the open too, under the graph's name. */}
+                                                {row.orphan ? <HoverTip label="Its data source no longer exists" className="inline-flex">{settings}</HoverTip> : settings}
                                                 <DropdownMenu.Root modal={false}>
                                                     <DropdownMenu.Trigger asChild>
                                                         <button type="button" aria-label={`More actions for ${nameOf(row)}`} disabled={busy !== null}

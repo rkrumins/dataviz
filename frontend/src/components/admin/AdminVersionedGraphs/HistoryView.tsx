@@ -8,11 +8,12 @@
  * first to the end of the last, in the reader's time zone); "Who" finds anyone in the directory, not
  * only the people on the pages read so far. "Put back…" opens the same review a save does — what
  * each value goes back to, what that would do where it can be worked out, a reason — then reverts
- * the change as one; a change set the pages split is read whole first.
+ * the change as one; a change set the pages split is read whole first. With no change yet, an
+ * editor is offered the guided setup.
  */
 import { useId, useMemo, useState, type KeyboardEvent } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { ArrowRight, History, RotateCw, Search, Undo2, X } from 'lucide-react'
+import { ArrowRight, History, RotateCw, Route, Search, Undo2, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { calendarTime } from '@/lib/smartTime'
 import { Badge } from '@/components/ui/Badge'
@@ -251,13 +252,15 @@ function PersonFilter({ value, seen, onChange }: {
     )
 }
 
-export function HistoryView({ schema, place = PLATFORM, placeName, onGoToSettings }: {
+export function HistoryView({ schema, place = PLATFORM, placeName, onGoToSettings, setup }: {
     schema: ServedSchema
     /** Whose history: the platform's (every change), or a workspace's (its own values and its graphs'). */
     place?: SettingsPlace
     /** A workspace's or a graph's name, by its id (a graph's: its data source's), where the page knows it. */
     placeName?: (scope: Scope, scopeId: string) => string | null
     onGoToSettings: () => void
+    /** The guided setup, for an editor: what an empty history offers first. */
+    setup?: { label: string; onStart: () => void }
 }) {
     const [filter, setFilter] = useState<HistoryFilter>({})
     // The days as picked (YYYY-MM-DD): they stay what the inputs show, in any time zone. The
@@ -393,7 +396,9 @@ export function HistoryView({ schema, place = PLATFORM, placeName, onGoToSetting
                     icon={History}
                     title={filtered ? 'No change matches these filters' : 'No changes yet'}
                     description={filtered ? 'Try fewer filters.' : 'Every save of a versioned-graph setting is listed here, with who made it, when and why. Nothing has been changed since settings moved here.'}
-                    action={filtered ? { label: 'Clear filters', onClick: clearFilters } : { label: 'Go to settings', onClick: onGoToSettings }}
+                    action={filtered ? { label: 'Clear filters', onClick: clearFilters }
+                        : setup ? { label: setup.label, icon: Route, onClick: setup.onStart } : { label: 'Go to settings', onClick: onGoToSettings }}
+                    secondaryAction={!filtered && setup ? { label: 'Go to settings', onClick: onGoToSettings } : undefined}
                 />
             ) : (
                 <div className="space-y-3">

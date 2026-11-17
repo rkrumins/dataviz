@@ -35,9 +35,11 @@ app (``--noconftest``), and the generated guide and the app's catalogue come fro
     STARTING POINTS AND EVIDENCE
     ----------------------------
     A ``Profile`` is a starting point: values for the settings it covers, chosen for one outcome.
-    Applying one stages, at the level being edited, only the values its editor may set there, and
-    nothing is saved until it is reviewed. A ``Signal`` is evidence: a count of something that
-    actually happened, tied to the symptom it answers, so "Something's wrong?" can say how often.
+    Its ``goal`` names that outcome as the person who wants it would, and the guided setup offers
+    the profiles by it. Applying one stages, at the level being edited, only the values its editor
+    may set there, and nothing is saved until it is reviewed. A ``Signal`` is evidence: a count of
+    something that actually happened, tied to the symptom it answers, so "Something's wrong?" can
+    say how often.
 """
 from __future__ import annotations
 
@@ -300,6 +302,7 @@ class Profile:
     id: str                                 # "fastest-reads": the guide's anchor for it too
     title: str
     promise: str                            # one sentence: the outcome
+    goal: str                               # one plain line: the outcome as someone wants it
     audience: Audience
     when: Tuple[str, ...]                   # when to choose it
     values: Mapping[str, Any]               # setting key → value

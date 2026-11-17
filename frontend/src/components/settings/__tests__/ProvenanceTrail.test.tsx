@@ -1,12 +1,15 @@
 /**
  * The trail says where the value in force came from, in words as well as in looks: which level
  * won, which values it overrode, which a lock ignored, which level chose nothing, the platform's
- * lock and limits, an exception, a deployment value that was ignored, and a staged change.
+ * lock and limits (each badge opening what it means), an exception, a deployment value that was
+ * ignored, and a staged change.
  */
 import { render, screen, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
 import { SETTINGS_BY_KEY as S } from '../__fixtures__/schema'
 import { GRAPH_VALUES, PLATFORM_VALUES, WORKSPACE_VALUES } from '../__fixtures__/resolved'
+import { limitsWords, stepAt } from '../format'
 import { ProvenanceTrail } from '../ProvenanceTrail'
 import type { ResolvedValues, Scope, SettingValue } from '../types'
 
@@ -51,12 +54,21 @@ describe('ProvenanceTrail', () => {
         expect(items[3]).toHaveTextContent('30% (In force)Your change: 25%')
     })
 
-    it('reads a badge’s explanation with it, and makes no tab stop of it', () => {
+    it('opens a badge’s explanation on a tap or Enter, and Esc hands focus back to it', async () => {
+        const user = userEvent.setup()
         const [, platform] = trail('reads.mode', GRAPH_VALUES, 'graph')
-        const limits = within(platform).getByText('Limits').parentElement as HTMLElement
-        expect(limits).toHaveTextContent(/^Limits: Workspaces and graphs may choose only within limits\./)
-        expect(limits).not.toHaveAttribute('tabindex')
-        expect(platform.querySelector('[tabindex]')).toBeNull()
+        const limits = within(platform).getByRole('button', { name: 'Limits' })
+        const words = `Workspaces and graphs may choose only within limits. ${limitsWords(S['reads.mode'], stepAt(GRAPH_VALUES['reads.mode'], 'platform')!.limits!)}.`
+
+        await user.click(limits)
+        expect(screen.getByRole('dialog', { name: 'Limits' })).toHaveTextContent(words)
+        expect(limits).toHaveAttribute('aria-expanded', 'true')
+        await user.keyboard('{Escape}')
+        expect(screen.queryByRole('dialog', { name: 'Limits' })).not.toBeInTheDocument()
+        expect(limits).toHaveFocus()
+
+        await user.keyboard('{Enter}')
+        expect(screen.getByRole('dialog', { name: 'Limits' })).toHaveTextContent(words)
     })
 
     it('a staged return to inheriting says so', () => {
