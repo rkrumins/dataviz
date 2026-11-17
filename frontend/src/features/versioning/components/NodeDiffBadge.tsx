@@ -1,11 +1,12 @@
 /**
  * The single diff tint vocabulary — added / modified / removed. Reused by the
- * Changes panel rows, on-canvas node decoration, and (later) the commit timeline,
- * so the colour of "added" is defined in exactly one place.
+ * Changes panel rows, on-canvas node decoration, and the commit timeline. Its
+ * colours are the tree's (`changeTone`): green, orange, rose.
  */
 import { Plus, PenLine, Minus } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { ChangeStatus } from '../model/changeModel'
+import { CHANGE_TONE } from '../model/changeTone'
 
 interface StatusMeta {
   label: string
@@ -21,33 +22,12 @@ interface StatusMeta {
 }
 
 export const STATUS_META: Record<ChangeStatus, StatusMeta> = {
-  added: {
-    label: 'Added',
-    Icon: Plus,
-    text: 'text-emerald-500',
-    bg: 'bg-emerald-500/5',
-    border: 'border-emerald-500/20',
-    ring: 'ring-emerald-500/50',
-    accent: 'border-l-emerald-500',
-  },
-  modified: {
-    label: 'Modified',
-    Icon: PenLine,
-    text: 'text-amber-500',
-    bg: 'bg-amber-500/5',
-    border: 'border-amber-500/20',
-    ring: 'ring-amber-500/50',
-    accent: 'border-l-amber-500',
-  },
-  removed: {
-    label: 'Removed',
-    Icon: Minus,
-    text: 'text-rose-500',
-    bg: 'bg-rose-500/5',
-    border: 'border-rose-500/20',
-    ring: 'ring-rose-500/50',
-    accent: 'border-l-rose-500',
-  },
+  added: { label: 'Added', Icon: Plus, text: CHANGE_TONE.added.text, bg: CHANGE_TONE.added.soft,
+    border: CHANGE_TONE.added.border, ring: CHANGE_TONE.added.ring, accent: CHANGE_TONE.added.accent },
+  modified: { label: 'Modified', Icon: PenLine, text: CHANGE_TONE.modified.text, bg: CHANGE_TONE.modified.soft,
+    border: CHANGE_TONE.modified.border, ring: CHANGE_TONE.modified.ring, accent: CHANGE_TONE.modified.accent },
+  removed: { label: 'Removed', Icon: Minus, text: CHANGE_TONE.removed.text, bg: CHANGE_TONE.removed.soft,
+    border: CHANGE_TONE.removed.border, ring: CHANGE_TONE.removed.ring, accent: CHANGE_TONE.removed.accent },
 }
 
 /** A small status chip: glyph + (optional) count. Used inline and in section headers. */

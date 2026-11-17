@@ -43,6 +43,7 @@ import {
 import { cn } from '@/lib/utils'
 import { HighlightedText } from '@/components/ui/HighlightedText'
 import { HoverTip } from '@/components/ui/HoverTip'
+import { fieldTone } from '@/features/versioning/model/changeTone'
 import {
   type FieldType,
   FIELD_TYPE_META,
@@ -557,8 +558,9 @@ interface PropertyRowProps {
 
 /** The row's left edge and badge for what its edit did. */
 const MARK_STYLE: Record<ChangeMark, { bar: string; badge: string; label: string }> = {
-  new: { bar: 'before:bg-emerald-500', badge: 'bg-emerald-500/12 text-emerald-700 dark:text-emerald-300', label: 'New' },
-  changed: { bar: 'before:bg-amber-500', badge: 'bg-amber-500/12 text-amber-700 dark:text-amber-300', label: 'Edited' },
+  // The tree's colours (`changeTone`): green for new, orange for edited.
+  new: { bar: 'before:bg-green-500', badge: fieldTone('added').chip, label: 'New' },
+  changed: { bar: 'before:bg-orange-500', badge: fieldTone('changed').chip, label: 'Edited' },
 }
 
 const PropertyRow = memo(function PropertyRow({
@@ -1936,8 +1938,8 @@ function FolderGroup({
         <span className="text-2xs text-ink-muted flex-1 flex items-center gap-1.5">
           {count} {count === 1 ? 'item' : 'items'}
           {edited > 0 && (
-            <span className="inline-flex items-center gap-1 text-amber-700 dark:text-amber-300 font-semibold">
-              <span className="w-1.5 h-1.5 rounded-full bg-amber-500" aria-hidden />{edited} edited
+            <span className={cn('inline-flex items-center gap-1 font-semibold', fieldTone('changed').text)}>
+              <span className={cn('w-1.5 h-1.5 rounded-full', fieldTone('changed').bar)} aria-hidden />{edited} edited
             </span>
           )}
         </span>

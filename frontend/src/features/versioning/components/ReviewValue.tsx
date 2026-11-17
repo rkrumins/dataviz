@@ -9,11 +9,12 @@ import { cn } from '@/lib/utils'
 import { inferFieldType } from '@/components/panels/property/fieldTypes'
 import { FormattedDate, FormattedLink } from '@/components/panels/property/valueWidgets'
 import type { FieldChange } from '../model/fieldDiff'
+import { fieldTone } from '../model/changeTone'
 
 const KIND_STYLE: Record<FieldChange['kind'], { badge: string; label: string }> = {
-  added: { badge: 'bg-emerald-500/12 text-emerald-700 dark:text-emerald-300', label: 'Added' },
-  changed: { badge: 'bg-amber-500/12 text-amber-700 dark:text-amber-300', label: 'Changed' },
-  removed: { badge: 'bg-rose-500/12 text-rose-700 dark:text-rose-300', label: 'Removed' },
+  added: { badge: fieldTone('added').chip, label: 'Added' },
+  changed: { badge: fieldTone('changed').chip, label: 'Changed' },
+  removed: { badge: fieldTone('removed').chip, label: 'Removed' },
 }
 
 function Empty() {
@@ -68,8 +69,8 @@ function TagDiff({ before, after }: { before: string[]; after: string[] }) {
     <span className="flex flex-wrap gap-1">
       {chips.map(({ t, k }) => (
         <span key={`${k}:${t}`} className={cn('px-1.5 py-px rounded-md text-[11px] font-medium',
-          k === 'added' && 'bg-emerald-500/12 text-emerald-700 dark:text-emerald-300',
-          k === 'removed' && 'bg-rose-500/12 text-rose-700 dark:text-rose-300 line-through',
+          k === 'added' && fieldTone('added').chip,
+          k === 'removed' && cn(fieldTone('removed').chip, 'line-through'),
           k === 'kept' && 'bg-black/[0.05] dark:bg-white/10 text-ink-secondary')}>
           {k === 'added' ? '+ ' : k === 'removed' ? '− ' : ''}{t}
         </span>
